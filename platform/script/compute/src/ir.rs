@@ -211,7 +211,7 @@ pub enum Op {
         off: Option<Val>,
     },
     /// Input channel `ch` at frame `clamp(idx, 0, n - 1)`.
-    In { ch: u8, idx: Val },
+    In { ch: u16, idx: Val },
     /// The frame count of this call (i32); for kernels, the element count.
     FrameCount,
     /// Length in words of host buffer k (i32).
@@ -230,7 +230,7 @@ pub enum Stmt {
         val: Val,
     },
     /// Output channel `ch` at frame `clamp(idx, 0, n - 1)` += val.
-    Out { ch: u8, idx: Val, val: Val },
+    Out { ch: u16, idx: Val, val: Val },
     If(Val, Block, Block),
     Loop { cap: u32, body: Block },
     Break(u32),
@@ -387,9 +387,79 @@ pub struct Program {
     /// Host buffer k's element representation at index k; missing entries are Word.
     /// Only the entry program's list counts; its functions leave their lists empty.
     pub bufs: Vec<Elem>,
+    /// Audio table layout, shared with callees: inputs first, then outputs.
+    pub input_channels: u16,
+    pub output_channels: u16,
 }
 
 impl Program {
+    /// Add cancellation to a compile-time program whose calls are already
+    /// inlined. Buffer zero is one read-only word. Poll at loop heads so a
+    /// continue takes the same poll as a fall-through back-edge.
+    pub fn poll_cancel_at_loops(&mut self) {
+        fn visit(block: &mut Block, depth: u32, vals: &mut Vec<Ty>, zero: Val) {
+            for stmt in block {
+                match stmt {
+                    Stmt::Loop { body, .. } => {
+                        visit(body, depth + 1, vals, zero);
+                        poll(body, depth + 1, vals, zero);
+                    }
+                    Stmt::If(_, yes, no) => {
+                        visit(yes, depth, vals, zero);
+                        visit(no, depth, vals, zero);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn poll(block: &mut Block, depth: u32, vals: &mut Vec<Ty>, zero: Val) {
+            let word = Val(vals.len() as u32);
+            vals.push(Ty::I32);
+            let cancelled = Val(vals.len() as u32);
+            vals.push(Ty::Bool);
+            block.splice(..0, [
+                Stmt::Def(word, Op::Load { region: Region::Buf(0), base: 0, extent: 1, off: None }),
+                Stmt::Def(cancelled, Op::CmpI(Cmp::Ne, word, zero)),
+                Stmt::If(cancelled, vec![Stmt::Break(depth)], Vec::new()),
+            ]);
+        }
+        debug_assert!(self.funcs.is_empty());
+        let zero = Val(self.vals.len() as u32);
+        self.vals.push(Ty::I32);
+        let mut body = std::mem::take(&mut self.body);
+        visit(&mut body, 0, &mut self.vals, zero);
+        poll(&mut body, 0, &mut self.vals, zero);
+        self.body = vec![Stmt::Def(zero, Op::ConstI(0)), Stmt::Loop { cap: 1, body }];
+    }
+
+    /// Number of pointers in this entry's audio table.
+    pub fn channel_count(&self) -> usize {
+        usize::from(self.input_channels) + usize::from(self.output_channels)
+    }
+
+    /// Slots used by one body in this entry's channel table, in ABI order.
+    pub(crate) fn used_channels(&self, body: &Block) -> Option<Vec<bool>> {
+        fn mark(b: &Block, ins: &mut [bool], outs: &mut [bool]) -> Option<()> {
+            for s in b {
+                match s {
+                    Stmt::Def(_, Op::In { ch, .. }) => *ins.get_mut(usize::from(*ch))? = true,
+                    Stmt::Out { ch, .. } => *outs.get_mut(usize::from(*ch))? = true,
+                    Stmt::If(_, t, e) => {
+                        mark(t, ins, outs)?;
+                        mark(e, ins, outs)?;
+                    }
+                    Stmt::Loop { body, .. } => mark(body, ins, outs)?,
+                    _ => {}
+                }
+            }
+            Some(())
+        }
+        let mut used = vec![false; self.channel_count()];
+        let (ins, outs) = used.split_at_mut(usize::from(self.input_channels));
+        mark(body, ins, outs)?;
+        Some(used)
+    }
+
     /// Registers the interpreter needs (vals + vars + frame, then the
     /// high words of every register when the program uses f64).
     pub fn scratch_words(&self) -> usize {
@@ -821,9 +891,10 @@ pub fn bounds(p: &Program) -> Vec<Option<u32>> {
 /// The memory and I/O a call runs against. Every I/O slice holds at least
 /// `n` frames.
 #[relax_api(plain)]
-pub struct Io<'a> {
-    pub ins: [&'a [f32]; 2],
-    pub outs: [&'a mut [f32]; 2],
+#[derive(Default)]
+pub struct Io<'table, 'samples> {
+    pub ins: &'table [&'table [f32]],
+    pub outs: &'table mut [&'samples mut [f32]],
 }
 
 /// A host buffer as a run sees it. Several workers may use one buffer at
@@ -949,14 +1020,14 @@ enum Flow {
     Continue(u32),
 }
 
-struct Interp<'a, 'm, 'i, 'p> {
+struct Interp<'a, 'm, 'i, 's, 'p> {
     regs: &'a mut [u32],
     /// High words of the registers (empty unless the program uses f64).
     hi: &'a mut [u32],
     nvals: usize,
     frame: &'a mut [u32],
     mem: &'a mut Mem<'m>,
-    io: &'a mut Io<'i>,
+    io: &'a mut Io<'i, 's>,
     n: u32,
     /// The entry program's functions, and a register file for each (calls
     /// do not recurse: one at a time per function), taken while it runs.
@@ -965,7 +1036,7 @@ struct Interp<'a, 'm, 'i, 'p> {
     ports: &'a mut (dyn Ports + 'p),
 }
 
-impl<'a, 'm, 'i, 'p> Interp<'a, 'm, 'i, 'p> {
+impl<'a, 'm, 'i, 's, 'p> Interp<'a, 'm, 'i, 's, 'p> {
     #[inline(always)]
     fn r(&self, v: Val) -> u64 {
         self.reg(v.0 as usize)
@@ -1119,7 +1190,11 @@ impl<'a, 'm, 'i, 'p> Interp<'a, 'm, 'i, 'p> {
                     }
                 }
                 Stmt::Break(d) => return Flow::Break(*d),
-                Stmt::Continue(d) => return Flow::Continue(*d),
+                Stmt::Continue(d) => {
+                    #[cfg(test)]
+                    tests::at_continue();
+                    return Flow::Continue(*d);
+                }
                 Stmt::Call { f, args, rets } => {
                     let Some(g) = self.funcs.get(*f as usize) else { continue };
                     let nregs = g.vals.len() + g.vars.len();
@@ -1207,6 +1282,9 @@ pub fn run_ports(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n
     if n == 0 {
         return;
     }
+    assert_eq!(io.ins.len(), usize::from(p.input_channels));
+    assert_eq!(io.outs.len(), usize::from(p.output_channels));
+    assert!(io.ins.iter().all(|s| s.len() >= n as usize) && io.outs.iter().all(|s| s.len() >= n as usize));
     let nregs = p.vals.len() + p.vars.len();
     let (regs, rest) = scratch.split_at_mut(nregs);
     let (frame, hi) = rest.split_at_mut(p.frame_words as usize);
@@ -1285,13 +1363,12 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
         visible: Vec<bool>,
         ever: Vec<bool>,
         scope: Vec<u32>,
-        funcs: &'a [Program],
-        bufs: &'a [Elem],
+        entry: &'a Program,
         consts: Vec<Option<i32>>,
     }
     impl<'a> V<'a> {
         fn elem(&self, k: u8) -> Elem {
-            self.bufs.get(k as usize).copied().unwrap_or(Elem::Word)
+            self.entry.bufs.get(k as usize).copied().unwrap_or(Elem::Word)
         }
         fn narrow(&self, region: Region) -> bool {
             matches!(region, Region::Buf(k) if self.elem(k) != Elem::Word)
@@ -1408,9 +1485,12 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                     }
                     t
                 }
-                Op::In { idx, .. } => {
+                Op::In { ch, idx } => {
                     if !self.r.io {
                         return Err("audio input in a program without audio I/O".into());
+                    }
+                    if ch >= self.entry.input_channels {
+                        return Err(format!("input channel {ch} outside the program's {} inputs", self.entry.input_channels));
                     }
                     self.used(idx, Some(I32))?;
                     F32
@@ -1459,9 +1539,12 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                         }
                         self.access(*region, *base, *extent, *off, true)?;
                     }
-                    Stmt::Out { idx, val, .. } => {
+                    Stmt::Out { ch, idx, val } => {
                         if !self.r.io {
                             return Err("audio output in a program without audio I/O".into());
+                        }
+                        if *ch >= self.entry.output_channels {
+                            return Err(format!("output channel {ch} outside the program's {} outputs", self.entry.output_channels));
                         }
                         self.used(*idx, Some(Ty::I32))?;
                         self.used(*val, Some(Ty::F32))?;
@@ -1550,7 +1633,7 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
                         }
                     }
                     Stmt::Call { f, args, rets } => {
-                        let Some(g) = self.funcs.get(*f as usize) else {
+                        let Some(g) = self.entry.funcs.get(*f as usize) else {
                             return Err(format!("no function {}", f));
                         };
                         if args.len() != g.params.len() || rets.len() != g.results.len() {
@@ -1626,13 +1709,16 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
         return Err("functions call each other in a cycle".into());
     }
     for (k, g) in p.funcs.iter().enumerate() {
+        if g.channel_count() != 0 {
+            return Err(format!("function {} has its own audio channel table", k));
+        }
         if !g.bufs.is_empty() {
             return Err(format!("function {} has its own buffer element table", k));
         }
         if !g.funcs.is_empty() {
             return Err(format!("function {} has functions of its own", k));
         }
-        let mut v = V { p: g, r: regions, ports, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs, bufs: &p.bufs, consts: vec![None; g.vals.len()] };
+        let mut v = V { p: g, r: regions, ports, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), entry: p, consts: vec![None; g.vals.len()] };
         for pv in &g.params {
             if pv.0 as usize >= g.vals.len() || v.ever[pv.0 as usize] {
                 return Err(format!("function {}: bad parameter {:?}", k, pv));
@@ -1656,7 +1742,7 @@ pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Resu
             return Err(format!("function {}: result {:?} is not defined at its top level", k, r));
         }
     }
-    let mut v = V { p, r: regions, ports, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs, bufs: &p.bufs, consts: vec![None; p.vals.len()] };
+    let mut v = V { p, r: regions, ports, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), entry: p, consts: vec![None; p.vals.len()] };
     // The top block's values stay visible to the end; nothing follows it.
     v.block(&p.body, 0)
 }
@@ -1721,6 +1807,68 @@ pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, sync::mpsc, time::Duration};
+
+    // An interlock on the compiling thread only, at an executed source continue.
+    thread_local! {
+        static CONTINUE: RefCell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn at_continue() {
+        CONTINUE.with(|gate| {
+            if let Some((started, resume)) = &*gate.borrow() {
+                started.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(5)).expect("constant ran past its cancellation poll");
+            }
+        });
+    }
+
+    #[test]
+    fn cancellation_discards_a_running_constant() {
+        use crate::{lower, parse};
+        use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+
+        let helper = "fn slow() {
+            var x = 0.0
+            for i in 0..1024 {
+                for j in 0..1024 {
+                    if i > 0 && j % 2 == 1 { continue }
+                    x += 0.25
+                }
+            }
+            x
+        }";
+        for caller in [
+            "let value = slow() fn voice() { value }",
+            "fn voice() { let obj = {value: slow()} obj.value }",
+            "rate(slow()) fn voice() { 0 }",
+        ] {
+            let src = format!("{helper} {caller}");
+            let tokens = parse::lex(&src).unwrap();
+            let items = parse::Parser::new(&tokens).items().unwrap();
+            let control = Arc::new(AtomicU32::new(0));
+            let worker_control = control.clone();
+            let (entered, started) = mpsc::channel();
+            let (resume, released) = mpsc::channel();
+            let (done, result) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                CONTINUE.with(|gate| *gate.borrow_mut() = Some((entered, released)));
+                let compiled = lower::lower_with_rate(&items, src.len() + 1, &|_| None,
+                    lower::RateOverride::default(), Some(&worker_control));
+                done.send(compiled.err()).unwrap();
+            });
+            // The first continue is in the second outer iteration, after the inner loop has run in full.
+            started.recv_timeout(Duration::from_secs(5)).expect("constant never entered its inner loop");
+            control.store(1, Ordering::Relaxed);
+            resume.send(()).unwrap();
+            drop(resume);
+            let error = result.recv_timeout(Duration::from_secs(2)).expect("constant did not stop after cancellation")
+                .expect("a partially folded value escaped into a compiled program");
+            assert!(error.is_cancelled(), "{caller}: expected cancellation, got {error}");
+            worker.join().unwrap();
+        }
+    }
+
     #[test]
     fn magic_division_is_exact() {
         let mut r = 0x9E37_79B9_7F4A_7C15u64;
@@ -1772,7 +1920,7 @@ pub fn inline_calls(p: &Program) -> Program {
     if p.funcs.is_empty() {
         return p.clone();
     }
-    let mut out = Program { vals: p.vals.clone(), vars: p.vars.clone(), frame_words: p.frame_words, bufs: p.bufs.clone(), ..Default::default() };
+    let mut out = Program { vals: p.vals.clone(), vars: p.vars.clone(), frame_words: p.frame_words, bufs: p.bufs.clone(), input_channels: p.input_channels, output_channels: p.output_channels, ..Default::default() };
     let mut vmap: Vec<Val> = (0..p.vals.len() as u32).map(Val).collect();
     let rmap: Vec<Var> = (0..p.vars.len() as u32).map(Var).collect();
     out.body = inline_block(&p.body, &mut out, &p.funcs, &mut vmap, &rmap);
@@ -1881,6 +2029,10 @@ pub fn to_words(p: &Program) -> Vec<u32> {
 }
 
 fn put_program(w: &mut Vec<u32>, p: &Program) {
+    // A tagged prefix distinguishes counted audio from the original kernel word format.
+    if p.input_channels != 0 || p.output_channels != 0 {
+        w.extend([u32::MAX, u32::from(p.input_channels), u32::from(p.output_channels)]);
+    }
     w.push(p.vals.len() as u32);
     w.extend(p.vals.iter().map(|t| *t as u32));
     w.push(p.vars.len() as u32);
@@ -2087,6 +2239,12 @@ impl Words<'_> {
         if depth > 2 {
             return None;
         }
+        let (input_channels, output_channels) = if self.w.get(self.at) == Some(&u32::MAX) {
+            self.at += 1;
+            (u16::try_from(self.next()?).ok()?, u16::try_from(self.next()?).ok()?)
+        } else {
+            (0, 0)
+        };
         let vals = self.tys()?;
         let vars = self.tys()?;
         let frame_words = self.next()?;
@@ -2095,7 +2253,7 @@ impl Words<'_> {
         let n = self.len()?;
         let funcs = (0..n).map(|_| self.program(depth + 1)).collect::<Option<Vec<_>>>()?;
         let body = self.block(0)?;
-        Some(Program { vals, vars, body, frame_words, params, results, funcs, bufs: Vec::new() })
+        Some(Program { vals, vars, body, frame_words, params, results, funcs, bufs: Vec::new(), input_channels, output_channels })
     }
     fn block(&mut self, depth: u32) -> Option<Block> {
         if depth > 256 {
@@ -2115,7 +2273,7 @@ impl Words<'_> {
                     let off = self.opt()?;
                     Stmt::Store { region, base, extent, off, val: self.val()? }
                 }
-                3 => Stmt::Out { ch: self.small(255)?, idx: self.val()?, val: self.val()? },
+                3 => Stmt::Out { ch: u16::try_from(self.next()?).ok()?, idx: self.val()?, val: self.val()? },
                 4 => {
                     let c = self.val()?;
                     let t = self.block(depth + 1)?;
@@ -2172,7 +2330,7 @@ impl Words<'_> {
                 let (region, base, extent) = (self.region()?, self.next()?, self.next()?);
                 Op::Load { region, base, extent, off: self.opt()? }
             }
-            14 => Op::In { ch: self.small(255)?, idx: self.val()? },
+            14 => Op::In { ch: u16::try_from(self.next()?).ok()?, idx: self.val()? },
             15 => Op::FrameCount,
             16 => Op::BufLen(self.small(255)?),
             _ => return None,

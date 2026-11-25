@@ -137,6 +137,8 @@ pub struct ScriptThread {
     /// Base of the CURRENT slot frame (see CallFrame::prev_slot_base).
     pub(crate) slot_base: usize,
     pub(crate) instruction_limit_remaining: Option<u64>,
+    /// Remaining instructions for a suspended run, reapplied only while it resumes.
+    pub(crate) paused_instruction_limit: Option<u64>,
     /// The innermost scope when the root frame returned, kept alive so
     /// the body can hand it to host->script calls.
     pub(crate) root_end_scope: Option<ScriptObjectRef>,
@@ -168,6 +170,18 @@ pub(crate) enum RunCompletion {
 }
 
 impl ScriptThread {
+    /// A host can install a policy while a thread is suspended. Its existing
+    /// stack must fit too, even if its first resumed instruction only pops.
+    pub(crate) fn policy_stack_failure(&self, policy: &crate::policy::ScriptVmPolicy) -> Option<crate::policy::Limit> {
+        if self.stack_limit_exceeded || policy.stack_values.is_some_and(|cap| self.stack.len() > cap) {
+            Some(crate::policy::Limit::OperandStack)
+        } else if self.call_frame_limit_exceeded || policy.call_frames.is_some_and(|cap| self.calls.len() > cap) {
+            Some(crate::policy::Limit::CallFrames)
+        } else {
+            None
+        }
+    }
+
     pub fn new(thread_id: ScriptThreadId) -> Self {
         Self {
             thread_id,
@@ -189,6 +203,7 @@ impl ScriptThread {
             slots: Vec::with_capacity(256),
             slot_base: 0,
             instruction_limit_remaining: None,
+            paused_instruction_limit: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
             name_reads: None,
@@ -209,6 +224,7 @@ impl ScriptThread {
     }
 
     pub fn pause(&mut self) -> ScriptThreadId {
+        self.paused_instruction_limit = self.instruction_limit_remaining;
         self.trap.set_on(Some(ScriptTrapOn::Pause));
         self.is_paused = true;
         self.thread_id

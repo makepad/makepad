@@ -1,0 +1,19 @@
+// A 40 ms grain starts at a new point in the recording each time its window closes.
+let src = sample(2)
+var phase = 0.0
+var position = 0.0
+var env = Adsr{}
+
+fn voice() {
+    if trigger || phase >= 1.0 {
+        phase = 0.0
+        position = (rand() * 0.5 + 0.5) * len(src)
+    }
+    let frame = read(src, position)
+    position += freq / 261.6256
+    let window = 0.5 - 0.5 * cos(TAU * phase)
+    phase += 25.0 / sample_rate
+    let level = adsr(env, 0.005, 0.1, 0.8, 0.08)
+    if gate == 0.0 && level == 0.0 { stop() }
+    frame * (window * level * velocity * 0.4)
+}

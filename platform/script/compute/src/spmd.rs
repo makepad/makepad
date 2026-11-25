@@ -22,6 +22,8 @@ use crate::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Un, Val, Var};
 use crate::lower::kernel::ELEMENT_CAP;
 use std::collections::{HashMap, HashSet};
 
+relax_api::option_layouts! { (usize, Val) }
+
 /// Largest frame (words per lane) vectorized: 4 lanes x 4096 words = 64 KiB.
 pub(crate) const MAX_FRAME_WORDS: u32 = 4096;
 
@@ -199,7 +201,7 @@ pub(crate) struct Shape<'a> {
     pub(crate) i: Var,
     /// After the loop: a run's counted work (`crate::work`), the variable
     /// each lane counted into and the ctx word their sum goes to.
-    pub(crate) post: Option<(Var, u32)>,
+    pub(crate) post: Option<(Var, Option<Var>, u32)>,
 }
 
 /// The counted-work postlude: `x = Get(var); ctx[word] = x`.
@@ -213,7 +215,12 @@ fn postlude(b: &[Stmt]) -> Option<(usize, Var, u32)> {
 
 pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
     let (body_end, post) = match postlude(&p.body) {
-        Some((k, var, word)) => (k, Some((var, word))),
+        Some((k, var, word)) => match postlude(&p.body[..k]) {
+            Some((start, lo, low_word)) if low_word == crate::lower::kernel::K_WORK && word == low_word + 1 =>
+                (start, Some((lo, Some(var), low_word))),
+            // A hand-built AIR program may still request a single-word lane sum.
+            _ => (k, Some((var, None, word))),
+        },
         None => (p.body.len(), None),
     };
     let last_at = p.body[..body_end].iter().rposition(|s| !matches!(s, Stmt::Mark(_)))?;
@@ -361,27 +368,36 @@ pub(crate) fn supported(p: &Program, body: &Block) -> bool {
     !ctx_stores.iter().any(|s| ctx_loads.iter().any(|l| overlaps(s, l)))
 }
 
-pub(crate) fn analyse(p: &Program, sh: &Shape) -> Option<Info> {
-    let Stmt::Loop { body, .. } = sh.element else { return None };
-    let mut info = Info { vval: vec![false; p.vals.len()], vvar: vec![false; p.vars.len()], ..Default::default() };
-    info.vvar[sh.i.0 as usize] = true;
-    // The `i >= n` exit: a CmpI(Ge, Get(i), FrameCount) guarding a
-    // Break(0) at the top of the element body.
-    let defs: HashMap<u32, &Op> = body.iter().chain(sh.prelude).filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
-    for s in crate::ir::unmarked(body).take(4) {
+/// The driver exits on `i >= n` before entering another element. Both the
+/// vectorizer and work meter leave this guard outside active lanes' work.
+pub(crate) fn element_range_check(prelude: &[Stmt], body: &[Stmt], i: Var) -> Option<(usize, Val)> {
+    let defs: HashMap<u32, &Op> = body.iter().chain(prelude).filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
+    for (index, s) in body.iter().enumerate().filter(|(_, s)| !matches!(s, Stmt::Mark(_))).take(4) {
         if let Stmt::If(c, t, e) = s {
             if matches!((crate::ir::unmarked(t).next(), crate::ir::unmarked(t).nth(1)), (Some(Stmt::Break(0)), None)) && crate::ir::unmarked(e).next().is_none() {
                 if let Some(Op::CmpI(Cmp::Ge, a, n)) = defs.get(&c.0) {
-                    if matches!(defs.get(&a.0), Some(Op::Get(g)) if *g == sh.i) && matches!(defs.get(&n.0), Some(Op::FrameCount)) {
-                        info.uniform_by_shape.insert(c.0);
+                    if matches!(defs.get(&a.0), Some(Op::Get(g)) if *g == i) && matches!(defs.get(&n.0), Some(Op::FrameCount)) {
+                        return Some((index, *c));
                     }
                 }
             }
         }
     }
-    if info.uniform_by_shape.is_empty() {
-        return None;
+    None
+}
+
+pub(crate) fn analyse(p: &Program, sh: &Shape) -> Option<Info> {
+    let Stmt::Loop { body, .. } = sh.element else { return None };
+    let mut info = Info { vval: vec![false; p.vals.len()], vvar: vec![false; p.vars.len()], ..Default::default() };
+    info.vvar[sh.i.0 as usize] = true;
+    // Even a uniform charge belongs to the active lanes. A final partial
+    // vector can leave its counters different at the end of the call.
+    if let Some((lo, hi, _)) = sh.post {
+        info.vvar[lo.0 as usize] = true;
+        if let Some(hi) = hi { info.vvar[hi.0 as usize] = true; }
     }
+    let (_, test) = element_range_check(sh.prelude, body, sh.i)?;
+    info.uniform_by_shape.insert(test.0);
     // Fixpoint: varying values/vars, divergent ifs, masked loops.
     for _ in 0..64 {
         let mut changed = info.pass(&p.body, false);

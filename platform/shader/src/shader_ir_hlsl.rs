@@ -349,6 +349,7 @@ float2 _mp_unpack_unorm2x16(uint u) { return float2(float(u & 0xffff), float(u >
 float2 _mp_unpack_snorm2x16(uint u) { int2 i = int2(int(u << 16), int(u)) >> 16; return clamp(float2(i) / 32767.0, -1.0, 1.0); }
 float4 _mp_unpack_unorm4x8(uint u) { return float4(float(u & 0xff), float((u >> 8) & 0xff), float((u >> 16) & 0xff), float((u >> 24) & 0xff)) * (1.0 / 255.0); }
 float4 _mp_unpack_snorm4x8(uint u) { int4 i = int4(int(u << 24), int(u << 16), int(u << 8), int(u)) >> 24; return clamp(float4(i) / 127.0, -1.0, 1.0); }
+float3 _mpTexSize3D(Texture3D tex) { uint w, h, d; tex.GetDimensions(w, h, d); return float3(w, h, d); }
 float2 _mpTexSize2D(Texture2D tex) { uint w, h; tex.GetDimensions(w, h); return float2(w, h); }
 float2 _mpTexSize2D(Texture2D<float> tex) { uint w, h; tex.GetDimensions(w, h); return float2(w, h); }
 #define _mp_asinh(x) log((x) + sqrt((x) * (x) + 1.0))

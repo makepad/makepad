@@ -1,0 +1,6 @@
+var heard_saw = false
+
+fn check_voice(frame, out) -> bool {
+    if abs(out.x) > 0.01 && abs(out.y) > 0.01 { heard_saw = true }
+    abs(out.x) <= 1.0 && abs(out.y) <= 1.0 && (frame < 4800 || heard_saw)
+}

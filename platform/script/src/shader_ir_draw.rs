@@ -3,9 +3,10 @@ pub use makepad_shader::shader_ir_draw::*;
 use crate::{shader::{ShaderMode, ShaderType}, shader_lower::IrFnCompiler, shader_output::ShaderOutput, trap::NoTrap, value::ScriptObject, vm::ScriptVm};
 use makepad_live_id::{id, LiveId};
 /// How a draw shader is compiled (the platform's choices).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct IrCompileOptions {
     pub const_table: bool,
+    pub max_sampler_anisotropy: u8,
     pub live_literals: Option<std::sync::Arc<crate::literal::LiveLiterals>>,
     /// The source is for Vulkan (GL keeps its clip z and video samplers).
     pub use_vulkan: bool,
@@ -15,9 +16,15 @@ pub struct IrCompileOptions {
     pub backend: crate::shader_backend::ShaderBackend,
 }
 
+impl Default for IrCompileOptions {
+    fn default() -> Self {
+        Self::new(Default::default(), false, false, false, false)
+    }
+}
+
 impl IrCompileOptions {
     pub fn new(backend: crate::shader_backend::ShaderBackend, const_table: bool, use_vulkan: bool, glsl_webgl2: bool, live_literals: bool) -> Self {
-        Self { backend, const_table, use_vulkan, glsl_webgl2, live_literals: if live_literals { crate::literal::live() } else { None } }
+        Self { backend, const_table, use_vulkan, glsl_webgl2, max_sampler_anisotropy: 16, live_literals: if live_literals { crate::literal::live() } else { None } }
     }
 }
 
@@ -31,6 +38,7 @@ pub fn compile_draw_shader_ir_with(vm: &mut ScriptVm, io_self: ScriptObject, opt
     output.live_literals = opts.live_literals.clone();
     output.use_vulkan = opts.use_vulkan;
     output.glsl_webgl2 = opts.glsl_webgl2;
+    output.max_sampler_anisotropy = Some(opts.max_sampler_anisotropy.clamp(1, 16));
     output.pre_collect_rust_instance_io(vm, io_self);
     output.pre_collect_shader_io(vm, io_self);
     for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {

@@ -934,7 +934,7 @@ impl IrFnCompiler {
                     let body = &bodies[self.trap.ip.body as usize];
                     let ip = self.trap.ip.index;
                     let mut found = None;
-                    for (frame_ip, names) in body.parser.slot_frames.iter().rev() {
+                    for (frame_ip, names, _, _) in body.parser.slot_frames.iter().rev() {
                         if *frame_ip < ip {
                             found = names.get(opargs.to_u32() as usize).copied();
                             break;

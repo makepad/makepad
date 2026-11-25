@@ -1,0 +1,36 @@
+// Stereo three-band strip. Matching the low band's phase to the upper split
+// makes the bands sum flat before tone shaping, gating and added noise.
+let bass = param(2.0, -12, 12, {unit: db})
+let middle = param(-2.0, -12, 12, {unit: db})
+let treble = param(1.0, -12, 12, {unit: db})
+let depth = param(0.6, 0, 1)
+let division = param(0.5, 0.125, 4, {unit: beats})
+struct Strip {
+    lower: Split4{} upper: Split4{} phase: Svf{}
+    bass_eq: Eq{} mid_eq: Eq{} high_eq: Eq{}
+    noise: Pink{}
+}
+var channels = [Strip{}; 2]
+fn block() {
+    for i in 0..2 {
+        let s = channels[i]
+        split4_set(s.lower, 300.0)
+        split4_set(s.upper, 3000.0)
+        svf_set(s.phase, 3000.0, 0.707106781)
+        eq_low_shelf_set(s.bass_eq, 150.0, 0.707106781, bass)
+        eq_bell_set(s.mid_eq, 1000.0, 1.0, middle)
+        eq_high_shelf_set(s.high_eq, 6000.0, 0.707106781, treble)
+    }
+}
+fn strip(s, x, gain) {
+    let first = split4(s.lower, x)
+    let bands = split4(s.upper, first.y)
+    let low = eq(s.bass_eq, svf_ap(s.phase, first.x))
+    let mid = eq(s.mid_eq, bands.x)
+    let high = eq(s.high_eq, bands.y)
+    (low + mid + high * gain) * 0.75 + pink(s.noise) * 0.002
+}
+fn effect(l, r) {
+    let gain = 1.0 - depth * (0.5 - 0.5 * lfo_beat(division, 3))
+    vec2(strip(channels[0], l, gain), strip(channels[1], r, gain))
+}

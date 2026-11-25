@@ -427,7 +427,19 @@ mod tests {
     }
 }
 
-pub(crate) const METAL_HELPERS: &str = "inline float2 _mp_unpack2f16(float x) { half2 h = as_type<half2>(as_type<uint>(x)); return float2(h.x, h.y); }
+/// MSL every shader and kernel starts with. `_mp_rem` is integer `%` spelled `a - (a / b) * b`
+/// (the same quotient, truncated toward zero, so the same bits for every operand), and
+/// `_mp_remv` the same lane by lane: Metal's compiler (M-series GPUs, 2026-11) took the remainder
+/// of a word's high half by a constant, `(x >> 16u) % 10u`, with the quotient of the word's low
+/// half, so packed coordinates (`gx | gy << 16`) landed in other cells. Both inline before the
+/// compiler simplifies them: a helper simplified on its own, its divisor still a parameter, folds
+/// back into `%` and takes the constant after; and a vector's `%` spelled out folds back too
+/// (`platform/tests/compute_int_remainder.rs`).
+pub(crate) const METAL_HELPERS: &str = "template <typename T> __attribute__((always_inline)) inline T _mp_rem(T a, T b) { return a - (a / b) * b; }
+template <typename T> __attribute__((always_inline)) inline vec<T, 2> _mp_remv(vec<T, 2> a, vec<T, 2> b) { return vec<T, 2>(_mp_rem<T>(a.x, b.x), _mp_rem<T>(a.y, b.y)); }
+template <typename T> __attribute__((always_inline)) inline vec<T, 3> _mp_remv(vec<T, 3> a, vec<T, 3> b) { return vec<T, 3>(_mp_rem<T>(a.x, b.x), _mp_rem<T>(a.y, b.y), _mp_rem<T>(a.z, b.z)); }
+template <typename T> __attribute__((always_inline)) inline vec<T, 4> _mp_remv(vec<T, 4> a, vec<T, 4> b) { return vec<T, 4>(_mp_rem<T>(a.x, b.x), _mp_rem<T>(a.y, b.y), _mp_rem<T>(a.z, b.z), _mp_rem<T>(a.w, b.w)); }
+inline float2 _mp_unpack2f16(float x) { half2 h = as_type<half2>(as_type<uint>(x)); return float2(h.x, h.y); }
 inline float4 _mp_unpack4u8(float x) { uint u = as_type<uint>(x); return float4(float(u & 0xffu), float((u >> 8) & 0xffu), float((u >> 16) & 0xffu), float((u >> 24) & 0xffu)) * (1.0 / 255.0); }
 inline float4x4 _mp_inverse(float4x4 m) {
     float a00 = m[0][0]; float a01 = m[0][1]; float a02 = m[0][2]; float a03 = m[0][3];

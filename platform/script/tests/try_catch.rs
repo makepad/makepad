@@ -50,6 +50,22 @@ fn assertion_failed(vm: &mut ScriptVm, name: &str, code: &str) -> Vec<String> {
 }
 
 #[test]
+fn assert_reports_its_optional_text_message() {
+    let mut vm = test_vm();
+    for (call, expected) in [
+        ("mod.std.assert(false)", Some("assertion failed")),
+        (r#"mod.std.assert(false, "missing value")"#, Some("assertion failed: missing value")),
+        ("mod.std.assert(false, 7)", Some("assertion failed")),
+        (r#"mod.std.assert(true, "unused")"#, None),
+    ] {
+        vm.capture_errors();
+        eval(&mut vm, "assert_message", call);
+        let errors = vm.take_error_records();
+        assert_eq!(errors.iter().map(|e| e.message()).collect::<Vec<_>>(), expected.into_iter().collect::<Vec<_>>());
+    }
+}
+
+#[test]
 fn legacy_catch_less_try_still_recovers_and_keeps_its_value() {
     let vm = &mut test_vm();
     assert_eq!(

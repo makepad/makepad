@@ -1511,7 +1511,14 @@ impl<'a> Gen<'a> {
         let o = match (op, s) {
             (BinOp::Div, IrScalar::I32) => OP_S_DIV,
             (BinOp::Div, _) => OP_U_DIV,
-            (_, IrScalar::I32) => OP_S_REM,
+            (_, IrScalar::I32) => {
+                // l - (l / d) * d, the remainder OpSRem defines: Vulkan on an NVIDIA GPU gave
+                // OpSRem of a negative operand as the unsigned remainder of its bits
+                // (platform/tests/compute_int_remainder.rs)
+                let q = self.ins_id(OP_S_DIV, t, &[l, divisor]);
+                let m = self.ins_id(OP_I_MUL, t, &[q, divisor]);
+                return self.ins_id(OP_I_SUB, t, &[l, m]);
+            }
             _ => OP_U_MOD,
         };
         self.ins_id(o, t, &[l, divisor])
@@ -2024,7 +2031,7 @@ impl<'a> Gen<'a> {
         let qt = self.vec_id(IrScalar::U32, n);
         let lod = self.b.const_u32(0);
         let size = self.ins_id(OP_IMAGE_QUERY_SIZE_LOD, qt, &[img, lod]);
-        let size = if n == 3 {
+        let size = if n == 3 && self.lanes(ty) == 2 {
             let u2 = self.vec_id(IrScalar::U32, 2);
             self.ins_id(OP_VECTOR_SHUFFLE, u2, &[size, size, 0, 1])
         } else {

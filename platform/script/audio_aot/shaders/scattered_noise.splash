@@ -1,0 +1,10 @@
+// Scatter quiet clicks over the input. Each click has two opposite samples
+// so it adds no DC. Each copy has its own place in the stereo field.
+var previous = 0.0
+
+fn effect(l, r) {
+    let pulse = if rand() > 0.999 { 0.12 } else { 0.0 }
+    let click = pulse - previous
+    previous = pulse
+    vec2(l * 0.85 + click * (1.0 - instance), r * 0.85 + click * instance)
+}

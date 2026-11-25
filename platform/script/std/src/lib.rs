@@ -1,3 +1,7 @@
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 use relax_api::relax_api;
 pub use makepad_network;
 pub use makepad_script;

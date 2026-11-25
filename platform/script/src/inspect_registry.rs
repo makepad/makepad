@@ -113,7 +113,7 @@ static ERROR_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// the hooks cost one relaxed load (a native build never pays more)
 static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-std::thread_local! {
+thread_local! {
     /// this thread runs an evaluation whose errors are its answer ([`unreported`])
     static UNREPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

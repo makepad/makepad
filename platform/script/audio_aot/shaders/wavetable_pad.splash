@@ -52,7 +52,8 @@ fn osc(p, m) {
 
 fn block() {
     up = 1.0 / (attack * sample_rate)
-    down = exp(-1.0 / (release * sample_rate))
+    // `release` is the seconds to fall 80 dB (e^-9.21), so a voice ends.
+    down = exp(-9.21 / (release * sample_rate))
     spread = exp2(detune / 12.0)
 }
 

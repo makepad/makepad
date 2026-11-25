@@ -158,7 +158,7 @@ pub(super) fn returns_in(e: &Expr) -> bool {
     }
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// In a traced lowering: a call's arguments with its value-typed places read, and a copy to
     /// note, an array of floats or vectors as its elements read at the call (a word the lowering
     /// knows the value of reads as that value). None: this lowering is not traced.
@@ -334,9 +334,7 @@ impl KernelTrace {
         }).collect();
         let mut state = [0u32; 1];
         let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Read(&t.shared), bufs: &bufs };
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut io = ir::Io::default();
         let mut scratch = vec![0u32; t.program.scratch_words()];
         ir::run(&t.program, &mut scratch, &mut mem, &mut io, 1);
         let n = values.len().min(t.values);

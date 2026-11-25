@@ -64,30 +64,45 @@ const DEFAULT_GLOB: &[&str] = &["std.shared"];
 /// Nesting of modules importing modules.
 const MAX_DEPTH: usize = 8;
 
-struct Resolver<'a> {
+struct Resolver<'a, 'b> {
     host: &'a [Module<'a>],
+    host_site: &'b mut dyn FnMut(&str, Option<Span>) -> Option<Span>,
     /// Where the next module's spans start (past the user code and the
     /// prelude, so errors inside modules are reported at the user's call).
     next_base: usize,
     stack: Vec<String>,
 }
 
-impl<'a> Resolver<'a> {
-    fn source(&self, path: &str) -> Option<&'a str> {
+impl<'a> Resolver<'a, '_> {
+    fn source(&self, path: &str) -> Option<(&'a str, bool)> {
         if let Some(m) = self.host.iter().find(|m| m.path == path) {
-            return Some(m.source);
+            return Some((m.source, true));
         }
         let std_path = if path.starts_with("std.") { path.to_string() } else { format!("std.{}", path) };
-        STD.iter().find(|(p, _)| *p == std_path).map(|(_, s)| *s)
+        STD.iter().find(|(p, _)| *p == std_path).map(|(_, s)| (*s, false))
     }
 
-    /// Parses a module's text with spans placed past everything so far.
-    fn parse(&mut self, path: &str, src: &str, at: Span) -> Result<Vec<Item>, ShaderError> {
+    /// Places module spans at the host's site or past everything parsed so far.
+    fn parse(&mut self, path: &str, src: &str, at: Span, site: Option<Span>) -> Result<Vec<Item>, ShaderError> {
+        let at = site.unwrap_or(at);
         let fail = |e: ShaderError| {
             let (line, col) = e.line_col(src);
             ShaderError::new(at.start, at.end.max(at.start + 1), format!("in module `{}` (line {}, column {}): {}", path, line, col, e.message))
         };
         let mut toks = lex(src).map_err(fail)?;
+        if let Some(site) = site {
+            for t in &mut toks {
+                t.start = site.start;
+                t.end = site.end;
+            }
+            return Parser::new(&toks).items().map_err(|error| {
+                // Recover the line within the module only on a parse failure.
+                match lex(src).and_then(|tokens| Parser::new(&tokens).items()) {
+                    Err(local) => fail(local),
+                    Ok(_) => error,
+                }
+            });
+        }
         let base = self.next_base;
         for t in &mut toks {
             t.start += base;
@@ -103,8 +118,8 @@ impl<'a> Resolver<'a> {
     /// Resolves the `use` items of `items`: returns the imported items
     /// (qualified, plus glob copies) and `items` without its uses.
     fn resolve(&mut self, items: Vec<Item>, auto_std: bool, keep: &HashSet<String>) -> Result<Vec<Item>, ShaderError> {
-        let own: HashSet<String> = items.iter().filter(|i| !matches!(i, Item::Use { .. })).map(|i| i.name().to_string()).collect();
-        let mut uses: Vec<(String, bool, String, Span)> = Vec::new();
+        let own: HashSet<String> = items.iter().filter(|i| !matches!(i, Item::Use { .. } | Item::Decl { .. })).map(|i| i.name().to_string()).collect();
+        let mut uses: Vec<(String, bool, String, Option<Span>)> = Vec::new();
         for it in &items {
             if let Item::Use { path, glob, alias, span } = it {
                 let alias = match alias {
@@ -112,7 +127,7 @@ impl<'a> Resolver<'a> {
                     None if path.starts_with("lib:") && !*glob => return Err(ShaderError::new(span.start, span.end, "name a library module: `use lib(\"id\", \"rev\") as name`".into())),
                     None => path.rsplit('.').next().unwrap_or(path).to_string(),
                 };
-                uses.push((path.clone(), *glob, alias, *span));
+                uses.push((path.clone(), *glob, alias, Some(*span)));
             }
         }
         // Qualified calls to modules nobody imported: std paths or host paths
@@ -128,7 +143,7 @@ impl<'a> Resolver<'a> {
         called.sort();
         for q in called {
             if !aliases.contains(&q) && !uses.iter().any(|u| u.0 == q) && self.source(&q).is_some() {
-                uses.push((q.clone(), false, q.clone(), Span { start: 0, end: 1 }));
+                uses.push((q.clone(), false, q.clone(), None));
             }
         }
         let mut out: Vec<Item> = Vec::new();
@@ -144,7 +159,7 @@ impl<'a> Resolver<'a> {
                 }
             }
             if *glob {
-                self.globs(&m, alias, path, &own, keep, &mut exported, &mut out, &mut have, false, *span)?;
+                self.globs(&m, alias, path, &own, keep, &mut exported, &mut out, &mut have, false, span.expect("a glob has a use"))?;
             }
         }
         if auto_std {
@@ -156,7 +171,7 @@ impl<'a> Resolver<'a> {
                     continue;
                 }
                 let span = Span { start: 0, end: 1 };
-                let m = self.import(path, &alias, span)?;
+                let m = self.import(path, &alias, None)?;
                 for it in &m {
                     if have.insert(it.name().to_string()) {
                         out.push(it.clone());
@@ -216,15 +231,20 @@ impl<'a> Resolver<'a> {
     }
 
     /// A module's items, resolved and qualified by `alias`.
-    fn import(&mut self, path: &str, alias: &str, span: Span) -> Result<Vec<Item>, ShaderError> {
+    fn import(&mut self, path: &str, alias: &str, at: Option<Span>) -> Result<Vec<Item>, ShaderError> {
+        let span = at.unwrap_or(Span { start: 0, end: 1 });
         if self.stack.iter().any(|p| p == path) || self.stack.len() >= MAX_DEPTH {
             return Err(ShaderError::new(span.start, span.end, format!("module `{}` imports itself (through {})", path, self.stack.join(" -> "))));
         }
-        let Some(src) = self.source(path) else {
+        let Some((src, is_host)) = self.source(path) else {
             let hint = if path.starts_with("lib:") { " (the host did not resolve this library revision)" } else { "" };
             return Err(ShaderError::new(span.start, span.end.max(span.start + 1), format!("no module `{}`{}", path, hint)));
         };
-        let items = self.parse(path, src, span)?;
+        let site = if is_host { (self.host_site)(path, at) } else { None };
+        let items = self.parse(path, src, span, site)?;
+        if let Some(Item::Decl { span, .. }) = items.iter().find(|i| matches!(i, Item::Decl { .. })) {
+            return Err(ShaderError::new(span.start, span.end, format!("in module `{path}`: declarations belong to the shader")));
+        }
         if items.iter().any(|i| matches!(i, Item::Var { .. })) {
             return Err(ShaderError::new(span.start, span.end, format!("module `{}` declares a `var`: modules hold functions and constants", path)));
         }
@@ -249,7 +269,14 @@ impl<'a> Resolver<'a> {
 /// source plus everything already placed after it (the prelude), so module
 /// spans land past both; `prelude` names are kept over default std globs.
 pub fn resolve(items: Vec<Item>, next_base: usize, host: &[Module], prelude: &[Item]) -> Result<Vec<Item>, ShaderError> {
-    let mut r = Resolver { host, next_base, stack: Vec::new() };
+    resolve_with(items, next_base, host, prelude, &mut |_, _| None)
+}
+
+/// As [`resolve`], visiting each imported host path (including nested imports).
+/// The visitor receives the explicit `use` span, or `None` for implicit imports.
+/// It may attribute the module's items to a span in the importing source.
+pub fn resolve_with(items: Vec<Item>, next_base: usize, host: &[Module], prelude: &[Item], host_site: &mut dyn FnMut(&str, Option<Span>) -> Option<Span>) -> Result<Vec<Item>, ShaderError> {
+    let mut r = Resolver { host, host_site, next_base, stack: Vec::new() };
     let keep: HashSet<String> = prelude.iter().map(|i| i.name().to_string()).collect();
     r.resolve(items, true, &keep)
 }
@@ -274,6 +301,7 @@ pub(crate) fn rename_refs(it: &mut Item, map: &HashMap<String, String>) {
             w.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
             w.stmts(&mut f.body);
         }
+        Item::Decl { name, args, .. } => w.decl_args(name, args),
         Item::Use { .. } => {}
     }
 }
@@ -282,7 +310,7 @@ fn rename(it: &mut Item, name: String) {
     match it {
         Item::Let { name: n, .. } | Item::Var { name: n, .. } | Item::Struct { name: n, .. } => *n = name,
         Item::Fn(f) => f.name = name,
-        Item::Use { .. } => {}
+        Item::Decl { .. } | Item::Use { .. } => {}
     }
 }
 
@@ -302,6 +330,7 @@ fn qualify(it: &mut Item, alias: &str, names: &HashSet<String>) {
             w.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
             w.stmts(&mut f.body);
         }
+        Item::Decl { name, args, .. } => w.decl_args(name, args),
         Item::Use { .. } => {}
     }
 }
@@ -320,6 +349,7 @@ fn qualify_fields(it: &mut Item, aliases: &HashSet<String>, quals: &HashSet<Stri
             w.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
             w.stmts(&mut f.body);
         }
+        Item::Decl { name, args, .. } => w.decl_args(name, args),
         Item::Use { .. } => {}
     }
 }
@@ -330,7 +360,21 @@ struct Walk<'m> {
     scopes: Vec<HashSet<String>>,
 }
 
+/// These bare identifiers denote literal modes in the conversion forms' mode positions.
+pub fn is_rate_mode_literal(arg: &Expr) -> bool {
+    matches!(&arg.kind, ExprKind::Ident(n) if matches!(n.as_str(), "filter" | "linear" | "hold"))
+}
+
 impl Walk<'_> {
+    fn decl_args(&mut self, name: &str, args: &mut [Expr]) {
+        for (i, arg) in args.iter_mut().enumerate() {
+            if name == "rate" && matches!(i, 1 | 2) && is_rate_mode_literal(arg) {
+                continue;
+            }
+            self.expr(arg);
+        }
+    }
+
     fn bound(&self, n: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(n))
     }
@@ -384,13 +428,18 @@ impl Walk<'_> {
                 }
             }
             ExprKind::Call(n, args) => {
-                if !self.bound(n) {
+                let bound = self.bound(n);
+                if !bound {
                     if let Some(q) = (self.map)(n) {
                         *n = q;
                     }
                 }
-                for a in args {
-                    self.expr(a);
+                let oversample = !bound && n == "oversample";
+                for (i, arg) in args.iter_mut().enumerate() {
+                    if oversample && matches!(i, 3 | 4) && is_rate_mode_literal(arg) {
+                        continue;
+                    }
+                    self.expr(arg);
                 }
             }
             ExprKind::StructLit(n, fields) => {
@@ -445,7 +494,7 @@ impl Walk<'_> {
                 self.stmts(&mut f.body);
                 self.scopes.pop();
             }
-            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => {}
         }
     }
 }
@@ -489,7 +538,7 @@ fn qualified_calls(b: &[Stmt], out: &mut HashSet<String>) {
             ExprKind::ArrayList(l) => l.iter().for_each(|x| expr(x, out)),
             ExprKind::StructLit(_, f) => f.iter().for_each(|(_, x)| expr(x, out)),
             ExprKind::Lambda(f) => qualified_calls(&f.body, out),
-            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unreadable(_) => {}
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => {}
         }
     }
     for s in b {
@@ -518,9 +567,11 @@ fn qualified_calls(b: &[Stmt], out: &mut HashSet<String>) {
 /// calls, identifiers and struct literals); library items nobody reaches
 /// are dropped before lowering, so an unused module costs nothing.
 pub fn prune(items: Vec<Item>, roots: &HashSet<String>) -> Vec<Item> {
-    let index: HashMap<String, usize> = items.iter().enumerate().map(|(k, i)| (i.name().to_string(), k)).collect();
+    let index: HashMap<String, usize> = items.iter().enumerate().filter(|(_, i)| !matches!(i, Item::Decl { .. })).map(|(k, i)| (i.name().to_string(), k)).collect();
     let mut keep = vec![false; items.len()];
-    let mut todo: Vec<usize> = roots.iter().filter_map(|r| index.get(r).copied()).collect();
+    // Preserve every authored declaration, including duplicates the front
+    // end must diagnose at their original locations.
+    let mut todo: Vec<usize> = items.iter().enumerate().filter(|(_, i)| roots.contains(i.name()) || matches!(i, Item::Decl { .. })).map(|(k, _)| k).collect();
     while let Some(k) = todo.pop() {
         if keep[k] {
             continue;
@@ -577,7 +628,7 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
             ExprKind::Block(b) => stmts(b, out),
             ExprKind::ArrayList(l) => l.iter().for_each(|x| expr(x, out)),
             ExprKind::Lambda(f) => stmts(&f.body, out),
-            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => {}
         }
     }
     fn stmts(b: &[Stmt], out: &mut HashSet<String>) {
@@ -606,6 +657,7 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
         Item::Let { value, .. } | Item::Var { value, .. } => expr(value, out),
         Item::Struct { fields, .. } => fields.iter().for_each(|(_, e)| expr(e, out)),
         Item::Fn(f) => stmts(&f.body, out),
+        Item::Decl { args, .. } => args.iter().for_each(|e| expr(e, out)),
         Item::Use { .. } => {}
     }
 }

@@ -16,7 +16,7 @@
 //!   proves the offset in range); host buffers clamp `base + off` (64-bit) to their length.
 //!
 //! Entry ABI (`relax_backend::host_fn_ptr!`): `extern "C" fn(ctx, state, shared,
-//! io, n)` (`extern "sysv64"` on x86-64, on every OS), io = [in_l, in_r, out_l, out_r] for audio programs and the (pointer, length)
+//! io, n)` (`extern "sysv64"` on x86-64, on every OS), io holds input pointers followed by output pointers for audio programs, and the (pointer, length)
 //! buffer table for kernels.
 use relax_api::relax_api;
 
@@ -63,16 +63,25 @@ impl Code {
         unsafe { std::slice::from_raw_parts(b.as_ptr() as *const u32, b.len() / 4) }
     }
 
-    /// Runs an audio program (see `arm64::Code::run`).
+    /// Convenience entry for existing stereo callers.
     ///
     /// # Safety
-    /// As `arm64::Code::run`: slice sizes as compiled for, n >= 1, `shared` alive.
+    /// As for `run_audio`. The program uses stereo inputs and outputs, or no audio I/O.
     pub unsafe fn run(&self, ctx: &mut [u32], state: &mut [u32], shared: *mut u32, ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: u32) {
-        let [o0, o1] = outs;
-        let io = [ins[0].as_ptr() as *mut f32, ins[1].as_ptr() as *mut f32, o0.as_mut_ptr(), o1.as_mut_ptr()];
+        let [left, right] = outs;
+        let table = [ins[0].as_ptr() as usize, ins[1].as_ptr() as usize, left.as_mut_ptr() as usize, right.as_mut_ptr() as usize];
+        unsafe { self.run_audio(ctx, state, shared, &table, n) }
+    }
+
+    /// Runs an audio program with its prepared input and output pointer table.
+    ///
+    /// # Safety
+    /// The regions and table must match the compiled program. Each channel
+    /// holds at least `n` frames, outputs are uniquely writable, and n >= 1.
+    pub unsafe fn run_audio(&self, ctx: &mut [u32], state: &mut [u32], shared: *mut u32, table: &[usize], n: u32) {
         unsafe {
             let f: Entry = std::mem::transmute(self.code.ptr());
-            f(ctx.as_mut_ptr(), state.as_mut_ptr(), shared, io.as_ptr(), n);
+            f(ctx.as_mut_ptr(), state.as_mut_ptr(), shared, table.as_ptr().cast(), n);
         }
     }
 
@@ -146,26 +155,32 @@ pub fn compile_words(words: &[u32], writable: u64) -> Option<Code> {
 /// Compiles a kernel whose host buffers have write permission `writable` (bit k: buffer
 /// k), passed on to host calls.
 pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
+    compile_with_offset_limit(p, writable, i32::MAX)
+}
+
+/// Compile with a smaller immediate range to exercise wide table addresses.
+#[doc(hidden)]
+pub fn compile_with_offset_limit(p: &Program, writable: u64, offset_limit: i32) -> Option<Code> {
     let flat = crate::ir::flat(p);
     let p = &*flat;
     // A program with ports runs in the interpreter (`ir::run_ports`).
     if !cpu_ok(p) || crate::ir::has_ports(p) || crate::ir::has_narrow(p) {
         return None;
     }
-    let key = crate::kcache::key("scalar", p, writable);
+    let key = (offset_limit == i32::MAX).then(|| crate::kcache::key("scalar", p, writable)).flatten();
     if let Some(code) = key.and_then(load) {
         if crate::kcache::verify() {
             // verify mode: the stored code must be what a compile makes now
-            let fresh = compile_fresh(p, writable, None).expect("a stored kernel compiles");
+            let fresh = compile_fresh(p, writable, None, offset_limit).expect("a stored kernel compiles");
             crate::kcache::same("scalar", code.bytes(), fresh.bytes());
         }
         return Some(code);
     }
-    compile_fresh(p, writable, key)
+    compile_fresh(p, writable, key, offset_limit)
 }
 
-fn compile_fresh(p: &Program, writable: u64, key: Option<u128>) -> Option<Code> {
-    let mut f = lower(p, writable);
+fn compile_fresh(p: &Program, writable: u64, key: Option<u128>, offset_limit: i32) -> Option<Code> {
+    let mut f = lower(p, writable, offset_limit)?;
     if f.verify().is_err() {
         return None;
     }
@@ -279,7 +294,7 @@ pub(crate) fn pair_halves(f: &mut Func) {
 pub fn rir_of(p: &Program, writable: u64) -> Func {
     assert!(!crate::ir::has_narrow(p), "native RIR requires Word buffers");
     let flat = crate::ir::flat(p);
-    let mut f = lower(&flat, writable);
+    let mut f = lower(&flat, writable, i32::MAX).expect("channel index outside the program table");
     optimise_for_codegen(&mut f);
     f
 }
@@ -387,6 +402,7 @@ struct Lx<'a> {
     loops: Vec<(u32, u32)>,
     bounds: Vec<Option<u32>>,
     writable: u64,
+    offset_limit: i32,
     /// call record slot (host calls)
     rec: Option<u32>,
     /// constant values: materialised at each use (rematerialised, never kept live across
@@ -398,6 +414,7 @@ struct Lx<'a> {
     /// per host buffer: (base pointer, last word index), loaded once at entry (the table
     /// does not change during a call)
     bufs: Vec<(VReg, VReg)>,
+    io: Vec<VReg>,
 }
 
 fn cls_of(t: Ty) -> Cls {
@@ -419,7 +436,8 @@ fn cond(c: Cmp) -> Cond {
     }
 }
 
-fn lower(p: &Program, writable: u64) -> Func {
+fn lower(p: &Program, writable: u64, offset_limit: i32) -> Option<Func> {
+    let used = p.used_channels(&p.body)?;
     let mut f = Func::new("splash_kernel".to_string(), 0);
     let entry = f.block();
     let mut regions = [VReg(0); 4];
@@ -434,7 +452,7 @@ fn lower(p: &Program, writable: u64) -> Func {
     let frame = if p.frame_words > 0 { Some(f.slot(p.frame_words * 4, 16)) } else { None };
     let n_u32 = VReg(0);
     let n_m1 = VReg(0);
-    let mut lx = Lx { p, f, cur: entry, vals, vars, regions, n_u32, n_m1, frame, loops: Vec::new(), bounds: crate::ir::bounds(p), writable, rec: None, consts: vec![None; p.vals.len()], cmps: vec![None; p.vals.len()], bufs: Vec::new() };
+    let mut lx = Lx { p, f, cur: entry, vals, vars, regions, n_u32, n_m1, frame, loops: Vec::new(), bounds: crate::ir::bounds(p), writable, offset_limit, rec: None, consts: vec![None; p.vals.len()], cmps: vec![None; p.vals.len()], bufs: Vec::new(), io: vec![VReg(0); used.len()] };
     // n arrives as a C u32 (upper bits undefined)
     let nu = lx.conv(Conv::IntToInt(U32), n_raw, Cls::I);
     lx.n_u32 = nu;
@@ -448,9 +466,16 @@ fn lower(p: &Program, writable: u64) -> Func {
         let last = lx.ibini(IOp::Sub, I64, len, 1);
         lx.bufs.push((ptr, last));
     }
+    for (slot, used) in used.into_iter().enumerate() {
+        if used {
+            let ptr = lx.f.vreg(Cls::I);
+            lx.emit(Inst::Load(PTR, ptr, lx.regions[3], slot as i32 * 8));
+            lx.io[slot] = ptr;
+        }
+    }
     lx.block(&p.body);
     lx.term(Term::Ret(Vec::new()));
-    lx.f
+    Some(lx.f)
 }
 
 impl<'a> Lx<'a> {
@@ -552,11 +577,18 @@ impl<'a> Lx<'a> {
             }
             Region::Buf(_) => unreachable!(),
         };
+        let bytes = i64::from(base) * 4;
+        let (rb, disp) = if bytes > i64::from(self.offset_limit) {
+            (self.ibini(IOp::Add, I64, rb, bytes), 0)
+        } else {
+            (rb, bytes as i32)
+        };
         let o = match off {
-            None => return (rb, (base * 4) as i32),
+            None => return (rb, disp),
             Some(o) => o,
         };
         let ov = self.v(o);
+        let ov = if extent > 1 << 31 { self.conv(Conv::IntToInt(U32), ov, Cls::I) } else { ov };
         let proven = self.bounds[o.0 as usize].is_some_and(|b| b < extent && b < 1 << 31);
         let idx = if proven {
             ov
@@ -568,13 +600,12 @@ impl<'a> Lx<'a> {
         };
         let sc = self.ibini(IOp::Shl, I64, idx, 2);
         let a = self.ibin(IOp::Add, I64, rb, sc);
-        (a, (base * 4) as i32)
+        (a, disp)
     }
 
     /// Clamped audio frame index `idx` into 0..n, scaled to bytes, plus channel pointer.
-    fn io_addr(&mut self, slot: u32, idx: Val) -> VReg {
-        let ptr = self.f.vreg(Cls::I);
-        self.emit(Inst::Load(PTR, ptr, self.regions[3], slot as i32 * 8));
+    fn io_addr(&mut self, slot: usize, idx: Val) -> VReg {
+        let ptr = self.io[slot];
         let iv = self.v(idx);
         let c = self.f.vreg(Cls::I);
         self.emit(Inst::ICmp(Cond::Le, false, c, iv, self.n_m1));
@@ -609,7 +640,7 @@ impl<'a> Lx<'a> {
                 self.emit(Inst::Store(m, a, o, x));
             }
             Stmt::Out { ch, idx, val } => {
-                let a = self.io_addr(2 + *ch as u32, *idx);
+                let a = self.io_addr(usize::from(self.p.input_channels) + usize::from(*ch), *idx);
                 let old = self.f.vreg(Cls::F32);
                 self.emit(Inst::Load(Mem::F32, old, a, 0));
                 let sum = self.f.vreg(Cls::F32);
@@ -829,7 +860,7 @@ impl<'a> Lx<'a> {
                 self.emit(Inst::Load(m, d, a, o));
             }
             Op::In { ch, idx } => {
-                let a = self.io_addr(ch as u32, idx);
+                let a = self.io_addr(usize::from(ch), idx);
                 self.emit(Inst::Load(Mem::F32, d, a, 0));
             }
             Op::FrameCount => self.emit(Inst::Mov(d, self.n_u32)),

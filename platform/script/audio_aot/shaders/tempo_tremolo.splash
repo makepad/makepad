@@ -1,0 +1,19 @@
+// Tremolo locked to the song: the gain swells once every `division` beats
+// and is at full level exactly on each whole `division`, so it stays in
+// step with the music at any tempo and across tempo changes. `division`
+// is a plain number of beats (1 is a quarter note, 0.5 an eighth, 2 a
+// half note), because a choice is an index, not a length. `shape` bends
+// the smooth cosine swell toward a squarer one by a smoothstep, so the
+// gain never steps.
+let division = param(0.5, 0.0625, 8, {unit: beats curve: log label: "Division" group: time})
+let depth = param(0.8, 0, 1, {label: "Depth" group: tremolo})
+let shape = param(0.3, 0, 1, {label: "Shape" group: tremolo})
+
+fn effect(l, r) {
+    // The place in the cycle, 0 at every whole division of the beat.
+    let ph = fract(beat / division)
+    let dip = 0.5 - 0.5 * cos(TAU * ph)
+    let squarer = smoothstep(0.15, 0.85, dip)
+    let gain = 1.0 - depth * mix(dip, squarer, shape)
+    vec2(l * gain, r * gain)
+}

@@ -1,9 +1,9 @@
 // Mono lead/bass: a polyBLEP saw through a zero-delay (TPT) state-variable
 // low-pass, with a filter envelope and an amp envelope.
-let cutoff = param(900, 30, 16000)
-let res = param(0.5, 0, 0.98)
-let env_amt = param(3000, 0, 12000)
-let decay = param(0.35, 0.01, 4)
+let cutoff = param(900, 30, 16000, {unit: hz curve: log label: "Cutoff" group: filter})
+let res = param(0.5, 0, 0.98, {unit: percent curve: linear label: "Resonance" group: filter})
+let env_amt = param(3000, 0, 12000, {unit: hz curve: exp label: "Envelope amount" group: filter})
+let decay = param(0.35, 0.01, 4, {unit: s curve: log label: "Envelope decay" group: filter})
 
 var phase = 0.0
 var amp = 0.0
@@ -62,5 +62,5 @@ fn voice() {
             stop()
         }
     }
-    v2 * amp * velocity * 0.5
+    v2 * amp * velocity * 0.35
 }

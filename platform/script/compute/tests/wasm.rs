@@ -6,7 +6,7 @@
 //! words around every buffer.
 //!
 //! The four-wide SIMD128 form needs an engine with SIMD (stitch implements
-//! a subset); it is checked in V8 by `examples/wasm_diff.rs` (see there).
+//! a subset); `tests/web_wasm.rs` checks it in CEF.
 //! WASM_FUZZ_SEED / WASM_FUZZ_ROUNDS for longer runs.
 
 #[path = "support/kernel_gen.rs"]
@@ -24,11 +24,11 @@ use wasm_case::*;
 
 /// Runs export `run0` of `module` on a copy of the case's image; the
 /// memory after it.
-fn run_stitch(case: &Case, module: &[u8]) -> Result<Vec<u32>, String> {
+fn run_stitch(image: &[u32], args: [u32; 6], module: &[u8]) -> Result<Vec<u32>, String> {
     let engine = stitch::Engine::new();
     let m = stitch::Module::new(&engine, module).map_err(|e| format!("decode: {:?}", e))?;
     let mut store = stitch::Store::new(engine);
-    let pages = (case.image.len() * 4).div_ceil(65536) as u32;
+    let pages = (image.len() * 4).div_ceil(65536) as u32;
     let mem = stitch::Mem::new(&mut store, stitch::MemType { limits: stitch::Limits { min: pages, max: None } });
     let mut linker = stitch::Linker::new();
     linker.define("env", "memory", mem);
@@ -36,26 +36,121 @@ fn run_stitch(case: &Case, module: &[u8]) -> Result<Vec<u32>, String> {
     let f = inst.exported_func("run0").ok_or("no run0")?;
     {
         let bytes = mem.bytes_mut(&mut store);
-        for (k, w) in case.image.iter().enumerate() {
+        for (k, w) in image.iter().enumerate() {
             bytes[4 * k..4 * k + 4].copy_from_slice(&w.to_le_bytes());
         }
     }
-    let args: Vec<stitch::Val> = [case.ctx, case.state, case.shared, case.table, case.n, case.frame].iter().map(|x| stitch::Val::I32(*x as i32)).collect();
+    let args: Vec<stitch::Val> = args.iter().map(|x| stitch::Val::I32(*x as i32)).collect();
     f.call(&mut store, &args, &mut []).map_err(|e| format!("trap: {:?}", e))?;
     let bytes = mem.bytes(&store);
-    Ok((0..case.image.len()).map(|k| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap())).collect())
+    Ok((0..image.len()).map(|k| u32::from_le_bytes(bytes[4 * k..4 * k + 4].try_into().unwrap())).collect())
 }
 
 /// The scalar module on stitch equals the interpreter (None: declined).
 fn check(case: &Case) -> Option<Result<(), String>> {
     let module = wasm::module(&[wasm::Entry { program: &case.program, simd: false }], wasm::Target::default())?;
-    let got = match run_stitch(case, &module) {
+    let got = match run_stitch(&case.image, [case.ctx, case.state, case.shared, case.table, case.n, case.frame], &module) {
         Ok(g) => g,
         Err(e) => return Some(Err(e)),
     };
     match case.first_difference(&got) {
         None => Some(Ok(())),
         Some(w) => Some(Err(format!("word {} (byte {}): interpreter {:08x}, wasm {:08x}", w, 4 * w, case.expected[w], got[w]))),
+    }
+}
+
+/// For every frame, mix each output's own scale times its input (or a
+/// constant for an instrument). Inputs have different signals on every lane.
+fn audio_mix(inputs: u16, outputs: u16, first: u16) -> ir::Program {
+    use ir::{Bin, Cmp, Op, Stmt, Ty, Val, Var};
+    let mut p = ir::Program { input_channels: inputs, output_channels: outputs, vars: vec![Ty::I32], ..Default::default() };
+    let mut def = |block: &mut ir::Block, ty, op| {
+        let v = Val(p.vals.len() as u32);
+        p.vals.push(ty);
+        block.push(Stmt::Def(v, op));
+        v
+    };
+    let zero = def(&mut p.body, Ty::I32, Op::ConstI(0));
+    let one = def(&mut p.body, Ty::I32, Op::ConstI(1));
+    let n = def(&mut p.body, Ty::I32, Op::FrameCount);
+    p.body.push(Stmt::Set(Var(0), zero));
+    let mut body = Vec::new();
+    let idx = def(&mut body, Ty::I32, Op::Get(Var(0)));
+    let done = def(&mut body, Ty::Bool, Op::CmpI(Cmp::Ge, idx, n));
+    body.push(Stmt::If(done, vec![Stmt::Break(0)], vec![]));
+    for ch in first..outputs {
+        let source = if inputs == 0 { Op::ConstF(1.0) } else { Op::In { ch: ch % inputs, idx } };
+        let sample = def(&mut body, Ty::F32, source);
+        let scale = def(&mut body, Ty::F32, Op::ConstF(f32::from(ch + 1)));
+        let val = def(&mut body, Ty::F32, Op::Bin(Bin::MulF, sample, scale));
+        body.push(Stmt::Out { ch, idx, val });
+    }
+    let next = def(&mut body, Ty::I32, Op::Bin(Bin::AddI, idx, one));
+    body.push(Stmt::Set(Var(0), next));
+    p.body.push(Stmt::Loop { cap: 9, body });
+    p
+}
+
+#[test]
+fn counted_audio_channels_agree_across_backends() {
+    let regions = Regions { io: true, ..Default::default() };
+    for (inputs, outputs, first) in [(0, 1, 0), (1, 1, 0), (2, 2, 0), (3, 5, 0), (8, 8, 0), (301, 301, 300)] {
+        let p = audio_mix(inputs, outputs, first);
+        ir::validate(&p, &regions).unwrap();
+        let decoded = ir::from_words(&ir::to_words(&p)).unwrap();
+        assert_eq!((decoded.input_channels, decoded.output_channels), (inputs, outputs), "serialized layout");
+        let module = wasm::module(&[wasm::Entry { program: &p, simd: false }], wasm::Target::default()).unwrap();
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let native = makepad_script_compute::native::compile(&p).expect("compiled audio entry");
+
+        for n in [8, 5] {
+            let signal: Vec<Vec<f32>> = (0..inputs).map(|ch| (0..n).map(|i| f32::from(ch + 1) + i as f32 * 0.25).collect()).collect();
+            let ins: Vec<_> = signal.iter().map(Vec::as_slice).collect();
+            let initial = vec![vec![-0.5; n]; usize::from(outputs)];
+            let expected: Vec<Vec<u32>> = (0..outputs).map(|ch| (0..n).map(|i| {
+                if ch < first { return (-0.5f32).to_bits(); }
+                let sample = if inputs == 0 { 1.0 } else { signal[usize::from(ch % inputs)][i] };
+                (-0.5 + f32::from(ch + 1) * sample).to_bits()
+            }).collect()).collect();
+            let bits = |data: &[Vec<f32>]| data.iter().map(|s| s.iter().map(|x| x.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>();
+
+            let mut out = initial.clone();
+            let mut outs: Vec<_> = out.iter_mut().map(Vec::as_mut_slice).collect();
+            let mut mem = ir::Mem { ctx: &mut [], state: &mut [], shared: ir::Shared::Read(&[]), bufs: &[] };
+            ir::run(&p, &mut vec![0; p.scratch_words()], &mut mem, &mut ir::Io { ins: &ins, outs: &mut outs }, n as u32);
+            assert_eq!(bits(&out), expected, "interpreter {inputs}/{outputs}, n={n}");
+
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            {
+                let mut out = initial.clone();
+                let table: Vec<_> = ins.iter().map(|s| s.as_ptr() as usize).chain(out.iter_mut().map(|s| s.as_mut_ptr() as usize)).collect();
+                // SAFETY: only the channel table is accessed, with n live samples per pointer.
+                unsafe { native.run_audio(&mut [], &mut [], std::ptr::null_mut(), &table, n as u32) };
+                assert_eq!(bits(&out), expected, "native {inputs}/{outputs}, n={n}");
+            }
+
+            let channels = p.channel_count();
+            let mut image = vec![0; channels];
+            for (slot, samples) in signal.iter().chain(&initial).enumerate() {
+                image[slot] = (4 * image.len()) as u32;
+                image.extend(samples.iter().map(|x| x.to_bits()));
+                image.push(wasm_case::GUARD);
+            }
+            let got = run_stitch(&image, [0, 0, 0, 0, n as u32, 0], &module).unwrap();
+            for (out, want) in expected.iter().enumerate() {
+                let at = image[usize::from(inputs) + out] as usize / 4;
+                image[at..at + n].copy_from_slice(want);
+            }
+            assert_eq!(got, image, "wasm output, inputs and guards {inputs}/{outputs}, n={n}");
+        }
+        let mut invalid = p.clone();
+        invalid.output_channels -= 1;
+        assert!(ir::validate(&invalid, &regions).unwrap_err().contains("output channel"), "first undeclared output");
+        if inputs > 0 {
+            invalid = p.clone();
+            invalid.input_channels -= 1;
+            assert!(ir::validate(&invalid, &regions).unwrap_err().contains("input channel"), "first undeclared input");
+        }
     }
 }
 

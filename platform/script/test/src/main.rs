@@ -6,7 +6,62 @@ use makepad_script::traits::*;
 use makepad_script::*;
 use std::collections::BTreeMap;
 
+#[cfg_attr(test, test)]
+fn object_freeze_modes() {
+    let mut host = ScriptVmHost::new(0, ());
+    let vm = &mut ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    };
+    vm.capture_errors();
+    vm.eval(script! {
+        use mod.std.assert
+        let plain = {p:1}
+        assert(plain.freeze() == plain, "freeze must return the fresh receiver")
+        try plain.p = 2 {} ok assert(false, "freeze must prevent writes")
+
+        let api = {x:1 y:2}
+        assert(api.freeze_api() == api, "freeze_api must return the fresh receiver")
+        try api.freeze_module() {} ok assert(false, "API to module must be refused")
+        try api.z = 3 {} ok assert(false, "API must still reject new fields after refusing module mode")
+        try api.freeze_component() {} ok assert(false, "API to component must be refused")
+        assert(api.freeze_api() == api, "repeating API mode must return the same receiver")
+        assert(api.x == 1 && api.y == 2, "equal repeat must preserve the fields")
+        try api.x = 2 {} ok assert(false, "equal repeat must preserve API write protection")
+        try {api{1}} {} ok assert(false, "API descendants must still reject vector entries")
+        try {api{z:3}} {} ok assert(false, "API descendants must reject unknown fields")
+        let child = api{x:3}
+        assert(child.x == 3, "API descendants must accept known fields")
+        try child.freeze() {} ok assert(false, "plain freeze must preserve inherited validation")
+
+        let module = {p:1}
+        assert(module.freeze_module() == module, "freeze_module must return the fresh receiver")
+        try module.p = 2 {} ok assert(false, "module must reject overwrites")
+        module.z = 2
+        assert(module.z == 2, "module must accept new fields")
+        try {module{1}} {} ok assert(false, "module must reject derivation")
+        try module.freeze() {} ok assert(false, "module mode must survive a plain freeze request")
+
+        let component = {p:1}
+        assert(component.freeze_component() == component, "freeze_component must return the fresh receiver")
+        try component.x = 1 {} ok assert(false, "component must reject new fields")
+        try component.p = 1 {} ok assert(false, "component must reject overwrites")
+        let derived = component{p:2 1}
+        assert(derived.p == 2 && derived[0] == 1, "component descendants must accept typed fields and vector entries")
+        try {component{p:true}} {} ok assert(false, "component descendants must reject a field of the wrong type")
+
+        let pinned = {p:1}
+        mod.gc.set_static(pinned)
+        try pinned.freeze() {} ok assert(false, "static receiver must reject a new freeze mode")
+        mod.gc.set_static(api)
+        assert(api.freeze_api() == api, "static receiver must accept an equal repeat")
+    });
+    let errors = vm.take_errors();
+    assert!(errors.is_empty(), "object freeze contract failed: {errors:?}");
+}
+
 pub fn main() {
+    object_freeze_modes();
     let mut host = ScriptVmHost::new(0, ());
     let vm = &mut ScriptVm {
         host: host.host_context(),
@@ -411,34 +466,6 @@ pub fn main() {
             result = 2
         }
         assert(result == 2) // This would fail if { was parsed as object literal
-
-        // freezing
-        let x = {x:1 y:2}.freeze_api();
-        // property value unknown
-        try {x{z:3}} assert(true) ok assert(false)
-        // property value known
-        let x2 = x{x:3} assert(x2.x == 3)
-        let x2 = x{x:2}
-        // property frozen
-        try x.x = 2 assert(true) ok assert(false)
-
-        // modules can be extended but not overwritten
-        let x = {p:1}.freeze_module();
-        try x.p = 2 assert(true) ok assert(false)
-        try x.z = 2 assert(false) ok assert(true)
-        // but we cant add items to its vec
-        try {x{1}} assert(true) ok assert(false)
-
-        let x = {p:1}.freeze_component();
-        // cant write to it at all
-        try x.x = 1 assert(true) ok assert(false)
-        try x.p = 1 assert(true) ok assert(false)
-        // can write with same type on derived
-        try {x{p:1}} assert(false) ok assert(true)
-        // cant change value type
-        try {x{p:true}} assert(true) ok assert(false)
-        // can append to vec
-        try {x{1}} assert(false) ok assert(true)
 
         // scope shadowing
         let x = 1

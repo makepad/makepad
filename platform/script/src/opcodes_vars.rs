@@ -93,12 +93,9 @@ impl<'a> ScriptVm<'a> {
         if let Some(me) = self.bx.threads.cur_ref().mes.last() {
             if let ScriptMe::Object(me_obj) = me {
                 let me_obj = *me_obj;
-                if field.is_string_like() {
-                    self.bx.heap.set_string_keys(me_obj);
-                }
                 self.bx
                     .heap
-                    .set_value_slot(me_obj, field, object, self.bx.threads.cur().trap.pass());
+                    .set_inherit_slot(me_obj, field, object, self.bx.threads.cur().trap.pass());
             }
         }
         self.bx.threads.cur().push_stack_unchecked(NIL);
@@ -167,12 +164,9 @@ impl<'a> ScriptVm<'a> {
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         if let Some(obj) = object.as_object() {
-            if field.is_string_like() {
-                self.bx.heap.set_string_keys(obj);
-            }
             self.bx
                 .heap
-                .set_value_slot(obj, field, built_object, self.bx.threads.cur().trap.pass());
+                .set_inherit_slot(obj, field, built_object, self.bx.threads.cur().trap.pass());
         }
         self.bx.threads.cur().push_stack_unchecked(NIL);
         self.bx.threads.cur().trap.goto_next();

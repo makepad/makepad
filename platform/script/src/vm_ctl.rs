@@ -90,9 +90,9 @@ pub const CTL_GC_IF_NEEDED: u32 = 3;
 pub const CTL_SET_RELOAD: u32 = 4;
 pub const CTL_SET_KEEP_NUMBERS: u32 = 5;
 pub const CTL_SET_SILENCE_ERRORS: u32 = 6;
-/// `a`: the limit to run under (already narrowed by the caller).
+/// `a`: the requested limit, then the applied limit. `b`: previous allowance if `value` is true.
 pub const CTL_LIMIT_SET: u32 = 7;
-/// `a`: the remaining allowance before (`u64::MAX`: none), `b`: the limit that was applied.
+/// `a`: previous allowance (`u64::MAX`: none unless `value` is true), `b`: applied limit.
 pub const CTL_LIMIT_END: u32 = 8;
 pub const CTL_SET_CURRENT_THREAD: u32 = 9;
 pub const CTL_SELECT_FIRST_UNPAUSED_THREAD: u32 = 10;
@@ -344,6 +344,25 @@ impl<'a> ScriptRegReq<'a> {
 
 #[relax_api(run)]
 impl ScriptVmBase {
+    #[inline]
+    pub(crate) fn enter_instruction_limit(&mut self, limit: u64) -> (Option<u64>, u64) {
+        let thread = self.threads.cur();
+        let previous = thread.instruction_limit_remaining;
+        let applied = previous.unwrap_or(limit).min(limit);
+        thread.instruction_limit_remaining = Some(applied);
+        self.last_limit_exit_remaining = applied;
+        (previous, applied)
+    }
+
+    #[inline]
+    pub(crate) fn leave_instruction_limit(&mut self, previous: Option<u64>, applied: u64) -> u64 {
+        let thread = self.threads.cur();
+        let remaining = thread.instruction_limit_remaining.unwrap_or(applied);
+        let consumed = applied.saturating_sub(remaining);
+        thread.instruction_limit_remaining = previous.map(|outer| outer.saturating_sub(consumed));
+        consumed
+    }
+
     /// The heap, the code, the current thread and its trap.
     #[inline]
     #[relax_api(run)]
@@ -376,7 +395,11 @@ impl ScriptVmBase {
                 let ip = self.threads.cur_ref().trap.ip;
                 ((ip.body as u64) << 32) | ip.index as u64
             }
-            STAT_LIMIT_REMAINING => self.threads.cur_ref().instruction_limit_remaining.unwrap_or(u64::MAX),
+            STAT_LIMIT_REMAINING => {
+                let thread = self.threads.cur_ref();
+                thread.instruction_limit_remaining.unwrap_or(u64::MAX)
+                    .min(thread.paused_instruction_limit.unwrap_or(u64::MAX))
+            }
             STAT_HANDLE_TYPE => self.code.native.borrow().handle_type.get(&LiveId(req.a)).unwrap().0 as u64,
             STAT_BODY_COUNT => self.code.bodies.borrow().len() as u64,
             STAT_RUN_BUDGET => match self.run_budget {
@@ -427,24 +450,15 @@ impl ScriptVmBase {
             }
             CTL_SET_SILENCE_ERRORS => std::mem::replace(&mut self.silence_errors, req.a != 0) as u64,
             CTL_LIMIT_SET => {
-                self.threads.cur().instruction_limit_remaining = Some(req.a);
-                // If the limited code runs no script at all, exit_remaining is never written:
-                // seed it so consumed reads 0 in that case.
-                self.last_limit_exit_remaining = req.a;
+                let (previous, applied) = self.enter_instruction_limit(req.a);
+                req.a = applied;
+                req.b = previous.unwrap_or(u64::MAX);
+                req.value = previous.is_some().into();
                 0
             }
             CTL_LIMIT_END => {
-                let (previous, applied) = (if req.a == u64::MAX { None } else { Some(req.a) }, req.b);
-                // Record what the call actually charged: hosts running several calls against ONE
-                // cumulative budget (a game tick where on_tick + timers + touch events share a
-                // pool) read it back via last_limit_consumed and shrink the next call's limit
-                // accordingly. A completed run wipes the thread's remaining to None (Return/Bail
-                // in handle_trap_on), which stashes it in last_limit_exit_remaining.
-                let remaining_now = self.threads.cur_ref().instruction_limit_remaining.unwrap_or(self.last_limit_exit_remaining);
-                self.last_limit_consumed = applied.saturating_sub(remaining_now);
-                if !self.threads.cur_ref().is_paused() {
-                    self.threads.cur().instruction_limit_remaining = previous;
-                }
+                let previous = (req.a != u64::MAX || req.value == TRUE).then_some(req.a);
+                self.last_limit_consumed = self.leave_instruction_limit(previous, req.b);
                 0
             }
             CTL_SET_CURRENT_THREAD => {

@@ -13,9 +13,13 @@
 
 use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, Val, Var};
 
+mod block;
 pub mod event;
+mod fft;
 pub mod kernel;
 mod portable;
+mod rate;
+use rate::{RateNests, RatePath};
 mod front;
 pub mod trace;
 pub use front::{AirBuilder, MathFn};
@@ -34,12 +38,15 @@ pub enum Domain {
 use crate::parse::*;
 use crate::ShaderError;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Words at the start of every state block (see `header`).
-pub const HEADER_WORDS: u32 = 8;
+pub const HEADER_WORDS: u32 = 15;
 pub mod header {
     pub const NOTE: u32 = 0;
-    pub const FREQ: u32 = 1;
+    /// A running glide's carry: the part of its sample distance that the
+    /// rounded pitch in GLIDE_NOTE cannot hold (see glide_frames()).
+    pub const GLIDE_REMAINDER: u32 = 1;
     pub const GATE: u32 = 2;
     pub const VELOCITY: u32 = 3;
     /// Absolute frame of the note-on (i32): `trigger` is true there.
@@ -49,12 +56,27 @@ pub mod header {
     pub const RNG: u32 = 6;
     /// 1 until the first control block ran (params jump, `block()` runs).
     pub const FRESH: u32 = 7;
+    pub const BEND: u32 = 8;
+    pub const PRESSURE: u32 = 9;
+    pub const SLIDE: u32 = 10;
+    pub const RELEASE_VELOCITY: u32 = 11;
+    pub const VOICE: u32 = 12;
+    pub const GLIDE_NOTE: u32 = 13;
+    pub const GLIDE_STEP: u32 = 14;
 }
-/// Ctx words: sample rate, the call's first absolute frame, then one
-/// target word per parameter.
+/// Sample rate, absolute frame, musical time, controllers and parameter targets.
 pub const CTX_RATE: u32 = 0;
 pub const CTX_FRAME: u32 = 1;
-pub const CTX_PARAMS: u32 = 2;
+pub const CTX_TEMPO: u32 = 2;
+pub const CTX_BEAT_AT: u32 = 3;
+pub const CTX_BEAT_FRAME: u32 = 4;
+pub const CTX_BEAT_STEP: u32 = 5;
+pub const CTX_BAR_BEATS: u32 = 6;
+pub const CTX_PLAYING: u32 = 7;
+pub const CTX_INSTANCE: u32 = CTX_PLAYING + 1;
+pub const CTX_CC: u32 = CTX_INSTANCE + 1;
+pub const CC_WORDS: u32 = 128;
+pub const CTX_PARAMS: u32 = CTX_CC + CC_WORDS;
 
 /// Frames per control block (params ramp across one; `block()` runs at
 /// each start).
@@ -83,23 +105,20 @@ const BYTES_PER_OP: u64 = 4;
 /// to every call site). Smaller helpers, helpers called once and calls
 /// whose arguments are all constants (they fold) are inlined.
 pub const INLINE_OPS: u64 = 48;
-pub const MAX_STATE_WORDS: u32 = 1 << 20;
-pub const MAX_SHARED_WORDS: u32 = 1 << 22;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
-/// Largest constant initializer (state, shared tables, struct defaults).
-pub const MAX_INIT_WORDS: u32 = 1 << 22;
 /// Largest program after inlining and unrolling (AIR values).
 pub const MAX_IR_VALS: usize = 1 << 20;
 /// Worst-case AIR ops of one `init()` run.
 pub const MAX_INIT_COST: u64 = 200_000_000;
-/// Worst-case AIR ops per frame.
-pub const MAX_COST_PER_FRAME: u64 = 4_000_000;
+/// Warn above this worst-case AIR cost per frame.
+pub const WARN_COST_PER_FRAME: u64 = 4_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Kind {
     Instrument,
     Effect,
+    Control,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +127,74 @@ pub struct ParamInfo {
     pub default: f32,
     pub min: f32,
     pub max: f32,
+}
+
+#[relax_api::relax_api(plain)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParamUnit {
+    #[default]
+    None,
+    Hz,
+    Secs,
+    Ms,
+    Db,
+    Semis,
+    Cents,
+    Beats,
+    Percent,
+}
+
+impl ParamUnit {
+    /// How a value's unit is written after it: `Hz`, `dB`, `%`, empty for none.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ParamUnit::None => "",
+            ParamUnit::Hz => "Hz",
+            ParamUnit::Secs => "s",
+            ParamUnit::Ms => "ms",
+            ParamUnit::Db => "dB",
+            ParamUnit::Semis => "st",
+            ParamUnit::Cents => "ct",
+            ParamUnit::Beats => "beats",
+            ParamUnit::Percent => "%",
+        }
+    }
+
+    /// A value as a person reads it: `1200 Hz`, `35%` (a percent param
+    /// holds a 0..1 fraction), a bare number without a unit.
+    pub fn show(self, value: f32) -> String {
+        match self {
+            ParamUnit::None => format!("{value}"),
+            ParamUnit::Percent => format!("{}%", value * 100.0),
+            unit => format!("{value} {}", unit.symbol()),
+        }
+    }
+}
+
+#[relax_api::relax_api(plain)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ParamCurve {
+    #[default]
+    Linear,
+    Log,
+    Exp,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ParamMeta {
+    pub unit: ParamUnit,
+    pub curve: ParamCurve,
+    /// Zero for a continuous parameter.
+    pub step: f32,
+    /// An empty label inherits the parameter name.
+    pub label: String,
+    pub group: String,
+    pub choices: Vec<String>,
+    /// Smoothing time in seconds. By default continuous parameters ramp
+    /// over one control block and discrete parameters jump.
+    pub smooth: Option<f32>,
 }
 
 /// A state variable's place in the state block (for hot swap).
@@ -122,11 +209,42 @@ pub struct StateVar {
     pub words: u32,
 }
 
+/// A declared audio port, in source order. Channels are numbered within its direction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioPortInfo {
+    pub name: String,
+    pub output: bool,
+    pub channels: u16,
+    pub first: u16,
+    pub control: bool,
+}
+
+struct AudioPort {
+    info: AudioPortInfo,
+    span: Span,
+    held: Vec<Var>,
+    frame_write: bool,
+}
+
+/// A nonfatal finding in the source of a successfully lowered shader.
+#[derive(Clone, Debug)]
+pub struct ShaderWarning {
+    pub span: Span,
+    pub message: String,
+}
+
 pub struct Lowered {
+    pub warnings: Vec<ShaderWarning>,
+    pub ports: Vec<AudioPortInfo>,
+    pub mono: bool,
+    pub latency: u32,
     pub kind: Kind,
     pub render: Program,
     pub init: Option<Program>,
     pub params: Vec<ParamInfo>,
+    pub probes: Vec<String>,
+    pub sample_names: Vec<String>,
+    pub param_meta: Vec<ParamMeta>,
     pub state_init: Vec<u32>,
     pub state_vars: Vec<StateVar>,
     pub shared_init: Vec<u32>,
@@ -247,11 +365,25 @@ enum Bind {
     Local(T, Vec<Var>),
     Place(Place),
     Param(usize),
+    AudioPort(usize),
     /// A kernel uniform (ctx word).
     Uniform(usize),
     /// A kernel emit buffer: (data region, count region, record width,
     /// slots per element).
     Emit(u8, u8, u32, u32),
+}
+
+fn image_words(words: u64, span: Span) -> LResult<u32> {
+    u32::try_from(words).map_err(|_| ShaderError::new(span.start, span.end, format!("the image needs {words} words, exceeding the 32-bit region length limit of {} words", u32::MAX)))
+}
+
+fn reserve_words(out: &mut Vec<u32>, additional: u32, span: Span) -> LResult<()> {
+    let words = image_words(out.len() as u64 + u64::from(additional), span)?;
+    #[cfg(target_arch = "wasm32")]
+    if words >= 1 << 30 {
+        return err(span, format!("the image needs {words} words before working memory; wasm memory addresses 65536 pages"));
+    }
+    out.try_reserve_exact(additional as usize).map_err(|_| ShaderError::new(span.start, span.end, format!("could not allocate {} bytes for the image", u64::from(words) * 4)))
 }
 
 /// A constant initializer (state, struct defaults, tables).
@@ -261,6 +393,7 @@ enum CInit {
     Vec(u8, [u32; 16]),
     Struct(usize, Vec<CInit>),
     Array(T, Vec<CInit>),
+    Repeat(Box<CInit>, u32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -276,6 +409,15 @@ struct Ret {
 }
 
 type LResult<T> = Result<T, ShaderError>;
+
+/// A speculative diagnostic lets the caller try another interpretation.
+fn speculative<T>(result: LResult<T>) -> LResult<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.is_cancelled() => Err(e),
+        Err(_) => Ok(None),
+    }
+}
 
 fn err<X>(span: Span, msg: impl Into<String>) -> LResult<X> {
     Err(ShaderError::new(span.start, span.end.max(span.start + 1), msg.into()))
@@ -307,7 +449,7 @@ enum Key {
     /// is not the stored value.
     Load(Region, u32, u32, Option<Val>, Ty),
     Get(Var),
-    In(u8, Val),
+    In(u16, Val),
     FrameCount,
     BufLen(u8),
 }
@@ -924,18 +1066,64 @@ fn dce(p: &mut Program) {
 #[derive(Clone)]
 struct EntryCtx {
     rate: Var,
+    // Phase and number of sub-samples actually run within this base frame.
+    subsample: Option<(Val, u32)>,
     pos: Var,
+    tempo: Val,
+    beat_at: Val,
+    beat_frame: Val,
+    beat_step: Val,
+    bar_beats: Val,
+    playing: Val,
+    voice_index: Val,
+    instance: Val,
     note: Var,
     freq: Var,
     gate: Var,
     velocity: Var,
+    bend: Var,
+    pressure: Var,
+    slide: Var,
+    release_velocity: Var,
+    mod_wheel: Var,
     trigger_at: Var,
     rng: Var,
     stop: Var,
     params: Vec<(Var, Var)>,
 }
 
-struct Lowerer {
+// Optional arguments and results used while lowering the audio frame loop.
+relax_api::option_layouts! {
+    Glide,
+    (Val, u32),
+    (Place, Lanes),
+    AudioRate,
+}
+
+#[derive(Clone, Copy)]
+struct Glide {
+    remaining: Var,
+    signed_step: Val,
+    target: Val,
+}
+
+struct Lowerer<'control> {
+    control: Option<&'control AtomicU32>,
+    block_layout: Option<block::Layout>,
+    fft_sites: Vec<fft::Site>,
+    render_entries: Vec<(u64, Span)>,
+    ports: Vec<AudioPort>,
+    audio_channels: [u16; 2],
+    // The base-frame index remains in scope inside an explicit rate region.
+    port_frame: Option<Val>,
+    mono: Option<Span>,
+    latency: u32,
+    oversampling: u32,
+    rate_modes: RateModes,
+    rate_reads_input: bool,
+    rate_nests: RateNests,
+    reads_note: bool,
+    reads_freq: bool,
     b: Builder,
     structs: Vec<StructDef>,
     fns: HashMap<String, FnDecl>,
@@ -944,13 +1132,18 @@ struct Lowerer {
     frames: Vec<Vec<HashMap<String, Bind>>>,
     loops: Vec<LoopKind>,
     rets: Vec<Ret>,
-    call_stack: Vec<String>,
+    // Distinguish anonymous functions and shadowed helpers by their definition.
+    call_stack: Vec<(String, Span)>,
     params: Vec<ParamInfo>,
+    /// In first-use order, with the last, minimum and maximum for this render call.
+    probes: Vec<(String, [Var; 3])>,
+    param_meta: Vec<ParamMeta>,
     state_init: Vec<u32>,
     state_vars: Vec<StateVar>,
     /// Promoted state scalars: (state word, var).
     promoted: Vec<(u32, Var)>,
     shared_init: Vec<u32>,
+    sample_names: Vec<String>,
     frame_words: u32,
     entry: Option<EntryCtx>,
     /// Lowering `init()`: shared tables are writable, inputs absent.
@@ -1103,7 +1296,7 @@ fn ty_of(t: &T) -> Ty {
     }
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// A number literal: a constant, or, a live literal lowered in code (not
     /// while evaluating a constant), a read of its hidden parameter.
     fn num(&mut self, x: f64, int: bool, span: Span) -> V {
@@ -1231,7 +1424,7 @@ impl Lowerer {
 
     fn alloc_frame(&mut self, words: u32, span: Span) -> LResult<u32> {
         let at = self.frame_words;
-        self.frame_words += words;
+        self.frame_words = self.frame_words.saturating_add(words);
         if self.frame_words > MAX_FRAME_WORDS {
             return err(span, format!("local arrays and structs exceed {} words; use a `var` (state) for big buffers", MAX_FRAME_WORDS));
         }
@@ -1532,42 +1725,49 @@ impl Lowerer {
             CInit::W(_, t) => t.clone(),
             CInit::Vec(n, _) => T::Vec(*n),
             CInit::Struct(s, _) => T::Struct(*s),
+            CInit::Repeat(el, n) => T::Array(Box::new(self.cinit_ty(el)), *n),
             CInit::Array(t, v) => T::Array(Box::new(t.clone()), v.len() as u32),
         }
     }
 
-    /// Words a constant initializer flattens to.
-    fn cinit_words(&self, c: &CInit) -> u32 {
-        match c {
-            CInit::W(..) => 1,
-            CInit::Vec(n, _) => *n as u32,
-            CInit::Struct(sid, _) => self.structs[*sid].words,
-            CInit::Array(_, f) => f.iter().map(|c| self.cinit_words(c)).fold(0u32, |a, b| a.saturating_add(b)),
-        }
+    /// Append the image after checking its entire word range and reserving it once.
+    fn flatten(&self, c: &CInit, out: &mut Vec<u32>, span: Span) -> LResult<()> {
+        let words = self.words(&self.cinit_ty(c));
+        reserve_words(out, words, span)?;
+        self.append_init(c, out);
+        Ok(())
     }
 
-    /// A constant initializer's words in memory order: struct fields at
-    /// their offsets, padding zero (no word of a record is left unset).
-    fn flatten(&self, c: &CInit, out: &mut Vec<u32>) {
+    fn append_init(&self, c: &CInit, out: &mut Vec<u32>) {
         match c {
             CInit::W(w, _) => out.push(*w),
             CInit::Vec(n, l) => out.extend_from_slice(&l[..*n as usize]),
-            CInit::Struct(sid, f) => {
+            CInit::Struct(sid, fields) => {
                 let d = &self.structs[*sid];
                 let start = out.len();
+                for (field, (_, _, offset, _)) in fields.iter().zip(&d.fields) {
+                    out.resize(start + *offset as usize, 0);
+                    self.append_init(field, out);
+                }
                 out.resize(start + d.words as usize, 0);
-                let mut tmp = Vec::new();
-                for (c, (_, _, off, _)) in f.iter().zip(d.fields.iter()) {
-                    tmp.clear();
-                    self.flatten(c, &mut tmp);
-                    let at = start + *off as usize;
-                    let end = (at + tmp.len()).min(out.len());
-                    out[at..end].copy_from_slice(&tmp[..end - at]);
+            }
+            CInit::Array(_, fields) => {
+                for field in fields {
+                    self.append_init(field, out);
                 }
             }
-            CInit::Array(_, f) => {
-                for c in f {
-                    self.flatten(c, out);
+            CInit::Repeat(el, count) => {
+                let start = out.len();
+                self.append_init(el, out);
+                let width = out.len() - start;
+                let end = start + width * *count as usize;
+                if width == 1 {
+                    out.resize(end, out[start]);
+                } else {
+                    while out.len() < end {
+                        let n = (end - out.len()).min(out.len() - start);
+                        out.extend_from_within(start..start + n);
+                    }
                 }
             }
         }
@@ -1577,7 +1777,7 @@ impl Lowerer {
     /// scalar, so the deterministic math works in initializers too).
     fn cinit(&mut self, e: &Expr, ann: Option<&TypeAnn>) -> LResult<CInit> {
         match &e.kind {
-            ExprKind::StructLit(name, fields) if name.is_empty() => self.object_cinit(fields),
+            ExprKind::StructLit(name, fields) if name.is_empty() => self.object_cinit(fields, e.span),
             ExprKind::StructLit(name, fields) => {
                 let Some(s) = self.structs.iter().position(|d| d.name == *name) else {
                     return err(e.span, format!("unknown struct `{}`", name));
@@ -1596,13 +1796,8 @@ impl Lowerer {
             ExprKind::ArrayRepeat(el, count) => {
                 let n = self.const_count(count)?;
                 let el = self.cinit(el, ann)?;
-                // Check the size before expanding anything.
-                let words = (self.cinit_words(&el) as u64).saturating_mul(n as u64);
-                if words > MAX_INIT_WORDS as u64 {
-                    return err(e.span, format!("this array holds {} words; the limit is {}", words, MAX_INIT_WORDS));
-                }
-                let t = self.cinit_ty(&el);
-                Ok(CInit::Array(t, vec![el; n as usize]))
+                image_words(self.words(&self.cinit_ty(&el)) as u64 * u64::from(n), e.span)?;
+                Ok(CInit::Repeat(Box::new(el), n))
             }
             ExprKind::ArrayList(list) => {
                 let mut out = Vec::new();
@@ -1610,6 +1805,7 @@ impl Lowerer {
                     out.push(self.cinit(x, ann)?);
                 }
                 let t = self.cinit_ty(&out[0]);
+                image_words(u64::from(self.words(&t)) * list.len() as u64, e.span)?;
                 for (x, c) in list.iter().zip(out.iter_mut()) {
                     let owned = c.clone();
                     *c = self.coerce_cinit(owned, &t, x.span)?;
@@ -1669,18 +1865,18 @@ impl Lowerer {
     /// unreadable fields (kernels have neither); so is a field that is not
     /// a constant when the object is a top-level table (see
     /// `lenient_objects`), so reading the other fields works.
-    fn object_cinit(&mut self, fields: &[(String, Expr)]) -> LResult<CInit> {
+    fn object_cinit(&mut self, fields: &[(String, Expr)], span: Span) -> LResult<CInit> {
         let mut vals: Vec<(String, CInit)> = Vec::new();
         let mut opaque: Vec<(String, String)> = Vec::new();
         for (fname, fe) in fields {
             if vals.iter().any(|v| v.0 == *fname) || opaque.iter().any(|v| v.0 == *fname) {
                 return err(fe.span, format!("field `{}` is given twice", fname));
             }
+            if let Some(why) = fe.kind.unreadable_reason() {
+                opaque.push((fname.clone(), format!("{} (an object a kernel reads holds numbers, vectors, colours, bools, arrays and objects of those)", why)));
+                continue;
+            }
             match &fe.kind {
-                ExprKind::Unreadable(why) => {
-                    opaque.push((fname.clone(), format!("{} (an object a kernel reads holds numbers, vectors, colours, bools, arrays and objects of those)", why)));
-                    continue;
-                }
                 ExprKind::Lambda(_) => {
                     opaque.push((fname.clone(), "a function kept in an object: a kernel calls functions by name (write it as `fn name(..)` or `let name = fn(..)` at the top level)".into()));
                     continue;
@@ -1693,6 +1889,7 @@ impl Lowerer {
             }
             let c = match self.cinit(fe, None) {
                 Ok(c) => c,
+                Err(e) if e.is_cancelled() => return Err(e),
                 Err(e) => match self.fold_const(fe)? {
                     Some(c) => c,
                     None if self.lenient_objects => {
@@ -1708,27 +1905,27 @@ impl Lowerer {
             vals.push((fname.clone(), c));
         }
         let types: Vec<(String, T)> = vals.iter().map(|(n, c)| (n.clone(), self.cinit_ty(c))).collect();
-        let sid = self.object_struct(&types, opaque);
+        let sid = self.object_struct(&types, opaque, span)?;
         Ok(CInit::Struct(sid, vals.into_iter().map(|v| v.1).collect()))
     }
 
     /// The struct of plain objects with these fields (one per shape).
-    fn object_struct(&mut self, types: &[(String, T)], opaque: Vec<(String, String)>) -> usize {
+    fn object_struct(&mut self, types: &[(String, T)], opaque: Vec<(String, String)>, span: Span) -> LResult<usize> {
         let same = |d: &StructDef| {
             d.name == OBJECT && d.opaque == opaque && d.fields.len() == types.len() && d.fields.iter().zip(types).all(|(f, (n, t))| f.0 == *n && f.1 == *t)
         };
         if let Some(k) = self.structs.iter().position(same) {
-            return k;
+            return Ok(k);
         }
         let mut fields = Vec::new();
         let mut off = 0;
         for (n, t) in types {
             let init = self.zero_cinit(t);
             fields.push((n.clone(), t.clone(), off, init));
-            off += self.words(t);
+            off = image_words(u64::from(off) + u64::from(self.words(t)), span)?;
         }
         self.structs.push(StructDef { name: OBJECT.into(), fields, words: off.max(1), opaque });
-        self.structs.len() - 1
+        Ok(self.structs.len() - 1)
     }
 
     /// The zero value of a type, as an initializer.
@@ -1736,7 +1933,7 @@ impl Lowerer {
         match t {
             T::Vec(n) => CInit::Vec(*n, [0; 16]),
             T::Struct(s) => CInit::Struct(*s, self.structs[*s].fields.iter().map(|f| f.3.clone()).collect()),
-            T::Array(e, n) => CInit::Array((**e).clone(), vec![self.zero_cinit(e); *n as usize]),
+            T::Array(e, n) => CInit::Repeat(Box::new(self.zero_cinit(e)), *n),
             t => CInit::W(0, t.clone()),
         }
     }
@@ -1745,6 +1942,7 @@ impl Lowerer {
     fn has_object(&self, c: &CInit) -> bool {
         match c {
             CInit::Struct(s, f) => self.structs[*s].name == OBJECT || f.iter().any(|c| self.has_object(c)),
+            CInit::Repeat(el, _) => self.has_object(el),
             CInit::Array(_, f) => f.first().is_some_and(|c| self.has_object(c)),
             _ => false,
         }
@@ -1785,6 +1983,7 @@ impl Lowerer {
                         _ => return None,
                     };
                     match path(l, b)? {
+                        CInit::Repeat(el, _) => Some(el),
                         CInit::Array(_, items) if !items.is_empty() => items.get((k.floor() as i64).rem_euclid(items.len() as i64) as usize),
                         _ => None,
                     }
@@ -1850,15 +2049,15 @@ impl Lowerer {
         let r = self.expr(e);
         self.b = saved;
         match r? {
-            V::Lit(x) if x.fract() == 0.0 && x >= 1.0 && x <= (1u64 << 24) as f64 => Ok(x as u32),
+            V::Lit(x) if x.fract() == 0.0 && x >= 1.0 && x <= u32::MAX as f64 => Ok(x as u32),
             _ => err(e.span, "array sizes must be positive integer constants (`let N = 64`)"),
         }
     }
 
     /// Writes a constant initializer into a place (frame locals).
-    fn store_cinit(&mut self, p: &Place, c: &CInit) {
+    fn store_cinit(&mut self, p: &Place, c: &CInit, span: Span) -> LResult<()> {
         let mut words = Vec::new();
-        self.flatten(c, &mut words);
+        self.flatten(c, &mut words, span)?;
         let t = self.cinit_ty(c);
         let n = words.len() as u32;
         let uniform = words.iter().all(|w| *w == words[0]);
@@ -1888,18 +2087,97 @@ impl Lowerer {
             self.b.set(j, jn);
             let body = self.b.close();
             self.b.push(IS::Loop { cap: n + 1, body });
-            return;
+            return Ok(());
         }
         for (k, w) in words.iter().enumerate() {
             let leaf = self.leaf_ty(&t, k as u32);
             let x = self.b.konst(leaf, *w as u64);
             self.write_word(p, k as u32, x);
         }
+        Ok(())
     }
 
     // -- top level -----------------------------------------------------------
 
+    fn latency_frames(&mut self, value: &Expr, span: Span) -> LResult<u32> {
+        // Check the operands before folding so arithmetic cannot hide a read of state.
+        fn constant(l: &Lowerer, e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Num(..) => true,
+                ExprKind::Ident(name) => name == "oversampling" || matches!(l.globals.get(name), Some(Bind::Const(V::Lit(_)) | Bind::Scalar(..))),
+                ExprKind::Neg(x) => constant(l, x),
+                ExprKind::Bin(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, a, b) => constant(l, a) && constant(l, b),
+                ExprKind::Call(name, args) if name == "len" && !l.fns.contains_key(name) => {
+                    matches!(args.as_slice(), [Expr { kind: ExprKind::Ident(t), .. }] if
+                        matches!(l.globals.get(t), Some(Bind::Place(Place { region: Region::Shared, ty: T::Array(..), .. }))))
+                }
+                _ => false,
+            }
+        }
+        if !constant(self, value) {
+            return err(span, "`latency()` needs a constant frame count");
+        }
+        let scratch = self.scratch();
+        let saved = std::mem::replace(&mut self.b, scratch);
+        let folded = self.expr(value);
+        let scratch = std::mem::replace(&mut self.b, saved);
+        let frames = match speculative(folded)? {
+            Some(V::Lit(x)) => Some(x),
+            Some(V::I(v)) => scratch.cst(v).map(|w| w as i32 as f64),
+            Some(V::F(v)) => scratch.cst(v).map(|w| f32::from_bits(w) as f64),
+            _ => None,
+        };
+        match frames {
+            Some(x) if x.fract() == 0.0 && x >= 0.0 && x <= u32::MAX as f64 => Ok(x as u32),
+            _ => err(span, "`latency()` needs a whole number of frames from 0 to 4294967295"),
+        }
+    }
+
+    fn sample_table(&mut self, name: &str, args: &[Expr], span: Span, binding: Option<(u32, u32, &[f32])>) -> LResult<()> {
+        if ["lib", "code", "mono", "at", "in", "seed"].contains(&name) {
+            return err(span, format!("sample table `{name}` uses a reserved score field"));
+        }
+        let channels = match args {
+            [count] => speculative(self.const_count(count))?,
+            _ => None,
+        };
+        let Some(channels @ (1 | 2)) = channels else {
+            return err(span, format!("sample table `{name}` needs 1 or 2 channels"));
+        };
+        let (source_channels, frames, data) = binding.unwrap_or((1, 1, &[0.0]));
+        if !matches!(source_channels, 1 | 2) {
+            return err(span, format!("sample table `{name}` needs 1 or 2 source channels, got {source_channels}"));
+        }
+        if frames == 0 || data.len() as u64 != u64::from(source_channels) * u64::from(frames) {
+            return err(span, format!("sample table `{name}` needs {frames} nonempty frames of {source_channels} channels"));
+        }
+        let root = self.shared_init.len() as u32;
+        let extent = image_words(u64::from(frames) * u64::from(channels), span)?;
+        reserve_words(&mut self.shared_init, extent, span)?;
+        if channels == source_channels {
+            // SAFETY: each f32 is an aligned word, every bit pattern is valid as u32,
+            // and the immutable slice is borrowed only for this copy.
+            let words = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u32>(), data.len()) };
+            self.shared_init.extend_from_slice(words);
+        } else if channels == 1 {
+            self.shared_init.extend(data.chunks_exact(2).map(|lr| ((lr[0] + lr[1]) * 0.5).to_bits()));
+        } else {
+            for x in data {
+                self.shared_init.extend_from_slice(&[x.to_bits(); 2]);
+            }
+        }
+        let element = if channels == 1 { T::F } else { T::Vec(2) };
+        let ty = T::Array(Box::new(element), frames);
+        self.globals.insert(name.to_owned(), Bind::Place(Place { region: Region::Shared, root, extent, off: None, stat: 0, ty }));
+        self.sample_names.push(name.to_owned());
+        Ok(())
+    }
+
     fn top(&mut self, items: &[Item]) -> LResult<()> {
+        self.top_with_samples(items, &|_| None, None)
+    }
+
+    fn top_with_samples<'a>(&mut self, items: &[Item], sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, header: Option<Vec<Option<AudioDecl>>>) -> LResult<()> {
         for item in items {
             if let Item::Fn(f) = item {
                 if self.fns.insert(f.name.clone(), f.clone()).is_some() {
@@ -1907,13 +2185,21 @@ impl Lowerer {
                 }
             }
         }
+        // A block-only audio node has only its named outputs in the I/O table.
+        if self.domain == Domain::Audio && self.fns.contains_key("block")
+            && !["voice", "effect", "effect_block"].iter().any(|name| self.fns.contains_key(*name)) {
+            self.audio_channels = [0, 0];
+        }
         // Header words (an event program's state is its own `var`s only).
         if self.domain != Domain::Event {
             self.state_init = vec![0; HEADER_WORDS as usize];
             self.state_init[header::FRESH as usize] = 1;
             self.state_init[header::RNG as usize] = 0x9e37_79b9;
         }
+        let mut latency = None;
+        let mut declarations = header.into_iter().flatten();
         for item in items {
+            let declaration = declarations.next().flatten();
             match item {
                 Item::Struct { name, fields, span } => {
                     if self.structs.iter().any(|s| s.name == *name) {
@@ -1926,7 +2212,7 @@ impl Lowerer {
                         let t = self.cinit_ty(&c);
                         let w = self.words(&t);
                         defs.push((fname.clone(), t, off, c));
-                        off += w;
+                        off = image_words(u64::from(off) + u64::from(w), *span)?;
                     }
                     self.structs.push(StructDef { name: name.clone(), fields: defs, words: off.max(1), opaque: Vec::new() });
                     if off == 0 {
@@ -1936,6 +2222,22 @@ impl Lowerer {
                 Item::Let { name, ann, value, span } => {
                     self.check_new_global(name, *span)?;
                     if let ExprKind::Call(f, args) = &value.kind {
+                        match declaration {
+                            Some(AudioDecl::Port { output, width }) => {
+                                self.audio_port(name, output, width?, *span)?;
+                                continue;
+                            }
+                            Some(AudioDecl::Sample) => {
+                                self.sample_table(name, args, *span, sample(name))?;
+                                continue;
+                            }
+                            Some(AudioDecl::Param { choices }) => {
+                                let bind = self.param(name, args, value.span, choices)?;
+                                self.globals.insert(name.clone(), bind);
+                                continue;
+                            }
+                            _ => {}
+                        }
                         if self.domain == Domain::Event {
                             if let Some(k) = self.event.forms.iter().position(|d| d.name == f) {
                                 let bind = self.event_decl(name, k, args, value.span)?;
@@ -1951,11 +2253,6 @@ impl Lowerer {
                             self.globals.insert(name.clone(), bind);
                             continue;
                         }
-                        if f == "param" {
-                            let bind = self.param(name, args, value.span)?;
-                            self.globals.insert(name.clone(), bind);
-                            continue;
-                        }
                     }
                     if matches!(value.kind, ExprKind::ArrayRepeat(..) | ExprKind::ArrayList(..) | ExprKind::StructLit(..)) {
                         self.lenient_objects = self.domain == Domain::Kernel;
@@ -1968,11 +2265,8 @@ impl Lowerer {
                             self.object_tables.insert(root, c.clone());
                         }
                         let mut w = std::mem::take(&mut self.shared_init);
-                        self.flatten(&c, &mut w);
+                        self.flatten(&c, &mut w, *span)?;
                         self.shared_init = w;
-                        if self.shared_init.len() as u32 > MAX_SHARED_WORDS {
-                            return err(*span, "tables exceed 4 Mi words");
-                        }
                         let extent = self.words(&t);
                         self.globals.insert(
                             name.clone(),
@@ -2002,6 +2296,7 @@ impl Lowerer {
                             // else the expression run once at lowering.
                             let c = match self.cinit(value, ann.as_ref()) {
                                 Ok(c) => c,
+                                Err(e) if e.is_cancelled() => return Err(e),
                                 Err(e) => match self.fold_const(value)? {
                                     Some(c) => c,
                                     None if self.domain == Domain::Kernel => {
@@ -2034,72 +2329,201 @@ impl Lowerer {
                     }
                     self.check_new_global(name, *span)?;
                     let c = self.cinit(value, ann.as_ref())?;
-                    let t = self.cinit_ty(&c);
-                    let offset = self.state_init.len() as u32;
-                    let mut w = std::mem::take(&mut self.state_init);
-                    self.flatten(&c, &mut w);
-                    self.state_init = w;
-                    if self.state_init.len() as u32 > MAX_STATE_WORDS {
-                        return err(*span, format!("state exceeds {} words (4 MiB) per instance", MAX_STATE_WORDS));
+                    self.add_state(name, c, *span)?;
+                }
+                Item::Decl { name, .. } if self.domain == Domain::Audio && name == "rate" => {}
+                Item::Decl { name, args, span } if self.domain == Domain::Audio && name == "latency" => {
+                    let [value] = args.as_slice() else { return err(*span, "`latency()` takes one argument") };
+                    if latency.replace((value, *span)).is_some() {
+                        return err(*span, "`latency()` declared twice");
                     }
-                    let words = self.words(&t);
-                    self.state_vars.push(StateVar { name: name.clone(), span: *span, sig: self.sig(&t), offset, words });
-                    let bind = match t {
-                        T::F | T::I | T::B => {
-                            let v = self.b.var(ty_of(&t));
-                            self.promoted.push((offset, v));
-                            Bind::Local(t, vec![v])
-                        }
-                        T::Vec(n) => {
-                            let vars: Vec<Var> = (0..n).map(|_| self.b.var(Ty::F32)).collect();
-                            for (k, v) in vars.iter().enumerate() {
-                                self.promoted.push((offset + k as u32, *v));
-                            }
-                            Bind::Local(T::Vec(n), vars)
-                        }
-                        t => Bind::Place(Place { region: Region::State, root: offset, extent: words, off: None, stat: 0, ty: t }),
-                    };
-                    self.globals.insert(name.clone(), bind);
+                }
+                Item::Decl { name, args, span } => {
+                    if !matches!(declaration, Some(AudioDecl::Mono)) {
+                        return err(*span, format!("unknown declaration `{name}()`"));
+                    }
+                    if !args.is_empty() {
+                        return err(*span, "`mono()` takes no arguments");
+                    }
+                    if self.mono.replace(*span).is_some() {
+                        return err(*span, "`mono()` declared twice");
+                    }
+                    if self.fns.contains_key("effect") || self.fns.contains_key("effect_block") {
+                        return err(*span, "`mono()` is for instruments");
+                    }
                 }
                 Item::Fn(_) => {}
                 // Resolved before lowering (kernels); audio has no modules.
                 Item::Use { .. } => {}
             }
         }
+        if let Some((value, span)) = latency {
+            self.latency = self.latency_frames(value, span)?;
+        }
         Ok(())
+    }
+
+    fn audio_port(&mut self, name: &str, output: bool, channels: u16, span: Span) -> LResult<()> {
+        if self.oversampling > 1 {
+            return err(span, format!("audio port `{name}` needs a base-rate shader: ports at a raised rate (rate(k) or a node's oversample:) are not supported yet; run the high-rate part in oversample(...)"));
+        }
+        let count = &mut self.audio_channels[usize::from(output)];
+        let first = *count;
+        *count = first.checked_add(channels).ok_or_else(|| ShaderError::new(span.start, span.end,
+            format!("audio port `{name}` exceeds the program's 16-bit channel count")))?;
+        let held = if output {
+            let start = self.promoted.len();
+            let zero = if channels == 1 { CInit::W(0, T::F) } else { CInit::Vec(2, [0; 16]) };
+            self.add_state(name, zero, span)?;
+            self.promoted[start..].iter().map(|&(_, var)| var).collect()
+        } else {
+            Vec::new()
+        };
+        self.globals.insert(name.to_owned(), Bind::AudioPort(self.ports.len()));
+        self.ports.push(AudioPort {
+            info: AudioPortInfo { name: name.to_owned(), output, channels, first, control: false },
+            span, held, frame_write: false,
+        });
+        Ok(())
+    }
+
+    fn add_state(&mut self, name: &str, c: CInit, span: Span) -> LResult<()> {
+        let t = self.cinit_ty(&c);
+        let offset = self.state_init.len() as u32;
+        let mut w = std::mem::take(&mut self.state_init);
+        self.flatten(&c, &mut w, span)?;
+        self.state_init = w;
+        let words = self.words(&t);
+        self.state_vars.push(StateVar { name: name.to_owned(), span, sig: self.sig(&t), offset, words });
+        let bind = match t {
+            T::F | T::I | T::B => {
+                let v = self.b.var(ty_of(&t));
+                self.promoted.push((offset, v));
+                Bind::Local(t, vec![v])
+            }
+            T::Vec(n) => {
+                let vars: Vec<Var> = (0..n).map(|_| self.b.var(Ty::F32)).collect();
+                for (k, v) in vars.iter().enumerate() {
+                    self.promoted.push((offset + k as u32, *v));
+                }
+                Bind::Local(T::Vec(n), vars)
+            }
+            t => Bind::Place(Place { region: Region::State, root: offset, extent: words, off: None, stat: 0, ty: t }),
+        };
+        self.globals.insert(name.to_owned(), bind);
+        Ok(())
+    }
+
+    fn add_rate_cascade(&mut self, kind: Kind, span: Span) -> LResult<()> {
+        let factor = self.oversampling;
+        let name = if kind == Kind::Effect { format!("Oversample{factor}") } else { format!("Halfband{factor}") };
+        let initial = self.cinit(&Expr { kind: ExprKind::StructLit(name, Vec::new()), span }, None)?;
+        let effect = kind == Kind::Effect;
+        let cascade = if effect { initial } else { CInit::Repeat(Box::new(initial), 2) };
+        self.rate_reads_input = self.fns.get("effect").is_some_and(|entry| {
+            entry.params.iter().any(|(name, _)| reads_parameter(&entry.body, name))
+        });
+        let delay = self.rate_modes.latency(factor, self.rate_reads_input);
+        self.latency = self.latency.checked_add(delay)
+            .ok_or_else(|| ShaderError::new(span.start, span.end, "declared latency plus rate conversion exceeds 4294967295 base frames".into()))?;
+        self.add_state(RATE_STATE, cascade, span)
     }
 
     fn check_new_global(&self, name: &str, span: Span) -> LResult<()> {
         if self.globals.contains_key(name) {
             return err(span, format!("`{}` is defined twice", name));
         }
-        if BUILTIN_NAMES.contains(&name) {
+        if BUILTIN_NAMES.contains(&name) || (self.domain == Domain::Audio && matches!(name, "oversampling" | "effect_block")) {
             return err(span, format!("`{}` is a builtin name", name));
         }
         Ok(())
     }
 
-    fn param(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<Bind> {
-        let mut nums = Vec::new();
-        for a in args {
-            let scratch = self.scratch();
-        let saved = std::mem::replace(&mut self.b, scratch);
-            let r = self.expr(a);
-            self.b = saved;
-            match r? {
-                V::Lit(x) => nums.push(x as f32),
-                _ => return err(a.span, "param(default, min, max) takes constant numbers"),
+    fn param_number(&mut self, value: &Expr) -> LResult<f32> {
+        match self.cinit(value, None)? {
+            CInit::W(w, T::F) => Ok(f32::from_bits(w)),
+            CInit::W(w, T::I) => Ok((w as i32) as f32),
+            _ => err(value.span, "expected a constant number"),
+        }
+    }
+
+    fn param(&mut self, name: &str, args: &[Expr], span: Span, choices: LResult<Vec<String>>) -> LResult<Bind> {
+        let mut choices = Some(choices);
+        let (numeric, fields) = param_parts(args);
+        let (default, mut min, mut max) = match numeric {
+            [d] => (d, f32::MIN, f32::MAX),
+            [d, lo, hi] => (d, self.param_number(lo)?, self.param_number(hi)?),
+            _ => return err(span, "param takes a default, optional min and max, and an optional info object"),
+        };
+        let mut meta = ParamMeta::default();
+        let mut log_span = None;
+        for (i, (field, value)) in fields.iter().enumerate() {
+            let span = value.span;
+            if fields[..i].iter().any(|(key, _)| key == field) {
+                return err(span, format!("param field `{field}` is given twice"));
+            }
+            let text = |e: &Expr| param_word(field, e);
+            match field.as_str() {
+                "unit" => meta.unit = match text(value)?.as_str() {
+                    "hz" => ParamUnit::Hz,
+                    "s" => ParamUnit::Secs,
+                    "ms" => ParamUnit::Ms,
+                    "db" => ParamUnit::Db,
+                    "st" => ParamUnit::Semis,
+                    "ct" => ParamUnit::Cents,
+                    "beats" => ParamUnit::Beats,
+                    "percent" | "%" => ParamUnit::Percent,
+                    unit => return err(span, format!("unknown unit `{unit}` (hz, s, ms, db, st, ct, beats, percent or \"%\")")),
+                },
+                "curve" => meta.curve = match text(value)?.as_str() {
+                    "linear" => ParamCurve::Linear,
+                    "log" => { log_span = Some(span); ParamCurve::Log }
+                    "exp" => ParamCurve::Exp,
+                    curve => return err(span, format!("unknown curve `{curve}` (linear, log, exp)")),
+                },
+                "label" => meta.label = text(value)?,
+                "group" => meta.group = text(value)?,
+                "step" | "smooth" => {
+                    let is_step = field == "step";
+                    let number = speculative(self.param_number(value))?.filter(|x| x.is_finite() && if is_step { *x > 0.0 } else { *x >= 0.0 });
+                    let Some(number) = number else {
+                        return err(span, if is_step { "step needs a constant number > 0" } else { "smooth needs a constant number >= 0" });
+                    };
+                    if is_step { meta.step = number } else { meta.smooth = Some(number) }
+                }
+                "choices" => {
+                    meta.choices = choices.take().unwrap()?;
+                    min = 0.0;
+                    max = (meta.choices.len() - 1) as f32;
+                }
+                _ => return err(span, format!("unknown param field `{field}` (unit, curve, step, label, group, choices, smooth)")),
             }
         }
-        let (default, min, max) = match nums[..] {
-            [d] => (d, f32::MIN, f32::MAX),
-            [d, lo, hi] => (d, lo, hi),
-            _ => return err(span, "param(default) or param(default, min, max)"),
-        };
-        if self.params.len() >= 64 {
-            return err(span, "at most 64 params");
+        if let Some(span) = log_span {
+            if !(min > 0.0) {
+                return err(span, "the log curve needs min > 0");
+            }
         }
+        let default = if meta.choices.is_empty() {
+            self.param_number(default)?
+        } else {
+            meta.step = 1.0;
+            match &default.kind {
+                ExprKind::Str(word) | ExprKind::Ident(word) => match meta.choices.iter().position(|choice| choice == word) {
+                    Some(index) => index as f32,
+                    None => return err(default.span, format!("unknown default choice `{word}`")),
+                },
+                _ => {
+                    let index = self.param_number(default)?;
+                    if index.fract() != 0.0 || !(min..=max).contains(&index) {
+                        return err(default.span, format!("the default choice must be an index from 0 to {max}"));
+                    }
+                    index
+                }
+            }
+        };
         self.params.push(ParamInfo { name: name.to_string(), default, min, max });
+        self.param_meta.push(meta);
         Ok(Bind::Param(self.params.len() - 1))
     }
 
@@ -2131,8 +2555,13 @@ impl Lowerer {
         v
     }
 
-    fn render(&mut self, kind: Kind) -> LResult<()> {
-        let entry_name = if kind == Kind::Instrument { "voice" } else { "effect" };
+    fn render(&mut self, kind: Kind) -> LResult<Span> {
+        let entry_name = match kind {
+            Kind::Instrument => "voice",
+            Kind::Effect if self.block_layout.is_some() => "effect_block",
+            Kind::Effect => "effect",
+            Kind::Control => "block",
+        };
         let entry = self.fns.get(entry_name).cloned().unwrap();
         let fresh_word = header::FRESH;
         // Header and param smoothing words are promoted like state scalars.
@@ -2146,20 +2575,28 @@ impl Lowerer {
             params.push((base, step));
         }
         self.load_promoted();
-        let note = self.header_var(Ty::F32, header::NOTE, false);
+        let base_note = self.b.load(Ty::F32, Region::State, header::NOTE, 1, None);
+        let bend = self.header_var(Ty::F32, header::BEND, false);
+        let semitones = self.b.get(bend);
+        let nv = self.b.add(base_note, semitones);
+        let note = self.b.var(Ty::F32);
+        self.b.set(note, nv);
         // freq from note with the deterministic exp (not the host's libm).
         let freq = self.b.var(Ty::F32);
-        let nv = self.b.get(note);
-        let d = self.b.addc(nv, -69.0);
-        let y = self.b.mulc(d, std::f32::consts::LN_2 / 12.0);
-        let e = self.b.exp(y);
-        let hz = self.b.mulc(e, 440.0);
+        let hz = self.note_hz(nv);
         self.b.set(freq, hz);
         let gate = self.header_var(Ty::F32, header::GATE, false);
         let velocity = self.header_var(Ty::F32, header::VELOCITY, false);
+        let pressure = self.header_var(Ty::F32, header::PRESSURE, false);
+        let slide = self.header_var(Ty::F32, header::SLIDE, false);
+        let release_velocity = self.header_var(Ty::F32, header::RELEASE_VELOCITY, false);
+        let mod_wheel = self.b.var(Ty::F32);
+        let wheel = self.b.load(Ty::F32, Region::Ctx, CTX_CC + 1, 1, None);
+        self.b.set(mod_wheel, wheel);
         let trigger_at = self.header_var(Ty::I32, header::TRIGGER, false);
         let rate = self.b.var(Ty::F32);
         let r = self.b.load(Ty::F32, Region::Ctx, CTX_RATE, 1, None);
+        let r = if self.oversampling == 1 { r } else { self.b.mulc(r, self.oversampling as f32) };
         self.b.set(rate, r);
         let frame0 = self.b.load(Ty::I32, Region::Ctx, CTX_FRAME, 1, None);
         let n = self.b.raw(Ty::I32, Op::FrameCount, None);
@@ -2167,16 +2604,136 @@ impl Lowerer {
         let zero = self.b.ci(0);
         self.b.set(i, zero);
         let pos = self.b.var(Ty::I32);
-        self.entry = Some(EntryCtx { rate, pos, note, freq, gate, velocity, trigger_at, rng, stop, params: params.clone() });
+        let tempo = self.b.load(Ty::F32, Region::Ctx, CTX_TEMPO, 1, None);
+        let beat_at = self.b.load(Ty::F32, Region::Ctx, CTX_BEAT_AT, 1, None);
+        let beat_frame = self.b.load(Ty::I32, Region::Ctx, CTX_BEAT_FRAME, 1, None);
+        let beat_step = self.b.load(Ty::F32, Region::Ctx, CTX_BEAT_STEP, 1, None);
+        let bar_beats = self.b.load(Ty::F32, Region::Ctx, CTX_BAR_BEATS, 1, None);
+        let playing = self.b.load(Ty::I32, Region::Ctx, CTX_PLAYING, 1, None);
+        let playing = self.b.cmpi(Cmp::Ne, playing, zero);
+        let voice_index = self.b.load(Ty::I32, Region::State, header::VOICE, 1, None);
+        let instance = self.b.load(Ty::F32, Region::Ctx, CTX_INSTANCE, 1, None);
+        self.entry = Some(EntryCtx {
+            subsample: None,
+            rate, pos, note, freq, gate, velocity, bend, pressure, slide, release_velocity, mod_wheel,
+            tempo, beat_at, beat_frame, beat_step, bar_beats, playing, voice_index, instance,
+            trigger_at, rng, stop, params: params.clone(),
+        });
 
+        let ent = self.entry.clone().unwrap();
+        let steady = self.frame_loop(&entry, kind, &ent, fresh, i, frame0, n, zero, None)?;
+        let loop_of = |body| IS::Loop { cap: MAX_FRAMES + 1, body };
+        let frames = if kind == Kind::Instrument && (self.reads_note || self.reads_freq) {
+            let step = self.b.load(Ty::F32, Region::State, header::GLIDE_STEP, 1, None);
+            let zf = self.b.cf(0.0);
+            let moving = self.b.cmpf(Cmp::Ne, step, zf);
+            self.b.open();
+            let target = self.b.un(Ty::F64, Un::F2D, base_note);
+            let step64 = self.b.un(Ty::F64, Un::F2D, step);
+            let pitch = self.b.load(Ty::F32, Region::State, header::GLIDE_NOTE, 1, None);
+            let estimated = self.glide_frames(target, pitch, step64);
+            let correction = self.b.load(Ty::F32, Region::State, header::GLIDE_REMAINDER, 1, None);
+            let correction = self.b.un(Ty::F64, Un::F2D, correction);
+            let distance = self.b.def(Ty::F64, Op::Bin(Bin::AddD, estimated, correction));
+            let left = self.b.un(Ty::F64, Un::AbsD, distance);
+            let remaining = self.b.var(Ty::F64);
+            self.b.set(remaining, left);
+            let zd = self.b.cd(0.0);
+            let rising = self.b.def(Ty::Bool, Op::CmpD(Cmp::Gt, distance, zd));
+            let down = self.b.un(Ty::F64, Un::NegD, step64);
+            let glide = Glide { remaining, signed_step: self.b.sel(rising, step64, down), target };
+            let sliding = self.frame_loop(&entry, kind, &ent, fresh, i, frame0, n, zero, Some(glide))?;
+            self.b.push(loop_of(sliding));
+            let left = self.b.get(remaining);
+            let pitch = self.glide_pitch(glide, left);
+            self.b.store(Region::State, header::GLIDE_NOTE, 1, None, pitch);
+            let estimated = self.glide_frames(target, pitch, step64);
+            let negative = self.b.un(Ty::F64, Un::NegD, left);
+            let distance = self.b.sel(rising, left, negative);
+            let correction = self.b.def(Ty::F64, Op::Bin(Bin::SubD, distance, estimated));
+            let correction = self.b.un(Ty::F32, Un::D2F, correction);
+            self.b.store(Region::State, header::GLIDE_REMAINDER, 1, None, correction);
+            let done = self.b.def(Ty::Bool, Op::CmpD(Cmp::Eq, left, zd));
+            let next_step = self.b.sel(done, zf, step);
+            self.b.store(Region::State, header::GLIDE_STEP, 1, None, next_step);
+            let slide = self.b.close();
+            IS::If(moving, slide, vec![loop_of(steady)])
+        } else {
+            loop_of(steady)
+        };
+        // The calls in the body have now declared all their accumulators.
+        for (_, vars) in &self.probes {
+            for (var, initial) in vars.iter().zip([f32::NAN, f32::INFINITY, f32::NEG_INFINITY]) {
+                let value = self.b.cf(initial);
+                self.b.set(*var, value);
+            }
+        }
+        self.b.push(frames);
+        self.store_promoted();
+        let mut word = CTX_PARAMS + self.params.len() as u32;
+        for (_, vars) in &self.probes {
+            for var in vars {
+                let value = self.b.get(*var);
+                self.b.store(Region::Ctx, word, 1, None, value);
+                word += 1;
+            }
+        }
+        Ok(entry.span)
+    }
+
+    fn note_hz(&mut self, note: Val) -> Val {
+        let d = self.b.addc(note, -69.0);
+        let y = self.b.mulc(d, std::f32::consts::LN_2 / 12.0);
+        let e = self.b.exp(y);
+        self.b.mulc(e, 440.0)
+    }
+
+    // The rounded pitch accounts for the whole samples it can represent.
+    // Carry the difference in the spare frequency word so slicing never
+    // loses a fraction of a sample, even when a pitch step is below one ulp.
+    fn glide_frames(&mut self, target: Val, pitch: Val, step: Val) -> Val {
+        let pitch = self.b.un(Ty::F64, Un::F2D, pitch);
+        let distance = self.b.def(Ty::F64, Op::Bin(Bin::SubD, target, pitch));
+        let frames = self.b.def(Ty::F64, Op::Bin(Bin::DivD, distance, step));
+        self.b.un(Ty::F64, Un::RoundD, frames)
+    }
+
+    fn glide_pitch(&mut self, glide: Glide, remaining: Val) -> Val {
+        let distance = self.b.def(Ty::F64, Op::Bin(Bin::MulD, remaining, glide.signed_step));
+        let pitch = self.b.def(Ty::F64, Op::Bin(Bin::SubD, glide.target, distance));
+        self.b.un(Ty::F32, Un::D2F, pitch)
+    }
+
+    fn frame_loop(&mut self, entry: &FnDecl, kind: Kind, ent: &EntryCtx, fresh: Var, i: Var,
+        frame0: Val, n: Val, zero: Val, glide: Option<Glide>) -> LResult<Block> {
         // The frame loop.
-        self.b.open();
+        self.b.open_loop();
         self.loops.push(LoopKind::Frame);
         let iv = self.b.get(i);
         let done = self.b.cmpi(Cmp::Ge, iv, n);
         self.b.push(IS::If(done, vec![IS::Break(0)], vec![]));
+        if let Some(glide) = glide {
+            let count = self.b.get(glide.remaining);
+            let zd = self.b.cd(0.0);
+            let moving = self.b.def(Ty::Bool, Op::CmpD(Cmp::Gt, count, zd));
+            self.b.open();
+            let one = self.b.cd(1.0);
+            let next = self.b.def(Ty::F64, Op::Bin(Bin::SubD, count, one));
+            let rest = self.b.def(Ty::F64, Op::Bin(Bin::MaxD, next, zd));
+            self.b.set(glide.remaining, rest);
+            let pitch = self.glide_pitch(glide, rest);
+            let bend = self.b.get(ent.bend);
+            let sounding = self.b.add(pitch, bend);
+            self.b.set(ent.note, sounding);
+            if self.reads_freq {
+                let hz = self.note_hz(sounding);
+                self.b.set(ent.freq, hz);
+            }
+            let advance = self.b.close();
+            self.b.push(IS::If(moving, advance, vec![]));
+        }
         let p = self.b.ib(Bin::AddI, frame0, iv);
-        self.b.set(pos, p);
+        self.b.set(ent.pos, p);
         let mask = self.b.ci(CONTROL_BLOCK as i32 - 1);
         let phase = self.b.ib(Bin::AndI, p, mask);
         let at_start = self.b.cmpi(Cmp::Eq, phase, zero);
@@ -2185,8 +2742,15 @@ impl Lowerer {
         let run_block = self.b.def(Ty::Bool, Op::Bin(Bin::OrB, at_start, is_fresh));
         // Control block start: params ramp toward their targets; block().
         self.b.open_loop();
-        for (k, (base, step)) in params.iter().enumerate() {
+        for (k, (base, step)) in ent.params.iter().enumerate() {
             let target = self.b.load(Ty::F32, Region::Ctx, CTX_PARAMS + k as u32, 1, None);
+            let meta = &self.param_meta[k];
+            if meta.smooth == Some(0.0) || (meta.smooth.is_none() && meta.step > 0.0) {
+                self.b.set(*base, target);
+                let zero = self.b.cf(0.0);
+                self.b.set(*step, zero);
+                continue;
+            }
             let bv = self.b.get(*base);
             let sv = self.b.get(*step);
             let s64 = self.b.mulc(sv, CONTROL_BLOCK as f32);
@@ -2194,7 +2758,17 @@ impl Lowerer {
             let nb = self.b.sel(is_fresh, target, reached);
             self.b.set(*base, nb);
             let d = self.b.sub(target, nb);
-            let ns = self.b.mulc(d, 1.0 / CONTROL_BLOCK as f32);
+            let ns = if let Some(seconds) = meta.smooth {
+                let rate = self.b.load(Ty::F32, Region::Ctx, CTX_RATE, 1, None);
+                let frames = self.b.mulc(rate, seconds);
+                let block = self.b.cf(CONTROL_BLOCK as f32);
+                let frames = self.b.fb(Bin::MaxF, frames, block);
+                let one = self.b.cf(1.0);
+                let fraction = self.b.div(one, frames);
+                self.b.mul(d, fraction)
+            } else {
+                self.b.mulc(d, 1.0 / CONTROL_BLOCK as f32)
+            };
             let zf = self.b.cf(0.0);
             let ns = self.b.sel(is_fresh, zf, ns);
             self.b.set(*step, ns);
@@ -2210,39 +2784,67 @@ impl Lowerer {
         let blk = self.b.close();
         self.b.push(IS::If(run_block, blk, vec![]));
 
-        // The sample.
-        let args = match kind {
-            Kind::Instrument => {
-                if !entry.params.is_empty() {
-                    return err(entry.span, "`fn voice()` takes no parameters (use note, freq, gate, velocity)");
-                }
-                vec![]
+        let iv2 = if kind == Kind::Control { self.b.get(i) } else { self.main_sample(entry, kind, iv, i)? };
+        for port in &self.ports {
+            for (lane, &var) in port.held.iter().enumerate() {
+                let val = self.b.get(var);
+                self.b.push(IS::Out { ch: port.info.first + lane as u16, idx: iv2, val });
             }
-            Kind::Effect => {
-                if entry.params.len() != 2 {
-                    return err(entry.span, "`fn effect(l, r)` takes the left and right input");
-                }
-                let l = self.b.raw(Ty::F32, Op::In { ch: 0, idx: iv }, None);
-                let r = self.b.raw(Ty::F32, Op::In { ch: 1, idx: iv }, None);
-                vec![V::F(l), V::F(r)]
+        }
+        let one = self.b.ci(1);
+        let inext = self.b.ib(Bin::AddI, iv2, one);
+        self.b.set(i, inext);
+        self.loops.pop();
+        Ok(self.b.close())
+    }
+
+    /// Render the stereo sample for an instrument or effect, before writing its named outputs.
+    fn main_sample(&mut self, entry: &FnDecl, kind: Kind, iv: Val, i: Var) -> LResult<Val> {
+        if let Some(layout) = self.block_layout {
+            self.block_sample(layout, entry, iv)?;
+            return Ok(iv);
+        }
+        self.port_frame = Some(iv);
+        let args = if kind == Kind::Instrument {
+            if !entry.params.is_empty() {
+                return err(entry.span, "`fn voice()` takes no parameters (use note, freq, gate, velocity)");
             }
+            vec![]
+        } else {
+            if entry.params.len() != 2 {
+                return err(entry.span, "`fn effect(l, r)` takes the left and right input");
+            }
+            let l = self.b.raw(Ty::F32, Op::In { ch: 0, idx: iv }, None);
+            let r = self.b.raw(Ty::F32, Op::In { ch: 1, idx: iv }, None);
+            vec![V::F(l), V::F(r)]
         };
-        let out = self.call(&entry, args, entry.span)?;
+        let out = if self.oversampling == 1 {
+            self.call(entry, args, entry.span)?
+        } else {
+            let Some(Bind::Place(state)) = self.globals.get(RATE_STATE).cloned() else { unreachable!() };
+            let (up, down) = if kind == Kind::Effect {
+                let down = self.field_place(&state, "down", entry.span)?;
+                let input = [self.to_f(&args[0], entry.span)?, self.to_f(&args[1], entry.span)?];
+                (self.rate_reads_input.then_some((state, lanes_of(&input))), down)
+            } else {
+                (None, state)
+            };
+            let output = self.rate_region(1, self.oversampling, self.rate_modes, up, down, 2, entry.span, |l, input| {
+                let args = if kind == Kind::Effect { vec![V::F(input[0]), V::F(input[1])] } else { vec![] };
+                let v = l.call(entry, args, entry.span)?;
+                l.to_vec(&v, 2, entry.span)
+            })?;
+            V::Vec(2, output)
+        };
         let (l, r) = match &out {
-            V::Unit => return err(entry.span, format!("`fn {}` must return the output sample (f32 or vec2)", entry_name)),
+            V::Unit => return err(entry.span, format!("`fn {}` must return the output sample (f32 or vec2)", entry.name)),
             v => self.to_v2(v, entry.span)?,
         };
         let iv2 = self.b.get(i);
         self.b.push(IS::Out { ch: 0, idx: iv2, val: l });
         self.b.push(IS::Out { ch: 1, idx: iv2, val: r });
-        let one = self.b.ci(1);
-        let inext = self.b.ib(Bin::AddI, iv2, one);
-        self.b.set(i, inext);
-        self.loops.pop();
-        let body = self.b.close();
-        self.b.push(IS::Loop { cap: MAX_FRAMES + 1, body });
-        self.store_promoted();
-        Ok(())
+        self.port_frame = None;
+        Ok(iv2)
     }
 
     fn init_program(&mut self, f: &FnDecl) -> LResult<Program> {
@@ -2271,9 +2873,10 @@ impl Lowerer {
         let mut prog = b.prog;
         prog.body = b.blocks.into_iter().next().unwrap();
         prog.frame_words = frame_words;
-        dce(&mut prog);
-        if prog.total_cost() > MAX_INIT_COST {
-            return err(f.span, format!("init() may run {} operations; the limit is {}", prog.total_cost(), MAX_INIT_COST));
+        // FFT argument offsets remain live through their call markers until expansion.
+        if self.fft_sites.is_empty() {
+            dce(&mut prog);
+            check_init_cost(&prog, f.span)?;
         }
         Ok(prog)
     }
@@ -2284,7 +2887,7 @@ impl Lowerer {
         if self.b.prog.vals.len() > MAX_IR_VALS {
             return err(span, "the program is too large after inlining (fewer or smaller helper calls, or smaller unrolled loops)");
         }
-        if self.call_stack.iter().any(|n| *n == f.name) {
+        if self.call_stack.iter().any(|(name, def)| *name == f.name && *def == f.span) {
             return err(span, format!("`{}` calls itself; audio shaders have no recursion", f.name));
         }
         if args.len() != f.params.len() {
@@ -2299,7 +2902,7 @@ impl Lowerer {
     /// Inlines a call of `f`; `outer`: the scopes a local function was
     /// defined in (it sees them, under its parameters).
     fn inline_call(&mut self, f: &FnDecl, args: Vec<V>, span: Span, outer: Vec<HashMap<String, Bind>>) -> LResult<V> {
-        if self.call_stack.iter().any(|n| *n == f.name) {
+        if self.call_stack.iter().any(|(name, def)| *name == f.name && *def == f.span) {
             return err(span, format!("`{}` calls itself; kernels and audio shaders have no recursion", f.name));
         }
         if args.len() != f.params.len() {
@@ -2337,7 +2940,8 @@ impl Lowerer {
             };
             scope.insert(name.clone(), bind);
         }
-        self.call_stack.push(f.name.clone());
+        let entries_before = self.render_entries.len();
+        self.call_stack.push((f.name.clone(), f.span));
         self.call_spans.push(span);
         let mut frame = outer;
         frame.push(scope);
@@ -2359,7 +2963,16 @@ impl Lowerer {
             }
             _ => self.stmts(&f.body),
         };
-        let body = self.b.close();
+        let mut body = self.b.close();
+        // The render dispatcher calls each entry at its declaration span.
+        // Fused dispatchers do the same for each authored node. Prefer those
+        // inner entries to the synthetic wrapper when attributing a warning.
+        if self.domain == Domain::Audio && self.entry.is_some() && !self.in_init
+            && span == f.span && self.render_entries.len() == entries_before {
+            let entry = Program { body, ..Default::default() };
+            self.render_entries.push((entry.total_cost(), span));
+            body = entry.body;
+        }
         self.loops.pop();
         let ret = self.rets.pop().unwrap();
         self.frames.pop();
@@ -2368,7 +2981,7 @@ impl Lowerer {
         let v = match r {
             Ok(v) => v,
             // An error inside a prelude helper is reported at the user's call.
-            Err(e) if e.start >= self.prelude_base && span.start < self.prelude_base => {
+            Err(e) if !e.is_cancelled() && e.start >= self.prelude_base && span.start < self.prelude_base => {
                 return err(span, format!("in `{}`: {}", f.name, e.message));
             }
             Err(e) => return Err(e),
@@ -2483,7 +3096,7 @@ impl Lowerer {
         }
         struct Cx<'a> {
             name: &'a str,
-            l: &'a Lowerer,
+            l: &'a Lowerer<'a>,
         }
         fn is(e: &Expr, name: &str) -> bool {
             matches!(&e.kind, ExprKind::Ident(n) if n == name)
@@ -2505,7 +3118,7 @@ impl Lowerer {
                 ExprKind::Lambda(g) => g.params.iter().all(|(n, _)| n != cx.name) && stmts(&g.body, cx),
                 ExprKind::If(arms, else_) => arms.iter().all(|(c, b)| expr(c, cx) && stmts(b, cx)) && else_.as_ref().is_none_or(|b| stmts(b, cx)),
                 ExprKind::Match(x, arms) => expr(x, cx) && arms.iter().all(|(ps, b)| ps.as_ref().is_none_or(|ps| ps.iter().all(|p| expr(p, cx))) && stmts(b, cx)),
-                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => true,
+                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => true,
             }
         }
         fn stmts(b: &[Stmt], cx: &Cx) -> bool {
@@ -2549,7 +3162,7 @@ impl Lowerer {
     fn state_in(&self, f: &FnDecl) -> Vec<StateArg> {
         use std::collections::{BTreeSet, HashSet};
         struct W<'a> {
-            l: &'a Lowerer,
+            l: &'a Lowerer<'a>,
             seen: HashSet<String>,
             named: BTreeSet<String>,
             set: HashSet<String>,
@@ -2567,7 +3180,7 @@ impl Lowerer {
             }
             fn expr(&mut self, e: &Expr) {
                 match &e.kind {
-                    ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
+                    ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => {}
                     ExprKind::Ident(n) => {
                         self.named.insert(n.clone());
                     }
@@ -2805,8 +3418,8 @@ impl Lowerer {
         }
         let at = (self.marks_spans.len(), self.cond_marks.len(), self.event.sites.len(), self.funcs_out.len());
         let depth = (self.frames.len(), self.rets.len(), self.call_stack.len());
-        match self.lower_function(f, vals, span) {
-            Ok(x) if x.is_none_or(|i| self.funcs_out[i as usize].1.lit_bad & typed == 0) => {
+        match speculative(self.lower_function(f, vals, span))? {
+            Some(x) if x.is_none_or(|i| self.funcs_out[i as usize].1.lit_bad & typed == 0) => {
                 self.func_cache.insert(key, x);
                 Ok(x)
             }
@@ -3039,7 +3652,7 @@ impl Lowerer {
             }
             self.globals.insert(name.clone(), Bind::Local(t.clone(), vars));
         }
-        self.call_stack.push(f.name.clone());
+        self.call_stack.push((f.name.clone(), f.span));
         self.frames.push(vec![scope]);
         self.rets.push(Ret { vars: None, used: false });
         self.loops.push(LoopKind::Wrapper);
@@ -3052,7 +3665,7 @@ impl Lowerer {
         self.call_stack.pop();
         let v = match r {
             Ok(v) => v,
-            Err(e) if e.start >= self.prelude_base && span.start < self.prelude_base => {
+            Err(e) if !e.is_cancelled() && e.start >= self.prelude_base && span.start < self.prelude_base => {
                 return err(span, format!("in `{}`: {}", f.name, e.message));
             }
             Err(e) => return Err(e),
@@ -3369,11 +3982,27 @@ impl Lowerer {
         self.binary(bop, old, rhs, span)
     }
 
+    fn assignment_binding(&mut self, name: &str, span: Span) -> LResult<Option<Bind>> {
+        let bind = self.lookup(name);
+        let Some(Bind::AudioPort(k)) = bind else { return Ok(bind) };
+        let port = &mut self.ports[k];
+        if !port.info.output {
+            return err(span, format!("input port `{name}` is read-only"));
+        }
+        if self.entry.is_none() {
+            return err(span, format!("output port `{name}` cannot be assigned outside block(), voice() or effect()"));
+        }
+        port.frame_write |= self.port_frame.is_some();
+        port.info.control = !port.frame_write;
+        let ty = if port.info.channels == 1 { T::F } else { T::Vec(2) };
+        Ok(Some(Bind::Local(ty, port.held.clone())))
+    }
+
     fn assign(&mut self, target: &Expr, op: AssignOp, value: &Expr, span: Span) -> LResult<()> {
         let rhs = self.expr(value)?;
         let combine = |l: &mut Self, old: V| -> LResult<V> { l.combined(op, old, rhs.clone(), span) };
         match &target.kind {
-            ExprKind::Ident(name) => match self.lookup(name) {
+            ExprKind::Ident(name) => match self.assignment_binding(name, target.span)? {
                 Some(Bind::Local(t, vars)) => {
                     let old = self.read_vars(&t, &vars);
                     let v = combine(self, old)?;
@@ -3391,7 +4020,7 @@ impl Lowerer {
             ExprKind::Field(base, field) => {
                 // A lane of a vector local.
                 if let ExprKind::Ident(name) = &base.kind {
-                    if let Some(Bind::Local(T::Vec(n), vars)) = self.lookup(name) {
+                    if let Some(Bind::Local(T::Vec(n), vars)) = self.assignment_binding(name, target.span)? {
                         let lane = single_lane(n, field).ok_or_else(|| {
                             ShaderError::new(target.span.start, target.span.end, format!("{} has no single component `{}`", vec_name(n), field))
                         })?;
@@ -3492,7 +4121,16 @@ impl Lowerer {
             return Ok(Place { ty: el, stat: p.stat + k * stride, ..p.clone() });
         }
         let i = self.to_i(idx, span)?;
-        let w = self.b.def(Ty::I32, Op::Wrap(i, n));
+        let w = if n > i32::MAX as u32 && !n.is_power_of_two() {
+            // A signed index is less than this length in magnitude.
+            let zero = self.b.ci(0);
+            let negative = self.b.cmpi(Cmp::Lt, i, zero);
+            let len = self.b.ci(n as i32);
+            let from_end = self.b.ib(Bin::AddI, i, len);
+            self.b.sel(negative, from_end, i)
+        } else {
+            self.b.def(Ty::I32, Op::Wrap(i, n))
+        };
         let w = if stride == 1 {
             w
         } else {
@@ -3588,7 +4226,7 @@ impl Lowerer {
                 ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => expr(l, a, memo, stack) + expr(l, b, memo, stack),
                 ExprKind::ArrayList(xs) => xs.iter().map(|x| expr(l, x, memo, stack)).sum(),
                 ExprKind::StructLit(_, fs) => fs.iter().map(|(_, x)| expr(l, x, memo, stack)).sum(),
-                ExprKind::Unreadable(_) => 0,
+                ExprKind::Str(_) | ExprKind::Unreadable(_) => 0,
                 // A local function: about one call's worth.
                 ExprKind::Lambda(f) => stmts(l, &f.body, memo, stack),
                 ExprKind::Block(b) => stmts(l, b, memo, stack),
@@ -3662,7 +4300,8 @@ impl Lowerer {
         };
         if let (V::Lit(a), V::Lit(z)) = (&a, &z) {
             let (a, z) = (a.floor() as i64, z.floor() as i64);
-            let count = (z - a).max(0) as u64;
+            // Saturating: a hostile bound (`1..-1e38`) is far outside i64.
+            let count = z.saturating_sub(a).max(0) as u64;
             // Small loops unroll while the unrolled code stays small. Audio
             // programs keep their own rule (up to 16 iterations, or 64 of a
             // one-line body): an unrolled loop's counter is a literal, and
@@ -3852,7 +4491,7 @@ impl Lowerer {
                 let ep = self.index_place(&p, &iv, idx.span)?;
                 Ok(self.read(&ep))
             }
-            ExprKind::Unreadable(why) => err(span, format!("this is {}", why)),
+            ExprKind::Str(_) | ExprKind::Unreadable(_) => err(span, format!("this is {}", e.kind.unreadable_reason().unwrap())),
             ExprKind::Lambda(_) => err(span, "a function value is bound with `let name = fn(..) {..}` and called by its name; kernels cannot store, pass or return functions"),
             ExprKind::Call(name, args) => self.call_expr(name, args, span),
             ExprKind::If(arms, else_) => self.if_expr(arms, else_.as_ref(), span),
@@ -3893,12 +4532,12 @@ impl Lowerer {
     fn aggregate_literal(&mut self, e: &Expr) -> LResult<V> {
         // Constant literals initialize from their image; otherwise field by
         // field.
-        if let Ok(c) = self.cinit_quiet(e) {
+        if let Some(c) = speculative(self.cinit_quiet(e))? {
             let t = self.cinit_ty(&c);
             let words = self.words(&t);
             let root = self.alloc_frame(words, e.span)?;
             let p = Place { region: Region::Frame, root, extent: words, off: None, stat: 0, ty: t };
-            self.store_cinit(&p, &c);
+            self.store_cinit(&p, &c, e.span)?;
             return Ok(V::Place(p));
         }
         match &e.kind {
@@ -3908,16 +4547,13 @@ impl Lowerer {
                 let mut types = Vec::new();
                 let mut opaque = Vec::new();
                 for (fname, fe) in fields {
-                    match &fe.kind {
-                        ExprKind::Unreadable(why) => {
-                            opaque.push((fname.clone(), why.clone()));
-                            continue;
-                        }
-                        ExprKind::Lambda(_) => {
-                            opaque.push((fname.clone(), "a function kept in an object: bind it with `let name = fn(..)` and call it by name".to_string()));
-                            continue;
-                        }
-                        _ => {}
+                    if let Some(why) = fe.kind.unreadable_reason() {
+                        opaque.push((fname.clone(), why.to_string()));
+                        continue;
+                    }
+                    if matches!(fe.kind, ExprKind::Lambda(_)) {
+                        opaque.push((fname.clone(), "a function kept in an object: bind it with `let name = fn(..)` and call it by name".to_string()));
+                        continue;
                     }
                     let v = self.expr(fe)?;
                     let t = match &v {
@@ -3930,7 +4566,7 @@ impl Lowerer {
                     types.push((fname.clone(), t));
                     vals.push((fname, v, fe.span));
                 }
-                let s = self.object_struct(&types, opaque);
+                let s = self.object_struct(&types, opaque, e.span)?;
                 let words = self.structs[s].words;
                 let root = self.alloc_frame(words, e.span)?;
                 let p = Place { region: Region::Frame, root, extent: words, off: None, stat: 0, ty: T::Struct(s) };
@@ -3948,7 +4584,7 @@ impl Lowerer {
                 let root = self.alloc_frame(words, e.span)?;
                 let p = Place { region: Region::Frame, root, extent: words, off: None, stat: 0, ty: T::Struct(s) };
                 let defaults = CInit::Struct(s, self.structs[s].fields.iter().map(|f| f.3.clone()).collect());
-                self.store_cinit(&p, &defaults);
+                self.store_cinit(&p, &defaults, e.span)?;
                 for (fname, fe) in fields {
                     let fp = self.field_place(&p, fname, fe.span)?;
                     let v = self.expr(fe)?;
@@ -3964,8 +4600,9 @@ impl Lowerer {
                 };
                 let ew = self.words(&et);
                 let n = list.len() as u32;
-                let root = self.alloc_frame(ew * n, e.span)?;
-                let p = Place { region: Region::Frame, root, extent: ew * n, off: None, stat: 0, ty: T::Array(Box::new(et.clone()), n) };
+                let extent = image_words(u64::from(ew) * u64::from(n), e.span)?;
+                let root = self.alloc_frame(extent, e.span)?;
+                let p = Place { region: Region::Frame, root, extent, off: None, stat: 0, ty: T::Array(Box::new(et.clone()), n) };
                 for (k, x) in list.iter().enumerate() {
                     let v = if k == 0 { first.clone() } else { self.expr(x)? };
                     let ep = Place { ty: et.clone(), stat: k as u32 * ew, ..p.clone() };
@@ -3981,8 +4618,9 @@ impl Lowerer {
                     v => self.value_t(v).unwrap(),
                 };
                 let ew = self.words(&et);
-                let root = self.alloc_frame(ew * n, e.span)?;
-                let p = Place { region: Region::Frame, root, extent: ew * n, off: None, stat: 0, ty: T::Array(Box::new(et.clone()), n) };
+                let extent = image_words(u64::from(ew) * u64::from(n), e.span)?;
+                let root = self.alloc_frame(extent, e.span)?;
+                let p = Place { region: Region::Frame, root, extent, off: None, stat: 0, ty: T::Array(Box::new(et.clone()), n) };
                 if n > 16 {
                     return err(e.span, "a local array filled with a non-constant needs at most 16 elements; use a loop");
                 }
@@ -4002,6 +4640,11 @@ impl Lowerer {
     /// that reads anything else (params, inputs, state, the time) is not a
     /// constant (None). Its value as a constant initializer.
     fn fold_const(&mut self, e: &Expr) -> LResult<Option<CInit>> {
+        if self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) {
+            return Err(ShaderError::cancelled());
+        }
+        let base = self.shared_init.len() as u32;
+        let end = image_words(u64::from(base) + 16, e.span)?;
         let scratch = self.scratch();
         let saved_b = std::mem::replace(&mut self.b, scratch);
         let saved_frame = std::mem::replace(&mut self.frame_words, 0);
@@ -4009,7 +4652,6 @@ impl Lowerer {
         let saved_globals = self.globals.clone();
         let saved_init = std::mem::replace(&mut self.in_init, true);
         self.globals.retain(|_, b| matches!(b, Bind::Const(_) | Bind::ConstVec(..) | Bind::Scalar(..)) || matches!(b, Bind::Place(p) if p.region == Region::Shared));
-        let base = self.shared_init.len() as u32;
         let r = self.expr(e).map(|v| {
             let (lanes, ty): (Vec<Val>, Option<T>) = match v {
                 V::F(x) => (vec![x], Some(T::F)),
@@ -4027,26 +4669,39 @@ impl Lowerer {
         self.entry = saved_entry;
         let frame_words = std::mem::replace(&mut self.frame_words, saved_frame);
         let b = std::mem::replace(&mut self.b, saved_b);
-        let Ok(Some(ty)) = r else { return Ok(None) };
+        let Some(ty) = speculative(r)?.flatten() else { return Ok(None) };
         let mut prog = b.prog;
         prog.body = b.blocks.into_iter().next().unwrap();
         prog.frame_words = frame_words;
-        let regions = ir::Regions { ctx: 0, state: 0, shared: base + 16, frame: frame_words, shared_writable: true, bufs: Vec::new(), io: false };
+        let mut regions = ir::Regions { ctx: 0, state: 0, shared: end, frame: frame_words, shared_writable: true, bufs: Vec::new(), io: false };
         if ir::validate(&prog, &regions).is_err() {
             return Ok(None);
         }
         if prog.total_cost() > MAX_INIT_COST {
             return err(e.span, format!("this constant may take {} operations to compute; the limit is {}", prog.total_cost(), MAX_INIT_COST));
         }
-        let mut shared = self.shared_init.clone();
-        shared.resize(base as usize + 16, 0);
+        // Validate and price source AIR before granting its generated polls buffer zero.
+        let buf = if let Some(control) = self.control {
+            prog.poll_cancel_at_loops();
+            regions.bufs.push(false);
+            ir::validate(&prog, &regions).map_err(|message| ShaderError::new(e.span.start, e.span.end,
+                format!("internal compiler error in constant evaluation: {message}")))?;
+            Some(ir::RawBuf { ptr: std::ptr::from_ref(control).cast::<u32>().cast_mut(), len: 1, writable: false, elem: ir::Elem::Word })
+        } else {
+            None
+        };
+        let mut shared = Vec::new();
+        reserve_words(&mut shared, end, e.span)?;
+        shared.extend_from_slice(&self.shared_init);
+        shared.resize(end as usize, 0);
         let mut scratch = vec![0u32; prog.scratch_words()];
         let (mut ctx, mut state) = ([0u32; 0], [0u32; 0]);
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: &[] };
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: buf.as_slice() };
+        let mut io = ir::Io::default();
         ir::run(&prog, &mut scratch, &mut mem, &mut io, 1);
+        if self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) {
+            return Err(ShaderError::cancelled());
+        }
         let w = |k: u32| shared[(base + k) as usize];
         Ok(Some(match ty {
             T::Vec(n) => {
@@ -4084,6 +4739,24 @@ impl Lowerer {
                 }
                 return Ok(V::Vec(n, lanes));
             }
+            Some(Bind::AudioPort(k)) => {
+                let port = &self.ports[k];
+                let mut lanes = [Val(0); 16];
+                for lane in 0..port.info.channels {
+                    lanes[usize::from(lane)] = if port.info.output {
+                        if self.in_init { self.b.cf(0.0) } else if self.entry.is_some() {
+                            self.b.get(port.held[usize::from(lane)])
+                        } else {
+                            return err(span, format!("output port `{name}` is not a constant"));
+                        }
+                    } else if let Some(idx) = self.port_frame {
+                        self.b.def(Ty::F32, Op::In { ch: port.info.first + lane, idx })
+                    } else {
+                        return err(span, format!("input port `{name}` can only be read in voice() or effect()"));
+                    };
+                }
+                return Ok(if port.info.channels == 1 { V::F(lanes[0]) } else { V::Vec(2, lanes) });
+            }
             Some(Bind::Local(t, vars)) => return Ok(self.read_vars(&t, &vars)),
             Some(Bind::Place(p)) => return Ok(self.read(&p)),
             Some(Bind::Param(k)) => {
@@ -4115,6 +4788,8 @@ impl Lowerer {
             return err(span, format!("{name} needs a float type; this program has none"));
         }
         match name {
+            "oversampling" if self.domain == Domain::Audio && self.oversampling == 0 => return err(span, "the rate factor cannot depend on itself"),
+            "oversampling" if self.domain == Domain::Audio => return Ok(V::Lit(self.oversampling as f64)),
             "PI" => return Ok(V::Lit(std::f64::consts::PI)),
             "TAU" => return Ok(V::Lit(std::f64::consts::TAU)),
             "E" => return Ok(V::Lit(std::f64::consts::E)),
@@ -4126,17 +4801,45 @@ impl Lowerer {
             };
             return Ok(match name {
                 "sample_rate" | "SR" => V::F(self.b.get(ent.rate)),
-                "note" => V::F(self.b.get(ent.note)),
-                "freq" => V::F(self.b.get(ent.freq)),
+                "tempo" => V::F(ent.tempo),
+                "beats_per_bar" => V::F(ent.bar_beats),
+                "playing" => V::B(ent.playing),
+                "voice_index" => V::I(ent.voice_index),
+                "instance" => V::F(ent.instance),
+                "beat" | "bar" => {
+                    let pos = self.b.get(ent.pos);
+                    let elapsed = self.b.ib(Bin::SubI, pos, ent.beat_frame);
+                    let elapsed = self.b.un(Ty::F32, Un::I2F, elapsed);
+                    let advance = self.b.mul(elapsed, ent.beat_step);
+                    let beat = self.b.add(ent.beat_at, advance);
+                    V::F(if name == "bar" { self.b.div(beat, ent.bar_beats) } else { beat })
+                }
+                "note" => { self.reads_note = true; V::F(self.b.get(ent.note)) }
+                "freq" => { self.reads_freq = true; V::F(self.b.get(ent.freq)) }
                 "gate" => V::F(self.b.get(ent.gate)),
                 "velocity" => V::F(self.b.get(ent.velocity)),
+                "bend" => V::F(self.b.get(ent.bend)),
+                "pressure" => V::F(self.b.get(ent.pressure)),
+                "slide" => V::F(self.b.get(ent.slide)),
+                "release_velocity" => V::F(self.b.get(ent.release_velocity)),
+                "mod_wheel" => V::F(self.b.get(ent.mod_wheel)),
                 "trigger" => {
                     let pos = self.b.get(ent.pos);
                     let at = self.b.get(ent.trigger_at);
-                    V::B(self.b.cmpi(Cmp::Eq, pos, at))
+                    let triggered = self.b.cmpi(Cmp::Eq, pos, at);
+                    V::B(if let Some((i, _)) = ent.subsample {
+                        let zero = self.b.ci(0);
+                        let first = self.b.cmpi(Cmp::Eq, i, zero);
+                        self.b.def(Ty::Bool, Op::Bin(Bin::AndB, triggered, first))
+                    } else {
+                        triggered
+                    })
                 }
                 _ => unreachable!(),
             });
+        }
+        if self.in_init && self.domain == Domain::Audio && self.state_vars.iter().any(|v| v.name == name) {
+            return err(span, format!("state variable `{name}` is unavailable in init()"));
         }
         let hint = self.suggest(name, false);
         err(span, format!("unknown name `{}`{}", name, hint))
@@ -4633,6 +5336,226 @@ impl Lowerer {
         self.call_expr_bound(name, args, span, &mut None)
     }
 
+    fn halfband_call(&mut self, name: &str, args: Vec<V>, span: Span) -> LResult<V> {
+        let f = self.fns.get(name).cloned().ok_or_else(|| ShaderError::new(span.start, span.end, format!("oversample needs `{name}` in the prelude")))?;
+        self.call(&f, args, span)
+    }
+
+    fn oversample(&mut self, args: &[Expr], span: Span) -> LResult<V> {
+        if self.fns.contains_key("effect_block") && self.domain == Domain::Audio {
+            return err(span, block::BASE_RATE);
+        }
+        if self.entry.is_none() || self.b.scratch {
+            return err(span, "oversample() runs on the audio path");
+        }
+        let [state, input, body, modes @ ..] = args else { return err(span, "expected oversample(state, input, fn(u) { .. })") };
+        let modes = RateModes::parse(modes, span)?;
+        let ExprKind::Lambda(f) = &body.kind else { return err(body.span, "write the oversample body here as fn(u) { .. }") };
+        let p = self.place(state)?;
+        let state_name = self.tname(&p.ty);
+        let factor = match state_name.as_str() {
+            "Oversample2" => 2,
+            "Oversample4" => 4,
+            "Oversample8" => 8,
+            _ => return err(state.span, "oversample needs Oversample2, Oversample4 or Oversample8 state"),
+        };
+        let [(param, ann)] = f.params.as_slice() else { return err(body.span, "the oversample body takes one sample") };
+        let reads_input = reads_parameter(&f.body, param);
+        let x = self.expr(input)?;
+        let channels = match x {
+            V::F(_) | V::Lit(_) => 1,
+            V::Vec(2, _) => 2,
+            _ => return err(input.span, "oversample takes an f32 or vec2 sample"),
+        };
+        if !matches!((channels, ann), (_, None) | (1, Some(TypeAnn::F32)) | (2, Some(TypeAnn::Vec2))) {
+            return err(body.span, "the oversample parameter must have the input sample's type");
+        }
+        let down = self.field_place(&p, "down", state.span)?;
+        let input = self.to_vec(&x, channels, input.span)?;
+        let up = reads_input.then_some((p, input));
+        let frame = |v: Lanes| if channels == 1 { V::F(v[0]) } else { V::Vec(2, v) };
+        let scopes = self.frames.last().unwrap().clone();
+        let output = self.rate_region(self.oversampling, factor, modes, up, down, channels, span, |l, input| {
+            let y = l.inline_call(f, vec![frame(input)], body.span, scopes)?;
+            if l.value_t(&y) != l.value_t(&x) {
+                return err(body.span, "the oversample body must return the input sample's type");
+            }
+            l.to_vec(&y, channels, body.span)
+        })?;
+        Ok(frame(output))
+    }
+
+    fn rate_region(&mut self, parent_rate: u32, factor: u32, modes: RateModes, up: Option<(Place, Lanes)>, down: Place, channels: u8, span: Span,
+        body: impl FnOnce(&mut Self, Lanes) -> LResult<Lanes>) -> LResult<Lanes> {
+        let (site, path, pads) = self.rate_nests.plan(parent_rate, factor, modes, up.is_some(), span)?;
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        // The filters see a vector or four pairs. The loop indexes the
+        // same contiguous frame words as individual f32 samples.
+        let ty = if factor == 8 { T::Array(Box::new(T::Vec(2)), 4) } else { T::Vec(factor as u8) };
+        for ch in 0..channels {
+            let dst = Place { region: Region::Frame, root: self.alloc_frame(factor, span)?, extent: factor, off: None, stat: 0, ty: ty.clone() };
+            if let Some((state, input)) = &up {
+                let src = Place { root: self.alloc_frame(factor, span)?, ..dst.clone() };
+                let x = input[ch as usize];
+                let channel = V::Lit(ch as f64);
+                match modes.up {
+                    RateMode::Filter => {
+                        let filters = self.field_place(state, "up", span)?;
+                        let filter = self.index_place(&filters, &channel, span)?;
+                        self.region_filter(filter, V::F(x), Some(&src), parent_rate, factor, pads[0], span)?;
+                    }
+                    RateMode::Linear => {
+                        let last = self.field_place(state, "last", span)?;
+                        let last = self.index_place(&last, &channel, span)?;
+                        let prev = self.read(&last);
+                        let prev = self.to_f(&prev, span)?;
+                        let delta = self.b.sub(x, prev);
+                        for j in 0..factor - 1 {
+                            let step = self.b.mulc(delta, (j + 1) as f32 / factor as f32);
+                            let sample = self.b.add(prev, step);
+                            self.b.store(Region::Frame, src.root + j, 1, None, sample);
+                        }
+                        // Keep the endpoint exact even if x - prev lost precision.
+                        self.b.store(Region::Frame, src.root + factor - 1, 1, None, x);
+                        self.write(&last, &V::F(x), span)?;
+                    }
+                    RateMode::Hold => {
+                        for j in 0..factor {
+                            self.b.store(Region::Frame, src.root + j, 1, None, x);
+                        }
+                    }
+                }
+                if modes.up != RateMode::Filter && pads[0] != 0 {
+                    let filters = self.field_place(state, "up", span)?;
+                    let filter = self.index_place(&filters, &channel, span)?;
+                    self.pad_region_buffer(&filter, &src, factor, pads[0], span)?;
+                }
+                inputs.push(src);
+            }
+            outputs.push(dst);
+        }
+
+        let outer_factor = self.oversampling;
+        let outer_rate = self.entry.as_ref().unwrap().rate;
+        // A whole entry already sees its raised clock in block().
+        if path.absolute != outer_factor {
+            let rate = self.b.get(outer_rate);
+            let rate = self.b.mulc(rate, factor as f32);
+            let high_rate = self.b.var(Ty::F32);
+            self.b.set(high_rate, rate);
+            self.entry.as_mut().unwrap().rate = high_rate;
+        }
+        let counter = self.b.var(Ty::I32);
+        let zero = self.b.ci(0);
+        self.b.set(counter, zero);
+        self.b.open_loop();
+        let i = self.b.get(counter);
+        let mut lanes = if inputs.is_empty() { [self.b.cf(0.0); 16] } else { [Val(0); 16] };
+        for (ch, src) in inputs.iter().enumerate() {
+            lanes[ch] = self.b.load(Ty::F32, Region::Frame, src.root, factor, Some(i));
+        }
+        let outer_sample = self.entry.as_ref().unwrap().subsample;
+        let subsample = if let Some((outer, count)) = outer_sample {
+            let k = self.b.ci(factor as i32);
+            let first = self.b.ib(Bin::MulI, outer, k);
+            (self.b.ib(Bin::AddI, first, i), count * factor)
+        } else { (i, factor) };
+        self.entry.as_mut().unwrap().subsample = Some(subsample);
+        self.oversampling = path.absolute;
+        self.rate_nests.push(site, path);
+        let result = body(self, lanes);
+        self.oversampling = outer_factor;
+        let ent = self.entry.as_mut().unwrap();
+        ent.rate = outer_rate;
+        ent.subsample = outer_sample;
+        let latency = self.rate_nests.finish(factor, modes, self.latency, span);
+        let lanes = result?;
+        latency?;
+        for (ch, dst) in outputs.iter().enumerate() {
+            self.b.store(Region::Frame, dst.root, factor, Some(i), lanes[ch]);
+        }
+        // The last pass exits with i == factor - 1. The work counter can
+        // then charge the fixed number of passes outside the sample loop.
+        let last = self.b.ci(factor as i32 - 1);
+        let done = self.b.cmpi(Cmp::Ge, i, last);
+        self.b.push(IS::If(done, vec![IS::Break(0)], vec![]));
+        let one = self.b.ci(1);
+        let next = self.b.ib(Bin::AddI, i, one);
+        self.b.set(counter, next);
+        let body = self.b.close();
+        self.b.push(IS::Loop { cap: factor, body });
+
+        let mut output = [Val(0); 16];
+        for (ch, dst) in outputs.iter().enumerate() {
+            if modes.down != RateMode::Filter && pads[1] != 0 {
+                let filter = self.index_place(&down, &V::Lit(ch as f64), span)?;
+                self.pad_region_buffer(&filter, dst, factor, pads[1], span)?;
+            }
+            output[ch] = match modes.down {
+                RateMode::Filter => {
+                    let down_state = self.index_place(&down, &V::Lit(ch as f64), span)?;
+                    let samples = self.read(dst);
+                    let y = self.region_filter(down_state, samples, None, parent_rate, factor, pads[1], span)?;
+                    self.to_f(&y, span)?
+                }
+                RateMode::Linear => {
+                    let mut sum = self.b.load(Ty::F32, Region::Frame, dst.root, 1, None);
+                    for j in 1..factor {
+                        let sample = self.b.load(Ty::F32, Region::Frame, dst.root + j, 1, None);
+                        sum = self.b.add(sum, sample);
+                    }
+                    self.b.mulc(sum, 1.0 / factor as f32)
+                }
+                RateMode::Hold => self.b.load(Ty::F32, Region::Frame, dst.root + factor - 1, 1, None),
+            };
+        }
+        Ok(output)
+    }
+
+    fn probe(&mut self, args: &[Expr], span: Span) -> LResult<V> {
+        if self.entry.is_none() || self.in_init || self.b.scratch {
+            return err(span, "probe() runs on the audio path");
+        }
+        let [label, value] = args else { return err(span, "expected probe(name, value)") };
+        let ExprKind::Ident(name) = &label.kind else { return err(label.span, "a probe name must be a bare word") };
+        let v = self.expr(value)?;
+        let x = match v {
+            V::B(b) => {
+                let one = self.b.cf(1.0);
+                let zero = self.b.cf(0.0);
+                self.b.sel(b, one, zero)
+            }
+            V::Vec(..) => return err(value.span, "probe one component at a time, such as `probe(left, v.x)`"),
+            _ => self.to_f(&v, value.span)?,
+        };
+        let [last, min, max] = match self.probes.iter().find(|(n, _)| n == name) {
+            Some((_, vars)) => *vars,
+            None => {
+                let vars = std::array::from_fn(|_| self.b.var(Ty::F32));
+                self.probes.push((name.clone(), vars));
+                vars
+            }
+        };
+        let final_subsample = self.entry.as_ref().unwrap().subsample.map(|(i, count)| {
+            let end = self.b.ci(count as i32 - 1);
+            self.b.cmpi(Cmp::Eq, i, end)
+        });
+        if final_subsample.is_some() { self.b.open(); }
+        self.b.set(last, x);
+        let lo = self.b.get(min);
+        let lo = self.b.fb(Bin::MinF, lo, x);
+        self.b.set(min, lo);
+        let hi = self.b.get(max);
+        let hi = self.b.fb(Bin::MaxF, hi, x);
+        self.b.set(max, hi);
+        if let Some(at_end) = final_subsample {
+            let record = self.b.close();
+            self.b.push(IS::If(at_end, record, vec![]));
+        }
+        Ok(V::Unit)
+    }
+
     /// Optionally records an integer min's constant upper bound for an event range.
     /// Ordinary call resolution and argument evaluation still happen exactly once.
     fn call_expr_bound(&mut self, name: &str, args: &[Expr], span: Span, min_bound: &mut Option<i32>) -> LResult<V> {
@@ -4655,7 +5578,7 @@ impl Lowerer {
             return self.kernel_emit(args, span);
         }
         if let Some(f) = self.fns.get(name).cloned() {
-            if matches!(name, "voice" | "effect" | "block" | "init") || self.event.entry_fns.iter().any(|e| e == name) {
+            if matches!(name, "voice" | "effect" | "block" | "init") || (self.domain == Domain::Audio && name == "effect_block") || self.event.entry_fns.iter().any(|e| e == name) {
                 return err(span, format!("`{}` is an entry point and cannot be called", name));
             }
             let mut vals = Vec::new();
@@ -4677,6 +5600,15 @@ impl Lowerer {
                 }
                 return self.event_port(k, &vals, args, span);
             }
+        }
+        if self.domain == Domain::Audio && matches!(name, "fft" | "ifft") {
+            return self.fft_call(name, args, span);
+        }
+        if self.domain == Domain::Audio && name == "probe" {
+            return self.probe(args, span);
+        }
+        if self.domain == Domain::Audio && name == "oversample" {
+            return self.oversample(args, span);
         }
         // `p.length()` on a plain path that names no module fn: the value
         // method, the receiver as the first argument.
@@ -5069,50 +6001,69 @@ impl Lowerer {
                 let V::Place(p) = &vals[0] else {
                     return err(args[0].span, "read(array, position) needs an array");
                 };
-                if !matches!(&p.ty, T::Array(e, _) if **e == T::F) {
-                    return err(args[0].span, "read() needs an array of f32");
+                let stereo = matches!(&p.ty, T::Array(e, _) if **e == T::Vec(2));
+                if !stereo && !matches!(&p.ty, T::Array(e, _) if **e == T::F) {
+                    return err(args[0].span, "read() needs an array of f32 or vec2");
                 }
                 let pos = self.to_f(&vals[1], args[1].span)?;
                 let fl = self.b.un(Ty::F32, Un::FloorF, pos);
                 let frac = self.b.sub(pos, fl);
                 let i0 = self.b.un(Ty::I32, Un::F2I, fl);
-                let tap = |l: &mut Self, k: i32| -> LResult<Val> {
+                let tap = |l: &mut Self, k: i32| -> LResult<[Val; 2]> {
                     let c = l.b.ci(k);
                     let ik = l.b.ib(Bin::AddI, i0, c);
                     let ep = l.index_place(p, &V::I(ik), span)?;
-                    let V::F(x) = l.read(&ep) else { unreachable!() };
-                    Ok(x)
+                    Ok(match l.read(&ep) {
+                        V::F(x) => [x, x],
+                        V::Vec(2, v) => [v[0], v[1]],
+                        _ => unreachable!(),
+                    })
                 };
-                if name == "read" {
-                    let a = tap(self, 0)?;
-                    let b = tap(self, 1)?;
-                    let d = self.b.sub(b, a);
-                    let d = self.b.mul(d, frac);
-                    return Ok(V::F(self.b.add(a, d)));
-                }
-                // 4-point, 3rd-order Hermite.
-                let xm1 = tap(self, -1)?;
+                let cubic = name == "read_cubic";
+                let xm1 = if cubic { Some(tap(self, -1)?) } else { None };
                 let x0 = tap(self, 0)?;
                 let x1 = tap(self, 1)?;
-                let x2 = tap(self, 2)?;
-                // de Soras' form: c = (x1 - x-1)/2, v = x0 - x1, w = c + v,
-                // a = w + v + (x2 - x0)/2, b = w + a; ((a f - b) f + c) f + x0.
+                let x2 = if cubic { Some(tap(self, 2)?) } else { None };
                 let b = &mut self.b;
-                let d = b.sub(x1, xm1);
-                let c = b.mulc(d, 0.5);
-                let v = b.sub(x0, x1);
-                let w = b.add(c, v);
-                let s = b.sub(x2, x0);
-                let s = b.mulc(s, 0.5);
-                let a = b.add(w, v);
-                let a = b.add(a, s);
-                let bn = b.add(w, a);
-                let t = b.mul(a, frac);
-                let t = b.sub(t, bn);
-                let t = b.mul(t, frac);
-                let t = b.add(t, c);
-                let t = b.mul(t, frac);
-                Ok(V::F(b.add(t, x0)))
+                let mut lanes = [Val(0); 16];
+                for k in 0..if stereo { 2 } else { 1 } {
+                    lanes[k] = if let (Some(before), Some(after)) = (xm1, x2) {
+                        let d = b.sub(x1[k], before[k]);
+                        let c = b.mulc(d, 0.5);
+                        let v = b.sub(x0[k], x1[k]);
+                        let w = b.add(c, v);
+                        let s = b.sub(after[k], x0[k]);
+                        let s = b.mulc(s, 0.5);
+                        let a = b.add(w, v);
+                        let a = b.add(a, s);
+                        let bn = b.add(w, a);
+                        let t = b.mul(a, frac);
+                        let t = b.sub(t, bn);
+                        let t = b.mul(t, frac);
+                        let t = b.add(t, c);
+                        let t = b.mul(t, frac);
+                        b.add(t, x0[k])
+                    } else {
+                        let d = b.sub(x1[k], x0[k]);
+                        let d = b.mul(d, frac);
+                        b.add(x0[k], d)
+                    };
+                }
+                Ok(if stereo { V::Vec(2, lanes) } else { V::F(lanes[0]) })
+            }
+            "cc" if self.domain == Domain::Audio => {
+                if self.entry.is_none() {
+                    return err(span, "`cc()` is an audio input: not available in init() or initial values");
+                }
+                let index = match vals.as_slice() {
+                    [V::Lit(x)] if x.fract() == 0.0 && (0.0..CC_WORDS as f64).contains(x) => Some(*x as u32),
+                    [V::I(v)] => self.b.cst(*v).filter(|&n| n < CC_WORDS),
+                    _ => None,
+                };
+                let Some(index) = index else {
+                    return err(span, "cc(n) needs a constant integer in 0..127");
+                };
+                Ok(V::F(self.b.load(Ty::F32, Region::Ctx, CTX_CC + index, 1, None)))
             }
             "rand" | "noise" if self.domain == Domain::Kernel => {
                 err(span, "kernels have no running random state: use hash01(i, k) or rand01(seed, i, k) for per-element randomness")
@@ -5158,6 +6109,14 @@ impl Lowerer {
             }
         }
     }
+}
+
+fn check_init_cost(prog: &Program, span: Span) -> LResult<()> {
+    let cost = prog.total_cost();
+    if cost > MAX_INIT_COST {
+        return err(span, format!("init() may run {cost} operations; the limit is {MAX_INIT_COST}"));
+    }
+    Ok(())
 }
 
 fn ann_width(a: &TypeAnn) -> u8 {
@@ -5208,6 +6167,54 @@ fn has_own_break(body: &[Stmt]) -> bool {
         })
     }
     stmts(body)
+}
+
+/// Syntactic reads of a parameter, including captures and either arm of
+/// a branch. A local with the same name shadows it after its initializer.
+fn reads_parameter(body: &[Stmt], name: &str) -> bool {
+    fn expr(e: &Expr, name: &str) -> bool {
+        let reads = |x: &Expr| expr(x, name);
+        match &e.kind {
+            ExprKind::Ident(n) => n == name,
+            ExprKind::Call(n, args) => n.split_once('.').is_some_and(|(root, _)| root == name) || args.iter().any(reads),
+            ExprKind::Neg(a) | ExprKind::Not(a) | ExprKind::Field(a, _) => reads(a),
+            ExprKind::Bin(_, a, b) | ExprKind::Index(a, b) | ExprKind::ArrayRepeat(a, b) => reads(a) || reads(b),
+            ExprKind::ArrayList(xs) => xs.iter().any(reads),
+            ExprKind::StructLit(_, fields) => fields.iter().any(|(_, x)| reads(x)),
+            ExprKind::Block(b) => reads_parameter(b, name),
+            ExprKind::Lambda(f) => !f.params.iter().any(|(p, _)| p == name) && reads_parameter(&f.body, name),
+            ExprKind::If(arms, other) => arms.iter().any(|(c, b)| reads(c) || reads_parameter(b, name))
+                || other.as_ref().is_some_and(|b| reads_parameter(b, name)),
+            ExprKind::Match(x, arms) => reads(x) || arms.iter().any(|(patterns, b)| {
+                patterns.iter().flatten().any(reads) || reads_parameter(b, name)
+            }),
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => false,
+        }
+    }
+    // A plain assignment reads its indices. A compound assignment also
+    // reads the old value at the target.
+    fn index_reads(target: &Expr, name: &str) -> bool {
+        match &target.kind {
+            ExprKind::Index(a, i) => expr(i, name) || index_reads(a, name),
+            ExprKind::Field(a, _) => index_reads(a, name),
+            ExprKind::Ident(_) => false,
+            _ => expr(target, name),
+        }
+    }
+    let reads = |x: &Expr| expr(x, name);
+    for s in body {
+        let used = match s {
+            Stmt::Let { name: local, value, .. } if local == name => return reads(value),
+            Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => reads(value),
+            Stmt::Assign { target, op, value, .. } => reads(value) || if *op == AssignOp::Set { index_reads(target, name) } else { reads(target) },
+            Stmt::For { var, from, to, body, .. } => reads(from) || reads(to) || (var != name && reads_parameter(body, name)),
+            Stmt::While { cond, body, .. } => reads(cond) || reads_parameter(body, name),
+            Stmt::Loop { body, .. } => reads_parameter(body, name),
+            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => false,
+        };
+        if used { return true }
+    }
+    false
 }
 
 /// Is `name` assigned (as a whole or by component) anywhere in `body`?
@@ -5303,17 +6310,35 @@ fn edit_distance(a: &str, b: &str) -> usize {
 const BUILTIN_FNS: &[&str] = &[
     "sin", "cos", "tan", "tanh", "atan", "atan2", "asin", "acos", "hypot", "cbrt", "f64", "exp", "exp2", "log", "ln", "log2", "log10", "sqrt", "abs", "floor", "ceil", "round", "trunc", "fract",
     "sign", "midi_to_hz", "db_to_gain", "min", "max", "clamp", "mix", "pow", "step", "smoothstep", "vec2", "int", "float", "len",
-    "read", "read_cubic", "rand", "stop",
+    "read", "read_cubic", "rand", "stop", "cc",
 ];
 
-const INPUT_NAMES: &[&str] = &["sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger"];
+const INPUT_NAMES: &[&str] = &[
+    "tempo", "beat", "bar", "beats_per_bar", "playing", "voice_index", "instance",
+    "sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger", "bend", "pressure", "slide", "release_velocity", "mod_wheel",
+];
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger", "PI", "TAU", "E", "voice", "effect", "block", "init",
 ];
 
 /// Lowers a parsed shader into its render (and optional init) programs.
-fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
+fn new_lowerer<'control>(prelude_base: usize, domain: Domain) -> Lowerer<'control> {
     Lowerer {
+        control: None,
+        block_layout: None,
+        fft_sites: Vec::new(),
+        render_entries: Vec::new(),
+        ports: Vec::new(),
+        audio_channels: [2, 2],
+        port_frame: None,
+        mono: None,
+        latency: 0,
+        oversampling: 1,
+        rate_modes: RateModes::default(),
+        rate_reads_input: false,
+        rate_nests: RateNests::default(),
+        reads_note: false,
+        reads_freq: false,
         b: Builder::new(),
         structs: Vec::new(),
         fns: HashMap::new(),
@@ -5323,10 +6348,13 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         rets: Vec::new(),
         call_stack: Vec::new(),
         params: Vec::new(),
+        probes: Vec::new(),
+        param_meta: Vec::new(),
         state_init: Vec::new(),
         state_vars: Vec::new(),
         promoted: Vec::new(),
         shared_init: Vec::new(),
+        sample_names: Vec::new(),
         frame_words: 0,
         entry: None,
         in_init: false,
@@ -5352,28 +6380,316 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
     }
 }
 
-pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError> {
-    let mut l = new_lowerer(prelude_base, Domain::Audio);
-    l.top(items)?;
-    let kind = match (l.fns.get("voice"), l.fns.get("effect")) {
-        (Some(_), None) => Kind::Instrument,
-        (None, Some(_)) => Kind::Effect,
-        (Some(f), Some(_)) => return err(f.span, "a shader is an instrument (`fn voice()`) or an effect (`fn effect(l, r)`), not both"),
-        (None, None) => {
-            return Err(ShaderError::new(0, 1, "missing entry: add `fn voice() { … }` (instrument) or `fn effect(l, r) { … }` (effect)".into()))
+// The lexer cannot produce this state name. Its type signature includes the factor.
+const RATE_STATE: &str = "$rate";
+
+fn halfband_down_latency(factor: u32) -> u32 {
+    match factor { 2 => 17, 4 => 19, 8 => 20, _ => unreachable!() }
+}
+
+#[relax_api::relax_api(plain)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RateMode { #[default] Filter, Linear, Hold }
+
+impl std::str::FromStr for RateMode {
+    type Err = &'static str;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "filter" => Ok(Self::Filter),
+            "linear" => Ok(Self::Linear),
+            "hold" => Ok(Self::Hold),
+            _ => Err("a conversion mode must be filter, linear or hold"),
+        }
+    }
+}
+
+impl RateMode {
+    fn parse(e: &Expr) -> LResult<Self> {
+        if let ExprKind::Ident(name) = &e.kind {
+            if let Ok(mode) = name.parse() { return Ok(mode); }
+        }
+        err(e.span, "a conversion mode must be filter, linear or hold")
+    }
+}
+
+/// Whole-shader rate selected by the host. A zero factor follows the declaration.
+#[relax_api::relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RateOverride {
+    pub factor: u32,
+    pub up: RateMode,
+    pub down: RateMode,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RateModes { up: RateMode, down: RateMode }
+
+impl RateModes {
+    fn parse(args: &[Expr], span: Span) -> LResult<Self> {
+        match args {
+            [] => Ok(Self::default()),
+            [both] => {
+                let mode = RateMode::parse(both)?;
+                Ok(Self { up: mode, down: mode })
+            }
+            [up, down] => Ok(Self { up: RateMode::parse(up)?, down: RateMode::parse(down)? }),
+            _ => err(span, "expected at most two conversion modes (filter, linear or hold)"),
+        }
+    }
+
+    fn latency(self, factor: u32, has_input: bool) -> u32 {
+        RatePath::base(1).extend(factor, self, has_input).latency()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AudioRate {
+    pub factor: u32,
+    pub span: Span,
+    modes: RateModes,
+}
+
+/// Resolves the audio rate before sizing any tables or per-instance state.
+pub fn audio_rate<'a>(items: &[Item], prelude: &[Item], sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, control: Option<&AtomicU32>)
+    -> Result<Option<AudioRate>, ShaderError> {
+    let mut decls = items.iter().filter(|i| matches!(i, Item::Decl { name, .. } if name == "rate"));
+    let Some(Item::Decl { args, span, .. }) = decls.next() else { return Ok(None) };
+    if let Some(Item::Decl { span, .. }) = decls.next() { return err(*span, "`rate()` declared twice") }
+    let span = *span;
+    let [value, modes @ ..] = args.as_slice() else { return err(span, "`rate()` needs at least one argument (the factor)") };
+    if modes.len() == 2 && items.iter().any(|i| matches!(i, Item::Fn(f) if f.name == "voice")) {
+        return err(span, "an instrument converts down only; write rate(k, mode)");
+    }
+    let modes = RateModes::parse(modes, span)?;
+    let factor = match value.kind {
+        ExprKind::Num(n, _) => Some(n),
+        _ => {
+            // Use ordinary constant evaluation, with only the definitions
+            // the factor reaches. Runtime bindings have no value here.
+            let mut defs: Vec<_> = prelude.iter().chain(items)
+                .filter(|i| !matches!(i, Item::Decl { .. })).cloned().collect();
+            const FACTOR: &str = "$rate";
+            defs.push(Item::Let { name: FACTOR.into(), ann: None, value: value.clone(), span });
+            let mut deps = crate::module::prune(defs, &[FACTOR.to_owned()].into_iter().collect());
+            deps.retain(|i| match i {
+                Item::Var { .. } => false,
+                Item::Let { value, .. } => !matches!(&value.kind, ExprKind::Call(f, _) if f == "param"),
+                _ => true,
+            });
+            let mut constants = new_lowerer(usize::MAX, Domain::Audio);
+            constants.control = control;
+            constants.oversampling = 0;
+            speculative(constants.top_with_samples(&deps, sample, Some(AudioHeader::new(&deps).items)))?.and_then(|_| match constants.globals.get(FACTOR) {
+                Some(Bind::Const(V::Lit(n))) => Some(*n),
+                _ => None,
+            })
         }
     };
-    // Param smoothing words sit after the header, before user state.
-    let nparams = l.params.len() as u32;
-    if nparams > 0 {
-        let shift = 2 * nparams;
-        let mut words = l.state_init[..HEADER_WORDS as usize].to_vec();
-        for p in &l.params {
-            words.push(p.default.to_bits());
-            words.push(0);
+    match factor {
+        Some(n) if [1.0, 2.0, 4.0, 8.0].contains(&n) => Ok(Some(AudioRate { factor: n as u32, span, modes })),
+        _ => err(span, "`rate()` needs a constant factor of 1, 2, 4 or 8"),
+    }
+}
+
+/// Audio interface as written. None of these declarations requires a folded value.
+#[derive(Debug)]
+pub struct AudioInventory {
+    pub kind: Kind,
+    pub mono: bool,
+    pub params: Vec<(String, Vec<String>)>,
+    pub samples: Vec<String>,
+    pub ports: Vec<(String, bool, u16)>,
+}
+
+enum AudioDecl {
+    Port { output: bool, width: LResult<u16> },
+    Param { choices: LResult<Vec<String>> },
+    Sample,
+    Mono,
+}
+
+fn param_parts(args: &[Expr]) -> (&[Expr], &[(String, Expr)]) {
+    match args.split_last() {
+        Some((Expr { kind: ExprKind::StructLit(ty, fields), .. }, rest)) if ty.is_empty() => (rest, fields),
+        _ => (args, &[]),
+    }
+}
+
+fn param_word(field: &str, expr: &Expr) -> LResult<String> {
+    match &expr.kind {
+        ExprKind::Str(s) | ExprKind::Ident(s) => Ok(s.clone()),
+        _ => err(expr.span, format!("`{field}` takes a word or a string")),
+    }
+}
+
+fn param_choices(args: &[Expr]) -> LResult<Vec<String>> {
+    let (numeric, fields) = param_parts(args);
+    let Some((_, value)) = fields.iter().find(|(key, _)| key == "choices") else { return Ok(Vec::new()) };
+    if numeric.len() != 1 {
+        return err(value.span, "choices sets the index range and cannot be given with min and max");
+    }
+    let ExprKind::ArrayList(list) = &value.kind else {
+        return err(value.span, "choices needs a list of at least two names");
+    };
+    if list.len() < 2 {
+        return err(value.span, "choices needs at least two names");
+    }
+    list.iter().map(|e| param_word("choices", e)).collect()
+}
+
+// Keep declaration errors at their item. A preceding lowering error still wins.
+fn audio_decl(item: &Item) -> Option<AudioDecl> {
+    match item {
+        Item::Decl { name, .. } if name == "mono" => Some(AudioDecl::Mono),
+        Item::Let { name, value, span, .. } => {
+            let ExprKind::Call(call, args) = &value.kind else { return None };
+            match call.as_str() {
+                "input" | "output" => {
+                    let width = match args.as_slice() {
+                        [Expr { kind: ExprKind::Num(n, _), .. }] if *n == 1.0 || *n == 2.0 => Ok(*n as u16),
+                        _ => err(*span, format!("audio port `{name}` needs a literal channel count of 1 or 2")),
+                    };
+                    Some(AudioDecl::Port { output: call == "output", width })
+                }
+                "sample" => Some(AudioDecl::Sample),
+                "param" => Some(AudioDecl::Param { choices: param_choices(args) }),
+                _ => None,
+            }
         }
-        words.extend_from_slice(&l.state_init[HEADER_WORDS as usize..]);
-        l.state_init = words;
+        _ => None,
+    }
+}
+
+struct AudioHeader {
+    kind: LResult<Kind>,
+    items: Vec<Option<AudioDecl>>,
+}
+
+impl AudioHeader {
+    fn new(items: &[Item]) -> Self {
+        Self { kind: audio_entry_kind(items), items: items.iter().map(audio_decl).collect() }
+    }
+}
+
+pub fn audio_inventory(items: &[Item]) -> LResult<AudioInventory> {
+    let header = AudioHeader::new(items);
+    let mut params = Vec::new();
+    let mut samples = Vec::new();
+    let mut ports = Vec::new();
+    let mut mono = false;
+    for (item, declaration) in items.iter().zip(header.items) {
+        match declaration {
+            Some(AudioDecl::Param { choices }) => params.push((item.name().to_owned(), choices?)),
+            Some(AudioDecl::Sample) => samples.push(item.name().to_owned()),
+            Some(AudioDecl::Port { output, width }) => ports.push((item.name().to_owned(), output, width?)),
+            Some(AudioDecl::Mono) => mono = true,
+            None => {}
+        }
+    }
+    Ok(AudioInventory { kind: header.kind?, mono, params, samples, ports })
+}
+
+/// Classify the parsed entry declarations before generating DSP code. A block
+/// with an input declaration is diagnosed at that port during lowering.
+pub fn audio_entry_kind(items: &[Item]) -> Result<Kind, ShaderError> {
+    let mut voice = None;
+    let mut effect_block = None;
+    let (mut effect, mut block, mut ports) = (false, false, false);
+    for item in items {
+        match item {
+            Item::Fn(f) => match f.name.as_str() {
+                "voice" => voice = Some(f.span),
+                "effect" => effect = true,
+                "effect_block" => effect_block = Some(f.span),
+                "block" => block = true,
+                _ => {}
+            },
+            Item::Let { value, .. } if matches!(&value.kind, ExprKind::Call(name, _) if name == "input" || name == "output") => ports = true,
+            _ => {}
+        }
+    }
+    if let Some(span) = effect_block {
+        if voice.is_some() {
+            return err(span, "effect_block() with voice() would allocate rings per voice; put effect_block() in a separate effect");
+        }
+        if effect {
+            return err(span, "effect() and effect_block() both process the stereo input; choose one entry");
+        }
+        return Ok(Kind::Effect);
+    }
+    match (voice, effect) {
+        (Some(_), false) => Ok(Kind::Instrument),
+        (None, true) => Ok(Kind::Effect),
+        (Some(span), true) => err(span, "a shader is an instrument (`fn voice()`) or an effect (`fn effect(l, r)`), not both"),
+        (None, false) if block && ports => Ok(Kind::Control),
+        _ => err(Span { start: 0, end: 1 }, "missing entry: add `fn voice() { … }` (instrument), `fn effect(l, r) { … }` or `fn effect_block(l, r) { … }` (effect), or `fn block() { … }` with an output (control)"),
+    }
+}
+
+pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError> {
+    lower_with_samples(items, prelude_base, &|_| None)
+}
+
+pub fn lower_with_samples<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>) -> Result<Lowered, ShaderError> {
+    lower_with_rate(items, prelude_base, sample, RateOverride::default(), None)
+}
+
+pub fn lower_with_rate<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, node: RateOverride, control: Option<&AtomicU32>) -> Result<Lowered, ShaderError> {
+    lower_audio(items, prelude_base, sample, node, Vec::new(), control)
+}
+
+fn lower_audio<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>,
+    node: RateOverride, branches: Vec<bool>, control: Option<&AtomicU32>) -> Result<Lowered, ShaderError> {
+    let mut l = new_lowerer(prelude_base, Domain::Audio);
+    l.control = control;
+    let block_entry = items.iter().find_map(|item| match item {
+        Item::Fn(f) if f.name == "effect_block" => Some(f),
+        _ => None,
+    });
+    if let Some(entry) = block_entry {
+        if entry.params.len() != 2 {
+            return err(entry.span, "write fn effect_block(l, r) with two frame arrays to edit in place");
+        }
+        block::check_declarations(items, node, entry.span)?;
+    }
+    let declared = audio_rate(items, &[], sample, control)?;
+    let span = declared.map_or(Span { start: 0, end: 1 }, |r| r.span);
+    let rate = match node.factor {
+        0 => declared,
+        1 | 2 | 4 | 8 => Some(AudioRate { factor: node.factor, modes: RateModes { up: node.up, down: node.down }, span }),
+        _ => return err(span, "the node's oversample factor must be 1, 2, 4 or 8"),
+    };
+    if let Some(rate) = rate {
+        l.oversampling = rate.factor;
+        l.rate_modes = rate.modes;
+    }
+    let AudioHeader { kind, items: declarations } = AudioHeader::new(items);
+    l.top_with_samples(items, sample, Some(declarations))?;
+    let kind = kind?;
+    if kind == Kind::Control {
+        if let Some(port) = l.ports.iter().find(|p| !p.info.output) {
+            return err(port.span, format!("control node input `{}`: input() needs a per-frame effect or voice; block() has no audio input", port.info.name));
+        }
+        if let Some(span) = l.mono {
+            return err(span, "mono() is for instrument voices; a control node has no voices");
+        }
+        for port in &mut l.ports { port.info.control = true; }
+    }
+    if let Some(AudioRate { factor: 2 | 4 | 8, span, .. }) = rate { l.add_rate_cascade(kind, span)?; }
+    // Param smoothing words sit after the header, before user state.
+    if !l.params.is_empty() {
+        let shift = image_words(2 * l.params.len() as u64, span)?;
+        let header = HEADER_WORDS as usize;
+        let end = l.state_init.len();
+        reserve_words(&mut l.state_init, shift, span)?;
+        l.state_init.resize(end + shift as usize, 0);
+        l.state_init.copy_within(header..end, header + shift as usize);
+        for (pair, p) in l.state_init[header..header + shift as usize].chunks_exact_mut(2).zip(&l.params) {
+            pair.copy_from_slice(&[p.default.to_bits(), 0]);
+        }
         for sv in &mut l.state_vars {
             sv.offset += shift;
         }
@@ -5388,32 +6704,88 @@ pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError
             }
         }
     }
-    let init = match l.fns.get("init").cloned() {
-        Some(f) => Some(l.init_program(&f)?),
-        None => None,
-    };
-    l.render(kind)?;
+    if let Some(entry) = block_entry {
+        l.block_layout = Some(l.add_block_layout(entry.span)?);
+    }
+    let mut init = l.fns.get("init").cloned().map(|f| l.init_program(&f)).transpose()?;
+    l.rate_nests.branches = branches;
+    let render_span = l.render(kind)?;
+    // Only a nest needs another emission: the outer up filter precedes the
+    // call that tells us where its pad belongs. Use the actual inlined call
+    // tree, including local functions, state arguments and node overrides.
+    if l.rate_nests.branches.is_empty() && l.rate_nests.observed.iter().any(|&branch| branch) {
+        let branches = std::mem::take(&mut l.rate_nests.observed);
+        drop(l);
+        return lower_audio(items, prelude_base, sample, node, branches, control);
+    }
     let mut render = l.b.prog;
+    [render.input_channels, render.output_channels] = l.audio_channels;
+    if kind == Kind::Instrument {
+        if let Some(port) = l.ports.iter().find(|port| port.info.control) {
+            return err(port.span, format!("control output port `{}` has no single value across instrument voices", port.info.name));
+        }
+    }
     render.body = l.b.blocks.into_iter().next().unwrap();
     render.frame_words = l.frame_words;
-    dce(&mut render);
-    if render.cost() > MAX_COST_PER_FRAME {
-        return Err(ShaderError::new(0, 1, format!("too much work per sample (worst case {} ops); reduce loop sizes", render.cost())));
+    let mut warnings = Vec::new();
+    if l.fft_sites.is_empty() {
+        dce(&mut render);
+    } else if let Some(warning) = fft::finish(&l.fft_sites, &mut l.shared_init, &mut init, &mut render,
+        l.fns.get("init").map(|f| f.span))? {
+        warnings.push(warning);
+    }
+    if warnings.is_empty() {
+        let cost = render.cost();
+        if cost > WARN_COST_PER_FRAME {
+            let span = l.render_entries.iter().max_by_key(|(cost, _)| cost).map_or(render_span, |e| e.1);
+            warnings.push(ShaderWarning { span, message: format!("too much work per sample (worst case {cost} ops); reduce loop sizes") });
+        }
+    }
+    // Price the source and any generated FFT loops before adding host control.
+    if let (Some(program), Some(_)) = (&mut init, control) {
+        program.poll_cancel_at_loops();
     }
     Ok(Lowered {
+        warnings,
+        ports: l.ports.into_iter().map(|p| p.info).collect(),
+        mono: l.mono.is_some(),
+        latency: l.latency,
         kind,
         render,
         init,
         params: l.params,
+        probes: l.probes.into_iter().map(|(name, _)| name).collect(),
+        param_meta: l.param_meta,
         state_init: l.state_init,
         state_vars: l.state_vars,
         shared_init: l.shared_init,
+        sample_names: l.sample_names,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_declarations_are_available_without_evaluating_initializers() {
+        let source = "mono() let wave = param(0, {choices: [sine saw]}) let gain = param(1)
+            let recording = sample(2) let side = input(2) let tap = output(1)
+            fn voice() { undefined_body_value }";
+        let parse = |code: &str| crate::parse::Parser::new(&crate::parse::lex(code).unwrap()).items().unwrap();
+        let items = parse(source);
+        let header = audio_inventory(&items).unwrap();
+        assert_eq!(header.kind, Kind::Instrument);
+        assert!(header.mono);
+        assert_eq!(header.params, [("wave".into(), vec!["sine".into(), "saw".into()]), ("gain".into(), vec![])]);
+        assert_eq!(header.samples, ["recording"]);
+        assert_eq!(header.ports, [("side".into(), false, 2), ("tap".into(), true, 1)]);
+
+        let items = parse(&source.replace("input(2)", "input(3)"));
+        let inventory = audio_inventory(&items).unwrap_err();
+        let lowered = lower(&items, usize::MAX).err().expect("invalid port width");
+        assert_eq!((inventory.start, inventory.end, inventory.message), (lowered.start, lowered.end, lowered.message));
+    }
 
     /// A store drops every value-numbered load of a word it may write, also
     /// for ranges that end past u32::MAX: summed in u32 such a range wrapped

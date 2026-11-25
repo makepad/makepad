@@ -31,10 +31,16 @@
 //! buffers, make the record the element type, or write its values through
 //! views of one buffer at the record's stride (`output(ty, stride, offset,
 //! buffer)`, every view the same stride).
+
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 use relax_api::relax_api;
 
 // Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
 relax_api::option_layouts! {
+    (),
     (f32, f32),
     (ir::Val, ir::Val),
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
@@ -49,6 +55,7 @@ relax_api::option_layouts! {
     i32,
     i64,
     ir::Val,
+    parse::Span,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     relax_backend::rir::VReg,
     u128,
@@ -102,9 +109,10 @@ pub mod native;
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub mod native_vec;
 
-/// A compile error with a byte span into the source it came from.
+/// A compilation failure. Diagnostics carry a source span and message.
 #[derive(Debug)]
 pub struct ShaderError {
+    cancelled: bool,
     pub start: usize,
     pub end: usize,
     pub message: String,
@@ -113,8 +121,15 @@ pub struct ShaderError {
 impl ShaderError {
     #[inline(always)]
     pub fn new(start: usize, end: usize, message: String) -> Self {
-        ShaderError { start, end, message }
+        Self { cancelled: false, start, end, message }
     }
+
+    pub(crate) fn cancelled() -> Self {
+        Self { cancelled: true, start: 0, end: 0, message: String::new() }
+    }
+
+    #[inline(always)]
+    pub fn is_cancelled(&self) -> bool { self.cancelled }
 
     /// 1-based line and column of the error start in `src`.
     #[inline(always)]
@@ -132,19 +147,20 @@ impl ShaderError {
 impl Clone for ShaderError {
     #[inline(always)]
     fn clone(&self) -> Self {
-        Self { start: self.start, end: self.end, message: self.message.clone() }
+        Self { cancelled: self.cancelled, start: self.start, end: self.end, message: self.message.clone() }
     }
 }
 
 impl PartialEq for ShaderError {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start && self.end == other.end && self.message == other.message
+        self.cancelled == other.cancelled && self.start == other.start && self.end == other.end && self.message == other.message
     }
 }
 
 impl std::fmt::Display for ShaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_cancelled() { return f.write_str("cancelled"); }
         write!(f, "{} (at {}..{})", self.message, self.start, self.end)
     }
 }

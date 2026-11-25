@@ -31,6 +31,8 @@ pub trait ShaderIrFn {
 #[derive(Clone, Copy)]
 pub struct ShaderCompileOptions {
     pub backend: ShaderBackend,
+    /// Maximum anisotropy allowed for draw-shader texture samples.
+    pub max_sampler_anisotropy: u8,
     pub const_table: bool,
     pub use_vulkan: bool,
     pub glsl_webgl2: bool,
@@ -56,6 +58,7 @@ impl ShaderCompileOptions {
     ) -> Self {
         Self {
             backend,
+            max_sampler_anisotropy: 16,
             const_table,
             use_vulkan,
             glsl_webgl2,
@@ -95,6 +98,7 @@ pub struct CompiledShaderView<'a> {
     pub storage_buffers: &'a [makepad_shader::shader_ir_compute::ComputeBufferBinding],
     pub storage_push_size: u32,
     pub has_errors: bool,
+    pub requests_anisotropy: bool,
     pub error_report: &'a str,
     pub combined: &'a str,
     pub pick_code: Option<&'a str>,
@@ -117,13 +121,14 @@ pub fn compile_shader(
     shader: ScriptObject,
     options: &ShaderCompileOptions,
 ) -> CompiledShader {
-    let opts = IrCompileOptions::new(
+    let mut opts = IrCompileOptions::new(
         options.backend,
         options.const_table,
         options.use_vulkan,
         options.glsl_webgl2,
         options.live_literals,
     );
+    opts.max_sampler_anisotropy = options.max_sampler_anisotropy;
     let mut state = compile_draw_shader_ir_with(vm, shader, &opts);
     state.set_pick(options.pick);
     let mut combined = String::new();
@@ -278,6 +283,7 @@ impl CompiledShader {
             storage_buffers: &self.state.storage_buffers,
             storage_push_size: self.state.storage_push_size,
             has_errors: self.state.has_errors(),
+            requests_anisotropy: self.state.requests_anisotropy,
             error_report: &self.diagnostics,
             combined: &self.combined,
             pick_code: self.pick_code.as_deref(),

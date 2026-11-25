@@ -38,7 +38,10 @@ fn every_splash_file_round_trips() {
                 failures.push(format!("{}:{line}:{col}: {}", path.display(), e.message));
             }
             Ok(syntax) => {
-                if syntax.print() != source {
+                if let Some(e) = syntax.diagnostics().first() {
+                    let (line, col) = line_col(&source, e.at);
+                    failures.push(format!("{}:{line}:{col}: {}", path.display(), e.message));
+                } else if syntax.print() != source {
                     failures.push(format!("{}: print differs from the source", path.display()));
                 } else if let Err(e) = check_nesting(&syntax) {
                     failures.push(format!("{}: {e}", path.display()));
@@ -89,6 +92,35 @@ fn operators_continue_across_lines_as_in_the_vm() {
     assert_eq!(sx("[1 - 2]").statements()[0].items().unwrap().len(), 1);
     let Kind::Call { callee, .. } = &s.statements()[2].children()[0].kind else { panic!("a chained call") };
     assert!(matches!(callee.kind, Kind::Member { .. }));
+}
+
+#[test]
+fn tree_walks_fit_the_budget_taken_at_parse_entry() {
+    let origin = 0u8;
+    let marker = std::hint::black_box(&origin) as *const u8 as usize;
+    let available = makepad_stack_budget::native_stack_budget(marker);
+    let units = UnitTable::standard();
+    // Exercise the same parse entry with less of this thread's stack available.
+    let small = (available / 4).min(32 * 1024);
+    let levels = (available / 1024).saturating_sub(12).min(256);
+    let chain = "f".to_owned() + &"()".repeat(levels);
+    let tree = parse_with_budget(&chain, &units, marker, available).expect("the wider budget admits the call chain");
+    assert!(tree.diagnostics().is_empty(), "postfix chain height follows available stack");
+    assert_eq!(tree.print(), chain, "the admitted chain is safe to print");
+    assert!(check_nesting(&tree).is_ok(), "the admitted chain is safe to walk");
+    drop(tree);
+
+    for expr in ["[".repeat(256) + "0" + &"]".repeat(256), "- ".repeat(256) + "1", chain] {
+        let text = format!("before;\n{expr};\nafter");
+        let tree = parse_with_budget(&text, &units, marker, small).expect("recover the file around a deep subtree");
+        assert!(!tree.diagnostics().is_empty(), "descent and loop-built chains both respect a smaller stack");
+        assert_eq!(tree.statements().len(), 3, "both sibling statements survive");
+        assert_eq!(tree.print(), text, "diagnostic nodes preserve their source bytes");
+    }
+
+    let flat = format!("{}f()", "f() + ".repeat(160));
+    assert!(parse(&flat).expect("a flat operator chain parses").diagnostics().is_empty(),
+        "sibling operands do not consume one another's nesting allowance");
 }
 
 #[test]
@@ -232,6 +264,16 @@ fn values_are_written_as_splash_reads_them() {
     let pretty = write::write_indented(&wide, "").unwrap();
     assert!(pretty.starts_with("[\n    vec3(0.0, 1.0, 2.0),\n"), "{pretty}");
     assert!(parse_value(&pretty).is_ok());
+    // A list of item texts: a point with negative y and z reads back as its three items.
+    let point = write::list(["5mm", "-10mm", "-0.5mm"]);
+    assert_eq!(point, "[5mm, -10mm, -0.5mm]");
+    let items = |text: &str| match parse_value(text).map(|n| n.kind) {
+        Ok(Kind::Array { items, .. }) => items.iter().map(|n| n.text(text).to_string()).collect::<Vec<_>>(),
+        other => panic!("{text} is no list: {other:?}"),
+    };
+    assert_eq!(items(&point), ["5mm", "-10mm", "-0.5mm"], "each item reads back as written");
+    assert_eq!(items("[5mm -10mm -0.5mm]").len(), 1, "spaced, a negative item folds into the one before it: why writers use list");
+    assert_eq!(write::list(Vec::<String>::new()), "[]");
 }
 
 /// A token at column 0 that is not a closer or a continuation begins a
@@ -370,4 +412,149 @@ fn a_for_block_ends_its_statement() {
     let s = sx("let f = fn() {\n    for x in [1] {}\n    -1.0\n}\n");
     let body = s.node(&Loc(vec![0, 0, 0])).unwrap();
     assert_eq!(body.block().unwrap().stmts.len(), 2);
+}
+
+#[test]
+fn value_box_text_reads_as_arithmetic_in_the_box_unit() {
+    use quantity::{evaluate, Measure, NamedValue, Reading};
+
+    let names = [
+        ("wall", "Wall", 0.002, Measure::Length),
+        ("knob_radius", "Radius", 0.015, Measure::Length),
+        ("n", "Count", 5.0, Measure::Plain),
+        ("ratio", "Ratio", 0.25, Measure::Fraction),
+    ].map(|(name, label, value, measure)| NamedValue { name: name.into(), label: label.into(), value, measure });
+    let mm = Reading::from_suffix(" mm");
+    let degrees = Reading::from_suffix("°");
+    let percent = Reading::from_suffix("%");
+    let plain = Reading::from_suffix("");
+    let seconds = Reading::from_suffix("s");
+    let feet = Reading::from_suffix("ft");
+    let frequency = Reading::from_suffix(" kHz ");
+    let read = |text, reading| evaluate(text, reading, &names).unwrap_or_else(|e| panic!("{text}: {e:?}"));
+    for (reading, text, expected, simple, rule) in [
+        (&mm, "12 + 2.5", 14.5, false, "bare sum uses display units"),
+        (&mm, "40/3", 40.0 / 3.0, false, "bare division keeps its precision"),
+        (&mm, "2*(5+1)", 12.0, false, "parentheses group the sum"),
+        (&mm, "1in", 25.4, false, "inches convert directly to millimetres"),
+        (&mm, "3mm + 0.5cm", 8.0, false, "decimal unit ratios are exact"),
+        (&mm, "12 mm", 12.0, true, "a space before the display suffix stays plain"),
+        (&mm, "-3", -3.0, true, "a glued negative literal stays plain"),
+        (&mm, "- 3", -3.0, true, "a separated minus also negates one literal"),
+        (&mm, "+2 * +3", 6.0, false, "unary plus works at either operand"),
+        (&degrees, "45deg", 45.0, false, "degree spellings share a scale"),
+        (&degrees, "45 °", 45.0, true, "a separated degree sign keeps its byte range"),
+        (&degrees, "1rad", 57.29577951308232, false, "radians convert to degrees"),
+        (&percent, "15 + 5%", 20.0, false, "a bare addend is in percent"),
+        (&percent, "ratio * 2", 50.0, false, "a fraction name is a factor"),
+        (&plain, "2 + 50%", 2.5, false, "a percentage in a plain sum is a fraction"),
+        (&seconds, "1s - 500ms", 0.5, false, "milliseconds use the longest matching suffix"),
+        (&feet, "6in + 0.5ft", 1.0, false, "an imperial display unit sets the scale"),
+        (&frequency, "2 kHz * 3kHz", 6.0, false, "a custom display suffix labels a bare number"),
+    ] {
+        let got = read(text, reading);
+        assert_eq!(got.value, expected, "{rule}: {text}");
+        assert_eq!(got.plain, simple, "{rule}: simple-number status of {text}");
+    }
+
+    for (text, expected, used, script, rule) in [
+        ("wall * 2", 4.0, &["wall"][..], "wall * 2", "a scalar factor keeps its spelling"),
+        ("wall + 1", 3.0, &["wall"][..], "wall + 1mm", "a bare addend uses the display unit"),
+        ("wall + 12", 14.0, &["wall"][..], "wall + 12mm", "write the promoted unit"),
+        ("wall + 1in", 27.4, &["wall"][..], "wall + 25.4mm", "write a standard unit for inches"),
+        ("wall + 2*3", 8.0, &["wall"][..], "wall + 6mm", "a constant promoted subtree folds"),
+        ("wall * 50%", 1.0, &["wall"][..], "wall * 0.5", "write a percentage as a fraction"),
+        ("wall * ratio", 0.5, &["wall", "ratio"][..], "wall * ratio", "a named fraction scales a length"),
+        ("(n + 1) * 2", 12.0, &["n"][..], "((n + 1) * 2) * 1mm", "keep a promoted subtree live"),
+        ("n + 1", 6.0, &["n"][..], "(n + 1) * 1mm", "group a named sum before its unit"),
+        ("wall + n + wall", 9.0, &["wall", "n"][..], "wall + n * 1mm + wall", "names appear once in first-use order"),
+    ] {
+        let got = read(text, &mm);
+        assert!((got.value - expected).abs() <= 1e-12 * expected.abs(), "{rule}: {text} gave {}", got.value);
+        assert_eq!(got.names, used, "{rule}: names in {text}");
+        assert_eq!(got.script, script, "{rule}: script for {text}");
+    }
+    for (reading, text, script, rule) in [
+        (&mm, "3in", "76.2mm", "conversion rounds to significant digits"),
+        (&mm, "wall + 012.00", "wall + 012.00mm", "a promoted literal keeps its digits"),
+        (&percent, "15", "0.15", "a bare percentage is a fraction in a script"),
+        (&feet, "1ft", "0.3048m", "use metres when the display unit is nonstandard"),
+        (&percent, "n + 5%", "n * 0.01 + 0.05", "a promoted name stays live in a percentage"),
+        (&mm, " 3 mm + 2mm ", " 3mm + 2mm ", "only the whitespace inside a unit is removed"),
+        (&frequency, "2 kHz * 3kHz", "2 * 3", "custom suffixes are local to the box"),
+    ] {
+        assert_eq!(read(text, reading).script, script, "{rule}: {text}");
+    }
+
+    for (reading, text, fault, words) in [
+        (&mm, "45deg", "45deg", &["an angle", "takes a length"][..]),
+        (&mm, "wall * wall", "wall * wall", &["an area", "not a length"][..]),
+        (&mm, "wall / knob_radius", "wall / knob_radius", &["a plain ratio", "not a length"][..]),
+        (&mm, "wal * 2", "wal", &["no parameter `wal`", "did you mean `wall`"][..]),
+        (&mm, "radius", "radius", &["did you mean `knob_radius` (Radius)"][..]),
+        (&mm, "1 / 0", "1 / 0", &["divides by zero"][..]),
+        (&mm, "1 +", "+", &["nothing after `+`"][..]),
+        (&mm, "(1 + 2", "(", &["`(` is never closed"][..]),
+        (&mm, "sqrt(2)", "sqrt(2)", &["call"][..]),
+        (&mm, "2 ^ 3", "^", &["`^`", "use +, -, * or /"][..]),
+        (&plain, "2 % 3", "%", &["`%`", "use +, -, * or /"][..]),
+        (&plain, "2%3", "%", &["`%`", "use +, -, * or /"][..]),
+        (&mm, "wall + ratio", "wall + ratio", &["can't add", "a length", "a plain number"][..]),
+        (&percent, "wall", "wall", &["a length", "takes a percentage"][..]),
+        (&plain, "1e300 * 1e20", "1e300 * 1e20", &["too large to hold"][..]),
+        (&degrees, "45 ° + 2 mm", "2 mm", &["a length", "takes an angle"][..]),
+        (&mm, "wall.x", "wall.x", &["isn't a number"][..]),
+        (&plain, "1e", "1e", &["complete number"][..]),
+        (&plain, "\"\"", "\"\"", &["isn't a number"][..]),
+        (&mm, "", "", &["type a number"][..]),
+    ] {
+        let err = evaluate(text, reading, &names).unwrap_err();
+        assert_eq!(&text[err.span], fault, "select the original bytes for {text}");
+        for &word in words {
+            assert!(err.message.contains(word), "explain {text} with {word}: {}", err.message);
+        }
+    }
+    let err = evaluate("foo", &mm, &[]).unwrap_err();
+    assert_eq!(err.message, "`foo` is not a number", "a box without parameters explains what it accepts");
+    assert_eq!(err.span, 0..3, "select the unknown name");
+}
+
+#[test]
+fn value_box_arithmetic_matches_the_vm() {
+    use quantity::{evaluate, Measure, NamedValue, Reading};
+    use crate::{ScriptMod, ScriptVm, ScriptVmBase, ScriptVmHost};
+
+    let mut host = ScriptVmHost::new(0i32, ());
+    let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+    vm.capture_errors();
+    let mut line = 0;
+    let mut vm_value = |source: &str| {
+        let module = ScriptMod::new("", "", "quantity", line, 0, source, &[]);
+        line += 1;
+        let value = vm.with_instruction_limit(10_000, |vm| vm.eval(module));
+        let errors = vm.take_errors();
+        assert!(errors.is_empty(), "the VM must read {source}: {errors:?}");
+        value.as_number().unwrap_or_else(|| panic!("the VM must return a number for {source}: {value:?}"))
+    };
+    let plain = Reading::from_suffix("");
+    for text in [
+        "1 - 2 - 3", "8 / 2 / 2", "2 + 3 * 4", "(2 + 3) * 4",
+        "-2 * -3", "2 - -3", "-(4 - 6)", "- 2 * 3",
+        "1 / 3", "0.1 + 0.2", "1e-7 * 3", "1e300 * 1e8 / 1e8", "-0.0 * 1", "2.5e3 / 7",
+    ] {
+        let got = evaluate(text, &plain, &[]).unwrap_or_else(|e| panic!("read {text}: {e:?}"));
+        assert_eq!(got.value.to_bits(), vm_value(text).to_bits(), "match the VM's arithmetic bit for bit on {text}");
+    }
+
+    let names = [("wall", 0.002, Measure::Length), ("n", 5.0, Measure::Plain), ("ratio", 0.25, Measure::Fraction)]
+        .map(|(name, value, measure)| NamedValue { name: name.into(), label: name.into(), value, measure });
+    let mm = Reading::from_suffix("mm");
+    for text in ["wall * 2", "wall + 12", "wall + 1in", "n + 1", "wall * 50%"] {
+        let got = evaluate(text, &mm, &names).unwrap_or_else(|e| panic!("read linked expression {text}: {e:?}"));
+        let source = format!("let wall = 2mm; let n = 5; let ratio = 0.25; {}", got.script);
+        let actual = vm_value(&source);
+        let expected = got.value * mm.scale;
+        assert!((actual - expected).abs() <= 1e-12 * expected.abs(),
+            "script for {text} must give its preview in metres: {} gave {actual}, expected {expected}", got.script);
+    }
 }

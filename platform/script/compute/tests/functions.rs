@@ -58,3 +58,96 @@ fn records_survive_function_calls() {
         }
     }
 }
+
+#[test]
+fn compile_time_cancel_escapes_nested_continue() {
+    use makepad_script_compute::{ir::{self, Block, Elem, Op, RawBuf, Region, Stmt, Ty, Val}, lower, parse};
+    use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+    use std::time::{Duration, Instant};
+
+    let src = "let table = [0.0; 2]
+        fn init() {
+            for i in 0..32 {
+                for j in 0..32768 {
+                    if j == 0 { continue }
+                    table[0] = 1.0
+                }
+            }
+            table[1] = 2.0
+        }
+        fn voice() { table[0] }";
+    let tokens = parse::lex(src).unwrap();
+    let items = parse::Parser::new(&tokens).items().unwrap();
+    let lowered = lower::lower_with_rate(&items, src.len() + 1, &|_| None, lower::RateOverride::default(), Some(&AtomicU32::new(0))).unwrap();
+    let mut program = lowered.init.unwrap();
+    // Interlock immediately before the source continue. This test-owned buffer
+    // is bound only here, after the compiler has finished injecting its polls.
+    // Reading the same cancel word acknowledges the sender. The break below
+    // releases only the interlock; the source then continues to its own loop head.
+    fn interlock(block: &mut Block, one: Val, ack: Val) -> bool {
+        if let Some(at) = block.iter().position(|s| matches!(s, Stmt::Continue(_))) {
+            block.splice(at..at, [
+                Stmt::Store { region: Region::Buf(1), base: 0, extent: 1, off: None, val: one },
+                Stmt::Loop { cap: u32::MAX, body: vec![
+                    Stmt::Def(ack, Op::Load { region: Region::Buf(0), base: 0, extent: 1, off: None }),
+                    Stmt::If(ack, vec![Stmt::Break(0)], vec![]),
+                ] },
+            ]);
+            return true;
+        }
+        block.iter_mut().any(|s| match s {
+            Stmt::If(_, yes, no) => interlock(yes, one, ack) || interlock(no, one, ack),
+            Stmt::Loop { body, .. } => interlock(body, one, ack),
+            _ => false,
+        })
+    }
+    let one = Val(program.vals.len() as u32);
+    let ack = Val(one.0 + 1);
+    program.vals.extend([Ty::I32, Ty::Bool]);
+    program.body.insert(0, Stmt::Def(one, Op::ConstI(1)));
+    assert!(interlock(&mut program.body, one, ack), "source continue lowered to AIR");
+
+    ir::validate(&program, &ir::Regions { ctx: 0, state: 0, shared: 2, frame: program.frame_words, shared_writable: true, bufs: vec![false, true], io: false }).unwrap();
+    for backend in [Backend::Interp, #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))] Backend::Native] {
+        let control = Arc::new(AtomicU32::new(0));
+        let signal = Arc::new(AtomicU32::new(0));
+        let worker_signal = signal.clone();
+        let worker_control = control.clone();
+        let p = program.clone();
+        let (done, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut shared = [0; 2];
+            let ptr = worker_control.as_ptr();
+            let signal_ptr = worker_signal.as_ptr();
+            match backend {
+                Backend::Interp => {
+                    let bufs = [
+                        RawBuf { ptr, len: 1, writable: false, elem: Elem::Word },
+                        RawBuf { ptr: signal_ptr, len: 1, writable: true, elem: Elem::Word },
+                    ];
+                    let mut mem = ir::Mem { ctx: &mut [], state: &mut [], shared: ir::Shared::Write(&mut shared), bufs: &bufs };
+                    ir::run(&p, &mut vec![0; p.scratch_words()], &mut mem, &mut ir::Io::default(), 1);
+                }
+                #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+                Backend::Native => {
+                    let code = makepad_script_compute::native::compile_with(&p, 2).expect("emit native init");
+                    let table = [ptr as u64, 1, signal_ptr as u64, 1];
+                    // SAFETY: the validated program accesses these two live descriptors
+                    // and the private two-word shared table only.
+                    unsafe { code.run_kernel([].as_mut_ptr(), [].as_mut_ptr(), shared.as_mut_ptr(), table.as_ptr(), 1) };
+                }
+                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+                Backend::Native => return,
+            }
+            done.send(shared).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while signal.load(Ordering::Relaxed) == 0 && Instant::now() < deadline && !worker.is_finished() {
+            std::thread::yield_now();
+        }
+        control.store(1, Ordering::Relaxed);
+        assert_eq!(signal.load(Ordering::Relaxed), 1, "{backend:?} never reached the inner continue");
+        assert_eq!(completion.recv_timeout(Duration::from_secs(2)).unwrap(), [0, 0], "{backend:?} ran beyond the inner loop");
+        worker.join().unwrap();
+    }
+}

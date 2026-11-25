@@ -410,6 +410,8 @@ pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
 /// `[f, nargs, nslices, nrets, args..., (buf, off, len) per slice, rets...]`.
 pub const REC_HEADER: usize = 4;
 
+// Native code calls in here; a wasm build runs kernels as generated wasm and has no entry.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 relax_backend::host_fn! {
     /// Native code's entry into the registry: `rec` is the call record (see
     /// [`REC_HEADER`]), `table` the kernel's buffer table ((ptr, len) pairs,
@@ -426,6 +428,7 @@ relax_backend::host_fn! {
     }
 }
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 unsafe fn trampoline_body(rec: *mut u32, table: *const u64, ctx: *mut u32, writable: u64) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let head = std::slice::from_raw_parts(rec, REC_HEADER);

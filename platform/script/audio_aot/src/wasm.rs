@@ -33,8 +33,34 @@ use std::sync::Arc;
 /// is shared with a maximum). Audio code has no fused multiply-add, so
 /// `relaxed_fma` changes nothing here.
 pub fn module(shaders: &[&AudioShader], target: Target) -> Option<Vec<u8>> {
+    module_checked(shaders, target).ok()
+}
+
+/// The memory a shader module imports, including its live data, scratch and audio buffers.
+pub fn module_checked(shaders: &[&AudioShader], target: Target) -> Result<Vec<u8>, crate::ShaderError> {
+    let mut resident = 0u64;
+    let mut scratch = 0;
+    let mut channels = 0;
+    for shader in shaders {
+        resident += shader.shared_table().len() as u64 + shader.ctx_words() as u64 + shader.state_words() as u64;
+        scratch = scratch.max(frame_words(shader) as u64);
+        channels = channels.max(shader.render.channel_count() as u64);
+    }
+    let pages = memory_pages(resident, scratch, channels, target.max_pages)?;
     let entries: Vec<Entry> = shaders.iter().map(|s| Entry { program: &s.render, simd: false }).collect();
-    backend::module(&entries, target)
+    backend::module_with_memory(&entries, target, pages).ok_or_else(|| crate::ShaderError::new(0, 1, "the shader could not be emitted for wasm".into()))
+}
+
+/// Minimum pages for the resident words, largest call frame, audio channels and their pointers.
+#[doc(hidden)]
+pub fn memory_pages(resident: u64, scratch: u64, channels: u64, maximum: Option<u32>) -> Result<u32, crate::ShaderError> {
+    let words = resident.saturating_add(scratch).saturating_add(channels.saturating_mul(1 + u64::from(crate::MAX_FRAMES)));
+    let pages = words.div_ceil(65536 / 4);
+    let limit = maximum.unwrap_or(65536).min(65536);
+    if pages > u64::from(limit) {
+        return Err(crate::ShaderError::new(0, 1, format!("the shader needs {} MiB ({pages} pages); wasm memory addresses {limit} pages", words.div_ceil(1 << 18))));
+    }
+    Ok(pages as u32)
 }
 
 /// Words of the `frame` scratch a call of `shader`'s entry needs (its
@@ -70,9 +96,9 @@ pub fn slot(key: u64) -> Option<u32> {
 /// Runs `n` frames (1..=MAX_FRAMES) on the generated entry at table slot
 /// `slot`, with `scratch` as its frame. wasm32 only.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn run_slot(shader: &AudioShader, slot: u32, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: usize) {
-    let [o0, o1] = outs;
-    let io = [ins[0].as_ptr() as u32, ins[1].as_ptr() as u32, o0.as_mut_ptr() as u32, o1.as_mut_ptr() as u32];
+pub(crate) fn run_slot(shader: &AudioShader, slot: u32, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], io: &mut crate::ir::Io, n: usize) {
+    let (frame, storage) = scratch.split_at_mut(frame_words(shader));
+    let table = crate::write_channel_table(storage, io);
     type Entry = extern "C" fn(u32, u32, u32, u32, u32, u32);
     // SAFETY: `slot` was linked by this thread's host for this program's
     // entry of type (i32 x 6) -> () (the engine checks the type at the
@@ -81,7 +107,7 @@ pub(crate) fn run_slot(shader: &AudioShader, slot: u32, ctx: &mut [u32], state: 
     // for this shader's), and every I/O index into 0..n, which the caller
     // checked each slice holds.
     let f: Entry = unsafe { std::mem::transmute::<usize, Entry>(slot as usize) };
-    f(ctx.as_mut_ptr() as u32, state.as_mut_ptr() as u32, shader.shared.as_ptr() as u32, io.as_ptr() as u32, n as u32, scratch.as_mut_ptr() as u32);
+    f(ctx.as_mut_ptr() as u32, state.as_mut_ptr() as u32, shader.shared.as_ptr() as u32, table.as_ptr() as u32, n as u32, frame.as_mut_ptr() as u32);
 }
 
 // -- recording (a build tool learns which audio programs a document makes) --

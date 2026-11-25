@@ -352,7 +352,7 @@ fn program_items(items: Vec<crate::parse::Item>, src_len: usize, modules: &[crat
     // reported at the kernel's call like the prelude's.
     // The kernel's own items are the roots; library items (modules, the
     // prelude) are compiled in only when reached.
-    let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
+    let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. } | crate::parse::Item::Decl { .. })).map(|i| i.name().to_string()).collect();
     let items = crate::module::resolve(items, src_len + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
     Ok(crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots))
 }
@@ -379,10 +379,8 @@ fn initial_shared(lowered: &kl::KernelLowered, ctx_words: usize) -> Result<Vec<u
         let mut ctx = vec![0u32; ctx_words];
         let mut state = [0u32; 1];
         let mut scratch = vec![0u32; init.scratch_words()];
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
         let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: &[] };
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut io = ir::Io::default();
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
     Ok(shared)
@@ -718,7 +716,7 @@ impl KernelBody {
     /// within each worker's share, so the slices running at once cannot
     /// pass the limit; at least four (four-wide code runs whole groups: a
     /// call stops at most four elements a worker past its limit), at most
-    /// a chunk, and a slice's loop count fits the u32 ctx word. Far from
+    /// a chunk, and a slice's host-call work fits its u32 ctx word. Far from
     /// the limit, whole chunks run with no more looks at the count than
     /// one a chunk.
     pub(crate) fn slice(&self, remaining: u64, threads: usize) -> usize {
@@ -896,15 +894,15 @@ impl KernelBody {
                 // One element a call: each stores its own loops' count.
                 let base = ctx[K_BASE as usize];
                 let w = kl::K_WORK as usize;
-                let mut sum = 0u32;
+                let mut sum = 0u64;
                 for e in 0..n {
                     ctx[K_BASE as usize] = base.wrapping_add(e as u32);
-                    ctx[w] = 0;
+                    ctx[w..w + 2].fill(0);
                     call(simd, args(1, frame, ctx));
-                    sum = sum.wrapping_add(ctx[w]);
+                    sum = sum.saturating_add(crate::work::read_count(ctx, w));
                 }
                 ctx[K_BASE as usize] = base;
-                ctx[w] = sum;
+                crate::work::write_count(ctx, w, sum);
             }
         });
         true
@@ -913,9 +911,10 @@ impl KernelBody {
     /// Runs `n` elements and returns the ops they counted: each element's
     /// own, and what their loops counted (ctx `K_WORK`).
     fn run_raw(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) -> u64 {
-        ctx[kl::K_WORK as usize] = 0;
+        let w = kl::K_WORK as usize;
+        crate::work::write_count(ctx, w, 0);
         self.run_once(ctx, table, n, mode);
-        self.element_work * n as u64 + ctx[kl::K_WORK as usize] as u64
+        self.element_work.saturating_mul(n as u64).saturating_add(crate::work::read_count(ctx, w))
     }
 
     /// One run of the generated code (or the interpreter).
@@ -937,13 +936,14 @@ impl KernelBody {
                 if n4 < n {
                     // The tail on scalar code, its loops' count added.
                     let w = kl::K_WORK as usize;
-                    let counted = ctx[w];
+                    let counted = crate::work::read_count(ctx, w);
                     let base = ctx[K_BASE as usize];
                     ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
-                    ctx[w] = 0;
+                    ctx[w..w + 2].fill(0);
                     self.run_once(ctx, table, n - n4, Mode::Scalar);
                     ctx[K_BASE as usize] = base;
-                    ctx[w] = ctx[w].wrapping_add(counted);
+                    let sum = counted.saturating_add(crate::work::read_count(ctx, w));
+                    crate::work::write_count(ctx, w, sum);
                 }
                 return;
             }
@@ -979,9 +979,7 @@ impl KernelBody {
                 bufs[k] = ir::RawBuf { elem: ir::Elem::Word, ptr: table[2 * k] as *mut u32, len: table[2 * k + 1] as usize, writable: self.buffers[k].access != Access::Read };
             }
             let mut mem = ir::Mem { ctx, state: &mut state, shared: ir::Shared::Read(&self.shared), bufs: &bufs[..self.buffers.len()] };
-            let zeros = [0f32; 1];
-            let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-            let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+            let mut io = ir::Io::default();
             ir::run(&self.flat, &mut scratch[..need], &mut mem, &mut io, n as u32);
         });
     }

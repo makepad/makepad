@@ -128,6 +128,11 @@ pub fn compile(p: &Program) -> Option<(Code, u32)> {
 
 /// [`compile`] at `lanes` (4 or 8).
 pub fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
+    compile_with_offset_limit(p, lanes, i32::MAX)
+}
+
+#[doc(hidden)]
+pub fn compile_with_offset_limit(p: &Program, lanes: u32, offset_limit: i32) -> Option<(Code, u32)> {
     if !cpu_ok() || crate::ir::has_narrow(p) {
         return None;
     }
@@ -137,19 +142,19 @@ pub fn compile_at(p: &Program, lanes: u32) -> Option<(Code, u32)> {
     }
     let flat = crate::ir::flat(p);
     let tag = if lanes == 8 { "x8" } else { "x4" };
-    let key = crate::kcache::key(tag, &flat, 0);
+    let key = (offset_limit == i32::MAX).then(|| crate::kcache::key(tag, &flat, 0)).flatten();
     if let Some(code) = key.and_then(crate::native::load) {
         if crate::kcache::verify() {
-            let fresh = compile_fresh(p, lanes, None).expect("a stored kernel compiles");
+            let fresh = compile_fresh(p, lanes, None, offset_limit).expect("a stored kernel compiles");
             crate::kcache::same(tag, code.bytes(), fresh.bytes());
         }
         return Some((code, lanes));
     }
-    compile_fresh(p, lanes, key).map(|c| (c, lanes))
+    compile_fresh(p, lanes, key, offset_limit).map(|c| (c, lanes))
 }
 
-fn compile_fresh(p: &Program, lanes: u32, key: Option<u128>) -> Option<Code> {
-    let mut f = rir_of(p, lanes)?;
+fn compile_fresh(p: &Program, lanes: u32, key: Option<u128>, offset_limit: i32) -> Option<Code> {
+    let mut f = rir_with_offset_limit(p, lanes, offset_limit)?;
     crate::native::optimise_for_codegen(&mut f);
     if f.verify().is_err() {
         return None;
@@ -165,6 +170,10 @@ type V = [VReg; 2];
 /// The vector RIR of a kernel at `lanes` (4 or 8) lanes (None when declined), before
 /// optimisation; at eight lanes `halves` names every value's (low, high) parts.
 pub fn rir_of(p: &Program, lanes: u32) -> Option<Func> {
+    rir_with_offset_limit(p, lanes, i32::MAX)
+}
+
+fn rir_with_offset_limit(p: &Program, lanes: u32, offset_limit: i32) -> Option<Func> {
     assert!(lanes == 4 || lanes == 8, "kernel lanes are 4 or 8");
     let np = (lanes / 4) as usize;
     let flat = crate::ir::flat(p);
@@ -205,6 +214,7 @@ pub fn rir_of(p: &Program, lanes: u32) -> Option<Func> {
         vals,
         vars,
         regions,
+        offset_limit,
         n_i32: VReg(0),
         frame,
         loops: Vec::new(),
@@ -270,16 +280,19 @@ pub fn rir_of(p: &Program, lanes: u32) -> Option<Func> {
         lx.stmt(s);
     }
     lx.stmt(sh.element);
-    if let Some((var, word)) = sh.post {
-        // the run's counted work: the lanes' counts summed into its ctx word (a wrapping sum:
-        // the same in any order, so at any width)
-        let v = lx.vars[var.0 as usize];
-        let mut sum = lx.extract_i(v, 0);
-        for l in 1..lanes as u8 {
-            let x = lx.extract_i(v, l);
-            sum = lx.ibin(IOp::Add, I32, sum, x);
+    if let Some((lo, hi, word)) = sh.post {
+        let mut sum = lx.iconst(0);
+        for lane in 0..lanes as u8 {
+            let low = lx.extract_i(lx.vars[lo.0 as usize], lane);
+            let low = lx.conv(Conv::IntToInt(U32), low);
+            let value = if let Some(hi) = hi {
+                let high = lx.extract_i(lx.vars[hi.0 as usize], lane);
+                let high = lx.ibini(IOp::Shl, I64, high, 32);
+                lx.ibin(IOp::Or, I64, low, high)
+            } else { low };
+            sum = lx.ibin(IOp::Add, I64, sum, value);
         }
-        lx.emit(Inst::Store(W32, lx.regions[0], 4 * word as i32, sum));
+        lx.emit(Inst::Store(if hi.is_some() { Mem::Int(8, false) } else { W32 }, lx.regions[0], 4 * word as i32, sum));
     }
     lx.term(Term::Ret(Vec::new()));
     lx.f.halves = lx.halves;
@@ -304,6 +317,7 @@ struct Vx<'a> {
     vals: Vec<V>,
     vars: Vec<V>,
     regions: [VReg; 4],
+    offset_limit: i32,
     n_i32: VReg,
     frame: Option<u32>,
     loops: Vec<Loop>,
@@ -523,6 +537,15 @@ impl<'a> Vx<'a> {
 
     // -- memory --------------------------------------------------------------
 
+    fn displacement(&mut self, ptr: VReg, word: u32) -> (VReg, i32) {
+        let bytes = i64::from(word) * 4;
+        if bytes > i64::from(self.offset_limit) {
+            (self.ibini(IOp::Add, I64, ptr, bytes), 0)
+        } else {
+            (ptr, bytes as i32)
+        }
+    }
+
     /// Scalar address of word `base + clamp(o)` of a non-buffer, non-frame region (o: a
     /// scalar i32 offset or None).
     fn region_addr(&mut self, region: Region, base: u32, extent: u32, o: Option<(Val, VReg)>) -> (VReg, i32) {
@@ -531,13 +554,15 @@ impl<'a> Vx<'a> {
             Region::State => self.regions[1],
             _ => self.regions[2],
         };
+        let (rb, disp) = self.displacement(rb, base);
         match o {
-            None => (rb, (base * 4) as i32),
+            None => (rb, disp),
             Some((ov, so)) => {
+                let so = if extent > 1 << 31 { self.conv(Conv::IntToInt(U32), so) } else { so };
                 let idx = self.clamp(ov, so, extent);
                 let sc = self.ibini(IOp::Shl, I64, idx, 2);
                 let a = self.ibin(IOp::Add, I64, rb, sc);
-                (a, (base * 4) as i32)
+                (a, disp)
             }
         }
     }
@@ -1072,7 +1097,8 @@ impl<'a> Vx<'a> {
             let mut rows = [VReg(0); 8];
             for l in 0..lanes {
                 rows[l] = self.f.vreg(Cls::V128);
-                self.emit(Inst::VLoad(rows[l], addr[l], 4 * c as i32));
+                let (ptr, disp) = self.displacement(addr[l], c);
+                self.emit(Inst::VLoad(rows[l], ptr, disp));
             }
             let mut cols = [[VReg(0); 4]; 2];
             for q in 0..self.np {

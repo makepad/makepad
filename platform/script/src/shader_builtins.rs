@@ -74,7 +74,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.acos(), |v: f64| v.acos())
+                .map_num(
+                    makepad_math::deterministic::acos,
+                    makepad_math::deterministic_f64::acos,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -89,7 +92,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.acosh(), |v: f64| v.acosh())
+                .map_num(
+                    makepad_math::deterministic::acosh,
+                    makepad_math::deterministic_f64::acosh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -104,7 +110,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.asin(), |v: f64| v.asin())
+                .map_num(
+                    makepad_math::deterministic::asin,
+                    makepad_math::deterministic_f64::asin,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -119,7 +128,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.asinh(), |v: f64| v.asinh())
+                .map_num(
+                    makepad_math::deterministic::asinh,
+                    makepad_math::deterministic_f64::asinh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -134,7 +146,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.atan(), |v: f64| v.atan())
+                .map_num(
+                    makepad_math::deterministic::atan,
+                    makepad_math::deterministic_f64::atan,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -155,7 +170,11 @@ pub fn define_shader_builtins(
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             // atan2 computes atan(y/x) with correct quadrant
-            y_nv.zip_num(x_nv, |y: f32, x: f32| y.atan2(x), |y: f64, x: f64| y.atan2(x)).to_script_value_vm(vm)
+            y_nv.zip_num(
+                x_nv,
+                makepad_math::deterministic::atan2,
+                makepad_math::deterministic_f64::atan2,
+            ).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -169,7 +188,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.atanh(), |v: f64| v.atanh())
+                .map_num(
+                    makepad_math::deterministic::atanh,
+                    makepad_math::deterministic_f64::atanh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -199,7 +221,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.cos(), |v: f64| v.cos())
+                .map_num(
+                    makepad_math::deterministic::cos,
+                    makepad_math::deterministic_f64::cos,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -214,7 +239,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.cosh(), |v: f64| v.cosh())
+                .map_num(
+                    makepad_math::deterministic::cosh,
+                    makepad_math::deterministic_f64::cosh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -244,7 +272,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.exp(), |v: f64| v.exp())
+                .map_num(
+                    makepad_math::deterministic::exp,
+                    makepad_math::deterministic_f64::exp,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -259,7 +290,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.exp2(), |v: f64| v.exp2())
+                .map_num(
+                    makepad_math::deterministic::exp2,
+                    makepad_math::deterministic_f64::exp2,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -304,7 +338,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.sqrt().recip(), |v: f64| v.sqrt().recip())
+                .map_num(|v: f32| makepad_math::deterministic::sqrt(v).recip(), |v: f64| v.sqrt().recip())
                 .to_script_value_vm(vm)
         },
     );
@@ -372,7 +406,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.ln(), |v: f64| v.ln())
+                .map_num(
+                    makepad_math::deterministic::ln,
+                    makepad_math::deterministic_f64::ln,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -390,7 +427,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.log2(), |v: f64| v.log2())
+                .map_num(
+                    makepad_math::deterministic::log2,
+                    makepad_math::deterministic_f64::log2,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -454,7 +494,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.sin(), |v: f64| v.sin())
+                .map_num(
+                    makepad_math::deterministic::sin,
+                    makepad_math::deterministic_f64::sin,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -469,7 +512,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.sinh(), |v: f64| v.sinh())
+                .map_num(
+                    makepad_math::deterministic::sinh,
+                    makepad_math::deterministic_f64::sinh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -484,7 +530,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.sqrt(), |v: f64| v.sqrt())
+                .map_num(makepad_math::deterministic::sqrt, |v: f64| v.sqrt())
                 .to_script_value_vm(vm)
         },
     );
@@ -499,7 +545,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.tan(), |v: f64| v.tan())
+                .map_num(
+                    makepad_math::deterministic::tan,
+                    makepad_math::deterministic_f64::tan,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -514,7 +563,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_num(|v: f32| v.tanh(), |v: f64| v.tanh())
+                .map_num(
+                    makepad_math::deterministic::tanh,
+                    makepad_math::deterministic_f64::tanh,
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -729,7 +781,11 @@ pub fn define_shader_builtins(
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
-            y_nv.zip_num(x_nv, |y: f32, x: f32| y.atan2(x), |y: f64, x: f64| y.atan2(x)).to_script_value_vm(vm)
+            y_nv.zip_num(
+                x_nv,
+                makepad_math::deterministic::atan2,
+                makepad_math::deterministic_f64::atan2,
+            ).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -862,7 +918,11 @@ pub fn define_shader_builtins(
                 .value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
-            x_nv.zip_num(y_nv, |a: f32, b: f32| a.powf(b), |a: f64, b: f64| a.powf(b)).to_script_value_vm(vm)
+            x_nv.zip_num(
+                y_nv,
+                makepad_math::deterministic::pow,
+                makepad_math::deterministic_f64::pow,
+            ).to_script_value_vm(vm)
         },
     );
     // Packed-attribute unpackers: two f16s / four unorm8s bitcast into one

@@ -15,6 +15,7 @@ use crate::native::*;
 use crate::object::*;
 use crate::opcode::*;
 use crate::parser::*;
+pub use crate::policy::{EntryUsage, Limit, Poison, ScriptVmPolicy};
 use crate::thread::*;
 use crate::tokenizer::*;
 use crate::trap::*;
@@ -338,7 +339,7 @@ impl ScriptBody {
     /// The zero-based line a text at ScriptMod line `line` starts at. Its first line is
     /// `line`, as runtime errors count (`row + line`, [`ScriptCode::ip_to_loc`]); a text at
     /// line 0 counts its lines from 1.
-    fn line0_of(line: usize) -> usize {
+    pub(crate) fn line0_of(line: usize) -> usize {
         line.saturating_sub(1)
     }
 
@@ -514,7 +515,7 @@ impl ScriptCode {
 }
 
 impl ScriptBody {
-    fn content_hash_of(code: &str, values: &[ScriptValue]) -> u64 {
+    pub(crate) fn content_hash_of(code: &str, values: &[ScriptValue]) -> u64 {
         let mut id = LiveId::from_str(code);
         for v in values {
             id = id.bytes_append(&v.raw().to_le_bytes());
@@ -1760,6 +1761,9 @@ impl<'a> ScriptVm<'a> {
             .set_on(Some(ScriptTrapOn::Bail(err)));
     }
 
+    /// Shares one instruction allowance across script entries on the current thread in `f`.
+    /// Nested scopes charge their parent. A suspended run carries its unspent allowance into
+    /// `resume`; the scope reports only the fuel used before it ended.
     #[inline(always)]
     pub fn with_instruction_limit<R>(
         &mut self,
@@ -1773,23 +1777,20 @@ impl<'a> ScriptVm<'a> {
     }
 
     /// The first half of [`Self::with_instruction_limit`]: applies the limit, returns
-    /// (the thread's previous remaining budget, the applied limit) for
+    /// (the enclosing allowance, the applied limit) for
     /// [`Self::instruction_limit_end`].
     #[inline(always)]
     pub fn instruction_limit_begin(&mut self, instruction_limit: u64) -> (Option<u64>, u64) {
-        let previous = self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_LIMIT_REMAINING));
-        let previous_remaining = if previous == u64::MAX { None } else { Some(previous) };
-        let applied = previous_remaining
-            .map(|remaining| remaining.min(instruction_limit))
-            .unwrap_or(instruction_limit);
-        self.bx.vm_ctl(&mut ScriptCtlReq::with(CTL_LIMIT_SET, applied));
-        (previous_remaining, applied)
+        let mut req = ScriptCtlReq::with(CTL_LIMIT_SET, instruction_limit);
+        self.bx.vm_ctl(&mut req);
+        ((req.value == TRUE).then_some(req.b), req.a)
     }
 
     /// The second half of [`Self::with_instruction_limit`].
     #[inline(always)]
     pub fn instruction_limit_end(&mut self, previous_remaining: Option<u64>, applied: u64) {
         let mut req = ScriptCtlReq::with(CTL_LIMIT_END, previous_remaining.unwrap_or(u64::MAX));
+        req.value = previous_remaining.is_some().into();
         req.b = applied;
         self.bx.vm_ctl(&mut req);
     }
@@ -1855,8 +1856,12 @@ impl<'a> ScriptVm<'a> {
     #[inline(always)]
     pub fn with_heap_allocation_limit<R>(&mut self, allocation_limit: usize, f: impl FnOnce(&mut Self) -> R) -> (R, ScriptAllocationReport) {
         self.heap_allocation_limit_begin(allocation_limit);
-        let result = f(self);
-        (result, self.heap_allocation_limit_end())
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
+        let report = self.heap_allocation_limit_end();
+        match result {
+            Ok(value) => (value, report),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// The first half of [`Self::with_heap_allocation_limit`], for a sliced run that pauses between
@@ -1871,6 +1876,11 @@ impl<'a> ScriptVm<'a> {
     /// an allocation was refused (recorded as a captured error).
     #[inline(always)]
     pub fn heap_allocation_limit_end(&mut self) -> ScriptAllocationReport {
+        // A native can finish the scope immediately after a refused allocation,
+        // before the interpreter polls the heap. CTL_ALLOC_END drains that error.
+        if self.bx.has_entry_policy() && self.bx.heap.allocation_error_pending {
+            self.bx.poison_limit(self.bx.heap_limit_reason());
+        }
         let mut req = ScriptCtlReq::new(CTL_ALLOC_END);
         let allocated_bytes = self.bx.vm_ctl(&mut req) as usize;
         ScriptAllocationReport { allocated_bytes, exceeded: req.b != 0 }
@@ -1894,7 +1904,7 @@ impl<'a> ScriptVm<'a> {
 
     /// Print a script value to stdout with debug formatting.
     pub fn println(&self, value: impl Into<ScriptValue>) {
-        self.bx.heap.println(value.into());
+        if !self.bx.has_entry_policy() || self.bx.allow_debug_output { self.bx.heap.println(value.into()); }
     }
 
     /// Run garbage collection (mark and sweep). Deliberately does NOT return
@@ -1934,7 +1944,8 @@ impl<'a> ScriptVm<'a> {
     /// Run garbage collection with status logging.
     #[inline(always)]
     pub fn gc_with_status(&mut self) {
-        self.bx.vm_ctl(&mut ScriptCtlReq::new(CTL_GC_WITH_STATUS));
+        if self.bx.has_entry_policy() && !self.bx.allow_debug_output { self.gc(); }
+        else { self.bx.vm_ctl(&mut ScriptCtlReq::new(CTL_GC_WITH_STATUS)); }
     }
 
     #[inline(always)]
@@ -2038,6 +2049,12 @@ impl<'a> ScriptVm<'a> {
     }
 
     fn call_with_scope(&mut self, scope: ScriptObject, me: ScriptValue) -> ScriptValue {
+        // Constructing native arguments can itself exhaust the heap. There may be
+        // no interpreter instruction between that allocation and the native call.
+        if self.bx.has_entry_policy() {
+            if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
+            if let Some(reason) = self.bx.poisoned() { return reason.as_script_error(); }
+        }
         if let Some(fnptr) = self.bx.heap.parent_as_fn(scope) {
             match fnptr {
                 ScriptFnPtr::Native(ni) => {
@@ -2082,7 +2099,7 @@ impl<'a> ScriptVm<'a> {
                     }
                     self.bx.threads.cur().trap.ip = sip;
                     self.drain_stale_errors();
-                    return self.run_core();
+                    return self.run_core_inner();
                 }
             }
         } else {
@@ -2107,10 +2124,111 @@ impl<'a> ScriptVm<'a> {
         self.vm_call(&mut req)
     }
 
+    /// Structured outcomes for a policy-aware host. The value-returning ABI used by
+    /// existing hosts goes through the same entry and maps a stopped VM to an error value.
+    pub fn call_entry(&mut self, req: &mut ScriptCallReq) -> Result<ScriptValue, &Poison> {
+        let value = self.vm_call(req);
+        self.bx.poisoned().map_or(Ok(value), Err)
+    }
+
+    pub fn load_entry(&mut self, req: &mut ScriptEvalReq) -> Result<ScriptValue, &Poison> {
+        let value = self.vm_eval(req);
+        self.bx.poisoned().map_or(Ok(value), Err)
+    }
+
+    pub fn resume_entry(&mut self) -> Result<ScriptValue, &Poison> {
+        self.call_entry(&mut ScriptCallReq::new(CALL_RESUME, NIL))
+    }
+
+    /// A caller that historically bounded only particular callbacks keeps that behavior
+    /// in a stock VM. An installed policy already governs the selected thread.
+    pub fn with_callback_fuel(&mut self, f: impl FnOnce(&mut Self) -> ScriptValue) -> ScriptValue {
+        if self.bx.has_entry_policy() { self.host_entry(f) }
+        else { self.with_instruction_limit(ScriptVmPolicy::CALLBACK_FUEL, f) }
+    }
+
+    /// Native work dispatched by the host on behalf of a script (for example, a method
+    /// requested by a paused thread). It shares the same accounting as interpreted calls.
+    #[inline]
+    pub fn host_entry(&mut self, run: impl FnOnce(&mut Self) -> ScriptValue) -> ScriptValue {
+        if !self.bx.has_entry_policy() { return run(self); }
+        if let Some(reason) = self.bx.poisoned() { return reason.as_script_error(); }
+        self.run_policy_entry(run)
+    }
+
+    fn run_policy_entry(&mut self, run: impl FnOnce(&mut Self) -> ScriptValue) -> ScriptValue {
+        self.bx.apply_policy_limits();
+        if let Some(limit) = self.bx.pending_policy_limit() {
+            if self.bx.policy_thread.is_none() { self.bx.policy.last_entry = EntryUsage::default(); }
+            self.bx.poison_limit(limit);
+            return self.bx.poisoned().unwrap().as_script_error();
+        }
+
+        let errors_before = self.bx.captured_errors.as_ref().map_or(0, Vec::len);
+        let total_before = self.bx.policy.total;
+        let thread = self.bx.threads.current();
+        let outer = self.bx.policy_thread;
+        // Re-entry on the same thread spends the active allowance. Another selected
+        // thread inherits the remaining fuel and charges it back on return.
+        let outer_fuel = outer.and_then(|id| self.bx.threads.get(id)?.instruction_limit_remaining);
+        let policy = &self.bx.policy;
+        let fuel = policy.fuel.unwrap_or(u64::MAX).min(outer_fuel.unwrap_or(u64::MAX));
+        let allocation = policy.allocation_bytes.unwrap_or(usize::MAX);
+        let frames = policy.call_frames.unwrap_or(usize::MAX);
+        let stack = policy.stack_values.unwrap_or(usize::MAX);
+        let own_budget = outer.is_none() || self.bx.heap.allocation_budget.is_none();
+        let prior_budget = own_budget.then(|| self.bx.heap.begin_allocation_budget(allocation));
+        let fuel_scope = self.bx.enter_instruction_limit(fuel);
+        let selected = self.bx.threads.cur();
+        let old_frames = selected.call_frame_limit;
+        let old_stack = selected.stack_limit;
+        selected.call_frame_limit = Some(frames.min(old_frames.unwrap_or(usize::MAX)));
+        selected.stack_limit = stack.min(old_stack);
+        self.bx.policy_thread = Some(thread);
+
+        // A host native can unwind to a containment boundary outside the interpreter.
+        // Restore the selected thread and budgets before that boundary regains control.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
+        let used = self.bx.leave_instruction_limit(fuel_scope.0, fuel_scope.1);
+        let selected = self.bx.threads.cur();
+        selected.call_frame_limit = old_frames;
+        selected.stack_limit = old_stack;
+        self.bx.policy_thread = outer;
+        if let Some(id) = outer.filter(|id| *id != thread) {
+            if let Some(remaining) = self.bx.threads.get_mut(id).and_then(|t| t.instruction_limit_remaining.as_mut()) {
+                *remaining = remaining.saturating_sub(used);
+            }
+        }
+        let bytes = prior_budget.map_or(0, |saved| self.bx.heap.end_allocation_budget(saved).allocated_bytes);
+        let policy = &mut self.bx.policy;
+        policy.total.bytes = policy.total.bytes.saturating_add(bytes);
+        if outer.is_none() {
+            policy.last_entry = EntryUsage { fuel: used, bytes: policy.total.bytes.saturating_sub(total_before.bytes) };
+            policy.total.fuel = policy.total.fuel.saturating_add(used);
+        }
+        let value = match result { Ok(value) => value, Err(panic) => std::panic::resume_unwind(panic) };
+        if (value.is_err() || self.bx.threads.cur_ref().trap.has_err()) && self.bx.bail_on_uncaught_error && !self.bx.is_poisoned() {
+            let message = self.bx.threads.cur_ref().trap.err_borrow().front().map(|e| e.message.clone())
+                .or_else(|| self.bx.captured_errors.as_ref()?.get(errors_before).map(|e| e.message.clone()))
+                .unwrap_or_else(|| format!("{:?}", value.value_type()));
+            self.bx.poison(Poison::Error(message));
+        }
+        self.bx.poisoned().map_or(value, Poison::as_script_error)
+    }
+
     /// The one entry into running script from the host (the op `call`, `resume` and
     /// the like are inline decoders of): `req.mode` says what, see [`ScriptCallReq`].
     #[relax_api(run)]
     pub fn vm_call(&mut self, req: &mut ScriptCallReq) -> ScriptValue {
+        let result = self.host_entry(|vm| vm.vm_call_inner(req));
+        if req.mode == CALL_TRANSFORM && self.bx.is_poisoned() {
+            req.found = true; // propagate the failure through the optional transform API
+        }
+        result
+    }
+
+    fn vm_call_inner(&mut self, req: &mut ScriptCallReq) -> ScriptValue {
         crate::inspect_query::safe_point(&self.bx);
         match req.mode {
             CALL_ARGS => self.call_with_me_impl(req.fnobj, req.args, req.me),
@@ -2128,13 +2246,22 @@ impl<'a> ScriptVm<'a> {
             CALL_RESUME => {
                 let thread = self.bx.threads.cur();
                 thread.is_paused = false;
+                // The continuation may outlive its limit scope, or resume inside another one.
+                // Charge both allowances for this slice. A fresh pause saves what is left.
+                let carried = thread.paused_instruction_limit.take();
                 // A run that yielded, or one a native paused under an entry that owes its end.
                 let yielded = std::mem::take(&mut thread.yielded);
-                if yielded || !thread.completions.is_empty() {
+                let finish_entries = yielded || !thread.completions.is_empty();
+                let scope = carried.map(|limit| self.bx.enter_instruction_limit(limit));
+                let value = if finish_entries {
                     self.resume_yielded()
                 } else {
-                    self.run_core()
+                    self.run_core_inner()
+                };
+                if let Some((previous, applied)) = scope {
+                    self.bx.leave_instruction_limit(previous, applied);
                 }
+                value
             }
             mode => panic!("vm_call: unknown mode {mode}"),
         }
@@ -2337,11 +2464,15 @@ impl<'a> ScriptVm<'a> {
             // `bail_on_uncaught_error`: the error then terminates the
             // evaluation before another instruction (and therefore another
             // host effect) can execute, and rides the Bail back as its result.
-            // Streaming evals (`silence_errors`) never bail: incomplete source
-            // inevitably raises errors that mean nothing until the rest arrives.
-            if !self.bx.bail_on_uncaught_error || self.bx.silence_errors {
+            // Stock streaming evaluations tolerate errors in incomplete source.
+            // An enrolled VM also stops its streaming entry on an uncaught error.
+            if !self.bx.bail_on_uncaught_error || (self.bx.silence_errors && !self.bx.has_entry_policy()) {
                 self.drain_errors();
                 return;
+            }
+            if self.bx.has_entry_policy() {
+                let message = self.bx.threads.cur_ref().trap.err_borrow().front().map(|e| e.message.clone());
+                if let Some(message) = message { self.bx.poison(Poison::Error(message)); }
             }
             let error = self
                 .bx
@@ -2366,6 +2497,9 @@ impl<'a> ScriptVm<'a> {
     /// one long native call ends a sliced run's slice.
     #[inline(always)]
     pub(crate) fn sample_budget_now(&mut self) {
+        if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
+            self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
+        }
         if let Some(budget) = self.bx.run_budget.as_mut() {
             budget.instructions_until_sample = 1;
         }
@@ -2391,7 +2525,8 @@ impl<'a> ScriptVm<'a> {
 
     #[inline(never)]
     #[cold]
-    fn bail_resource_limit(&mut self, message: &'static str) -> ScriptValue {
+    fn bail_resource_limit(&mut self, limit: Limit, message: &'static str) -> ScriptValue {
+        self.bx.poison_limit(limit);
         let err = script_err_limit!(self.bx.threads.cur_ref().trap, "{message}");
         // Resource-limit failures are uncatchable. Drain pre-existing script
         // errors before the Bail unwinds to a clean root state.
@@ -2422,10 +2557,10 @@ impl<'a> ScriptVm<'a> {
         let stack_limit_exceeded = self.bx.threads.cur().take_stack_limit_exceeded();
         let call_frame_limit_exceeded = self.bx.threads.cur().take_call_frame_limit_exceeded();
         if stack_limit_exceeded {
-            return Some(self.bail_resource_limit("script operand stack limit exceeded"));
+            return Some(self.bail_resource_limit(Limit::OperandStack, "script operand stack limit exceeded"));
         }
         if call_frame_limit_exceeded {
-            return Some(self.bail_resource_limit("script call frame limit exceeded"));
+            return Some(self.bail_resource_limit(Limit::CallFrames, "script call frame limit exceeded"));
         }
         None
     }
@@ -2437,9 +2572,7 @@ impl<'a> ScriptVm<'a> {
         Some(match self.bx.threads.cur().trap.take_on().unwrap() {
             ScriptTrapOn::Pause | ScriptTrapOn::TimeBudgetYield => NIL,
             ScriptTrapOn::Return(value) => {
-                // Preserve the remaining allowance for consumption accounting
-                // (with_instruction_limit reads it after the None wipe).
-                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                if let Some(rem) = self.bx.threads.cur_ref().instruction_limit_remaining {
                     self.bx.last_limit_exit_remaining = rem;
                 }
                 value
@@ -2461,7 +2594,7 @@ impl<'a> ScriptVm<'a> {
                         break;
                     }
                 }
-                if let Some(rem) = self.bx.threads.cur().instruction_limit_remaining.take() {
+                if let Some(rem) = self.bx.threads.cur_ref().instruction_limit_remaining {
                     self.bx.last_limit_exit_remaining = rem;
                 }
                 value
@@ -2470,13 +2603,38 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_core(&mut self) -> ScriptValue {
-        // How many interpreter loops are live on the Rust stack: a sliced run yields only the
-        // outermost (`check_run_budget`). A panic unwinding through leaves it raised, which only
-        // stops this VM's runs from yielding.
+        self.host_entry(Self::run_core_inner)
+    }
+
+    fn run_core_inner(&mut self) -> ScriptValue {
+        if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
+            self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
+            return self.handle_trap_on().unwrap();
+        }
+        let marker = 0u8;
+        let here = std::hint::black_box(&marker) as *const u8 as usize;
+        if self.bx.run_depth == 0 {
+            self.bx.run_stack_origin = here;
+            self.bx.run_stack_budget = native_stack_budget(here);
+        }
+        if self.bx.run_depth >= self.bx.native_depth_limit
+            || self.bx.run_depth as usize >= self.bx.run_stack_budget / NATIVE_ENTRY_BYTES
+            || self.bx.run_stack_origin.abs_diff(here) >= self.bx.run_stack_budget
+        {
+            let error = self.bail_resource_limit(Limit::NativeReentry, "script native re-entry limit exceeded");
+            if self.bx.run_depth != 0 { self.bx.reentry_failure = Some(error); }
+            return error;
+        }
+        // A host may catch a native panic. Count only interpreters still on its stack.
+        struct Entry<'a, 'host>(&'a mut ScriptVm<'host>);
+        impl Drop for Entry<'_, '_> {
+            fn drop(&mut self) {
+                self.0.bx.run_depth -= 1;
+                if self.0.bx.run_depth == 0 { self.0.bx.reentry_failure = None; }
+            }
+        }
         self.bx.run_depth += 1;
-        let value = self.run_core_loop();
-        self.bx.run_depth -= 1;
-        value
+        Entry(self).0.run_core_loop()
     }
 
     fn run_core_loop(&mut self) -> ScriptValue {
@@ -2502,6 +2660,7 @@ impl<'a> ScriptVm<'a> {
             // refusal on the heap. Turn it into the same uncatchable Bail as
             // the instruction ceiling before executing another opcode.
             if let Some(message) = self.bx.heap.take_allocation_error() {
+                self.bx.poison_limit(self.bx.heap_limit_reason());
                 let err = script_err_limit!(
                     self.bx.threads.cur_ref().trap,
                     "{}",
@@ -2537,6 +2696,7 @@ impl<'a> ScriptVm<'a> {
                     return value;
                 }
             } else if instruction_limit_exceeded {
+                self.bx.poison_limit(if self.bx.interrupt.is_set() { Limit::Interrupted } else { Limit::Fuel });
                 let err = if self.bx.interrupt.is_set() {
                     script_err_limit!(self.bx.threads.cur_ref().trap, "script interrupted")
                 } else {
@@ -2566,11 +2726,13 @@ impl<'a> ScriptVm<'a> {
                     ScriptRunBudgetHit::Soft if self.bx.run_depth != 1 => {}
                     ScriptRunBudgetHit::Soft => {
                         let thread = self.bx.threads.cur();
+                        thread.paused_instruction_limit = thread.instruction_limit_remaining;
                         thread.is_paused = true;
                         thread.yielded = true;
                         thread.trap.set_on(Some(ScriptTrapOn::TimeBudgetYield));
                     }
                     ScriptRunBudgetHit::Hard => {
+                        self.bx.poison_limit(Limit::Time);
                         let err = script_err_limit!(
                             self.bx.threads.cur().trap.pass(),
                             "script time budget exceeded"
@@ -2626,7 +2788,7 @@ impl<'a> ScriptVm<'a> {
                 crate::inspect_query::line_probe_check(&self.bx, body_index, ip_index);
             }
 
-            if self.bx.debug_trace {
+            if self.bx.debug_trace && (!self.bx.has_entry_policy() || self.bx.allow_debug_output) {
                 let stack_len = self.bx.threads.cur_ref().stack.len();
                 if let Some((op, a)) = opcode.as_opcode() {
                     eprintln!("TRACE b{body_index} ip{ip_index} stack{stack_len} {op:?} {a:?}");
@@ -2645,6 +2807,10 @@ impl<'a> ScriptVm<'a> {
                 // single-load poll for both interrupt sources (errors + traps)
                 let pending = self.bx.threads.cur().trap.pending();
                 if pending != 0 {
+                    if let Some(error) = self.bx.poisoned().map(Poison::as_script_error).or(self.bx.reentry_failure) {
+                        self.bx.threads.cur().trap.set_on(Some(ScriptTrapOn::Bail(error)));
+                        return self.handle_trap_on().unwrap();
+                    }
                     if pending & crate::trap::TRAP_PENDING_ERR != 0 {
                         self.handle_errors();
                     }
@@ -2671,12 +2837,16 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_root(&mut self, body_id: u16) -> ScriptValue {
+        self.host_entry(|vm| vm.run_root_inner(body_id))
+    }
+
+    fn run_root_inner(&mut self, body_id: u16) -> ScriptValue {
         // Extract values from bodies before modifying thread state
         let (scope, me) = {
             let bodies = self.bx.code.bodies.borrow();
             // Recovery bytecode is for parser tooling, never execution: a
             // rejected loop body can otherwise become an infinite empty loop.
-            if bodies[body_id as usize].parser.had_error {
+            if bodies.get(body_id as usize).is_none_or(|body| body.parser.had_error) {
                 return ScriptValue::script_err_unexpected(ScriptIp {
                     body: body_id,
                     index: 0,
@@ -2719,7 +2889,8 @@ impl<'a> ScriptVm<'a> {
 
         // the main interpreter loop
         self.drain_stale_errors();
-        let value = self.run_core();
+        let value = self.run_core_inner();
+        if self.bx.is_poisoned() { return value; }
         if self.bx.threads.cur_ref().run_unfinished() {
             self.bx.threads.cur().completions.push(RunCompletion::RootEnd { body_id });
             return value;
@@ -2767,13 +2938,14 @@ impl<'a> ScriptVm<'a> {
         if let Some(budget) = self.bx.run_budget.as_mut() {
             budget.instructions_until_sample = budget.instructions_until_sample.max(2);
         }
-        let value = self.run_core();
+        let value = self.run_core_inner();
         if streaming {
             self.bx.silence_errors = false;
         }
         if self.bx.threads.cur_ref().run_unfinished() {
             return value;
         }
+        if self.bx.is_poisoned() { return value; }
         for completion in std::mem::take(&mut self.bx.threads.cur().completions) {
             match completion {
                 RunCompletion::RootEnd { body_id } => self.finish_root(body_id),
@@ -3290,20 +3462,6 @@ impl<'a> ScriptVm<'a> {
         (value, req.body)
     }
 
-    fn eval_module_impl(&mut self, mut script_mod: ScriptMod, uses: &[ScriptObject]) -> (ScriptValue, u16) {
-        let shown = std::mem::take(&mut script_mod.file);
-        script_mod.line = script_mod.line.max(1);
-        script_mod.file = format!("{shown}#{:016x}", ScriptBody::content_hash_of(&script_mod.code, &script_mod.values));
-        // Transient: a text that is edited again and again must not pile up bodies; the
-        // GC reclaims a body once nothing made from it (the exported fns) lives.
-        let body_id = self.add_script_mod_with(script_mod, true);
-        self.bx.set_body_shown(body_id, &shown, 0);
-        for from in uses {
-            self.bx.body_use_all(body_id, *from);
-        }
-        (self.eval_body(body_id, ScriptObject::ZERO), body_id)
-    }
-
     /// Name `body`'s file in its messages and count its first line from
     /// `ScriptMod::line` (see [`ScriptBody::shown`]), that line's text starting at column
     /// `first_col` of the file ([`ScriptBody::first_col`]; 0: a line of its own).
@@ -3383,20 +3541,48 @@ impl<'a> ScriptVm<'a> {
     fn adopt_fn_impl(&mut self, image: &ScriptFnImage, parent: ScriptObject) -> Option<ScriptObject> {
         let d = image.data()?;
         let file = format!("adopted://{:016x}", d.hash);
-        let script_mod = ScriptMod { cargo_manifest_path: String::new(), module_path: String::new(), file: file.clone(), line: d.line as usize, column: d.col as usize, code: d.text.clone(), values: Vec::new() };
+        let site = AdmissionSite { file: &d.file, line: d.line as usize, column: d.col as usize, first_col: 0 };
+        let tokenizer = |heap: &mut ScriptHeap| {
+            let mut tokens = d.tokens.clone();
+            for (k, text) in &d.strings {
+                tokens[*k].token = ScriptToken::String(heap.new_string_from_str(text));
+            }
+            ScriptTokenizer::adopted(&d.text, tokens)
+        };
+        let mut admitted = None;
+        if self.bx.admission != AdmissionLimits::UNLIMITED {
+            let candidate = self.bx.admission.for_text(&d.text, site).and_then(|limits| {
+                let key = ScriptModKey::new(&file, site.line, site.column);
+                if self.bx.code.script_mod_overrides.borrow().get(&key).is_some_and(|s| s.len() > limits.source_bytes) {
+                    return Err(site.limit(0, 0, "source too large to admit"));
+                }
+                if d.tokens.len() > limits.tokens {
+                    return Err(site.limit(0, 0, "token count exceeded"));
+                }
+                AdmittedSource::from_tokens(&d.text, &[], tokenizer(&mut self.bx.heap), None, site, limits, self.bx.keep_numbers)
+            });
+            match candidate {
+                Ok(parsed) => admitted = Some(parsed),
+                Err(record) => {
+                    if self.bx.has_entry_policy() { self.bx.poison(Poison::Error(record.message.clone())); }
+                    if let Some(sink) = &mut self.bx.captured_errors { sink.push(record); }
+                    return None;
+                }
+            }
+        }
+        let script_mod = ScriptMod { cargo_manifest_path: String::new(), module_path: String::new(), file: file.clone(), line: site.line, column: site.column, code: d.text.clone(), values: Vec::new() };
         let body_id = self.add_script_mod_with(script_mod, false);
         {
             let mut bodies = self.bx.code.bodies.borrow_mut();
             let body = &mut bodies[body_id as usize];
             body.real_file = d.file.clone();
-            if body.source_len == 0 {
-                let mut tokens = d.tokens.clone();
-                for (k, text) in &d.strings {
-                    tokens[*k].token = ScriptToken::String(self.bx.heap.new_string_from_str(text));
-                }
-                body.tokenizer = ScriptTokenizer::adopted(&d.text, tokens);
+            if let Some(parsed) = admitted {
+                parsed.install(body);
+            } else if body.source_len == 0 {
+                body.tokenizer = tokenizer(&mut self.bx.heap);
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
-                body.parser.parse(&body.tokenizer, &file, (ScriptBody::line0_of(d.line as usize), d.col as usize), &[]);
+                if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
+                body.parser.parse(&body.tokenizer, &file, (ScriptBody::line0_of(site.line), site.column), &[]);
                 body.source_len = d.text.len();
                 body.content_hash = ScriptBody::content_hash_of(&d.text, &[]);
             }
@@ -3442,32 +3628,54 @@ impl<'a> ScriptVm<'a> {
     /// decoders of): `req.mode` picks what to do with the module, see [`ScriptEvalReq`].
     #[relax_api(run)]
     pub fn vm_eval(&mut self, req: &mut ScriptEvalReq) -> ScriptValue {
+        let result = self.host_entry(|vm| vm.vm_eval_inner(req));
+        if self.bx.is_poisoned() { req.body = u16::MAX; }
+        result
+    }
+
+    fn vm_eval_inner(&mut self, req: &mut ScriptEvalReq) -> ScriptValue {
+        let limits = self.bx.admission;
+        let module = req.module;
+        let line = if req.mode == EVAL_MODULE { module.line.max(1) } else { module.line };
+        let site = AdmissionSite { file: module.file, line, column: if req.mode == EVAL_MODULE { 0 } else { module.column }, first_col: 0 };
+        if limits != AdmissionLimits::UNLIMITED {
+            // Hashing a module name and copying its text also require reading the
+            // source. Reject an unaffordable input while every view is borrowed.
+            let input = if req.mode == EVAL_APPEND && req.code.len() > module.code.len() { req.code } else { module.code };
+            if let Err(record) = limits.for_text(input, site) {
+                return self.refuse_source(req, record);
+            }
+        }
+        let module_name = (req.mode == EVAL_MODULE).then(|| {
+            format!("{}#{:016x}", module.file, ScriptBody::content_hash_of(module.code, module.values))
+        });
+        let module = ScriptModView { file: module_name.as_deref().unwrap_or(module.file), line, ..module };
+        let admitted = if limits != AdmissionLimits::UNLIMITED && req.mode != EVAL_ADOPT {
+            match self.admit_source(req, &module, site) {
+                Ok(source) => Some(source),
+                Err(record) => return self.refuse_source(req, record),
+            }
+        } else { None };
         match req.mode {
-            EVAL_ADD => {
-                req.body = self.add_script_mod_with(req.module.to_owned(), false);
-                NIL
+            EVAL_ADD | EVAL_SOURCE | EVAL_TRANSIENT | EVAL_IN_SCOPE | EVAL_MODULE => {
+                req.body = self.add_script_mod_with(module.to_owned(), matches!(req.mode, EVAL_TRANSIENT | EVAL_MODULE));
+                if let Some(parsed) = admitted {
+                    parsed.install(&mut self.bx.code.bodies.borrow_mut()[req.body as usize]);
+                }
+                if req.mode == EVAL_ADD { return NIL; }
+                if req.mode == EVAL_MODULE {
+                    self.bx.set_body_shown(req.body, req.module.file, 0);
+                    for from in req.uses { self.bx.body_use_all(req.body, *from); }
+                }
+                if req.mode == EVAL_IN_SCOPE {
+                    let scope = self.bx.code.bodies.borrow()[req.body as usize].scope.obj;
+                    self.bx.heap.objects[scope].proto = req.scope.into();
+                    self.ref_reparented_scope(scope);
+                }
+                let source = if req.mode == EVAL_SOURCE { req.scope } else { ScriptObject::ZERO };
+                self.eval_body(req.body, source)
             }
-            EVAL_SOURCE => {
-                req.body = self.add_script_mod_with(req.module.to_owned(), false);
-                self.eval_body(req.body, req.scope)
-            }
-            EVAL_TRANSIENT => {
-                req.body = self.add_script_mod_with(req.module.to_owned(), true);
-                self.eval_body(req.body, ScriptObject::ZERO)
-            }
-            EVAL_IN_SCOPE => {
-                req.body = self.add_script_mod_with(req.module.to_owned(), false);
-                let scope = self.bx.code.bodies.borrow()[req.body as usize].scope.obj;
-                self.bx.heap.objects[scope].proto = req.scope.into();
-                self.ref_reparented_scope(scope);
-                self.eval_body(req.body, ScriptObject::ZERO)
-            }
-            EVAL_MODULE => {
-                let (value, body) = self.eval_module_impl(req.module.to_owned(), req.uses);
-                req.body = body;
-                value
-            }
-            EVAL_APPEND => self.eval_with_append_source_impl(req.module.to_owned(), req.code, req.scope),
+            EVAL_APPEND => self.eval_with_append_source_impl(module.to_owned(), req.code, req.scope, admitted),
             EVAL_ADOPT => {
                 // SAFETY: the request's image points at the caller's fn image for this call
                 let image = unsafe { &*req.image };
@@ -3478,6 +3686,13 @@ impl<'a> ScriptVm<'a> {
             }
             mode => panic!("vm_eval: unknown mode {mode}"),
         }
+    }
+
+    fn refuse_source(&mut self, req: &mut ScriptEvalReq, record: ScriptErrorRecord) -> ScriptValue {
+        req.body = u16::MAX;
+        if self.bx.has_entry_policy() { self.bx.poison(Poison::Error(record.message.clone())); }
+        if let Some(sink) = &mut self.bx.captured_errors { sink.push(record); }
+        ScriptValue::script_err_unexpected(self.bx.threads.cur_ref().trap.ip)
     }
 
     fn eval_body(&mut self, body_id: u16, source: ScriptObject) -> ScriptValue {
@@ -3506,9 +3721,10 @@ impl<'a> ScriptVm<'a> {
         let body = &mut bodies[body_id as usize];
 
         if let ScriptSource::Mod(script_mod) = &body.source {
-            if body.source_len == 0 {
+            if body.source_len == 0 && body.parser.opcodes.is_empty() {
                 body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
+                if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
                 body.tokenizer
                     .tokenize(&body.effective_code, &mut self.bx.heap);
                 body.tokenizer.finish(&mut self.bx.heap);
@@ -3528,7 +3744,10 @@ impl<'a> ScriptVm<'a> {
                 .map(|(i, text)| ScriptErrorRecord::parse(text, body.parser.diagnostics.get(i), &body.parser.file, shift)).collect();
             let warnings: Vec<ScriptErrorRecord> = body.parser.parse_warnings.iter().enumerate()
                 .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.warnings.get(i), &body.parser.file, shift)).collect();
+            let syntax_error = (self.bx.policy.bail_on_uncaught_error && body.parser.had_error)
+                .then(|| parse_records.first().map(|r| r.message.clone())).flatten();
             drop(bodies);
+            if let Some(message) = syntax_error { self.bx.poison(Poison::Error(message)); }
             if let Some(sink) = self.bx.captured_errors.as_mut() {
                 sink.extend(parse_records);
             }
@@ -3536,7 +3755,8 @@ impl<'a> ScriptVm<'a> {
                 self.bx.captured_warnings.extend(warnings);
             }
             // lets point our thread to it
-            let result = self.run_root(body_id);
+            let result = self.run_root_inner(body_id);
+            if self.bx.is_poisoned() { return result; }
             if self.bx.threads.cur_ref().run_unfinished() {
                 self.bx.threads.cur().completions.push(RunCompletion::EvalBody { body_id });
                 return result;
@@ -3568,6 +3788,7 @@ impl<'a> ScriptVm<'a> {
         script_mod: ScriptMod,
         code: &str,
         source: ScriptObject,
+        admitted: Option<Box<AdmittedSource>>,
     ) -> ScriptValue {
         // Look for an existing body with matching file/line/column
         let existing_body_id = {
@@ -3611,8 +3832,13 @@ impl<'a> ScriptVm<'a> {
 
         let mut bodies = self.bx.code.bodies.borrow_mut();
         let body = &mut bodies[body_id as usize];
+        if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
 
-        if let ScriptSource::Mod(existing_mod) = &body.source {
+        let (errors_before, warnings_before);
+        if let Some(parsed) = admitted {
+            parsed.install(body);
+            (errors_before, warnings_before) = (0, 0);
+        } else if let ScriptSource::Mod(existing_mod) = &body.source {
             // Restore checkpoint (removes auto-close opcodes from previous run)
             if let Some(cp) = body.checkpoint.take() {
                 body.parser.restore_checkpoint(cp);
@@ -3623,12 +3849,13 @@ impl<'a> ScriptVm<'a> {
             // Compare the new code's prefix against what the tokenizer already has.
             let content_changed = prev_len > 0
                 && (code.len() < prev_len
-                    || code[..prev_len] != body.tokenizer.original[..prev_len]);
+                    || code.as_bytes()[..prev_len] != body.tokenizer.original.as_bytes()[..prev_len]);
 
             if content_changed {
                 // Content changed entirely — reset and re-tokenize from scratch
                 body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
+                if self.bx.has_entry_policy() && !self.bx.allow_debug_output { body.parser.set_emit_errors(false); }
                 body.checkpoint = None;
                 body.source_len = code.len();
                 body.tokenizer.tokenize(code, &mut self.bx.heap);
@@ -3649,8 +3876,8 @@ impl<'a> ScriptVm<'a> {
             let provisional = body.tokenizer.push_pending_token(&mut self.bx.heap);
 
             // Incremental parse: continue from checkpoint, auto-close for execution
-            let errors_before = body.parser.parse_errors.len();
-            let warnings_before = body.parser.parse_warnings.len();
+            errors_before = body.parser.parse_errors.len();
+            warnings_before = body.parser.parse_warnings.len();
             let (site_file, site_offsets) = body.parse_site(existing_mod);
             body.parser.first_col = body.first_col;
             let cp = body.parser.parse_streaming(
@@ -3664,7 +3891,11 @@ impl<'a> ScriptVm<'a> {
 
             body.checkpoint = Some(cp);
             body.content_hash = ScriptBody::content_hash_of(code, &existing_mod.values);
+        } else {
+            return NIL;
+        }
 
+        if let ScriptSource::Mod(existing_mod) = &body.source {
             // Surface structural errors before run_root rejects the body.
             // Incomplete but valid prefixes still use the parser's auto-close;
             // recovery bytecode from an actual parse error is never executed.
@@ -3676,7 +3907,10 @@ impl<'a> ScriptVm<'a> {
             let new_warnings: Vec<ScriptErrorRecord> = body.parser.parse_warnings[from..].iter().enumerate()
                 .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.warnings.get(from + i), &body.parser.file, shift)).collect();
 
+            let syntax_error = (self.bx.policy.bail_on_uncaught_error && body.parser.had_error)
+                .then(|| body.parser.diagnostics.first().map(|d| d.message.clone())).flatten();
             drop(bodies);
+            if let Some(message) = syntax_error { self.bx.poison(Poison::Error(message)); }
             if let Some(sink) = &mut self.bx.captured_errors {
                 sink.extend(new_parse_errors);
             }
@@ -3687,8 +3921,9 @@ impl<'a> ScriptVm<'a> {
             // will inevitably produce errors that are meaningless until the
             // source is fully received.
             self.bx.silence_errors = true;
-            let result = self.run_root(body_id);
+            let result = self.run_root_inner(body_id);
             self.bx.silence_errors = false;
+            if self.bx.is_poisoned() { return result; }
             if self.bx.threads.cur_ref().run_unfinished() {
                 self.bx.threads.cur().completions.push(RunCompletion::Streaming);
                 return result;
@@ -3787,11 +4022,16 @@ pub struct ScriptVmBase {
     pub run_budget: Option<ScriptRunBudget>,
     /// Interpreter loops live on the Rust stack (`run_core`): a sliced run yields only at 1.
     pub(crate) run_depth: u32,
+    pub(crate) native_depth_limit: u32,
+    // Natives may ignore a callback's result. Carry the bail through every live interpreter.
+    reentry_failure: Option<ScriptValue>,
+    run_stack_origin: usize,
+    run_stack_budget: usize,
+    pub(crate) admission: AdmissionLimits,
     /// Instructions charged by the most recent with_instruction_limit call
     /// (see ScriptVm::last_limit_consumed).
     pub last_limit_consumed: u64,
-    /// The thread's remaining allowance at Return/Bail, stashed because
-    /// handle_trap_on wipes instruction_limit_remaining to None on exit.
+    /// The most recent limited run's remaining allowance at Return/Bail, seeded on entry.
     pub last_limit_exit_remaining: u64,
     /// Arithmetic on host objects (none by default): a host whose values
     /// are objects (animation descriptions, handles) can make `a + b` build
@@ -3809,6 +4049,15 @@ pub struct ScriptVmBase {
     pub(crate) alloc_budgets: Vec<Option<ScriptAllocationBudget>>,
     /// The cross-thread stop runs under an instruction limit sample ([`Self::interrupt_handle`]).
     pub(crate) interrupt: crate::interrupt::ScriptInterrupt,
+    // Layout constraint: the policy stays boxed, after the hot fields, with only its
+    // active bit inline. Held inline at the front of this struct it moved the
+    // interpreter's hot fields (threads, heap, the body epoch) off their offsets and
+    // cost an interpreted loop 2.4% with no new instruction on the dispatch path
+    // (measured natively). A large field added here goes behind a Box too, or is
+    // measured the same way before it lands.
+    policy: Box<ScriptVmPolicy>,
+    policy_thread: Option<usize>,
+    entry_policy_active: bool,
 }
 
 impl Drop for ScriptVmBase {
@@ -3817,6 +4066,67 @@ impl Drop for ScriptVmBase {
 
 #[relax_api(run)]
 impl ScriptVmBase {
+    /// Installs the host's policy. Once a box has stopped only a new VM can run.
+    pub fn set_policy(&mut self, mut policy: ScriptVmPolicy) -> Result<(), &Poison> {
+        if self.is_poisoned() { return Err(self.poisoned().unwrap()); }
+        assert!(self.policy_thread.is_none(), "cannot replace a policy during execution");
+        policy.active = policy.has_limits();
+        policy.total = self.policy.total;
+        policy.last_entry = self.policy.last_entry;
+        self.entry_policy_active = policy.active;
+        *self.policy = policy;
+        self.apply_policy_limits();
+        Ok(())
+    }
+
+    fn apply_policy_limits(&mut self) {
+        self.allow_debug_output &= self.policy.allow_debug_output;
+        self.bail_on_uncaught_error |= self.policy.bail_on_uncaught_error;
+        if let Some(cap) = self.policy.retained_heap_bytes {
+            if self.heap.max_heap_bytes().is_none_or(|current| current > cap) {
+                self.heap.set_max_heap_bytes(Some(cap));
+            }
+        }
+        if let Some(cap) = self.policy.string_bytes {
+            if self.heap.max_string_bytes().is_none_or(|current| current > cap) {
+                self.heap.set_max_string_bytes(Some(cap));
+            }
+        }
+    }
+
+    pub fn policy(&self) -> &ScriptVmPolicy { &self.policy }
+    pub fn poisoned(&self) -> Option<&Poison> { self.policy.poisoned() }
+
+    #[relax_api(run)]
+    pub fn has_entry_policy(&self) -> bool { self.entry_policy_active }
+
+    #[relax_api(run)]
+    pub fn is_poisoned(&self) -> bool { self.poisoned().is_some() }
+
+    pub fn clear_admitted_object(&mut self) {
+        self.policy.clear_admitted_object();
+    }
+
+    fn poison(&mut self, reason: Poison) {
+        if self.has_entry_policy() { self.policy.poisoned.get_or_insert(reason); }
+    }
+
+    pub(crate) fn poison_limit(&mut self, limit: Limit) { self.poison(Poison::Limit(limit)); }
+
+    fn heap_limit_reason(&self) -> Limit {
+        if self.heap.heap_limit_exceeded { Limit::RetainedHeap }
+        else if self.heap.string_limit_exceeded { Limit::StringBytes }
+        else { Limit::Allocation }
+    }
+
+    fn pending_policy_limit(&self) -> Option<Limit> {
+        if self.heap.heap_limit_exceeded || self.heap.allocation_error_pending {
+            Some(self.heap_limit_reason())
+        } else {
+            self.threads.cur_ref().policy_stack_failure(&self.policy)
+        }
+    }
+
     pub(crate) fn notify_let_hook(&self, id: LiveId, value: ScriptValue) {
         if let Some(hook) = self.let_hook {
             unsafe { (hook.call)(hook.data, &self.heap, self.threads.cur_ref().trap.ip, id, value); }
@@ -3872,6 +4182,9 @@ impl ScriptVmBase {
     #[relax_api(run)]
     pub fn empty() -> Self {
         Self {
+            policy: Box::default(),
+            entry_policy_active: false,
+            policy_thread: None,
             void: 0,
             code: ScriptCode::default(),
             threads: ScriptThreads::empty(),
@@ -3891,6 +4204,11 @@ impl ScriptVmBase {
             captured_stash: Vec::new(),
             run_budget: None,
             run_depth: 0,
+            native_depth_limit: u32::MAX,
+            reentry_failure: None,
+            run_stack_origin: 0,
+            run_stack_budget: 0,
+            admission: AdmissionLimits::UNLIMITED,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
@@ -3918,6 +4236,9 @@ impl ScriptVmBase {
         let builtins = ScriptBuiltins::new(&mut heap, pod_builtins, mod_call);
 
         Self {
+            policy: Box::default(),
+            entry_policy_active: false,
+            policy_thread: None,
             void: 0,
             code: ScriptCode {
                 builtins,
@@ -3946,6 +4267,11 @@ impl ScriptVmBase {
             captured_stash: Vec::new(),
             run_budget: None,
             run_depth: 0,
+            native_depth_limit: u32::MAX,
+            reentry_failure: None,
+            run_stack_origin: 0,
+            run_stack_budget: 0,
+            admission: AdmissionLimits::UNLIMITED,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
@@ -4107,13 +4433,13 @@ impl ScriptVmBase {
             if let Some(err) = err {
                 if self.captured_errors.is_some() {
                     let formatted = self.format_error(&err);
-                    crate::inspect_registry::error(self, || formatted.text().to_owned());
+                    if !self.has_entry_policy() || self.allow_debug_output { crate::inspect_registry::error(self, || formatted.text().to_owned()); }
                     if let Some(sink) = self.captured_errors.as_mut() {
                         sink.push(formatted);
                     }
                     continue;
                 }
-                if self.silence_errors {
+                if self.silence_errors || (self.has_entry_policy() && !self.allow_debug_output) {
                     continue;
                 }
                 {

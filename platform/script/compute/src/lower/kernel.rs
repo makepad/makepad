@@ -42,10 +42,9 @@ pub const K_HOST_ERR: u32 = 22;
 /// The op-equivalents one host call may cost for its actual input (0: no
 /// limit); set from admission.
 pub const K_HOST_LIMIT: u32 = 23;
-/// What a run's loops counted (see `crate::work`), stored after its
-/// element loop (four-wide code: its lanes summed).
+/// Low and high words of the work counted in this run, summed across SIMD lanes.
 pub const K_WORK: u32 = 24;
-pub const K_PARAMS: u32 = 25;
+pub const K_PARAMS: u32 = K_WORK + 2;
 /// Most elements one call may run.
 pub const ELEMENT_CAP: u32 = 1 << 30;
 pub const MAX_BUFFERS: usize = 64;
@@ -286,7 +285,7 @@ fn type_words(name: &str) -> Option<(T, u32)> {
     })
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// Registers host layouts as structs (fields at their given offsets).
     fn add_layouts(&mut self, layouts: &[Layout]) -> LResult<()> {
         for lay in layouts {

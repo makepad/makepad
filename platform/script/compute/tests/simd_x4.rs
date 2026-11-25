@@ -41,10 +41,8 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64, lanes: u32) -> Option<[(
         let mut state = [0u32; 1];
         let shared = SHARED;
         let mut scratch = vec![0u32; p.scratch_words()];
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
         let mut mem = ir::Mem { ctx: &mut ictx, state: &mut state, shared: ir::Shared::Read(&shared), bufs: &bufs };
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut io = ir::Io::default();
         ir::run(p, &mut scratch, &mut mem, &mut io, n as u32);
     }
     let mut state = [0u32; 1];
@@ -190,10 +188,8 @@ fn vector_code_of_both_widths_equals_scalar_and_interpreter_on_random_kernels() 
             let mut state = [0u32; 1];
             let shared = SHARED;
             let mut scratch = vec![0u32; p.scratch_words()];
-            let zeros = [0f32; 1];
-            let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
             let mut mem = ir::Mem { ctx: &mut ictx, state: &mut state, shared: ir::Shared::Read(&shared), bufs: &bufs };
-            let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+            let mut io = ir::Io::default();
             ir::run(&p, &mut scratch, &mut mem, &mut io, n as u32);
         }
         // Scalar native.
@@ -280,7 +276,8 @@ fn same_everywhere_at(src: &str, out: &str, words: usize, lanes: u32) {
 #[test]
 fn fused_multiply_add_nans_agree_with_x4() {
     let vals: [u32; 12] = [0x3f80_0000, 0xbfc0_0000, 0, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0xffc0_0000, 0x7fc3_872e, 0xffc1_2345, 0x7f80_0567, 0xff80_0089, 0x7149_f2ca];
-    let mut abc = Vec::new();
+    // The relaxed wasm SubFrom regression, in the first vector at both widths.
+    let mut abc = [0xff81_6802, 0x1d80_2a52, 0x41f7_fe86].map(f32::from_bits).to_vec();
     for &x in &vals {
         for &y in &vals {
             for &z in &vals {
@@ -314,6 +311,9 @@ fn fused_multiply_add_nans_agree_with_x4() {
                 bits(&o)
             };
             let (v, s, i) = (run(&k, true), run(&k, false), run(&ki, false));
+            if src == srcs[1] {
+                assert_eq!(i[0], 0x7fc1_6802, "c - a*b quiets the sign-flipped NaN");
+            }
             for e in 0..n {
                 let t = (abc[3 * e].to_bits(), abc[3 * e + 1].to_bits(), abc[3 * e + 2].to_bits(), u[0].to_bits());
                 assert_eq!(s[e], i[e], "scalar != interpreter, (x, y, z, u) {:x?}:\n{}", t, src);

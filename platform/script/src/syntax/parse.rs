@@ -13,7 +13,24 @@ const ASSIGN: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "
 /// What follows a field name in an object.
 const FIELD_OPS: &[&str] = &[":", ":=", "+:", "-:", ">:", "<:", "^:"];
 
+// Release probes compared trees 8, 24 and 40 nodes deep (calls, arrays,
+// objects, indices and unary operators). The largest per-node strides for
+// print / recursive for_each_child / drop, in bytes, were 112/80/48 on x64
+// Linux, 128/112/48 on arm64 macOS and 176/144/128 on x64 Windows. Print
+// and drop were sampled at allocator calls, the child visitor at each node.
+// Allow 512 bytes per node on top of the stack the shared budget reserves.
+const WALK_BYTES_PER_NODE: usize = 512;
+// Between guarded expressions the grammar can wrap an operand in a statement,
+// assignment, operator chain, function and block, or a named field/argument.
+// Reserve six nodes per descent. Postfix adds one node per iteration.
+const EXPR_NODES: usize = 6;
+
 struct Parser<'a> {
+    stack_origin: usize,
+    stack_budget: usize,
+    ancestor_height: usize,
+    height: usize,
+    diagnostics: Vec<SyntaxError>,
     source: &'a str,
     tokens: Vec<LexedToken>,
     /// For each opening bracket token, the index of its closing one.
@@ -23,8 +40,8 @@ struct Parser<'a> {
 
 type Res<T> = Result<T, SyntaxError>;
 
-pub(super) fn parse_file(source: &str, units: &UnitTable) -> Res<Node> {
-    let mut p = Parser::new(source, units)?;
+pub(super) fn parse_file(source: &str, units: &UnitTable, origin: usize, budget: usize) -> Res<(Node, Vec<SyntaxError>)> {
+    let mut p = Parser::new(source, units, origin, budget)?;
     let mut stmts = Vec::new();
     loop {
         p.skip_separators();
@@ -33,7 +50,7 @@ pub(super) fn parse_file(source: &str, units: &UnitTable) -> Res<Node> {
         }
         stmts.push(p.statement(true)?);
     }
-    Ok(Node { span: 0..source.len(), kind: Kind::Block(Block { open: None, close: None, stmts }) })
+    Ok((Node { span: 0..source.len(), kind: Kind::Block(Block { open: None, close: None, stmts }) }, p.diagnostics))
 }
 
 /// Parse one value or statement (a fragment such as `keys([0, 1], [1, 2])`).
@@ -43,9 +60,12 @@ pub fn parse_value(text: &str) -> Res<Node> {
 
 /// Parse one value or statement with the host's registered number suffixes.
 pub fn parse_value_with(text: &str, units: &UnitTable) -> Res<Node> {
-    let mut p = Parser::new(text, units)?;
+    let origin = 0u8;
+    let marker = std::hint::black_box(&origin) as *const u8 as usize;
+    let mut p = Parser::new(text, units, marker, makepad_stack_budget::native_stack_budget(marker))?;
     p.skip_separators();
     let node = p.statement(true)?;
+    if let Some(diagnostic) = p.diagnostics.pop() { return Err(diagnostic); }
     p.skip_separators();
     if !p.done() {
         return p.error("more text follows the value");
@@ -54,7 +74,7 @@ pub fn parse_value_with(text: &str, units: &UnitTable) -> Res<Node> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str, units: &UnitTable) -> Res<Self> {
+    fn new(source: &'a str, units: &UnitTable, stack_origin: usize, stack_budget: usize) -> Res<Self> {
         let tokens = lex_with(source, units);
         let mut close = vec![None; tokens.len()];
         let mut stack: Vec<usize> = Vec::new();
@@ -82,7 +102,9 @@ impl<'a> Parser<'a> {
         if let Some(&open) = stack.first() {
             return Err(SyntaxError { at: tokens[open].span().start, message: format!("this `{}` is never closed", &source[tokens[open].span().clone()]) });
         }
-        Ok(Parser { source, tokens, close, at: 0 })
+        // Include the file block and an enclosing statement in every path.
+        Ok(Parser { source, tokens, close, at: 0, stack_origin, stack_budget,
+            ancestor_height: 2, height: 0, diagnostics: Vec::new() })
     }
 
     // ---- token helpers
@@ -157,9 +179,70 @@ impl<'a> Parser<'a> {
         self.end_of(self.at - 1)
     }
 
+    fn diagnostic_node(&mut self, span: Range<usize>) -> Node {
+        let diagnostic = SyntaxError { at: span.start, message: "syntax nesting too deep".into() };
+        self.diagnostics.push(diagnostic);
+        Node { span, kind: Kind::Error }
+    }
+
+    // Skip a rejected subtree using the delimiter pairs found in the iterative
+    // first pass. Leave its enclosing delimiter and subsequent statements intact.
+    fn skip_nested(&mut self) -> Res<Node> {
+        let start = self.here();
+        if let Some(close) = self.close.get(self.at).copied().flatten() {
+            self.at = close + 1;
+        } else {
+            let first = self.at;
+            self.skip_statement_tokens();
+            if self.at == first { return self.error("a value was expected"); }
+        }
+        Ok(self.diagnostic_node(start..self.last_end()))
+    }
+
+    fn skip_statement_tokens(&mut self) {
+        let first = self.at;
+        while !self.done() && !self.is_separator(self.at)
+            && !matches!(self.kind(self.at), Some(ScriptTokenTag::CloseCurly | ScriptTokenTag::CloseSquare | ScriptTokenTag::CloseRound))
+            && (self.at == first || !self.newline_before(self.at))
+        {
+            self.at = self.close[self.at].unwrap_or(self.at) + 1;
+        }
+    }
+
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> Res<Node>) -> Res<Node> {
+        let marker = 0u8;
+        let here = std::hint::black_box(&marker) as *const u8 as usize;
+        if self.ancestor_height + EXPR_NODES >= self.stack_budget / WALK_BYTES_PER_NODE
+            || self.stack_origin.abs_diff(here) >= self.stack_budget
+        {
+            return self.skip_nested();
+        }
+        self.ancestor_height += EXPR_NODES;
+        let sibling_height = std::mem::take(&mut self.height);
+        let node = parse(self);
+        self.ancestor_height -= EXPR_NODES;
+        self.height = sibling_height.max(self.height + EXPR_NODES);
+        node
+    }
+
     // ---- statements
 
     fn statement(&mut self, allow_struct: bool) -> Res<Node> {
+        let start = self.at;
+        let diagnostics = self.diagnostics.len();
+        match self.statement_inner(allow_struct) {
+            // Skipping part of an unbracketed expression (e.g. a nested if)
+            // can also elide its continuation. Recover at the statement boundary.
+            Err(_) if self.diagnostics.len() > diagnostics => {
+                self.at = start;
+                self.skip_statement_tokens();
+                Ok(Node { span: self.start_of(start)..self.last_end(), kind: Kind::Error })
+            }
+            result => result,
+        }
+    }
+
+    fn statement_inner(&mut self, allow_struct: bool) -> Res<Node> {
         if let Some((name, name_span, op, after)) = self.field_key(self.at) {
             // `name: value` as a statement (a file or block that is the body of an object).
             self.at = after;
@@ -258,6 +341,10 @@ impl<'a> Parser<'a> {
     /// A `-` is binary wherever it follows a value, as in the VM: `[1 -2]` is one
     /// element, `[1, -2]` two.
     fn expr(&mut self, allow_struct: bool) -> Res<Node> {
+        self.nested(|p| p.expression_inner(allow_struct))
+    }
+
+    fn expression_inner(&mut self, allow_struct: bool) -> Res<Node> {
         let first = self.operand(allow_struct)?;
         // `for`, `while` and `loop` end the statement (the VM starts a new one after
         // their block: an operator on the next line does not continue it).
@@ -314,6 +401,13 @@ impl<'a> Parser<'a> {
     }
 
     fn operand(&mut self, allow_struct: bool) -> Res<Node> {
+        let sibling_height = std::mem::take(&mut self.height);
+        let node = self.operand_inner(allow_struct);
+        self.height = sibling_height.max(self.height);
+        node
+    }
+
+    fn operand_inner(&mut self, allow_struct: bool) -> Res<Node> {
         let Some(token) = self.tokens.get(self.at) else { return self.error("a value was expected, the text ended") };
         let index = self.at;
         let start = token.span().start;
@@ -336,7 +430,7 @@ impl<'a> Parser<'a> {
                 }
                 "-" | "!" | ".." | "~" => {
                     self.at += 1;
-                    let inner = self.operand(allow_struct)?;
+                    let inner = self.nested(|p| p.operand(allow_struct))?;
                     return Ok(Node { span: start..inner.span.end, kind: Kind::Unary { op: op.to_string(), operand: Box::new(inner) } });
                 }
                 "." if self.is_word(index + 1) => {
@@ -388,6 +482,11 @@ impl<'a> Parser<'a> {
                     node = Node { span: node.span.start..end, kind: Kind::Unary { op: "?".into(), operand: Box::new(node) } };
                 }
                 _ => return Ok(node),
+            }
+            self.height += 1;
+            if self.ancestor_height + self.height >= self.stack_budget / WALK_BYTES_PER_NODE {
+                node = self.diagnostic_node(node.span);
+                self.height = 1;
             }
         }
     }
@@ -752,12 +851,12 @@ impl<'a> Parser<'a> {
         if self.is_kw(self.at, "else") {
             self.at += 1;
             if self.is_kw(self.at, "if") {
-                otherwise = Some(Box::new(self.if_expr()?));
+                otherwise = Some(Box::new(self.nested(Self::if_expr)?));
             } else {
                 otherwise = Some(Box::new(self.body_or_expr_after_cond()?));
             }
         } else if self.is_kw(self.at, "elif") {
-            otherwise = Some(Box::new(self.if_expr()?));
+            otherwise = Some(Box::new(self.nested(Self::if_expr)?));
         }
         let end = otherwise.as_ref().map_or(then.span.end, |o| o.span.end);
         Ok(Node { span: start..end, kind: Kind::If { cond: Box::new(cond), then: Box::new(then), otherwise } })

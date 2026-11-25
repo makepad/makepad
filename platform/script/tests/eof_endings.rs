@@ -6,6 +6,11 @@
 //! Common in AI-written sources. Full evals now flush the tokenizer at the
 //! end (ScriptTokenizer::finish); streamed evals parse the pending token
 //! provisionally and re-lex it when more source arrives (pending_token).
+//!
+//! Also a block that ends on a `use` statement (the source before a `;` or a
+//! host's `\n;` terminator, a fn body, an if arm): a `use` leaves no value,
+//! but the block's end took one from the empty stack and failed the same
+//! way. Source written as appended chunks often ends a chunk on a `use`.
 
 use makepad_script::*;
 
@@ -43,11 +48,16 @@ const ENDINGS: &[(&str, &str, f64)] = &[
     ("unclosed_comment", "let x = 5\nx * 4 /* never closed", 20.0),
     ("color", "let c = #f00\nc", -4.0),
     ("negative", "let x = 3\nx - 10", -7.0),
+    ("use_last", "let x = 2\nuse mod.math.*\n;", -1.0),
+    ("use_mid_and_last", "use mod.math.*\nlet x = abs(-2)\nuse mod.math.*;", -1.0),
+    ("use_ends_fn", "fn f() { use mod.math.* }\nlet v = f()\nif v == nil { 2 } else { 0 }", 2.0),
+    ("use_ends_arm", "if true { use mod.math.* }\nlet v = if true { use mod.math.* }\nif v == nil { 3 } else { 0 }", 3.0),
 ];
 
 fn check(name: &str, value: ScriptValue, want: f64, errs: Vec<String>) {
     assert!(errs.is_empty(), "{name}: eval errors: {errs:?}");
     match want {
+        w if w == -1.0 => assert!(value.is_nil(), "{name}: {value:?}"),
         // A string, an atom and a color: just not nil.
         w if w == -2.0 || w == -3.0 || w == -4.0 => {
             assert!(!value.is_nil(), "{name}: the last value was lost: {value:?}")

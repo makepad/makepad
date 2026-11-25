@@ -148,6 +148,7 @@ fn run_script_task_thread_completed_hooks(
         .clone();
     let mut consumed = false;
     for hook in hooks {
+        if host.vm_base().is_some_and(ScriptVmBase::is_poisoned) { break; }
         consumed |= unsafe { (hook.call)(hook.context, host, thread_id, result) };
     }
     consumed
@@ -164,6 +165,7 @@ fn run_script_task_pump_hooks(host: &mut ScriptHostContext) -> bool {
         .clone();
     let mut progressed = false;
     for hook in hooks {
+        if host.vm_base().is_some_and(ScriptVmBase::is_poisoned) { break; }
         progressed |= unsafe { (hook.call)(hook.context, host) };
     }
     progressed
@@ -171,7 +173,15 @@ fn run_script_task_pump_hooks(host: &mut ScriptHostContext) -> bool {
 
 #[relax_api(run)]
 pub fn handle_script_tasks(host: &mut ScriptHostContext) {
+    fn stopped(host: &mut ScriptHostContext) -> bool {
+        if !host.vm_base().is_some_and(ScriptVmBase::is_poisoned) { return false; }
+        let tasks = &mut host.std_mut::<ScriptStd>().unwrap().data.tasks;
+        tasks.pending_resumes.clear();
+        tasks.tasks.borrow_mut().clear();
+        true
+    }
     loop {
+        if stopped(host) { return; }
         let mut progressed = false;
 
         let mut next_thread = None;
@@ -227,11 +237,13 @@ pub fn handle_script_tasks(host: &mut ScriptHostContext) {
                 .and_then(|bx| bx.thread_is_paused(next_thread.to_index()))
                 .unwrap_or(true);
 
+            if stopped(host) { return; }
             if !is_paused {
                 run_script_task_thread_completed_hooks(host, next_thread, result);
             }
         }
 
+        if stopped(host) { return; }
         if run_script_task_pump_hooks(host) {
             progressed = true;
         }

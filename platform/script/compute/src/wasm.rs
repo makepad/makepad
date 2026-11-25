@@ -41,8 +41,8 @@
 //!   - `ctx`: the shader's ctx words (rate, frame of the first sample,
 //!     ..., params; `AudioShader::ctx_words`), `state` one voice's (or the
 //!     effect's) state words, `shared` its init()-built tables (read only).
-//!   - `table`: four i32 byte addresses: input channels 0 and 1, output
-//!     channels 0 and 1, each `n` f32 frames (16 bytes; an instrument's
+//!   - `table`: one i32 byte address per channel, inputs then outputs,
+//!     each pointing to `n` f32 frames (an instrument's
 //!     inputs may be one zero buffer, its outputs anything to mix into).
 //!     The program ADDS into the outputs; `In`/`Out` clamp the frame index
 //!     into `0..n` exactly as the interpreter does.
@@ -110,7 +110,12 @@ pub struct Entry<'a> {
 /// for a program without the element loop's shape: audio programs are
 /// scalar).
 pub fn module(entries: &[Entry], target: Target) -> Option<Vec<u8>> {
-    if entries.iter().any(|e| ir::has_narrow(e.program)) {
+    module_with_memory(entries, target, 1)
+}
+
+/// Assembles entries that share an imported memory of at least `min_pages`.
+pub fn module_with_memory(entries: &[Entry], target: Target, min_pages: u32) -> Option<Vec<u8>> {
+    if min_pages > target.max_pages.unwrap_or(65536).min(65536) || entries.iter().any(|e| ir::has_narrow(e.program)) {
         return None;
     }
     // Function indices: the entries; the four-wide exact multiply-add's
@@ -160,13 +165,13 @@ pub fn module(entries: &[Entry], target: Target) -> Option<Vec<u8>> {
             } else {
                 let params = base.into_iter().chain(g.params.iter().map(|v| wty(g.vals[v.0 as usize]))).collect();
                 let t = ty(params, g.results.iter().map(|v| wty(g.vals[v.0 as usize])).collect());
-                funcs.push((scalar_fn(g, target, &calls[k])?, t));
+                funcs.push((scalar_fn(g, e.program, target, &calls[k])?, t));
             }
         }
     }
     let exports: Vec<(String, u32)> = (0..n).map(|k| (format!("run{}", k), k)).collect();
     let types: Vec<(&[u8], &[u8])> = types.iter().map(|(a, b)| (&a[..], &b[..])).collect();
-    Some(assemble(&funcs, &types, &exports, target))
+    Some(assemble(&funcs, &types, &exports, target, min_pages.max(1)))
 }
 
 /// Any f32 fused multiply-add in `b`.
@@ -211,7 +216,7 @@ pub fn fma_probe(target: Target) -> Vec<u8> {
     f.fd(op::F32X4_RELAXED_MADD);
     f.fd(op::F32X4_EXTRACT_LANE);
     f.b(0);
-    assemble(&[(f, 0)], &[(&[op::F32; 3], &[op::F32])], &[("fma".into(), 0)], target)
+    assemble(&[(f, 0)], &[(&[op::F32; 3], &[op::F32])], &[("fma".into(), 0)], target, 1)
 }
 
 /// The probe's arguments: (1 + 2^-23)^2 - (1 + 2^-22) is 2^-46 exactly,
@@ -240,6 +245,7 @@ pub(crate) mod op {
     pub const I32_LOAD: u8 = 0x28;
     pub const F32_LOAD: u8 = 0x2A;
     pub const I32_STORE: u8 = 0x36;
+    pub const I64_STORE: u8 = 0x37;
     pub const F32_STORE: u8 = 0x38;
     pub const I32_CONST: u8 = 0x41;
     pub const I64_CONST: u8 = 0x42;
@@ -397,7 +403,6 @@ pub(crate) mod op {
     pub const I32X4_TRUNC_SAT_F32X4_U: u32 = 0xF9;
     pub const F32X4_CONVERT_I32X4_S: u32 = 0xFA;
     pub const F32X4_RELAXED_MADD: u32 = 0x105;
-    pub const F32X4_RELAXED_NMADD: u32 = 0x106;
 }
 
 pub(crate) fn uleb(out: &mut Vec<u8>, mut x: u64) {
@@ -538,7 +543,7 @@ fn wty(t: Ty) -> u8 {
 
 /// Type section, import, function and export sections, code: functions
 /// (body, type index), types (params, results), exports (name, function).
-fn assemble(funcs: &[(Body, u32)], types: &[(&[u8], &[u8])], exports: &[(String, u32)], mem: Target) -> Vec<u8> {
+fn assemble(funcs: &[(Body, u32)], types: &[(&[u8], &[u8])], exports: &[(String, u32)], mem: Target, min_pages: u32) -> Vec<u8> {
     fn section(out: &mut Vec<u8>, id: u8, body: &[u8]) {
         out.push(id);
         uleb(out, body.len() as u64);
@@ -565,17 +570,17 @@ fn assemble(funcs: &[(Body, u32)], types: &[(&[u8], &[u8])], exports: &[(String,
     match (mem.shared, mem.max_pages) {
         (true, max) => {
             s.push(0x03);
-            uleb(&mut s, 1);
+            uleb(&mut s, u64::from(min_pages));
             uleb(&mut s, max.unwrap_or(65536) as u64);
         }
         (false, Some(max)) => {
             s.push(0x01);
-            uleb(&mut s, 1);
+            uleb(&mut s, u64::from(min_pages));
             uleb(&mut s, max as u64);
         }
         (false, None) => {
             s.push(0x00);
-            uleb(&mut s, 1);
+            uleb(&mut s, u64::from(min_pages));
         }
     }
     section(&mut out, 2, &s);
@@ -647,9 +652,9 @@ struct Sc<'a> {
     var: Vec<u32>,
     /// Per host buffer used: (byte address local, last word index local).
     buf: Vec<Option<(u32, u32)>>,
-    /// Audio I/O: per channel used (in 0, in 1, out 0, out 1) the local
-    /// holding its byte address, loaded from `table` once.
-    io: [u32; 4],
+    /// Local holding each used channel's byte address, in table order.
+    io: Vec<u32>,
+    output_base: usize,
     labels: Vec<Label>,
     bounds: Vec<Option<u32>>,
     consts: Vec<Option<i32>>,
@@ -670,7 +675,7 @@ pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body>
     }
     let mut sc = Sc::new(p, target, Body::new(), &|_| true, &|_| true);
     sc.calls = calls.to_vec();
-    if uses_io(p) {
+    if p.channel_count() != 0 {
         // An audio call of no frames does nothing (the interpreter returns
         // before running the program; `n - 1` clamps every I/O index).
         sc.f.get(P_N);
@@ -680,6 +685,7 @@ pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body>
         sc.f.b(op::RETURN);
         sc.f.b(op::END);
     }
+    sc.load_io(p)?;
     sc.block(&p.body);
     Some(sc.f)
 }
@@ -700,36 +706,23 @@ fn scalar_ok(p: &Program) -> bool {
         })
     }
     let all = || std::iter::once(p).chain(p.funcs.iter());
+    if !all().all(|g| ok(&g.body)) {
+        return false;
+    }
+    if p.channel_count() == 0 {
+        return true;
+    }
     let bufs = all().any(|g| {
         let mut used = Vec::new();
         used_bufs(&g.body, &mut used);
         !used.is_empty()
     });
-    all().all(|g| ok(&g.body)) && !(bufs && uses_io(p))
-}
-
-/// The audio I/O channels `b` reads (`In`, bits 0-1) and adds to (`Out`,
-/// bits 2-3).
-fn io_channels(b: &Block) -> u8 {
-    b.iter()
-        .map(|s| match s {
-            Stmt::Def(_, Op::In { ch, .. }) => 1 << (*ch & 1),
-            Stmt::Out { ch, .. } => 4 << (*ch & 1),
-            Stmt::If(_, t, e) => io_channels(t) | io_channels(e),
-            Stmt::Loop { body, .. } => io_channels(body),
-            _ => 0,
-        })
-        .fold(0, |a, b| a | b)
-}
-
-/// Any audio I/O in `p` or its functions.
-fn uses_io(p: &Program) -> bool {
-    io_channels(&p.body) != 0 || p.funcs.iter().any(|g| io_channels(&g.body) != 0)
+    !bufs || all().all(|g| p.used_channels(&g.body).is_some_and(|used| !used.contains(&true)))
 }
 
 /// The scalar code of function `g`: the six entry parameters, then its
 /// params; its results returned.
-pub(crate) fn scalar_fn(g: &Program, target: Target, calls: &[u32]) -> Option<Body> {
+pub(crate) fn scalar_fn(g: &Program, entry: &Program, target: Target, calls: &[u32]) -> Option<Body> {
     if !scalar_ok(g) {
         return None;
     }
@@ -738,6 +731,7 @@ pub(crate) fn scalar_fn(g: &Program, target: Target, calls: &[u32]) -> Option<Bo
     for (k, pv) in g.params.iter().enumerate() {
         sc.val[pv.0 as usize] = N_PARAMS + k as u32;
     }
+    sc.load_io(entry)?;
     sc.block(&g.body);
     for r in &g.results {
         sc.v(*r);
@@ -976,17 +970,7 @@ impl<'a> Sc<'a> {
         let tf32 = f.local(op::F32);
         let mut consts = vec![None; p.vals.len()];
         collect_consts(&p.body, &mut consts);
-        let mut sc = Sc { p, f, val, var, buf: Vec::new(), io: [u32::MAX; 4], labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma, calls: Vec::new() };
-        let chans = io_channels(&p.body);
-        for k in 0..4 {
-            if chans & (1 << k) != 0 {
-                let l = sc.f.local(op::I32);
-                sc.f.get(P_TABLE);
-                sc.f.mem(op::I32_LOAD, 4 * k);
-                sc.f.set(l);
-                sc.io[k as usize] = l;
-            }
-        }
+        let mut sc = Sc { p, f, val, var, buf: Vec::new(), io: Vec::new(), output_base: 0, labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma, calls: Vec::new() };
         let mut used = Vec::new();
         used_bufs(&p.body, &mut used);
         sc.buf = vec![None; used.iter().copied().max().map_or(0, |m| m as usize + 1)];
@@ -1003,6 +987,22 @@ impl<'a> Sc<'a> {
             sc.buf[k as usize] = Some((ptr, last));
         }
         sc
+    }
+
+    fn load_io(&mut self, entry: &Program) -> Option<()> {
+        let used = entry.used_channels(&self.p.body)?;
+        self.output_base = usize::from(entry.input_channels);
+        self.io.resize(used.len(), u32::MAX);
+        for (slot, used) in used.into_iter().enumerate() {
+            if used {
+                let local = self.f.local(op::I32);
+                self.f.get(P_TABLE);
+                self.f.mem(op::I32_LOAD, 4 * slot as u32);
+                self.f.set(local);
+                self.io[slot] = local;
+            }
+        }
+        Some(())
     }
 
     fn v(&mut self, v: Val) {
@@ -1129,7 +1129,7 @@ impl<'a> Sc<'a> {
             Stmt::Out { ch, idx, val } => {
                 // out[clamp(idx, 0, n - 1)] += val (f32, as the interpreter).
                 let t = self.ti[2];
-                self.io_address(2 + (*ch & 1), *idx);
+                self.io_address(self.output_base + usize::from(*ch), *idx);
                 self.f.tee(t);
                 self.f.get(t);
                 self.f.mem(op::F32_LOAD, 0);
@@ -1142,8 +1142,8 @@ impl<'a> Sc<'a> {
     }
 
     /// Pushes the byte address of frame `clamp(idx, 0, n - 1)` of audio
-    /// channel `k` (0, 1 in; 2, 3 out). n >= 1 here (the entry returns on 0).
-    fn io_address(&mut self, k: u8, idx: Val) {
+    /// table slot `k`. n >= 1 here (the entry returns on 0).
+    fn io_address(&mut self, k: usize, idx: Val) {
         let [t0, t1, _] = self.ti;
         self.v(idx);
         self.f.get(P_N);
@@ -1152,7 +1152,7 @@ impl<'a> Sc<'a> {
         self.f.min_u(t0, t1);
         self.f.i32c(2);
         self.f.b(op::I32_SHL);
-        self.f.get(self.io[k as usize]);
+        self.f.get(self.io[k]);
         self.f.b(op::I32_ADD);
     }
 
@@ -1323,15 +1323,15 @@ impl<'a> Sc<'a> {
                 self.f.b(op::I32_ADD);
             }
             Op::Fma(k, a, b, c) if self.relaxed => {
-                // Lane 0 of the fused vector multiply-add.
-                for (x, neg) in [(a, false), (b, false), (c, k == Fma::Sub)] {
+                // Negate the AIR operand before the fused multiply-add so a NaN's sign flips too.
+                for (x, neg) in [(a, k == Fma::SubFrom), (b, false), (c, k == Fma::Sub)] {
                     self.v(x);
                     if neg {
                         self.f.b(op::F32_NEG);
                     }
                     self.f.fd(op::F32X4_SPLAT);
                 }
-                self.f.fd(if k == Fma::SubFrom { op::F32X4_RELAXED_NMADD } else { op::F32X4_RELAXED_MADD });
+                self.f.fd(op::F32X4_RELAXED_MADD);
                 self.f.fd(op::F32X4_EXTRACT_LANE);
                 self.f.b(0);
             }
@@ -1359,7 +1359,7 @@ impl<'a> Sc<'a> {
                 self.fma_tail();
             }
             Op::In { ch, idx } => {
-                self.io_address(ch & 1, idx);
+                self.io_address(usize::from(ch), idx);
                 self.f.mem(op::F32_LOAD, 0);
             }
         }

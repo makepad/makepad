@@ -79,7 +79,7 @@ impl Builder {
         self.sel(c, n, v)
     }
 
-    fn k_sin(&mut self, x: Val) -> Val {
+    pub(super) fn k_sin(&mut self, x: Val) -> Val {
         const S1: f64 = -1.66666666666666324348e-01;
         const S2: f64 = 8.33333333332248946124e-03;
         const S3: f64 = -1.98412698298579493134e-04;
@@ -109,7 +109,7 @@ impl Builder {
         acc
     }
 
-    fn k_cos(&mut self, x: Val) -> Val {
+    pub(super) fn k_cos(&mut self, x: Val) -> Val {
         const C1: f64 = 4.16666666666666019037e-02;
         const C2: f64 = -1.38888888888741095749e-03;
         const C3: f64 = 2.48015872894767294178e-05;

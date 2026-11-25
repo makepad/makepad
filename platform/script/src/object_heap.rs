@@ -77,6 +77,8 @@ pub const OBJ_SET_MERGE: u32 = 9;
 /// Write `value` where the name `key` lives: a named child in `obj`'s own vec is replaced in
 /// place, anything else is `set_value`.
 pub const OBJ_SET_SLOT: u32 = 10;
+// A quoted field in a +: write keeps its literal key and opts the receiver into string lookup.
+const OBJ_SET_INHERIT_SLOT: u32 = 11;
 
 // obj_new modes
 pub const OBJ_NEW: u32 = 0;
@@ -302,7 +304,9 @@ impl ScriptHeap {
         match mode {
             OBJ_SET_VALUE => self.set_value_impl(obj, key, value, trap),
             OBJ_SET_VEC => self.set_value_vec_impl(obj, key, value, trap),
-            OBJ_SET_SLOT => self.set_value_slot_impl(obj, key, value, trap),
+            OBJ_SET_SLOT | OBJ_SET_INHERIT_SLOT => self.set_value_slot_impl(
+                obj, key, value, mode == OBJ_SET_INHERIT_SLOT && key.is_string_like(), trap,
+            ),
             OBJ_SET_MAP_OWN => {
                 self.objects[obj].map.insert(key, ScriptMapValue { tag: Default::default(), value });
                 NIL
@@ -335,10 +339,20 @@ impl ScriptHeap {
             let kv = object.vec[index];
             return ObjIterAt { key: kv.key, value: kv.value, found: true, vec_len, map_len: object.map.len() };
         }
-        match object.map.iter().nth(index - vec_len) {
+        match object.map.get_index(index - vec_len) {
             Some((key, map_val)) => ObjIterAt { key: *key, value: map_val.value, found: true, vec_len, map_len: object.map.len() },
             None => ObjIterAt { key: NIL, value: NIL, found: false, vec_len, map_len: object.map.len() },
         }
+    }
+
+    /// A live object's vector children precede the insertion-ordered fields.
+    pub(crate) fn next_object_entry(&mut self, obj: ScriptObject, cursor: usize, iteration: usize) -> Option<ScriptVecValue> {
+        self.touch_obj(obj);
+        let object = &mut self.objects[obj];
+        if let Some(kv) = object.vec.get(iteration) {
+            return Some(*kv);
+        }
+        object.map.cursor_next(cursor).map(|(key, v)| ScriptVecValue { key: *key, value: v.value })
     }
 
     /// A new object by `mode` (OBJ_NEW*). `proto` is the prototype, or for OBJ_NEW_MODULE the
@@ -751,14 +765,36 @@ impl ScriptHeap {
         ptr: ScriptObject,
         key: ScriptValue,
         value: ScriptValue,
+        literal_string: bool,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        // an instance holds its own copy of the template's vec, so its own vec is where a
-        // named child lives; a typed object's set_value routes a proto's vec child itself
+        // A named child lives in the instance's own copy of the template's vec.
         if self.objects[ptr].vec.iter().any(|kv| kv.key == key) {
-            return self.set_value_vec_impl(ptr, key, value, trap);
+            let result = self.set_value_vec_impl(ptr, key, value, trap);
+            // An existing vec slot is replaced in place, with no allocation charge.
+            if literal_string && !result.is_err() {
+                self.objects[ptr].tag.set_string_keys();
+            }
+            return result;
+        }
+        if literal_string {
+            // Use the literal spelling for this write without changing subsequent lookups
+            // until the store (including its allocation charge) actually succeeds.
+            return match self.store_non_id_property(ptr, key, value, trap) {
+                Ok(()) => {
+                    self.escape_value(value);
+                    self.objects[ptr].tag.set_string_keys();
+                    NIL
+                }
+                Err(result) => result,
+            };
         }
         self.set_value_impl(ptr, key, value, trap)
+    }
+
+    #[inline]
+    pub(crate) fn set_inherit_slot(&mut self, ptr: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        self.obj_set(OBJ_SET_INHERIT_SLOT, ptr, key, value, trap)
     }
 
     #[inline]
@@ -773,11 +809,11 @@ impl ScriptHeap {
         value: ScriptValue,
         trap: ScriptTrap,
     ) -> ScriptValue {
-        self.escape_value(value);
-        let object = &mut self.objects[ptr];
-        if object.tag.is_vec_frozen() {
+        if self.objects[ptr].tag.is_vec_frozen() {
             return script_err_immutable!(trap, "cannot set vec key on frozen vec");
         }
+        self.escape_value(value);
+        let object = &mut self.objects[ptr];
         for kv in object.vec.iter_mut().rev() {
             if kv.key == key {
                 kv.value = value;
@@ -799,7 +835,7 @@ impl ScriptHeap {
         key: ScriptValue,
         value: ScriptValue,
         trap: ScriptTrap,
-    ) -> ScriptValue {
+    ) -> Result<(), ScriptValue> {
         let mut ptr = ptr;
         loop {
             let object = &mut self.objects[ptr];
@@ -808,19 +844,19 @@ impl ScriptHeap {
             for kv in object.vec.iter_mut().rev() {
                 if kv.key == key {
                     if is_immutable {
-                        return script_err_immutable!(trap, "cannot modify immutable object");
+                        return Err(script_err_immutable!(trap, "cannot modify immutable object"));
                     }
                     kv.value = value;
-                    return NIL;
+                    return Ok(());
                 }
             }
             // Check map for key
             if object.map_get(&key).is_some() {
                 if is_immutable {
-                    return script_err_immutable!(trap, "cannot modify immutable object");
+                    return Err(script_err_immutable!(trap, "cannot modify immutable object"));
                 }
                 object.map_set_if_exist(key, value);
-                return NIL;
+                return Ok(());
             }
             if let Some(next_ptr) = object.proto.as_object() {
                 ptr = next_ptr
@@ -830,22 +866,22 @@ impl ScriptHeap {
         }
         // alright nothing found
         if self.objects[ptr].tag.is_immutable() {
-            return script_err_immutable!(trap, "cannot modify immutable object");
+            return Err(script_err_immutable!(trap, "cannot modify immutable object"));
         }
         if self.objects[ptr].tag.is_vec2() {
             if !self.charge_object_vec_entries(1, "adding a deep object vector property") {
-                return NIL;
+                return Err(NIL);
             }
             let object = &mut self.objects[ptr];
             object.vec.push(ScriptVecValue { key, value });
         } else {
             if !self.charge_object_map_entry(ptr, key, "adding a deep object property") {
-                return NIL;
+                return Err(NIL);
             }
             let object = &mut self.objects[ptr];
             object.map_insert(key, value);
         }
-        NIL
+        Ok(())
     }
 
     #[inline]
@@ -956,7 +992,7 @@ impl ScriptHeap {
                                     format_value_type(self, value)
                                 );
                             }
-                            return self.set_value_shallow(top_ptr, key, value, trap);
+                            return self.set_value_shallow(top_ptr, key, value, trap).err().unwrap_or(NIL);
                         }
                     }
                 }
@@ -970,7 +1006,7 @@ impl ScriptHeap {
                             format_value_type(self, value)
                         );
                     }
-                    return self.set_value_shallow(top_ptr, key, value, trap);
+                    return self.set_value_shallow(top_ptr, key, value, trap).err().unwrap_or(NIL);
                 }
                 // also check vec for := defined properties on non-vec2 objects
                 if !object.tag.is_vec2() {
@@ -1030,30 +1066,30 @@ impl ScriptHeap {
         key: ScriptValue,
         value: ScriptValue,
         trap: ScriptTrap,
-    ) -> ScriptValue {
+    ) -> Result<(), ScriptValue> {
         if self.is_allocation_poison_object(ptr) || self.objects[ptr].tag.is_immutable() {
-            return script_err_immutable!(trap, "cannot set property on immutable object");
+            return Err(script_err_immutable!(trap, "cannot set property on immutable object"));
         }
         if self.objects[ptr].tag.is_vec2() {
             for kv in self.objects[ptr].vec.iter_mut().rev() {
                 if kv.key == key {
                     kv.value = value;
-                    return NIL;
+                    return Ok(());
                 }
             }
             if !self.charge_object_vec_entries(1, "adding an object vector property") {
-                return NIL;
+                return Err(NIL);
             }
             let object = &mut self.objects[ptr];
             object.vec.push(ScriptVecValue { key, value });
-            return NIL;
+            return Ok(());
         }
         if !self.charge_object_map_entry(ptr, key, "adding an object property") {
-            return NIL;
+            return Err(NIL);
         }
         let object = &mut self.objects[ptr];
         object.map_insert(key, value);
-        NIL
+        Ok(())
     }
 
     /// A loop variable bound into its iteration scope: `set_value_def`,
@@ -1114,14 +1150,14 @@ impl ScriptHeap {
                             None
                         }
                     }) {
-                        return self.set_value_shallow(ptr, skey, value, trap);
+                        return self.set_value_shallow(ptr, skey, value, trap).err().unwrap_or(NIL);
                     }
                     // LiveId couldn't be converted to string - fall through to use LiveId
                     // This happens for hashed IDs that lost their string representation
                 }
-                return self.set_value_shallow(ptr, key, value, trap);
+                return self.set_value_shallow(ptr, key, value, trap).err().unwrap_or(NIL);
             } else {
-                return self.set_value_deep(ptr, key, value, trap);
+                return self.set_value_deep(ptr, key, value, trap).err().unwrap_or(NIL);
             }
         }
         if key.is_index() {
@@ -1129,18 +1165,26 @@ impl ScriptHeap {
             return self.set_value_index(ptr, key, value, trap);
         }
         if key.is_string_like() || key.is_object() || key.is_color() || key.is_bool() {
-            // scan protochain for object
-            let object = &mut self.objects[ptr];
-            if !object.tag.is_deep() {
-                if object.tag.needs_checking() {
-                    return script_err_type_mismatch!(trap, "invalid key type for checked object");
-                }
-                return self.set_value_shallow(ptr, key, value, trap);
-            } else {
-                return self.set_value_deep(ptr, key, value, trap);
-            }
+            return self.store_non_id_property(ptr, key, value, trap).err().unwrap_or(NIL);
         }
         script_err_type_mismatch!(trap, "unsupported key type for set_value")
+    }
+
+    fn store_non_id_property(
+        &mut self,
+        ptr: ScriptObject,
+        key: ScriptValue,
+        value: ScriptValue,
+        trap: ScriptTrap,
+    ) -> Result<(), ScriptValue> {
+        let tag = self.objects[ptr].tag;
+        if tag.is_deep() {
+            self.set_value_deep(ptr, key, value, trap)
+        } else if tag.needs_checking() {
+            Err(script_err_type_mismatch!(trap, "invalid key type for checked object"))
+        } else {
+            self.set_value_shallow(ptr, key, value, trap)
+        }
     }
 
     // scope specific value get/set
@@ -1365,7 +1409,9 @@ impl ScriptHeap {
     }
 
     /// A name's value as seen from scope `ptr`, or `None` when no scope in
-    /// its chain has it (no error raised).
+    /// its chain has it (no error raised). Run as rustc built it: it reads the
+    /// objects' maps, whose bytes are rustc's.
+    #[relax_api(run)]
     pub fn scope_value_opt(&self, ptr: ScriptObject, key: LiveId) -> Option<ScriptValue> {
         let mut ptr = ptr;
         let key_sv: ScriptValue = key.into();
@@ -1962,18 +2008,13 @@ impl ScriptHeap {
         &object.map
     }
 
-    /// `object`'s own map entries (no prototype chain) in map order, appended to `out`;
-    /// `ordered`: in definition order (the map tag's order) instead.
+    /// Appends own fields in insertion order. Both historical ordering modes now agree.
     #[relax_api(run)]
-    pub fn map_entries_into(&self, object: ScriptObject, ordered: bool, out: &mut ScriptEntriesOut) {
+    pub fn map_entries_into(&self, object: ScriptObject, _ordered: bool, out: &mut ScriptEntriesOut) {
         self.touch_obj(object);
-        let map = &self.objects[object].map;
-        let mut entries: Vec<(u32, ScriptMapEntry)> =
-            map.iter().map(|(k, v)| (v.tag.order(), ScriptMapEntry { key: *k, value: v.value })).collect();
-        if ordered {
-            entries.sort_by_key(|(order, _)| *order);
-        }
-        let entries: Vec<ScriptMapEntry> = entries.into_iter().map(|(_, e)| e).collect();
+        let entries: Vec<_> = self.objects[object].map.iter()
+            .map(|(k, v)| ScriptMapEntry { key: *k, value: v.value })
+            .collect();
         out.push(&entries);
     }
 
@@ -2453,6 +2494,62 @@ impl ScriptHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inherit_string_key_only_changes_receiver_on_success() {
+        use crate::opcode::{Opcode, OpcodeArgs};
+
+        fn snapshot(object: &ScriptObjectData) -> (u64, Vec<(ScriptValue, ScriptMapValue)>, Vec<ScriptVecValue>) {
+            // SAFETY: ScriptObjectTag consists of one initialized u64.
+            let bits = unsafe { std::mem::transmute::<ScriptObjectTag, u64>(object.tag) };
+            (bits, object.map.iter().map(|(k, v)| (*k, *v)).collect(), object.vec.clone())
+        }
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        let key = vm.heap_mut().new_string_from_str("child");
+        let built = vm.heap_mut().new_object();
+        for opcode in [Opcode::PROTO_INHERIT_WRITE, Opcode::FIELD_INHERIT_WRITE] {
+            for (protection, in_vec) in [
+                ("frozen", false), ("static", false), ("mutable", false),
+                ("frozen", true), ("static", true), ("mutable", true),
+            ] {
+                let receiver = vm.heap_mut().new_object();
+                let vec_key = if in_vec { key } else { id!(sibling).into() };
+                vm.heap_mut().set_value_def(receiver, id!(existing).into(), 1.into());
+                vm.heap_mut().vec_push(receiver, vec_key, 2.into(), NoTrap);
+                match protection {
+                    "frozen" => vm.heap_mut().freeze(receiver),
+                    "static" => vm.heap_mut().set_static(receiver.into()),
+                    _ => {}
+                }
+                let before = snapshot(&vm.heap().objects[receiver]);
+                let thread = vm.thread_mut();
+                if opcode == Opcode::PROTO_INHERIT_WRITE {
+                    thread.mes.push(ScriptMe::Object(receiver));
+                } else {
+                    thread.stack.push(receiver.into());
+                }
+                thread.stack.push(key);
+                thread.stack.push(built.into());
+                vm.opcode(opcode, OpcodeArgs::NONE);
+                vm.thread_mut().stack.pop();
+                vm.thread_mut().mes.clear();
+
+                let errors = vm.thread().trap.err_take();
+                let object = &vm.heap().objects[receiver];
+                if protection == "mutable" {
+                    assert!(errors.is_empty(), "{opcode:?} on mutable receiver: {errors:?}");
+                    assert!(object.tag.is_string_keys(), "successful merge must enable string lookup");
+                    let stored = if in_vec { Some(object.vec[0].value) } else { object.map_get(&key) };
+                    assert_eq!(stored, Some(built.into()), "merged object must occupy the literal key");
+                } else {
+                    assert_eq!(errors.len(), 1, "{opcode:?} must refuse the {protection} write");
+                    assert_eq!(snapshot(object), before, "{opcode:?} changed the {protection} receiver");
+                }
+            }
+        }
+    }
 
     #[test]
     fn capped_map_insert_is_refused_before_mutation() {

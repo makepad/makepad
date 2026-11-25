@@ -203,7 +203,7 @@ pub struct EventCtx {
     pub(super) copies: std::collections::BTreeMap<String, u32>,
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// `let name = form(args..)` at the top level.
     pub(super) fn event_decl(&mut self, name: &str, form: usize, args: &[Expr], span: Span) -> LResult<Bind> {
         let mut out = Vec::new();

@@ -76,7 +76,7 @@ struct Shape {
 fn shape(node: &Node, src: &str) -> Shape {
     let mut names = Vec::new();
     let label = match &node.kind {
-        Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) => format!("{}:{}", node.kind_name(), node.text(src)),
+        Kind::Error | Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) => format!("{}:{}", node.kind_name(), node.text(src)),
         Kind::Object { ty, fields, .. } => {
             for f in fields {
                 names.push(format!("{}{}", f.name.as_deref().unwrap_or(""), f.op));

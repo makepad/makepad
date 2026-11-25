@@ -213,13 +213,21 @@ impl<'a> ScriptVm<'a> {
                 }
             } else {
                 if self.bx.heap.iter_len(obj) > 0 {
-                    let kv = self
-                        .bx
-                        .heap
-                        .iter_key_value(obj, 0, self.bx.threads.cur().trap.pass());
+                    let threads = &self.bx.threads;
+                    let cursor = self.bx.heap.objects[obj].map.open_cursor(
+                        threads.current(), threads.cur_ref().loops.len(), |thread, frame, id| {
+                            threads.get(thread).and_then(|t| t.loops.get(frame))
+                                .and_then(|f| f.values.as_ref())
+                                .is_some_and(|v| v.source.as_object() == Some(obj) && v.index == id as f64)
+                        },
+                    );
+                    let kv = self.bx.heap.next_object_entry(obj, cursor, 0).unwrap();
                     self.begin_for_loop_inner(
                         jump, source, value_id, index_id, key_id, kv.value, 0.0, kv.key, None,
                     );
+                    // For objects, index identifies this frame's cursor on the map. pos
+                    // remains the script-visible iteration number, as for all other loops.
+                    self.bx.threads.cur().loops.last_mut().unwrap().values.as_mut().unwrap().index = cursor as f64;
                     return;
                 }
             }
@@ -374,23 +382,17 @@ impl<'a> ScriptVm<'a> {
                         self.bail("loop values empty in end_for_loop/object");
                         return;
                     };
-                    values.index += 1.0;
                     values.pos += 1;
-                    let index = values.index;
-                    let source = values.source;
-                    let Some(obj) = source.as_object() else {
+                    let cursor = values.index as usize;
+                    let iteration = values.pos as usize;
+                    let Some(obj) = values.source.as_object() else {
                         self.bail("source not object in end_for_loop/object");
                         return;
                     };
-                    if index >= self.bx.heap.iter_len(obj) as f64 {
+                    let Some(kv) = self.bx.heap.next_object_entry(obj, cursor, iteration) else {
                         self.break_for_loop();
                         return;
-                    }
-                    let kv = self.bx.heap.iter_key_value(
-                        obj,
-                        index as usize,
-                        self.bx.threads.cur().trap.pass(),
-                    );
+                    };
 
                     let Some(lf) = self.bx.threads.cur().loops.last_mut() else {
                         self.bail("loops empty in end_for_loop/object re-borrow");
@@ -406,7 +408,7 @@ impl<'a> ScriptVm<'a> {
                     let value_id = values.value_id;
                     let index_id = values.index_id;
                     let key_id = values.key_id;
-                    let index = values.index;
+                    let index = values.pos as f64;
 
                     // Discard iteration-local try frames, operand values and
                     // call-builder state before the next iteration (matches break).
@@ -522,6 +524,13 @@ impl<'a> ScriptVm<'a> {
             self.bail("loops empty in break_for_loop");
             return;
         };
+        if let Some(values) = &lp.values {
+            if let Some(obj) = values.source.as_object() {
+                self.bx.heap.objects[obj].map.close_cursor(
+                    values.index as usize, self.bx.threads.current(), self.bx.threads.cur_ref().loops.len(),
+                );
+            }
+        }
         self.bx
             .threads
             .cur()

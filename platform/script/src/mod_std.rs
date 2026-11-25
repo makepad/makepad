@@ -11,12 +11,16 @@ pub fn define_std_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         heap,
         std,
         id_lut!(assert),
-        script_args!(v = NIL),
+        script_args!(v = NIL, message = NIL),
         |vm, args| {
-            if let Some(x) = script_value!(vm, args.v).as_bool() {
-                if x == true {
-                    return NIL;
-                }
+            if script_value!(vm, args.v).as_bool() == Some(true) {
+                return NIL;
+            }
+            let message = script_value!(vm, args.message);
+            if let Some(error) = vm.string_with(message, |vm, text| {
+                script_err_assert_fail!(vm.bx.threads.cur_ref().trap, "assertion failed: {text}")
+            }) {
+                return error;
             }
             script_err_assert_fail!(vm.bx.threads.cur_ref().trap, "assertion failed")
         },
@@ -63,6 +67,7 @@ pub fn define_std_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(print),
         script_args_def!(what = NIL),
         |vm, args| {
+            if !vm.bx.allow_debug_output { return NIL; }
             let what = script_value!(vm, args.what);
             if vm
                 .string_with(what, |_vm, str| {
@@ -90,6 +95,7 @@ pub fn define_std_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         id_lut!(println),
         script_args_def!(what = NIL),
         |vm, args| {
+            if !vm.bx.allow_debug_output { return NIL; }
             let what = script_value!(vm, args.what);
             if vm
                 .string_with(what, |_vm, str| {

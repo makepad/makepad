@@ -147,6 +147,7 @@ impl<'a> ScriptVm<'a> {
         } else {
             usize::MAX
         };
+        let mut limit = crate::Limit::EqualityWork;
         let mut units_until_clock = DEADLINE_SAMPLE_UNITS;
         let result = self
             .bx
@@ -154,6 +155,7 @@ impl<'a> ScriptVm<'a> {
             .deep_eq_bounded(a, b, maximum_work, || {
                 if let Some(remaining) = thread.instruction_limit_remaining.as_mut() {
                     if *remaining == 0 {
+                        limit = crate::Limit::Fuel;
                         return false;
                     }
                     *remaining -= 1;
@@ -166,7 +168,11 @@ impl<'a> ScriptVm<'a> {
                     return true;
                 }
                 units_until_clock = DEADLINE_SAMPLE_UNITS;
-                crate::clock::monotonic_now() < deadline
+                if crate::clock::monotonic_now() >= deadline {
+                    limit = crate::Limit::Time;
+                    return false;
+                }
+                true
             });
         match result {
             Some(equal) => {
@@ -177,6 +183,7 @@ impl<'a> ScriptVm<'a> {
                 self.bx.threads.cur().trap.goto_next();
             }
             None => {
+                self.bx.poison_limit(limit);
                 let error = script_err_limit!(
                     self.bx.threads.cur_ref().trap,
                     "script equality work, instruction, or time limit exceeded"

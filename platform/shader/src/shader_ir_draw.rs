@@ -1173,8 +1173,14 @@ fn build_depth_clip(ir: &mut IrModule, xr: bool, xr_depth: GlobalId, view_id: Gl
     let lod = b.i32(0);
     let tex = b.glob(xr_depth);
     let z = b.e(ExprKind::TexLoad(tex, coord, layer, lod), TY_F32);
+    // if (z >= min(depth_hc.z, 1.0)) return color: the fragment is clipped only where the depth
+    // picture holds something nearer. An empty texel (1.0, also the 1x1 stand-in bound when there
+    // is no depth picture) never clips, so a draw whose `world` lies past the depth camera's far
+    // plane while its own depth is pinned inside the range (a sky dome at depth 1) is kept.
     let hcr = b.e(ExprKind::Local(hc_l), vec3);
     let hz = b.lane(hcr, 2);
+    let one = b.f32(1.0);
+    let hz = b.builtin(Builtin::Min, vec![hz, one], TY_F32);
     let c = b.bin(BinOp::Ge, z, hz, TY_BOOL);
     let r = ret_color(&mut b);
     b.f.body.push(Stmt::If(c, r, Vec::new()));

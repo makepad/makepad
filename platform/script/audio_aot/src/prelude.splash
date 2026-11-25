@@ -9,6 +9,7 @@
 
 // ---- Oscillators -----------------------------------------------------------
 
+// For all phase oscillators, use dt = freq / sample_rate at the rate where they run.
 // Advances a phase by dt, wrapping into 0..1.
 fn advance(p, dt) { fract(p + dt) }
 
@@ -48,6 +49,7 @@ fn varsaw(p, bright) { (p - 0.5) * 2.0 * soft_clip(bright * p * (1.0 - p)) }
 
 // ---- Filters ---------------------------------------------------------------
 
+// For coefficient-based filters, run the setter at the same sample rate as the filter step.
 // Zero-delay (TPT) state-variable filter. svf_set at control rate (in
 // block()), then one of svf_lp/bp/hp/notch/peak/ap per sample.
 struct Svf {
@@ -127,6 +129,7 @@ fn onepole_lp(f, x) {
 }
 fn onepole_hp(f, x) { x - onepole_lp(f, x) }
 
+// Its fixed pole puts the corner near 10 Hz times the factor at a 48 kHz base rate.
 // DC blocker (about 10 Hz).
 struct DcBlock {
     x1: 0.0
@@ -139,6 +142,7 @@ fn dc_block(d, x) {
     y
 }
 
+// A fixed c scales its corner in Hz by the factor. Compute c using the raised rate.
 // First-order allpass with coefficient c (phasers, fractional delays).
 struct Allpass1 {
     x1: 0.0
@@ -217,12 +221,14 @@ fn decay_env(e, d) {
 
 // ---- Delay lines (any f32 array is a ring buffer) --------------------------
 
+// Scale d and the buffer length by oversampling to preserve a delay measured in base frames.
 // Reads `d` samples (fractional) behind write index `w`.
 fn tap(buf, w, d) { read(buf, float(w) - d) }
 fn tap_cubic(buf, w, d) { read_cubic(buf, float(w) - d) }
 
 // ---- Shaping ---------------------------------------------------------------
 
+// These memoryless curves keep their transfer functions at every rate.
 // Rational tanh-like saturation: smooth, odd, reaches +-1 at +-3.
 fn soft_clip(x) {
     let y = clamp(x, -3.0, 3.0)
@@ -236,6 +242,7 @@ fn asym_clip(x, bias) { soft_clip(x + bias) - soft_clip(bias) }
 
 // ---- Stereo ------------------------------------------------------------------
 
+// Pan and width are instantaneous gains at every rate.
 // Equal-power pan, p in -1..1.
 fn pan(x, p) {
     let a = (clamp(p, -1.0, 1.0) + 1.0) * PI * 0.25
@@ -248,53 +255,640 @@ fn width(v, w) {
     vec2(m + s, m - s)
 }
 
-// ---- 4x oversampling -------------------------------------------------------
-//
-//     for k in 0..4 {
-//         os4_push(o, shape(os4_up(o, x, k)))
-//     }
-//     let y = os4_out(o)
-//
-// A 64-tap weighted-least-squares low-pass at 4x the rate: flat to 18 kHz,
-// images and aliases 58 dB down (48 kHz). Latency: about 8 samples.
-let OS4_TAPS = [
-    4.54109714e-05, 0.000254704495, 0.00060465543, 0.000930314923, 0.00093203865, 0.000338821264, -0.0008442829, -0.00216390554,
-    -0.00280132488, -0.00197667701, 0.000475579944, 0.00370374771, 0.00597045199, 0.00544479408, 0.00136977675, -0.00503920881,
-    -0.0106524806, -0.0117292876, -0.00604482805, 0.00522996961, 0.017128393, 0.0226483209, 0.0162531968, -0.00242181263,
-    -0.0266736884, -0.0441041262, -0.0412534376, -0.00977462385, 0.0486412124, 0.121145034, 0.187415828, 0.226947433,
-    0.226947433, 0.187415828, 0.121145034, 0.0486412124, -0.00977462385, -0.0412534376, -0.0441041262, -0.0266736884,
-    -0.00242181263, 0.0162531968, 0.0226483209, 0.017128393, 0.00522996961, -0.00604482805, -0.0117292876, -0.0106524806,
-    -0.00503920881, 0.00136977675, 0.00544479408, 0.00597045199, 0.00370374771, 0.000475579944, -0.00197667701, -0.00280132488,
-    -0.00216390554, -0.0008442829, 0.000338821264, 0.00093203865, 0.000930314923, 0.00060465543, 0.000254704495, 4.54109714e-05,
-]
-struct Os4 {
-    up: [0.0; 16]
-    dn: [0.0; 64]
-    w: int(0)
-    dw: int(0)
+// ---- Complex numbers and windows ------------------------------------------
+
+// A bin is vec2(real, imaginary). Each of the four products and each sum
+// or difference in cmul rounds separately.
+fn cmul(a, b) { vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x) }
+fn cconj(a) { vec2(a.x, -a.y) }
+fn cabs(a) { hypot(a.x, a.y) }
+// Complex phases are in radians.
+fn carg(a) { atan2(a.y, a.x) }
+fn cexp(phase) { vec2(cos(phase), sin(phase)) }
+fn cpolar(mag, phase) { mag * cexp(phase) }
+
+// Periodic windows span one cycle over i in 0..n for power-of-two n.
+// Fold the index first so mirrored bins have identical bits.
+fn hann(i, n) {
+    let s = sin(PI * (float(min(i, n - i)) / float(n)))
+    s * s
 }
-// The k-th (0..3) of four upsampled values for input x.
-fn os4_up(o, x, k) {
-    if k == 0 {
-        o.up[o.w] = x
-        o.w = o.w + 1
+fn hamming(i, n) { 0.08 + 0.92 * hann(i, n) }
+// The three-term Blackman window expressed in terms of sin²(pi*i/n).
+fn blackman(i, n) {
+    let h = hann(i, n)
+    h * (0.36 + 0.64 * h)
+}
+fn fill_hann(w) {
+    for i in 0..len(w) { w[i] = hann(i, len(w)) }
+}
+
+// ---- Partitioned stereo convolution ---------------------------------------
+
+let CONV_HEAD = 64
+let CONV_TAIL = 2048
+
+// Unit energy across both response channels. Accumulate off the audio
+// thread in double precision so quiet taps still contribute to long tails.
+fn conv_energy_gain(ir) {
+    let energy = f64(0)
+    for i in 0..len(ir) {
+        let l = f64(ir[i].x)
+        let r = f64(ir[i].y)
+        energy += l*l + r*r
     }
-    let s = 0.0
+    if energy > 0 { 1 / sqrt(energy) } else { f64(1) }
+}
+
+// Unpack the two real spectra of FFT(left + i*right) at a positive bin.
+// Store both real parts first, then both imaginary parts. Negative bins
+// are their conjugates, so each channel needs only one product per pair.
+fn conv_unpack(re, im, opposite_re, opposite_im) {
+    vec4((re+opposite_re)*0.5, (im+opposite_im)*0.5,
+         (im-opposite_im)*0.5, (opposite_re-re)*0.5)
+}
+
+// One row per response partition. Keep only the nonnegative frequencies;
+// each bin holds the real parts of L/R followed by their imaginary parts.
+fn conv_prepare(ir, h, scratch, b) {
+    let re = scratch[0]
+    let im = scratch[1]
+    for k in 0..len(h) {
+        for i in 0..b {
+            let tap = (k + 1) * b + i
+            let v = if tap < len(ir) { ir[tap] } else { vec2(0.0) }
+            re[i] = v.x
+            im[i] = v.y
+            re[b+i] = 0.0
+            im[b+i] = 0.0
+        }
+        fft(re, im)
+        // The inverse uses the forward transform with exchanged planes.
+        // Fold its 1/N into this immutable spectrum once.
+        for i in 0..(b+1) {
+            h[k][i] = conv_unpack(re[i], im[i], re[-i], im[-i]) * (1.0 / (2*b))
+        }
+    }
+}
+
+// Each even phase computes two adjacent outputs. Tap zero is applied
+// directly when its own input arrives, so it is absent from these rows.
+fn conv_prepare_head(ir, taps) {
+    for pair in 0..4 {
+        let phase = int(pair*2)
+        for group in 0..8 {
+            for j in 0..8 {
+                let age = (group*8 + phase - j) & (CONV_HEAD-1)
+                if age > 0 && age < len(ir) { taps[pair][group][j] = ir[age] }
+            }
+        }
+    }
+}
+
+// Taps after zero can already contribute to the following sample.
+// Both sums use the same coefficient and adjacent history values.
+fn conv_dot_pair(v, next, h) {
+    vec4(v[0],v[1])*h[0].xyxy + vec4(v[1],v[2])*h[1].xyxy +
+    vec4(v[2],v[3])*h[2].xyxy + vec4(v[3],v[4])*h[3].xyxy +
+    vec4(v[4],v[5])*h[4].xyxy + vec4(v[5],v[6])*h[5].xyxy +
+    vec4(v[6],v[7])*h[6].xyxy + vec4(v[7],next)*h[7].xyxy
+}
+fn conv_head(ir, taps, history, ahead, frame, x) {
+    let group = frame >> 3
+    let phase = frame & 7
+    history[group][phase] = x
+    let y = x * ir[0]
+    if len(ir) < 8 {
+        for j in 1..len(ir) {
+            let t = frame-j
+            y += history[t >> 3][t & 7] * ir[j]
+        }
+    } elif (phase & 1) == 0 {
+        let row = taps[phase >> 1]
+        let pair = conv_dot_pair(history[0],history[1][0],row[group]) +
+            conv_dot_pair(history[1],history[2][0],row[group-1]) +
+            conv_dot_pair(history[2],history[3][0],row[group-2]) +
+            conv_dot_pair(history[3],history[4][0],row[group-3]) +
+            conv_dot_pair(history[4],history[5][0],row[group-4]) +
+            conv_dot_pair(history[5],history[6][0],row[group-5]) +
+            conv_dot_pair(history[6],history[7][0],row[group-6]) +
+            conv_dot_pair(history[7],history[0][0],row[group-7])
+        y += pair.xy
+        ahead[0] = pair.zw
+    } else { y += ahead[0] }
+    y
+}
+
+// An eight-point complex transform. Pair the even and odd four-point
+// butterflies in registers; column k holds output bins k and k+4.
+fn conv_pair(e,o) { vec4(e+o,e-o) }
+fn conv_octet(a,b,c,d) {
+    let ac = a+c
+    let bd = b+d
+    let am = a-c
+    let bm = b-d
+    let rot = vec4(bm.y,-bm.x,bm.w,-bm.z)
+    let v0 = ac+bd
+    let v1 = am+rot
+    let v2 = ac-bd
+    let v3 = am-rot
+    let h = 0.7071067811865476
+    mat4(conv_pair(v0.xy,v0.zw),
+         conv_pair(v1.xy,h*vec2(v1.z+v1.w,v1.w-v1.z)),
+         conv_pair(v2.xy,vec2(v2.w,-v2.z)),
+         conv_pair(v3.xy,h*vec2(v3.w-v3.z,-v3.z-v3.w)))
+}
+
+// The near level uses a 128-point transform (16 by 8). A unit impulse
+// at sample one gives its forward twiddle factors using the same init FFT.
+fn conv_near_roots(roots, scratch) {
+    let re = scratch[0]
+    let im = scratch[1]
+    for i in 0..128 { re[i] = 0.0; im[i] = 0.0 }
+    re[1] = 1.0
+    fft(re, im)
+    for k in 0..8 {
+        for j in 0..16 { roots[k][j] = vec2(re[k*j], im[k*j]) }
+    }
+}
+
+fn conv_read_complex(re, im, i) { vec2(re[i],im[i]) }
+
+// One radix-two butterfly in the last stage. Overlap-save discards the
+// first half of the inverse, so it only needs the difference in that pass.
+fn conv_write_pair(re, im, i, e, o, high_only) {
+    if !high_only {
+        re[i] = e.x+o.x
+        im[i] = e.y+o.y
+    }
+    re[i+64] = e.x-o.x
+    im[i+64] = e.y-o.y
+}
+
+// First transform sixteen strided octets. Writing each result across
+// the tile makes the eight length-16 transforms read contiguous rows.
+fn conv_fft128(re, im, tile, roots, high_only) {
     for j in 0..16 {
-        s = s + OS4_TAPS[4 * j + k] * o.up[o.w - 1 - j]
+        let z = conv_octet(
+            vec4(conv_read_complex(re,im,j),    conv_read_complex(re,im,j+16)),
+            vec4(conv_read_complex(re,im,j+32), conv_read_complex(re,im,j+48)),
+            vec4(conv_read_complex(re,im,j+64), conv_read_complex(re,im,j+80)),
+            vec4(conv_read_complex(re,im,j+96), conv_read_complex(re,im,j+112)))
+        tile[0][j] = z.c0.xy; tile[4][j] = z.c0.zw
+        tile[1][j] = z.c1.xy; tile[5][j] = z.c1.zw
+        tile[2][j] = z.c2.xy; tile[6][j] = z.c2.zw
+        tile[3][j] = z.c3.xy; tile[7][j] = z.c3.zw
     }
-    s * 4.0
-}
-// Feeds one processed 4x value to the decimator.
-fn os4_push(o, y) {
-    o.dn[o.dw] = y
-    o.dw = o.dw + 1
-}
-// The decimated output (after the 4th push of a frame).
-fn os4_out(o) {
-    let s = 0.0
-    for i in 0..64 {
-        s = s + OS4_TAPS[i] * o.dn[o.dw - 1 - i]
+    for k in 0..8 {
+        let x = tile[k]
+        let w = roots[k]
+        let even = conv_octet(vec4(x[0],cmul(x[2],w[2])),
+            vec4(cmul(x[4],w[4]),cmul(x[6],w[6])),
+            vec4(cmul(x[8],w[8]),cmul(x[10],w[10])),
+            vec4(cmul(x[12],w[12]),cmul(x[14],w[14])))
+        let odd = conv_octet(vec4(cmul(x[1],w[1]),cmul(x[3],w[3])),
+            vec4(cmul(x[5],w[5]),cmul(x[7],w[7])),
+            vec4(cmul(x[9],w[9]),cmul(x[11],w[11])),
+            vec4(cmul(x[13],w[13]),cmul(x[15],w[15])))
+        conv_write_pair(re,im,k,even.c0.xy,odd.c0.xy,high_only)
+        conv_write_pair(re,im,k+8,even.c1.xy,cmul(odd.c1.xy,roots[1][8]),high_only)
+        conv_write_pair(re,im,k+16,even.c2.xy,cmul(odd.c2.xy,roots[2][8]),high_only)
+        conv_write_pair(re,im,k+24,even.c3.xy,cmul(odd.c3.xy,roots[3][8]),high_only)
+        conv_write_pair(re,im,k+32,even.c0.zw,cmul(odd.c0.zw,roots[4][8]),high_only)
+        conv_write_pair(re,im,k+40,even.c1.zw,cmul(odd.c1.zw,roots[5][8]),high_only)
+        conv_write_pair(re,im,k+48,even.c2.zw,cmul(odd.c2.zw,roots[6][8]),high_only)
+        conv_write_pair(re,im,k+56,even.c3.zw,cmul(odd.c3.zw,roots[7][8]),high_only)
     }
-    s
+}
+
+// Multiply the independent left and right complex bins.
+fn conv_product(x, h) {
+    vec4(x.xy*h.xy - x.zw*h.zw, x.xy*h.zw + x.zw*h.xy)
+}
+
+// Fold a group in registers, including a short final group. The width
+// is constant at each call, so only its active products are emitted.
+fn conv_terms(a, ha, b, hb, c, hc, d, hd, width) {
+    if width == 4 { conv_product(a,ha) + conv_product(b,hb) + conv_product(c,hc) + conv_product(d,hd) }
+    elif width == 3 { conv_product(a,ha) + conv_product(b,hb) + conv_product(c,hc) }
+    elif width == 2 { conv_product(a,ha) + conv_product(b,hb) }
+    else { conv_product(a,ha) }
+}
+
+// Resolve the row addresses once for the stripe. Adjacent iterations read
+// adjacent bins of every active partition, and write the sum once per group.
+fn conv_stripe(s, history, h, k, width) {
+    let a = history[s.slot-k]
+    let b = history[s.slot-k-1]
+    let c = history[s.slot-k-2]
+    let d = history[s.slot-k-3]
+    let ha = h[k]
+    let hb = h[k+1]
+    let hc = h[k+2]
+    let hd = h[k+3]
+    let start = s.cursor
+    // Each stripe owns 64 positive bins. The first also handles DC.
+    if start == 0 {
+        s.sum[0] += conv_terms(a[0],ha[0],b[0],hb[0],c[0],hc[0],d[0],hd[0],width)
+    }
+    for lane in 1..(CONV_HEAD+1) {
+        let i = start+lane
+        s.sum[i] += conv_terms(a[i],ha[i],b[i],hb[i],c[i],hc[i],d[i],hd[i],width)
+    }
+}
+
+fn conv_spread(s, history, h) {
+    if s.cursor >= len(s.overlap) { return }
+    // A fresh history contains only zeros. Visit a group as soon as its
+    // first input spectrum is available; its other empty slots sum to zero.
+    for g in 0..((len(h)-1-(len(h)-1)%4)/4) {
+        if 4*g >= s.filled { break }
+        conv_stripe(s, history, h, 4*g+1, 4)
+    }
+    if (len(h)-1)%4 > 0 && s.filled > len(h)-1-(len(h)-1)%4 {
+        conv_stripe(s, history, h, len(h)-(len(h)-1)%4, (len(h)-1)%4)
+    }
+    s.cursor += CONV_HEAD
+}
+
+// The tail spectrum becomes ready on the last input frame. Its first
+// output is due on the following frame. Running the inverse there puts
+// the two transforms on opposite sides of an aligned control boundary.
+fn conv_tail_inverse(s, i) {
+    if i != 0 { return }
+    if s.ready != 0 { fft(s.im, s.re) }
+}
+
+fn conv_frame(s, history, h, frame, x, roots, b) {
+    let i = frame & (b-1)
+    if b == CONV_TAIL { conv_tail_inverse(s, i) }
+    // Overlap-save: read the valid half of the inverse, then replace
+    // this pair of slots with the previous and current input samples.
+    let y = vec2(s.re[b+i], s.im[b+i])
+    let previous = s.overlap[i]
+    s.re[i] = previous.x
+    s.im[i] = previous.y
+    s.re[b+i] = x.x
+    s.im[b+i] = x.y
+    s.overlap[i] = x
+    if i != b-1 { return y }
+    if b == CONV_HEAD {
+        conv_spread(s, history, h)
+        conv_fft128(s.re, s.im, s.tile, roots, false)
+    } else { fft(s.re, s.im) }
+    let recent = history[s.slot]
+    let first = h[0]
+    // Read both members of each pair before overwriting them. DC and
+    // Nyquist have zero imaginary parts in each real channel.
+    for j in 0..(b+1) {
+        let z = conv_unpack(s.re[j], s.im[j], s.re[-j], s.im[-j])
+        recent[j] = z
+        let v = s.sum[j] + conv_product(z, first[j])
+        s.re[j] = v.x-v.w
+        s.im[j] = v.z+v.y
+        s.re[-j] = v.x+v.w
+        s.im[-j] = v.y-v.z
+        s.sum[j] = vec4(0.0)
+    }
+    if b == CONV_TAIL { s.ready = 1 } else { conv_fft128(s.im, s.re, s.tile, roots, true) }
+    s.filled = min(s.filled+1, len(h)-1)
+    s.slot = (s.slot+1) % len(h)
+    s.cursor = 0
+    y
+}
+
+// ---- Half-band rate conversion --------------------------------------------
+// Raising the input rate scales each stage’s bandwidth in Hz by the same factor.
+// Frequencies below are in cycles per high-rate sample of the stage.
+// Only the odd offsets from the 0.5 centre are stored, nearest first.
+let HALFBAND_TAPS_2 = [
+    0.3172180652618408, -0.10286698490381241, 0.058395855128765106,
+    -0.03835920989513397, 0.02664419263601303, -0.018880946561694145,
+    0.013395711779594421, -0.009401528164744377, 0.006467400584369898,
+    -0.004324760753661394, 0.002786883618682623, -0.0017126455204561353,
+    0.0009896456031128764, -0.0005262919003143907, 0.00024804146960377693,
+    -9.541280451230705e-05, 2.255978324683383e-05,
+]
+let HALFBAND_TAPS_4 = [
+    0.303902804851532, -0.06923013925552368, 0.01820034347474575,
+    -0.0029712955001741648, 8.271920523839071e-05,
+]
+let HALFBAND_TAPS_8 = [
+    0.2972416281700134, -0.05584760755300522,
+    0.008848658762872219, -0.00022409098164644092,
+]
+
+// Add symmetric samples before weighting, accumulating from centre to edge.
+fn halfband_sum(ring, centre, taps) {
+    let sum = 0.0
+    for i in 0..len(taps) {
+        sum += (ring[centre - (2*i+1)] + ring[centre + (2*i+1)]) * taps[i]
+    }
+    sum
+}
+// Only even ring slots hold input. Each pair has a doubled tap sum and
+// one delayed input sample. An odd top-rate pad swaps their phases.
+fn halfband_up_pad(s, x, taps, pad) {
+    let w = s.w
+    let centre = w - (2 * len(taps) - 1 + pad - (pad & 1))
+    s.ring[w] = x
+    s.w = (w + 2) & (len(s.ring) - 1)
+    let sum = halfband_sum(s.ring, centre, taps)
+    if (pad & 1) == 0 { vec2(sum + sum, s.ring[centre + 1]) }
+    else { vec2(s.ring[centre - 1], sum + sum) }
+}
+fn halfband_up(s, x, taps) { halfband_up_pad(s, x, taps, 0) }
+// Emit the filtered even phase. Reading pad high-rate samples further back
+// delays both branches together. The centre keeps its 0.5 gain on the way down.
+fn halfband_down(s, pair, taps, pad) {
+    let w = s.w
+    let centre = w - (2 * len(taps) - 1) - pad
+    s.ring[w] = pair.x
+    s.ring[w + 1] = pair.y
+    s.w = (w + 2) & (len(s.ring) - 1)
+    halfband_sum(s.ring, centre, taps) + 0.5 * s.ring[centre]
+}
+
+// 1x to 2x, 67 taps. Pass to 0.21 within 0.05 dB, stop from 0.29 at -80 dB.
+// One top-rate sample of pad in each direction gives 17 base frames each way.
+// Per base frame and channel: 17 multiplies up, 18 down including the centre.
+let HALFBAND_DOWN_LATENCY_2 = 17
+let HALFBAND_LATENCY_2 = 34
+struct Halfband2 { w: int(0) ring: [0.0; 128] }
+fn halfband_up2(s, x) { halfband_up_pad(s, x, HALFBAND_TAPS_2, 1) }
+fn halfband_down2(s, pair) { halfband_down(s, pair, HALFBAND_TAPS_2, 1) }
+
+// 2x to 4x, 19 taps. Pass to 0.105 within 0.05 dB, stop from 0.395 at -80 dB.
+// Two calls per base frame and channel: 10 multiplies up, 12 down.
+struct HalfbandStage4 { w: int(0) ring: [0.0; 32] }
+fn halfband_stage4_up(s, x) { halfband_up(s, x, HALFBAND_TAPS_4) }
+fn halfband_stage4_down(s, pair, pad) { halfband_down(s, pair, HALFBAND_TAPS_4, pad) }
+
+// 4x to 8x, 15 taps. Pass to 0.0525 within 0.05 dB, stop from 0.4475 at -80 dB.
+// Four calls per base frame and channel: 16 multiplies up, 20 down.
+struct HalfbandStage8 { w: int(0) ring: [0.0; 32] }
+fn halfband_stage8_up(s, x) { halfband_up(s, x, HALFBAND_TAPS_8) }
+fn halfband_stage8_down(s, pair, pad) { halfband_down(s, pair, HALFBAND_TAPS_8, pad) }
+
+// Four samples in time order. Each direction pads one sample at 4x only,
+// giving 19 base frames each way. Per channel: 27 multiplies up, 30 down.
+let HALFBAND_DOWN_LATENCY_4 = 19
+let HALFBAND_LATENCY_4 = 38
+struct Halfband4 { low: Halfband2{} high: HalfbandStage4{} }
+fn halfband_up4_stages(s, x, low, high, pad) {
+    let v = halfband_up(s.low, x, low)
+    let a = halfband_up_pad(s.high, v.x, high, pad)
+    let b = halfband_up_pad(s.high, v.y, high, pad)
+    vec4(a, b)
+}
+fn halfband_up4_pad(s, x, pad) { halfband_up4_stages(s, x, HALFBAND_TAPS_2, HALFBAND_TAPS_4, pad) }
+fn halfband_up4(s, x) { halfband_up4_pad(s, x, 1) }
+fn halfband_down4_stages(s, v, low, high, pad) {
+    let a = halfband_down(s.high, v.xy, high, pad)
+    let b = halfband_down(s.high, v.zw, high, pad)
+    halfband_down(s.low, vec2(a, b), low, 0)
+}
+fn halfband_down4_pad(s, v, pad) { halfband_down4_stages(s, v, HALFBAND_TAPS_2, HALFBAND_TAPS_4, pad) }
+fn halfband_down4(s, v) { halfband_down4_pad(s, v, 1) }
+
+// Eight samples in four chronological pairs written to a caller-owned array.
+// Three samples of pad at 8x alone give 20 base frames in each direction.
+// Per base frame and channel: 43 multiplies up, 50 down.
+let HALFBAND_DOWN_LATENCY_8 = 20
+let HALFBAND_LATENCY_8 = 40
+struct Halfband8 { low: Halfband4{} high: HalfbandStage8{} }
+fn halfband_up8(s, x, pairs) {
+    let v = halfband_up4_pad(s.low, x, 0)
+    pairs[0] = halfband_up_pad(s.high, v.x, HALFBAND_TAPS_8, 3)
+    pairs[1] = halfband_up_pad(s.high, v.y, HALFBAND_TAPS_8, 3)
+    pairs[2] = halfband_up_pad(s.high, v.z, HALFBAND_TAPS_8, 3)
+    pairs[3] = halfband_up_pad(s.high, v.w, HALFBAND_TAPS_8, 3)
+}
+fn halfband_down8(s, pairs) {
+    let a = halfband_stage8_down(s.high, pairs[0], 3)
+    let b = halfband_stage8_down(s.high, pairs[1], 3)
+    let c = halfband_stage8_down(s.high, pairs[2], 3)
+    let d = halfband_stage8_down(s.high, pairs[3], 3)
+    halfband_down4_pad(s.low, vec4(a, b, c, d), 0)
+}
+
+// Each channel has up and down filter history and a previous input (last) for linear upsampling.
+struct Oversample2 { up: [Halfband2{}; 2] down: [Halfband2{}; 2] last: [0.0; 2] }
+struct Oversample4 { up: [Halfband4{}; 2] down: [Halfband4{}; 2] last: [0.0; 2] }
+struct Oversample8 { up: [Halfband8{}; 2] down: [Halfband8{}; 2] last: [0.0; 2] }
+
+// ---- Cascades and equalisation --------------------------------------------
+
+// Map the cutoff in Hz to the integrator gain, then set its damping and gains.
+fn svf_coefficients(f, g, k) {
+    f.k = k
+    f.a1 = 1.0 / (1.0 + g * (g + k))
+    f.a2 = g * f.a1
+    f.a3 = g * f.a2
+}
+fn svf_prewarp(freq) { tan(PI * clamp(freq, 10.0, sample_rate * 0.45) / sample_rate) }
+
+// An order N maximally flat filter has evenly spaced poles on a semicircle.
+// Pair conjugates, from lowest Q up. Odd N also has one real pole.
+fn butter_sections_set(f, g, odd) {
+    let order = 2 * len(f) + odd
+    for i in 0..len(f) {
+        let angle = PI * (float(i) + 0.5 + 0.5 * odd) / order
+        svf_coefficients(f[i], g, 2.0 * cos(angle))
+    }
+}
+fn butter_set(f, cutoff) { butter_sections_set(f, svf_prewarp(cutoff), 0) }
+fn butter_lp(f, x) {
+    let y = float(x)
+    for i in 0..len(f) { y = svf_lp(f[i], y) }
+    y
+}
+fn butter_hp(f, x) {
+    let y = float(x)
+    for i in 0..len(f) { y = svf_hp(f[i], y) }
+    y
+}
+// The real pole uses the same prewarped frequency as the pairs. Its
+// trapezoidal integrator takes two half steps around the output sample.
+fn butter_set_odd(f, o, cutoff) {
+    let g = svf_prewarp(cutoff)
+    butter_sections_set(f, g, 1)
+    o.a = g / (1.0 + g)
+}
+// A first-order filter uses just the real pole.
+fn butter_real_set(o, cutoff) {
+    let g = svf_prewarp(cutoff)
+    o.a = g / (1.0 + g)
+}
+fn butter_real_lp(o, x) {
+    let d = (x - o.z) * o.a
+    let y = o.z + d
+    o.z = y + d
+    y
+}
+fn butter_lp_odd(f, o, x) { butter_lp(f, butter_real_lp(o, x)) }
+fn butter_hp_odd(f, o, x) { butter_hp(f, x - butter_real_lp(o, x)) }
+
+// The low and high branches share their first section's integrators.
+// Each branch has two identical sections of Q = 1/sqrt(2). Their sum is
+// the allpass of one section. For three bands, split at the lower corner,
+// split its high output again, and pass its low output through svf_ap
+// at the upper corner with the same Q. Both paths then have the same phase.
+struct Split4 { first: Svf{} low: Svf{} high: Svf{} }
+fn split4_set(s, freq) {
+    let g = svf_prewarp(freq)
+    svf_coefficients(s.first, g, 1.414213562)
+    svf_coefficients(s.low, g, 1.414213562)
+    svf_coefficients(s.high, g, 1.414213562)
+}
+fn split4(s, x) {
+    let v = svf_step(s.first, x)
+    vec2(svf_lp(s.low, v.x), svf_hp(s.high, x - v.y - v.x))
+}
+
+// Mix the input, unity-peak band and low outputs of a single integrator pair.
+// A is the square root of the requested gain. A bell divides the damping
+// by A. Shelves move the pole frequency by sqrt(A) in opposite directions,
+// giving half the requested dB at the corner and unity at the other end.
+struct Eq {
+    ic1: 0.0 ic2: 0.0 a1: 0.0 a2: 0.0 a3: 0.0 k: 1.0
+    m0: 1.0 m1: 0.0 m2: 0.0
+}
+fn eq_bell_set(e, freq, q, db) {
+    let gain = db_to_gain(db)
+    svf_coefficients(e, svf_prewarp(freq), 1.0 / (max(q, 0.1) * sqrt(gain)))
+    e.m0 = 1.0
+    e.m1 = gain - 1.0
+    e.m2 = 0.0
+}
+fn eq_low_shelf_set(e, freq, q, db) {
+    let gain = db_to_gain(db)
+    let a = sqrt(gain)
+    svf_coefficients(e, svf_prewarp(freq) / sqrt(a), 1.0 / max(q, 0.1))
+    e.m0 = 1.0
+    e.m1 = a - 1.0
+    e.m2 = gain - 1.0
+}
+fn eq_high_shelf_set(e, freq, q, db) {
+    let gain = db_to_gain(db)
+    let a = sqrt(gain)
+    svf_coefficients(e, svf_prewarp(freq) * sqrt(a), 1.0 / max(q, 0.1))
+    e.m0 = gain
+    e.m1 = a - gain
+    e.m2 = 1.0 - gain
+}
+fn eq(e, x) {
+    let v = svf_step(e, x)
+    e.m0 * x + e.m1 * v.y + e.m2 * v.x
+}
+
+// The low, normalised band and high outputs reconstruct the input.
+fn svf_multi(f, x) {
+    let v = svf_step(f, x)
+    vec3(v.x, v.y, x - v.y - v.x)
+}
+
+// ---- Noise and modulation -------------------------------------------------
+
+// Parallel one-pole responses to the same white sample. The weights fit
+// amplitude proportional to 1/sqrt(f) on a logarithmic frequency grid.
+// Pink keeps its level at a raised rate. The fit departs below about 20 Hz times the factor.
+// Fixed poles for 44.1 to 96 kHz; at 48 kHz the fit covers 20 Hz to 20 kHz.
+struct Pink { a: 0.0 b: 0.0 c: 0.0 d: 0.0 e: 0.0 f: 0.0 g: 0.0 }
+fn pink(p) {
+    let w = rand()
+    p.a = 0.999476538 * p.a + 0.004330463 * w
+    p.b = 0.996341517 * p.b + 0.005633026 * w
+    p.c = 0.983770676 * p.c + 0.011121148 * w
+    p.d = 0.928102754 * p.d + 0.024033172 * w
+    p.e = 0.720904046 * p.e + 0.043740677 * w
+    p.f = 0.270090838 * p.f + 0.081512363 * w
+    p.g = -0.55 * p.g - 0.006434663 * w
+    p.a + p.b + p.c + p.d + p.e + p.f + p.g + 0.006380287 * w
+}
+
+// Brown keeps its level at a raised rate. The fit departs below about 20 Hz times the factor.
+// A leaky integral removes long-term drift. A two-tap average of the
+// excitation corrects the integrator's high-frequency slope towards -6 dB/octave.
+struct Brown { z: 0.0 prev: 0.0 }
+fn brown(b) {
+    let w = rand()
+    b.z = clamp(0.999 * b.z + 0.01635 * w + 0.00165 * b.prev, -1.0, 1.0)
+    b.prev = w
+    b.z
+}
+
+// At a raised rate all sub-samples share the beat of their base frame.
+// One turn per division beats, anchored at beat zero. The held shape mixes
+// the integer cycle bits, so neither the voice seed nor the call size matters.
+fn lfo_beat(division, shape) {
+    let turns = if division > 0.0 { beat / division } else { 0.0 }
+    let p = fract(turns)
+    match int(shape) {
+        1 => 1.0 - 4.0 * abs(p - 0.5),
+        2 => 2.0 * p - 1.0,
+        3 => if p < 0.5 { 1.0 } else { -1.0 },
+        4 => {
+            let h = int(floor(turns))
+            h = (h ^ (h >>> 16)) * 0x7feb352d
+            h = (h ^ (h >>> 15)) * 0x846ca68b
+            float((h ^ (h >>> 16)) >>> 8) * (1.0 / 8388608.0) - 1.0
+        },
+        _ => sin(TAU * p)
+    }
+}
+
+// ---- Recorded sound -------------------------------------------------------
+
+// Playback divides the step by oversampling to keep its pitch and duration at a raised rate.
+// Position and signed speed are in frames. A one-shot holds silence after it
+// leaves the table. Seeking to a frame starts it again in either direction.
+struct Player { pos: 0.0 }
+fn player_start(p, at) { p.pos = at }
+fn play(p, t, speed) {
+    if p.pos >= 0.0 && p.pos < len(t) {
+        let v = read_cubic(t, p.pos)
+        p.pos += speed / float(oversampling)
+        v
+    } else { 0.0 }
+}
+
+// Wrap both the position and the four interpolation taps in the half-open
+// frame interval, so fractional reads across a splice use only loop samples.
+fn player_wrap(pos, lo, hi) {
+    if pos >= lo && pos < hi { pos } else {
+        let span = float(hi - lo)
+        let offset = (pos - float(lo)) % span
+        float(lo) + if offset < 0.0 { offset + span } else { offset }
+    }
+}
+fn player_loop_read(t, pos, lo, hi) {
+    let i = int(pos)
+    if i > lo && i + 2 < hi { return read_cubic(t, pos) }
+    let n = hi - lo
+    let j = i - lo
+    let before = t[if j == 0 { hi - 1 } else { i - 1 }]
+    let x = t[i]
+    let next = t[lo + (j + 1) % n]
+    let after = t[lo + (j + 2) % n]
+    let c = (next - before) * 0.5
+    let d = x - next
+    let w = c + d
+    let a = w + d + (after - x) * 0.5
+    let frac = pos - float(i)
+    ((a * frac - (w + a)) * frac + c) * frac + x
+}
+fn play_loop(p, t, speed, from, to) {
+    let lo = int(clamp(from, 0, len(t)))
+    let hi = int(clamp(to, 0, len(t)))
+    if hi > lo {
+        let pos = player_wrap(p.pos, lo, hi)
+        p.pos = player_wrap(pos + speed / float(oversampling), lo, hi)
+        player_loop_read(t, pos, lo, hi)
+    } else {
+        // Keep the frame width even for a statically empty stereo loop.
+        let silence = t[0]
+        silence = 0.0
+        silence
+    }
 }

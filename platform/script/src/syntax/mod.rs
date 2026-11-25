@@ -25,6 +25,7 @@
 
 mod parse;
 pub mod edit;
+pub mod quantity;
 pub mod write;
 
 use std::ops::Range;
@@ -152,6 +153,8 @@ pub struct Arm {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
+    /// An over-nested subtree, preserved verbatim in its source span.
+    Error,
     Number(f64),
     /// A string, escapes resolved.
     Str(String),
@@ -424,7 +427,7 @@ impl Node {
     pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Node)) {
         let mut out = Push(f);
         match &self.kind {
-            Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) => {}
+            Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) | Kind::Error => {}
             Kind::Call { callee, args, .. } => {
                 out.push(callee);
                 out.extend(args.iter());
@@ -547,8 +550,13 @@ impl Node {
 
 /// A parsed file: its text and its tree. The text is the tree's source of truth;
 /// every edit returns a new `Syntax`.
+///
+/// The parser sizes the tree for its thread's available stack. Walk, print
+/// and drop it on a thread with at least as much stack available as at parse
+/// entry, including when moving a tree between threads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Syntax {
+    diagnostics: Vec<SyntaxError>,
     source: String,
     root: Node,
     units: UnitTable,
@@ -561,11 +569,20 @@ pub fn parse(source: &str) -> Result<Syntax, SyntaxError> {
 
 /// Parse a whole file with the host's registered number suffixes, kept for edits.
 pub fn parse_with(source: &str, units: &UnitTable) -> Result<Syntax, SyntaxError> {
-    let root = parse::parse_file(source, units)?;
-    Ok(Syntax { source: source.to_string(), root, units: units.clone() })
+    let origin = 0u8;
+    let marker = std::hint::black_box(&origin) as *const u8 as usize;
+    parse_with_budget(source, units, marker, makepad_stack_budget::native_stack_budget(marker))
+}
+
+fn parse_with_budget(source: &str, units: &UnitTable, origin: usize, budget: usize) -> Result<Syntax, SyntaxError> {
+    let (root, diagnostics) = parse::parse_file(source, units, origin, budget)?;
+    Ok(Syntax { diagnostics, source: source.to_string(), root, units: units.clone() })
 }
 
 impl Syntax {
+    /// Nodes skipped to keep deeply nested input safe to edit.
+    pub fn diagnostics(&self) -> &[SyntaxError] { &self.diagnostics }
+
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -707,6 +724,7 @@ pub fn check_nesting(syntax: &Syntax) -> Result<(), String> {
 impl Node {
     pub fn kind_name(&self) -> &'static str {
         match self.kind {
+            Kind::Error => "error",
             Kind::Number(_) => "number",
             Kind::Str(_) => "string",
             Kind::Name(_) => "name",

@@ -115,6 +115,26 @@ pub fn quote(text: &str) -> String {
     out
 }
 
+/// A Splash list of items already written as Splash (`5mm`, `-0.5`, `@c4`), comma-separated: a
+/// negative item after another stays its own item (`[5mm, -10mm]`), where a space would read
+/// `5mm -10mm` as one subtraction.
+///
+/// The rule for writers: a list whose items after the first can be negative (a point, a
+/// normal, an offset, a bend) is written with this. A list whose items never can (names,
+/// notes, strings, operands, colours, counts, a note row whose only signed item is its first)
+/// may keep the house style of spaces.
+pub fn list<T: AsRef<str>>(items: impl IntoIterator<Item = T>) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(item.as_ref());
+    }
+    out.push(']');
+    out
+}
+
 /// A float literal that reads back as the same number and as a float.
 pub fn number(v: f64) -> Result<String, String> {
     if !v.is_finite() {

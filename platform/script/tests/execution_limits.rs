@@ -37,6 +37,10 @@ fn errors_mention(vm: &mut ScriptVm, needle: &str) -> bool {
     take_errors(vm).iter().any(|e| e.contains(needle))
 }
 
+fn instructions_remaining(vm: &ScriptVm) -> u64 {
+    vm.bx.vm_stat(&mut vm_ctl::ScriptCtlReq::new(vm_ctl::STAT_LIMIT_REMAINING))
+}
+
 #[test]
 fn operand_stack_limit_is_uncatchable_and_the_vm_recovers() {
     let mut vm = test_vm();
@@ -104,6 +108,19 @@ fn nested_limits_only_narrow() {
     });
     assert!(value.is_err(), "{value:?}");
     assert!(errors_mention(&mut vm, "call frame limit exceeded"));
+
+    let body = |file| ScriptMod::new("", "", file, 0, 0, "7\n;", &[]);
+    let first_cost = vm.with_instruction_limit(2_000, |vm| {
+        let first = vm.with_instruction_limit(256, |vm| vm.eval(body("inner_limit.splash")));
+        assert_eq!(first.as_number(), Some(7.0), "the first body completed under the inner limit");
+        let used = vm.last_limit_consumed();
+        assert!((1..256).contains(&used), "the inner scope reports the first body's cost");
+        assert_eq!(instructions_remaining(vm), 2_000 - used, "the outer scope paid for the inner body");
+        let second = vm.eval(body("outer_limit.splash"));
+        assert_eq!(second.as_number(), Some(7.0), "the second body completed under the outer limit");
+        used
+    });
+    assert_eq!(vm.last_limit_consumed(), 2 * first_cost, "both identical bodies count toward the outer scope");
 }
 
 #[test]
@@ -255,18 +272,37 @@ fn a_native_calling_script_in_a_sliced_run_gets_the_real_value() {
     });
     assert!(yields > 3, "yielded only {yields} times");
     assert_eq!(value.as_number(), Some(312111.0), "{value:?} {:#?}", take_errors(vm));
+
+    let probe = vm.new_module(id!(probe));
+    vm.add_method(probe, id_lut!(invoke), script_args_def!(cb = NIL), |vm, args| {
+        let cb = script_value!(vm, args.cb);
+        let value = vm.call(cb, &[]);
+        assert_eq!(value.as_number(), Some(7.0), "the native received the script callback's result");
+        assert!(instructions_remaining(vm) < 1_000, "the callback returned with the outer budget still installed");
+        value
+    });
+    let value = vm.with_instruction_limit(1_000, |vm| {
+        vm.eval(ScriptMod::new("", "", "callback_limit.splash", 0, 0, "mod.probe.invoke(fn() { return 7 })\nloop {}\n;", &[]))
+    });
+    assert!(value.is_err(), "the loop after the native callback must bail");
+    assert!(errors_mention(vm, "instruction limit exceeded"), "the outer budget stopped the loop after the callback");
 }
 
 #[test]
 fn the_instruction_limit_counts_across_slices_and_still_bails() {
     let vm = &mut test_vm();
-    let (previous, applied) = vm.instruction_limit_begin(5_000);
-    let (value, yields) = run_sliced(vm, 1, false, |vm| {
-        vm.eval(ScriptMod::new("", "", "execution_limits_sliced_limit.octoscript", 0, 0, "loop {}\n;", &[]))
+    let (value, yields) = vm.with_instruction_limit(5_000, |vm| {
+        let first = vm.eval(ScriptMod::new("", "", "first_limit.splash", 0, 0, "7\n;", &[]));
+        assert_eq!(first.as_number(), Some(7.0), "the first body completed");
+        assert!((1..5_000).contains(&instructions_remaining(vm)), "the second body inherits the first body's remaining allowance");
+        run_sliced(vm, 1, false, |vm| {
+            vm.eval(ScriptMod::new("", "", "execution_limits_sliced_limit.octoscript", 0, 0, "loop {}\n;", &[]))
+        })
     });
-    vm.instruction_limit_end(previous, applied);
-    assert!(value.is_err(), "{value:?}");
-    assert!(errors_mention(vm, "instruction limit exceeded"));
+    assert!(value.is_err(), "the second body must bail: {value:?}");
+    assert!(errors_mention(vm, "instruction limit exceeded"), "the shared limit stopped the second body");
+    assert_eq!(vm.last_limit_consumed(), 5_000, "the two bodies exhausted one allowance");
+    assert_eq!(instructions_remaining(vm), u64::MAX, "the exhausted allowance ended with its scope");
     // a resumed slice runs at most two instructions here: the one limit ran out over thousands
     // of slices (a limit restarted per slice would never run out)
     assert!((2_400..=5_100).contains(&yields), "{yields} slices for a 5000-instruction limit");
@@ -374,7 +410,15 @@ fn a_native_pausing_a_sliced_streaming_eval_leaves_the_eval_end_to_the_resume() 
     let code = "let a = 20\nlet w = mod.probe.wait()\nlet m = [1, 2].map(fn(v) { return mod.probe.wait() + v })\nlet b = a + w + m[0] + m[1]\n{b: b}\n;";
     let vm = &mut test_vm();
     add_wait_probe(vm);
-    let (value, resumes) = run_paused(vm, 3, |vm| vm.eval_with_append_source(append_source("pause_streaming.splash"), code, ScriptObject::ZERO));
+    let (previous, applied) = vm.instruction_limit_begin(5_000);
+    let (value, resumes) = run_paused(vm, 3, |vm| {
+        vm.with_instruction_limit(1_000, |vm| vm.eval_with_append_source(append_source("pause_streaming.splash"), code, ScriptObject::ZERO))
+    });
+    let before_resume = vm.last_limit_consumed();
+    vm.instruction_limit_end(previous, applied);
+    let total = vm.last_limit_consumed();
+    assert!(before_resume < total && total < 1_000, "the parent reports the fuel spent before and after the pause");
+    assert_eq!(instructions_remaining(vm), u64::MAX, "the successful continuation released its remaining fuel");
     let calls = WAIT.with(|w| w.borrow().1.clone());
     assert_eq!(calls, [true, true, true, true, false, false], "can_pause: the outermost run's call may pause, a closure's inside `map` may not");
     assert!(resumes >= 3, "resumed {resumes} times for three pauses");
@@ -391,11 +435,22 @@ fn a_native_pausing_a_sliced_streaming_eval_leaves_the_eval_end_to_the_resume() 
 fn a_paused_sliced_run_still_ends_on_its_instruction_and_heap_limits() {
     let vm = &mut test_vm();
     add_wait_probe(vm);
-    let (previous, applied) = vm.instruction_limit_begin(5_000);
-    let (value, _) = run_paused(vm, 3, |vm| vm.eval_with_append_source(append_source("pause_limit.splash"), "mod.probe.wait()\nloop {}\n;", ScriptObject::ZERO));
-    vm.instruction_limit_end(previous, applied);
-    assert!(value.is_err() || value.is_nil(), "{value:?}");
+    let mut before_resume = 0;
+    let (value, _) = run_paused(vm, 3, |vm| {
+        let code = "mod.probe.wait()\nlet a = [1].map(fn(v) { return v + 1 })\nfor i in 0..5000 { a[0] }\n;";
+        let value = vm.with_instruction_limit(5_000, |vm| vm.eval_with_append_source(append_source("pause_limit.splash"), code, ScriptObject::ZERO));
+        assert!(vm.is_paused(), "the limited call suspended before leaving its scope");
+        before_resume = vm.last_limit_consumed();
+        assert!((1..5_000).contains(&before_resume), "the scope charged only work before the pause");
+        assert_eq!(instructions_remaining(vm), 5_000 - before_resume, "the continuation kept its unspent allowance");
+        value
+    });
+    assert!(value.is_err() || value.is_nil(), "the resumed loop must bail: {value:?}");
     assert!(errors_mention(vm, "instruction limit exceeded"), "the instruction limit across pauses");
+    assert_eq!(vm.last_limit_consumed(), before_resume, "out-of-scope resumes preserve the scope's reported cost");
+    assert_eq!(instructions_remaining(vm), u64::MAX, "the continuation's allowance ended with its run");
+    let next = vm.eval(ScriptMod::new("", "", "after_resume.splash", 0, 0, "7\n;", &[]));
+    assert_eq!(next.as_number(), Some(7.0), "the same thread runs unrelated code without a limit");
 
     let vm = &mut test_vm();
     add_wait_probe(vm);

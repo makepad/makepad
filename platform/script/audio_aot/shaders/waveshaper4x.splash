@@ -1,43 +1,30 @@
-// Drive with 4x oversampling: zero-stuff to 4x, a 7-tap low-pass, the
-// shaper (tanh with a bias for even harmonics), the same low-pass, keep
-// every 4th sample. Clipping at 1x folds harmonics back as fizz; at 4x
-// most of them stay above the audio band and get filtered.
-let TAPS = [0.0135, 0.0976, 0.2356, 0.3066, 0.2356, 0.0976, 0.0135]
+// Biased tanh at 4x. Delay the dry path to keep it aligned with the wet mix.
+latency(HALFBAND_LATENCY_4)
 let drive = param(4.0, 1, 40)
 let bias = param(0.1, -0.5, 0.5)
 let mix = param(1.0, 0, 1)
 
-struct Chan {
-    up: [0.0; 8]
-    dn: [0.0; 8]
-    w: int(0)
+var os = Oversample4{}
+var dl = OnePole{}
+var dr = OnePole{}
+var history = [vec2(0.0); 64]
+var w = int(0)
+
+fn block() {
+    onepole_set(dl, 10.0)
+    onepole_set(dr, 10.0)
 }
 
-var ch = [Chan{}; 2]
-
-fn fir(buf, w) {
-    let s = 0.0
-    for t in 0..7 {
-        s = s + TAPS[t] * buf[w - t]
-    }
-    s
-}
-
-fn oversampled(c, x) {
-    let out = 0.0
+fn shape(u) {
     let dc = tanh(bias * drive)
-    for k in 0..4 {
-        c.up[c.w] = if k == 0 { x * 4.0 } else { 0.0 }
-        let u = fir(c.up, c.w)
-        c.dn[c.w] = tanh((u + bias) * drive) - dc
-        out = fir(c.dn, c.w)
-        c.w = c.w + 1
-    }
-    out / tanh(drive)
+    vec2(tanh((u.x + bias) * drive) - dc, tanh((u.y + bias) * drive) - dc)
 }
 
 fn effect(l, r) {
-    let yl = oversampled(ch[0], l)
-    let yr = oversampled(ch[1], r)
-    vec2(l + (yl - l) * mix, r + (yr - r) * mix)
+    let shaped = oversample(os, vec2(l, r), fn(u) { shape(u) })
+    let wet = vec2(onepole_hp(dl, shaped.x), onepole_hp(dr, shaped.y)) * (0.75 / tanh(drive))
+    let dry = history[w - int(HALFBAND_LATENCY_4)]
+    history[w] = vec2(l, r)
+    w = w + 1
+    dry + (wet - dry) * mix
 }

@@ -9,30 +9,24 @@
 //!
 //! - every pass through a loop body adds that body's ops (its nested loops
 //!   aside: they count their own passes) plus two for the iteration, as
-//!   [`Program::cost`] charges them; a branch counts its dearer side;
+//!   [`Program::cost`] charges them; a branch counts the arm it takes;
 //! - the element body's own ops (its pass of the element loop) are a
 //!   constant the runtime adds per element: no code runs for them;
-//! - a call counts its function's body in place, its loops aside, exactly
-//!   as the inlined copy native code runs would (so a program and its
-//!   inlined form count the same); a function with loops counts them into
-//!   a variable of its own and returns that as an extra result, which the
-//!   caller adds; a loop-free one runs no counting code;
+//! - a call pays its callee's fixed cost. If the callee has variable
+//!   work, it returns the two words of that additional count;
 //! - a load or store of a host buffer counts [`MEMORY_OPS`] (memory-bound
 //!   work counts what it takes, not one op per miss);
 //! - a host call counts its call overhead here; its own work, at the input
 //!   it was actually given, is added by the runtime (`K_HOST_WORK`);
-//! - what varies (loops, functions with loops) counts into a variable that
-//!   runs on across a run's elements (four-wide code keeps one per lane)
-//!   and is stored once after the element loop, in ctx word `K_WORK` (the
-//!   lanes summed); the runtime adds it and the elements' constant after
-//!   each slice of elements, and stops the call once the sum passes its
-//!   limit. A kernel without loops runs no counting code at all.
+//! - variable work accumulates in a 64-bit counter per lane. The kernel
+//!   stores their sum in the two ctx words starting at `K_WORK`. The host
+//!   adds this and the fixed cost per element to the call's total.
 //!
 //! The counting statements are not counted. Four-wide code counts each
 //! lane's own passes (a lane that left a loop adds nothing), so the count
 //! is the same for any backend, thread count or slicing.
 
-use crate::ir::{Bin, Block, Op, Program, Region, Stmt, Ty, Val, Var};
+use crate::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Ty, Val, Var};
 use crate::lower::kernel::{ELEMENT_CAP, K_WORK};
 
 /// What a load or store of a host buffer counts: about what a cache and
@@ -41,7 +35,7 @@ use crate::lower::kernel::{ELEMENT_CAP, K_WORK};
 pub const MEMORY_OPS: u64 = 256;
 
 /// What one statement counts by itself (a branch, a loop and a function
-/// body aside: a branch is 1 plus its dearer side, a loop counts its
+/// body aside: a branch is 1 plus its selected arm, a loop counts its
 /// passes, a function its body on entry; a host call's own work is added at
 /// run time).
 pub fn op(s: &Stmt) -> u64 {
@@ -60,8 +54,7 @@ pub struct Fns {
     /// Each function's body by its fixed parts (its loops aside), counted
     /// where it is called: what its inlined copy counts in place.
     pub statics: Vec<u64>,
-    /// The function (or one it calls) has loops: it returns what they
-    /// counted as an extra result.
+    /// The function (or a callee) has variable work and returns its count.
     pub looped: Vec<bool>,
 }
 
@@ -72,36 +65,31 @@ pub fn local(b: &[Stmt], fixed: &Fns, consts: &Consts) -> u64 {
     b.iter()
         .enumerate()
         .map(|(k, s)| match s {
-            Stmt::If(_, t, e) => 1 + local(t, fixed, consts).max(local(e, fixed, consts)),
+            // Both arms pay their common cost here; the dearer arm pays the
+            // difference on entry, even when its work is a fixed-trip loop.
+            Stmt::If(_, t, e) => 1u64.saturating_add(local(t, fixed, consts).min(local(e, fixed, consts))),
             // A one-pass block (a function's `return` wrapper) counts inline.
             // A one-pass block: its first segment (see `segments`) counts
             // here, the rest where they are reached.
             Stmt::Loop { cap: 1, body } => local(&body[segments(body)[0].clone()], fixed, consts),
             // A loop of a known number of passes: all of them here.
             Stmt::Loop { cap, body } if trips(&b[..k], body, *cap, consts).is_some() => {
-                trips(&b[..k], body, *cap, consts).unwrap().saturating_mul(local(body, fixed, consts) + 2)
+                trips(&b[..k], body, *cap, consts).unwrap().saturating_mul(local(body, fixed, consts).saturating_add(2))
             }
             // A loop with a counter: its last pass here (the others after it).
-            Stmt::Loop { body, .. } if counter(body, consts).is_some() => local(body, fixed, consts) + 2,
+            Stmt::Loop { cap, body } if counter(body, consts).is_some() => {
+                let cost = local(body, fixed, consts).saturating_add(2);
+                if word_product(*cap, cost) { cost } else { 0 }
+            }
             Stmt::Call { f, .. } => fixed.statics.get(*f as usize).copied().unwrap_or(u64::MAX / 4),
             s => op(s),
         })
-        .sum()
+        .fold(0, u64::saturating_add)
 }
 
 /// Each function's fixed parts and whether it loops (see [`Fns`]).
 /// Functions are not recursive: resolved callees first.
 fn fns(p: &Program) -> Fns {
-    // A loop counted at run time (a known number of passes is fixed).
-    fn has_loop(b: &Block, consts: &Consts) -> bool {
-        b.iter().enumerate().any(|(k, s)| match s {
-            Stmt::Loop { cap: 1, body } => has_loop(body, consts) || segments(body).len() > 1,
-            Stmt::Loop { cap, body } if trips(&b[..k], body, *cap, consts).is_some() => has_loop(body, consts),
-            Stmt::Loop { .. } => true,
-            Stmt::If(_, t, e) => has_loop(t, consts) || has_loop(e, consts),
-            _ => false,
-        })
-    }
     fn callees(b: &Block, out: &mut Vec<u16>) {
         for s in b {
             match s {
@@ -126,8 +114,9 @@ fn fns(p: &Program) -> Fns {
             let mut cs = Vec::new();
             callees(&g.body, &mut cs);
             if cs.iter().all(|c| done.get(*c as usize).copied().unwrap_or(false)) {
-                out.statics[k] = local(&g.body, &out, &const_ints(&g.body));
-                out.looped[k] = has_loop(&g.body, &const_ints(&g.body)) || cs.iter().any(|c| out.looped[*c as usize]);
+                let consts = const_ints(&g.body);
+                out.statics[k] = local(&g.body, &out, &consts);
+                out.looped[k] = dynamic(&g.body, &out, &consts);
                 done[k] = true;
             }
         }
@@ -145,26 +134,79 @@ impl Fresh<'_> {
         Val(self.vals.len() as u32 - 1)
     }
 
-    fn konst(&mut self, out: &mut Block, n: u64) -> Val {
-        let c = self.val(Ty::I32);
-        out.push(Stmt::Def(c, Op::ConstI(n.min(i32::MAX as u64) as i32)));
-        c
+    fn def(&mut self, out: &mut Block, ty: Ty, op: Op) -> Val {
+        let v = self.val(ty);
+        out.push(Stmt::Def(v, op));
+        v
+    }
+
+    fn word(&mut self, out: &mut Block, n: u32) -> Val {
+        self.def(out, Ty::I32, Op::ConstI(n as i32))
     }
 }
 
-/// `sink += n`.
-fn add(f: &mut Fresh, sink: Var, n: u64) -> Block {
+// AIR integer registers are 32-bit. Keep an unsigned low and high word so
+// scalar, SIMD and wasm need neither floating-point arithmetic nor a new op.
+#[derive(Clone, Copy)]
+struct Counter { lo: Var, hi: Var }
+
+impl Counter {
+    fn new(vars: &mut Vec<Ty>) -> Self {
+        let lo = vars.len() as u32;
+        vars.extend([Ty::I32, Ty::I32]);
+        Self { lo: Var(lo), hi: Var(lo + 1) }
+    }
+
+    fn init(self, f: &mut Fresh, n: u64) -> Block {
+        let mut out = Vec::new();
+        for (var, word) in [(self.lo, n as u32), (self.hi, (n >> 32) as u32)] {
+            let v = f.word(&mut out, word);
+            out.push(Stmt::Set(var, v));
+        }
+        out
+    }
+
+    fn store(self, f: &mut Fresh, b: &mut Block, word: u32) {
+        for (base, var) in [(word, self.lo), (word + 1, self.hi)] {
+            let val = f.def(b, Ty::I32, Op::Get(var));
+            b.push(Stmt::Store { region: Region::Ctx, base, extent: 1, off: None, val });
+        }
+    }
+}
+
+fn add(f: &mut Fresh, sink: Counter, n: u64) -> Block {
     let mut out = Vec::new();
-    let c = f.konst(&mut out, n);
-    out.extend(add_val(f, sink, c));
+    let lo = f.word(&mut out, n as u32);
+    let hi = ((n >> 32) != 0).then(|| f.word(&mut out, (n >> 32) as u32));
+    add_val(f, &mut out, sink, lo, hi);
     out
 }
 
-/// `sink += v`.
-fn add_val(f: &mut Fresh, sink: Var, v: Val) -> Block {
-    let old = f.val(Ty::I32);
-    let new = f.val(Ty::I32);
-    vec![Stmt::Def(old, Op::Get(sink)), Stmt::Def(new, Op::Bin(Bin::AddI, old, v)), Stmt::Set(sink, new)]
+fn add_val(f: &mut Fresh, out: &mut Block, sink: Counter, lo: Val, hi: Option<Val>) {
+    let old = f.def(out, Ty::I32, Op::Get(sink.lo));
+    let sum = f.def(out, Ty::I32, Op::Bin(Bin::AddI, old, lo));
+    // Unsigned sum < old is the carry. Bias both words for AIR's signed compare.
+    let sign = f.word(out, 1 << 31);
+    let a = f.def(out, Ty::I32, Op::Bin(Bin::XorI, sum, sign));
+    let b = f.def(out, Ty::I32, Op::Bin(Bin::XorI, old, sign));
+    let carry = f.def(out, Ty::Bool, Op::CmpI(Cmp::Lt, a, b));
+    let one = f.word(out, 1);
+    let zero = f.word(out, 0);
+    let carry = f.def(out, Ty::I32, Op::Sel(carry, one, zero));
+    let high = f.def(out, Ty::I32, Op::Get(sink.hi));
+    let high = if let Some(hi) = hi { f.def(out, Ty::I32, Op::Bin(Bin::AddI, high, hi)) } else { high };
+    let high = f.def(out, Ty::I32, Op::Bin(Bin::AddI, high, carry));
+    out.extend([Stmt::Set(sink.lo, sum), Stmt::Set(sink.hi, high)]);
+}
+
+/// Reads the two little-endian words written by the counting pass.
+pub fn read_count(ctx: &[u32], word: usize) -> u64 {
+    u64::from(ctx[word]) | (u64::from(ctx[word + 1]) << 32)
+}
+
+pub(crate) fn write_count(ctx: &mut [u32], word: usize, count: u64) {
+    ctx[word] = count as u32;
+    ctx[word + 1] = (count >> 32) as u32;
 }
 
 /// A one-pass block's segments: up to and including each statement that
@@ -353,18 +395,31 @@ fn starts_at_zero(before: &[Stmt], v: Var, consts: &Consts) -> bool {
     false
 }
 
+// When the product could overflow an AIR integer, count each executed
+// iteration directly in the wide accumulator.
+fn word_product(cap: u32, cost: u64) -> bool {
+    cost <= u64::from(u32::MAX) / u64::from(cap.max(1))
+}
+
 /// Counts every loop of `b` (and of loops inside branches): a loop with a
 /// [`counter`] counts its passes but the last once after it (one
 /// multiply-add; the last is in its parent's fixed count, see [`local`]);
 /// any other adds its body's ops in every pass.
-fn loops(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns, consts: &Consts) {
+fn loops(b: &mut Block, f: &mut Fresh, sink: Counter, fixed: &Fns, consts: &Consts) {
     let mut k = 0;
     while k < b.len() {
         let known = matches!(&b[k], Stmt::Loop { cap, body } if trips(&b[..k], body, *cap, consts).is_some());
         match &mut b[k] {
             Stmt::If(_, t, e) => {
+                let taken = local(t, fixed, consts);
+                let other = local(e, fixed, consts);
                 loops(t, f, sink, fixed, consts);
                 loops(e, f, sink, fixed, consts);
+                if taken > other {
+                    t.splice(0..0, add(f, sink, taken - other));
+                } else if other > taken {
+                    e.splice(0..0, add(f, sink, other - taken));
+                }
             }
             // At most one pass (a function's `return` wrapper): its first
             // segment counts in its parent, each later one where it starts
@@ -386,8 +441,9 @@ fn loops(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns, consts: &Consts) 
                 }
                 *body = rebuilt;
             }
-            Stmt::Loop { body, .. } => {
-                let n = local(body, fixed, consts) + 2;
+            Stmt::Loop { cap, body } => {
+                let n = local(body, fixed, consts).saturating_add(2);
+                let fits_word = word_product(*cap, n);
                 let passes = counter(body, consts);
                 loops(body, f, sink, fixed, consts);
                 if known {
@@ -396,7 +452,7 @@ fn loops(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns, consts: &Consts) 
                     continue;
                 }
                 match passes {
-                    Some((v, step)) => {
+                    Some((v, step)) if fits_word => {
                         let mut after = Vec::new();
                         let end = f.val(Ty::I32);
                         after.push(Stmt::Def(end, Op::Get(v)));
@@ -413,17 +469,14 @@ fn loops(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns, consts: &Consts) 
                             after.push(Stmt::Def(d, if step == 1 { Op::Bin(Bin::SubI, end, start) } else { Op::Bin(Bin::SubI, start, end) }));
                             d
                         };
-                        let c = f.konst(&mut after, n);
-                        let old = f.val(Ty::I32);
-                        after.push(Stmt::Def(old, Op::Get(sink)));
-                        let m = f.val(Ty::I32);
-                        after.push(Stmt::Def(m, Op::Fma(crate::ir::Fma::MulAddI, d, c, old)));
-                        after.push(Stmt::Set(sink, m));
+                        let c = f.word(&mut after, n as u32);
+                        let charge = f.def(&mut after, Ty::I32, Op::Bin(Bin::MulI, d, c));
+                        add_val(f, &mut after, sink, charge, None);
                         let len = after.len();
                         b.splice(k + 1..k + 1, after);
                         k += len;
                     }
-                    None => {
+                    _ => {
                         let mut counted = add(f, sink, n);
                         counted.append(body);
                         *body = counted;
@@ -436,9 +489,8 @@ fn loops(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns, consts: &Consts) 
     }
 }
 
-/// Every call of a function with loops takes its callee's count (an extra
-/// result) and adds it.
-fn calls(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns) {
+/// Add the variable part of each callee's count when the call runs.
+fn calls(b: &mut Block, f: &mut Fresh, sink: Counter, fixed: &Fns) {
     let mut k = 0;
     while k < b.len() {
         match &mut b[k] {
@@ -448,9 +500,11 @@ fn calls(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns) {
             }
             Stmt::Loop { body, .. } => calls(body, f, sink, fixed),
             Stmt::Call { f: callee, rets, .. } if fixed.looped.get(*callee as usize).copied().unwrap_or(true) => {
-                let r = f.val(Ty::I32);
-                rets.push(r);
-                let added = add_val(f, sink, r);
+                let lo = f.val(Ty::I32);
+                let hi = f.val(Ty::I32);
+                rets.extend([lo, hi]);
+                let mut added = Vec::new();
+                add_val(f, &mut added, sink, lo, Some(hi));
                 let n = added.len();
                 b.splice(k + 1..k + 1, added);
                 k += n;
@@ -461,9 +515,7 @@ fn calls(b: &mut Block, f: &mut Fresh, sink: Var, fixed: &Fns) {
     }
 }
 
-/// A function with loops counts what they run into a variable of its own
-/// and returns it; its fixed parts, and a loop-free function, count where
-/// they are called.
+/// A function with variable work returns that count. The caller pays its fixed part.
 fn count_functions(p: &mut Program) -> Fns {
     let fixed = fns(p);
     for (k, g) in p.funcs.iter_mut().enumerate() {
@@ -472,32 +524,28 @@ fn count_functions(p: &mut Program) -> Fns {
         }
         // Its fixed parts are counted where it is called; it counts what
         // its loops (and looping callees) run, and returns that.
-        g.vars.push(Ty::I32);
-        let fv = Var(g.vars.len() as u32 - 1);
+        let fv = Counter::new(&mut g.vars);
         let consts = const_ints(&g.body);
         let mut f = Fresh { vals: &mut g.vals };
         loops(&mut g.body, &mut f, fv, &fixed, &consts);
         calls(&mut g.body, &mut f, fv, &fixed);
-        let mut body = Vec::new();
-        let c = f.konst(&mut body, 0);
-        body.push(Stmt::Set(fv, c));
+        let mut body = fv.init(&mut f, 0);
         body.append(&mut g.body);
-        let r = f.val(Ty::I32);
-        body.push(Stmt::Def(r, Op::Get(fv)));
+        for var in [fv.lo, fv.hi] {
+            g.results.push(f.def(&mut body, Ty::I32, Op::Get(var)));
+        }
         g.body = body;
-        g.results.push(r);
     }
     fixed
 }
 
-/// Whether `b` counts anything at run time: a loop, or a call of a
-/// function with loops.
-fn dynamic(b: &Block, fixed: &Fns, consts: &Consts) -> bool {
+/// Whether a loop, branch or callee can vary the cost of this block.
+fn dynamic(b: &[Stmt], fixed: &Fns, consts: &Consts) -> bool {
     b.iter().enumerate().any(|(k, s)| match s {
         Stmt::Loop { cap: 1, body } => dynamic(body, fixed, consts) || segments(body).len() > 1,
         Stmt::Loop { cap, body } if trips(&b[..k], body, *cap, consts).is_some() => dynamic(body, fixed, consts),
         Stmt::Loop { .. } => true,
-        Stmt::If(_, t, e) => dynamic(t, fixed, consts) || dynamic(e, fixed, consts),
+        Stmt::If(_, t, e) => local(t, fixed, consts) != local(e, fixed, consts) || dynamic(t, fixed, consts) || dynamic(e, fixed, consts),
         Stmt::Call { f, .. } => fixed.looped.get(*f as usize).copied().unwrap_or(true),
         _ => false,
     })
@@ -517,40 +565,34 @@ pub(crate) fn count(p: &mut Program) -> Option<u64> {
 fn count_program(p: &mut Program) -> Option<u64> {
     let fixed = count_functions(p);
     let consts = const_ints(&p.body);
-    let n = {
-        let Some(Stmt::Loop { cap: ELEMENT_CAP, body: element }) = crate::ir::unmarked(&p.body).next_back() else { return None };
-        if !matches!(crate::ir::unmarked(element).next_back(), Some(Stmt::Set(..))) {
-            return None;
-        }
-        local(element, &fixed, &consts) + 2
-    };
-    let dynamic = matches!(crate::ir::unmarked(&p.body).next_back(), Some(Stmt::Loop { body, .. }) if dynamic(body, &fixed, &consts));
+    let at = p.body.iter().rposition(|s| !matches!(s, Stmt::Mark(_)))?;
+    let Stmt::Loop { cap: ELEMENT_CAP, body: element } = &p.body[at] else { return None };
+    let Some(Stmt::Set(i, _)) = crate::ir::unmarked(element).next_back() else { return None };
+    // The final range check is outside the n elements billed by the host.
+    let start = crate::spmd::element_range_check(&p.body[..at], element, *i).map_or(0, |(k, _)| k + 1);
+    let n = local(element, &fixed, &consts).saturating_add(2);
+    let dynamic = dynamic(&element[start..], &fixed, &consts);
     if !dynamic {
         return Some(n);
     }
     // What runs a varying amount (loops, functions with loops) counts into
     // a variable that runs on across the run's elements (one per lane in
     // four-wide code), stored once after the loop.
-    p.vars.push(Ty::I32);
-    let wv = Var(p.vars.len() as u32 - 1);
+    let wv = Counter::new(&mut p.vars);
     let mut f = Fresh { vals: &mut p.vals };
-    let at = p.body.iter().rposition(|s| !matches!(s, Stmt::Mark(_)))?;
-    let z = f.val(Ty::I32);
     let Some(Stmt::Loop { body: element, .. }) = p.body.get_mut(at) else { return None };
-    loops(element, &mut f, wv, &fixed, &consts);
-    calls(element, &mut f, wv, &fixed);
-    let total = f.val(Ty::I32);
-    // Before the loop the count starts at 0 (four-wide code allows only
-    // definitions and sets there).
-    p.body.splice(at..at, [Stmt::Def(z, Op::ConstI(0)), Stmt::Set(wv, z)]);
-    p.body.push(Stmt::Def(total, Op::Get(wv)));
-    p.body.push(Stmt::Store { region: Region::Ctx, base: K_WORK, extent: 1, off: None, val: total });
+    let mut payload = element.split_off(start);
+    loops(&mut payload, &mut f, wv, &fixed, &consts);
+    calls(&mut payload, &mut f, wv, &fixed);
+    element.append(&mut payload);
+    p.body.splice(at..at, wv.init(&mut f, 0));
+    wv.store(&mut f, &mut p.body, K_WORK);
     Some(n)
 }
 
 /// Makes `p` (any program: an audio shader's render, say) count the ops it
 /// runs, as [`count`] does for a kernel's elements, and store the total of
-/// each run in ctx word `ctx_word` (which the caller adds to its region).
+/// each run in two ctx words starting at `ctx_word`.
 pub fn count_runs(p: &mut Program, ctx_word: u32) {
     forget_counters();
     count_program_runs(p, ctx_word);
@@ -560,18 +602,71 @@ pub fn count_runs(p: &mut Program, ctx_word: u32) {
 fn count_program_runs(p: &mut Program, ctx_word: u32) {
     let fixed = count_functions(p);
     let consts = const_ints(&p.body);
-    p.vars.push(Ty::I32);
-    let wv = Var(p.vars.len() as u32 - 1);
+    let wv = Counter::new(&mut p.vars);
     let mut f = Fresh { vals: &mut p.vals };
     let n = local(&p.body, &fixed, &consts);
     loops(&mut p.body, &mut f, wv, &fixed, &consts);
     calls(&mut p.body, &mut f, wv, &fixed);
-    let mut body = Vec::new();
-    let c = f.konst(&mut body, n);
-    body.push(Stmt::Set(wv, c));
+    let mut body = wv.init(&mut f, n);
     body.append(&mut p.body);
-    let total = f.val(Ty::I32);
-    body.push(Stmt::Def(total, Op::Get(wv)));
-    body.push(Stmt::Store { region: Region::Ctx, base: ctx_word, extent: 1, off: None, val: total });
+    wv.store(&mut f, &mut body, ctx_word);
     p.body = body;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ir, lower, parse};
+
+    #[test]
+    fn a_guard_charges_only_the_path_run() {
+        fn play(src: &str, left: f32, frames: u32) -> (u64, f32) {
+            let tokens = parse::lex(src).unwrap();
+            let items = parse::Parser::new(&tokens).items().unwrap();
+            let mut shader = lower::lower(&items, src.len() + 1).unwrap();
+            let word = lower::CTX_PARAMS;
+            count_runs(&mut shader.render, word);
+            let mut ctx = vec![0; word as usize + 2];
+            let mut mem = ir::Mem { ctx: &mut ctx, state: &mut shader.state_init,
+                shared: ir::Shared::Read(&shader.shared_init), bufs: &[] };
+            let (mut l, mut r) = ([0.0; 2], [0.0; 2]);
+            ir::run(&shader.render, &mut vec![0; shader.render.scratch_words()], &mut mem,
+                &mut ir::Io { ins: &[&[left; 2], &[1.0; 2]], outs: &mut [&mut l, &mut r] }, frames);
+            (read_count(&ctx, word as usize), l[0])
+        }
+        let shader = |body: &str| format!("var t=[0.0;128]\nfn effect(l,r){{ {body} t[0] }}");
+        let whole_loop = "for i in 0..128 { t[i]+=r }";
+        for visits in [1, 3] {
+            let source = |body: &str| {
+                if visits == 1 { shader(body) } else { shader(&format!("for j in 0..{visits} {{ {body} }}")) }
+            };
+            let guarded = source(&format!("if l>0 {{ {whole_loop} }}"));
+            let reference = source("if l>0 { t[0]+=r }");
+            let (skipped, zero) = play(&guarded, -1.0, 1);
+            let (taken, output) = play(&guarded, 1.0, 1);
+            assert_eq!(zero, 0.0);
+            assert_eq!(output, visits as f32);
+            assert_eq!(skipped, play(&reference, -1.0, 1).0, "an unvisited loop was charged");
+            // Compare an additional active frame, excluding the render loop's
+            // final bounds check and its conservative fixed cost per invocation.
+            let unguarded = source(whole_loop);
+            let full = play(&unguarded, 1.0, 2).0 - play(&unguarded, 1.0, 1).0;
+            let active = play(&guarded, 1.0, 2).0 - taken;
+            assert!(active >= full && full >= 128 * visits, "guarded {active}, unconditional {full}");
+        }
+    }
+
+    #[test]
+    fn counted_work_carries_into_the_high_word() {
+        let mut p = Program::default();
+        let sink = Counter::new(&mut p.vars);
+        let mut f = Fresh { vals: &mut p.vals };
+        p.body = sink.init(&mut f, u64::from(u32::MAX) - 1);
+        p.body.extend(add(&mut f, sink, (2u64 << 32) + 3));
+        sink.store(&mut f, &mut p.body, 0);
+        let mut ctx = [0; 2];
+        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut [], shared: ir::Shared::Read(&[]), bufs: &[] };
+        ir::run(&p, &mut vec![0; p.scratch_words()], &mut mem, &mut ir::Io::default(), 1);
+        assert_eq!(read_count(&ctx, 0), (3u64 << 32) + 1);
+    }
 }

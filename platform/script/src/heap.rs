@@ -32,6 +32,8 @@ pub(crate) struct ScriptAllocationBudget {
     remaining: usize,
     allocated: usize,
     exceeded: bool,
+    /// First charge that did not fit, used to settle an enclosing scope.
+    refused_bytes: usize,
     error: Option<String>,
 }
 
@@ -41,6 +43,7 @@ impl ScriptAllocationBudget {
             remaining: limit,
             allocated: 0,
             exceeded: false,
+            refused_bytes: 0,
             error: None,
         }
     }
@@ -55,6 +58,7 @@ impl ScriptAllocationBudget {
         }
         if bytes > self.remaining {
             self.exceeded = true;
+            self.refused_bytes = bytes;
             self.error = Some(format!(
                 "script {kind} limit exceeded while {operation}: requested {bytes} bytes, {} remaining",
                 self.remaining
@@ -353,8 +357,14 @@ impl ScriptHeap {
         limit: usize,
     ) -> Option<ScriptAllocationBudget> {
         self.ensure_allocation_poison();
-        self.allocation_budget
-            .replace(ScriptAllocationBudget::new(limit))
+        // Only the innermost counter is hot. Its headroom already includes
+        // every ancestor, and its accepted charges transfer back on exit.
+        let mut child = ScriptAllocationBudget::new(limit);
+        if let Some(parent) = &self.allocation_budget {
+            child.remaining = child.remaining.min(parent.remaining);
+            child.exceeded = parent.exceeded;
+        }
+        self.allocation_budget.replace(child)
     }
 
     pub(crate) fn end_allocation_budget(
@@ -363,7 +373,16 @@ impl ScriptHeap {
     ) -> ScriptAllocationReport {
         let current = self.allocation_budget.take();
         self.allocation_budget = previous;
-        current.map_or_else(ScriptAllocationReport::default, |budget| {
+        current.map_or_else(ScriptAllocationReport::default, |mut budget| {
+            if let Some(parent) = &mut self.allocation_budget {
+                parent.remaining -= budget.allocated;
+                parent.allocated = parent.allocated.saturating_add(budget.allocated);
+                if !parent.exceeded && budget.refused_bytes > parent.remaining {
+                    parent.exceeded = true;
+                    parent.refused_bytes = budget.refused_bytes;
+                    parent.error = budget.error.take();
+                }
+            }
             ScriptAllocationReport {
                 allocated_bytes: budget.allocated,
                 exceeded: budget.exceeded,
@@ -1893,21 +1912,110 @@ mod tests {
     }
 
     #[test]
-    fn updating_an_untracked_field_keeps_its_insertion_order() {
+    fn object_fields_keep_insertion_order_through_iteration_and_json() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
             host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
-        let result = eval(
-            &mut vm,
-            "insertion-order.octoscript",
-            "let o = {a: 1, b: 2, c: 3}\no.a = 10\no.b = 20\no.to_json()",
-        );
-        assert_eq!(
-            string_of(&vm, result).as_deref(),
-            Some(r#"{"a":10,"b":20,"c":3}"#)
-        );
+        // Cross the spill threshold on the same object, preserving its surviving fields.
+        let code = r#"
+            fn snapshot(o) {
+                let pairs = []
+                for k, v in o { pairs.push([k.to_string(), v]) }
+                [pairs.to_json(), o.to_json()]
+            }
+            let o = {a: 1, b: 2, c: 3, d: 4}
+            let states = [snapshot(o)]
+            o.a = 10
+            o.b = 20
+            states.push(snapshot(o))
+            o.delete(@b)
+            o.delete(@c)
+            o.e = 5
+            o.b = 6
+            states.push(snapshot(o))
+            for i in 20 { o["key" + i] = i }
+            o.key2 = 42
+            o.delete(@key0)
+            o.delete(@a)
+            o.f = 7
+            o.key0 = 8
+            states.push(snapshot(o))
+            let big = {}
+            for i in 4096 { big["field" + i] = i }
+            big.delete(@field1)
+            big.field1 = 777
+            states.push(snapshot(big))
+
+            let changing = {}
+            for i in 32 { changing["f" + i] = i }
+            let keys = for k, v in changing { k }
+            let seen = []
+            for k, v in changing {
+                seen.push(v)
+                changing.delete(k)
+                if v == 2 {
+                    for i in 3..20 { changing.delete(keys[i]) }
+                    changing.extra = 32
+                }
+            }
+            states.push(seen.to_json())
+            for i in 32 { changing[keys[i]] = i }
+            let inserts = []
+            let nested = []
+            for k, v in changing {
+                inserts.push(v)
+                if v == 2 {
+                    for nk, nv in changing {
+                        nested.push(nv)
+                        if nv == 0 {
+                            for i in 4..24 { changing.delete(keys[i]) }
+                            changing.extra = 32
+                            for i in 25..32 { changing.delete(keys[i]) }
+                            changing.more = 33
+                        }
+                    }
+                }
+            }
+            states.push(inserts.to_json())
+            states.push(nested.to_json())
+            states
+        "#;
+        vm.capture_errors();
+        let result = eval(&mut vm, "insertion-order.octoscript", code);
+        assert_eq!(vm.take_errors(), Vec::<String>::new(), "order script must run");
+        let states = result.as_array().unwrap();
+        let heap = &vm.bx.heap;
+        let check = |i, fields: &[(&str, usize)]| {
+            let state = heap.array_index(states, i, NoTrap).as_array().unwrap();
+            let pairs = fields.iter().map(|(k, v)| format!(r#"["{k}",{v}]"#)).collect::<Vec<_>>().join(",");
+            let json = fields.iter().map(|(k, v)| format!(r#""{k}":{v}"#)).collect::<Vec<_>>().join(",");
+            assert_eq!(string_of(&vm, heap.array_index(state, 0, NoTrap)).unwrap(), format!("[{pairs}]"), "for at step {i}");
+            assert_eq!(string_of(&vm, heap.array_index(state, 1, NoTrap)).unwrap(), format!("{{{json}}}"), "JSON at step {i}");
+        };
+        check(0, &[("a", 1), ("b", 2), ("c", 3), ("d", 4)]);
+        check(1, &[("a", 10), ("b", 20), ("c", 3), ("d", 4)]);
+        check(2, &[("a", 10), ("d", 4), ("e", 5), ("b", 6)]);
+        let names: Vec<_> = (1..20).map(|i| format!("key{i}")).collect();
+        let mut spilled = vec![("d", 4), ("e", 5), ("b", 6)];
+        spilled.extend(names.iter().zip(1..20).map(|(name, i)| (name.as_str(), if i == 2 { 42 } else { i })));
+        spilled.extend([("f", 7), ("key0", 8)]);
+        check(3, &spilled);
+
+        let names: Vec<_> = (0..4096).map(|i| format!("field{i}")).collect();
+        let mut big: Vec<_> = names.iter().enumerate().filter(|(i, _)| *i != 1)
+            .map(|(i, name)| (name.as_str(), i)).collect();
+        big.push(("field1", 777));
+        check(4, &big);
+        assert_eq!(string_of(&vm, heap.array_index(states, 5, NoTrap)).unwrap(),
+            "[0,1,2,20,21,22,23,24,25,26,27,28,29,30,31,32]",
+            "deleting the current entry and compacting must keep the next survivor");
+        assert_eq!(string_of(&vm, heap.array_index(states, 6, NoTrap)).unwrap(),
+            "[0,1,2,3,24,32,33]",
+            "a suspended outer cursor must survive two compactions and visit both appends");
+        assert_eq!(string_of(&vm, heap.array_index(states, 7, NoTrap)).unwrap(),
+            "[0,1,2,3,24,32,33]", "nested cursors keep their own positions");
 
         // The raw storage path: re-inserting an existing key keeps its slot.
         let mut object = ScriptObjectData::default();
@@ -1924,6 +2032,17 @@ mod tests {
                 (id!(b).into(), ScriptValue::from_f64(2.0)),
             ]
         );
+
+        let mut map = ScriptObjectMap::default();
+        for i in 0..32 {
+            map.insert(ScriptValue::from_f64(i as f64), ScriptMapValue::default());
+        }
+        for i in 0..24 { map.remove(&ScriptValue::from_f64(i as f64)); }
+        assert!(map.hole_count() > map.len(), "deletes leave holes until an append");
+        for i in 0..24 {
+            map.insert_absent(ScriptValue::from_f64(i as f64), ScriptMapValue::default());
+            assert!(map.hole_count() <= map.len(), "hole budget after insertion {i}");
+        }
     }
 
     #[test]

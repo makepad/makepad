@@ -1,7 +1,7 @@
 //! A kernel run laid out in one wasm linear memory image, with the
 //! interpreter's result: the differential checks of the wasm backend
-//! (tests/wasm.rs runs scalar modules on stitch; examples/wasm_diff.rs
-//! hands cases to V8 through node for the SIMD128 form) run generated code
+//! (tests/wasm.rs runs scalar modules on stitch; tests/web_wasm.rs
+//! runs scalar and SIMD128 modules in CEF) run generated code
 //! on a copy of `image` and compare it with `expected`.
 //!
 //! Image layout (byte addresses): 64 zero bytes, ctx, state (1 word),
@@ -110,10 +110,8 @@ pub fn layout(name: String, p: Program, parallel_safe: bool, ctx: &[u32], shared
             .collect();
         let mut state = [0u32; 1];
         let mut scratch = vec![0u32; p.scratch_words()];
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
         let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Read(shared), bufs: &raw };
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut io = ir::Io::default();
         ir::run(&p, &mut scratch, &mut mem, &mut io, n);
     }
     out[ctx_at as usize / 4..ctx_at as usize / 4 + ctx.len()].copy_from_slice(&ctx);

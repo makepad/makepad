@@ -1,0 +1,17 @@
+use tone
+
+let drive = param(2.0, 1.0, 8.0)
+let color = param(0.2, -1.0, 1.0)
+var left = OnePole{}
+var right = OnePole{}
+
+fn block() {
+    onepole_set(left, 1000.0)
+    onepole_set(right, 1000.0)
+}
+
+fn channel(filter, x) {
+    tone.soft(drive * tone.tilt(x, onepole_lp(filter, x), color))
+}
+
+fn effect(l, r) { vec2(channel(left, l), channel(right, r)) }

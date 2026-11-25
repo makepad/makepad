@@ -43,6 +43,7 @@ pub fn define_gc_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
         script_args!(value = NIL),
         |vm, args| {
             let value = script_value!(vm, args.value);
+            if !vm.bx.allow_debug_output { return value; }
             if let Some(obj) = value.as_object() {
                 let object = &vm.bx.heap.objects[obj];
                 let tag = &object.tag;

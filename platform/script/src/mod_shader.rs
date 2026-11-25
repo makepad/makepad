@@ -533,7 +533,7 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
             let backend = match backend_name.as_str() {
                 "metal" => ShaderBackend::Metal,
                 "hlsl" => ShaderBackend::Hlsl,
-                "glsl" => ShaderBackend::Glsl,
+                "glsl" | "gles" => ShaderBackend::Glsl,
                 "wgsl" | "wgsl_xr" => ShaderBackend::Wgsl,
                 // SPIR-V through the shader IR: the layout compile is GLSL,
                 // as the Vulkan renderer's (`_xr`: the multiview variant).
@@ -561,8 +561,12 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
                 }
                 let mut out = String::new();
                 match backend_name.as_str() {
-                    "glsl" => {
-                        let src = crate::shader_ir_glsl::glsl_draw_sources(&mut output, vm);
+                    "glsl" | "gles" => {
+                        let src = if backend_name == "gles" {
+                            crate::shader_ir_glsl::gles_draw_sources(&mut output, vm, false)
+                        } else {
+                            crate::shader_ir_glsl::glsl_draw_sources(&mut output, vm)
+                        };
                         out.push_str(&src.vertex);
                         out.push_str(&src.fragment);
                     }

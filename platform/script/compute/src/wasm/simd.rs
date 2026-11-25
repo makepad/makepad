@@ -48,7 +48,7 @@
 //! paths, which write all four lanes' words, are off in that iteration
 //! (the words past n may be another call's elements). Every iteration sets
 //! the mask (`i < n` per lane, and whether all lanes run) without a branch:
-//! a branch that touches vectors in the loop slowed V8's code around it.
+//! a branch that touches vectors in the loop slowed the web engine's code around it.
 //! Only element-local kernels whose outputs hold every record may run four
 //! wide (the caller checks `parallel_safe`). [`body`] declines what [`crate::spmd::supported`]
 //! declines (f64, state, host calls, audio I/O, reductions, large frames)
@@ -117,6 +117,7 @@ fn emitter<'a>(p: &'a Program, info: Info, i: Var, target: Target, fix: u32, cal
         pre: Body::new(),
         entry: !function,
         element: None,
+        work: None,
         full_iter: NONE,
         n_splat: NONE,
         info,
@@ -178,6 +179,7 @@ pub(super) fn body(p: &Program, target: Target, fix: u32, calls: &[u32]) -> Opti
     let (sh, info) = analysis(p)?;
     let (mut w, pre_at) = emitter(p, info, sh.i, target, fix, calls, false);
     w.element = Some(id(sh.element));
+    w.work = sh.post.map(|(lo, hi, _)| (lo, hi));
     // Every lane runs (a partial last iteration masks its own).
     w.vconst([u32::MAX; 4]);
     w.sc.f.set(w.m);
@@ -194,17 +196,23 @@ pub(super) fn body(p: &Program, target: Target, fix: u32, calls: &[u32]) -> Opti
     }
     w.stmt(sh.element);
     // The run's counted work: the lanes' counts, summed, into its ctx word.
-    if let Some((var, word)) = sh.post {
+    if let Some((lo, hi, word)) = sh.post {
         w.sc.f.get(super::P_CTX);
-        let l = w.vv[var.0 as usize];
         for lane in 0..4 {
-            w.get(l);
+            w.get(w.vv[lo.0 as usize]);
             w.lane_op(op::I32X4_EXTRACT_LANE, lane);
-            if lane > 0 {
-                w.sc.f.b(op::I32_ADD);
+            if let Some(hi) = hi {
+                w.sc.f.b(op::I64_EXTEND_I32_U);
+                w.get(w.vv[hi.0 as usize]);
+                w.lane_op(op::I32X4_EXTRACT_LANE, lane);
+                w.sc.f.b(op::I64_EXTEND_I32_U);
+                w.sc.f.i64c(32);
+                w.sc.f.b(op::I64_SHL);
+                w.sc.f.b(op::I64_OR);
             }
+            if lane > 0 { w.sc.f.b(if hi.is_some() { op::I64_ADD } else { op::I32_ADD }); }
         }
-        w.sc.f.mem(op::I32_STORE, 4 * word);
+        w.sc.f.mem(if hi.is_some() { op::I64_STORE } else { op::I32_STORE }, 4 * word);
     }
     Some(finish(w, pre_at))
 }
@@ -301,6 +309,7 @@ struct W<'a> {
     entry: bool,
     /// The element loop (an entry's).
     element: Option<spmd::Id>,
+    work: Option<(Var, Option<Var>)>,
     /// An entry's: 1 when every lane of this iteration has an element (the
     /// store fast paths need it); splat(n).
     full_iter: u32,
@@ -826,7 +835,8 @@ impl W<'_> {
         // A raw bool variable takes a mask as its 0/1 word.
         let word = self.is_bool(v) && !self.var_mask[k];
         self.vget_word(v, word);
-        if !self.full {
+        if !self.full || self.work.is_some_and(|(lo, hi)| var == lo || Some(var) == hi) {
+            // Counters also respect the final partial element vector.
             // Only the running lanes take the new value.
             self.get(self.vv[k]);
             self.get(self.m);
@@ -1709,13 +1719,17 @@ impl W<'_> {
             return;
         }
         if self.relaxed {
+            // Flip the operand sign before madd, including for a NaN.
             self.vget(a);
+            if k == Fma::SubFrom {
+                self.fd(op::F32X4_NEG);
+            }
             self.vget(b);
             self.vget(c);
             if k == Fma::Sub {
                 self.fd(op::F32X4_NEG);
             }
-            self.fd(if k == Fma::SubFrom { op::F32X4_RELAXED_NMADD } else { op::F32X4_RELAXED_MADD });
+            self.fd(op::F32X4_RELAXED_MADD);
             return;
         }
         // Exact: per half, p = a * b in f64 (exact: 48 bits) and s = p + c;
@@ -1724,7 +1738,7 @@ impl W<'_> {
         // Those rare lanes are fixed through the scalar sequence ([`fma_fix`],
         // out of line); only then do the operands and the result pass
         // through the frame's head (storing them every time measured 20-25%
-        // slower on heavy kernels in V8). Round to odd without a branch
+        // slower on heavy kernels in a web engine). Round to odd without a branch
         // (TwoSum's error nudging the last bit) measured slower.
         let [ta, tb, tc, plo, phi, slo, shi, _] = self.tv;
         self.vget(a);

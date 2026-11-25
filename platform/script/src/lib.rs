@@ -2,6 +2,10 @@
 // spellings rather than depending on Rust's host-side constants.
 #![allow(clippy::approx_constant)]
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 // Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
 relax_api::option_layouts! {
     (),
@@ -19,6 +23,7 @@ relax_api::option_layouts! {
     makepad_math::Vec3f,
     makepad_math::Vec4f,
     mod_shader::ShaderIoType,
+    object::ScriptVecValue,
     opcode::Opcode,
     tokenizer::ScriptLoc,
     traits::ScriptTypeIndex,
@@ -90,6 +95,7 @@ pub mod mod_std;
 pub mod object;
 pub mod object_heap;
 pub mod parser;
+pub mod policy;
 pub mod regex;
 pub mod regex_heap;
 pub mod string;

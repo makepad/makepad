@@ -1,0 +1,7 @@
+fn check_effect(frame, in, out) -> bool {
+    let wet = out - in * (1.0 - mix)
+    // Both channels begin dry. The shortest delay first returns on the left.
+    if frame < DL_LEN[0] { return abs(wet.x) < 0.00001 && abs(wet.y) < 0.00001 }
+    if frame == DL_LEN[0] { return abs(wet.x) > 0.0001 && abs(wet.y) < 0.00001 }
+    abs(out.x) <= 1.0 && abs(out.y) <= 1.0
+}

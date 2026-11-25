@@ -609,7 +609,7 @@ fn free_names(f: &FnDecl) -> Vec<(String, Span, bool)> {
                     }
                 }
                 ExprKind::Lambda(f) => self.fn_decl(f),
-                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
+                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Unreadable(_) => {}
             }
         }
     }

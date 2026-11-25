@@ -1,0 +1,6 @@
+// A soft knee and a tilt around a low-pass split.
+fn soft(x) { x / (1.0 + abs(x)) }
+
+fn tilt(x, low, amount) {
+    low * (1.0 - amount) + (x - low) * (1.0 + amount)
+}

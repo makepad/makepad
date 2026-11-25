@@ -97,7 +97,7 @@ fn run<'a>(lowered: &EventLowered, entry: usize, state: &mut [u32], ports: &'a m
     let program = &lowered.entries[entry].program;
     let mut scratch = vec![0; program.scratch_words()];
     let mut mem = ir::Mem { ctx: &mut [], state, shared: ir::Shared::Read(&lowered.shared_init), bufs: &[] };
-    let mut io = ir::Io { ins: [&[], &[]], outs: [&mut [], &mut []] };
+    let mut io = ir::Io::default();
     let first = ports.calls.len();
     ir::run_ports(program, &mut scratch, &mut mem, &mut io, 1, ports);
     &ports.calls[first..]

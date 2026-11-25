@@ -600,7 +600,10 @@ impl<'a> TextCx<'a> {
             ExprKind::TexSize(t) => {
                 let ts = self.expr(f, *t);
                 let unsigned = self.m.scalar_of(ty) == Some(IrScalar::U32);
-                if glsl {
+                if matches!(self.m.get(ty), IrTy::Vec(3, IrScalar::F32)) {
+                    if glsl { format!("vec3(textureSize({}, 0))", ts) }
+                    else { format!("vec3f(textureDimensions({}))", ts) }
+                } else if glsl {
                     if unsigned {
                         format!("uvec2(textureSize({}, 0).xy)", ts)
                     } else {
@@ -1135,7 +1138,9 @@ impl<'a> TextCx<'a> {
             }
             ExprKind::TexSize(t) => {
                 let ts = self.expr(f, *t);
-                if self.m.scalar_of(ty) == Some(IrScalar::U32) {
+                if matches!(self.m.get(ty), IrTy::Vec(3, IrScalar::F32)) {
+                    format!("_mpTexSize3D({})", ts)
+                } else if self.m.scalar_of(ty) == Some(IrScalar::U32) {
                     format!("((uint2)_mpTexSize2D({}))", ts)
                 } else {
                     format!("_mpTexSize2D({})", ts)
@@ -1150,6 +1155,8 @@ impl<'a> TextCx<'a> {
                 let r = if *layer != NO_EXPR {
                     let l = self.expr(f, *layer);
                     format!("{}.Load(int4({}, {}, {}))", ts, cs, l, ls)
+                } else if matches!(self.m.get(tt), IrTy::Texture(TextureType::Texture3d)) {
+                    format!("{}.Load(int4({}, {}))", ts, cs, ls)
                 } else {
                     format!("{}.Load(int3({}, {}))", ts, cs, ls)
                 };
@@ -1320,6 +1327,19 @@ impl<'a> TextCx<'a> {
 
     // ---- Metal ----
 
+    /// Integer `a % b` of type `ty` through the `_mp_rem` helpers ([`crate::shader_ir_metal::METAL_HELPERS`]),
+    /// a vector's lane by lane, each operand at `ty` (a scalar beside a vector is splat).
+    fn metal_int_rem(&self, ty: TyId, a: &str, b: &str) -> String {
+        let lanes = self.m.lanes(ty);
+        let scalar = self.scalar_name(self.m.scalar_of(ty).unwrap());
+        if lanes == 1 {
+            format!("_mp_rem<{scalar}>({a}, {b})")
+        } else {
+            let t = self.ty_name(ty);
+            format!("_mp_remv<{scalar}>({t}({a}), {t}({b}))")
+        }
+    }
+
     /// The expressions MSL spells its own way (None: the shared spelling).
     fn metal_expr(&mut self, f: &IrFunction, e: ExprId) -> Option<String> {
         let ex = &f.exprs[e as usize];
@@ -1332,6 +1352,9 @@ impl<'a> TextCx<'a> {
                 if *op == BinOp::Rem && self.m.scalar_of(ty).map(|s| s.is_float()).unwrap_or(false) {
                     let sa = if self.m.lanes(at) < self.m.lanes(ty) { format!("{}({})", self.ty_name(ty), sa) } else { sa };
                     return Some(format!("fmod({}, {})", sa, sb));
+                }
+                if *op == BinOp::Rem && self.m.scalar_of(ty).is_some_and(|s| s.is_int()) {
+                    return Some(self.metal_int_rem(ty, &sa, &sb));
                 }
                 if self.m.scalar_of(ty) == Some(IrScalar::Bool) && self.m.scalar_of(at) == Some(IrScalar::Bool) {
                     let o = match op {
@@ -1433,7 +1456,9 @@ impl<'a> TextCx<'a> {
             }
             ExprKind::TexSize(t) => {
                 let ts = self.expr(f, *t);
-                if self.m.scalar_of(ty) == Some(IrScalar::U32) {
+                if matches!(self.m.get(ty), IrTy::Vec(3, IrScalar::F32)) {
+                    format!("float3({0}.get_width(), {0}.get_height(), {0}.get_depth())", ts)
+                } else if self.m.scalar_of(ty) == Some(IrScalar::U32) {
                     format!("uint2({0}.get_width(), {0}.get_height())", ts)
                 } else {
                     format!("float2({0}.get_width(), {0}.get_height())", ts)
@@ -1448,6 +1473,8 @@ impl<'a> TextCx<'a> {
                 let r = if *layer != NO_EXPR {
                     let l = self.expr(f, *layer);
                     format!("{}.read(uint2({}), uint({}), uint({}))", ts, cs, l, ls)
+                } else if matches!(self.m.get(tt), IrTy::Texture(TextureType::Texture3d)) {
+                    format!("{}.read(uint3({}), uint({}))", ts, cs, ls)
                 } else {
                     format!("{}.read(uint2({}), uint({}))", ts, cs, ls)
                 };
@@ -1617,6 +1644,10 @@ impl<'a> TextCx<'a> {
                 }
                 if self.metal() && *op == BinOp::Rem && self.m.scalar_of(pt).map(|s| s.is_float()).unwrap_or(false) {
                     writeln!(out, "{} = fmod({}, {});", place, place, val).ok();
+                    return;
+                }
+                if self.metal() && *op == BinOp::Rem && self.m.scalar_of(pt).is_some_and(|s| s.is_int()) {
+                    writeln!(out, "{} = {};", place, self.metal_int_rem(pt, &place, &val)).ok();
                     return;
                 }
                 if self.glsl() && *op == BinOp::Rem && self.m.scalar_of(pt).map(|s| s.is_float()).unwrap_or(false) {

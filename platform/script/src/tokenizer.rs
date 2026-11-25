@@ -942,14 +942,16 @@ impl ScriptTokenizer {
     pub fn run(&mut self, finish: bool, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
         if finish {
             if self.state != State::Whitespace && !self.in_string() {
-                self.tokenize_impl("\n", heap);
+                self.tokenize_up_to("\n", heap, usize::MAX);
             }
             return &[];
         }
-        self.tokenize_impl(new_chars, heap)
+        self.tokenize_up_to(new_chars, heap, usize::MAX)
     }
 
-    fn tokenize_impl(&mut self, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
+    // Keep the first excess token for its diagnostic location. A single
+    // character can terminate a number, a suffix and a delimiter together.
+    pub(crate) fn tokenize_up_to(&mut self, new_chars: &str, heap: &mut ScriptHeap, max_tokens: usize) -> &[ScriptTokenPos] {
         if self.provisional {
             self.provisional = false;
             self.tokens.pop();
@@ -1001,6 +1003,7 @@ impl ScriptTokenizer {
         };
 
         while let Some(c) = iter.next() {
+            if self.tokens.len() > max_tokens { break; }
             self.original.push(c);
             self.pos += 1;
             self.tok_end = self.pos - 1;
@@ -1889,6 +1892,30 @@ mod tests {
                 "\"h\\\"i\"", "e", ":", "vec2", "(", "1", "..", "2", ")", "f", ":", "1.0f", "g", ":", "x", "->", "y", "}"
             ]
         );
+    }
+
+    /// A raw literal is one token through its matching delimiter, its
+    /// backslashes and inner quotes kept as written, and a lone `r#` opens none.
+    #[test]
+    fn raw_strings_preserve_contents_and_literal_spans() {
+        let source = r###"a: r"x\ge{1}" b: r#"say "hi" \n"# c: r##"one "# two"## d: r#x after"###;
+        let mut tokens = lex(source).into_iter();
+        for (literal, contents) in [
+            (r#"r"x\ge{1}""#, r"x\ge{1}"),
+            (r##"r#"say "hi" \n"#"##, r#"say "hi" \n"#),
+            (r###"r##"one "# two"##"###, r##"one "# two"##),
+        ] {
+            // Each field starts with its name and a colon.
+            let token = tokens.nth(2).unwrap_or_else(|| panic!("missing raw literal {literal}"));
+            assert_eq!(token.string(), Some(contents), "{literal} lost its raw contents");
+            assert_eq!(&source[token.span()], literal, "{literal} span must include both delimiters");
+        }
+        let field = tokens.next().expect("missing field after the last raw literal");
+        assert_eq!(&source[field.span()], "d", "the last raw literal must end before field d");
+        let prefix = tokens.nth(1).expect("missing token after d:");
+        assert!(prefix.string().is_none(), "r#x opened a raw string without a quote");
+        let after = tokens.last().expect("r#x swallowed the following identifier");
+        assert_eq!(&source[after.span()], "after", "lexing must resume after r#x");
     }
 }
 

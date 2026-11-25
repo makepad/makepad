@@ -77,7 +77,7 @@ fn run(lowered: &EventLowered, name: &str, state: &mut [u32], bufs: &[RawBuf], p
     let entry = lowered.entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("missing entry {name}"));
     let mut scratch = vec![0; entry.program.scratch_words()];
     let mut mem = ir::Mem { ctx: &mut [], state, shared: ir::Shared::Read(&lowered.shared_init), bufs };
-    let mut io = ir::Io { ins: [&[], &[]], outs: [&mut [], &mut []] };
+    let mut io = ir::Io::default();
     ir::run_ports(&entry.program, &mut scratch, &mut mem, &mut io, 1, ports);
 }
 

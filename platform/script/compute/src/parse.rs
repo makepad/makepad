@@ -10,7 +10,7 @@ pub enum Tk {
     /// A number and whether it was written without a fraction/exponent.
     Num(f64, bool),
     Punct(&'static str),
-    /// A string (one line, no escapes): only `use lib("id", "rev")`.
+    /// A quoted string on one line, without escapes.
     Str(String),
     /// A colour literal (`#eee9df`, `#fff`, `#ff000080`) as Splash reads
     /// it: `0xRRGGBBAA`, the channels sRGB-encoded as written.
@@ -213,6 +213,7 @@ pub enum TypeAnn {
 
 #[derive(Clone, Debug)]
 pub enum Item {
+    Decl { name: String, args: Vec<Expr>, span: Span },
     Let { name: String, ann: Option<TypeAnn>, value: Expr, span: Span },
     Var { name: String, ann: Option<TypeAnn>, value: Expr, span: Span },
     Struct { name: String, fields: Vec<(String, Expr)>, span: Span },
@@ -225,7 +226,7 @@ pub enum Item {
 impl Item {
     pub fn name(&self) -> &str {
         match self {
-            Item::Let { name, .. } | Item::Var { name, .. } | Item::Struct { name, .. } => name,
+            Item::Decl { name, .. } | Item::Let { name, .. } | Item::Var { name, .. } | Item::Struct { name, .. } => name,
             Item::Fn(f) => &f.name,
             Item::Use { path, .. } => path,
         }
@@ -294,6 +295,7 @@ pub enum ExprKind {
     Num(f64, bool),
     Bool(bool),
     Ident(String),
+    Str(String),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
@@ -310,12 +312,21 @@ pub enum ExprKind {
     /// `Name { field: value }`; an empty name is a plain object
     /// `{ field: value }` (its fields give its shape).
     StructLit(String, Vec<(String, Expr)>),
-    /// An object's field value a kernel cannot hold (a string, a value
-    /// that does not parse as kernel code), and why: reading the field is
-    /// the error, the object's other fields stay readable.
+    /// Why a field value could not be parsed. Reading that field reports
+    /// the error. The object's other fields stay readable.
     Unreadable(String),
     /// A function value `fn(a, b) { .. }`: bound by `let`, then called.
     Lambda(Box<FnDecl>),
+}
+
+impl ExprKind {
+    pub(crate) fn unreadable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Str(_) => Some("a string: kernels have no strings"),
+            Self::Unreadable(why) => Some(why),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -372,13 +383,15 @@ pub(crate) fn type_ann_named(name: &str) -> Option<TypeAnn> {
 pub struct Parser<'a> {
     toks: &'a [Token],
     pos: usize,
+    /// The next identifier opens a top-level parameter declaration.
+    param_decl: bool,
 }
 
 type PResult<T> = Result<T, ShaderError>;
 
 impl<'a> Parser<'a> {
     pub fn new(toks: &'a [Token]) -> Self {
-        Parser { toks, pos: 0 }
+        Parser { toks, pos: 0, param_decl: false }
     }
 
     fn peek(&self) -> &Tk {
@@ -466,6 +479,7 @@ impl<'a> Parser<'a> {
                 let name = self.ident()?;
                 let ann = self.type_ann()?;
                 self.expect("=")?;
+                self.param_decl = !is_var && self.is_kw("param");
                 let value = self.expr()?;
                 let span = Span { start, end: self.prev_end() };
                 items.push(match value.kind {
@@ -486,8 +500,19 @@ impl<'a> Parser<'a> {
             } else if self.is_kw("use") {
                 self.bump();
                 items.push(self.use_item(start)?);
+            } else if matches!(self.peek(), Tk::Ident(_)) && self.toks.get(self.pos + 1).is_some_and(|t| t.tk == Tk::Punct("(") && !t.nl) {
+                let name = self.ident()?;
+                self.expect("(")?;
+                let mut args = Vec::new();
+                while !self.eat(")") {
+                    args.push(self.expr()?);
+                    if !self.is(")") {
+                        self.expect(",")?;
+                    }
+                }
+                items.push(Item::Decl { name, args, span: Span { start, end: self.prev_end() } });
             } else {
-                return self.err("expected `let`, `const`, `var`, `struct`, `fn` or `use` at the top level");
+                return self.err("expected a declaration, `let`, `const`, `var`, `struct`, `fn` or `use` at the top level");
             }
         }
     }
@@ -584,9 +609,9 @@ impl<'a> Parser<'a> {
             let name = self.ident()?;
             self.expect(":")?;
             let t = self.tok().clone();
-            let value = if let Tk::Str(_) = &t.tk {
+            let value = if let Tk::Str(s) = t.tk {
                 self.bump();
-                Expr { kind: ExprKind::Unreadable("a string: kernels have no strings".into()), span: Span { start: t.start, end: t.end } }
+                Expr { kind: ExprKind::Str(s), span: Span { start: t.start, end: t.end } }
             } else {
                 let at = self.pos;
                 match self.expr() {
@@ -612,6 +637,67 @@ impl<'a> Parser<'a> {
                 }
             };
             fields.push((name, value));
+        }
+    }
+
+    /// Names in parameter info are literal text, including when a fused
+    /// node declares a variable with the same name. Numeric fields are
+    /// expressions and follow the usual name resolution.
+    fn param_info(&mut self, default: &mut Expr) -> PResult<Expr> {
+        let start = self.bump().start;
+        let mut fields = Vec::new();
+        loop {
+            self.skip_seps();
+            if self.eat("}") {
+                return Ok(Expr { kind: ExprKind::StructLit(String::new(), fields), span: Span { start, end: self.prev_end() } });
+            }
+            let field_start = self.tok().start;
+            let name = self.ident()?;
+            self.expect(":")?;
+            let kind = match name.as_str() {
+                "unit" | "curve" => {
+                    match self.peek() {
+                        Tk::Ident(_) => ExprKind::Str(self.ident()?),
+                        Tk::Str(s) if name == "unit" && s == "%" => {
+                            self.bump();
+                            ExprKind::Str("%".into())
+                        }
+                        _ => return Err(ShaderError::new(field_start, self.tok().end, format!("expected a {} word", name))),
+                    }
+                }
+                "label" | "group" => self.param_text()?,
+                "choices" => {
+                    self.expect("[")?;
+                    let mut list = Vec::new();
+                    loop {
+                        self.skip_seps();
+                        if self.eat("]") {
+                            break;
+                        }
+                        let start = self.tok().start;
+                        let kind = self.param_text()?;
+                        list.push(Expr { kind, span: Span { start, end: self.prev_end() } });
+                    }
+                    if list.len() < 2 {
+                        return Err(ShaderError::new(field_start, self.prev_end(), "choices needs at least two names".into()));
+                    }
+                    if let ExprKind::Ident(word) = &default.kind {
+                        default.kind = ExprKind::Str(word.clone());
+                    }
+                    ExprKind::ArrayList(list)
+                }
+                "step" | "smooth" => self.expr()?.kind,
+                _ => return Err(ShaderError::new(field_start, field_start + name.len(), format!("unknown param field `{name}` (unit, curve, step, label, group, choices, smooth)"))),
+            };
+            fields.push((name, Expr { kind, span: Span { start: field_start, end: self.prev_end() } }));
+        }
+    }
+
+    fn param_text(&mut self) -> PResult<ExprKind> {
+        let t = self.bump();
+        match t.tk {
+            Tk::Ident(s) | Tk::Str(s) => Ok(ExprKind::Str(s)),
+            _ => Err(ShaderError::new(t.start, t.end, "expected a word or a quoted string".into())),
         }
     }
 
@@ -985,6 +1071,7 @@ impl<'a> Parser<'a> {
                 done(self, ExprKind::ArrayList(list))
             }
             Tk::Ident(name) => {
+                let param_decl = std::mem::take(&mut self.param_decl);
                 match name.as_str() {
                     "true" | "false" => {
                         self.bump();
@@ -1011,7 +1098,11 @@ impl<'a> Parser<'a> {
                         if self.eat(")") {
                             break;
                         }
-                        args.push(self.expr()?);
+                        let is_info = param_decl && matches!(args.len(), 1 | 3) && self.is("{")
+                            && (matches!(self.toks.get(self.pos + 1).map(|t| &t.tk), Some(Tk::Punct("}")))
+                                || matches!(self.toks.get(self.pos + 2).map(|t| &t.tk), Some(Tk::Punct(":"))));
+                        let arg = if is_info { self.param_info(&mut args[0])? } else { self.expr()? };
+                        args.push(arg);
                         if !self.is(")") && !self.is(",") {
                             self.expect(")")?;
                         }

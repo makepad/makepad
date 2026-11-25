@@ -711,52 +711,22 @@ impl fmt::Display for ScriptObjectTag {
 
 #[relax_api(plain, run)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
-pub struct ScriptMapTag(u64);
+pub struct ScriptMapTag(bool);
 
 impl ScriptMapTag {
-    // Lower 32 bits store insertion order
-    const ORDER_MASK: u64 = 0xFFFF_FFFF;
-    // Bit 33 (index 32) stores the dirty flag
-    const DIRTY: u64 = 1 << 32;
-
-    #[allow(dead_code)]
     #[inline]
     fn dirty() -> Self {
-        Self(Self::DIRTY)
-    }
-
-    #[inline]
-    fn dirty_with_order(order: u32) -> Self {
-        Self(Self::DIRTY | (order as u64))
+        Self(true)
     }
 
     #[inline]
     fn get_and_clear_dirty(&mut self) -> bool {
-        let ret = self.0 & Self::DIRTY != 0;
-        self.0 &= !Self::DIRTY;
-        ret
+        std::mem::take(&mut self.0)
     }
 
     #[inline]
     fn set_dirty(&mut self) {
-        self.0 |= Self::DIRTY;
-    }
-
-    #[inline]
-    pub fn order(&self) -> u32 {
-        (self.0 & Self::ORDER_MASK) as u32
-    }
-
-    #[allow(dead_code)]
-    #[inline]
-    fn set_order(&mut self, order: u32) {
-        self.0 = (self.0 & !Self::ORDER_MASK) | (order as u64);
-    }
-
-    #[inline]
-    fn with_order_offset(self, offset: u32) -> Self {
-        let new_order = self.order() + offset;
-        Self((self.0 & !Self::ORDER_MASK) | (new_order as u64))
+        self.0 = true;
     }
 }
 
@@ -801,6 +771,52 @@ impl Default for ScriptObjectData {
             made_at: ScriptIp::UNKNOWN,
         }
     }
+}
+
+type FreezeMode = (&'static str, fn(&mut ScriptObjectTag));
+
+const SCRIPT_FREEZE_MODES: &[FreezeMode] = &[
+    ("freeze", ScriptObjectTag::freeze),
+    ("freeze_api", ScriptObjectTag::freeze_api),
+    ("freeze_module", ScriptObjectTag::freeze_module),
+    ("freeze_component", ScriptObjectTag::freeze_component),
+];
+
+fn script_freeze_object(
+    vm: &mut ScriptVm,
+    args: ScriptObject,
+    name: &str,
+    apply: fn(&mut ScriptObjectTag),
+) -> ScriptValue {
+    let Some(object) = script_value!(vm, args.self).as_object() else {
+        return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "{} called on non-object value", name);
+    };
+    let tag = vm.bx.heap.objects[object].tag;
+    let mut next = tag;
+    apply(&mut next);
+    // Compare the whole tag: freeze_module also sets NOTPROTO outside FREEZE_MASK.
+    if next.0 == tag.0 {
+        return object.into();
+    }
+    if tag.is_static() || tag.0 & ScriptObjectTag::FREEZE_MASK != 0 {
+        let host_modes: &[FreezeMode] = &[
+            ("freeze_type", ScriptObjectTag::freeze_type),
+            ("freeze_shader", ScriptObjectTag::freeze_shader),
+            ("freeze_ext", ScriptObjectTag::freeze_ext),
+        ];
+        let current = SCRIPT_FREEZE_MODES.iter().chain(host_modes).find_map(|&(name, apply)| {
+            let mut probe = tag;
+            apply(&mut probe);
+            (probe.0 == tag.0).then_some(name)
+        }).unwrap_or(if tag.0 & ScriptObjectTag::FREEZE_MASK == 0 { "object" } else { "inherited freeze policy" });
+        let static_prefix = if tag.is_static() { "static " } else { "" };
+        return script_err_immutable!(
+            vm.bx.threads.cur_ref().trap,
+            "cannot apply {} to receiver with current mode {}{}", name, static_prefix, current
+        );
+    }
+    vm.bx.heap.objects[object].tag = next;
+    object.into()
 }
 
 impl ScriptObjectData {
@@ -1018,73 +1034,15 @@ impl ScriptObjectData {
             },
         );
 
-        native.add_type_method(
-            heap,
-            ScriptValueType::REDUX_OBJECT,
-            id!(freeze),
-            &[],
-            |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    vm.bx.heap.freeze(sself);
-                    return sself.into();
-                }
-                script_err_unexpected!(
-                    vm.bx.threads.cur_ref().trap,
-                    "freeze called on non-object value"
-                )
-            },
-        );
-
-        native.add_type_method(
-            heap,
-            ScriptValueType::REDUX_OBJECT,
-            id!(freeze_api),
-            &[],
-            |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    vm.bx.heap.freeze_api(sself);
-                    return sself.into();
-                }
-                script_err_unexpected!(
-                    vm.bx.threads.cur_ref().trap,
-                    "freeze_api called on non-object value"
-                )
-            },
-        );
-
-        native.add_type_method(
-            heap,
-            ScriptValueType::REDUX_OBJECT,
-            id!(freeze_module),
-            &[],
-            |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    vm.bx.heap.freeze_module(sself);
-                    return sself.into();
-                }
-                script_err_unexpected!(
-                    vm.bx.threads.cur_ref().trap,
-                    "freeze_module called on non-object value"
-                )
-            },
-        );
-
-        native.add_type_method(
-            heap,
-            ScriptValueType::REDUX_OBJECT,
-            id!(freeze_component),
-            &[],
-            |vm, args| {
-                if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    vm.bx.heap.freeze_component(sself);
-                    return sself.into();
-                }
-                script_err_unexpected!(
-                    vm.bx.threads.cur_ref().trap,
-                    "freeze_component called on non-object value"
-                )
-            },
-        );
+        for &(name, apply) in SCRIPT_FREEZE_MODES {
+            native.add_type_method(
+                heap,
+                ScriptValueType::REDUX_OBJECT,
+                LiveId::from_str(name),
+                &[],
+                move |vm, args| script_freeze_object(vm, args, name, apply),
+            );
+        }
 
         native.add_type_method(
             heap,
@@ -1121,38 +1079,8 @@ impl ScriptObjectData {
     pub fn vec_values(&self) -> &[ScriptVecValue] { &self.vec }
 
     pub fn map_insert(&mut self, key: ScriptValue, value: ScriptValue) {
-        let order = self.map.len() as u32;
-        if self.tag.is_tracked() {
-            if let Some(old) = self.map.get_mut(&key) {
-                if old.value != value {
-                    old.tag.set_dirty();
-                    self.tag.set_dirty();
-                    old.value = value;
-                }
-                return;
-            }
-            self.map.insert(
-                key,
-                ScriptMapValue {
-                    value,
-                    tag: ScriptMapTag::dirty_with_order(order),
-                },
-            );
-        } else {
-            // Updating an existing field keeps its original insertion order,
-            // matching the tracked path above; re-inserting would move it to
-            // the end and reorder iteration, JSON output and equality.
-            if let Some(existing) = self.map.get_mut(&key) {
-                existing.value = value;
-                return;
-            }
-            self.map.insert(
-                key,
-                ScriptMapValue {
-                    value,
-                    tag: ScriptMapTag::dirty_with_order(order),
-                },
-            );
+        if !self.map_set_if_exist(key, value) {
+            self.map.insert_absent(key, ScriptMapValue { value, tag: ScriptMapTag::dirty() });
         }
     }
 
@@ -1160,14 +1088,7 @@ impl ScriptObjectData {
     /// `key` (the caller just looked): no second scan.
     #[inline]
     pub(crate) fn map_insert_absent_untracked(&mut self, key: ScriptValue, value: ScriptValue) {
-        let order = self.map.len() as u32;
-        self.map.insert_absent(
-            key,
-            ScriptMapValue {
-                value,
-                tag: ScriptMapTag::dirty_with_order(order),
-            },
-        );
+        self.map.insert_absent(key, ScriptMapValue { value, tag: ScriptMapTag::dirty() });
     }
 
     pub fn map_set_if_exist(&mut self, key: ScriptValue, value: ScriptValue) -> bool {
@@ -1267,24 +1188,15 @@ impl ScriptObjectData {
     /// # Safety
     /// `ctx` must remain valid for `visit` throughout this call.
     pub unsafe fn map_iter_ordered_with(&self, ctx: *mut u8, visit: unsafe extern "C-unwind" fn(*mut u8, ScriptValue, ScriptValue)) {
-        let mut ordered: Vec<_> = self.map.iter().collect();
-        ordered.sort_by_key(|(_, val)| val.tag.order());
-        for (key, val) in ordered {
+        for (key, val) in &self.map {
             unsafe { visit(ctx, *key, val.value); }
         }
     }
 
     #[inline]
     pub fn merge_map_from_other(&mut self, other: &ScriptObjectData) {
-        let offset = self.map.len() as u32;
-        for (k, v) in other.map.iter() {
-            self.map.insert(
-                *k,
-                ScriptMapValue {
-                    value: v.value,
-                    tag: v.tag.with_order_offset(offset),
-                },
-            );
+        for (k, v) in &other.map {
+            self.map.insert(*k, *v);
         }
     }
 
@@ -1292,16 +1204,9 @@ impl ScriptObjectData {
     /// Used by the splat operator to not overwrite existing values.
     #[inline]
     pub fn merge_map_from_other_no_overwrite(&mut self, other: &ScriptObjectData) {
-        let offset = self.map.len() as u32;
-        for (k, v) in other.map.iter() {
+        for (k, v) in &other.map {
             if !self.map.contains_key(k) {
-                self.map.insert(
-                    *k,
-                    ScriptMapValue {
-                        value: v.value,
-                        tag: v.tag.with_order_offset(offset),
-                    },
-                );
+                self.map.insert_absent(*k, *v);
             }
         }
     }

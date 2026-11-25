@@ -7,6 +7,16 @@ description = "The Splash compute core: a typed Splash subset with logic, compil
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/makepad/makepad/"
 
+[package.metadata.makepad.platform-gaps]
+windows = { "test:web_wasm" = "its pages run in CEF on Linux only (libs/web_test)" }
+
+[package.metadata.makepad.native-tests]
+"test:web_wasm" = "its pages run in CEF (libs/web_test), and Chromium re-runs the test binary as its subprocesses"
+
+[[test]]
+name = "web_wasm"
+harness = false
+
 [features]
 host-shims = []
 # `module::register_shared_std`: the shared stdlib registered in a Splash VM
@@ -15,6 +25,7 @@ host-shims = []
 vm = ["dep:makepad-script"]
 
 [dependencies]
+makepad-thread-local = { path = "../../../libs/thread_local", version = "1.0.0" }
 relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
 makepad-script = { path = "..", optional = true }
 
@@ -26,6 +37,8 @@ relax-backend = { workspace = true }
 relax-session = { workspace = true }
 
 [dev-dependencies]
+makepad-web-test = { path = "../../../libs/web_test" }
+makepad-cef = { path = "../../../libs/cef" }
 makepad-script-compute-sched = { path = "../compute_sched" }
 makepad-csg-math = { path = "../../../libs/csg/csg_math" }
 # tests/wasm.rs runs the generated scalar wasm natively (a wasm interpreter).

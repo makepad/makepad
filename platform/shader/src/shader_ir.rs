@@ -1037,10 +1037,15 @@ impl IrModule {
                 if !live[i] {
                     continue;
                 }
-                if let ExprKind::Call(callee, _) = &e.kind {
-                    if !seen[*callee as usize] {
-                        stack.push(*callee);
-                    }
+                let callee = match &e.kind {
+                    ExprKind::Call(callee, _) => Some(*callee),
+                    // the XR depth clip calls its helper (made with a draw's entry points), which
+                    // the backends that run it write out as a function of the module
+                    ExprKind::DepthClip(..) => self.function_by_name("depth_clip"),
+                    _ => None,
+                };
+                if let Some(callee) = callee.filter(|c| !seen[*c as usize]) {
+                    stack.push(callee);
                 }
             }
         }

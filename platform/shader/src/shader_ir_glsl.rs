@@ -85,6 +85,10 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
 
     // Shared definitions: the structs, members before their users.
     let mut shared = if complete { GLES_PRELUDE.to_owned() } else { String::new() };
+    if !complete && output.io.iter().any(|io| matches!(io.kind, ShaderIoKind::Texture(TextureType::Texture3d))) {
+        // The same packed shader body also runs with the WebGL2 host's ES prelude.
+        shared.push_str("#ifdef GL_ES\nprecision highp sampler3D;\n#endif\n");
+    }
     if pick {
         shared.push_str(GLES_PICK);
         for (g, _) in &cx.pick_twins {
@@ -200,6 +204,7 @@ precision highp int;
 precision highp sampler2D;
 precision highp samplerCube;
 precision highp sampler2DArray;
+precision highp sampler3D;
 precision highp sampler2DShadow;
 precision highp sampler2DArrayShadow;
 precision highp usampler2D;

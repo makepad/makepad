@@ -89,6 +89,10 @@ pub struct ShaderOutput {
     pub scope_uniforms: Vec<ScopeUniformSource>,
     pub scope_uniform_buffers: Vec<ScopeUniformBufferSource>,
     pub scope_textures: Vec<ScopeTextureSource>,
+    /// The draw compiler's sampler clamp. Other compiles use the full sampler request.
+    pub(crate) max_sampler_anisotropy: Option<u8>,
+    /// A reached texture operation requested more than one sample before capping.
+    pub(crate) requests_anisotropy: bool,
     pub const_table: bool,
     pub table_consts: Vec<ShaderTableConst>,
     pub live_literals: Option<std::sync::Arc<crate::literal::LiveLiterals>>,
@@ -104,6 +108,11 @@ impl std::ops::DerefMut for ShaderOutput {
 }
 pub const MAX_EMITTED_BYTES: usize = 1 << 20;
 impl ShaderOutput {
+    pub(crate) fn request_anisotropy(&mut self, requested: u8) -> u8 {
+        self.requests_anisotropy |= requested > 1;
+        requested.min(self.max_sampler_anisotropy.unwrap_or(16))
+    }
+
     pub(crate) fn register_function(&mut self, object: ScriptObject) -> makepad_shader::shader_ids::ShaderFnId {
         *self.function_ids.entry(object).or_insert_with(|| {
             self.function_objects.push(object);

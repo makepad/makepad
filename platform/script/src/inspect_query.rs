@@ -9,6 +9,7 @@
 use crate::heap::ScriptHeap;
 use crate::inspect_registry::{json_str, vm_of};
 use crate::value::*;
+use crate::pod::{ScriptPodTy, ScriptPodVec};
 use crate::vm::{ScriptSource, ScriptVmBase};
 use crate::makepad_live_id::*;
 use crate::trap::*;
@@ -231,6 +232,17 @@ fn write_value(heap: &ScriptHeap, v: ScriptValue, depth: usize, left: &mut usize
                 seen.pop();
             }
         }
+    } else if let Some((vt, data)) = v.as_pod().and_then(|p| vec_pod(heap, p)) {
+        let _ = write!(out, "{}(", vt.name());
+        for i in 0..vt.dims() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            write_value(heap, heap.pod_swizzle_vec1(vt, data, i, NoTrap), 0, left, out, seen);
+        }
+        out.push(')');
+    } else if v.is_pod() {
+        out.push_str("<pod>");
     } else if v.is_handle() {
         out.push_str("<handle>");
     } else if v.is_err() {
@@ -245,7 +257,8 @@ fn write_value(heap: &ScriptHeap, v: ScriptValue, depth: usize, left: &mut usize
 
 /// A path `companions[0].near` as its root name and steps.
 enum Step {
-    Field(LiveId),
+    /// the field as an id, and as written (an id alone prints as its hash)
+    Field(LiveId, String),
     Index(usize),
 }
 
@@ -261,7 +274,7 @@ fn parse_path(p: &str) -> Result<(LiveId, Vec<Step>), String> {
     while !rest.is_empty() {
         if let Some(r) = rest.strip_prefix('.') {
             let end = r.find(|c: char| c == '.' || c == '[').unwrap_or(r.len());
-            steps.push(Step::Field(LiveId::from_str(&r[..end])));
+            steps.push(Step::Field(LiveId::from_str(&r[..end]), r[..end].to_string()));
             rest = &r[end..];
         } else if let Some(r) = rest.strip_prefix('[') {
             let end = r.find(']').ok_or_else(|| format!("`{}`: unclosed [", p))?;
@@ -317,7 +330,33 @@ fn lookup(base: &ScriptVmBase, name: LiveId, file: Option<&str>) -> Option<(Scri
     (!v.is_err() && !v.is_nil()).then(|| (v, "module".into()))
 }
 
-fn walk(heap: &ScriptHeap, mut v: ScriptValue, steps: &[Step]) -> Result<ScriptValue, String> {
+/// What a path reached: a value, or (a swizzle of several lanes, which would need a new pod)
+/// its text.
+enum Reached {
+    Value(ScriptValue),
+    Text(String),
+}
+
+/// A vector pod's kind and lanes, read without allocating.
+fn vec_pod(heap: &ScriptHeap, p: ScriptPod) -> Option<(ScriptPodVec, [u32; 4])> {
+    let pod = &heap.pods[p];
+    let ScriptPodTy::Vec(vt) = &heap.pod_types[pod.ty.index as usize].ty else { return None };
+    let mut data = [0u32; 4];
+    for (d, s) in data.iter_mut().zip(pod.data.iter()) {
+        *d = *s;
+    }
+    Some((*vt, data))
+}
+
+/// The lanes a swizzle name picks (`x`, `zy`, `rgb`: one set of letters, 1 to 4 of them).
+fn swizzle_of(n: &str) -> Option<Vec<usize>> {
+    let set = if n.chars().all(|c| "xyzw".contains(c)) { "xyzw" } else { "rgba" };
+    let lanes: Vec<usize> = n.chars().map(|c| set.find(c)).collect::<Option<_>>()?;
+    (1..=4).contains(&lanes.len()).then_some(lanes)
+}
+
+fn walk(base: &ScriptVmBase, mut v: ScriptValue, steps: &[Step]) -> Result<Reached, String> {
+    let heap = &base.heap;
     for (k, s) in steps.iter().enumerate() {
         v = match s {
             Step::Index(i) => match (v.as_array(), v.as_object()) {
@@ -331,16 +370,34 @@ fn walk(heap: &ScriptHeap, mut v: ScriptValue, steps: &[Step]) -> Result<ScriptV
                 (_, Some(o)) => heap.vec_value(o, *i, NoTrap),
                 _ => return Err(format!("step {}: not a list ({})", k + 1, short_value(heap, v, 0, 40))),
             },
-            Step::Field(f) => match v.as_object() {
-                Some(o) => heap.value(o, (*f).into(), NoTrap),
-                None => return Err(format!("step {}: `{}` of a non-object ({})", k + 1, f, short_value(heap, v, 0, 40))),
+            Step::Field(f, name) => match (v.as_object(), v.as_pod()) {
+                (Some(o), _) => heap.value(o, (*f).into(), NoTrap),
+                // a vector's lanes and swizzles, as `v.x` / `v.xy` read them (read-only: a
+                // swizzle of several lanes is shown as text, it would take a new pod)
+                (_, Some(p)) => {
+                    let Some((vt, data)) = vec_pod(heap, p) else {
+                        return Err(format!("step {}: `{}` of a pod that is not a vector (only vectors are probed)", k + 1, name));
+                    };
+                    let Some(lanes) = swizzle_of(name).filter(|l| l.iter().all(|&i| i < vt.dims())) else {
+                        return Err(format!("step {}: `{}` is not a lane of a {} (x y z w / r g b a, up to {})", k + 1, name, vt.name(), vt.dims()));
+                    };
+                    if lanes.len() == 1 {
+                        heap.pod_swizzle_vec1(vt, data, lanes[0], NoTrap)
+                    } else if k + 1 == steps.len() {
+                        let parts: Vec<String> = lanes.iter().map(|&i| short_value(heap, heap.pod_swizzle_vec1(vt, data, i, NoTrap), 0, 40)).collect();
+                        return Ok(Reached::Text(format!("({})", parts.join(", "))));
+                    } else {
+                        return Err(format!("step {}: a swizzle of several lanes ends a path", k + 1));
+                    }
+                }
+                _ => return Err(format!("step {}: `{}` of a non-object ({})", k + 1, name, short_value(heap, v, 0, 40))),
             },
         };
         if v.is_err() {
             return Err(format!("step {}: no such field / item", k + 1));
         }
     }
-    Ok(v)
+    Ok(Reached::Value(v))
 }
 
 /// The top-level names of one scope (its own map, not its protos).
@@ -576,8 +633,9 @@ fn get_job(path: String, file: Option<String>, depth: usize) -> Job {
         let near: Vec<String> = scopes(base, file.as_deref()).into_iter().take(3).flat_map(|(_, _, o)| names_of(&base.heap, o, 64).into_iter().map(|x| x.0)).take(24).collect();
         return vec![err(&format!("no name `{}` in V{}'s scripts; some names: {}", root, vm_of(base).unwrap_or(0), near.join(", ")))];
     };
-    match walk(&base.heap, v, &steps) {
-        Ok(v) => {
+    match walk(base, v, &steps) {
+        Ok(Reached::Text(t)) => vec![format!("{{\"path\":{},\"from\":{},\"value\":{}}}", json_str(&path), json_str(&from), json_str(&t))],
+        Ok(Reached::Value(v)) => {
             let mut rows = vec![format!("{{\"path\":{},\"from\":{},\"value\":{}}}", json_str(&path), json_str(&from), json_str(&short_value(&base.heap, v, depth, 4000)))];
             // a list of objects: one row per item, so a table can show them
             if let Some(a) = v.as_array() {
@@ -709,7 +767,7 @@ fn roots_job(top: usize) -> Job {
 
 /// `probe add game.splash:76 [dist,config.near]`: every time a VM starts running line 76 of a
 /// file ending in game.splash, the values of the names (or, without names, the frame's locals and
-/// the innermost scope's own names) are recorded, newest kept; `probe read SP<n>` shows them as
+/// the call's dynamic names) are recorded, newest kept; `probe read SP<n>` shows them as
 /// the Rust probes' table. The VM loop pays one relaxed load per instruction while no line probe
 /// exists; while one does, each instruction checks the (thread-cached, sorted) target ips.
 struct LineProbe {
@@ -816,25 +874,35 @@ fn targets_of(base: &ScriptVmBase) -> Targets {
     t
 }
 
-/// The frame's names at a probe hit: the slot-compiled locals (their names from the body's slot
-/// table: the nearest SLOTS_FRAME before `ip`, when the slab's top frame has its size), then the
-/// innermost scope's own names.
+/// The frame's names at a probe hit: the slot-compiled locals in scope at `ip` (their names and
+/// spans from the slot table of the frame holding `ip`, when the slab's top frame has its size),
+/// then the dynamic names of the call's scopes.
 fn frame_names(base: &ScriptVmBase, body: usize, ip: usize, cap: usize) -> Vec<(String, ScriptValue)> {
     let mut out = Vec::new();
     let th = base.threads.cur_ref();
     if let Some(bodies) = base.code.bodies.try_borrow() {
         if let Some(b) = bodies.get(body) {
-            let frame = b.parser.slot_frames.iter().filter(|f| f.0 as usize <= ip).max_by_key(|f| f.0);
-            if let Some((_, names)) = frame {
+            // the frame whose code holds `ip` (a fn body's slots: its code is the frame's own),
+            // and in it the lets bound at `ip`: after their let, until the loop holding them
+            // exits. A let not yet run on this pass, or whose loop has ended, is not in scope.
+            let frame = b.parser.slot_frames.iter().find(|f| f.0 as usize <= ip && ip < f.3 as usize);
+            if let Some((_, names, spans, _)) = frame {
                 if th.slot_base + names.len() == th.slots.len() {
                     for (i, n) in names.iter().enumerate() {
-                        out.push((n.to_string(), th.slots[th.slot_base + i]));
+                        let (from, to) = spans[i];
+                        if (from as usize..to as usize).contains(&ip) {
+                            out.push((n.to_string(), th.slots[th.slot_base + i]));
+                        }
                     }
                 }
             }
         }
     }
-    if let Some(&scope) = th.scopes.last() {
+    // the dynamic names of this call: its scope and the loop and shadow scopes above it (a
+    // `let` of a name already in a scope, or a loop's iteration, pushes one), newest first so a
+    // shadowed name reads its latest value; never the caller's scopes below the call's own
+    let first = th.calls.last().map_or(0, |c| c.bases.scope).min(th.scopes.len());
+    for &scope in th.scopes[first..].iter().rev() {
         for (k, v) in names_of(&base.heap, scope, cap) {
             if !out.iter().any(|x| x.0 == k) {
                 out.push((k, v));
@@ -869,8 +937,9 @@ fn record_line_probe(base: &ScriptVmBase, id: u32, body: usize, ip: usize) {
                             th.scopes.last().map(|&s| heap.value(s, root.into(), NoTrap)).filter(|v| !v.is_err() && !v.is_nil())
                         }).or_else(|| lookup(base, root, None).map(|x| x.0));
                         match v0 {
-                            Some(v) => match walk(heap, v, &steps) {
-                                Ok(v) => short_value(heap, v, 1, 80),
+                            Some(v) => match walk(base, v, &steps) {
+                                Ok(Reached::Value(v)) => short_value(heap, v, 1, 80),
+                                Ok(Reached::Text(t)) => t,
                                 Err(e) => format!("({})", e),
                             },
                             None => "(not in scope)".to_string(),
@@ -916,7 +985,7 @@ fn line_probe_cmd(words: &[String], kv: &[(String, String)]) -> Vec<String> {
                 "{{\"probe\":\"SP{}\",\"at\":{},\"records\":{},\"note\":\"records each time a VM starts running the line (before it runs); no hit yet means the line has not run since\",\"more\":[\"probe read SP{}\",\"probe rm SP{}\",\"src {} line={}\"]}}",
                 id,
                 json_str(&format!("{}:{}", file, line)),
-                json_str(&if names.is_empty() { "the frame's locals and the innermost scope's names".to_string() } else { names.join(", ") }),
+                json_str(&if names.is_empty() { "the frame's locals and the call's scope names".to_string() } else { names.join(", ") }),
                 id,
                 id,
                 json_str(&file),
