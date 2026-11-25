@@ -1,7 +1,7 @@
 use makepad_apple_sys::{
     errSSLClosedAbort, errSSLClosedGraceful, errSSLServerAuthCompleted, errSSLWouldBlock,
     kSSLClientSide, kSSLServerSide, kSSLSessionOptionBreakOnServerAuth, kSSLStreamType,
-    CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDataGetBytePtr, CFDataGetLength,
+    kCFTypeArrayCallBacks, CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDataGetBytePtr, CFDataGetLength,
     CFRelease, OSStatus, SSLClose, SSLConnectionRef, SSLContextRef, SSLCopyPeerTrust,
     SSLCreateContext, SSLHandshake, SSLProtocol, SSLRead, SSLSetCertificate, SSLSetConnection,
     SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetPeerID, SSLSetProtocolVersionMin, SSLSetSessionOption, SSLWrite,
@@ -34,124 +34,69 @@ fn check_ssl_status(stage: &str, status: OSStatus) -> io::Result<()> {
     }
 }
 
-// SecureTransport's SSLSetIOFuncs contract: a callback returns noErr ONLY
-// when the FULL requested length was transferred; anything shorter must be
-// reported as a partial count in *data_len with errSSLWouldBlock so the
-// library re-enters for the remainder. Returning noErr with a short read
-// makes SecureTransport parse a short buffer and fail the whole handshake
-// with errSecParam (-50) whenever a flight spans TCP segments (any server
-// whose certificate chain exceeds one segment — huggingface.co, example.com).
-// The sockets here are blocking, so the callbacks loop to fill the request
-// and only report WouldBlock on a genuine socket timeout.
+use crate::tls::{engine::SocketPump, TlsEngine, TlsIdentity};
 
-unsafe extern "C" fn ssl_read_callback(
-    connection: SSLConnectionRef,
-    data: *mut std::ffi::c_void,
-    data_len: *mut usize,
-) -> OSStatus {
-    if connection.is_null() || data.is_null() || data_len.is_null() {
-        return ERR_SSL_CLOSED_ABORT;
-    }
-
-    let stream = &mut *(connection as *mut TcpStream);
-    let requested = *data_len;
-    if requested == 0 {
-        return SSL_OK;
-    }
-
-    let buffer = std::slice::from_raw_parts_mut(data as *mut u8, requested);
-    let mut done = 0usize;
-    while done < requested {
-        match stream.read(&mut buffer[done..]) {
-            Ok(0) => {
-                *data_len = done;
-                return ERR_SSL_CLOSED_GRACEFUL;
-            }
-            Ok(read_bytes) => done += read_bytes,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                *data_len = done;
-                return ERR_SSL_WOULD_BLOCK;
-            }
-            Err(_) => {
-                *data_len = done;
-                return ERR_SSL_CLOSED_ABORT;
-            }
-        }
-    }
-    *data_len = done;
-    SSL_OK
-}
-
-unsafe extern "C" fn ssl_write_callback(
-    connection: SSLConnectionRef,
-    data: *const std::ffi::c_void,
-    data_len: *mut usize,
-) -> OSStatus {
-    if connection.is_null() || data.is_null() || data_len.is_null() {
-        return ERR_SSL_CLOSED_ABORT;
-    }
-
-    let stream = &mut *(connection as *mut TcpStream);
-    let requested = *data_len;
-    if requested == 0 {
-        return SSL_OK;
-    }
-
-    let buffer = std::slice::from_raw_parts(data as *const u8, requested);
-    let mut done = 0usize;
-    while done < requested {
-        match stream.write(&buffer[done..]) {
-            Ok(0) => {
-                *data_len = done;
-                return ERR_SSL_CLOSED_ABORT;
-            }
-            Ok(written_bytes) => done += written_bytes,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                *data_len = done;
-                return ERR_SSL_WOULD_BLOCK;
-            }
-            Err(_) => {
-                *data_len = done;
-                return ERR_SSL_CLOSED_ABORT;
-            }
-        }
-    }
-    *data_len = done;
-    SSL_OK
-}
-
-pub(crate) struct SecureTransportStream {
-    tcp_stream: Box<TcpStream>,
-    ssl_context: SSLContextRef,
-    is_closed: bool,
-    /// Key of this connection's session in SecureTransport's client session
-    /// cache (captured client connections only): a connection made with the
-    /// same key resumes the session.
-    peer_id: Option<[u8; 16]>,
-}
+// Apple changes the ABI of SSLCipherSuite between targets (CipherSuite.h).
+#[cfg(any(all(target_os = "macos", target_arch = "x86_64"), target_abi = "macabi"))]
+type CipherSuite = u32;
+#[cfg(not(any(all(target_os = "macos", target_arch = "x86_64"), target_abi = "macabi")))]
+type CipherSuite = u16;
 
 #[link(name = "Security", kind = "framework")]
 extern "C" {
-    fn SSLSetEnabledCiphers(context: SSLContextRef, ciphers: *const u16, count: usize) -> OSStatus;
-    fn SSLGetBufferedReadSize(context: SSLContextRef, buffer_size: *mut usize) -> OSStatus;
+    fn SSLGetNegotiatedProtocolVersion(context: SSLContextRef, version: *mut SSLProtocol) -> OSStatus;
+    fn SSLSetEnabledCiphers(context: SSLContextRef, ciphers: *const CipherSuite, count: usize) -> OSStatus;
 }
 
-/// kTLSProtocol12: the floor for the pinned and server paths.
 const TLS_PROTOCOL_12: SSLProtocol = 8;
-/// ECDHE with RSA or ECDSA authentication, AEAD only.
-const MODERN_SUITES: [u16; 6] = [0xC02B, 0xC02C, 0xCCA9, 0xC02F, 0xC030, 0xCCA8];
+const MODERN_SUITES: [CipherSuite; 6] = [0xC02B, 0xC02C, 0xCCA9, 0xC02F, 0xC030, 0xCCA8];
+const ALLOW_RENEGOTIATION: i32 = 8;
+const ENABLE_SESSION_TICKETS: i32 = 9;
+
+#[derive(Default)]
+struct MemoryIo {
+    input: Vec<u8>,
+    pos: usize,
+    output: Vec<u8>,
+}
+
+unsafe extern "C" fn ssl_read_callback(connection: SSLConnectionRef, data: *mut std::ffi::c_void, len: *mut usize) -> OSStatus {
+    let io = &mut *(connection as *mut MemoryIo);
+    let requested = *len;
+    let n = requested.min(io.input.len() - io.pos);
+    if n != 0 {
+        ptr::copy_nonoverlapping(io.input.as_ptr().add(io.pos), data.cast(), n);
+        io.pos += n;
+    }
+    *len = n;
+    // SecureTransport consumes a short count only with errSSLWouldBlock.
+    if n == requested { SSL_OK } else { ERR_SSL_WOULD_BLOCK }
+}
+
+unsafe extern "C" fn ssl_write_callback(connection: SSLConnectionRef, data: *const std::ffi::c_void, len: *mut usize) -> OSStatus {
+    let io = &mut *(connection as *mut MemoryIo);
+    if *len != 0 {
+        io.output.extend_from_slice(std::slice::from_raw_parts(data.cast::<u8>(), *len));
+    }
+    SSL_OK
+}
+
+pub(crate) struct NativeEngine {
+    ssl_context: SSLContextRef,
+    // SSLSetConnection retains this address until CFRelease.
+    io: Box<MemoryIo>,
+    peer_id: Option<[u8; 16]>,
+    // A full unverified client handshake breaks at server authentication. A
+    // resumed legacy connection gets its leaf from the cached trust object.
+    captured: Option<Vec<u8>>,
+    require_auth_break: bool,
+}
+// A context and its callback storage move together to one owning worker.
+unsafe impl Send for NativeEngine {}
+
+impl Drop for NativeEngine {
+    fn drop(&mut self) { unsafe { CFRelease(self.ssl_context) }; }
+}
 
 /// A fresh session cache key per captured connection (unique in the process).
 fn next_peer_id() -> [u8; 16] {
@@ -189,312 +134,163 @@ fn peer_chain_der(ssl_context: SSLContextRef) -> io::Result<Vec<Vec<u8>>> {
     }
 }
 
-unsafe impl Send for SecureTransportStream {}
-
-impl SecureTransportStream {
-    fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
-        let mut tcp_stream = Box::new(tcp_stream);
-        let ssl_context = unsafe { SSLCreateContext(ptr::null(), kSSLClientSide, kSSLStreamType) };
-        if ssl_context.is_null() {
-            return Err(io_other("SSLCreateContext returned null"));
-        }
-
-        if let Err(err) = (|| -> io::Result<()> {
-            check_ssl_status("SSLSetIOFuncs", unsafe {
-                SSLSetIOFuncs(
-                    ssl_context,
-                    Some(ssl_read_callback),
-                    Some(ssl_write_callback),
-                )
-            })?;
-            check_ssl_status("SSLSetConnection", unsafe {
-                SSLSetConnection(
-                    ssl_context,
-                    tcp_stream.as_mut() as *mut TcpStream as SSLConnectionRef,
-                )
-            })?;
-            check_ssl_status("SSLSetPeerDomainName", unsafe {
-                SSLSetPeerDomainName(
-                    ssl_context,
-                    host.as_ptr() as *const std::ffi::c_void,
-                    host.len(),
-                )
-            })?;
-            if !verify_peer {
-                check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
-                    SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
-                })?;
-            }
-
-            loop {
-                let status = unsafe { SSLHandshake(ssl_context) };
-                match status {
-                    SSL_OK => break,
-                    s if s == errSSLServerAuthCompleted => continue, // skip verification
-                    ERR_SSL_WOULD_BLOCK => continue,
-                    _ => {
-                        return Err(io_other(format!(
-                            "SSLHandshake failed with status {status}"
-                        )));
-                    }
-                }
-            }
-            Ok(())
-        })() {
-            unsafe {
-                let _ = SSLClose(ssl_context);
-                CFRelease(ssl_context);
-            }
-            return Err(err);
-        }
-
-        Ok(Self {
-            tcp_stream,
-            ssl_context,
-            is_closed: false,
-            peer_id: None,
-        })
-    }
-
-    /// Client handshake without CA validation (self-signed servers): the
-    /// server's leaf certificate DER is taken at the server-auth break
-    /// and returned, for the caller to authenticate. TLS 1.2+, ECDHE AEAD
-    /// suites only. `peer_id`: the session cache key; the key of an earlier
-    /// connection resumes its session (an abbreviated handshake, whose leaf
-    /// comes from the cached session).
-    pub(crate) fn connect_capture(tcp_stream: TcpStream, peer_id: [u8; 16]) -> io::Result<(Self, Vec<u8>)> {
-        // A peer that never answers (not a TLS server) must not hang us.
-        tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
-        let mut tcp_stream = Box::new(tcp_stream);
-        let ssl_context = unsafe { SSLCreateContext(ptr::null(), kSSLClientSide, kSSLStreamType) };
-        if ssl_context.is_null() {
-            return Err(io_other("SSLCreateContext returned null"));
-        }
-        let result = (|| -> io::Result<Vec<u8>> {
-            Self::configure(ssl_context, &mut tcp_stream)?;
-            check_ssl_status("SSLSetPeerID", unsafe {
-                SSLSetPeerID(ssl_context, peer_id.as_ptr() as *const std::ffi::c_void, peer_id.len())
-            })?;
-            check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
-                SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
-            })?;
-            let mut seen = None;
-            loop {
-                let status = unsafe { SSLHandshake(ssl_context) };
-                match status {
-                    // A resumed session has no server-auth break.
-                    SSL_OK => return match seen {
-                        Some(leaf) => Ok(leaf),
-                        None => Ok(peer_chain_der(ssl_context)?.remove(0)),
-                    },
-                    s if s == errSSLServerAuthCompleted => {
-                        let leaf = peer_chain_der(ssl_context)?.remove(0);
-                        seen = Some(leaf);
-                    }
-                    ERR_SSL_WOULD_BLOCK => {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
-                    }
-                    _ => return Err(io_other(format!("SSLHandshake failed with status {status}"))),
-                }
-            }
-        })();
-        let der = match result {
-            Ok(der) => der,
-            Err(err) => {
-                unsafe {
-                    let _ = SSLClose(ssl_context);
-                    CFRelease(ssl_context);
-                }
-                return Err(err);
-            }
+impl NativeEngine {
+    fn new(server: bool, modern: bool, strict: bool) -> io::Result<Self> {
+        let side = if server { kSSLServerSide } else { kSSLClientSide };
+        let ctx = unsafe { SSLCreateContext(ptr::null(), side, kSSLStreamType) };
+        if ctx.is_null() { return Err(io_other("SSLCreateContext returned null")); }
+        let mut engine = Self {
+            ssl_context: ctx, io: Box::default(), peer_id: None, captured: None,
+            require_auth_break: strict && !server,
         };
-        tcp_stream.set_read_timeout(None)?;
-        Ok((Self { tcp_stream, ssl_context, is_closed: false, peer_id: Some(peer_id) }, der))
-    }
-
-    /// Server handshake with an in-memory identity.
-    pub(crate) fn accept(tcp_stream: TcpStream, identity: SecIdentityRef) -> io::Result<Self> {
-        let mut tcp_stream = Box::new(tcp_stream);
-        let ssl_context = unsafe { SSLCreateContext(ptr::null(), kSSLServerSide, kSSLStreamType) };
-        if ssl_context.is_null() {
-            return Err(io_other("SSLCreateContext returned null"));
-        }
-        let result = (|| -> io::Result<()> {
-            Self::configure(ssl_context, &mut tcp_stream)?;
-            let certs = [identity as *const std::ffi::c_void];
-            let array = unsafe { CFArrayCreate(ptr::null(), certs.as_ptr(), 1, ptr::null()) };
-            if array.is_null() {
-                return Err(io_other("CFArrayCreate failed"));
-            }
-            let status = unsafe { SSLSetCertificate(ssl_context, array) };
-            unsafe { CFRelease(array) };
-            check_ssl_status("SSLSetCertificate", status)?;
-            loop {
-                let status = unsafe { SSLHandshake(ssl_context) };
-                match status {
-                    SSL_OK => return Ok(()),
-                    ERR_SSL_WOULD_BLOCK => {
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
-                    }
-                    _ => return Err(io_other(format!("SSLHandshake failed with status {status}"))),
-                }
-            }
-        })();
-        if let Err(err) = result {
-            unsafe {
-                let _ = SSLClose(ssl_context);
-                CFRelease(ssl_context);
-            }
-            return Err(err);
-        }
-        Ok(Self { tcp_stream, ssl_context, is_closed: false, peer_id: None })
-    }
-
-    fn configure(ssl_context: SSLContextRef, tcp_stream: &mut Box<TcpStream>) -> io::Result<()> {
-        check_ssl_status("SSLSetIOFuncs", unsafe {
-            SSLSetIOFuncs(ssl_context, Some(ssl_read_callback), Some(ssl_write_callback))
-        })?;
-        check_ssl_status("SSLSetConnection", unsafe {
-            SSLSetConnection(ssl_context, tcp_stream.as_mut() as *mut TcpStream as SSLConnectionRef)
-        })?;
-        check_ssl_status("SSLSetProtocolVersionMin", unsafe {
-            SSLSetProtocolVersionMin(ssl_context, TLS_PROTOCOL_12)
-        })?;
-        check_ssl_status("SSLSetEnabledCiphers", unsafe {
-            SSLSetEnabledCiphers(ssl_context, MODERN_SUITES.as_ptr(), MODERN_SUITES.len())
-        })
-    }
-
-    /// Plaintext the TLS layer holds already: a read returns it without
-    /// waiting on the socket. A reader that waits for input on the socket
-    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
-    pub(crate) fn buffered(&self) -> usize {
-        // shutdown() released the context: nothing may touch it again.
-        if self.is_closed {
-            return 0;
-        }
-        let mut size = 0usize;
-        if unsafe { SSLGetBufferedReadSize(self.ssl_context, &mut size) } == SSL_OK {
-            size
-        } else {
-            0
-        }
-    }
-
-    pub(crate) fn tcp(&self) -> &TcpStream {
-        &self.tcp_stream
-    }
-
-    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.tcp_stream.set_read_timeout(timeout)
-    }
-
-    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.tcp_stream.set_write_timeout(timeout)
-    }
-
-    pub(crate) fn shutdown(&mut self) {
-        if self.is_closed {
-            return;
-        }
-        self.is_closed = true;
         unsafe {
-            let _ = SSLClose(self.ssl_context);
-            CFRelease(self.ssl_context);
+            check_ssl_status("SSLSetIOFuncs", SSLSetIOFuncs(ctx, Some(ssl_read_callback), Some(ssl_write_callback)))?;
+            check_ssl_status("SSLSetConnection", SSLSetConnection(ctx, engine.io.as_mut() as *mut MemoryIo as SSLConnectionRef))?;
+            if modern {
+                check_ssl_status("SSLSetProtocolVersionMin", SSLSetProtocolVersionMin(ctx, TLS_PROTOCOL_12))?;
+                check_ssl_status("SSLSetEnabledCiphers", SSLSetEnabledCiphers(ctx, MODERN_SUITES.as_ptr(), MODERN_SUITES.len()))?;
+            }
+            if strict {
+                check_ssl_status("disable TLS renegotiation", SSLSetSessionOption(ctx, ALLOW_RENEGOTIATION, false))?;
+                check_ssl_status("disable TLS session tickets", SSLSetSessionOption(ctx, ENABLE_SESSION_TICKETS, false))?;
+            }
         }
-        let _ = self.tcp_stream.shutdown(Shutdown::Both);
+        Ok(engine)
     }
-}
 
-impl Drop for SecureTransportStream {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-impl Read for SecureTransportStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // shutdown() released the context: nothing may touch it again.
-        if buf.is_empty() || self.is_closed {
-            return Ok(0);
+    fn client(host: Option<&str>, verify: bool, peer_id: Option<[u8; 16]>, strict: bool) -> io::Result<Self> {
+        let mut engine = Self::new(false, strict || peer_id.is_some(), strict)?;
+        let ctx = engine.ssl_context;
+        unsafe {
+            if let Some(host) = host {
+                check_ssl_status("SSLSetPeerDomainName", SSLSetPeerDomainName(ctx, host.as_ptr().cast(), host.len()))?;
+            }
+            if let Some(id) = peer_id {
+                check_ssl_status("SSLSetPeerID", SSLSetPeerID(ctx, id.as_ptr().cast(), id.len()))?;
+                engine.peer_id = Some(id);
+            }
+            if !verify {
+                check_ssl_status("BreakOnServerAuth", SSLSetSessionOption(ctx, kSSLSessionOptionBreakOnServerAuth, true))?;
+            }
         }
-        let mut processed = 0usize;
-        let status = unsafe {
-            SSLRead(
-                self.ssl_context,
-                buf.as_mut_ptr() as *mut std::ffi::c_void,
-                buf.len(),
-                &mut processed,
-            )
-        };
+        Ok(engine)
+    }
+
+    pub(crate) fn strict_client() -> io::Result<Self> {
+        Self::client(None, false, None, true)
+    }
+
+    pub(crate) fn strict_server(identity: &TlsIdentity) -> io::Result<Self> {
+        crate::tls::platform::ServerConfig::new(&identity.cert_der, &identity.key)?.engine(true)
+    }
+
+    pub(crate) fn server(identity: SecIdentityRef, strict: bool) -> io::Result<Self> {
+        let engine = Self::new(true, true, strict)?;
+        let certs = [identity as *const std::ffi::c_void];
+        unsafe {
+            let array = CFArrayCreate(ptr::null(), certs.as_ptr(), 1, ptr::addr_of!(kCFTypeArrayCallBacks).cast());
+            if array.is_null() { return Err(io_other("CFArrayCreate failed")); }
+            let result = SSLSetCertificate(engine.ssl_context, array);
+            CFRelease(array);
+            check_ssl_status("SSLSetCertificate", result)?;
+        }
+        Ok(engine)
+    }
+
+    pub(crate) fn is_tls12(&self) -> io::Result<bool> {
+        let mut version = 0;
+        check_ssl_status("negotiated TLS version", unsafe {
+            SSLGetNegotiatedProtocolVersion(self.ssl_context, &mut version)
+        })?;
+        Ok(version == TLS_PROTOCOL_12)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tls12_server(id: &TlsIdentity) -> io::Result<Self> {
+        Self::strict_server(id)
+    }
+
+    pub(crate) fn handshake(&mut self) -> io::Result<bool> {
+        loop {
+            match unsafe { SSLHandshake(self.ssl_context) } {
+                SSL_OK if self.require_auth_break && self.captured.is_none() => return Err(io_other("expected a full TLS handshake")),
+                SSL_OK => return Ok(true),
+                ERR_SSL_WOULD_BLOCK => return Ok(false),
+                status if status == errSSLServerAuthCompleted => {
+                    if self.require_auth_break || self.peer_id.is_some() {
+                        self.captured = Some(peer_chain_der(self.ssl_context)?.remove(0));
+                    }
+                }
+                status => return Err(io_other(format!("SSLHandshake failed with status {status}"))),
+            }
+        }
+    }
+
+    pub(crate) fn peer_leaf_der(&mut self) -> io::Result<Vec<u8>> {
+        match self.captured.take() {
+            Some(cert) => Ok(cert),
+            None => Ok(peer_chain_der(self.ssl_context)?.remove(0)),
+        }
+    }
+
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.io.pos == self.io.input.len() {
+            self.io.input.clear();
+            self.io.pos = 0;
+        }
+        self.io.input.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn take(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if output.is_empty() {
+            std::mem::swap(output, &mut self.io.output);
+        } else {
+            output.append(&mut self.io.output);
+        }
+        Ok(())
+    }
+
+    fn processed(status: OSStatus, n: usize) -> io::Result<usize> {
         match status {
-            SSL_OK => Ok(processed),
-            // A socket timeout mid-record surfaces as WouldBlock; anything
-            // already decrypted is delivered first.
-            ERR_SSL_WOULD_BLOCK if processed > 0 => Ok(processed),
-            ERR_SSL_WOULD_BLOCK => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "SSLRead would block",
-            )),
+            SSL_OK | ERR_SSL_WOULD_BLOCK if n > 0 => Ok(n),
             ERR_SSL_CLOSED_GRACEFUL => Ok(0),
-            ERR_SSL_CLOSED_ABORT => Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "SSLRead connection aborted",
-            )),
-            _ => Err(io_other(format!("SSLRead failed with status {status}"))),
+            ERR_SSL_WOULD_BLOCK => Err(io::ErrorKind::WouldBlock.into()),
+            ERR_SSL_CLOSED_ABORT => Err(io::ErrorKind::ConnectionAborted.into()),
+            _ => Err(io_other(format!("TLS record failed with status {status}"))),
         }
     }
+
+    pub(crate) fn read_plain(&mut self, data: &mut [u8]) -> io::Result<usize> {
+        let mut n = 0;
+        let status = unsafe { SSLRead(self.ssl_context, data.as_mut_ptr().cast(), data.len(), &mut n) };
+        Self::processed(status, n)
+    }
+
+    pub(crate) fn write_plain(&mut self, data: &[u8]) -> io::Result<usize> {
+        let mut n = 0;
+        let status = unsafe { SSLWrite(self.ssl_context, data.as_ptr().cast(), data.len(), &mut n) };
+        Self::processed(status, n)
+    }
+
+    pub(crate) fn close(&mut self) { unsafe { SSLClose(self.ssl_context) }; }
 }
 
-impl Write for SecureTransportStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.is_closed {
-            return Err(io::Error::new(io::ErrorKind::NotConnected, "TLS stream is closed"));
-        }
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let mut processed = 0usize;
-        let status = unsafe {
-            SSLWrite(
-                self.ssl_context,
-                buf.as_ptr() as *const std::ffi::c_void,
-                buf.len(),
-                &mut processed,
-            )
-        };
-        match status {
-            SSL_OK => Ok(processed),
-            ERR_SSL_WOULD_BLOCK if processed > 0 => Ok(processed),
-            ERR_SSL_WOULD_BLOCK => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "SSLWrite would block",
-            )),
-            ERR_SSL_CLOSED_ABORT => Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "SSLWrite connection aborted",
-            )),
-            _ => Err(io_other(format!("SSLWrite failed with status {status}"))),
-        }
+type SecureTransportStream = SocketPump;
+
+impl SocketPump {
+    fn connect(tcp: TcpStream, host: &str, verify: bool) -> io::Result<Self> {
+        let native = NativeEngine::client(Some(host), verify, None, false)?;
+        Self::handshake(tcp, TlsEngine::start(native, None, false, None)?, None)
     }
 
-    /// Sends what SecureTransport still holds: a write that ran into the socket's send timeout
-    /// was taken whole (`processed`) but part of its record stayed queued in the context, and
-    /// only a later SSLWrite sends it. An empty SSLWrite services that queue and writes nothing
-    /// new; WouldBlock means some is still queued (call again). Without it the tail of a stream
-    /// written under a send timeout never left (the stream ended short when it was closed).
-    fn flush(&mut self) -> io::Result<()> {
-        if self.is_closed {
-            return Ok(());
-        }
-        let mut processed = 0usize;
-        let status = unsafe { SSLWrite(self.ssl_context, [0u8; 1].as_ptr() as *const std::ffi::c_void, 0, &mut processed) };
-        match status {
-            SSL_OK => Ok(()),
-            ERR_SSL_WOULD_BLOCK => Err(io::Error::new(io::ErrorKind::WouldBlock, "SSLWrite flush would block")),
-            ERR_SSL_CLOSED_ABORT => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "SSLWrite connection aborted")),
-            _ => Err(io_other(format!("SSLWrite (flush) failed with status {status}"))),
-        }
+    fn connect_capture(tcp: TcpStream, peer_id: [u8; 16]) -> io::Result<(Self, Vec<u8>)> {
+        tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
+        let native = NativeEngine::client(None, false, Some(peer_id), false)?;
+        let stream = Self::handshake(tcp, TlsEngine::start(native, None, true, None)?, None)?;
+        stream.tcp().set_read_timeout(None)?;
+        let der = stream.engine.server_certificate_der().unwrap().to_vec();
+        Ok((stream, der))
     }
 }
 
@@ -535,10 +331,10 @@ impl SocketStream {
     /// Like [`Self::connect_capture`], resuming the TLS session of `session_of`
     /// (an earlier captured connection; FTPS data channels need this).
     pub fn connect_capture_resuming(host: &str, port: &str, session_of: &Self) -> io::Result<(Self, Vec<u8>)> {
-        let SocketStream::Tls(SecureTransportStream { peer_id: Some(peer_id), .. }) = session_of else {
+        let SocketStream::Tls(previous) = session_of else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "no captured TLS session to resume"));
         };
-        let peer_id = *peer_id;
+        let peer_id = previous.engine.native.peer_id.ok_or_else(|| io_other("no captured TLS session to resume"))?;
         let tcp_stream = connect_lan(host, port)?;
         let _ = tcp_stream.set_nodelay(true);
         let (stream, der) = SecureTransportStream::connect_capture(tcp_stream, peer_id)?;
@@ -548,7 +344,7 @@ impl SocketStream {
     pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
         let (mut socket, _) = Self::connect_capture(host, port)?;
         let result = match &socket {
-            Self::Tls(stream) => peer_chain_der(stream.ssl_context),
+            Self::Tls(stream) => peer_chain_der(stream.engine.native.ssl_context),
             Self::Plain(_) => Err(io_other("TLS stream required")),
         };
         match result {
@@ -569,14 +365,14 @@ impl SocketStream {
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Plain(stream) => stream.set_read_timeout(timeout),
-            SocketStream::Tls(stream) => stream.set_read_timeout(timeout),
+            SocketStream::Tls(stream) => stream.tcp().set_read_timeout(timeout),
         }
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Plain(stream) => stream.set_write_timeout(timeout),
-            SocketStream::Tls(stream) => stream.set_write_timeout(timeout),
+            SocketStream::Tls(stream) => stream.tcp().set_write_timeout(timeout),
         }
     }
 
@@ -594,7 +390,7 @@ impl SocketStream {
     pub fn try_clone_tcp(&self) -> io::Result<TcpStream> {
         match self {
             SocketStream::Plain(stream) => stream.try_clone(),
-            SocketStream::Tls(stream) => stream.tcp_stream.try_clone(),
+            SocketStream::Tls(stream) => stream.tcp().try_clone(),
         }
     }
 
@@ -639,4 +435,62 @@ impl Write for SocketStream {
 fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
     let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
     crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls::engine::tests::{handshake, identity};
+
+    extern "C" {
+        fn SSLReHandshake(context: SSLContextRef) -> OSStatus;
+    }
+
+    // TLS 1.2 preserves the outer record content type even after encryption.
+    fn has_handshake_record(mut wire: &[u8]) -> bool {
+        while !wire.is_empty() {
+            let size = 5 + u16::from_be_bytes([wire[3], wire[4]]) as usize;
+            if wire[0] == 22 { return true; }
+            wire = &wire[size..];
+        }
+        false
+    }
+
+    #[test]
+    fn tls_strict_client_refuses_a_renegotiation_request() {
+        let id = identity();
+        let config = crate::tls::platform::ServerConfig::new(&id.cert_der, &id.key).unwrap();
+        let native = config.engine(false).unwrap();
+        assert_eq!(unsafe { SSLSetSessionOption(native.ssl_context, ALLOW_RENEGOTIATION, true) }, SSL_OK);
+        let mut server = TlsEngine::start(native, None, false, None).unwrap();
+        let mut client = TlsEngine::client(identity(), None).unwrap();
+        handshake(&mut client, &mut server);
+        assert_eq!(unsafe { SSLReHandshake(server.native.ssl_context) }, SSL_OK);
+        server.native.handshake().unwrap();
+        let mut request = Vec::new();
+        server.take_ciphertext(&mut request).unwrap();
+        assert!(has_handshake_record(&request), "the control server sent no HelloRequest");
+        let error = client.feed_ciphertext(&request).unwrap_err();
+        assert_eq!(error.to_string(), "TLS renegotiation refused");
+        assert!(!client.handshake_done());
+        let mut reply = Vec::new();
+        client.take_ciphertext(&mut reply).unwrap();
+        assert!(!has_handshake_record(&reply), "client answered the HelloRequest");
+    }
+
+    #[test]
+    fn tls_strict_server_requires_a_full_certificate_handshake() {
+        let id = identity();
+        let config = crate::tls::platform::ServerConfig::new(&id.cert_der, &id.key).unwrap();
+        let cache_key = next_peer_id();
+        // Request resumption from the second connection, with the same key
+        // and server certificate. A server-auth break proves a full handshake.
+        for strict in [false, true] {
+            let native = NativeEngine::client(None, false, Some(cache_key), false).unwrap();
+            let mut client = TlsEngine::start(native, None, false, None).unwrap();
+            let mut server = TlsEngine::start(config.engine(strict).unwrap(), None, false, None).unwrap();
+            handshake(&mut client, &mut server);
+            assert_eq!(client.native.captured.as_ref(), Some(&id.cert_der), "server resumed an earlier session");
+        }
+    }
 }

@@ -166,7 +166,7 @@ impl SocketStream {
 
     pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {
         let (mut socket, _) = Self::connect_capture(host, port)?;
-        let result = socket.schannel.as_mut().ok_or_else(|| io_other("TLS stream required"))?.peer_chain_der();
+        let result = socket.schannel.as_mut().ok_or_else(|| io_other("TLS stream required"))?.engine.native.peer_chain_der();
         match result {
             Ok(chain) => Ok((socket, chain)),
             Err(e) => { socket.shutdown(); Err(e) }

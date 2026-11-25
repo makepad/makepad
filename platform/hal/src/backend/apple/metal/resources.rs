@@ -124,7 +124,9 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     let depth = format::is_depth(t.format);
     let descriptor = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).ok_or("no texture descriptor")?);
     let d = descriptor.as_id();
-    let texture_type = if t.is_cube() {
+    let texture_type = if t.is_volume() {
+        MTLTextureType::D3
+    } else if t.is_cube() {
         MTLTextureType::Cube
     } else if t.depth > 1 || t.usage & usage::ARRAY != 0 {
         // An array of one layer is still an array: a shader that declares a
@@ -152,7 +154,8 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
         let _: () = msg_send![d, setTextureType: texture_type];
         let _: () = msg_send![d, setWidth: t.w as u64];
         let _: () = msg_send![d, setHeight: t.h as u64];
-        let _: () = msg_send![d, setDepth: 1u64];
+        let spatial_depth = if t.is_volume() { u64::from(t.depth) } else { 1 };
+        let _: () = msg_send![d, setDepth: spatial_depth];
         if texture_type == MTLTextureType::D2Array {
             let _: () = msg_send![d, setArrayLength: t.depth as u64];
         }
@@ -346,10 +349,10 @@ pub struct Upload {
     pub offset: u64,
     pub bytes_per_row: u64,
     pub rows: u64,
-    pub size: [u64; 2],
+    pub size: [u64; 3],
     pub mip: u64,
     pub layer: u64,
-    pub origin: [u64; 2],
+    pub origin: [u64; 3],
 }
 
 /// Encodes uploads on one blit encoder of `cb`.
@@ -360,8 +363,8 @@ pub fn encode_uploads(cb: ObjcId, uploads: &mut Vec<Upload>) {
     unsafe {
         let blit: ObjcId = msg_send![cb, blitCommandEncoder];
         for u in uploads.drain(..) {
-            let size = MTLSize { width: u.size[0], height: u.size[1], depth: 1 };
-            let origin = MTLOrigin { x: u.origin[0], y: u.origin[1], z: 0 };
+            let size = MTLSize { width: u.size[0], height: u.size[1], depth: u.size[2] };
+            let origin = MTLOrigin { x: u.origin[0], y: u.origin[1], z: u.origin[2] };
             let _: () = msg_send![blit,
                 copyFromBuffer: u.staging
                 sourceOffset: u.offset

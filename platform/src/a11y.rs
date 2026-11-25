@@ -76,6 +76,16 @@ struct Frame {
     list: Option<DrawListId>,
 }
 
+/// Open semantic scopes and the parents to which a nested draw can attach children.
+pub struct A11yUnwindMark {
+    nodes: usize,
+    windows: usize,
+    parent: Option<Frame>,
+    outside_changes: usize,
+    suspended: Vec<Frame>,
+    attachments: [Option<(WindowKey, NodeId, usize)>; 2],
+}
+
 /// Where a lookup request originated, and the number its acknowledgement must echo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LookupSource {
@@ -94,7 +104,11 @@ pub struct CxA11y {
     stack: Vec<Frame>,
     suspended: Vec<Frame>,
     outside_windows: HashSet<NodeId>,
-    window_stack: Vec<WindowKey>,
+    // Nodes can first enter outside a window and then open their own window.
+    // Remember membership changes so nested draws can restore that distinction.
+    outside_changes: Vec<(NodeId, bool)>,
+    // The previous root is needed if a window draw unwinds before end_window.
+    window_stack: Vec<(WindowKey, NodeId)>,
     announcements: Vec<Notification>,
     pending: Option<(u64, ActionResult)>,
     requested_focus: NodeId,
@@ -132,6 +146,56 @@ pub fn set_path_resolver(resolve: fn(&Cx, u64, u64) -> Option<String>) {
 }
 
 impl CxA11y {
+    pub fn unwind_mark(&self) -> A11yUnwindMark {
+        let parent = self.stack.last().copied();
+        let attachments = [parent, self.suspended.last().copied()].map(|frame| {
+            let frame = frame?;
+            let window = frame.window?;
+            let record = self.windows.get(&window)?.records.get(&frame.id)?;
+            Some((window, frame.id, record.drawn_children.len()))
+        });
+        A11yUnwindMark {
+            nodes: self.stack.len(),
+            windows: self.window_stack.len(),
+            parent,
+            outside_changes: self.outside_changes.len(),
+            // Re-entering a yielded ancestor can consume an existing suspension.
+            suspended: self.suspended.clone(),
+            attachments,
+        }
+    }
+
+    /// Discard unfinished scopes and their attachments. A yielded node has already
+    /// closed its token, so restoring the suspended context never ends a node.
+    pub fn unwind_to(&mut self, mark: A11yUnwindMark) {
+        self.stack.truncate(mark.nodes);
+        while self.window_stack.len() > mark.windows {
+            let (window, root) = self.window_stack.pop().unwrap();
+            self.windows.get_mut(&window).unwrap().root = root;
+        }
+        if let (Some(top), Some(parent)) = (self.stack.last_mut(), mark.parent) {
+            if top.id == parent.id {
+                *top = parent;
+            }
+        }
+        self.suspended = mark.suspended;
+        while self.outside_changes.len() > mark.outside_changes {
+            let (id, was_outside) = self.outside_changes.pop().unwrap();
+            if was_outside {
+                self.outside_windows.insert(id);
+            } else {
+                self.outside_windows.remove(&id);
+            }
+        }
+        for (window, parent, count) in mark.attachments.into_iter().flatten() {
+            let tree = self.windows.get_mut(&window).unwrap();
+            let children = &mut tree.records.get_mut(&parent).unwrap().drawn_children;
+            while children.len() > count {
+                tree.links.remove(&(parent, children.pop().unwrap()));
+            }
+        }
+    }
+
     /// The consumer bits (`makepad_a11y::consumer`) that keep the builder on; zero when off.
     pub fn consumers(&self) -> u32 {
         self.consumers
@@ -151,6 +215,7 @@ impl CxA11y {
             self.stack.clear();
             self.suspended.clear();
             self.outside_windows.clear();
+            self.outside_changes.clear();
             self.window_stack.clear();
             self.announcements.clear();
             return false;
@@ -260,6 +325,7 @@ impl CxA11y {
         self.stack.clear();
         self.suspended.clear();
         self.outside_windows.clear();
+        self.outside_changes.clear();
         self.window_stack.clear();
         for tree in self.windows.values_mut() {
             tree.links.clear();
@@ -267,14 +333,16 @@ impl CxA11y {
     }
     pub fn begin_window(&mut self, window: WindowId) {
         let key = key(window);
-        self.window_stack.push(key);
         let tree = self.windows.entry(key).or_insert_with(|| WindowTree {
             full: true,
             ..Default::default()
         });
+        self.window_stack.push((key, tree.root));
         if let Some(frame) = self.stack.last_mut() {
             frame.window = Some(key);
-            self.outside_windows.remove(&frame.id);
+            if self.outside_windows.remove(&frame.id) {
+                self.outside_changes.push((frame.id, true));
+            }
             tree.root = frame.id;
             Self::touch(tree, frame.id, NodeId::NONE, frame.list, self.frame);
         }
@@ -335,7 +403,7 @@ impl CxA11y {
     }
     pub fn begin_node(&mut self, uid: u64, list: Option<DrawListId>) -> u32 {
         let id = NodeId::widget(uid);
-        let window = self.window_stack.last().copied().or_else(|| {
+        let window = self.window_stack.last().map(|&(window, _)| window).or_else(|| {
             // A Root (or another caller outside all windows) can also resume a step.
             // It must not become a child of the yielded list merely by re-entering.
             (!self.outside_windows.contains(&id))
@@ -363,8 +431,8 @@ impl CxA11y {
             }
             Self::touch(tree, id, parent, list, self.frame);
         }
-        if window.is_none() {
-            self.outside_windows.insert(id);
+        if window.is_none() && self.outside_windows.insert(id) {
+            self.outside_changes.push((id, false));
         }
         let token = self.stack.len() as u32;
         self.stack.push(Frame { id, window, list });
@@ -2162,46 +2230,7 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod allocation_tests {
     use super::*;
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        cell::Cell,
-    };
-    thread_local! {
-        static COUNT: Cell<Option<usize>> = const { Cell::new(None) };
-    }
-    struct CountAllocator;
-    fn note() {
-        COUNT.with(|c| {
-            if let Some(n) = c.get() {
-                c.set(Some(n + 1));
-            }
-        });
-    }
-    unsafe impl GlobalAlloc for CountAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            note();
-            System.alloc(layout)
-        }
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            note();
-            System.alloc_zeroed(layout)
-        }
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            note();
-            System.realloc(ptr, layout, size)
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            System.dealloc(ptr, layout)
-        }
-    }
-    #[global_allocator]
-    static ALLOCATOR: CountAllocator = CountAllocator;
-
-    fn measured(f: impl FnOnce()) -> usize {
-        COUNT.with(|c| c.set(Some(0)));
-        f();
-        COUNT.with(|c| c.replace(None).unwrap())
-    }
+    use crate::test_alloc::measured;
 
     #[test]
     fn off_snapshots_preserve_ids_and_os_continuity() {

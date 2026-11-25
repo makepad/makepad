@@ -141,6 +141,13 @@ mod native {
         }
     }
 
+    /// [`exempt`] for an app: this launch runs on its own, whatever its single instance (an
+    /// agent's, a test's, a host's or a window manager's launch). Such a launch must not act for
+    /// the person's instance either.
+    pub fn launch_runs_on_its_own() -> bool {
+        exempt()
+    }
+
     /// Instances started for an agent, a test or a host run on their own:
     /// a `--remote` or hidden run must never land in the user's window, and
     /// a hosted child belongs to its host. A window manager's launch is its
@@ -155,14 +162,13 @@ mod native {
             || crate::app_main::launched_by_window_manager()
     }
 
-    pub fn claim_single_instance(app_name: &str) -> SingleInstance {
+    /// `across_builds`: one instance whatever build runs ([`crate::AppMain::single_instance_across_builds`]).
+    pub fn claim_single_instance(app_name: &str, across_builds: bool) -> SingleInstance {
         if exempt() {
             return SingleInstance::Standalone;
         }
-        let exe = std::env::current_exe()
-            .and_then(|exe| exe.canonicalize())
-            .unwrap_or_default();
-        let key = si::instance_key(app_name, &exe);
+        let exe = (!across_builds).then(|| std::env::current_exe().and_then(|exe| exe.canonicalize()).unwrap_or_default());
+        let key = si::instance_key(app_name, exe.as_deref());
         let items: Vec<String> = launch_items().iter().map(AppOpenItem::to_arg).collect();
         #[cfg(unix)]
         let claim = match si::unix::runtime_dir() {
@@ -192,7 +198,12 @@ mod native {
         pub fn serve(self) {}
     }
 
-    pub fn claim_single_instance(_app_name: &str) -> SingleInstance {
+    /// No single instance here: every launch runs on its own.
+    pub fn launch_runs_on_its_own() -> bool {
+        true
+    }
+
+    pub fn claim_single_instance(_app_name: &str, _across_builds: bool) -> SingleInstance {
         SingleInstance::Standalone
     }
 }
@@ -202,6 +213,7 @@ mod native {
 /// instance. Before the `Cx`, so a handed-off launch costs no VM or window.
 #[doc(hidden)]
 pub use native::{claim_single_instance, SingleInstanceServer};
+pub use native::launch_runs_on_its_own;
 
 #[cfg(test)]
 mod tests {

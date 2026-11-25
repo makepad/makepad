@@ -230,6 +230,10 @@ fn json_escape(s: &str) -> String {
 fn format_name(format: &TextureFormat) -> &'static str {
     match format {
         TextureFormat::Storage { .. } => "Storage",
+        TextureFormat::VecVolume(v) => match v.desc.format {
+            crate::texture::VolumeFormat::R8Unorm => "VecVolumeR8Unorm",
+            crate::texture::VolumeFormat::Rgba8Unorm => "VecVolumeRgba8Unorm",
+        },
         TextureFormat::Unknown => "Unknown",
         TextureFormat::VecBGRAu8_32 { .. } => "VecBGRAu8_32",
         TextureFormat::VecCubeBGRAu8_32 { .. } => "VecCubeBGRAu8_32",
@@ -265,6 +269,7 @@ fn format_name(format: &TextureFormat) -> &'static str {
 /// Bytes per texel (per block for compressed formats, handled apart).
 fn texel_size(format: &TextureFormat) -> u64 {
     match format {
+        TextureFormat::VecVolume(v) => v.desc.format.bytes() as u64,
         TextureFormat::Storage { format, .. } => {
             use crate::makepad_script::shader_ir_compute::StorageTextureFormat as F;
             match format { F::R8unorm => 1, F::R16f => 2, F::Rgba16f => 8, _ => 4 }
@@ -466,6 +471,7 @@ impl Cx {
                 _ => 1,
             };
             let faces: u64 = match &texture.format {
+                TextureFormat::VecVolume(v) => u64::from(v.desc.extent[2]),
                 TextureFormat::VecCubeBGRAu8_32 { .. } | TextureFormat::RenderCubeBGRAu8 { .. } => 6,
                 TextureFormat::VecArrayMipBGRAu8_32 { layers, .. } | TextureFormat::VecArrayMipCompressed { layers, .. } => (*layers).max(1) as u64,
                 _ => 1,

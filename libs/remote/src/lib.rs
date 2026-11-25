@@ -8,6 +8,10 @@
 //! front end for an app's remote commands ([`app`], with the `frames` service records in [`frames`]). The CI bridge of the
 //! same name is built from `main.rs` and keeps its own wire until it moves onto this one.
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
 // log in a full tmpfs /tmp aborted a fleet run inside a lazy compile, 2026-10-23), so in this
 // crate every print is a write whose error is dropped. Test builds keep std's captured macros.
@@ -52,6 +56,7 @@ pub mod hub;
 pub mod hot;
 pub mod lines;
 pub mod pair;
+pub mod peer;
 pub mod program;
 pub mod link;
 pub mod mcp;
@@ -69,5 +74,6 @@ mod hub_tests;
 pub use cmd::{json_str, now_ms, Out, Req};
 pub use conn::{Channel, ChannelTx, Conn, Event, Hooks};
 pub use endpoint::Endpoint;
+pub use peer::{PeerEndpoint, PeerIdentity, PeerService};
 pub use link::Client;
 pub use served::{asked_cpu_ns, charge_served, own_thread, runtime_cpu_ns, runtime_waited_ns, served_count, served_cpu_ns};

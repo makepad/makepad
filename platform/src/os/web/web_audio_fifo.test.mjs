@@ -1,14 +1,12 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
 // Audio without threads: the UI thread renders ahead into a FIFO (MakepadAudioFifoOutput)
 // that a worklet without wasm plays (makepad_audio_fifo_worklet). Here both run against a
 // virtual audio device: the worklet's render quanta at the sample rate, the page's pumps on a
 // timer and on animation frames, messages between them delivered as the clock moves.
 
-const source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
-  .replace(/^import .*wasm_bridge\.js"\n/, "")
+const source = read_text(new URL("./web.js", import.meta.url))
+  .replace(/^import .*\n/gm, "")
   .replace(/^export /gm, "");
 
 const clock = { ms: 0 };

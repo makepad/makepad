@@ -1,3 +1,7 @@
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 pub mod backend;
 // The blocking client is a native socket API; wasm uses the async web backend.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -42,6 +46,10 @@ pub mod mpsc;
 // The blocking TCP websocket is native-only; wasm uses backend::web.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod plain_web_socket;
+// Peer-to-peer reach: self-address discovery, router port mapping, hole punching, address words.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod p2p;
 pub mod runtime;
 pub mod runtime_handle;
 pub mod socket_stream;

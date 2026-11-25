@@ -104,7 +104,7 @@ pub(crate) struct Readbacks {
     /// Window copies in flight for `screen_capture` byte sinks: req -> window index. One per window.
     captures: HashMap<u32, usize>,
     capture_backlog: CaptureBacklog,
-    picks: HashMap<u32, (crate::pick::PickTicket, Texture, Texture)>,
+    picks: HashMap<u32, (crate::pick::PickTicket, Texture)>,
     images: VecDeque<(Vec<u64>, u32, u32, HostBuf)>,
     workers: Vec<TaskHandle<()>>,
     raw: HashMap<u32, (Texture, usize, usize, usize, RawCallback)>,
@@ -440,7 +440,6 @@ impl Cx {
         &mut self,
         fb: &mut FrameBuilder,
         ticket: crate::pick::PickTicket,
-        original: Texture,
         texture: Texture,
     ) {
         let id = texture.texture_id();
@@ -451,6 +450,7 @@ impl Cx {
             return;
         };
         let Some(alloc) = &self.textures[id].alloc else {
+            self.pick.results.push((ticket, Err(crate::pick::PickError::NotRendered)));
             return;
         };
         let (width, height) = (alloc.width, alloc.height);
@@ -459,7 +459,7 @@ impl Cx {
         self.hal
             .readbacks
             .picks
-            .insert(req, (ticket, original, texture));
+            .insert(req, (ticket, texture));
     }
 
     /// Readback commands queued before replacement refer to the old device's
@@ -551,18 +551,9 @@ impl Cx {
             }
             return;
         }
-        if let Some((ticket, original, _texture)) = self.hal.readbacks.picks.remove(&req) {
-            if status == makepad_hal::readback::INCOMPLETE {
-                self.pick.requests.insert(
-                    0,
-                    crate::pick::PickRequest {
-                        ticket,
-                        texture: original,
-                    },
-                );
-                self.hal_repaint_all(crate::event::hal_intake::RepaintAll::PickIncomplete);
-                return;
-            }
+        if let Some((ticket, _texture)) = self.hal.readbacks.picks.remove(&req) {
+            // Replay waited for its feeder pipelines and layouts. A draw the HAL
+            // still couldn't encode fails this ticket, as does an unreadable target.
             let result = if ok {
                 Ok(crate::pick::PickImage {
                     width: w as usize,
@@ -583,6 +574,7 @@ impl Cx {
             } else {
                 crate::error!("HAL window readback failed: status={status}");
                 crate::remote::fail_grabs(&ids, "HAL window readback failed");
+                Cx::fail_frame_captures(&ids, "the window readback failed");
             }
         }
     }
@@ -723,6 +715,7 @@ impl Cx {
                     Err(error) => {
                         crate::error!("HAL screenshot PNG: {error:?}");
                         crate::remote::fail_grabs(&ids, "HAL screenshot PNG encoding failed");
+                        Cx::fail_frame_captures(&ids, "the frame's PNG encoding failed");
                     }
                 }
             }) { self.hal.readbacks.workers.push(handle); }

@@ -68,6 +68,7 @@ impl Vulkan {
         }
         image.transition(batch.cb, image.sampled_layout());
         s.stats.arena_allocs += batch.allocs - allocs;
+        s.stats.batch_slots_made += batch.take_slot_made();
         Ok(())
     }
 
@@ -99,6 +100,7 @@ impl Vulkan {
             let rect = [rect[0], rect[1], rect[2].min(image.desc.w - rect[0]), rect[3].min(image.desc.h - rect[1])];
             let fmt = image.desc.format;
             let batch = self.ensure_batch()?;
+            s.stats.batch_slots_made += batch.take_slot_made();
             let (staging, stencil) = Self::record_read(batch, image, rect)?;
             batch.tickets.push(Ticket::Read { token: Self::token(s), req, rect, format: fmt, staging, stencil }); Ok::<_, String>(())
         })();

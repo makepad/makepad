@@ -138,6 +138,10 @@ pub struct CxDrawShaders {
     /// Explicit const-table mode override; None = decide from the
     /// environment / remote bridge (see `Cx::shader_const_table_mode`).
     pub const_table_mode: Option<bool>,
+    /// The context's draw sampler clamp. The default is 16.
+    max_sampler_anisotropy: Option<u8>,
+    #[cfg(not(target_arch = "wasm32"))]
+    sampler_rebuild_pending: bool,
 
     pub cache_object_reuse_epoch_seen: u64,
     /// Keyed by (heap key, object): an isolate's objects share index space
@@ -189,6 +193,67 @@ impl CxDrawShaders {
 }
 
 impl Cx {
+    pub fn max_sampler_anisotropy(&self) -> u8 {
+        self.draw_shaders.max_sampler_anisotropy.unwrap_or(16)
+    }
+
+    /// Limit draw samplers to 1–16 anisotropic samples. Returns the number of
+    /// native programs rebuilt in place. A held VM defers that work to the
+    /// next frame. On wasm this only records the value.
+    pub fn set_max_sampler_anisotropy(&mut self, n: u8) -> usize {
+        let clamp = n.clamp(1, 16);
+        if self.max_sampler_anisotropy() == clamp {
+            return 0;
+        }
+        self.draw_shaders.max_sampler_anisotropy = Some(clamp);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.is_script_vm_held() {
+                self.draw_shaders.sampler_rebuild_pending = self.draw_shaders.shaders.iter()
+                    .any(|shader| shader.mapping.anisotropic_clamp.is_some_and(|old| old != clamp));
+                if self.draw_shaders.sampler_rebuild_pending {
+                    self.redraw_all();
+                }
+                return 0;
+            }
+            self.draw_shaders.sampler_rebuild_pending = false;
+            let rebuilt = self.rebuild_anisotropic_shaders(clamp);
+            if rebuilt > 0 {
+                self.redraw_all();
+            }
+            rebuilt
+        }
+        #[cfg(target_arch = "wasm32")]
+        { 0 }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn apply_pending_sampler_rebuild(&mut self) {
+        if self.draw_shaders.sampler_rebuild_pending {
+            if self.is_script_vm_held() {
+                self.redraw_all();
+                return;
+            }
+            self.draw_shaders.sampler_rebuild_pending = false;
+            self.rebuild_anisotropic_shaders(self.max_sampler_anisotropy());
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn replace_shader_mapping(&mut self, id: DrawShaderId, pipe: LiveId, mut mapping: CxDrawShaderMapping) {
+        mapping.scope_uniforms_gen = self.next_uniform_gen();
+        let shaders = &mut self.draw_shaders;
+        let shader = &mut shaders.shaders[id.index];
+        let old = std::mem::replace(&mut shader.mapping, mapping);
+        let old_key = (old.code, pipe);
+        if shaders.cache_code_to_shader.get(&old_key) == Some(&id) {
+            shaders.cache_code_to_shader.remove(&old_key);
+        }
+        shaders.cache_code_to_shader.insert((shader.mapping.code.clone(), pipe), id);
+        shader.pipeline_id = None;
+        shaders.compile_set.insert(id.index);
+    }
+
     /// The return facts for the unique function with this key name. An unknown shader,
     /// a prebuilt shader, a missing function or an overloaded name yields `None`.
     pub fn draw_shader_return_facts(
@@ -990,6 +1055,9 @@ pub enum VertexExtent {
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
+    /// The clamp used for a native program that requested an anisotropic sampler.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) anisotropic_clamp: Option<u8>,
     pub code: CxDrawShaderCode,
     /// The pick variant's source (`Cx::enable_pick_variants`).
     pub pick_code: Option<String>,
@@ -1604,6 +1672,8 @@ impl CxDrawShaderMapping {
             #[cfg(not(target_arch = "wasm32"))]
             storage_push_size: 0,
             source,
+            #[cfg(not(target_arch = "wasm32"))]
+            anisotropic_clamp: None,
             code,
             pick_code: None,
             #[cfg(not(target_arch = "wasm32"))]

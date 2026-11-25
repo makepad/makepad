@@ -1878,6 +1878,15 @@ impl HitOptions {
 }
 
 impl Cx {
+    /// Nesting of scroll containers dispatching to their children, per axis.
+    pub fn scroll_container_depth(&self) -> [u32; 2] {
+        self.fingers.scroll_latch.containers
+    }
+
+    pub fn unwind_scroll_containers_to(&mut self, depth: [u32; 2]) {
+        self.fingers.scroll_latch.containers = depth;
+    }
+
     pub(crate) fn validate_scoped_sweep_locks_after_draw(&mut self) {
         self.fingers.sweep_lock_validation_event = None;
         self.validate_scoped_sweep_locks();

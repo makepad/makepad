@@ -3757,6 +3757,7 @@ mod uniform_generation_tests {
             options: Default::default(),
             append_group_id: 0,
             draw_shader_id: Some(call.draw_shader_id),
+            own_shader_id: None,
             geometry_id: None,
             shader_gen: 0,
             shader_default: None,

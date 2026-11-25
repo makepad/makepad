@@ -197,8 +197,12 @@ pub fn socket_path(dir: &Path, index: u32) -> PathBuf {
     dir.join(format!("{SOCKET_PREFIX}{index}"))
 }
 
-/// The socket a client asks: the one its WM exported, else the first of this user's.
+/// The socket a client asks: where it found its WM after waiting for it ([`discovered`]), else
+/// the one its WM exported, else the first of this user's.
 pub fn discovery_path() -> Option<PathBuf> {
+    if let Some(path) = FOUND.get() {
+        return Some(path.clone());
+    }
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
@@ -303,13 +307,78 @@ pub fn probe_with(path: &Path, wire: u64, versions: Versions) -> Probe {
     hello(path, &mut stream, wire, versions).0
 }
 
-/// This process's answer for [`discovery_path`], asked once per process.
+/// Where this process found its WM after waiting for it ([`discovered`]): the next WM may sit at
+/// another index than the one its old WM exported.
+static FOUND: OnceLock<PathBuf> = OnceLock::new();
+
+/// How often a process waiting for the next WM asks the sockets again.
+const NEXT_WM_EVERY: Duration = Duration::from_secs(1);
+
+/// This process's answer for [`discovery_path`], asked once per process. A process its WM's
+/// socket was exported to (`MAKEPAD_WM_SOCKET`: it was started to be hosted there) that finds no
+/// WM there, while that WM's notice says it went away for a next WM ([`left_for_next`]), waits for
+/// the next one, as the apps that WM left waiting do. Such a process started in the seconds a
+/// WM restart takes and found no window system: a lease's next app launch in the gap a WM
+/// restart claims ([`wait_for_next`]).
 pub fn discovered(wire: u64) -> &'static Probe {
     static PROBE: OnceLock<Probe> = OnceLock::new();
-    PROBE.get_or_init(|| match discovery_path() {
-        Some(path) => probe(&path, wire),
-        None => Probe::Absent,
+    PROBE.get_or_init(|| {
+        let Some(path) = discovery_path() else { return Probe::Absent };
+        let first = probe(&path, wire);
+        let exported = std::env::var_os(SOCKET_ENV).is_some_and(|p| !p.is_empty());
+        let Some(left) = (exported && matches!(first, Probe::Absent | Probe::Dead(_))).then(|| read_state(&path)).flatten().filter(|n| left_for_next(n)) else { return first };
+        eprintln!("[hal-wm] the WM at {} went away for a next WM: this process waits for it, as the apps it left do", path.display());
+        let t = std::time::Instant::now();
+        let (probe, at) = wait_for_next(&path, &left, wire, Versions::THIS, reattach_paths, NEXT_WM_EVERY);
+        match &at {
+            Some(at) => {
+                eprintln!("[hal-wm] the next WM answered at {} after {:.1} s", at.display(), t.elapsed().as_secs_f64());
+                let _ = FOUND.set(at.clone());
+            }
+            None => eprintln!("[hal-wm] the WM at {} no longer says it went for a next WM, and none answers: {probe:?}", path.display()),
+        }
+        probe
     })
+}
+
+/// The notice a WM published beside its socket (`<socket>.state`).
+fn read_state(socket: &Path) -> Option<String> {
+    std::fs::read_to_string(socket.with_added_extension("state")).ok()
+}
+
+/// Whether a WM's notice says it went away for a next WM, leaving its apps waiting for it: a
+/// keeping WM's `keep=1` with the `left_ms=` it adds as it goes, which the next WM replaces with
+/// its own notice. A final stop removes the notice; a crashed WM's has no `left_ms=`.
+pub fn left_for_next(notice: &str) -> bool {
+    notice.lines().any(|l| l == "keep=1") && notice.lines().any(|l| l.starts_with("left_ms="))
+}
+
+/// The kind of WM a notice names: its `lane=` (empty: a node's own WM, else a lane's test WM).
+fn notice_lane(notice: &str) -> &str {
+    notice.lines().find_map(|l| l.strip_prefix("lane=")).unwrap_or("")
+}
+
+/// Waits for the next WM after the one at `exported` went away for it (its notice `left`): the
+/// first socket of `paths` (the exported one first, [`reattach_paths`]) where a WM of the same
+/// kind answers, and its answer, every `every`. It ends without one (None, the exported socket's
+/// probe) once the exported socket's notice no longer says its WM went for a next one and none
+/// answers there.
+fn wait_for_next(exported: &Path, left: &str, wire: u64, versions: Versions, paths: impl Fn() -> Vec<PathBuf>, every: Duration) -> (Probe, Option<PathBuf>) {
+    loop {
+        for path in paths() {
+            if path != exported && read_state(&path).is_none_or(|n| notice_lane(&n) != notice_lane(left)) {
+                continue;
+            }
+            match probe_with(&path, wire, versions) {
+                Probe::Absent | Probe::Dead(_) => {}
+                answer => return (answer, Some(path)),
+            }
+        }
+        if !read_state(exported).is_some_and(|n| left_for_next(&n)) {
+            return (probe_with(exported, wire, versions), None);
+        }
+        std::thread::sleep(every);
+    }
 }
 
 /// Ask the WM at `path` to host this process: on `Ok` it has a window slot for client
@@ -830,6 +899,43 @@ mod tests {
         assert_eq!(found, Some(Admission { port: 1, client: 2, version: Versions::THIS.max, wire }));
         server.join().unwrap();
         let _ = std::fs::remove_file(&stale);
+
+        // a process started while its WM went away for a next one waits for that WM, wherever it
+        // binds, and passes over a WM of another kind: a lease's app launched in the seconds a WM
+        // restart took found no window system (11-24)
+        let exported = socket_path(&dir, 2);
+        let state = |path: &Path, notice: &str| std::fs::write(path.with_added_extension("state"), notice).unwrap();
+        state(&exported, "epoch=ab\nkeep=1\nlane=\nleft_ms=1700000000000\nleft=41\n");
+        let left = read_state(&exported).unwrap();
+        assert!(left_for_next(&left) && !left_for_next("epoch=ab\nkeep=1\nlane=\n") && !left_for_next("keep=0\nlane=\nleft_ms=1\n"), "only a keeping WM's going says a next WM comes");
+        let serve_one = move |socket: WmSocket| thread::spawn(move || {
+            let (stream, _) = socket.listener.accept().unwrap();
+            WmSocket::serve(stream, wire, |request| Ok(Admission { port: 1, client: 2, version: request.version, wire }), |_, _| Ok(()), |_, _, _| Ok(())).unwrap();
+            socket
+        });
+        let lane_wm = WmSocket::bind(&dir, 3).unwrap();
+        state(&lane_wm.path, "epoch=cd\nkeep=1\nlane=other\n");
+        let lane_wm = serve_one(lane_wm);
+        let next_dir = dir.clone();
+        let next = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            let socket = WmSocket::bind(&next_dir, 5).unwrap();
+            state(&socket.path, "epoch=ef\nkeep=1\nlane=\n");
+            serve_one(socket).join().unwrap()
+        });
+        let paths = || reattach_paths_in(Some(exported.clone()), Some(dir.clone()));
+        let (answer, at) = wait_for_next(&exported, &left, wire, Versions::THIS, paths, Duration::from_millis(20));
+        assert_eq!((answer, at), (Probe::Live, Some(socket_path(&dir, 5))), "the next WM of its kind, not the lane's test WM at 3");
+        let next = next.join().unwrap();
+        // the lane's WM was never asked: it answers this probe
+        assert_eq!(probe(&socket_path(&dir, 3), wire), Probe::Live);
+        drop((lane_wm.join().unwrap(), next));
+        // no next WM comes once the notice stops saying one does (a final stop, a next WM's own)
+        state(&exported, "keep=0\nlane=\n");
+        assert_eq!(wait_for_next(&exported, &left, wire, Versions::THIS, paths, Duration::from_millis(20)), (Probe::Absent, None));
+        for index in [2, 3, 5] {
+            let _ = std::fs::remove_file(socket_path(&dir, index).with_added_extension("state"));
+        }
         let _ = std::fs::remove_dir(&dir);
     }
 

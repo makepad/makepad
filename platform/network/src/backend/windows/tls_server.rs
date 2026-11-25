@@ -1,26 +1,20 @@
 //! TLS server on Schannel (SSPI `AcceptSecurityContext`).
 //!
 //! Keys: generated and used for signing with BCrypt (ECDSA P-256). For the
-//! handshake, Schannel reads the private key from the CNG key store of the
-//! account running the server, so each [`ServerConfig`] imports the key
-//! there under a name of its own (`makepad-tls-<certificate>-<process>-<n>`)
-//! and points its in-memory certificate context at it. The config deletes
-//! that key when it drops (or when it fails to start), so no key outlives
-//! its server, and two servers of one identity (in one process or two)
-//! never share a stored key, so neither can delete the other's. The key
-//! file remains the source of truth, so the identity moves between accounts
-//! unchanged. A process that dies without dropping its config leaves its
-//! key behind; nothing sweeps those, since another process may be using one.
+//! handshake, Schannel reopens a named key in the account's CNG store. Each
+//! credential owns its key until its last session drops. The first use in a
+//! process also cleans up containers whose owning processes have exited.
 //!
 //! Plain Win32 C APIs (SSPI, crypt32, CNG) declared here; no COM.
 
 #![allow(non_snake_case, clippy::upper_case_acronyms)]
 
 use std::ffi::c_void;
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::io;
+use std::net::TcpStream;
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
+use crate::tls::{engine::SocketPump, TlsEngine, TlsIdentity};
 
 type SecurityStatus = i32;
 
@@ -192,6 +186,8 @@ extern "system" {
     ) -> SecurityStatus;
     fn NCryptFreeObject(object: usize) -> SecurityStatus;
     fn NCryptOpenKey(provider: usize, key: *mut usize, name: *const u16, legacy_key_spec: u32, flags: u32) -> SecurityStatus;
+    fn NCryptEnumKeys(provider: usize, scope: *const u16, name: *mut *mut KeyName, state: *mut *mut c_void, flags: u32) -> SecurityStatus;
+    fn NCryptFreeBuffer(buffer: *mut c_void) -> SecurityStatus;
     fn NCryptDeleteKey(key: usize, flags: u32) -> SecurityStatus;
 }
 
@@ -308,7 +304,6 @@ struct SessionInfo {
 const X509_ASN_ENCODING: u32 = 0x1 | 0x10000;
 const CERT_KEY_PROV_INFO_PROP_ID: u32 = 2;
 const NCRYPTBUFFER_PKCS_KEY_NAME: u32 = 45;
-const NCRYPT_OVERWRITE_KEY_FLAG: u32 = 0x80;
 const ECDSA_PRIVATE_P256_MAGIC: u32 = 0x3253_4345;
 const ECDH_PRIVATE_P256_MAGIC: u32 = 0x324b_4345;
 const ECDH_PUBLIC_P256_MAGIC: u32 = 0x314b_4345;
@@ -470,94 +465,188 @@ pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 const KEY_PROVIDER: &str = "Microsoft Software Key Storage Provider";
 
-/// A key this process stored in the account's CNG store, by its container name (wide): deleted
-/// when dropped.
-struct StoredKey(Vec<u16>);
+const CONTAINER_PREFIX: &str = "makepad-tls-session-";
 
+#[repr(C)]
+struct KeyName {
+    name: *const u16,
+    algorithm: *const u16,
+    legacy_spec: u32,
+    flags: u32,
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn WaitForSingleObject(object: *mut c_void, timeout: u32) -> u32;
+    fn CloseHandle(object: *mut c_void) -> i32;
+}
+
+fn owner(name: &str) -> Option<u32> {
+    let (pid, id) = name.strip_prefix(CONTAINER_PREFIX)?.split_once('-')?;
+    let pid = pid.parse::<u32>().ok()?;
+    (pid != 0 && id.len() == 32 && id.bytes().all(|v| v.is_ascii_hexdigit())).then_some(pid)
+}
+
+fn process_exited(pid: u32) -> bool {
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    unsafe {
+        let handle = OpenProcess(SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            // ERROR_INVALID_PARAMETER means no such PID. Access denied and
+            // other failures leave the owner's container alone.
+            return io::Error::last_os_error().raw_os_error() == Some(87);
+        }
+        let exited = WaitForSingleObject(handle, 0) == 0;
+        CloseHandle(handle);
+        exited
+    }
+}
+
+fn delete_container(provider: usize, name: &[u16]) -> bool {
+    unsafe {
+        let mut key = 0;
+        if NCryptOpenKey(provider, &mut key, name.as_ptr(), 0, 0) != 0 { return false; }
+        if NCryptDeleteKey(key, 0) == 0 { return true; } // releases the handle on success
+        NCryptFreeObject(key);
+        false
+    }
+}
+
+struct Provider(usize);
+impl Provider {
+    fn open() -> io::Result<Self> {
+        let mut raw = 0;
+        let st = unsafe { NCryptOpenStorageProvider(&mut raw, wide(KEY_PROVIDER).as_ptr(), 0) };
+        if st != 0 { return Err(status_error("NCryptOpenStorageProvider", st)); }
+        Ok(Self(raw))
+    }
+}
+impl Drop for Provider {
+    fn drop(&mut self) { unsafe { NCryptFreeObject(self.0) }; }
+}
+
+fn sweep_orphans() -> io::Result<()> {
+    let provider = Provider::open()?;
+    let mut state = null_mut();
+    let mut orphans = Vec::new();
+    let status = loop {
+        let mut entry: *mut KeyName = null_mut();
+        let status = unsafe { NCryptEnumKeys(provider.0, null(), &mut entry, &mut state, 0) };
+        if status != 0 { break status; }
+        unsafe {
+            let name = (*entry).name;
+            if !name.is_null() {
+                let mut len = 0;
+                while *name.add(len) != 0 { len += 1; }
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
+                if owner(&text).is_some_and(process_exited) { orphans.push(text); }
+            }
+            NCryptFreeBuffer(entry.cast());
+        }
+    };
+    if !state.is_null() { unsafe { NCryptFreeBuffer(state) }; }
+    // Finish enumerating before modifying the store. Another sweeper can
+    // win a deletion; the per-credential random name is never reused.
+    for name in orphans {
+        if delete_container(provider.0, &wide(&name)) {
+            eprintln!("tls: removed abandoned CNG key {name}");
+        }
+    }
+    const NTE_NO_MORE_ITEMS: i32 = 0x8009_002au32 as i32;
+    if status != NTE_NO_MORE_ITEMS { return Err(status_error("NCryptEnumKeys", status)); }
+    Ok(())
+}
+
+fn sweep_once() {
+    static SWEEP: Once = Once::new();
+    SWEEP.call_once(|| {
+        if let Err(e) = sweep_orphans() { eprintln!("tls: CNG key cleanup: {e}"); }
+    });
+}
+
+fn container_name(pid: u32) -> io::Result<Vec<u16>> {
+    let mut random = [0; 16];
+    crate::tls::os_random(&mut random)?;
+    Ok(wide(&format!("{CONTAINER_PREFIX}{pid}-{}", crate::tls::to_hex(&random))))
+}
+
+// Schannel reopens the signing key across the LSASS process boundary.
+// For a strict connection it is fresh: the in-band proof authenticates
+// the device and signs the leaf hash. ECDHE protects prior traffic even
+// if this TLS key is later read. The named import is owned by this
+// credential and swept after a crash. Never store the device key here
+// for a strict session.
+fn store_key(container: &[u16], key: &[u8; 97]) -> io::Result<()> {
+    let provider = Provider::open()?;
+    unsafe {
+        let blob = ecc_private_blob(key);
+        let mut name_buffer = NCryptBuffer {
+            cb: (container.len() * 2) as u32,
+            kind: NCRYPTBUFFER_PKCS_KEY_NAME,
+            pv: container.as_ptr() as *mut c_void,
+        };
+        let params = NCryptBufferDesc { version: 0, count: 1, buffers: &mut name_buffer };
+        let mut nkey = 0usize;
+        let st = NCryptImportKey(
+            provider.0,
+            0,
+            wide("ECCPRIVATEBLOB").as_ptr(),
+            &params,
+            &mut nkey,
+            blob.as_ptr(),
+            blob.len() as u32,
+            0,
+        );
+        if nkey != 0 {
+            NCryptFreeObject(nkey);
+        }
+        if st != 0 {
+            return Err(status_error("NCryptImportKey", st));
+        }
+    }
+    Ok(())
+}
+
+struct StoredKey(Vec<u16>);
 impl Drop for StoredKey {
     fn drop(&mut self) {
-        let deleted = unsafe {
-            let mut provider = 0usize;
-            NCryptOpenStorageProvider(&mut provider, wide(KEY_PROVIDER).as_ptr(), 0) == 0 && {
-                let mut key = 0usize;
-                let opened = NCryptOpenKey(provider, &mut key, self.0.as_ptr(), 0, 0) == 0;
-                // NCryptDeleteKey frees the handle when it succeeds.
-                let deleted = opened && NCryptDeleteKey(key, 0) == 0;
-                if opened && !deleted {
-                    NCryptFreeObject(key);
-                }
-                NCryptFreeObject(provider);
-                deleted
-            }
-        };
-        if !deleted {
-            eprintln!("tls: could not delete the server key {} from this account's key store", String::from_utf16_lossy(&self.0[..self.0.len() - 1]));
+        if !Provider::open().is_ok_and(|provider| delete_container(provider.0, &self.0)) {
+            eprintln!("tls: could not delete the server's CNG key");
         }
     }
 }
 
-pub struct ServerConfig {
+struct ServerCredential {
     cred: SecHandle,
     cert: *const c_void,
-    /// Held for its drop, which deletes the stored key after the credential and the certificate
-    /// are freed (fields drop after `Drop::drop`).
     _key: StoredKey,
 }
 
-unsafe impl Send for ServerConfig {}
-unsafe impl Sync for ServerConfig {}
+unsafe impl Send for ServerCredential {}
+unsafe impl Sync for ServerCredential {}
+
+#[derive(Clone)]
+pub struct ServerConfig(Arc<ServerCredential>);
 
 impl ServerConfig {
     pub fn new(cert_der: &[u8], key: &[u8; 97]) -> io::Result<Self> {
-        static STORED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let fp = crate::tls::fingerprint(cert_der);
-        let n = STORED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let container = wide(&format!("makepad-tls-{}-{}-{n}", crate::tls::to_hex(&fp[..12]), std::process::id()));
-        let provider_name = wide(KEY_PROVIDER);
+        Self::create(cert_der, key, false, SP_PROT_TLS1_2 | SP_PROT_TLS1_3)
+    }
 
-        // The key, persisted in this account's CNG store where Schannel
-        // looks it up through the certificate's key-provider property; this
-        // config's own, deleted with it.
-        let stored = unsafe {
-            let mut provider = 0usize;
-            let st = NCryptOpenStorageProvider(&mut provider, provider_name.as_ptr(), 0);
-            if st != 0 {
-                return Err(status_error("NCryptOpenStorageProvider", st));
-            }
-            let blob = ecc_private_blob(key);
-            let mut name_buffer = NCryptBuffer {
-                cb: (container.len() * 2) as u32,
-                kind: NCRYPTBUFFER_PKCS_KEY_NAME,
-                pv: container.as_ptr() as *mut c_void,
-            };
-            let params = NCryptBufferDesc { version: 0, count: 1, buffers: &mut name_buffer };
-            let mut nkey = 0usize;
-            let st = NCryptImportKey(
-                provider,
-                0,
-                wide("ECCPRIVATEBLOB").as_ptr(),
-                &params,
-                &mut nkey,
-                blob.as_ptr(),
-                blob.len() as u32,
-                NCRYPT_OVERWRITE_KEY_FLAG,
-            );
-            if nkey != 0 {
-                NCryptFreeObject(nkey);
-            }
-            NCryptFreeObject(provider);
-            if st != 0 {
-                return Err(status_error("NCryptImportKey", st));
-            }
-            StoredKey(container.clone())
-        };
+    fn create(cert_der: &[u8], key: &[u8; 97], strict: bool, protocols: u32) -> io::Result<Self> {
+        sweep_once();
+        let container = container_name(std::process::id())?;
+        store_key(&container, key)?;
+        let stored = StoredKey(container);
+        let provider_name = wide(KEY_PROVIDER);
 
         let cert = unsafe { CertCreateCertificateContext(X509_ASN_ENCODING, cert_der.as_ptr(), cert_der.len() as u32) };
         if cert.is_null() {
             return Err(io::Error::last_os_error());
         }
         let info = CryptKeyProvInfo {
-            container_name: container.as_ptr(),
+            container_name: stored.0.as_ptr(),
             prov_name: provider_name.as_ptr(),
             prov_type: 0,
             flags: 0,
@@ -571,167 +660,20 @@ impl ServerConfig {
             return Err(err);
         }
 
-        let certs = [cert];
-        let package = wide("Microsoft Unified Security Protocol Provider");
-        let mut cred = SecHandle::default();
-        let mut expiry = 0i64;
-        // TLS 1.2 and 1.3 (where this Windows has it) through SCH_CREDENTIALS.
-        let mut tls = TlsParameters {
-            alpn_count: 0,
-            alpn_ids: null_mut(),
-            disabled_protocols: !(SP_PROT_TLS1_2 | SP_PROT_TLS1_3),
-            disabled_crypto_count: 0,
-            disabled_crypto: null_mut(),
-            flags: 0,
+        let cred = match credentials(Some(cert), strict, protocols) {
+            Ok(cred) => cred,
+            Err(e) => { unsafe { CertFreeCertificateContext(cert) }; return Err(e); }
         };
-        let mut creds = SchCredentials {
-            version: SCH_CREDENTIALS_VERSION,
-            cred_format: 0,
-            cert_count: 1,
-            certs: certs.as_ptr(),
-            root_store: null_mut(),
-            mapper_count: 0,
-            mappers: null_mut(),
-            session_lifespan: 0,
-            flags: SCH_USE_STRONG_CRYPTO,
-            tls_parameter_count: 1,
-            tls_parameters: &mut tls,
-        };
-        let mut st = unsafe {
-            AcquireCredentialsHandleW(
-                null(),
-                package.as_ptr(),
-                SECPKG_CRED_INBOUND,
-                null_mut(),
-                &mut creds as *mut _ as *mut c_void,
-                null_mut(),
-                null_mut(),
-                &mut cred,
-                &mut expiry,
-            )
-        };
-        if st != SEC_E_OK {
-            // Windows before 10 1809 knows only SCHANNEL_CRED: TLS 1.2.
-            let mut legacy = SchannelCred {
-                version: SCHANNEL_CRED_VERSION,
-                cert_count: 1,
-                certs: certs.as_ptr(),
-                root_store: null_mut(),
-                mapper_count: 0,
-                mappers: null_mut(),
-                alg_count: 0,
-                algs: null_mut(),
-                enabled_protocols: SP_PROT_TLS1_2_SERVER,
-                min_cipher_strength: 0,
-                max_cipher_strength: 0,
-                session_lifespan: 0,
-                flags: SCH_USE_STRONG_CRYPTO,
-                cred_format: 0,
-            };
-            st = unsafe {
-                AcquireCredentialsHandleW(
-                    null(),
-                    package.as_ptr(),
-                    SECPKG_CRED_INBOUND,
-                    null_mut(),
-                    &mut legacy as *mut _ as *mut c_void,
-                    null_mut(),
-                    null_mut(),
-                    &mut cred,
-                    &mut expiry,
-                )
-            };
-        }
-        if st != SEC_E_OK {
-            unsafe { CertFreeCertificateContext(cert) };
-            return Err(status_error("AcquireCredentialsHandle", st));
-        }
-        Ok(Self { cred, cert, _key: stored })
+        Ok(Self(Arc::new(ServerCredential { cred, cert, _key: stored })))
     }
 
-    pub fn accept(&self, mut tcp: TcpStream) -> io::Result<ServerStream> {
-        let mut cred = self.cred;
-        let mut ctx = SecHandle::default();
-        let mut have_ctx = false;
-        let mut incoming: Vec<u8> = Vec::new();
-        let mut need_read = true;
-        let mut buf = vec![0u8; 16 * 1024];
-        loop {
-            if need_read {
-                let n = tcp.read(&mut buf)?;
-                if n == 0 {
-                    if have_ctx {
-                        unsafe { DeleteSecurityContext(&mut ctx) };
-                    }
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed during TLS handshake"));
-                }
-                incoming.extend_from_slice(&buf[..n]);
-            }
-            let mut in_bufs = [
-                SecBuffer { cb: incoming.len() as u32, kind: SECBUFFER_TOKEN, pv: incoming.as_mut_ptr() as *mut c_void },
-                SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-            ];
-            let mut out_bufs = [SecBuffer { cb: 0, kind: SECBUFFER_TOKEN, pv: null_mut() }];
-            let mut in_desc = SecBufferDesc { version: 0, count: 2, buffers: in_bufs.as_mut_ptr() };
-            let mut out_desc = SecBufferDesc { version: 0, count: 1, buffers: out_bufs.as_mut_ptr() };
-            let mut attrs = 0u32;
-            let mut new_ctx = SecHandle::default();
-            let st = unsafe {
-                AcceptSecurityContext(
-                    &mut cred,
-                    if have_ctx { &mut ctx } else { null_mut() },
-                    &mut in_desc,
-                    ASC_FLAGS,
-                    SECURITY_NATIVE_DREP,
-                    if have_ctx { null_mut() } else { &mut new_ctx },
-                    &mut out_desc,
-                    &mut attrs,
-                    null_mut(),
-                )
-            };
-            if !have_ctx && (st == SEC_E_OK || st == SEC_I_CONTINUE_NEEDED) {
-                ctx = new_ctx;
-                have_ctx = true;
-            }
-            if out_bufs[0].cb > 0 && !out_bufs[0].pv.is_null() {
-                let token = unsafe { std::slice::from_raw_parts(out_bufs[0].pv as *const u8, out_bufs[0].cb as usize) };
-                let sent = tcp.write_all(token);
-                unsafe { FreeContextBuffer(out_bufs[0].pv) };
-                sent?;
-            }
-            match st {
-                SEC_E_INCOMPLETE_MESSAGE => need_read = true,
-                SEC_E_OK | SEC_I_CONTINUE_NEEDED => {
-                    if in_bufs[1].kind == SECBUFFER_EXTRA && in_bufs[1].cb > 0 {
-                        let keep = in_bufs[1].cb as usize;
-                        incoming.drain(..incoming.len() - keep);
-                    } else {
-                        incoming.clear();
-                    }
-                    if st == SEC_E_OK {
-                        break;
-                    }
-                    need_read = incoming.is_empty();
-                }
-                _ => {
-                    if have_ctx {
-                        unsafe { DeleteSecurityContext(&mut ctx) };
-                    }
-                    return Err(status_error("TLS handshake (AcceptSecurityContext)", st));
-                }
-            }
-        }
-        let mut sizes = StreamSizes::default();
-        let st = unsafe { QueryContextAttributesW(&mut ctx, SECPKG_ATTR_STREAM_SIZES, &mut sizes as *mut _ as *mut c_void) };
-        if st != SEC_E_OK {
-            unsafe { DeleteSecurityContext(&mut ctx) };
-            return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
-        }
-        Ok(ServerStream { tcp, cred, ctx, client: None, sizes, incoming, plain: Vec::new(), plain_pos: 0, closed: false, pending: Vec::new(), pending_pos: 0 })
+    pub fn accept(&self, tcp: TcpStream) -> io::Result<ServerStream> {
+        let native = NativeEngine::new(Side::Server(self.clone()), false);
+        SocketPump::handshake(tcp, TlsEngine::start(native, None, false, None)?, None)
     }
 }
 
-impl Drop for ServerConfig {
+impl Drop for ServerCredential {
     fn drop(&mut self) {
         unsafe {
             FreeCredentialsHandle(&mut self.cred);
@@ -740,160 +682,7 @@ impl Drop for ServerConfig {
     }
 }
 
-pub struct ServerStream {
-    tcp: TcpStream,
-    cred: SecHandle,
-    ctx: SecHandle,
-    /// Client side (pinned connect): runs post-handshake messages through
-    /// InitializeSecurityContext.
-    client: Option<ClientSide>,
-    sizes: StreamSizes,
-    incoming: Vec<u8>,
-    plain: Vec<u8>,
-    plain_pos: usize,
-    closed: bool,
-    /// Encrypted bytes of a record whose send timed out, resumed before anything new is encrypted.
-    pending: Vec<u8>,
-    pending_pos: usize,
-}
-
-unsafe impl Send for ServerStream {}
-
-impl ServerStream {
-    pub fn tcp(&self) -> &TcpStream {
-        &self.tcp
-    }
-
-    /// Plaintext the TLS layer holds already: a read returns it without
-    /// waiting on the socket. A reader that waits for input on the socket
-    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
-    /// Here: decrypted bytes not read yet, or a whole record already taken
-    /// off the socket and not decrypted yet (a part of one waits on the socket).
-    pub fn buffered(&self) -> usize {
-        if self.plain_pos < self.plain.len() {
-            return self.plain.len() - self.plain_pos;
-        }
-        if self.closed {
-            // A read answers at once (end of stream).
-            return 1;
-        }
-        let whole_record = self.incoming.len() >= 5 && self.incoming.len() >= 5 + u16::from_be_bytes([self.incoming[3], self.incoming[4]]) as usize;
-        if whole_record { self.incoming.len() } else { 0 }
-    }
-
-    pub fn shutdown(&mut self) {
-        self.closed = true;
-        let _ = self.tcp.shutdown(Shutdown::Both);
-    }
-
-    /// One decrypt attempt over `incoming`. Ok(true) when progress was made.
-    fn decrypt_some(&mut self) -> io::Result<bool> {
-        if self.incoming.is_empty() {
-            return Ok(false);
-        }
-        let mut bufs = [
-            SecBuffer { cb: self.incoming.len() as u32, kind: SECBUFFER_DATA, pv: self.incoming.as_mut_ptr() as *mut c_void },
-            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-        ];
-        let mut desc = SecBufferDesc { version: 0, count: 4, buffers: bufs.as_mut_ptr() };
-        let st = unsafe { DecryptMessage(&mut self.ctx, &mut desc, 0, null_mut()) };
-        match st {
-            SEC_E_INCOMPLETE_MESSAGE => Ok(false),
-            SEC_I_CONTEXT_EXPIRED => {
-                self.closed = true;
-                self.incoming.clear();
-                Ok(true)
-            }
-            SEC_E_OK | SEC_I_RENEGOTIATE => {
-                let mut extra: Option<Vec<u8>> = None;
-                for b in &bufs {
-                    if b.kind == SECBUFFER_DATA && b.cb > 0 {
-                        let data = unsafe { std::slice::from_raw_parts(b.pv as *const u8, b.cb as usize) };
-                        self.plain.extend_from_slice(data);
-                    } else if b.kind == SECBUFFER_EXTRA && b.cb > 0 {
-                        let start = self.incoming.len() - b.cb as usize;
-                        extra = Some(self.incoming[start..].to_vec());
-                    }
-                }
-                self.incoming = extra.unwrap_or_default();
-                if st == SEC_I_RENEGOTIATE {
-                    // TLS 1.3 post-handshake message (e.g. key update):
-                    // hand it back to the handshake engine.
-                    self.post_handshake()?;
-                }
-                Ok(true)
-            }
-            _ => Err(status_error("DecryptMessage", st)),
-        }
-    }
-
-    fn post_handshake(&mut self) -> io::Result<()> {
-        let mut in_bufs = [
-            SecBuffer { cb: self.incoming.len() as u32, kind: SECBUFFER_TOKEN, pv: self.incoming.as_mut_ptr() as *mut c_void },
-            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-        ];
-        let mut out_bufs = [SecBuffer { cb: 0, kind: SECBUFFER_TOKEN, pv: null_mut() }];
-        let mut in_desc = SecBufferDesc { version: 0, count: 2, buffers: in_bufs.as_mut_ptr() };
-        let mut out_desc = SecBufferDesc { version: 0, count: 1, buffers: out_bufs.as_mut_ptr() };
-        let mut attrs = 0u32;
-        let st = unsafe {
-            match &self.client {
-                Some(client) => InitializeSecurityContextW(
-                    &mut self.cred,
-                    &mut self.ctx,
-                    client.target.as_ptr(),
-                    ISC_FLAGS,
-                    0,
-                    0,
-                    &mut in_desc,
-                    0,
-                    null_mut(),
-                    &mut out_desc,
-                    &mut attrs,
-                    null_mut(),
-                ),
-                None => AcceptSecurityContext(
-                    &mut self.cred,
-                    &mut self.ctx,
-                    &mut in_desc,
-                    ASC_FLAGS,
-                    SECURITY_NATIVE_DREP,
-                    null_mut(),
-                    &mut out_desc,
-                    &mut attrs,
-                    null_mut(),
-                ),
-            }
-        };
-        if out_bufs[0].cb > 0 && !out_bufs[0].pv.is_null() {
-            let token = unsafe { std::slice::from_raw_parts(out_bufs[0].pv as *const u8, out_bufs[0].cb as usize) };
-            let sent = self.tcp.write_all(token);
-            unsafe { FreeContextBuffer(out_bufs[0].pv) };
-            sent?;
-        }
-        if st != SEC_E_OK && st != SEC_I_CONTINUE_NEEDED && st != SEC_E_INCOMPLETE_MESSAGE {
-            return Err(status_error("TLS post-handshake", st));
-        }
-        if in_bufs[1].kind == SECBUFFER_EXTRA && in_bufs[1].cb > 0 {
-            let keep = in_bufs[1].cb as usize;
-            let len = self.incoming.len();
-            self.incoming.drain(..len - keep);
-        } else if st != SEC_E_INCOMPLETE_MESSAGE {
-            self.incoming.clear();
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ServerStream {
-    fn drop(&mut self) {
-        unsafe {
-            DeleteSecurityContext(&mut self.ctx);
-        }
-    }
-}
+pub(crate) type ServerStream = SocketPump;
 
 /// A client credential handle. Schannel caches client sessions per
 /// credential and target name, so connections that resume each other's
@@ -918,59 +707,81 @@ struct ClientSide {
     cred: Arc<ClientCred>,
 }
 
-fn client_credentials() -> io::Result<SecHandle> {
+#[repr(C)]
+struct UnicodeString {
+    len: u16,
+    capacity: u16,
+    text: *const u16,
+}
+impl UnicodeString {
+    fn from_wide(text: &[u16]) -> Self {
+        Self { len: ((text.len() - 1) * 2) as u16, capacity: (text.len() * 2) as u16, text: text.as_ptr() }
+    }
+}
+
+#[repr(C)]
+struct CryptoSettings {
+    usage: u32,
+    algorithm: UnicodeString,
+    mode_count: u32,
+    modes: *const UnicodeString,
+    min_bits: u32,
+    max_bits: u32,
+}
+
+fn credentials(cert: Option<*const c_void>, strict: bool, protocols: u32) -> io::Result<SecHandle> {
+    sweep_once();
+    let server = cert.is_some();
+    let direction = if server { SECPKG_CRED_INBOUND } else { SECPKG_CRED_OUTBOUND };
+    let cert_count = u32::from(server);
+    let certs = cert.as_ref().map_or(null(), |p| p as *const _);
     let package = wide("Microsoft Unified Security Protocol Provider");
     let mut cred = SecHandle::default();
     let mut expiry = 0i64;
-    let flags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+    let mut flags = SCH_USE_STRONG_CRYPTO;
+    if !server { flags |= SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS; }
+    if strict && server { flags |= 0x80; } // SCH_CRED_DISABLE_RECONNECTS
+
+    // TLS_PARAMETERS describes exclusions. Remove finite-field DH and RSA
+    // key exchange, and CBC AES; TLS 1.3 suites and the final negotiated
+    // cipher are checked independently. No machine policy changes.
+    let names = ["RSA", "DH", "AES", "3DES", "DES", "RC4", "NULL"].map(wide);
+    let cbc = wide("ChainingModeCBC");
+    let mode = UnicodeString::from_wide(&cbc);
+    let disabled: Vec<_> = names.iter().enumerate().map(|(i, name)| CryptoSettings {
+        usage: if i < 2 { 0 } else { 2 },
+        algorithm: UnicodeString::from_wide(name),
+        mode_count: u32::from(i == 2),
+        modes: if i == 2 { &mode } else { null() },
+        min_bits: 0, max_bits: 0,
+    }).collect();
     let mut tls = TlsParameters {
-        alpn_count: 0,
-        alpn_ids: null_mut(),
-        disabled_protocols: !(SP_PROT_TLS1_2 | SP_PROT_TLS1_3),
-        disabled_crypto_count: 0,
-        disabled_crypto: null_mut(),
+        alpn_count: 0, alpn_ids: null_mut(), disabled_protocols: !protocols,
+        disabled_crypto_count: if strict { disabled.len() as u32 } else { 0 },
+        disabled_crypto: if strict { disabled.as_ptr() as *mut c_void } else { null_mut() },
         flags: 0,
     };
     let mut creds = SchCredentials {
-        version: SCH_CREDENTIALS_VERSION,
-        cred_format: 0,
-        cert_count: 0,
-        certs: null(),
-        root_store: null_mut(),
-        mapper_count: 0,
-        mappers: null_mut(),
-        session_lifespan: 0,
-        flags,
-        tls_parameter_count: 1,
-        tls_parameters: &mut tls,
+        version: SCH_CREDENTIALS_VERSION, cred_format: 0, cert_count, certs, root_store: null_mut(),
+        mapper_count: 0, mappers: null_mut(), session_lifespan: 0, flags, tls_parameter_count: 1, tls_parameters: &mut tls,
     };
     let mut st = unsafe {
-        AcquireCredentialsHandleW(null(), package.as_ptr(), SECPKG_CRED_OUTBOUND, null_mut(), &mut creds as *mut _ as *mut c_void, null_mut(), null_mut(), &mut cred, &mut expiry)
+        AcquireCredentialsHandleW(null(), package.as_ptr(), direction, null_mut(), &mut creds as *mut _ as *mut c_void,
+            null_mut(), null_mut(), &mut cred, &mut expiry)
     };
-    if st != SEC_E_OK {
+    if st != SEC_E_OK && !strict {
         let mut legacy = SchannelCred {
-            version: SCHANNEL_CRED_VERSION,
-            cert_count: 0,
-            certs: null(),
-            root_store: null_mut(),
-            mapper_count: 0,
-            mappers: null_mut(),
-            alg_count: 0,
-            algs: null_mut(),
-            enabled_protocols: SP_PROT_TLS1_2_CLIENT,
-            min_cipher_strength: 0,
-            max_cipher_strength: 0,
-            session_lifespan: 0,
-            flags,
-            cred_format: 0,
+            version: SCHANNEL_CRED_VERSION, cert_count, certs, root_store: null_mut(), mapper_count: 0,
+            mappers: null_mut(), alg_count: 0, algs: null_mut(),
+            enabled_protocols: if server { SP_PROT_TLS1_2_SERVER } else { SP_PROT_TLS1_2_CLIENT },
+            min_cipher_strength: 0, max_cipher_strength: 0, session_lifespan: 0, flags, cred_format: 0,
         };
         st = unsafe {
-            AcquireCredentialsHandleW(null(), package.as_ptr(), SECPKG_CRED_OUTBOUND, null_mut(), &mut legacy as *mut _ as *mut c_void, null_mut(), null_mut(), &mut cred, &mut expiry)
+            AcquireCredentialsHandleW(null(), package.as_ptr(), direction, null_mut(), &mut legacy as *mut _ as *mut c_void,
+                null_mut(), null_mut(), &mut cred, &mut expiry)
         };
     }
-    if st != SEC_E_OK {
-        return Err(status_error("AcquireCredentialsHandle (client)", st));
-    }
+    if st != SEC_E_OK { return Err(status_error("AcquireCredentialsHandle", st)); }
     Ok(cred)
 }
 
@@ -983,7 +794,7 @@ struct CertContext {
     store: *mut c_void,
 }
 
-impl ServerStream {
+impl NativeEngine {
     pub(crate) fn peer_chain_der(&mut self) -> io::Result<Vec<Vec<u8>>> {
         let mut cert: *const c_void = null();
         let status = unsafe { QueryContextAttributesW(&mut self.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert as *mut _ as *mut c_void) };
@@ -1010,240 +821,256 @@ impl ServerStream {
     }
 }
 
-/// Client handshake on Schannel without chain validation (self-signed
-/// servers); returns the server leaf certificate DER with the stream.
-/// `resume`: an earlier client connection to the same host whose session
-/// this one resumes (its credential handle is shared).
-pub fn connect_capture(mut tcp: TcpStream, host: &str, resume: Option<&ServerStream>) -> io::Result<(ServerStream, Vec<u8>)> {
-    let cred = match resume {
-        Some(earlier) => match &earlier.client {
-            Some(client) => client.cred.clone(),
-            None => return Err(io::Error::new(io::ErrorKind::InvalidInput, "no client TLS session to resume")),
-        },
-        None => Arc::new(ClientCred(client_credentials()?)),
-    };
-    let target = wide(host);
-    // The stream owns ctx (and a share of cred) from here; its Drop frees them.
-    let mut stream = ServerStream {
-        tcp: crate::clone_tcp(&tcp)?,
-        cred: cred.0,
-        ctx: SecHandle::default(),
-        client: Some(ClientSide { target: target.clone(), cred }),
-        sizes: StreamSizes::default(),
-        incoming: Vec::new(),
-        plain: Vec::new(),
-        plain_pos: 0,
-        closed: false,
-        pending: Vec::new(),
-        pending_pos: 0,
-    };
-    let mut have_ctx = false;
-    let mut buf = vec![0u8; 16 * 1024];
-    let mut need_read = false;
-    let mut certificate_requests = 0;
-    loop {
-        if need_read {
-            let n = tcp.read(&mut buf)?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed during TLS handshake"));
-            }
-            stream.incoming.extend_from_slice(&buf[..n]);
-        }
-        let mut in_bufs = [
-            SecBuffer { cb: stream.incoming.len() as u32, kind: SECBUFFER_TOKEN, pv: stream.incoming.as_mut_ptr() as *mut c_void },
-            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
-        ];
-        let mut out_bufs = [SecBuffer { cb: 0, kind: SECBUFFER_TOKEN, pv: null_mut() }];
-        let mut in_desc = SecBufferDesc { version: 0, count: 2, buffers: in_bufs.as_mut_ptr() };
-        let mut out_desc = SecBufferDesc { version: 0, count: 1, buffers: out_bufs.as_mut_ptr() };
-        let mut attrs = 0u32;
-        let mut new_ctx = SecHandle::default();
-        let st = unsafe {
-            InitializeSecurityContextW(
-                &mut stream.cred,
-                if have_ctx { &mut stream.ctx } else { null_mut() },
-                target.as_ptr(),
-                ISC_FLAGS,
-                0,
-                0,
-                if have_ctx { &mut in_desc } else { null_mut() },
-                0,
-                if have_ctx { null_mut() } else { &mut new_ctx },
-                &mut out_desc,
-                &mut attrs,
-                null_mut(),
-            )
-        };
-        if !have_ctx && (st == SEC_E_OK || st == SEC_I_CONTINUE_NEEDED) {
-            stream.ctx = new_ctx;
-            have_ctx = true;
-        }
-        if out_bufs[0].cb > 0 && !out_bufs[0].pv.is_null() {
-            let token = unsafe { std::slice::from_raw_parts(out_bufs[0].pv as *const u8, out_bufs[0].cb as usize) };
-            let sent = tcp.write_all(token);
-            unsafe { FreeContextBuffer(out_bufs[0].pv) };
-            sent?;
-        }
-        match st {
-            SEC_E_INCOMPLETE_MESSAGE => need_read = true,
-            // We have no client certificate: calling again with the same
-            // input continues the handshake without one.
-            SEC_I_INCOMPLETE_CREDENTIALS if have_ctx && certificate_requests == 0 => {
-                certificate_requests += 1;
-                need_read = false;
-            }
-            SEC_E_OK | SEC_I_CONTINUE_NEEDED => {
-                if have_ctx && in_bufs[1].kind == SECBUFFER_EXTRA && in_bufs[1].cb > 0 {
-                    let keep = in_bufs[1].cb as usize;
-                    let len = stream.incoming.len();
-                    stream.incoming.drain(..len - keep);
-                } else if have_ctx {
-                    stream.incoming.clear();
-                }
-                if st == SEC_E_OK {
-                    break;
-                }
-                need_read = stream.incoming.is_empty();
-            }
-            _ => {
-                if !have_ctx {
-                    // Nothing to delete yet; keep Drop from touching ctx.
-                    stream.ctx = SecHandle::default();
-                }
-                return Err(status_error("TLS handshake (InitializeSecurityContext)", st));
-            }
-        }
-    }
-    // The certificate, before any application data.
-    let mut cert: *const c_void = null();
-    let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert as *mut _ as *mut c_void) };
-    if st != SEC_E_OK || cert.is_null() {
-        return Err(status_error("server certificate", st));
-    }
-    let der = unsafe {
-        let c = &*(cert as *const CertContext);
-        std::slice::from_raw_parts(c.encoded, c.encoded_len as usize).to_vec()
-    };
-    unsafe { CertFreeCertificateContext(cert) };
-    let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_STREAM_SIZES, &mut stream.sizes as *mut _ as *mut c_void) };
-    if st != SEC_E_OK {
-        return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
-    }
-    if resume.is_some() {
-        let mut info = SessionInfo { flags: 0, session_id_len: 0, session_id: [0; 32] };
-        let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_SESSION_INFO, &mut info as *mut _ as *mut c_void) };
-        if st != SEC_E_OK || info.flags & SSL_SESSION_RECONNECT == 0 {
-            // Seen with servers that lack the extended master secret
-            // (RFC 7627): Schannel does not resume their sessions.
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "the TLS session was not resumed (Schannel resumes no sessions without the extended master secret)"));
-        }
-    }
-    Ok((stream, der))
+enum Side {
+    Client(ClientSide),
+    Server(ServerConfig),
 }
 
-impl Read for ServerStream {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        loop {
-            if self.plain_pos < self.plain.len() {
-                let n = out.len().min(self.plain.len() - self.plain_pos);
-                out[..n].copy_from_slice(&self.plain[self.plain_pos..self.plain_pos + n]);
-                self.plain_pos += n;
-                if self.plain_pos == self.plain.len() {
-                    self.plain.clear();
-                    self.plain_pos = 0;
-                }
-                return Ok(n);
-            }
-            if self.closed {
-                return Ok(0);
-            }
-            if self.decrypt_some()? {
-                continue;
-            }
-            let mut buf = [0u8; 16 * 1024];
-            let n = self.tcp.read(&mut buf)?;
-            if n == 0 {
-                self.closed = true;
-                return Ok(0);
-            }
-            self.incoming.extend_from_slice(&buf[..n]);
-        }
+#[repr(C)]
+struct CipherInfo {
+    version: u32, protocol: u32, suite: u32, base_suite: u32,
+    suite_name: [u16; 64], cipher: [u16; 64], cipher_len: u32, block_len: u32,
+    hash: [u16; 64], hash_len: u32, exchange: [u16; 64], min_exchange: u32, max_exchange: u32,
+    certificate: [u16; 64], key_type: u32,
+}
+
+pub(crate) struct NativeEngine {
+    side: Side,
+    strict: bool,
+    ctx: SecHandle,
+    have_ctx: bool,
+    declined_client_cert: bool,
+    post_handshake: bool,
+    #[cfg(test)]
+    post_handshake_messages: usize,
+    tls13: bool,
+    sizes: StreamSizes,
+    incoming: Vec<u8>,
+    pos: usize,
+    output: Vec<u8>,
+}
+
+unsafe impl Send for NativeEngine {}
+
+impl Drop for NativeEngine {
+    fn drop(&mut self) {
+        if self.have_ctx { unsafe { DeleteSecurityContext(&mut self.ctx) }; }
     }
 }
 
-impl ServerStream {
-    /// Sends what an earlier write left of its encrypted record. Past the socket's write timeout
-    /// the rest is kept (`pending_pos` marks how far it got) and `WouldBlock` returned; call
-    /// again to resume.
-    ///
-    /// The timeout is kept here, not by Winsock: a blocking send that runs into SO_SNDTIMEO
-    /// leaves the socket "indeterminate" (bytes of it may have gone out although it reports
-    /// none), and sending them again duplicated TLS bytes on the wire: the peer's next record
-    /// failed to decrypt (macOS: errSSLDecryptionFail, -9845) and the connection broke. So with a
-    /// timeout the socket sends non-blocking, where WouldBlock means nothing was taken.
-    fn drain_pending(&mut self) -> io::Result<()> {
-        if self.pending_pos >= self.pending.len() {
-            self.pending.clear();
-            self.pending_pos = 0;
-            return Ok(());
+fn buffer(kind: u32, bytes: &mut [u8]) -> SecBuffer {
+    SecBuffer { cb: bytes.len() as u32, kind, pv: bytes.as_mut_ptr().cast() }
+}
+fn empty(kind: u32) -> SecBuffer { SecBuffer { cb: 0, kind, pv: null_mut() } }
+fn descriptor(bufs: &mut [SecBuffer]) -> SecBufferDesc {
+    SecBufferDesc { version: 0, count: bufs.len() as u32, buffers: bufs.as_mut_ptr() }
+}
+
+impl NativeEngine {
+    fn new(side: Side, strict: bool) -> Self {
+        Self { side, strict, ctx: SecHandle::default(), have_ctx: false, declined_client_cert: false,
+            #[cfg(test)]
+            post_handshake_messages: 0,
+            post_handshake: false, tls13: false, sizes: StreamSizes::default(), incoming: Vec::new(), pos: 0, output: Vec::new() }
+    }
+
+    fn client(host: Option<&str>, resume: Option<&Self>, strict: bool) -> io::Result<Self> {
+        let cred = match resume.map(|e| &e.side) {
+            Some(Side::Client(side)) => side.cred.clone(),
+            Some(Side::Server(_)) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a client session")),
+            None => Arc::new(ClientCred(credentials(None, strict, SP_PROT_TLS1_2 | SP_PROT_TLS1_3)?)),
+        };
+        Ok(Self::new(Side::Client(ClientSide { cred, target: host.map(wide).unwrap_or_default() }), strict))
+    }
+
+    pub(crate) fn strict_client() -> io::Result<Self> { Self::client(None, None, true) }
+
+    pub(crate) fn strict_server(id: &TlsIdentity) -> io::Result<Self> {
+        let config = ServerConfig::create(&id.cert_der, &id.key, true, SP_PROT_TLS1_2 | SP_PROT_TLS1_3)?;
+        Ok(Self::new(Side::Server(config), true))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tls12_server(id: &TlsIdentity) -> io::Result<Self> {
+        let config = ServerConfig::create(&id.cert_der, &id.key, true, SP_PROT_TLS1_2)?;
+        Ok(Self::new(Side::Server(config), true))
+    }
+
+    pub(crate) fn is_tls12(&self) -> io::Result<bool> {
+        Ok(!self.tls13)
+    }
+
+    fn query<T>(&mut self, attribute: u32, output: &mut T) -> io::Result<()> {
+        let st = unsafe { QueryContextAttributesW(&mut self.ctx, attribute, (output as *mut T).cast()) };
+        if st == SEC_E_OK { Ok(()) } else { Err(status_error("QueryContextAttributes", st)) }
+    }
+
+    fn resumed(&mut self) -> io::Result<bool> {
+        let mut session = SessionInfo { flags: 0, session_id_len: 0, session_id: [0; 32] };
+        self.query(SECPKG_ATTR_SESSION_INFO, &mut session)?;
+        Ok(session.flags & SSL_SESSION_RECONNECT != 0)
+    }
+
+    fn established(&mut self) -> io::Result<()> {
+        let mut sizes = StreamSizes::default();
+        self.query(SECPKG_ATTR_STREAM_SIZES, &mut sizes)?;
+        self.sizes = sizes;
+        // SecPkgContext_ConnectionInfo consists of seven DWORDs. Its first
+        // field is the role-specific SP_PROT flag for the negotiated version.
+        let mut connection_info = [0u32; 7];
+        self.query(0x5a, &mut connection_info)?;
+        self.tls13 = match connection_info[0] {
+            SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_2_SERVER => false,
+            0x1000 | 0x2000 => true, // SP_PROT_TLS1_3_SERVER / CLIENT
+            other => return Err(io::Error::other(format!("unexpected Schannel protocol {other:#x}"))),
+        };
+        if self.strict {
+            if self.resumed()? { return Err(io::Error::other("unexpected TLS resumption")); }
+            let mut cipher: CipherInfo = unsafe { std::mem::zeroed() };
+            self.query(0x64, &mut cipher)?; // SECPKG_ATTR_CIPHER_INFO, version 1 (zero)
+            let modern = if self.tls13 {
+                matches!(cipher.suite, 0x1301..=0x1303)
+            } else {
+                matches!(cipher.suite, 0xc02b | 0xc02c | 0xc02f | 0xc030 | 0xcca8 | 0xcca9)
+            };
+            if !modern { return Err(io::Error::other(format!("unexpected TLS cipher suite {:04x}", cipher.suite))); }
         }
-        let Some(limit) = self.tcp.write_timeout()? else {
-            while self.pending_pos < self.pending.len() {
-                match self.tcp.write(&self.pending[self.pending_pos..]) {
-                    Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
-                    Ok(n) => self.pending_pos += n,
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            self.pending.clear();
-            self.pending_pos = 0;
-            return Ok(());
-        };
-        let deadline = std::time::Instant::now() + limit;
-        self.tcp.set_nonblocking(true)?;
-        let result = loop {
-            if self.pending_pos >= self.pending.len() {
-                break Ok(());
-            }
-            match self.tcp.write(&self.pending[self.pending_pos..]) {
-                Ok(0) => break Err(io::Error::new(io::ErrorKind::WriteZero, "TLS record not sent")),
-                Ok(n) => self.pending_pos += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
-                        break Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS send timed out"));
-                    }
-                    // the send buffer is full: the peer reads slower than we write
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(e) => break Err(e),
-            }
-        };
-        let restored = self.tcp.set_nonblocking(false);
-        result?;
-        restored?;
-        self.pending.clear();
-        self.pending_pos = 0;
         Ok(())
     }
-}
 
-/// Write contract (resumable across write timeouts, like OpenSSL's same-buffer retry): `write`
-/// first sends what an earlier record left unsent; if that times out it returns `WouldBlock`
-/// having consumed nothing, and the caller retries the same data. Otherwise it encrypts one
-/// record of `data` into `pending` and returns its plaintext length: the data is accepted from
-/// then on, even if sending the record timed out part way. The rest goes out on the next
-/// `write` or `flush`, which a caller keeps calling until it stops returning `WouldBlock`.
-impl Write for ServerStream {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        if data.is_empty() {
-            return Ok(0);
+    /// One SSPI transition. Input may be empty for the initial client token
+    /// or when DecryptMessage asks SSPI to process a post-handshake message.
+    fn transition(&mut self, bytes: &mut [u8], initial_client: bool) -> (i32, usize) {
+        let mut input = [buffer(SECBUFFER_TOKEN, bytes), empty(SECBUFFER_EMPTY)];
+        let mut output = [empty(SECBUFFER_TOKEN)];
+        let mut in_desc = descriptor(&mut input);
+        let mut out_desc = descriptor(&mut output);
+        let mut attrs = 0;
+        let mut new_ctx = SecHandle::default();
+        let ctx = if self.have_ctx { &mut self.ctx } else { null_mut() };
+        let next = if self.have_ctx { null_mut() } else { &mut new_ctx };
+        let st = unsafe {
+            match &self.side {
+                Side::Client(side) => {
+                    let mut cred = side.cred.0;
+                    let target = if side.target.is_empty() { null() } else { side.target.as_ptr() };
+                    InitializeSecurityContextW(&mut cred, ctx, target, ISC_FLAGS, 0, 0,
+                        if initial_client { null_mut() } else { &mut in_desc }, 0, next, &mut out_desc, &mut attrs, null_mut())
+                }
+                Side::Server(config) => {
+                    let mut cred = config.0.cred;
+                    AcceptSecurityContext(&mut cred, ctx, &mut in_desc, ASC_FLAGS, SECURITY_NATIVE_DREP, next, &mut out_desc, &mut attrs, null_mut())
+                }
+            }
+        };
+        if !self.have_ctx && matches!(st, SEC_E_OK | SEC_I_CONTINUE_NEEDED | SEC_I_INCOMPLETE_CREDENTIALS) {
+            self.ctx = new_ctx;
+            self.have_ctx = true;
         }
-        self.drain_pending()?;
+        if !output[0].pv.is_null() {
+            unsafe {
+                self.output.extend_from_slice(std::slice::from_raw_parts(output[0].pv.cast::<u8>(), output[0].cb as usize));
+                FreeContextBuffer(output[0].pv);
+            }
+        }
+        let extra = if input[1].kind == SECBUFFER_EXTRA { input[1].cb as usize } else { 0 };
+        (st, extra)
+    }
+
+    fn advance(&mut self, mut allow_empty: bool) -> io::Result<bool> {
+        loop {
+            let initial_client = matches!(self.side, Side::Client(_)) && !self.have_ctx;
+            let len = (self.incoming.len() - self.pos).min(u32::MAX as usize);
+            if len == 0 && !initial_client && !allow_empty { return Ok(false); }
+            allow_empty = false;
+            let mut incoming = std::mem::take(&mut self.incoming);
+            let (st, extra) = self.transition(&mut incoming[self.pos..self.pos + len], initial_client);
+            self.incoming = incoming;
+            match st {
+                SEC_E_INCOMPLETE_MESSAGE => return Ok(false),
+                SEC_I_INCOMPLETE_CREDENTIALS if !self.declined_client_cert => {
+                    self.declined_client_cert = true;
+                    allow_empty = true;
+                }
+                SEC_E_OK | SEC_I_CONTINUE_NEEDED => {
+                    self.pos += len.checked_sub(extra).ok_or_else(|| io::Error::other("invalid Schannel input count"))?;
+                    if st == SEC_E_OK {
+                        self.established()?;
+                        self.post_handshake = false;
+                        return Ok(true);
+                    }
+                    if extra == len && len != 0 { return Ok(false); }
+                }
+                _ => return Err(status_error("TLS handshake", st)),
+            }
+        }
+    }
+
+    pub(crate) fn handshake(&mut self) -> io::Result<bool> { self.advance(false) }
+
+    pub(crate) fn feed(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.pos >= self.incoming.len() - self.pos && self.pos != 0 {
+            self.incoming.drain(..self.pos);
+            self.pos = 0;
+        }
+        self.incoming.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn take(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if output.is_empty() { std::mem::swap(output, &mut self.output); }
+        else { output.append(&mut self.output); }
+        Ok(())
+    }
+
+    pub(crate) fn peer_leaf_der(&mut self) -> io::Result<Vec<u8>> {
+        let mut cert: *const CertContext = null();
+        self.query(SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert)?;
+        if cert.is_null() { return Err(io::Error::other("server sent no certificate")); }
+        unsafe {
+            let der = std::slice::from_raw_parts((*cert).encoded, (*cert).encoded_len as usize).to_vec();
+            CertFreeCertificateContext(cert.cast());
+            Ok(der)
+        }
+    }
+
+    pub(crate) fn read_plain(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.post_handshake && !self.advance(false)? { return Err(io::ErrorKind::WouldBlock.into()); }
+            let input = &mut self.incoming[self.pos..];
+            if input.len() < 5 { return Err(io::ErrorKind::WouldBlock.into()); }
+            let len = 5 + u16::from_be_bytes([input[3], input[4]]) as usize;
+            if input.len() < len { return Err(io::ErrorKind::WouldBlock.into()); }
+            // Submit exactly one complete TLS record. Keep any following
+            // records separate from SSPI's modified post-handshake token.
+            let mut bufs = [buffer(SECBUFFER_DATA, &mut input[..len]), empty(SECBUFFER_EMPTY), empty(SECBUFFER_EMPTY), empty(SECBUFFER_EMPTY)];
+            let st = unsafe { DecryptMessage(&mut self.ctx, &mut descriptor(&mut bufs), 0, null_mut()) };
+            match st {
+                SEC_I_CONTEXT_EXPIRED => return Ok(0),
+                SEC_I_RENEGOTIATE => {
+                    #[cfg(test)]
+                    { self.post_handshake_messages += 1; }
+                    let extra = bufs.iter().find(|b| b.kind == SECBUFFER_EXTRA).map_or(0, |b| b.cb as usize);
+                    self.pos += len.checked_sub(extra).ok_or_else(|| io::Error::other("invalid Schannel token"))?;
+                    self.post_handshake = true;
+                    if !self.advance(true)? { return Err(io::ErrorKind::WouldBlock.into()); }
+                }
+                SEC_E_OK => {
+                    self.pos += len;
+                    if let Some(b) = bufs.iter().find(|b| b.kind == SECBUFFER_DATA && b.cb != 0) {
+                        let n = b.cb as usize;
+                        if n > out.len() || b.pv.is_null() { return Err(io::Error::other("invalid Schannel plaintext size")); }
+                        unsafe { std::ptr::copy_nonoverlapping(b.pv.cast::<u8>(), out.as_mut_ptr(), n); }
+                        return Ok(n);
+                    }
+                }
+                _ => return Err(status_error("DecryptMessage", st)),
+            }
+        }
+    }
+
+    pub(crate) fn write_plain(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.post_handshake { return Err(io::ErrorKind::WouldBlock.into()); }
         let n = data.len().min(self.sizes.max_message as usize);
         let header = self.sizes.header as usize;
         let trailer = self.sizes.trailer as usize;
@@ -1261,28 +1088,41 @@ impl Write for ServerStream {
         if st != SEC_E_OK {
             return Err(status_error("EncryptMessage", st));
         }
-        let total = (bufs[0].cb + bufs[1].cb + bufs[2].cb) as usize;
-        msg.truncate(total);
-        self.pending = msg;
-        self.pending_pos = 0;
-        match self.drain_pending() {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e),
+        for b in &bufs[..3] {
+            if b.cb != 0 {
+                unsafe { self.output.extend_from_slice(std::slice::from_raw_parts(b.pv.cast::<u8>(), b.cb as usize)); }
+            }
         }
         Ok(n)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.drain_pending()?;
-        self.tcp.flush()
+    pub(crate) fn close(&mut self) {
+        // Tell SSPI to emit close_notify; a failed/expired context can only
+        // be closed at the transport.
+        extern "system" { fn ApplyControlToken(ctx: *mut SecHandle, input: *mut SecBufferDesc) -> i32; }
+        let mut shutdown = 1u32.to_ne_bytes(); // SCHANNEL_SHUTDOWN
+        let mut token = [buffer(SECBUFFER_TOKEN, &mut shutdown)];
+        if self.have_ctx && unsafe { ApplyControlToken(&mut self.ctx, &mut descriptor(&mut token)) } == SEC_E_OK {
+            self.transition(&mut [], false);
+        }
     }
+}
+
+pub(crate) fn connect_capture(tcp: TcpStream, host: &str, resume: Option<&SocketPump>) -> io::Result<(SocketPump, Vec<u8>)> {
+    let native = NativeEngine::client(Some(host), resume.map(|s| &s.engine.native), false)?;
+    let mut stream = SocketPump::handshake(tcp, TlsEngine::start(native, None, true, None)?, None)?;
+    if resume.is_some() && !stream.engine.native.resumed()? {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "the TLS session was not resumed"));
+    }
+    let leaf = stream.engine.server_certificate_der().unwrap().to_vec();
+    Ok((stream, leaf))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    use std::io::{Read, Write};
     use std::time::Duration;
 
     /// Whether this account's key store holds a key by this (wide) name.
@@ -1300,6 +1140,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tls_strict_server_sends_no_tickets_and_refuses_reconnect() {
+        let id = crate::tls::engine::tests::identity();
+        let config = ServerConfig::create(&id.cert_der, &id.key, true, SP_PROT_TLS1_2 | SP_PROT_TLS1_3).unwrap();
+        // A legacy client can cache and offer sessions by credential and target.
+        // Reuse both, and even the server credential, across the two handshakes.
+        let target = std::net::Ipv4Addr::LOCALHOST.to_string();
+        let mut previous: Option<TlsEngine> = None;
+        for _ in 0..2 {
+            let native = NativeEngine::client(Some(&target), previous.as_ref().map(|s| &s.native), false).unwrap();
+            let mut client = TlsEngine::start(native, None, true, None).unwrap();
+            let native = NativeEngine::new(Side::Server(config.clone()), true);
+            let mut server = TlsEngine::start(native, None, false, None).unwrap();
+            crate::tls::engine::tests::handshake(&mut client, &mut server);
+            assert!(!client.native.resumed().unwrap(), "the client resumed a strict session");
+            assert_eq!(client.native.post_handshake_messages, 0, "strict server issued a post-handshake ticket");
+            previous = Some(client);
+        }
+    }
+
     /// Two servers of one identity each store a key of their own and delete only it: dropping one
     /// leaves the other serving, and once both are dropped the account's key store holds neither.
     #[test]
@@ -1307,9 +1167,17 @@ mod tests {
         let identity = crate::tls::TlsIdentity::in_memory(generate_p256().unwrap(), "makepad stored key test", None).unwrap();
         let first = ServerConfig::new(&identity.cert_der, &identity.key).unwrap();
         let second = ServerConfig::new(&identity.cert_der, &identity.key).unwrap();
-        let (first_key, second_key) = (first._key.0.clone(), second._key.0.clone());
+        let (first_key, second_key) = (first.0._key.0.clone(), second.0._key.0.clone());
         assert_ne!(first_key, second_key, "one identity, a key per config");
         assert!(stored(&first_key) && stored(&second_key), "each config stored its key");
+        let mut exited = std::process::Command::new("cmd.exe").args(["/d", "/c", "exit", "0"]).spawn().unwrap();
+        assert!(exited.wait().unwrap().success());
+        let orphan = container_name(exited.id()).unwrap();
+        store_key(&orphan, &identity.key).unwrap();
+        assert!(stored(&orphan), "the exited process's container exists before the sweep");
+        sweep_orphans().unwrap();
+        assert!(!stored(&orphan), "the sweep left an exited process's container");
+        assert!(stored(&first_key), "the sweep removed a live process's container");
         drop(first);
         assert!(!stored(&first_key), "a dropped config's key is gone");
         assert!(stored(&second_key), "the other config's key stays");

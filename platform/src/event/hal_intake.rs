@@ -33,11 +33,10 @@ pub(crate) enum RepaintAll {
     BufferEvicted,
     DeviceReset,
     DisplaysChanged,
-    PickIncomplete,
 }
 
 impl RepaintAll {
-    const ALL: [(RepaintAll, &'static str); 9] = [
+    const ALL: [(RepaintAll, &'static str); 8] = [
         (RepaintAll::SurfaceBack, "surface back"),
         (RepaintAll::ChildWindow, "child window"),
         (RepaintAll::FrameDropped, "hosted frame dropped"),
@@ -46,7 +45,6 @@ impl RepaintAll {
         (RepaintAll::BufferEvicted, "buffer evicted"),
         (RepaintAll::DeviceReset, "device reset"),
         (RepaintAll::DisplaysChanged, "displays changed"),
-        (RepaintAll::PickIncomplete, "pick incomplete"),
     ];
 }
 
@@ -57,7 +55,7 @@ impl RepaintAll {
 #[derive(Default)]
 pub(crate) struct RepaintAllLog {
     since: f64,
-    counts: [u32; 9],
+    counts: [u32; RepaintAll::ALL.len()],
     logged: f64,
 }
 
@@ -74,7 +72,7 @@ impl RepaintAllLog {
                     .filter(|(_, n)| *n > 0).map(|((_, name), n)| format!("{name} {n}")).collect();
                 line = Some(format!("hal: every pass painted again {total} times in {elapsed:.1} s: {}", causes.join(", ")));
             }
-            self.counts = [0; 9];
+            self.counts = [0; RepaintAll::ALL.len()];
             self.since = now;
         }
         self.counts[why as usize] += 1;
@@ -1102,6 +1100,14 @@ impl Cx {
                     self.hal_repaint_all(RepaintAll::PipelineReady);
                 }
             }
+            HalEvent::PipelineLayoutFailed { pipeline, layout, log } => {
+                let log = String::from_utf8_lossy(log);
+                if let Some(shader) = self.hal.frames.pipeline_layout_failed(pipeline, layout, &log) {
+                    let name = self.draw_shaders.shaders.get(shader).map(|s| s.debug_id).unwrap_or_default();
+                    crate::error!("hal: shader {:?} pipeline variant failed: {}", name, log);
+                    self.hal_repaint_all(RepaintAll::PipelineFailed);
+                }
+            }
             HalEvent::PipelineFailed { pipeline, log } => {
                 let log = String::from_utf8_lossy(log);
                 if let Some((shader, waited)) = self.hal.frames.pipeline_failed(pipeline, &log) {
@@ -1140,6 +1146,11 @@ impl Cx {
                 if let Some(id) = self.hal.frames.texture_pool_id(texture) {
                     if self.textures.0.is_live_generation(id.0, id.generation()) {
                         self.release_texture_allocation(id);
+                        // A volume that could not be staged retains the edited CPU image.
+                        // Wake a static scene as well so the next draw retries the upload.
+                        if matches!(self.textures[id].format, crate::TextureFormat::VecVolume(_)) {
+                            self.redraw_all();
+                        }
                     }
                 }
             }

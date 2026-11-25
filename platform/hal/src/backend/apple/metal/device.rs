@@ -25,6 +25,7 @@ pub(crate) enum Done {
     Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
     PipelineReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id },
     PipelineLayoutReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, layout: u32 },
+    PipelineLayoutFailed { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, layout: u32, log: String },
     PipelineFailed { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, log: String },
     /// A recorded window frame is in its capture buffer (a retained `CVPixelBuffer`).
     Surface { sid: u32, incarnation: Arc<crate::font::FrameProgress>, window: crate::Id, w: u32, h: u32, buffer: usize },
@@ -34,7 +35,7 @@ impl Done {
     fn sid(&self) -> u32 {
         match self {
             Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::BufferLeases { sid, .. } | Done::PipelineReady { sid, .. }
-            | Done::PipelineLayoutReady { sid, .. } | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
+            | Done::PipelineLayoutReady { sid, .. } | Done::PipelineLayoutFailed { sid, .. } | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
         }
     }
 }
@@ -140,9 +141,9 @@ struct Chunk {
 pub struct Device {
     pub device: ObjcId,
     pub queue: ObjcId,
-    /// 1x1 transparent texture bound where a draw's texture slot has no storage (sampling nil is
-    /// a GPU fault)
-    pub fallback: ObjcId,
+    /// Transparent one-texel textures for empty sampled slots, owned for the device's lifetime.
+    pub fallback: RcObjcId,
+    pub volume_fallback: RcObjcId,
     /// What the backend made for itself: the ledger's backend rows (`Ledger::set_pools`).
     pub pools: Arc<Pools>,
     _fallback_charge: Charge,
@@ -178,6 +179,8 @@ pub struct Device {
     pub descriptor: RcObjcId,
     pub clock: Option<Option<Arc<PassClock>>>,
     chunks: Vec<Chunk>,
+    /// Leased through GPU completion and retained across idle turns for later volume edits.
+    volume_chunks: Vec<Chunk>,
     /// batch-local: where a (pointer, length) of the caller's memory already sits in the arena
     pub dedup: FastMap<(usize, usize), Loc>,
     pub recommended_working_set: u64,
@@ -206,26 +209,27 @@ impl Device {
                 0
             }
         };
-        let queue: ObjcId = unsafe { msg_send![device, newCommandQueueWithMaxCommandBufferCount: QUEUE_MAX_COMMAND_BUFFERS] };
-        if queue == nil {
-            return None;
-        }
-        let fallback = unsafe {
+        let make_fallback = |kind: MTLTextureType| unsafe {
+            let storage = if cfg!(target_os = "macos") && !unified_memory { MTLStorageMode::Managed } else { MTLStorageMode::Shared };
             let descriptor: ObjcId = msg_send![class!(MTLTextureDescriptor), new];
-            let _: () = msg_send![descriptor, setTextureType: MTLTextureType::D2];
+            let _: () = msg_send![descriptor, setTextureType: kind];
             let _: () = msg_send![descriptor, setWidth: 1u64];
             let _: () = msg_send![descriptor, setHeight: 1u64];
             let _: () = msg_send![descriptor, setDepth: 1u64];
-            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-            let _: () = msg_send![descriptor, setStorageMode: MTLStorageMode::Shared];
+            let _: () = msg_send![descriptor, setPixelFormat: MTLPixelFormat::RGBA8Unorm];
+            let _: () = msg_send![descriptor, setStorageMode: storage];
             let _: () = msg_send![descriptor, setUsage: MTLTextureUsage::ShaderRead];
             let tex: ObjcId = msg_send![device, newTextureWithDescriptor: descriptor];
             let _: () = msg_send![descriptor, release];
+            let tex = RcObjcId::from_owned(NonNull::new(tex)?);
             let zero: [u8; 4] = [0, 0, 0, 0];
             let region = MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 1, height: 1, depth: 1 } };
-            let _: () = msg_send![tex, replaceRegion: region mipmapLevel: 0u64 withBytes: zero.as_ptr() as *const std::ffi::c_void bytesPerRow: 4u64];
-            tex
+            let image_pitch = if kind == MTLTextureType::D3 { 4u64 } else { 0u64 };
+            let _: () = msg_send![tex.as_id(), replaceRegion: region mipmapLevel: 0u64 slice: 0u64 withBytes: zero.as_ptr() as *const std::ffi::c_void bytesPerRow: 4u64 bytesPerImage: image_pitch];
+            Some(tex)
         };
+        let fallback = make_fallback(MTLTextureType::D2)?;
+        let volume_fallback = make_fallback(MTLTextureType::D3)?;
         let (depth_write, depth_no_write, depth_greater_write, depth_greater_no_write, descriptor) = unsafe {
             let desc = RcObjcId::from_owned(NonNull::new(msg_send![class!(MTLDepthStencilDescriptor), new])?);
             let _: () = msg_send![desc.as_id(), setDepthCompareFunction: MTLCompareFunction::LessEqual];
@@ -243,6 +247,10 @@ impl Device {
             let _: () = msg_send![stencil, setTexture: nil];
             (write, no_write, greater_write, greater_no_write, pass)
         };
+        let queue: ObjcId = unsafe { msg_send![device, newCommandQueueWithMaxCommandBufferCount: QUEUE_MAX_COMMAND_BUFFERS] };
+        if queue == nil {
+            return None;
+        }
         let completed = Arc::new(AtomicU64::new(0));
         let in_flight: InFlightQueue = Arc::new(Mutex::new(Default::default()));
         let (submit_tx, submit_thread) = spawn_submitter(in_flight.clone(), mailbox.clone());
@@ -256,11 +264,12 @@ impl Device {
         crate::gpu_limits::set_max_gpu_buffer_bytes(unsafe { msg_send![device, maxBufferLength] });
         crate::gpu_limits::set_gpu_working_set_bytes(if recommended != 0 { recommended } else { physical / 2 });
         let pools: Arc<Pools> = Default::default();
-        let _fallback_charge = pools.charge(Pool::Fallback, super::resources::allocated_size(fallback));
+        let _fallback_charge = pools.charge(Pool::Fallback, super::resources::allocated_size(fallback.as_id()) + super::resources::allocated_size(volume_fallback.as_id()));
         let mut dev = Device {
             device,
             queue,
             fallback,
+            volume_fallback,
             pools,
             _fallback_charge,
             name,
@@ -285,12 +294,13 @@ impl Device {
             descriptor,
             clock: None,
             chunks: Vec::new(),
+            volume_chunks: Vec::new(),
             dedup: FastMap::default(),
             recommended_working_set: crate::gpu_limits::gpu_working_set_bytes(),
         };
         // the first batches' uniforms: two chunks, touched now so no draw waits for a page fault
         for _ in 0..2 {
-            dev.add_chunk(CHUNK_BYTES);
+            dev.add_chunk(CHUNK_BYTES, false);
         }
         Some(dev)
     }
@@ -334,7 +344,7 @@ impl Device {
     /// that runs ahead waits in its own pump. A cap of 16 here, waited for on a condition
     /// variable up to 100 ms, held the UI thread inside its submit, and with it every other
     /// session's.
-    pub fn new_command_buffer(&mut self) -> (RcObjcId, u64) {
+    pub fn new_command_buffer(&mut self, pass_name_pool: PassNamePool) -> (RcObjcId, u64) {
         let buffer: ObjcId = unsafe { msg_send![self.queue, commandBuffer] };
         let buffer = RcObjcId::from_unowned(NonNull::new(buffer).expect("Metal command buffer"));
         let () = unsafe { msg_send![buffer.as_id(), enqueue] };
@@ -353,6 +363,10 @@ impl Device {
                     queue.iter().position(|e| e.seq == seq).and_then(|at| queue.remove(at))
                 };
                 report_command_buffer_error(cb, seq, entry.as_ref());
+                if let Some(mut entry) = entry {
+                    entry.passes.clear();
+                    crate::lock(&pass_name_pool).push(entry.passes);
+                }
             })]
         };
         (buffer, seq)
@@ -386,7 +400,7 @@ impl Device {
         Some(PoolBuffer { obj, _charge: charge })
     }
 
-    fn add_chunk(&mut self, capacity: usize) -> Option<usize> {
+    fn add_chunk(&mut self, capacity: usize, volume: bool) -> Option<&mut Chunk> {
         // allocated right here and its pages touched, so no draw is skipped while a chunk sits
         // with a worker
         let buffer = self.pool_buffer(Pool::UploadArena, capacity as u64)?;
@@ -397,11 +411,11 @@ impl Device {
         for offset in (0..capacity).step_by(4096) {
             unsafe { contents.add(offset).write_volatile(0) };
         }
-        // smallest first, as a batch takes the first with room: a burst's larger chunk goes idle
-        // and `arena_trim` releases it
-        let i = self.chunks.partition_point(|c| c.capacity <= capacity);
-        self.chunks.insert(i, Chunk { buffer, contents, capacity, used: 0, lease: 0, used_ns: crate::clock_ns() });
-        Some(i)
+        // Smallest first, as a batch takes the first with room.
+        let chunks = if volume { &mut self.volume_chunks } else { &mut self.chunks };
+        let i = chunks.partition_point(|c| c.capacity <= capacity);
+        chunks.insert(i, Chunk { buffer, contents, capacity, used: 0, lease: 0, used_ns: crate::clock_ns() });
+        Some(&mut chunks[i])
     }
 
     /// Copies `data` into the arena for command buffer `seq` (256-byte aligned: the constant
@@ -412,7 +426,7 @@ impl Device {
             self.touch_lease(loc.buffer, seq);
             return Some(loc);
         }
-        let loc = self.arena_copy(data, seq)?;
+        let loc = self.arena_copy(data, seq, false)?;
         self.dedup.insert(key, loc);
         Some(loc)
     }
@@ -421,13 +435,19 @@ impl Device {
     /// frees right after): its address says nothing about its content, as the next such buffer
     /// of the same length is allocated at the same address, so it is never deduplicated.
     pub fn arena_put_transient(&mut self, data: &[u8], seq: u64) -> Option<Loc> {
-        self.arena_copy(data, seq)
+        self.arena_copy(data, seq, false)
     }
 
-    fn arena_copy(&mut self, data: &[u8], seq: u64) -> Option<Loc> {
+    /// Volume staging has the same GPU lease as transient data, and keeps its high-water storage.
+    pub fn arena_put_volume(&mut self, data: &[u8], seq: u64) -> Option<Loc> {
+        self.arena_copy(data, seq, true)
+    }
+
+    fn arena_copy(&mut self, data: &[u8], seq: u64, volume: bool) -> Option<Loc> {
         let completed = self.completed.load(Ordering::Acquire);
+        let chunks = if volume { &mut self.volume_chunks } else { &mut self.chunks };
         let mut found = None;
-        for (i, chunk) in self.chunks.iter_mut().enumerate() {
+        for chunk in chunks {
             // a chunk is an arena every command buffer appends to: a buffer still executing
             // reads only what was written before it was encoded, so later writes go past `used`;
             // it rewinds once the buffer that leased it completed
@@ -436,19 +456,17 @@ impl Device {
             }
             let offset = (chunk.used + 255) & !255;
             if offset + data.len() <= chunk.capacity {
-                found = Some((i, offset));
+                found = Some((chunk, offset));
                 break;
             }
         }
-        let (i, offset) = match found {
+        let (chunk, offset) = match found {
             Some(f) => f,
             None => {
                 let capacity = data.len().next_power_of_two().max(CHUNK_BYTES);
-                let i = self.add_chunk(capacity)?;
-                (i, 0)
+                (self.add_chunk(capacity, volume)?, 0)
             }
         };
-        let chunk = &mut self.chunks[i];
         // SAFETY: offset + len <= capacity of a live shared buffer; the source is the caller's data
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), chunk.contents.add(offset), data.len()) };
         chunk.used = offset + data.len();
@@ -471,24 +489,16 @@ impl Device {
         for chunk in self.chunks.iter_mut().filter(|c| c.lease > completed) {
             chunk.used_ns = now;
         }
-        let mut free: Vec<(usize, usize)> = self.chunks.iter().enumerate().filter(|(_, c)| c.lease <= completed).map(|(i, c)| (c.capacity, i)).collect();
-        let mut total: usize = free.iter().map(|f| f.0).sum();
-        if total <= ARENA_KEEP_BYTES {
-            return;
-        }
-        free.sort_unstable_by(|a, b| b.cmp(a));
-        let mut drop_idx = Vec::new();
-        for (cap, i) in free {
-            if total <= ARENA_KEEP_BYTES {
-                break;
+        let mut free: usize = self.chunks.iter().filter(|c| c.lease <= completed).map(|c| c.capacity).sum();
+        // add_chunk keeps the table in size order. Release the largest eligible buffers first.
+        for i in (0..self.chunks.len()).rev() {
+            if free <= ARENA_KEEP_BYTES { break; }
+            let c = &self.chunks[i];
+            if c.lease <= completed {
+                free -= c.capacity;
+                let chunk = self.chunks.remove(i);
+                self.retire(Box::new(chunk.buffer));
             }
-            total -= cap;
-            drop_idx.push(i);
-        }
-        drop_idx.sort_unstable_by(|a, b| b.cmp(a));
-        for i in drop_idx {
-            let chunk = self.chunks.remove(i);
-            self.retire(Box::new(chunk.buffer));
         }
     }
 
@@ -618,7 +628,6 @@ impl Drop for Device {
         }
         unsafe {
             let _: () = msg_send![self.queue, release];
-            let _: () = msg_send![self.fallback, release];
         }
     }
 }
@@ -680,6 +689,41 @@ mod tests {
         unsafe { std::slice::from_raw_parts(chunk.contents.add(loc.offset as usize), len).to_vec() }
     }
 
+    #[test]
+    fn volume_region_metal_staging() {
+        use super::super::{Gpu, Metal, Pool as AutoreleasePool};
+        use crate::{format, open_flags, session::{TextureObj, World}, usage, Id};
+        use std::time::Duration;
+
+        let _pool = AutoreleasePool::new();
+        let mut metal = Metal::new(open_flags::OFFSCREEN_WINDOWS, Arc::new(|_, _| {}), Arc::new(|| {})).expect("Metal device");
+        let mut world = World::new();
+        let sid = world.open(0);
+        let session = world.session_mut(sid).unwrap();
+        let id = Id::new(1, 1);
+        let mut texture = TextureObj { format: format::R8, w: 8, h: 8, depth: 40, mips: 1,
+            usage: usage::SAMPLED | usage::VOLUME, bytes: 0, imported: false, uploaded: 0, lent: None };
+        metal.texture_create(session, id, &mut texture).unwrap();
+
+        let mut warm = None;
+        for boxes in [5, 1, 3, 5] {
+            for i in 0..boxes {
+                metal.texture_update_3d(session, id, &texture, [0, 0, i * 8], [8; 3], &[i as u8; 512]).unwrap();
+            }
+            assert_eq!(metal.uploads.len(), boxes as usize);
+            let first = &metal.uploads[0];
+            let staging = (first.staging, first.offset);
+            metal.end_batch();
+            assert!(metal.uploads.is_empty());
+            assert!(metal.dev.settle(Duration::from_secs(10)), "GPU finished reading the staging buffers");
+            metal.dev.arena_trim(u64::MAX); // include an idle interval between rounds
+            let bytes: usize = metal.dev.volume_chunks.iter().map(|chunk| chunk.capacity).sum();
+            assert!(bytes >= 5 * 512, "the warmed staging space survived GPU completion and idle trimming");
+            let storage = (metal.uploads.as_ptr(), metal.uploads.capacity(), bytes, staging);
+            assert_eq!(storage, *warm.get_or_insert(storage), "reuse upload records and the completed staging buffer");
+        }
+    }
+
     /// Texture uploads come from buffers the caller frees right after (the font service's atlas
     /// rectangles): the next one of the same length lands on the same address with other
     /// content, and must not be taken for the first (garbled and missing glyphs in small
@@ -687,7 +731,7 @@ mod tests {
     #[test]
     fn transient_buffers_of_one_address_are_not_deduplicated() {
         let mut dev = Device::new(Mailbox::new(Arc::new(|_, _| {}))).expect("Metal device");
-        let (_, seq) = dev.new_command_buffer();
+        let (_, seq) = dev.new_command_buffer(Default::default());
         let mut seen = Vec::new();
         for i in 0..8u8 {
             let data = vec![i + 1; 400];

@@ -38,6 +38,7 @@ pub use pipeline::compile_msl;
 use makepad_apple_sys::*;
 use resources::*;
 use crate::FastMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// How long a transient render target may sit unbound before its GPU storage goes.
@@ -112,6 +113,10 @@ pub struct Metal {
     /// Pick targets whose latest replay skipped a not-yet-ready draw.
     pick_pending: std::collections::HashSet<(u32, Id)>,
     batch: Option<frame::Batch>,
+    frame_scratch: frame::FrameScratch,
+    ticket_pool: Arc<frame::TicketPool>,
+    name_interner: HashSet<Arc<str>>,
+    pass_name_pool: timing::PassNamePool,
     uploads: Vec<Upload>,
     housekept_ns: u64,
     /// the window system, `None` in offscreen mode
@@ -214,6 +219,9 @@ impl Metal {
             msaa,
             dpi: shell.map_or(1.0, |s| s.dpi()),
             max_texture: 16384,
+            // The supported Apple and Mac Metal GPU families share this 3D texture limit.
+            max_volume_dimension: 2048,
+            volume_formats: (1 << format::R8) | (1 << format::RGBA8),
             max_window: [16384, 16384],
             max_buffer: crate::gpu_limits::max_gpu_buffer_bytes(),
             working_set: crate::gpu_limits::gpu_working_set_bytes(),
@@ -249,6 +257,10 @@ impl Metal {
             restores: FastMap::default(),
             pick_pending: Default::default(),
             batch: None,
+            frame_scratch: Default::default(),
+            ticket_pool: Default::default(),
+            name_interner: Default::default(),
+            pass_name_pool: Default::default(),
             uploads: Vec::new(),
             housekept_ns: 0,
             shell,
@@ -300,8 +312,8 @@ impl Metal {
         })
     }
 
-    fn label(s: &Session, attr: Attr) -> String {
-        s.string(attr.label).or_else(|| s.string(attr.owner)).or_else(|| s.string(attr.site)).unwrap_or("hal").to_string()
+    fn label(s: &Session, attr: Attr) -> &str {
+        s.string(attr.label).or_else(|| s.string(attr.owner)).or_else(|| s.string(attr.site)).unwrap_or("hal")
     }
 
     fn attr_of(s: &Session, kind: Kind, id: Id) -> Attr {
@@ -332,13 +344,14 @@ impl Metal {
         let mut owed = Vec::new();
         self.retired.retain(|mailbox| {
             let alone = mailbox.alone();
-            owed.extend(mailbox.take().into_iter().filter(|done| !matches!(done, Done::PipelineReady { .. } | Done::PipelineLayoutReady { .. } | Done::PipelineFailed { .. })));
+            owed.extend(mailbox.take().into_iter().filter(|done| !matches!(done, Done::PipelineReady { .. } | Done::PipelineLayoutReady { .. } | Done::PipelineLayoutFailed { .. } | Done::PipelineFailed { .. })));
             !alone
         });
         for done in owed.into_iter().chain(completions) {
             let (sid, incarnation) = match &done {
                 Done::Frame { sid, incarnation, .. } | Done::DispatchTime { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. } | Done::BufferLeases { sid, incarnation, .. }
                 | Done::PipelineReady { sid, incarnation, .. } | Done::PipelineLayoutReady { sid, incarnation, .. }
+                | Done::PipelineLayoutFailed { sid, incarnation, .. }
                 | Done::PipelineFailed { sid, incarnation, .. } | Done::Surface { sid, incarnation, .. } => (*sid, incarnation),
             };
             // Every completion belongs to a session incarnation, including driver callbacks
@@ -406,6 +419,13 @@ impl Metal {
                     if let Some(s) = world.session_mut(sid) {
                         if s.pipelines.get(sid, id).is_ok() {
                             s.events.pipeline_layout_ready(id, layout);
+                        }
+                    }
+                }
+                Done::PipelineLayoutFailed { sid, id, layout, log, .. } => {
+                    if let Some(s) = world.session_mut(sid) {
+                        if s.pipelines.get(sid, id).is_ok() {
+                            s.events.pipeline_layout_failed(id, layout, log.as_bytes());
                         }
                     }
                 }
@@ -584,10 +604,12 @@ impl Backend for Metal {
         let timer = exec::next_timer(world, sid).into_iter().chain(self.media.next_due(sid, world.now())).min();
         let trim = world.session(sid).and_then(|s| {
             s.textures
-                .keys_of(sid)
-                .into_iter()
-                .filter(|id| s.textures.get(sid, *id).is_ok_and(|e| e.val.usage & usage::TRANSIENT != 0) && self.tex.contains_key(&(sid, id.index)))
-                .filter_map(|id| s.ledger.get(Kind::Texture, id.index).map(|l| l.last_used_ns.max(l.created_ns) + TRANSIENT_IDLE_NS))
+                .iter_of(sid)
+                .filter(|(id, e)| e.val.usage & usage::TRANSIENT != 0 && self.tex.contains_key(&(sid, id.index)))
+                .filter_map(|(id, _)| {
+                    s.ledger.get(Kind::Texture, id.index)
+                        .map(|l| l.last_used_ns.max(l.created_ns) + TRANSIENT_IDLE_NS)
+                })
                 .min()
         });
         let restore = (sid == HOST && !self.restores.is_empty()).then(|| world.now() + 16_666_667);
@@ -674,7 +696,7 @@ impl Gpu for Metal {
     }
     fn texture_create(&mut self, s: &mut Session, id: Id, t: &mut TextureObj) -> Result<(), String> {
         let label = Self::label(s, Self::attr_of(s, Kind::Texture, id));
-        let tex = create_texture(self.dev.device, t, id.gen, &label)?;
+        let tex = create_texture(self.dev.device, t, id.gen, label)?;
         t.bytes = allocated_size(tex.obj.as_id());
         if let Some(old) = self.tex.insert((s.id, id.index), tex) {
             self.dev.retire(Box::new(old));
@@ -694,7 +716,23 @@ impl Gpu for Metal {
             s.stats.skipped_draws += 1;
             return;
         };
-        self.uploads.push(Upload { texture, staging: loc.buffer, offset: loc.offset, bytes_per_row: row, rows, size: [w as u64, h as u64], mip: mip as u64, layer: layer as u64, origin: [x as u64, y as u64] });
+        self.uploads.push(Upload { texture, staging: loc.buffer, offset: loc.offset, bytes_per_row: row, rows, size: [w as u64, h as u64, 1], mip: mip as u64, layer: layer as u64, origin: [x as u64, y as u64, 0] });
+    }
+
+    fn volume_limit(&self, fmt: u32) -> u32 {
+        if fmt < format::COUNT && self.info.volume_formats & (1u64 << fmt) != 0 { self.info.max_volume_dimension } else { 0 }
+    }
+
+    fn texture_update_3d(&mut self, s: &mut Session, id: Id, t: &TextureObj,
+        origin: [u32; 3], extent: [u32; 3], data: &[u8]) -> Result<(), String> {
+        let tex = self.tex.get(&(s.id, id.index)).filter(|tex| tex.gen == id.gen).ok_or("missing Metal volume")?;
+        let texture = tex.obj.clone();
+        let (_, seq) = self.ensure_batch();
+        let loc = self.dev.arena_put_volume(data, seq).ok_or("Metal staging allocation failed")?;
+        let (bytes_per_row, rows) = row_layout(t.format, extent[0], extent[1]);
+        self.uploads.push(Upload { texture, staging: loc.buffer, offset: loc.offset, bytes_per_row, rows,
+            size: extent.map(u64::from), mip: 0, layer: 0, origin: origin.map(u64::from) });
+        Ok(())
     }
 
     fn texture_destroy(&mut self, sid: u32, id: Id) {
@@ -851,7 +889,10 @@ impl Gpu for Metal {
     }
 
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
-        self.encode_frame(s, sid, target, kind, packet, view, now)
+        let mut scratch = std::mem::take(&mut self.frame_scratch);
+        let submitted = self.encode_frame(s, sid, target, kind, packet, view, now, &mut scratch);
+        self.frame_scratch = scratch;
+        submitted
     }
 
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {

@@ -374,6 +374,11 @@ pub fn find(spec: &str, caller: &Caller) -> Result<App, String> {
     if spec.starts_with("tcp:") {
         return list.into_iter().rfind(|a| a.socket == spec).ok_or_else(|| no_endpoint(spec));
     }
+    // an endpoint file an app published in a directory it owns ([`publish`]): like a pid, an
+    // explicit choice, so any caller may use it
+    if is_endpoint_file(spec) {
+        return published(std::path::Path::new(spec), &list);
+    }
     let app = match spec.parse::<u32>() {
         Ok(pid) => list.into_iter().find(|a| a.answers_to(pid)).ok_or_else(|| no_endpoint(spec)),
         Err(_) => named(&list, spec, caller),
@@ -381,6 +386,98 @@ pub fn find(spec: &str, caller: &Caller) -> Result<App, String> {
     match app.unreachable() {
         Some(why) => Err(why),
         None => Ok(app),
+    }
+}
+
+/// Whether a target names an endpoint file (a path) rather than a pid, a name or a socket.
+pub fn is_endpoint_file(spec: &str) -> bool {
+    (spec.contains('/') || spec.contains('\\')) && !is_socket_path(spec)
+}
+
+/// Whether a target is an endpoint's socket: a path ending in `.sock` (as [`crate::carrier::unix`]
+/// names them), or one that is a socket on disk.
+pub fn is_socket_path(spec: &str) -> bool {
+    if spec.ends_with(".sock") {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if let Ok(meta) = std::fs::metadata(spec) {
+            return meta.file_type().is_socket();
+        }
+    }
+    false
+}
+
+/// Writes `path`, a file naming this process's endpoint (its pid, app and start time), for an app
+/// that owns a directory (a home it holds the lock of) so that callers can find "the instance of
+/// this home" across restarts by naming the file as their target. Another instance with another
+/// home can't be confused with it, and a reused pid doesn't match the start time. Written beside
+/// and renamed, so a reader never sees half a file; 0600 on Unix. Not a secret: any process of the
+/// user can read it, as it can list the registry.
+pub fn publish(path: &std::path::Path) -> std::io::Result<()> {
+    let pid = std::process::id();
+    let me = apps()
+        .into_iter()
+        .find(|a| a.pid == pid)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "this process has no remote endpoint yet"))?;
+    let tmp = path.with_extension("new");
+    {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp)?;
+        std::io::Write::write_all(&mut file, published_line(&me).as_bytes())?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// The line [`publish`] writes for `app`.
+fn published_line(app: &App) -> String {
+    format!("{{\"pid\":{},\"app\":{},\"started_ms\":{}}}\n", app.pid, crate::cmd::json_str(&app.app), app.started_ms)
+}
+
+/// The running endpoint an endpoint file names: the same pid and the same start time.
+fn published(path: &std::path::Path, list: &[App]) -> Result<App, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("no endpoint file {}: {e}", path.display()))?;
+    let named = parse(text.lines().next().unwrap_or("")).ok_or_else(|| format!("{} is not an endpoint file", path.display()))?;
+    let app = list
+        .iter()
+        .find(|a| a.pid == named.pid && a.started_ms == named.started_ms)
+        .cloned()
+        .ok_or_else(|| format!("the {} that wrote {} (pid {}) is not running", named.app, path.display(), named.pid))?;
+    match app.unreachable() {
+        Some(why) => Err(why),
+        None => Ok(app),
+    }
+}
+
+#[cfg(test)]
+mod published_tests {
+    use super::*;
+
+    #[test]
+    fn an_endpoint_file_reaches_its_own_instance_only() {
+        let line = |pid: u32, started: u64| format!("{{\"pid\":{pid},\"app\":\"create\",\"socket\":\"/s{pid}\",\"started_ms\":{started},\"caps\":[]}}\n");
+        let list = vec![parse(&line(41, 1000)).unwrap(), parse(&line(42, 2000)).unwrap()];
+        let dir = crate::carrier::unix::test_root().join(format!("published-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("endpoint");
+        let written = published_line(&list[1]);
+        assert_eq!(parse(&written).map(|a| (a.pid, a.started_ms, a.app)), Some((42, 2000, "create".into())), "the line round-trips");
+        std::fs::write(&file, &written).unwrap();
+        let spec = file.to_str().unwrap();
+        assert!(is_endpoint_file(spec) && !is_endpoint_file("42") && !is_endpoint_file("create"), "paths only");
+        assert!(!is_endpoint_file("/run/user/x/makepad-remote-42.sock"), "a socket path is not an endpoint file");
+        assert_eq!(published(&file, &list).map(|a| a.pid), Ok(42), "the instance that wrote it");
+        let reused = vec![parse(&line(42, 3000)).unwrap()];
+        assert!(published(&file, &reused).unwrap_err().contains("not running"), "a reused pid is not that instance");
+        std::fs::write(&file, "not json").unwrap();
+        assert!(published(&file, &list).unwrap_err().contains("not an endpoint file"), "garbage is refused");
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(published(&file, &list).unwrap_err().contains("no endpoint file"), "a missing file says so");
     }
 }
 

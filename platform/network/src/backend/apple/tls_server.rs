@@ -3,7 +3,7 @@
 //! DER, joined by SecIdentityCreate, so nothing touches a keychain.
 
 use std::ffi::c_void;
-use std::io::{self, Read, Write};
+use std::io;
 use std::net::TcpStream;
 use std::ptr;
 
@@ -13,7 +13,7 @@ use makepad_apple_sys::{
     SecIdentityRef, SecKeyCreateWithData, SecKeyRef,
 };
 
-use crate::socket_stream::apple_impl::SecureTransportStream;
+use crate::socket_stream::apple_impl::NativeEngine;
 
 #[link(name = "Security", kind = "framework")]
 extern "C" {
@@ -248,8 +248,13 @@ impl ServerConfig {
         }
     }
 
+    pub(crate) fn engine(&self, strict: bool) -> io::Result<NativeEngine> {
+        NativeEngine::server(self.identity, strict)
+    }
+
     pub fn accept(&self, tcp: TcpStream) -> io::Result<ServerStream> {
-        Ok(ServerStream(SecureTransportStream::accept(tcp, self.identity)?))
+        let engine = crate::tls::TlsEngine::start(self.engine(false)?, None, false, None)?;
+        ServerStream::handshake(tcp, engine, None)
     }
 }
 
@@ -259,37 +264,4 @@ impl Drop for ServerConfig {
     }
 }
 
-pub struct ServerStream(SecureTransportStream);
-
-impl ServerStream {
-    pub fn tcp(&self) -> &TcpStream {
-        self.0.tcp()
-    }
-
-    /// Plaintext the TLS layer holds already: a read returns it without
-    /// waiting on the socket. A reader that waits for input on the socket
-    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
-    pub fn buffered(&self) -> usize {
-        self.0.buffered()
-    }
-
-    pub fn shutdown(&mut self) {
-        self.0.shutdown();
-    }
-}
-
-impl Read for ServerStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-impl Write for ServerStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
+pub(crate) type ServerStream = crate::tls::engine::SocketPump;

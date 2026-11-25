@@ -16,7 +16,7 @@ pub struct Attribute {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Texture {
     pub name: String,
-    /// 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array.
+    /// 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 7 = volume.
     pub shape: u32,
     pub sampler: SpirvSampler,
 }
@@ -87,7 +87,7 @@ impl GlslPipeline {
             let name = string(&mut bytes)?;
             let shape = word(&mut bytes)?; let filter = word(&mut bytes)?; let address = word(&mut bytes)?;
             let compare = word(&mut bytes)?; let pixel = word(&mut bytes)?; let anisotropy = word(&mut bytes)?;
-            if shape > 4 || filter > 1 || address > 3 || compare > 1 || pixel > 1 || anisotropy == 0 { return Err("invalid GL texture/sampler".into()); }
+            if !matches!(shape, 0..=4 | crate::TEXTURE_SHAPE_3D) || filter > 1 || address > 3 || compare > 1 || pixel > 1 || anisotropy == 0 { return Err("invalid GL texture/sampler".into()); }
             textures.push(Texture { name, shape, sampler: SpirvSampler { filter, address, compare: compare != 0, pixel: pixel != 0, anisotropy } });
         }
         if !bytes.is_empty() { return Err("trailing GLSL payload bytes".into()); }
@@ -110,6 +110,7 @@ mod tests {
             textures: vec![
                 Texture { name: "tex_image".into(), shape: 2, sampler: SpirvSampler { filter: 1, address: 3, compare: false, pixel: false, anisotropy: 1 } },
                 Texture { name: "tex_aniso".into(), shape: 0, sampler: SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 16 } },
+                Texture { name: "tex_volume".into(), shape: crate::TEXTURE_SHAPE_3D, sampler: SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 } },
             ],
             vertex_stride: 12,
             instance_stride: 64,

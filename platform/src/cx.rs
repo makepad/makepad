@@ -281,6 +281,9 @@ pub struct Cx {
     /// How many whole-tree reload walks (`Event::LiveEdit` or `Event::ScriptReapply`) have run,
     /// so a widget kept outside the tree can tell whether it missed one.
     pub reload_generation: u64,
+    /// The draws the newest live edit changed the shader of, reported once after the draw that
+    /// shows the edit (`Cx::live_shader_switches`).
+    pub(crate) live_shader_switches: crate::draw_vars::LiveShaderSwitches,
 
     /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
     /// the freshly re-run `script_mod` value with. A file-change hot reload
@@ -988,6 +991,7 @@ impl Cx {
 
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         crate::thread::ui_hang::initialize();
+        makepad_core_util::ui_thread::mark_ui_thread();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         if !crate::restart::hosted() {
             crate::os::termination_signal::install();
@@ -1195,6 +1199,7 @@ impl Cx {
             gc_after_draw: false,
             pending_style_reload: false,
             reload_generation: 0,
+            live_shader_switches: Default::default(),
             pending_live_edit_request: false,
             live_edit_errors: Vec::new(),
             live_edit_apply: Apply::Reload,
@@ -1633,25 +1638,6 @@ pub fn relax_app_main() {
 #[cfg(not(any(unix, windows)))]
 #[doc(hidden)]
 pub fn relax_app_main() {}
-
-/// Before the first window frame is submitted: the loader may hold it (`makepad run` checks the
-/// app's own crates beside main, and an error there ends the run before any frame). A rustc
-/// build has no such symbol.
-#[cfg(any(unix, windows))]
-pub(crate) fn relax_before_first_frame() {
-    static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if ASKED.load(std::sync::atomic::Ordering::Relaxed) || ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    let hook = relax_host_symbol(c"relax_before_first_frame");
-    if !hook.is_null() {
-        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
-        hook();
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
-pub(crate) fn relax_before_first_frame() {}
 
 /// The app's shutdown starts (it quits, its last window closed, a remote `/quit`): under Relax the
 /// loader marks the quit (its quit-compile accounting, no settle swap from now on) and writes the

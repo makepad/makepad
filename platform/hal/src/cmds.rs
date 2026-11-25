@@ -31,6 +31,9 @@ pub struct PipelineLayout {
 }
 
 impl PipelineLayout {
+    /// A variant built by a draw before a caller asked for its logical pass layout.
+    pub const UNPROBED: u32 = u32::MAX;
+
     /// An unused colour or depth attachment. Zero is the valid format `RGBA8`.
     pub const ABSENT: u32 = u32::MAX;
 }
@@ -228,6 +231,8 @@ hal_commands! {
     /// Uploads `bytes` (borrowed for the submit call, tightly packed rows) into `rect` (x, y, w,
     /// h) of mip level `mip` of layer / cube face `layer`. A block format takes whole 4x4 blocks.
     TextureUpdate = 51, texture_update { id: obj, mip: flags, rect: urect, layer: u32, bytes: slice32 };
+    /// A tight level-zero box in a sampled volume. xywh in texels, followed by z and depth.
+    TextureUpdate3d = 173, texture_update_3d { id: obj, xywh: urect, z_depth: u16x2, bytes: slice32 };
     TextureDestroy = 52, texture_destroy { id: obj };
     /// Answered by a `Readback` event with the same `req`.
     TextureReadback = 53, texture_readback { id: obj, req: u32, rect: urect };

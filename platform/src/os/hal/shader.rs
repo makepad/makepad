@@ -7,7 +7,7 @@ use crate::{
     draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId, FnCachedShader},
     draw_vars::DrawVars,
     makepad_live_id::*,
-    makepad_script::{apply::Apply, shader_backend::ShaderBackend, value::ScriptValue, ScriptVm},
+    makepad_script::{apply::Apply, shader_backend::ShaderBackend, shader_compile::CompiledShader, value::{ScriptObject, ScriptValue}, ScriptVm},
     script::vm::ScriptVmCx,
 };
 
@@ -38,11 +38,42 @@ impl DrawVars {
             vm.heap().object_type_name_in_chain(io_self).map(|id| format!("{}", id)).unwrap_or_else(|| format!("<script object {}>", io_self.index())),
             fnhash,
             if vm.host.cx().draw_shaders.cache_functions_to_shader.contains_key(&fnhash) { "its functions' reached bodies changed" } else { "functions not seen" });
+        let Some((output, code)) = Self::compile_hal_program(vm, io_self) else { return };
+        if let Some(shader_id) = vm.host.cx().draw_shaders.code_hit(&code, pipe, output.table_consts()) {
+            let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
+            let cx = vm.host.cx_mut();
+            cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
+            cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
+            self.finalize_cached_shader(vm, shader_id, geometry_id);
+            return;
+        }
+
+        let reached = FnCachedShader::reached(vm, &output);
+        let Some(mut mapping) = Self::hal_shader_mapping(vm, io_self, code.clone(), output, None) else { return };
+        if !self.bind_dyn_instances(vm, io_self, &mapping) {
+            return;
+        }
+
+        let index = vm.host.cx().draw_shaders.shaders.len();
+        let shader_id = DrawShaderId { index };
+        let entry = FnCachedShader { shader: shader_id, reached: Some(reached) };
+        let cx = vm.host.cx_mut();
+        mapping.scope_uniforms_gen = cx.next_uniform_gen();
+        cx.draw_shaders.shaders.push(CxDrawShader { debug_id: LiveId(0), pipeline_id: None, mapping });
+        cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
+        cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
+        cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
+        // the frame builder creates the HAL pipeline at the next beat
+        cx.draw_shaders.compile_set.insert(index);
+        self.draw_shader_id = Some(shader_id);
+        self.geometry_id = geometry_id;
+    }
+
+    fn compile_hal_program(vm: &mut ScriptVm, io_self: ScriptObject) -> Option<(CompiledShader, CxDrawShaderCode)> {
         // not seen: compile. Uniform buffer indices start at 3 (0 = geometry, 1 = instances,
         // 2 = dyn uniforms)
         let dialect = vm.host.cx().hal.info.map_or(makepad_hal::dialect::NONE, |i| i.dialect);
         let vulkan = dialect == makepad_hal::dialect::SPIRV;
-        let hlsl = dialect == makepad_hal::dialect::HLSL;
         let gl = dialect == makepad_hal::dialect::GLSL;
         let backend = match dialect {
             makepad_hal::dialect::SPIRV | makepad_hal::dialect::GLSL => ShaderBackend::Glsl,
@@ -56,30 +87,34 @@ impl DrawVars {
             false,
             true,
         );
+        opts.max_sampler_anisotropy = vm.cx().max_sampler_anisotropy();
         opts.gles_complete = gl;
         opts.pick = vm.host.cx().pick_variants();
         // the GLSL is Vulkan's dedup key too, so a shader the check below finds needs no SPIR-V
         opts.defer_spirv = vulkan;
-        let mut output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
+        let output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
         if output.has_errors() {
             DrawVars::log_shader_compile_failure(vm, io_self, &output);
-            return;
+            return None;
         }
         let code = if vulkan || gl {
             let view = output.view();
             CxDrawShaderCode::Separate { vertex: view.glsl_vertex.to_owned(), fragment: view.glsl_fragment.to_owned() }
         } else { CxDrawShaderCode::Combined { code: output.combined().to_owned() } };
-        if let Some(shader_id) = vm.host.cx().draw_shaders.code_hit(&code, pipe, output.table_consts()) {
-            let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
-            let cx = vm.host.cx_mut();
-            cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
-            cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
-            self.finalize_cached_shader(vm, shader_id, geometry_id);
-            return;
-        }
+        Some((output, code))
+    }
 
+    fn hal_shader_mapping(
+        vm: &mut ScriptVm, io_self: ScriptObject, code: CxDrawShaderCode,
+        mut output: CompiledShader, previous: Option<DrawShaderId>,
+    ) -> Option<CxDrawShaderMapping> {
+        let dialect = vm.cx().hal.info.map_or(makepad_hal::dialect::NONE, |i| i.dialect);
+        let vulkan = dialect == makepad_hal::dialect::SPIRV;
+        let hlsl = dialect == makepad_hal::dialect::HLSL;
+        let gl = dialect == makepad_hal::dialect::GLSL;
         let source = vm.new_object_ref(io_self);
-        let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output);
+        let mut mapping = CxDrawShaderMapping::from_shader_output(source, code, vm, &output);
+        mapping.anisotropic_clamp = output.view().requests_anisotropy.then(|| vm.cx().max_sampler_anisotropy());
         mapping.pick_code = output.pick_code().map(str::to_owned);
         mapping.storage_buffers = output.view().storage_buffers.to_vec();
         mapping.storage_push_size = output.view().storage_push_size;
@@ -91,10 +126,10 @@ impl DrawVars {
                 let stage = &view.stages[0];
                 let textures = mapping.textures.iter().map(|t| match t.tex_type {
                     TextureType::Texture2d => Ok(0), TextureType::TextureCube => Ok(1),
-                    TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
+                    TextureType::Texture3d => Ok(makepad_hal::TEXTURE_SHAPE_3D), TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
                     // a combined image sampler (its sampler in the descriptor layout)
                     TextureType::TextureVideo => Ok(6),
-                    _ => Err("HAL Vulkan texture shape is not a 2D/cube/depth/video image".to_owned()),
+                    _ => Err("unsupported HAL Vulkan texture shape".to_owned()),
                 }).collect::<Result<Vec<_>, _>>()?;
                 let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                     filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
@@ -125,24 +160,24 @@ impl DrawVars {
             use makepad_hal::info_flags::{MULTIVIEW, XR, XR_OFFSCREEN};
             let multiview = flags & MULTIVIEW != 0 && flags & XR != 0 && flags & XR_OFFSCREEN == 0;
             output.build_spirv(vm, multiview);
-            let Some(spirv) = output.spirv() else { return };
-            let normal = match payload(spirv, multiview) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return; } };
+            let Some(spirv) = output.spirv() else { return None };
+            let normal = match payload(spirv, multiview) { Ok(bytes) => bytes, Err(e) => { crate::error!("Vulkan shader: {e}"); return None; } };
             let pick = match output.view().pick_spirv {
-                Some(result) => match payload(result, false) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return; } },
+                Some(result) => match payload(result, false) { Ok(bytes) => Some(bytes), Err(e) => { crate::error!("Vulkan pick shader: {e}"); return None; } },
                 None => None,
             };
             mapping.hal_code = Some(normal); mapping.hal_pick_code = pick;
         }
         if hlsl {
             use crate::makepad_script::shader::{SamplerAddress, SamplerFilter, TextureType};
-            let CxDrawShaderCode::Combined { code: source } = &code else { return };
+            let CxDrawShaderCode::Combined { code: source } = &mapping.code else { return None };
             let textures = match mapping.textures.iter().map(|t| match t.tex_type {
                 TextureType::Texture2d | TextureType::TextureVideo => Ok(0), TextureType::TextureCube => Ok(1),
-                TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
+                TextureType::Texture3d => Ok(makepad_hal::TEXTURE_SHAPE_3D), TextureType::Texture2dArray => Ok(2), TextureType::TextureDepth => Ok(3), TextureType::TextureDepthArray => Ok(4),
                 _ => Err(()),
             }).collect::<Result<Vec<_>, _>>() {
                 Ok(t) => t,
-                Err(()) => { crate::error!("D3D11 shader: a texture shape that is not 2D/cube/array/depth"); return; }
+                Err(()) => { crate::error!("D3D11 shader: unsupported texture shape"); return None; }
             };
             let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                 filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
@@ -154,30 +189,70 @@ impl DrawVars {
             mapping.hal_pick_code = output.pick_code().map(payload);
         }
         if gl {
-            if let Err(e) = set_gl_payloads(&mut mapping, &output) { crate::error!("{e}"); return; }
+            if let Err(e) = set_gl_payloads(&mut mapping, &output) { crate::error!("{e}"); return None; }
+        }
+        if let Some(previous) = previous {
+            // A sampler change recompiles from source, which does not contain a
+            // live patch's current value. Keep it when the literal is the same.
+            let old = &vm.cx().draw_shaders[previous.index].mapping.table_consts;
+            for (current, prior) in mapping.table_consts.iter_mut().zip(old) {
+                if current.ip == prior.ip && current.site == prior.site && current.doc == prior.doc
+                    && current.initial == prior.initial && current.initial_color == prior.initial_color
+                    && current.negated == prior.negated
+                {
+                    current.value = prior.value;
+                    current.color = prior.color;
+                }
+            }
         }
         mapping.fill_scope_uniforms_buffer(vm.heap(), &vm.trap());
-        if !self.bind_dyn_instances(vm, io_self, &mapping) {
-            return;
-        }
+        Some(mapping)
+    }
 
-        let index = vm.host.cx().draw_shaders.shaders.len();
-        let shader_id = DrawShaderId { index };
-        let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
-        let cx = vm.host.cx_mut();
-        mapping.scope_uniforms_gen = cx.next_uniform_gen();
-        cx.draw_shaders.shaders.push(CxDrawShader { debug_id: LiveId(0), pipeline_id: None, mapping });
-        cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), (shader_id, geometry_id));
-        cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
-        cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
-        // the frame builder creates the HAL pipeline at the next beat
-        cx.draw_shaders.compile_set.insert(index);
-        self.draw_shader_id = Some(shader_id);
-        self.geometry_id = geometry_id;
+    fn recompile_shader_in_place(vm: &mut ScriptVm, index: usize) -> bool {
+        let id = DrawShaderId { index };
+        let source = vm.cx().draw_shaders[index].mapping.source.as_object();
+        let Some((output, code)) = Self::compile_hal_program(vm, source) else { return false };
+        let Some(mapping) = Self::hal_shader_mapping(vm, source, code, output, Some(id)) else { return false };
+        let pipe = Self::pipeline_state_hash(vm.heap(), source);
+        vm.cx_mut().replace_shader_mapping(id, pipe, mapping);
+        true
     }
 }
 
 impl crate::cx::Cx {
+    /// Rebuild in the VM that owns each source. A draw can outlive that VM.
+    pub(crate) fn rebuild_anisotropic_shaders(&mut self, clamp: u8) -> usize {
+        let mut by_heap = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+        for (index, shader) in self.draw_shaders.shaders.iter().enumerate() {
+            if shader.mapping.anisotropic_clamp.is_some_and(|old| old != clamp) {
+                by_heap.entry(shader.mapping.source.heap_key()).or_default().push(index);
+            }
+        }
+
+        let mut rebuilt = 0;
+        let mut skipped = 0;
+        for (heap, indices) in by_heap {
+            let reached = self.with_vm_of_heap(heap, &mut |vm| {
+                for &index in &indices {
+                    if DrawVars::recompile_shader_in_place(vm, index) {
+                        rebuilt += 1;
+                    }
+                }
+            });
+            if !reached {
+                skipped += indices.len();
+            }
+        }
+        if skipped > 0 {
+            crate::log!("sampler clamp {clamp}: {skipped} shaders kept their programs because their source VM was unavailable");
+        }
+        if rebuilt > 0 {
+            crate::log!("sampler clamp {clamp}: rebuilt {rebuilt} shaders in place");
+        }
+        rebuilt
+    }
+
     /// The HAL draws with GLES now (`BackendChanged`): every draw shader is compiled for it under
     /// the same index, so the draws using it don't change, and makes its pipeline again.
     pub(crate) fn hal_recompile_shaders(&mut self) {
@@ -197,39 +272,11 @@ impl crate::cx::Cx {
         heaps.dedup();
         for heap in heaps {
             let mut compile = |vm: &mut ScriptVm| for index in 0..vm.host.cx().draw_shaders.shaders.len() {
-                let source = &vm.host.cx().draw_shaders.shaders[index].mapping.source;
-                if source.heap_key() != heap { continue; }
-                let source = source.clone();
-                let io_self = source.as_object();
-                let mut opts = crate::makepad_script::shader_compile::ShaderCompileOptions::new(
-                    ShaderBackend::Glsl, vm.host.cx().shader_const_table_mode(), false, false, true);
-                opts.gles_complete = true;
-                opts.pick = vm.host.cx().pick_variants();
-                let output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
-                if output.has_errors() {
-                    DrawVars::log_shader_compile_failure(vm, io_self, &output);
-                    continue;
+                if vm.cx().draw_shaders[index].mapping.source.heap_key() == heap {
+                    DrawVars::recompile_shader_in_place(vm, index);
                 }
-                let view = output.view();
-                let code = CxDrawShaderCode::Separate { vertex: view.glsl_vertex.to_owned(), fragment: view.glsl_fragment.to_owned() };
-                let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output);
-                mapping.pick_code = output.pick_code().map(str::to_owned);
-                mapping.storage_buffers = output.view().storage_buffers.to_vec();
-                mapping.storage_push_size = output.view().storage_push_size;
-                if let Err(e) = set_gl_payloads(&mut mapping, &output) {
-                    crate::error!("{e}");
-                    continue;
-                }
-                mapping.fill_scope_uniforms_buffer(vm.heap(), &vm.trap());
-                let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
-                let cx = vm.host.cx_mut();
-                mapping.scope_uniforms_gen = cx.next_uniform_gen();
-                cx.draw_shaders.cache_code_to_shader.insert((code, pipe), DrawShaderId { index });
-                cx.draw_shaders.shaders[index].mapping = mapping;
-                cx.draw_shaders.compile_set.insert(index);
             };
-            // the app's VM or a live isolate's: a heap no live isolate owns compiles nothing, since
-            // nothing draws with its shaders
+            // The app's VM or a live isolate's. A heap no live VM owns compiles nothing.
             self.with_vm_of_heap(heap, &mut compile);
         }
     }
@@ -280,11 +327,11 @@ fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::sh
     let textures = mapping.textures.iter().enumerate().map(|(i, t)| {
         let shape = match t.tex_type {
             TextureType::Texture2d | TextureType::TextureVideo => 0, TextureType::TextureCube => 1,
-            TextureType::Texture2dArray => 2, TextureType::TextureDepth => 3, TextureType::TextureDepthArray => 4,
+            TextureType::Texture3d => makepad_hal::TEXTURE_SHAPE_3D, TextureType::Texture2dArray => 2, TextureType::TextureDepth => 3, TextureType::TextureDepthArray => 4,
             _ => return Err("unsupported GLES texture shape".to_owned()),
         };
         let sampler = mapping.texture_sampler_indices.get(i).and_then(|i| mapping.samplers.get(*i)).map_or(
-            makepad_hal::spirv::SpirvSampler { filter: 1, address: 1, compare: shape >= 3, pixel: false, anisotropy: 1 },
+            makepad_hal::spirv::SpirvSampler { filter: 1, address: 1, compare: matches!(shape, 3 | 4), pixel: false, anisotropy: 1 },
             |s| makepad_hal::spirv::SpirvSampler {
                 filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
                 address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },

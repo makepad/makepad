@@ -134,21 +134,33 @@ impl FilePromise {
         let name = if name.trim_matches('.').is_empty() { "file".to_string() } else { name };
         let path = dir.join(&name);
         let promised = DragOutFile::Promise { path: path.to_string_lossy().into_owned(), mime: self.mime };
+        let failed = makepad_hal::drag_promise::failed_path(&path);
+        // The producer's hold, taken before the promise is handed out (a receiver may ask for the
+        // file at once) and let go on its thread once the file or its failure is in place: a
+        // backend waits for the file while it is held, however long it takes. Its folder and
+        // lock are two file system calls here, beside the thread's spawn.
+        let held = match std::fs::create_dir_all(&dir).and_then(|()| makepad_hal::drag_promise::hold(&path)) {
+            Ok(held) => held,
+            Err(e) => {
+                crate::error!("drag out: making {}: {e}", path.display());
+                let _ = std::fs::write(&failed, e.to_string());
+                return promised;
+            }
+        };
         let produce = self.produce;
         let spawned = std::thread::Builder::new().name("drag-out".into()).spawn(move || {
             let part = makepad_hal::drag_promise::part_path(&path);
-            let result = std::fs::create_dir_all(&dir)
-                .map_err(|e| e.to_string())
-                .and_then(|()| produce(&part))
-                .and_then(|()| complete(&part, &path));
+            let result = produce(&part).and_then(|()| complete(&part, &path));
             if let Err(e) = result {
                 crate::error!("drag out: making {}: {e}", path.display());
                 let _ = std::fs::remove_file(&part);
                 let _ = std::fs::write(makepad_hal::drag_promise::failed_path(&path), e);
             }
+            drop(held);
         });
         if spawned.is_err() {
             crate::error!("drag out: no thread for the producer");
+            let _ = std::fs::write(&failed, "no thread for the producer");
         }
         promised
     }
@@ -507,17 +519,23 @@ mod drag_out_tests {
         let DragOutFile::Promise { path, mime } = promise.start() else { panic!("a promise") };
         assert_eq!(mime, "audio/mpeg");
         assert!(path.ends_with("Night_Drive.mp3"), "{path}");
-        makepad_hal::drag_promise::wait(std::path::Path::new(&path), std::time::Duration::from_secs(10)).unwrap();
+        makepad_hal::drag_promise::wait(std::path::Path::new(&path)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"mp3 bytes");
         let failing = FilePromise { name: "x.mp3".into(), mime: String::new(), produce: Box::new(|_| Err("no decoder for Opus".into())) };
         let DragOutFile::Promise { path, .. } = failing.start() else { panic!("a promise") };
-        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path), std::time::Duration::from_secs(10)).unwrap_err();
+        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path)).unwrap_err();
         assert_eq!(err, "no decoder for Opus");
         // a producer that "succeeds" with an empty file never hands a 0-byte file to a receiver
         let empty = FilePromise { name: "e.mp4".into(), mime: String::new(), produce: Box::new(|part| std::fs::write(part, b"").map_err(|e| e.to_string())) };
         let DragOutFile::Promise { path, .. } = empty.start() else { panic!("a promise") };
-        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path), std::time::Duration::from_secs(10)).unwrap_err();
+        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path)).unwrap_err();
         assert_eq!(err, "the producer wrote an empty file");
         assert!(!std::path::Path::new(&path).exists());
+        // The wait goes on while the producer works, on a loaded box too, and ends when it lets go:
+        // a 10 s clock failed a 9-byte file whose producer was still at work (11-24).
+        let dying = FilePromise { name: "d.mp3".into(), mime: String::new(), produce: Box::new(|_| panic!("a producer that dies before its file")) };
+        let DragOutFile::Promise { path, .. } = dying.start() else { panic!("a promise") };
+        let err = makepad_hal::drag_promise::wait(std::path::Path::new(&path)).unwrap_err();
+        assert!(err.ends_with("its producer ended without it"), "{err}");
     }
 }

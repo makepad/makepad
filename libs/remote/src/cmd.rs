@@ -323,7 +323,7 @@ impl Write for ChanWriter {
     }
 }
 
-std::thread_local! {
+thread_local! {
     /// The process that sent the command this thread answers now, and the name its client gave
     /// itself (0 and empty: not known, or none).
     static ASKER: std::cell::RefCell<(u32, String)> = const { std::cell::RefCell::new((0, String::new())) };

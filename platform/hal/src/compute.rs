@@ -127,7 +127,7 @@ impl KernelLayout {
             if textures.contains(id) { return Err("a dispatch samples a texture it writes".into()); }
             // the session's own single-layer 2D textures of a float format, made to be sampled
             // (a child's lent window would need the child's frame ordered before the kernel)
-            if !s.textures.get(s.id, *id).is_ok_and(|t| t.val.depth <= 1 && t.val.usage & usage::SAMPLED != 0 && t.val.usage & usage::ARRAY == 0
+            if !s.textures.get(s.id, *id).is_ok_and(|t| t.val.depth <= 1 && t.val.usage & usage::SAMPLED != 0 && t.val.usage & (usage::ARRAY | usage::VOLUME) == 0
                 && t.val.lent.is_none() && t.val.format < format::COUNT && t.val.format != format::R32UINT) {
                 return Err("invalid sampled texture: a kernel samples its session's own single-layer float textures".into());
             }
@@ -197,4 +197,25 @@ impl CmdWriter {
 pub(crate) fn unsupported() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| eprintln!("[hal] compute and draw storage buffers are unsupported on this backend; work skipped"));
+}
+
+#[cfg(test)]
+#[test]
+fn volume_region_depth_one_compute_slot() {
+    use crate::session::{TextureObj, World};
+
+    let mut world = World::new();
+    let sid = world.open(0);
+    let session = world.session_mut(sid).unwrap();
+    let id = Id::new(1, 1);
+    let layout = KernelLayout { desc: ComputeDesc::default(), sampled: vec![SampledImageBinding { index: 0 }],
+        textures: vec![], buffers: vec![], samplers: vec![] };
+    let mut w = CmdWriter::new(sid);
+    let dispatch = Dispatch { sampled: w.put_items(&[[id.index, id.gen]]), ..Default::default() };
+    let texture = TextureObj { w: 1, h: 1, depth: 1, mips: 1, format: format::R8, usage: usage::SAMPLED,
+        bytes: 1, imported: false, uploaded: 0, lent: None };
+    session.textures.insert(sid, id, sid, texture).unwrap();
+    assert!(layout.validate_dispatch(session, &dispatch, w.arena()).is_ok(), "ordinary 2D sampled texture");
+    session.textures.get_mut(sid, id).unwrap().val.usage |= usage::VOLUME;
+    assert!(layout.validate_dispatch(session, &dispatch, w.arena()).is_err(), "a depth-one volume requires a 3D slot");
 }

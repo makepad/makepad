@@ -146,6 +146,10 @@ pub(super) struct Selections {
     writes: HashMap<(x::Window, x::Atom), Write>,
     incoming: HashMap<x::Window, DragIn>,
     outgoing: Option<DragOut>,
+    /// Requests for a drag's file list while one of its promised files is still being made
+    /// ([`crate::drag_promise::pending`]): answered (a SelectionNotify may come late) by the
+    /// event loop once the promise waiter wakes it, so the loop serves events meanwhile.
+    promised: Vec<x::XSelectionRequestEvent>,
     next_drag: u64,
 }
 impl Selections {
@@ -162,6 +166,7 @@ impl Selections {
             writes: HashMap::new(),
             incoming: HashMap::new(),
             outgoing: None,
+            promised: Vec::new(),
             next_drag: 0,
         }
     }
@@ -456,11 +461,18 @@ impl Selections {
             }
         } else {
             let text = input::TEXT_MIMES.iter().any(|m| self.atom(m) == e.target);
+            // Promised files are handed over once they are written: the request waits for its
+            // answer, not this thread (`Self::answer_promised`).
+            if e.selection == xdnd && e.target == uri {
+                if let Some(d) = self.outgoing.as_ref().filter(|d| crate::drag_promise::pending(&d.items)) {
+                    self.promised.push(e);
+                    crate::drag_promise::when_made(d.items.clone(), |_| Shared::global().signal());
+                    return;
+                }
+            }
             let bytes = if e.selection == xdnd {
                 self.outgoing.as_ref().and_then(|d| {
                     if e.target == uri {
-                        // promised files are handed over once they are written
-                        crate::drag_promise::wait_promised(&d.items);
                         Some(Arc::new(input::encode_uris(&d.items)))
                     } else if text {
                         Some(Arc::new(
@@ -834,7 +846,21 @@ impl Selections {
             icon
         }
     }
+    /// Answers the file-list requests whose promised files are made, failed, or no longer
+    /// produced (or whose drag is gone: no list then).
+    fn answer_promised(&mut self) {
+        if self.promised.is_empty() {
+            return;
+        }
+        let ready = |d: &Option<DragOut>| d.as_ref().is_none_or(|d| !crate::drag_promise::pending(&d.items));
+        if ready(&self.outgoing) {
+            for e in std::mem::take(&mut self.promised) {
+                self.request(e);
+            }
+        }
+    }
     pub fn tick(&mut self, shared: &Shared) {
+        self.answer_promised();
         let Some(mut d) = self.outgoing.take() else {
             return;
         };

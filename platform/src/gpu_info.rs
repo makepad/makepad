@@ -22,6 +22,8 @@ pub struct GpuInfo {
     /// backend sets them after probing the device.
     pub texture_bc7: bool,
     pub texture_astc4x4: bool,
+    /// None until the first device handshake. An unsupported backend reports empty capabilities.
+    pub(crate) volume: Option<crate::texture::VolumeCaps>,
     /// The longest side a texture may have, as the backend or WebGL reports it.
     pub max_texture_size: usize,
     pub performance: GpuPerformance,
@@ -43,6 +45,7 @@ impl Default for GpuInfo {
             // The web backend enables every attachment of a pass for every draw, so a pass
             // there cannot yet mix draws with different outputs.
             mixed_output_passes: cfg!(not(target_arch = "wasm32")),
+            volume: if cfg!(target_arch = "wasm32") { Some(Default::default()) } else { None },
             texture_bc7: false,
             texture_astc4x4: false,
             max_texture_size: 8192,
@@ -55,6 +58,9 @@ impl Default for GpuInfo {
 }
 
 impl GpuInfo {
+    /// Supported sampled 3D formats and dimension limit. Empty before device negotiation.
+    pub fn volume_caps(&self) -> crate::texture::VolumeCaps { self.volume.unwrap_or_default() }
+
     pub fn init_from_info(&mut self, min_uniform_vectors: u32, vendor: String, renderer: String) {
         self.vendor = vendor;
         self.vendor.make_ascii_lowercase();

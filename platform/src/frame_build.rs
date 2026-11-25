@@ -27,7 +27,7 @@ use crate::{
     makepad_live_id::*,
     makepad_math::{PointUsize, RectUsize, SizeUsize},
     shared_instances::PublishReceipt,
-    texture::{CompressedTextureFormat, TextureCategory, Texture, TextureAlloc, TextureFormat, TextureId, TexturePixel, TextureUpdated},
+    texture::{CompressedTextureFormat, TextureCategory, Texture, TextureAlloc, TextureFormat, TextureId, TexturePixel, TextureUpdated, VolumeRegion},
     uniform_buffer::UniformBufferId,
 };
 use makepad_hal::{
@@ -193,6 +193,8 @@ pub(crate) struct FrameBuilder {
     probes: std::cell::Cell<bool>,
     /// Interned on the first probe of a layout. Its index is the id the HAL echoes.
     layouts: RefCell<Vec<PipelineLayout>>,
+    /// Terminal driver diagnostics for a pipeline generation and one of its pass layouts.
+    layout_failures: HashMap<(Id, u32), Box<str>>,
     draw_layout: Option<PipelineLayout>,
     warned_layouts: Vec<(usize, PipelineLayout)>,
     /// (pipe, entry in that pipe's layouts) to want on the next submit.
@@ -435,6 +437,7 @@ impl FrameBuilder {
     pub(crate) fn backend_changed(&mut self, info: HalInfo) {
         self.info = info;
         self.pipes.clear();
+        self.layout_failures.clear();
         self.warned_layouts.clear();
         self.layout_probes.get_mut().clear();
         self.pipe_by_hash.clear();
@@ -593,7 +596,7 @@ impl FrameBuilder {
         let id = self.next_tex_id(slot);
         let attr = self.attr(origin, 0);
         self.w.texture_create(id, usage, fmt, w.max(1) as u32, h.max(1) as u32, [layers.max(1) as u16, mips.max(1) as u16], attr);
-        self.tex.insert(slot, TexRec { id, gen, shared: None, layers: layers.max(1) });
+        self.tex.insert(slot, TexRec { id, gen, shared: None, layers: if usage & usage::VOLUME != 0 { 1 } else { layers.max(1) } });
         self.stats.texture_creates += 1;
         id
     }
@@ -682,6 +685,7 @@ impl FrameBuilder {
     /// (the retained ones' draw items are returned: they upload on their next draw); render
     /// targets keep their ids and are painted again. Frames the old device dropped count as done.
     pub(crate) fn device_reset(&mut self, reupload: impl Fn(usize, u64) -> bool) -> Vec<(usize, usize)> {
+        self.layout_failures.clear();
         self.layout_probes.get_mut().clear();
         for pipe in &mut self.pipes {
             pipe.layouts.get_mut().clear();
@@ -763,6 +767,7 @@ impl FrameBuilder {
     }
 
     pub(crate) fn pipeline_layout_ready(&mut self, id: Id, layout: u32) -> bool {
+        if self.layout_failures.contains_key(&(id, layout)) { return false; }
         let Some(p) = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id) else { return false };
         let Some(entry) = p.layouts.get_mut().iter_mut().find(|e| e.layout == layout && e.wanted) else { return false };
         if std::mem::replace(&mut entry.ready, true) { return false; }
@@ -770,6 +775,20 @@ impl FrameBuilder {
         // Like a repeat PipelineReady, this can complete a draw the HAL skipped on a ready
         // pipeline. If the base is pending, its own answer still owes that repaint.
         p.ready_on_device()
+    }
+
+    pub(crate) fn pipeline_layout_failed(&mut self, id: Id, layout: u32, log: &str) -> Option<usize> {
+        let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
+        // A capability rejection already answered every layout with the base failure.
+        if p.failed { return None; }
+        if layout != PipelineLayout::UNPROBED {
+            let entry = p.layouts.get_mut().iter_mut().find(|e| e.layout == layout && e.wanted)?;
+            let std::collections::hash_map::Entry::Vacant(slot) = self.layout_failures.entry((id, layout)) else { return None };
+            slot.insert(log.into());
+            entry.ready = false;
+        }
+        self.answered = true;
+        Some(p.first_shader)
     }
 
     /// An app asked whether a draw shader can draw, and it cannot yet: the next pipeline
@@ -815,11 +834,18 @@ impl FrameBuilder {
     /// A known pair needs only the pipeline's small list and an index into the layout table.
     /// A new pair is also the probe to submit, even if the base pipeline already answered.
     pub(crate) fn pipeline_ready_in(&self, pipe: usize, desc: PipelineLayout) -> bool {
-        let Some(p) = self.pipes.get(pipe).filter(|p| !p.failed) else { return false };
+        self.pipeline_status_in(pipe, desc).unwrap_or(false)
+    }
+
+    pub(crate) fn pipeline_status_in(&self, pipe: usize, desc: PipelineLayout) -> Result<bool, &str> {
+        let Some(p) = self.pipes.get(pipe) else { return Ok(false) };
+        if let Some(log) = p.failure.as_deref() { return Err(log); }
         let mut layouts = self.layouts.borrow_mut();
         let mut entries = p.layouts.borrow_mut();
         if let Some(entry) = entries.iter().find(|e| layouts[e.layout as usize] == desc) {
-            return p.ready_on_device() && entry.ready;
+            if entry.ready { return Ok(p.ready_on_device()); }
+            if let Some(log) = self.layout_failures.get(&(p.id, entry.layout)) { return Err(log); }
+            return Ok(false);
         }
         let layout = layouts.iter().position(|l| *l == desc).unwrap_or_else(|| {
             layouts.push(desc);
@@ -828,7 +854,7 @@ impl FrameBuilder {
         self.layout_probes.borrow_mut().push((pipe, entries.len()));
         entries.push(PipeLayoutRec { layout, wanted: false, ready: false });
         if !p.ready { p.probed.set(true); }
-        false
+        Ok(false)
     }
 
     /// Wants newly probed layouts and promotes base pipelines probed while compiling.
@@ -879,14 +905,15 @@ impl FrameBuilder {
         Some((surface.index as u64) << 32 | surface.gen as u64)
     }
 
-    /// The failed pipeline's first shader, and whether a pass waited for it (it paints again,
-    /// without those draws). `log` is what the HAL said, kept for [`Self::pipeline_failure`].
+    /// The failed pipeline's first shader and whether to repaint a waiting or previously
+    /// ready picture. `log` is kept for [`Self::pipeline_failure`].
     pub(crate) fn pipeline_failed(&mut self, id: Id, log: &str) -> Option<(usize, bool)> {
         let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
+        let was_ready = std::mem::take(&mut p.ready);
         p.failed = true;
         p.failure = Some(log.into());
         self.answered = true;
-        Some((p.first_shader, std::mem::take(&mut p.drawn_unready)))
+        Some((p.first_shader, std::mem::take(&mut p.drawn_unready) || was_ready))
     }
 
     /// A draw of the pass being built is left out (its shader is still queued for
@@ -1116,9 +1143,85 @@ impl Cx {
 
     // ------------------------------------------------------------------ textures
 
+    /// Emit as much of each queued box as this frame can stage. The ordinary case emits
+    /// one command per edit. Large boxes split on plane or row boundaries.
+    fn fb_volume_texture(&mut self, fb: &mut FrameBuilder, id: TextureId) -> Id {
+        let slot = id.0;
+        let known = fb.tex.get(&slot).is_some_and(|rec| rec.gen == id.generation());
+        let texture = &mut self.textures[id];
+        if known && texture.updated().is_empty() { return fb.tex[&slot].id; }
+        let reallocated = texture.alloc_vec();
+        let TextureFormat::VecVolume(volume) = &mut texture.format else { unreachable!() };
+        let desc = volume.desc;
+        let [width, height, depth] = desc.extent;
+        let fmt = match desc.format {
+            crate::texture::VolumeFormat::R8Unorm => format::R8,
+            crate::texture::VolumeFormat::Rgba8Unorm => format::RGBA8,
+        };
+        if fb.info.volume_formats & (1 << fmt) == 0 || width.max(height).max(depth) > fb.info.max_volume_dimension {
+            fb.gap("this device cannot sample the requested 3D texture");
+            return Id::NONE;
+        }
+        if reallocated || !known {
+            fb.texture_create(slot, id.generation(), usage::SAMPLED | usage::VOLUME, fmt,
+                width as usize, height as usize, depth as usize, 1, &texture.origin);
+            volume.mark_full();
+        }
+        let hal_id = fb.tex[&slot].id;
+        let Some(bytes) = volume.data.as_deref() else { return hal_id };
+        let bpp = desc.format.bytes();
+        let mut uploaded = 0;
+        while let Some(&region) = volume.dirty.front() {
+            // Bound temporary packing/staging size even for an unstaged whole-image restore.
+            // Unstaged textures send every band in this submission.
+            let mut room = crate::texture::STAGED_UPLOAD_BYTES;
+            if texture.staged_upload { room = room.min(fb.staged_left); }
+            let [x, y, z] = region.origin;
+            let [w, h, d] = region.extent;
+            let row = w as usize * bpp;
+            let rows = room / row;
+            if rows == 0 { break; }
+            let planes = (rows / h as usize).min(d as usize) as u32;
+            let (take_h, take_d) = if planes == 0 { (rows as u32, 1) } else { (h, planes) };
+            volume.dirty.pop_front();
+            if take_d < d {
+                volume.dirty.push_front(VolumeRegion { origin: [x, y, z + take_d], extent: [w, h, d - take_d] });
+            }
+            if take_h < h {
+                volume.dirty.push_front(VolumeRegion { origin: [x, y + take_h, z], extent: [w, h - take_h, 1] });
+            }
+
+            let at = |y: u32, z: u32| ((z as usize * height as usize + y as usize) * width as usize + x as usize) * bpp;
+            let rect = [x, y, w, take_h];
+            let slices = [z as u16, take_d as u16];
+            let length = row * take_h as usize * take_d as usize;
+            let contiguous = (take_h == 1 || w == width) && (take_d == 1 || (h == height && w == width));
+            if contiguous {
+                let start = at(y, z);
+                // SAFETY: the retained image outlives submission (module header).
+                unsafe { fb.w.texture_update_3d_borrowed(hal_id, rect, slices, &bytes[start..start + length]); }
+            } else {
+                let rows = (z..z + take_d).flat_map(|dz| (y..y + take_h).map(move |dy| {
+                    let start = at(dy, dz);
+                    &bytes[start..start + row]
+                }));
+                fb.w.texture_update_3d_rows(hal_id, rect, slices, length, rows);
+            }
+            if texture.staged_upload { fb.staged_left -= length; }
+            uploaded += length as u64;
+        }
+        if uploaded > 0 {
+            fb.stats.bytes_uploaded += uploaded;
+            texture.texel_generation += 1;
+            if texture.discard_cpu_after_upload && volume.dirty.is_empty() { fb.post_submit_discard_textures.push(id); }
+        }
+        hal_id
+    }
+
     /// The HAL texture of a vec texture, created and brought up to date (the dirty rect goes up,
     /// the whole image after a new allocation). `Id::NONE` for what the HAL cannot hold.
     fn fb_vec_texture(&mut self, fb: &mut FrameBuilder, id: TextureId) -> Id {
+        if let TextureFormat::VecVolume(_) = self.textures[id].format { return self.fb_volume_texture(fb, id); }
         let slot = id.0;
         let gen = id.generation();
         let known = fb.tex.get(&slot).is_some_and(|r| r.gen == gen);
@@ -1293,6 +1396,10 @@ impl Cx {
         let slot = id.0;
         let gen = id.generation();
         let tex = &mut self.textures[id];
+        if matches!(tex.format, TextureFormat::VecVolume(_)) {
+            fb.gap("sampled 3D textures cannot be attached to a render pass");
+            return Id::NONE;
+        }
         let changed = if depth { tex.alloc_depth(w, h) } else { tex.alloc_render(w, h) };
         let mips = if tex.render_mips && !depth && !matches!(tex.format, TextureFormat::RenderCubeBGRAu8 { .. }) {
             (usize::BITS - w.max(h).leading_zeros()) as usize
@@ -1497,6 +1604,11 @@ impl Cx {
             bindings[binding::SCOPE] = bindings_in.scope_uniform_buffer_index().map_or(none, |v| v as u32);
             bindings[binding::TEXTURES] = mapping.textures.len() as u32;
             bindings.extend(mapping.uniform_buffers.iter().map(|b| b.buffer_index as u32));
+            let volume = crate::makepad_script::shader::TextureType::Texture3d;
+            let metal_shapes = fb.info.dialect == makepad_hal::dialect::MSL && mapping.textures.iter().any(|t| t.tex_type == volume);
+            if metal_shapes {
+                bindings.extend(mapping.textures.iter().map(|t| if t.tex_type == volume { makepad_hal::TEXTURE_SHAPE_3D } else { none }));
+            }
             // geometry inputs: stride in bytes, then (byte offset, format, lane count) each
             let mut layout = vec![mapping.geometry_stride_bytes() as u32];
             for input in &mapping.geometries.inputs {
@@ -1510,7 +1622,8 @@ impl Cx {
                     DrawShaderBlendOp::Max => pipeline_blend::MAX,
                     DrawShaderBlendOp::Add => pipeline_blend::ADD,
                 }) | (if mapping.color_format.blends() || mapping.blend_op == DrawShaderBlendOp::Add { 0 } else { pipeline_blend::RAW }),
-                flags: if mapping.precise_math { pipeline_flags::PRECISE } else { 0 },
+                flags: (if mapping.precise_math { pipeline_flags::PRECISE } else { 0 })
+                    | (if metal_shapes { pipeline_flags::METAL_TEXTURE_SHAPES } else { 0 }),
                 outputs: mapping.fragment_outputs as u32,
                 shader: index as u32,
                 name,
@@ -1617,25 +1730,41 @@ impl Cx {
         };
         let mut passes = Vec::new();
         self.pick_feeders(target, &mut passes, &mut Vec::new());
+        // A ready base shader can still be compiling for a feeder's id attachments
+        // (in particular an MRT pass). Ask for all of those layouts in one batch.
+        let mut waiting = false;
         let mut lists = Vec::new();
-        for pass in &passes { if let Some(list) = self.passes[*pass].main_draw_list_id { self.pick_lists(list, &mut lists); } }
-        for list in lists {
-            for index in 0..self.draw_lists[list].draw_items.len() {
-                let item = &self.draw_lists[list].draw_items[index];
-                let Some(call) = item.kind.draw_call() else { continue };
-                let Some(pipe) = self.draw_shaders[call.draw_shader_id.index].pipeline_id.and_then(|p| fb.pipes[p].pick) else { continue };
-                if fb.pipes[pipe].failed {
-                    self.pick.requests.remove(0);
-                    self.pick.results.push((ticket, Err(crate::pick::PickError::Failed)));
-                    return;
-                }
-                if !fb.pipes[pipe].ready {
-                    fb.pipes[pipe].drawn_unready = true;
-                    fb.want(pipe);
-                    return;
+        for &pass in &passes {
+            let Some(list) = self.passes[pass].main_draw_list_id else { continue };
+            let Some(target) = self.fb_pass_target(pass, true) else {
+                self.pick.requests.remove(0);
+                self.pick.results.push((ticket, Err(crate::pick::PickError::NotRendered)));
+                return;
+            };
+            let layout = self.fb_target_layout(pass, &target, true);
+            lists.clear();
+            self.pick_lists(list, &mut lists);
+            for &list in &lists {
+                for index in 0..self.draw_lists[list].draw_items.len() {
+                    let item = &self.draw_lists[list].draw_items[index];
+                    let Some(call) = item.kind.draw_call() else { continue };
+                    let Some(pipe) = self.draw_shaders[call.draw_shader_id.index].pipeline_id.and_then(|p| fb.pipes[p].pick) else { continue };
+                    match fb.pipeline_status_in(pipe, layout) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if !fb.pipes[pipe].ready { fb.pipes[pipe].drawn_unready = true; }
+                            waiting = true;
+                        }
+                        Err(_) => {
+                            self.pick.requests.remove(0);
+                            self.pick.results.push((ticket, Err(crate::pick::PickError::Failed)));
+                            return;
+                        }
+                    }
                 }
             }
         }
+        if waiting { return; }
         let kept: Vec<_> = passes.iter().map(|p| (*p, self.passes[*p].paint_dirty, self.passes[*p].painted_serial)).collect();
         self.pick.paint = Some(crate::pick::PickPaint { painted: Default::default() });
         for pass in passes {
@@ -1645,13 +1774,13 @@ impl Cx {
         }
         for (pass, dirty, serial) in kept { self.passes[pass].paint_dirty = dirty; self.passes[pass].painted_serial = serial; }
         let paint = self.pick.paint.take().unwrap();
-        let original = self.pick.requests.remove(0).texture;
+        self.pick.requests.remove(0);
         if !paint.painted.contains(&texture) {
             self.pick.results.push((ticket, Err(crate::pick::PickError::NotRendered)));
             return;
         }
         let twin = self.pick.twins[&texture].clone();
-        self.hal_pick_readback(fb, ticket, original, twin);
+        self.hal_pick_readback(fb, ticket, twin);
     }
 
     /// The Activity shows our clear color in place of the surface whenever it hasn't drawn yet,
@@ -1691,12 +1820,14 @@ impl Cx {
 
     pub(crate) fn fb_pass_layout(&self, pass_id: DrawPassId) -> Option<PipelineLayout> {
         let target = self.fb_pass_target(pass_id, false)?;
-        Some(self.fb_target_layout(pass_id, &target))
+        Some(self.fb_target_layout(pass_id, &target, false))
     }
 
-    fn fb_target_layout(&self, pass_id: DrawPassId, target: &PassTarget) -> PipelineLayout {
+    fn fb_target_layout(&self, pass_id: DrawPassId, target: &PassTarget, picking: bool) -> PipelineLayout {
         let pass = &self.passes[pass_id];
         let texture_format = |texture: &Texture, depth: bool| {
+            // The formats of CxPick::twin, independent of the original texture.
+            if picking { return if depth { format::DEPTH32F } else { format::BGRA8 }; }
             let tex = &self.textures[texture.texture_id()];
             attachment_format(&tex.format, depth, tex.alloc.as_ref())
         };
@@ -1929,7 +2060,7 @@ impl Cx {
         }
         // A window image the HAL keeps between frames only needs what changed repainted.
         let can_repaint_partially = is_window && !stereo && !picking && hosted_target.is_none()
-            && !self.draw_damage.is_disabled
+            && self.draw_damage.is_enabled
             && self.hal_info_flags() & makepad_hal::info_flags::PARTIAL_REPAINT != 0;
         if can_repaint_partially {
             if let Some((rects, since)) = self.compute_pass_damage(fb, pass_id, pass_rect, (tw as i32, th as i32), serial) {
@@ -1956,7 +2087,7 @@ impl Cx {
         fb.pass_drew_all = true;
         // Picking substitutes private pipelines and targets. Readiness probes describe
         // the colour draw, which uses the pass's own attachments.
-        fb.draw_layout = if fb.layouts.get_mut().is_empty() || picking { None } else { Some(self.fb_target_layout(pass_id, &target)) };
+        fb.draw_layout = if fb.layouts.get_mut().is_empty() || picking { None } else { Some(self.fb_target_layout(pass_id, &target, false)) };
         if multiview {
             // both eyes in one pass: the draws are built once, the GPU renders each eye's layer
             // with its camera (the uniforms' `_r` matrices are the right eye's)
@@ -2657,6 +2788,337 @@ impl Cx {
 mod tests {
     use super::*;
 
+    #[test]
+    fn volume_region() {
+        use crate::texture::{VolumeDesc, VolumeFormat, VolumeTextureError};
+        use makepad_hal::HalCmd;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let desc = VolumeDesc { extent: [23, 13, 12], format: VolumeFormat::R8Unorm };
+        let info = HalInfo { volume_formats: 1 << format::R8, max_volume_dimension: 32, ..Default::default() };
+        assert_eq!(HalInfo::from_bytes(&info.to_bytes()), Some(info));
+        cx.hal_take_info(info);
+        assert_eq!(Texture::new_volume(&mut cx, VolumeDesc { format: VolumeFormat::Rgba8Unorm, ..desc }, vec![]), Err(VolumeTextureError::UnsupportedFormat));
+        assert_eq!(Texture::new_volume(&mut cx, VolumeDesc { extent: [4, 4, 33], ..desc }, vec![]), Err(VolumeTextureError::InvalidExtent));
+        assert_eq!(Texture::new_volume(&mut cx, desc, vec![]), Err(VolumeTextureError::InvalidLayout));
+
+        let mut expected: Vec<u8> = (0..23 * 13 * 12).map(|i| (i % 251) as u8).collect();
+        let tex = Texture::new_volume(&mut cx, desc, expected.clone()).unwrap();
+        assert_eq!(tex.uploaded_texel_generation(&cx), None, "the first upload is pending");
+        let id = tex.texture_id();
+        let mut fb = FrameBuilder::default();
+        fb.open(1, info);
+        let first = cx.fb_sampled(&mut fb, id);
+        assert_ne!(first, Id::NONE);
+        let uploads = |fb: &FrameBuilder| fb.w.cmds().iter().filter_map(|cmd| match cmd.decode(fb.w.arena()) {
+            Some(HalCmd::TextureUpdate3d { xywh, z_depth, bytes, .. }) => {
+                // SAFETY: the writer and source volume are alive and unchanged while decoding.
+                Some((xywh, z_depth, unsafe { bytes.as_bytes() }.to_vec()))
+            }
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(uploads(&fb), vec![([0, 0, 23, 13], [0, 12], expected.clone())], "initial image");
+        let initial = tex.uploaded_texel_generation(&cx).expect("the whole image was uploaded");
+        fb.submitted();
+
+        // The last row has no trailing padding. Guard bytes differ from every intended texel.
+        let (row, plane) = (11, 91);
+        let mut boxes = Vec::new();
+        for (x0, seed) in [(1, 10), (12, 80)] {
+            let region = VolumeRegion { origin: [x0, 2, 3], extent: [8; 3] };
+            let mut pitched = vec![255; 7 * plane + 7 * row + 8];
+            let mut tight = Vec::new();
+            for z in 0..8 {
+                for y in 0..8 {
+                    for x in 0..8 {
+                        let val = (seed + x + 2 * y + 3 * z) as u8;
+                        pitched[z * plane + y * row + x] = val;
+                        expected[((3 + z) * 13 + 2 + y) * 23 + x0 as usize + x] = val;
+                        tight.push(val);
+                    }
+                }
+            }
+            tex.update_volume(&mut cx, region, row, plane, &pitched).unwrap();
+            assert_eq!(tex.uploaded_texel_generation(&cx), None, "a CPU write invalidates sampled results immediately");
+            boxes.push(([x0, 2, 8, 8], [3, 8], tight));
+        }
+        let region = VolumeRegion { origin: [1, 2, 3], extent: [8; 3] };
+        for (rp, sp, bytes) in [(8, 64, 511), (7, 64, 512), (8, 63, 512), (usize::MAX, usize::MAX, 512)] {
+            assert_eq!(tex.update_volume(&mut cx, region, rp, sp, &vec![0; bytes]), Err(VolumeTextureError::InvalidLayout));
+        }
+        assert_eq!(tex.update_volume(&mut cx, VolumeRegion { origin: [0, 0, u32::MAX], ..region }, 8, 64, &[0; 512]), Err(VolumeTextureError::InvalidExtent));
+        let before = fb.stats.bytes_uploaded;
+        assert_eq!(cx.fb_sampled(&mut fb, id), first);
+        assert_eq!(uploads(&fb), boxes, "only the two valid boxes, tightly packed");
+        let edited = tex.uploaded_texel_generation(&cx).expect("both edits were uploaded");
+        assert_ne!(edited, initial);
+        assert_eq!(fb.stats.bytes_uploaded - before, 1024);
+        assert_eq!(fb.stats.texture_creates, 1);
+        fb.submitted();
+        cx.fb_sampled(&mut fb, id);
+        assert!(fb.w.cmds().is_empty(), "a clean volume emits no commands");
+        assert_eq!(tex.uploaded_texel_generation(&cx), Some(edited));
+
+        // Stage a multi-plane overwrite a row at a time, then restore the entire edited image.
+        tex.set_staged_upload(&mut cx, true);
+        let small = VolumeRegion { origin: [2, 3, 4], extent: [2, 2, 2] };
+        tex.update_volume(&mut cx, small, 2, 4, &[254; 8]).unwrap();
+        for z in 4..6 {
+            for y in 3..5 {
+                fb.staged_left = 2;
+                assert_eq!(tex.uploaded_texel_generation(&cx), None, "rows still await upload");
+                cx.fb_sampled(&mut fb, id);
+                assert_eq!(uploads(&fb), vec![([2, y, 2, 1], [z, 1], vec![254; 2])]);
+                let i = (usize::from(z) * 13 + y as usize) * 23 + 2;
+                expected[i..i + 2].fill(254);
+                fb.submitted();
+            }
+        }
+        assert!(!tex.upload_pending(&cx));
+        assert_ne!(tex.uploaded_texel_generation(&cx).expect("all rows uploaded"), edited);
+        fb.device_reset(|_, _| true);
+        tex.set_staged_upload(&mut cx, false);
+        assert_ne!(cx.fb_sampled(&mut fb, id), first);
+        assert_eq!(uploads(&fb), vec![([0, 0, 23, 13], [0, 12], expected)], "restore includes every edit");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn volume_region_allocations() {
+        use crate::{makepad_script::ScriptNew, test_alloc::measured, texture::{VolumeDesc, VolumeFormat}};
+        use makepad_hal::HalCmd;
+
+        // Four long z-runs and one tile span more than one writer chunk.
+        const K: usize = 5;
+        const DEPTH: usize = 256;
+        const ROW: usize = 8 * 4;
+        const PLANE: usize = 8 * ROW;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let info = HalInfo { volume_formats: 1 << format::RGBA8, max_volume_dimension: 512, ..Default::default() };
+        cx.hal_take_info(info);
+        let desc = VolumeDesc { extent: [(8 * K + 1) as u32, 10, DEPTH as u32 + 1], format: VolumeFormat::Rgba8Unorm };
+        let volume = Texture::new_volume(&mut cx, desc, vec![0; desc.extent.iter().product::<u32>() as usize * 4]).unwrap();
+        let mut fb = FrameBuilder::default();
+        fb.open(1, info);
+        let id = cx.fb_sampled(&mut fb, volume.texture_id());
+        assert_ne!(id, Id::NONE);
+        fb.submitted();
+        volume.set_staged_upload(&mut cx, true);
+
+        let regions: [VolumeRegion; K] = std::array::from_fn(|i| VolumeRegion {
+            origin: [(i * 8) as u32, 1, 1], extent: [8, 8, if i + 1 == K { 8 } else { DEPTH as u32 }],
+        });
+        let payloads: [Vec<u8>; K] = std::array::from_fn(|i| (0..PLANE * DEPTH)
+            .map(|n| ((i * 31 + n / PLANE * 13 + n % PLANE) % 251) as u8).collect());
+        let mut vars = cx.with_vm(|vm| crate::DrawVars::script_new(vm));
+        let mut round = |turn: usize, count: usize| {
+            vars.set_texture(0, &volume);
+            assert_eq!(vars.texture_slots[0].as_ref().unwrap().texture_id(), volume.texture_id());
+            let edits = (0..count).map(|i| {
+                let region = regions[(i + turn) % K];
+                let len = PLANE * region.extent[2] as usize;
+                (region, &payloads[(i + 2 * turn) % K][..len])
+            });
+            for (region, data) in edits.clone() {
+                volume.update_volume(&mut cx, region, ROW, PLANE, data).unwrap();
+            }
+            // With no draw passes, the normal frame build emits just the staged edits.
+            assert!(cx.fb_build(&mut fb, &[], 0.0, 0).is_empty());
+            assert_eq!(fb.w.cmds().len(), count, "one command per box, including a whole z-run");
+            for (cmd, (region, data)) in fb.w.cmds().iter().zip(edits) {
+                let Some(HalCmd::TextureUpdate3d { id: target, xywh, z_depth, bytes }) = cmd.decode(fb.w.arena()) else {
+                    panic!("expected a volume upload");
+                };
+                assert_eq!(target, id);
+                assert_eq!(xywh, [region.origin[0], 1, 8, 8]);
+                assert_eq!(z_depth, [1, region.extent[2] as u16]);
+                // SAFETY: all packed runs belong to this still-live submission.
+                assert_eq!(unsafe { bytes.as_bytes() }, data, "x-fastest rows across all z tiles");
+            }
+            fb.submitted();
+        };
+        round(0, K);
+        let mut allocations = [0; 4];
+        for (i, count) in [1, 0, 3, K].into_iter().enumerate() {
+            let turn = i + 1;
+            allocations[i] = measured(|| round(turn, count));
+            eprintln!("volume_region round {turn}: {count} boxes, {} allocations", allocations[i]);
+        }
+        assert_eq!(allocations, [0; 4], "allocations per round after warming {K} boxes");
+    }
+
+    /// Read every texel of both formats through a real Metal draw. The readback is a 2D
+    /// contact sheet: the two formats side by side and successive z slices stacked vertically.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn volume_region_metal() {
+        use crate::texture::{VolumeDesc, VolumeFormat};
+        use crate::draw_list::{CxDrawCall, CxDrawKind};
+        use crate::makepad_script::{apply::Apply, ScriptMod, ScriptNew};
+        use makepad_hal::{backend_id, open_flags, readback, EventStore, Hal, HalEvent, OpenReq};
+        let hal = Hal::new();
+        let info = hal.open(&OpenReq { backend: backend_id::METAL, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
+        assert_eq!(info.backend, backend_id::METAL);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.hal_take_info(info);
+        let mut fb = FrameBuilder::default();
+        fb.open(info.session, info);
+        const SIDE: usize = 7;
+        const DEPTH: usize = 6;
+        let r8: Vec<u8> = (0..SIDE * SIDE * DEPTH).map(|i| (i % 251) as u8).collect();
+        let rgba: Vec<u8> = r8.iter().flat_map(|&v| [v, 129, 255 - v, 255]).collect();
+        let desc = VolumeDesc { extent: [SIDE as u32, SIDE as u32, DEPTH as u32], format: VolumeFormat::R8Unorm };
+        let red = Texture::new_volume(&mut cx, desc, r8.clone()).unwrap();
+        let color = Texture::new_volume(&mut cx, VolumeDesc { format: VolumeFormat::Rgba8Unorm, ..desc }, rgba.clone()).unwrap();
+        let red_id = cx.fb_sampled(&mut fb, red.texture_id());
+        let color_id = cx.fb_sampled(&mut fb, color.texture_id());
+
+        const PROBE: &str = r#"
+use mod.pod.*
+use mod.math.*
+use mod.shader
+{
+    geom: shader.vertex_buffer(vec2f, nil)
+    z: shader.instance(0.0)
+    vertex_pos: shader.vertex_position(vec4f)
+    at: shader.fragment_position()
+    pixel: shader.fragment_output(0, vec4f)
+    red: shader.texture_3d(float)
+    color: shader.texture_3d(float)
+    empty: shader.texture_3d(float)
+    vertex: fn() { self.vertex_pos = vec4(self.geom.x, self.geom.y, self.z, 1.0) }
+    fragment: fn() {
+        let size = self.red.size()
+        let w = i32(size.x)
+        let h = i32(size.y)
+        let x = i32(self.at.x)
+        let y = i32(self.at.y)
+        if x == w * 2i {
+            if y == 0i { self.pixel = vec4(size / 255.0, 1.0) }
+            else {
+                let fallback = self.empty.load(vec3i(0i, 0i, 0i))
+                self.pixel = vec4(self.empty.size() / 255.0 + fallback.rgb, 1.0 - fallback.a)
+            }
+        } else {
+            let xyz = vec3i(x % w, y % h, y / h)
+            if x < w {
+                let r = self.red.load(xyz).r
+                self.pixel = vec4(r, r, r, 1.0)
+            } else { self.pixel = self.color.load(xyz) }
+        }
+    }
+}
+"#;
+        let (width, height) = (2 * SIDE + 1, SIDE * DEPTH);
+        let (pass, list, target) = sized_texture_pass(&mut cx, width, height);
+        let geometry = crate::geometry::Geometry::new(&mut cx);
+        geometry.update(&mut cx, vec![0, 1, 2], vec![-1., -1., 3., -1., -1., 3.]);
+        let mut vars = cx.with_vm(|vm| {
+            vm.capture_errors();
+            let value = vm.eval(ScriptMod::new("", "", "volume_probe", 0, 0, PROBE, &[]));
+            let mut vars = crate::DrawVars::script_new(vm);
+            vars.compile_shader(vm, &Apply::New, value);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:?}");
+            vars
+        });
+        let shader = vars.draw_shader_id.expect("Splash volume probe compiled").index;
+        vars.geometry_id = Some(geometry.geometry_id());
+        let uniforms_gen = cx.next_uniform_gen();
+        let mapping = &cx.draw_shaders[shader].mapping;
+        let slot = |name| mapping.textures.iter().position(|t| t.id == name).expect("reflected texture slot");
+        vars.set_texture(slot(id!(red)), &red);
+        vars.set_texture(slot(id!(color)), &color);
+        let call = CxDrawCall::new(mapping, &vars, 0.0, uniforms_gen);
+        let slots = call.total_instance_slots;
+        assert!(slots > 0);
+        let redraw = cx.redraw_id;
+        let recording_gen = cx.next_uniform_gen();
+        let items = &mut cx.draw_lists[list.id()];
+        items.clear_draw_items(redraw, recording_gen, uniforms_gen);
+        let item = items.draw_items.push_item(redraw, CxDrawKind::DrawCall(call));
+        item.instances.as_mut().unwrap().resize(slots, 0.0);
+        items.draw_items.finish_recording();
+
+        cx.fb_compile_shaders(&mut fb);
+        let pipeline = fb.pipes[cx.draw_shaders[shader].pipeline_id.unwrap()].id;
+        hal.submit(&fb.w.buf());
+        fb.submitted();
+
+        let mut store = EventStore::new(info.session, 64, 1 << 16);
+        let mut wait = |accept: &mut dyn FnMut(HalEvent<'_>) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                assert!(std::time::Instant::now() < deadline, "Metal volume probe timed out");
+                let mut buf = store.buf();
+                let n = hal.pump(10_000_000, &mut buf);
+                for (_, e) in store.reader(n, buf.arena_len) {
+                    if let HalEvent::PipelineFailed { log, .. } = e { panic!("Metal probe: {}", String::from_utf8_lossy(log)); }
+                    if accept(e) { return; }
+                }
+            }
+        };
+        wait(&mut |e| matches!(e, HalEvent::PipelineReady { pipeline: p } if p == pipeline));
+        fb.pipeline_ready(pipeline);
+        // The HAL also admits raw writers. Reject malformed boxes before a blit, even for
+        // an allocated volume, and preserve its untouched texels for the probe below.
+        let bad_before = hal.with_world(|world| world.session(info.session).unwrap().stats.bad_args);
+        fb.w.texture_update(red_id, 0, [0, 0, 1, 1], 0, &[255]);
+        fb.w.texture_update_3d(red_id, [0, 0, 2, 1], [0, 1], &[255]);
+        fb.w.texture_update_3d(red_id, [0, 0, 1, 1], [DEPTH as u16, 1], &[255]);
+        hal.submit(&fb.w.buf());
+        fb.submitted();
+        assert_eq!(hal.with_world(|world| world.session(info.session).unwrap().stats.bad_args) - bad_before, 3);
+        let region = VolumeRegion { origin: [1, 2, 3], extent: [3, 2, 2] };
+        red.update_volume(&mut cx, region, 3, 6, &[254; 12]).unwrap();
+        color.update_volume(&mut cx, region, 12, 24, &[4, 32, 219, 255].repeat(12)).unwrap();
+        let frames = cx.fb_build(&mut fb, &[pass.draw_pass_id()], 0.0, 0);
+        assert_eq!(frames.len(), 1);
+        for (texture, original) in [(&red, red_id), (&color, color_id)] {
+            let id = texture.texture_id();
+            assert_eq!(fb.texture_hal_id(id.0, id.generation()), Some(original), "region edits reuse the bound volume");
+        }
+        let target_id = target.texture_id();
+        let target_id = fb.texture_hal_id(target_id.0, target_id.generation()).unwrap();
+        hal.submit(&fb.w.buf());
+        wait(&mut |e| matches!(e, HalEvent::FrameDone { frame, .. } if frame == frames[0]));
+        fb.submitted();
+        fb.w.texture_readback(target_id, 1, [0, 0, width as u32, height as u32]);
+        hal.submit(&fb.w.buf());
+        wait(&mut |e| {
+            let HalEvent::Readback { req: 1, status, lease, .. } = e else { return false };
+            assert_eq!(status, readback::OK);
+            // SAFETY: this session takes its readback lease exactly once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
+            for i in 0..r8.len() {
+                let (x, y, z) = (i % SIDE, i / SIDE % SIDE, i / (SIDE * SIDE));
+                let edited = (1..4).contains(&x) && (2..4).contains(&y) && (3..5).contains(&z);
+                let r = if edited { 254 } else { r8[i] };
+                let output = ((z * SIDE + y) * width + x) * 4;
+                assert_eq!(pixels[output..output + 4], [r, r, r, 255], "R8 ({x},{y},{z})");
+                let output = output + SIDE * 4;
+                let want = if edited { &[4, 32, 219, 255][..] } else { &rgba[i * 4..i * 4 + 4] };
+                assert_eq!(&pixels[output..output + 4], want, "RGBA8 ({x},{y},{z})");
+            }
+            let size_pixel = 2 * SIDE * 4;
+            assert_eq!(&pixels[size_pixel..size_pixel + 4], &[SIDE as u8, SIDE as u8, DEPTH as u8, 255], "volume size in xyz");
+            let empty_pixel = size_pixel + width * 4;
+            assert_eq!(&pixels[empty_pixel..empty_pixel + 4], &[1, 1, 1, 255], "unbound slot reads a transparent 1x1x1 volume");
+            true
+        });
+        assert!(hal.close(info.session));
+    }
+
+    /// A fresh Cx repaints in full: partial repainting is off until an app opts in, and opting out resets it.
+    #[test]
+    fn partial_repainting_is_off_until_an_app_opts_in() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(!cx.draw_damage.is_enabled, "a fresh Cx must not repaint partially");
+        cx.set_partial_repainting(true);
+        assert!(cx.draw_damage.is_enabled, "set_partial_repainting(true) must opt in");
+        cx.set_partial_repainting(false);
+        assert!(!cx.draw_damage.is_enabled, "set_partial_repainting(false) must opt out again");
+    }
+
     /// A retained draw's bounds come from the item's memo only under the key they were walked
     /// for: every key part changed alone gives exactly what a fresh walk of the contiguous rows
     /// gives (and differs from the bounds before, so a memo that ignored that part would fail),
@@ -2889,16 +3351,20 @@ mod tests {
     /// A texture pass of 4 x 4 pixels with its own list, ready for `fb_pass` (no window: it
     /// paints whenever it is built).
     fn texture_pass(cx: &mut Cx) -> (crate::draw_pass::DrawPass, crate::draw_list::DrawList, crate::texture::Texture) {
+        sized_texture_pass(cx, 4, 4)
+    }
+
+    fn sized_texture_pass(cx: &mut Cx, width: usize, height: usize) -> (crate::draw_pass::DrawPass, crate::draw_list::DrawList, crate::texture::Texture) {
         use crate::draw_pass::{CxDrawPassRect, DrawPassClearColor};
         use crate::texture::{TextureFormat, TextureSize};
         let pass = crate::draw_pass::DrawPass::new(cx);
         let list = crate::draw_list::DrawList::new(cx);
-        let target = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width: 4, height: 4 }, initial: true });
+        let target = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: TextureSize::Fixed { width, height }, initial: true });
         pass.set_color_texture(cx, &target, DrawPassClearColor::ClearWith(crate::makepad_math::vec4(0.0, 0.0, 0.0, 0.0)));
         let id = pass.draw_pass_id();
         cx.passes[id].main_draw_list_id = Some(list.id());
         cx.passes[id].dpi_factor = Some(1.0);
-        cx.passes[id].pass_rect = Some(CxDrawPassRect::Size(crate::makepad_math::dvec2(4.0, 4.0)));
+        cx.passes[id].pass_rect = Some(CxDrawPassRect::Size(crate::makepad_math::dvec2(width as f64, height as f64)));
         (pass, list, target)
     }
 
@@ -3024,7 +3490,31 @@ mod tests {
         cx.hal_intake(0, HalEvent::PipelineLayoutReady { pipeline, layout });
         assert!(cx.draw_shader_ready_in(probed, pass_id), "the window's own layout answered");
         cx.passes[pass_id].parent = CxDrawPassParent::Window(crate::window::WindowId(2, 2));
+        let diagnostic = "Metal rejected the fragment output for this attachment";
+        cx.hal_intake(0, HalEvent::PipelineLayoutFailed {
+            pipeline, layout: PipelineLayout::UNPROBED, log: diagnostic.as_bytes(),
+        });
+        // The first draw can fail without a logical layout id. Querying
+        // its reason alone asks the HAL to match its retained driver result.
+        assert_eq!(cx.draw_shader_failure_in(probed, pass_id), None);
+        cx.hal.frames.submitted();
+        cx.hal.frames.want_probed();
+        let writer = &cx.hal.frames.w;
+        let [want] = writer.cmds() else { panic!("expected one probe of the failed variant") };
+        let Some(HalCmd::PipelineWantedIn { layout: rejected_layout, .. }) = want.decode(writer.arena()) else { panic!("expected a layout probe") };
         assert!(!cx.draw_shader_ready_in(probed, pass_id), "a new window in the same slot needs its own state");
+        cx.hal_intake(0, HalEvent::PipelineLayoutFailed {
+            pipeline, layout: rejected_layout, log: diagnostic.as_bytes(),
+        });
+        assert!(cx.hal.frames.take_answer(), "a failure wakes the host waiting on this pass");
+        cx.hal_intake(0, HalEvent::PipelineReady { pipeline });
+        cx.hal_intake(0, HalEvent::PipelineLayoutReady { pipeline, layout: rejected_layout });
+        assert_eq!(cx.draw_shader_failure_in(probed, pass_id), Some(diagnostic));
+        assert!(!cx.draw_shader_ready_in(probed, pass_id), "later completions cannot revive a rejected layout");
+        assert_eq!(cx.draw_shader_failure(probed), None, "the base pipeline is still usable");
+        cx.passes[pass_id].parent = CxDrawPassParent::Window(crate::window::WindowId(2, 1));
+        assert_eq!(cx.draw_shader_failure_in(probed, pass_id), None);
+        assert!(cx.draw_shader_ready_in(probed, pass_id), "the original layout still draws");
         cx.hal.frames.submitted();
         let _ = cx.hal.frames.device_reset(|_, _| false);
         cx.passes[pass_id].parent = CxDrawPassParent::None;
@@ -3037,6 +3527,58 @@ mod tests {
         assert!(!cx.draw_shader_ready_in(probed, pass_id), "the old device's base answer cannot make the new layout ready");
         cx.hal_intake(0, HalEvent::PipelineReady { pipeline });
         assert!(cx.draw_shader_ready_in(probed, pass_id), "both answers came from the replacement device");
+        cx.passes[pass_id].parent = CxDrawPassParent::Window(crate::window::WindowId(2, 2));
+        assert_eq!(cx.draw_shader_failure_in(probed, pass_id), None, "the old device's rejection has expired");
+        let unsupported = "volume textures aren't available on Vulkan yet";
+        assert!(cx.hal.frames.pipeline_failed(pipeline, unsupported).is_some_and(|(_, repaint)| repaint),
+            "a base refusal withdraws an earlier ready picture");
+        assert!(!cx.draw_shader_ready(probed, false), "a failed base must not remain ready");
+        assert!(!cx.draw_shader_ready_in(probed, pass_id));
+        assert_eq!(cx.draw_shader_failure_in(probed, pass_id), Some(unsupported), "every pass sees the capability reason");
+        assert!(cx.hal.frames.pipeline_layout_failed(pipeline, PipelineLayout::UNPROBED, unsupported).is_none(),
+            "the accompanying layout refusal must not trigger another repaint");
+    }
+
+    #[test]
+    fn a_pick_waits_for_its_layout_and_finishes_on_an_incomplete_replay() {
+        use makepad_hal::{readback, HalCmd};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (pass, list, target) = texture_pass(&mut cx);
+        let hdr = Texture::new_with_format(&mut cx, TextureFormat::RenderRGBAf16 { size: crate::texture::TextureSize::Auto, initial: true });
+        pass.add_color_texture(&mut cx, &hdr, DrawPassClearColor::ClearWith(Default::default()));
+        let shader = shader(&mut cx, Some(0));
+        record_draw(&mut cx, &list, shader);
+        let pick = Id::new(1, 1);
+        fb.pipes.push(PipeRec::new(Id::new(0, 1), shader));
+        fb.pipes.push(PipeRec::new(pick, shader));
+        fb.pipes[0].pick = Some(1);
+        fb.pipeline_ready(pick);
+        cx.enable_pick_variants();
+        let ticket = cx.request_pick(&target);
+        cx.fb_picks(&mut fb);
+        fb.want_probed();
+        let layout = fb.w.cmds().iter().find_map(|c| match c.decode(fb.w.arena()) {
+            Some(HalCmd::PipelineWantedIn { id, layout, colors, .. }) if id == pick => {
+                assert_eq!(colors, [format::BGRA8, format::BGRA8, PipelineLayout::ABSENT, PipelineLayout::ABSENT], "pick twins determine the MRT layout");
+                Some(layout)
+            }
+            _ => None,
+        }).expect("the ready base still needs a layout probe");
+        assert_eq!(cx.pick.requests.len(), 1, "the ticket waits for the layout answer");
+        fb.pipeline_layout_ready(pick, layout);
+        cx.fb_picks(&mut fb);
+        let req = fb.w.cmds().iter().find_map(|c| match c.decode(fb.w.arena()) {
+            Some(HalCmd::TextureReadback { req, .. }) => Some(req), _ => None,
+        }).expect("layout readiness releases the replay");
+        cx.hal_readback(req, readback::INCOMPLETE, [0; 4], None);
+        assert!(matches!(cx.take_pick(ticket), Some(Err(crate::pick::PickError::Failed))), "an unencodable draw fails the ticket");
+        assert!(cx.pick.requests.is_empty(), "an incomplete readback must not schedule another replay");
+
+        fb.pipeline_layout_failed(pick, layout, "layout rejected");
+        let ticket = cx.request_pick(&target);
+        cx.fb_picks(&mut fb);
+        assert!(matches!(cx.take_pick(ticket), Some(Err(crate::pick::PickError::Failed))), "a rejected layout fails before readback");
     }
 
     #[test]

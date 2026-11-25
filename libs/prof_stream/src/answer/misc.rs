@@ -130,7 +130,7 @@ fn hitch_table(a: &mut Answer, hs: &[&Value]) -> String {
         }
     }
     h.push('.');
-    let mut t = Table::new(&["hitch", "at s", "frame ms", "compile ms", "compiles", "top 3 by time (ms)", "critical path ms"]);
+    let mut t = Table::new(&["hitch", "at s", "thread", "frame ms", "compile ms", "compiles", "top 3 by time (ms)", "critical path ms"]);
     for x in &v {
         let by: Vec<String> = arr(x, "time_by").iter().take(3).map(|b| format!("{} {}", s(b, "on"), sig(f(b, "ms")))).collect();
         let cp: f64 = arr(x, "critical_path").iter().map(|p| f(p, "ms")).sum::<f64>() + f(x, "critical_path_other_ms");
@@ -138,6 +138,7 @@ fn hitch_table(a: &mut Answer, hs: &[&Value]) -> String {
         t.row(vec![
             format!("{}", f(x, "hitch")),
             sig(f(x, "at_ms") / 1000.0),
+            s(x, "thread").to_string(),
             sig(f(x, "frame_ms")),
             c.map_or(String::new(), |c| sig(f(c, "ms"))),
             c.map_or(String::new(), |c| sig(f(c, "n"))),

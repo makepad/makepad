@@ -14,7 +14,17 @@ use crate::types::*;
 pub enum PipeStatus {
     Ready,
     Failed(String),
+    /// A reflected resource requirement rules out every pass layout on this device.
+    Unsupported(&'static str),
     Pending,
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "android", test))]
+pub(crate) fn check_sampled_shapes(info: &HalInfo, mut shapes: impl Iterator<Item = u32>) -> Result<(), PipeStatus> {
+    if let Err(reason) = info.sampled_volume_support() {
+        if shapes.any(|shape| shape == TEXTURE_SHAPE_3D) { return Err(PipeStatus::Unsupported(reason)); }
+    }
+    Ok(())
 }
 
 pub struct SubmittedFrame {
@@ -138,6 +148,13 @@ pub trait Gpu {
     /// `data` is tightly packed rows of `rect` at `mip` / `layer`; already bounds-checked.
     #[allow(clippy::too_many_arguments)]
     fn texture_update(&mut self, s: &mut Session, id: Id, t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]);
+    /// Maximum spatial dimension for this sampled volume format on the current device.
+    fn volume_limit(&self, _format: u32) -> u32 { 0 }
+    /// Stages one validated, tightly packed volume region during submit.
+    fn texture_update_3d(&mut self, _s: &mut Session, _id: Id, _t: &TextureObj,
+        _origin: [u32; 3], _extent: [u32; 3], _data: &[u8]) -> Result<(), String> {
+        Err("this backend cannot upload a sampled 3D texture".into())
+    }
     fn texture_destroy(&mut self, sid: u32, id: Id);
     /// Answers with a `Readback` event (now or when the GPU is done).
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]);
@@ -330,11 +347,13 @@ pub struct PassView {
 /// A pass's views: its `view_rects`, each with its block of the uniforms, or without rects the
 /// one view of its viewport with all of them. A pass whose rects break the rules of
 /// [`Pass::view_rects`] is refused, saying why: the backends draw nothing of it.
-pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static str> {
+pub fn pass_views_into(pass: &Pass, arena: &[u8], views: &mut Vec<PassView>) -> Result<(), &'static str> {
+    views.clear();
     let n = pass.view_rects.len as usize;
     let len = pass.uniforms.len();
     if n == 0 {
-        return Ok(vec![PassView { rect: pass.viewport, block: 0..len }]);
+        views.push(PassView { rect: pass.viewport, block: 0..len });
+        return Ok(());
     }
     if pass.views >= 2 {
         return Err("view rects in a multiview pass");
@@ -347,7 +366,7 @@ pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static s
     }
     let v = pass.viewport;
     let size = len / n;
-    let mut views = Vec::with_capacity(n);
+    views.reserve(n);
     for (i, r) in read_rects(arena, pass.view_rects).enumerate() {
         let inside = r.iter().all(|x| x.is_finite()) && r[2] > 0.0 && r[3] > 0.0
             && r[0] >= v[0] && r[1] >= v[1] && r[0] + r[2] <= v[0] + v[2] && r[1] + r[3] <= v[1] + v[3];
@@ -359,6 +378,13 @@ pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static s
     if views.len() != n {
         return Err("view rects past the end of the arena");
     }
+    Ok(())
+}
+
+/// Returns the pass's views in a new vector.
+pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static str> {
+    let mut views = Vec::new();
+    pass_views_into(pass, arena, &mut views)?;
     Ok(views)
 }
 
@@ -593,7 +619,9 @@ pub fn texture_bytes(format: u32, w: u32, h: u32, depth: u32, mips: u32) -> u64 
 }
 
 pub fn texture_detail(format: u32, usage: u16) -> &'static str {
-    if format::is_depth(format) {
+    if usage & usage::VOLUME != 0 {
+        "volume"
+    } else if format::is_depth(format) {
         "depth"
     } else if usage & usage::SHARED != 0 {
         "shared surface"
@@ -742,6 +770,10 @@ fn make_objects_again(b: &mut dyn Gpu, world: &mut World) {
                 continue;
             }
             let mut obj = e.val.clone();
+            if obj.is_volume() && obj.w.max(obj.h).max(obj.depth) > b.volume_limit(obj.format) {
+                s.events.texture_evicted(id);
+                continue;
+            }
             match b.texture_create(s, id, &mut obj) {
                 Ok(()) if obj.usage & usage::SHARED != 0 => b.texture_share(s, id),
                 Ok(()) => {}
@@ -1708,12 +1740,18 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.bad();
                 return;
             }
+            if usage & usage::VOLUME != 0 && (usage != (usage::SAMPLED | usage::VOLUME)
+                || depth == 0 || mips != 1 || !matches!(fmt, format::R8 | format::RGBA8)
+                || w.max(h).max(u32::from(depth)) > gpu.volume_limit(fmt)) {
+                s.bad();
+                return;
+            }
             let bytes = texture_bytes(fmt, w, h, depth as u32, mips as u32);
             let obj = TextureObj { format: fmt, w, h, depth: (depth as u32).max(1), mips: (mips as u32).max(1), usage, bytes, imported: false, uploaded: 0, lent: None };
             insert_texture(gpu, s, id, obj, attr, now);
         }
         // the HAL's own ids (embedded window surfaces and their aliases) are not Cx's to touch
-        HalCmd::TextureUpdate { id, .. } | HalCmd::TextureDestroy { id } if id.index >= LENT_BASE => s.bad(),
+        HalCmd::TextureUpdate { id, .. } | HalCmd::TextureUpdate3d { id, .. } | HalCmd::TextureDestroy { id } if id.index >= LENT_BASE => s.bad(),
         HalCmd::TextureUpdate { id, mip, rect, layer, bytes } => {
             // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
             let data = unsafe { bytes.as_bytes() };
@@ -1723,7 +1761,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                     let [x, y, rw, rh] = rect;
                     let level = mip as u32;
                     let (mw, mh) = ((t.w >> level.min(t.mips - 1)).max(1), (t.h >> level.min(t.mips - 1)).max(1));
-                    let fits = level < t.mips && layer < t.depth && x.checked_add(rw).is_some_and(|v| v <= mw) && y.checked_add(rh).is_some_and(|v| v <= mh);
+                    let fits = !t.is_volume() && level < t.mips && layer < t.depth && x.checked_add(rw).is_some_and(|v| v <= mw) && y.checked_add(rh).is_some_and(|v| v <= mh);
                     if !fits || data.len() as u64 != format::level_bytes(t.format, rw, rh) {
                         s.stats.bad_args += 1;
                     } else {
@@ -1734,6 +1772,30 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 Err(_) => s.stale(),
             }
         }
+        HalCmd::TextureUpdate3d { id, xywh: [x, y, w, h], z_depth: [z, d], bytes } => {
+            let Ok(entry) = s.textures.get(sid, id) else { s.stale(); return };
+            let t = entry.val.clone();
+            let (z, d) = (u32::from(z), u32::from(d));
+            let fits = |origin: u32, len: u32, limit: u32| len > 0 && origin.checked_add(len).is_some_and(|end| end <= limit);
+            if !t.is_volume() || !fits(x, w, t.w) || !fits(y, h, t.h) || !fits(z, d, t.depth) {
+                s.bad();
+                return;
+            }
+            // SAFETY: the writer's bytes are borrowed only during this submit.
+            let data = unsafe { bytes.as_bytes() };
+            if format::level_bytes(t.format, w, h).checked_mul(u64::from(d)) != Some(data.len() as u64) {
+                s.bad();
+                return;
+            }
+            match gpu.texture_update_3d(s, id, &t, [x, y, z], [w, h, d], data) {
+                Ok(()) => s.textures.get_mut(sid, id).unwrap().val.uploaded += data.len() as u64,
+                Err(reason) => {
+                    eprintln!("[hal] volume upload {id:?}: {reason}");
+                    // A partially populated allocation must be refilled from its CPU image.
+                    s.events.texture_evicted(id);
+                }
+            }
+        }
         HalCmd::TextureDestroy { id } => match s.textures.remove(sid, id) {
             Ok(_) => {
                 s.ledger.remove(Kind::Texture, id.index);
@@ -1742,7 +1804,9 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             Err(_) => s.stale(),
         },
         HalCmd::TextureReadback { id, req, rect } => {
-            if s.textures.get(sid, id).is_ok() {
+            if s.textures.get(sid, id).is_ok_and(|entry| entry.val.is_volume()) {
+                s.events.readback(req, readback::FAILED, rect, None);
+            } else if s.textures.get(sid, id).is_ok() {
                 gpu.texture_readback(s, id, req, rect);
             } else {
                 s.stale();
@@ -1876,7 +1940,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         },
         HalCmd::PipelineCreate { id, dialect, attr, desc } => match PipelineBlob::parse(desc) {
             Some(b) => {
-                let obj = PipelineObj { dialect, desc: b.desc, blob: desc.into() };
+                let obj = PipelineObj { dialect, desc: b.desc, blob: desc.into(), unsupported: None };
                 match s.pipelines.insert(sid, id, sid, obj) {
                     Ok(old) => {
                         if old.is_some() {
@@ -1913,6 +1977,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                         match gpu.pipeline_create(s, id, dialect, &b, attr) {
                             PipeStatus::Ready => s.events.pipeline_ready(id),
                             PipeStatus::Failed(log) => s.events.pipeline_failed(id, log.as_bytes()),
+                            PipeStatus::Unsupported(reason) => {
+                                s.pipelines.get_mut(sid, id).unwrap().val.unsupported = Some(reason);
+                                s.events.pipeline_failed(id, reason.as_bytes());
+                                s.events.pipeline_layout_failed(id, PipelineLayout::UNPROBED, reason.as_bytes());
+                            }
                             PipeStatus::Pending => s.pipelines_pending += 1,
                         }
                     }
@@ -1929,7 +1998,11 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             Err(_) => s.stale(),
         },
         HalCmd::PipelineWantedIn { id, layout, window, colors, depth, samples_views } => match s.pipelines.get(sid, id) {
-            Ok(_) => {
+            Ok(entry) => {
+                if let Some(reason) = entry.val.unsupported {
+                    s.events.pipeline_layout_failed(id, layout, reason.as_bytes());
+                    return;
+                }
                 gpu.pipeline_wanted(sid, id);
                 let [samples, views] = samples_views.to_le_bytes();
                 let desc = PipelineLayout { window, colors, depth, samples, views };

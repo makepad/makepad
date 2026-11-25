@@ -48,6 +48,18 @@ fn screenshot_file_sinks() -> &'static std::sync::Mutex<HashMap<u64, std::path::
     SCREENSHOT_FILE_SINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
+/// Memory sinks for in-app frame captures (`Cx::capture_next_frame`), static for the same reason
+/// as the file sinks: the PNG is made off the main thread. A request cancelled after its frame was
+/// drained keeps its entry, so the delivery still finds it (and drops the bytes) instead of
+/// taking it for a studio request.
+static SCREENSHOT_MEMORY_SINKS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<u64, crate::screen_capture::FrameCapture>>,
+> = std::sync::OnceLock::new();
+
+fn screenshot_memory_sinks() -> &'static std::sync::Mutex<HashMap<u64, crate::screen_capture::FrameCapture>> {
+    SCREENSHOT_MEMORY_SINKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 /// Half the time between presents, so a `time_fps` frame takes the present nearest its due, or 0
 /// when there are no presents to go by and it waits for the moment it's due.
 fn time_fps_tolerance(frame_interval: f64) -> f64 {
@@ -653,7 +665,29 @@ impl Cx {
         request_id
     }
 
-    /// Forget a pending [`capture_next_frame_to_file`]. The GPU readback
+    /// Capture the next presented frame of the main window as PNG bytes in memory: the same
+    /// request as [`capture_next_frame_to_file`](Self::capture_next_frame_to_file), delivered to
+    /// the returned [`FrameCapture`](crate::screen_capture::FrameCapture) instead of a file, so
+    /// its caller polls it with no file system access. Cancel it with
+    /// [`cancel_frame_capture`](Self::cancel_frame_capture) and its `request_id`.
+    pub fn capture_next_frame(&mut self) -> crate::screen_capture::FrameCapture {
+        let request_id = SCREENSHOT_FILE_NEXT_ID
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let capture = crate::screen_capture::FrameCapture {
+            request_id,
+            result: Default::default(),
+        };
+        screenshot_memory_sinks().lock().unwrap_or_else(|e| e.into_inner()).insert(request_id, capture.clone());
+        self.screenshot_requests
+            .push(makepad_studio_protocol::ScreenshotRequest {
+                request_id,
+                kind_id: 0,
+            });
+        self.redraw_all();
+        capture
+    }
+
+    /// Forget a pending [`capture_next_frame_to_file`] or [`capture_next_frame`]. The GPU readback
     /// cannot be recalled once its frame presents, so a request that has
     /// already been drained keeps its sink entry but with an EMPTY path —
     /// the writer discards those bytes instead of writing a file the
@@ -665,9 +699,15 @@ impl Cx {
             .screenshot_requests
             .iter()
             .any(|request| request.request_id == request_id);
-        let mut sinks = screenshot_file_sinks().lock().unwrap();
         if queued {
             self.screenshot_requests.retain(|request| request.request_id != request_id);
+            screenshot_memory_sinks().lock().unwrap_or_else(|e| e.into_inner()).remove(&request_id);
+        } else if let Some(capture) = screenshot_memory_sinks().lock().unwrap_or_else(|e| e.into_inner()).get_mut(&request_id) {
+            // Drained: the delivery still comes, into a slot nobody holds any more.
+            capture.result = Default::default();
+        }
+        let mut sinks = screenshot_file_sinks().lock().unwrap();
+        if queued {
             sinks.remove(&request_id);
         } else if sinks.contains_key(&request_id) {
             sinks.insert(request_id, std::path::PathBuf::new());
@@ -701,6 +741,21 @@ impl Cx {
         request_ids
     }
 
+    /// The frames of these screenshot requests could not be read back or encoded: an in-memory
+    /// capture among them learns why (the others: `--remote` grabs are failed by the caller,
+    /// file captures and studio requests get nothing, as before). Called by the HAL's readback,
+    /// like the delivery below.
+    #[allow(dead_code)]
+    pub(crate) fn fail_frame_captures(request_ids: &[u64], why: &str) {
+        let failed: Vec<_> = {
+            let mut memory = screenshot_memory_sinks().lock().unwrap_or_else(|e| e.into_inner());
+            request_ids.iter().filter_map(|id| memory.remove(id)).collect()
+        };
+        for capture in failed {
+            capture.put(Err(why.to_string()));
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn send_studio_screenshot_response(
         request_ids: Vec<u64>,
@@ -721,30 +776,43 @@ impl Cx {
         if request_ids.is_empty() {
             return;
         }
-        // Ids registered by capture_next_frame_to_file get written to disk;
-        // the rest (if any) still go to studio.
+        // Ids registered by capture_next_frame get the PNG in memory, those of
+        // capture_next_frame_to_file get it written to disk; the rest (if any)
+        // still go to studio. The sinks' locks are held only to take the entries:
+        // the files are written after, so a UI thread that registers or cancels a
+        // capture never waits on this thread's I/O.
         let mut studio_ids = Vec::new();
+        let mut captures = Vec::new();
+        let mut files = Vec::new();
         {
-            let mut sinks = screenshot_file_sinks().lock().unwrap();
+            let mut memory = screenshot_memory_sinks().lock().unwrap_or_else(|e| e.into_inner());
+            let mut sinks = screenshot_file_sinks().lock().unwrap_or_else(|e| e.into_inner());
             for id in request_ids {
-                if let Some(path) = sinks.remove(&id) {
-                    if path.as_os_str().is_empty() {
-                        // Cancelled after its frame was drained: discard.
-                        continue;
-                    }
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if let Err(err) = std::fs::write(&path, &png) {
-                        crate::error!(
-                            "capture_next_frame_to_file: write {} failed: {}",
-                            path.display(),
-                            err
-                        );
+                if let Some(capture) = memory.remove(&id) {
+                    captures.push(capture);
+                } else if let Some(path) = sinks.remove(&id) {
+                    // An empty path: cancelled after its frame was drained; discard.
+                    if !path.as_os_str().is_empty() {
+                        files.push(path);
                     }
                 } else {
                     studio_ids.push(id);
                 }
+            }
+        }
+        for capture in captures {
+            capture.put(Ok(png.clone()));
+        }
+        for path in files {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(err) = std::fs::write(&path, &png) {
+                crate::error!(
+                    "capture_next_frame_to_file: write {} failed: {}",
+                    path.display(),
+                    err
+                );
             }
         }
         if studio_ids.is_empty() {
@@ -2252,6 +2320,35 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     #[test]
+    fn a_frame_capture_in_memory_gets_its_frame_or_why_not_and_a_cancelled_one_nothing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        // Drained as a presenting pass drains it, then answered as the readback answers.
+        let drain = |cx: &mut Cx, id: u64| cx.screenshot_requests.retain(|r| r.request_id != id);
+        let shot = cx.capture_next_frame();
+        assert!(shot.take().is_none(), "nothing before its frame");
+        drain(&mut cx, shot.request_id());
+        Cx::send_studio_screenshot_response(vec![shot.request_id()], 2, 2, b"png".to_vec());
+        assert_eq!(shot.take(), Some(Ok(b"png".to_vec())), "the frame's PNG once it is delivered");
+        assert!(shot.take().is_none(), "the PNG is taken once");
+
+        let failed = cx.capture_next_frame();
+        drain(&mut cx, failed.request_id());
+        Cx::fail_frame_captures(&[failed.request_id()], "the window readback failed");
+        assert_eq!(failed.take(), Some(Err("the window readback failed".into())), "why its frame could not be read back");
+
+        // Cancelled after its frame was drained: the delivery still comes, and goes nowhere.
+        let cancelled = cx.capture_next_frame();
+        drain(&mut cx, cancelled.request_id());
+        cx.cancel_frame_capture(cancelled.request_id());
+        Cx::send_studio_screenshot_response(vec![cancelled.request_id()], 2, 2, b"png".to_vec());
+        assert!(cancelled.take().is_none(), "a capture cancelled after its drain gets nothing");
+
+        let queued = cx.capture_next_frame();
+        cx.cancel_frame_capture(queued.request_id());
+        assert!(!cx.screenshot_requests.iter().any(|r| r.request_id == queued.request_id()), "a queued capture's request is dropped");
+    }
+
+    #[test]
     fn a_pass_sampling_a_target_still_to_paint_is_incomplete() {
         use crate::draw_pass::DrawPassClearColor;
         use crate::makepad_math::vec4;
@@ -3249,9 +3346,14 @@ impl Cx {
         self.hosted_hidden && !crate::remote::needs_ticks()
     }
 
+    /// A held draw keeps its dirty passes and NextFrame callbacks until it can build a frame.
+    pub(crate) fn frames_held(&self) -> bool {
+        self.hosted_frames_held()
+    }
+
     /// At most one frame request until the host answers with a Tick, none while frames are held.
     pub(crate) fn stdin_request_frame(&self) {
-        if !self.hosted_frames_held() {
+        if !self.frames_held() {
             hosted_demand::request_frame();
         }
     }
@@ -3262,7 +3364,7 @@ impl Cx {
     pub(crate) fn stdin_announce_demand(&self, timers: &crate::os::shared_framebuf::PollTimers) {
         // As in call_next_frame_event, a virtual clock advances callbacks only on /step.
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
-        if !self.hosted_frames_held() && (next_frames_due || self.need_redrawing()) {
+        if !self.frames_held() && (next_frames_due || self.need_redrawing()) {
             self.stdin_request_frame();
         } else if let Some(delay) = timers.next_due_in() {
             Self::send_studio_message(AppToStudio::WakeIn(delay));

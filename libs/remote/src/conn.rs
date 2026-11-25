@@ -7,14 +7,15 @@
 //! thread never blocks on the socket: [`ChannelTx::try_send`] returns [`SendError::Full`] and the
 //! service decides what to drop.
 
-use crate::frame::{kind, write_frame, Frame, FrameReader, FLAG_MORE, MAX_PAYLOAD};
+use crate::frame::{kind, write_frame, Frame, FrameReader, FLAG_MESSAGE_LIMIT, FLAG_MORE, MAX_PAYLOAD};
 use crate::hello::{self, Hello, Resume};
+use crate::endpoint::{service_limits, ServiceLimits};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 /// Bytes a sender may have outstanding on a channel before the receiver grants more.
 pub const INITIAL_CREDIT: usize = 256 << 10;
@@ -23,7 +24,25 @@ const GRANT_AT: usize = 64 << 10;
 /// Bytes queued per channel before `try_send` says Full (a single larger message is accepted when
 /// the queue is empty).
 pub const QUEUE_CAP: usize = 1 << 20;
-const KEEPALIVE: Duration = Duration::from_secs(5);
+/// How long a connection's writer stays idle before it pings the peer.
+pub const KEEPALIVE: Duration = Duration::from_secs(5);
+
+/// Every connection of this process that has not ended yet ([`shut_down_all`]).
+static LIVE: Mutex<Vec<Weak<Shared>>> = Mutex::new(Vec::new());
+
+/// Shuts down every connection of this process, both ways, before it execs in place. The exec
+/// closes this process's descriptors, but a child that inherited a copy of a connection's socket
+/// holds that socket open, and its peer waited on it for good: macOS sets close-on-exec on an
+/// accepted or dialled socket only once accept or socket returns, and a spawn on another thread
+/// in between inherits it (11-23). Shut down, the copy holds a dead socket and the peer sees the
+/// end at once, as at any close; its calls fail as lost and dial again. An exec that fails leaves
+/// them shut down: their peers dial again.
+pub fn shut_down_all() {
+    let live: Vec<Arc<Shared>> = LIVE.lock().unwrap_or_else(|e| e.into_inner()).iter().filter_map(Weak::upgrade).collect();
+    for c in live {
+        (c.shutdown)();
+    }
+}
 
 pub const CLOSE_NORMAL: u16 = 0;
 pub const CLOSE_UNSUPPORTED: u16 = 1;
@@ -99,29 +118,111 @@ pub struct Open {
 /// handler keeps the channel (it usually hands it to a thread).
 pub type OpenHandler = Arc<dyn Fn(&Conn, Open) -> Result<String, (u16, String)> + Send + Sync>;
 
+#[derive(Clone)]
+pub(crate) struct ServiceOpen {
+    pub limits: ServiceLimits,
+    pub handler: OpenHandler,
+}
+
+pub(crate) type ServiceLookup = Arc<dyn Fn(&str) -> Option<ServiceOpen> + Send + Sync>;
+
+const STRICT_SLICE: usize = 16 << 10;
+/// Strict links answer at most four PINGs per second, with no accumulated burst allowance.
+const PONG_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Clone, Copy)]
+pub struct ConnOptions {
+    pub(crate) strict: bool,
+    frame_slice: usize,
+    pub(crate) open_max_message: fn(&str) -> usize,
+}
+
+impl Default for ConnOptions {
+    fn default() -> Self {
+        // A local link (same user, same machine) carries whatever its services send: a whole file,
+        // a big frame. Message ceilings would only surface as random failures there, so they
+        // belong to the strict profile alone.
+        Self { strict: false, frame_slice: MAX_PAYLOAD, open_max_message: |_| usize::MAX }
+    }
+}
+
+impl ConnOptions {
+    /// For a link whose peer may be on another person's machine.
+    pub fn strict() -> Self {
+        Self { strict: true, frame_slice: STRICT_SLICE, open_max_message: |name| service_limits(name).max_message }
+    }
+
+    /// At most this many DATA bytes per scheduling decision, up to the profile's frame limit.
+    pub fn with_frame_slice(mut self, bytes: std::num::NonZeroUsize) -> Self {
+        self.frame_slice = bytes.get().min(if self.strict { STRICT_SLICE } else { MAX_PAYLOAD });
+        self
+    }
+}
+
 struct Chan {
+    generation: u64,
     prio: u8,
     credit: usize,
-    q: VecDeque<Vec<u8>>,
+    /// Credit still available to the peer for incoming DATA.
+    recv_credit: usize,
+    q: VecDeque<Queued>,
     off: usize,
     queued: usize,
     tx: Sender<(Event, bool)>,
     ungranted: usize,
     served: u64,
     reasm: Vec<u8>,
+    max_message: usize,
     partial: bool,
+    echo: bool,
     /// opened by the peer and not yet answered: nothing is written for it until the OK or CLOSE
     hold: bool,
+    awaiting_ok: bool,
     close_after: Option<(u16, String)>,
+    // The channel's slot under the service's cap (strict links): freed with this entry, when the
+    // CLOSE is sent or received. The service's own end may still be tearing down by then; holding
+    // the slot for that would refuse a well-behaved peer that closes and reopens straight away.
+    _admission: Option<Arc<str>>,
+}
+
+enum Queued {
+    Bytes(Vec<u8>),
+    // Empty messages use no byte credit. Keep their order and multiplicity in constant space.
+    Empty(u64),
+}
+
+impl Chan {
+    fn enqueue(&mut self, msg: Vec<u8>) {
+        if msg.is_empty() {
+            if let Some(Queued::Empty(n)) = self.q.back_mut() {
+                *n += 1;
+            } else {
+                self.q.push_back(Queued::Empty(1));
+            }
+        } else {
+            self.queued += msg.len();
+            self.q.push_back(Queued::Bytes(msg));
+        }
+    }
 }
 
 #[derive(Default)]
 struct State {
-    ctrl: VecDeque<Frame>,
+    ctrl: VecDeque<Control>,
     chans: HashMap<u16, Chan>,
+    generation: u64,
+    admissions: Vec<Weak<str>>,
     served: u64,
     next_id: u16,
     draining: bool,
+    protocol_error: Option<String>,
+    pong: Option<[u8; 8]>,
+    last_pong: Option<Instant>,
+}
+
+enum Control {
+    Frame(Frame),
+    Grant { id: u16, generation: u64, bytes: u32 },
 }
 
 struct Shared {
@@ -136,8 +237,14 @@ struct Shared {
     rtt_ns: AtomicU64,
     reason: Mutex<String>,
     shutdown: Box<dyn Fn() + Send + Sync>,
-    handler: Option<OpenHandler>,
+    lookup: Option<ServiceLookup>,
+    options: ConnOptions,
     hooks: Hooks,
+    /// how long a ping may go unanswered before the link is lost, ns ([`Conn::set_ping_limit`];
+    /// 0: never)
+    ping_limit_ns: AtomicU64,
+    /// when the oldest ping that nothing came back after went ([`mono_ns`], 0: none is out)
+    ping_out_ns: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -147,21 +254,75 @@ enum Work {
     Frame(Frame),
     Flush,
     Exit,
+    /// a ping went unanswered past the limit ([`Conn::set_ping_limit`])
+    Lost(String),
+    ProtocolError(String),
 }
 
 impl State {
     fn push_ctrl(&mut self, chan: u16, k: u8, payload: Vec<u8>) {
-        self.ctrl.push_back(Frame { chan, kind: k, flags: 0, payload });
+        self.push_ctrl_flags(chan, k, 0, payload);
     }
 
-    fn pick(&mut self) -> Option<Frame> {
-        if let Some(f) = self.ctrl.pop_front() {
-            return Some(f);
+    fn push_ctrl_flags(&mut self, chan: u16, kind: u8, flags: u8, payload: Vec<u8>) {
+        self.ctrl.push_back(Control::Frame(Frame { chan, kind, flags, payload }));
+    }
+
+    fn insert(&mut self, id: u16, service: &str, max_message: usize, tx: Sender<(Event, bool)>, hold: bool, admission: Option<Arc<str>>) -> u64 {
+        self.generation += 1;
+        let generation = self.generation;
+        self.chans.insert(id, Chan {
+            generation, prio: priority(service), credit: INITIAL_CREDIT, recv_credit: INITIAL_CREDIT,
+            q: VecDeque::new(), off: 0, queued: 0, tx, ungranted: 0, served: 0,
+            reasm: Vec::new(), max_message, partial: false, echo: false, hold, awaiting_ok: !hold,
+            close_after: None, _admission: admission,
+        });
+        generation
+    }
+
+    fn admit(&mut self, service: &str, cap: usize) -> Option<Arc<str>> {
+        let mut used = 0;
+        self.admissions.retain(|slot| {
+            let Some(name) = slot.upgrade() else { return false };
+            used += usize::from(&*name == service);
+            true
+        });
+        if used >= cap {
+            return None;
+        }
+        let slot: Arc<str> = service.into();
+        self.admissions.push(Arc::downgrade(&slot));
+        Some(slot)
+    }
+
+    fn push_close(&mut self, id: u16, code: u16, reason: &str) {
+        let mut payload = code.to_le_bytes().to_vec();
+        payload.extend_from_slice(reason.as_bytes());
+        self.push_ctrl(id, kind::CLOSE, payload);
+    }
+
+    fn pick(&mut self, slice: usize) -> Option<Frame> {
+        if let Some(cookie) = self.pong.take() {
+            self.last_pong = Some(Instant::now());
+            return Some(Frame { chan: 0, kind: kind::PONG, flags: 0, payload: cookie.to_vec() });
+        }
+        while let Some(ctrl) = self.ctrl.pop_front() {
+            match ctrl {
+                Control::Frame(f) => return Some(f),
+                Control::Grant { id, generation, bytes } => {
+                    // A retired channel's queued grant cannot credit a reuse of its wire id.
+                    if let Some(c) = self.chans.get_mut(&id).filter(|c| c.generation == generation) {
+                        c.recv_credit += bytes as usize;
+                        return Some(Frame { chan: id, kind: kind::CREDIT, flags: 0, payload: bytes.to_le_bytes().to_vec() });
+                    }
+                }
+            }
         }
         let mut best: Option<(u8, u64, u16)> = None;
         for (id, c) in &self.chans {
             let ready = !c.hold && match c.q.front() {
-                Some(m) => c.credit > 0 || (m.is_empty() && c.off == 0),
+                Some(Queued::Empty(_)) => true,
+                Some(Queued::Bytes(_)) => c.credit > 0,
                 None => c.close_after.is_some(),
             };
             if ready {
@@ -176,31 +337,49 @@ impl State {
         let served = self.served;
         let c = self.chans.get_mut(&id)?;
         c.served = served;
-        let Some(msg) = c.q.front() else {
+        let Some(next) = c.q.front_mut() else {
             let (code, reason) = c.close_after.take().unwrap_or((CLOSE_NORMAL, String::new()));
             self.chans.remove(&id);
             let mut p = code.to_le_bytes().to_vec();
             p.extend_from_slice(reason.as_bytes());
             return Some(Frame { chan: id, kind: kind::CLOSE, flags: 0, payload: p });
         };
-        let n = (msg.len() - c.off).min(c.credit).min(MAX_PAYLOAD);
-        let payload;
-        let more;
-        if c.off == 0 && n == msg.len() {
-            payload = c.q.pop_front().unwrap_or_default();
-            more = false;
-        } else {
-            payload = msg[c.off..c.off + n].to_vec();
-            c.off += n;
-            more = c.off < msg.len();
-            if !more {
-                c.q.pop_front();
-                c.off = 0;
+        let (payload, more) = match next {
+            Queued::Empty(count) => {
+                *count -= 1;
+                if *count == 0 {
+                    c.q.pop_front();
+                }
+                (Vec::new(), false)
             }
-        }
-        c.credit -= n;
-        c.queued -= n;
+            Queued::Bytes(msg) => {
+                let n = (msg.len() - c.off).min(c.credit).min(slice);
+                let more = c.off + n < msg.len();
+                let payload = if c.off == 0 && !more { std::mem::take(msg) } else { msg[c.off..c.off + n].to_vec() };
+                if more {
+                    c.off += n;
+                } else {
+                    c.q.pop_front();
+                    c.off = 0;
+                }
+                c.credit -= n;
+                c.queued -= n;
+                if c.echo {
+                    // A stalled reader holds at most its receive window in echoed bytes.
+                    Conn::credit(self, id, n);
+                }
+                (payload, more)
+            }
+        };
         Some(Frame { chan: id, kind: kind::DATA, flags: if more { FLAG_MORE } else { 0 }, payload })
+    }
+
+    fn queue_pong(&mut self, cookie: [u8; 8], now: Instant) -> bool {
+        if self.pong.is_some() || self.last_pong.is_some_and(|last| now.saturating_duration_since(last) < PONG_INTERVAL) {
+            return false;
+        }
+        self.pong = Some(cookie);
+        true
     }
 }
 
@@ -209,7 +388,18 @@ impl Conn {
     /// side that dialled (it allocates odd channel numbers, the other even). A connection with a
     /// `handler` serves its peer: its threads' CPU counts as served (else as asked).
     pub fn start(io: Io, peer: Hello, initiator: bool, handler: Option<OpenHandler>, hooks: Hooks) -> Conn {
-        let serves = handler.is_some();
+        Self::start_with_options(io, peer, initiator, handler, hooks, ConnOptions::default())
+    }
+
+    pub fn start_with_options(io: Io, peer: Hello, initiator: bool, handler: Option<OpenHandler>, hooks: Hooks, options: ConnOptions) -> Conn {
+        let lookup = handler.map(|handler| Arc::new(move |name: &str| Some(ServiceOpen {
+            limits: service_limits(name), handler: handler.clone(),
+        })) as ServiceLookup);
+        Self::start_registry(io, peer, initiator, lookup, hooks, options)
+    }
+
+    pub(crate) fn start_registry(io: Io, peer: Hello, initiator: bool, lookup: Option<ServiceLookup>, hooks: Hooks, options: ConnOptions) -> Conn {
+        let serves = lookup.is_some();
         let closed = Arc::new(AtomicBool::new(false));
         let mut reader = io.reader;
         reader.cancel = Some(closed.clone());
@@ -225,9 +415,17 @@ impl Conn {
             rtt_ns: AtomicU64::new(0),
             reason: Mutex::new(String::new()),
             shutdown: io.shutdown,
-            handler,
+            lookup,
+            options,
             hooks,
+            ping_limit_ns: AtomicU64::new(0),
+            ping_out_ns: AtomicU64::new(0),
         });
+        {
+            let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+            live.retain(|c| c.strong_count() > 0);
+            live.push(Arc::downgrade(&shared));
+        }
         let conn = Conn(shared);
         let (c1, c2) = (conn.clone(), conn.clone());
         let writer = io.writer;
@@ -286,6 +484,30 @@ impl Conn {
 
     pub fn ping(&self) {
         self.ctrl(0, kind::PING, mono_ns().to_le_bytes().to_vec());
+        self.ping_out();
+    }
+
+    /// Ends the connection as lost once a ping has gone `limit` with nothing back from the peer
+    /// (any frame answers it), and pings at least twice within `limit` while idle; zero (the
+    /// default) never does. A peer's reader answers pings whatever its services do, so only a
+    /// process that holds its end without serving it stays silent: a run that inherited a
+    /// master's connection kept it open past that master's exec into its next build, and a request
+    /// on it waited for good, never told the link had gone. Its open requests fail with
+    /// [`crate::link::Error::LinkLost`], and a client dials again for the next.
+    pub fn set_ping_limit(&self, limit: Duration) {
+        self.0.ping_limit_ns.store(limit.as_nanos().min(u64::MAX as u128) as u64, Relaxed);
+        self.0.work.notify_one();
+    }
+
+    /// A ping went: the oldest one out is the one the limit counts from.
+    fn ping_out(&self) {
+        let _ = self.0.ping_out_ns.compare_exchange(0, mono_ns().max(1), Relaxed, Relaxed);
+    }
+
+    /// Why the link is lost, once a ping has gone unanswered past the limit.
+    fn ping_lost(&self) -> Option<String> {
+        let (limit, out) = (self.0.ping_limit_ns.load(Relaxed), self.0.ping_out_ns.load(Relaxed));
+        (limit > 0 && out > 0 && mono_ns().saturating_sub(out) >= limit).then(|| format!("the peer answered no ping for {:.1} s", Duration::from_nanos(limit).as_secs_f32()))
     }
 
     /// Sends a channel-0 control message (see `hello`).
@@ -314,13 +536,17 @@ impl Conn {
     }
 
     fn terminate(&self, reason: &str) {
+        self.terminate_with(CLOSE_LINK_LOST, reason);
+    }
+
+    fn terminate_with(&self, code: u16, reason: &str) {
         if self.0.closed.swap(true, Relaxed) {
             return;
         }
         *self.0.reason.lock().unwrap() = reason.to_string();
         let chans = std::mem::take(&mut self.0.st.lock().unwrap().chans);
         for (_, c) in chans {
-            let _ = c.tx.send((Event::Closed(CLOSE_LINK_LOST, reason.to_string()), false));
+            let _ = c.tx.send((Event::Closed(code, reason.to_string()), false));
         }
         self.0.work.notify_all();
         self.0.space.notify_all();
@@ -333,18 +559,24 @@ impl Conn {
     }
 
     pub fn open_timeout(&self, service: &str, args: &str, wait: Duration) -> Result<Channel, (u16, String)> {
+        self.open_bounded(service, args, (self.0.options.open_max_message)(service), wait)
+    }
+
+    /// Opens a channel with a local ceiling on incoming DATA messages, including service
+    /// headers. A limit supplied by the service in OK can only lower this ceiling.
+    pub fn open_bounded(&self, service: &str, args: &str, max_message: usize, wait: Duration) -> Result<Channel, (u16, String)> {
         // OPEN is one control frame (only DATA is chunked). Refuse before
         // queueing so an oversized call cannot tear down the whole carrier.
         let bytes = service.len().saturating_add(1).saturating_add(args.len());
         if bytes > MAX_PAYLOAD {
             return Err((CLOSE_REFUSED, format!("the encoded call is {bytes} bytes; one call carries {MAX_PAYLOAD}. Send a smaller first part, then append the rest with the service's edit tool.")));
         }
-        if !self.is_usable() {
-            return Err((CLOSE_LINK_LOST, self.close_reason()));
-        }
         let (tx, rx) = channel();
-        let id = {
+        let (id, generation) = {
             let mut st = self.0.st.lock().unwrap();
+            if !self.is_usable() {
+                return Err((CLOSE_LINK_LOST, self.close_reason()));
+            }
             let mut id = st.next_id;
             let mut tries = 0u32;
             while st.chans.contains_key(&id) || id == 0 {
@@ -355,12 +587,12 @@ impl Conn {
                 }
             }
             st.next_id = id.wrapping_add(2);
-            st.chans.insert(id, new_chan(service, tx));
-            st.push_ctrl(id, kind::OPEN, format!("{service}\n{args}").into_bytes());
-            id
+            let generation = st.insert(id, service, max_message, tx, false, None);
+            st.push_ctrl_flags(id, kind::OPEN, FLAG_MESSAGE_LIMIT, format!("{service}\n{args}").into_bytes());
+            (id, generation)
         };
         self.0.work.notify_one();
-        let ch = Channel { tx: ChannelTx { conn: self.clone(), id }, rx };
+        let ch = Channel { tx: ChannelTx { conn: self.clone(), id, generation }, rx, close_on_drop: true };
         match ch.rx.recv_timeout(wait) {
             Ok((Event::Opened(_), _)) => Ok(ch),
             Ok((Event::Closed(code, reason), _)) => Err((code, reason)),
@@ -386,8 +618,10 @@ impl Conn {
                     return;
                 }
             };
+            // anything from the peer answers the pings out
+            self.0.ping_out_ns.store(0, Relaxed);
             if let Err(msg) = self.on_frame(f) {
-                self.close(&msg);
+                self.protocol_error(msg);
                 return;
             }
             if self.is_closed() {
@@ -396,8 +630,27 @@ impl Conn {
         }
     }
 
+    fn protocol_error(&self, reason: String) {
+        self.0.closing.store(true, Relaxed);
+        let mut st = self.0.st.lock().unwrap();
+        st.protocol_error = Some(reason.clone());
+        self.0.work.notify_one();
+        // A peer may also have stopped reading. Give the writer a chance to send CLOSE, then
+        // shut down the carrier to wake a blocked write and release the channels either way.
+        let (st, _) = self.0.space.wait_timeout_while(st, Duration::from_secs(1), |_| !self.is_closed()).unwrap();
+        drop(st);
+        self.terminate_with(CLOSE_PROTOCOL, &reason);
+    }
+
     fn on_frame(&self, f: Frame) -> Result<(), String> {
         match f.kind {
+            kind::PING if self.0.options.strict => {
+                if let (0, Ok(cookie)) = (f.chan, f.payload.as_slice().try_into()) {
+                    if self.0.st.lock().unwrap().queue_pong(cookie, Instant::now()) {
+                        self.0.work.notify_one();
+                    }
+                }
+            }
             kind::PING => self.ctrl(0, kind::PONG, f.payload),
             kind::PONG => {
                 if let Ok(b) = <[u8; 8]>::try_from(f.payload.as_slice()) {
@@ -407,30 +660,63 @@ impl Conn {
             kind::DATA if f.chan == 0 => self.on_control(&f.payload),
             kind::OPEN => self.on_open(f)?,
             kind::OK => {
-                let st = self.0.st.lock().unwrap();
-                if let Some(c) = st.chans.get(&f.chan) {
-                    let _ = c.tx.send((Event::Opened(String::from_utf8_lossy(&f.payload).into_owned()), false));
+                let mut st = self.0.st.lock().unwrap();
+                if let Some(c) = st.chans.get_mut(&f.chan) {
+                    if !c.awaiting_ok {
+                        return if self.0.options.strict { Err(format!("unexpected OK on channel {}", f.chan)) } else { Ok(()) };
+                    }
+                    c.awaiting_ok = false;
+                    let mut caps = f.payload.as_slice();
+                    if f.flags & FLAG_MESSAGE_LIMIT != 0 {
+                        let (limit, rest) = caps.split_at_checked(8).ok_or_else(|| format!("short OK limit on channel {}", f.chan))?;
+                        let limit = usize::try_from(u64::from_le_bytes(limit.try_into().unwrap())).unwrap_or(usize::MAX);
+                        c.max_message = c.max_message.min(limit);
+                        caps = rest;
+                    }
+                    let _ = c.tx.send((Event::Opened(String::from_utf8_lossy(caps).into_owned()), false));
                 }
             }
             kind::DATA => {
                 let mut st = self.0.st.lock().unwrap();
                 let mut credit = None;
                 if let Some(c) = st.chans.get_mut(&f.chan) {
-                    // the pieces of a long message are credited as they arrive: the consumer
-                    // sees the message only whole, and the sender needs the credit to finish it
+                    if c.awaiting_ok {
+                        return Err(format!("DATA before OK on channel {}", f.chan));
+                    }
                     let n = f.payload.len();
-                    if f.flags & FLAG_MORE != 0 {
+                    c.recv_credit = c.recv_credit.checked_sub(n).ok_or_else(|| {
+                        format!("DATA on channel {} uses {n} bytes with {} bytes of credit left", f.chan, c.recv_credit)
+                    })?;
+                    let size = c.reasm.len().saturating_add(n);
+                    if size > c.max_message {
+                        let reason = format!("channel {} message is {size} bytes; the limit is {}", f.chan, c.max_message);
+                        let _ = c.tx.send((Event::Closed(CLOSE_PROTOCOL, reason.clone()), false));
+                        st.chans.remove(&f.chan);
+                        st.push_close(f.chan, CLOSE_PROTOCOL, &reason);
+                        drop(st);
+                        self.0.space.notify_all();
+                        self.0.work.notify_one();
+                        return Ok(());
+                    }
+                    let more = f.flags & FLAG_MORE != 0;
+                    let fragmented = more || c.partial;
+                    // Only a message that can exceed the remaining window needs intermediate
+                    // grants. Strict short messages keep their credit until the consumer drains.
+                    let precredit = fragmented && !c.echo && (!self.0.options.strict || c.max_message > INITIAL_CREDIT - GRANT_AT);
+                    let data = if fragmented {
                         c.reasm.extend_from_slice(&f.payload);
-                        c.partial = true;
+                        c.partial = more;
+                        (!more).then(|| std::mem::take(&mut c.reasm))
+                    } else { Some(f.payload) };
+                    if precredit {
                         credit = Some(n);
-                    } else if c.partial {
-                        c.reasm.extend_from_slice(&f.payload);
-                        c.partial = false;
-                        let data = std::mem::take(&mut c.reasm);
-                        let _ = c.tx.send((Event::Data(data), true));
-                        credit = Some(n);
-                    } else {
-                        let _ = c.tx.send((Event::Data(f.payload), false));
+                    }
+                    if let Some(data) = data {
+                        if c.echo {
+                            c.enqueue(data);
+                        } else {
+                            let _ = c.tx.send((Event::Data(data), precredit));
+                        }
                     }
                 }
                 if let Some(n) = credit {
@@ -443,17 +729,21 @@ impl Conn {
                 if let Ok(b) = <[u8; 4]>::try_from(f.payload.as_slice()) {
                     let mut st = self.0.st.lock().unwrap();
                     if let Some(c) = st.chans.get_mut(&f.chan) {
-                        c.credit += u32::from_le_bytes(b) as usize;
+                        c.credit = c.credit.saturating_add(u32::from_le_bytes(b) as usize);
                         drop(st);
                         self.0.work.notify_one();
                     }
                 }
             }
             kind::CLOSE => {
+                let code = f.payload.get(..2).map_or(CLOSE_NORMAL, |b| u16::from_le_bytes([b[0], b[1]]));
+                let reason = f.payload.get(2..).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+                if f.chan == 0 {
+                    self.terminate_with(code, &reason);
+                    return Ok(());
+                }
                 let mut st = self.0.st.lock().unwrap();
                 if let Some(c) = st.chans.remove(&f.chan) {
-                    let code = f.payload.get(..2).map_or(CLOSE_NORMAL, |b| u16::from_le_bytes([b[0], b[1]]));
-                    let reason = f.payload.get(2..).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
                     let _ = c.tx.send((Event::Closed(code, reason), false));
                     drop(st);
                     self.0.space.notify_all();
@@ -474,37 +764,53 @@ impl Conn {
     }
 
     fn on_open(&self, f: Frame) -> Result<(), String> {
-        let text = String::from_utf8_lossy(&f.payload).into_owned();
-        let (service, args) = text.split_once('\n').map_or((text.as_str(), ""), |(a, b)| (a, b));
-        let (tx, rx) = channel();
-        {
-            let mut st = self.0.st.lock().unwrap();
-            if f.chan == 0 || st.chans.contains_key(&f.chan) {
-                return Err(format!("OPEN of channel {} which is already in use", f.chan));
-            }
-            let mut c = new_chan(service, tx);
-            c.hold = true;
-            st.chans.insert(f.chan, c);
+        let text = String::from_utf8_lossy(&f.payload);
+        let (service, args) = text.split_once('\n').unwrap_or((&text, ""));
+        let found = self.0.lookup.as_ref().and_then(|lookup| lookup(service));
+        let mut st = self.0.st.lock().unwrap();
+        if f.chan == 0 || st.chans.contains_key(&f.chan) {
+            return Err(format!("OPEN of channel {} which is already in use", f.chan));
         }
-        let channel = Channel { tx: ChannelTx { conn: self.clone(), id: f.chan }, rx };
-        let open = Open { service: service.to_string(), args: args.to_string(), channel };
-        let answer = match &self.0.handler {
-            Some(h) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h(self, open))).unwrap_or_else(|_| Err((CLOSE_REFUSED, "the service failed to open".into()))),
-            None => Err((CLOSE_UNSUPPORTED, format!("unsupported service {service}"))),
+        let Some(svc) = found else {
+            let reason = if service.len() <= 255 { format!("unsupported service {service}") } else { "unsupported service".into() };
+            st.push_close(f.chan, CLOSE_UNSUPPORTED, &reason);
+            self.0.work.notify_one();
+            return Ok(());
         };
+        let admission = if self.0.options.strict {
+            let Some(slot) = st.admit(service, svc.limits.max_channels) else {
+                st.push_close(f.chan, CLOSE_REFUSED, &format!("all {} channels of {service} are in use", svc.limits.max_channels));
+                self.0.work.notify_one();
+                return Ok(());
+            };
+            Some(slot)
+        } else { None };
+        let (tx, rx) = channel();
+        // Only a strict link bounds a message (see `ConnOptions::default`).
+        let max_message = if self.0.options.strict { svc.limits.max_message } else { usize::MAX };
+        let generation = st.insert(f.chan, service, max_message, tx, true, admission);
+        drop(st);
+        let channel = Channel { tx: ChannelTx { conn: self.clone(), id: f.chan, generation }, rx, close_on_drop: true };
+        let open = Open { service: service.to_string(), args: args.to_string(), channel };
+        let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (svc.handler)(self, open)))
+            .unwrap_or_else(|_| Err((CLOSE_REFUSED, "the service failed to open".into())));
         let mut st = self.0.st.lock().unwrap();
         match answer {
             Ok(caps) => {
                 if let Some(c) = st.chans.get_mut(&f.chan) {
                     c.hold = false;
                 }
-                st.push_ctrl(f.chan, kind::OK, caps.into_bytes());
+                if f.flags & FLAG_MESSAGE_LIMIT != 0 && caps.len() <= MAX_PAYLOAD - 8 {
+                    let mut payload = (max_message as u64).to_le_bytes().to_vec();
+                    payload.extend_from_slice(caps.as_bytes());
+                    st.push_ctrl_flags(f.chan, kind::OK, FLAG_MESSAGE_LIMIT, payload);
+                } else {
+                    st.push_ctrl(f.chan, kind::OK, caps.into_bytes());
+                }
             }
             Err((code, reason)) => {
                 st.chans.remove(&f.chan);
-                let mut p = code.to_le_bytes().to_vec();
-                p.extend_from_slice(reason.as_bytes());
-                st.push_ctrl(f.chan, kind::CLOSE, p);
+                st.push_close(f.chan, code, &reason);
             }
         }
         drop(st);
@@ -526,7 +832,10 @@ impl Conn {
                     if self.is_closed() {
                         return;
                     }
-                    if let Some(f) = st.pick() {
+                    if let Some(reason) = st.protocol_error.take() {
+                        break Work::ProtocolError(reason);
+                    }
+                    if let Some(f) = st.pick(self.0.options.frame_slice) {
                         break Work::Frame(f);
                     }
                     if !flushed {
@@ -535,10 +844,17 @@ impl Conn {
                     if st.draining {
                         break Work::Exit;
                     }
-                    let (g, to) = self.0.work.wait_timeout(st, KEEPALIVE).unwrap();
+                    if let Some(why) = self.ping_lost() {
+                        break Work::Lost(why);
+                    }
+                    // a ping limit pings at least twice within it
+                    let limit = self.0.ping_limit_ns.load(Relaxed);
+                    let every = if limit == 0 { KEEPALIVE } else { KEEPALIVE.min(Duration::from_nanos(limit / 2)) };
+                    let (g, to) = self.0.work.wait_timeout(st, every).unwrap();
                     st = g;
-                    if to.timed_out() && idle_since.elapsed() >= KEEPALIVE {
+                    if to.timed_out() && idle_since.elapsed() >= every {
                         st.push_ctrl(0, kind::PING, mono_ns().to_le_bytes().to_vec());
+                        self.ping_out();
                     }
                 }
             };
@@ -561,6 +877,18 @@ impl Conn {
                     self.terminate("closed");
                     return;
                 }
+                Work::Lost(why) => {
+                    self.terminate(&why);
+                    return;
+                }
+                Work::ProtocolError(reason) => {
+                    let mut payload = CLOSE_PROTOCOL.to_le_bytes().to_vec();
+                    payload.extend_from_slice(reason.as_bytes());
+                    let _ = write_frame(&mut w, 0, kind::CLOSE, 0, &payload);
+                    let _ = w.flush();
+                    self.terminate_with(CLOSE_PROTOCOL, &reason);
+                    return;
+                }
             };
             if let Err(e) = r {
                 self.terminate(&format!("write failed: {e}"));
@@ -569,26 +897,15 @@ impl Conn {
         }
     }
 
-    fn grant(&self, id: u16, n: usize) {
-        let mut st = self.0.st.lock().unwrap();
-        Self::credit(&mut st, id, n);
-        drop(st);
-        self.0.work.notify_one();
-    }
-
     /// Counts `n` consumed bytes of channel `id`; hands the sender more credit past a quarter window.
     fn credit(st: &mut State, id: u16, n: usize) {
         let Some(c) = st.chans.get_mut(&id) else { return };
         c.ungranted += n;
         if c.ungranted >= GRANT_AT {
             let g = std::mem::take(&mut c.ungranted) as u32;
-            st.push_ctrl(id, kind::CREDIT, g.to_le_bytes().to_vec());
+            st.ctrl.push_back(Control::Grant { id, generation: c.generation, bytes: g });
         }
     }
-}
-
-fn new_chan(service: &str, tx: Sender<(Event, bool)>) -> Chan {
-    Chan { prio: priority(service), credit: INITIAL_CREDIT, q: VecDeque::new(), off: 0, queued: 0, tx, ungranted: 0, served: 0, reasm: Vec::new(), partial: false, hold: false, close_after: None }
 }
 
 /// The sending half of a channel; cloneable, usable from any thread.
@@ -596,9 +913,14 @@ fn new_chan(service: &str, tx: Sender<(Event, bool)>) -> Chan {
 pub struct ChannelTx {
     conn: Conn,
     id: u16,
+    generation: u64,
 }
 
 impl ChannelTx {
+    fn current<'a>(&self, st: &'a mut State) -> Option<&'a mut Chan> {
+        st.chans.get_mut(&self.id).filter(|c| c.generation == self.generation)
+    }
+
     pub fn id(&self) -> u16 {
         self.id
     }
@@ -610,15 +932,14 @@ impl ChannelTx {
     /// Queues `msg` unless the queue is full (never blocks).
     pub fn try_send(&self, msg: Vec<u8>) -> Result<(), SendError> {
         let mut st = self.conn.0.st.lock().unwrap();
-        let Some(c) = st.chans.get_mut(&self.id) else { return Err(SendError::Closed) };
+        let Some(c) = self.current(&mut st) else { return Err(SendError::Closed) };
         if c.close_after.is_some() {
             return Err(SendError::Closed);
         }
         if c.queued > 0 && c.queued + msg.len() > QUEUE_CAP {
             return Err(SendError::Full(msg));
         }
-        c.queued += msg.len();
-        c.q.push_back(msg);
+        c.enqueue(msg);
         drop(st);
         self.conn.0.work.notify_one();
         Ok(())
@@ -632,13 +953,12 @@ impl ChannelTx {
             if self.conn.is_closed() {
                 return Err(broken());
             }
-            let Some(c) = st.chans.get_mut(&self.id) else { return Err(broken()) };
+            let Some(c) = self.current(&mut st) else { return Err(broken()) };
             if c.close_after.is_some() {
                 return Err(broken());
             }
             if c.queued == 0 || c.queued + msg.len() <= QUEUE_CAP {
-                c.queued += msg.len();
-                c.q.push_back(msg);
+                c.enqueue(msg);
                 drop(st);
                 self.conn.0.work.notify_one();
                 return Ok(());
@@ -650,10 +970,22 @@ impl ChannelTx {
     /// Closes the channel once what is queued has been sent.
     pub fn close(&self, code: u16, reason: &str) {
         let mut st = self.conn.0.st.lock().unwrap();
-        if let Some(c) = st.chans.get_mut(&self.id) {
-            if c.close_after.is_none() {
-                c.close_after = Some((code, reason.to_string()));
+        let now = match self.current(&mut st) {
+            // Nothing left to send (and answered, if the peer opened it): the CLOSE goes out in
+            // order with the control frames, so an OPEN queued after it can't overtake it and
+            // find the peer still counting this channel against the service's cap.
+            Some(c) if !c.hold && c.q.is_empty() && c.close_after.is_none() => true,
+            Some(c) => {
+                if c.close_after.is_none() {
+                    c.close_after = Some((code, reason.to_string()));
+                }
+                false
             }
+            None => false,
+        };
+        if now {
+            st.chans.remove(&self.id);
+            st.push_close(self.id, code, reason);
         }
         drop(st);
         self.conn.0.work.notify_one();
@@ -667,9 +999,19 @@ pub struct Channel {
     tx: ChannelTx,
     /// (event, its credit was already granted when its fragments arrived)
     rx: Receiver<(Event, bool)>,
+    close_on_drop: bool,
 }
 
 impl Channel {
+    /// Transfer a short-message echo service to the reader. Its writer returns the credit as it
+    /// sends replies, so the reader never waits for space or a worker.
+    pub(crate) fn echo_on_reader(mut self) {
+        if let Some(c) = self.tx.current(&mut self.conn().0.st.lock().unwrap()) {
+            c.echo = true;
+        }
+        self.close_on_drop = false;
+    }
+
     pub fn id(&self) -> u16 {
         self.tx.id
     }
@@ -696,7 +1038,12 @@ impl Channel {
 
     fn got(&self, (e, granted): (Event, bool)) -> Event {
         if let (Event::Data(d), false) = (&e, granted) {
-            self.tx.conn.grant(self.tx.id, d.len());
+            let mut st = self.conn().0.st.lock().unwrap();
+            if self.tx.current(&mut st).is_some() {
+                Conn::credit(&mut st, self.id(), d.len());
+                drop(st);
+                self.conn().0.work.notify_one();
+            }
         }
         e
     }
@@ -726,6 +1073,46 @@ impl Channel {
 
 impl Drop for Channel {
     fn drop(&mut self) {
-        self.tx.close(CLOSE_NORMAL, "");
+        if self.close_on_drop {
+            self.tx.close(CLOSE_NORMAL, "");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_pongs_have_one_pending_reply_and_no_burst() {
+        let mut st = State::default();
+        let now = Instant::now();
+        for i in 0..20 {
+            assert_eq!(st.queue_pong([i; 8], now), i == 0);
+        }
+        assert_eq!(st.pick(STRICT_SLICE).unwrap().payload, [0; 8]);
+        let sent = st.last_pong.unwrap();
+        for ms in 0..250 {
+            assert!(!st.queue_pong([1; 8], sent + Duration::from_millis(ms)));
+        }
+        assert!(st.pick(STRICT_SLICE).is_none(), "excess PINGs left work for the writer");
+        assert!(st.queue_pong([2; 8], sent + PONG_INTERVAL));
+        assert_eq!(st.pick(STRICT_SLICE).unwrap().payload, [2; 8]);
+    }
+
+    #[test]
+    fn writer_rechecks_priority_between_slices() {
+        let mut st = State::default();
+        st.insert(1, "stream", INITIAL_CREDIT, channel().0, false, None);
+        st.insert(3, "cmd", INITIAL_CREDIT, channel().0, false, None);
+        let slice = ConnOptions::strict().frame_slice;
+        st.chans.get_mut(&1).unwrap().enqueue(vec![0; 2 * slice]);
+        let first = st.pick(slice).unwrap();
+        assert_eq!((first.chan, first.payload.len(), first.flags), (1, 16 << 10, FLAG_MORE));
+        st.chans.get_mut(&3).unwrap().enqueue(b"cmd".to_vec());
+        let urgent = st.pick(slice).unwrap();
+        assert_eq!((urgent.chan, urgent.payload.as_slice()), (3, &b"cmd"[..]));
+        let last = st.pick(slice).unwrap();
+        assert_eq!((last.chan, last.payload.len(), last.flags), (1, 16 << 10, 0));
     }
 }

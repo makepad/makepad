@@ -3,14 +3,13 @@
 //! still exports.
 
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
-use std::os::fd::AsRawFd;
+use std::io;
+use std::net::TcpStream;
 use std::ptr;
 
 use crate::backend::linux::socket_stream::{
-    init_openssl, ERR_error_string_n, ERR_get_error, SSL_CTX_free, SSL_CTX_new, SSL_free,
-    SSL_get_error, SSL_new, SSL_pending, SSL_read, SSL_set_fd, SSL_shutdown, SSL_write, SSL, SSL_CTX, SSL_METHOD,
+    init_openssl, ERR_error_string_n, ERR_get_error, SSL_CTX_free, SSL_CTX_new,
+    SSL_CTX_ctrl, SSL_CTX_set_cipher_list, NativeEngine, SSL_CTX, SSL_METHOD,
 };
 use crate::tls::x509;
 
@@ -18,12 +17,9 @@ use crate::tls::x509;
 #[link(name = "crypto")]
 extern "C" {
     fn TLS_server_method() -> *const SSL_METHOD;
-    fn SSL_CTX_ctrl(ctx: *mut SSL_CTX, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
-    fn SSL_CTX_set_cipher_list(ctx: *mut SSL_CTX, list: *const c_char) -> c_int;
     fn SSL_CTX_use_certificate_ASN1(ctx: *mut SSL_CTX, len: c_int, der: *const u8) -> c_int;
     fn SSL_CTX_use_PrivateKey_ASN1(kind: c_int, ctx: *mut SSL_CTX, der: *const u8, len: c_long) -> c_int;
     fn SSL_CTX_check_private_key(ctx: *const SSL_CTX) -> c_int;
-    fn SSL_accept(ssl: *mut SSL) -> c_int;
 
     fn EC_KEY_new_by_curve_name(nid: c_int) -> *mut c_void;
     fn EC_KEY_generate_key(key: *mut c_void) -> c_int;
@@ -71,11 +67,6 @@ const EVP_PKEY_EC: c_int = 408;
 const POINT_CONVERSION_UNCOMPRESSED: c_int = 4;
 const SSL_CTRL_SET_MIN_PROTO_VERSION: c_int = 123;
 const TLS1_2_VERSION: c_long = 0x0303;
-const SSL_ERROR_WANT_READ: c_int = 2;
-const SSL_ERROR_WANT_WRITE: c_int = 3;
-const SSL_ERROR_SYSCALL: c_int = 5;
-const SSL_ERROR_ZERO_RETURN: c_int = 6;
-
 fn ssl_error(what: &str) -> io::Error {
     let code = unsafe { ERR_get_error() };
     let mut buf = [0 as c_char; 256];
@@ -231,26 +222,13 @@ impl ServerConfig {
         }
     }
 
+    pub(crate) fn engine(&self, strict: bool) -> io::Result<NativeEngine> {
+        NativeEngine::from_context(self.ctx, true, strict)
+    }
+
     pub fn accept(&self, tcp: TcpStream) -> io::Result<ServerStream> {
-        unsafe {
-            let ssl = SSL_new(self.ctx);
-            if ssl.is_null() {
-                return Err(ssl_error("SSL_new"));
-            }
-            let stream = ServerStream { tcp, ssl };
-            if SSL_set_fd(ssl, stream.tcp.as_raw_fd()) != 1 {
-                return Err(ssl_error("SSL_set_fd"));
-            }
-            let ret = SSL_accept(ssl);
-            if ret != 1 {
-                let err = SSL_get_error(ssl, ret);
-                if err == SSL_ERROR_SYSCALL || err == SSL_ERROR_WANT_READ {
-                    return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "TLS handshake aborted or timed out"));
-                }
-                return Err(ssl_error("SSL_accept"));
-            }
-            Ok(stream)
-        }
+        let engine = crate::tls::TlsEngine::start(self.engine(false)?, None, false, None)?;
+        ServerStream::handshake(tcp, engine, None)
     }
 }
 
@@ -260,84 +238,7 @@ impl Drop for ServerConfig {
     }
 }
 
-pub struct ServerStream {
-    tcp: TcpStream,
-    ssl: *mut SSL,
-}
-
-unsafe impl Send for ServerStream {}
-
-impl ServerStream {
-    pub fn tcp(&self) -> &TcpStream {
-        &self.tcp
-    }
-
-    /// Plaintext the TLS layer holds already: a read returns it without
-    /// waiting on the socket. A reader that waits for input on the socket
-    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
-    pub fn buffered(&self) -> usize {
-        unsafe { SSL_pending(self.ssl) }.max(0) as usize
-    }
-
-    pub fn shutdown(&mut self) {
-        unsafe { SSL_shutdown(self.ssl) };
-        let _ = self.tcp.shutdown(Shutdown::Both);
-    }
-
-    fn map_error(&self, ret: c_int, what: &str) -> io::Error {
-        match unsafe { SSL_get_error(self.ssl, ret) } {
-            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => {
-                io::Error::new(io::ErrorKind::WouldBlock, format!("{what} would block"))
-            }
-            SSL_ERROR_SYSCALL => {
-                let os = io::Error::last_os_error();
-                io::Error::new(os.kind(), format!("{what}: {os}"))
-            }
-            _ => ssl_error(what),
-        }
-    }
-}
-
-impl Drop for ServerStream {
-    fn drop(&mut self) {
-        unsafe { SSL_free(self.ssl) };
-    }
-}
-
-impl Read for ServerStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let len = buf.len().min(c_int::MAX as usize) as c_int;
-        let ret = unsafe { SSL_read(self.ssl, buf.as_mut_ptr() as *mut c_void, len) };
-        if ret > 0 {
-            return Ok(ret as usize);
-        }
-        if unsafe { SSL_get_error(self.ssl, ret) } == SSL_ERROR_ZERO_RETURN {
-            return Ok(0);
-        }
-        Err(self.map_error(ret, "SSL_read"))
-    }
-}
-
-impl Write for ServerStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let len = buf.len().min(c_int::MAX as usize) as c_int;
-        let ret = unsafe { SSL_write(self.ssl, buf.as_ptr() as *const c_void, len) };
-        if ret > 0 {
-            return Ok(ret as usize);
-        }
-        Err(self.map_error(ret, "SSL_write"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
+pub(crate) type ServerStream = crate::tls::engine::SocketPump;
 
 #[cfg(test)]
 mod tests {

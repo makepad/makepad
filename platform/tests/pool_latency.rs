@@ -54,7 +54,7 @@ fn main() {
         burners.push(
             pool.submit(Class::Background, move || {
                 started.fetch_add(1, Ordering::AcqRel);
-                if current_class() != Some(Class::Background) || makepad_cpu_budget::thread_class() != Some(BACKGROUND) {
+                if current_class() != Some(Class::Background) || makepad_cpu_budget::applied_thread_class() != Some(BACKGROUND) {
                     misclassed.fetch_add(1, Ordering::Relaxed);
                 }
                 let mut value = seed as u64 + 1;

@@ -160,6 +160,7 @@ impl Cx {
             self.enable_pick_variants();
         }
         self.hal.frames.open(info.session, info);
+        self.register_async_load_probe("glyph", Cx::hal_glyph_requests_unanswered);
         self.hal.events = Some(EventStore::new(info.session, 512, self.hal.event_arena.room()));
         super::register_wake_session(info.session);
     }
@@ -172,6 +173,11 @@ impl Cx {
         self.gpu_info.float16_blend_targets = supports(makepad_hal::format::RGBA16F);
         self.gpu_info.mixed_output_passes = info.backend != makepad_hal::backend_id::VULKAN
             || info.flags & info_flags::MIXED_OUTPUT_PASSES != 0;
+        self.gpu_info.volume = Some(crate::texture::VolumeCaps {
+            max_dimension: info.max_volume_dimension,
+            r8_unorm: info.volume_formats & (1 << makepad_hal::format::R8) != 0,
+            rgba8_unorm: info.volume_formats & (1 << makepad_hal::format::RGBA8) != 0,
+        });
         self.gpu_info.texture_bc7 = supports(makepad_hal::format::BC7);
         self.gpu_info.texture_astc4x4 = supports(makepad_hal::format::ASTC4X4);
         self.gpu_info.max_texture_size = info.max_texture as usize;
@@ -304,7 +310,7 @@ impl Cx {
         let round = crate::first_draw::Round {
             painted: self.window_paints != 0,
             window: self.first_draw_window(),
-            hidden: self.hosted_frames_held(),
+            hidden: self.frames_held(),
             work: self.hal_has_work(),
             reasked,
         };
@@ -337,13 +343,13 @@ impl Cx {
     /// (`hal_frame_work`) and for NextFrame requests to dispatch.
     pub(super) fn hal_has_work(&self) -> bool {
         self.hal_frame_work()
-            || (!self.hosted_frames_held() && !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled())
+            || (!self.frames_held() && !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled())
     }
 
     /// The work a beat has for a frame, NextFrame requests aside: those ask for a beat, which
     /// draws only if a handler asks for a draw. The frame trace's due frame (`hal_trace_turn`).
     fn hal_frame_work(&self) -> bool {
-        if self.hosted_frames_held() {
+        if self.frames_held() {
             return false;
         }
         #[cfg(target_os = "android")]
@@ -374,7 +380,7 @@ impl Cx {
     /// How long the loop can sleep before it asks for the next `time_fps` frame, or `None` when
     /// no frame is coming or none can paint (a hosted child that's held, a lost GPU or surface).
     fn hal_time_repaint_wait_ns(&self) -> Option<u64> {
-        if self.hal.device_lost || self.hal.surface_lost || self.hosted_frames_held() {
+        if self.hal.device_lost || self.hal.surface_lost || self.frames_held() {
             return None;
         }
         let at = self.hal_time_repaint_ask_at()?;
@@ -525,9 +531,9 @@ impl Cx {
                 match requested.filter(|_| display_clock && self.hal_has_work()) {
                     // Android's shell holds a paused app's request till it's back, so it sleeps meanwhile
                     #[cfg(target_os = "android")]
-                    Some(_) if makepad_hal::backend::android::jni::frame_requests_held() => u64::MAX,
+                    Some(_) if makepad_hal::hal_frame_requests_held() => u64::MAX,
                     Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
-                    // (a run that beat and painted nothing wakes to count its rounds: `first_draw`)
+                    // A missing draw wakes to count idle rounds. A held draw already has a wake coming.
                     None if self.first_draw.armed() && self.first_draw_window() => {
                         crate::first_draw::IDLE_ROUND_NS.min(self.hal_time_repaint_wait_ns().unwrap_or(u64::MAX))
                     }
@@ -849,7 +855,6 @@ impl Cx {
             eprintln!("[hal-client] session={} submitting window FramePackets targets={:?}", self.hal.frames.w.session(), self.hal.frames.window_frames);
         }
         if !self.hal.frames.window_frames.is_empty() {
-            crate::cx::relax_before_first_frame();
             makepad_hal::profile::submitted();
         }
         hal_submit(&buf);
@@ -961,7 +966,7 @@ impl Cx {
             self.hal_poll_software_videos();
         }
         self.run_live_edit_if_needed("hal");
-        if !self.hosted_frames_held() {
+        if !self.frames_held() {
             // a frame drawn only to answer a tree request is the request's CPU, not the app's
             let answering = self.a11y_answer_frame.is_some().then(makepad_hal::clock::thread_cpu_ns);
             let drawn = self.hal_draw_frame();
@@ -980,6 +985,9 @@ impl Cx {
         let mut did_gc = false;
         // (a design re-run's garbage: collected after the draw that shows the edit)
         let rerun = std::mem::take(&mut self.gc_after_draw);
+        if rerun {
+            self.report_live_shader_switches();
+        }
         let t_gc = rerun.then(Cx::time_now);
         self.with_vm(|vm| {
             if rerun || vm.heap().needs_gc() {
@@ -1260,7 +1268,7 @@ impl Cx {
     /// Android's `OsType` carries the Activity's paths, density and versions, which can come after
     /// the app starts and come again with each configuration change (followed by a `Display`).
     pub(crate) fn hal_update_android_os_type(&mut self) {
-        let params = makepad_hal::backend::android::AndroidBackend::params();
+        let params = makepad_hal::hal_android_params();
         if params.data_path.is_empty() {
             return;
         }

@@ -11,7 +11,7 @@ use crate::spirv::SpirvSampler;
 pub struct HlslPipeline {
     pub source: String,
     /// Texture shapes in register order (t0..): 0 = 2D, 1 = cube, 2 = array, 3 = depth,
-    /// 4 = depth array, 5 = uint.
+    /// 4 = depth array, 5 = uint, 7 = volume.
     pub textures: Vec<u32>,
     /// Sampler states in register order (s0..).
     pub samplers: Vec<SpirvSampler>,
@@ -42,7 +42,7 @@ impl HlslPipeline {
             return Err("invalid HAL HLSL payload lengths".into());
         }
         let textures: Vec<u32> = (4..4 + nt).map(|i| word(i).unwrap()).collect();
-        if textures.iter().any(|t| *t > 5) {
+        if textures.iter().any(|t| !matches!(*t, 0..=5 | crate::TEXTURE_SHAPE_3D)) {
             return Err("invalid HLSL texture shape".into());
         }
         let mut samplers = Vec::with_capacity(ns);
@@ -67,13 +67,22 @@ mod tests {
     fn a_payload_round_trips() {
         let p = HlslPipeline {
             source: "float4 pixel_main() : SV_TARGET0 { return 1; }".into(),
-            textures: vec![0, 1, 2, 3],
+            textures: vec![0, 1, 2, 3, crate::TEXTURE_SHAPE_3D],
             samplers: vec![
                 SpirvSampler { filter: 1, address: 1, compare: true, pixel: false, anisotropy: 1 },
                 SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 16 },
             ],
         };
-        assert_eq!(HlslPipeline::decode(&p.encode()).unwrap(), p);
+        let decoded = HlslPipeline::decode(&p.encode()).unwrap();
+        assert_eq!(decoded, p);
         assert!(HlslPipeline::decode(&p.encode()[..10]).is_err());
+        use crate::backend::exec::{check_sampled_shapes, PipeStatus};
+        let mut device = crate::HalInfo { backend: crate::backend_id::D3D11, ..Default::default() };
+        let layout = |info: &crate::HalInfo| check_sampled_shapes(info, decoded.textures.iter().copied());
+        assert!(matches!(layout(&device), Err(PipeStatus::Unsupported("volume textures aren't available on D3D11 yet"))));
+        assert!(check_sampled_shapes(&device, [0, 1, 2, 3].into_iter()).is_ok(), "2D, cube, array and depth layouts still work");
+        device.volume_formats = 1 << crate::format::R8;
+        device.max_volume_dimension = 32;
+        assert!(layout(&device).is_ok(), "advertised volume support admits the same reflected layout");
     }
 }

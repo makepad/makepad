@@ -30,7 +30,35 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// A one-shot capture of the main window's next presented frame, delivered in memory
+/// ([`crate::Cx::capture_next_frame`]): its PNG (or why there is none: the readback or the
+/// encoding failed) is put here on the thread that makes it, and the caller takes it with
+/// [`FrameCapture::take`] (a brief lock, no file system), so a UI thread can wait for it frame by
+/// frame without touching a file.
+#[derive(Clone, Debug)]
+pub struct FrameCapture {
+    pub(crate) request_id: u64,
+    pub(crate) result: Arc<Mutex<Option<Result<Vec<u8>, String>>>>,
+}
+
+impl FrameCapture {
+    /// The request's id, for [`crate::Cx::cancel_frame_capture`].
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    /// The frame's PNG, or why the frame could not be captured; `None` until its frame has
+    /// presented and been encoded, and after it was taken.
+    pub fn take(&self) -> Option<Result<Vec<u8>, String>> {
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub(crate) fn put(&self, result: Result<Vec<u8>, String>) {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+    }
+}
 
 pub struct ScreenCaptureFrame<'a> {
     /// The window the presenting pass belongs to, when the backend knows it.

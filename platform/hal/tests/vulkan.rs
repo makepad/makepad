@@ -725,6 +725,59 @@ fn steady_upload_frames_allocate_no_arenas() {
     assert!(hal.close(sid));
 }
 
+/// A steady clear uses one slot. At each burst the frame-completion batch must return from its
+/// callback before it can give its slot back. The callback waits until the clear is submitted,
+/// so both batches hold a slot even if the GPU has already finished the first one. Between the
+/// bursts the clears go on for longer than a reset slot may idle (5.5 s of the HAL clock, moved
+/// by the test): an app that keeps submitting goes round all its slots, so the second burst
+/// finds the first one's slot.
+#[cfg(target_os = "linux")]
+#[test]
+fn recurring_bursts_reuse_their_batch_slot() {
+    let (hal, info) = open();
+    let sid = info.session;
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(TEX, usage::RENDER_TARGET, format::RGBA8, 1, 1, [1, 1], Attr::default());
+    hal.submit(&w.buf());
+    let mut frame = 0;
+    let mut submit_clear = || {
+        frame += 1;
+        w.clear();
+        w.frame_begin(frame, FrameMeta::default());
+        w.pass(pass(TEX, 1, 1, [0.0; 4]));
+        w.frame_end(TEX, target::TEXTURE);
+        hal.submit(&w.buf());
+        frame
+    };
+    let slots_made = || hal.with_world(|world| world.session(sid).unwrap().stats.batch_slots_made);
+    // HAL time stops following the real clock; the steady stretch below moves it
+    hal.clock_advance(0);
+    frame_done(&hal, sid, submit_clear());
+    let steady = slots_made();
+    assert_eq!(steady, 1, "the steady frame should make one batch slot");
+    for burst in 1..=2 {
+        if burst > 1 {
+            for _ in 0..11 {
+                hal.clock_advance(500_000_000);
+                frame_done(&hal, sid, submit_clear());
+            }
+        }
+        let (at_completion, release) = std::sync::mpsc::sync_channel(0);
+        let mut completion = hal.frame_completion(sid, std::sync::Arc::new(move || { let _ = at_completion.send(()); })).unwrap();
+        let frame = submit_clear();
+        release.recv_timeout(Duration::from_secs(2)).expect("the burst's completion callback");
+        frame_done(&hal, sid, frame);
+        assert!(matches!(completion.poll(), Some(Ok(_))), "the burst's completion batch failed");
+        if burst == 1 {
+            assert_eq!(slots_made(), steady + 1, "the first burst should make one extra batch slot");
+        } else {
+            assert_eq!(slots_made(), steady + 1, "burst {burst} rebuilt a batch slot after 5.5 s of steady frames");
+        }
+    }
+    hal.clock_real();
+    assert!(hal.close(sid));
+}
+
 /// Every pass keeps its framebuffer for the frames after it, however many passes a frame has: a
 /// frame of 40 passes into 40 targets makes their framebuffers once, and the same frame drawn
 /// again makes none. (A cache capped at 32 made every one of them again on every frame: a 3D
@@ -917,15 +970,42 @@ fn a_pipeline_on_an_already_compiled_shared_program_is_answered_without_another_
         }
         None
     };
-    let mut w = CmdWriter::new(first.session);
-    w.pipeline_create(PIPE, dialect::SPIRV, Attr::default(), &blob);
-    hal.submit(&w.buf());
-    assert!(ready(first.session).is_some(), "the first session never heard its pipeline was ready");
+    resources(&hal, first.session);
     let mut w = CmdWriter::new(second.session);
     w.pipeline_create(PIPE, dialect::SPIRV, Attr::default(), &blob);
     hal.submit(&w.buf());
     let took = ready(second.session).expect("the second session never heard its pipeline was ready");
     assert!(took < Duration::from_secs(2), "the second session heard it only after {took:?}");
+    if first.flags & info_flags::MULTIVIEW != 0 {
+        // The shared shader has only mono stages. Its first stereo draw must
+        // revoke a previously acknowledged layout in B, even with no Add blend.
+        let colors = [format::RGBA8, u32::MAX, u32::MAX, u32::MAX];
+        let wanted = |sid, layout, views| {
+            let mut w = CmdWriter::new(sid);
+            w.pipeline_wanted_in(PIPE, layout, Id::NONE, colors, u32::MAX, u16::from_le_bytes([1, views]));
+            hal.submit(&w.buf());
+        };
+        wanted(second.session, 7, 2);
+        until(&hal, second.session, |e| matches!(e, HalEvent::PipelineLayoutReady { pipeline: PIPE, layout: 7 }));
+        let stereo = Id::new(2, 1);
+        let mut w = CmdWriter::new(first.session);
+        w.texture_create(stereo, usage::ARRAY | usage::RENDER_TARGET, format::RGBA8, 8, 8, [2, 1], Attr::default());
+        w.frame_begin(1, FrameMeta::default());
+        w.pass(Pass { views: 2, ..pass(stereo, 8, 8, [0.0; 4]) });
+        w.draw(draw());
+        w.frame_end(stereo, target::TEXTURE);
+        hal.submit(&w.buf());
+        let rejected = |e: HalEvent<'_>, want| matches!(e,
+            HalEvent::PipelineLayoutFailed { pipeline: PIPE, layout, log }
+                if layout == want && log == b"the shader has no multiview stages for a multiview pass");
+        until(&hal, first.session, |e| rejected(e, makepad_hal::cmds::PipelineLayout::UNPROBED));
+        until(&hal, second.session, |e| rejected(e, 7));
+        wanted(first.session, 8, 2);
+        until(&hal, first.session, |e| rejected(e, 8));
+        wanted(first.session, 9, 1);
+        until(&hal, first.session, |e| matches!(e, HalEvent::PipelineLayoutReady { pipeline: PIPE, layout: 9 }));
+        rendered(&hal, first.session, TEX, target::TEXTURE, [32, 32], 2);
+    }
     assert!(hal.close(second.session));
     assert!(hal.close(first.session));
 }

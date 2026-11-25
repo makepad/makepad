@@ -58,6 +58,11 @@ pub(super) struct Selection {
     pending_primary: Option<String>,
     reads: Vec<io::ReadPipe<(u64, String)>>,
     writes: Vec<io::WritePipe>,
+    /// A drag's file list asked for while one of its promised files is still being made
+    /// ([`crate::drag_promise::pending`]): the receiver's fd and the drag's items. The promise
+    /// waiter wakes the loop once they are made, and `transfers` writes the list then, at the
+    /// receiver's pace; the loop serves events meanwhile.
+    promised: Vec<(File, Arc<Vec<(u32, String)>>)>,
     groups: HashMap<u64, Group>,
     next: u64,
     incoming: Option<Incoming>,
@@ -326,6 +331,15 @@ impl State {
                 }
             }
         }
+        let promised = std::mem::take(&mut self.selection.promised);
+        for (file, items) in promised {
+            if crate::drag_promise::pending(&items) {
+                self.selection.promised.push((file, items));
+            } else {
+                // made, failed (the wait logged it) or its producer gone: the list as it stands
+                self.selection.writes.push(io::WritePipe { file, bytes: Arc::new(common::encode_uris(&items)), offset: 0 });
+            }
+        }
         self.selection.writes.retain_mut(|pipe| match pipe.write() {
             Ok(done) => !done,
             Err(e) => {
@@ -348,6 +362,13 @@ impl State {
             };
             text.as_bytes().to_vec()
         } else if mime == common::URI_MIME {
+            // Promised files are handed over once they are written: the promise waiter waits
+            // for them, not this thread (`transfers` writes the list when woken).
+            if source.drag.is_some() && crate::drag_promise::pending(&source.items) {
+                self.selection.promised.push((File::from(fd), source.items.clone()));
+                crate::drag_promise::when_made(source.items.to_vec(), |_| Shared::global().signal());
+                return;
+            }
             common::encode_uris(&source.items)
         } else {
             source
@@ -612,13 +633,7 @@ impl Dispatch<wl_data_source::WlDataSource, Source> for State {
         _: &QueueHandle<Self>,
     ) {
         match e {
-            wl_data_source::Event::Send { mime_type, fd } => {
-                if data.drag.is_some() {
-                    // promised files are handed over once they are written
-                    crate::drag_promise::wait_promised(&data.items);
-                }
-                s.send_selection(fd, &mime_type, data)
-            }
+            wl_data_source::Event::Send { mime_type, fd } => s.send_selection(fd, &mime_type, data),
             wl_data_source::Event::Cancelled | wl_data_source::Event::DndFinished => {
                 let success = matches!(e, wl_data_source::Event::DndFinished);
                 if let Some(key) = data.drag {

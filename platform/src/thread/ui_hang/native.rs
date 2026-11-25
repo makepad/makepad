@@ -46,12 +46,19 @@ pub(super) struct State {
     stop: AtomicBool,
     completions: SyncSender<Completion>,
     lost: AtomicU64,
+    /// the busy scope (its `start`) the watchdog last recorded a stack sample of
+    sampled: AtomicU64,
 }
 struct Completion { start: u64, nanos: u64, phase: u64 }
 
 impl State {
     pub(super) fn begin(&self) {
         self.start.store(self.origin.elapsed().as_nanos() as u64 + 1, Ordering::Release);
+    }
+    /// Has the watchdog a stack sample of the busy scope under way now ([`super::stall_sampled`])?
+    pub(super) fn sampled(&self) -> bool {
+        let start = self.start.load(Ordering::Acquire);
+        start != 0 && self.sampled.load(Ordering::Acquire) == start
     }
     pub(super) fn end(&self) {
         let start = self.start.swap(0, Ordering::AcqRel);
@@ -87,7 +94,7 @@ pub(super) fn initialize() {
         let state = Arc::new(State {
             threshold,
             origin: Instant::now(), start: AtomicU64::new(0), phase: AtomicU64::new(0),
-            stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0),
+            stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0), sampled: AtomicU64::new(0),
         });
         let worker = state.clone();
         match std::thread::Builder::new().name("makepad-ui-watchdog".into()).spawn(move || {
@@ -137,6 +144,7 @@ fn watch(state: Arc<State>, rx: Receiver<Completion>, target: impl Sampler, mut 
                 } else if batch.len() < 32 {
                     batch.push(Sample { phase, frames, count: 1 });
                 }
+                state.sampled.store(start, Ordering::Release);
             }
         }
         while let Ok(done) = rx.try_recv() {
@@ -222,7 +230,7 @@ mod tests {
             threshold: Duration::from_millis(250),
             origin: Instant::now(), start: AtomicU64::new(0),
             phase: AtomicU64::new(super::super::UiPhase::CodePageInstall as u64),
-            stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0),
+            stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0), sampled: AtomicU64::new(0),
         });
         let (reports, received) = sync_channel(16);
         let worker = state.clone();

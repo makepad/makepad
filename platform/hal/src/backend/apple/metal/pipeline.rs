@@ -243,15 +243,20 @@ impl PipeState {
         {
             let mut wanted = self.wanted.lock().unwrap_or_else(|e| e.into_inner());
             for w in wanted.iter_mut() {
-                if !w.answered && (!w.base || base_ready) && w.variants.iter().all(|v| matches!(v.pipeline.get(), Some(Ok(_)))) {
-                    w.answered = true;
-                    answers.push(w.layout);
-                }
+                if w.answered { continue; }
+                let failure = w.variants.iter().find_map(|v| v.pipeline.get()?.as_ref().err());
+                let answer = if let Some(log) = failure {
+                    Done::PipelineLayoutFailed { sid: self.sid, id: self.id, layout: w.layout, incarnation: self.incarnation.clone(), log: log.clone() }
+                } else if (!w.base || base_ready) && w.variants.iter().all(|v| matches!(v.pipeline.get(), Some(Ok(_)))) {
+                    Done::PipelineLayoutReady { sid: self.sid, id: self.id, layout: w.layout, incarnation: self.incarnation.clone() }
+                } else {
+                    continue;
+                };
+                w.answered = true;
+                answers.push(answer);
             }
         }
-        for layout in answers {
-            self.mailbox.push(Done::PipelineLayoutReady { sid: self.sid, id: self.id, layout, incarnation: self.incarnation.clone() });
-        }
+        for answer in answers { self.mailbox.push(answer); }
     }
 
     /// The state for a draw into `formats` with `samples` per pixel (an MSAA pass's; else 1);
@@ -278,12 +283,7 @@ impl PipeState {
         }
         match variant.pipeline.get() {
             Some(Ok(p)) => Select::State(p.as_id()),
-            Some(Err(e)) => {
-                // A probed Add state can fail while the app still uses its fallback.
-                // Selecting that failed state reports the same pipeline failure as a lazy build.
-                if self.blend_add { self.failure(e.clone()); }
-                Select::Failed
-            }
+            Some(Err(_)) => Select::Failed,
             None => Select::Pending,
         }
     }
@@ -330,19 +330,20 @@ impl PipeState {
                     format!("blend_op: @Add requires Metal color attachment blending for {:?}: {}", variant.formats, describe_error(error, "Metal returned no pipeline"))
                 } else { describe_error(error, "Metal returned no pipeline") }),
             };
-            if let Err(e) = &result {
-                if state.blend_add && !probed {
-                    state.failure(e.clone());
-                    let _ = variant.pipeline.set(result);
-                    return;
-                }
-                eprintln!("[metal] pipeline variant {:?} at {} samples: {e}", variant.formats, variant.samples);
-            }
             let _ = variant.pipeline.set(result);
-            // A lazy draw still gets its repaint. An early speculative build must not
-            // announce a base that is still compiling. Its settle will repaint in that case.
-            if !probed || (state.base_ready() && !state.failed.load(Ordering::Acquire)) {
-                state.mailbox.push(Done::PipelineReady { sid: state.sid, id: state.id, incarnation: state.incarnation.clone() });
+            match variant.pipeline.get() {
+                Some(Err(log)) if !probed => {
+                    // Wake a host even when the first draw built this variant. Its
+                    // next probe gets the retained error under the exact layout id.
+                    state.mailbox.push(Done::PipelineLayoutFailed {
+                        sid: state.sid, id: state.id, incarnation: state.incarnation.clone(),
+                        layout: crate::cmds::PipelineLayout::UNPROBED, log: log.clone(),
+                    });
+                }
+                Some(Ok(_)) if state.base_ready() && !state.failed.load(Ordering::Acquire) => {
+                    state.mailbox.push(Done::PipelineReady { sid: state.sid, id: state.id, incarnation: state.incarnation.clone() });
+                }
+                _ => {}
             }
             state.answer_layouts();
         });

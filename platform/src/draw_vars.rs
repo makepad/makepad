@@ -62,6 +62,11 @@ pub struct DrawVars {
     pub append_group_id: u64,
     #[rust]
     pub draw_shader_id: Option<DrawShaderId>,
+    /// The shader this object's own script value compiled to, whatever variant a holder draws it
+    /// through (`draw_shader_id`): what a live edit compares with to tell whether it changed this
+    /// draw's shader.
+    #[rust]
+    pub own_shader_id: Option<DrawShaderId>,
     #[rust]
     pub geometry_id: Option<GeometryId>,
     /// The reload walk (`Cx::reload_generation`, low bits) the shader was bound at: a draw after
@@ -120,7 +125,23 @@ impl ScriptHook for DrawVars {
             if let Some(io_self) = value.as_object() {
                 self.note_shader_source(vm, io_self);
             }
+            // what the object compiles to; a compile that fails keeps what was drawing
+            let drawing = self.draw_shader_id.take();
             self.compile_shader(vm, apply, value);
+            match self.draw_shader_id {
+                None => self.draw_shader_id = drawing,
+                Some(id) => {
+                    // a live edit's walk, or a draw made from its type's default taking the new
+                    // default (`rebuild_from_default`): the same code is the same shader, so another
+                    // shader is an edited one
+                    if matches!(apply, Apply::Reload) && self.own_shader_id.is_some_and(|own| own != id) {
+                        if let Some(io_self) = value.as_object() {
+                            Self::note_shader_switch(vm, io_self);
+                        }
+                    }
+                    self.own_shader_id = Some(id);
+                }
+            }
         }
 
         // Read draw-call level options from the shader object.
@@ -183,6 +204,71 @@ impl ScriptHook for DrawVars {
                 self.update_instance_areas_when_in_object(cx, heap, io_self);
                 self.update_uniform_areas_when_in_object(cx, heap, io_self);
             }
+        }
+    }
+}
+
+/// The draws a live edit changed the shader of, for one report per design re-run
+/// ([`Cx::live_shader_switches`]): the reload walk's draws as it applies them, and a draw made from
+/// its type's default (kept outside the tree) as it first draws after the walk. A draw counts when
+/// the shader its own script object compiles to is another than before (shaders are shared by
+/// code, so the same code is the same shader): never for the variant a holder draws it through,
+/// nor for a draw whose module only ran again.
+#[derive(Debug, Default)]
+pub struct LiveShaderSwitches {
+    /// The reload walk (`Cx::reload_generation`) these are of.
+    generation: u64,
+    /// The walk's report went out: a draw first drawn after it is told on a line of its own.
+    reported: bool,
+    /// Each type's name and how many of its draws switched.
+    names: Vec<(String, usize)>,
+}
+
+impl LiveShaderSwitches {
+    fn at(&mut self, generation: u64) {
+        if self.generation != generation {
+            *self = Self { generation, ..Self::default() };
+        }
+    }
+
+    fn note(&mut self, generation: u64, name: String) {
+        self.at(generation);
+        if self.reported {
+            crate::log!("live design: {name} draws the edited shader (first drawn after the edit's report)");
+        }
+        match self.names.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => self.names.push((name, 1)),
+        }
+    }
+}
+
+impl Cx {
+    /// The draws whose shader the newest reload walk changed, by type name with how many of its
+    /// draws: those the walk applied and those made from a type default that drew since.
+    pub fn live_shader_switches(&self) -> &[(String, usize)] {
+        if self.live_shader_switches.generation == self.reload_generation { &self.live_shader_switches.names } else { &[] }
+    }
+
+    /// After the draw that shows a design re-run (`gc_after_draw`): one line naming the draws
+    /// whose shader the edit changed, or that it changed none. A re-bake (`Apply::Rebake`, no
+    /// design change) says nothing. O(types named).
+    pub(crate) fn report_live_shader_switches(&mut self) {
+        if !matches!(self.live_edit_apply, Apply::Reload) {
+            return;
+        }
+        let generation = self.reload_generation;
+        let switches = &mut self.live_shader_switches;
+        switches.at(generation);
+        if switches.reported {
+            return;
+        }
+        switches.reported = true;
+        if switches.names.is_empty() {
+            crate::log!("live design: the edit changed no drawn shader");
+        } else {
+            let names: Vec<String> = switches.names.iter().map(|(name, n)| if *n > 1 { format!("{name} ({n} draws)") } else { name.clone() }).collect();
+            crate::log!("live design: the edit changed the shader of {}", names.join(", "));
         }
     }
 }
@@ -294,14 +380,18 @@ impl DrawVars {
         }
         self.area = saved.area;
         self.append_group_id = saved.append_group_id;
-        // (the same code is the same shader: only its values were taken; the shader on the draw
-        // may be one its holder derived from the old default, a renderer lane's variant)
-        let heap_key = vm.heap_key();
-        let was = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, old_obj)).map_or(old_id, |&(id, _)| id);
-        if new_id != was {
-            let name = vm.heap().object_type_name_in_chain(old_obj).map_or_else(|| "a draw object".to_string(), |n| format!("{n}"));
-            crate::log!("live design: {name} (made from its default, kept outside the reloaded tree) draws the edited shader");
-        }
+        // (whether the edit changed the shader was noted as the new default compiled,
+        // `on_after_apply`: against the shader the old default compiled to, never the variant a
+        // holder draws it through, a renderer lane's)
+    }
+
+    /// A live edit changed the shader `io_self` compiles to: noted for the edit's report
+    /// ([`LiveShaderSwitches`]).
+    fn note_shader_switch(vm: &mut ScriptVm, io_self: ScriptObject) {
+        let name = vm.heap().object_type_name_in_chain(io_self).map_or_else(|| "a draw object".to_string(), |n| format!("{n}"));
+        let cx = vm.host.cx_mut();
+        let generation = cx.reload_generation;
+        cx.live_shader_switches.note(generation, name);
     }
 
     /// The reload walk this shader is bound at, and whether `io_self` is its type's registered
@@ -1726,6 +1816,7 @@ mod tests {
             options: Default::default(),
             append_group_id: 0,
             draw_shader_id: Some(new),
+            own_shader_id: None,
             geometry_id: None,
             shader_gen: 0,
             shader_default: None,

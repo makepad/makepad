@@ -333,7 +333,8 @@ mod tests {
 
     #[test]
     fn the_layout_lives_in_the_window_managers_config_dir_unless_a_test_names_another() {
-        let p = |s: &str| Some(PathBuf::from(s));
+        // (a root is absolute on Windows with its drive: `/cfg` alone is relative there)
+        let p = |s: &str| Some(PathBuf::from(if cfg!(windows) && s.starts_with('/') { format!("C:{s}") } else { s.to_string() }));
         assert_eq!(layout_path_from(None, p("/cfg"), p("/home/a")), p("/cfg/makepad/wm/display-layout"));
         assert_eq!(layout_path_from(None, None, p("/home/a")), p("/home/a/.config/makepad/wm/display-layout"));
         // A relative root is not a config dir.

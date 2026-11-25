@@ -1,6 +1,4 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
 const quiet_console = {
   log() {},
@@ -30,7 +28,7 @@ class MockWasmBridge {
   }
 }
 
-const web_source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
+const web_source = read_text(new URL("./web.js", import.meta.url))
   .replace(/^import .*wasm_bridge\.js"\n/, "")
   .replace(/^import .*a11y\.js"\n/m, "")
   .replace(/^export /gm, "");
@@ -144,10 +142,7 @@ const gl_console = {
   },
 };
 
-const web_gl_source = readFileSync(
-  new URL("./web_gl.js", import.meta.url),
-  "utf8",
-)
+const web_gl_source = read_text(new URL("./web_gl.js", import.meta.url))
   .replace(/^import \{[\s\S]*?\} from "\.\/web\.js";\n/, "")
   .replace(/^export /gm, "");
 const load_web_gl = new Function(
@@ -179,8 +174,8 @@ const web_gl = load_web_gl(
 function assert_bounded(size, budget = web.MAKEPAD_WEBGL_PIXEL_BUDGET, limits = { max_width: 8192, max_height: 8192 }) {
   assert.ok(size.width * size.height <= budget);
   assert.ok(size.width <= limits.max_width && size.height <= limits.max_height);
-  assert.equal(size.width, Math.floor(size.logical_width * size.scale));
-  assert.equal(size.height, Math.floor(size.logical_height * size.scale));
+  assert.equal(Math.ceil(size.logical_width * size.scale - 0.01), size.width);
+  assert.equal(Math.ceil(size.logical_height * size.scale - 0.01), size.height);
 }
 
 test("large, retina, phone, and hidden viewports use a uniform DPI within the device limits", () => {
@@ -211,6 +206,11 @@ test("large, retina, phone, and hidden viewports use a uniform DPI within the de
   const budgeted = web.makepad_compute_webgl_size(1920, 1080, 2, limits, 1024 * 1024);
   assert_bounded(budgeted, 1024 * 1024);
 
+  // The CSS area fits the budget at scale 1, but rounding to 11 x 11 would exceed it.
+  const rounded_over_budget = web.makepad_compute_webgl_size(10.75, 10.75, 1, limits, 116);
+  assert.equal(rounded_over_budget.scale, 1);
+  assert.deepEqual([rounded_over_budget.width, rounded_over_budget.height], [10, 10]);
+
   const hidden = web.makepad_compute_webgl_size(0, Number.NaN, 1.5, limits);
   assert.deepEqual([hidden.width, hidden.height], [0, 0]);
   assert.equal(hidden.scale, 1.5);
@@ -221,8 +221,9 @@ test("canvas pixels and WASM window info receive the same effective DPI", () => 
   const canvas = {
     width: 0,
     height: 0,
-    offsetWidth: 1920,
-    offsetHeight: 1080,
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 1920, height: 1080 };
+    },
     getAttribute() {
       return null;
     },
@@ -248,6 +249,56 @@ test("canvas pixels and WASM window info receive the same effective DPI", () => 
   );
 });
 
+test("the canvas backing is the canvas's own device-pixel box at any ratio", () => {
+  // DPR, CSS left/top/width/height, and devicePixelContentBoxSize from Chrome.
+  const rows = [
+    [0.9375, 0, 0, 1601.0667724609375, 815, 1501, 764],
+    [0.9375, 13.366667747497559, 7.100000381469727, 980.800048828125, 533.4000244140625, 919, 500],
+    [0.800000011920929, 13.359375, 7.08984375, 980.78125, 533.4765625, 784, 426],
+    [1.25, 13.3625, 7.099999904632568, 981.7750244140625, 390.0874938964844, 1227, 487],
+    [1.75, 13.366071701049805, 7.098214626312256, 980.794677734375, 533.1875, 1717, 934],
+    [0.8, 0, 0, 1603.75, 890, 1283, 712],
+    // A width limit reduces the scale to 0.5 and floors the height to 31.
+    [2, 0, 0, 128, 63.75, 64, 31, { max_width: 64, max_height: 64 }],
+  ];
+  const previous_dpr = web_window.devicePixelRatio;
+  try {
+    for (const [dpr, left, top, width, height, expected_width, expected_height, limits] of rows) {
+      const row = `DPR ${dpr}, ${width} x ${height} at (${left}, ${top})`;
+      const rect = { left, top, width, height };
+      web_window.devicePixelRatio = dpr;
+      const canvas = {
+        getBoundingClientRect() { return rect; },
+        getAttribute(name) {
+          return name === "fullpage" && left === 0 && top === 0 ? "true" : null;
+        },
+      };
+      const browser = Object.assign(Object.create(web.WasmWebBrowser.prototype), {
+        canvas,
+        detect: { is_add_to_homescreen_safari: false },
+        render_quality: null,
+        webgl_limits: limits,
+        window_info: {},
+      });
+      browser.update_window_info();
+
+      const { inner_width, inner_height, dpi_factor } = browser.window_info;
+      assert.deepEqual([canvas.width, canvas.height], [expected_width, expected_height], row);
+      assert.equal(Math.ceil(inner_width * dpi_factor - 0.01), canvas.width, row);
+      assert.equal(Math.ceil(inner_height * dpi_factor - 0.01), canvas.height, row);
+      if (limits) {
+        assert.ok(dpi_factor < dpr, row);
+        assert.ok(canvas.width <= limits.max_width && canvas.height <= limits.max_height, row);
+      } else {
+        assert.equal(dpi_factor, dpr, row);
+        assert.ok(Math.abs(inner_width - rect.width) * dpr < 1, row);
+      }
+    }
+  } finally {
+    web_window.devicePixelRatio = previous_dpr;
+  }
+});
+
 test("unchanged canvas dimensions do not reallocate its backbuffer", () => {
   // 640x480 CSS pixels at the window's device pixel ratio of 2.
   let width = 1280;
@@ -255,8 +306,9 @@ test("unchanged canvas dimensions do not reallocate its backbuffer", () => {
   let width_sets = 0;
   let height_sets = 0;
   const canvas = {
-    offsetWidth: 640,
-    offsetHeight: 480,
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 640, height: 480 };
+    },
     getAttribute() { return null; },
     get width() { return width; },
     set width(value) { width = value; width_sets += 1; },
@@ -359,6 +411,9 @@ test("legacy HTTP requests preserve arbitrary binary bodies", () => {
 
 test("render targets are uniformly bounded and malformed sizes are rejected", () => {
   const limits = { max_width: 2048, max_height: 1024 };
+  const unscaled = web.makepad_compute_webgl_size(1200, 800, 1.0, limits);
+  assert.deepEqual([unscaled.width, unscaled.height], [1200, 800]);
+
   const target = web_gl.makepad_render_target_size(4096, 2048, limits);
   assert.equal(target.ok, true);
   assert.equal(target.scaled, true);

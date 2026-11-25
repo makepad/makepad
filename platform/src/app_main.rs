@@ -439,6 +439,18 @@ pub trait AppMain {
         false
     }
 
+    /// With [`Self::single_instance`]: whether every build of the app is that one instance, not
+    /// one per build. For a service that holds what a machine has one of (the port it serves on,
+    /// a tray icon): a later launch of another build (an installed copy, a kept one, a worktree's)
+    /// hands off to the running one rather than run beside it. The launches exempt from the single
+    /// instance stay so.
+    fn single_instance_across_builds() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
     /// Whether the app lives in the menu bar (macOS): no Dock icon from the first moment, as for a
     /// bundle whose Info.plist says `LSUIElement`, also when the binary is not such a bundle (Desk
     /// Host, started by its launcher bundle). Windows it shows later may turn the Dock icon on
@@ -829,7 +841,7 @@ macro_rules! app_main {
             // A later launch of a single-instance app hands its command line
             // to the running instance and ends here, before the VM or a window.
             let single_instance = if <$app as AppMain>::single_instance() {
-                match $crate::app_open::claim_single_instance(env!("CARGO_PKG_NAME")) {
+                match $crate::app_open::claim_single_instance(env!("CARGO_PKG_NAME"), <$app as AppMain>::single_instance_across_builds()) {
                     $crate::app_open::SingleInstance::Forwarded => return,
                     $crate::app_open::SingleInstance::Primary(server) => Some(server),
                     $crate::app_open::SingleInstance::Standalone => None,

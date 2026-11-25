@@ -10,10 +10,26 @@
 //!   file when it asks for it at the drop. The type is declared `Promised`, so nothing is
 //!   resolved while the pointer only hovers.
 //! The app's producer runs from the moment the drag starts, so either wait is usually short.
+//! The file URL must be answered in its call, on the main thread: a wait there longer than a
+//! frame is logged, once per drag, so a slow producer freezing the UI is seen.
 
 use crate::drag_promise;
 use makepad_apple_sys::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+/// Drags started (`drag_started`): each promise provider keeps the one it belongs to.
+static DRAGS: AtomicU64 = AtomicU64::new(0);
+/// The drag whose main-thread wait was last logged.
+static LOGGED: AtomicU64 = AtomicU64::new(u64::MAX);
+/// A wait the UI shows as a dropped frame (a 60 Hz frame).
+const FRAME: Duration = Duration::from_nanos(16_666_667);
+
+/// A drag begins: the promise providers made next belong to it.
+pub(super) fn drag_started() {
+    DRAGS.fetch_add(1, Ordering::Relaxed);
+}
 
 const FILE_URL: &str = "public.file-url";
 /// `NSPasteboardWritingPromised`.
@@ -69,7 +85,16 @@ fn define_promise_class() -> *const Class {
                 return msg_send![super(this, class!(NSFilePromiseProvider)), pasteboardPropertyListForType: ty];
             }
             let path = promise_path(this);
-            match drag_promise::wait(std::path::Path::new(&path), drag_promise::WAIT) {
+            let asked = Instant::now();
+            let made = drag_promise::wait(std::path::Path::new(&path));
+            let waited = asked.elapsed();
+            if waited > FRAME {
+                let drag: u64 = *this.get_ivar("halDrag");
+                if LOGGED.swap(drag, Ordering::Relaxed) != drag {
+                    eprintln!("[hal] drag out: the drop waited {waited:.2?} on the main thread for {path} to be made");
+                }
+            }
+            match made {
                 // The URL's own pasteboard form, exactly what a plain file URL item writes (and
                 // whatever AppKit attaches to it for a sandboxed reader), not a bare string.
                 Ok(()) => {
@@ -100,6 +125,7 @@ fn define_promise_class() -> *const Class {
         decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
     }
     decl.add_ivar::<ObjcId>("halPath");
+    decl.add_ivar::<u64>("halDrag");
     decl.register()
 }
 
@@ -117,7 +143,7 @@ fn define_delegate_class() -> *const Class {
             let dest: ObjcId = msg_send![url, path];
             let dest = nsstring_to_string(dest);
             // The completion handler runs only after the whole file sits under its final name.
-            let result = drag_promise::wait(std::path::Path::new(&path), drag_promise::WAIT)
+            let result = drag_promise::wait(std::path::Path::new(&path))
                 .and_then(|()| drag_promise::deliver(std::path::Path::new(&path), std::path::Path::new(&dest)));
             let error: ObjcId = match result {
                 Ok(()) => nil,
@@ -179,6 +205,7 @@ pub(super) unsafe fn promise_writer(item: &str) -> ObjcId {
     let ns_path: ObjcId = str_to_nsstring(path);
     let () = msg_send![ns_path, retain];
     (*provider).set_ivar("halPath", ns_path);
+    (*provider).set_ivar("halDrag", DRAGS.load(Ordering::Relaxed));
     provider
 }
 
@@ -236,13 +263,16 @@ mod tests {
             let delegate: ObjcId = msg_send![provider, delegate];
             let name: ObjcId = msg_send![delegate, filePromiseProvider: provider fileNameForType: ty];
             assert_eq!(nsstring_to_string(name), "Night Drive.mp3");
-            // the producer finishes a little after the receiver asks
+            // the producer (holding its promise, as FilePromise's does) finishes a little after
+            // the receiver asks
             let producer_path = path.clone();
+            let held = drag_promise::hold(&path).unwrap();
             let producer = std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let part = drag_promise::part_path(&producer_path);
                 std::fs::write(&part, b"ID3 made for the drop").unwrap();
                 std::fs::rename(&part, &producer_path).unwrap();
+                drop(held);
             });
             let url: ObjcId = msg_send![provider, pasteboardPropertyListForType: str_to_nsstring(FILE_URL)];
             assert!(url != nil, "the file URL resolves once the file is written");
@@ -265,11 +295,13 @@ mod tests {
             let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i * 31 % 251) as u8).collect();
             let producer_path = video.clone();
             let producer_bytes = bytes.clone();
+            let held = drag_promise::hold(&video).unwrap();
             let producer = std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let part = drag_promise::part_path(&producer_path);
                 std::fs::write(&part, &producer_bytes).unwrap();
                 std::fs::rename(&part, &producer_path).unwrap();
+                drop(held);
             });
             let provider = promise_writer(&drag_promise::encode(&video.to_string_lossy(), "video/mp4"));
             let ty: ObjcId = msg_send![provider, fileType];

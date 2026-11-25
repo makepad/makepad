@@ -38,6 +38,20 @@ use std::time::Duration;
 
 use crate::digest::sha256_hash;
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos", target_os = "ios", target_os = "tvos",
+    target_os = "windows",
+))]
+#[path = "tls_engine.rs"]
+pub(crate) mod engine;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos", target_os = "ios", target_os = "tvos",
+    target_os = "windows",
+))]
+pub use engine::TlsEngine;
+
 pub const KEY_FILE: &str = "tls-key.x963";
 pub const CERT_FILE: &str = "tls-cert.der";
 pub const FINGERPRINT_FILE: &str = "tls-fingerprint.txt";
@@ -825,12 +839,12 @@ impl Write for TlsStream {
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[path = "backend/apple/tls_server.rs"]
-mod platform;
+pub(crate) mod platform;
 
 #[cfg(target_os = "linux")]
 #[path = "backend/linux/tls_server.rs"]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-mod platform;
+pub(crate) mod platform;
 
 #[cfg(target_os = "windows")]
 #[path = "backend/windows/tls_server.rs"]

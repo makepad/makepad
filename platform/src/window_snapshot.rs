@@ -124,6 +124,34 @@ impl Cx {
         { let _ = (shader, pass); true }
     }
 
+    /// The driver's terminal diagnostic for this shader in the pass's current layout.
+    /// A base shader failure applies to every pass. On a first query the HAL can
+    /// still be matching a variant built by an earlier draw to this layout. In that
+    /// case, as while compiling, `DrawShadersReady` wakes the caller to query again.
+    pub fn draw_shader_failure_in(&self, shader: DrawShaderId, pass: DrawPassId) -> Option<&str> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(pipe) = self.draw_shaders[shader.index].pipeline_id else {
+                self.hal.frames.asked_unready();
+                return None;
+            };
+            if let Some(log) = self.hal.frames.pipeline_failure(pipe) { return Some(log); }
+            if self.hal.device_lost || self.hal.info.is_some_and(|i| i.backend == makepad_hal::backend_id::HEADLESS) {
+                return None;
+            }
+            let layout = self.fb_pass_layout(pass)?;
+            match self.hal.frames.pipeline_status_in(pipe, layout) {
+                Err(log) => Some(log),
+                Ok(ready) => {
+                    if !ready { self.hal.frames.asked_unready(); }
+                    None
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = (shader, pass); None }
+    }
+
     /// The pipeline layout of the pass's current attachments, when its target is known.
     pub fn pass_layout(&self, pass: DrawPassId) -> Option<PassLayout> {
         #[cfg(not(target_arch = "wasm32"))]

@@ -15,6 +15,10 @@ pub use makepad_hal::font::{wire as hal_font_wire, FontSource as HalFontSource, 
 #[derive(Default)]
 pub(crate) struct GlyphWait {
     pub(crate) pending: HashSet<(u32, u32, u32, u32)>,
+    /// Requests still awaiting a host answer (font, glyph, kind, size bits), across draws.
+    /// A session that reopens a font id with requests in flight may leave them counted, as its client would.
+    unanswered: HashSet<(u32, u32, u32, u32)>,
+    answers_received: u64,
     /// Background requests the host hasn't answered yet (font, glyph, kind, size bits).
     pub(crate) background: HashSet<(u32, u32, u32, u32)>,
     /// The lists that redraw once `background` empties, with the recording that drew each one's
@@ -46,6 +50,8 @@ impl GlyphWait {
                 continue;
             }
             let key = (font, entry.glyph, entry.kind, entry.dpxs_bits);
+            self.unanswered.remove(&key);
+            self.answers_received += 1;
             let was_pending = self.pending.remove(&key);
             let was_background = self.background.remove(&key);
             redraw |= was_pending || !was_background;
@@ -77,14 +83,47 @@ impl Cx {
 
     /// Asks for glyphs (id, pixels per em) of an open font; `kind` is `hal_font_wire::kind`.
     pub fn hal_glyph_request(&mut self, font: u32, kind: u32, glyphs: &[(u32, f32)]) {
-        self.hal.frames.w.request_glyphs(font, kind, glyphs);
+        self.hal_request_glyphs(font, kind, glyphs, false);
     }
 
     /// `hal_glyph_request` for glyphs nothing waits on, since the app draws stand-ins for them:
     /// their answers redraw nothing until the last one is in.
     pub fn hal_glyph_request_background(&mut self, font: u32, kind: u32, glyphs: &[(u32, f32)]) {
-        self.hal.glyph_wait.background.extend(glyphs.iter().map(|(glyph, dpxs)| (font, *glyph, kind, dpxs.to_bits())));
+        self.hal_request_glyphs(font, kind, glyphs, true);
+    }
+
+    fn hal_request_glyphs(&mut self, font: u32, kind: u32, glyphs: &[(u32, f32)], background: bool) {
+        let wait = &mut self.hal.glyph_wait;
+        for &(glyph, dpxs) in glyphs {
+            // The host answers SLUG requests at size zero because curves are independent of size.
+            let bits = if kind == hal_font_wire::kind::SLUG { 0 } else { dpxs.to_bits() };
+            let key = (font, glyph, kind, bits);
+            wait.unanswered.insert(key);
+            if background {
+                wait.background.insert(key);
+            }
+        }
         self.hal.frames.w.request_glyphs(font, kind, glyphs);
+    }
+
+    /// Glyph requests still awaiting a host answer. A draw can use any answer already queued.
+    pub fn hal_glyph_requests_unanswered(&self) -> usize {
+        self.hal.glyph_wait.unanswered.len()
+    }
+
+    /// Glyph answers received by this session, including answers already taken and excluding upgrades.
+    pub fn hal_glyph_answers_received(&self) -> u64 {
+        self.hal.glyph_wait.answers_received
+    }
+
+    /// Glyph answers waiting for a draw to take them. Counted on demand for stall diagnostics.
+    pub fn hal_glyph_answers_queued(&self) -> usize {
+        self.hal.font_events.iter()
+            .map(|event| match event {
+                HalFontEvent::Ready { entries, .. } => entries.iter().filter(|entry| entry.replaces == 0).count(),
+                _ => 0,
+            })
+            .sum()
     }
 
     /// The list being recorded drew a stand-in for a background glyph, so it redraws once those
@@ -134,6 +173,7 @@ impl Cx {
         let mut redraw_all = true;
         match &event {
             HalFontEvent::Opened { font, status, .. } if *status != hal_font_wire::font_status::OPENED => {
+                self.hal.glyph_wait.unanswered.retain(|(f, _, _, _)| f != font);
                 self.hal.glyph_wait.pending.retain(|(f, _, _, _)| f != font);
                 self.hal.glyph_wait.background.retain(|(f, _, _, _)| f != font);
             }

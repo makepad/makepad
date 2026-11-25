@@ -3,6 +3,7 @@
 
 use super::device::{error, lock, Device, VideoSampler};
 use super::resources::vk_format;
+use crate::cmds::PipelineLayout;
 use crate::spirv::SpirvPipeline;
 use crate::types::*;
 use makepad_vulkan::vk;
@@ -373,6 +374,8 @@ pub(super) struct State {
     /// pictures), and their pipelines; made at the first draw that needs them.
     video: Mutex<HashMap<Vec<VideoSampler>, Result<Arc<Program>, String>>>,
     video_variants: Mutex<HashMap<(Vec<VideoSampler>, VariantKey), Result<Arc<Pipeline>, String>>>,
+    /// First terminal diagnostic per physical target layout, shared by identical programs.
+    pub layout_failures: Mutex<Vec<(PipelineLayout, String)>>,
     pub epoch: AtomicU64,
     /// An Add variant failed: do not retry another layout or silently draw raw.
     blend_failed: AtomicBool,
@@ -387,7 +390,7 @@ pub(super) struct State {
 impl State {
     pub fn new(src: Arc<Source>) -> Arc<Self> {
         Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), video: Mutex::new(HashMap::new()), video_variants: Mutex::new(HashMap::new()),
-            epoch: AtomicU64::new(0), blend_failed: AtomicBool::new(false), waiters: Mutex::new(Some(Vec::new())), rank: super::Compilers::rank(super::compile_rank::DRAW) })
+            layout_failures: Mutex::default(), epoch: AtomicU64::new(0), blend_failed: AtomicBool::new(false), waiters: Mutex::new(Some(Vec::new())), rank: super::Compilers::rank(super::compile_rank::DRAW) })
     }
 
     /// Session `sid` has a pipeline on this program: its pump is woken when the compile answers.
@@ -424,9 +427,8 @@ impl State {
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not this pipeline's failure: the first draw that needs it tries again
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return; }
-        let failed = made.is_err();
+        if let Err(log) = &made { self.reject_layout(key, log); }
         lock(&self.variants).insert(VariantKey::new(program, key, flags), made);
-        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 { self.blend_failed.store(true, Ordering::Release); }
     }
 
     /// Whether a draw into a pass of `key` with `flags` would compile its pipeline now: the
@@ -437,10 +439,43 @@ impl State {
         !lock(&self.variants).contains_key(&VariantKey::new(program, key, flags))
     }
 
+    fn reject_layout(&self, key: PassKey, reason: &str) {
+        let layout = PipelineLayout { colors: key.colors, depth: key.depth, views: key.views,
+            samples: key.samples.max(1), window: Id::NONE };
+        let mut failures = lock(&self.layout_failures);
+        if failures.iter().any(|(l, _)| *l == layout) { return; }
+        failures.push((layout, reason.to_owned()));
+        if self.src.desc.blend & pipeline_blend::ADD != 0 {
+            self.blend_failed.store(true, Ordering::Release);
+        }
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+
+    /// Preflight a draw on the compiler thread. A permanently unsupported
+    /// target can already be refused when creating its compatible render pass.
+    pub fn warm_variant(&self, dev: &Arc<Device>, key: PassKey, flags: u32) {
+        match RenderPass::new(dev.clone(), key) {
+            Ok(pass) => { self.select(&pass, flags); }
+            Err(reason) => {
+                eprintln!("[hal-vulkan] render pass for a pipeline variant: {reason}");
+                if out_of_memory(&reason) { return; }
+                if let Some(Ok(program)) = self.program.get() {
+                    let mut variants = lock(&self.variants);
+                    if let Err(log) = variants.entry(VariantKey::new(program, key, flags)).or_insert(Err(reason)) {
+                        self.reject_layout(key, log);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn failure(&self) -> Option<String> {
         if let Some(Err(e)) = self.program.get() { return Some(e.clone()); }
-        lock(&self.variants).values().find_map(|made| made.as_ref().err().cloned())
-            .or_else(|| lock(&self.video_variants).values().find_map(|made| made.as_ref().err().cloned()))
+        // Add promises blending in every target. Preserve its whole-program refusal.
+        if self.blend_failed.load(Ordering::Acquire) {
+            return lock(&self.layout_failures).first().map(|(_, log)| log.clone());
+        }
+        None
     }
 
     /// The pipeline for a draw into `pass` with `flags`. One the program was not built with is
@@ -456,13 +491,10 @@ impl State {
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not kept: the next draw tries again (the frame skips it meanwhile)
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
-        let failed = made.is_err();
-        let result = lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned();
-        // an Add variant that cannot blend fails the whole pipeline, announced once
-        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 && !self.blend_failed.swap(true, Ordering::AcqRel) {
-            self.epoch.fetch_add(1, Ordering::Release);
-        }
-        result
+        let mut variants = lock(&self.variants);
+        let result = variants.entry(key).or_insert(made);
+        if let Err(log) = result { self.reject_layout(pass.key, log); }
+        result.as_ref().ok().cloned()
     }
 }
 
@@ -476,24 +508,26 @@ impl State {
         if base.video == video { return self.select(pass, flags); }
         let program = {
             let mut programs = lock(&self.video);
-            programs.entry(video.to_vec()).or_insert_with(|| {
+            let made = programs.entry(video.to_vec()).or_insert_with(|| {
                 let made = Program::new(base.dev.clone(), self.src.desc, self.src.code.clone(), self.src.bindings.clone(), self.src.stride, self.src.storage.clone(), Some(video), &self.src.name);
                 if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline: {e}"); }
                 made
-            }).as_ref().ok()?.clone()
+            });
+            match made {
+                Ok(program) => program.clone(),
+                Err(log) if out_of_memory(log) => { programs.remove(video); return None; }
+                Err(log) => { self.reject_layout(pass.key, log); return None; }
+            }
         };
         let key = (video.to_vec(), VariantKey::new(&program, pass.key, flags));
         if let Some(made) = lock(&self.video_variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
         if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); note_refusal(e); }
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
-        let failed = made.is_err();
-        let result = lock(&self.video_variants).entry(key).or_insert(made).as_ref().ok().cloned();
-        // an Add variant that cannot blend fails the whole pipeline, announced once
-        if failed && self.src.desc.blend & pipeline_blend::ADD != 0 && !self.blend_failed.swap(true, Ordering::AcqRel) {
-            self.epoch.fetch_add(1, Ordering::Release);
-        }
-        result
+        let mut variants = lock(&self.video_variants);
+        let result = variants.entry(key).or_insert(made);
+        if let Err(log) = result { self.reject_layout(pass.key, log); }
+        result.as_ref().ok().cloned()
     }
 }
 

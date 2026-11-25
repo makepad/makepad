@@ -27,11 +27,13 @@ use {
         cx_api::CxThreadPriority,
         event::{Event, Timer},
     },
+    makepad_cpu_budget::BudgetHandle,
     std::{
         any::Any,
         collections::{HashMap, VecDeque},
         fmt,
         num::NonZeroUsize,
+        ops::Range,
         panic::{catch_unwind, AssertUnwindSafe},
         sync::{
             atomic::{
@@ -1029,6 +1031,15 @@ impl Cx {
         self.task_pool = std::cell::OnceCell::from(TaskPool::closed());
     }
 
+    /// From now on this Cx's pool is one of its own: one worker on a CPU budget of its own, so
+    /// what it reads of its pool (`/settled`) is its own jobs alone. The process's app pool is
+    /// every Cx's, and so every test's in one process.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn use_own_task_pool(&mut self) {
+        let pool = TaskPool::create(self.thread_spawner(), 1, BudgetHandle::of_cores(2)).expect("a pool of its own");
+        self.task_pool = std::cell::OnceCell::from(pool);
+    }
+
     pub(crate) fn warm_task_pool(&self) {
         let status = Cx::set_thread_priority(CxThreadPriority::UserInteractive);
         crate::trace!("pool", "UI thread priority UserInteractive: {status:?}");
@@ -1168,8 +1179,29 @@ impl Ticket {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+// Web workers get their monotonic clock from the host.
+#[cfg(target_arch = "wasm32")]
+struct Instant(f64);
+#[cfg(target_arch = "wasm32")]
+impl Instant {
+    fn now() -> Self {
+        Self(Cx::monotonic_now())
+    }
+
+    fn elapsed(&self) -> Duration {
+        Duration::from_secs_f64((Cx::monotonic_now() - self.0).max(0.0))
+    }
+}
+
+const CHECKPOINT_QUANTUM: Duration = Duration::from_millis(10);
+
 struct JobContext {
+    budget: BudgetHandle,
     permit: Option<u32>,
+    checkpoint_at: Instant,
     class: Class,
     label: &'static str,
     ticket: Ticket,
@@ -1182,6 +1214,10 @@ struct JobContext {
     raised: Option<Arc<Raised>>,
 }
 impl JobContext {
+    fn should_yield(&self) -> bool {
+        self.permit.is_some_and(|permit| self.budget.should_yield(permit))
+    }
+
     /// Takes on the class the job was raised to: a job whose permit is out now follows it there.
     fn follow_raise(&mut self) {
         let Some(raised) = &self.raised else { return };
@@ -1189,7 +1225,7 @@ impl JobContext {
         if class.budget() < self.class.budget() {
             self.class = class;
             if let Some(permit) = self.permit {
-                makepad_cpu_budget::reclass(permit, class.budget());
+                self.budget.reclass(permit, class.budget());
                 makepad_cpu_budget::set_thread_class(class.budget());
             }
         }
@@ -1212,33 +1248,31 @@ impl Raised {
 }
 thread_local! {
     static JOB: std::cell::RefCell<Option<JobContext>> = const { std::cell::RefCell::new(None) };
-    /// The pool whose worker this thread is (pool_worker): its queue says whether a higher-class
-    /// job waits for a worker (worker_wanted).
-    static WORKER_POOL: std::cell::RefCell<Option<std::sync::Weak<PoolInner>>> = const { std::cell::RefCell::new(None) };
+    /// The physical worker, including while it runs a nested job on another budget.
+    static WORKER_POOL: std::cell::RefCell<Option<(Arc<PoolInner>, usize)>> = const { std::cell::RefCell::new(None) };
 }
 pub fn current_class() -> Option<Class> {
     JOB.with(|j| j.borrow().as_ref().map(|j| j.class))
 }
 
 /// A job that takes task after task (a crew's helper) gives its worker back at its next task
-/// boundary: a job of a higher class waits in this worker's pool (every worker is busy, so none can
-/// admit it until one leaves), or for this job's CPU permit (of a higher class, or the JIT's below
-/// its floor while the machine is full: that one wait ends with the floor met), or, for a scope's
+/// boundary: a job of a higher class waits for a place in this worker's pool, or for this job's
+/// CPU permit (of a higher class, or the JIT's below its floor while the machine is full:
+/// that one wait ends with the floor met), or, for a scope's
 /// job, another job of its class waits while its scope holds more than its part of the workers.
-/// The rule fan-out helpers follow (`FanOut::work`): a checkpoint alone yields the permit, never
-/// the thread.
+/// Fan-out helpers leave at an item boundary so the next job can use this thread.
 pub fn worker_wanted() -> bool {
-    let Some((class, permit)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.permit))) else {
+    let Some((class, should_yield)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.should_yield()))) else {
         return false;
     };
-    permit.is_some_and(makepad_cpu_budget::should_yield) || higher_queued_in_pool(class) || over_share_in_pool()
+    should_yield || higher_queued_in_pool(class) || over_share_in_pool()
 }
 
 /// The pool's half of [`worker_wanted`]: a job of a higher class than `class` waits in the calling
-/// worker's pool. The permit's half answers for the whole process's CPU budget (the JIT's own
-/// compiles are in it), this one for the pool alone.
+/// worker's pool. The permit's half answers for the job's budget, which the app pool shares
+/// with the JIT's compiles.
 fn higher_queued_in_pool(class: Class) -> bool {
-    WORKER_POOL.with(|p| p.borrow().as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|p| p.higher_queued(class)))
+    WORKER_POOL.with(|p| p.borrow().as_ref().is_some_and(|(pool, _)| pool.higher_queued(class)))
 }
 
 /// The calling job's group holds more than its part of its pool's workers while another job of
@@ -1247,9 +1281,10 @@ fn over_share_in_pool() -> bool {
     let Some(share) = JOB.with(|j| j.borrow().as_ref().and_then(|j| j.share.clone())) else {
         return false;
     };
-    WORKER_POOL.with(|p| p.borrow().as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|p| p.over_share(&share)))
+    WORKER_POOL.with(|p| p.borrow().as_ref().is_some_and(|(pool, _)| pool.over_share(&share)))
 }
 
+/// A job that yields its CPU permit frees its worker's place until it is admitted again.
 pub fn checkpoint() -> Result<(), Stale> {
     JOB.with(|cell| {
         let mut context = cell.borrow_mut();
@@ -1263,8 +1298,11 @@ pub fn checkpoint() -> Result<(), Stale> {
                 .iter()
                 .any(|(ticket, token)| ticket.is_stale() || token.is_cancelled())
         {
+            // The quantum does not restart: every later poll reports the stale job too, so a
+            // caller that ignores one `Stale` (a pacing hook) never hides it from the next.
             return Err(Stale);
         }
+        job.checkpoint_at = Instant::now();
         if let Some(permit) = job.permit {
             // A helper observes should_yield at its item boundary and leaves.
             // Calling the parking operation here would race a newly arriving
@@ -1280,13 +1318,21 @@ pub fn checkpoint() -> Result<(), Stale> {
                 let site = location.map(|l| format!("{}:{}", l.file(), l.line()));
                 job.follow_raise();
                 let site = site.as_deref().unwrap_or("");
-                job.permit = Some(match &job.raised {
-                    Some(raised) => makepad_cpu_budget::checkpoint_following(permit, held, site, raised.class.as_ptr()),
-                    None => makepad_cpu_budget::checkpoint(permit, held, site),
-                });
-                // (raised while it waited: the permit it got has that class)
-                if let Some(raised) = &job.raised {
-                    job.class = Class::of_budget(raised.class.load(Ordering::Relaxed));
+                let mut admission = job.budget.admission();
+                job.permit = admission.checkpoint(permit, held, site);
+                if job.permit.is_none() {
+                    let _parked = ParkedWorker::park_if(|_| true);
+                    loop {
+                        let class = job.raised.as_ref().map_or(job.class.budget(), |raised| {
+                            raised.class.load(Ordering::Relaxed)
+                        });
+                        if let Some(permit) = admission.poll(class, makepad_cpu_budget::APP, job.label) {
+                            job.permit = Some(permit);
+                            job.class = Class::of_budget(class);
+                            break;
+                        }
+                        makepad_cpu_budget::park_admission(class);
+                    }
                 }
             }
         }
@@ -1294,11 +1340,37 @@ pub fn checkpoint() -> Result<(), Stale> {
     })
 }
 
-// A nested, caller-helped job borrows the caller's permit. Checkpoints can change
-// its index, so the returned index (not the saved one) is restored on unwind too.
+fn checkpoint_due() -> bool {
+    JOB.with(|j| {
+        j.borrow().as_ref().is_some_and(|job| job.checkpoint_at.elapsed() >= CHECKPOINT_QUANTUM)
+    })
+}
+
+/// Poll from a loop whose iterations take microseconds. A full [`checkpoint`] takes the
+/// budget lock and records the stretch since the previous checkpoint, which can cost more
+/// than the iteration. The first poll after a scheduling quantum calls that checkpoint.
+/// Outside a pool job this returns `Ok(())`.
+pub fn checkpoint_when_due() -> Result<(), Stale> {
+    if checkpoint_due() { checkpoint() } else { Ok(()) }
+}
+
+/// The calling thread is a pool's own worker, whose OS class (macOS QoS, Linux nice and scheduling
+/// policy) follows the job it runs. A thread the pool does not own (an app's long-lived thread, a
+/// tool's, a test's) that fans out or runs a claimed job keeps its own priority while it is in the
+/// job (`JobGuard`): its share runs at that priority, its helpers at the job's class. A Linux thread
+/// cannot climb back from Background, and a thread outside the pool's jobs has no class to go back
+/// to, so its first Background fan-out used to demote it for good.
+fn on_pool_worker() -> bool {
+    WORKER_POOL.with(|p| p.borrow().is_some())
+}
+
+// On the same budget a nested job borrows the caller's row, which a checkpoint can replace.
+// Across budgets the caller keeps its row and lends its token until the nested guard drops.
 struct JobGuard {
     previous: Option<JobContext>,
     borrowed: bool,
+    /// on a thread outside the pool: whether it kept its priority before this job
+    kept: Option<bool>,
 }
 impl JobGuard {
     fn enter(
@@ -1308,16 +1380,27 @@ impl JobGuard {
         token: CancellationToken,
         permit: Option<u32>,
         raised: Option<Arc<Raised>>,
+        budget: &BudgetHandle,
     ) -> Self {
+        // before admission, which applies the job's class to the admitted thread
+        let kept = (!on_pool_worker()).then(|| makepad_cpu_budget::set_thread_keeps_priority(true));
         let mut previous = JOB.with(|j| j.borrow_mut().take());
-        debug_assert!(permit.is_none() || previous.is_none());
-        let borrowed_permit = previous.as_mut().and_then(|j| j.permit.take());
+        let borrowed_permit = previous.as_mut().and_then(|job| {
+            let row = job.permit?;
+            if job.budget.id() == budget.id() {
+                debug_assert!(permit.is_none());
+                job.permit.take()
+            } else {
+                job.budget.lend_permit(row);
+                None
+            }
+        });
         let borrowed = borrowed_permit.is_some();
-        let permit = permit.or(borrowed_permit).unwrap_or_else(|| {
-            makepad_cpu_budget::admit(class.budget(), makepad_cpu_budget::APP, label)
+        let permit = borrowed_permit.or(permit).unwrap_or_else(|| {
+            budget.admit(class.budget(), makepad_cpu_budget::APP, label)
         });
         if borrowed {
-            makepad_cpu_budget::reclass(permit, class.budget());
+            budget.reclass(permit, class.budget());
         }
         makepad_cpu_budget::set_thread_class(class.budget());
         let parents = previous
@@ -1330,7 +1413,9 @@ impl JobGuard {
             .unwrap_or_default();
         JOB.with(|j| {
             *j.borrow_mut() = Some(JobContext {
+                budget: budget.clone(),
                 permit: Some(permit),
+                checkpoint_at: Instant::now(),
                 class,
                 label,
                 ticket,
@@ -1341,7 +1426,7 @@ impl JobGuard {
                 raised: raised.or_else(|| if borrowed { previous.as_ref().and_then(|p| p.raised.clone()) } else { None }),
             })
         });
-        Self { previous, borrowed }
+        Self { previous, borrowed, kept }
     }
 }
 impl Drop for JobGuard {
@@ -1353,45 +1438,89 @@ impl Drop for JobGuard {
                 if let Some(raised) = &previous.raised {
                     previous.class = Class::of_budget(raised.class.load(Ordering::Relaxed));
                 }
-                makepad_cpu_budget::reclass(permit, previous.class.budget());
+                job.budget.reclass(permit, previous.class.budget());
                 previous.permit = Some(permit);
-                makepad_cpu_budget::set_thread_class(previous.class.budget());
             } else {
-                makepad_cpu_budget::release(permit);
+                job.budget.release(permit);
             }
         }
+        if let Some(JobContext { budget, permit: Some(row), class, .. }) = &self.previous {
+            if !self.borrowed {
+                budget.take_back_permit(*row);
+            }
+            makepad_cpu_budget::set_thread_class(class.budget());
+        }
         JOB.with(|j| *j.borrow_mut() = self.previous.take());
+        if let Some(kept) = self.kept {
+            makepad_cpu_budget::set_thread_keeps_priority(kept);
+        }
     }
 }
 /// Runs `f`, which waits for other jobs, without the calling job's CPU permit: waiting never
 /// retains one. The job is admitted again once `f` returns (or unwinds). Hold no lock across it
 /// that a job admitted meanwhile needs: admission may wait for one of them.
+/// The waiting job frees its place for a spare worker through its re-admission.
 pub fn without_permit<R>(f: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+    struct Restore {
+        released: bool,
+        // Fields drop after Restore::drop re-admits the job, including on unwind.
+        _parked: Option<ParkedWorker>,
+    }
     impl Drop for Restore {
         fn drop(&mut self) {
-            if self.0 {
+            if self.released {
                 JOB.with(|j| {
                     let mut context = j.borrow_mut();
                     let job = context.as_mut().unwrap();
                     job.permit = Some(match &job.raised {
                         Some(raised) => {
-                            let permit = makepad_cpu_budget::admit_following(raised.class.as_ptr(), makepad_cpu_budget::APP, job.label);
+                            let permit = job.budget.admit_following(raised.class.as_ptr(), makepad_cpu_budget::APP, job.label);
                             job.class = Class::of_budget(raised.class.load(Ordering::Relaxed));
                             permit
                         }
-                        None => makepad_cpu_budget::admit(job.class.budget(), makepad_cpu_budget::APP, job.label),
+                        None => job.budget.admit(job.class.budget(), makepad_cpu_budget::APP, job.label),
                     });
                 });
             }
         }
     }
-    let released = JOB.with(|j| j.borrow_mut().as_mut().and_then(|j| j.permit.take()));
-    if let Some(permit) = released {
-        makepad_cpu_budget::release(permit);
+    let released = JOB.with(|j| {
+        let mut context = j.borrow_mut();
+        let Some(job) = context.as_mut() else { return false };
+        let Some(permit) = job.permit.take() else { return false };
+        job.budget.release(permit);
+        true
+    });
+    let mut restore = Restore { released, _parked: None };
+    if released {
+        restore._parked = ParkedWorker::park_if(|_| true);
     }
-    let _restore = Restore(released.is_some());
-    f()
+    let result = f();
+    drop(restore);
+    result
+}
+
+/// Waits the UI thread made through [`makepad_core_util::blocking`], for every pool: the platform
+/// test asserts it stays put.
+static UI_THREAD_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+/// [`makepad_core_util::blocking`]'s hook, installed with the first pool: a pool job waiting for
+/// another thread's work (a [`makepad_core_util::once::ComputeOnce`] another job computes) holds
+/// no CPU permit while it waits ([`without_permit`]), so the job it waits for can pace. A UI
+/// thread must not wait so; one that does is counted and logged once per waited-for type, and
+/// still waits: a wait is better than a crash. Runs only on a contended wait, never per frame.
+fn blocking_wait(wait: &mut dyn FnMut(), what: &'static str) {
+    if makepad_core_util::ui_thread::is_ui_thread() {
+        UI_THREAD_WAITS.fetch_add(1, Ordering::Relaxed);
+        static LOGGED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        let mut logged = LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+        if !logged.contains(&what) {
+            logged.push(what);
+            drop(logged);
+            crate::log!("the UI thread waited for another thread to compute a {what}: read it with `get` and ask a job for it");
+        }
+    }
+    without_permit(|| wait())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1486,9 +1615,10 @@ where
         run: Some(Box::new(move |completed: &AtomicU64| {
             // (the class it runs at: a strand's job may have been raised since it was queued)
             status.store(
-                if makepad_cpu_budget::set_thread_class(current_class().unwrap_or(class).budget()) {
+                if on_pool_worker() && makepad_cpu_budget::set_thread_class(current_class().unwrap_or(class).budget()) {
                     PriorityStatus::Applied
                 } else {
+                    // refused, or run by a thread outside the pool, which keeps its own priority
                     PriorityStatus::BestEffortUnsupported
                 } as u8,
                 Ordering::Release,
@@ -1683,6 +1813,104 @@ struct PoolState {
     waiting: [bool; 3],
     closed: u8,
     running: Vec<Option<CancellationToken>>,
+    starts: HashMap<&'static str, u64>,
+    /// All-class workers reserved for or running Visible and Background jobs, excluding parked jobs.
+    active: usize,
+    parked: usize,
+    /// All-class workers with neither an admission request nor a job.
+    free: usize,
+    slots: Vec<WorkerCount>,
+    /// One report per exhaustion episode, reset when a worker next goes idle.
+    no_spare: bool,
+    pending_log: Option<SpareWait>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkerCount {
+    Free,
+    Interactive,
+    Active,
+    Parked,
+}
+impl WorkerCount {
+    fn for_class(class: usize) -> Self {
+        if class == makepad_cpu_budget::INTERACTIVE as usize { Self::Interactive } else { Self::Active }
+    }
+}
+struct SpareWait {
+    queued: [usize; 3],
+    parked: usize,
+}
+impl SpareWait {
+    fn log(self) {
+        let [i, v, b] = self.queued;
+        crate::log!("pool: no spare worker free, queued I{} V{} B{}, {} parked", i, v, b, self.parked);
+    }
+}
+/// Only the outermost park of the physical worker owns its return to the count.
+struct ParkedWorker {
+    pool: Arc<PoolInner>,
+    index: usize,
+}
+impl ParkedWorker {
+    fn park_if(should_park: impl FnOnce(&PoolInner) -> bool) -> Option<Self> {
+        WORKER_POOL.with(|worker| {
+            let worker = worker.borrow();
+            let (pool, index) = worker.as_ref()?;
+            if *index >= pool.all_class || !should_park(pool) {
+                return None;
+            }
+            let (guard, wake) = pool.with_worker_state(|state| {
+                if state.slots.get(*index) != Some(&WorkerCount::Active) {
+                    return None;
+                }
+                state.set_slot(*index, WorkerCount::Parked);
+                state.record_exhaustion();
+                Some((Self { pool: pool.clone(), index: *index }, pool.idle_candidates(state)))
+            })?;
+            pool.wake_one(wake);
+            Some(guard)
+        })
+    }
+}
+impl Drop for ParkedWorker {
+    fn drop(&mut self) {
+        self.pool.with_worker_state(|state| state.set_slot(self.index, WorkerCount::Active));
+    }
+}
+impl PoolState {
+    fn needs_worker(&self, class: usize) -> bool {
+        !self.waiting[class] && !self.queues[class].is_empty()
+    }
+    fn set_slot(&mut self, index: usize, next: WorkerCount) {
+        // Only the all-class workers have places to lend. The reserve is independent.
+        let Some(slot) = self.slots.get_mut(index) else { return };
+        if *slot == next {
+            return;
+        }
+        match *slot {
+            WorkerCount::Active => self.active -= 1,
+            WorkerCount::Parked => self.parked -= 1,
+            WorkerCount::Free => self.free -= 1,
+            WorkerCount::Interactive => {}
+        }
+        match next {
+            WorkerCount::Active => self.active += 1,
+            WorkerCount::Parked => self.parked += 1,
+            WorkerCount::Free => self.free += 1,
+            WorkerCount::Interactive => {}
+        }
+        *slot = next;
+    }
+    /// Snapshot the first unclaimed lower-class job with no free all-class thread.
+    /// A worker writes it outside the lock, as soon as one is back in the pool.
+    fn record_exhaustion(&mut self) {
+        if self.free == 0 && self.parked != 0 && !self.no_spare
+            && (1..3).any(|i| self.queues[i].len() > usize::from(self.waiting[i]))
+        {
+            self.no_spare = true;
+            self.pending_log = Some(SpareWait { queued: self.queues.each_ref().map(VecDeque::len), parked: self.parked });
+        }
+    }
 }
 struct WorkerSlot {
     thread: OnceLock<std::thread::Thread>,
@@ -1692,11 +1920,11 @@ struct WorkerSlot {
     /// wakes it to look again.
     wake: OnceLock<makepad_cpu_budget::Wake>,
     admitting: AtomicU8,
-    /// The classes it takes work of, from Interactive: all three, or for a worker of the pool's
-    /// reserve, Interactive alone ([`interactive_reserve`]).
+    /// Number of classes it takes, from Interactive through Visible to Background.
     takes: usize,
 }
 struct PoolInner {
+    budget: BudgetHandle,
     state: Mutex<PoolState>,
     /// Jobs queued per class (as `state.queues`, read without the lock).
     queued: [AtomicUsize; 3],
@@ -1705,10 +1933,14 @@ struct PoolInner {
     /// The classes a worker waits for a permit of (as `state.waiting`, one bit per class, read
     /// without the lock): work of a class no worker waits for wakes one waiting for a lower class.
     waiting: AtomicU8,
-    /// The workers that take every class, then the reserve's.
+    /// Workers in wake order: general, spare, Visible reserve, Interactive reserve.
     workers: Vec<WorkerSlot>,
-    /// How many workers take every class (the rest are the reserve's).
+    /// Limit for new all-class worker reservations below Interactive, and width for work splits.
     general: usize,
+    /// End of the general and spare workers in `workers`. Only these have counted slots.
+    all_class: usize,
+    /// End of the Visible reserve, where the Interactive-only workers begin.
+    visible_end: usize,
     started: AtomicUsize,
     exited: AtomicUsize,
     /// Jobs the workers ran, each counted before its handle is answered: whoever has a job's
@@ -1732,14 +1964,26 @@ const POOL_OPEN: u8 = 0;
 const POOL_DRAINING: u8 = 1;
 const POOL_CANCELLED: u8 = 2;
 impl PoolInner {
+    /// Worker-side transitions also deliver any exhaustion report captured by a submitter.
+    fn with_worker_state<T>(&self, f: impl FnOnce(&mut PoolState) -> T) -> T {
+        let mut state = self.state.lock().unwrap();
+        let result = f(&mut state);
+        let report = state.pending_log.take();
+        drop(state);
+        if let Some(report) = report {
+            report.log();
+        }
+        result
+    }
     fn enqueue(&self, job: PoolJob) -> Result<(), SubmitError> {
         let mut state = self.state.lock().unwrap();
         if state.closed != POOL_OPEN {
             return Err(SubmitError::Closed);
         }
         self.push(&mut state, job);
+        let wake = self.idle_candidates(&state);
         drop(state);
-        self.wake_one();
+        self.wake_one(wake);
         Ok(())
     }
     /// A strand's wrapper waiting in the queue takes `class`: a more urgent job is queued behind
@@ -1748,7 +1992,7 @@ impl PoolInner {
         for from in 0..state.queues.len() {
             if let Some(at) = state.queues[from].iter().position(|job| Arc::ptr_eq(&job.token.inner, &token.inner)) {
                 let mut job = state.queues[from].remove(at).expect("the wrapper is queued");
-                makepad_cpu_budget::queued(job.class.budget(), makepad_cpu_budget::APP, -1);
+                self.budget.queued(job.class.budget(), makepad_cpu_budget::APP, -1);
                 self.queued[from].fetch_sub(1, Ordering::Relaxed);
                 job.class = class;
                 self.push(state, job);
@@ -1758,24 +2002,24 @@ impl PoolInner {
     }
     fn push(&self, state: &mut PoolState, job: PoolJob) {
         let index = job.class.budget() as usize;
-        makepad_cpu_budget::queued(job.class.budget(), makepad_cpu_budget::APP, 1);
+        self.budget.queued(job.class.budget(), makepad_cpu_budget::APP, 1);
         self.queued[index].fetch_add(1, Ordering::Relaxed);
         state.queues[index].push_back(job);
+        state.record_exhaustion();
     }
-    /// A job of a higher class than `class` waits in the queue: every worker is busy, so it
-    /// starts only when one leaves.
+    /// A job of a higher class than `class` waits to start in this pool.
     fn higher_queued(&self, class: Class) -> bool {
         self.queued[..class.budget() as usize].iter().any(|q| q.load(Ordering::Relaxed) > 0)
     }
     /// The calling thread is one of this pool's workers.
     fn on_worker(&self) -> bool {
-        WORKER_POOL.with(|p| p.borrow().as_ref().is_some_and(|p| std::ptr::eq(p.as_ptr(), self)))
+        WORKER_POOL.with(|p| p.borrow().as_ref().is_some_and(|(pool, _)| std::ptr::eq(Arc::as_ptr(pool), self)))
     }
     /// A job of `share` should give its worker back at its next boundary: another job of its class
     /// waits (every worker is busy, or that job would have one) and `share` holds more than its
-    /// part of the workers: all the workers split between the class's groups and, as one more,
-    /// the jobs of no group, while such a job waits; else what the groups hold, split between
-    /// them. Its own queued jobs wait for nothing it holds. A group at its part stays, so groups
+    /// part of the general width. The groups and any waiting ungrouped work share that width.
+    /// With only grouped work waiting, the groups divide what they hold up to that width.
+    /// Its own queued jobs wait for nothing it holds. A group at its part stays, so groups
     /// at rest do not trade workers; its queued job starts when another group's work thins out.
     fn over_share(&self, share: &Share) -> bool {
         let queued = self.queued[share.class].load(Ordering::Relaxed);
@@ -1783,45 +2027,46 @@ impl PoolInner {
             return false;
         }
         let groups = share.of.groups.load(Ordering::Relaxed).max(1);
+        let width = self.workers_of(share.class);
         let part = if queued > share.of.queued.load(Ordering::Relaxed) {
-            self.workers_of(share.class).div_ceil(groups + 1)
+            width.div_ceil(groups + 1)
         } else {
-            share.of.workers.load(Ordering::Relaxed).div_ceil(groups)
+            share.of.workers.load(Ordering::Relaxed).min(width).div_ceil(groups)
         };
         share.workers.load(Ordering::Relaxed) > part
     }
-    /// The workers that take work of `class` (a budget index): the reserve's take only
-    /// Interactive work.
-    fn workers_of(&self, class: usize) -> usize {
-        if class == makepad_cpu_budget::INTERACTIVE as usize {
-            self.workers.len()
-        } else {
-            self.general
-        }
+    /// Every class splits by the general width. The reserves keep threads available for new jobs.
+    fn workers_of(&self, _class: usize) -> usize {
+        self.general
     }
-    /// An idle worker that takes every class woken, or with none idle, those waiting for a permit
-    /// of a lower class than work that queues, and an idle worker of the reserve while Interactive
-    /// work queues.
-    fn wake_one(&self) {
-        if !self.wake_idle(false) {
-            if self.queued[makepad_cpu_budget::INTERACTIVE as usize].load(Ordering::SeqCst) > 0 {
-                self.wake_idle(true);
-            }
-            self.wake_admitting(false);
+    /// Snapshot under the queue lock, so the submitter can wake outside it. An empty range
+    /// for Visible can still mean a Background admission needs to switch its request.
+    fn idle_candidates(&self, state: &PoolState) -> Option<Range<usize>> {
+        if state.needs_worker(makepad_cpu_budget::INTERACTIVE as usize) {
+            return Some(0..self.workers.len());
         }
+        let room = state.active < self.general;
+        if state.needs_worker(makepad_cpu_budget::VISIBLE as usize) {
+            let start = if room { 0 } else { self.all_class };
+            return Some(start..self.visible_end);
+        }
+        (room && state.needs_worker(makepad_cpu_budget::BACKGROUND as usize)).then_some(0..self.all_class)
     }
-    /// An idle worker of the reserve, or of the rest, woken.
-    fn wake_idle(&self, reserve: bool) -> bool {
-        let workers = if reserve { &self.workers[self.general..] } else { &self.workers[..self.general] };
-        for worker in workers {
+    fn wake_one(&self, candidates: Option<Range<usize>>) {
+        let Some(candidates) = candidates else { return };
+        for index in candidates {
+            let worker = &self.workers[index];
             if worker.idle.swap(false, Ordering::SeqCst) {
                 if let Some(t) = worker.thread.get() {
                     t.unpark();
                 }
-                return true;
+                if index < self.all_class {
+                    return;
+                }
+                break;
             }
         }
-        false
+        self.wake_admitting(false);
     }
     /// Workers waiting for a permit look at the queues again ([`PoolInner::admit`]): `all`, or
     /// those whose class is below work that queues with no worker waiting for its class.
@@ -1857,6 +2102,13 @@ impl PoolInner {
             self.waiting.fetch_and(!(1 << class), Ordering::SeqCst);
         }
     }
+    fn eligible_classes(&self, state: &PoolState, index: usize) -> usize {
+        if index >= self.all_class || state.active < self.general || state.slots[index] == WorkerCount::Active {
+            self.workers[index].takes
+        } else {
+            1 // Interactive always has access to the worker.
+        }
+    }
     /// A permit for worker `index`, asked for at `class` (`state.waiting` set for it, the class's
     /// head job `label`). While it waits, a higher class whose work no worker waits for takes the
     /// request over (it keeps its place in the budget's queue): a worker never waits in a lower
@@ -1864,32 +2116,38 @@ impl PoolInner {
     /// queues it takes from emptied meanwhile (the pool closed, or other workers took their jobs).
     fn admit(&self, index: usize, class: &mut usize, label: &mut &'static str) -> Option<u32> {
         let worker = &self.workers[index];
-        let mut admission = makepad_cpu_budget::Admission::default();
+        let mut admission = self.budget.admission();
         // (before the queues are read: whoever queues higher work after that read wakes it)
         worker.admitting.store(*class as u8 + 1, Ordering::SeqCst);
         let permit = loop {
-            let (left, any) = {
-                let mut state = self.state.lock().unwrap();
-                let any = state.queues[..worker.takes].iter().any(|q| !q.is_empty());
-                let higher = (0..*class).find(|&i| !state.waiting[i] && !state.queues[i].is_empty());
+            let (wake, any) = self.with_worker_state(|state| {
+                let takes = self.eligible_classes(state, index);
+                let any = state.queues[..takes].iter().any(|q| !q.is_empty());
+                let higher = (0..*class).find(|&i| state.needs_worker(i));
                 if !any || higher.is_some() {
-                    self.set_waiting(&mut state, *class, false);
+                    self.set_waiting(state, *class, false);
+                }
+                if !any {
+                    // With a reservation, every queue this worker takes must be empty here.
+                    state.set_slot(index, WorkerCount::Free);
                 }
                 if let Some(higher) = higher {
-                    self.set_waiting(&mut state, higher, true);
+                    self.set_waiting(state, higher, true);
+                    if higher == makepad_cpu_budget::INTERACTIVE as usize {
+                        state.set_slot(index, WorkerCount::Interactive);
+                    }
+                    state.record_exhaustion();
                     *class = higher;
                     *label = state.queues[higher].front().unwrap().label;
                     worker.admitting.store(higher as u8 + 1, Ordering::SeqCst);
                 }
-                (higher.is_some(), any)
-            };
+                (higher.and_then(|_| self.idle_candidates(state)), any)
+            });
             if !any {
                 break None;
             }
-            if left {
-                // the class it left has work and no worker waiting for it
-                self.wake_one();
-            }
+            // The class it left may now have work and no worker waiting for it.
+            self.wake_one(wake);
             if let Some(permit) = admission.poll(*class as u8, makepad_cpu_budget::APP, label) {
                 break Some(permit);
             }
@@ -1932,7 +2190,7 @@ impl PoolInner {
         }
         for (class, queue) in discarded.into_iter().enumerate() {
             for job in queue {
-                makepad_cpu_budget::queued(class as u8, makepad_cpu_budget::APP, -1);
+                self.budget.queued(class as u8, makepad_cpu_budget::APP, -1);
                 self.queued[class].fetch_sub(1, Ordering::Relaxed);
                 drop(job);
             }
@@ -1940,15 +2198,20 @@ impl PoolInner {
         self.unpark_all();
     }
     fn summary(&self) -> String {
-        let (queued, closed) = {
+        use std::fmt::Write;
+        let (queued, closed, active, parked, mut starts) = {
             let state = self.state.lock().unwrap();
-            (state.queues.each_ref().map(VecDeque::len), state.closed != POOL_OPEN)
+            let starts: Vec<_> = state.starts.iter().map(|(&label, &count)| (std::cmp::Reverse(count), label)).collect();
+            (state.queues.each_ref().map(VecDeque::len), state.closed != POOL_OPEN, state.active, state.parked, starts)
         };
-        format!(
-            "{}pool: workers={}+{} started={} exited={} queued={}/{}/{} taken={} completed={} closed={}\n",
-            makepad_cpu_budget::report_string(),
+        starts.sort_unstable();
+        let mut summary = format!(
+            "{}pool: general={} spares={} visible_reserve={} interactive_reserve={} active={active} parked={parked} started={} exited={} queued={}/{}/{} taken={} completed={} closed={}\nstarts:",
+            self.budget.report_string(),
             self.general,
-            self.workers.len() - self.general,
+            self.all_class - self.general,
+            self.visible_end - self.all_class,
+            self.workers.len() - self.visible_end,
             self.started.load(Ordering::Acquire),
             self.exited.load(Ordering::Acquire),
             queued[0],
@@ -1957,16 +2220,21 @@ impl PoolInner {
             self.taken.load(Ordering::Relaxed),
             self.completed.load(Ordering::Relaxed),
             closed
-        )
+        );
+        for (std::cmp::Reverse(count), label) in starts {
+            write!(summary, " {label}={count}").unwrap();
+        }
+        summary.push('\n');
+        summary
     }
-    /// One line of the pool's timeline ([`trace_timeline`]): its workers on a job, parked idle,
-    /// or between (admitting one); the jobs queued per class; the CPU budget's tokens running
-    /// and its waiters per class; who holds a permit, by class and label (`~`: lent by a thread
+    /// One line of the pool's timeline ([`trace_timeline`]): its workers on a job (including
+    /// the parked subset), idle, or admitting one; the jobs queued per class; the budget's
+    /// running tokens and its waiters per class; who holds a permit, by class and label (`~`: lent by a thread
     /// asleep on other work); and what is queued, by class and label. A worker on a job with no
     /// permit waits for other jobs.
     #[cfg(not(target_arch = "wasm32"))]
     fn timeline(&self) -> String {
-        let (on_jobs, queued, queued_labels) = {
+        let (on_jobs, parked, queued, queued_labels) = {
             let state = self.state.lock().unwrap();
             let mut labels: Vec<(usize, &str, usize)> = Vec::new();
             for (c, q) in state.queues.iter().enumerate() {
@@ -1978,10 +2246,10 @@ impl PoolInner {
                     }
                 }
             }
-            (state.running.iter().filter(|r| r.is_some()).count(), state.queues.each_ref().map(VecDeque::len), labels)
+            (state.running.iter().filter(|r| r.is_some()).count(), state.parked, state.queues.each_ref().map(VecDeque::len), labels)
         };
         let idle = self.workers.iter().filter(|w| w.idle.load(Ordering::Relaxed)).count();
-        let tokens = makepad_cpu_budget::tokens();
+        let tokens = self.budget.tokens();
         let mut waiting = [0usize; 3];
         for w in &tokens.waiting {
             waiting[w.class as usize] += 1;
@@ -2012,10 +2280,12 @@ impl PoolInner {
         #[cfg(not(target_os = "linux"))]
         let on_cpu = "?";
         let mut line = format!(
-            "pool timeline t={:.3} workers {}+{}: {on_jobs} on jobs, {idle} idle, {on_cpu} on a CPU | queued I{} V{} B{} | cpu {}/{} running, waiting I{} V{} B{} |",
+            "pool timeline t={:.3} workers {}+{}+{}+{}: {on_jobs} on jobs, {parked} parked, {idle} idle, {on_cpu} on a CPU | queued I{} V{} B{} | cpu {}/{} running, waiting I{} V{} B{} |",
             Cx::monotonic_now(),
             self.general,
-            self.workers.len() - self.general,
+            self.all_class - self.general,
+            self.visible_end - self.all_class,
+            self.workers.len() - self.visible_end,
             queued[0],
             queued[1],
             queued[2],
@@ -2039,17 +2309,17 @@ impl PoolInner {
     fn run_job(&self, mut job: PoolJob, permit: Option<u32>, turn: Turn) {
         let class = job.class;
         let label = job.label;
-        let _context = JobGuard::enter(class, label, job.ticket.clone(), job.token.clone(), permit, job.raised.take());
+        let _context = JobGuard::enter(class, label, job.ticket.clone(), job.token.clone(), permit, job.raised.take(), &self.budget);
         let ns = |secs: f64| (secs.max(0.0) * 1e9) as u64;
         match turn {
-            Turn::Pool => makepad_cpu_budget::waited(
+            Turn::Pool => self.budget.waited(
                 class.budget(),
                 makepad_cpu_budget::APP,
                 ns(Cx::monotonic_now() - job.submitted_at),
                 label,
             ),
             Turn::Strand { at } => {
-                makepad_cpu_budget::strand_waited(class.budget(), ns(at - job.submitted_at), label)
+                self.budget.strand_waited(class.budget(), ns(at - job.submitted_at), label)
             }
         }
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
@@ -2068,58 +2338,87 @@ impl PoolInner {
     }
 }
 fn pool_worker(inner: Arc<PoolInner>, index: usize) {
+    enum Next {
+        Stop,
+        Idle(Option<Range<usize>>),
+        Admit(usize, &'static str),
+    }
     let _ = inner.workers[index].thread.set(std::thread::current());
     let _ = inner.workers[index].wake.set(makepad_cpu_budget::Wake::current());
-    WORKER_POOL.with(|p| *p.borrow_mut() = Some(Arc::downgrade(&inner)));
+    WORKER_POOL.with(|p| *p.borrow_mut() = Some((inner.clone(), index)));
     inner.started.fetch_add(1, Ordering::AcqRel);
-    // a worker of the reserve takes only Interactive work ([`interactive_reserve`])
     let takes = inner.workers[index].takes;
     loop {
-        inner.workers[index].idle.store(true, Ordering::SeqCst);
-        let candidate = {
-            let mut state = inner.state.lock().unwrap();
+        let next = inner.with_worker_state(|state| {
             if state.closed != POOL_OPEN && state.queues[..takes].iter().all(VecDeque::is_empty) {
-                break;
+                return Next::Stop;
             }
-            let candidate = (0..takes).find(|&i| !state.waiting[i] && !state.queues[i].is_empty());
-            candidate.map(|i| {
-                inner.set_waiting(&mut state, i, true);
-                (i, state.queues[i].front().unwrap().label)
-            })
+            let eligible = inner.eligible_classes(state, index);
+            let candidate = (0..eligible).find(|&i| state.needs_worker(i));
+            if let Some(i) = candidate {
+                inner.set_waiting(state, i, true);
+                state.set_slot(index, WorkerCount::for_class(i));
+                state.record_exhaustion();
+                inner.workers[index].idle.store(false, Ordering::SeqCst);
+                Next::Admit(i, state.queues[i].front().unwrap().label)
+            } else {
+                // A parked job may have reclaimed the last place since this worker was woken.
+                // Pass unclaimed Visible work to its reserve or a lower admission.
+                let wake = if eligible < takes { inner.idle_candidates(state) } else { None };
+                state.no_spare = false;
+                inner.workers[index].idle.store(true, Ordering::SeqCst);
+                Next::Idle(wake)
+            }
+        });
+        let (mut waiting, mut label) = match next {
+            Next::Stop => break,
+            Next::Idle(wake) => {
+                inner.wake_one(wake);
+                std::thread::park();
+                continue;
+            }
+            Next::Admit(class, label) => (class, label),
         };
-        let Some((mut waiting, mut label)) = candidate else {
-            std::thread::park();
-            continue;
-        };
-        inner.workers[index].idle.store(false, Ordering::SeqCst);
         // Only one worker per class waits for a permit. Others remain available to
         // submit a higher-class request, including while the JIT owns all cores.
         let Some(permit) = inner.admit(index, &mut waiting, &mut label) else {
             continue;
         };
-        let job = {
-            let mut state = inner.state.lock().unwrap();
-            inner.set_waiting(&mut state, waiting, false);
-            let job = state.queues[..takes].iter_mut().find_map(VecDeque::pop_front);
+        let (job, wake) = inner.with_worker_state(|state| {
+            inner.set_waiting(state, waiting, false);
+            let eligible = inner.eligible_classes(state, index);
+            let job = state.queues[..eligible].iter_mut().find_map(VecDeque::pop_front);
             if let Some(job) = &job {
-                makepad_cpu_budget::queued(job.class.budget(), makepad_cpu_budget::APP, -1);
+                state.set_slot(index, WorkerCount::for_class(job.class.budget() as usize));
+                inner.budget.queued(job.class.budget(), makepad_cpu_budget::APP, -1);
                 inner.queued[job.class.budget() as usize].fetch_sub(1, Ordering::Relaxed);
                 inner.taken.fetch_add(1, Ordering::Relaxed);
+                *state.starts.entry(job.label).or_default() += 1;
                 state.running[index] = Some(job.token.clone());
+                state.record_exhaustion();
+            } else {
+                state.set_slot(index, WorkerCount::Free);
             }
-            job
-        };
-        inner.wake_one();
+            (job, inner.idle_candidates(state))
+        });
+        inner.wake_one(wake);
         if let Some(job) = job {
             if job.class.budget() != waiting as u8 {
-                makepad_cpu_budget::reclass(permit, job.class.budget());
+                inner.budget.reclass(permit, job.class.budget());
             }
             inner.run_job(job, Some(permit), Turn::Pool);
-            inner.state.lock().unwrap().running[index] = None;
+            let wake = inner.with_worker_state(|state| {
+                state.running[index] = None;
+                let counted = state.slots.get(index) == Some(&WorkerCount::Active);
+                state.set_slot(index, WorkerCount::Free);
+                if counted { inner.idle_candidates(state) } else { None }
+            });
+            inner.wake_one(wake);
         } else {
-            makepad_cpu_budget::release(permit);
+            inner.budget.release(permit);
         }
     }
+    WORKER_POOL.with(|p| *p.borrow_mut() = None);
 }
 struct PoolWorkerExit(Arc<PoolInner>);
 impl Drop for PoolWorkerExit {
@@ -2171,16 +2470,21 @@ impl fmt::Debug for TaskPool {
             .finish()
     }
 }
-/// The app pool's workers that take only Interactive work. A job holds its worker until it ends:
-/// a checkpoint yields its CPU permit, never its thread. So with every other worker in long
-/// lower-class jobs, Interactive work (a view's tiles, a pick) would have a permit and no thread
-/// to run on. The budget gives Interactive every core and the other classes `limit` of them: the
-/// reserve is the cores between, so the permits they leave always find a thread. At one core
+/// The app pool's workers that take only Interactive work. A parked job frees its place but
+/// keeps a thread for its stack. With every spare occupied, Interactive work (a view's tiles,
+/// a pick) would still have a permit and no thread. The budget gives Interactive every core
+/// and the other classes `limit` of them. The reserve covers the difference. At one core
 /// there are none between, and one worker still waits for the permit, so that the lower class's
 /// next checkpoint yields it. Parked until Interactive work queues with no other worker idle,
 /// they cost nothing per frame.
-fn interactive_reserve() -> usize {
-    makepad_cpu_budget::cores().saturating_sub(makepad_cpu_budget::limit()).max(1) as usize
+fn interactive_reserve(budget: &BudgetHandle) -> usize {
+    budget.cores().saturating_sub(budget.limit()).max(1) as usize
+}
+/// Workers that take Interactive and Visible work. They give Visible a thread for each
+/// token Background leaves free, even when every general and spare worker is occupied.
+/// When the limits coincide, one worker asks for Visible so Background yields at a checkpoint.
+fn visible_reserve(budget: &BudgetHandle) -> usize {
+    (budget.limit() - budget.background_limit()).max(1) as usize
 }
 fn app_pool() -> &'static Mutex<Weak<PoolInner>> {
     static POOL: OnceLock<Mutex<Weak<PoolInner>>> = OnceLock::new();
@@ -2208,7 +2512,7 @@ fn trace_timeline(pool: Weak<PoolInner>) {
 pub(crate) fn cpu_summary() -> String {
     let pool = app_pool().lock().unwrap().upgrade();
     pool.map_or_else(
-        || format!("{}pool: not started\n", makepad_cpu_budget::report_string()),
+        || format!("{}pool: not started\n", BudgetHandle::process().report_string()),
         |p| p.summary(),
     )
 }
@@ -2218,17 +2522,19 @@ impl TaskPool {
         if let Some(inner) = global.upgrade().filter(|inner| inner.add_live_handle()) {
             return Ok(Self { inner, set: Arc::default() });
         }
+        let budget = BudgetHandle::process();
         // (the budget's limit at its long-lived pools' cores, [`makepad_cpu_budget::pool_cores`]:
         // a live test session's call charge, not its box, which its JIT keeps)
         #[cfg(not(target_arch = "wasm32"))]
-        let workers = (makepad_cpu_budget::pool_cores() as usize).saturating_sub(1).clamp(1, makepad_cpu_budget::limit() as usize);
+        let workers = (budget.pool_cores() as usize).saturating_sub(1).clamp(1, budget.limit() as usize);
         #[cfg(target_arch = "wasm32")]
         let workers = spawner
             .available_parallelism()
             .get()
             .saturating_sub(1)
             .clamp(3, 6);
-        let pool = Self::create_with(spawner, workers, interactive_reserve())?;
+        // One spare per general worker on every platform (on wasm each is a web worker).
+        let pool = PoolInner::create_with(spawner, workers, workers, visible_reserve(&budget), interactive_reserve(&budget), budget)?;
         *global = Arc::downgrade(&pool.inner);
         #[cfg(not(target_arch = "wasm32"))]
         if crate::makepad_error_log::trace_enabled("pool.timeline") {
@@ -2237,16 +2543,27 @@ impl TaskPool {
         Ok(pool)
     }
     /// A pool of `worker_len` workers that take every class, and no reserve.
-    fn create(spawner: ThreadSpawner, worker_len: usize) -> Result<Self, SpawnError> {
-        Self::create_with(spawner, worker_len, 0)
+    fn create(spawner: ThreadSpawner, worker_len: usize, budget: BudgetHandle) -> Result<Self, SpawnError> {
+        PoolInner::create_with(spawner, worker_len, 0, 0, 0, budget)
     }
-    /// A pool of `general` workers that take every class and `reserve` that take only Interactive
-    /// work ([`interactive_reserve`]).
-    fn create_with(spawner: ThreadSpawner, general: usize, reserve: usize) -> Result<Self, SpawnError> {
-        let worker_len = general + reserve;
-        let inner = Arc::new(PoolInner {
+}
+impl PoolInner {
+    /// General and spare workers take every class. A spare runs queued work while a job is
+    /// parked, at the cost of a parked thread's stack and nothing per frame. The reserves
+    /// serve Visible and higher work ([`visible_reserve`]) or Interactive alone ([`interactive_reserve`]).
+    fn create_with(
+        spawner: ThreadSpawner, general: usize, spares: usize, visible_reserve: usize,
+        interactive_reserve: usize, budget: BudgetHandle,
+    ) -> Result<TaskPool, SpawnError> {
+        let all_class = general + spares;
+        let visible_end = all_class + visible_reserve;
+        let worker_len = visible_end + interactive_reserve;
+        let inner = Arc::new(Self {
+            budget,
             state: Mutex::new(PoolState {
                 running: vec![None; worker_len],
+                free: all_class,
+                slots: vec![WorkerCount::Free; all_class],
                 ..Default::default()
             }),
             queued: Default::default(),
@@ -2258,10 +2575,12 @@ impl TaskPool {
                     idle: AtomicBool::new(false),
                     wake: OnceLock::new(),
                     admitting: AtomicU8::new(0),
-                    takes: if index < general { 3 } else { 1 },
+                    takes: if index < all_class { 3 } else if index < visible_end { 2 } else { 1 },
                 })
                 .collect(),
             general,
+            all_class,
+            visible_end,
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
             completed: AtomicU64::new(0),
@@ -2270,10 +2589,11 @@ impl TaskPool {
             shutdown_state: Arc::new(TaskState::default()),
             ui_thread: spawner.ui_thread,
         });
-        let pool = Self {
+        let pool = TaskPool {
             inner: inner.clone(),
             set: Arc::default(),
         };
+        makepad_core_util::blocking::install(blocking_wait);
         spawner.register_pool(&inner)?;
         for index in 0..worker_len {
             let worker_inner = inner.clone();
@@ -2313,20 +2633,24 @@ impl TaskPool {
         }
         Ok(pool)
     }
+}
+impl TaskPool {
     /// A pool of its own with no workers that refuses every job, as a target
     /// without threads has (wasm without atomics): callers take their
     /// synchronous path. The shared pool other users hold is not touched.
     pub fn closed() -> Self {
-        let pool = Self::create(ThreadSpawner::for_current_thread(1), 0).unwrap();
+        let pool = Self::create(ThreadSpawner::for_current_thread(1), 0, BudgetHandle::process()).unwrap();
         pool.inner.close(ShutdownMode::CancelPending);
         pool
+    }
+    pub(crate) fn budget(&self) -> &BudgetHandle {
+        &self.inner.budget
     }
     /// Whether a job submitted through this handle is taken: the pool and the handle's jobs open.
     pub(crate) fn is_open(&self) -> bool {
         self.inner.state.lock().unwrap().closed == POOL_OPEN && self.set.is_open()
     }
-    /// The workers that take every class: what a split of work is sized by. The reserve's are not
-    /// counted: they wait for Interactive work alone ([`interactive_reserve`]).
+    /// General-worker width used to split work. Spares and reserves serve queued jobs.
     pub fn worker_count(&self) -> usize {
         self.inner.general
     }
@@ -2583,7 +2907,7 @@ impl FanOutShared {
     }
     // Every index runs exactly once. A fan-out has no partial result, so a stale or
     // cancelled job still runs its remaining indices; skipping work is the closure's own
-    // decision (its caller's cancel check). The checkpoint here only yields the permit.
+    // decision (its caller's cancel check).
     // A helper leaves at an item boundary when a higher class waits for its permit, or for
     // its thread: a higher-class job queued while every worker is busy (none can admit it
     // until one leaves), or a job of its own class while this fan-out holds more than its
@@ -2599,12 +2923,8 @@ impl FanOutShared {
             }
             let _ = checkpoint();
             if helper
-                && (JOB.with(|j| {
-                    j.borrow()
-                        .as_ref()
-                        .and_then(|j| j.permit)
-                        .is_some_and(makepad_cpu_budget::should_yield)
-                }) || pool.as_ref().is_some_and(|p| p.higher_queued(self.class) || p.over_share(&self.share)))
+                && (JOB.with(|j| j.borrow().as_ref().is_some_and(JobContext::should_yield))
+                    || pool.as_ref().is_some_and(|p| p.higher_queued(self.class) || p.over_share(&self.share)))
             {
                 break;
             }
@@ -2658,22 +2978,25 @@ impl FanOutShared {
             // (a helper's handed to the caller was lent by the helper's sleeps while the caller
             // ran on it, and a checkpoint that yielded it then counted it twice: a box's visible
             // tokens leaked one by one until no pool thread was admitted).
-            let permit = JOB.with(|j| j.borrow().as_ref().and_then(|j| j.permit));
-            if let Some(permit) = permit {
-                makepad_cpu_budget::lend_permit(permit);
-            }
+            let permit = JOB.with(|j| {
+                let context = j.borrow();
+                let job = context.as_ref()?;
+                let permit = job.permit?;
+                job.budget.lend_permit(permit);
+                Some(permit)
+            });
             while self.active.load(Ordering::SeqCst) != 0 {
                 state = self.wake.wait(state).unwrap();
             }
             drop(state);
             if let Some(permit) = permit {
-                makepad_cpu_budget::take_back_permit(permit);
                 JOB.with(|j| {
                     let mut context = j.borrow_mut();
                     let job = context.as_mut().unwrap();
+                    job.budget.take_back_permit(permit);
                     if let Some(raised) = &job.raised {
                         job.class = Class::of_budget(raised.class.load(Ordering::Relaxed));
-                        makepad_cpu_budget::reclass(permit, job.class.budget());
+                        job.budget.reclass(permit, job.class.budget());
                     }
                 });
             }
@@ -2728,7 +3051,7 @@ impl TaskPool {
                 .map(|j| (Some(j.label), j.ticket.clone(), j.token.clone()))
                 .unwrap_or_else(|| (None, Ticket::none(), CancellationToken::new()))
         });
-        let _context = JobGuard::enter(class, label.unwrap_or("fan_out caller"), ticket, token, None, None);
+        let _context = JobGuard::enter(class, label.unwrap_or("fan_out caller"), ticket, token, None, None, self.budget());
         let share = Share::new(&self.inner, class);
         let _member = self.inner.on_worker().then(|| ShareJob::running(share.clone()));
         let shared = Arc::new(FanOutShared {
@@ -3051,7 +3374,7 @@ impl<S: Send + 'static> Strand<S> {
             return handle;
         };
         job.member = Some(member);
-        let schedule = {
+        let (schedule, wake) = {
             let mut pool = self.inner.pool.inner.state.lock().unwrap();
             if pool.closed != POOL_OPEN {
                 drop(pool);
@@ -3063,20 +3386,22 @@ impl<S: Send + 'static> Strand<S> {
             let schedule = !state.scheduled;
             state.scheduled = true;
             let raise = state.waiting.as_mut().filter(|(_, waiting)| class.budget() < waiting.budget());
-            let raised = raise.is_some();
-            if let Some((token, waiting)) = raise {
+            let wake = if let Some((token, waiting)) = raise {
                 *waiting = class;
                 self.inner.pool.inner.raise(&mut pool, token, class);
-            }
+                self.inner.pool.inner.idle_candidates(&pool)
+            } else {
+                None
+            };
             if let Some(running) = &state.running {
                 running.raise(class);
             }
-            (schedule, raised)
+            (schedule, wake)
         };
-        match schedule {
-            (true, _) => self.inner.schedule(),
-            (false, true) => self.inner.pool.inner.wake_one(),
-            (false, false) => {}
+        if schedule {
+            self.inner.schedule();
+        } else {
+            self.inner.pool.inner.wake_one(wake);
         }
         handle
     }
@@ -3162,8 +3487,9 @@ impl<S: Send + 'static> StrandInner<S> {
         state.waiting = Some((job.token.clone(), class));
         drop(state);
         self.pool.inner.push(&mut pool, job);
+        let wake = self.pool.inner.idle_candidates(&pool);
         drop(pool);
-        self.pool.inner.wake_one();
+        self.pool.inner.wake_one(wake);
     }
 }
 
@@ -3800,65 +4126,19 @@ mod tests {
     use std::sync::mpsc;
     static POOL_TESTS: Mutex<()> = Mutex::new(());
 
-    /// The pool tests' CPU budget. What they check needs room the share a run is given
-    /// (`MAKEPAD_CPU_CORES`, two cores on a small lease) may not have: two Visible permits besides
-    /// Background's, three workers on jobs at once. At that share one of them holds the only
-    /// Visible permit while it waits for jobs that need another, and starves every other test of
-    /// its process. So they run in a process of their own with this budget, set before its first
-    /// use ([`the_pool_tests_run_in_a_budget_of_their_own`]).
+    /// Each test pool has room for its concurrent jobs even on a small lease.
     const POOL_TEST_CORES: usize = 8;
-    /// Set in the process the pool tests run in.
+    /// Set in the child whose process budget is sized for the two tests below.
     const POOL_CHILD: &str = "MAKEPAD_POOL_TESTS_CHILD";
-    /// The tests that run there, each starting with `in_own_budget!`.
+    /// Cx uses the process pool, and Relax's thread-wide lend acts on the process budget.
+    /// Only these tests need the child. All other test pools own their budgets.
     const IN_OWN_BUDGET: &[&str] = &[
-        "closed_runtime_refuses_new_work",
-        "pool_workers_are_warm_before_the_first_job",
-        "pool_jobs_complete_in_order_of_availability",
-        "pool_cancel_pending_shutdown_cancels_queued_and_joins",
-        "stop_workers_closes_static_pools_and_cancels_dedicated_workers",
-        "pool_reports_panic_and_keeps_worker_alive",
-        "task_queue_orders_replaces_and_prunes_without_locking",
-        "fan_out_helpers_observe_the_callers_stale_ticket",
-        "fan_out_runs_every_index_after_its_job_goes_stale",
-        "fan_out_completes_with_a_saturated_pool_and_from_a_worker",
-        "a_fan_out_from_outside_the_pool_runs_at_the_class_it_names",
         "a_cx_that_ends_leaves_the_process_pool_to_the_others",
-        "dropping_the_last_handle_closes_the_pool",
-        "classes_are_prioritized_and_fifo_within_each_class",
-        "stale_ticket_is_cancelled_without_running",
-        "cancellation_and_version_changes_reach_running_checkpoints",
-        "strand_preserves_submit_order_across_classes_and_stale_jobs",
-        "scope_borrows_and_helps_when_the_only_worker_is_its_caller",
-        "scope_and_fan_out_wait_for_borrows_on_panic",
-        "fan_out_helpers_leave_for_a_queued_higher_class_job",
-        "an_interactive_job_starts_while_long_visible_jobs_hold_every_worker",
-        "a_fan_out_on_few_workers_leaves_the_others_free",
-        "a_fan_out_gives_a_worker_to_a_job_of_its_class_queued_behind_it",
-        "fan_outs_of_a_class_share_its_workers_and_rest_at_their_parts",
-        "a_group_gives_up_workers_only_past_its_part",
-        "a_scope_job_learns_a_job_of_its_class_waits_past_its_scopes_part",
-        "a_long_job_learns_a_higher_class_job_waits_for_its_worker",
-        "fan_out_finishes_when_all_helpers_yield_to_visible_work",
-        "a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted",
         "a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission",
-        "admission_waiters_leave_a_worker_for_higher_classes",
-        "a_background_admission_gives_way_to_visible_work_queued_behind_it",
-        "scope_wait_releases_its_permit_for_work_that_unblocks_a_child",
-        "scoped_cancellation_drops_borrowed_captures_before_returning",
-        "a_strand_jobs_wait_behind_an_earlier_job_is_reported_as_the_strands",
-        "a_strand_job_runs_at_the_class_of_a_more_urgent_job_queued_behind_it",
-        "a_strand_job_admitted_for_a_more_urgent_one_behind_it_runs_at_that_class",
-        "a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it",
-        "a_strand_job_on_its_way_takes_the_class_of_a_more_urgent_one_behind_it",
-        "draining_a_strand_runs_accepted_successors_and_refuses_new_submits",
     ];
 
-    /// A pool test failed in this process. Its threads may hold CPU permits they never give back
-    /// (a helper waiting for the test's end, a holder still waiting for its last token), and every
-    /// test after it shares the budget: one that wants the whole budget waits for good. So the first
-    /// failure ends the run: the tests after it do not run, and the runner reports that failure. (A
-    /// failed strand test left its person's permit held; the next one's holder waited for its eighth
-    /// token for good with the other seven, and the pool tests' process hung 25 min, 11-12.)
+    /// A failed child test may leave threads holding process permits. Stop there so another
+    /// test cannot wait for them indefinitely.
     static POOL_TEST_FAILED: AtomicBool = AtomicBool::new(false);
     struct MarksAFailure;
     impl Drop for MarksAFailure {
@@ -3869,9 +4149,7 @@ mod tests {
         }
     }
 
-    /// A pool test's first line: in the pool tests' own process it goes on, elsewhere it returns
-    /// (the runner runs it there), and a test missing from [`IN_OWN_BUDGET`] fails. After a pool
-    /// test failed there it returns too ([`POOL_TEST_FAILED`]).
+    /// Runs a process-budget test only in the child and checks the runner lists it.
     macro_rules! in_own_budget {
         ($name:ident) => {
             if std::env::var_os(POOL_CHILD).is_none() {
@@ -3886,9 +4164,8 @@ mod tests {
         };
     }
 
-    /// The pool tests, in a child of this test binary whose budget is [`POOL_TEST_CORES`], one at
-    /// a time. It fails with the first test that failed there and its panic, or when the child ran
-    /// fewer of them than are listed: a pool test never passes by not running.
+    /// Runs both process-budget tests serially with [`POOL_TEST_CORES`] set before first use.
+    /// Reports the child's first failure or any listed test it missed.
     #[test]
     fn the_pool_tests_run_in_a_budget_of_their_own() {
         if std::env::var_os(POOL_CHILD).is_some() {
@@ -3933,8 +4210,8 @@ mod tests {
     }
 
     /// Polls state the test cannot wait on otherwise, such as the pool's own. Stays awake:
-    /// under the JIT a thread asleep (on a lock, a channel, the clock, a build) lends every
-    /// CPU token it holds.
+    /// under the JIT a thread asleep (on a lock, a channel, the clock, a build) lends its
+    /// process-budget tokens.
     fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
         let began = std::time::Instant::now();
         while !ready() {
@@ -3985,27 +4262,27 @@ mod tests {
     }
 
     impl HeldTokens {
-        fn new(count: usize, label: &'static str) -> Self {
-            assert!(std::env::var_os(POOL_CHILD).is_some(), "a budget test runs in the pool tests' own budget: start it with in_own_budget!");
-            fn hold(permits: &mut Vec<u32>, keep: &AtomicUsize) -> bool {
+        fn new(budget: &BudgetHandle, count: usize, label: &'static str) -> Self {
+            fn hold(budget: &BudgetHandle, permits: &mut Vec<u32>, keep: &AtomicUsize) -> bool {
                 while permits.len() > keep.load(Ordering::Relaxed) {
-                    makepad_cpu_budget::release(permits.pop().unwrap());
+                    budget.release(permits.pop().unwrap());
                 }
                 std::thread::yield_now();
                 !permits.is_empty()
             }
             let shared = Arc::new((AtomicUsize::new(count), AtomicBool::new(false)));
             let theirs = shared.clone();
+            let budget = budget.clone();
             let holder = std::thread::spawn(move || {
                 let (keep, held) = &*theirs;
                 let mut permits = Vec::new();
-                // (built before it holds a token: a thread waiting for a build lends them)
-                hold(&mut permits, keep);
+                // Warm this loop before taking tokens: a JIT build can lend process-budget tokens.
+                hold(&budget, &mut permits, keep);
                 permits.extend((0..count).map(|_| {
-                    makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, label)
+                    budget.admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, label)
                 }));
                 held.store(true, Ordering::Release);
-                while hold(&mut permits, keep) {}
+                while hold(&budget, &mut permits, keep) {}
             });
             wait_for("the test's tokens to be held", || shared.1.load(Ordering::Acquire));
             Self { shared, holder: Some(holder) }
@@ -4023,8 +4300,400 @@ mod tests {
     }
 
     fn test_pool(workers: usize) -> TaskPool {
-        assert!(std::env::var_os(POOL_CHILD).is_some(), "a pool test runs in the pool tests' own budget: start it with in_own_budget!");
-        TaskPool::create(ThreadSpawner::for_current_thread(workers + 1), workers).unwrap()
+        test_pool_on(workers, BudgetHandle::of_cores(POOL_TEST_CORES as u32))
+    }
+
+    fn test_pool_on(workers: usize, budget: BudgetHandle) -> TaskPool {
+        TaskPool::create(ThreadSpawner::for_current_thread(workers + 1), workers, budget).unwrap()
+    }
+
+    impl TaskPool {
+        /// The existing reserve fixture has no spares.
+        fn create_with(spawner: ThreadSpawner, general: usize, reserve: usize, budget: BudgetHandle) -> Result<Self, SpawnError> {
+            PoolInner::create_with(spawner, general, 0, 0, reserve, budget)
+        }
+    }
+
+    /// The calling thread's QoS class and relative priority as one rank, higher runs first.
+    #[cfg(target_vendor = "apple")]
+    fn thread_rank() -> i32 {
+        unsafe extern "C" {
+            fn pthread_self() -> *mut std::ffi::c_void;
+            fn pthread_get_qos_class_np(thread: *mut std::ffi::c_void, class: *mut u32, relative: *mut i32) -> i32;
+        }
+        let (mut class, mut relative) = (0, 0);
+        assert_eq!(unsafe { pthread_get_qos_class_np(pthread_self(), &mut class, &mut relative) }, 0, "the thread's QoS reads back");
+        class as i32 * 100 + relative
+    }
+
+    /// The pool is made by the UI thread once it runs at UserInteractive (`warm_task_pool`), and a
+    /// new thread takes its creator's QoS. Its workers still run below it, at the class of the job
+    /// they hold, so a frame wins the cores it shares with jobs.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn pool_workers_run_below_the_ui_thread() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(Cx::set_thread_priority(CxThreadPriority::UserInteractive), PriorityStatus::Applied, "the UI thread's priority applies");
+        let ui = thread_rank();
+        let pool = PoolInner::create_with(ThreadSpawner::for_current_thread(3), 1, 0, 0, 1, BudgetHandle::of_cores(POOL_TEST_CORES as u32)).unwrap();
+        // The general worker parks with a Background job, so the Interactive job goes to the reserve.
+        let (open, parked) = parked_background(&pool, thread_rank);
+        let reserve = worker_join(pool.submit(Class::Interactive, thread_rank).unwrap()).unwrap();
+        drop(open);
+        let general = worker_join(parked).unwrap();
+        assert!(general < ui && reserve < ui, "every worker runs below the UI thread: ranks {general} (general, Background job) and {reserve} (Interactive reserve) against the UI's {ui}");
+    }
+
+    fn test_pool_with_spares(general: usize, spares: usize) -> TaskPool {
+        let budget = BudgetHandle::of_cores(8);
+        PoolInner::create_with(ThreadSpawner::for_current_thread(general + spares + 1), general, spares, 0, 0, budget).unwrap()
+    }
+
+    /// Returns once the job is inside without_permit. Dropping the sender opens its gate,
+    /// including if an assertion on the test thread unwinds.
+    fn parked_background<T: Send + 'static>(
+        pool: &TaskPool,
+        resumed: impl FnOnce() -> T + Send + 'static,
+    ) -> (mpsc::Sender<()>, TaskHandle<T>) {
+        let (inside, entered) = mpsc::channel();
+        let (open, gate) = mpsc::channel();
+        let job = pool.submit(Class::Background, move || {
+            without_permit(|| {
+                inside.send(()).unwrap();
+                let _ = gate.recv();
+            });
+            resumed()
+        }).unwrap();
+        entered.recv_timeout(NOTHING_MOVES).expect("the Background job must reach its gate inside without_permit");
+        (open, job)
+    }
+
+    #[test]
+    fn a_visible_job_runs_while_every_general_workers_job_waits_without_its_permit() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool_with_spares(2, 2);
+        let (open_a, a) = parked_background(&pool, || ());
+        let (open_b, b) = parked_background(&pool, || ());
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "both Background jobs must be parked before Visible queues");
+        let visible = pool.submit(Class::Visible, || ()).unwrap();
+        wait_for("Visible to finish with both Background gates closed", || visible.is_finished());
+        worker_join(visible).expect("Visible must complete on a spare");
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "Visible must complete while both jobs still wait");
+        drop((open_a, open_b));
+        worker_join(a).unwrap();
+        worker_join(b).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_job_waiting_for_a_token_at_a_checkpoint_frees_its_worker() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool_with_spares(2, 2);
+        let budget = pool.budget();
+        let gate = Together::new((0, false));
+        let open = || gate.change(|(_, go)| *go = true);
+        let _end = AtEnd(open);
+        let jobs = [(); 2].map(|_| {
+            let gate = gate.clone();
+            pool.submit(Class::Background, move || {
+                gate.change(|(started, _)| *started += 1);
+                drop(gate.until("permission to checkpoint", |(_, go)| *go));
+                checkpoint().expect("the Background job must resume with a token");
+            }).unwrap()
+        });
+        drop(gate.until("both Background jobs to hold their tokens", |(started, _)| *started == 2));
+        let held = HeldTokens::new(budget, 6, "six Interactive tokens");
+        let mut requests = [budget.admission(), budget.admission()];
+        let poll = |request: &mut makepad_cpu_budget::Admission| {
+            request.poll(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "checkpoint pressure")
+        };
+        for request in &mut requests {
+            assert!(poll(request).is_none(), "each Interactive request must wait while all eight tokens are held");
+        }
+        // Keep work queued at both checkpoints. This job also needs a Background token,
+        // so it stays queued when a spare starts its admission.
+        let queued_background = pool.submit(Class::Background, || ()).unwrap();
+        open();
+        wait_for("both Background jobs to park in budget admission at their checkpoints", || {
+            let tokens = budget.tokens();
+            pool.inner.state.lock().unwrap().parked == 2
+                && tokens.running == 6
+                && tokens.waiting.iter().filter(|w| w.class == makepad_cpu_budget::BACKGROUND).count() >= 2
+        });
+        let permits = requests.map(|mut request| {
+            let permit = poll(&mut request).expect("a yielded token must admit each Interactive waiter in order");
+            AtEnd(move || budget.release(permit))
+        });
+        let visible = pool.submit(Class::Visible, || ()).unwrap();
+        drop(permits);
+        // Six tokens stay held. Visible can start below seven, Background only below five.
+        wait_for("Visible to finish while the Background budget is full", || visible.is_finished());
+        worker_join(visible).expect("Visible must complete on a spare");
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "both checkpoint jobs must stay parked through Visible completion");
+        drop(held);
+        for job in jobs {
+            worker_join(job).unwrap();
+        }
+        worker_join(queued_background).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_job_that_waits_for_a_token_with_nothing_queued_frees_its_worker() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool_with_spares(2, 2);
+        let budget = pool.budget();
+        let gate = Together::new((0, false));
+        let open = || gate.change(|(_, go)| *go = true);
+        let _end = AtEnd(open);
+        let jobs = [(); 2].map(|_| {
+            let gate = gate.clone();
+            pool.submit_named(Class::Background, "model", move || {
+                gate.change(|(started, _)| *started += 1);
+                drop(gate.until("permission to checkpoint", |(_, go)| *go));
+                checkpoint().expect("the Background job must regain its token");
+            }).unwrap()
+        });
+        drop(gate.until("both Background jobs to hold their tokens", |(started, _)| *started == 2));
+        let held = HeldTokens::new(budget, 6, "six Interactive tokens");
+        let mut outside = budget.admission();
+        let mut poll = || outside.poll(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "outside the pool");
+        assert!(poll().is_none(), "the external request must wait for a checkpoint to release a token");
+        open();
+        wait_for("both workers to park with an empty pool queue", || {
+            let waiting = budget.tokens().waiting.iter().filter(|w| w.class == makepad_cpu_budget::BACKGROUND).count();
+            let state = pool.inner.state.lock().unwrap();
+            waiting == 2 && state.parked == 2 && state.queues.iter().all(VecDeque::is_empty)
+        });
+        let visible = pool.submit_named(Class::Visible, "draw", || ()).unwrap();
+        budget.release(poll().expect("the external request must receive a yielded token"));
+        // Six tokens stay held: Visible has room and neither Background job can resume.
+        wait_for("late Visible work to complete on a spare", || visible.is_finished());
+        worker_join(visible).expect("Visible must finish while the checkpoint jobs wait");
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "neither Background job may resume before Visible completes");
+        assert!(pool.summary().lines().any(|line| line == "starts: model=2 draw=1"),
+            "the summary must count each popped label and list the most starts first");
+        drop(held);
+        for job in jobs {
+            worker_join(job).expect("each parked Background job must resume");
+        }
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_parked_job_resumes_at_once_and_holds_back_new_starts() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool_with_spares(1, 2);
+        let (resumed, at_resume) = mpsc::channel();
+        let (finish_a, end_a) = mpsc::channel::<()>();
+        let a_ending = Arc::new(AtomicBool::new(false));
+        let (g1, a) = parked_background(&pool, {
+            let inner = pool.inner.clone();
+            let ending = a_ending.clone();
+            move || {
+                let snapshot = {
+                    let state = inner.state.lock().unwrap();
+                    (state.active, state.queues[2].len())
+                };
+                resumed.send(snapshot).unwrap();
+                let _ = end_a.recv();
+                ending.store(true, Ordering::Release);
+            }
+        });
+        let (started, b_started) = mpsc::channel();
+        let (g2, end_b) = mpsc::channel();
+        let b = pool.submit(Class::Background, gate_job(started, end_b)).unwrap();
+        b_started.recv_timeout(NOTHING_MOVES).expect("B must take A's place");
+        let c = pool.submit(Class::Background, move || a_ending.load(Ordering::Acquire)).unwrap();
+        drop(g1);
+        assert_eq!(at_resume.recv_timeout(NOTHING_MOVES), Ok((2, 1)), "A must resume alongside B with C still queued");
+        drop(g2);
+        worker_join(b).unwrap();
+        wait_for("both spare threads to go idle after B ends", || {
+            pool.inner.workers.iter().filter(|w| w.idle.load(Ordering::SeqCst)).count() == 2
+        });
+        {
+            let state = pool.inner.state.lock().unwrap();
+            assert_eq!((state.active, state.queues[2].len()), (1, 1), "A alone must hold back C at the general limit");
+        }
+        drop(finish_a);
+        worker_join(a).unwrap();
+        wait_for("C to finish when A gives back the last place", || c.is_finished());
+        assert!(worker_join(c).unwrap(), "C must start after A is allowed to end");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn with_no_spare_free_queued_work_waits_for_a_job_to_end() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool_with_spares(1, 1);
+        let (open_a, a) = parked_background(&pool, || std::thread::current().id());
+        let (open_b, b) = parked_background(&pool, || ());
+        let c = pool.submit(Class::Visible, || std::thread::current().id()).unwrap();
+        {
+            let state = pool.inner.state.lock().unwrap();
+            assert_eq!(state.parked, 2, "both physical workers must still be parked");
+            assert_eq!((state.active, state.queues[1].len()), (0, 1), "C must stay queued with room in the count and no free thread");
+        }
+        drop(open_a);
+        let first_worker = worker_join(a).unwrap();
+        wait_for("C to finish while B is still parked", || c.is_finished());
+        assert_eq!(worker_join(c).unwrap(), first_worker, "C must run on A's released worker");
+        drop(open_b);
+        worker_join(b).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_visible_job_runs_on_the_visible_reserve_when_every_thread_is_parked() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = PoolInner::create_with(ThreadSpawner::for_current_thread(8), 1, 1, 1, 0, BudgetHandle::of_cores(8)).unwrap();
+        wait_for("all three workers to go idle before the first submit", || {
+            pool.inner.workers.iter().all(|w| w.idle.load(Ordering::SeqCst))
+        });
+        let (open_a, a) = parked_background(&pool, || ());
+        let (open_b, b) = parked_background(&pool, || ());
+        let reserve = &pool.inner.workers[pool.inner.all_class];
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "both all-class workers must have parked before Visible queues");
+        let visible = pool.submit(Class::Visible, || std::thread::current().id()).unwrap();
+        wait_for("Visible to finish with both gates closed", || visible.is_finished());
+        assert_eq!(worker_join(visible).unwrap(), reserve.thread.get().unwrap().id(), "Visible must run on its reserve");
+        assert_eq!(pool.inner.state.lock().unwrap().parked, 2, "both Background jobs must still be parked after Visible completes");
+        drop((open_a, open_b));
+        worker_join(a).unwrap();
+        worker_join(b).unwrap();
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn at_one_worker_a_visible_job_preempts_a_background_job_at_its_checkpoint() {
+        assert_visible_preempts_background(checkpoint);
+    }
+
+    #[test]
+    fn a_job_polling_checkpoint_when_due_gives_its_token_to_a_waiting_higher_class() {
+        assert_visible_preempts_background(checkpoint_when_due);
+    }
+
+    fn assert_visible_preempts_background(poll: fn() -> Result<(), Stale>) {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let budget = BudgetHandle::of_cores(2);
+        let pool = PoolInner::create_with(ThreadSpawner::for_current_thread(2), 1, 1,
+            visible_reserve(&budget), interactive_reserve(&budget), budget).unwrap();
+        let gate = Arc::new(AtomicBool::new(false));
+        let _end = AtEnd(|| gate.store(true, Ordering::Release));
+        let (started, running) = mpsc::channel();
+        let go = gate.clone();
+        let budget = pool.budget().clone();
+        let background = pool.submit(Class::Background, move || {
+            started.send(()).unwrap();
+            loop {
+                poll().expect("Background must keep or regain its token");
+                if go.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            assert!(budget.tokens().holders.iter().any(|h| h.class == makepad_cpu_budget::BACKGROUND && !h.lent),
+                "Background must hold its token again after Visible finishes");
+        }).unwrap();
+        running.recv_timeout(NOTHING_MOVES).expect("Background must hold the only lower-class token");
+        wait_for("the other workers to be idle before Visible queues", || {
+            pool.inner.workers.iter().filter(|w| w.idle.load(Ordering::SeqCst)).count() == 3
+        });
+        let inner = pool.inner.clone();
+        let visible = pool.submit(Class::Visible, move || {
+            // The budget releases Background's token before its worker marks itself parked.
+            // Hold the Visible token until both halves of the yield are observable.
+            wait_for("Background to park at its checkpoint", || inner.state.lock().unwrap().parked == 1);
+            let waiting = inner.budget.tokens().waiting.iter().any(|w| w.class == makepad_cpu_budget::BACKGROUND);
+            let active = inner.state.lock().unwrap().active;
+            (std::thread::current().id(), waiting, active)
+        }).unwrap();
+        wait_for("Visible to complete while the Background gate is closed", || visible.is_finished());
+        let (worker, waiting, active) = worker_join(visible).expect("Visible must finish before Background is released");
+        assert_eq!(worker, pool.inner.workers[pool.inner.all_class].thread.get().unwrap().id(), "Visible must start on its reserve");
+        assert!(waiting, "the checkpoint must retain Background's ticket while Visible holds the token");
+        assert_eq!(active, 0, "neither the parked job nor the Visible reserve may use a general place");
+        assert!(!background.is_finished(), "Background must stay in its loop through Visible completion");
+        gate.store(true, Ordering::Release);
+        worker_join(background).expect("Background must return from its checkpoint and finish after its gate opens");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    /// A Background job computes a `ComputeOnce` value and paces at its checkpoints; a Visible job
+    /// that preempted it asks for the same value. The waiting job frees the token, so the
+    /// computation goes on and both finish (with `OnceLock`, the waiter blocks holding the only
+    /// token while the computation stays parked for it). No pool job's wait counts as the UI
+    /// thread's; a UI thread's contended wait does, once.
+    #[test]
+    fn a_job_waiting_on_a_compute_once_value_frees_its_token_for_the_job_computing_it() {
+        use makepad_core_util::once::ComputeOnce;
+        #[derive(Debug, PartialEq)]
+        struct Basis(u32);
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let budget = BudgetHandle::of_cores(2);
+        let pool = PoolInner::create_with(ThreadSpawner::for_current_thread(2), 1, 1,
+            visible_reserve(&budget), interactive_reserve(&budget), budget).unwrap();
+        let ui_waits = UI_THREAD_WAITS.load(Ordering::SeqCst);
+        let cell = Arc::new(ComputeOnce::<Basis>::new());
+        let asked = Arc::new(AtomicBool::new(false));
+        let _end = AtEnd(|| asked.store(true, Ordering::Release));
+        let (started, building) = mpsc::channel();
+        let background = pool.submit(Class::Background, {
+            let (cell, asked) = (cell.clone(), asked.clone());
+            move || cell.get_or_init(|| {
+                started.send(()).unwrap();
+                // Paces until the Visible job asked; it can only ask once this job gave way.
+                while !asked.load(Ordering::Acquire) {
+                    checkpoint_when_due().expect("Background must keep or regain its token");
+                    std::thread::yield_now();
+                }
+                checkpoint_when_due().expect("Background must regain its token from the waiting job");
+                Basis(5)
+            }).0
+        }).unwrap();
+        building.recv_timeout(NOTHING_MOVES).expect("Background must start computing the value");
+        wait_for("the other workers to be idle before Visible queues", || {
+            pool.inner.workers.iter().filter(|w| w.idle.load(Ordering::SeqCst)).count() == 3
+        });
+        let visible = pool.submit(Class::Visible, {
+            let (cell, asked) = (cell.clone(), asked.clone());
+            move || {
+                asked.store(true, Ordering::Release);
+                cell.get_or_init(|| Basis(0)).0
+            }
+        }).unwrap();
+        assert_eq!(worker_join(visible).expect("the waiting job must finish"), 5, "the waiting job reads the computed value");
+        assert_eq!(worker_join(background).expect("the computing job must finish"), 5, "the computing job returns its value");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+        assert_eq!(UI_THREAD_WAITS.load(Ordering::SeqCst), ui_waits, "a pool job's wait is not the UI thread's");
+
+        // A UI thread asks while a thread computes: it waits (no crash), counted.
+        #[derive(Debug, PartialEq)]
+        struct OnUi(u32);
+        let cell = Arc::new(ComputeOnce::<OnUi>::new());
+        let (started, building) = mpsc::channel();
+        let computing = std::thread::spawn({
+            let cell = cell.clone();
+            move || cell.get_or_init(|| {
+                started.send(()).unwrap();
+                wait_for("the UI thread to wait for the value", || UI_THREAD_WAITS.load(Ordering::SeqCst) > ui_waits);
+                OnUi(3)
+            }).0
+        });
+        building.recv_timeout(NOTHING_MOVES).expect("the thread must start computing the value");
+        let read = std::thread::spawn(move || {
+            makepad_core_util::ui_thread::mark_ui_thread();
+            cell.get_or_init(|| OnUi(0)).0
+        }).join().unwrap();
+        assert_eq!((read, computing.join().unwrap()), (3, 3), "the UI thread waits for the computed value");
+        assert_eq!(UI_THREAD_WAITS.load(Ordering::SeqCst), ui_waits + 1, "the UI thread's wait is counted");
+    }
+
+    fn process_test_budget() -> BudgetHandle {
+        assert!(std::env::var_os(POOL_CHILD).is_some(), "a process-budget test must run in the pool tests' child");
+        BudgetHandle::process()
     }
 
     /// A job that reports it started and then waits for a release.
@@ -4143,7 +4812,6 @@ mod tests {
 
     #[test]
     fn closed_runtime_refuses_new_work() {
-        in_own_budget!(closed_runtime_refuses_new_work);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let spawner = ThreadSpawner::for_current_thread(2);
         spawner.close_runtime();
@@ -4156,7 +4824,7 @@ mod tests {
             Err(SpawnError::RuntimeClosed)
         ));
         assert!(matches!(
-            TaskPool::create(spawner, 1),
+            TaskPool::create(spawner, 1, BudgetHandle::of_cores(POOL_TEST_CORES as u32)),
             Err(SpawnError::RuntimeClosed)
         ));
     }
@@ -4207,7 +4875,6 @@ mod tests {
 
     #[test]
     fn pool_workers_are_warm_before_the_first_job() {
-        in_own_budget!(pool_workers_are_warm_before_the_first_job);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(3);
         wait_for("workers to start", || {
@@ -4232,7 +4899,6 @@ mod tests {
 
     #[test]
     fn pool_jobs_complete_in_order_of_availability() {
-        in_own_budget!(pool_jobs_complete_in_order_of_availability);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         let order = Arc::new(Mutex::new(Vec::new()));
@@ -4274,7 +4940,6 @@ mod tests {
 
     #[test]
     fn pool_cancel_pending_shutdown_cancels_queued_and_joins() {
-        in_own_budget!(pool_cancel_pending_shutdown_cancels_queued_and_joins);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let (started_tx, started_rx) = mpsc::channel();
@@ -4302,14 +4967,13 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stop_workers_closes_static_pools_and_cancels_dedicated_workers() {
-        in_own_budget!(stop_workers_closes_static_pools_and_cancels_dedicated_workers);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         static POOLS: OnceLock<(TaskPool, TaskPool)> = OnceLock::new();
         let spawner = ThreadSpawner::for_current_thread(4);
         let (idle, busy) = POOLS.get_or_init(|| {
             (
-                TaskPool::create(spawner.clone(), 2).unwrap(),
-                TaskPool::create(spawner.clone(), 1).unwrap(),
+                TaskPool::create(spawner.clone(), 2, BudgetHandle::of_cores(POOL_TEST_CORES as u32)).unwrap(),
+                TaskPool::create(spawner.clone(), 1, BudgetHandle::of_cores(POOL_TEST_CORES as u32)).unwrap(),
             )
         });
         wait_for("idle static workers", || {
@@ -4371,7 +5035,6 @@ mod tests {
 
     #[test]
     fn pool_reports_panic_and_keeps_worker_alive() {
-        in_own_budget!(pool_reports_panic_and_keeps_worker_alive);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let failed = pool
@@ -4389,7 +5052,6 @@ mod tests {
 
     #[test]
     fn task_queue_orders_replaces_and_prunes_without_locking() {
-        in_own_budget!(task_queue_orders_replaces_and_prunes_without_locking);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let mut queue: TaskQueue<u32> = TaskQueue::new(Class::Visible, 1, 16);
@@ -4438,7 +5100,6 @@ mod tests {
 
     #[test]
     fn fan_out_helpers_observe_the_callers_stale_ticket() {
-        in_own_budget!(fan_out_helpers_observe_the_callers_stale_ticket);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(3);
         let worker_count = pool.worker_count();
@@ -4480,7 +5141,6 @@ mod tests {
 
     #[test]
     fn fan_out_runs_every_index_after_its_job_goes_stale() {
-        in_own_budget!(fan_out_runs_every_index_after_its_job_goes_stale);
         // A non-cancellable map inside a job a newer version made stale still gets every
         // result: fan_out never drops indices (an app's par::map panicked on one).
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
@@ -4504,7 +5164,6 @@ mod tests {
 
     #[test]
     fn fan_out_completes_with_a_saturated_pool_and_from_a_worker() {
-        in_own_budget!(fan_out_completes_with_a_saturated_pool_and_from_a_worker);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         wait_for("workers to start", || {
@@ -4555,6 +5214,7 @@ mod tests {
                     CancellationToken::new(),
                     None,
                     None,
+                    saturated_pool.budget(),
                 );
                 saturated_pool.fan_out(64, |_| {
                     count.fetch_add(1, Ordering::Relaxed);
@@ -4589,9 +5249,29 @@ mod tests {
         seen.into_inner().unwrap()
     }
 
+    /// The calling thread's OS priority as the pool could set it: Linux nice and scheduling policy
+    /// (fields 19 and 41 of /proc/thread-self/stat, the thread's /proc/self/task/<tid>/stat), the
+    /// QoS rank on Apple targets.
+    fn os_priority() -> (i64, i64) {
+        #[cfg(target_os = "linux")]
+        {
+            let stat = std::fs::read_to_string("/proc/thread-self/stat").expect("the thread's stat reads");
+            let fields: Vec<&str> = stat[stat.rfind(')').expect("the stat names its thread") + 2..].split(' ').collect();
+            // `fields` starts at field 3 (the state)
+            (fields[16].parse().expect("nice"), fields[38].parse().expect("policy"))
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            (thread_rank() as i64, 0)
+        }
+        #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+        {
+            (0, 0)
+        }
+    }
+
     #[test]
     fn a_fan_out_from_outside_the_pool_runs_at_the_class_it_names() {
-        in_own_budget!(a_fan_out_from_outside_the_pool_runs_at_the_class_it_names);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         wait_for("workers to start", || {
@@ -4607,6 +5287,17 @@ mod tests {
             })
             .unwrap();
         let (plain, named, after) = worker_join(own).unwrap();
+        // A plain std thread's own OS priority never changes: neither its spread at Background nor
+        // one at a named class moves it (a Linux thread could not climb back).
+        let std_pool = pool.clone();
+        let (before, plain_std, named_std, later) = std::thread::spawn(move || {
+            let before = os_priority();
+            let plain = spread_classes(&std_pool, None);
+            let named = spread_classes(&std_pool, Some(Class::Visible));
+            (before, plain, named, os_priority())
+        }).join().unwrap();
+        assert!(plain_std.iter().all(|c| *c == Some(Class::Background)) && named_std.iter().all(|c| *c == Some(Class::Visible)), "a std thread's spreads run at their classes: {plain_std:?} {named_std:?}");
+        assert_eq!(later, before, "a std thread that fans out keeps its OS priority (nice and policy, or QoS rank)");
         assert!(plain.len() == 64 && plain.iter().all(|c| *c == Some(Class::Background)), "a plain spread from the app's own thread runs at Background: {plain:?}");
         assert!(named.len() == 64 && named.iter().all(|c| *c == Some(Class::Visible)), "a spread from the app's own thread that names Visible runs at Visible, its helpers too: {named:?}");
         assert_eq!(after, None, "the thread is outside the pool's jobs once its spreads return");
@@ -4619,11 +5310,59 @@ mod tests {
     }
 
     #[test]
+    fn a_job_helping_another_budgets_pool_keeps_each_permit_on_its_own_budget() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let a = test_pool(1);
+        let b = test_pool(1);
+        let a_budget = a.budget().clone();
+        let b_budget = b.budget().clone();
+        let nested_pool = b.clone();
+        let job = a.submit(Class::Visible, move || {
+            let before = a_budget.tokens();
+            let during = OnceLock::new();
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                nested_pool.fan_out_on(1, 2, |i| {
+                    if i == 1 {
+                        panic!("item 1");
+                    }
+                    assert!(during.set((a_budget.tokens(), b_budget.tokens(), checkpoint().is_ok())).is_ok(), "item 0 must run only once");
+                });
+            })).expect_err("the caller must catch the second item's panic");
+            assert_eq!(&*panic_report(panic).message, "item 1", "the panic must come from item 1");
+            let (outer, inner, checked) = during.into_inner().expect("the caller must run item 0");
+            assert_eq!((before.holders.len(), before.running), (1, 1), "the outer job must start with one running holder on a");
+            assert!(!before.holders[0].lent, "a's initial token must be running");
+            assert_eq!((outer.holders.len(), outer.running), (1, 0), "a must retain its row and free its token during the nested job");
+            assert!(outer.holders[0].lent, "a must lend its token while the caller runs on b");
+            assert_eq!((inner.holders.len(), inner.running), (1, 1), "the nested job must hold its own running row on b");
+            assert!(!inner.holders[0].lent, "the nested job must run on b's token");
+            assert!(checked, "item 0 must checkpoint on b");
+
+            let restored = a_budget.tokens();
+            assert_eq!((restored.holders.len(), restored.running), (1, 1), "unwinding must leave a's row running with the outer job");
+            assert!(!restored.holders[0].lent, "unwinding must take back a's token");
+            assert_eq!(b_budget.tokens().running, 0, "unwinding must release b's permit");
+            assert!(checkpoint().is_ok(), "the restored job must checkpoint on a");
+            assert_eq!(current_class(), Some(Class::Visible), "the restored job must run at Visible");
+        }).unwrap();
+        worker_join(job).expect("the outer job must finish after catching the nested panic");
+        for (pool, idle) in [(&a, "a to release its last permit"), (&b, "b to release its last permit")] {
+            wait_for(idle, || {
+                let tokens = pool.budget().tokens();
+                tokens.running == 0 && tokens.holders.is_empty() && tokens.waiting.is_empty()
+            });
+            worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+        }
+    }
+
+    #[test]
     fn a_cx_that_ends_leaves_the_process_pool_to_the_others() {
         in_own_budget!(a_cx_that_ends_leaves_the_process_pool_to_the_others);
+        let budget = process_test_budget();
         let mut ending = crate::Cx::new(Box::new(|_, _| {}));
         let going_on = crate::Cx::new(Box::new(|_, _| {}));
         let (ended, pool) = (ending.task_pool(), going_on.task_pool());
+        assert_eq!(pool.budget().id(), budget.id(), "Cx must use the process budget");
         ending.call_event_handler(&crate::event::Event::Shutdown);
         assert!(!ended.is_open(), "its own jobs are over");
         assert!(pool.is_open(), "the other Cx's are not");
@@ -4632,7 +5371,6 @@ mod tests {
 
     #[test]
     fn dropping_the_last_handle_closes_the_pool() {
-        in_own_budget!(dropping_the_last_handle_closes_the_pool);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         wait_for("workers to start", || {
@@ -4708,7 +5446,6 @@ mod tests {
     }
     #[test]
     fn classes_are_prioritized_and_fifo_within_each_class() {
-        in_own_budget!(classes_are_prioritized_and_fifo_within_each_class);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         assert!(Class::Interactive > Class::Visible && Class::Visible > Class::Background);
         let pool = test_pool(1);
@@ -4747,7 +5484,6 @@ mod tests {
 
     #[test]
     fn stale_ticket_is_cancelled_without_running() {
-        in_own_budget!(stale_ticket_is_cancelled_without_running);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let version = Version::new();
@@ -4767,10 +5503,10 @@ mod tests {
 
     #[test]
     fn cancellation_and_version_changes_reach_running_checkpoints() {
-        in_own_budget!(cancellation_and_version_changes_reach_running_checkpoints);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        assert!(checkpoint().is_ok());
-        assert_eq!(current_class(), None);
+        assert!(checkpoint().is_ok(), "a checkpoint outside a pool job must succeed");
+        assert!(checkpoint_when_due().is_ok(), "a poll outside a pool job must succeed");
+        assert_eq!(current_class(), None, "the calling thread must be outside a pool job");
         let pool = test_pool(1);
         for supersede in [false, true] {
             let version = Version::new();
@@ -4780,7 +5516,9 @@ mod tests {
                 .submit_at(Class::Visible, "checkpoint", version.next(), move || {
                     started.send(()).unwrap();
                     wait.recv().unwrap();
-                    checkpoint().is_err()
+                    let immediate = checkpoint().is_err();
+                    wait_for("the stale job's next checkpoint to be due", checkpoint_due);
+                    (immediate, checkpoint_when_due().is_err(), checkpoint_when_due().is_err())
                 })
                 .unwrap();
             began.recv().unwrap();
@@ -4790,14 +5528,16 @@ mod tests {
                 job.cancel();
             }
             go.send(()).unwrap();
-            assert!(worker_join(job).unwrap());
+            let (immediate, when_due, again) = worker_join(job).unwrap();
+            assert!(immediate, "an explicit checkpoint must report the stale job (supersede={supersede})");
+            assert!(when_due, "the first due poll must report the stale job (supersede={supersede})");
+            assert!(again, "a reported stale result must not be consumed: the next poll reports it too (supersede={supersede})");
         }
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 
     #[test]
     fn strand_preserves_submit_order_across_classes_and_stale_jobs() {
-        in_own_budget!(strand_preserves_submit_order_across_classes_and_stale_jobs);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(3);
         let strand = Strand::with_state(&pool, "ordered", Vec::<usize>::new());
@@ -4854,7 +5594,6 @@ mod tests {
 
     #[test]
     fn scope_borrows_and_helps_when_the_only_worker_is_its_caller() {
-        in_own_budget!(scope_borrows_and_helps_when_the_only_worker_is_its_caller);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let child_pool = pool.clone();
@@ -4885,7 +5624,6 @@ mod tests {
 
     #[test]
     fn scope_and_fan_out_wait_for_borrows_on_panic() {
-        in_own_budget!(scope_and_fan_out_wait_for_borrows_on_panic);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         let child_pool = pool.clone();
@@ -4920,12 +5658,7 @@ mod tests {
     /// admits it, so the helpers cannot learn of it from the budget.
     #[test]
     fn fan_out_helpers_leave_for_a_queued_higher_class_job() {
-        in_own_budget!(fan_out_helpers_leave_for_a_queued_higher_class_job);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        // Two Visible permits besides any other test's.
-        if makepad_cpu_budget::limit() < 3 {
-            return;
-        }
         const WORKERS: usize = 2;
         const ITEMS: usize = 64;
         #[derive(Default)]
@@ -4968,14 +5701,14 @@ mod tests {
     /// would wait for the Visible job's end.
     #[test]
     fn an_interactive_job_starts_while_long_visible_jobs_hold_every_worker() {
-        in_own_budget!(an_interactive_job_starts_while_long_visible_jobs_hold_every_worker);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         #[derive(Default)]
         struct State {
             visible_started: usize,
             interactive_ran: bool,
         }
-        let pool = TaskPool::create_with(ThreadSpawner::for_current_thread(3), 1, interactive_reserve()).unwrap();
+        let budget = BudgetHandle::of_cores(POOL_TEST_CORES as u32);
+        let pool = TaskPool::create_with(ThreadSpawner::for_current_thread(3), 1, interactive_reserve(&budget), budget).unwrap();
         assert_eq!(pool.worker_count(), 1, "a split of work is sized by the workers that take every class");
         let state = Together::new(State::default());
         let released = Arc::new(AtomicBool::new(false));
@@ -5012,11 +5745,7 @@ mod tests {
     /// `most` counts the caller: the rest of the pool stays free for other work.
     #[test]
     fn a_fan_out_on_few_workers_leaves_the_others_free() {
-        in_own_budget!(a_fan_out_on_few_workers_leaves_the_others_free);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if makepad_cpu_budget::limit() < 5 {
-            return;
-        }
         const WORKERS: usize = 4;
         const ITEMS: usize = 64;
         #[derive(Default)]
@@ -5057,11 +5786,7 @@ mod tests {
     /// fan-out that keeps its workers is on the next item on every worker, with the job queued.
     #[test]
     fn a_fan_out_gives_a_worker_to_a_job_of_its_class_queued_behind_it() {
-        in_own_budget!(a_fan_out_gives_a_worker_to_a_job_of_its_class_queued_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if makepad_cpu_budget::limit() < 5 {
-            return;
-        }
         const WORKERS: usize = 4;
         const ITEMS: usize = 64;
         #[derive(Default)]
@@ -5101,11 +5826,7 @@ mod tests {
     /// reads where every worker went. No job stays counted once all ended.
     #[test]
     fn fan_outs_of_a_class_share_its_workers_and_rest_at_their_parts() {
-        in_own_budget!(fan_outs_of_a_class_share_its_workers_and_rest_at_their_parts);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if makepad_cpu_budget::limit() < 7 {
-            return;
-        }
         const WORKERS: usize = 6;
         #[derive(Default)]
         struct State {
@@ -5166,7 +5887,6 @@ mod tests {
     /// A group's part, by the counts alone, on 7 workers.
     #[test]
     fn a_group_gives_up_workers_only_past_its_part() {
-        in_own_budget!(a_group_gives_up_workers_only_past_its_part);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(7);
         let inner = &pool.inner;
@@ -5222,11 +5942,7 @@ mod tests {
     /// asks the jobs at their task boundaries and reads their answers.
     #[test]
     fn a_scope_job_learns_a_job_of_its_class_waits_past_its_scopes_part() {
-        in_own_budget!(a_scope_job_learns_a_job_of_its_class_waits_past_its_scopes_part);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if makepad_cpu_budget::limit() < 6 {
-            return;
-        }
         #[derive(Default)]
         struct State {
             on: usize,
@@ -5301,16 +6017,10 @@ mod tests {
     /// A crew helper (a job taking task after task on a worker) learns at its task boundary that a
     /// higher-class job waits for a worker, though no permit waits: every worker is busy. Before
     /// it, an Interactive job waited 8 s behind 14 Visible helpers that checkpointed
-    /// every few ms. What the pool says is asked: the permit's half of `worker_wanted` answers for
-    /// the whole process's CPU budget, which on a loaded box (the JIT's compiles below their floor)
-    /// asks any job to yield, the Interactive one too.
+    /// every few ms. This test checks that the pool's queue alone can make `worker_wanted` true.
     #[test]
     fn a_long_job_learns_a_higher_class_job_waits_for_its_worker() {
-        in_own_budget!(a_long_job_learns_a_higher_class_job_waits_for_its_worker);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if makepad_cpu_budget::limit() < 2 {
-            return;
-        }
         fn pool_wants_worker() -> bool {
             current_class().is_some_and(higher_queued_in_pool)
         }
@@ -5344,12 +6054,7 @@ mod tests {
     /// spent 13.8 s of 32.7 s in fan-outs waiting like that.
     #[test]
     fn a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted() {
-        in_own_budget!(a_fan_out_returns_when_its_items_are_done_not_when_its_helpers_are_admitted);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        // Smaller budgets cannot admit a Background helper alongside its caller.
-        if (makepad_cpu_budget::limit() as usize) < 4 {
-            return;
-        }
         let pool = test_pool(2);
         let child_pool = pool.clone();
         let job = pool
@@ -5369,15 +6074,17 @@ mod tests {
                         wait_for("the helper to take the other item", || helper_in_item.load(Ordering::Acquire));
                         // Fill the budget and let a higher class wait for a permit: the
                         // helper's next checkpoint gives its permit up and waits for one.
-                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(2), "fan-out occupant");
+                        let budget = child_pool.budget();
+                        let held = HeldTokens::new(budget, (budget.cores() as usize).saturating_sub(2), "fan-out occupant");
                         let (release, wait_release) = mpsc::channel::<()>();
+                        let waiter_budget = budget.clone();
                         let waiter = std::thread::spawn(move || {
-                            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
+                            let permit = waiter_budget.admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
                             let _ = wait_release.recv();
-                            makepad_cpu_budget::release(permit);
+                            waiter_budget.release(permit);
                         });
                         let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
-                        wait_for("a higher class waiting for a permit", || makepad_cpu_budget::should_yield(permit));
+                        wait_for("a higher class waiting for a permit", || budget.should_yield(permit));
                         *pressure.lock().unwrap() = Some((held, release, waiter));
                         // A fan-out that waits for its helper's permit never returns by itself:
                         // give the budget back after a while, so that failure is an assert.
@@ -5430,10 +6137,7 @@ mod tests {
     fn a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission() {
         in_own_budget!(a_fan_out_caller_takes_its_own_token_back_instead_of_a_new_admission);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        if (makepad_cpu_budget::limit() as usize) < 4 {
-            return;
-        }
-        let pool = test_pool(2);
+        let pool = test_pool_on(2, process_test_budget());
         let child_pool = pool.clone();
         let job = pool
             .submit(Class::Background, move || {
@@ -5448,15 +6152,17 @@ mod tests {
                         wait_for("the helper to take the other item", || helper_in_item.load(Ordering::Acquire));
                         // Every other permit is held and a higher class waits for one: it
                         // takes the token the caller lends when it sleeps for the helper.
-                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(2), "fan-out occupant");
+                        let budget = child_pool.budget();
+                        let held = HeldTokens::new(budget, (budget.cores() as usize).saturating_sub(2), "fan-out occupant");
                         let (release, wait_release) = mpsc::channel::<()>();
+                        let waiter_budget = budget.clone();
                         let waiter = std::thread::spawn(move || {
-                            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
+                            let permit = waiter_budget.admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "fan-out waiter");
                             let _ = wait_release.recv();
-                            makepad_cpu_budget::release(permit);
+                            waiter_budget.release(permit);
                         });
                         let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
-                        wait_for("a higher class waiting for a permit", || makepad_cpu_budget::should_yield(permit));
+                        wait_for("a higher class waiting for a permit", || budget.should_yield(permit));
                         *pressure.lock().unwrap() = Some((held, release, waiter));
                         let (pressure, released) = (pressure.clone(), released.clone());
                         *watchdog.lock().unwrap() = Some(std::thread::spawn(move || {
@@ -5504,15 +6210,8 @@ mod tests {
 
     #[test]
     fn fan_out_finishes_when_all_helpers_yield_to_visible_work() {
-        in_own_budget!(fan_out_finishes_when_all_helpers_yield_to_visible_work);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        // Smaller budgets cannot admit even one Background helper alongside its caller.
-        let helpers = (makepad_cpu_budget::limit() as usize)
-            .saturating_sub(3)
-            .min(2);
-        if helpers == 0 {
-            return;
-        }
+        let helpers = 2;
         let pool = test_pool(helpers + 1);
         let child_pool = pool.clone();
         let job = pool
@@ -5529,15 +6228,17 @@ mod tests {
                         && !caller_started.swap(true, Ordering::Relaxed)
                     {
                         barrier.wait();
-                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(helpers + 1), "batch occupant");
+                        let budget = child_pool.budget();
+                        let held = HeldTokens::new(budget, (budget.cores() as usize).saturating_sub(helpers + 1), "batch occupant");
                         let (release, released) = mpsc::channel();
+                        let waiter_budget = budget.clone();
                         let waiter = std::thread::spawn(move || {
-                            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "batch waiter");
+                            let permit = waiter_budget.admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "batch waiter");
                             let _ = released.recv();
-                            makepad_cpu_budget::release(permit);
+                            waiter_budget.release(permit);
                         });
                         let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
-                        wait_for("higher class waiting for the batch", || makepad_cpu_budget::should_yield(permit));
+                        wait_for("higher class waiting for the batch", || budget.should_yield(permit));
                         pressure_ready.store(true, Ordering::Release);
                         // Keep the caller in its first item so both helpers must
                         // relinquish their permits before the caller checkpoints.
@@ -5578,10 +6279,9 @@ mod tests {
 
     #[test]
     fn admission_waiters_leave_a_worker_for_higher_classes() {
-        in_own_budget!(admission_waiters_leave_a_worker_for_higher_classes);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        let held = HeldTokens::new(makepad_cpu_budget::cores() as usize, "admission gate");
         let pool = test_pool(3);
+        let held = HeldTokens::new(pool.budget(), pool.budget().cores() as usize, "admission gate");
         let (began, started) = mpsc::channel();
         let bg = pool.submit(Class::Background, || ()).unwrap();
         wait_for("Background admission waiter", || {
@@ -5611,16 +6311,10 @@ mod tests {
     /// then waits for the Background job's own.
     #[test]
     fn a_background_admission_gives_way_to_visible_work_queued_behind_it() {
-        in_own_budget!(a_background_admission_gives_way_to_visible_work_queued_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        let background = makepad_cpu_budget::background_limit() as usize;
-        if background >= makepad_cpu_budget::limit() as usize {
-            // no permit Visible work may take that Background work may not
-            return;
-        }
-        // every permit Background work may have, held: Visible work still has room
-        let held = HeldTokens::new(background, "background permits");
         let pool = test_pool(1);
+        // Every permit Background work may have, held: Visible work still has room.
+        let held = HeldTokens::new(pool.budget(), pool.budget().background_limit() as usize, "background permits");
         let (bg_started, bg_began) = mpsc::channel();
         let bg = pool.submit(Class::Background, move || bg_started.send(()).unwrap()).unwrap();
         wait_for("the worker to wait for a Background permit", || {
@@ -5644,14 +6338,10 @@ mod tests {
 
     #[test]
     fn scope_wait_releases_its_permit_for_work_that_unblocks_a_child() {
-        in_own_budget!(scope_wait_releases_its_permit_for_work_that_unblocks_a_child);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        // Two permits let the caller and its child start together.
-        if makepad_cpu_budget::cores() < 2 {
-            return;
-        }
-        let held = HeldTokens::new(makepad_cpu_budget::cores() as usize - 2, "scope gate");
         let pool = test_pool(3);
+        // Two permits let the caller and its child start together.
+        let held = HeldTokens::new(pool.budget(), pool.budget().cores() as usize - 2, "scope gate");
         let child_pool = pool.clone();
         let job = pool
             .submit(Class::Interactive, move || {
@@ -5681,7 +6371,6 @@ mod tests {
 
     #[test]
     fn scoped_cancellation_drops_borrowed_captures_before_returning() {
-        in_own_budget!(scoped_cancellation_drops_borrowed_captures_before_returning);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(1);
         let child_pool = pool.clone();
@@ -5731,7 +6420,6 @@ mod tests {
 
     #[test]
     fn a_strand_jobs_wait_behind_an_earlier_job_is_reported_as_the_strands() {
-        in_own_budget!(a_strand_jobs_wait_behind_an_earlier_job_is_reported_as_the_strands);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         let strand = Strand::new(&pool, "behind its strand");
@@ -5751,7 +6439,7 @@ mod tests {
         go.send(()).unwrap();
         worker_join(first).unwrap();
         worker_join(second).unwrap();
-        let report = makepad_cpu_budget::report_string();
+        let report = pool.budget().report_string();
         let line = report
             .lines()
             .find_map(|l| l.strip_prefix("behind an earlier job on its strand: wait p50 / p95 / max  "))
@@ -5771,11 +6459,10 @@ mod tests {
 
     #[test]
     fn a_strand_job_runs_at_the_class_of_a_more_urgent_job_queued_behind_it() {
-        in_own_budget!(a_strand_job_runs_at_the_class_of_a_more_urgent_job_queued_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         // Background's share is taken: a background job waits for a token, a visible one has room.
-        let held = HeldTokens::new(makepad_cpu_budget::background_limit() as usize, "background share");
         let pool = test_pool(2);
+        let held = HeldTokens::new(pool.budget(), pool.budget().background_limit() as usize, "background share");
         let strand = Strand::new(&pool, "raised");
         let (ran, order) = mpsc::channel();
         let first_ran = ran.clone();
@@ -5794,10 +6481,9 @@ mod tests {
     /// parked at its first checkpoint for its own class's share.
     #[test]
     fn a_strand_job_admitted_for_a_more_urgent_one_behind_it_runs_at_that_class() {
-        in_own_budget!(a_strand_job_admitted_for_a_more_urgent_one_behind_it_runs_at_that_class);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        let held = HeldTokens::new(makepad_cpu_budget::background_limit() as usize, "background share");
         let pool = test_pool(2);
+        let held = HeldTokens::new(pool.budget(), pool.budget().background_limit() as usize, "background share");
         let strand = Strand::new(&pool, "raised");
         let (ran, order) = mpsc::channel();
         let first = strand.submit(Class::Background, Ticket::none(), move |_| ran.send(current_class()).unwrap());
@@ -5815,141 +6501,69 @@ mod tests {
     /// Background's share would let it go on, however urgent what waited behind it.
     #[test]
     fn a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it() {
-        in_own_budget!(a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        // The test needs a full machine until the job is raised where it waits. Under the JIT a
-        // thread asleep or paused lends its token (see `wait_for`), and work waiting for one comes
-        // in on it: a step that finds the app over the cores (`over_the_cores`) sets the test up
-        // again. Every other outcome is asserted.
-        let mut again = 0;
-        while let Err(what) = a_parked_strand_job_goes_on_for_a_more_urgent_one() {
-            again += 1;
-            use std::io::Write as _;
-            // (past libtest's capture: a log shows it when the test passed too)
-            let _ = writeln!(std::io::stderr(), "a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it: work came in on a lent token {what}; set up again ({again})");
-        }
-    }
-
-    /// Whether the app holds more permits than the machine has cores: none is admitted over a full
-    /// machine, so one came in while a sleeping or paused thread had lent its token.
-    fn over_the_cores() -> bool {
-        let app = makepad_cpu_budget::tokens().holders.iter().filter(|h| h.client == makepad_cpu_budget::APP).count();
-        app > makepad_cpu_budget::cores() as usize
-    }
-
-    /// One go of the test above: `Err` says when work came in on a lent token.
-    fn a_parked_strand_job_goes_on_for_a_more_urgent_one() -> Result<(), &'static str> {
         let pool = test_pool(2);
         let strand = Strand::new(&pool, "raised while parked");
         let (started, began) = mpsc::channel();
-        // (the job and the person wait awake, see `wait_for`: asleep, each would lend its token)
-        let go = Arc::new(AtomicBool::new(false));
-        // (the job holds its token until the test has looked at what it ran at)
-        let looked = Arc::new(AtomicBool::new(false));
+        let (go, proceed) = mpsc::channel();
         let (ran, order) = mpsc::channel();
         let first_ran = ran.clone();
-        let (first_go, first_looked) = (go.clone(), looked.clone());
         let first = strand.submit(Class::Background, Ticket::none(), move |_| {
-            // Under the JIT a thread that waits for the build of code it runs for the first time
-            // lends its token, and the person would take it (never waiting) or the job would run
-            // its checkpoint lent (never parking): before it says it started, the job runs once
-            // all it runs while the machine is held, a checkpoint nothing waits behind, its report
-            // and a whole look of its wait.
-            let _ = checkpoint();
-            let (warm, warmed) = mpsc::channel();
-            warm.send(("background job", current_class())).unwrap();
-            let _ = warmed.recv();
-            let mut looks = 0;
-            wait_for("the test's go", || {
-                looks += 1;
-                if looks == 2 {
-                    started.send(()).unwrap();
-                }
-                first_go.load(Ordering::Acquire)
-            });
+            started.send(()).unwrap();
+            proceed.recv().unwrap();
             let _ = checkpoint();
             first_ran.send(("background job", current_class())).unwrap();
-            wait_for("the test's look", || first_looked.load(Ordering::Acquire));
         });
         began.recv().unwrap();
-        // every other token taken, and a person's work waiting: the job gives its token up at its checkpoint
-        let held = HeldTokens::new(makepad_cpu_budget::cores() as usize - 1, "the rest of the machine");
-        let end = Arc::new(AtomicBool::new(false));
+        // Only the job's checkpoint can free a token for the person's work on this budget.
+        let budget = pool.budget();
+        let held = HeldTokens::new(budget, budget.cores() as usize - 1, "the rest of the machine");
+        let (end, person_end) = mpsc::channel::<()>();
         let person_in = Arc::new(AtomicBool::new(false));
-        let (person_end, admitted) = (end.clone(), person_in.clone());
+        let admitted = person_in.clone();
+        let person_budget = budget.clone();
         let person = std::thread::spawn(move || {
-            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "a person");
+            let permit = person_budget.admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "a person");
             admitted.store(true, Ordering::Release);
-            wait_for("the test's end", || person_end.load(Ordering::Acquire));
-            makepad_cpu_budget::release(permit);
+            let _ = person_end.recv();
+            person_budget.release(permit);
         });
-        // (the app's waiters: the JIT's own builds wait in the same budget)
-        let waiting = |class: u8| {
-            makepad_cpu_budget::tokens().waiting.iter().any(|w| w.class == class && w.client == makepad_cpu_budget::APP)
-        };
-        let mut second = None;
-        let outcome = 'go: {
-            wait_for("the person's work to wait", || person_in.load(Ordering::Acquire) || waiting(makepad_cpu_budget::INTERACTIVE));
-            if person_in.load(Ordering::Acquire) {
-                assert!(over_the_cores(), "the person's work came in with every token taken");
-                break 'go Err("before the job's checkpoint");
-            }
-            go.store(true, Ordering::Release);
-            // the job parks for Background's share, its token the person's
-            let mut report = None;
-            wait_for("the job to wait for Background's share", || {
-                report = report.take().or_else(|| order.try_recv().ok());
-                report.is_some() || (waiting(makepad_cpu_budget::BACKGROUND) && person_in.load(Ordering::Acquire))
-            });
-            if let Some(report) = report {
-                assert!(over_the_cores(), "the job ran on at its checkpoint with a person's work waiting: {report:?}");
-                break 'go Err("at the job's checkpoint");
-            }
-            let second_ran = ran;
-            second = Some(strand.submit(Class::Interactive, Ticket::none(), move |_| second_ran.send(("load", current_class())).unwrap()));
-            wait_for("the job to wait at the class of the job behind it", || {
-                report = report.take().or_else(|| order.try_recv().ok());
-                report.is_some() || waiting(makepad_cpu_budget::INTERACTIVE)
-            });
-            let report = match report {
-                Some(report) => report,
-                None => {
-                    // a token comes free that Background may not take, and Interactive may
-                    held.give_back_one();
-                    order.recv_timeout(NOTHING_MOVES).expect("the job's report")
-                }
-            };
-            if report.1 != Some(Class::Interactive) && over_the_cores() {
-                break 'go Err("before the job's raise");
-            }
-            assert_eq!(report, ("background job", Some(Class::Interactive)), "the job stayed at its class");
-            looked.store(true, Ordering::Release);
-            assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("load", Some(Class::Interactive))));
-            Ok(())
-        };
-        looked.store(true, Ordering::Release);
-        go.store(true, Ordering::Release);
-        end.store(true, Ordering::Release);
+        let waiting = |class| budget.tokens().waiting.iter().any(|w| w.class == class);
+        wait_for("the person's work to wait", || {
+            assert!(!person_in.load(Ordering::Acquire), "the person's work came in with every token taken");
+            waiting(makepad_cpu_budget::INTERACTIVE)
+        });
+        go.send(()).unwrap();
+        wait_for("the job to park for Background's share and the person to take its token", || {
+            assert!(order.try_recv().is_err(), "the job ran on at its checkpoint with a person's work waiting");
+            waiting(makepad_cpu_budget::BACKGROUND) && person_in.load(Ordering::Acquire)
+        });
+        let second = strand.submit(Class::Interactive, Ticket::none(), move |_| ran.send(("load", current_class())).unwrap());
+        wait_for("the parked job to wait at Interactive", || {
+            assert!(order.try_recv().is_err(), "the raised job ran before a token was free");
+            waiting(makepad_cpu_budget::INTERACTIVE)
+        });
+        // One token comes free that only Interactive may take.
+        held.give_back_one();
+        assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("background job", Some(Class::Interactive))), "the parked job must resume at Interactive");
+        assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("load", Some(Class::Interactive))));
+        drop(end);
         person.join().unwrap();
         drop(held);
         worker_join(first).unwrap();
-        if let Some(second) = second {
-            worker_join(second).unwrap();
-        }
+        worker_join(second).unwrap();
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
-        outcome
     }
 
     /// A job that has started and runs on takes the class at its next checkpoint: it holds its token
     /// through whatever a higher class leaves behind it.
     #[test]
     fn a_strand_job_on_its_way_takes_the_class_of_a_more_urgent_one_behind_it() {
-        in_own_budget!(a_strand_job_on_its_way_takes_the_class_of_a_more_urgent_one_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         let strand = Strand::new(&pool, "raised while it runs");
         let (started, began) = mpsc::channel();
-        // (the job waits awake, see `wait_for`: asleep, it would lend its token)
+        let budget = pool.budget().clone();
         let go = Arc::new(AtomicBool::new(false));
         let (ran, order) = mpsc::channel();
         let first_go = go.clone();
@@ -5957,7 +6571,7 @@ mod tests {
             started.send(current_class()).unwrap();
             wait_for("the test's go", || first_go.load(Ordering::Acquire));
             let _ = checkpoint();
-            ran.send((current_class(), makepad_cpu_budget::tokens().holders.iter().any(|h| h.label == "raised while it runs" && h.class == makepad_cpu_budget::VISIBLE))).unwrap();
+            ran.send((current_class(), budget.tokens().holders.iter().any(|h| h.label == "raised while it runs" && h.class == makepad_cpu_budget::VISIBLE))).unwrap();
         });
         assert_eq!(began.recv().unwrap(), Some(Class::Background));
         let second = strand.submit(Class::Visible, Ticket::none(), |_| ());
@@ -5970,7 +6584,6 @@ mod tests {
 
     #[test]
     fn draining_a_strand_runs_accepted_successors_and_refuses_new_submits() {
-        in_own_budget!(draining_a_strand_runs_accepted_successors_and_refuses_new_submits);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(2);
         let strand = Strand::new(&pool, "draining");

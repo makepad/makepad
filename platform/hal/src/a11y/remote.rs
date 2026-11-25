@@ -121,8 +121,14 @@ pub fn find(trees: &Trees, q: &Query) -> Vec<(u64, Node)> {
     q.find_in(trees.iter().map(|(k, t)| (*k, t))).into_iter().map(|(k, n)| (k, n.clone())).collect()
 }
 
+/// The refusal of an act over windows with no tree yet: the app builds its tree for a request
+/// (its builder is off between them), and the first one it builds may take longer than the
+/// request's `timeout_ms`. Nothing was done, so a caller may send the act again.
+pub const NO_TREE_YET: &str = "no tree yet (none built within timeout_ms; nothing was done)";
+
 pub fn resolve(trees: &Trees, q: &Query) -> Result<(u64, Node), String> {
     let rows = find(trees, q);
+    if rows.is_empty() && trees.iter().all(|(_, t)| t.nodes.is_empty()) { return Err(NO_TREE_YET.into()); }
     if rows.is_empty() { return Err("no such node (ui find lists matches)".into()); }
     if rows.len() != 1 { return Err(format!("ambiguous: {} nodes match; use nth=, node= or w=", rows.len())); }
     let (key, node) = rows.into_iter().next().unwrap();
@@ -484,6 +490,10 @@ mod tests {
         assert!(ok.contains("\"count\":0"), "{ok}");
         let timed_out = run("ui wait w=4294967295 count=1 timeout_ms=0");
         assert!(timed_out.contains("ui wait timed out"), "{timed_out}");
+        // An act over windows with no tree yet says so, not that the node is missing: the
+        // tree may still come, and nothing was done, so the act may be sent again.
+        let early = run("ui act press q=path=button w=4294967295 timeout_ms=0");
+        assert!(early.contains(NO_TREE_YET) && !early.contains("no such node"), "{early}");
         // An act's present by its window: a window gone (its button closed it) has none to wait
         // for, at once; without a node or a window there is nothing to present.
         let gone = run("ui present w=4294967295 json=1");

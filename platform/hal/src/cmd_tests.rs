@@ -5,6 +5,7 @@ fn open(hal: &Hal, key: u64) -> u32 {
     let info = hal.open(&OpenReq { backend: backend_id::HEADLESS, app_key: key, flags: 0, dpi_hint: 2.0, parent: 0 });
     assert_ne!(info.session, 0);
     assert_eq!(info.dpi, 2.0);
+    assert_eq!((info.volume_formats, info.max_volume_dimension), (0, 0), "headless has no sampled volumes");
     info.session
 }
 
@@ -14,7 +15,7 @@ fn every_command_round_trips() {
     let expected = sample_cmds(&mut w);
     assert_eq!(expected.len(), CMD_TABLE.len());
     assert_eq!(w.cmds().len(), CMD_TABLE.len());
-    // 60 core (including BufferReadbacks, PipelineWanted, PipelineWantedIn, ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
+    // 61 core (including TextureUpdate3d, BufferReadbacks, PipelineWanted, PipelineWantedIn, ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
     // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 3 accessibility, 3 fonts, 8 direct display/input
     // (incl. DirectDisplayArrangement, DirectDisplayPacing, DirectTapToClick, DirectDisplayVirtual tag 153), 2 GL interop, 3 mobile system UI (MobileUi,
     // SelectionHandles, Haptic), 1 system back (BackUnhandled), 1 font touch (GlyphTouch, tag 150), 3 tray (TraySet,
@@ -29,7 +30,7 @@ fn every_command_round_trips() {
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 60 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 3 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2);
+    assert_eq!(CMD_TABLE.len(), 61 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 3 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 2);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));
@@ -51,10 +52,12 @@ fn bad_arguments_are_counted() {
     w.texture_update(Id::new(2, 1), 0, [2, 2, 4, 4], 0, &[0; 64]); // outside
     w.texture_update(Id::new(2, 1), 0, [0, 0, 4, 4], 0, &[0; 10]); // wrong length
     w.texture_update(Id::new(2, 1), 0, [0, 0, 4, 4], 0, &[0; 64]); // fine
+    w.texture_update_3d(Id::new(2, 1), [0, 0, 1, 1], [0, 1], &[0; 4]); // a 2D texture
+    w.texture_create(Id::new(3, 1), usage::VOLUME | usage::SAMPLED, format::R8, 2, 2, [2, 1], Attr::default()); // unsupported on headless
     w.push(Cmd { tag: 9999, ..Default::default() });
     hal.submit(&w.buf());
     let st = hal.with_world(|w| w.session(s).unwrap().stats);
-    assert_eq!((st.bad_args, st.unknown_cmds, st.stale_ids), (4, 1, 0));
+    assert_eq!((st.bad_args, st.unknown_cmds, st.stale_ids), (6, 1, 0));
 }
 
 #[test]

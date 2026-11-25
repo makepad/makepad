@@ -10,15 +10,20 @@
 //! - `tweak final`: the app's answer, plus `"png"` (the composited window) when the user drew
 //! - `tools`: the app's AI services and their tools (the `app` service's `list`)
 //! - `call <service>.<tool> [<instance>] [<json args>]`: one AI tool call (progress lines, then
-//!   the result)
+//!   the result). Pictures are written to files and their paths come back in `image_files`.
 
 use crate::discovery;
 use crate::frames::{self, Record};
 use crate::link::{Client, Error};
+use makepad_strict_json::{self as json, Value};
+use std::borrow::Cow;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Frames of one folder kept per window (older ones are deleted when a new one is written).
 const KEPT_PER_WINDOW: usize = 64;
+const KEPT_CALL_FILES: usize = 64;
 
 /// The `app` service request (the app's AI tools) of a command line, when it is one: `tools`
 /// (the service's `list`) or `call <service>.<tool> [<instance>] [<json args>]`, the arguments
@@ -138,6 +143,21 @@ fn get<'a>(kv: &'a [(String, String)], keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| kv.iter().find(|x| x.0 == *k).map(|x| x.1.as_str()))
 }
 
+/// [`run`] as a command line prints it: a tool result's inline pictures are written to files in
+/// the app's grab folder and the line names them instead (`image_files`, [`call_image_line`]), so
+/// a shell or a coding agent reads paths, not megabytes of base64. A library caller of [`run`]
+/// (a test, the MCP bridge) keeps the inline `images`.
+pub fn run_printed(client: &Client, argv: &[String], each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
+    let dir = std::cell::LazyCell::new(|| grab_dir(client));
+    run(client, argv, &mut |l| each(&call_image_line(l, || (*dir).clone())))
+}
+
+/// [`run_line`] as a command line prints it ([`run_printed`]).
+pub fn run_line_printed(client: &Client, line: &str, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
+    let dir = std::cell::LazyCell::new(|| grab_dir(client));
+    run_line(client, line, &mut |l| each(&call_image_line(l, || (*dir).clone())))
+}
+
 /// Like [`run`] for a request typed as one line (words split on spaces).
 pub fn run_line(client: &Client, line: &str, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, Error> {
     // a JSON request goes as it is (its values keep their spaces and `=`)
@@ -236,6 +256,96 @@ fn forward(client: &Client, words: &[String], kv: &[(String, String)], each: &mu
         }
     }
     Ok((err, lines.end().map(str::to_string)))
+}
+
+/// The printed form of a tool result: its inline pictures replaced with paths ([`run_printed`]).
+/// Only a result with pictures needs a folder.
+fn call_image_line(line: &str, dir: impl FnOnce() -> Result<PathBuf, String>) -> Cow<'_, str> {
+    let Ok(Value::Obj(mut envelope)) = json::parse_depth(line.as_bytes(), json::TOOL_JSON_DEPTH) else { return Cow::Borrowed(line) };
+    let result = envelope.iter_mut().find(|(key, _)| key == "Result").and_then(|(_, value)| match value {
+        Value::Arr(items) => items.first_mut(),
+        object => Some(object),
+    });
+    let Some(Value::Obj(fields)) = result else { return Cow::Borrowed(line) };
+    let Some((key, Value::Arr(images))) = fields.iter_mut().find(|(key, _)| key == "images") else { return Cow::Borrowed(line) };
+    if images.is_empty() {
+        return Cow::Borrowed(line);
+    }
+
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    if let Err(why) = dir().and_then(|dir| write_call_images(&dir, images, &mut files, &mut errors).map_err(|e| e.to_string())) {
+        errors.extend((0..images.len()).map(|i| json::s(format!("image {i}: {why}"))));
+    }
+    *key = "image_files".into();
+    *images = files;
+    if !errors.is_empty() {
+        fields.push(("image_errors".into(), Value::Arr(errors)));
+    }
+    Cow::Owned(Value::Obj(envelope).to_json())
+}
+
+fn call_file_number(path: &Path) -> Option<(u64, usize)> {
+    if !matches!(path.extension()?.to_str()?, "png" | "jpg") {
+        return None;
+    }
+    let (seq, index) = path.file_stem()?.to_str()?.strip_prefix("call-")?.split_once('-')?;
+    Some((seq.parse().ok()?, index.parse().ok()?))
+}
+
+fn write_call_images(dir: &Path, images: &[Value], files: &mut Vec<Value>, errors: &mut Vec<Value>) -> io::Result<()> {
+    let dir = std::path::absolute(dir)?;
+    if dir.to_str().is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "picture folder path is not UTF-8"));
+    }
+    // Two CLI processes can receive pictures from the same app at once. Assign and prune under one lock.
+    let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(".call-images.lock"))?;
+    lock.lock()?;
+    let mut existing = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if let Some(number) = call_file_number(&path) {
+            if entry.file_type()?.is_file() {
+                existing.push((number, path));
+            }
+        }
+    }
+    existing.sort_unstable();
+    let last = existing.last().map_or(0, |((seq, _), _)| *seq);
+    let seq = last.checked_add(1).ok_or_else(|| io::Error::other("call picture sequence exhausted"))?;
+    for (i, image) in images.iter().enumerate() {
+        match write_call_image(&dir, seq, i, image) {
+            Ok(path) => {
+                files.push(json::s(path.to_string_lossy()));
+                existing.push(((seq, i), path));
+            }
+            Err(why) => errors.push(json::s(format!("image {i}: {why}"))),
+        }
+    }
+    let expired = existing.len().saturating_sub(KEPT_CALL_FILES);
+    for (_, path) in existing.into_iter().take(expired) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
+fn write_call_image(dir: &Path, seq: u64, index: usize, image: &Value) -> Result<PathBuf, String> {
+    let data = image.as_str().ok_or("expected a base64 string")?;
+    let ext = match crate::mcp::picture_media_type(data)? {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => return Err("unsupported picture format".into()),
+    };
+    let bytes = makepad_base64::base64_decode(data.as_bytes()).map_err(|e| format!("invalid base64 ({e:?})"))?;
+    let path = dir.join(format!("call-{seq:05}-{index}.{ext}"));
+    let mut file = fs::File::create_new(&path).map_err(|e| format!("write {}: {e}", path.display()))?;
+    if let Err(e) = file.write_all(&bytes) {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(format!("write {}: {e}", path.display()));
+    }
+    Ok(path)
 }
 
 /// One request of the `app` service (the app's AI tools): its answer lines, as they come. The
@@ -612,10 +722,64 @@ fn tweak_final(client: &Client, words: &[String], kv: &[(String, String)], each:
 
 #[cfg(test)]
 mod tests {
-    use super::{client_side, typed_line};
+    use super::{call_image_line, client_side, typed_line};
 
     fn words(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn call_pictures_become_files() {
+        use makepad_base64::{base64_encode, BASE64_STANDARD};
+        use makepad_strict_json::{self as json, Value};
+        use std::{fs, path::Path};
+
+        let dir = std::env::temp_dir().join(format!("call_pictures_become_files-{}-{}", std::process::id(), crate::cmd::wall_ms()));
+        fs::create_dir(&dir).expect("create fresh picture folder");
+        for i in 0..64 {
+            fs::write(dir.join(format!("call-00003-{i}.png")), []).expect("seed older call pictures");
+        }
+        let grab = dir.join("grab-w0-00001.png");
+        fs::write(&grab, []).expect("seed a window grab");
+
+        let png = b"\x89PNG\r\n\x1a\n";
+        let jpg = b"\xff\xd8\xff\xe0\x00\x04\x00\x00\xff";
+        let encode = |bytes: &[u8]| String::from_utf8(base64_encode(bytes, &BASE64_STANDARD)).unwrap();
+        let line = format!(r#"{{"Result":{{"text":"rendered","call_id":"abc","images":["{}","{}"]}}}}"#, encode(png), encode(jpg));
+        let output = call_image_line(&line, || Ok(dir.clone()));
+        let parsed = json::parse(output.as_bytes()).expect("rewritten result is JSON");
+        let result = parsed.get("Result").expect("keep result envelope");
+        assert!(result.get("images").is_none(), "remove inline pictures");
+        assert_eq!(result.get("text").and_then(Value::as_str), Some("rendered"), "preserve result text");
+        assert_eq!(result.get("call_id").and_then(Value::as_str), Some("abc"), "preserve call ID");
+        let files = result.get("image_files").and_then(Value::as_arr).expect("return a list of picture paths");
+        assert_eq!(files.len(), 2, "return one path per picture");
+        for (i, (ext, bytes)) in [("png", png.as_slice()), ("jpg", jpg.as_slice())].into_iter().enumerate() {
+            let path = Path::new(files[i].as_str().expect("picture path is a string"));
+            assert!(path.is_absolute(), "picture {i} has an absolute path");
+            assert_eq!(path, dir.join(format!("call-00004-{i}.{ext}")), "picture {i} uses the next sequence, its index and its format");
+            assert_eq!(fs::read(path).expect("returned picture path exists"), bytes, "picture {i} holds the decoded bytes");
+        }
+        assert!(!dir.join("call-00003-0.png").exists() && !dir.join("call-00003-1.png").exists(), "expire the two oldest call pictures");
+        assert!(dir.join("call-00003-2.png").exists() && grab.exists(), "keep the 64th newest call picture and the window grab");
+
+        for line in [r#"{ "Progress": {"text":"waiting"} }"#, r#"{ "Result": {"text":"done"} }"#, r#"{ "Result": [{"images":[]}] }"#, r#"{ "err": "busy" }"#, "plain text"] {
+            assert_eq!(call_image_line(line, || panic!("only pictures need the folder")), line, "pass this line through byte for byte: {line}");
+        }
+
+        let bad = format!("{}!!!!", encode(jpg));
+        let line = format!(r#"{{"Result":[{{"images":["{bad}","{}"]}}]}}"#, encode(png));
+        let output = call_image_line(&line, || Ok(dir.clone()));
+        assert!(!output.contains(&bad), "omit the invalid base64 payload from the answer");
+        let parsed = json::parse(output.as_bytes()).expect("mixed success and failure is JSON");
+        let result = &parsed.get("Result").and_then(Value::as_arr).expect("keep the wrapped result")[0];
+        let errors = result.get("image_errors").and_then(Value::as_arr).expect("report picture errors");
+        assert_eq!(errors.len(), 1, "report one error for the invalid picture");
+        assert!(errors[0].as_str().unwrap().contains("base64"), "explain the decoding failure");
+        let files = result.get("image_files").and_then(Value::as_arr).expect("keep the successful picture");
+        assert_eq!(files.len(), 1, "return only the successful path");
+        assert_eq!(Path::new(files[0].as_str().unwrap()), dir.join("call-00005-1.png"), "a failed picture preserves the next picture's index");
+        fs::remove_dir_all(dir).expect("remove the test's picture folder");
     }
 
     #[test]

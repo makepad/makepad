@@ -7,11 +7,16 @@
 //!
 //! OLE calls the target on the main thread (its STA) from the modal loop of whoever drags: the
 //! callbacks only queue events and answer from published state, never wait for the app.
+//!
+//! A receiver's GetData of a drag out must answer in its call, on this thread. A promised file
+//! still being made is waited for on the promise waiter while this thread goes on dispatching its
+//! messages (`wait_pumping`), and the data object offers IDataObjectAsyncCapability, so a receiver
+//! that takes it (Explorer) takes the data on a thread of its own and its UI does not wait either.
 
 use super::window::{win_of, Win};
 use crate::buffers::pack_drag_items;
 use crate::types::input;
-use makepad_windows_sys::core::{HRESULT, BOOL};
+use makepad_windows_sys::core::{ObjectBuilder, HRESULT, BOOL};
 use makepad_windows_sys::Win32::Foundation::*;
 use makepad_windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use makepad_windows_sys::Win32::System::Com::*;
@@ -20,7 +25,11 @@ use makepad_windows_sys::Win32::System::Ole::*;
 use makepad_windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
 use makepad_windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
 use makepad_windows_sys::Win32::UI::Shell::HDROP;
-use makepad_windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use makepad_windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+use makepad_windows_sys::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetCursorPos, MsgWaitForMultipleObjectsEx, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, MWMO_INPUTAVAILABLE, PM_REMOVE,
+    QS_ALLINPUT, WM_QUIT,
+};
 use std::cell::{Cell, RefCell};
 
 type Items = Vec<(u32, String)>;
@@ -240,7 +249,7 @@ impl IDataObjectImpl for Files {
         }
         // promised files are handed over once they are written
         let items: Vec<(u32, String)> = self.0.iter().map(|p| (input::drag_item::FILE, p.clone())).collect();
-        if !crate::drag_promise::wait_promised(&items) {
+        if !wait_pumping(items) {
             return Err(E_UNEXPECTED);
         }
         // the receiver owns the block (ReleaseStgMedium frees it)
@@ -281,6 +290,174 @@ impl IDataObjectImpl for Files {
     fn EnumDAdvise(&self) -> Result<IEnumSTATDATA, HRESULT> {
         Err(OLE_E_ADVISENOTSUPPORTED)
     }
+}
+
+thread_local! {
+    /// This thread's drag loops under way: DoDragDrop's (`start`) and a receiver's GetData waiting
+    /// for a promised file (`wait_pumping`). Both dispatch the thread's messages, so a HAL op can
+    /// arrive inside one; a DragStart then ends at once, its gesture over without a drop, said.
+    static LOOPS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// One of this thread's drag loops, counted in [`LOOPS`] while it lives.
+struct InLoop;
+impl InLoop {
+    fn enter() -> Self {
+        LOOPS.with(|n| n.set(n.get() + 1));
+        InLoop
+    }
+}
+impl Drop for InLoop {
+    fn drop(&mut self) {
+        LOOPS.with(|n| n.set(n.get() - 1));
+    }
+}
+
+/// [`crate::drag_promise::wait_promised`] for a receiver's GetData, which must answer in its call
+/// on this thread: the promise waiter waits (`drag_promise::when_made`) while this thread goes on
+/// dispatching its messages (its windows paint, HAL ops and COM calls arrive), until the waiter
+/// sets an event. A WM_QUIT taken meanwhile is posted again after. Nothing promised still being
+/// made: no wait. Without an event (it could not be made) it waits here, as before, and says so.
+fn wait_pumping(items: Vec<(u32, String)>) -> bool {
+    if !crate::drag_promise::pending(&items) {
+        return crate::drag_promise::wait_promised(&items);
+    }
+    let event = match unsafe { CreateEventW(None, true, false, None) } {
+        Ok(event) => event,
+        Err(e) => {
+            eprintln!("[hal-win32] drag out: no event to wait on ({e:?}): the drop waits without dispatching");
+            return crate::drag_promise::wait_promised(&items);
+        }
+    };
+    let (answer, answered) = std::sync::mpsc::channel();
+    let raw = event.0 as usize;
+    crate::drag_promise::when_made(items, move |made| {
+        // the event first: the wait closes it once it has the answer
+        unsafe {
+            let _ = SetEvent(HANDLE(raw as _));
+        }
+        let _ = answer.send(made);
+    });
+    let _loop = InLoop::enter();
+    let mut quit = None;
+    let made = loop {
+        match answered.try_recv() {
+            Ok(made) => break made,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if unsafe { MsgWaitForMultipleObjectsEx(Some(&[event]), u32::MAX, QS_ALLINPUT, MWMO_INPUTAVAILABLE) } == WAIT_FAILED {
+            eprintln!("[hal-win32] drag out: the drop's wait could not dispatch: it waits without");
+            break answered.recv().unwrap_or(false);
+        }
+        let mut msg = MSG::default();
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                quit = Some(msg.wParam.0 as i32);
+                continue;
+            }
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    };
+    unsafe {
+        let _ = CloseHandle(event);
+        if let Some(code) = quit {
+            PostQuitMessage(code);
+        }
+    }
+    made
+}
+
+/// IDataObjectAsyncCapability (IAsyncOperation before its rename), which the generated bindings
+/// do not carry, beside the drag's IDataObject on one object. A receiver that takes it calls
+/// StartOperation in its drop, returns, and takes the data on a thread of its own: its UI does
+/// not wait on a promised file, and DoDragDrop returns here.
+mod async_op {
+    use makepad_windows_sys::core::{object_add_ref, object_query, object_release, ObjectBuilder, ObjectSlot, BOOL, GUID, HRESULT};
+    use makepad_windows_sys::Win32::Foundation::{E_POINTER, S_OK};
+    use makepad_windows_sys::Win32::System::Com::IUnknown_Vtbl;
+    use std::cell::Cell;
+    use std::ffi::c_void;
+
+    pub(super) const IID: GUID = GUID::from_u128(0x3D8B0590_F691_11D2_8EA9_006097DF5BD4);
+
+    #[repr(C)]
+    pub(super) struct Vtbl {
+        pub base: IUnknown_Vtbl,
+        pub set_async_mode: unsafe extern "system" fn(*mut c_void, BOOL) -> HRESULT,
+        pub get_async_mode: unsafe extern "system" fn(*mut c_void, *mut BOOL) -> HRESULT,
+        pub start_operation: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+        pub in_operation: unsafe extern "system" fn(*mut c_void, *mut BOOL) -> HRESULT,
+        pub end_operation: unsafe extern "system" fn(*mut c_void, HRESULT, *mut c_void, u32) -> HRESULT,
+    }
+
+    static VTABLE: Vtbl = Vtbl {
+        base: IUnknown_Vtbl { QueryInterface: object_query, AddRef: object_add_ref, Release: object_release },
+        set_async_mode,
+        get_async_mode,
+        start_operation,
+        in_operation,
+        end_operation,
+    };
+
+    struct State {
+        asynchronous: Cell<bool>,
+        running: Cell<bool>,
+    }
+
+    unsafe fn state<'a>(this: *mut c_void) -> &'a State {
+        &*((*(this as *const ObjectSlot)).implementation as *const State)
+    }
+    unsafe fn destroy(raw: *mut c_void) {
+        drop(Box::from_raw(raw as *mut State));
+    }
+    unsafe extern "system" fn set_async_mode(this: *mut c_void, on: BOOL) -> HRESULT {
+        state(this).asynchronous.set(on.as_bool());
+        S_OK
+    }
+    unsafe extern "system" fn get_async_mode(this: *mut c_void, out: *mut BOOL) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        *out = BOOL(state(this).asynchronous.get() as i32);
+        S_OK
+    }
+    unsafe extern "system" fn start_operation(this: *mut c_void, _: *mut c_void) -> HRESULT {
+        state(this).running.set(true);
+        S_OK
+    }
+    unsafe extern "system" fn in_operation(this: *mut c_void, out: *mut BOOL) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        *out = BOOL(state(this).running.get() as i32);
+        S_OK
+    }
+    unsafe extern "system" fn end_operation(this: *mut c_void, result: HRESULT, _: *mut c_void, effect: u32) -> HRESULT {
+        state(this).running.set(false);
+        if super::super::log_enabled() {
+            eprintln!("[hal-win32] the receiver took the drag's data on its own thread: {result:?}, effect {effect}");
+        }
+        S_OK
+    }
+
+    /// Adds the capability, asynchronous from the start, to the object `builder` makes.
+    pub(super) fn add(mut builder: ObjectBuilder) -> ObjectBuilder {
+        let state = Box::new(State { asynchronous: Cell::new(true), running: Cell::new(false) });
+        unsafe {
+            builder.add(&VTABLE as *const Vtbl as *const c_void, Box::into_raw(state) as *mut c_void, destroy, vec![IID]);
+        }
+        builder
+    }
+}
+
+/// The drag's data object: its files, and IDataObjectAsyncCapability ([`async_op`]).
+fn data_object(paths: Vec<String>) -> IDataObject {
+    let builder = async_op::add(ObjectBuilder::new().add_IDataObject(Box::new(Files(paths))));
+    unsafe { IDataObject::from_raw(builder.finish().expect("COM object")).expect("allocated COM interface") }
 }
 
 struct Formats {
@@ -342,6 +519,12 @@ impl IDropSourceImpl for Source {
 pub(super) fn start(w: &Win, items: &[(u32, String)]) {
     let paths: Option<Vec<String>> = items.iter().map(|(k, s)| (*k == input::drag_item::FILE).then(|| s.clone())).collect();
     let ok = match &paths {
+        // inside a drag's loop (a HAL op dispatched by DoDragDrop or by a drop's wait): the
+        // pointer is that drag's
+        _ if LOOPS.with(Cell::get) > 0 => {
+            eprintln!("[hal-win32] a drag asked while another drag's loop runs ends at once");
+            false
+        }
         None => {
             eprintln!("[hal-win32] an external drag accepts only file paths");
             false
@@ -358,10 +541,13 @@ pub(super) fn start(w: &Win, items: &[(u32, String)]) {
         Some(_) => true,
     };
     if ok {
-        let data = IDataObject::implement(Box::new(Files(paths.unwrap_or_default())));
+        let data = data_object(paths.unwrap_or_default());
         let source = IDropSource::implement(Box::new(Source));
         let mut done = DROPEFFECT_NONE;
-        let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut done) };
+        let hr = {
+            let _loop = InLoop::enter();
+            unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut done) }
+        };
         if super::log_enabled() {
             eprintln!("[hal-win32] external drag ended {hr:?} effect {}", done.0);
         }
@@ -378,4 +564,54 @@ pub(super) fn start(w: &Win, items: &[(u32, String)]) {
     }
     let pos = client_point(w, POINTL { x: pt.x, y: pt.y });
     push_drop(w, pos, false, &Vec::new());
+}
+
+/// The drag promise test's Win32 part (`drag_promise::tests`): a receiver's GetData while the
+/// producer holds its promise answers once the file is made, and this thread's messages (a timer
+/// standing for the window's) are dispatched meanwhile; the third lets the producer finish. The
+/// data object takes asynchronous extraction.
+#[cfg(test)]
+pub(crate) fn check_get_data_pumps(dir: &std::path::Path) {
+    use makepad_windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+    thread_local! {
+        static TICKS: Cell<u32> = const { Cell::new(0) };
+        static PRODUCER: RefCell<Option<(std::path::PathBuf, std::fs::File)>> = const { RefCell::new(None) };
+    }
+    unsafe extern "system" fn tick(_: HWND, _: u32, _: usize, _: u32) {
+        let n = TICKS.with(|t| {
+            t.set(t.get() + 1);
+            t.get()
+        });
+        if n == 3 {
+            if let Some((path, held)) = PRODUCER.with_borrow_mut(Option::take) {
+                std::fs::write(&path, b"made while the receiver waited").unwrap();
+                drop(held);
+            }
+        }
+    }
+    let path = dir.join("pumped.mp3");
+    let name = path.to_string_lossy().into_owned();
+    PRODUCER.with_borrow_mut(|p| *p = Some((path.clone(), crate::drag_promise::hold(&path).unwrap())));
+    let data = data_object(vec![name.clone()]);
+    unsafe {
+        let timer = SetTimer(None, 0, 1, Some(tick));
+        let mut medium = data.GetData(&format(CF_HDROP)).expect("the file list once the file is made");
+        let _ = KillTimer(None, timer);
+        assert!(TICKS.with(Cell::get) >= 3, "the thread's messages were dispatched while GetData waited");
+        assert_eq!(LOOPS.with(Cell::get), 0, "the wait's loop ended with it");
+        assert_eq!(super::clipboard::hdrop_paths(HDROP(medium.u.hGlobal.0)), vec![name]);
+        ReleaseStgMedium(&mut medium);
+        let cap = makepad_windows_sys::core::query(data.as_raw(), &async_op::IID).expect("the data object takes asynchronous extraction");
+        let v = &**(cap as *const *const async_op::Vtbl);
+        let mut on = BOOL(0);
+        assert_eq!((v.get_async_mode)(cap, &mut on), S_OK);
+        assert!(on.as_bool(), "asynchronous from the start");
+        assert_eq!((v.start_operation)(cap, std::ptr::null_mut()), S_OK);
+        let _ = (v.in_operation)(cap, &mut on);
+        assert!(on.as_bool(), "in operation once started");
+        assert_eq!((v.end_operation)(cap, S_OK, std::ptr::null_mut(), DROPEFFECT_COPY.0), S_OK);
+        let _ = (v.in_operation)(cap, &mut on);
+        assert!(!on.as_bool(), "not after it ended");
+        makepad_windows_sys::core::release(cap);
+    }
 }

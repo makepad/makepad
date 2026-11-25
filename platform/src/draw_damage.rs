@@ -2,6 +2,9 @@
 //!
 //! We walk the pass's draw lists in paint order and compare each draw call with what it drew last frame,
 //! so a backend that keeps the rest of the last frame on screen only repaints those rects.
+//!
+//! This is off by default: a frame repaints in full until an app calls `Cx::set_partial_repainting(true)`.
+//! Only the Vulkan and GLES backends repaint partially.
 
 use crate::{
     cx::Cx,
@@ -98,12 +101,25 @@ struct DrawCallRecord {
     bound: DamageRect,
 }
 
+impl DrawCallRecord {
+    fn reset(&mut self) {
+        self.walk_id = 0;
+        self.shader_index = None;
+        self.key.clear();
+        self.uniforms_gen = 0;
+        self.uniforms.clear();
+        self.instances.clear();
+        self.bound = DamageRect::default();
+    }
+}
+
 #[derive(Default)]
 struct DrawListRecord {
     generation: u64,
     pass_id: Option<DrawPassId>,
     walk_id: u64,
     uniforms: Vec<f32>,
+    /// Keep vacated item slots so their next draw calls can reuse the buffers.
     draw_calls: Vec<DrawCallRecord>,
 }
 
@@ -129,12 +145,17 @@ struct UnboundedCall {
 /// What each pass showed last frame, so we can tell which of its pixels the next frame changes.
 #[derive(Default)]
 pub struct CxDrawDamage {
-    pub(crate) is_disabled: bool,
+    /// Off until an app opts in with `Cx::set_partial_repainting(true)`.
+    pub(crate) is_enabled: bool,
     walk_id: u64,
     passes: Vec<PassRecord>,
     draw_lists: Vec<DrawListRecord>,
     /// The pass being built and the rects of it that a backend may repaint alone.
     repaint: Option<(DrawPassId, Vec<DamageRect>)>,
+    spare_draw_list_slots: Vec<usize>,
+    spare_call_key: Vec<u64>,
+    spare_pass_key: Vec<u64>,
+    spare_rects: Vec<DamageRect>,
 }
 
 /// How a pass's camera puts logical coordinates on its framebuffer: `pixel = x * scale + offset`.
@@ -226,9 +247,9 @@ impl DamageWalk<'_> {
 
 impl CxDrawDamage {
     /// Turning partial repaints on or off forgets every frame, so the next one repaints in full.
-    pub(crate) fn set_disabled(&mut self, is_disabled: bool) {
-        if self.is_disabled != is_disabled {
-            *self = Self { is_disabled, ..Default::default() };
+    pub(crate) fn set_enabled(&mut self, is_enabled: bool) {
+        if self.is_enabled != is_enabled {
+            *self = Self { is_enabled, ..Default::default() };
         }
     }
 
@@ -238,7 +259,10 @@ impl CxDrawDamage {
     }
 
     pub(crate) fn end_repaint(&mut self) {
-        self.repaint = None;
+        if let Some((_, mut rects)) = self.repaint.take() {
+            rects.clear();
+            self.spare_rects = rects;
+        }
     }
 
     /// One bit for each rect being repainted that a draw call overlaps, or `None` when we repaint the whole pass.
@@ -302,10 +326,10 @@ impl CxDrawDamage {
             // Our records go stale in the meantime, so we forget them and the next walk repaints everything.
             if record.unbounded_call.is_some() {
                 record.is_valid = false;
-                for slot in std::mem::take(&mut record.draw_list_slots) {
+                for slot in record.draw_list_slots.drain(..) {
                     let list = &mut self.draw_lists[slot];
                     if list.pass_id == Some(pass_id) {
-                        list.draw_calls.clear();
+                        list.draw_calls.iter_mut().for_each(DrawCallRecord::reset);
                         list.pass_id = None;
                     }
                 }
@@ -327,10 +351,10 @@ impl CxDrawDamage {
             framebuffer: DamageRect { x0: 0, y0: 0, x1: framebuffer.0, y1: framebuffer.1 },
         };
         let clear = pass.clear_color;
-        let mut key: Vec<u64> = [origin.x, origin.y, size.x, size.y, dpi_factor, pass.display_dpi_factor.unwrap_or(0.0)]
-            .iter()
-            .map(|v| v.to_bits())
-            .collect();
+        let key = &mut self.spare_pass_key;
+        key.extend(
+            [origin.x, origin.y, size.x, size.y, dpi_factor, pass.display_dpi_factor.unwrap_or(0.0)].map(f64::to_bits),
+        );
         key.extend(
             [clear.x, clear.y, clear.z, clear.w, pass.zbias_step, pass.pass_uniforms.shiny_time].map(|v| v.to_bits() as u64),
         );
@@ -347,7 +371,7 @@ impl CxDrawDamage {
             self.passes.resize_with(pass_id.0 + 1, Default::default);
         }
         let record = &mut self.passes[pass_id.0];
-        let is_pass_changed = record.key != key;
+        let is_pass_changed = record.key != *key;
         let is_full = !record.is_valid
             || is_pass_changed
             || !scale.0.is_finite()
@@ -355,15 +379,18 @@ impl CxDrawDamage {
             || pass.dont_clear
             || pass.keep_camera_matrix
             || pass.sploded.is_some();
-        record.key = key;
+        std::mem::swap(&mut record.key, key);
+        key.clear();
+        // Warm both buffers so an identical second frame can reuse the spare.
+        key.reserve(record.key.len());
         let since = std::mem::replace(&mut record.serial, serial);
-        let old_draw_list_slots = std::mem::take(&mut record.draw_list_slots);
-        // The pass may map instances to other pixels now, so we drop every draw call's record of where it drew.
+        let mut old_draw_list_slots = std::mem::take(&mut record.draw_list_slots);
+        // The pass may map instances to other pixels now, so we forget where its draw calls drew.
         if is_pass_changed {
             for &slot in &old_draw_list_slots {
                 let list = &mut self.draw_lists[slot];
                 if list.pass_id == Some(pass_id) {
-                    list.draw_calls.clear();
+                    list.draw_calls.iter_mut().for_each(DrawCallRecord::reset);
                 }
             }
         }
@@ -373,35 +400,46 @@ impl CxDrawDamage {
             fb,
             pass_id,
             pixels,
-            rects: Vec::new(),
+            rects: std::mem::take(&mut self.spare_rects),
             is_full,
             is_uncertain: false,
             unbounded_call: None,
             paint_index: 0,
-            key: Vec::new(),
-            draw_list_slots: Vec::new(),
+            key: std::mem::take(&mut self.spare_call_key),
+            draw_list_slots: std::mem::take(&mut self.spare_draw_list_slots),
         };
         let mut zbias = 0.0;
         self.walk_draw_list(&mut walk, main_list_id, &mut zbias, pass.zbias_step);
 
         // A list the pass doesn't reach anymore leaves nothing of itself on screen.
-        for slot in old_draw_list_slots {
+        for slot in old_draw_list_slots.drain(..) {
             let list = &mut self.draw_lists[slot];
             if list.walk_id == self.walk_id || list.pass_id != Some(pass_id) {
                 continue;
             }
-            for call in list.draw_calls.drain(..) {
+            for call in &mut list.draw_calls {
                 if call.walk_id != 0 {
                     walk.add(call.bound);
                 }
+                call.reset();
             }
             list.pass_id = None;
         }
         let record = &mut self.passes[pass_id.0];
-        record.draw_list_slots = std::mem::take(&mut walk.draw_list_slots);
+        old_draw_list_slots.reserve(walk.draw_list_slots.len());
+        self.spare_draw_list_slots = old_draw_list_slots;
+        record.draw_list_slots = walk.draw_list_slots;
+        walk.key.clear();
+        self.spare_call_key = walk.key;
         record.is_valid = !walk.is_uncertain;
-        record.unbounded_call = walk.unbounded_call.take();
-        (!walk.is_full && !walk.is_uncertain && since != 0).then_some((walk.rects, since))
+        record.unbounded_call = walk.unbounded_call;
+        if !walk.is_full && !walk.is_uncertain && since != 0 {
+            Some((walk.rects, since))
+        } else {
+            walk.rects.clear();
+            self.spare_rects = walk.rects;
+            None
+        }
     }
 
     fn walk_draw_list(
@@ -434,7 +472,7 @@ impl CxDrawDamage {
                 }
             }
             let record = &mut self.draw_lists[slot];
-            record.draw_calls.clear();
+            record.draw_calls.iter_mut().for_each(DrawCallRecord::reset);
             record.uniforms.clear();
             record.generation = list_id.generation();
             record.pass_id = Some(walk.pass_id);

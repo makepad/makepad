@@ -412,7 +412,8 @@ pub(super) fn back_unhandled() -> bool {
     }).unwrap_or(false)
 }
 unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) { boost_frame_rate();
-    if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
+    // Enter, Tab, Backspace and Escape reach the app as key events; their control characters are no text
+    if let Some(c) = char::from_u32(code as u32).filter(|c| !c.is_control()) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
 unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) {
     // Every layout pass (onGlobalLayout) reports the IME state again, a boost's own window update
@@ -476,7 +477,7 @@ pub(super) fn vm_and_activity() -> Option<(*mut c_void, *mut c_void)> {
 
 type JavaJob = Box<dyn FnOnce(*mut JNIEnv) + Send>;
 
-std::thread_local! {
+thread_local! {
     /// This thread's companion: an ordinary thread attached to the VM that makes its Java calls.
     static COMPANION: std::cell::OnceCell<Option<std::sync::mpsc::Sender<JavaJob>>> = const { std::cell::OnceCell::new() };
 }

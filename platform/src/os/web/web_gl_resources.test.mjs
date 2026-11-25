@@ -1,8 +1,6 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
-const source = readFileSync(new URL("./web_gl.js", import.meta.url), "utf8")
+const source = read_text(new URL("./web_gl.js", import.meta.url))
   .replace(/^import \{[\s\S]*?\} from "\.\/web\.js";\n/, "")
   .replace(/^export /gm, "");
 const load = new Function(

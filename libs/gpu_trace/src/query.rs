@@ -251,6 +251,19 @@ struct Stat {
     bubble_count: u32,
     class: Class,
     hitch: bool,
+    /// left out of every time statistic: an experiment frame (split, ablation) or one whose
+    /// passes shared the GPU in its wake ([`SHARED`])
+    special: bool,
+    /// why the frame is in an experiment frame's wake: [`SHARED`], [`HELD`] (0: it is not)
+    wake: u8,
+}
+
+impl Stat {
+    /// The frame's interval is a frame-time sample: a normal frame that presented, not held for
+    /// an experiment frame ([`HELD`]: its passes' times still count).
+    fn paced(&self) -> bool {
+        !self.special && self.interval > 0 && self.wake & HELD == 0
+    }
 }
 
 struct Analysis {
@@ -266,9 +279,75 @@ struct Analysis {
     /// some frame has CPU phases
     has_cpu: bool,
     split_frames: usize,
+    /// normal frames left out as in an experiment frame's wake
+    wake_frames: usize,
+    /// of those, the ones only [`HELD`] (their own passes ran alone on the GPU)
+    wake_held: usize,
 }
 
 const BUBBLE_NS: u64 = 500_000;
+
+/// An experiment frame disturbs the frames after it. A split frame takes longer on the GPU (each
+/// pass cut into one encoder per shader run: a fight's main pass 1.3 ms whole, 9.7 ms split), so
+/// the frames queued behind it run on the GPU at the same time as their neighbours, and a pass's
+/// span then holds GPU time another frame's passes shared: in a GPU-bound game the GI trace pass
+/// took 2.6-2.8x its time in the 1-5 frames after each split frame, though alone it took what it
+/// always takes, and the frames' attribution moved (trace -12%, bloom +10% in `top by=pass`).
+/// A frame is in an experiment frame's wake from there on while its shader work overlaps a
+/// neighbouring frame's by more than this. Shader work: render and compute passes, a render
+/// pass's fragment stage where sampled (a next frame's vertex stage runs early in every frame on
+/// a tile GPU); copies overlap frames in a steady state too. Consecutive frames' shader work
+/// touches by under 0.5 us at their encoders' boundary samples in a steady state (M-series Metal,
+/// three recordings); a frame in a wake overlaps by 0.1-13 ms. Which frames are in the wake is
+/// the same for any floor from 1 to 50 us there.
+const WAKE_OVERLAP_NS: u64 = 10_000;
+
+/// In an experiment frame's wake: the frame's shader work overlapped a neighbouring frame's
+/// ([`WAKE_OVERLAP_NS`]), so its passes' times hold time they shared.
+const SHARED: u8 = 1;
+/// In an experiment frame's wake: the frame's CPU waited for the experiment frame's GPU work
+/// (its `gpu-wait` phase spans that work's end), so its interval holds the experiment's cost and
+/// is no frame-time sample; its passes ran alone, so their times count.
+/// In a GPU-bound app a beat waits while two frames are on the GPU, so the frame two later is held
+/// (M-series Metal: a wait ends 0.1-0.7 ms after the GPU work of the frame two before it, in
+/// 2,318 of 2,319 waits); that frame's interval was 1.7x the median after every split frame of a
+/// fight recording, though its own passes took their usual time.
+const HELD: u8 = 2;
+
+/// Per frame: why it is in an experiment frame's wake ([`SHARED`], [`HELD`]; 0: it is not).
+fn wake(rec: &Recording) -> Vec<u8> {
+    let work: Vec<Vec<(u64, u64)>> = rec
+        .frames
+        .iter()
+        .map(|f| union(f.passes.iter().filter(|p| p.kind != crate::kind::BLIT).map(|p| if p.fs.1 > p.fs.0 { p.fs } else { (p.start, p.end) }).collect()))
+        .collect();
+    let n = work.len();
+    let shared = |k: usize| intersect_ns(&work[k], &work[k - 1]) + if k + 1 < n { intersect_ns(&work[k], &work[k + 1]) } else { 0 };
+    let mut out = vec![0u8; n];
+    for j in (0..n).filter(|&j| rec.frames[j].special()) {
+        let mut k = j + 1;
+        while k < n && !rec.frames[k].special() && shared(k) > WAKE_OVERLAP_NS {
+            out[k] |= SHARED;
+            k += 1;
+        }
+        // the frame the CPU held for this frame's GPU work; a frame whose CPU work began after
+        // that work ended waited for no part of it, nor does any frame after it
+        let Some(end) = rec.frames[j].passes.iter().filter(|p| p.gpu_ok()).map(|p| p.end).max() else { continue };
+        for k in j + 1..n {
+            let cpu = &rec.frames[k].cpu;
+            if cpu.iter().any(|c| c.start <= end && end <= c.end && rec.s(c.name) == "gpu-wait") {
+                if !rec.frames[k].special() {
+                    out[k] |= HELD;
+                }
+                break;
+            }
+            if cpu.iter().all(|c| c.start > end) {
+                break;
+            }
+        }
+    }
+    out
+}
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
@@ -299,6 +378,7 @@ fn analyze(rec: &Recording) -> Analysis {
     // 0: the display refresh is unknown, so a hitch is judged against the median alone
     let budget = if rec.header.refresh_hz > 1.0 { (1e9 / rec.header.refresh_hz as f64) as u64 } else { 0 };
     let mut stats = Vec::with_capacity(rec.frames.len());
+    let wake = wake(rec);
     let (mut prev_present, mut floor) = (0u64, 0u64);
     for (idx, f) in rec.frames.iter().enumerate() {
         let interval = if f.present != 0 && prev_present != 0 { f.present.saturating_sub(prev_present) } else { 0 };
@@ -328,15 +408,15 @@ fn analyze(rec: &Recording) -> Analysis {
         let gpu_wait_name = |n: u32| rec.s(n) == "gpu-wait";
         let cpu_busy = union(f.cpu.iter().filter(|c| !gpu_wait_name(c.name)).map(|c| (c.start, c.end)).collect()).iter().map(|s| s.1 - s.0).sum();
         let gpu_wait = union(f.cpu.iter().filter(|c| gpu_wait_name(c.name)).map(|c| (c.start, c.end)).collect()).iter().map(|s| s.1 - s.0).sum();
-        stats.push(Stat { idx, interval, busy, owned, cpu_busy, gpu_wait, bubbles, bubble_count, class: Class::Ok, hitch: false });
+        stats.push(Stat { idx, interval, busy, owned, cpu_busy, gpu_wait, bubbles, bubble_count, class: Class::Ok, hitch: false, special: f.special() || wake[idx] & SHARED != 0, wake: wake[idx] });
     }
-    let mut ivs: Vec<u64> = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| s.interval).collect();
+    let mut ivs: Vec<u64> = stats.iter().filter(|s| s.paced()).map(|s| s.interval).collect();
     ivs.sort();
     let median = percentile(&ivs, 0.5);
     let p95 = percentile(&ivs, 0.95);
     let max = ivs.last().copied().unwrap_or(0);
     for s in stats.iter_mut() {
-        if rec.frames[s.idx].special() || s.interval == 0 {
+        if !s.paced() {
             continue;
         }
         let iv = s.interval as f64;
@@ -355,7 +435,7 @@ fn analyze(rec: &Recording) -> Analysis {
     // a hitch is classed by what grew: the part of its excess over the median frame that the
     // CPU or the GPU took longer than in a median frame. A beat held for the GPU (`gpu-wait`: its
     // earlier frames still running) grew on the GPU's side, whatever its own passes took.
-    let normal: Vec<&Stat> = stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
+    let normal: Vec<&Stat> = stats.iter().filter(|s| s.paced()).collect();
     let med = |f: fn(&Stat) -> u64| {
         let mut v: Vec<u64> = normal.iter().map(|s| f(s)).collect();
         v.sort();
@@ -396,7 +476,9 @@ fn analyze(rec: &Recording) -> Analysis {
             .collect()
     }
     let has_cpu = rec.frames.iter().any(|f| !f.cpu.is_empty());
-    Analysis { stats, median, p95, max, budget, shares: normalise(sums), shares_by_name: normalise(sums_name), has_cpu, split_frames }
+    let wake_frames = wake.iter().filter(|w| **w != 0).count();
+    let wake_held = wake.iter().filter(|w| **w == HELD).count();
+    Analysis { stats, median, p95, max, budget, shares: normalise(sums), shares_by_name: normalise(sums_name), has_cpu, split_frames, wake_frames, wake_held }
 }
 
 /// Exclusive ns per phase name of one frame's nested CPU spans.
@@ -523,8 +605,9 @@ fn aggregate(rec: &Recording, an: &Analysis, r: (u64, u64), by: &str) -> (Vec<(S
     let (mut frames, mut total) = (0usize, 0.0f64);
     for st in an.stats.iter().filter(|s| in_range(rec, s, r)) {
         let f = &rec.frames[st.idx];
-        // split frames only lend their shader shares: no time and no counts from them
-        if f.special() {
+        // split frames only lend their shader shares: no time and no counts from them (nor
+        // the frames in an experiment frame's wake)
+        if st.special {
             continue;
         }
         let counted = true;
@@ -599,7 +682,7 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
     let n = args.num("n", 10) as usize;
     let an = analyze(rec);
     let mut a = Answer::new("GPU frame profile");
-    let normal: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
+    let normal: Vec<&Stat> = an.stats.iter().filter(|s| s.paced()).collect();
     let mut busy: Vec<u64> = normal.iter().map(|s| s.busy).collect();
     let mut cpu: Vec<u64> = normal.iter().map(|s| s.cpu_busy).collect();
     busy.sort();
@@ -712,7 +795,7 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
         // normal frames around it (the split frames' times are only used as shares)
         let mut ratios: Vec<f64> = Vec::new();
         for (i, st) in an.stats.iter().enumerate().filter(|(_, s)| rec.frames[s.idx].split && s.busy > 0) {
-            let mut near: Vec<u64> = an.stats[i.saturating_sub(8)..(i + 9).min(an.stats.len())].iter().filter(|s| !rec.frames[s.idx].special() && s.busy > 0).map(|s| s.busy).collect();
+            let mut near: Vec<u64> = an.stats[i.saturating_sub(8)..(i + 9).min(an.stats.len())].iter().filter(|s| !s.special && s.busy > 0).map(|s| s.busy).collect();
             near.sort();
             if !near.is_empty() {
                 ratios.push(st.busy as f64 / percentile(&near, 0.5).max(1) as f64);
@@ -720,11 +803,27 @@ fn frames(rec: &Recording, args: &Args) -> Answer {
         }
         ratios.sort_by(|x, y| x.total_cmp(y));
         let mid = ratios.get(ratios.len() / 2).copied();
-        a.lines.push(format!("{{\"split_frames\":{},\"split_gpu_busy_vs_neighbours\":{}}}", an.split_frames, mid.map_or("null".into(), |m| format!("{m:.2}"))));
-        a.findings.push(format!(
-            "{} split frames are left out of these statistics; they only give each shader's share of its pass{}",
+        a.lines.push(format!(
+            "{{\"split_frames\":{},\"split_gpu_busy_vs_neighbours\":{},\"wake_frames\":{}}}",
             an.split_frames,
-            mid.map_or(String::new(), |m| format!(" (cutting the passes cost {:+.0}% GPU time against neighbouring frames)", (m - 1.0) * 100.0))
+            mid.map_or("null".into(), |m| format!("{m:.2}")),
+            an.wake_frames
+        ));
+        a.findings.push(format!(
+            "{} split frames are left out of these statistics; they only give each shader's share of its pass{}{}",
+            an.split_frames,
+            mid.map_or(String::new(), |m| format!(" (cutting the passes cost {:+.0}% GPU time against neighbouring frames)", (m - 1.0) * 100.0)),
+            match (an.wake_frames - an.wake_held, an.wake_held) {
+                (0, 0) => String::new(),
+                (shared, held) => format!(
+                    "; so are the {} frame{} in their wake: {}{}{}",
+                    an.wake_frames,
+                    if an.wake_frames == 1 { "" } else { "s" },
+                    if shared > 0 { format!("{shared} ran on the GPU at the same time as a neighbouring frame (their passes' times hold time they shared)") } else { String::new() },
+                    if shared > 0 && held > 0 { " and " } else { "" },
+                    if held > 0 { format!("{held} waited on the CPU for an experiment frame's GPU work (their intervals hold its cost; their passes' times count)") } else { String::new() }
+                ),
+            }
         ));
     }
     // on glass: the display's own times, when the backend gets them
@@ -837,7 +936,7 @@ fn pick_frame(rec: &Recording, want: &str) -> Option<u64> {
         return Some(id);
     }
     let an = analyze(rec);
-    let mut normal: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).collect();
+    let mut normal: Vec<&Stat> = an.stats.iter().filter(|s| s.paced()).collect();
     let st = match want {
         "last" => normal.last().copied(),
         "slowest" => normal.iter().max_by_key(|s| s.interval).copied(),
@@ -934,6 +1033,11 @@ fn frame(rec: &Recording, args: &Args) -> Result<Answer, String> {
     a.findings.push(finding);
     if f.split {
         a.findings.push("this is a split frame: its encoders were cut per shader group, so its times are not a normal frame's".into());
+    } else if st.wake != 0 {
+        let why = [(SHARED, "it ran on the GPU at the same time as a neighbouring frame, so its passes' times hold time they shared"), (HELD, "its CPU waited for the experiment frame's GPU work, so its interval holds that frame's cost")];
+        let why: Vec<&str> = why.iter().filter(|w| st.wake & w.0 != 0).map(|w| w.1).collect();
+        let out = if st.special { "it is left out of the statistics" } else { "its interval is left out of the frame-time statistics; its passes' times count" };
+        a.findings.push(format!("this frame is in an experiment frame's wake: {}; {out}", why.join(", and ")));
     }
     Ok(a)
 }
@@ -999,7 +1103,7 @@ fn top(rec: &Recording, args: &Args) -> Result<Answer, String> {
     if by != "pass" && unsplit > 0.1 * total {
         // which passes they are
         let mut passes: HashMap<String, f64> = HashMap::new();
-        for st in an.stats.iter().filter(|s| !rec.frames[s.idx].special() && in_range(rec, s, r)) {
+        for st in an.stats.iter().filter(|s| !s.special && in_range(rec, s, r)) {
             let f = &rec.frames[st.idx];
             for at in attribute(rec, &an, st).iter().filter(|x| x.shader == UNSPLIT) {
                 *passes.entry(format!("{} {}x{}", rec.s(f.passes[at.pass].name), f.passes[at.pass].w, f.passes[at.pass].h)).or_default() += at.ns;
@@ -1042,9 +1146,17 @@ fn ablate(rec: &Recording) -> Answer {
         for (i, st) in an.stats.iter().enumerate().filter(|(_, s)| rec.frames[s.idx].ablated == sh) {
             busy_a.push(st.busy);
             let f = &rec.frames[st.idx];
-            let near: Vec<&Stat> = an.stats[i.saturating_sub(6)..(i + 7).min(an.stats.len())].iter().filter(|s| !rec.frames[s.idx].special()).collect();
+            let near: Vec<&Stat> = an.stats[i.saturating_sub(6)..(i + 7).min(an.stats.len())].iter().filter(|s| !s.special).collect();
             busy_n.extend(near.iter().map(|s| s.busy));
+            // A name a frame gives several passes (one per bloom level, one per shadow face) is
+            // one time on both sides: the sum of those passes.
+            let owned = |s: &Stat, name: u32| -> u64 {
+                rec.frames[s.idx].passes.iter().enumerate().filter(|(_, q)| q.name == name).map(|(k, _)| s.owned[k]).sum()
+            };
             for (pi, p) in f.passes.iter().enumerate() {
+                if f.passes[..pi].iter().any(|q| q.name == p.name) {
+                    continue;
+                }
                 let e = match per.iter_mut().position(|x| x.0 == p.name) {
                     Some(k) => &mut per[k],
                     None => {
@@ -1052,12 +1164,8 @@ fn ablate(rec: &Recording) -> Answer {
                         per.last_mut().unwrap()
                     }
                 };
-                e.1.push(st.owned[pi]);
-                for n in &near {
-                    let g = &rec.frames[n.idx];
-                    let t: u64 = g.passes.iter().enumerate().filter(|(_, q)| q.name == p.name).map(|(k, _)| n.owned[k]).sum();
-                    e.2.push(t);
-                }
+                e.1.push(owned(st, p.name));
+                e.2.extend(near.iter().map(|n| owned(*n, p.name)));
             }
         }
         let med = |mut v: Vec<u64>| {
@@ -1260,7 +1368,7 @@ fn util(rec: &Recording, args: &Args) -> Answer {
         }
     };
     let an = analyze(rec);
-    let sel: Vec<&Stat> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0 && in_range(rec, s, r)).collect();
+    let sel: Vec<&Stat> = an.stats.iter().filter(|s| s.paced() && in_range(rec, s, r)).collect();
     let mut a = Answer::new(format!("GPU utilisation, {} frames", sel.len()));
     if sel.is_empty() {
         a.findings.push("no normal frames in that range".into());
@@ -1333,13 +1441,13 @@ fn util(rec: &Recording, args: &Args) -> Answer {
 fn diff(a: &Recording, b: &Recording) -> Answer {
     let (aa, ab) = (analyze(a), analyze(b));
     let mut out = Answer::new("difference between two recordings");
-    let summary = |an: &Analysis, rec: &Recording| {
-        let n = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).count();
-        let mut busy: Vec<u64> = an.stats.iter().filter(|s| !rec.frames[s.idx].special() && s.interval > 0).map(|s| s.busy).collect();
+    let summary = |an: &Analysis| {
+        let n = an.stats.iter().filter(|s| s.paced()).count();
+        let mut busy: Vec<u64> = an.stats.iter().filter(|s| s.paced()).map(|s| s.busy).collect();
         busy.sort();
         (n, an.median, an.p95, percentile(&busy, 0.5), an.stats.iter().filter(|s| s.hitch).count())
     };
-    let (sa, sb) = (summary(&aa, a), summary(&ab, b));
+    let (sa, sb) = (summary(&aa), summary(&ab));
     out.lines.push(format!(
         "{{\"a\":{{\"frames\":{},\"median_ms\":{},\"p95_ms\":{},\"gpu_busy_ms\":{},\"hitches\":{}}},\"b\":{{\"frames\":{},\"median_ms\":{},\"p95_ms\":{},\"gpu_busy_ms\":{},\"hitches\":{}}}}}",
         sa.0, f3(ms(sa.1)), f3(ms(sa.2)), f3(ms(sa.3)), sa.4, sb.0, f3(ms(sb.1)), f3(ms(sb.2)), f3(ms(sb.3)), sb.4
@@ -1451,6 +1559,66 @@ mod tests {
         assert!(zone.contains("in shader feedback#4"), "{zone}");
         assert!(zone.contains("single quad draw in a 3840x2160 pass"), "{zone}");
         assert!(a.findings.iter().any(|f| f.contains("split frames are left out")));
+        assert!(!a.findings.iter().any(|f| f.contains("wake")), "frames that never overlap are in no wake: {:?}", a.findings);
+
+        // A split frame's wake: split frame 112 runs 20 ms late, so 113 and 114, queued behind it,
+        // run at the same time as their neighbours and their scene passes hold the shared time
+        // (18 and 6 ms against 3). They answer as if they were not recorded; 115 starts alone.
+        let mut late = synth();
+        let at = |rec: &Recording, id: u64| rec.frames.iter().position(|f| f.id == id).unwrap();
+        let (s12, s13) = (at(&late, 112), at(&late, 113));
+        assert!(late.frames[s12].split);
+        let p = &mut late.frames[s12].passes;
+        p[0].end += 20 * MS;
+        p[1].start += 20 * MS;
+        p[1].end += 20 * MS;
+        for (k, scene) in [(s13, 18 * MS), (s13 + 1, 6 * MS)] {
+            let p = &mut late.frames[k].passes;
+            p[0].start -= 5 * MS;
+            p[0].end = p[0].start + scene;
+            (p[1].start, p[1].end) = (p[0].end, p[0].end + MS);
+        }
+        let mut gone = late.clone();
+        gone.frames.retain(|f| f.id != 113 && f.id != 114);
+        let w = run_q(&late, "frames");
+        assert!(w.findings.iter().any(|f| f.contains("so are the 2 frames in their wake")), "{:?}", w.findings);
+        // (the `top` answers read no intervals, which leaving frames out of the recording moves)
+        for q in ["top by=pass", "top by=shader"] {
+            assert_eq!(run_q(&late, q).lines, run_q(&gone, q).lines, "{q}: a wake frame is no sample");
+        }
+        let f = run_q(&late, "frame F114");
+        assert!(f.findings.iter().any(|x| x.contains("in an experiment frame's wake")), "{:?}", f.findings);
+        assert!(!run_q(&late, "frame F115").findings.iter().any(|x| x.contains("wake")), "the wake ends at the first frame alone on the GPU");
+
+        // A frame held for a split frame: split frame 120's GPU work runs 12 ms longer (ending
+        // before 121's starts), and 121's CPU waits for it, so 121 presents 15 ms late: a 31.7 ms
+        // interval though its passes ran alone and on time. Its interval is no hitch and no
+        // sample; its passes' times are.
+        let mut held = synth();
+        let (s20, s21) = (at(&held, 120), at(&held, 121));
+        assert!(held.frames[s20].split);
+        let p = &mut held.frames[s20].passes;
+        p[0].end += 12 * MS;
+        p[1].start += 12 * MS;
+        p[1].end += 12 * MS;
+        let end = p[1].end;
+        let wait = held.strings.iter().position(|s| s == "gpu-wait").unwrap() as u32;
+        let start = held.frames[s21].passes[0].start;
+        assert!(end < start, "121 runs alone on the GPU");
+        held.frames[s21].cpu.push(CpuSpan { name: wait, start: start - MS, end: end + MS / 5 });
+        for f in &mut held.frames[s21..] {
+            f.present += 15 * MS;
+        }
+        let mut unheld = held.clone();
+        unheld.frames[s21].cpu.pop();
+        assert_eq!(run_q(&held, "top by=pass").lines, run_q(&unheld, "top by=pass").lines, "a held frame's passes count");
+        let h = run_q(&held, "frames");
+        assert!(h.findings.iter().any(|f| f.contains("so are the 1 frame in their wake: 1 waited on the CPU")), "{:?}", h.findings);
+        assert!(h.findings.iter().any(|f| f.starts_with("frames 130-132: 3 hitches")), "{:?}", h.findings);
+        assert!(!h.lines.iter().any(|l| l.contains("\"slow_frame\":121") || l.contains("\"first\":121")), "{:?}", h.lines);
+        let f = run_q(&held, "frame F121");
+        assert!(f.findings.iter().any(|x| x.contains("its CPU waited for the experiment frame's GPU work") && x.contains("its passes' times count")), "{:?}", f.findings);
+        assert!(!run_q(&held, "frame F122").findings.iter().any(|x| x.contains("wake")), "only the frame that waited is held");
     }
 
     #[test]
@@ -1504,9 +1672,20 @@ mod tests {
                 f.passes[1].end -= 2 * MS;
             }
         }
+        // A name repeated within a frame (one pass per bloom level), the same in every frame:
+        // no saving, on either side.
+        let bloom = rec.strings.len() as u32;
+        rec.strings.push("bloom down".into());
+        for f in rec.frames.iter_mut() {
+            let at = f.passes[1].end;
+            for (from, to) in [(0, 8), (8, 10)] {
+                f.passes.push(Pass { name: bloom, w: 960, h: 540, start: at + from * MS / 10, end: at + to * MS / 10, ..Default::default() });
+            }
+        }
         let a = run_q(&rec, "ablate");
         assert!(a.lines[0].contains("\"shader\":\"feedback#4\""), "{:?}", a.lines);
         assert!(a.lines[0].contains("\"saved_ms\":\"2.00\"") || a.lines[0].contains("\"saved_ms\":2.00"), "{:?}", a.lines);
+        assert!(!a.lines.iter().any(|l| l.contains("bloom down")), "a repeated pass is no saving: {:?}", a.lines);
         // ablation frames are not frame-time samples
         let f = run_q(&rec, "top by=pass");
         assert!(f.findings[0].starts_with("4"), "{:?}", f.findings);

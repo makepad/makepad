@@ -45,15 +45,16 @@ pub(crate) type Sink = Box<dyn FnMut(Vec<String>) + Send>;
 
 /// The name one app's instances share: its package name, and a hash of the
 /// package name and the executable's path, so another build of the same app
-/// (a worktree, a debug build, an installed copy) is another instance.
-pub(crate) fn instance_key(app_name: &str, exe: &Path) -> String {
+/// (a worktree, a debug build, an installed copy) is another instance. `exe`
+/// None: every build is the one instance (a service a machine has one of).
+pub(crate) fn instance_key(app_name: &str, exe: Option<&Path>) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in app_name
-        .as_bytes()
-        .iter()
-        .chain(&[0])
-        .chain(exe.to_string_lossy().as_bytes())
-    {
+    let mut bytes = app_name.as_bytes().to_vec();
+    if let Some(exe) = exe {
+        bytes.push(0);
+        bytes.extend_from_slice(exe.to_string_lossy().as_bytes());
+    }
+    for byte in &bytes {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -516,12 +517,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Each build is an instance of its own, unless the app is one instance across builds (a
+    /// service a machine has one of: a Dock launch of the AI Hub's build met the running hub's
+    /// kept copy as another instance, and a second hub ran beside it, 11-25).
     #[test]
     fn instance_key_separates_builds() {
-        let a = instance_key("makepad-app-image", Path::new("/a/target/release/image"));
-        let b = instance_key("makepad-app-image", Path::new("/b/target/release/image"));
+        let a = instance_key("makepad-app-image", Some(Path::new("/a/target/release/image")));
+        let b = instance_key("makepad-app-image", Some(Path::new("/b/target/release/image")));
         assert_ne!(a, b);
         assert!(a.starts_with("makepad-app-image-"));
-        assert_eq!(a, instance_key("makepad-app-image", Path::new("/a/target/release/image")));
+        assert_eq!(a, instance_key("makepad-app-image", Some(Path::new("/a/target/release/image"))));
+        let any = instance_key("makepad-app-aihub", None);
+        assert!(any.starts_with("makepad-app-aihub-") && any == instance_key("makepad-app-aihub", None), "every build meets at one key");
+        for exe in ["/a/target/release/aihub", ""] {
+            assert_ne!(any, instance_key("makepad-app-aihub", Some(Path::new(exe))), "no build's own key is it, an unknown path's either");
+        }
     }
 }

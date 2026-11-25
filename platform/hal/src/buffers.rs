@@ -541,64 +541,59 @@ fn merge_closest(rects: &mut [[f32; 4]; 9]) {
     rects[best.3] = rects[8];
 }
 
-/// The bytes of a writer's upload commands and kept runs: copied in at the call (or moved in
-/// whole, `*_owned`) and held until [`CmdWriter::clear`], so the caller's memory may change or go
-/// away before the submit. A chunk never grows past the capacity it was made with, so a run in it
-/// never moves; runs start 16-byte aligned.
+/// Runs copied into writer-owned storage. Chunks never grow after allocation, so earlier
+/// commands keep valid addresses through submission. Runs start 16-byte aligned.
 #[derive(Default)]
-struct Uploads {
+struct UploadChunks {
     chunks: Vec<Vec<u8>>,
-    /// the chunk being filled
     at: usize,
-    /// payloads moved in whole, dropped at `clear`
-    owned: Vec<Vec<u8>>,
 }
 
 /// The smallest chunk: the first holds a frame's small uploads (glyph rects, uniforms) for good.
 const UPLOAD_CHUNK: usize = 256 << 10;
 
-impl Uploads {
+impl UploadChunks {
     fn keep(&mut self, bytes: &[u8]) -> Slice {
-        if bytes.is_empty() {
+        self.keep_rows(bytes.len(), std::iter::once(bytes))
+    }
+
+    fn keep_rows<'a>(&mut self, len: usize, rows: impl Iterator<Item = &'a [u8]>) -> Slice {
+        if len == 0 {
             return Slice::EMPTY;
         }
         loop {
             if self.at == self.chunks.len() {
-                // geometric: a turn's uploads take a few chunks, however many there are
+                // Geometric growth, with no relocation of runs already encoded in this turn.
                 let used: usize = self.chunks.iter().map(Vec::len).sum();
-                self.chunks.push(Vec::with_capacity((bytes.len() + 15).max(UPLOAD_CHUNK).max(used)));
+                let capacity = len.saturating_add(15).max(UPLOAD_CHUNK).max(used);
+                self.chunks.push(Vec::with_capacity(capacity));
             }
-            let chunk = &mut self.chunks[self.at];
-            let base = chunk.as_ptr() as usize;
-            let start = (base + chunk.len()).next_multiple_of(16) - base;
-            if start + bytes.len() <= chunk.capacity() {
-                chunk.resize(start, 0);
-                chunk.extend_from_slice(bytes);
-                return Slice { ptr: chunk[start..].as_ptr(), len: bytes.len() };
+            let dst = &mut self.chunks[self.at];
+            let base = dst.as_ptr() as usize;
+            let start = (base + dst.len()).next_multiple_of(16) - base;
+            if len <= dst.capacity().saturating_sub(start) {
+                dst.resize(start, 0);
+                for row in rows {
+                    // Even a malformed iterator must never grow a chunk with earlier live runs.
+                    assert!(row.len() <= start + len - dst.len());
+                    dst.extend_from_slice(row);
+                }
+                assert_eq!(dst.len() - start, len);
+                return Slice { ptr: dst[start..].as_ptr(), len };
             }
             self.at += 1;
         }
     }
 
-    fn own(&mut self, bytes: Vec<u8>) -> Slice {
-        // a Vec's heap block does not move with the Vec
-        let run = Slice { ptr: bytes.as_ptr(), len: bytes.len() };
-        self.owned.push(bytes);
-        run
-    }
-
-    /// After the submit. A chunk this turn filled stays for the next, as does the first small
-    /// one; a chunk the turn did not touch is freed, so a one-off upload does not stay resident.
-    fn clear(&mut self) {
+    fn clear(&mut self, keep_all: bool) {
         let mut first = true;
         self.chunks.retain_mut(|chunk| {
-            let keep = !chunk.is_empty() || (first && chunk.capacity() <= UPLOAD_CHUNK);
+            let keep = keep_all || !chunk.is_empty() || (first && chunk.capacity() <= UPLOAD_CHUNK);
             first = false;
             chunk.clear();
             keep
         });
         self.at = 0;
-        self.owned.clear();
     }
 }
 
@@ -614,7 +609,10 @@ pub struct CmdWriter {
     session: u32,
     cmds: Vec<Cmd>,
     arena: Vec<u8>,
-    uploads: Uploads,
+    uploads: UploadChunks,
+    /// A quiet frame retains the high-water storage for volume edits.
+    volume_uploads: UploadChunks,
+    owned_uploads: Vec<Vec<u8>>,
     frames: Vec<FramePacket>,
     passes: Vec<Pass>,
     draws: Vec<Draw>,
@@ -674,9 +672,16 @@ impl CmdWriter {
         self.uploads.keep(bytes)
     }
 
+    fn own_upload(&mut self, bytes: Vec<u8>) -> Slice {
+        // Moving the Vec leaves its payload at the address the command will read.
+        let run = Slice { ptr: bytes.as_ptr(), len: bytes.len() };
+        self.owned_uploads.push(bytes);
+        run
+    }
+
     /// [`CmdWriter::buffer_update`] with bytes the writer takes: they move in without a copy.
     pub fn buffer_update_owned(&mut self, id: Id, off: u64, bytes: Vec<u8>) {
-        let bytes = self.uploads.own(bytes);
+        let bytes = self.own_upload(bytes);
         self.push(Cmd::buffer_update(id, off, bytes));
     }
 
@@ -684,7 +689,7 @@ impl CmdWriter {
     pub fn texture_update_owned(&mut self, id: Id, mip: u16, rect: [u32; 4], layer: u32, mut bytes: Vec<u8>) {
         // the run's length is one word (`k::slice32`)
         bytes.truncate(u32::MAX as usize);
-        let bytes = self.uploads.own(bytes);
+        let bytes = self.own_upload(bytes);
         self.push(Cmd::texture_update(id, mip, rect, layer, bytes));
     }
 
@@ -702,6 +707,30 @@ impl CmdWriter {
     /// As [`CmdWriter::buffer_update_borrowed`].
     pub unsafe fn texture_update_borrowed(&mut self, id: Id, mip: u16, rect: [u32; 4], layer: u32, bytes: &[u8]) {
         self.push(Cmd::texture_update(id, mip, rect, layer, Slice::from_bytes(&bytes[..bytes.len().min(u32::MAX as usize)])));
+    }
+
+    /// A packed 3D box whose storage the writer takes through submission.
+    pub fn texture_update_3d_owned(&mut self, id: Id, rect: [u32; 4], z_depth: [u16; 2], bytes: Vec<u8>) {
+        assert!(u32::try_from(bytes.len()).is_ok(), "split volume uploads before encoding");
+        let bytes = self.own_upload(bytes);
+        self.push(Cmd::texture_update_3d(id, rect, z_depth, bytes));
+    }
+
+    /// Pack the rows of one volume box directly into writer storage held through submission.
+    pub fn texture_update_3d_rows<'a>(&mut self, id: Id, rect: [u32; 4], z_depth: [u16; 2],
+        length: usize, rows: impl Iterator<Item = &'a [u8]>) {
+        assert!(u32::try_from(length).is_ok(), "split volume uploads before encoding");
+        let bytes = self.volume_uploads.keep_rows(length, rows);
+        self.push(Cmd::texture_update_3d(id, rect, z_depth, bytes));
+    }
+
+    /// A contiguous box of a retained volume.
+    ///
+    /// # Safety
+    /// The bytes must stay alive and unchanged until this batch has been submitted.
+    pub unsafe fn texture_update_3d_borrowed(&mut self, id: Id, rect: [u32; 4], z_depth: [u16; 2], bytes: &[u8]) {
+        assert!(u32::try_from(bytes.len()).is_ok(), "split volume uploads before encoding");
+        self.push(Cmd::texture_update_3d(id, rect, z_depth, unsafe { Slice::from_bytes(bytes) }));
     }
 
     /// One ordered buffer-read request; only its range metadata is copied into the command.
@@ -949,7 +978,9 @@ impl CmdWriter {
     pub fn clear(&mut self) {
         self.cmds.clear();
         self.arena.clear();
-        self.uploads.clear();
+        self.uploads.clear(false);
+        self.volume_uploads.clear(true);
+        self.owned_uploads.clear();
         self.frames.clear();
         self.passes.clear();
         self.draws.clear();
@@ -962,7 +993,7 @@ impl CmdWriter {
     /// Capacities (cmds, arena bytes, frames, passes, draws, layers, upload bytes): tests show a
     /// steady state does not grow.
     pub fn capacities(&self) -> [usize; 7] {
-        let uploads = self.uploads.chunks.iter().map(Vec::capacity).sum();
+        let uploads = self.uploads.chunks.iter().chain(&self.volume_uploads.chunks).map(Vec::capacity).sum();
         [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity(), uploads]
     }
 }

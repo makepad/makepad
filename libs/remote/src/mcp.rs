@@ -10,8 +10,10 @@
 //! `--caller-env NAME` passes the capability in that environment variable with every call (an
 //! agent lane's `MAKEPAD_SCOPE_MCP_TOKEN`); the app checks it.
 //!
-//! The target is a pid, an app name or `<host>:<pid>` (through the hub). With `--launch
-//! <program> [args..]` an app that is not running is started (detached) when a request needs it.
+//! The target is a pid, an app name, `<host>:<pid>` (through the hub) or an endpoint file an app
+//! published in a directory it owns (`discovery::publish`): the instance of that home, found again
+//! when it restarts. With `--launch <program> [args..]` an app that is not running is started
+//! (detached) when a request needs it.
 
 use crate::conn::{Event, CLOSE_LINK_LOST, CLOSE_NORMAL};
 use crate::link::{Client, Error};
@@ -160,7 +162,8 @@ impl Adapter {
 
     fn tools(&mut self) -> Result<Vec<Tool>, String> {
         let client = self.client()?;
-        let lines = app_request(&client, "list")?;
+        drop(client);
+        let lines = self.app("list")?;
         let mut tools: Vec<Tool> = Vec::new();
         for l in lines {
             let Some(manifest) = l.get("Instance").and_then(|i| i.get("manifest")) else { continue };
@@ -200,7 +203,8 @@ impl Adapter {
             Some(c) => format!(" caller={c}"),
             None => String::new(),
         };
-        let lines = app_request(&client, &format!("call {service}.{tool}{caller}\n{args}"))?;
+        drop(client);
+        let lines = self.app(&format!("call {service}.{tool}{caller}\n{args}"))?;
         let result = lines.iter().find_map(|l| l.get("Result").and_then(|r| match r {
             Value::Arr(a) => a.first().cloned(),
             other => Some(other.clone()),
@@ -230,7 +234,7 @@ impl Adapter {
 
 /// A local endpoint by pid / app name, or `<host>:<app|pid>` through the hub.
 fn connect(target: &str) -> Result<Client, String> {
-    if target.contains(':') && !target.contains('/') {
+    if target.contains(':') && !crate::discovery::is_endpoint_file(target) {
         #[cfg(unix)]
         {
             let relax = std::env::var_os("RELAX_BIN").map(std::path::PathBuf::from);
@@ -255,26 +259,68 @@ fn has_window(client: &Client) -> bool {
     client.cmd("status").map(|lines| lines.filter_map(Result::ok).any(|l| l.contains("\"w\":[{"))).unwrap_or(false)
 }
 
+/// Why an `app` request failed.
+enum Failure {
+    /// The channel never opened: the link is gone (the app quit or restarted), nothing ran.
+    NotOpened(String),
+    /// The link dropped while the request was out: it may have run.
+    LinkLost(String),
+    Other(String),
+}
+
 /// One `app` request: its answer lines, parsed.
-fn app_request(client: &Client, args: &str) -> Result<Vec<Value>, String> {
+fn app_request(client: &Client, args: &str) -> Result<Vec<Value>, Failure> {
     let ch = client.open("app", args).map_err(|e| match e {
-        Error::Refused(_, why) if why.contains("unsupported service") => "this process serves no `app` service".to_string(),
-        e => e.to_string(),
+        Error::Refused(_, why) if why.contains("unsupported service") => Failure::Other("this process serves no `app` service".to_string()),
+        Error::Refused(_, why) => Failure::Other(why),
+        e => Failure::NotOpened(e.to_string()),
     })?;
     let mut lines = Vec::new();
     loop {
         match ch.recv_timeout(CALL_WAIT) {
             Ok(Event::Data(d)) => {
                 for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                    lines.push(json::parse_depth(l.as_bytes(), DEPTH).map_err(|e| format!("an answer line I cannot read ({e})"))?);
+                    lines.push(json::parse_depth(l.as_bytes(), DEPTH).map_err(|e| Failure::Other(format!("an answer line I cannot read ({e})")))?);
                 }
             }
             Ok(Event::Closed(CLOSE_NORMAL, _)) => return Ok(lines),
-            Ok(Event::Closed(CLOSE_LINK_LOST, why)) => return Err(format!("link lost: {why}")),
-            Ok(Event::Closed(_, why)) => return Err(why),
+            Ok(Event::Closed(CLOSE_LINK_LOST, why)) => return Err(Failure::LinkLost(why)),
+            Ok(Event::Closed(_, why)) => return Err(Failure::Other(why)),
             Ok(Event::Opened(_)) => {}
-            Err(true) => return Err("no answer in time".into()),
-            Err(false) => return Err("the channel closed".into()),
+            Err(true) => return Err(Failure::Other("no answer in time".into())),
+            Err(false) => return Err(Failure::LinkLost("the channel closed".into())),
+        }
+    }
+}
+
+impl Adapter {
+    /// One `app` request on the target. A link that is gone is dropped and the target found
+    /// again, once: an app name or an endpoint file then reaches the instance that runs now (an
+    /// app restarted in place). A request cut off mid-way is not repeated, since it may have run;
+    /// the next request reconnects.
+    fn app(&mut self, args: &str) -> Result<Vec<Value>, String> {
+        let client = self.client()?;
+        let failure = match app_request(&client, args) {
+            Ok(lines) => return Ok(lines),
+            Err(f) => f,
+        };
+        match failure {
+            Failure::Other(why) => Err(why),
+            Failure::LinkLost(why) => {
+                self.client = None;
+                Err(format!("link lost: {why}"))
+            }
+            Failure::NotOpened(_) => {
+                self.client = None;
+                let client = self.client()?;
+                app_request(&client, args).map_err(|f| match f {
+                    Failure::NotOpened(why) | Failure::LinkLost(why) => {
+                        self.client = None;
+                        format!("link lost: {why}")
+                    }
+                    Failure::Other(why) => why,
+                })
+            }
         }
     }
 }
@@ -334,7 +380,7 @@ fn tool_json(t: &Tool) -> Value {
 
 // This adapter sits below the AI hub (platform depends on remote), so sniff
 // the wire prefix here without linking a provider or decoding any pixels.
-fn picture_media_type(data: &str) -> Result<&'static str, String> {
+pub(crate) fn picture_media_type(data: &str) -> Result<&'static str, String> {
     let head = data.get(..12).ok_or("tool picture is too short")?;
     let bytes = makepad_base64::base64_decode(head.as_bytes())
         .map_err(|_| "tool picture is not base64")?;

@@ -18,65 +18,77 @@ export function makepad_device_pixel_ratio(value) {
     return makepad_positive_number(value, 1.0);
 }
 
-// Computes one uniform scale for both axes. CSS dimensions stay untouched;
-// only the drawable is reduced to fit the shared pixel and hardware limits.
+// One uniform scale for both axes, lowered only to fit a page's pixel budget and
+// the device's limits. At the full scale the drawable is the canvas's own
+// device-pixel box: the browser snaps both CSS edges of the canvas to device
+// pixels, and a drawable a pixel smaller than that box is stretched over it and
+// resampled every frame, which blurs all text at fractional ratios. A lowered
+// drawable is floored so it stays within its bounds. The logical size handed to
+// the app is the drawable at the scale, so the app's pass is exactly the drawable.
 export function makepad_compute_webgl_size(
     width,
     height,
     scale_ceiling,
     limits = {},
     pixel_budget = MAKEPAD_WEBGL_PIXEL_BUDGET,
+    left = 0,
+    top = 0,
 ) {
-    const logical_width = Number.isFinite(Number(width)) && Number(width) > 0
+    const css_width = Number.isFinite(Number(width)) && Number(width) > 0
         ? Number(width)
         : 0;
-    const logical_height = Number.isFinite(Number(height)) && Number(height) > 0
+    const css_height = Number.isFinite(Number(height)) && Number(height) > 0
         ? Number(height)
         : 0;
     const max_width = makepad_positive_number(limits.max_width, Number.MAX_SAFE_INTEGER);
     const max_height = makepad_positive_number(limits.max_height, Number.MAX_SAFE_INTEGER);
     const budget = Number(pixel_budget) > 0 ? Number(pixel_budget) : MAKEPAD_WEBGL_PIXEL_BUDGET;
-    let scale = Number(scale_ceiling) > 0 ? Number(scale_ceiling) : 1.0;
+    const requested_scale = Number(scale_ceiling) > 0 ? Number(scale_ceiling) : 1.0;
 
-    if (logical_width === 0 || logical_height === 0) {
+    if (css_width === 0 || css_height === 0) {
         return {
-            logical_width,
-            logical_height,
+            logical_width: css_width,
+            logical_height: css_height,
             width: 0,
             height: 0,
-            scale,
+            scale: requested_scale,
         };
     }
 
     // Dividing the square roots avoids overflowing width * height for hostile
     // or accidentally enormous inputs.
     const budget_scale = Math.sqrt(budget)
-        / Math.sqrt(logical_width)
-        / Math.sqrt(logical_height);
-    scale = Math.min(
-        scale,
+        / Math.sqrt(css_width)
+        / Math.sqrt(css_height);
+    const scale = Math.min(
+        requested_scale,
         budget_scale,
-        max_width / logical_width,
-        max_height / logical_height,
+        max_width / css_width,
+        max_height / css_height,
     );
     if (!Number.isFinite(scale) || scale <= 0) {
         return {
-            logical_width,
-            logical_height,
+            logical_width: css_width,
+            logical_height: css_height,
             width: 0,
             height: 0,
             scale: 0,
         };
     }
 
-    // Flooring keeps rounding from crossing either the pixel or dimension
-    // ceiling. A visible dimension is kept drawable even for extreme aspect
-    // ratios, where exact aspect preservation is impossible at integer size.
-    const physical_width = Math.max(1, Math.min(max_width, Math.floor(logical_width * scale)));
-    const physical_height = Math.max(1, Math.min(max_height, Math.floor(logical_height * scale)));
+    let physical_width = Math.max(1, Math.min(max_width, Math.floor(css_width * scale)));
+    let physical_height = Math.max(1, Math.min(max_height, Math.floor(css_height * scale)));
+    if (scale === requested_scale) {
+        const rounded_width = Math.max(1, Math.round((left + css_width) * scale) - Math.round(left * scale));
+        const rounded_height = Math.max(1, Math.round((top + css_height) * scale) - Math.round(top * scale));
+        if (rounded_width <= max_width && rounded_height <= max_height && rounded_width * rounded_height <= budget) {
+            physical_width = rounded_width;
+            physical_height = rounded_height;
+        }
+    }
     return {
-        logical_width,
-        logical_height,
+        logical_width: physical_width / scale,
+        logical_height: physical_height / scale,
         width: physical_width,
         height: physical_height,
         scale,
@@ -3860,27 +3872,26 @@ export class WasmWebBrowser extends WasmBridge {
     update_window_info() {
         var w;
         var h;
-        var canvas = this.canvas;
+        let left = 0;
+        let top = 0;
+        const canvas = this.canvas;
 
-        if (canvas.getAttribute("fullpage")) {
-            if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
-                if (window.orientation == 90 || window.orientation == -90) {
-                    h = screen.width;
-                    w = screen.height - 90;
-                }
-                else {
-                    w = screen.width;
-                    h = screen.height - 80;
-                }
+        if (canvas.getAttribute("fullpage") && this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
+            if (window.orientation == 90 || window.orientation == -90) {
+                h = screen.width;
+                w = screen.height - 90;
             }
             else {
-                w = window.innerWidth;
-                h = window.innerHeight;
+                w = screen.width;
+                h = screen.height - 80;
             }
         }
         else {
-            w = canvas.offsetWidth;
-            h = canvas.offsetHeight;
+            const rect = canvas.getBoundingClientRect();
+            w = rect.width;
+            h = rect.height;
+            left = rect.left;
+            top = rect.top;
         }
         const physical_device_dpi = makepad_device_pixel_ratio(window.devicePixelRatio);
         this.physical_device_dpi = physical_device_dpi;
@@ -3891,6 +3902,8 @@ export class WasmWebBrowser extends WasmBridge {
             Math.min(physical_device_dpi, quality.dpr_ceiling),
             this.webgl_limits,
             quality.pixel_budget,
+            left,
+            top,
         );
         if (canvas.width !== size.width) {
             canvas.width = size.width;

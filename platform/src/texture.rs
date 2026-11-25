@@ -643,8 +643,99 @@ pub enum TextureWrap {
     Repeat,
 }
 
+/// Sampled, linear, single-level 3D texture formats. Bytes are ordered R or RGBA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeFormat { R8Unorm, Rgba8Unorm }
+
+impl VolumeFormat {
+    pub(crate) fn bytes(self) -> usize {
+        match self { Self::R8Unorm => 1, Self::Rgba8Unorm => 4 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VolumeCaps {
+    pub max_dimension: u32,
+    pub r8_unorm: bool,
+    pub rgba8_unorm: bool,
+}
+
+impl VolumeCaps {
+    pub fn supports(self, format: VolumeFormat) -> bool {
+        match format { VolumeFormat::R8Unorm => self.r8_unorm, VolumeFormat::Rgba8Unorm => self.rgba8_unorm }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeDesc { pub extent: [u32; 3], pub format: VolumeFormat }
+
+/// Origin and extent in texels, in x, y, z order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeRegion { pub origin: [u32; 3], pub extent: [u32; 3] }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeTextureError {
+    CapabilitiesPending, UnsupportedFormat, InvalidExtent, InvalidLayout, WrongTextureKind, MissingCpuImage,
+}
+
+impl std::fmt::Display for VolumeTextureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") }
+}
+impl std::error::Error for VolumeTextureError {}
+
+/// The validated CPU backing of a volume. Construct it through `Texture::new_volume`.
+#[derive(Clone)]
+pub struct VolumeImage {
+    pub(crate) desc: VolumeDesc,
+    pub(crate) data: Option<Vec<u8>>,
+    pub(crate) dirty: std::collections::VecDeque<VolumeRegion>,
+}
+
+impl VolumeImage {
+    pub(crate) fn full(&self) -> VolumeRegion { VolumeRegion { origin: [0; 3], extent: self.desc.extent } }
+
+    pub(crate) fn mark_full(&mut self) {
+        self.dirty.clear();
+        if self.data.is_some() { self.dirty.push_back(self.full()); }
+    }
+
+    fn write(&mut self, region: VolumeRegion, row_pitch: usize, slice_pitch: usize, src: &[u8]) -> Result<(), VolumeTextureError> {
+        use VolumeTextureError::{InvalidExtent, InvalidLayout, MissingCpuImage};
+        for axis in 0..3 {
+            if region.origin[axis].checked_add(region.extent[axis]).is_none_or(|end| end > self.desc.extent[axis]) {
+                return Err(InvalidExtent);
+            }
+        }
+        if region.extent.contains(&0) { return Ok(()); }
+        let [w, h, d] = region.extent.map(|n| n as usize);
+        let bpp = self.desc.format.bytes();
+        let row = w.checked_mul(bpp).ok_or(InvalidLayout)?;
+        let plane = (h - 1).checked_mul(row_pitch).and_then(|n| n.checked_add(row)).ok_or(InvalidLayout)?;
+        let required = (d - 1).checked_mul(slice_pitch).and_then(|n| n.checked_add(plane)).ok_or(InvalidLayout)?;
+        if row_pitch < row || (d > 1 && slice_pitch < plane) || src.len() < required { return Err(InvalidLayout); }
+
+        let full = self.full();
+        if self.data.is_none() && region != full { return Err(MissingCpuImage); }
+        let [width, height, _] = self.desc.extent.map(|n| n as usize);
+        let [x, y, z] = region.origin.map(|n| n as usize);
+        // Creation checked the complete image length. A discarded base is rebuilt only by a full write.
+        let dst = self.data.get_or_insert_with(|| vec![0; row * h * d]);
+        for dz in 0..d {
+            for dy in 0..h {
+                let target = (((z + dz) * height + y + dy) * width + x) * bpp;
+                let source = dz * slice_pitch + dy * row_pitch;
+                dst[target..target + row].copy_from_slice(&src[source..source + row]);
+            }
+        }
+        if region == full { self.dirty.clear(); }
+        if self.dirty.front() != Some(&full) { self.dirty.push_back(region); }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub enum TextureFormat {
+    VecVolume(VolumeImage),
     Storage { format: crate::makepad_script::shader_ir_compute::StorageTextureFormat, width: usize, height: usize },
     Unknown,
     VecBGRAu8_32 {
@@ -842,6 +933,7 @@ pub enum TextureFormat {
 impl std::fmt::Debug for TextureFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
+            TextureFormat::VecVolume(v) => write!(f, "VecVolume({:?})", v.desc),
             TextureFormat::Unknown => write!(f, "TextureFormat::Unknown"),
             TextureFormat::Storage { format, width, height } => write!(f, "Storage({format:?}, {width}x{height})"),
             TextureFormat::VecBGRAu8_32 { width, height, .. } => write!(
@@ -957,6 +1049,7 @@ pub enum TextureCategory {
     VecCube,
     /// a sampled 2D array of this many layers
     VecArray(usize),
+    VecVolume(u32),
     Render,
     RenderCube,
     DepthBuffer,
@@ -983,6 +1076,7 @@ impl PartialEq for TextureCategory {
                     false
                 }
             }
+            Self::VecVolume(d) => matches!(other, Self::VecVolume(other_depth) if other_depth == d),
             Self::VecArray(n) => matches!(other, Self::VecArray(m) if m == n),
             Self::VecCube { .. } => {
                 if let Self::VecCube { .. } = other {
@@ -1121,6 +1215,7 @@ impl CxTexture {
     #[allow(unused)]
     pub(crate) fn updated(&self) -> TextureUpdated {
         match self.format {
+            TextureFormat::VecVolume(ref v) => if v.dirty.is_empty() { TextureUpdated::Empty } else { TextureUpdated::Full },
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecMipBGRAu8_32 { updated, .. } => updated,
@@ -1157,6 +1252,10 @@ impl CxTexture {
 
     #[allow(unused)]
     pub(crate) fn set_updated(&mut self, updated: TextureUpdated) {
+        if let TextureFormat::VecVolume(v) = &mut self.format {
+            if updated.is_empty() { v.dirty.clear(); } else { v.mark_full(); }
+            return;
+        }
         *match &mut self.format {
             TextureFormat::VecBGRAu8_32 { updated, .. } => updated,
             TextureFormat::VecCubeBGRAu8_32 { updated, .. } => updated,
@@ -1286,6 +1385,7 @@ impl TextureFormat {
     /// CPU pixel bytes this format currently holds (Vec capacity or shared chain length).
     pub(crate) fn cpu_data_bytes(&self) -> usize {
         match self {
+            Self::VecVolume(v) => v.data.as_ref().map_or(0, Vec::capacity),
             TextureFormat::VecBGRAu8_32 { data, .. }
             | TextureFormat::VecCubeBGRAu8_32 { data, .. } => data
                 .as_ref()
@@ -1307,6 +1407,7 @@ impl TextureFormat {
     /// Release any CPU pixel storage held by a `Vec*` variant, keeping format and dimensions intact.
     pub(crate) fn discard_cpu_data(&mut self) {
         match self {
+            Self::VecVolume(v) => v.data = None,
             TextureFormat::VecBGRAu8_32 { data, .. }
             | TextureFormat::VecCubeBGRAu8_32 { data, .. } => *data = None,
             TextureFormat::VecMipBGRAu8_32 { data, .. }
@@ -1330,6 +1431,7 @@ impl TextureFormat {
     }
     pub fn is_vec(&self) -> bool {
         match self {
+            Self::VecVolume(_) => true,
             Self::VecBGRAu8_32 { .. } => true,
             Self::VecCubeBGRAu8_32 { .. } => true,
             Self::VecMipBGRAu8_32 { .. } => true,
@@ -1401,6 +1503,7 @@ impl TextureFormat {
 
     pub fn vec_width_height(&self) -> Option<(usize, usize)> {
         match self {
+            Self::VecVolume(v) => Some((v.desc.extent[0] as usize, v.desc.extent[1] as usize)),
             Self::VecBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecCubeBGRAu8_32 { width, height, .. } => Some((*width, *height)),
             Self::VecMipBGRAu8_32 { width, height, .. } => Some((*width, *height)),
@@ -1432,6 +1535,11 @@ impl TextureFormat {
     #[allow(unused)]
     pub(crate) fn as_vec_alloc(&self) -> Option<TextureAlloc> {
         match self {
+            Self::VecVolume(v) => Some(TextureAlloc {
+                width: v.desc.extent[0] as usize, height: v.desc.extent[1] as usize,
+                category: TextureCategory::VecVolume(v.desc.extent[2]),
+                pixel: match v.desc.format { VolumeFormat::R8Unorm => TexturePixel::Ru8, VolumeFormat::Rgba8Unorm => TexturePixel::RGBAu8 },
+            }),
             Self::VecBGRAu8_32 { width, height, .. } => Some(TextureAlloc {
                 width: *width,
                 height: *height,
@@ -1714,6 +1822,30 @@ impl Texture {
         texture
     }
 
+    /// Create a sampled volume from initialized, tightly packed texels in x-fastest order.
+    /// A Splash `shader.texture_3d(float)` reads level zero with `.load(vec3i)`.
+    /// Its `.size()` returns the width, height and depth as a `vec3f`.
+    /// R8Unorm stores a normalized red channel. Recover a byte index with `round(sample.r * 255.0)`.
+    #[track_caller]
+    pub fn new_volume(cx: &mut Cx, desc: VolumeDesc, texels: Vec<u8>) -> Result<Self, VolumeTextureError> {
+        let caps = cx.gpu_info().volume.ok_or(VolumeTextureError::CapabilitiesPending)?;
+        if !caps.supports(desc.format) { return Err(VolumeTextureError::UnsupportedFormat); }
+        if desc.extent.contains(&0) || desc.extent.iter().any(|&n| n > caps.max_dimension) || desc.extent[2] > u32::from(u16::MAX) {
+            return Err(VolumeTextureError::InvalidExtent);
+        }
+        let length = desc.extent.into_iter().try_fold(desc.format.bytes(), |n, side| n.checked_mul(side as usize));
+        if length != Some(texels.len()) { return Err(VolumeTextureError::InvalidLayout); }
+        let mut v = VolumeImage { desc, data: Some(texels), dirty: Default::default() };
+        v.mark_full();
+        Ok(Self::new_with_format(cx, TextureFormat::VecVolume(v)))
+    }
+
+    /// Update a box in place. Both pitches are in bytes. Padding after the final row is optional.
+    pub fn update_volume(&self, cx: &mut Cx, region: VolumeRegion, row_pitch: usize, slice_pitch: usize, texels: &[u8]) -> Result<(), VolumeTextureError> {
+        let TextureFormat::VecVolume(v) = &mut cx.textures[self.texture_id()].format else { return Err(VolumeTextureError::WrongTextureKind) };
+        v.write(region, row_pitch, slice_pitch, texels)
+    }
+
     /// A tight NV12 frame, `width` x `height` (the Y plane, then the
     /// interleaved UV rows), as one byte texture `width` x
     /// [`Texture::nv12_rows`]`(height)`: what `DrawNv12` draws as RGB.
@@ -1797,6 +1929,13 @@ impl Texture {
     /// Whether some of this texture's data has not gone to the GPU yet.
     pub fn upload_pending(&self, cx: &Cx) -> bool {
         !cx.textures[self.texture_id()].updated().is_empty()
+    }
+
+    /// Content revision of an uploaded CPU-backed image. A pending write (including
+    /// a partially uploaded volume) has no stable revision to reuse in a sampled result.
+    pub fn uploaded_texel_generation(&self, cx: &Cx) -> Option<u64> {
+        let texture = &cx.textures[self.texture_id()];
+        (texture.format.is_vec() && texture.updated().is_empty()).then_some(texture.texel_generation)
     }
 
     /// Records that this texture holds a shrunk copy of an image (or of each frame of an

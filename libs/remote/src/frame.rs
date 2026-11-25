@@ -11,6 +11,9 @@ pub const HEADER: usize = 4;
 pub const MAX_PAYLOAD: usize = MAX_FRAME - HEADER;
 /// DATA continues in the next DATA frame of the same channel.
 pub const FLAG_MORE: u8 = 1;
+/// OPEN requests, and OK supplies, a little-endian u64 message limit before the service caps.
+/// An older peer answers with an ordinary OK; an ordinary OPEN still receives an ordinary OK.
+pub const FLAG_MESSAGE_LIMIT: u8 = 2;
 
 pub mod kind {
     /// `service \n args` (utf8)
@@ -20,7 +23,7 @@ pub mod kind {
     pub const DATA: u8 = 3;
     /// `bytes u32 LE`
     pub const CREDIT: u8 = 4;
-    /// `code u16 LE | reason utf8`
+    /// `code u16 LE | reason utf8`. On channel zero this closes the entire connection.
     pub const CLOSE: u8 = 5;
     /// `mono_ns u64 LE`
     pub const PING: u8 = 6;

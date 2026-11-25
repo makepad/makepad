@@ -1109,7 +1109,7 @@ impl HostedApp {
             return;
         }
         // the window's pixels, as the app's frames size them
-        let [min_width, min_height] = makepad_platform::makepad_hal::window_pixels([rect.size.x, rect.size.y], dpi_factor);
+        let [min_width, min_height] = makepad_platform::window_size::window_pixels([rect.size.x, rect.size.y], dpi_factor);
         #[cfg(target_os = "linux")]
         let live = self.live_resize;
         let needs_new_swapchain = self
@@ -1680,7 +1680,7 @@ mod pacing_tests {
     /// tile at 2.43, the HAL drew them offscreen, and the app behind it never started.
     #[test]
     fn a_tiles_frames_are_its_shared_images() {
-        let window_pixels = makepad_platform::makepad_hal::window_pixels;
+        let window_pixels = makepad_platform::window_size::window_pixels;
         let mut checked = 0;
         for dpi in [1.0f64, 1.25, 1.3, 1.5, 1.75, 2.0, 2.25, 2.43, 2.5, 2.625, 3.0] {
             for n in 1..4000u32 {

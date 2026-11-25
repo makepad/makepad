@@ -100,6 +100,33 @@ fn backend_name(b: u32) -> &'static str {
     }
 }
 
+fn restore_contents(w: &mut CmdWriter, id: Id, t: &CapTexture, bytes: &[u8]) -> Result<(), String> {
+    let volume = t.usage & usage::VOLUME != 0;
+    if volume {
+        let plane = format::level_bytes(t.format, t.w, t.h);
+        if t.depth == 0 || u16::try_from(t.depth).is_err() || t.mips != 1 || u32::try_from(plane).is_err()
+            || plane.checked_mul(u64::from(t.depth)) != Some(bytes.len() as u64) {
+            return Err("invalid captured volume contents".into());
+        }
+    }
+    let mut at = 0usize;
+    for level in 0..t.mips.max(1) {
+        let (lw, lh) = ((t.w >> level).max(1), (t.h >> level).max(1));
+        let n = format::level_bytes(t.format, lw, lh) as usize;
+        for layer in 0..t.depth.max(1) {
+            let Some(part) = bytes.get(at..at + n) else { break };
+            if volume {
+                // A captured plane of a volume is spatial z at level zero.
+                w.texture_update_3d(id, [0, 0, lw, lh], [layer as u16, 1], part);
+            } else {
+                w.texture_update(id, level as u16, [0, 0, lw, lh], layer, part);
+            }
+            at += n;
+        }
+    }
+    Ok(())
+}
+
 impl Replayer {
     /// A private HAL with every resource of the capture created and every pipeline compiled.
     pub fn new(c: &Capture) -> Result<Replayer, String> {
@@ -129,16 +156,7 @@ impl Replayer {
             r.tex.insert(t.id, id);
             w.texture_create(id, t.usage | usage::SAMPLED, t.format, t.w, t.h, [t.depth.min(u16::MAX as u32) as u16, t.mips.min(u16::MAX as u32) as u16], Attr::default());
             let Some(bytes) = t.contents.as_ref().filter(|_| !format::is_depth(t.format)) else { continue };
-            let mut at = 0usize;
-            for level in 0..t.mips.max(1) {
-                let (lw, lh) = ((t.w >> level).max(1), (t.h >> level).max(1));
-                let n = format::level_bytes(t.format, lw, lh) as usize;
-                for layer in 0..t.depth.max(1) {
-                    let Some(part) = bytes.get(at..at + n) else { break };
-                    w.texture_update(id, level as u16, [0, 0, lw, lh], layer, part);
-                    at += n;
-                }
-            }
+            restore_contents(&mut w, id, t, bytes)?;
         }
         if c.passes.iter().any(|p| p.is_window()) {
             r.rt = fresh();
@@ -428,4 +446,36 @@ pub fn to_rgba8(fmt: u32, px: &[u8]) -> Vec<u8> {
         _ => out.extend(px.iter().copied()),
     }
     out
+}
+
+#[cfg(test)]
+#[test]
+fn volume_region_replay() {
+    use crate::HalCmd;
+
+    let mut w = CmdWriter::new(1);
+    let id = Id::new(2, 1);
+    let pixels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    for shape in [usage::VOLUME, usage::ARRAY] {
+        w.clear();
+        let t = CapTexture { id, w: 2, h: 2, depth: 3, mips: 1, usage: usage::SAMPLED | shape,
+            format: format::R8, ..Default::default() };
+        restore_contents(&mut w, id, &t, &pixels).unwrap();
+        let mut planes = 0;
+        for cmd in w.cmds() {
+            let (first, count, rect, bytes) = match cmd.decode(w.arena()) {
+                Some(HalCmd::TextureUpdate3d { xywh, z_depth: [z, d], bytes, .. }) if shape == usage::VOLUME =>
+                    (usize::from(z), usize::from(d), xywh, bytes),
+                Some(HalCmd::TextureUpdate { mip: 0, rect, layer, bytes, .. }) if shape == usage::ARRAY =>
+                    (layer as usize, 1, rect, bytes),
+                _ => panic!("wrong update for captured shape {shape}"),
+            };
+            assert_eq!(rect, [0, 0, 2, 2]);
+            assert_eq!(first, planes);
+            planes += count;
+            // SAFETY: the writer still owns this batch.
+            assert_eq!(unsafe { bytes.as_bytes() }, &pixels[first * 4..planes * 4]);
+        }
+        assert_eq!(planes, 3, "replay restored all three planes");
+    }
 }

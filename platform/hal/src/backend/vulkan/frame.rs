@@ -270,7 +270,7 @@ impl Vulkan {
     fn begin_compose(&mut self, key: (u32, Id), covered: bool, batch: &mut Batch) -> Option<Arc<Image>> {
         // the retained image is an older frame than the one last shown (the newest went straight
         // to the shell's target): nothing to compose over until the app's next frame lands in it
-        if !covered && self.retained_stale.contains(&key.1.index) { return None; }
+        if !covered && self.direct.stale((HOST, key.1.index)) { return None; }
         let base = self.win.get(&(key.0, key.1.index)).filter(|t| t.gen == key.1.gen)?.image.clone();
         let badged = self.badged.get_mut(&key.1.index)?;
         badged.last = None;
@@ -299,14 +299,12 @@ impl Vulkan {
     /// image out again, before session 0's frame lands in it.
     /// (A take-back that fails, the retained image not made, leaves the frame where it is.)
     fn take_back(&mut self, s: &mut Session, window: Id, size: [u32; 2], batch: &mut Batch, now: u64) -> bool {
-        if !self.retained_stale.contains(&window.index) { return true }
-        let Some(direct) = self.direct_frame.get(&window.index).cloned() else { return true };
+        let Some((direct, _)) = self.direct.newest((HOST, window)) else { return true };
         if batch.may_read(&direct).is_err() { return false }
         match self.offscreen(s, window, size, now) {
             Ok(retained) if retained.desc.format == direct.desc.format => {
                 self.copy_image("window take-back copy", &direct, &retained, batch);
-                self.retained_stale.remove(&window.index);
-                self.direct_frame.remove(&window.index);
+                self.direct.take((HOST, window.index));
             }
             Ok(_) => eprintln!("[hal-vulkan] window take-back: the shell's target and the window image differ in format"),
             Err(e) => eprintln!("[hal-vulkan] window take-back: {e}"),
@@ -324,8 +322,8 @@ impl Vulkan {
         let mut batch = self.batch.take().expect("batch");
         let taken = self.take_back(s, window, [image.desc.w, image.desc.h], &mut batch, now);
         // (a failed take-back: still the shell's target, which the shell has given back)
-        let source = if !taken { None } else if self.retained_stale.contains(&window.index) {
-            self.direct_frame.get(&window.index).cloned()
+        let source = if !taken { None } else if self.direct.stale((HOST, window.index)) {
+            self.direct.newest((HOST, window)).map(|(image, _)| image)
         } else {
             self.win.get(&(HOST, window.index)).filter(|t| t.gen == window.gen).map(|t| t.image.clone())
         };
@@ -359,12 +357,15 @@ impl Vulkan {
 
     /// What a snapshot or copy of `window` reads: its newest frame's size (a hosted window's
     /// shared image is larger), else the whole window image.
-    pub(super) fn window_rect(&self, sid: u32, window: Id, image: Option<&Image>) -> [u32; 4] {
-        match (self.hosted_sizes.get(&(sid, window.index)), image) {
-            (Some([w, h]), Some(i)) => [0, 0, (*w).min(i.desc.w), (*h).min(i.desc.h)],
-            (None, Some(i)) => [0, 0, i.desc.w, i.desc.h],
-            _ => [0; 4],
-        }
+    pub(super) fn window_rect(&self, sid: u32, window: Id, image: Option<&Arc<Image>>) -> [u32; 4] {
+        let Some(image) = image else { return [0; 4]; };
+        // An embedded or badged window can select a different image for this same key.
+        let [w, h] = self.direct.newest(self.window_key(sid, window))
+            .filter(|(direct, _)| Arc::ptr_eq(direct, image))
+            .map(|(_, size)| size)
+            .or_else(|| self.hosted_sizes.get(&(sid, window.index)).copied())
+            .unwrap_or([image.desc.w, image.desc.h]);
+        [0, 0, w.min(image.desc.w), h.min(image.desc.h)]
     }
 
     /// A window with a badge layer reads as it was last presented: with the layer.
@@ -377,9 +378,7 @@ impl Vulkan {
         let (sid, id) = self.window_key(s.id, id);
         if let Some(last) = self.badged.get(&id.index).filter(|_| sid == HOST && viewer == HOST).and_then(|b| b.last.clone()) { return Some(last); }
         // the newest frame went straight to the shell's target: a read of this frame takes it from there
-        if sid == HOST && self.retained_stale.contains(&id.index) {
-            if let Some(direct) = self.direct_frame.get(&id.index) { return Some(direct.clone()); }
-        }
+        if let Some((image, _)) = self.direct.newest((sid, id)) { return Some(image); }
         self.win.get(&(sid, id.index)).filter(|t| t.gen == id.gen).map(|t| t.image.clone())
     }
 
@@ -448,6 +447,7 @@ impl Vulkan {
             }
         };
         batch.dispatch_query = prof_queries;
+        batch.affinity = Batch::affinity_of(sid, target);
         self.kept.tick();
         if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
         s.frame = packet.frame; s.font_frames.submitted(packet.frame);
@@ -587,10 +587,10 @@ impl Vulkan {
                         let shared = badges.then(|| self.windows.source.target(key.0, key.1, [image.desc.w, image.desc.h])).flatten();
                         // the shell gave back the image of the frame last shown since this frame
                         // began: the retained image takes that frame back before this one replaces it
-                        if shared.as_ref().is_some_and(|i| self.direct_frame.get(&key.1.index).is_some_and(|d| Arc::ptr_eq(d, i))) {
+                        if shared.as_ref().is_some_and(|i| self.direct.newest((HOST, key.1)).is_some_and(|(d, _)| Arc::ptr_eq(&d, i))) {
                             self.take_back(s, target, [image.desc.w, image.desc.h], &mut batch, now);
                             // (a failed one: the frame is gone with this one)
-                            self.direct_frame.remove(&key.1.index);
+                            self.direct.drop_image((HOST, key.1.index));
                         }
                         let scanout = if let Some(shared) = shared {
                             // the composed image into the host's next shared image
@@ -672,6 +672,7 @@ impl Vulkan {
             gpu_prof::with_frame(key, |b| b.present(crate::clock_ns()));
         }
         s.stats.arena_allocs += batch.allocs;
+        s.stats.batch_slots_made += batch.take_slot_made();
         if kind & target::SNAPSHOT != 0 && !pick {
             // The reads of this frame (a grab, a window snapshot or copy) follow this command in
             // the same submit: they record into this frame's command buffer, before a hosted
@@ -737,20 +738,32 @@ impl Vulkan {
                 Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?,
                 None => {
                     let key = self.window_key(s.id, target);
+                    let slot = (key.0, key.1.index);
                     let layered = key.0 == HOST && self.badged.contains_key(&key.1.index);
                     match self.compose.clone() {
                         Some(composed) => composed,
                         // the retained image a badge layer is composed over
-                        None if layered => { self.retained_stale.remove(&key.1.index); retained = true; self.offscreen(s, target, size, now)? }
+                        None if layered => {
+                            self.direct.retained_is_newest(slot);
+                            retained = true;
+                            self.offscreen(s, target, size, now)?
+                        }
                         // a multiview window: the shell's own target (a layer per view), or its own image
                         None if views > 1 => match self.windows.source.target(key.0, key.1, size) {
-                            Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); self.direct_frame.insert(key.1.index, image.clone()); } image }
-                            None => self.offscreen_layers(s, target, size, views as u32, now)?,
+                            Some(image) => { self.direct.record(key, image.clone(), size); image }
+                            None => {
+                                self.direct.retained_is_newest(slot);
+                                self.offscreen_layers(s, target, size, views as u32, now)?
+                            }
                         },
                         None => match self.windows.source.target(key.0, key.1, size) {
                             // the retained image no longer holds the newest frame
-                            Some(image) => { if key.0 == HOST { self.retained_stale.insert(key.1.index); self.direct_frame.insert(key.1.index, image.clone()); } image }
-                            None => { self.retained_stale.remove(&key.1.index); retained = true; self.offscreen(s, target, size, now)? }
+                            Some(image) => { self.direct.record(key, image.clone(), size); image }
+                            None => {
+                                self.direct.retained_is_newest(slot);
+                                retained = true;
+                                self.offscreen(s, target, size, now)?
+                            }
                         },
                     }
                 }

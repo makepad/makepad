@@ -341,3 +341,36 @@ pub fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shortcuts follow the typed letter when the active layout gives it a key.
+    /// Dvorak and AZERTY shortcuts used to select the letter at the US position.
+    #[test]
+    fn layout_keys_follow_the_typed_character() {
+        for (case, position, typed, expected) in [
+            ("Dvorak", KeyCode::Period, 'v', KeyCode::KeyV),
+            ("AZERTY", KeyCode::KeyQ, 'a', KeyCode::KeyA),
+            ("upper-case Dvorak", KeyCode::Period, 'V', KeyCode::KeyV),
+        ] {
+            assert_eq!(layout_keycode(position, Some(typed)), expected, "{case} shortcut for {typed:?}");
+        }
+        for (position, typed) in LAYOUT_KEYS {
+            assert_eq!(layout_keycode(position, Some(typed)), position, "the US layout moved {typed:?}");
+        }
+        for typed in [None, Some('ф')] {
+            assert_eq!(
+                layout_keycode(KeyCode::Quote, typed), KeyCode::Quote,
+                "an unmapped character {typed:?} moved the quote key"
+            );
+        }
+        for position in [KeyCode::Key1, KeyCode::ReturnKey] {
+            assert_eq!(
+                layout_keycode(position, Some('a')), position,
+                "typing 'a' moved the fixed key {position:?}"
+            );
+        }
+    }
+}

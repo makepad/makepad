@@ -17,12 +17,18 @@ use super::appkit::native;
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
 use super::uikit::native;
 
+/// Whether work for an existing window can be dispatched without starting the shell.
+#[relax_api]
+pub(super) fn main_loop_ready() -> bool {
+    lock(&Shared::global().run).ready
+}
+
 /// Runs `f` once on the main thread, in every run-loop mode (also inside the OS's nested loops),
 /// for the media module's native objects (location, views) that must live on it. False, and `f`
 /// dropped, when the window system is not running: a backend without windows (offscreen) has no
 /// main thread work to offer.
 pub fn on_main(f: impl FnOnce() + Send + 'static) -> bool {
-    if !lock(&Shared::global().run).ready {
+    if !main_loop_ready() {
         return false;
     }
     let f = Mutex::new(Some(f));

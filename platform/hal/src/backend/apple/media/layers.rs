@@ -952,15 +952,41 @@ pub fn hit_test(parent: ObjcId, point: NSPoint, event: ObjcId) -> Option<ObjcId>
 #[cfg(target_os = "macos")]
 pub fn native_click(sid: u32, window: Id, x: f64, y: f64, valid: impl FnOnce() -> bool + Send + 'static,
     reply: impl FnOnce(Result<bool, &'static str>) + Send + 'static) {
-    crate::backend::apple::shell::on_main(move || {
+    if !crate::backend::apple::shell::main_loop_ready() {
+        reply(Err("native window system is not ready"));
+        return;
+    }
+    crate::dispatch_main(move || {
         if !valid() { reply(Err("native click expired or user intervened")); return; }
-        let Some(parent) = crate::backend::apple::shell::window_view(sid, window) else {
-            reply(Err("native window is gone")); return;
-        };
-        unsafe {
+        reply(match native_click_at(sid, window, x, y) {
+            NativeClickResult::Delivered => Ok(true),
+            NativeClickResult::Makepad => Ok(false),
+            NativeClickResult::WindowGone => Err("native window is gone"),
+            NativeClickResult::OutsideWindow => Err("native click outside window"),
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+#[relax_api::relax_api(plain)]
+#[repr(u8)]
+enum NativeClickResult {
+    Delivered,
+    Makepad,
+    WindowGone,
+    OutsideWindow,
+}
+
+/// AppKit's window, committed layers and event delivery all belong to the loader's main thread.
+#[cfg(target_os = "macos")]
+#[relax_api::relax_api]
+fn native_click_at(sid: u32, window: Id, x: f64, y: f64) -> NativeClickResult {
+    match crate::backend::apple::shell::window_view(sid, window) {
+        None => NativeClickResult::WindowGone,
+        Some(parent) => unsafe {
             let bounds: NSRect = msg_send![parent, bounds];
             if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x >= bounds.size.width || y >= bounds.size.height {
-                reply(Err("native click outside window")); return;
+                return NativeClickResult::OutsideWindow;
             }
             let point = NSPoint { x, y: bounds.size.height - y };
             let location: NSPoint = msg_send![parent, convertPoint: point toView: nil];
@@ -971,16 +997,16 @@ pub fn native_click(sid: u32, window: Id, x: f64, y: f64, valid: impl FnOnce() -
             let down: ObjcId = msg_send![class!(NSEvent), mouseEventWithType: 1u64 location: location modifierFlags: 0u64
                 timestamp: timestamp windowNumber: number context: nil eventNumber: 0i64 clickCount: 1i64 pressure: 1.0f32];
             let hit = hit_test(parent, point, down).unwrap_or(parent);
-            if hit == nil || hit == parent { reply(Ok(false)); return; }
+            if hit == nil || hit == parent { return NativeClickResult::Makepad; }
             // Keep AppKit's press receiver for the release, even if the press changes layout.
             let retained = RcObjcId::from_unowned(NonNull::new(hit).unwrap());
             let () = msg_send![hit, mouseDown: down];
             let up: ObjcId = msg_send![class!(NSEvent), mouseEventWithType: 2u64 location: location modifierFlags: 0u64
                 timestamp: timestamp windowNumber: number context: nil eventNumber: 1i64 clickCount: 1i64 pressure: 0.0f32];
             let () = msg_send![retained.as_id(), mouseUp: up];
-            reply(Ok(true));
-        }
-    });
+            NativeClickResult::Delivered
+        },
+    }
 }
 
 pub fn destroy(sid: u32, id: Id) {

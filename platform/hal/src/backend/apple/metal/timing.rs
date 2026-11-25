@@ -276,13 +276,36 @@ impl PassTime {
 
 // ------------------------------------------------------------------ in-flight registry, watchdog
 
+/// A command buffer's passes for the hang watchdog: interned names, pass i's shaders at `shaders[range]`.
+#[derive(Default)]
+pub struct PassNames {
+    passes: Vec<(Arc<str>, std::ops::Range<usize>)>,
+    shaders: Vec<Arc<str>>,
+}
+
+impl PassNames {
+    pub fn push(&mut self, name: Arc<str>, shaders: &mut Vec<Arc<str>>) {
+        let start = self.shaders.len();
+        self.shaders.append(shaders);
+        self.passes.push((name, start..self.shaders.len()));
+    }
+
+    pub fn clear(&mut self) {
+        self.passes.clear();
+        self.shaders.clear();
+    }
+}
+
+/// Cleared `PassNames` that completion handlers hand back for the next command buffer.
+pub type PassNamePool = Arc<Mutex<Vec<PassNames>>>;
+
 /// One in-flight command buffer as the hang watchdog sees it. Entries are born when the buffer
 /// is created, stamped at commit, and removed by the buffer's completion handler.
 pub struct InFlightCb {
     pub seq: u64,
     pub committed_at: Option<Instant>,
     /// the passes in the buffer: name and the shaders' names
-    pub passes: Vec<(String, Vec<String>)>,
+    pub passes: PassNames,
 }
 
 /// The command buffers committed and not completed: pushed by the submitter thread, removed by
@@ -293,12 +316,13 @@ pub fn lock_in_flight(queue: &InFlightQueue) -> std::sync::MutexGuard<'_, VecDeq
     queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn describe_passes(passes: &[(String, Vec<String>)]) -> String {
-    if passes.is_empty() {
+fn describe_passes(names: &PassNames) -> String {
+    if names.passes.is_empty() {
         return "(no draw pass recorded)".to_string();
     }
     let mut out = String::new();
-    for (name, shaders) in passes {
+    for (name, range) in &names.passes {
+        let shaders = &names.shaders[range.clone()];
         out.push_str(&format!("\"{}\" shaders [{}]; ", if name.is_empty() { "main" } else { name }, shaders.join(", ")));
     }
     out
@@ -327,6 +351,7 @@ pub fn spawn_hang_watchdog(in_flight: InFlightQueue, completed: Arc<AtomicU64>, 
             let diagnostic = {
                 let mut queue = lock_in_flight(&in_flight);
                 while queue.front().is_some_and(|entry| entry.seq <= completed.load(Ordering::Acquire)) {
+                    // If the watchdog gets here first, this entry's name buffers miss the pool.
                     queue.pop_front();
                 }
                 let Some(oldest) = queue.iter().find(|entry| entry.committed_at.is_some()) else { continue };

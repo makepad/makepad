@@ -2,6 +2,7 @@
 //! channel 0 whose first byte is the opcode, followed by `key=value` lines (utf8).
 
 use crate::frame::{kind, write_frame, FrameReader};
+use crate::conn::ConnOptions;
 use std::io::{self, Write};
 
 pub const PROTO_MAJOR: u16 = 1;
@@ -87,6 +88,36 @@ fn decode(body: &[u8]) -> Hello {
     h
 }
 
+const MAX_CAPS: usize = 63;
+const MAX_FIELDS: usize = MAX_CAPS + 9;
+const MAX_KEY: usize = 32;
+const MAX_VALUE: usize = 255;
+
+/// Check the wire bytes before allocating any strings or growing the capability list.
+fn check_fields(body: &[u8]) -> Result<(), &'static str> {
+    if body.len() > MAX_FIELDS * (MAX_KEY + 1 + MAX_VALUE + 2) {
+        return Err("HELLO is too large");
+    }
+    let text = std::str::from_utf8(body).map_err(|_| "HELLO is not UTF-8")?;
+    let mut caps = 0;
+    for (i, line) in text.lines().enumerate() {
+        if i >= MAX_FIELDS {
+            return Err("HELLO has too many fields");
+        }
+        let (key, value) = line.split_once('=').ok_or("malformed HELLO field")?;
+        if key.len() > MAX_KEY || value.len() > MAX_VALUE {
+            return Err("HELLO field is too long");
+        }
+        if key == "cap" {
+            caps += 1;
+            if caps > MAX_CAPS {
+                return Err("HELLO has too many capabilities");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Per-service last sequence number a reconnecting client saw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Resume {
@@ -168,12 +199,19 @@ fn next_control(r: &mut FrameReader) -> Result<Vec<u8>, HandshakeError> {
 
 /// Client side: sends HELLO, waits for HELLO_OK.
 pub fn client_handshake(r: &mut FrameReader, w: &mut dyn Write, hello: &Hello) -> Result<Hello, HandshakeError> {
+    client_handshake_with_options(r, w, hello, ConnOptions::default())
+}
+
+pub fn client_handshake_with_options(r: &mut FrameReader, w: &mut dyn Write, hello: &Hello, options: ConnOptions) -> Result<Hello, HandshakeError> {
     let mine = Hello { major: PROTO_MAJOR, minor: PROTO_MINOR, role: "client".into(), ..hello.clone() };
-    write_frame(w, 0, kind::DATA, 0, &encode(OP_HELLO, &mine))?;
+    let request = encode(OP_HELLO, &mine);
+    check_profile(w, &request, options)?;
+    write_frame(w, 0, kind::DATA, 0, &request)?;
     w.flush()?;
     let p = next_control(r)?;
     match p[0] {
         OP_HELLO_OK => {
+            check_profile(w, &p, options)?;
             let ok = decode(&p[1..]);
             if ok.major != PROTO_MAJOR {
                 return Err(HandshakeError::Mismatch(version_message((PROTO_MAJOR, PROTO_MINOR), (ok.major, ok.minor))));
@@ -185,6 +223,21 @@ pub fn client_handshake(r: &mut FrameReader, w: &mut dyn Write, hello: &Hello) -
     }
 }
 
+fn refuse<T>(w: &mut dyn Write, msg: String) -> Result<T, HandshakeError> {
+    let _ = write_frame(w, 0, kind::DATA, 0, &encode_goodbye(&msg));
+    let _ = w.flush();
+    Err(HandshakeError::Mismatch(msg))
+}
+
+fn check_profile(w: &mut dyn Write, frame: &[u8], options: ConnOptions) -> Result<(), HandshakeError> {
+    if options.strict {
+        if let Err(msg) = check_fields(&frame[1..]) {
+            return refuse(w, msg.into());
+        }
+    }
+    Ok(())
+}
+
 /// Equal, without stopping at the first difference.
 fn same_secret(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
@@ -193,25 +246,28 @@ fn same_secret(a: &str, b: &str) -> bool {
 /// Endpoint side: reads HELLO, answers HELLO_OK with `own` (its name and caps) or refuses a
 /// different major version with a message naming both.
 pub fn server_handshake(r: &mut FrameReader, w: &mut dyn Write, own: &Hello) -> Result<Hello, HandshakeError> {
+    server_handshake_with_options(r, w, own, ConnOptions::default())
+}
+
+pub fn server_handshake_with_options(r: &mut FrameReader, w: &mut dyn Write, own: &Hello, options: ConnOptions) -> Result<Hello, HandshakeError> {
     let p = next_control(r)?;
     if p[0] != OP_HELLO {
         return Err(HandshakeError::Io(io::Error::new(io::ErrorKind::InvalidData, "the peer did not start with HELLO")));
     }
+    check_profile(w, &p, options)?;
     let peer = decode(&p[1..]);
     if peer.major != PROTO_MAJOR {
         let msg = version_message((PROTO_MAJOR, PROTO_MINOR), (peer.major, peer.minor));
-        let _ = write_frame(w, 0, kind::DATA, 0, &encode_goodbye(&msg));
-        let _ = w.flush();
-        return Err(HandshakeError::Mismatch(msg));
+        return refuse(w, msg);
     }
     if !own.token.is_empty() && !same_secret(&own.token, &peer.token) {
         let msg = "this endpoint requires the token from its discovery file".to_string();
-        let _ = write_frame(w, 0, kind::DATA, 0, &encode_goodbye(&msg));
-        let _ = w.flush();
-        return Err(HandshakeError::Mismatch(msg));
+        return refuse(w, msg);
     }
     let mine = Hello { major: PROTO_MAJOR, minor: PROTO_MINOR, role: "endpoint".into(), link_id: peer.link_id.clone(), token: String::new(), ..own.clone() };
-    write_frame(w, 0, kind::DATA, 0, &encode(OP_HELLO_OK, &mine))?;
+    let reply = encode(OP_HELLO_OK, &mine);
+    check_profile(w, &reply, options)?;
+    write_frame(w, 0, kind::DATA, 0, &reply)?;
     w.flush()?;
     Ok(peer)
 }

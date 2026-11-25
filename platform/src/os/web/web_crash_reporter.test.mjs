@@ -1,9 +1,7 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
-const source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
-    .replace(/^import .*wasm_bridge\.js"\n/, "")
+const source = read_text(new URL("./web.js", import.meta.url))
+    .replace(/^import .*\n/gm, "")
     .replace(/^export /gm, "");
 const load = new Function("WasmBridge", `${source}\nreturn {
     makepad_create_breadcrumb_ring,

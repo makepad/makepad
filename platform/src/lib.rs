@@ -33,6 +33,8 @@ mod shared_bytes;
 
 pub mod action;
 pub mod a11y;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod test_alloc;
 pub use makepad_a11y as a11y_tree;
 pub mod game_input;
 pub mod frame_trace;
@@ -240,6 +242,14 @@ pub use makepad_hal::window_controls;
 #[path = "../hal/src/window_controls.rs"]
 pub mod window_controls;
 
+/// A window's points and dpi to its pixels: the HAL's one conversion, compiled in directly on the
+/// web as well, so an app host sizes a window's frames the same way on every target.
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_hal::window_size;
+#[cfg(target_arch = "wasm32")]
+#[path = "../hal/src/window_size.rs"]
+pub mod window_size;
+
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
@@ -426,6 +436,7 @@ pub use {
         texture::{ReadbackTicket, ReadbackRequest, ReadbackError, TextureReadback, TEXTURE_READBACK_MAX_BYTES, STAGED_UPLOAD_BYTES,
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap, CompressedTextureFormat,
+            VolumeCaps, VolumeDesc, VolumeFormat, VolumeRegion, VolumeTextureError,
         },
         thread::*,
         ui_runner::*,

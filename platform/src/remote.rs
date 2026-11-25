@@ -175,6 +175,12 @@ mod imp {
         match r.key {
             "status" => route_status(p),
             "gamepads" => reply_to_answer(ask(Cmd::Gamepads, ACTIVITY_WAIT_SECS)),
+            "worker_violations" => {
+                let items = makepad_core_util::ui_thread::violations().into_iter()
+                    .map(|(operation, count)| format!("{}:{count}", json_str(operation)))
+                    .collect::<Vec<_>>();
+                Answer::Json(format!("{{{}}}", items.join(",")))
+            }
             "activity" => reply_to_answer(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "mouse" => route_mouse(p, None),
             "click" => route_mouse(p, Some("click")),
@@ -445,7 +451,10 @@ mod imp {
         /// `wait_loads=1`: no frame opens while asynchronous loads (image
         /// decodes, glyph rasters, fetched resources) are in flight.
         wait_loads: bool,
-        loads_since: Option<Instant>,
+        /// An empty snapshot starts a fresh wait before the next frame.
+        last_loads: Vec<(&'static str, usize)>,
+        last_glyph_answers: u64,
+        last_load_progress: Instant,
         tx: Sender<Reply>,
     }
 
@@ -481,9 +490,8 @@ mod imp {
     /// wait on the capture encoder, before `/step` gives up with an error.
     const STEP_FRAME_LIMIT: Duration = Duration::from_secs(20);
 
-    /// How long `/step?wait_loads=1` waits for asynchronous loads before a
-    /// frame, before it fails naming them.
-    const STEP_LOADS_LIMIT: Duration = Duration::from_secs(30);
+    /// How long pending counts and received glyph answers may both stay unchanged before a step fails.
+    const STEP_LOAD_STALL_LIMIT: Duration = Duration::from_secs(30);
 
     fn loads_text(loads: &[(&'static str, usize)]) -> String {
         loads
@@ -1573,19 +1581,25 @@ mod imp {
                 if job.wait_loads {
                     let loads = cx.pending_async_loads();
                     if !loads.is_empty() {
-                        let since = *job.loads_since.get_or_insert_with(Instant::now);
-                        if since.elapsed() < STEP_LOADS_LIMIT {
+                        let glyph_answers = cx.hal_glyph_answers_received();
+                        if loads != job.last_loads || glyph_answers != job.last_glyph_answers {
+                            job.last_loads = loads;
+                            job.last_glyph_answers = glyph_answers;
+                            job.last_load_progress = Instant::now();
+                        }
+                        if job.last_load_progress.elapsed() < STEP_LOAD_STALL_LIMIT {
                             break true;
                         }
                         let _ = job.tx.send(Reply::Err(format!(
-                            "asynchronous loads still in flight after {:?} before step frame {}: {}",
-                            STEP_LOADS_LIMIT,
+                            "asynchronous loads made no progress for {:?} before step frame {}: {} (glyph answers queued, not yet taken by a draw: {})",
+                            STEP_LOAD_STALL_LIMIT,
                             app_clock::frame() + 1,
-                            loads_text(&loads)
+                            loads_text(&job.last_loads),
+                            cx.hal_glyph_answers_queued()
                         )));
                         return false;
                     }
-                    job.loads_since = None;
+                    job.last_loads.clear();
                 }
                 job.open = Some(open_step_frame(cx, &job));
             }
@@ -2448,7 +2462,9 @@ mod imp {
                     open: None,
                     wait_since: None,
                     wait_loads,
-                    loads_since: None,
+                    last_loads: Vec::new(),
+                    last_glyph_answers: 0,
+                    last_load_progress: Instant::now(),
                     tx,
                 }));
             }
@@ -3211,9 +3227,12 @@ mod imp {
         /// `settled` waits for the app pool's jobs while they run, not only while they wait for a
         /// worker: a job on a worker is a result still to come (a plate built for 30 s on the pool
         /// read as settled, 11-16). Once it has ended, the pool is no reason.
+        /// Its Cx has a pool of its own: on the process's pool, another test's job still queued
+        /// there read as this one's after it had ended (11-24).
         #[test]
         fn settled_waits_for_a_running_pool_job() {
-            let cx = Cx::new(Box::new(|_, _| {}));
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.use_own_task_pool();
             let (started_tx, started) = std::sync::mpsc::channel::<()>();
             let (release, gate) = std::sync::mpsc::channel::<()>();
             let mut job = cx

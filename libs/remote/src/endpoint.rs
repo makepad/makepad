@@ -4,7 +4,7 @@
 
 use crate::carrier::Carrier;
 use crate::cmd::{self, Out, Req};
-use crate::conn::{Conn, Hooks, Io, Open, OpenHandler, CLOSE_UNSUPPORTED};
+use crate::conn::{Conn, ConnOptions, Hooks, Io, Open, ServiceLookup, ServiceOpen};
 use crate::frame::FrameReader;
 use crate::hello::{self, Hello, HandshakeError};
 use crate::ring::{Ring, DEFAULT_RING_BYTES};
@@ -20,7 +20,30 @@ pub type Factory = Arc<dyn Fn(&Conn, Open) -> Result<(), (u16, String)> + Send +
 struct Service {
     name: String,
     version: u32,
-    factory: Factory,
+    open: ServiceOpen,
+}
+
+#[derive(Clone, Copy)]
+pub struct ServiceLimits {
+    /// Maximum bytes in one incoming DATA message.
+    pub max_message: usize,
+    /// Simultaneous incoming channels of this service on one strict connection.
+    pub max_channels: usize,
+}
+
+/// DATA message ceilings used on registration and on dial. A command write can contain a
+/// whole line, and an app reply or a relay can carry a whole file. A frame can contain a
+/// raw 16K-square RGBA image plus its record header.
+pub(crate) fn service_limits(service: &str) -> ServiceLimits {
+    let (max_message, max_channels) = match service {
+        "stream" => (DEFAULT_RING_BYTES - 4, 2), // ring record header is 4 bytes longer than the wire header
+        "watch" | "observe" => (64 << 20, 2),
+        "cmd" | "app" => (256 << 20, 8),
+        "prof" | "gpuprof" => (512 << 20, 2), // sample and string tables, including GPU backfill
+        "frames" => ((1 << 30) + crate::frame::MAX_PAYLOAD, 2),
+        _ => ((1 << 30) + crate::frame::MAX_PAYLOAD, 8), // whole files and transparent relays
+    };
+    ServiceLimits { max_message, max_channels }
 }
 
 struct Inner {
@@ -28,6 +51,7 @@ struct Inner {
     services: RwLock<Vec<Service>>,
     hooks: Mutex<Hooks>,
     ring: Arc<Ring>,
+    ring_bytes: usize,
     accept: Mutex<Option<AcceptHook>>,
     end_fields: cmd::EndFields,
     /// The discovery file this endpoint wrote: its caps follow later registrations.
@@ -49,7 +73,7 @@ impl Endpoint {
 
     /// An endpoint whose replay ring holds `ring_bytes` of stream chunks.
     pub fn with_ring(app: &str, ring_bytes: usize) -> Endpoint {
-        Endpoint(Arc::new(Inner { app: app.to_string(), services: RwLock::new(Vec::new()), hooks: Mutex::new(Hooks::default()), ring: Arc::new(Ring::new(ring_bytes)), accept: Mutex::new(None), end_fields: Default::default(), discovery: Mutex::new(None), since_ms: cmd::wall_ms() }))
+        Endpoint(Arc::new(Inner { app: app.to_string(), services: RwLock::new(Vec::new()), hooks: Mutex::new(Hooks::default()), ring: Arc::new(Ring::new(ring_bytes)), ring_bytes, accept: Mutex::new(None), end_fields: Default::default(), discovery: Mutex::new(None), since_ms: cmd::wall_ms() }))
     }
 
     /// Listens on this process's Unix socket and writes the discovery file (register the services
@@ -76,12 +100,19 @@ impl Endpoint {
         *self.0.hooks.lock().unwrap()
     }
 
-    /// Registers (or replaces) a service.
+    /// Registers (or replaces) a service with its standard DATA message ceiling.
     pub fn register(&self, name: &str, version: u32, factory: Factory) {
+        self.register_bounded(name, version, service_limits(name), factory);
+    }
+
+    /// Registers a service with its message and channel limits.
+    pub fn register_bounded(&self, name: &str, version: u32, limits: ServiceLimits, factory: Factory) {
+        let caps = format!("{name}/{version}");
+        let handler = Arc::new(move |conn: &Conn, open| factory(conn, open).map(|()| caps.clone()));
         {
             let mut s = self.0.services.write().unwrap();
             s.retain(|x| x.name != name);
-            s.push(Service { name: name.to_string(), version, factory });
+            s.push(Service { name: name.to_string(), version, open: ServiceOpen { limits, handler } });
         }
         let file = self.0.discovery.lock().unwrap().clone();
         if let Some(file) = file {
@@ -118,7 +149,9 @@ impl Endpoint {
 
     /// The `stream` service; chunks are published through the returned sink.
     pub fn register_stream(&self) -> StreamSink {
-        self.register("stream", 1, crate::stream::service(self.0.ring.clone()));
+        // Even the smallest ring can report a gap (seq + tag + length + a u64 varint).
+        let max_message = self.0.ring_bytes.saturating_sub(4).max(20);
+        self.register_bounded("stream", 1, ServiceLimits { max_message, ..service_limits("stream") }, crate::stream::service(self.0.ring.clone()));
         StreamSink(self.0.ring.clone())
     }
 
@@ -131,15 +164,9 @@ impl Endpoint {
         self.0.services.read().unwrap().iter().map(|s| format!("{}/{}", s.name, s.version)).collect()
     }
 
-    fn handler(&self) -> OpenHandler {
+    fn lookup(&self) -> ServiceLookup {
         let ep = self.clone();
-        Arc::new(move |conn, open| {
-            let found = ep.0.services.read().unwrap().iter().find(|s| s.name == open.service).map(|s| (s.factory.clone(), format!("{}/{}", s.name, s.version)));
-            match found {
-                Some((factory, caps)) => factory(conn, open).map(|_| caps),
-                None => Err((CLOSE_UNSUPPORTED, format!("unsupported service {}", open.service))),
-            }
-        })
+        Arc::new(move |name| ep.0.services.read().unwrap().iter().find(|s| s.name == name).map(|s| s.open.clone()))
     }
 
     /// Runs the endpoint side of the handshake on a carrier and, if the peer is acceptable, starts
@@ -159,10 +186,15 @@ impl Endpoint {
     /// (`pid`, from a Unix socket's credentials): [`Hello::pid`] of the connection's peer, which a
     /// command's log names as who asked ([`crate::cmd::asked_by`]). With no credentials (0), a peer
     /// that sends this process's own secret (`Hello::own`) is this process.
-    pub fn serve_peer(&self, mut reader: FrameReader, mut writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str, pid: u32) -> Result<Conn, HandshakeError> {
+    pub fn serve_peer(&self, reader: FrameReader, writer: Box<dyn Write + Send>, shutdown: Box<dyn Fn() + Send + Sync>, token: &str, pid: u32) -> Result<Conn, HandshakeError> {
+        self.serve_with_options(Io { reader, writer, shutdown }, token, pid, ConnOptions::default())
+    }
+
+    pub fn serve_with_options(&self, io: Io, token: &str, pid: u32, options: ConnOptions) -> Result<Conn, HandshakeError> {
+        let Io { mut reader, mut writer, shutdown } = io;
         reader.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
         let own = Hello { name: self.0.app.clone(), caps: self.caps(), token: token.to_string(), serving_pid: std::process::id(), serving_since_ms: self.0.since_ms, ..Hello::default() };
-        let peer = match hello::server_handshake(&mut reader, &mut *writer, &own) {
+        let peer = match hello::server_handshake_with_options(&mut reader, &mut *writer, &own, options) {
             // (the loopback carrier gives no credentials: a peer with this process's own secret is
             // this process; the secret goes no further)
             Ok(p) => Hello { pid: if pid == 0 && crate::carrier::loopback::is_own(&p.own) { std::process::id() } else { pid }, own: String::new(), ..p },
@@ -171,7 +203,7 @@ impl Endpoint {
                 return Err(e);
             }
         };
-        let conn = Conn::start(Io { reader, writer, shutdown }, peer, false, Some(self.handler()), self.hooks());
+        let conn = Conn::start_registry(Io { reader, writer, shutdown }, peer, false, Some(self.lookup()), self.hooks(), options);
         let hook = self.0.accept.lock().unwrap().clone();
         if let Some(h) = hook {
             h(&conn);
@@ -182,16 +214,20 @@ impl Endpoint {
     /// The dialling side of a link on which this endpoint's services are served: a device that
     /// dials a hub offers its services to the hub over the connection it opened. `link_id` names
     /// the link across reconnects.
-    pub fn connect(&self, mut car: Carrier, link_id: &str) -> Result<Conn, HandshakeError> {
+    pub fn connect(&self, car: Carrier, link_id: &str) -> Result<Conn, HandshakeError> {
+        self.connect_with_options(car, link_id, ConnOptions::default())
+    }
+
+    pub fn connect_with_options(&self, mut car: Carrier, link_id: &str, options: ConnOptions) -> Result<Conn, HandshakeError> {
         car.reader.deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
         let hello = Hello { name: self.0.app.clone(), link_id: link_id.to_string(), ..Hello::default() };
-        let peer = match hello::client_handshake(&mut car.reader, &mut *car.writer, &hello) {
+        let peer = match hello::client_handshake_with_options(&mut car.reader, &mut *car.writer, &hello, options) {
             Ok(p) => p,
             Err(e) => {
                 (car.shutdown)();
                 return Err(e);
             }
         };
-        Ok(Conn::start(Io { reader: car.reader, writer: car.writer, shutdown: car.shutdown }, peer, true, Some(self.handler()), self.hooks()))
+        Ok(Conn::start_registry(Io { reader: car.reader, writer: car.writer, shutdown: car.shutdown }, peer, true, Some(self.lookup()), self.hooks(), options))
     }
 }

@@ -1082,6 +1082,9 @@ impl Cx {
             // The script heap's collection, once a frame when it is due, as
             // the desktop loop runs it (the web loop never collected).
             let rerun = std::mem::take(&mut self.gc_after_draw);
+            if rerun {
+                self.report_live_shader_switches();
+            }
             self.with_vm(|vm| {
                 if rerun || vm.heap().needs_gc() {
                     vm.gc();

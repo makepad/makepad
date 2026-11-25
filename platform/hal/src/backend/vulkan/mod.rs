@@ -12,6 +12,7 @@ mod capture_gpu;
 mod native_app;
 mod blocks;
 mod device;
+mod direct;
 mod frame;
 #[cfg(target_os = "android")]
 mod native_layer;
@@ -41,6 +42,7 @@ use super::exec::{self, Gpu, PipeStatus};
 use super::Shell;
 use super::{Backend, Pixels};
 use crate::buffers::{CmdView, PipelineBlob};
+use crate::cmds::PipelineLayout;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
 use crate::types::*;
@@ -65,7 +67,9 @@ struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool, written: Optio
 /// A session's pipeline. `desc` is its own create's: the program may be shared with an identical
 /// shader of another session, whose names (string ids) are that session's; the GPU profiler names
 /// the pipeline by this one.
-struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool, desc: PipelineDesc }
+struct Pipe { gen: u32, state: Arc<State>, epoch: u64, announced: bool, desc: PipelineDesc,
+    layouts: Vec<(u32, PipelineLayout)>, failures_seen: usize,
+}
 
 pub struct Vulkan {
     #[cfg(target_os = "linux")]
@@ -132,12 +136,7 @@ pub struct Vulkan {
     /// session 0's windows with a badge layer (by index): the images their layer was composed
     /// into (`frame::Badged`)
     badged: FastMap<u32, frame::Badged>,
-    /// session 0's windows (by index) whose newest frame went straight to the shell's target, so
-    /// their retained image holds an older one: a badge layer is never composed over it (the
-    /// stale picture showed in the WM for a frame each time a badge came up)
-    retained_stale: std::collections::HashSet<u32>,
-    /// The shell target of a host window's newest frame while `retained_stale` says the retained image is older.
-    direct_frame: FastMap<u32, Arc<Image>>,
+    direct: direct::DirectFrames<Arc<Image>>,
     /// the composed image the badge frame being encoded draws into
     compose: Option<Arc<Image>>,
     aliases: FastMap<(u32, Id), Id>,
@@ -266,7 +265,7 @@ impl Vulkan {
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, leases: Default::default(), dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(), draw_memo: Default::default(), kept: Default::default(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
-            passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), damage_checks: Vec::new(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), damage_checks: Vec::new(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), direct: direct::DirectFrames::new(), compose: None, aliases: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -382,11 +381,27 @@ impl Vulkan {
             pipe.epoch = epoch;
             let id = Id::new(*index, pipe.gen);
             let Some(s) = world.session_mut(*sid) else { continue };
-            if !pipe.announced { pipe.announced = true; s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
+            if pipe.state.program.get().is_none() { continue; }
+            let first = !std::mem::replace(&mut pipe.announced, true);
+            if first { s.pipelines_pending = s.pipelines_pending.saturating_sub(1); }
             if let Some(e) = pipe.state.failure() {
                 world.to_session(*sid, |q| q.pipeline_failed(id, e.as_bytes()));
-            } else if matches!(pipe.state.program.get(), Some(Ok(_))) {
-                world.to_session(*sid, |q| q.pipeline_ready(id));
+            } else {
+                if first { world.to_session(*sid, |q| q.pipeline_ready(id)); }
+                let failures = device::lock(&pipe.state.layout_failures);
+                for (failed, log) in &failures[pipe.failures_seen..] {
+                    let mut matched = false;
+                    for (layout, physical) in &pipe.layouts {
+                        if physical == failed {
+                            matched = true;
+                            world.to_session(*sid, |q| q.pipeline_layout_failed(id, *layout, log.as_bytes()));
+                        }
+                    }
+                    if !matched {
+                        world.to_session(*sid, |q| q.pipeline_layout_failed(id, PipelineLayout::UNPROBED, log.as_bytes()));
+                    }
+                }
+                pipe.failures_seen = failures.len();
             }
         }
         // upload arenas idle for a while go, frame or not (`next_due` wakes the pump for them)
@@ -407,6 +422,9 @@ impl Vulkan {
                 owner.ledger.add(row);
             }
         }
+        // reset batch slots idle on the HAL clock, at every drain: a lock and a look at the ends
+        // of a short queue
+        self.spares.sweep_slots(world.now());
         let now = crate::clock_ns();
         if now >= self.sweep_at {
             self.sweep_at = now + SWEEP_NS;
@@ -443,7 +461,6 @@ impl Vulkan {
         self.msaa.retain(|_, (target, _)| target.strong_count() > 0);
         self.leases.trim(now);
         self.spares.trim();
-        self.spares.sweep_slots();
         self.programs.retain(|_, state| state.strong_count() > 0);
     }
 
@@ -604,10 +621,7 @@ impl Backend for Vulkan {
         let dev = self.dev.clone();
         Some(Box::new(move || {
             for (state, key, flags) in needed {
-                match RenderPass::new(dev.clone(), key) {
-                    Ok(pass) => { state.select(&pass, flags); }
-                    Err(e) => eprintln!("[hal-vulkan] render pass for a pipeline variant: {e}"),
-                }
+                state.warm_variant(&dev, key, flags);
             }
         }))
     }
@@ -709,7 +723,8 @@ impl Backend for Vulkan {
         self.capture_pool.retain(|key, _| key.0 != sid);
         self.windows.close_session(sid, self.queue.as_ref().unwrap());
         self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid); self.compute.retain(|k, _| k.0 != sid);
-        if sid == HOST { self.badged.clear(); self.retained_stale.clear(); self.direct_frame.clear(); }
+        self.direct.close_session(sid);
+        if sid == HOST { self.badged.clear(); }
         self.win.retain(|k, _| k.0 != sid); self.damage_base.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
@@ -862,6 +877,7 @@ impl exec::DeviceReset for Vulkan {
         self.native_layers.reset();
         self.buf.clear();
         self.win.clear();
+        self.direct.reset();
         self.damage_base.clear();
         self.damage_checks.clear();
         self.hosted_sizes.clear();
@@ -920,6 +936,8 @@ impl exec::DeviceReset for Vulkan {
             let pipe = self.pipe.get_mut(&key).expect("listed above");
             pipe.state = state;
             pipe.epoch = 0;
+            pipe.failures_seen = 0;
+            pipe.layouts.clear();
             // pending again until the new program answers
             if std::mem::replace(&mut pipe.announced, false) {
                 if let Some(s) = world.session_mut(key.0) { s.pipelines_pending += 1; }
@@ -1138,6 +1156,9 @@ impl Gpu for Vulkan {
         if dialect != self::dialect::SPIRV { return PipeStatus::Failed("Vulkan takes binary SPIR-V".into()); }
         if blob.desc.compute.len != 0 { return self.create_compute(s, id, blob); }
         let code = match crate::spirv::SpirvPipeline::decode(blob.code) { Ok(c) => c, Err(e) => return PipeStatus::Failed(e) };
+        if let Err(failure) = exec::check_sampled_shapes(&self.info, code.textures.iter().copied()) {
+            return failure;
+        }
         let mut key = blob.code.to_vec();
         key.extend_from_slice(crate::compute::bytes(blob.raw, blob.desc.storage_buffers).unwrap_or_default());
         key.extend_from_slice(&(blob.bindings.len() as u64).to_le_bytes());
@@ -1156,7 +1177,33 @@ impl Gpu for Vulkan {
             }
         };
         state.wait(s.id);
-        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false, desc: blob.desc }); PipeStatus::Pending
+        self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false, desc: blob.desc, layouts: Vec::new(), failures_seen: 0 }); PipeStatus::Pending
+    }
+    fn pipeline_wanted_in(&mut self, s: &mut Session, id: Id, layout: u32, desc: &PipelineLayout) -> bool {
+        let mut physical = *desc;
+        if physical.colors[0] == format::WINDOW_TARGET {
+            physical.colors[0] = match s.windows.get(s.id, desc.window).ok().and_then(|w| w.val.embedded) {
+                Some(em) => s.textures.get(s.id, em.tex).map_or(format::BGRA8, |t| t.val.format),
+                None => { let (sid, window) = self.window_key(s.id, desc.window); self.windows.source.window_format(sid, window) }
+            };
+        }
+        physical.window = Id::NONE;
+        physical.samples = match desc.samples {
+            n @ (2 | 4 | 8) if self.dev.msaa & u32::from(n) != 0 => n,
+            _ => 1,
+        };
+        physical.views = if desc.views >= 2 { 2 } else { 1 };
+        let Some(pipe) = self.pipe.get_mut(&(s.id, id.index)).filter(|p| p.gen == id.gen) else { return false };
+        if !pipe.layouts.iter().any(|(i, _)| *i == layout) { pipe.layouts.push((layout, physical)); }
+        let failures = device::lock(&pipe.state.layout_failures);
+        if let Some((_, log)) = failures.iter().find(|(l, _)| *l == physical) {
+            s.events.pipeline_layout_failed(id, layout, log.as_bytes());
+            true
+        } else {
+            // Vulkan builds a new draw state synchronously at its first use. A later
+            // refusal revokes this layout acknowledgement through the same logical id.
+            false
+        }
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
         if self.compute.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.compute.remove(&(sid, id.index)).is_some_and(|p| !p.announced); }
@@ -1204,7 +1251,7 @@ impl Gpu for Vulkan {
     }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
         let image = self.window_image_for(s.id, s, window);
-        let rect = self.window_rect(s.id, window, image.as_deref());
+        let rect = self.window_rect(s.id, window, image.as_ref());
         self.read(s, image, req, rect);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) { self.copy_window(s, window, texture, req); }
@@ -1215,7 +1262,8 @@ impl Gpu for Vulkan {
         self.capture_pool.remove(&(sid, id));
         self.win.remove(&(sid, id.index)); self.damage_base.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index));
         self.scanout_images.remove(&(sid, id));
-        if sid == HOST { self.badged.remove(&id.index); self.retained_stale.remove(&id.index); self.direct_frame.remove(&id.index); }
+        self.direct.close_window((sid, id.index));
+        if sid == HOST { self.badged.remove(&id.index); }
         self.windows.remove((sid, id), self.queue.as_ref().unwrap());
     }
     fn window_lent(&mut self, sid: u32, id: Id, host: Id, attach: bool) {

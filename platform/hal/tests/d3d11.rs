@@ -271,6 +271,60 @@ fn pick_frame_answers_the_draw_id() {
     assert!(hal.close(sid));
 }
 
+#[test]
+fn volume_sampling_pipeline_answers_its_layout() {
+    use makepad_hal::cmds::PipelineLayout;
+    let (hal, info) = open();
+    let sid = info.session;
+    let code = HlslPipeline {
+        source: "Texture3D<float4> image : register(t0);
+            struct VertexIn { float4 g : GEOMA0; };
+            float4 vertex_main(VertexIn i) : SV_POSITION { return i.g; }
+            float4 pixel_main() : SV_TARGET0 { return image.Load(int4(0,0,0,0)); }".into(),
+        textures: vec![TEXTURE_SHAPE_3D], samplers: Vec::new(),
+    }.encode();
+    let none = u32::MAX;
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &code,
+        &[none, none, none, none, none, 1], &[16, 0, 3, 4]);
+    let mut w = CmdWriter::new(sid);
+    w.pipeline_create(PIPE, dialect::HLSL, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    w.clear();
+    w.pipeline_wanted_in(PIPE, 3, Id::NONE, [format::BGRA8, none, none, none], none, u16::from_le_bytes([1, 1]));
+    hal.submit(&w.buf());
+    if info.max_volume_dimension > 0 && info.volume_formats != 0 {
+        let (mut base, mut layout) = (false, false);
+        until(&hal, sid, |event| {
+            match event {
+                HalEvent::PipelineReady { pipeline: PIPE } => base = true,
+                HalEvent::PipelineLayoutReady { pipeline: PIPE, layout: 3 } => layout = true,
+                HalEvent::PipelineLayoutFailed { log, .. } => panic!("volume layout: {}", String::from_utf8_lossy(log)),
+                _ => {}
+            }
+            base && layout
+        });
+    } else {
+        let reason = b"volume textures aren't available on D3D11 yet";
+        // Both submissions are answered synchronously, without a draw or compiler wakeup.
+        let mut store = EventStore::new(sid, 64, 65536);
+        let mut buf = store.buf();
+        let n = hal.pump(0, &mut buf);
+        let (mut base, mut creation, mut probe) = (false, false, false);
+        for (_, event) in store.reader(n, buf.arena_len) {
+            match event {
+                HalEvent::PipelineFailed { pipeline: PIPE, log } => base = log == reason,
+                HalEvent::PipelineLayoutFailed { pipeline: PIPE, layout: PipelineLayout::UNPROBED, log } => creation = log == reason,
+                HalEvent::PipelineLayoutFailed { pipeline: PIPE, layout: 3, log } => probe = log == reason,
+                HalEvent::PipelineReady { pipeline: PIPE } | HalEvent::PipelineLayoutReady { pipeline: PIPE, .. } =>
+                    panic!("unsupported sampled volume was acknowledged"),
+                _ => {}
+            }
+        }
+        assert!(base && creation && probe, "creation and the later layout probe must all carry the capability reason");
+    }
+    assert!(hal.close(sid));
+}
+
 /// A device loss (simulated: the device is dropped and a new one made, as on a removal) keeps
 /// every id: the session hears `DeviceLost { 1 }` then `DeviceReset { 2 }`, the pipelines answer
 /// ready again, the buffers take their contents again under the same ids and the same frame

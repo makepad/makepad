@@ -9,7 +9,15 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
 [package.metadata.makepad.platform-gaps]
-windows = { "test:resource_resolver" = "1 of 6 fails there: reading a directory gives no InvalidPath there" }
+windows = { "test:resource_resolver" = "1 of 6 fails there: reading a directory gives no InvalidPath there", "test:web_js" = "its pages run in CEF on Linux only (libs/web_test)" }
+
+# Chromium re-runs the test binary as its subprocesses, which the JIT's runner is not.
+[package.metadata.makepad.native-tests]
+"test:web_js" = "its pages run in CEF (libs/web_test), and Chromium re-runs the test binary as its subprocesses"
+
+# Run by the mac bucket on a Mac: the Linux buckets run them on Vulkan, never reaching Metal.
+[package.metadata.makepad.macos-tests]
+"test:compute_int_remainder" = "integer remainders through Metal's shader compiler, which took a constant remainder of a word's high half with the quotient of its low half"
 
 # The app pool leaves the process main thread its cores under a full Background load (counted;
 # the main thread's wake times are printed, not gated). No UI backend.
@@ -26,6 +34,15 @@ harness = false
 [[test]]
 name = "frame_trace"
 harness = false
+
+# The web backend's JavaScript (src/os/web/*.js) under its tests (src/os/web/*.test.mjs), as
+# pages in our own CEF (libs/web_test); Linux.
+[[test]]
+name = "web_js"
+harness = false
+
+[dev-dependencies]
+makepad-web-test = { path = "../libs/web_test" }
 
 [dependencies]
 makepad-cpu-budget = { workspace = true }
@@ -56,14 +73,18 @@ bitflags = { version = "2.10", path = "../libs/bitflags" }
 # reads the export's embedded files (os/web/web_embed.rs) in it. No dependencies.
 makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 foldhash = { version = "0.2", path = "../libs/vulkan/foldhash" }
+# how the process ends (the same end under the JIT and natively), and a pool job's waits off the CPU
+# (`blocking`, `once`) on every target
+makepad-core-util = { path = "../libs/core_util", version = "0.1.0" }
+
+# The profiler stream of a native build (src/prof_native.rs), built on the targets that serve it.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+makepad-prof-stream = { path = "../libs/prof_stream", version = "1.0.0" }
 
 # The process's remote endpoint (`--remote`, `makepad inspect <pid> gpu`); it does not exist on
 # these targets.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../libs/remote", version = "0.1.0" }
-# how the process ends (the same end under the JIT and natively)
-makepad-core-util = { path = "../libs/core_util", version = "0.1.0" }
-makepad-prof-stream = { path = "../libs/prof_stream", version = "1.0.0" }
 # Every native target uses the HAL; web retains its browser backend.
 makepad-hal = { path = "./hal", version = "1.0.0" }
 makepad-gpu-trace = { path = "../libs/gpu_trace", version = "1.0.0" }

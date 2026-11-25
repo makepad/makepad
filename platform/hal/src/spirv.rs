@@ -12,7 +12,7 @@ pub struct SpirvPipeline {
     /// Optional pick uniforms and the base of pick twins; NONE for an ordinary pipeline.
     pub pick_binding: u32,
     pub pick_texture_base: u32,
-    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint, 6 = video
+    /// Texture shapes: 0 = 2D, 1 = cube, 2 = array, 3 = depth, 4 = depth array, 5 = uint, 6 = video, 7 = volume.
     /// (2D, a combined image sampler whose sampler is immutable in the descriptor layout: an
     /// ordinary image gets a linear clamp-to-edge sampler, a decoder's external-format picture its
     /// format's Y'CbCr conversion).
@@ -70,7 +70,7 @@ impl SpirvPipeline {
             return Err("invalid HAL SPIR-V payload lengths".into());
         }
         let textures = words[HEADER..HEADER + nt].to_vec();
-        if textures.iter().any(|t| *t > 6) { return Err("invalid SPIR-V texture shape".into()); }
+        if textures.iter().any(|t| !matches!(*t, 0..=6 | crate::TEXTURE_SHAPE_3D)) { return Err("invalid SPIR-V texture shape".into()); }
         let mut samplers = Vec::with_capacity(ns);
         for s in words[HEADER + nt..HEADER + nt + ns * 5].chunks_exact(5) {
             if s[0] > 1 || s[1] > 3 || s[2] > 1 || s[3] > 1 || s[4] == 0 { return Err("invalid SPIR-V sampler".into()); }
@@ -111,7 +111,7 @@ mod tests {
         let p = SpirvPipeline {
             vertex: stage.clone(), fragment: stage, texture_base: 2, sampler_base: 20, depth_binding: 0,
             instance_binding: 1, pick_binding: u32::MAX, pick_texture_base: 40,
-            textures: (0..12).map(|i| i % 3).collect(),
+            textures: (0..11).map(|i| i % 3).chain([crate::TEXTURE_SHAPE_3D]).collect(),
             samplers: vec![
                 SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 1 },
                 SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 16 },

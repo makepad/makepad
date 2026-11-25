@@ -27,6 +27,8 @@ pub(crate) fn end_run() {
 mod clipboard;
 mod dialog;
 mod drag;
+#[cfg(test)]
+pub(crate) use drag::check_get_data_pumps;
 mod identity;
 mod ime;
 mod keys;

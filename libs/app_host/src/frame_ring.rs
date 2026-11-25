@@ -32,10 +32,13 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use makepad_platform::makepad_micro_serde::*;
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_platform::thread::{SignalToUI, ThreadOptions};
 use makepad_platform::*;
 
-use crate::shm::{self, Semaphore, SharedMem};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::shm;
+use crate::shm::{Semaphore, SharedMem};
 
 const MAGIC: u32 = 0x4d50_5247; // "MPRG"
 const VERSION: u32 = 1;
@@ -333,11 +336,13 @@ pub struct HostRing {
     textures: Vec<Texture>,
     shared: Option<Arc<RingShared>>,
     setup: Option<RingSetup>,
+    #[cfg(not(target_arch = "wasm32"))]
     setup_taken: bool,
     shown: Option<usize>,
     previous: Option<usize>,
     error: Option<String>,
     /// Linux: the socket the slots' DMA-BUFs go out on.
+    #[cfg(not(target_arch = "wasm32"))]
     fds: String,
     /// Capture: the frame number the consumer takes next (0: any).
     next_seq: u64,
@@ -362,6 +367,7 @@ fn keep_in_order(ready: &mut Vec<(u64, usize)>, next_seq: &mut u64) {
 impl HostRing {
     /// Allocate the slots' textures. The handles arrive asynchronously; the
     /// setup is ready to send once they all have (see `take_setup`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(cx: &mut Cx, id: u64, generation: u64, spec: RingSpec) -> HostRing {
         let textures = (0..spec.slots.max(2)).map(|_| cx.create_shared_texture(spec.width as usize, spec.height as usize)).collect();
         HostRing { id, generation, spec, textures, shared: None, setup: None, setup_taken: false, shown: None, previous: None, error: None, fds: String::new(), next_seq: 0 }
@@ -386,6 +392,7 @@ impl HostRing {
 
     /// The setup to send the child, once (None until the handles are known
     /// and after it was taken).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn take_setup(&mut self, cx: &mut Cx) -> Option<String> {
         if self.setup_taken || self.error.is_some() {
             return None;
@@ -445,6 +452,7 @@ impl HostRing {
         self.setup.as_ref().map(RingSetup::to_json)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_shared(&mut self, slots: Vec<RingSlot>) -> io::Result<RingSetup> {
         let name = shm::unique_name('r');
         let path = shm::file_path(&name);
@@ -484,6 +492,7 @@ impl HostRing {
     }
 
     /// The thread that sleeps on the child's `ready` posts and wakes the UI.
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_waiter(&self, cx: &mut Cx) {
         let Some(shared) = self.shared.clone() else { return };
         let started = cx.thread_spawner().spawn_worker(ThreadOptions { name: Some(format!("frame-ring-{}", self.id).into()), ..Default::default() }, move || loop {
@@ -623,7 +632,10 @@ impl HostRing {
                 shared.ready.post();
             }
         }
-        self.setup_taken = true;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.setup_taken = true;
+        }
     }
 }
 

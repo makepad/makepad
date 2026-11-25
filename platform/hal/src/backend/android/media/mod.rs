@@ -795,7 +795,7 @@ impl Drop for Global {
         if attach { ((**vm).DetachCurrentThread.unwrap())(vm); }
     }}
 }
-std::thread_local! {
+thread_local! {
     static WORKER_VM: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 struct JniThread;

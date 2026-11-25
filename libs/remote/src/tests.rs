@@ -1,6 +1,6 @@
 use crate::cmd::{Out, Req};
-use crate::conn::{Channel, Conn, Event, Hooks, Io, CLOSE_UNSUPPORTED};
-use crate::endpoint::{Endpoint, Factory};
+use crate::conn::{Channel, Conn, ConnOptions, Event, Hooks, Io, CLOSE_UNSUPPORTED};
+use crate::endpoint::{Endpoint, Factory, ServiceLimits};
 use crate::frame::{kind, write_frame, FrameReader, MAX_FRAME};
 use crate::hello::{self, Hello};
 use crate::link::{Client, Error, Target};
@@ -72,13 +72,17 @@ pub(crate) fn pair(ep: &Endpoint) -> Conn {
 /// As [`pair`], returning the endpoint's side as well: (client, served). The endpoint's accept
 /// hook has seen the served side by the time this returns.
 pub(crate) fn pair_served(ep: &Endpoint) -> (Conn, Conn) {
+    pair_with_options(ep, ConnOptions::default())
+}
+
+fn pair_with_options(ep: &Endpoint, options: ConnOptions) -> (Conn, Conn) {
     let (a, b) = UnixStream::pair().unwrap();
     let ep = ep.clone();
     let served = std::thread::spawn(move || {
         let (r, w, s) = (a.try_clone().unwrap(), a.try_clone().unwrap(), a);
-        ep.serve(FrameReader::new(Box::new(r)), Box::new(w), Box::new(move || {
+        ep.serve_with_options(Io { reader: FrameReader::new(Box::new(r)), writer: Box::new(w), shutdown: Box::new(move || {
             let _ = s.shutdown(std::net::Shutdown::Both);
-        }))
+        }) }, "", 0, options)
     });
     let (r, w, s) = (b.try_clone().unwrap(), b.try_clone().unwrap(), b);
     let mut reader = FrameReader::new(Box::new(r));
@@ -95,6 +99,198 @@ fn data(ch: &Channel) -> Vec<u8> {
         Ok(Event::Data(d)) => d,
         other => panic!("expected data, got {other:?}"),
     }
+}
+
+#[test]
+fn data_must_fit_the_granted_window() {
+    use crate::conn::{CLOSE_PROTOCOL, INITIAL_CREDIT};
+
+    // A fixed input transcript. The service holds its channel without consuming any credit.
+    let mut input = Vec::new();
+    write_frame(&mut input, 7, kind::OPEN, 0, b"held\n").unwrap();
+    write_frame(&mut input, 7, kind::DATA, 0, &vec![0; INITIAL_CREDIT]).unwrap();
+    write_frame(&mut input, 7, kind::DATA, 0, &[1]).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (w, r) = UnixStream::pair().unwrap();
+    let io = Io { reader: FrameReader::new(Box::new(std::io::Cursor::new(input))), writer: Box::new(w), shutdown: Box::new(|| {}) };
+    let conn = Conn::start(io, Hello::default(), false, Some(Arc::new(move |_, open| {
+        tx.send(open.channel).unwrap();
+        Ok("held/1".into())
+    })), Hooks::default());
+    let ch = rx.recv_timeout(WAIT).unwrap();
+    let mut frames = FrameReader::new(Box::new(r));
+    let mut end = frames.next().unwrap();
+    if end.kind == kind::OK {
+        end = frames.next().unwrap();
+    }
+    assert_eq!((end.chan, end.kind), (0, kind::CLOSE));
+    assert_eq!(&end.payload[..2], &CLOSE_PROTOCOL.to_le_bytes());
+    assert!(String::from_utf8_lossy(&end.payload[2..]).contains("channel 7"));
+    assert_eq!(data(&ch).len(), INITIAL_CREDIT, "the exact window reaches the service");
+    assert!(matches!(ch.recv_timeout(WAIT), Ok(Event::Closed(CLOSE_PROTOCOL, _))));
+    assert!(conn.is_closed());
+}
+
+#[test]
+fn message_bounds_apply_in_both_directions_and_close_only_the_channel() {
+    use crate::conn::{CLOSE_PROTOCOL, INITIAL_CREDIT};
+
+    let ep = Endpoint::with_ring("test", 1024);
+    // Two at a time: `other` stays open beside the channel each bound closes, and `dialled` takes
+    // the slot `incoming` frees when its CLOSE is sent.
+    ep.register_bounded("echo", 1, ServiceLimits { max_message: INITIAL_CREDIT, max_channels: 2 }, echo());
+    ep.register_bounded("reply", 1, ServiceLimits { max_message: 3, max_channels: 1 }, Arc::new(|_, open| {
+        open.channel.send(b"abcd".to_vec()).unwrap();
+        Ok(())
+    }));
+    // A local link has no ceilings: they would only surface as random failures there.
+    let local = pair(&ep);
+    let big = local.open("echo", "").unwrap();
+    big.send(vec![7; INITIAL_CREDIT * 2 + 1]).unwrap();
+    let mut echoed = 0;
+    while echoed < INITIAL_CREDIT * 2 + 1 {
+        echoed += data(&big).len();
+    }
+    assert_eq!(echoed, INITIAL_CREDIT * 2 + 1, "a local link carries a message over the service bound whole");
+    local.close("done");
+
+    // The strict profile (a peer on another person's machine) applies them.
+    let conn = pair_with_options(&ep, ConnOptions::strict()).0;
+    let other = conn.open("echo", "").unwrap();
+    let incoming = conn.open("echo", "").unwrap();
+    // The first continuation fits exactly. The next continuation crosses the service bound.
+    incoming.send(vec![0; INITIAL_CREDIT * 2 + 1]).unwrap();
+    assert!(matches!(incoming.recv_timeout(WAIT), Ok(Event::Closed(CLOSE_PROTOCOL, why))
+        if why.contains(&(INITIAL_CREDIT * 2).to_string())));
+
+    let dialled = conn.open_bounded("echo", "", 3, WAIT).unwrap();
+    dialled.send(b"abc".to_vec()).unwrap();
+    assert_eq!(data(&dialled), b"abc");
+    dialled.send(b"abcd".to_vec()).unwrap();
+    assert!(matches!(dialled.recv_timeout(WAIT), Ok(Event::Closed(CLOSE_PROTOCOL, why)) if why.contains("4 bytes")));
+    let declared = conn.open("reply", "").unwrap();
+    assert!(matches!(declared.recv_timeout(WAIT), Ok(Event::Closed(CLOSE_PROTOCOL, why)) if why.contains("limit is 3")),
+        "ordinary OPEN applies the service's declared answer limit");
+    other.send(b"still open".to_vec()).unwrap();
+    assert_eq!(data(&other), b"still open");
+    conn.close("done");
+}
+
+#[test]
+fn message_limits_interoperate_with_plain_open_and_ok() {
+    let (a, mut b) = UnixStream::pair().unwrap();
+    let io = Io {
+        reader: FrameReader::new(Box::new(a.try_clone().unwrap())),
+        writer: Box::new(a.try_clone().unwrap()),
+        shutdown: Box::new(move || { let _ = a.shutdown(std::net::Shutdown::Both); }),
+    };
+    let (hold, held) = std::sync::mpsc::channel();
+    let conn = Conn::start(io, Hello::default(), true, Some(Arc::new(move |_, open| {
+        hold.send(open.channel).unwrap();
+        Ok("legacy/1".into())
+    })), Hooks::default());
+    let mut frames = FrameReader::new(Box::new(b.try_clone().unwrap()));
+    write_frame(&mut b, 2, kind::OPEN, 0, b"legacy\n").unwrap();
+    let ok = frames.next().unwrap();
+    assert_eq!((ok.kind, ok.flags, ok.payload.as_slice()), (kind::OK, 0, &b"legacy/1"[..]));
+    let _held = held.recv_timeout(WAIT).unwrap();
+
+    let dial = conn.clone();
+    let opening = std::thread::spawn(move || dial.open_bounded("legacy", "", 3, WAIT).unwrap());
+    let open = frames.next().unwrap();
+    assert_eq!((open.kind, open.flags), (kind::OPEN, crate::frame::FLAG_MESSAGE_LIMIT));
+    write_frame(&mut b, open.chan, kind::OK, 0, b"legacy/1").unwrap();
+    let ch = opening.join().unwrap();
+    write_frame(&mut b, open.chan, kind::DATA, 0, b"abc").unwrap();
+    assert_eq!(data(&ch), b"abc");
+    write_frame(&mut b, open.chan, kind::DATA, 0, b"abcd").unwrap();
+    assert!(matches!(ch.recv_timeout(WAIT), Ok(Event::Closed(crate::conn::CLOSE_PROTOCOL, _))));
+    conn.close("done");
+    conn.wait_closed();
+}
+
+#[test]
+fn peer_registry_echo_and_identity_are_scoped_to_the_authenticated_link() {
+    use crate::{PeerEndpoint, PeerIdentity, PeerService};
+
+    fn carrier(socket: UnixStream) -> crate::carrier::Carrier {
+        crate::carrier::Carrier {
+            reader: FrameReader::new(Box::new(socket.try_clone().unwrap())),
+            writer: Box::new(socket.try_clone().unwrap()),
+            shutdown: Box::new(move || { let _ = socket.shutdown(std::net::Shutdown::Both); }),
+        }
+    }
+    let mut server = PeerEndpoint::new("peer");
+    let dialler = PeerEndpoint::new("same HELLO on both links");
+    assert!(dialler.caps().is_empty());
+    let (seen, identities) = std::sync::mpsc::channel();
+    server.register(PeerService::Ping, move |identity| {
+        seen.send(identity.clone()).unwrap();
+        Ok(())
+    });
+    let caps: Vec<_> = PeerService::ALL.iter().map(|s| format!("{}/1", s.name())).collect();
+    assert_eq!(server.caps(), caps);
+    assert_eq!(caps, ["ping/1"]);
+    let mut links = Vec::new();
+    for key in [1, 2] {
+        let identity = PeerIdentity { device_key: vec![key] };
+        let endpoint = server.clone();
+        let (a, b) = UnixStream::pair().unwrap();
+        let expected = identity.clone();
+        let serve = std::thread::spawn(move || endpoint.serve(carrier(a), identity));
+        let conn = dialler.connect(carrier(b), PeerIdentity { device_key: vec![3] }).unwrap();
+        let served = serve.join().unwrap().unwrap();
+        assert_eq!(conn.peer().caps, caps);
+        assert_eq!(served.peer().name, "same HELLO on both links");
+        for name in ["cmd", "watch", "stream", "app", "unknown"] {
+            assert!(matches!(conn.open(name, ""), Err((CLOSE_UNSUPPORTED, _))), "{name}");
+        }
+        let ping = conn.open("ping", "").unwrap();
+        assert_eq!(identities.recv_timeout(WAIT).unwrap(), expected);
+        assert!(matches!(conn.open("ping", ""), Err((crate::conn::CLOSE_REFUSED, _))));
+        links.push((conn, ping));
+    }
+    for (conn, ping) in links {
+        // Fragmented messages cross a whole window; empty messages keep their places.
+        for i in 0..5 {
+            let msg = vec![i; 64 << 10];
+            ping.send(msg.clone()).unwrap();
+            ping.send(Vec::new()).unwrap();
+            ping.send(Vec::new()).unwrap();
+            assert!(data(&ping) == msg, "echo differs at round {i}");
+            assert!(data(&ping).is_empty());
+            assert!(data(&ping).is_empty());
+        }
+        conn.close("done");
+        conn.wait_closed();
+    }
+}
+
+#[test]
+fn strict_open_checks_the_service_cap_before_calling_its_factory_and_frees_a_slot_with_its_close() {
+    let ep = Endpoint::with_ring("test", 1024);
+    let (opened, held) = std::sync::mpsc::channel();
+    ep.register_bounded("held", 1, ServiceLimits { max_message: 16, max_channels: 2 }, Arc::new(move |_, open| {
+        opened.send(open.channel).unwrap();
+        Ok(())
+    }));
+    let (client, _) = pair_with_options(&ep, ConnOptions::strict());
+    let first = client.open("held", "").unwrap();
+    let _second = client.open("held", "").unwrap();
+    let first_server = held.recv_timeout(WAIT).unwrap();
+    let _second_server = held.recv_timeout(WAIT).unwrap();
+    assert!(matches!(client.open("held", ""), Err((crate::conn::CLOSE_REFUSED, why)) if why.contains("held")),
+        "an OPEN beyond the cap while every slot is live is refused");
+    assert!(held.try_recv().is_err(), "a refused OPEN reached the factory");
+    // Close and reopen at once, while the service still holds its end of the closed channel: the
+    // slot is free once the CLOSE is through, so a well-behaved peer is never refused for it.
+    first.close(0, "done");
+    let _third = client.open("held", "").expect("an OPEN right after a CLOSE takes the freed slot");
+    // kept: dropping the service's end would close the channel and free its slot
+    let _third_server = held.recv_timeout(WAIT).expect("the freed slot's OPEN reached the factory");
+    assert!(matches!(first_server.recv_timeout(WAIT), Ok(Event::Closed(0, _))), "the service still sees its channel close");
+    assert!(matches!(client.open("held", ""), Err((crate::conn::CLOSE_REFUSED, _))), "the cap holds again with two live");
+    client.close("done");
 }
 
 #[test]
@@ -192,6 +388,32 @@ fn slow_reader_does_not_block_cmd() {
     });
     assert!(sender.join().unwrap() > 0);
     assert!(drain.join().unwrap() >= 4 << 20);
+}
+
+#[test]
+fn strict_handshakes_refuse_oversized_fields_and_cap_lists() {
+    fn input(op: u8, fields: &str) -> FrameReader {
+        let mut bytes = vec![op];
+        bytes.extend_from_slice(b"major=1\n");
+        bytes.extend_from_slice(fields.as_bytes());
+        let mut wire = Vec::new();
+        write_frame(&mut wire, 0, kind::DATA, 0, &bytes).unwrap();
+        FrameReader::new(Box::new(std::io::Cursor::new(wire)))
+    }
+    let h = Hello::default();
+    let strict = ConnOptions::strict();
+    for fields in [format!("name={}\n", "n".repeat(256)), format!("token={}\n", "t".repeat(256)),
+                   "cap=one/1\n".repeat(64), "extra=x\n".repeat(73)] {
+        let mut reply = Vec::new();
+        assert!(matches!(hello::server_handshake_with_options(&mut input(hello::OP_HELLO, &fields), &mut reply, &h, strict),
+            Err(hello::HandshakeError::Mismatch(_))));
+        assert_eq!(FrameReader::new(Box::new(std::io::Cursor::new(reply))).next().unwrap().payload[0], hello::OP_GOODBYE);
+        assert!(matches!(hello::client_handshake_with_options(&mut input(hello::OP_HELLO_OK, &fields), &mut Vec::new(), &h, strict),
+            Err(hello::HandshakeError::Mismatch(_))));
+    }
+    let valid = format!("name={}\n{}", "n".repeat(255), "cap=one/1\n".repeat(63));
+    let peer = hello::server_handshake_with_options(&mut input(hello::OP_HELLO, &valid), &mut Vec::new(), &h, strict).unwrap();
+    assert_eq!((peer.name.len(), peer.caps.len()), (255, 63));
 }
 
 #[test]
@@ -375,6 +597,20 @@ fn a_request_sees_its_client_go() {
     conn.close("client ended");
     gone.recv_timeout(WAIT).unwrap();
     assert!(!crate::lines::client_gone(), "no request on this thread");
+    // a peer that keeps its socket open and serves nothing (a process holding a copy of it): a
+    // connection with a ping limit is lost once a ping goes that long unanswered, and its call
+    // with it; with none, the call waited for good (11-23)
+    let (mine, silent) = UnixStream::pair().unwrap();
+    let (r, w, s) = (mine.try_clone().unwrap(), mine.try_clone().unwrap(), mine);
+    let quiet = Conn::start(Io { reader: FrameReader::new(Box::new(r)), writer: Box::new(w), shutdown: Box::new(move || {
+        let _ = s.shutdown(std::net::Shutdown::Both);
+    }) }, Hello::default(), true, None, Hooks::default());
+    quiet.set_ping_limit(Duration::from_millis(300));
+    let t = std::time::Instant::now();
+    let lost = quiet.open_timeout("slow", "", WAIT).map(|_| ());
+    assert!(matches!(&lost, Err((code, why)) if *code == crate::conn::CLOSE_LINK_LOST && why.contains("answered no ping")), "{lost:?}");
+    assert!(t.elapsed() < WAIT / 2 && quiet.is_closed(), "lost at its ping limit, not at the call's own wait: {:?}", t.elapsed());
+    drop(silent);
 }
 
 /// A handler that waits says so ahead of its answer, on that request's channel only.
@@ -430,6 +666,14 @@ fn unix_end_to_end_with_discovery_and_reconnect() {
     assert_eq!(app.text("extra").as_deref(), Some("x"));
     let client = Client::connect(&std::process::id().to_string()).unwrap();
     assert!(client.caps().contains(&"cmd/1".to_string()));
+    // an endpoint file the app published reaches the same instance (it is a path, not a socket)
+    let file = crate::carrier::unix::test_root().join(format!("endpoint-{me}"));
+    crate::discovery::publish(&file).unwrap();
+    let by_file = Client::connect(file.to_str().unwrap()).expect("an endpoint file dials the instance that wrote it");
+    assert!(by_file.cmd("ping").unwrap().next().unwrap().unwrap().starts_with("{\"pong\":1"), "the endpoint file's instance answers");
+    by_file.conn().unwrap().close("test drop");
+    let _ = std::fs::remove_file(&file);
+    assert!(crate::discovery::is_socket_path(&app.socket), "the instance's own socket is still dialled as a socket");
     let mut lines = client.cmd("ping").unwrap();
     assert!(lines.next().unwrap().unwrap().starts_with("{\"pong\":1"));
     assert!(lines.next().is_none() && lines.end().unwrap().starts_with("{\"end\":\"ping\""));
@@ -588,11 +832,20 @@ fn fake_frames() -> Factory {
     })
 }
 
+/// A tool result with one inline picture (a 1x1 PNG).
+const PICTURE_RESULT: &str = "{\"Result\":{\"images\":[\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==\"]}}";
+
 /// An `app` service that answers each request with the request it was asked, then ends.
 fn fake_app() -> Factory {
     Arc::new(|_, open| {
         std::thread::spawn(move || {
-            let _ = open.channel.send(format!("{{\"asked\":{}}}\n", crate::json_str(&open.args)).into_bytes());
+            // a tool whose result carries a picture, as a render's does
+            let answer = if open.args.starts_with("call demo.picture") {
+                PICTURE_RESULT.to_string()
+            } else {
+                format!("{{\"asked\":{}}}", crate::json_str(&open.args))
+            };
+            let _ = open.channel.send(format!("{answer}\n").into_bytes());
             open.channel.close(crate::conn::CLOSE_NORMAL, "");
         });
         Ok(())
@@ -607,6 +860,8 @@ fn call_and_tools_ask_the_app_service() {
     assert_eq!((lines, err), (vec![r#"{"asked":"call demo.support plate\n{\"at\": [1, 2]}"}"#.to_string()], false));
     assert_eq!(run_app(&["tools"]).0, vec![r#"{"asked":"list"}"#.to_string()]);
     assert_eq!(run_app(&["call"]), (vec![r#"{"err":"call <service>.<tool> [<instance>] [<json args>]"}"#.to_string()], true));
+    assert_eq!(run_app(&["call", "demo.picture"]), (vec![PICTURE_RESULT.to_string()], false),
+        "a library call keeps the result's inline images: only the printed form writes them to files");
     assert_eq!(crate::app::app_request_of("call demo.x {\"a\": \"b c\"}"), Some(Ok("call demo.x\n{\"a\": \"b c\"}".to_string())));
     assert_eq!(crate::app::app_request_of("call demo.x"), Some(Ok("call demo.x\n{}".to_string())));
     assert_eq!(crate::app::app_request_of("ui tree"), None);

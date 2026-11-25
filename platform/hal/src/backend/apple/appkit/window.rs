@@ -871,6 +871,7 @@ impl Win {
                 (app::nsimage_from_rgba(i.w, i.h, &i.rgba, size), size)
             });
             let mut dragging_items = Vec::with_capacity(items.len());
+            super::drag_out::drag_started();
             for (index, (kind, s)) in items.iter().enumerate() {
                 let (writer, icon_path) = if *kind == input::drag_item::PROMISE {
                     (super::drag_out::promise_writer(s), crate::drag_promise::decode(s).0)

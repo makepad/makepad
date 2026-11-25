@@ -1,6 +1,4 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
 // The GPU safety layer of web.js: the frame watchdog's decisions and the
 // live-bytes ledger (GPU-SAFETY.md).
@@ -8,7 +6,7 @@ import test from "node:test";
 // is stripped, whatever it imports, and each imported name becomes a parameter that gets a
 // stub: a new import in web.js must not stop these checks from running.
 const imported = [];
-const web_source = readFileSync(new URL("./web.js", import.meta.url), "utf8")
+const web_source = read_text(new URL("./web.js", import.meta.url))
   .replace(/^import\s*\{([^}]*)\}\s*from\s*["'][^"']+["'];?[ \t]*\n/gm, (_, names) => {
     for (const entry of names.split(",")) {
       const name = entry.trim().split(/\s+as\s+/).pop();

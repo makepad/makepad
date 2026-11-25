@@ -11,6 +11,10 @@
 //! the GPU ledger in [`ledger`]. This crate ships the headless backend; the platform backends
 //! come with their phases.
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 /// The HAL's maps of objects, keyed by small ids ((session, index) pairs, string ids): hashed
 /// with the in-tree FxHash. The per-draw path looks textures, buffers and pipelines up in them
 /// many times a frame, where std's SipHash was ~4% of the main thread's encode samples.
@@ -94,6 +98,8 @@ pub mod session;
 pub mod types;
 pub mod window_controls;
 pub use window_controls::{host_caption, host_window_controls, HostCaption, WindowControls};
+pub mod window_size;
+pub use window_size::window_pixels;
 
 #[cfg(target_vendor = "apple")]
 pub use backend::apple::media::{can_play_type, video_h264_probe};
@@ -1784,6 +1790,25 @@ pub fn open_url(url: &str) -> bool {
             let _: BOOL = msg_send![workspace, openURL: value];
         }
     })
+}
+
+/// Android: the Activity's parameters as the shell last heard them (its paths, density, the OS's
+/// version and build, the app's build, night mode, rotation). An op: Java's callbacks fill them on
+/// the loader's side. Read at startup and with each `Display` (a configuration change), not per
+/// frame; `run`: its Strings are the program's to keep.
+#[cfg(target_os = "android")]
+#[relax_api(run)]
+pub fn hal_android_params() -> backend::android::AndroidParams {
+    backend::android::AndroidBackend::params()
+}
+
+/// Android: whether the app's frame requests wait (no XR session, and the Activity has no window
+/// or is paused); `resume` and a new surface post them. An op: the window and the Activity's state
+/// are the loader's. Allocates nothing (an atomic and two short locks): the main loop asks each turn.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_frame_requests_held() -> bool {
+    backend::android::jni::frame_requests_held()
 }
 
 /// Reads an APK asset into caller-owned memory. Returns its size, or -1 on failure.

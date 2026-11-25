@@ -276,7 +276,21 @@ mod imp {
             bound.as_ref().err().map_or(String::new(), |e| format!(",\"socket_error\":{}", crate::cmd::json_str(&e.to_string()))),
             format!("{extra}{}", crate::discovery::lease_field())
         );
-        let _ = std::fs::write(disc, info);
+        // a registry the run is told (MAKEPAD_REMOTE_REGISTRY) that is not there yet is made, this
+        // user's own: before, the file went nowhere, the run still said its socket, and every
+        // client said no endpoint ran (a hidden JIT run on a Mac, 11-24)
+        let announced = disc.parent().map_or(Ok(()), |dir| {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+        });
+        if let Err(e) = announced.and_then(|()| std::fs::write(disc, info)) {
+            eprintln!(
+                "makepad-remote: the discovery file {} cannot be written ({e}): no client finds pid {} by its pid or name; `makepad-remote app {}` reaches it",
+                disc.display(),
+                std::process::id(),
+                sock.display()
+            );
+        }
         let listener = bound?;
         ep.set_discovery(disc.to_path_buf());
         accept_loop(ep, listener);
@@ -343,13 +357,18 @@ mod tests {
     #[test]
     fn a_socket_path_too_long_to_bind_is_said_in_the_discovery_file() {
         let sock = std::env::temp_dir().join("d".repeat(SOCKET_PATH_MAX)).join("makepad-remote-1.sock");
-        let disc = std::env::temp_dir().join(format!("makepad-remote-long-test-{}.json", std::process::id()));
+        // (in a registry dir that is not there yet: the run makes it, this user's own)
+        let registry = std::env::temp_dir().join(format!("makepad-remote-long-test-{}", std::process::id()));
+        let disc = registry.join("makepad-remote-1.json");
         let ep = crate::endpoint::Endpoint::new("makepad-remote-long");
         ep.register_cmd(|_, _| {});
         let err = serve_announced(&ep, "", &sock, &disc, |_| Ok(())).unwrap_err().to_string();
         assert!(err.contains(&format!("bytes, over the {SOCKET_PATH_MAX}")), "{err}");
-        let app = crate::discovery::parse(&std::fs::read_to_string(&disc).unwrap()).unwrap();
+        let made = std::fs::metadata(&registry).map(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o777);
+        let app = crate::discovery::parse(&std::fs::read_to_string(&disc).expect("the registry dir is made and the file written")).unwrap();
         std::fs::remove_file(&disc).unwrap();
+        std::fs::remove_dir(&registry).unwrap();
+        assert_eq!(made.unwrap(), 0o700, "the made registry dir is this user's own");
         assert!(app.caps.is_empty(), "nothing is served: {:?}", app.caps);
         let why = app.unreachable().expect("the discovery file says why");
         assert!(why.contains("runs but cannot be reached") && why.contains(&err), "{why}");

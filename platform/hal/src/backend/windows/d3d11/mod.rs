@@ -743,6 +743,9 @@ impl Gpu for D3d11 {
             Ok(c) => c,
             Err(e) => return PipeStatus::Failed(e),
         };
+        if let Err(failure) = exec::check_sampled_shapes(&self.info, code.textures.iter().copied()) {
+            return failure;
+        }
         let src = PipeSrc {
             code,
             desc: blob.desc,

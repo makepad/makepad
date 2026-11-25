@@ -10,10 +10,13 @@ license = "MIT OR Apache-2.0"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
 
 [dependencies]
+makepad-thread-local = { path = "../../libs/thread_local", version = "1.0.0" }
 makepad-civil-time = { path = "../../libs/civil_time", version = "0.1.0" }
 makepad-error-log = { path = "../../libs/error_log", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
+# The default gateways (p2p::portmap asks the router for a port).
+makepad-core-util = { path = "../../libs/core_util" }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
 makepad-apple-sys = { path = "../../libs/apple_sys", version = "1.0.0" }

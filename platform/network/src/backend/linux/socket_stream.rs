@@ -3,11 +3,12 @@ use std::{
     io,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    os::fd::AsRawFd,
     ptr,
     sync::OnceLock,
     time::Duration,
 };
+
+use crate::tls::{engine::SocketPump, TlsEngine, TlsIdentity};
 
 #[repr(C)]
 pub(crate) struct SSL_CTX {
@@ -30,6 +31,7 @@ const SSL_VERIFY_NONE: c_int = 0;
 const SSL_VERIFY_PEER: c_int = 1;
 const SSL_CTRL_SET_TLSEXT_HOSTNAME: c_int = 55;
 const TLSEXT_NAMETYPE_HOST_NAME: c_long = 0;
+const X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS: u32 = 0x4;
 
 const SSL_ERROR_WANT_READ: c_int = 2;
 const SSL_ERROR_WANT_WRITE: c_int = 3;
@@ -50,20 +52,36 @@ unsafe extern "C" {
     pub(crate) fn TLS_client_method() -> *const SSL_METHOD;
     pub(crate) fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
     pub(crate) fn SSL_CTX_free(ctx: *mut SSL_CTX);
-    pub(crate) fn SSL_CTX_up_ref(ctx: *mut SSL_CTX) -> c_int;
+    fn SSL_get_SSL_CTX(ssl: *const SSL) -> *mut SSL_CTX;
+    pub(crate) fn SSL_CTX_ctrl(ctx: *mut SSL_CTX, cmd: c_int, arg: c_long, ptr: *mut c_void) -> c_long;
+    pub(crate) fn SSL_CTX_set_cipher_list(ctx: *mut SSL_CTX, list: *const c_char) -> c_int;
+    fn SSL_CTX_set_ciphersuites(ctx: *mut SSL_CTX, list: *const c_char) -> c_int;
+    fn SSL_CTX_set_options(ctx: *mut SSL_CTX, options: u64) -> u64;
+    fn SSL_CTX_set_num_tickets(ctx: *mut SSL_CTX, count: usize) -> c_int;
     pub(crate) fn SSL_get1_session(ssl: *mut SSL) -> *mut SSL_SESSION;
     pub(crate) fn SSL_set_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int;
     pub(crate) fn SSL_SESSION_free(session: *mut SSL_SESSION);
     pub(crate) fn SSL_session_reused(ssl: *const SSL) -> c_int;
     pub(crate) fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
     pub(crate) fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
+    fn SSL_set_hostflags(ssl: *mut SSL, flags: u32);
+    fn SSL_set1_host(ssl: *mut SSL, hostname: *const c_char) -> c_int;
+    fn SSL_get0_param(ssl: *mut SSL) -> *mut c_void;
+    fn X509_VERIFY_PARAM_set1_ip_asc(param: *mut c_void, ipasc: *const c_char) -> c_int;
     pub(crate) fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
     pub(crate) fn SSL_free(ssl: *mut SSL);
-    pub(crate) fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
-    pub(crate) fn SSL_connect(ssl: *mut SSL) -> c_int;
+    fn SSL_set_bio(ssl: *mut SSL, r: *mut c_void, w: *mut c_void);
+    fn BIO_new(method: *const c_void) -> *mut c_void;
+    fn BIO_s_mem() -> *const c_void;
+    fn BIO_free(bio: *mut c_void) -> c_int;
+    fn BIO_write(bio: *mut c_void, data: *const c_void, len: c_int) -> c_int;
+    fn BIO_read(bio: *mut c_void, buf: *mut c_void, len: c_int) -> c_int;
+    fn BIO_ctrl_pending(bio: *mut c_void) -> usize;
+    fn SSL_set_connect_state(ssl: *mut SSL);
+    fn SSL_set_accept_state(ssl: *mut SSL);
+    fn SSL_do_handshake(ssl: *mut SSL) -> c_int;
     pub(crate) fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
     pub(crate) fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
-    pub(crate) fn SSL_pending(ssl: *const SSL) -> c_int;
     pub(crate) fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
     pub(crate) fn SSL_shutdown(ssl: *mut SSL) -> c_int;
     pub(crate) fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
@@ -122,186 +140,208 @@ pub fn init_openssl() -> io::Result<()> {
     }
 }
 
-pub(crate) struct OpenSslStream {
-    tcp_stream: TcpStream,
-    ssl_ctx: *mut SSL_CTX,
+pub(crate) struct NativeEngine {
     ssl: *mut SSL,
+    // Owned by SSL after SSL_set_bio. Each side has an independent memory BIO.
+    input: *mut c_void,
+    output: *mut c_void,
+    strict: bool,
+    verified_name: Option<CString>,
 }
 
-unsafe impl Send for OpenSslStream {}
+// An SSL and its memory BIOs are owned by one worker at a time.
+unsafe impl Send for NativeEngine {}
 
-impl OpenSslStream {
-    /// Plaintext the TLS layer holds already: a read returns it without
-    /// waiting on the socket. A reader that waits for input on the socket
-    /// (`try_clone_tcp`, `peek`) reads first while this is above zero.
-    pub(crate) fn buffered(&self) -> usize {
-        unsafe { SSL_pending(self.ssl) }.max(0) as usize
+impl Drop for NativeEngine {
+    fn drop(&mut self) { unsafe { SSL_free(self.ssl) }; }
+}
+
+struct ClientContext(*mut SSL_CTX);
+impl Drop for ClientContext {
+    fn drop(&mut self) { unsafe { SSL_CTX_free(self.0) }; }
+}
+
+impl NativeEngine {
+    pub(crate) fn strict_client() -> io::Result<Self> {
+        Self::client(None, false, None, true)
     }
 
-    fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
-        Self::connect_until(tcp_stream, host, verify_peer, None, None)
+    pub(crate) fn strict_server(identity: &TlsIdentity) -> io::Result<Self> {
+        crate::tls::platform::ServerConfig::new(&identity.cert_der, &identity.key)?.engine(true)
     }
 
-    fn new_context(verify_peer: bool) -> io::Result<*mut SSL_CTX> {
-        let method = unsafe { TLS_client_method() };
-        if method.is_null() {
-            return Err(io_other("TLS_client_method returned null"));
-        }
-        let ssl_ctx = unsafe { SSL_CTX_new(method) };
-        if ssl_ctx.is_null() {
-            return Err(io_other(format!(
-                "SSL_CTX_new failed: {}",
-                last_ssl_error()
-            )));
-        }
-        if verify_peer {
-            unsafe {
-                SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, ptr::null_mut());
-            }
-            if unsafe { SSL_CTX_set_default_verify_paths(ssl_ctx) } != 1 {
-                unsafe {
-                    SSL_CTX_free(ssl_ctx);
-                }
-                return Err(io_other(format!(
-                    "SSL_CTX_set_default_verify_paths failed: {}",
-                    last_ssl_error()
-                )));
-            }
-        } else {
-            unsafe {
-                SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_NONE, ptr::null_mut());
+    // Called on a private per-connection context before SSL_new.
+    fn strict_context(ctx: *mut SSL_CTX) -> io::Result<()> {
+        const NO_TICKET: u64 = 1 << 14;
+        const NO_RENEGOTIATION: u64 = 1 << 30;
+        const SET_CACHE_MODE: c_int = 44;
+        const SET_GROUPS_LIST: c_int = 92;
+        const SET_MIN_VERSION: c_int = 123;
+        unsafe {
+            let options = NO_TICKET | NO_RENEGOTIATION;
+            SSL_CTX_ctrl(ctx, SET_CACHE_MODE, 0, ptr::null_mut());
+            if SSL_CTX_set_options(ctx, options) & options != options
+                || SSL_CTX_set_num_tickets(ctx, 0) != 1
+                || SSL_CTX_ctrl(ctx, SET_MIN_VERSION, 0x0303, ptr::null_mut()) != 1
+                || SSL_CTX_ctrl(ctx, SET_GROUPS_LIST, 0, c"X25519:P-256:P-384".as_ptr() as *mut c_void) != 1
+                || SSL_CTX_set_cipher_list(ctx, c"ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305".as_ptr()) != 1
+                || SSL_CTX_set_ciphersuites(ctx, c"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256".as_ptr()) != 1
+            {
+                return Err(io_other(format!("strict TLS settings: {}", last_ssl_error())));
             }
         }
-        Ok(ssl_ctx)
+        Ok(())
     }
 
-    /// `deadline`: give up the handshake then (a peer that never answers).
-    /// `resume`: an earlier connection whose context and TLS session this
-    /// one reuses (the session is offered for an abbreviated handshake).
-    fn connect_until(
-        tcp_stream: TcpStream,
-        host: &str,
-        verify_peer: bool,
-        deadline: Option<std::time::Instant>,
-        resume: Option<&OpenSslStream>,
-    ) -> io::Result<Self> {
-        init_openssl()?;
-
-        // A resuming connection shares the earlier one's context (and so its
-        // verify settings): the session belongs to it.
-        let ssl_ctx = match resume {
-            Some(earlier) => {
-                if unsafe { SSL_CTX_up_ref(earlier.ssl_ctx) } != 1 {
-                    return Err(io_other(format!("SSL_CTX_up_ref failed: {}", last_ssl_error())));
-                }
-                earlier.ssl_ctx
-            }
-            None => Self::new_context(verify_peer)?,
-        };
-
-        let ssl = unsafe { SSL_new(ssl_ctx) };
-        if ssl.is_null() {
-            unsafe {
-                SSL_CTX_free(ssl_ctx);
-            }
-            return Err(io_other(format!("SSL_new failed: {}", last_ssl_error())));
-        }
-
-        if let Some(earlier) = resume {
-            let session = unsafe { SSL_get1_session(earlier.ssl) };
-            let set = !session.is_null() && unsafe { SSL_set_session(ssl, session) } == 1;
-            if !session.is_null() {
-                unsafe { SSL_SESSION_free(session) };
-            }
-            if !set {
-                unsafe {
-                    SSL_free(ssl);
-                    SSL_CTX_free(ssl_ctx);
-                }
-                return Err(io_other("the earlier TLS connection has no session to resume"));
-            }
-        }
-
-        let host_cstr =
-            CString::new(host).map_err(|_| io_other("TLS host contains interior null"))?;
-        let sni_ok = unsafe {
-            SSL_ctrl(
-                ssl,
-                SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                TLSEXT_NAMETYPE_HOST_NAME,
-                host_cstr.as_ptr() as *mut c_void,
-            )
-        };
-        if sni_ok == 0 {
-            unsafe {
+    pub(crate) fn from_context(ctx: *mut SSL_CTX, server: bool, strict: bool) -> io::Result<Self> {
+        if strict { Self::strict_context(ctx)?; }
+        unsafe {
+            let ssl = SSL_new(ctx);
+            if ssl.is_null() { return Err(io_other(last_ssl_error())); }
+            let input = BIO_new(BIO_s_mem());
+            let output = BIO_new(BIO_s_mem());
+            if input.is_null() || output.is_null() {
+                BIO_free(input);
+                BIO_free(output);
                 SSL_free(ssl);
-                SSL_CTX_free(ssl_ctx);
+                return Err(io_other("creating TLS memory BIOs"));
             }
-            return Err(io_other(format!("SNI setup failed: {}", last_ssl_error())));
+            SSL_set_bio(ssl, input, output);
+            if server { SSL_set_accept_state(ssl); } else { SSL_set_connect_state(ssl); }
+            Ok(Self { ssl, input, output, strict, verified_name: None })
         }
+    }
 
-        if unsafe { SSL_set_fd(ssl, tcp_stream.as_raw_fd()) } != 1 {
-            unsafe {
-                SSL_free(ssl);
-                SSL_CTX_free(ssl_ctx);
-            }
-            return Err(io_other(format!("SSL_set_fd failed: {}", last_ssl_error())));
-        }
-
-        loop {
-            let ret = unsafe { SSL_connect(ssl) };
-            if ret == 1 {
-                break;
-            }
-            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                unsafe {
-                    SSL_free(ssl);
-                    SSL_CTX_free(ssl_ctx);
-                }
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
-            }
-            let err = unsafe { SSL_get_error(ssl, ret) };
-            match err {
-                SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                SSL_ERROR_SYSCALL => {
-                    let os_err = io::Error::last_os_error();
-                    if matches!(
-                        os_err.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) {
-                        continue;
-                    }
-                    unsafe {
-                        SSL_free(ssl);
-                        SSL_CTX_free(ssl_ctx);
-                    }
-                    return Err(io_other(format!("SSL_connect syscall error: {os_err}")));
-                }
-                _ => {
-                    unsafe {
-                        SSL_free(ssl);
-                        SSL_CTX_free(ssl_ctx);
-                    }
-                    return Err(io_other(format!(
-                        "SSL_connect failed: {}",
-                        last_ssl_error()
-                    )));
-                }
-            }
-        }
-
-        Ok(Self {
-            tcp_stream,
-            ssl_ctx,
-            ssl,
+    fn client(host: Option<&str>, verify: bool, resume: Option<&Self>, strict: bool) -> io::Result<Self> {
+        Self::client_with_roots(host, verify, resume, strict, |ctx| unsafe {
+            SSL_CTX_set_default_verify_paths(ctx)
         })
     }
 
-    fn peer_leaf_der(&self) -> io::Result<Vec<u8>> {
+    fn client_with_roots(
+        host: Option<&str>,
+        verify: bool,
+        resume: Option<&Self>,
+        strict: bool,
+        load_roots: impl FnOnce(*mut SSL_CTX) -> c_int,
+    ) -> io::Result<Self> {
+        init_openssl()?;
+        let name = host.map(CString::new).transpose()?;
+        // OpenSSL restores the old verification result on resumption. A new
+        // name or a previously unverified session needs a full handshake.
+        let resume = resume.filter(|previous| !verify || (name.is_some() && previous.verified_name == name));
+        let mut engine = unsafe {
+            if let Some(previous) = resume {
+                let engine = Self::from_context(SSL_get_SSL_CTX(previous.ssl), false, false)?;
+                let session = SSL_get1_session(previous.ssl);
+                if session.is_null() { return Err(io_other("no TLS session to resume")); }
+                let ok = SSL_set_session(engine.ssl, session);
+                SSL_SESSION_free(session);
+                if ok != 1 { return Err(io_other(last_ssl_error())); }
+                engine
+            } else {
+                let ctx = ClientContext(SSL_CTX_new(TLS_client_method()));
+                if ctx.0.is_null() { return Err(io_other(last_ssl_error())); }
+                SSL_CTX_set_verify(ctx.0, if verify { SSL_VERIFY_PEER } else { SSL_VERIFY_NONE }, ptr::null_mut());
+                if verify && load_roots(ctx.0) != 1 { return Err(io_other(last_ssl_error())); }
+                Self::from_context(ctx.0, false, strict)?
+            }
+        };
+        if let (Some(host), Some(name)) = (host, name) {
+            let ok = unsafe { SSL_ctrl(engine.ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_HOST_NAME, name.as_ptr() as *mut c_void) };
+            if ok != 1 { return Err(io_other(last_ssl_error())); }
+            if verify {
+                // An empty reference disables name checks; a leading dot
+                // asks OpenSSL to match any subdomain.
+                if host.is_empty() || host.starts_with('.') {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected a TLS host name"));
+                }
+                let ok = unsafe {
+                    if host.parse::<std::net::IpAddr>().is_ok() {
+                        let param = SSL_get0_param(engine.ssl);
+                        !param.is_null() && X509_VERIFY_PARAM_set1_ip_asc(param, name.as_ptr()) == 1
+                    } else {
+                        SSL_set_hostflags(engine.ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+                        SSL_set1_host(engine.ssl, name.as_ptr()) == 1
+                    }
+                };
+                if !ok { return Err(io_other(format!("setting TLS peer name: {}", last_ssl_error()))); }
+                engine.verified_name = Some(name);
+            }
+        }
+        Ok(engine)
+    }
+
+    fn result(&self, ret: c_int) -> io::Result<usize> {
+        if ret > 0 { return Ok(ret as usize); }
+        match unsafe { SSL_get_error(self.ssl, ret) } {
+            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => Err(io::ErrorKind::WouldBlock.into()),
+            SSL_ERROR_ZERO_RETURN => Ok(0),
+            SSL_ERROR_SYSCALL if ret == 0 => Err(io::ErrorKind::UnexpectedEof.into()),
+            _ if unsafe { ERR_peek_error() } == SSL_R_UNEXPECTED_EOF_WHILE_READING => Err(io::ErrorKind::UnexpectedEof.into()),
+            _ => Err(io_other(format!("TLS: {}", last_ssl_error()))),
+        }
+    }
+
+    pub(crate) fn is_tls12(&self) -> io::Result<bool> {
+        Ok(unsafe { SSL_version(self.ssl) } == 0x0303)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tls12_server(id: &TlsIdentity) -> io::Result<Self> {
+        let engine = Self::strict_server(id)?;
+        const SET_MAX_VERSION: c_int = 124;
+        if unsafe { SSL_ctrl(engine.ssl, SET_MAX_VERSION, 0x0303, ptr::null_mut()) } != 1 {
+            return Err(io_other(last_ssl_error()));
+        }
+        Ok(engine)
+    }
+
+    pub(crate) fn handshake(&mut self) -> io::Result<bool> {
+        unsafe { ERR_clear_error() };
+        match self.result(unsafe { SSL_do_handshake(self.ssl) }) {
+            Ok(1) if self.strict && unsafe { SSL_session_reused(self.ssl) } != 0 => Err(io_other("unexpected TLS resumption")),
+            Ok(1) => Ok(true),
+            Ok(_) => Err(io::ErrorKind::UnexpectedEof.into()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) fn feed(&mut self, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            let n = unsafe { BIO_write(self.input, bytes.as_ptr().cast(), bytes.len().min(c_int::MAX as usize) as c_int) };
+            if n <= 0 { return Err(io_other(last_ssl_error())); }
+            bytes = &bytes[n as usize..];
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take(&mut self, out: &mut Vec<u8>) -> io::Result<()> {
+        loop {
+            let len = unsafe { BIO_ctrl_pending(self.output) }.min(c_int::MAX as usize);
+            if len == 0 { return Ok(()); }
+            let start = out.len();
+            out.resize(start + len, 0);
+            let n = unsafe { BIO_read(self.output, out[start..].as_mut_ptr().cast(), len as c_int) };
+            out.truncate(start + n.max(0) as usize);
+            if n <= 0 { return Err(io_other(last_ssl_error())); }
+        }
+    }
+
+    pub(crate) fn read_plain(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        unsafe { ERR_clear_error() };
+        self.result(unsafe { SSL_read(self.ssl, out.as_mut_ptr().cast(), out.len() as c_int) })
+    }
+
+    pub(crate) fn write_plain(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        unsafe { ERR_clear_error() };
+        self.result(unsafe { SSL_write(self.ssl, bytes.as_ptr().cast(), bytes.len() as c_int) })
+    }
+
+    pub(crate) fn close(&mut self) { unsafe { SSL_shutdown(self.ssl) }; }
+
+    pub(crate) fn peer_leaf_der(&self) -> io::Result<Vec<u8>> {
         unsafe {
             let cert = SSL_get1_peer_certificate(self.ssl);
             if cert.is_null() {
@@ -320,117 +360,14 @@ impl OpenSslStream {
         }
     }
 
-    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.tcp_stream.set_read_timeout(timeout)
-    }
-
-    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
-        self.tcp_stream.set_write_timeout(timeout)
-    }
-
-    fn shutdown(&mut self) {
-        unsafe {
-            let _ = SSL_shutdown(self.ssl);
-        }
-        let _ = self.tcp_stream.shutdown(Shutdown::Both);
-    }
 }
 
-impl Drop for OpenSslStream {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = SSL_shutdown(self.ssl);
-            SSL_free(self.ssl);
-            SSL_CTX_free(self.ssl_ctx);
-        }
-        let _ = self.tcp_stream.shutdown(Shutdown::Both);
-    }
-}
+type OpenSslStream = SocketPump;
 
-impl Read for OpenSslStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let len = buf.len().min(c_int::MAX as usize) as c_int;
-        let ret = unsafe { SSL_read(self.ssl, buf.as_mut_ptr() as *mut c_void, len) };
-        if ret > 0 {
-            return Ok(ret as usize);
-        }
-
-        let ssl_err = unsafe { SSL_get_error(self.ssl, ret) };
-        match ssl_err {
-            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "SSL_read would block",
-            )),
-            SSL_ERROR_ZERO_RETURN => Ok(0),
-            SSL_ERROR_SYSCALL => {
-                let os_err = io::Error::last_os_error();
-                if matches!(
-                    os_err.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) {
-                    Err(io::Error::new(os_err.kind(), os_err.to_string()))
-                } else if ret == 0 {
-                    Ok(0)
-                } else {
-                    Err(io_other(format!("SSL_read syscall error: {os_err}")))
-                }
-            }
-            _ if unsafe { ERR_peek_error() } == SSL_R_UNEXPECTED_EOF_WHILE_READING => {
-                // Reported as its own kind so the HTTP reader can accept it
-                // once the response body is complete by its own framing,
-                // and still fail a body that was cut short.
-                unsafe { ERR_clear_error() };
-                Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "peer closed the TLS connection without close_notify",
-                ))
-            }
-            _ => Err(io_other(format!("SSL_read failed: {}", last_ssl_error()))),
-        }
-    }
-}
-
-impl Write for OpenSslStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let len = buf.len().min(c_int::MAX as usize) as c_int;
-        let ret = unsafe { SSL_write(self.ssl, buf.as_ptr() as *const c_void, len) };
-        if ret > 0 {
-            return Ok(ret as usize);
-        }
-
-        let ssl_err = unsafe { SSL_get_error(self.ssl, ret) };
-        match ssl_err {
-            SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "SSL_write would block",
-            )),
-            SSL_ERROR_SYSCALL => {
-                let os_err = io::Error::last_os_error();
-                if matches!(
-                    os_err.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
-                ) {
-                    Err(io::Error::new(os_err.kind(), os_err.to_string()))
-                } else {
-                    Err(io_other(format!("SSL_write syscall error: {os_err}")))
-                }
-            }
-            _ => Err(io_other(format!("SSL_write failed: {}", last_ssl_error()))),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+impl SocketPump {
+    fn connect(tcp: TcpStream, host: &str, verify: bool) -> io::Result<Self> {
+        let native = NativeEngine::client(Some(host), verify, None, false)?;
+        Self::handshake(tcp, TlsEngine::start(native, None, false, None)?, None)
     }
 }
 
@@ -481,16 +418,17 @@ impl SocketStream {
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        let mut stream = OpenSslStream::connect_until(tcp_stream, host, false, Some(deadline), resume)?;
-        let _ = stream.set_read_timeout(None);
+        let native = NativeEngine::client(Some(host), false, resume.map(|s| &s.engine.native), false)?;
+        let mut stream = SocketPump::handshake(tcp_stream, TlsEngine::start(native, None, true, None)?, Some(deadline))?;
+        stream.tcp().set_read_timeout(None)?;
         let result = (|| {
-            if unsafe { SSL_version(stream.ssl) } < 0x0303 {
+            if unsafe { SSL_version(stream.engine.native.ssl) } < 0x0303 {
                 return Err(io_other("server negotiated a TLS version below 1.2"));
             }
-            if resume.is_some() && unsafe { SSL_session_reused(stream.ssl) } != 1 {
+            if resume.is_some() && unsafe { SSL_session_reused(stream.engine.native.ssl) } != 1 {
                 return Err(io::Error::new(io::ErrorKind::Unsupported, "the server did not resume the TLS session"));
             }
-            stream.peer_leaf_der()
+            Ok(stream.engine.server_certificate_der().unwrap().to_vec())
         })();
         match result {
             Ok(der) => Ok((SocketStream::Tls(stream), der)),
@@ -508,7 +446,7 @@ impl SocketStream {
             let mut chain = vec![leaf];
             // Borrowed certificates belong to SSL; do not free them.
             unsafe {
-                let stack = SSL_get_peer_cert_chain(stream.ssl);
+                let stack = SSL_get_peer_cert_chain(stream.engine.native.ssl);
                 if !stack.is_null() {
                     for i in 0..OPENSSL_sk_num(stack) {
                         let cert = OPENSSL_sk_value(stack, i);
@@ -544,14 +482,14 @@ impl SocketStream {
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Plain(stream) => stream.set_read_timeout(timeout),
-            SocketStream::Tls(stream) => stream.set_read_timeout(timeout),
+            SocketStream::Tls(stream) => stream.tcp().set_read_timeout(timeout),
         }
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match self {
             SocketStream::Plain(stream) => stream.set_write_timeout(timeout),
-            SocketStream::Tls(stream) => stream.set_write_timeout(timeout),
+            SocketStream::Tls(stream) => stream.tcp().set_write_timeout(timeout),
         }
     }
 
@@ -569,7 +507,7 @@ impl SocketStream {
     pub fn try_clone_tcp(&self) -> io::Result<TcpStream> {
         match self {
             SocketStream::Plain(stream) => stream.try_clone(),
-            SocketStream::Tls(stream) => stream.tcp_stream.try_clone(),
+            SocketStream::Tls(stream) => stream.tcp().try_clone(),
         }
     }
 
@@ -614,4 +552,106 @@ impl Write for SocketStream {
 fn connect_lan(host: &str, port: &str) -> io::Result<TcpStream> {
     let port: u16 = port.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad port"))?;
     crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tls::engine::tests::{deliver, handshake, identity};
+    use crate::tls::platform::ServerConfig;
+    use crate::tls::SubjectName;
+
+    extern "C" {
+        fn SSL_renegotiate(ssl: *mut SSL) -> c_int;
+        fn SSL_get_certificate(ssl: *const SSL) -> *mut c_void;
+        fn SSL_CTX_get_cert_store(ctx: *const SSL_CTX) -> *mut c_void;
+        fn X509_STORE_add_cert(store: *mut c_void, cert: *mut c_void) -> c_int;
+        fn SSL_get_verify_result(ssl: *const SSL) -> c_long;
+    }
+
+    #[test]
+    fn tls_verified_client_checks_dns_and_ip_names() {
+        const DNS: &str = "server.example";
+        const IP: &str = "192.0.2.7";
+        const HOSTNAME_MISMATCH: c_long = 62;
+        const IP_ADDRESS_MISMATCH: c_long = 64;
+        let names = [SubjectName::Dns(DNS.into()), SubjectName::Ip(IP.parse().unwrap())];
+        let mut nonce = [0u8; 16];
+        crate::tls::os_random(&mut nonce).unwrap();
+        let dir = std::env::temp_dir().join(format!("makepad-tls-names-{}", crate::tls::to_hex(&nonce)));
+        let id = TlsIdentity::load_or_create_for_names(&dir, DNS, &names).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        let config = ServerConfig::new(&id.cert_der, &id.key).unwrap();
+
+        let connect = |host: &str, verify: bool, previous: Option<&TlsEngine>, expected_error: Option<c_long>| {
+            let server = config.engine(false).unwrap();
+            let native = NativeEngine::client_with_roots(Some(host), verify, previous.map(|p| &p.native), false, |ctx| unsafe {
+                // The new context's only trust anchor is this server's certificate.
+                let cert = SSL_get_certificate(server.ssl);
+                let store = SSL_CTX_get_cert_store(ctx);
+                assert!(!cert.is_null() && !store.is_null());
+                X509_STORE_add_cert(store, cert)
+            }).unwrap();
+            // TLS 1.2 gives the same-name control a ticket during the handshake.
+            assert_eq!(unsafe { SSL_ctrl(native.ssl, 124, 0x0303, ptr::null_mut()) }, 1);
+            let mut client = TlsEngine::start(native, None, false, None).unwrap();
+            let mut server = TlsEngine::start(server, None, false, None).unwrap();
+            let result = loop {
+                let sent = deliver(&mut client, &mut server, 1024).unwrap();
+                match deliver(&mut server, &mut client, 1024) {
+                    Err(e) => break Err(e),
+                    Ok(n) if sent + n == 0 => break Ok(()),
+                    Ok(_) => {}
+                }
+            };
+            if let Some(code) = expected_error {
+                assert!(result.is_err(), "verified handshake accepted {host}");
+                assert_eq!(unsafe { SSL_get_verify_result(client.native.ssl) }, code, "verification error for {host}");
+            } else {
+                result.unwrap();
+                assert!(client.handshake_done() && server.handshake_done());
+            }
+            client
+        };
+
+        let verified = connect(DNS, true, None, None);
+        connect(IP, true, None, None);
+        connect("other.example", true, None, Some(HOSTNAME_MISMATCH));
+        connect("192.0.2.8", true, None, Some(IP_ADDRESS_MISMATCH));
+        connect("2001:db8::1", true, None, Some(IP_ADDRESS_MISMATCH));
+        let resumed = connect(DNS, true, Some(&verified), None);
+        assert_eq!(unsafe { SSL_session_reused(resumed.native.ssl) }, 1);
+        connect("other.example", true, Some(&verified), Some(HOSTNAME_MISMATCH));
+        let unchecked = connect("other.example", false, None, None);
+        connect("other.example", true, Some(&unchecked), Some(HOSTNAME_MISMATCH));
+    }
+
+    fn tls12_client(previous: Option<&TlsEngine>) -> TlsEngine {
+        let native = NativeEngine::client(None, false, previous.map(|p| &p.native), false).unwrap();
+        // SSL_CTRL_SET_MAX_PROTO_VERSION. TLS 1.2 exercises real renegotiation and tickets.
+        assert_eq!(unsafe { SSL_ctrl(native.ssl, 124, 0x0303, ptr::null_mut()) }, 1);
+        TlsEngine::start(native, None, true, None).unwrap()
+    }
+
+    #[test]
+    fn tls_strict_server_refuses_an_existing_session_and_renegotiation() {
+        let id = identity();
+        let config = ServerConfig::new(&id.cert_der, &id.key).unwrap();
+        let mut original = tls12_client(None);
+        let mut server = TlsEngine::start(config.engine(false).unwrap(), None, false, None).unwrap();
+        handshake(&mut original, &mut server);
+
+        let mut resumed = tls12_client(Some(&original));
+        let mut server = TlsEngine::start(config.engine(false).unwrap(), None, false, None).unwrap();
+        handshake(&mut resumed, &mut server);
+        assert_eq!(unsafe { SSL_session_reused(resumed.native.ssl) }, 1, "control ticket did not resume");
+
+        // Use the same credential context and ticket keys to give the strict
+        // server an otherwise valid resumption offer.
+        let mut strict = TlsEngine::start(config.engine(true).unwrap(), Some(id.cert_der.clone()), false, None).unwrap();
+        let mut offer = tls12_client(Some(&original));
+        handshake(&mut offer, &mut strict);
+        assert_eq!(unsafe { SSL_session_reused(offer.native.ssl) }, 0, "strict server resumed");
+        assert_eq!(unsafe { SSL_renegotiate(strict.native.ssl) }, 0, "strict server initiated renegotiation");
+    }
 }

@@ -1183,6 +1183,10 @@ impl Cx {
             self.drawing_id += 1;
             self.drawing_start = self.redraw_id;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.redraw_id == self.drawing_start {
+            self.apply_pending_sampler_rebuild();
+        }
         self.redraw_id += 1;
     }
 
@@ -1247,6 +1251,14 @@ impl Cx {
     }
     pub fn gpu_info(&self) -> &GpuInfo {
         &self.gpu_info
+    }
+
+    /// The device's answer for sampled 3D textures, or None when there is no native graphics session.
+    pub fn sampled_volume_support(&self) -> Option<Result<(), &'static str>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.hal.info.as_ref().map(makepad_hal::HalInfo::sampled_volume_support) }
+        #[cfg(target_arch = "wasm32")]
+        { None }
     }
 
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
@@ -2932,11 +2944,12 @@ impl Cx {
         cfg!(target_os = "android") && crate::first_present_seen()
     }
 
-    /// Sets whether a frame repaints only the parts of the window that changed, which it does by default.
-    /// Only the Vulkan and GLES backends do that so far.
+    /// Sets whether a frame repaints only the parts of the window that changed.
+    /// It is off by default, so a frame repaints in full until an app calls this with `true`.
+    /// Only the Vulkan and GLES backends do it, and the others ignore the setting.
     pub fn set_partial_repainting(&mut self, is_enabled: bool) {
         #[cfg(not(target_arch = "wasm32"))]
-        self.draw_damage.set_disabled(!is_enabled);
+        self.draw_damage.set_enabled(is_enabled);
         #[cfg(target_arch = "wasm32")]
         let _ = is_enabled;
     }

@@ -11,10 +11,10 @@ use makepad_network::tunnel::*;
 
 fn print_usage() {
     eprintln!("Usage:");
-    eprintln!("  App:    makepad-remote app <pid|socket> <command> [k=v ...]   (a running makepad app's endpoint; `help` lists its commands; an app name only at a terminal, or for an app of your own lease)");
+    eprintln!("  App:    makepad-remote app <pid|socket|endpoint-file> <command> [k=v ...]   (a running makepad app's endpoint; `help` lists its commands; an app name only at a terminal, or for an app of your own lease)");
     eprintln!("          makepad-remote app <pid> grab [w=ID] [scale=F] out=<file>   (images are written by this client)");
     eprintln!("          makepad-remote app <pid> tools | call <service>.<tool> [instance] [json]   (its AI tools: the `app` service)");
-    eprintln!("  MCP:    makepad-remote mcp <pid|app-name|host:pid> [--no-builtins] [--caller-env NAME] [--launch <program> [args...]]   (stdio MCP server)");
+    eprintln!("  MCP:    makepad-remote mcp <pid|app-name|host:pid|endpoint-file> [--no-builtins] [--caller-env NAME] [--launch <program> [args...]]   (stdio MCP server)");
     eprintln!("  Server: makepad-remote --server [--port 8384] [--bind lan|<ip>] [--all]");
     eprintln!("                         [--keys <file>] [--identity <dir>] [--audit-log <file>] [--max-run <secs>]");
     eprintln!("          makepad-remote --init [--identity <dir>]     create the TLS identity, print its pin");
@@ -68,7 +68,7 @@ fn run_app(spec: &str, argv: &[String]) -> ExitCode {
         }
     };
     let argv = if argv.is_empty() { vec!["help".to_string()] } else { argv.to_vec() };
-    match makepad_remote::app::run(&client, &argv, &mut |l| {
+    match makepad_remote::app::run_printed(&client, &argv, &mut |l| {
         println!("{l}");
         true
     }) {

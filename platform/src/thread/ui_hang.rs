@@ -81,6 +81,22 @@ pub fn initialize() {
     native::initialize();
 }
 
+/// Whether the calling UI thread's watchdog holds a stack sample of the busy scope the thread is
+/// in now: false without one (`MAKEPAD_UI_HANG_MS` unset), outside a scope, or before its first
+/// sample. The watchdog's own test holds a stall until it is sampled, so a watchdog a loaded box
+/// runs late still reports it with its stack.
+#[doc(hidden)]
+pub fn stall_sampled() -> bool {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        let state = CURRENT.with(Cell::get);
+        // SAFETY: CURRENT points at the registration's state, which lives as long as the thread
+        !state.is_null() && unsafe { (*state).sampled() }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    false
+}
+
 /// Nesting restores the previous phase. The outermost scope defines one busy
 /// event/frame; the event loop's idle wait must remain outside that scope.
 #[must_use]

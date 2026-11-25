@@ -1,9 +1,6 @@
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { performance as nodePerformance } from "node:perf_hooks";
-import test from "node:test";
+import { assert, read_text, test } from "makepad-web-test";
 
-const source = readFileSync(new URL("./web_gl.js", import.meta.url), "utf8")
+const source = read_text(new URL("./web_gl.js", import.meta.url))
   .replace(/^import \{[\s\S]*?\} from "\.\/web\.js";\n/, "")
   .replace(/^export /gm, "");
 const load = new Function(
@@ -149,6 +146,7 @@ function mock_gl() {
     enableVertexAttribArray() {},
     vertexAttribDivisor() {},
     useProgram() {},
+    depthFunc() {},
     depthMask() {},
     enable() {},
     disable() {},
@@ -792,11 +790,11 @@ test("repeated draws reuse cached index/layout validation and configured VAO", (
   new Uint32Array(s.memory.buffer, 256, 3).fill(0xffffffff);
 
   const iterations = 2000;
-  const started = nodePerformance.now();
+  const started = performance.now();
   for (let i = 0; i < iterations; i++) {
     s.FromWasmDrawCall(args);
   }
-  const elapsed = nodePerformance.now() - started;
+  const elapsed = performance.now() - started;
 
   assert.equal(draw_shader.attrib_layout, cached_layout);
   assert.equal(index_reads, reads_after_upload);

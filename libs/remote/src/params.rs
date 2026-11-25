@@ -211,7 +211,7 @@ pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
         ("vsnative", _) => params!("file": "string", "pid": "string", "native": "string", "build": "boolean", "args": "string", "s": "number", "warm_ms": "integer", "hz": "integer", "n": "integer", "ev": "string", "tree": "integer", "min": "number", "roots": "string", "save": "boolean", "threads": "string", "nthreads": "string"),
         ("ab", _) => params!("a": "string", "b": "string", "rounds": "integer", "s": "number", "settle_ms": "integer", "hz": "integer", "metric": "string", "per": "string", "ev": "string", "keep": "string"),
         ("remarks" | "code" | "stale", _) => params!("n": "integer"),
-        ("why-tier", "stuck" | "uncounted") => params!("n": "integer"),
+        ("why-tier", "stuck" | "uncounted" | "parked") => params!("n": "integer"),
         ("why-tier", _) => "",
         ("tier", _) => params!("fresh": "boolean"),
         ("probe", "add") => params!("code": "string", "mutate": "boolean", "tier": "string"),

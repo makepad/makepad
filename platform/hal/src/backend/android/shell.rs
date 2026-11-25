@@ -4,6 +4,10 @@ use std::{collections::HashSet, sync::{Arc, Mutex, MutexGuard, OnceLock}};
 
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
+/// What the Activity told the shell (Java fills it on the loader's side). JIT code gets it from
+/// the `hal_android_params` op and reads its fields itself (`repr(C)`: both sides lay it out alike).
+#[relax_api::relax_api(handle, clone, run)]
+#[repr(C)]
 #[derive(Clone, Debug)]
 pub struct AndroidParams {
     pub cache_path: String,

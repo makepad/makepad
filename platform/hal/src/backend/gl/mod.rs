@@ -572,6 +572,9 @@ impl Gpu for GlBackend {
     fn pipeline_create(&mut self, s: &mut Session, id: Id, dialect: u32, blob: &PipelineBlob, _: Attr) -> PipeStatus {
         if dialect != self::dialect::GLSL { return PipeStatus::Failed("GLES takes the GLSL dialect payload".into()); }
         let code = match GlslPipeline::decode(blob.code) { Ok(c) => c, Err(e) => return PipeStatus::Failed(e) };
+        if let Err(failure) = exec::check_sampled_shapes(&self.info, code.textures.iter().map(|t| t.shape)) {
+            return failure;
+        }
         let custom = blob.bindings.len().saturating_sub(pipeline_binding::BUFFERS);
         if blob.bindings.len() < pipeline_binding::BUFFERS || blob.bindings[pipeline_binding::TEXTURES] as usize != code.textures.len()
             || code.blocks.len() != 5 + custom {

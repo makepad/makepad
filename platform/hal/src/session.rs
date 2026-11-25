@@ -117,6 +117,13 @@ impl<T> Table<T> {
         v
     }
 
+    /// Unordered, allocation-free form of `keys_of` for scanning a session's entries.
+    pub fn iter_of(&self, session: u32) -> impl Iterator<Item = (Id, &Entry<T>)> + '_ {
+        self.map.iter()
+            .filter(move |((s, _), _)| *s == session)
+            .map(|((_, index), e)| (Id::new(*index, e.gen), e))
+    }
+
     /// Frees everything of the session; returns the entries (aliases included) for the caller to
     /// give lent objects back.
     pub fn take_session(&mut self, session: u32) -> Vec<(Id, Entry<T>)> {
@@ -145,10 +152,12 @@ pub struct TextureObj {
 }
 
 impl TextureObj {
+    pub fn is_volume(&self) -> bool { self.usage & usage::VOLUME != 0 }
+
     /// Six square colour layers are a cube, unless the texture was created as an array
     /// ([`usage::ARRAY`]); every other layered texture is a 2D array.
     pub fn is_cube(&self) -> bool {
-        self.depth == 6 && self.w == self.h && !format::is_depth(self.format) && self.usage & usage::ARRAY == 0
+        self.depth == 6 && self.w == self.h && !format::is_depth(self.format) && self.usage & (usage::ARRAY | usage::VOLUME) == 0
     }
 }
 
@@ -191,6 +200,8 @@ pub struct BufferObj {
 pub struct PipelineObj {
     pub dialect: u32,
     pub desc: PipelineDesc,
+    /// Failure shared by all layout probes, including probes made after creation.
+    pub(crate) unsupported: Option<&'static str>,
     /// The `PipelineCreate` blob as received (header, code, bindings, vertex layout): frame
     /// capture replays exactly this code.
     pub blob: std::sync::Arc<[u8]>,
@@ -458,6 +469,9 @@ pub struct Stats {
     /// upload arenas (uniforms, inline instances, texture upload staging) the backend had to
     /// allocate for this session's frames and uploads; steady frames reuse theirs and add none
     pub arena_allocs: u64,
+    /// command buffer slots made for this session's frames, uploads and readbacks (Vulkan).
+    /// Recurring batches reuse their slots once their fences have signalled.
+    pub batch_slots_made: u64,
     /// framebuffers the backend made for this session's passes; a pass drawn again into the same
     /// attachments at the same size reuses its framebuffer, so steady frames add none (Vulkan)
     pub framebuffers_made: u64,
@@ -1712,6 +1726,10 @@ mod texture_kind_tests {
     fn six_square_colour_layers_are_a_cube_unless_made_as_an_array() {
         assert!(tex(64, 64, 6, format::BGRA8, usage::SAMPLED).is_cube());
         assert!(!tex(64, 64, 6, format::BGRA8, usage::SAMPLED | usage::ARRAY).is_cube());
+        for depth in [1, 6] {
+            let volume = tex(64, 64, depth, format::RGBA8, usage::SAMPLED | usage::VOLUME);
+            assert!(volume.is_volume() && !volume.is_cube());
+        }
         assert!(!tex(64, 32, 6, format::BGRA8, usage::SAMPLED).is_cube());
         assert!(!tex(64, 64, 4, format::BGRA8, usage::SAMPLED).is_cube());
         assert!(!tex(64, 64, 6, format::DEPTH32F, usage::SAMPLED).is_cube());

@@ -155,9 +155,10 @@ impl Metal {
         unsafe {
             let blit: ObjcId = msg_send![cb, blitCommandEncoder];
             for &(level, layer, w, h, stride, _, rows, offset) in &regions {
-                let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+                let (slice, z) = if t.is_volume() { (0, u64::from(layer)) } else { (u64::from(layer), 0) };
+                let origin = MTLOrigin { x: 0, y: 0, z };
                 let size = MTLSize { width: w as u64, height: h as u64, depth: 1 };
-                let _: () = msg_send![blit, copyFromTexture: tex.as_id() sourceSlice: layer as u64 sourceLevel: level as u64 sourceOrigin: origin sourceSize: size toBuffer: staging.as_id() destinationOffset: offset destinationBytesPerRow: stride destinationBytesPerImage: stride * rows];
+                let _: () = msg_send![blit, copyFromTexture: tex.as_id() sourceSlice: slice sourceLevel: level as u64 sourceOrigin: origin sourceSize: size toBuffer: staging.as_id() destinationOffset: offset destinationBytesPerRow: stride destinationBytesPerImage: stride * rows];
             }
             let _: () = msg_send![blit, endEncoding];
         }

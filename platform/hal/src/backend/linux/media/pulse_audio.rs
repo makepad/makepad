@@ -24,15 +24,67 @@ relax_api::option_layouts! {
 /// the UI thread.
 const PULSE_TIMEOUT_MS: u64 = 3000;
 
-/// Values of `PulseContextState::state`.
+/// Values of `PulseConnection`.
 const CONTEXT_CONNECTING: u32 = 0;
 const CONTEXT_READY: u32 = 1;
 const CONTEXT_FAILED: u32 = 2;
+/// Still connecting after the startup wait: its outcome is logged.
+const CONTEXT_CONNECTING_LATE: u32 = 3;
 
 /// Values of the `ready_state` of an input/output stream.
 const STREAM_CONNECTING: u32 = 0;
 const STREAM_READY: u32 = 1;
 const STREAM_FAILED: u32 = 2;
+
+struct PulseConnection(AtomicU32);
+
+impl PulseConnection {
+    fn is_ready(&self) -> bool {
+        self.0.load(Ordering::Acquire) == CONTEXT_READY
+    }
+
+    /// Called with the mainloop locked, after the bounded startup wait.
+    fn keep_after_wait(&self) -> bool {
+        match self.0.load(Ordering::Acquire) {
+            CONTEXT_CONNECTING => {
+                // A callback can only change the state while the mainloop is unlocked.
+                self.0.store(CONTEXT_CONNECTING_LATE, Ordering::Release);
+                eprintln!("PulseAudio: still connecting to the sound server, using ALSA until then");
+                true
+            }
+            CONTEXT_READY => true,
+            _ => false,
+        }
+    }
+
+    fn state_changed(
+        &self,
+        state: pa_context_state_t,
+        subscribe: impl FnOnce(),
+        signal: impl FnOnce(),
+    ) {
+        let next = match state {
+            PA_CONTEXT_READY => CONTEXT_READY,
+            PA_CONTEXT_FAILED | PA_CONTEXT_TERMINATED => CONTEXT_FAILED,
+            _ => return,
+        };
+        let previous = self.0.swap(next, Ordering::AcqRel);
+        if previous != next {
+            if next == CONTEXT_READY {
+                subscribe();
+            }
+            // A normal start is quiet; only a connection that outlived the wait reports its end.
+            if previous == CONTEXT_CONNECTING_LATE {
+                if next == CONTEXT_READY {
+                    eprintln!("PulseAudio: connected to the sound server");
+                } else {
+                    eprintln!("PulseAudio: the sound server did not connect, using ALSA only");
+                }
+            }
+            signal();
+        }
+    }
+}
 
 struct PulseAudioDesc {
     name: String,
@@ -45,7 +97,7 @@ struct PulseAudioDesc {
 /// holding the `PulseAudioAccess` mutex, so a callback that took that mutex
 /// would deadlock both threads.
 struct PulseContextState {
-    state: AtomicU32,
+    connection: PulseConnection,
     main_loop: *mut pa_threaded_mainloop,
     change_signal: Signal,
 }
@@ -687,10 +739,8 @@ impl PulseDeviceQuery {
 impl PulseAudioAccess {
     /// Connects to the PulseAudio server.
     ///
-    /// Returns `None` when there is no usable server (headless machines,
-    /// containers without a sound server, and so on); the caller is expected to
-    /// carry on with ALSA only. Nothing in here may panic or abort: a machine
-    /// without audio is a perfectly normal machine to run on.
+    /// A pending connection continues on the mainloop after the startup wait.
+    /// ALSA serves while it connects, or on its own if setup fails.
     pub fn new(change_signal: Signal, entries: &Entries) -> Option<Self> {
         unsafe {
             let main_loop = pa_threaded_mainloop_new();
@@ -717,7 +767,7 @@ impl PulseAudioAccess {
             }
 
             let context_state = Box::into_raw(Box::new(PulseContextState {
-                state: AtomicU32::new(CONTEXT_CONNECTING),
+                connection: PulseConnection(AtomicU32::new(CONTEXT_CONNECTING)),
                 main_loop,
                 change_signal: change_signal.clone(),
             }));
@@ -756,48 +806,24 @@ impl PulseAudioAccess {
 
             pa_threaded_mainloop_lock(main_loop);
             let timeout = PulseTimeout::new(main_loop_api, main_loop, PULSE_TIMEOUT_MS);
-            while (*context_state).state.load(Ordering::Acquire) == CONTEXT_CONNECTING
+            let connection = &(*context_state).connection;
+            while connection.0.load(Ordering::Acquire) == CONTEXT_CONNECTING
                 && !timeout.expired()
             {
                 pa_threaded_mainloop_wait(main_loop);
             }
             timeout.free();
+            let keep = connection.keep_after_wait();
+            if !keep {
+                eprintln!(
+                    "PulseAudio: could not connect to a sound server ({}), using ALSA only",
+                    context_error(context)
+                );
+            }
             pa_threaded_mainloop_unlock(main_loop);
-
-            match (*context_state).state.load(Ordering::Acquire) {
-                CONTEXT_READY => {
-                    pa_threaded_mainloop_lock(main_loop);
-                    pa_context_set_subscribe_callback(
-                        context,
-                        Some(Self::subscribe_callback),
-                        context_state.cast(),
-                    );
-                    let op = pa_context_subscribe(
-                        context,
-                        0x0001 | 0x0002 | 0x0080,
-                        None,
-                        std::ptr::null_mut(),
-                    );
-                    if !op.is_null() {
-                        pa_operation_unref(op);
-                    }
-                    pa_threaded_mainloop_unlock(main_loop);
-                }
-                CONTEXT_CONNECTING => {
-                    eprintln!(
-                        "PulseAudio: timed out connecting to a sound server, using ALSA only"
-                    );
-                    Self::destroy_context(main_loop, context, context_state);
-                    return None;
-                }
-                _ => {
-                    eprintln!(
-                        "PulseAudio: could not connect to a sound server ({}), using ALSA only",
-                        context_error(context)
-                    );
-                    Self::destroy_context(main_loop, context, context_state);
-                    return None;
-                }
+            if !keep {
+                Self::destroy_context(main_loop, context, context_state);
+                return None;
             }
 
             Some(PulseAudioAccess {
@@ -830,15 +856,12 @@ impl PulseAudioAccess {
     ) {
         // stop the mainloop first, so no callback can reference the state below
         pa_threaded_mainloop_stop(main_loop);
+        pa_context_set_subscribe_callback(context, None, std::ptr::null_mut());
         pa_context_set_state_callback(context, None, std::ptr::null_mut());
         pa_context_disconnect(context);
         pa_context_unref(context);
         pa_threaded_mainloop_free(main_loop);
         drop(Box::from_raw(context_state));
-    }
-
-    fn context_state(&self) -> u32 {
-        unsafe { (*self.context_state).state.load(Ordering::Acquire) }
     }
 
     /// Whether the server connection is alive.
@@ -847,7 +870,7 @@ impl PulseAudioAccess {
     /// and passing one of those to `pa_operation_get_state`/`pa_operation_unref`
     /// aborts the process inside libpulse.
     fn is_context_ready(&self) -> bool {
-        self.context_state() == CONTEXT_READY
+        unsafe { (*self.context_state).connection.is_ready() }
     }
 
     unsafe extern "C" fn subscribe_callback(
@@ -867,13 +890,19 @@ impl PulseAudioAccess {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let context_state = &*(state_ptr as *const PulseContextState);
 
-            match pa_context_get_state(c) {
-                PA_CONTEXT_READY => context_state.state.store(CONTEXT_READY, Ordering::Release),
-                PA_CONTEXT_FAILED | PA_CONTEXT_TERMINATED => {
-                    context_state.state.store(CONTEXT_FAILED, Ordering::Release)
-                }
-                _ => (),
-            }
+            context_state.connection.state_changed(
+                pa_context_get_state(c),
+                || {
+                    // libpulse holds the mainloop lock here for both early and late readiness.
+                    pa_context_set_subscribe_callback(c, Some(Self::subscribe_callback), state_ptr);
+                    let op =
+                        pa_context_subscribe(c, 0x0001 | 0x0002 | 0x0080, None, std::ptr::null_mut());
+                    if !op.is_null() {
+                        pa_operation_unref(op);
+                    }
+                },
+                || context_state.change_signal.set(),
+            );
             // always signal: whoever is waiting has to re-check both the context
             // state and whatever else it was waiting for
             pa_threaded_mainloop_signal(context_state.main_loop, 0);
@@ -1288,6 +1317,29 @@ impl Drop for PulseAudioAccess {
             pa_context_unref(self.context);
             pa_threaded_mainloop_free(self.main_loop);
             drop(Box::from_raw(self.context_state));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_connection_survives_startup_and_refreshes_devices_on_completion() {
+        for outcome in [PA_CONTEXT_READY, PA_CONTEXT_FAILED, PA_CONTEXT_TERMINATED] {
+            let connection = PulseConnection(AtomicU32::new(CONTEXT_CONNECTING));
+            assert!(connection.keep_after_wait(), "keep the context on timeout");
+            assert!(!connection.is_ready(), "pending access exposes no devices");
+
+            let (mut subscriptions, mut signals) = (0, 0);
+            for state in [PA_CONTEXT_AUTHORIZING, outcome, outcome] {
+                connection.state_changed(state, || subscriptions += 1, || signals += 1);
+            }
+            let ready = outcome == PA_CONTEXT_READY;
+            assert_eq!(subscriptions, u32::from(ready), "subscribe once on ready");
+            assert_eq!(signals, 1, "refresh once on completion");
+            assert_eq!(connection.is_ready(), ready, "failed access exposes no devices");
         }
     }
 }

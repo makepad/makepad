@@ -470,6 +470,10 @@ pub struct HalInfo {
     /// array: this struct crosses the HAL pipe as plain data). An app picks its
     /// graphics quality from it ([`HalInfo::device_name`]).
     pub device_name: [u64; 8],
+    /// Single-level sampled 3D formats, one bit per format. Empty on unsupported devices.
+    pub volume_formats: u64,
+    /// Maximum width, height and depth for every advertised volume format.
+    pub max_volume_dimension: u32,
 }
 
 /// What kind of GPU a backend runs on (`HalInfo::device_kind`).
@@ -482,6 +486,17 @@ pub mod device_kind {
 }
 
 impl HalInfo {
+    /// Whether this device accepts a pipeline that samples a 3D texture.
+    pub fn sampled_volume_support(&self) -> Result<(), &'static str> {
+        if self.volume_formats != 0 && self.max_volume_dimension != 0 { return Ok(()); }
+        Err(match self.backend {
+            backend_id::VULKAN => "volume textures aren't available on Vulkan yet",
+            backend_id::D3D11 => "volume textures aren't available on D3D11 yet",
+            backend_id::GL => "volume textures aren't available on GLES yet",
+            _ => "volume textures aren't available on this backend yet",
+        })
+    }
+
     /// The device name (empty when the backend does not know it).
     pub fn device_name(&self) -> String {
         let bytes: Vec<u8> = self.device_name.iter().flat_map(|w| w.to_le_bytes()).take_while(|b| *b != 0).collect();
@@ -502,23 +517,29 @@ impl HalInfo {
     /// Field by field, little-endian, for an event payload (`BackendChanged`).
     /// Every field is named, so a new one can't be left out of the payload.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let Self { session, backend, dialect, flags, formats, storage_formats, max_workgroup_size, max_workgroup_invocations,
+        let Self { session, backend, dialect, flags, formats, storage_formats, volume_formats, max_volume_dimension, max_workgroup_size, max_workgroup_invocations,
             msaa, dpi, max_texture, max_window, max_buffer, working_set, vendor_id, device_kind, device_name } = *self;
         let words = [session, backend, dialect, flags, max_workgroup_size[0], max_workgroup_size[1], max_workgroup_size[2],
             max_workgroup_invocations, msaa, dpi.to_bits(), max_texture, max_window[0], max_window[1], vendor_id, device_kind];
         let longs = [formats, storage_formats, max_buffer, working_set].into_iter().chain(device_name);
-        words.iter().flat_map(|w| w.to_le_bytes()).chain(longs.flat_map(u64::to_le_bytes)).collect()
+        words.iter().flat_map(|w| w.to_le_bytes()).chain(longs.flat_map(u64::to_le_bytes))
+            .chain(volume_formats.to_le_bytes()).chain(max_volume_dimension.to_le_bytes()).collect()
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         // 15 u32 words, then 12 u64s (4 fields and the 8 of `device_name`), as `to_bytes` writes them
         const WORDS: usize = 15;
-        if bytes.len() != WORDS * 4 + 12 * 8 { return None; }
+        const VOLUME: usize = WORDS * 4 + 12 * 8;
+        let (volume_formats, max_volume_dimension) = match bytes.get(VOLUME..)? {
+            [] => (0, 0),
+            tail if tail.len() == 12 => (u64::from_le_bytes(tail[..8].try_into().ok()?), u32::from_le_bytes(tail[8..].try_into().ok()?)),
+            _ => return None,
+        };
         let w = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
         let l = |i: usize| u64::from_le_bytes(bytes[WORDS * 4 + i * 8..WORDS * 4 + i * 8 + 8].try_into().unwrap());
         Some(Self { session: w(0), backend: w(1), dialect: w(2), flags: w(3), max_workgroup_size: [w(4), w(5), w(6)],
             max_workgroup_invocations: w(7), msaa: w(8), dpi: f32::from_bits(w(9)), max_texture: w(10), max_window: [w(11), w(12)],
-            vendor_id: w(13), device_kind: w(14), formats: l(0), storage_formats: l(1), max_buffer: l(2), working_set: l(3),
+            volume_formats, max_volume_dimension, vendor_id: w(13), device_kind: w(14), formats: l(0), storage_formats: l(1), max_buffer: l(2), working_set: l(3),
             device_name: std::array::from_fn(|i| l(4 + i)) })
     }
 }
@@ -664,6 +685,8 @@ pub mod usage {
     /// are a cube: [`crate::session::TextureObj::is_cube`])
     pub const ARRAY: u16 = 16;
     pub const STORAGE: u16 = 32;
+    /// Spatial z slices of a sampled 3D image. Mutually exclusive with ARRAY.
+    pub const VOLUME: u16 = 64;
 }
 
 /// Buffer kinds (`BufferCreate` flags).
@@ -1009,9 +1032,12 @@ pub mod target {
     pub const FLAGS: u32 = PICK | CAPTURE | SNAPSHOT | OVERLAY | BADGES | REPLAY;
 }
 
+/// Sampled volume shape in GL, HLSL and SPIR-V reflection and the Metal binding table.
+pub const TEXTURE_SHAPE_3D: u32 = 7;
+
 /// Layout of `PipelineDesc::bindings` (the blob's `[u32]` binding table): the buffer slot of each
 /// uniform block (`NONE`: the shader has none), then the texture count and the custom uniform
-/// buffer slots.
+/// buffer slots. A Metal pipeline with `METAL_TEXTURE_SHAPES` appends one shape per texture.
 pub mod pipeline_binding {
     pub const DRAW_CALL: usize = 0;
     pub const PASS: usize = 1;
@@ -1524,21 +1550,6 @@ pub fn clock_ns() -> u64 {
     crate::clock::raw_ns()
 }
 
-/// A window of `points` at `dpi` in whole pixels: round(points × dpi), at least one.
-///
-/// The one points-to-pixels conversion of a window: a WM makes a window's shared images this
-/// size, the HAL's window shell and a session's embedded window take it as the window's pixels,
-/// and the boot screen and an app's frames size the window's pass to it. The size and dpi are
-/// taken at f32 first, as they reach an app (`HalEvent::Geom` carries an f32 dpi, a session keeps
-/// f32 geometry), so every side makes the same pixels from the numbers it has. A frame a pixel
-/// larger than its window's shared images is drawn offscreen and never shown: the boot screen's
-/// f32 points × dpi made 1352 × 789 frames for the WM's 1352 × 788 images of a tile at 2.43, and
-/// the app behind it never started.
-pub fn window_pixels(points: [f64; 2], dpi: f64) -> [u32; 2] {
-    let dpi = dpi as f32 as f64;
-    points.map(|p| (p as f32 as f64 * dpi).round().max(1.0) as u32)
-}
-
 /// One window's / target's frame. `passes` and `draws` are ELEMENT ranges into the CmdBuf's
 /// `[Pass]` / `[Draw]` arrays (typed arrays of their own, not the byte arena: they hold padding
 /// and need alignment); `Pass::draws` is an element range into the same draw array.
@@ -1595,6 +1606,9 @@ pub mod pipeline_flags {
     /// math (no fma contraction or reassociation, IEEE division and sqrt where it can), so a
     /// data pass can match a CPU reference bit for bit
     pub const PRECISE: u32 = 1;
+    /// MSL binding table ends with one shape per sampled slot, after the custom uniform
+    /// buffers. TEXTURE_SHAPE_3D selects a volume; NONE preserves the ordinary binding.
+    pub const METAL_TEXTURE_SHAPES: u32 = 2;
 }
 
 /// `PipelineDesc::blend` bits.
