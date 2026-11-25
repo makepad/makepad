@@ -1,11 +1,12 @@
 //! The shipped shader library: every document compiles, audits clean with
-//! `check`, renders the same bits natively and interpreted, and does its
-//! technique better than the native voice it replaces or extends
-//! (tuning, aliasing), with CPU numbers.
+//! `check`, and does its technique better than the native voice it
+//! replaces or extends (tuning, aliasing), with CPU numbers. That it plays
+//! the same bits on every backend is tested with the examples, in the
+//! audio shader crate's tests.
 
 use makepad_audio_synth::recipe::{Recipe, RecipeVoice};
-use makepad_script_audio_aot::{compile_with, Backend, Instance, Kind};
-use makepad_score_player::shader::{check, library, ShaderInst, LIBRARY};
+use makepad_script_audio_aot::{compile_with, Backend, Instance};
+use makepad_score_player::shader::{check, check_with, library, AudioBindings, SampleView, ShaderInst, LIBRARY};
 use std::f32::consts::TAU;
 
 const RATE: f32 = 48000.0;
@@ -13,36 +14,29 @@ const RATE: f32 = 48000.0;
 #[test]
 fn every_library_shader_checks_clean() {
     for (name, code) in LIBRARY {
-        let report = check(code).unwrap_or_else(|e| {
+        let report = if *name == "convolver" {
+            // A room's broadband decay gives a representative reverb level when the audition plays music through it.
+            let frames = (1.5 * RATE) as u32;
+            let mut seed = 1u32;
+            let mut noise = || {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 9) as f32 / 4194304.0 - 1.0
+            };
+            let room: Vec<f32> = (0..frames).flat_map(|i| {
+                let decay = 0.001_f32.powf(i as f32 / frames as f32);
+                [decay * noise(), decay * noise()]
+            }).collect();
+            let ir = SampleView { name: "ir", frames, channels: 2, data: &room };
+            check_with(code, &AudioBindings { samples: &[ir], ..Default::default() })
+        } else {
+            check(code)
+        }.unwrap_or_else(|e| {
             let (line, col) = e[0].line_col(code);
             panic!("{} {}:{}: {}", name, line, col, e[0].message)
         });
-        eprintln!("{:12} {:?} peak {:.2} rms {:.3} {:>8.1} ops/frame tail {:?} {:?}", name, report.kind, report.peak, report.rms, report.ops_per_frame, report.tail_secs, report.warnings);
+        eprintln!("{:12} {:?} peak {:.4} rms {:.4} ops/frame {:.2} mean {:.2} peak tail {:?} {:?}",
+            name, report.kind, report.peak, report.rms, report.ops_per_frame, report.peak_ops_per_block, report.tail_secs, report.warnings);
         assert!(report.warnings.is_empty(), "{}: {:?}", name, report.warnings);
-    }
-}
-
-#[test]
-fn library_backends_agree_bit_for_bit() {
-    for (name, code) in LIBRARY {
-        let native = compile_with(code, Backend::Native).unwrap();
-        let interp = compile_with(code, Backend::Interp).unwrap();
-        let render = |s: &makepad_script_audio_aot::AudioShaderRef| {
-            let mut i = Instance::new(s.clone(), RATE);
-            let n = 12000;
-            let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
-            if s.kind == Kind::Effect {
-                let x: Vec<f32> = (0..n).map(|k| ((k as f32 * 0.021).sin() + if k % 3000 == 0 { 0.8 } else { 0.0 }) * 0.5).collect();
-                i.process(&x, &x, &mut l, &mut r);
-            } else {
-                i.note_on(50.0, 0.9, 3);
-                i.render(&mut l[..8000], &mut r[..8000]);
-                i.note_off();
-                i.render(&mut l[8000..], &mut r[8000..]);
-            }
-            l.iter().chain(&r).map(|x| x.to_bits()).collect::<Vec<_>>()
-        };
-        assert!(render(&native) == render(&interp), "{}: native and interpreter differ", name);
     }
 }
 
@@ -148,9 +142,9 @@ fn acid_slides_without_retriggering() {
     let shader = compile_with(library("acid").unwrap(), Backend::Native).unwrap();
     let mut inst = ShaderInst::new(shader, RATE);
     let (mut l, mut r) = (vec![0.0f32; 24000], vec![0.0f32; 24000]);
-    inst.note_on(36.0, 0.7, 0);
+    inst.note_on(36.0, 0.7, 0, 1);
     inst.render(&mut l[..12000], &mut r[..12000]);
-    inst.legato(48.0, 0.7, 0);
+    inst.legato(48.0, 0.7, 0, 1);
     inst.render(&mut l[12000..], &mut r[12000..]);
     // No new attack: the level right after the slide stays under the
     // level at the first note's start (the filter envelope kept decaying).
@@ -168,7 +162,7 @@ fn acid_slides_without_retriggering() {
 fn echo_lands_on_the_beat_division() {
     let shader = compile_with(library("echo").unwrap(), Backend::Native).unwrap();
     let mut i = Instance::new(shader, RATE);
-    i.set_param("bpm", 125.0);
+    i.set_time(125.0, 0.0, 0, 125.0 / 60.0 / RATE as f64, 4.0, true);
     i.set_param("division", 0.5);
     i.set_param("side_ms", 0.0);
     i.set_param("wet", 1.0);

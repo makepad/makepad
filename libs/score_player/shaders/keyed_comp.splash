@@ -1,0 +1,31 @@
+// Stereo peak compressor. The louder key channel sets the gain for both
+// main channels. With a silent key only makeup gain is applied.
+let key = input(2)
+let threshold = param(-18, -60, 0, {unit: db label: "Threshold"})
+let ratio = param(4, 1, 20, {curve: log label: "Ratio"})
+let attack = param(5, 0.1, 100, {unit: ms curve: log label: "Attack"})
+let release = param(100, 2, 2000, {unit: ms curve: log label: "Release"})
+let makeup = param(0, 0, 24, {unit: db label: "Makeup"})
+
+var rise = 0.0
+var fall = 0.0
+var level = 0.0
+var knee = 1.0
+var slope = 0.0
+var post = 1.0
+
+fn block() {
+    rise = 1.0 - exp(-1000.0 / (attack * sample_rate))
+    fall = 1.0 - exp(-1000.0 / (release * sample_rate))
+    knee = db_to_gain(threshold)
+    slope = 1.0 / ratio - 1.0
+    post = db_to_gain(makeup)
+}
+
+fn effect(l, r) {
+    let peak = max(abs(key.x), abs(key.y))
+    let speed = if peak > level { rise } else { fall }
+    level += (peak - level) * speed
+    let gain = if level > knee { pow(level / knee, slope) } else { 1.0 }
+    vec2(l, r) * (gain * post)
+}

@@ -46,6 +46,193 @@ pub enum Group {
 /// Seconds a group volume change glides over (a mute is a quick fade).
 const GROUP_GLIDE: f32 = 0.08;
 
+/// A finite linear transition in audio time. Commands may retarget it mid-ramp.
+#[derive(Clone, Copy)]
+struct Glide {
+    value: f32,
+    target: f32,
+    left: f64,
+}
+
+impl Glide {
+    const fn new(value: f32) -> Self { Self { value, target: value, left: 0.0 } }
+
+    fn set(&mut self, target: f32, seconds: f64) {
+        self.target = target;
+        self.left = if target == self.value { 0.0 } else { seconds };
+        if self.left == 0.0 { self.value = target; }
+    }
+
+    fn advance(&mut self, frames: usize, rate: f32) -> f32 {
+        if self.left > 0.0 {
+            let remaining = (self.left * rate as f64).round().max(1.0);
+            if frames as f64 >= remaining {
+                self.value = self.target;
+                self.left = 0.0;
+            } else {
+                self.value += (self.target - self.value) * (frames as f64 / remaining) as f32;
+                self.left -= frames as f64 / rate as f64;
+            }
+        }
+        self.value
+    }
+}
+
+fn seconds(s: f32) -> f64 { finite(s, 0.0).max(0.0) as f64 }
+
+/// Script volume and a retriggerable duck, independent of the player's volume.
+#[derive(Clone, Copy)]
+pub struct GroupMix {
+    script: Glide,
+    duck: Glide,
+    floor: f32,
+    hold: f64,
+    release: f64,
+}
+
+impl Default for GroupMix {
+    fn default() -> Self {
+        Self { script: Glide::new(1.0), duck: Glide::new(1.0), floor: 1.0, hold: 0.0, release: 0.0 }
+    }
+}
+
+impl GroupMix {
+    pub fn set_gain(&mut self, gain: f32, ease: f32) {
+        self.script.set(finite(gain, 1.0).clamp(0.0, 4.0), seconds(ease));
+    }
+
+    pub fn duck(&mut self, to: f32, attack: f32, hold: f32, release: f32) {
+        let to = finite(to, 1.0).clamp(0.0, 1.0);
+        let (attack, hold, release) = (seconds(attack), seconds(hold), seconds(release));
+        let old_end = self.duck.left + self.hold + self.release;
+        if old_end == 0.0 && (to == 1.0 || attack + hold + release == 0.0) { return; }
+        let old_hold_end = if self.duck.target < 1.0 { self.duck.left + self.hold } else { 0.0 };
+        let hold_end = old_hold_end.max(attack + hold);
+        let end = old_end.max(attack + hold + release);
+        let attack = if old_hold_end > 0.0 && to > self.floor {
+            self.duck.left
+        } else if self.duck.target <= to {
+            self.duck.left.min(attack)
+        } else { attack };
+        self.floor = if old_end > 0.0 { self.floor.min(to) } else { to };
+        self.duck.set(self.floor, attack);
+        self.hold = (hold_end - self.duck.left).max(0.0);
+        self.release = end - hold_end;
+        self.begin_release();
+    }
+
+    fn begin_release(&mut self) {
+        if self.duck.left == 0.0 && self.hold == 0.0 && self.duck.target != 1.0 {
+            self.duck.set(1.0, self.release);
+            self.release = 0.0;
+        }
+    }
+
+    /// Write one gain per frame for all sources in this group. Unity leaves
+    /// the scratch untouched. Split at phase boundaries even for a one-buffer duck.
+    pub fn levels(&mut self, out: &mut [f32], rate: f32) -> bool {
+        if self.script.value == 1.0 && self.script.left == 0.0 && self.duck.value == 1.0
+            && self.duck.left == 0.0 && self.hold == 0.0 && self.release == 0.0 {
+            return false;
+        }
+        let mut offset = 0;
+        while offset < out.len() {
+            let holding = self.duck.left == 0.0 && self.hold > 0.0;
+            let mut n = out.len() - offset;
+            for time in [self.script.left, self.duck.left, if holding { self.hold } else { 0.0 }] {
+                if time > 0.0 { n = n.min((time * rate as f64).round().max(1.0) as usize); }
+            }
+            let script = self.script.value;
+            let duck = self.duck.value;
+            let ds = (self.script.advance(n, rate) - script) / n as f32;
+            let dd = (self.duck.advance(n, rate) - duck) / n as f32;
+            let span = &mut out[offset..offset+n];
+            if ds == 0.0 && dd == 0.0 {
+                span.fill(script * duck);
+            } else {
+                for (i, g) in span.iter_mut().enumerate() {
+                    let t = (i + 1) as f32;
+                    *g = (script + t * ds) * (duck + t * dd);
+                }
+            }
+            if holding {
+                let remaining = (self.hold * rate as f64).round();
+                self.hold = if n as f64 >= remaining { 0.0 } else { self.hold - n as f64 / rate as f64 };
+            }
+            self.begin_release();
+            offset += n;
+        }
+        true
+    }
+}
+
+/// Glides the feedback coefficient of two cascaded low-pass sections.
+/// A zero feedback coefficient is the exact identity at the end of a glide.
+#[derive(Clone, Copy)]
+pub struct Muffle {
+    amount: f32,
+    rate: f32,
+    pole: Glide,
+}
+
+impl Default for Muffle {
+    fn default() -> Self { Self { amount: 0.0, rate: 0.0, pole: Glide::new(0.0) } }
+}
+
+impl Muffle {
+    pub fn bypassed(&self) -> bool {
+        self.amount == 0.0 && self.pole.value == 0.0
+    }
+
+    pub fn set(&mut self, amount: f32, ease: f32, rate: f32) {
+        self.amount = finite(amount, 0.0).clamp(0.0, 1.0);
+        self.retune(rate, seconds(ease));
+    }
+
+    fn retune(&mut self, rate: f32, ease: f64) {
+        self.rate = rate;
+        let pole = if self.amount == 0.0 { 0.0 } else {
+            let cutoff = 20_000.0 * 0.03_f32.powf(self.amount);
+            (-std::f32::consts::TAU * cutoff / rate).exp()
+        };
+        self.pole.set(pole, ease);
+    }
+
+    /// The active prefix of the block. Frames after it bypass the filter.
+    pub fn poles(&mut self, out: &mut [f32], rate: f32) -> usize {
+        if self.bypassed() { return 0; }
+        if self.rate != rate { self.retune(rate, self.pole.left); }
+        let n = out.len().min((self.pole.left * rate as f64).round() as usize);
+        if n > 0 {
+            let start = self.pole.value;
+            let end = self.pole.advance(n, rate);
+            let step = (end - start) / n as f32;
+            for (i, p) in out[..n].iter_mut().enumerate() { *p = start + step * (i + 1) as f32; }
+            out[n-1] = end;
+        } else if self.pole.left > 0.0 {
+            self.pole.set(self.pole.target, 0.0);
+        }
+        if self.pole.value == 0.0 { return n.saturating_sub(1); }
+        out[n..].fill(self.pole.value);
+        out.len()
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct LowPassPair {
+    first: f32,
+    second: f32,
+}
+
+impl LowPassPair {
+    #[inline]
+    pub fn filter(&mut self, x: f32, pole: f32) -> f32 {
+        self.first = x + pole * (self.first - x);
+        self.second = self.first + pole * (self.second - self.first);
+        self.second
+    }
+}
+
 /// Where a voice is and how it carries. `positional: false` is a 2D sound
 /// (UI, the player's own gun): centred, no distance, no doppler.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,9 +312,15 @@ pub enum Command {
     Room(RoomParams),
     Master(f32),
     GroupGain { group: Group, gain: f32 },
+    GroupScript { group: Group, gain: f32, ease: f32 },
+    GroupDuck { group: Group, to: f32, attack: f32, hold: f32, release: f32 },
+    Muffle { amount: f32, ease: f32 },
+    ResetScriptMix,
     InstrumentGroup { key: u64, group: Group },
     Duck(f32),
     PlayRecipe { id: u64, recipe: Recipe, pitch: f32, gain: f32, emitter: Emitter, priority: Priority, key: u64 },
+    /// An interface cue keeps the player's effects volume and bypasses script mix controls.
+    PlayUnmixedRecipe { id: u64, recipe: Recipe, pitch: f32, gain: f32, emitter: Emitter, priority: Priority, key: u64 },
     MoveVoice { id: u64, pos: V3, vel: V3 },
     StopVoice { id: u64 },
     Vehicle { key: u64, spec: EngineSpec, engine: EngineInput, tyres: TyreInput, emitter: Emitter, interior: f32, gain: f32 },
@@ -158,6 +351,7 @@ pub enum Command {
 }
 
 struct RecipeSlot {
+    bypass_mix: bool,
     active: bool,
     id: u64,
     key: u64,
@@ -292,6 +486,14 @@ pub struct SynthBus {
     /// Group volumes ([`Group`]), smoothed so a mute fades.
     fx_gain: Smooth,
     music_gain: Smooth,
+    script: [GroupMix; 2],
+    muffle: Muffle,
+    low_pass: [LowPassPair; 3],
+    // Reusable control ramps and the dry L/R + send that bypass the effects filter.
+    fx_levels: [f32; BLOCK],
+    music_levels: [f32; BLOCK],
+    poles: [f32; BLOCK],
+    clear: [[f32; BLOCK]; 3],
     /// Reverb send for the external (sampled) input.
     pub external_send: f32,
     mono: [f32; BLOCK],
@@ -316,6 +518,7 @@ impl SynthBus {
         let default_recipe = Recipe::default();
         let recipes = (0..RECIPE_VOICES)
             .map(|_| RecipeSlot {
+                bypass_mix: false,
                 active: false,
                 id: 0,
                 key: 0,
@@ -382,6 +585,13 @@ impl SynthBus {
             master: 1.0,
             fx_gain: Smooth::new(1.0),
             music_gain: Smooth::new(1.0),
+            script: [GroupMix::default(); 2],
+            muffle: Muffle::default(),
+            low_pass: [LowPassPair::default(); 3],
+            fx_levels: [0.0; BLOCK],
+            music_levels: [0.0; BLOCK],
+            poles: [0.0; BLOCK],
+            clear: [[0.0; BLOCK]; 3],
             external_send: 0.12,
             mono: [0.0; BLOCK],
             dry_l: [0.0; BLOCK],
@@ -438,15 +648,21 @@ impl SynthBus {
     /// or cannot place goes to `retire`. With [`SynthBus::render`] and
     /// [`SynthBus::reap`] this is everything the audio thread calls.
     pub fn apply(&mut self, cmd: Command, retire: &mut impl FnMut(Retired)) {
+        let bypass_mix = matches!(&cmd, Command::PlayUnmixedRecipe { .. });
         match cmd {
             Command::Listener(listener) => self.set_listener(listener),
             Command::Room(room) => self.set_room(room),
             Command::Master(gain) => self.set_master(gain),
             Command::GroupGain { group, gain } => self.set_group_gain(group, gain),
+            Command::GroupScript { group, gain, ease } => self.set_group_script(group, gain, ease),
+            Command::GroupDuck { group, to, attack, hold, release } => self.duck_group(group, to, attack, hold, release),
+            Command::Muffle { amount, ease } => self.set_muffle(amount, ease),
+            Command::ResetScriptMix => self.reset_script_mix(),
             Command::InstrumentGroup { key, group } => self.set_instrument_group(key, group),
             Command::Duck(key) => self.set_duck(key),
-            Command::PlayRecipe { id, recipe, pitch, gain, emitter, priority, key } => {
-                self.play_recipe(id, &recipe, pitch, gain, emitter, priority, key);
+            Command::PlayRecipe { id, recipe, pitch, gain, emitter, priority, key }
+            | Command::PlayUnmixedRecipe { id, recipe, pitch, gain, emitter, priority, key } => {
+                self.start_recipe(id, &recipe, pitch, gain, emitter, priority, key, bypass_mix);
             }
             Command::MoveVoice { id, pos, vel } => self.move_voice(id, pos, vel),
             Command::StopVoice { id } => self.stop_voice(id),
@@ -522,6 +738,24 @@ impl SynthBus {
         }
     }
 
+    pub fn set_group_script(&mut self, group: Group, gain: f32, ease: f32) {
+        self.script[group as usize].set_gain(gain, ease);
+    }
+
+    pub fn duck_group(&mut self, group: Group, to: f32, attack: f32, hold: f32, release: f32) {
+        self.script[group as usize].duck(to, attack, hold, release);
+    }
+
+    pub fn set_muffle(&mut self, amount: f32, ease: f32) {
+        if self.muffle.bypassed() && amount > 0.0 { self.low_pass = Default::default(); }
+        self.muffle.set(amount, ease, self.rate);
+    }
+
+    pub fn reset_script_mix(&mut self) {
+        self.script = Default::default();
+        self.muffle = Default::default();
+    }
+
     pub fn group_gain(&self, group: Group) -> f32 {
         match group {
             Group::Fx => self.fx_gain.target,
@@ -563,6 +797,11 @@ impl SynthBus {
         priority: Priority,
         key: u64,
     ) -> bool {
+        self.start_recipe(id, recipe, pitch, gain, emitter, priority, key, false)
+    }
+
+    fn start_recipe(&mut self, id: u64, recipe: &Recipe, pitch: f32, gain: f32, emitter: Emitter,
+                    priority: Priority, key: u64, bypass_mix: bool) -> bool {
         let place = emitter.placement(&self.listener);
         let loudness = place.gain * gain;
         if emitter.positional && place.gain <= 0.0 {
@@ -613,6 +852,7 @@ impl SynthBus {
         slot.active = true;
         slot.id = id;
         slot.key = key;
+        slot.bypass_mix = bypass_mix;
         slot.voice = RecipeVoice::new(recipe, pitch, None, false, seed);
         slot.emitter = emitter;
         slot.place = place;
@@ -1043,8 +1283,18 @@ impl SynthBus {
         let mut peak = 0.0f32;
         while at < n {
             let len = (n - at).min(BLOCK);
-            self.render_block(&mut out_l[at..at + len], &mut out_r[at..at + len], &mut peak);
-            at += len;
+            let end = at + len;
+            // Resume the original summation order on the first fully clear frame,
+            // even when the release ends in the middle of this render block.
+            if self.muffle.amount == 0.0 && self.muffle.pole.left > 0.0 {
+                let wet = ((self.muffle.pole.left * self.rate as f64).round() as usize).saturating_sub(1);
+                if wet > 0 && wet < len {
+                    self.render_block(&mut out_l[at..at + wet], &mut out_r[at..at + wet], &mut peak);
+                    at += wet;
+                }
+            }
+            self.render_block(&mut out_l[at..end], &mut out_r[at..end], &mut peak);
+            at = end;
         }
         // CPU accounting and graceful shedding.
         let spent = match (started, cpu_seconds()) {
@@ -1090,6 +1340,18 @@ impl SynthBus {
         let group_coef = crate::dsp::Smooth::coef(GROUP_GLIDE, rate);
         let mono = &mut self.mono[..len];
 
+        let fx_script = self.script[Group::Fx as usize].levels(&mut self.fx_levels[..len], rate);
+        let music_script = self.script[Group::Music as usize].levels(&mut self.music_levels[..len], rate);
+        let filtered = self.muffle.poles(&mut self.poles[..len], rate);
+        let bypass_voices = (filtered > 0 || fx_script) && self.recipes.iter().any(|s| s.active && s.bypass_mix);
+        let split_fx = filtered > 0 || bypass_voices;
+        let [clear_l, clear_r, clear_send] = &mut self.clear;
+        if bypass_voices {
+            clear_l[..len].fill(0.0);
+            clear_r[..len].fill(0.0);
+            clear_send[..len].fill(0.0);
+        }
+
         // Recipes.
         let fade_step = len as f32 * inv / STEAL_FADE;
         for s in self.recipes.iter_mut().filter(|s| s.active) {
@@ -1103,6 +1365,11 @@ impl SynthBus {
                 (f0, s.fade)
             } else {
                 (1.0, 1.0)
+            };
+            let (dry_l, dry_r, send) = if split_fx && s.bypass_mix {
+                (&mut clear_l[..len], &mut clear_r[..len], &mut clear_send[..len])
+            } else {
+                (&mut *dry_l, &mut *dry_r, &mut *send)
             };
             let g = s.gain;
             for i in 0..len {
@@ -1162,18 +1429,42 @@ impl SynthBus {
         // The effects' group volume, then the external input (already
         // balanced by its host) as it is.
         let ext_send = self.external_send;
-        for i in 0..len {
-            let g = self.fx_gain.next(group_coef);
-            dry_l[i] = dry_l[i] * g + out_l[i];
-            dry_r[i] = dry_r[i] * g + out_r[i];
-            send[i] = send[i] * g + (out_l[i] + out_r[i]) * 0.5 * ext_send;
+        if split_fx {
+            for i in 0..len {
+                let player = self.fx_gain.next(group_coef);
+                let g = if fx_script { player * self.fx_levels[i] } else { player };
+                dry_l[i] *= g;
+                dry_r[i] *= g;
+                send[i] *= g;
+                if bypass_voices {
+                    clear_l[i] = clear_l[i] * player + out_l[i];
+                    clear_r[i] = clear_r[i] * player + out_r[i];
+                    clear_send[i] = clear_send[i] * player + (out_l[i] + out_r[i]) * 0.5 * ext_send;
+                } else {
+                    clear_l[i] = out_l[i];
+                    clear_r[i] = out_r[i];
+                    clear_send[i] = (out_l[i] + out_r[i]) * 0.5 * ext_send;
+                }
+            }
+        } else {
+            for i in 0..len {
+                let player = self.fx_gain.next(group_coef);
+                let g = if fx_script { player * self.fx_levels[i] } else { player };
+                dry_l[i] = dry_l[i] * g + out_l[i];
+                dry_r[i] = dry_r[i] * g + out_r[i];
+                send[i] = send[i] * g + (out_l[i] + out_r[i]) * 0.5 * ext_send;
+            }
         }
         // One ramp per group for this block, shared by its instruments.
         let music = &mut self.mono[..len];
-        for m in music.iter_mut() {
-            *m = self.music_gain.next(group_coef);
+        for m in music.iter_mut() { *m = self.music_gain.next(group_coef); }
+        if music_script {
+            for (m, script) in music.iter_mut().zip(&self.music_levels) { *m *= script; }
         }
         let fx_now = self.fx_gain.value;
+        if fx_script && self.instruments.iter().any(|s| s.group == Group::Fx) {
+            for level in &mut self.fx_levels[..len] { *level *= fx_now; }
+        }
 
         // Instruments (stereo sources: each side placed at the emitter).
         let il = &mut self.inst_l[..len];
@@ -1185,6 +1476,11 @@ impl SynthBus {
             s.spatial_r.set(&s.place, s.emitter.occlusion);
             let g = s.gain;
             let step = s.fade_step;
+            let (dry_l, dry_r, send) = if split_fx && s.group == Group::Music {
+                (&mut clear_l[..len], &mut clear_r[..len], &mut clear_send[..len])
+            } else {
+                (&mut *dry_l, &mut *dry_r, &mut *send)
+            };
             for i in 0..len {
                 // A retiring slot ramps to silence and stays there until
                 // the control side reaps it.
@@ -1192,7 +1488,7 @@ impl SynthBus {
                 if step > 0.0 {
                     s.fade = (s.fade - step).max(0.0);
                 }
-                let f = f * if s.group == Group::Music { music[i] } else { fx_now };
+                let f = f * if s.group == Group::Music { music[i] } else if fx_script { self.fx_levels[i] } else { fx_now };
                 let (a, b) = (il[i] * g * f, ir[i] * g * f);
                 if s.emitter.positional {
                     // A positioned instrument is a point source: its own
@@ -1205,6 +1501,21 @@ impl SynthBus {
                     dry_r[i] += b;
                 }
                 send[i] += (a + b) * 0.5 * s.send * if s.emitter.positional { s.spatial_l.gain() } else { 0.4 };
+            }
+        }
+
+        if split_fx {
+            // The room is shared. Only the effects' dry stereo and mono send pass the poles.
+            for i in 0..filtered {
+                let pole = self.poles[i];
+                dry_l[i] = self.low_pass[0].filter(dry_l[i], pole);
+                dry_r[i] = self.low_pass[1].filter(dry_r[i], pole);
+                send[i] = self.low_pass[2].filter(send[i], pole);
+            }
+            for i in 0..len {
+                dry_l[i] += clear_l[i];
+                dry_r[i] += clear_r[i];
+                send[i] += clear_send[i];
             }
         }
 
@@ -1311,6 +1622,10 @@ mod tests {
         for cmd in [
             Command::Listener(listener),
             Command::Room(room),
+            Command::GroupScript { group: Group::Music, gain: 1.0, ease: 0.3 },
+            Command::GroupScript { group: Group::Fx, gain: 1.0, ease: 0.3 },
+            Command::GroupDuck { group: Group::Music, to: 1.0, attack: 0.1, hold: 0.2, release: 0.1 },
+            Command::Muffle { amount: 0.0, ease: 0.1 },
             Command::GroupGain { group: Group::Music, gain: 0.5 },
             Command::PlayRecipe { id: 1, recipe, pitch: 1.1, gain: 0.6, emitter, priority: Priority::Normal, key: 0 },
             Command::Tone { id: 2, freq: 220.0, wave: Some(Wave::Sine), gain: 0.3 },
@@ -1327,8 +1642,8 @@ mod tests {
         let (mut bl, mut br) = (vec![0.0; 4800], vec![0.0; 4800]);
         a.render(&mut al, &mut ar);
         b.render(&mut bl, &mut br);
-        assert_eq!(al, bl);
-        assert_eq!(ar, br);
+        assert!(al.iter().chain(&ar).zip(bl.iter().chain(&br)).all(|(a,b)| a.to_bits() == b.to_bits()),
+            "explicit unity script gains, unity duck and bypass leave both output channels bit-identical");
         // CPU timings measure separate renders, not synthesis state.
         let same_view = |a: &SynthBus, b: &SynthBus| {
             let (mut a, mut b) = (a.view(), b.view());
@@ -1473,6 +1788,107 @@ mod tests {
         bus.set_group_gain(Group::Fx, 0.0);
         let quiet = peak(&mut bus);
         assert!(tone > 0.01 && quiet < tone * 0.05, "fx muted: {quiet} vs {tone}");
+
+        // Below the master compressor threshold, a tone measures the actual group product.
+        let frames = |bus: &mut SynthBus, n| {
+            let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+            bus.render(&mut l, &mut r);
+            l
+        };
+        let amplitude = |x: &[f32]| x.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+        let mut bus = SynthBus::new(48_000.0);
+        bus.tone(1, 1000.0, Some(Wave::Sine), 0.05);
+        let full = amplitude(&frames(&mut bus, 24_000)[23_000..]);
+        bus.set_group_gain(Group::Fx, 0.5);
+        frames(&mut bus, 36_000);
+        bus.set_group_script(Group::Fx, 0.5, 0.3);
+        let glide = frames(&mut bus, 14_400 + 384);
+        let ratio = |x: &[f32]| amplitude(x) / full;
+        assert!((ratio(&glide[7200..7296]) - 0.375).abs() < 0.015, "script gain is halfway through its 0.3 s ease");
+        assert!((ratio(&glide[14_600..]) - 0.25).abs() < 0.01, "script and player gains multiply");
+        bus.duck_group(Group::Fx, 0.55, 0.005, 0.035, 0.01);
+        let held = frames(&mut bus, 960);
+        assert!((ratio(&held[720..]) * 4.0 - 0.55).abs() < 0.03, "duck holds 0.55 of the scaled group");
+        bus.duck_group(Group::Fx, 0.3, 0.005, 0.015, 0.01);
+        bus.duck_group(Group::Fx, 0.8, 0.005, 0.05, 0.01);
+        let overlap = frames(&mut bus, 3840);
+        assert!((ratio(&overlap[2160..2400]) * 4.0 - 0.3).abs() < 0.03, "overlap holds the deeper target through the later hold");
+        assert!((ratio(&overlap[3600..]) * 4.0 - 1.0).abs() < 0.03, "release restores the player's scaled level");
+    }
+
+    #[test]
+    fn muffle_attenuates_the_effects_band_and_spares_unmixed_recipes() {
+        for (freq, minimum, maximum) in [(4000.0, -100.0, -20.0), (200.0, -3.0, 0.1)] {
+            let measured = |amount| {
+                let mut bus = SynthBus::new(48_000.0);
+                bus.set_muffle(amount, 0.01);
+                bus.tone(1, freq, Some(Wave::Sine), 0.05);
+                let mut l = [0.0; 4800];
+                bus.render(&mut l, &mut [0.0; 4800]);
+                l[2400..].iter().map(|x| x*x).sum::<f32>()
+            };
+            let db = 10.0 * (measured(1.0) / measured(0.0)).log10();
+            assert!(db > minimum && db < maximum, "effects tone at {freq} Hz has {db} dB change");
+        }
+        // Refer the independently filtered dry tone through the same master, so
+        // the comparison includes its look-ahead without assuming a delay length.
+        let mut dry = SynthBus::new(48_000.0);
+        let mut wet = SynthBus::new(48_000.0);
+        let mut reference = SynthBus::new(48_000.0);
+        reference.external_send = 0.0;
+        for bus in [&mut dry, &mut wet] { bus.tone(1, 4000.0, Some(Wave::Sine), 0.05); }
+        let mut history = [0.0_f64; 2];
+        let closed = (-std::f64::consts::TAU * 600.0 / 48_000.0).exp();
+        let mut error = 0.0_f32;
+        for (stage, amount) in [0.0, 1.0, 0.0].into_iter().enumerate() {
+            wet.set_muffle(amount, 0.005);
+            let mut at = 0;
+            for n in [157, 131, 211] {
+                let (mut l, mut r) = ([0.0; BLOCK], [0.0; BLOCK]);
+                dry.render(&mut l[..n], &mut r[..n]);
+                for i in 0..n {
+                    let x = dry.dry_l[i] as f64;
+                    let t = ((at + i + 1) as f64 / 240.0).min(1.0);
+                    let pole = match stage { 1 => t * closed, 2 => (1.0 - t) * closed, _ => 0.0 };
+                    if stage == 0 {
+                        l[i] = x as f32;
+                    } else {
+                        history[0] = x + pole * (history[0] - x);
+                        history[1] = history[0] + pole * (history[1] - history[0]);
+                        l[i] = history[1] as f32;
+                    }
+                    r[i] = l[i];
+                }
+                reference.render(&mut l[..n], &mut r[..n]);
+                let (mut wl, mut wr) = ([0.0; BLOCK], [0.0; BLOCK]);
+                wet.render(&mut wl[..n], &mut wr[..n]);
+                for i in 0..n { error = error.max((wl[i] - l[i]).abs()).max((wr[i] - r[i]).abs()); }
+                at += n;
+            }
+        }
+        assert!(error < 2.0e-5, "bus muffle transitions match the glided reference within 2e-5 full scale: {error}");
+
+        let render = |controlled, music| {
+            let mut bus = SynthBus::new(48_000.0);
+            if music {
+                bus.add_instrument(1, Box::new(Drone), Emitter::FLAT, 1.0, &mut |_| {});
+                bus.set_instrument_group(1, Group::Music);
+            } else {
+                bus.apply(Command::PlayUnmixedRecipe {
+                    id: 1, recipe: Recipe::parse(builtin("coin").unwrap()).unwrap(), pitch: 1.0, gain: 0.25,
+                    emitter: Emitter::FLAT, priority: Priority::Normal, key: 0,
+                }, &mut |_| {});
+            }
+            if controlled {
+                bus.duck_group(Group::Fx, 0.0, 0.0, 0.5, 0.0);
+                bus.set_muffle(1.0, 0.0);
+            }
+            let mut l = [0.0; 4096];
+            bus.render(&mut l, &mut [0.0; 4096]);
+            l.map(f32::to_bits)
+        };
+        assert_eq!(render(true, false), render(false, false), "a UI recipe and its room send bypass the effects controls");
+        assert_eq!(render(true, true), render(false, true), "a music instrument and its room send bypass the effects controls");
     }
 
     #[test]

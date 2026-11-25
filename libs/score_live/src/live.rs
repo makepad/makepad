@@ -12,10 +12,10 @@
 //! status carries the problems with their lines.
 
 use crate::compose::{Composer, Played};
-use crate::model::{self, Diag};
+use crate::model::{self, CompiledShaders, Diag};
 use makepad_audio_engine::feed::{loop_feed, LoopFeed};
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -31,7 +31,7 @@ pub trait ClockSource: Send + Sync {
 }
 
 pub enum Cmd {
-    Source(String),
+    Source(String, crate::PrepareControl),
     Param(String, f32),
     Trigger(String),
     Goto { section: String, quant: f64 },
@@ -51,6 +51,22 @@ pub enum Cmd {
     /// Start over from beat 0 on this transport ([`LiveScore::rewind`]).
     Rewind(String),
     Quit,
+}
+
+enum WorkerCmd {
+    Command(Cmd),
+    Prepared,
+}
+
+struct PreparedSource {
+    source: Arc<str>,
+    shaders: Arc<CompiledShaders>,
+    revision: u64,
+}
+
+struct CommandSender {
+    commands: Sender<WorkerCmd>,
+    prepared: SyncSender<PreparedSource>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -78,6 +94,8 @@ pub struct Status {
     /// Sources received, and the one playing now.
     pub revision: u64,
     pub playing_revision: u64,
+    /// Editor revision of the most recent prepared source received.
+    pub document_revision: Option<u64>,
     /// Problems of the newest source (empty when it plays).
     pub diags: Vec<Diag>,
     pub label: String,
@@ -98,6 +116,22 @@ pub struct Status {
     pub looping: Option<(f64, f64)>,
 }
 
+impl Status {
+    /// Diagnostics are displayed with the document they describe. The live
+    /// composer can still be publishing an older generation's loop state.
+    pub fn document_diags<'a, J>(&'a self, loads: &'a model::RevisionLoads<J>) -> &'a [Diag] {
+        if !loads.diags.is_empty() { return &loads.diags; }
+        if self.document_revision == loads.applied.as_ref().map(|r| r.revision) { &self.diags } else { &[] }
+    }
+
+    pub fn document_problems<J>(&self, loads: &model::RevisionLoads<J>) -> Vec<String> {
+        let diags = self.document_diags(loads);
+        if !diags.is_empty() { return diags.iter().map(ToString::to_string).collect(); }
+        if self.document_revision != loads.applied.as_ref().map(|r| r.revision) { return Vec::new(); }
+        self.loops.iter().filter_map(|l| l.error.as_ref().map(ToString::to_string)).collect()
+    }
+}
+
 #[derive(Clone)]
 pub struct LiveConfig {
     /// The score's node in the graph: its loops' feeds are `<instance>/<loop>`.
@@ -108,7 +142,7 @@ pub struct LiveConfig {
 }
 
 pub struct LiveScore {
-    cmd: Sender<Cmd>,
+    cmd: CommandSender,
     pub status: Arc<Mutex<Status>>,
     thread: Option<JoinHandle<()>>,
     /// The composer when it has no thread: the host pumps it.
@@ -175,11 +209,18 @@ impl LiveScore {
     }
 
     pub fn send(&self, cmd: Cmd) {
-        let _ = self.cmd.send(cmd);
+        let _ = self.cmd.commands.send(WorkerCmd::Command(cmd));
     }
 
-    pub fn set_source(&self, source: impl Into<String>) {
-        self.send(Cmd::Source(source.into()));
+    pub fn set_source(&self, source: impl Into<String>, control: &crate::PrepareControl) {
+        self.send(Cmd::Source(source.into(), control.clone()));
+    }
+
+    /// One prepared revision can wait for the composer. Its notification is
+    /// ordered with transport commands. A full slot is retried by the editor.
+    pub fn try_set_prepared(&self, source: Arc<str>, shaders: Arc<CompiledShaders>, revision: u64) -> bool {
+        if self.cmd.prepared.try_send(PreparedSource { source, shaders, revision }).is_err() { return false; }
+        self.cmd.commands.send(WorkerCmd::Prepared).is_ok()
     }
 
     pub fn set_param(&self, name: &str, value: f32) {
@@ -246,7 +287,7 @@ impl LiveScore {
 
 impl Drop for LiveScore {
     fn drop(&mut self) {
-        let _ = self.cmd.send(Cmd::Quit);
+        let _ = self.cmd.commands.send(WorkerCmd::Command(Cmd::Quit));
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -259,7 +300,7 @@ impl Drop for LiveScore {
 /// waits for its first command (the source) before it reads the clock, so it can start well
 /// before its music. Dropped unowned, it tells its thread to quit and does not wait for it.
 pub struct LiveThread {
-    parts: Option<(Sender<Cmd>, Arc<Mutex<Status>>, JoinHandle<()>, String)>,
+    parts: Option<(CommandSender, Arc<Mutex<Status>>, JoinHandle<()>, String)>,
 }
 
 // A composer thread must be able to leave the thread that started it.
@@ -279,7 +320,7 @@ impl LiveThread {
 impl Drop for LiveThread {
     fn drop(&mut self) {
         if let Some((cmd, _, _, instance)) = self.parts.take() {
-            let _ = cmd.send(Cmd::Quit);
+            let _ = cmd.commands.send(WorkerCmd::Command(Cmd::Quit));
             makepad_audio_engine::feed::midi_out::set_live(&instance, false);
         }
     }
@@ -287,23 +328,26 @@ impl Drop for LiveThread {
 
 /// A composer's command line and status, and the worker to build where it runs: the
 /// composer's VM never moves between threads.
-fn worker(config: LiveConfig, transport: &str) -> (Sender<Cmd>, Arc<Mutex<Status>>, impl FnOnce() -> Worker + Send) {
+fn worker(config: LiveConfig, transport: &str) -> (CommandSender, Arc<Mutex<Status>>, impl FnOnce() -> Worker + Send) {
     // Its MIDI loops play to the MIDI outputs.
     makepad_audio_engine::feed::midi_out::set_live(&config.instance, true);
     let tempo = makepad_audio_engine::feed::tempo_feed(transport);
     let status = Arc::new(Mutex::new(Status { bpm: 120.0, sig: (4, 4), ..Status::default() }));
-    let (tx, rx) = channel();
+    let (commands, rx) = channel();
+    let (prepared, sources) = sync_channel(1);
     let shared = status.clone();
-    let worker = move || Worker { config, rx, status: shared, composer: None, source: String::new(), revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, tempo, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false };
-    (tx, status, worker)
+    let worker = move || Worker { config, rx, sources, status: shared, composer: None, source: Arc::from(""), shaders: None, revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, tempo, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false };
+    (CommandSender { commands, prepared }, status, worker)
 }
 
 struct Worker {
     config: LiveConfig,
-    rx: Receiver<Cmd>,
+    rx: Receiver<WorkerCmd>,
+    sources: Receiver<PreparedSource>,
     status: Arc<Mutex<Status>>,
     composer: Option<Composer>,
-    source: String,
+    source: Arc<str>,
+    shaders: Option<Arc<CompiledShaders>>,
     revision: u64,
     feeds: HashMap<u64, Arc<LoopFeed>>,
     last_beat: Option<f64>,
@@ -333,7 +377,7 @@ impl Worker {
     /// nothing reads the clock.
     fn run_from_first_command(mut self) {
         match self.rx.recv() {
-            Ok(Cmd::Quit) | Err(_) => return,
+            Ok(WorkerCmd::Command(Cmd::Quit)) | Err(_) => return,
             Ok(cmd) => self.command(cmd),
         }
         if self.step(PUBLISH_EVERY) {
@@ -346,7 +390,7 @@ impl Worker {
     fn run(mut self) {
         loop {
             match self.rx.recv_timeout(STEP) {
-                Ok(Cmd::Quit) | Err(RecvTimeoutError::Disconnected) => break,
+                Ok(WorkerCmd::Command(Cmd::Quit)) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => self.command(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -360,7 +404,7 @@ impl Worker {
     /// the status every `publish_every` steps. False once told to quit.
     fn step(&mut self, publish_every: u32) -> bool {
         while let Ok(cmd) = self.rx.try_recv() {
-            if let Cmd::Quit = cmd {
+            if let WorkerCmd::Command(Cmd::Quit) = cmd {
                 return false;
             }
             self.command(cmd);
@@ -433,11 +477,21 @@ impl Worker {
         }
     }
 
+    fn reevaluate(&self) -> Option<model::Loaded> {
+        match self.shaders.as_ref()?.evaluate(&self.source) {
+            Ok(loaded) => Some(loaded),
+            Err(diags) => {
+                if let Ok(mut status) = self.status.lock() { status.diags = diags; }
+                None
+            }
+        }
+    }
+
     /// Start every loop over from the bar holding `beat` (the clock jumped).
     fn restart_at(&mut self, beat: f64) {
-        let Ok(loaded) = model::load(&self.source) else { return };
+        let Some(loaded) = self.reevaluate() else { return };
         let params = self.composer.as_ref().map(|c| c.params.clone()).unwrap_or_default();
-        let mut fresh = Composer::new(loaded);
+        let mut fresh = Composer::new(loaded.into_evaluated());
         for (name, value) in params {
             fresh.set_param(&name, value);
         }
@@ -467,11 +521,11 @@ impl Worker {
         self.locating = Some(self.config.clock.located());
         let clock = makepad_audio_engine::feed::tempo_feed(transport);
         let locate = |bpm| makepad_audio_engine::feed::TempoEvent { beat: 0.0, bpm, ramp: 0.0, locate: true };
-        let Ok(loaded) = model::load(&self.source) else {
+        let Some(loaded) = self.reevaluate() else {
             clock.send(locate(0.0));
             return;
         };
-        let mut composer = Composer::new(loaded);
+        let mut composer = Composer::new(loaded.into_evaluated());
         composer.set_loop(self.loop_range);
         let bpm = crate::render::transport_bpm(&composer.doc);
         let slot = crate::node::slot(&self.config.instance);
@@ -545,11 +599,28 @@ impl Worker {
         }
     }
 
-    fn command(&mut self, cmd: Cmd) {
+    fn command(&mut self, cmd: WorkerCmd) {
         let locating = self.locating.is_some();
         let now = self.config.clock.now().map_or(0.0, |(beat, bpm, _)| if locating { 0.0 } else { beat } + self.config.lookahead * bpm / 60.0);
+        let cmd = match cmd {
+            WorkerCmd::Command(cmd) => cmd,
+            WorkerCmd::Prepared => {
+                if let Ok(prepared) = self.sources.try_recv() {
+                    let loaded = prepared.shaders.evaluate(&prepared.source);
+                    self.load(prepared.source, Some(prepared.shaders), Some(prepared.revision), now, loaded);
+                }
+                return;
+            }
+        };
         match cmd {
-            Cmd::Source(source) => self.load(source, now),
+            Cmd::Source(source, control) => {
+                let loaded = match model::load_controlled(&source, &control) {
+                    Ok(loaded) => Ok(loaded),
+                    Err(crate::LoadError::Cancelled) => return,
+                    Err(crate::LoadError::Problems(diags)) => Err(diags),
+                };
+                self.load(source.into(), None, None, now, loaded);
+            }
             Cmd::Param(name, value) => {
                 if let Some(composer) = &mut self.composer {
                     composer.set_param(&name, value);
@@ -614,24 +685,27 @@ impl Worker {
         }
     }
 
-    fn load(&mut self, source: String, now: f64) {
+    fn load(&mut self, source: Arc<str>, shaders: Option<Arc<CompiledShaders>>, revision: Option<u64>, now: f64, loaded: Result<model::Loaded, Vec<model::Diag>>) {
         self.revision += 1;
-        match model::load(&source) {
+        match loaded {
             Err(diags) => {
                 if let Ok(mut status) = self.status.lock() {
                     status.revision = self.revision;
+                    status.document_revision = revision;
                     status.diags = diags;
                 }
             }
             Ok(loaded) => {
+                self.shaders = Some(shaders.unwrap_or_else(|| CompiledShaders::from_doc(&loaded.doc)));
                 match &mut self.composer {
-                    Some(composer) => composer.reload(loaded, now),
-                    None => self.composer = Some(Composer::new(loaded)),
+                    Some(composer) => composer.reload(loaded.into_evaluated(), now),
+                    None => self.composer = Some(Composer::new(loaded.into_evaluated())),
                 }
                 self.feeds_for();
                 self.source = source;
                 if let Ok(mut status) = self.status.lock() {
                     status.revision = self.revision;
+                    status.document_revision = revision;
                     status.playing_revision = self.revision;
                     status.diags.clear();
                 }
@@ -685,7 +759,7 @@ mod tests {
     fn a_pumped_score_plays_without_a_thread() {
         let config = LiveConfig { instance: "pumped_test".into(), lookahead: 0.15, clock: Arc::new(Playing) };
         let live = LiveScore::new_pumped(config, "pumped_test_clock");
-        live.set_source("use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet l = Loop{play: s beats: 1 code: fn(i) { play(@c4) sleep(1) }}\nScore{clock s l}\n");
+        live.set_source("use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet l = Loop{play: s beats: 1 code: fn(i) { play(@c4) sleep(1) }}\nScore{clock s l}\n", &crate::PrepareControl::default());
         assert!(live.status().loops.is_empty(), "nothing runs before a pump");
         for _ in 0..3 {
             live.pump();

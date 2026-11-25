@@ -17,7 +17,7 @@ use crate::model::{scope_fx, scope_play, Diag, InstKind, ListKind, LoopDef, Scor
 use makepad_audio_engine::feed::{loop_feed, LoopFeed};
 use makepad_audio_engine::nodes::{descriptor, CLOCK};
 use makepad_audio_engine::run::{run, NoExt};
-use makepad_audio_engine::schedule::{compile, AudioBudget, ClockChunk, Layout, NodeState, Schedule, CLOCK_IN, SPAN};
+use makepad_audio_engine::schedule::{compile_with_note_labels_controlled, AudioBudget, ClockChunk, Layout, NodeState, NoteEdge, Schedule, CLOCK_IN, SPAN};
 use makepad_audio_engine::{CHUNK, OWNER};
 use makepad_flow::document::ident::DPort;
 use makepad_flow::document::types::TypeKey;
@@ -73,9 +73,14 @@ fn key_of(ty: &PortType) -> TypeKey {
 }
 
 /// A shader node's code and settings.
-fn shader_fields(shader: &crate::model::ShaderDef) -> [(&'static str, Literal); 2] {
-    let params = shader.params.iter().flat_map(|(name, value)| [text(name), num(*value as f64)]).collect();
-    [("shader", text(&shader.code)), ("shader_params", Literal::Arr(params))]
+fn shader_fields(shader: &crate::model::ShaderDef, checked: &crate::model::CheckedShader, doc: &ScoreDoc) -> [(&'static str, Literal); 6] {
+    let clock_seed = doc.clock.seed;
+    let seed = makepad_score_player::shader::mix_seed((clock_seed ^ (clock_seed >> 32)) as u32, shader.seed);
+    let params = checked.params.iter().flat_map(|(name, value)| [text(name), num(*value as f64)]).collect();
+    let samples = shader.samples.iter().flat_map(|(name, asset)| [text(name), text(&sample_name(asset))]).collect();
+    let modules = doc.shader_modules.iter().filter(|(path, _)| checked.shader.uses_module(path)).flat_map(|(path, source)| [text(path), text(source)]).collect();
+    [("shader", text(&shader.code)), ("shader_params", Literal::Arr(params)), ("shader_samples", Literal::Arr(samples)), ("shader_modules", Literal::Arr(modules)),
+        ("oversample", Literal::Arr(shader.oversample.clone())), ("seed", num(f64::from(seed)))]
 }
 
 /// The instrument settings of a loop's node.
@@ -118,10 +123,13 @@ fn inst_fields(doc: &ScoreDoc, l: &LoopDef) -> Vec<(&'static str, Literal)> {
         }
         Some(InstKind::Input { gain }) => vec![("inst", text("input")), ("gain", num(*gain as f64))],
         Some(InstKind::Midi { channel, port }) => vec![("inst", text("midi")), ("channel", num(*channel as f64)), ("midi_port", text(port))],
-        Some(InstKind::Shader { shader, mono }) => {
+        Some(InstKind::Shader { shader, mono, legato, glide, steal }) => {
             let mut out = vec![("inst", text("shader"))];
-            out.extend(shader_fields(shader));
-            out.push(("mono", num(*mono as u8 as f64)));
+            out.extend(shader_fields(shader, doc.shader(&inst.unwrap().name).unwrap(), doc));
+            if let Some(mono) = mono {
+                out.push(("mono", num(*mono as u8 as f64)));
+            }
+            out.extend([("legato", num(*legato as u8 as f64)), ("glide", num(*glide as f64)), ("steal", text(steal.name()))]);
             out
         }
         Some(InstKind::Morph { patch, srcs }) => vec![
@@ -180,21 +188,21 @@ impl Build<'_> {
         self.nodes.push(live_node(descriptor(type_name).expect("an audio engine node type"), id, authored, wires));
     }
 
-    /// `inputs` (member names) as at most [`FAN_IN`] node ids.
-    fn fan_in(&mut self, to: &str, inputs: Vec<String>) -> Vec<String> {
-        let mut inputs: Vec<String> = inputs.iter().map(|name| self.id(name)).collect();
+    /// Sum broad fan-ins through the same tree of unit buses, keeping the
+    /// source port on each leaf until its bus has read it.
+    fn fan_in<'a>(&mut self, to: &str, mut inputs: Vec<(String, &'a str)>) -> Vec<(String, &'a str)> {
         let mut level = 0;
         while inputs.len() > FAN_IN {
             level += 1;
             inputs = inputs.chunks(FAN_IN).enumerate().map(|(k, chunk)| {
                 let bus = self.id(&format!("{to}_mix_{level}_{}", k + 1));
-                let wires = [("audio", chunk.iter().map(|id| (id.clone(), "audio")).collect())];
-                self.node("Bus", bus.clone(), &[("gain", num(1.0)), ("pan", num(0.0))], &wires);
-                bus
+                self.node("Bus", bus.clone(), &[("gain", num(1.0)), ("pan", num(0.0))], &[("audio", chunk.to_vec())]);
+                (bus, "audio")
             }).collect();
         }
         inputs
     }
+
 }
 
 /// The score as the audio owner's slice, its nodes `<name>/…`.
@@ -203,7 +211,7 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
     let clock = match clocking {
         ClockMode::Own => {
             let clock = transport(name);
-            b.node("Transport", clock.clone(), &[("bpm", num(doc.clock.bpm.clamp(40.0, 240.0))), ("playing", num(1.0))], &[]);
+            b.node("Transport", clock.clone(), &[("bpm", num(doc.clock.bpm.clamp(40.0, 240.0))), ("playing", num(1.0)), ("beats_per_bar", num(doc.beats_per_bar().clamp(1.0, 32.0)))], &[]);
             clock
         }
         ClockMode::Host => {
@@ -217,6 +225,39 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
     };
     let clocked = [("clock", vec![(clock.clone(), "clock")])];
     let audio = |ids: &[String]| [("audio", ids.iter().map(|id| (id.clone(), "audio")).collect::<Vec<_>>())];
+    let expand = |name: &str, port: &str| {
+        let mut names = vec![name.to_string()];
+        if let Some(l) = doc.loops.iter().find(|l| l.name == name) {
+            for (k, chain) in l.scopes.iter().enumerate() {
+                if port != "audio" { names.push(scope_play(name, k + 1)); }
+                else if chain.len() == 1 { names.push(scope_fx(name, k + 1)); }
+            }
+        }
+        names
+    };
+    let outs = |name: &str| expand(name, "audio");
+    // Each authored reference to a scoped loop is one stereo source, including
+    // for a param's stereo mean. Only build sums a consumer actually reads.
+    let mut sums = std::collections::BTreeMap::new();
+    let inst_sources = doc.insts.iter().filter_map(|i| doc.shader_def(&i.name))
+        .flat_map(|s| s.wires.iter().map(|(_, sources)| sources));
+    let native_params = doc.fx.iter().filter(|f| f.shader.is_none()).flat_map(|f|
+        f.sides.iter().filter(|(field, _)| field != "key").map(|(_, sources)| sources));
+    let fx_sources = doc.fx.iter().flat_map(|f| std::iter::once(&f.inputs).chain(f.sides.iter().map(|(_, sources)| sources)));
+    for (from, port) in inst_sources.chain(native_params).flat_map(|s| s.graph_ports(doc)).chain(fx_sources.flat_map(|s| s.graph_ports(doc)).filter(|(_, p)| *p != "audio")) {
+        if sums.contains_key(&(from, port)) { continue; }
+        let parts = expand(from, port);
+        if parts.len() > 1 {
+            let sum = b.id(&format!(":sum:{from}:{port}"));
+            let parts = parts.iter().map(|n| (b.id(n), port)).collect();
+            b.node("AudioMixer", sum.clone(), &[("master", num(1.0))], &[("inputs", parts)]);
+            sums.insert((from, port), sum);
+        }
+    }
+    let endpoint = |from: &str, port| match sums.get(&(from, port)) {
+        Some(id) => (id.clone(), "audio"),
+        None => (format!("{name}/{from}"), port),
+    };
     for l in &doc.loops {
         let mut fields = inst_fields(doc, l);
         fields.extend([("amp", num(l.amp as f64)), ("pan", num(l.pan as f64)), ("mute", num(l.mute as u8 as f64)), ("solo", num(l.solo as u8 as f64))]);
@@ -229,7 +270,19 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
                 ("midi_latency", num(stream.latency as f64)),
             ]);
         }
-        b.node("Loop", b.id(&l.name), &fields, &clocked);
+        let shader = l.play.as_deref().and_then(|name| doc.shader(name));
+        let authored = l.play.as_deref().and_then(|name| doc.shader_def(name));
+        let descriptor = shader.filter(|s| authored.is_some_and(|def| !def.wires.is_empty()) || s.shader.port_count() > 0).map(|s| makepad_audio_engine::nodes::shader_fx_descriptor(&s.shader));
+        let descriptor = descriptor.as_ref().unwrap_or_else(|| makepad_audio_engine::nodes::descriptor("Loop").unwrap());
+        let mut wires = clocked.to_vec();
+        if let Some(shader) = authored {
+            for (field, inputs) in &shader.wires {
+                let sources = inputs.graph_ports(doc).map(|(from, output)| endpoint(from, output)).collect();
+                wires.push((makepad_audio_engine::nodes::instrument_input(field), sources));
+            }
+        }
+        let loop_node = |id| live_node(descriptor, id, &fields, &wires);
+        b.nodes.push(loop_node(b.id(&l.name)));
         // fx() scopes: a copy of the loop playing the scope's notes into
         // its effect, the deepest first (an effect reads its inner ones).
         let mut order: Vec<usize> = (0..l.scopes.len()).collect();
@@ -237,7 +290,7 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
         for k in order {
             let chain = &l.scopes[k];
             let (play, fx) = (b.id(&scope_play(&l.name, k + 1)), b.id(&scope_fx(&l.name, k + 1)));
-            b.node("Loop", play.clone(), &fields, &clocked);
+            b.nodes.push(loop_node(play.clone()));
             let inner = l.scopes.iter().enumerate().filter(|(_, c)| c.len() == chain.len() + 1 && c.starts_with(chain)).map(|(j, _)| b.id(&scope_fx(&l.name, j + 1)));
             let entries: Vec<String> = std::iter::once(play).chain(inner).collect();
             let kind = *chain.last().unwrap_or(&FxKind::Bus);
@@ -245,14 +298,6 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
             b.node(kind.name(), fx, &params, &audio(&entries));
         }
     }
-    // What a loop's audio is: the loop and its outermost fx() scopes.
-    let outs = |name: &str| -> Vec<String> {
-        let mut v = vec![name.to_string()];
-        if let Some(l) = doc.loops.iter().find(|l| l.name == name) {
-            v.extend(l.scopes.iter().enumerate().filter(|(_, c)| c.len() == 1).map(|(k, _)| scope_fx(&l.name, k + 1)));
-        }
-        v
-    };
     let mut consumed: Vec<String> = Vec::new();
     // Aux sends: a Bus per (loop, FX) at the send's amount, read by the FX;
     // the loop keeps its own path.
@@ -267,27 +312,54 @@ pub fn slice(doc: &ScoreDoc, name: &str, clocking: ClockMode) -> OwnerSlice {
         }
     }
     for fx in &doc.fx {
-        let inputs: Vec<String> = fx.inputs.iter().flat_map(|i| outs(i)).chain(sends.iter().filter(|(to, _)| *to == fx.name).map(|(_, bus)| bus.clone())).collect();
-        let inputs = b.fan_in(&fx.name, inputs);
-        consumed.extend(fx.inputs.iter().flat_map(|i| outs(i)));
+        let mut main = Vec::new();
+        for (node, port) in fx.inputs.graph_ports(doc) {
+            if port == "audio" {
+                for source in outs(node) { main.push((b.id(&source), port)); consumed.push(source); }
+            } else { main.push(endpoint(node, port)); }
+        }
+        main.extend(sends.iter().filter(|(to, _)| *to == fx.name).map(|(_, bus)| (b.id(bus), "audio")));
+        let mut wires = vec![("audio", b.fan_in(&fx.name, main))];
         let id = b.id(&fx.name);
         match &fx.shader {
-            Some(shader) => b.node("ShaderFx", id, &shader_fields(shader), &audio(&inputs)),
+            Some(shader) => {
+                let checked = doc.shader(&fx.name).unwrap();
+                for (field, inputs) in &fx.sides {
+                    let mut sources = Vec::new();
+                    for (node, port) in inputs.graph_ports(doc) {
+                        if port == "audio" { sources.extend(outs(node).iter().map(|s| (b.id(s), port))); }
+                        else { sources.push(endpoint(node, port)); }
+                    }
+                    let port = if checked.shader.param_index(field).is_some() {
+                        makepad_audio_engine::nodes::shader_param_input(field)
+                    } else { field };
+                    wires.push((port, sources));
+                }
+                let descriptor = makepad_audio_engine::nodes::shader_fx_descriptor(&checked.shader);
+                b.nodes.push(live_node(&descriptor, id, &shader_fields(shader, checked, doc), &wires));
+            }
             None => {
                 let params: Vec<(&str, Literal)> = fx.kind.params().iter().enumerate().map(|(i, (param, ..))| (*param, num(fx.params[i] as f64))).collect();
-                let mut wires = vec![("audio", inputs.iter().map(|id| (id.clone(), "audio")).collect::<Vec<_>>())];
-                if let (Some(side), FxKind::Duck | FxKind::Comp) = (&fx.side, fx.kind) {
-                    wires.push(("key", vec![(b.id(side), "audio")]));
+                for (field, sources) in &fx.sides {
+                    wires.push((field, sources.graph_ports(doc).map(|(node, port)| {
+                        if field == "key" && port == "audio" { (b.id(node), port) } else { endpoint(node, port) }
+                    }).collect()));
                 }
-                b.node(fx.kind.name(), id, &params, &wires);
+                if fx.sides.iter().any(|(field, sources)| field != "key" && !sources.is_empty()) {
+                    let descriptor = makepad_audio_engine::nodes::native_fx_descriptor(fx.kind);
+                    b.nodes.push(live_node(&descriptor, id, &params, &wires));
+                } else {
+                    b.node(fx.kind.name(), id, &params, &wires);
+                }
             }
         }
     }
     // Everything nothing else reads, through the master limiter.
-    let to_master: Vec<String> = doc.loops.iter().flat_map(|l| outs(&l.name)).chain(doc.fx.iter().map(|f| f.name.clone())).filter(|name| !consumed.iter().any(|c| c == name)).collect();
-    let to_master = b.fan_in("master", to_master);
+    let to_master: Vec<String> = doc.loops.iter().flat_map(|l| outs(&l.name)).chain(doc.fx.iter().filter(|f| !doc.is_control(f)).map(|f| f.name.clone())).filter(|name| !consumed.iter().any(|c| c == name)).collect();
+    let sources = to_master.iter().map(|name| (b.id(name), "audio")).collect();
+    let to_master = b.fan_in("master", sources);
     let master = b.id("master");
-    b.node("Limiter", master.clone(), &[("ceiling", num(doc.ceiling as f64)), ("gain", num(doc.master as f64))], &audio(&to_master));
+    b.node("Limiter", master.clone(), &[("ceiling", num(doc.ceiling as f64)), ("gain", num(doc.master as f64))], &[("audio", to_master)]);
     if clocking == ClockMode::Own {
         b.node("AudioOutput", "out".into(), &[("enabled", num(1.0))], &audio(&[master]));
     }
@@ -387,15 +459,43 @@ fn fail(message: impl Into<String>) -> Vec<Diag> {
 /// Prepare `doc` as the player `name` at `rate`, generation `generation`;
 /// against `base` (the layout playing) its staying nodes list their state
 /// to carry over (`Schedule::migrate`).
-pub fn prepare(doc: &ScoreDoc, rate: f32, name: &str, clocking: ClockMode, base: Option<&Layout>, generation: u64) -> Result<Player, Vec<Diag>> {
-    let slice = slice(doc, name, clocking);
-    prepare_slice(doc, slice, rate, name, clocking, base, generation)
-}
-
-/// [`prepare`] from a slice already built.
-pub(crate) fn prepare_slice(doc: &ScoreDoc, slice: OwnerSlice, rate: f32, name: &str, clocking: ClockMode, base: Option<&Layout>, generation: u64) -> Result<Player, Vec<Diag>> {
+pub fn prepare(doc: &ScoreDoc, slice: OwnerSlice, rate: f32, name: &str, clocking: ClockMode, base: Option<&Layout>, generation: u64, control: &crate::PrepareControl) -> Result<Player, crate::LoadError> {
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
     let format = (1u64 << 32) | rate.round() as u64;
-    let compiled = compile::<NoExt, ()>(&slice, generation, 1, format, base, &Arc::new(AudioBudget::default())).map_err(|e| fail(e.message))?;
+    // Scope copies and other loops playing the definition read the very same
+    // authored connection. Name its first public loop in the diagnostic.
+    let mut representatives = HashMap::new();
+    let mut instances = HashMap::new();
+    for l in &doc.loops {
+        let Some(def) = l.play.as_deref() else { continue };
+        let Some(shader) = doc.shader_def(def).filter(|s| !s.wires.is_empty()) else { continue };
+        let public = *representatives.entry(def).or_insert(l.name.as_str());
+        instances.insert(l.name.clone(), (public, shader));
+        for k in 1..=l.scopes.len() { instances.insert(scope_play(&l.name, k), (public, shader)); }
+    }
+    let note_label = |node: &LiveNode, port: &str, source: &LiveSource| {
+        let field = port.strip_prefix(':').unwrap_or(port);
+        if let (Some(&(to, shader)), Some(entry)) = (instances.get(&node.node.node.0), source.conn) {
+            if let Some((from, output)) = shader.wires.iter().find(|(p, _)| p == field)
+                .and_then(|(_, inputs)| inputs.ports().nth(entry.checked_sub(1)? as usize)) {
+                return NoteEdge { source: format!("{from}.{output}"), node: to.to_owned(), port: field.to_owned(), entry: Some(entry) };
+            }
+        }
+        NoteEdge { source: format!("{}.{}", source.from.node.node.0, source.from.port), node: node.node.node.0.clone(), port: field.to_owned(), entry: source.conn }
+    };
+    let result = compile_with_note_labels_controlled::<NoExt, ()>(&slice, generation, 1, format, base, &Arc::new(AudioBudget::default()), Some(control.word()), &note_label);
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+    let mut compiled = result.map_err(|e| fail(e.message))?;
+    // A param bound to Clock automation in this plan; a hot swap that ends the
+    // binding releases its ramp (schedule.rs migrate_state).
+    for fx in doc.fx.iter().filter(|fx| !fx.follow.is_empty()) {
+        let id = format!("{name}/{}", fx.name);
+        if let Some(node) = compiled.layout.nodes.iter().find(|node| node.id == id) {
+            if let makepad_audio_engine::schedule::NodeState::Fx(state) = &mut compiled.schedule.states[usize::from(node.state)] {
+                for &(i, _) in &fx.follow { state.automated[i] = true; }
+            }
+        }
+    }
     let feeds = doc.feed_names().iter().map(|n| (crate::key(n), loop_feed(&format!("{name}/{n}")))).collect();
     let master = *compiled.layout.audio_probes.get(&format!("{name}/master.audio")).ok_or_else(|| fail("the score has no master"))?;
     let meters = (clocking == ClockMode::Host).then(|| Arc::new(Meters::new(compiled.schedule.probes.len(), compiled.schedule.arena.len() / SPAN)));
@@ -406,7 +506,11 @@ impl Player {
     /// One pass of `frames` (at most [`CHUNK`]) on its own clock; `sink`
     /// gets what its output sends.
     pub fn run(&mut self, frames: usize, sink: &mut dyn FnMut(bool, &[f32], &[f32])) {
-        run(&mut self.schedule, frames, sink, &mut NoExt);
+        if makepad_audio_engine::run::rests(&mut self.schedule, &NoExt) {
+            self.schedule.last_frames = frames as u16;
+        } else {
+            makepad_audio_engine::run::run_awake(&mut self.schedule, frames, sink, &mut NoExt, true);
+        }
     }
 
     /// One pass on the host's `clock`: `left` and `right` (the pass's

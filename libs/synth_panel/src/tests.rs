@@ -21,6 +21,39 @@ fn tapers_and_source_text() {
 }
 
 #[test]
+fn shader_fields_control_travel_and_display() {
+    let shader = makepad_score_player::shader::compile(r#"
+        let cutoff = param(1200, 20, 16000, {label: "Cutoff" group: filter unit: hz curve: log})
+        let rise_time = param(0, 0, 1000, {unit: ms curve: exp})
+        let wave = param(tri, {choices: [saw "soft pulse" tri]})
+        let mix_level = param(0, -1, 1, {unit: percent step: 0.25})
+        fn voice() { vec2(wave, cutoff) }
+    "#).unwrap();
+    let spec = |name| spec::ParamSpec::from_shader(&shader, shader.param_index(name).unwrap());
+    let (cut, rise, wave, mix) = (spec("cutoff"), spec("rise_time"), spec("wave"), spec("mix_level"));
+    assert_eq!((&*cut.label, &*cut.group, cut.min, cut.max, cut.default), ("Cutoff", "filter", 20.0, 16000.0, 1200.0));
+    assert_eq!(&*cut.about, "Cutoff (filter): 20 Hz to 16000 Hz, log, default 1200 Hz");
+    assert_eq!(cut.display(cut.min), "20 Hz");
+    assert_eq!((&*rise.label, rise.display(30.6)), ("RISE TIME", "31 ms".into()));
+    assert_eq!((cut.taper, rise.taper, wave.taper), (Taper::Log, Taper::Exp, Taper::Int));
+    assert_eq!(wave.options, ["saw", "soft pulse", "tri"]);
+    assert_eq!((wave.default, wave.source_text(1.0)), (2.0, "\"soft pulse\"".into()));
+    assert_eq!(wave.parse("\"soft pulse\"", 0.0), Ok(1.0));
+    assert!((cut.denorm(0.5) - (20.0f64 * 16000.0).sqrt()).abs() < 1e-9, "logarithmic midpoint");
+    assert!((rise.denorm(0.5) - 30.6).abs() < 0.1, "exponential midpoint");
+    for spec in [&cut, &rise, &wave] {
+        assert_eq!((spec.denorm(0.0), spec.denorm(1.0)), (spec.min, spec.max), "{} endpoints", spec.key);
+        for t in [0.0, 0.5, 1.0] {
+            assert!((spec.norm(spec.denorm(t)) - t).abs() < 1e-9, "{} travel {t}", spec.key);
+        }
+    }
+    assert!(mix.bipolar);
+    assert_eq!(mix.parse("37%", 0.0), Ok(0.25));
+    assert_eq!(mix.display(0.25), "25%");
+    assert_eq!(mix.source_text(f64::INFINITY), "0", "a nonfinite edit uses the shader default");
+}
+
+#[test]
 fn display_maths() {
     use crate::dsp;
     // A resonant ladder peaks near its cutoff; far above, it is steep.

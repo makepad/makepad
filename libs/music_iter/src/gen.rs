@@ -61,14 +61,14 @@ impl TurnActivity {
 /// One blocking chat turn: the system text and the conversation so far
 /// (user, assistant, user, …), the reply's text.
 pub trait Writer: Send + Sync {
-    fn chat(&self, system: &str, turns: &[String], cancel: &AtomicBool) -> Result<String, String>;
+    fn chat(&self, system: &str, turns: &[String], cancel: &dyn Fn() -> bool) -> Result<String, String>;
     fn label(&self) -> String;
 
     /// A turn with the tools of one MCP server (`mcp`: the
     /// `{"mcpServers":{…}}` config and the `--allowedTools` pattern), which
     /// the model calls as often as it likes within the turn; a writer
     /// without tools answers as [`Writer::chat`].
-    fn chat_with(&self, system: &str, turns: &[String], cancel: &AtomicBool, mcp: Option<&(String, String)>) -> Result<String, String> {
+    fn chat_with(&self, system: &str, turns: &[String], cancel: &dyn Fn() -> bool, mcp: Option<&(String, String)>) -> Result<String, String> {
         let _ = mcp;
         self.chat(system, turns, cancel)
     }
@@ -88,12 +88,12 @@ impl Default for ClaudeCode {
 }
 
 impl Writer for ClaudeCode {
-    fn chat(&self, system: &str, turns: &[String], cancel: &AtomicBool) -> Result<String, String> {
+    fn chat(&self, system: &str, turns: &[String], cancel: &dyn Fn() -> bool) -> Result<String, String> {
         self.chat_with(system, turns, cancel, None)
     }
 
-    fn chat_with(&self, system: &str, turns: &[String], cancel: &AtomicBool, mcp: Option<&(String, String)>) -> Result<String, String> {
-        if cancel.load(Ordering::Relaxed) {
+    fn chat_with(&self, system: &str, turns: &[String], cancel: &dyn Fn() -> bool, mcp: Option<&(String, String)>) -> Result<String, String> {
+        if cancel() {
             return Err("cancelled".into());
         }
         let activity = self.monitor.begin();
@@ -106,25 +106,31 @@ impl Writer for ClaudeCode {
         input.tools_enabled = false;
         provider.begin_turn(&input)?;
         let mut text = String::new();
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                provider.cancel();
-                return Err("cancelled".into());
-            }
-            let events = provider.poll();
-            if !events.is_empty() {
-                activity.progress();
-            }
-            for event in events {
-                match event {
-                    ProviderEvent::Delta(d) => text.push_str(&d),
-                    ProviderEvent::Done { text: all } => return Ok(if all.is_empty() { text } else { all }),
-                    ProviderEvent::Error(e) => return Err(e),
-                    _ => {}
+        // The turn waits on the model's reply: it holds no CPU (a host pool's permit)
+        // meanwhile, so the host's other jobs keep their workers.
+        let mut result = Err("cancelled".to_string());
+        makepad_core_util::blocking::wait_off_cpu("a model's reply", || {
+            result = 'turn: loop {
+                if cancel() {
+                    provider.cancel();
+                    break 'turn Err("cancelled".into());
                 }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+                let events = provider.poll();
+                if !events.is_empty() {
+                    activity.progress();
+                }
+                for event in events {
+                    match event {
+                        ProviderEvent::Delta(d) => text.push_str(&d),
+                        ProviderEvent::Done { text: all } => break 'turn Ok(if all.is_empty() { text } else { all }),
+                        ProviderEvent::Error(e) => break 'turn Err(e),
+                        _ => {}
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            };
+        });
+        result
     }
 
     fn label(&self) -> String {
@@ -209,12 +215,12 @@ pub fn parse_concepts(reply: &str) -> Vec<Concept> {
 /// them.
 const DIRECTOR_TOOLS: &str = "\n\n# Real songs to ground the cards in\n\nYou have two tools on a library of real songs as MIDI: `midi_lookup` finds songs by decade, genre, tag, artist or title (\"80s synthpop\", \"italo disco\", \"artist:jan hammer\"), and `midi_transcribe` reads one as compact text: its tempo, key, form, parts and instruments, and per bar its chords and each part on a sixteenth grid (detail `chords`, `drums`, `melody` or `bass`, and `bars` such as 1-16, keep it short). When the brief names an era, a style or an artist, look up two or three fitting songs, read their form, groove and harmony (chords and drums, 8-16 bars), and ground the cards in what you read: tempos, forms, drum patterns, progressions, palettes. Never copy a melody or a whole progression; a card says what it takes from a reference in its PALETTE or FEEL line. Skip the tools when the brief needs no reference.";
 
-pub fn direct(writer: &dyn Writer, req: &Request, n: usize, history: &str, cancel: &AtomicBool) -> Result<Vec<Concept>, String> {
+pub fn direct(writer: &dyn Writer, req: &Request, n: usize, history: &str, cancel: &makepad_score_live::PrepareControl) -> Result<Vec<Concept>, String> {
     let tools = crate::context::midi_tools();
     let system = if tools.is_some() { format!("{}{DIRECTOR_TOOLS}", director_system()) } else { director_system() };
     let mut turns = vec![director_prompt(req, n, history)];
     for _ in 0..2 {
-        let reply = writer.chat_with(&system, &turns, cancel, tools.as_ref())?;
+        let reply = writer.chat_with(&system, &turns, &|| cancel.is_cancelled(), tools.as_ref())?;
         let cards = parse_concepts(&reply);
         let mut titles: Vec<String> = cards.iter().map(|c| c.title.to_lowercase()).collect();
         titles.sort();
@@ -298,27 +304,28 @@ pub enum Progress {
 
 /// Write song `k` of `n`, render it (mix, stems, dry lead) and repair what
 /// does not load or whose loops fail, up to `max_turns` model turns.
-pub fn write_song(writer: &dyn Writer, system: &str, req: &Request, k: usize, n: usize, recent: &str, concept: Option<&Concept>, cancel: &AtomicBool, progress: &dyn Fn(Progress)) -> Result<Written, String> {
+pub fn write_song(writer: &dyn Writer, system: &str, req: &Request, k: usize, n: usize, recent: &str, concept: Option<&Concept>, cancel: &makepad_score_live::PrepareControl, progress: &dyn Fn(Progress)) -> Result<Written, String> {
     write_from(writer, system, req, vec![song_prompt(req, k, n, recent, concept)], cancel, progress)
 }
 
 /// Continue a conversation whose last message asks for a whole song: up to
 /// three turns until one loads and plays.
-pub fn write_from(writer: &dyn Writer, system: &str, req: &Request, mut turns: Vec<String>, cancel: &AtomicBool, progress: &dyn Fn(Progress)) -> Result<Written, String> {
+pub fn write_from(writer: &dyn Writer, system: &str, req: &Request, mut turns: Vec<String>, cancel: &makepad_score_live::PrepareControl, progress: &dyn Fn(Progress)) -> Result<Written, String> {
     const MAX_TURNS: usize = 3;
     let mut last_error = String::new();
     for turn in 1..=MAX_TURNS {
         progress(Progress::Writing { turn });
-        let reply = writer.chat(system, &turns, cancel)?;
+        let reply = writer.chat(system, &turns, &|| cancel.is_cancelled())?;
         turns.push(reply.clone());
         let problem = match parse_song(&reply) {
             None => "Your reply had no ```splash block with a whole score (`use mod.score.*` … `Score{…}`). Send the whole song again in the format asked.".to_string(),
             Some((title, idea, source)) => {
                 progress(Progress::Rendering);
                 let cap = req.seconds as f64 * 1.6 + 12.0;
-                let length = makepad_score_live::model::load(&source).ok().map(|l| makepad_score_live::render::natural_length(&l.doc));
+                let length = makepad_score_live::model::read_document(&source).ok().map(|l| makepad_score_live::render::natural_length(&l.doc));
                 let opts = RenderOpts { seconds: length.map(|s| s.min(cap)), ..RenderOpts::default() };
-                match render_song(&source, &opts, true) {
+                match render_song(&source, &opts, true, cancel) {
+                    _ if cancel.is_cancelled() => return Err("the song was cancelled".into()),
                     Ok(song) if song.mix.errors.is_empty() && song.mix.left.iter().any(|v| v.abs() > 1e-3) => {
                         return Ok(Written { title, idea, source, song, turns: turn, history: turns });
                     }
@@ -415,7 +422,7 @@ pub fn parse_rules(reply: &str) -> Option<(Vec<String>, String)> {
 
 /// Ask the learner for the new rules.
 pub fn learn(writer: &dyn Writer, rated: &[Rated], rules: &[String], today: &str, cancel: &AtomicBool) -> Result<(Vec<String>, String), String> {
-    let reply = writer.chat(LEARN_SYSTEM, &[learn_prompt(rated, rules, today)], cancel)?;
+    let reply = writer.chat(LEARN_SYSTEM, &[learn_prompt(rated, rules, today)], &|| cancel.load(Ordering::Relaxed))?;
     let (mut new, changes) = parse_rules(&reply).ok_or_else(|| "the learner's reply had no rule list".to_string())?;
     new.truncate(30);
     Ok((new, changes))
@@ -425,7 +432,7 @@ pub fn learn(writer: &dyn Writer, rated: &[Rated], rules: &[String], today: &str
 pub struct Scripted<F: Fn(&str, &[String]) -> Result<String, String> + Send + Sync>(pub F);
 
 impl<F: Fn(&str, &[String]) -> Result<String, String> + Send + Sync> Writer for Scripted<F> {
-    fn chat(&self, system: &str, turns: &[String], _cancel: &AtomicBool) -> Result<String, String> {
+    fn chat(&self, system: &str, turns: &[String], _cancel: &dyn Fn() -> bool) -> Result<String, String> {
         (self.0)(system, turns)
     }
 
@@ -474,7 +481,7 @@ mod monitor_tests {
     fn a_cancelled_turn_never_starts() {
         let writer = ClaudeCode::default();
         let cancel = AtomicBool::new(true);
-        assert_eq!(writer.chat_with("s", &["hi".into()], &cancel, None), Err("cancelled".to_string()));
+        assert_eq!(writer.chat_with("s", &["hi".into()], &|| cancel.load(Ordering::Relaxed), None), Err("cancelled".to_string()));
         assert!(!writer.monitor.not_responding());
     }
 }

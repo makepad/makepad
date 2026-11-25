@@ -62,7 +62,7 @@ fn median(mut v: Vec<f32>) -> Option<f32> {
 /// Every loop's role: by its instrument (a kit plays drums, a voice
 /// sings), else by name and register (a loop called bass or sub, or one
 /// whose notes sit below D3, is bass).
-pub fn roles(doc: &ScoreDoc, played: &[Played]) -> Vec<(String, Role)> {
+pub fn roles(doc: &makepad_score_live::model::AuthoredDoc, played: &[Played]) -> Vec<(String, Role)> {
     doc.loops
         .iter()
         .map(|l| {
@@ -86,7 +86,7 @@ pub fn roles(doc: &ScoreDoc, played: &[Played]) -> Vec<(String, Role)> {
 }
 
 /// `src` with every loop not in `keep` muted.
-pub fn only(src: &str, doc: &ScoreDoc, keep: &[String]) -> Result<String, String> {
+pub fn only(src: &str, doc: &makepad_score_live::model::AuthoredDoc, keep: &[String]) -> Result<String, String> {
     let mut out = src.to_string();
     for l in &doc.loops {
         if !keep.contains(&l.name) && !l.mute {
@@ -96,18 +96,19 @@ pub fn only(src: &str, doc: &ScoreDoc, keep: &[String]) -> Result<String, String
     Ok(out)
 }
 
-fn diag_text(d: &[makepad_score_live::Diag]) -> String {
-    d.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("; ")
+fn render_error(error: makepad_score_live::LoadError) -> String {
+    error.describe(|diags| diags.iter().map(|diag| format!("{diag:?}")).collect::<Vec<_>>().join("; "))
 }
 
-pub fn render_mix(src: &str, opts: &RenderOpts) -> Result<Rendered, String> {
-    render(src, opts, &NoSamples).map_err(|d| diag_text(&d))
+pub fn render_mix(src: &str, opts: &RenderOpts, control: &makepad_score_live::PrepareControl) -> Result<Rendered, String> {
+    render(src, opts, &NoSamples, control).map_err(render_error)
 }
 
 /// Render the mix, then each role's stem and a sung lead.
-pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool) -> Result<Song, String> {
-    let doc = makepad_score_live::model::load(src).map_err(|d| diag_text(&d))?.doc;
-    let mix = render_mix(src, opts)?;
+pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool, control: &makepad_score_live::PrepareControl) -> Result<Song, String> {
+    let loaded = makepad_score_live::load_controlled(src, control).map_err(render_error)?;
+    let doc = loaded.doc.clone();
+    let mix = makepad_score_live::render::render_loaded(loaded, opts, &NoSamples, control, &mut |_, _| {}).map_err(render_error)?;
     let roles = roles(&doc, &mix.played);
     let seconds = Some(mix.seconds());
     let opts = RenderOpts { seconds, ..opts.clone() };
@@ -118,7 +119,7 @@ pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool) -> Result<Son
             if loops.is_empty() || !mix.played.iter().any(|p| loops.contains(&p.loop_name)) {
                 continue;
             }
-            let r = render_mix(&only(src, &doc, &loops)?, &opts)?;
+            let r = render_mix(&only(src, &doc, &loops)?, &opts, control)?;
             stems.push(Stem { role, loops, left: r.left, right: r.right });
         }
     }
@@ -137,7 +138,7 @@ pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool) -> Result<Son
                     dry = makepad_edit_values::apply_splices(&dry, 0, &[s])?;
                 }
             }
-            let r = render_mix(&dry, &opts)?;
+            let r = render_mix(&dry, &opts, control)?;
             Some((name, r.left.iter().zip(&r.right).map(|(l, r)| 0.5 * (l + r)).collect()))
         }
         None => None,

@@ -75,6 +75,67 @@ pub fn descriptor(type_name: &str) -> Option<&'static TypeDescriptor> {
     descriptors().iter().find(|descriptor| descriptor.type_name == type_name)
 }
 
+/// Fields already owned by the effect node in a score or an engine graph.
+pub fn reserved_shader_port(name: &str) -> bool {
+    let fx = descriptor("ShaderFx").unwrap();
+    matches!(name, "in" | "lib" | "code" | "at" | "mono")
+        || fx.params.iter().any(|p| p.name == name)
+        || fx.inputs.iter().any(|p| p.name == name)
+        || fx.outputs.iter().any(|p| p.name == name)
+}
+
+/// The engine calls its main input "audio", while a score spells it "in".
+/// Keep a shader parameter actually named "audio" distinct on the owner slice.
+pub fn shader_param_input(name: &str) -> &str {
+    if name == "audio" { ":audio" } else { name }
+}
+
+/// Keep an instrument input distinct from the clock and the loop's own controls.
+pub fn instrument_input(name: &str) -> &str {
+    match name { "clock" => ":clock", "amp" => ":amp", "mute" => ":mute", "solo" => ":solo", "pan" => ":pan", other => shader_param_input(other) }
+}
+
+/// Keep a named instrument output distinct from the loop's main pair and meter.
+pub fn instrument_output(name: &str) -> &str {
+    match name { "audio" => ":audio", "peak" => ":peak", other => other }
+}
+
+/// A score's native effect can read each parameter from an ordered list of
+/// audio spans. Registered Flow descriptors retain their scalar controls.
+pub fn native_fx_descriptor(kind: makepad_score_player::FxKind) -> TypeDescriptor {
+    let mut fx = descriptor(kind.name()).unwrap().clone();
+    for &(name, ..) in kind.params() {
+        let mut wire = input(name, AUDIO, Some(ANY));
+        wire.default = Literal::Null;
+        fx.inputs.push(wire);
+    }
+    fx
+}
+
+/// Per-instance audio ports for a score's owner slice.
+pub fn shader_fx_descriptor(shader: &makepad_score_player::shader::AudioShader) -> TypeDescriptor {
+    use makepad_score_player::shader::Kind;
+    let kind = match shader.kind() { Kind::Control => "ShaderControl", Kind::Effect => "ShaderFx", Kind::Instrument => "Loop" };
+    let mut fx = descriptor(kind).unwrap().clone();
+    for i in 0..shader.param_count() {
+        let param = shader.param_view(i);
+        let name = if kind == "Loop" { instrument_input(param.name) } else { shader_param_input(param.name) };
+        let mut wire = input(name, AUDIO, Some(ANY));
+        // A param input falls back to its authored scalar when disconnected.
+        wire.default = Literal::Null;
+        fx.inputs.push(wire);
+    }
+    for i in 0..shader.port_count() {
+        let port = shader.port_view(i);
+        if !port.output {
+            fx.inputs.push(input(if kind == "Loop" { instrument_input(port.name) } else { port.name }, AUDIO, Some(ANY)));
+        } else {
+            fx.outputs.push(output(if kind == "Loop" { instrument_output(port.name) } else { port.name }, AUDIO));
+        }
+    }
+    fx
+}
+
 fn build_descriptors() -> Vec<TypeDescriptor> {
     let mut stem_params = Vec::new();
     for stem in ["vocals", "drums", "bass", "other"] {
@@ -89,6 +150,7 @@ fn build_descriptors() -> Vec<TypeDescriptor> {
             vec![
                 ParamDescriptor::control("bpm", 120.0, 40.0, 240.0, "Tempo in beats per minute."),
                 ParamDescriptor::toggle("playing", false, "Whether the clock advances. Stopping holds the position."),
+                ParamDescriptor::control("beats_per_bar", 4.0, 1.0, 32.0, "Beats in a bar: what a shader's bar counts."),
             ],
             vec![],
             vec![output("clock", CLOCK)],
@@ -175,8 +237,12 @@ fn score_nodes() -> Vec<TypeDescriptor> {
             number("singers", 1.0, "A voice's choir size (1 is a solo voice)."),
             number("parts", 1.0, "The harmony parts a choir splits into."),
             list("style", "A voice's style: vibrato vibrato_rate vibrato_delay portamento scoop breath drift jitter (-1 keeps the default)."),
+            number("seed", 0.0, "The seed for this loop's shader."),
             text("shader", "A shader instrument's code (an audio shader)."),
             list("shader_params", "A shader instrument's settings: name, value, name, value..."),
+            list("shader_samples", "A shader instrument's sample tables: table name, sample name, ..."),
+            list("shader_modules", "Imported shader modules in path, source pairs."),
+            list("oversample", "A shader rate factor and optional conversion modes. An empty list follows the shader."),
             text("recipe", "A recipe synth's patch (recipe text)."),
             list("kit", "A drum kit's sixteen slots, each a recipe."),
             list("kit_gain", "Each kit slot's gain."),
@@ -192,11 +258,14 @@ fn score_nodes() -> Vec<TypeDescriptor> {
             number("root", 60.0, "A sampler's root note (plays the sample as recorded)."),
             number("attack", 0.002, "A sampler's attack (s)."),
             number("release", 0.05, "A sampler's release (s)."),
-            number("mono", 0.0, "1 plays one voice at a time (legato lines)."),
+            number("mono", -1.0, "One voice (1) or a chord (0). The default follows the instrument."),
+            number("legato", 1.0, "An overlapping mono note keeps its envelope (1) or retriggers (0)."),
+            number("glide", 0.0, "Seconds for a legato pitch change."),
+            ParamDescriptor::authored("steal", ParamType::String, Literal::Str("oldest".into()), "Choose the oldest or quietest voice when the pool fills."),
             number("program", 0.0, "Ironfish: which built-in program (0-7)."),
             number("channel", 1.0, "A MIDI loop's channel (1-16)."),
             text("midi_port", "A MIDI loop's output (its name; empty: the first)."),
-            list("stream", "Played from MIDI in: its note stream (makepad_score_player::stream::StreamDef::encode: bend range, MPE, then each stage: transpose, chord, velocity, arp). Empty: the composer's events."),
+            list("stream", "Played from MIDI in: its note stream (makepad_score_player::stream::StreamDef::encode: bend range, per-note channels, master channel (-1: none), then each stage: transpose, chord, velocity, arp). Empty: the composer's events."),
             text("midi_device", "A MIDI-in loop's device: part of an input port's name (any case); empty or any: every input."),
             number("midi_channel", 0.0, "A MIDI-in loop's channel (1-16); 0: every channel."),
             number("midi_latency", 8.0, "A MIDI-in loop's delay (ms) from a message's arrival to its sample: keeps the spacing as played; 0 plays each as soon as it is read."),
@@ -230,10 +299,17 @@ fn score_nodes() -> Vec<TypeDescriptor> {
         }
         out.push(node(kind.name(), "A score's FX: the sum of its inputs, processed.", params, inputs, vec![output("audio", AUDIO), output("peak", LEVEL), output("gr", LEVEL)]));
     }
+    let shader_fields = vec![
+        text("shader", "The audio shader source."),
+        list("shader_params", "Its settings: name, value, name, value..."),
+        list("shader_samples", "Its sample tables: table name, sample name, ..."),
+        list("shader_modules", "Imported shader modules in path, source pairs."),
+        list("oversample", "A shader rate factor and optional conversion modes. An empty list follows the shader."),
+        number("seed", 0.0, "The random stream selector."),
+    ];
+    out.push(node("ShaderControl", "A block-rate shader with named outputs.", shader_fields.clone(), vec![], vec![]));
     out.push(node(
-        "ShaderFx",
-        "A score's FX written as an audio shader: the sum of its inputs through the shader.",
-        vec![text("shader", "The effect's code (an audio shader)."), list("shader_params", "Its settings: name, value, name, value...")],
+        "ShaderFx", "The sum of the inputs through an audio shader.", shader_fields,
         vec![input("audio", AUDIO, Some(ANY))],
         vec![output("audio", AUDIO), output("peak", LEVEL)],
     ));

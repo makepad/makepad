@@ -40,6 +40,7 @@ fn main() {
 
 /// The commands (`midi-text` runs `text`).
 pub fn run(args: Vec<String>) {
+    let control = makepad_score_live::PrepareControl::default();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let has = |name: &str| args.iter().any(|a| a == name);
     // Positional words: everything that is not a flag or a flag's value.
@@ -62,16 +63,16 @@ pub fn run(args: Vec<String>) {
         Some("index") => build_index(flag("--threads").and_then(|t| t.parse().ok()).unwrap_or(4)),
         Some("search") => search(&words.join(" "), flag("--n").and_then(|n| n.parse().ok()).unwrap_or(20)),
         Some("import") if words.len() == 2 => import_one(&words[0], Path::new(&words[1]), &options(&flag, has("--gm"), has("--presets"))),
-        Some("cover") if !words.is_empty() => covers(&words, &out_dir(&flag), &options(&flag, has("--gm"), has("--presets")), lufs(&flag), !has("--mechanical")),
-        Some("covers") => pick(&words.join(" "), flag("--n").and_then(|n| n.parse().ok()).unwrap_or(5)).and_then(|ids| covers(&ids, &out_dir(&flag), &options(&flag, has("--gm"), has("--presets")), lufs(&flag), !has("--mechanical"))),
+        Some("cover") if !words.is_empty() => covers(&words, &out_dir(&flag), &options(&flag, has("--gm"), has("--presets")), lufs(&flag), !has("--mechanical"), &control),
+        Some("covers") => pick(&words.join(" "), flag("--n").and_then(|n| n.parse().ok()).unwrap_or(5)).and_then(|ids| covers(&ids, &out_dir(&flag), &options(&flag, has("--gm"), has("--presets")), lufs(&flag), !has("--mechanical"), &control)),
         Some("refs") if !words.is_empty() => references(&words),
-        Some("chip") => makepad_midi_library::chip::cli::run(&args[1..]),
+        Some("chip") => makepad_midi_library::chip::cli::run(&args[1..], &control),
         Some("mcp") => {
             makepad_midi_library::tools::serve_mcp();
             Ok(())
         }
         Some("text") if !words.is_empty() => text(&words.join(" "), &flag, has("--all")),
-        Some("score") if words.len() == 2 => text_to_score(Path::new(&words[0]), Path::new(&words[1])),
+        Some("score") if words.len() == 2 => text_to_score(Path::new(&words[0]), Path::new(&words[1]), &control),
         _ => {
             eprintln!("midi_library status | install --accept | index | search <words> | import <id> <out.splash> | cover <id>... | covers <words> [--n 5] | refs <id>...");
             std::process::exit(2);
@@ -290,7 +291,7 @@ fn import_one(name: &str, out: &Path, opts: &Options) -> Result<(), String> {
 
 /// One cover: the mechanical import, then (with `arrange`) the arranger's
 /// Score, rendered at `lufs`; the line for covers.txt.
-fn one_cover(entry: &Entry, bytes: &[u8], out: &Path, opts: &Options, lufs: f64, arrange: bool) -> Result<String, String> {
+fn one_cover(entry: &Entry, bytes: &[u8], out: &Path, opts: &Options, lufs: f64, arrange: bool, control: &makepad_score_live::PrepareControl) -> Result<String, String> {
     let started = std::time::Instant::now();
     let slug = format!("{}{}{}", entry.slug(), if opts.gm_only { "_gm" } else { "" }, if arrange { "" } else { "_mechanical" });
     let imported = import::import(bytes, &about(entry), opts)?;
@@ -298,14 +299,13 @@ fn one_cover(entry: &Entry, bytes: &[u8], out: &Path, opts: &Options, lufs: f64,
     let mut similarity = String::new();
     let source = if arrange {
         let writer = makepad_music_iter::gen::ClaudeCode::default();
-        let cancel = std::sync::atomic::AtomicBool::new(false);
-        let arranged = makepad_midi_library::arranger::arrange(&writer, &imported.arrangement, &imported.source, &cancel, &|p| println!("{slug}: {p}"))?;
+        let arranged = makepad_midi_library::arranger::arrange(&writer, &imported.arrangement, &imported.source, control, &|p| println!("{slug}: {p}"))?;
         similarity = format!(" | {} after {} turn(s)", arranged.similarity.line(), arranged.turns);
         arranged.source
     } else {
         imported.source.clone()
     };
-    let r = cover::render(&source, lufs)?;
+    let r = cover::render(&source, lufs, control)?;
     std::fs::write(out.join(format!("{slug}.wav")), cover::wav(&r.song)).map_err(|e| e.to_string())?;
     std::fs::write(out.join(format!("{slug}.splash")), &r.source).map_err(|e| e.to_string())?;
     std::fs::write(out.join(format!("{slug}.card.tsv")), r.card.to_tsv()).map_err(|e| e.to_string())?;
@@ -324,11 +324,16 @@ fn one_cover(entry: &Entry, bytes: &[u8], out: &Path, opts: &Options, lufs: f64,
     ))
 }
 
-fn covers(names: &[String], out: &Path, opts: &Options, lufs: f64, arrange: bool) -> Result<(), String> {
+fn covers(names: &[String], out: &Path, opts: &Options, lufs: f64, arrange: bool, control: &makepad_score_live::PrepareControl) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let songs = if names.iter().all(|n| n.to_lowercase().ends_with(".mid")) { names.iter().map(|n| resolve_one(n)).collect::<Result<Vec<_>, _>>()? } else { resolve(names)? };
     for (entry, bytes) in songs {
-        let line = one_cover(&entry, &bytes, out, opts, lufs, arrange).unwrap_or_else(|e| format!("{}: FAILED {e}", entry.slug()));
+        let result = one_cover(&entry, &bytes, out, opts, lufs, arrange, control);
+        let line = match result {
+            Err(_) if control.is_cancelled() => return Err("the cover was cancelled".into()),
+            Err(error) => format!("{}: FAILED {error}", entry.slug()),
+            Ok(line) => line,
+        };
         println!("{line}");
         // Each line as it is done: a long run leaves what it finished.
         let path = out.join("covers.txt");
@@ -390,10 +395,10 @@ fn text(name: &str, flag: &dyn Fn(&str) -> Option<String>, all: bool) -> Result<
     Ok(())
 }
 
-fn text_to_score(input: &Path, out: &Path) -> Result<(), String> {
+fn text_to_score(input: &Path, out: &Path, control: &makepad_score_live::PrepareControl) -> Result<(), String> {
     let a = roll::from_text(&std::fs::read_to_string(input).map_err(|e| e.to_string())?)?;
     let source = makepad_midi_library::arrangement::to_score(&a);
-    makepad_score_live::model::load(&source).map_err(|d| format!("the Score does not load: {d:?}"))?;
+    makepad_score_live::load_controlled(&source, control).map_err(|e| e.describe(|d| format!("the Score does not load: {d:?}")))?;
     std::fs::write(out, &source).map_err(|e| e.to_string())?;
     println!("{} -> {} ({} parts, {} bars)", input.display(), out.display(), a.parts.len(), a.bar_count());
     Ok(())

@@ -34,24 +34,24 @@ pub fn phrase(choice: &Choice) -> Option<String> {
 /// stopped, only the loops that play `node` (soloed), from the first
 /// section they play in. None when the switch does not apply or the
 /// choice makes no sound here.
-pub fn in_place(source: &str, node: &str, choice: &Choice, song_beat: Option<f64>) -> Option<(String, Option<f64>)> {
-    phrase(choice)?;
-    let splice = crate::instruments::switch(source, node, choice).ok()?;
-    let mut next = makepad_edit_values::apply_splices(source, 0, &[splice]).ok()?;
-    let doc = crate::model::ScoreDoc::load(&next).ok()?;
+pub fn in_place(source: &str, node: &str, choice: &Choice, song_beat: Option<f64>, control: &crate::PrepareControl) -> Result<Option<(String, Option<f64>)>, String> {
+    let Some(mut next) = phrase(choice).and_then(|_| crate::instruments::switch(source, node, choice).ok())
+        .and_then(|splice| makepad_edit_values::apply_splices(source, 0, &[splice]).ok()) else { return Ok(None); };
+    let doc = match crate::model::ScoreDoc::load_controlled(&next, control) {
+        Ok(doc) => doc,
+        Err(crate::LoadError::Problems(_)) => return Ok(None),
+        Err(crate::LoadError::Cancelled) => return Err("the audition was cancelled".into()),
+    };
     let players: Vec<String> = doc.loops.iter().filter(|l| l.play.as_deref() == Some(node)).map(|l| l.name.clone()).collect();
-    if players.is_empty() {
-        return None;
-    }
-    if song_beat.is_some() {
-        return Some((next, song_beat));
-    }
+    if players.is_empty() { return Ok(None); }
+    if song_beat.is_some() { return Ok(Some((next, song_beat))); }
     for name in &players {
         if let Ok(splice) = crate::source::set_field(&next, name, "solo", "true") {
-            next = makepad_edit_values::apply_splices(&next, 0, &[splice]).ok()?;
+            let Ok(edited) = makepad_edit_values::apply_splices(&next, 0, &[splice]) else { return Ok(None); };
+            next = edited;
         }
     }
-    Some((next, first_beat(&doc, &players)))
+    Ok(Some((next, first_beat(&doc, &players))))
 }
 
 /// Where the first section that plays any of `loops` starts (song beats);
@@ -70,17 +70,17 @@ pub fn first_beat(doc: &crate::model::ScoreDoc, loops: &[String]) -> Option<f64>
 }
 
 /// Render an in-place audition: `seconds` from `start` (song beats).
-pub fn render_in_place(source: &str, start: Option<f64>, seconds: f64, rate: f32) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
-    let r = render(source, &RenderOpts { rate, seconds: Some(seconds.clamp(0.5, 8.0)), seed: None, params: Vec::new(), start, held: Vec::new() }, &crate::NoSamples)
-        .map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
+pub fn render_in_place(source: &str, start: Option<f64>, seconds: f64, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    let r = render(source, &RenderOpts { rate, seconds: Some(seconds.clamp(0.5, 8.0)), seed: None, params: Vec::new(), start, held: Vec::new() }, &crate::NoSamples, control)
+        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
     Ok((r.left, r.right, r.rate))
 }
 
 /// The phrase on `choice`, rendered: (left, right, rate).
-pub fn render_phrase(choice: &Choice, rate: f32) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+pub fn render_phrase(choice: &Choice, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
     let source = phrase(choice).ok_or_else(|| format!("{} makes no sound to audition", choice.label))?;
-    let r = render(&source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: Vec::new() }, &crate::NoSamples)
-        .map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
+    let r = render(&source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: Vec::new() }, &crate::NoSamples, control)
+        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
     Ok((r.left, r.right, r.rate))
 }
 
@@ -114,9 +114,9 @@ pub fn pad(source: &str, node: &str, drum: &str) -> Option<String> {
 }
 
 /// Render a [`key`] score with the fields an editor holds: (left, right, rate).
-pub fn render_key(source: &str, held: &[crate::held::Held], rate: f32) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
-    let r = render(source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: held.to_vec() }, &crate::NoSamples)
-        .map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
+pub fn render_key(source: &str, held: &[crate::held::Held], rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    let r = render(source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: held.to_vec() }, &crate::NoSamples, control)
+        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
     Ok((r.left, r.right, r.rate))
 }
 
@@ -277,14 +277,15 @@ mod tests {
     #[test]
     fn every_instrument_auditions_or_says_why_not() {
         let all = catalog(None, &Available::default());
-        let mut groups = vec!["Synths", "Morph", "Drum kits", "Piano", "Ironfish", "Voices", "Shader instruments", "MIDI out", "Audio in"];
         // The neural singer, where a voice is installed (MAKEPAD_CANTOR_MODEL).
-        if makepad_score_player::sung::neural::model_path().is_file() {
-            groups.push("Neural singers");
-        }
+        #[cfg(feature = "neural")]
+        let neural = makepad_score_player::sung::neural::model_path().is_file().then_some("Neural singers");
+        #[cfg(not(feature = "neural"))]
+        let neural = None;
+        let groups = ["Synths", "Morph", "Drum kits", "Piano", "Ironfish", "Voices", "Shader instruments", "MIDI out", "Audio in"].into_iter().chain(neural);
         for group in groups {
             let choice = all.iter().find(|c| c.group == group).unwrap_or_else(|| panic!("no {group}"));
-            match render_phrase(choice, 24_000.0) {
+            match render_phrase(choice, 24_000.0, &crate::PrepareControl::default()) {
                 Ok((l, r, rate)) => {
                     assert_eq!(rate, 24_000.0);
                     let peak = l.iter().chain(&r).fold(0.0f32, |a, x| a.max(x.abs()));
@@ -301,17 +302,17 @@ mod tests {
         let all = catalog(None, &Available::default());
         let piano = all.iter().find(|c| c.group == "Piano").unwrap();
         // Stopped: only `line` (soloed), from the section it plays in.
-        let (candidate, start) = in_place(src, "bass", piano, None).unwrap();
+        let (candidate, start) = in_place(src, "bass", piano, None, &crate::PrepareControl::default()).unwrap().unwrap();
         assert!(candidate.contains("let bass = Instrument{kind: @piano") && candidate.contains("solo: true"), "{candidate}");
         assert_eq!(start, Some(8.0));
-        let (l, _, _) = render_in_place(&candidate, start, 2.0, 24_000.0).unwrap();
+        let (l, _, _) = render_in_place(&candidate, start, 2.0, 24_000.0, &crate::PrepareControl::default()).unwrap();
         assert!(l.iter().fold(0.0f32, |a, x| a.max(x.abs())) > 0.01);
         // Playing: the whole mix, from where it plays.
-        let (candidate, start) = in_place(src, "bass", piano, Some(12.0)).unwrap();
+        let (candidate, start) = in_place(src, "bass", piano, Some(12.0), &crate::PrepareControl::default()).unwrap().unwrap();
         assert!(!candidate.contains("solo: true") && start == Some(12.0));
         // MIDI out or audio in: no audition.
         let midi = all.iter().find(|c| c.group == "MIDI out").unwrap();
-        assert!(in_place(src, "bass", midi, None).is_none());
+        assert!(in_place(src, "bass", midi, None, &crate::PrepareControl::default()).unwrap().is_none());
     }
 
     #[test]

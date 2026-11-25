@@ -24,7 +24,7 @@ fn main() {
             Ok(())
         }
         Some("zones") if args.len() >= 3 => zones(args[1].parse().unwrap_or(0), args[2].parse().unwrap_or(0)),
-        Some("audition") if args.len() >= 2 => audition(PathBuf::from(&args[1]), args.get(2).map(String::as_str)),
+        Some("audition") if args.len() >= 2 => audition(PathBuf::from(&args[1]), args.get(2).map(String::as_str), &makepad_score_live::PrepareControl::default()),
         Some("measure") if args.len() >= 2 => measure_all(PathBuf::from(&args[1]), args.get(2).map(PathBuf::from)),
         _ => Err("usage: score_palette presets | zones <bank> <program> | search <words> | audition <dir> [id prefix] | measure <catalogue.tsv> [pieces.tsv]".into()),
     };
@@ -174,7 +174,7 @@ impl Instrument for KitPlayer {
     }
 }
 
-fn audition(dir: PathBuf, filter: Option<&str>) -> Result<(), String> {
+fn audition(dir: PathBuf, filter: Option<&str>, control: &makepad_score_live::PrepareControl) -> Result<(), String> {
     let bytes = font_bytes()?;
     // Holds the parsed font for every render's graph.
     let _keep = instrument(&bytes, &palette::entries()[0])?;
@@ -189,7 +189,7 @@ fn audition(dir: PathBuf, filter: Option<&str>) -> Result<(), String> {
         let source = palette::audition_score(&e);
         let seconds = if e.phrase == palette::Phrase::Groove { 8.6 } else { 6.8 };
         let opts = makepad_score_live::RenderOpts { rate: RATE, seconds: Some(seconds), ..Default::default() };
-        let r = makepad_score_live::render(&source, &opts, &makepad_score_live::NoSamples).map_err(|d| format!("{}: {d:?}", e.id))?;
+        let r = makepad_score_live::render(&source, &opts, &makepad_score_live::NoSamples, control).map_err(|error| error.describe(|d| format!("{}: {d:?}", e.id)))?;
         let name = file_name(&e);
         std::fs::write(dir.join(&name), makepad_audio_synth::wav::stereo_wav_16(&r.left, &r.right, RATE as u32)).map_err(|e| e.to_string())?;
         let f = palette::measure(&r.left, &r.right, RATE);

@@ -24,6 +24,7 @@ var fenv = 0.0
 var fstage = int(0)
 var f = Svf{}
 var amp = Adsr{}
+var dc = DcBlock{}
 
 fn block() {
     let track = pow(freq / 261.63, keytrack)
@@ -54,7 +55,8 @@ fn voice() {
     let w = 0.5 + pwm_depth * sin(TAU * lfo)
     let pulse = pulse_blep(p1, dt, w)
     let saw = saw_blep(p2, dt * 1.003)
-    let x = mix(pulse, saw, mix_saw)
+    // A moving pulse width moves the pulse's mean: keep it centred.
+    let x = dc_block(dc, mix(pulse, saw, mix_saw))
     let e = adsr(amp, attack, decay, sustain, release)
     if gate == 0.0 && e == 0.0 {
         stop()

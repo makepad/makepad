@@ -2,6 +2,7 @@
 // legato notes for slides), saw or square into a resonant ladder whose
 // envelope decays per note; accents (velocity above 0.8) open the filter
 // further, decay faster and play louder; slides glide the pitch.
+mono()
 let cutoff = param(380, 30, 8000)
 let res = param(0.72, 0, 1)
 let env_mod = param(0.6, 0, 1)

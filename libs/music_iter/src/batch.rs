@@ -83,7 +83,7 @@ pub enum Update {
 
 pub struct Run {
     rx: Receiver<Update>,
-    pub cancel: Arc<AtomicBool>,
+    pub cancel: makepad_score_live::PrepareControl,
     pending: usize,
 }
 
@@ -119,7 +119,7 @@ impl Run {
     }
 
     pub fn stop(&self) {
-        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel.cancel();
     }
 }
 
@@ -138,7 +138,7 @@ fn next_id(root: &Path) -> u32 {
 
 /// One composer: write song `k` from its card, render, score and keep it.
 #[allow(clippy::too_many_arguments)]
-fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::Writer, system: &str, request: &Request, recent: &str, cancel: &AtomicBool, dir: &Path, tx: &std::sync::mpsc::Sender<Update>) {
+fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::Writer, system: &str, request: &Request, recent: &str, cancel: &makepad_score_live::PrepareControl, dir: &Path, tx: &std::sync::mpsc::Sender<Update>) {
     let progress = |p: Progress| {
         let _ = tx.send(Update::State(k, match p {
             Progress::Writing { turn } => State::Writing { turn },
@@ -152,7 +152,7 @@ fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::
             // One producer's pass: the weak lines and the form, as notes for
             // a revision, kept only when it scores at least as well.
             let (w, card, revised) = match gen::critique(&w.song, &card) {
-                Some(notes) if !cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                Some(notes) if !cancel.is_cancelled() => {
                     progress(Progress::Revising);
                     let mut turns = w.history.clone();
                     turns.push(notes.clone());
@@ -174,6 +174,10 @@ fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::
                 }
                 _ => (w, card, "no revision needed".to_string()),
             };
+            if cancel.is_cancelled() {
+                let _ = tx.send(Update::State(k, State::Failed("the song was cancelled".into())));
+                return;
+            }
             let name = format!("s{}", k + 1);
             let _ = std::fs::write(dir.join(format!("{name}.splash")), &w.source);
             let _ = std::fs::write(dir.join(format!("{name}.wav")), crate::render::wav(w.song.mix.rate, &w.song.mix.left, &w.song.mix.right));
@@ -190,13 +194,23 @@ fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::
 
 impl Batch {
     /// A new batch of `n` songs, written and rendered at once.
-    pub fn start(writer: SharedWriter, request: Request, n: usize) -> Result<(Batch, Run), String> {
-        Batch::start_with(writer, request, n, None)
+    pub fn start(writer: SharedWriter, request: Request, n: usize, cancel: &makepad_score_live::PrepareControl) -> Result<(Batch, Run), String> {
+        Batch::start_with(writer, request, n, None, cancel)
     }
 
     /// A new batch written from `cards` (no director): the same concepts
     /// again, e.g. to compare composers or patches before and after.
-    pub fn start_with(writer: SharedWriter, request: Request, n: usize, cards: Option<Vec<gen::Concept>>) -> Result<(Batch, Run), String> {
+    pub fn start_with(writer: SharedWriter, request: Request, n: usize, cards: Option<Vec<gen::Concept>>, cancel: &makepad_score_live::PrepareControl) -> Result<(Batch, Run), String> {
+        Self::start_on(writer, request, n, cards, Arc::new(|work| {
+            std::thread::Builder::new().spawn(work).map(|_| ()).map_err(|e| e.to_string())
+        }), cancel)
+    }
+
+    /// Schedule the director and each independent song on the host's executor.
+    pub fn start_on(writer: SharedWriter, request: Request, n: usize, cards: Option<Vec<gen::Concept>>,
+        dispatch: Arc<dyn Fn(Box<dyn FnOnce() + Send>) -> Result<(), String> + Send + Sync>,
+        cancel: &makepad_score_live::PrepareControl,
+    ) -> Result<(Batch, Run), String> {
         let n = cards.as_ref().map_or(n, Vec::len);
         let root = root();
         let id = next_id(&root);
@@ -204,15 +218,18 @@ impl Batch {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::write(dir.join("request.txt"), format!("{}model: {}\n", request.text(), writer.label())).map_err(|e| e.to_string())?;
         let (tx, rx) = channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let system = Arc::new(gen::system());
-        let recent = Arc::new(recent_verdicts(&root));
-        let history = history(&root, 3);
-        // The director plans five different songs, then five composers
-        // write them at once, each from its own card.
-        let director = (tx.clone(), writer.clone(), cancel.clone(), request.clone(), dir.clone());
-        std::thread::spawn(move || {
+        let cancel = cancel.clone();
+        let director = (tx, writer, cancel.clone(), request.clone(), dir.clone());
+        let composers = dispatch.clone();
+        dispatch(Box::new(move || {
             let (tx, writer, cancel, request, dir) = director;
+            if cancel.is_cancelled() {
+                for k in 0..n { let _ = tx.send(Update::State(k, State::Failed("stopped".into()))); }
+                return;
+            }
+            let system = Arc::new(gen::system());
+            let recent = Arc::new(recent_verdicts(&root));
+            let history = history(&root, 3);
             let planned = match cards {
                 Some(cards) => Ok(cards),
                 // a director that panics is a plan that failed: the composers still write
@@ -237,8 +254,13 @@ impl Batch {
                 }
             };
             for (k, concept) in concepts.into_iter().enumerate() {
+                if cancel.is_cancelled() {
+                    let _ = tx.send(Update::State(k, State::Failed("stopped".into())));
+                    continue;
+                }
+                let failure = tx.clone();
                 let (tx, writer, cancel, system, recent, request, dir) = (tx.clone(), writer.clone(), cancel.clone(), system.clone(), recent.clone(), request.clone(), dir.clone());
-                std::thread::spawn(move || {
+                let started = composers(Box::new(move || {
                     // A composer that panics (writing, rendering or scoring) fails its song with
                     // the panic's text: a dead composer left its song at Rendering for ever.
                     let composed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compose(k, n, concept, &*writer, &system, &request, &recent, &cancel, &dir, &tx)));
@@ -247,9 +269,10 @@ impl Batch {
                         let _ = std::fs::write(dir.join(format!("s{}.failed", k + 1)), &e);
                         let _ = tx.send(Update::State(k, State::Failed(e)));
                     }
-                });
+                }));
+                if let Err(error) = started { let _ = failure.send(Update::State(k, State::Failed(error))); }
             }
-        });
+        }))?;
         let songs = vec![Entry::default(); n];
         Ok((Batch { id, dir, request, songs }, Run { rx, cancel, pending: n }))
     }
@@ -487,7 +510,7 @@ mod tests {
             Ok(format!("TITLE: Test\nIDEA: a kick and an acid line\n```splash\n{song}```\n"))
         }));
         let req = Request { prompt: "a test".into(), markers: vec!["techno".into()], seconds: 8 };
-        let (mut batch, mut run) = Batch::start(writer.clone(), req, 2).unwrap();
+        let (mut batch, mut run) = Batch::start(writer.clone(), req, 2, &makepad_score_live::PrepareControl::default()).unwrap();
         let t0 = std::time::Instant::now();
         while !run.done() && t0.elapsed().as_secs() < 120 {
             run.poll(&mut batch);
@@ -522,7 +545,7 @@ mod tests {
             panic!("a test composer's panic");
         }));
         let req = Request { prompt: "a panic".into(), markers: vec!["techno".into()], seconds: 8 };
-        let (mut failed, mut run) = Batch::start(boom, req, 2).unwrap();
+        let (mut failed, mut run) = Batch::start(boom, req, 2, &makepad_score_live::PrepareControl::default()).unwrap();
         let t0 = std::time::Instant::now();
         while !run.done() && t0.elapsed().as_secs() < 120 {
             run.poll(&mut failed);
@@ -550,19 +573,8 @@ pub fn history(root: &Path, batches: u32) -> String {
         for e in b.songs.iter().filter(|e| e.state == State::Ready) {
             let key = e.card.as_ref().and_then(|c| c.get("harmony")).and_then(|m| m.value.split(':').next()).unwrap_or("?").to_string();
             let genre = e.concept.lines().find_map(|l| l.strip_prefix("SUBGENRE:")).unwrap_or("").trim().to_string();
-            let (bpm, palette) = makepad_score_live::model::load(&e.source).map_or((0.0, String::new()), |l| {
-                let names: Vec<String> = l.doc.insts.iter().map(|i| match &i.kind {
-                    makepad_score_live::model::InstKind::Synth { .. } => format!("{} (synth)", i.name),
-                    makepad_score_live::model::InstKind::Drums { kit, .. } => format!("drums {kit}"),
-                    makepad_score_live::model::InstKind::Native { native, program, .. } if native == "soundfont" => format!("{} (GM {program})", i.name),
-                    makepad_score_live::model::InstKind::Native { native, .. } => format!("{} ({native})", i.name),
-                    makepad_score_live::model::InstKind::Shader { shader, .. } => format!("{} (shader {})", i.name, shader.lib.as_deref().unwrap_or("own")),
-                    makepad_score_live::model::InstKind::Ironfish { .. } => format!("{} (ironfish)", i.name),
-                    makepad_score_live::model::InstKind::Voice { .. } => format!("{} (voice)", i.name),
-                    _ => i.name.clone(),
-                }).collect();
-                (l.doc.clock.bpm, names.join(", "))
-            });
+            let (bpm, instruments) = makepad_score_live::model::evaluated_palette(&e.source).unwrap_or_default();
+            let palette = instruments.join(", ");
             let ratings: Vec<String> = ASPECTS.iter().zip(e.ratings).filter_map(|(a, r)| r.map(|r| format!("{a} {}", if r { "liked" } else { "disliked" }))).collect();
             out.push_str(&format!(
                 "- \"{}\"{} · {key} · {bpm:.0} bpm · {palette} · {}{}\n",

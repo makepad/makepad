@@ -13,6 +13,8 @@ pub struct ScoreValues<'a> {
     src: &'a str,
     file: usize,
     outline: Outline,
+    /// A shader node's declared params (empty for other nodes).
+    shaders: &'a dyn Fn(&str) -> Vec<ParamSpec>,
 }
 
 impl<'a> ScoreValues<'a> {
@@ -22,7 +24,18 @@ impl<'a> ScoreValues<'a> {
 
     /// Read the score's values at the given file index.
     pub fn in_file(src: &'a str, file: usize) -> ScoreValues<'a> {
-        ScoreValues { src, file, outline: outline(src) }
+        Self::with_shaders(src, file, &crate::host::shader_params)
+    }
+
+    /// Read the score's values, a shader node's params as `shaders` gives
+    /// them (the installed host's loaded score by default).
+    pub fn with_shaders(src: &'a str, file: usize, shaders: &'a dyn Fn(&str) -> Vec<ParamSpec>) -> ScoreValues<'a> {
+        ScoreValues { src, file, outline: outline(src), shaders }
+    }
+
+    /// The params a shader node declares, in declaration order.
+    fn shader_specs(&self, node: &Ctor) -> Vec<ParamSpec> {
+        if matches!(node.type_name.as_str(), "Shader" | "ShaderFx") { (self.shaders)(node_name(node)) } else { Vec::new() }
     }
 
     fn nodes(&self) -> impl Iterator<Item = &Ctor> {
@@ -37,19 +50,20 @@ impl<'a> ScoreValues<'a> {
         }
     }
 
-    /// The site of `key` on `node` (written or not).
-    fn site(&self, node: &Ctor, key: &str) -> Option<ValueSite> {
+    /// The site of `key` on `node` (written or not); `shader` is the
+    /// node's [`Self::shader_specs`].
+    fn site(&self, node: &Ctor, key: &str, shader: &[ParamSpec]) -> Option<ValueSite> {
         let field = node.field(key);
         let written = field.map(|f| f.value.text(self.src).trim());
         let number = written.and_then(|w| w.parse::<f64>().ok());
-        let Some(spec) = spec(&node.type_name, key) else {
+        let Some(spec) = field_spec(node, key, shader) else {
             let field = field?;
             let range = field.value.start..field.value.end;
             return Some(site_of(&format!("{}.{key}", node_name(node)), self.file, range.clone(), self.src[range].to_string()));
         };
         let (kind, unit) = spec_kind(&spec);
         let value = match (written, spec.is_choice(), spec.unit) {
-            (Some(w), true, _) => Value::Choice(spec.options.iter().position(|o| o == w.trim_start_matches('@')).unwrap_or(0)),
+            (Some(w), true, _) => Value::Choice(spec.parse(w, spec.default).map_or(0, |i| i as usize)),
             (Some(w), _, Unit::Bool) => Value::Bool(w == "true"),
             (Some(w), _, _) => match number {
                 Some(x) => Value::Num(x),
@@ -67,7 +81,7 @@ impl<'a> ScoreValues<'a> {
             kind,
             unit: unit.to_string(),
             range: Range::hard(lo, hi),
-            step: if spec.taper == Taper::Int { 1.0 } else { 0.0 },
+            step: spec.step(),
             taper: spec.taper,
             choices: spec.options.clone(),
             default: Some(default_of(&spec)),
@@ -88,6 +102,12 @@ fn node_name(node: &Ctor) -> &str {
     } else {
         &node.name
     }
+}
+
+/// A field's spec: its node type's table, else the param a shader node
+/// declares.
+fn field_spec(node: &Ctor, key: &str, shader: &[ParamSpec]) -> Option<ParamSpec> {
+    spec(&node.type_name, key).or_else(|| shader.iter().find(|s| s.key == key).cloned())
 }
 
 /// The kind and unit a spec's field has.
@@ -240,10 +260,11 @@ impl ValueSource for ScoreValues<'_> {
     fn sites(&self) -> Vec<ValueSite> {
         let mut out = Vec::new();
         for node in self.nodes() {
-            let table = keys(&node.type_name);
+            let shader = self.shader_specs(node);
+            let table: Vec<&str> = keys(&node.type_name).into_iter().chain(shader.iter().map(|s| s.key.as_str())).collect();
             let written = node.fields.iter().filter(|f| !f.bare).map(|f| f.key.as_str()).filter(|k| !table.contains(k));
             for key in table.iter().copied().chain(written) {
-                if let Some(site) = self.site(node, key) {
+                if let Some(site) = self.site(node, key, &shader) {
                     if kind_of(&site.text) == ValueKind::Record {
                         for (key, range) in record_fields(self.src, site.range()) {
                             out.push(site_of(&format!("{}.{key}", site.id), self.file, range.clone(), self.src[range].to_string()));
@@ -262,7 +283,7 @@ impl ValueSource for ScoreValues<'_> {
         let key = parts.next().ok_or_else(|| format!("`{id}` is not `node.field`"))?;
         let ctor = self.node(node).ok_or_else(|| format!("no node `{node}`"))?;
         if parts.clone().next().is_none() {
-            return self.site(ctor, key).ok_or_else(|| format!("`{id}` is not a value"));
+            return self.site(ctor, key, &self.shader_specs(ctor)).ok_or_else(|| format!("`{id}` is not a value"));
         }
         let field = ctor.field(key).ok_or_else(|| format!("`{node}` writes no `{key}`"))?;
         let mut range = field.value.start..field.value.end;
@@ -276,7 +297,7 @@ impl ValueSource for ScoreValues<'_> {
         let site = self.resolve(id)?;
         let (node, key) = id.split_once('.').unwrap_or(("", id));
         let ctor = self.node(node).ok_or_else(|| format!("no node `{node}`"))?;
-        let table = if key.contains('.') { None } else { spec(&ctor.type_name, key) };
+        let table = if key.contains('.') { None } else { field_spec(ctor, key, &self.shader_specs(ctor)) };
         let literal = match value {
             Value::Num(n) => match table {
                 Some(spec) => spec.source_text(site.range.clamp(*n)),
@@ -284,7 +305,7 @@ impl ValueSource for ScoreValues<'_> {
                 None if site.kind == ValueKind::Bool => (if *n >= 0.5 { "true" } else { "false" }).to_string(),
                 None => fmt_num(*n),
             },
-            Value::Choice(i) => format!("@{}", site.choices.get(*i).ok_or_else(|| format!("`{id}` has no choice {i}"))?),
+            Value::Choice(i) => makepad_score_live::model::shader_choice(site.choices.get(*i).ok_or_else(|| format!("`{id}` has no choice {i}"))?),
             Value::Bool(b) => b.to_string(),
             Value::Text(t) if site.kind == ValueKind::Choice || site.kind == ValueKind::Function => {
                 if site.kind == ValueKind::Choice && !t.starts_with('@') { format!("@{t}") } else { t.clone() }
@@ -354,6 +375,25 @@ mod tests {
         let release = v.resolve("acid.release").unwrap();
         assert!(release.span.is_none());
         assert!(v.sites().iter().any(|s| s.id == "Score.bpm"));
+    }
+
+    #[test]
+    fn a_shader_nodes_declared_params_are_its_sites() {
+        let shader = makepad_score_player::shader::compile("let cutoff = param(900, 30, 16000, {unit: hz curve: log})\nlet res = param(0.5, 0, 1, {step: 0.25})\nlet wave = param(saw, {choices: [saw square]})\nfn voice() { vec2(cutoff * res * wave, 0) }").unwrap();
+        let declared = |node: &str| if node == "lead" { (0..shader.param_count()).map(|i| ParamSpec::from_shader(&shader, i)).collect() } else { Vec::new() };
+        let src = "let lead = Shader{code: \"..\" cutoff: 1200}\nScore{lead}";
+        let v = ScoreValues::with_shaders(src, 0, &declared);
+        let ids: Vec<String> = v.sites().into_iter().map(|s| s.id).filter(|id| id.starts_with("lead.")).collect();
+        assert_eq!(ids[..3], ["lead.cutoff", "lead.res", "lead.wave"], "every declared param is listed first, in declaration order");
+        let cutoff = v.resolve("lead.cutoff").unwrap();
+        assert_eq!((cutoff.kind, cutoff.unit.as_str(), cutoff.value.clone()), (ValueKind::Frequency, "hz", Value::Num(1200.0)));
+        let res = v.resolve("lead.res").unwrap();
+        assert!(res.span.is_none() && res.value == Value::Num(0.5) && res.step == 0.25, "an unwritten param is listed at its default with its step");
+        assert_eq!(v.resolve("lead.wave").unwrap().choices, ["saw", "square"]);
+        let out = apply_splices(src, 0, &v.write("lead.res", &Value::Num(0.6)).unwrap()).unwrap();
+        assert!(out.contains("res: 0.5"), "a write snaps to the declared step: {out}");
+        let out = apply_splices(src, 0, &v.write("lead.wave", &Value::Choice(1)).unwrap()).unwrap();
+        assert!(out.contains("wave: @square"), "{out}");
     }
 
     #[test]

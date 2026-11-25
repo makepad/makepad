@@ -13,6 +13,11 @@ description = "The audio engine of a flow graph: node types, prepared schedules 
 name = "makepad_audio_engine"
 path = "src/lib.rs"
 
+[features]
+# A score's neural voice (`Voice{engine: @neural}`): its model runs in this process, so an app turns
+# it on only under its own `localai` (AGENTS.md).
+neural = ["makepad-score-player/neural"]
+
 [dependencies]
 makepad-flow = { path = "../flow", default-features = false, features = ["live"] }
 makepad-lock-free = { path = "../lock_free" }

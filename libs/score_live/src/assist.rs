@@ -9,6 +9,7 @@
 //! cursor is looked at: cheap enough for every keystroke.
 
 use crate::instruments::{Available, GM_PROGRAMS, INSTRUMENT_TYPES};
+use crate::model::{shader_choice, ScoreDoc, CheckedShader};
 use crate::source::{self, Tok};
 use makepad_score_player::presets;
 
@@ -111,7 +112,12 @@ pub fn field_doc(ty: &str, field: &str) -> Option<&'static str> {
         ("Tandem", _) => "a Tandem parameter by storage name, raw units (tandem_params lists them)",
         ("Shader", "lib") => "a library shader instrument by name",
         ("Shader", "code") => "the shader's own code (a string)",
-        ("Shader", "mono") => "one voice, legato (slides)",
+        ("ShaderModule", "code") => "functions and constants that shaders can import by the module's name",
+        ("Shader" | "ShaderFx", "oversample") => "Run at 1, 2, 4 or 8 times the base rate, with optional conversion modes. Omit to follow the shader.",
+        ("Shader", "mono") => "1 plays one voice, 0 plays chords. Omit to follow the shader.",
+        ("Shader", "legato") => "1 connects overlapping mono notes, 0 retriggers each note",
+        ("Shader", "glide") => "seconds for the pitch to slide to the next note",
+        ("Shader", "steal") => "@oldest or @quietest when all voices are busy",
         ("Voice", "profile") => "@soprano @alto @tenor @baritone @bass or asset(id, rev)",
         ("Voice", "choir") => "singers 1..8",
         ("Voice", "parts") => "harmony parts 1..8",
@@ -141,6 +147,7 @@ pub fn field_doc(ty: &str, field: &str) -> Option<&'static str> {
         ("MidiIn", "channel") => "the MIDI channel 1..16 it takes; 0 every channel (default)",
         ("MidiIn", "bend") => "semitones a full pitch bend moves (default 2)",
         ("MidiIn", "mpe") => "true: a channel per key (MPE): bend, pressure and slide move that key",
+        ("MidiIn", "master") => "master channel for shader expression, 0..15 (default 0) or @none",
         ("MidiIn", "latency") => "ms from a key's arrival to its sound (default 8): keeps the playing's timing; 0 as soon as read",
         ("Arp", "in") => "the stream it arpeggiates: a MidiIn, or a Chord/Transpose/Velocity",
         ("Arp", "pattern") => "@up @down @updown @downup @converge @diverge @thumb @pinky @played @random @chord",
@@ -194,13 +201,52 @@ pub fn fields_of(ty: &str) -> Vec<&'static str> {
         "Chord" => CHORD_FIELDS.to_vec(),
         "Transpose" => TRANSPOSE_FIELDS.to_vec(),
         "Velocity" => VELOCITY_FIELDS.to_vec(),
-        "Shader" => vec!["lib", "code", "mono", "at"],
-        "ShaderFx" => vec!["in", "lib", "code", "at"],
+        "Shader" => vec!["lib", "code", "oversample", "mono", "legato", "glide", "steal", "at"],
+        "ShaderFx" => vec!["in", "lib", "code", "oversample", "at"],
+        "ShaderModule" => vec!["code"],
         other => match makepad_score_player::FxKind::parse(other) {
             Some(kind) => kind.params().iter().map(|(p, ..)| *p).chain(["in", "key", "at", "b1", "b2", "b3", "b4"]).collect(),
             None => Vec::new(),
         },
     }
+}
+
+fn shader_at<'a>(doc: Option<&'a ScoreDoc>, outline: &source::Outline, ty: Option<&str>, at: usize) -> Option<&'a CheckedShader> {
+    let ty = ty.filter(|ty| matches!(*ty, "Shader" | "ShaderFx"))?;
+    let node = outline.nodes.iter().find(|n| n.type_name == ty && n.span.start <= at && at < n.body.end)?;
+    let def = doc?.shader(&node.name)?;
+    let is_instrument = def.shader.kind() == makepad_score_player::shader::Kind::Instrument;
+    (is_instrument == (ty == "Shader")).then_some(def)
+}
+
+/// The parameter description shared by completions, hover help and the panel.
+pub fn shader_field_doc(shader: &makepad_score_player::shader::AudioShader, index: usize) -> String {
+    let info = shader.param_view(index);
+    let meta = shader.param_meta(index);
+    let mut label = if meta.label.is_empty() {
+        let mut name = info.name.replace('_', " ");
+        if let Some(first) = name.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        name
+    } else {
+        meta.label.to_owned()
+    };
+    if !meta.group.is_empty() {
+        label.push_str(&format!(" ({})", meta.group));
+    }
+    if !meta.choices.is_empty() {
+        let choices: Vec<_> = meta.choices.iter().map(|s| shader_choice(s)).collect();
+        return format!("{label}: {}, default {}", choices.join(" "), choices[info.default as usize]);
+    }
+    use makepad_score_player::shader::ParamCurve;
+    let curve = match meta.curve {
+        ParamCurve::Linear => "linear",
+        ParamCurve::Log => "log",
+        ParamCurve::Exp => "exp",
+    };
+    let show = |v: f32| meta.unit.show(v);
+    format!("{label}: {} to {}, {curve}, default {}", show(info.min), show(info.max), show(info.default))
 }
 
 /// The loop code's functions.
@@ -402,6 +448,11 @@ fn place(src: &str, at: usize) -> Place {
 
 /// Completions at `at` (the cursor's byte offset) in `src`.
 pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completions> {
+    complete_in(src, at, available, None)
+}
+
+/// Complete against the last loaded score while its source is being edited.
+pub fn complete_in(src: &str, at: usize, available: &Available, doc: Option<&ScoreDoc>) -> Option<Completions> {
     let at = at.min(src.len());
     let b = src.as_bytes();
     let mut start = at;
@@ -422,7 +473,9 @@ pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completio
     let mut items: Vec<Item> = Vec::new();
     let item = |label: &str, insert: String, detail: String, kind| Item { label: label.to_string(), insert, detail, kind };
     let outline = source::outline(src);
+    let shader = shader_at(doc, &outline, here.ty.as_deref(), start);
     if atom {
+        let shader_param = shader.and_then(|def| def.shader.param_index(here.field.as_deref()?).map(|i| def.shader.param_meta(i)));
         let atoms = |items: &mut Vec<Item>, names: &mut dyn Iterator<Item = String>, detail: &str| {
             for name in names {
                 items.push(Item { label: format!("@{name}"), insert: crate::instruments::atom(&name), detail: detail.to_string(), kind: ItemKind::Atom });
@@ -437,6 +490,12 @@ pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completio
             (Some("Section"), Some("next")) => {
                 let mut names = outline.nodes.iter().filter(|n| n.type_name == "Section").map(|n| n.name.clone()).chain(["self".to_string(), "stop".to_string()]);
                 atoms(&mut items, &mut names, "section");
+            }
+            (_, Some(field)) if shader_param.is_some() => {
+                for choice in shader_param?.choices {
+                    let text = shader_choice(choice);
+                    items.push(item(&text, text.clone(), field.to_string(), ItemKind::Atom));
+                }
             }
             _ => {
                 let mut drums = presets::DRUM_SLOTS.iter().map(|s| s.to_string()).chain(["pedalhat", "floortom", "tom1", "tom2", "tom3", "bell"].iter().map(|s| s.to_string()));
@@ -481,11 +540,20 @@ pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completio
                 }
             }
             Some("lib") => {
-                let effect = ty == "ShaderFx";
-                for (name, code) in makepad_score_player::shader::LIBRARY {
-                    if code.contains("fn voice") != effect {
-                        items.push(item(name, format!("{name:?}"), "library shader".into(), ItemKind::Atom));
-                    }
+                use makepad_score_player::shader::{declares_audio_kind, Kind, LIBRARY};
+                use std::sync::OnceLock;
+                static BY_KIND: [OnceLock<Vec<&str>>; 3] = [const { OnceLock::new() }; 3];
+                let kind = match ty {
+                    "Shader" => Kind::Instrument,
+                    "ShaderFx" => Kind::Effect,
+                    "ShaderControl" => Kind::Control,
+                    _ => return None,
+                };
+                let names = BY_KIND[kind as usize].get_or_init(|| LIBRARY.iter().filter_map(|&(name, code)| {
+                    declares_audio_kind(code, kind).then_some(name)
+                }).collect());
+                for name in names {
+                    items.push(item(name, format!("{name:?}"), "library shader".into(), ItemKind::Atom));
                 }
             }
             Some("src") => {
@@ -495,8 +563,23 @@ pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completio
                 }
             }
             _ => {
-                for field in fields_of(ty) {
+                let fields = fields_of(ty);
+                for &field in &fields {
                     items.push(item(field, format!("{field}: "), field_doc(ty, field).unwrap_or("").to_string(), ItemKind::Field));
+                }
+                if let Some(def) = shader {
+                    for i in 0..def.shader.port_count() {
+                        let port = def.shader.port_view(i);
+                        if !port.output && !fields.contains(&port.name) {
+                            items.push(item(port.name, format!("{}: ", port.name), "named audio input".into(), ItemKind::Field));
+                        }
+                    }
+                    for index in 0..def.shader.param_count() {
+                        let name = def.shader.param_view(index).name;
+                        if !fields.contains(&name) {
+                            items.push(item(name, format!("{name}: "), shader_field_doc(&def.shader, index), ItemKind::Field));
+                        }
+                    }
                 }
             }
         }
@@ -520,21 +603,37 @@ pub fn complete(src: &str, at: usize, available: &Available) -> Option<Completio
 
 /// Docs for the word at `at`: its range and a line or two.
 pub fn hover(src: &str, at: usize) -> Option<((usize, usize), String)> {
+    hover_in(src, at, None)
+}
+
+/// Hover help with the shader declarations from the last loaded score.
+pub fn hover_in(src: &str, at: usize, doc: Option<&ScoreDoc>) -> Option<((usize, usize), String)> {
     let (start, end) = word_at(src, at)?;
     let word = &src[start..end];
     let here = place(src, start);
-    if let Some(doc) = type_doc(word) {
-        let fields = fields_of(word);
-        return Some(((start, end), format!("{word}: {doc}\nwrites: {}", fields.join(" · "))));
+    let outline = source::outline(src);
+    if let Some(about) = type_doc(word) {
+        let mut fields = fields_of(word);
+        if let Some(def) = shader_at(doc, &outline, Some(word), start) {
+            for index in 0..def.shader.param_count() {
+                let name = def.shader.param_view(index).name;
+                if !fields.contains(&name) {
+                    fields.push(name);
+                }
+            }
+        }
+        return Some(((start, end), format!("{word}: {about}\nwrites: {}", fields.join(" · "))));
     }
     if let Some(ty) = here.ty.as_deref() {
         if src[end..].trim_start().starts_with(':') {
             if let Some(doc) = field_doc(ty, word) {
                 return Some(((start, end), format!("{ty}.{word}: {doc}")));
             }
+            if let Some(def) = shader_at(doc, &outline, Some(ty), start) {
+                return Some(((start, end), shader_field_doc(&def.shader, def.shader.param_index(word)?)));
+            }
         }
     }
-    let outline = source::outline(src);
     if let Some(node) = outline.node(word) {
         let fields: Vec<String> = node.fields.iter().filter(|f| !f.bare && f.key != "code" && f.key != "notes").map(|f| format!("{}: {}", f.key, f.value.text(src).chars().take(24).collect::<String>())).collect();
         return Some(((start, end), format!("{word} = {}{{{}}}\n{}", node.type_name, fields.join(" "), type_doc(&node.type_name).unwrap_or(""))));
@@ -588,6 +687,25 @@ mod tests {
         assert!(labels(field, "s be").contains(&"beats".to_string()));
         let kind = "use mod.score.*\nlet g = Instrument{kind: @p";
         assert_eq!(labels(kind, "@p"), ["@piano"]);
+        assert_eq!(labels("let modulator = ShaderControl{lib: lf", "lib: lf"), ["lfo"]);
+
+        let tone = "let cutoff = param(1200, 20, 16000, {unit: hz curve: log label: Cutoff group: filter})\nlet wave = param(saw, {choices: [saw square tri]})\nfn voice() { vec2(wave, cutoff) }";
+        let src = format!("use mod.score.*\nlet clock = Clock{{}}\nlet lead = Shader{{code: {tone:?} cutoff: 300 wave: @tri}}\nlet space = ShaderFx{{lib: \"echo\" wet: 0.3}}\nScore{{clock lead space}}");
+        let doc = ScoreDoc::load(&src).unwrap();
+        for (marker, field, detail) in [
+            (" cutoff: 300", "cutoff", "Cutoff (filter): 20 Hz to 16000 Hz, log, default 1200 Hz"),
+            (" wave: @tri", "wave", "Wave: @saw @square @tri, default @saw"),
+        ] {
+            let at = src.find(marker).unwrap() + 2;
+            let items = complete_in(&src, at, &Available::default(), Some(&doc)).unwrap().items;
+            assert_eq!(items.iter().find(|i| i.label == field).unwrap().detail, detail);
+            assert_eq!(hover_in(&src, at, Some(&doc)).unwrap().1, detail);
+        }
+        let at = src.find("@tri").unwrap() + 1;
+        let atoms = complete_in(&src, at, &Available::default(), Some(&doc)).unwrap().items;
+        assert_eq!(atoms.iter().map(|i| i.insert.as_str()).collect::<Vec<_>>(), ["@saw", "@square", "@tri"]);
+        let at = src.find(" wet:").unwrap() + 2;
+        assert!(hover_in(&src, at, Some(&doc)).unwrap().1.starts_with("Wet: "), "the effect reads its own declaration");
     }
 
     #[test]

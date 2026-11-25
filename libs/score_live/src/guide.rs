@@ -130,15 +130,25 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   log2 seconds, levels amplitudes with gain v^3).
   `Shader`: an instrument written as an audio shader: `lib: "acid"` (the
   library: supersaw analog_poly acid pluck epiano modal_bell techno_kick)
-  or `code: "…"` (its own, see the audio shader guide), mono (one voice,
-  legato: slides), and any of its params by name (`cutoff: 600`).
+  or `code: "…"` (see the audio shader guide). A high worst-case render cost
+  appears in `score_check.warnings` with the node and shader span. The score
+  still writes and plays. Reduce loop sizes or precompute in shader `init()`.
+  Omit `mono` to follow the shader, or set `mono: 1` for one voice and `mono: 0` for chords.
+  `steal: @oldest|@quietest` chooses which voice gives way, released voices
+  first. `legato` (default 1) connects overlapping mono notes and `glide`
+  sets the slide in seconds. Set `legato: 0` to retrigger. Set shader params
+  by name (`cutoff: 600`). `seed: n` changes its random stream. Params
+  with choices take their names (`wave: @saw`). The code assist and the panel
+  show each param's unit, range and label. Bind a shader's `sample()` table with `<name>: asset(id, rev)`. Played from a keyboard it follows
+  bend, pressure, slide, release velocity and
+  every controller, each on its exact sample (the shader reads `bend`,
+  `pressure`, `slide`, `release_velocity`, `cc(n)`).
   `Voice`: sung voices, played with `sing` (see Vocals): profile (@soprano
   @alto @tenor @baritone @bass, or a library singer asset(id, rev)),
   choir (singers, 1..8), parts (harmony parts a choir splits into),
   vibrato (semitones) vibrato_rate (Hz) vibrato_delay (s) portamento (s)
   scoop (semitones) breath (0..1) drift jitter (cents).
-- `ShaderFx{in: [loops or fx] lib: "echo" wet: 0.3}`: an effect written as
-  an audio shader (library: drive phaser flanger echo gated_verb), params by name.
+- ShaderFx, ShaderControl and ShaderModule are described in Shader wiring.
 - `Loop`: play (an instrument), beats (the cycle's length; without it the
   cycle is as long as the code sleeps), amp, pan, mute, solo, dur (the
   default note length in beats), sync (@bar, @now or another loop: where
@@ -181,7 +191,10 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   on its sample): `let keys_in = MidiIn{device: "any" channel: 0}` (device:
   part of an input's name, "any" every input; channel 1..16, 0 every one;
   bend: the bend range in semitones, default 2; mpe: true for a channel per
-  key; latency: ms from a key's arrival to its sound, default 8). A loop
+  key. With per-note channels, a shader adds bend from the master channel
+  to each note's bend. Master pressure and slide reach every note.
+  Use `master: 0` (default), another channel through 15, or `master: @none`.
+  Latency is the time in ms from a key's arrival to its sound, default 8). A loop
   plays a stream: `let keys = Loop{play: piano in: keys_in}` (only the
   stream: no hits, code or notes). Streams pass through stream nodes, each
   `in:` the one before: `Arp{in: keys_in pattern: @updown rate: 1/16
@@ -220,6 +233,8 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   (0 is from, 1 is to, reached over `ramp` beats), and a Section sets params
   as it starts, `Section{bars: 8 set: {build: 1}}`: builds, drops, filter
   sweeps. Loops read the same params (`param(@build)`, `follow:`).
+- Behind a look-ahead, a tempo change can reach built-in beat-synced effects
+  such as Delay up to the input's accumulated latency in frames before the corresponding audio.
 - Aux sends: a Loop's `sends: {verb: 0.3 echo: 0.15}` feeds FX that much
   and keeps its own path to the master (set the return's mix to 1).
 - FX read `in: [loops or FX]` and are summed into the master unless another
@@ -239,6 +254,10 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   knee: 6 makeup: 0}`: attack and release in ms, knee in dB; with `key:`
   it listens to another loop or FX (a sidechain). The master has a limiter at
   `Score{ceiling: -0.8}` (sample peak: for -1 dBTP set about -1.5).
+  Its look-ahead delays the score by 128 frames. Every score's total latency
+  includes those frames. Live MIDI output uses the same delay so notes reach
+  the output when their audio is heard. Offline renders trim the total delay
+  so the first beat starts at frame zero, and `score_listen` reports the trim as `latency_frames`.
 - `Section{bars loops: [..] next: @other}` and `arrange: [a b c]` in
   Score: a loop plays only in the sections that list it; the last section
   repeats, and so does one reached by a goto that is not in the
@@ -253,6 +272,64 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   ramp: 4}}` moves the tempo with a param (0 is from, 1 is to) from the
   next beat; games also set it directly. Tempo changes are exact: notes,
   beat events and an edit's beat marks follow them.
+
+## Shader wiring
+
+- `ShaderFx{in: [loops or fx] lib: "echo" wet: 0.3}`: an effect written as
+  an audio shader (library: filter drive phaser flanger echo gated_verb keyed_comp spectral_gate convolver), params by name;
+  shaders follow the clock: `tempo`, `beat`, `bar` inside them. `seed: n` changes its random stream.
+  Params with choices take their names (`wave: @saw`). The code assist and
+  the panel show each param's unit, range and label. Bind a shader's `sample()` table with `<name>: asset(id, rev)`.
+  `ShaderFx{in: guitar lib: "convolver" ir: asset(id, rev)}` applies a mono or stereo impulse response with zero latency.
+  It normalizes the wet response to unit energy by default.
+  For a calibrated response, use `normalize: @off gain: 0`.
+  Both nodes follow the shader unless `oversample: 1|2|4|8` sets a factor (1 is base rate).
+  Use `[4 @linear]` for one mode or `[4 @filter @hold]` for separate effect up/down modes.
+- `ShaderControl{lib: "lfo"}` or `ShaderControl{code: ...}` runs a block shader.
+  It exposes named outputs and accepts params and a seed. For a pad loop, list
+  the modulation source before its filter in the score:
+
+      let lfo = ShaderControl{lib: "lfo" shape: @sine beats: 4 center: 900 depth: 600}
+      let pad_f = ShaderFx{lib: "filter" in: pad cutoff: Port{node: lfo name: @out}}
+
+  LFO shapes are @sine, @triangle, @saw, @square and @hold. Set beats to 0
+  for rate in Hz. Phase is in cycles. The stereo filter offers @low, @high,
+  @band and @notch, with cutoff in Hz and resonance as Q.
+- Inside `Score{…}`, `tone := ShaderModule{code: "fn soft(x) { x / (1.0 + abs(x)) }"}` shares a helper with every shader that imports `tone`.
+- Wire ShaderFx inputs by name, e.g. `ShaderFx{lib: "keyed_comp" in: [bass] key: kick}`.
+  A field takes one source or a list. Use `Port{node: split name: @low}` for a named output.
+  Inputs sum in stereo. Mono inputs average left and right, and mono outputs feed both.
+  Unwired inputs read silence and unwired outputs are discarded.
+  Side inputs may also read a held control output. ShaderFx and ShaderControl
+  params accept the same sources or lists. At each absolute 64-frame block
+  start the host adds each source's stereo mean and sets the param target.
+  The shader applies its usual smoothing. For a built-in instrument's ports
+  or wired params, use Shader.
+- Native effect params accept the same wires, e.g. `Lowpass{in: pad cutoff: Port{node: lfo name: @out}}`.
+  The sources align with the main input. Every 64 frames the effect takes their
+  summed stereo means, clamped in the param's own units (cutoff in Hz, Delay
+  time in beats). The wire takes precedence over the panel. Use either a wire
+  or Clock automation on a field. Removing the wire restores the authored value,
+  or the effect's default if the field is empty.
+  A native Lowpass cutoff moves in steps. Use `ShaderFx{lib: "filter"}` for a smooth sweep.
+  Clock automation samples its ramp at these same block starts. Duck uses the
+  previous complete 64-frame block's stereo key peak. Reverb advances room
+  smoothing every 64 frames, and DjFilter switches sides as its fade crosses
+  the threshold. These responses sound identical across host buffer sizes.
+- The engine Filter updates on absolute 32-frame boundaries. Gain, mixer,
+  stem, Loop and Pads levels take targets every 64 frames and ramp for 256.
+  Delay takes tempo changes on their first whole frame. These timings and the
+  frame that cuts a quiet tail are the same in live playback and export.
+  Untimed live input wakes a resting graph at the pass start that sees it.
+- Put a pad's wires on its definition: `pad = Shader{code: pad_code key: kick
+  cutoff: Port{node: lfo name: @out}}`. In `voice()` read the mono `key`
+  to duck each voice and use `cutoff` for its filter. Each loop, stinger and
+  fx() copy reads the same sources. Read an extra output from the loop:
+  `Port{node: pad_loop name: @env}` sums its voices and scope copies.
+  Instrument wires follow producer order with no delay compensation. A late
+  key or param appears in `plan_notes` with its edge and lateness in frames.
+  Wired params can add four runs per voice per 256 frames. For three voices
+  of epiano, three extra cuts × 894 ops/call × 3 voices / 256 adds 31.43 ops/frame.
 
 ## Loop code
 
@@ -577,7 +654,8 @@ aim it near -12 dBFS for -10 LUFS, peaks at the limiter's ceiling.
 You cannot hear. After every change call `score_listen` (4-8 bars from
 where you changed) and read it: per-loop levels against the table above,
 the band balance verdict, the onset grid (is the groove what you meant?),
-the notes each loop played, the warnings (a silent loop, clipping).
+`notes` for the music each loop played, `plan_notes` for late edges in frames,
+and the warnings (a silent loop, clipping).
 Compare a loop or FX with `instrument_search` using its `measured` block.
 It measures the mono mix of the first 4 seconds from the node's first sound in
 the window, so a long evolving pad's numbers describe its onset.
@@ -643,7 +721,7 @@ mod tests {
             if block.starts_with("use mod.score") {
                 crate::model::ScoreDoc::load(block).unwrap_or_else(|d| panic!("{d:?}\n{block}"));
                 let opts = crate::render::RenderOpts { seconds: Some(3.0), ..Default::default() };
-                let out = crate::render::render(block, &opts, &crate::NoSamples).unwrap_or_else(|d| panic!("{d:?}"));
+                let out = crate::render::render(block, &opts, &crate::NoSamples, &crate::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}"));
                 assert!(out.left.iter().any(|v| v.abs() > 1e-3), "an example is silent:\n{block}");
                 examples += 1;
             }

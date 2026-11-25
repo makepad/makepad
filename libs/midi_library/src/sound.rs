@@ -147,15 +147,15 @@ pub fn mix_problems(mix: &Measure, stems: &[(String, Measure)]) -> Vec<String> {
 
 /// Render `source` for `seconds` from beat `start`, every loop alone and
 /// the mix: (loop, measure) per loop that sounds, and the mix's measure.
-pub fn stems(source: &str, start: f64, seconds: f64) -> Result<(Vec<(String, Measure)>, Measure), String> {
-    let doc = makepad_score_live::model::load(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
+pub fn stems(source: &str, start: f64, seconds: f64, control: &makepad_score_live::PrepareControl) -> Result<(Vec<(String, Measure)>, Measure), String> {
+    let doc = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
     let opts = RenderOpts { seconds: Some(seconds), start: Some(start), ..RenderOpts::default() };
-    let mix = makepad_music_iter::render::render_mix(source, &opts)?;
+    let mix = makepad_music_iter::render::render_mix(source, &opts, control)?;
     let mix_measure = measure(&mix.left, &mix.right, mix.rate);
     let mut out = Vec::new();
     for l in &doc.loops {
         let solo = makepad_music_iter::render::only(source, &doc, std::slice::from_ref(&l.name))?;
-        let r = makepad_music_iter::render::render_mix(&solo, &opts)?;
+        let r = makepad_music_iter::render::render_mix(&solo, &opts, control)?;
         if r.left.iter().any(|v| v.abs() > 1e-4) {
             out.push((l.name.clone(), measure(&r.left, &r.right, r.rate)));
         }

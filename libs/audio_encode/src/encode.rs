@@ -233,14 +233,10 @@ fn pass1(
     let mut desired = [0i32; FLOOR_POINTS];
     let mut vals_i32 = [0i32; FLOOR_POINTS];
 
-    let mut t_mdct = 0f64;
-    let mut t_psy = 0f64;
-    let mut t_quant = 0f64;
-    let mut t_gather = 0f64;
+    #[cfg(not(target_arch = "wasm32"))]
+    let (mut t_mdct, mut t_psy, mut t_quant, mut t_gather) = (0.0, 0.0, 0.0, 0.0);
     #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("OGGENC_PHASES").is_ok();
-    #[cfg(target_arch = "wasm32")]
-    let timing = false;
     for (bi, b) in range.enumerate() {
         for c in 0..ch {
             #[cfg(not(target_arch = "wasm32"))]
@@ -321,6 +317,7 @@ fn pass1(
             if let Some(t) = t0 { t_quant += t.elapsed().as_secs_f64(); }
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     if timing {
         eprintln!("phases: gather {t_gather:.3}s mdct {t_mdct:.3}s psy+floor {t_psy:.3}s quant+hist {t_quant:.3}s");
     }

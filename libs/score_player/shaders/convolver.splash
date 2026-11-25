@@ -1,0 +1,62 @@
+// Independent left and right convolution with a recorded impulse response.
+latency(0)
+let ir = sample(2)
+let wet = param(1, 0, 1, {unit: percent label: "Wet"})
+let dry = param(0, 0, 1, {unit: percent label: "Dry"})
+let normalize = param(on, {choices: [off on] label: "Normalize"})
+let gain = param(0, -60, 12, {unit: db label: "Output gain"})
+
+let A = CONV_HEAD
+let C = CONV_TAIL
+let head_taps = [[[vec2(0.0); 8]; 8]; 4]
+// A covers taps 64..C, then C covers the rest. A partition at j*b exists
+// exactly when j*b < len(ir), including the last partial partition.
+let PA = min((len(ir)-1 - (len(ir)-1)%A)/A, C/A-1)
+let PC = (len(ir)-1 - (len(ir)-1)%C)/C
+let HA = max(1, PA)
+let HC = max(1, PC)
+let ha = [[vec4(0.0); A+1]; HA]
+let near_roots = [[vec2(0.0); 16]; 8]
+let scratch_a = [[0.0; 2*A]; 2]
+let hc = [[vec4(0.0); C+1]; HC]
+let ir_gain_root = [1.0]
+
+var frame = int(0)
+var ahead = [vec2(0.0)]
+var head = [[vec2(0.0); 8]; 8]
+var xa = [[vec4(0.0); A+1]; HA]
+var xc = [[vec4(0.0); C+1]; HC]
+var a = { tile: [[vec2(0.0); 16]; 8] re: [0.0; 2*A] im: [0.0; 2*A] sum: [vec4(0.0); A+1]
+          overlap: [vec2(0.0); A] slot: int(0) filled: int(0) cursor: int(0) }
+var c = { re: [0.0; 2*C] im: [0.0; 2*C] sum: [vec4(0.0); C+1]
+          overlap: [vec2(0.0); C] ready: int(0) slot: int(0) filled: int(0) cursor: int(0) }
+
+fn init() {
+    ir_gain_root[0] = float(sqrt(conv_energy_gain(ir)))
+    if len(ir) >= 8 { conv_prepare_head(ir, head_taps) }
+    if PA > 0 {
+        conv_prepare(ir, ha, scratch_a, A)
+        conv_near_roots(near_roots, scratch_a)
+    }
+    if PC > 0 {
+        let scratch = [[0.0; 2*C]; 2]
+        conv_prepare(ir, hc, scratch, C)
+    }
+}
+
+fn block() {
+    if PC > 1 { conv_spread(c, xc, hc) }
+}
+
+fn effect(l, r) {
+    let x = vec2(l, r)
+    let y = conv_head(ir, head_taps, head, ahead, frame, x)
+    if PA > 0 { y += conv_frame(a, xa, ha, frame, x, near_roots, A) }
+    if PC > 0 { y += conv_frame(c, xc, hc, frame, x, near_roots, C) }
+    frame += 1
+    if normalize {
+        // A very quiet response can have a reciprocal norm larger than f32.
+        y = (y * ir_gain_root[0]) * ir_gain_root[0]
+    }
+    (x*dry + y*wet) * db_to_gain(gain)
+}

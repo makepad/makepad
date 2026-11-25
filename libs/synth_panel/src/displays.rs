@@ -107,6 +107,11 @@ pub struct SynthDisplay {
     osc: String,
     #[rust]
     values: Fields<f64>,
+    #[rust]
+    readouts: [Option<makepad_value_pickers::panel::control::DisplayValue>; 2],
+    /// In field order, refreshed with the bindings or the score revision.
+    #[rust]
+    specs: Vec<(String, ParamSpec)>,
     /// Whether each field is written (else its default shows, dimmed).
     #[rust]
     written: Fields<bool>,
@@ -137,6 +142,28 @@ pub struct SynthDisplay {
 }
 
 impl SynthDisplay {
+    /// A filter display may share either live axis with a control elsewhere.
+    pub fn filter_paths(&self) -> Option<[String; 2]> {
+        (self.kind.round() as i32 == 3).then(|| FILTER.map(|field| {
+            let path = self.path_override(field);
+            if path.is_empty() { format!("{}.{field}", self.node) } else { path.to_owned() }
+        }))
+    }
+
+    pub fn set_display_value(&mut self, cx: &mut Cx, axis: usize, value: Option<makepad_value_pickers::panel::control::DisplayValue>) {
+        if let Some(slot) = self.readouts.get_mut(axis) {
+            if *slot != value { *slot = value; self.redraw(cx); }
+        }
+    }
+
+    fn displayed(&self) -> Fields<f64> {
+        let mut values = self.values;
+        for (i, live) in self.readouts.iter().enumerate() {
+            if let Some(live) = live { values[i] = live.value; }
+        }
+        values
+    }
+
     fn fields(&self) -> &'static [&'static str] {
         match self.kind.round() as i32 {
             3 => &FILTER,
@@ -145,67 +172,60 @@ impl SynthDisplay {
         }
     }
 
-    fn path(&self, field: &str) -> String {
-        let given = match field {
+    fn path_override(&self, field: &str) -> &str {
+        match field {
             "cutoff" => &self.cutoff,
             "res" => &self.res,
             "osc" => &self.osc,
             _ => "",
-        };
-        if given.is_empty() { format!("{}.{field}", self.node) } else { given.to_string() }
+        }
     }
 
-    fn spec(&self, field: &str) -> ParamSpec {
-        let ty = synth::type_of(&self.node).unwrap_or_else(|| "Synth".into());
-        // A shader instrument's fields read as a synth's of the same name.
-        spec::spec(&ty, field).or_else(|| spec::spec("Synth", field)).unwrap_or_else(|| ParamSpec::generic(field, None))
+    fn spec(&self, field: &str, path: &str) -> ParamSpec {
+        let (node, key) = path.split_once('.').unwrap_or((&self.node, field));
+        if let Some(spec) = synth::shader_param(node, key) {
+            return spec;
+        }
+        let ty = synth::type_of(node).unwrap_or_else(|| "Synth".into());
+        spec::spec(&ty, key).or_else(|| spec::spec("Synth", field)).unwrap_or_else(|| ParamSpec::generic(key, None))
     }
 
     /// The fields as written (held values while a gesture runs).
     fn read(&mut self) {
+        self.specs.clear();
         for (i, field) in self.fields().iter().enumerate() {
-            let path = self.path(field);
-            match host::read(&path) {
-                Some(PanelValue::Number(n)) => {
-                    self.values[i] = n;
-                    self.written[i] = true;
-                }
-                Some(PanelValue::Code(code)) if *field == "osc" => {
-                    self.wave = code.trim().trim_start_matches('@').to_string();
-                    self.written[i] = true;
-                }
-                Some(PanelValue::Code(code)) => match code.trim().parse::<f64>() {
-                    Ok(n) => {
-                        self.values[i] = n;
-                        self.written[i] = true;
-                    }
-                    Err(_) => self.written[i] = false,
-                },
-                _ => {
-                    self.values[i] = self.spec(field).default;
-                    self.written[i] = false;
-                    if *field == "osc" {
-                        self.wave = "saw".into();
-                    }
-                }
+            let given = self.path_override(field);
+            let path = if given.is_empty() { format!("{}.{field}", self.node) } else { given.to_owned() };
+            let spec = self.spec(field, &path);
+            let value = match host::read(&path) {
+                Some(PanelValue::Number(n)) => Some(n),
+                Some(PanelValue::Code(code)) if spec.is_choice() => spec.parse(&code, spec.default).ok(),
+                Some(PanelValue::Code(code)) => code.trim().parse().ok(),
+                _ => None,
+            };
+            self.values[i] = value.map_or(spec.default, |v| spec.constrain(v));
+            self.written[i] = value.is_some();
+            if *field == "osc" {
+                self.wave = spec.options.get(self.values[i] as usize).cloned().unwrap_or_default();
             }
+            self.specs.push((path, spec));
         }
     }
 
     fn set(&mut self, i: usize, value: f64) {
-        let field = self.fields()[i];
-        let spec = self.spec(field);
-        let value = value.clamp(spec.min, spec.max);
+        if self.readouts.get(i).and_then(Option::as_ref).is_some_and(|v| v.read_only.is_some()) { return; }
+        let (path, spec) = &self.specs[i];
         self.values[i] = value;
-        host::set(&self.path(field), PanelValue::Code(spec.source_text(value)));
+        host::set(path, PanelValue::Code(spec.source_text(value)));
     }
 
     /// Where the handles are on the plot: (x, y) 0..1, y up.
     fn handles(&self) -> Vec<(f64, f64)> {
         match self.kind.round() as i32 {
             3 => {
-                let spec = self.spec("res");
-                vec![(dsp::freq_x(self.values[0] as f32) as f64, spec.norm(self.values[1]))]
+                let Some((_, spec)) = self.specs.get(1) else { return Vec::new() };
+                let v = self.displayed();
+                vec![(dsp::freq_x(v[0] as f32) as f64, spec.norm(v[1]))]
             }
             _ => Vec::new(),
         }
@@ -230,9 +250,11 @@ impl SynthDisplay {
         let dy = (drag.start.y - abs.y) / p.size.y.max(1.0);
         match (self.kind.round() as i32, drag.handle) {
             (3, _) => {
-                let (cut, res) = (self.spec("cutoff"), self.spec("res"));
-                self.set(0, cut.denorm(cut.norm(drag.from[0]) + dx));
-                self.set(1, res.denorm(res.norm(drag.from[1]) + dy));
+                let [(_, cut), (_, res)] = self.specs.as_slice() else { return };
+                let cutoff = cut.denorm(cut.norm(drag.from[0]) + dx);
+                let resonance = res.denorm(res.norm(drag.from[1]) + dy);
+                self.set(0, cutoff);
+                self.set(1, resonance);
             }
             _ => {}
         }
@@ -241,7 +263,7 @@ impl SynthDisplay {
     /// The trace for the screen, into `row`.
     fn trace(&mut self, cx: &mut Cx2d) {
         self.row.resize(ROW, 0.0);
-        let v = self.values;
+        let v = self.displayed();
         match self.kind.round() as i32 {
             3 => {
                 let mode = match host::read(&format!("{}.filter", self.node)).map(|v| v.code()) {
@@ -342,9 +364,11 @@ impl Widget for SynthDisplay {
             }
             Hit::FingerUp(fe) => {
                 if self.drag.take().is_none() && kind == 2 && fe.is_over && fe.was_tap() {
-                    let next = spec::WAVES.iter().position(|w| *w == self.wave).map_or(0, |i| (i + 1) % spec::WAVES.len());
-                    self.wave = spec::WAVES[next].to_string();
-                    host::set(&self.path("osc"), PanelValue::Code(format!("@{}", self.wave)));
+                    if let Some((_, spec)) = self.specs.first().filter(|(_, s)| s.is_choice()) {
+                        let next = (self.values[0] as usize + 1) % spec.options.len();
+                        self.wave = spec.options[next].clone();
+                        self.set(0, next as f64);
+                    }
                 }
                 self.redraw(cx);
             }
@@ -354,19 +378,26 @@ impl Widget for SynthDisplay {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         let rev = host::revision();
-        if self.seen != rev && self.drag.is_none() {
+        let fields = self.fields();
+        let rebound = fields.len() != self.specs.len() || fields.iter().zip(&self.specs).any(|(&field, (path, _))| {
+            let given = self.path_override(field);
+            if given.is_empty() { path.split_once('.') != Some((self.node.as_str(), field)) } else { given != path }
+        });
+        if rebound || (self.seen != rev && self.drag.is_none()) {
+            if rebound {
+                self.drag = None;
+            }
             self.seen = rev;
             self.read();
         }
         // What a module's presets, morph and dice move.
-        for field in self.fields() {
-            let spec = self.spec(field);
+        for (path, spec) in &self.specs {
             let kind = if spec.is_choice() {
-                BoundKind::Choice(spec.options.iter().map(|o| format!("@{o}")).collect())
+                BoundKind::Choice(spec.options.iter().map(|o| makepad_score_live::model::shader_choice(o)).collect())
             } else {
-                BoundKind::Numbers { lo: spec.min, hi: spec.max, step: if spec.taper == makepad_edit_values::Taper::Int { 1.0 } else { 0.0 } }
+                BoundKind::Numbers { lo: spec.min, hi: spec.max, step: spec.step() }
             };
-            host::register(Bound { path: self.path(field), kind });
+            host::register(Bound { path: path.clone(), kind });
         }
         let p = makepad_look::palette::get(cx);
         let rect = cx.walk_turtle(walk);
@@ -419,8 +450,12 @@ impl Widget for SynthDisplay {
         self.draw_text.color = color(p.secondary, 1.0);
         self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 8.0, rect.pos.y + 5.0), &format!("{caption}  {}", self.node));
         let values = match kind {
-            3 => format!("{}  Q {:.2}", self.spec("cutoff").display(self.values[0]), self.values[1]),
-            2 => self.wave.to_uppercase(),
+            3 => {
+                let (cut, res) = (&self.specs[0].1, &self.specs[1].1);
+                let v = self.displayed();
+                format!("{}  Q {}", cut.display(v[0]), res.display(v[1]))
+            }
+            2 => self.specs[0].1.display(self.values[0]),
             _ => format!("{:.0} dB", 20.0 * self.level.peak.max(1e-5).log10()),
         };
         self.draw_small.color = color(p.muted, 1.0);

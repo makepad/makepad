@@ -65,6 +65,14 @@ static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// A GET, at least a second after the last one.
 pub(crate) fn get(url: &str, max: usize) -> Result<Vec<u8>, String> {
+    let mut reply = None;
+    makepad_core_util::blocking::wait_off_cpu("a web reply", || {
+        reply = Some(get_blocking(url, max));
+    });
+    reply.unwrap_or_else(|| Err("the web request did not run".into()))
+}
+
+fn get_blocking(url: &str, max: usize) -> Result<Vec<u8>, String> {
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = *last {

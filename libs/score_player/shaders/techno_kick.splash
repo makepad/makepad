@@ -1,6 +1,7 @@
 // Techno kick: a sine sweeping from ~700 Hz down to the note with a
 // curved fall, a click, a short noise burst, all through an asymmetric
 // wavefolder at 4x (the grit), then a drive. Play it at C1..G1.
+latency(HALFBAND_LATENCY_4)
 let punch = param(700, 100, 3000)
 let sweep = param(0.05, 0.005, 0.3)
 let decay = param(0.45, 0.05, 2)
@@ -11,9 +12,18 @@ let gain = param(0.8, 0, 1)
 
 var ph = 0.0
 var t = 0.0
-var os = Os4{}
-var dc = DcBlock{}
-var noise_lp = 0.0
+var os = Oversample4{}
+var dc = OnePole{}
+var noise_lp = OnePole{}
+var noise_gain = 1.0
+
+fn block() {
+    onepole_set(dc, 10.0)
+    // At 48 kHz this cutoff gives the original 0.3 noise coefficient.
+    onepole_set(noise_lp, 2724.8)
+    // A one-pole passes a/(2-a) of the white noise power.
+    noise_gain = sqrt((0.3 / 1.7) * (2.0 - noise_lp.a) / noise_lp.a)
+}
 
 fn fold_drive(x) { fold((x + asym) * (1.0 + grit * 3.0)) - fold(asym * (1.0 + grit * 3.0)) }
 
@@ -28,12 +38,10 @@ fn voice() {
     let f = mix(punch, freq, pow(k, 0.25))
     ph = advance(ph, f / sample_rate)
     let body = sin(TAU * ph) * exp(-t * 6.9 / decay)
-    noise_lp = noise_lp + (rand() - noise_lp) * 0.3
-    let x = body + (click * exp(-t * 80.0) + noise_lp * 0.2 * exp(-t * 40.0)) * 0.5
-    for i in 0..4 {
-        os4_push(os, fold_drive(os4_up(os, x, i)))
-    }
-    let y = dc_block(dc, os4_out(os))
+    let noise = onepole_lp(noise_lp, rand()) * noise_gain
+    let x = body + (click * exp(-t * 80.0) + noise * 0.2 * exp(-t * 40.0)) * 0.5
+    let folded = oversample(os, x, fn(u) { fold_drive(u) })
+    let y = onepole_hp(dc, folded)
     if t > decay * 1.5 {
         stop()
     }

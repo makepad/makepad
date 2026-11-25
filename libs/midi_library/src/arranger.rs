@@ -21,7 +21,6 @@ use crate::gm::Role;
 use crate::roll::{self, Detail};
 use makepad_music_iter::gen::Writer;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 
 /// Model turns at most (the first writes, the others repair).
 pub const TURNS: usize = 3;
@@ -223,21 +222,22 @@ pub struct Arranged {
 
 /// Run the arranger on `song` (the mechanical import, `mechanical` its
 /// Score): up to [`TURNS`] turns; the best Score that loads and plays.
-pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel: &AtomicBool, progress: &dyn Fn(&str)) -> Result<Arranged, String> {
+pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel: &makepad_score_live::PrepareControl, progress: &dyn Fn(&str)) -> Result<Arranged, String> {
     let system = system();
     let mut turns = vec![prompt(song, mechanical)];
     let mut best: Option<Arranged> = None;
     for turn in 1..=TURNS {
         progress(&format!("arranging (turn {turn})"));
-        let reply = writer.chat(&system, &turns, cancel)?;
+        let reply = writer.chat(&system, &turns, &|| cancel.is_cancelled())?;
         turns.push(reply.clone());
         let Some(source) = splash_block(&reply) else {
             turns.push("Your reply had no ```splash block with a whole Score. Send the whole Score in the format asked.".into());
             continue;
         };
-        let problem = match makepad_score_live::model::load(&source) {
-            Err(d) => format!("The Score does not load:\n{}\nFix it and send the whole Score again.", d.iter().take(20).map(|d| d.to_string()).collect::<Vec<_>>().join("\n")),
-            Ok(_) => match roll::from_score(&source) {
+        let problem = match makepad_score_live::load_controlled(&source, cancel) {
+            Err(makepad_score_live::LoadError::Cancelled) => return Err("the arrangement was cancelled".into()),
+            Err(makepad_score_live::LoadError::Problems(d)) => format!("The Score does not load:\n{}\nFix it and send the whole Score again.", d.iter().take(20).map(|d| d.to_string()).collect::<Vec<_>>().join("\n")),
+            Ok(loaded) => match roll::from_loaded(loaded) {
                 Err(e) => format!("The Score does not play: {e}. Fix it and send the whole Score again."),
                 Ok(arranged) => {
                     let similarity = compare(song, &arranged);
@@ -260,8 +260,9 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
     // The sound: each part alone and the mix, measured, against the briefs.
     for turn in 1..=SOUND_TURNS {
         progress(&format!("listening to the parts (sound turn {turn})"));
-        let report = match sound_report(&best.source) {
+        let report = match sound_report(&best.source, cancel) {
             Ok(report) => report,
+            Err(_) if cancel.is_cancelled() => return Err("the arrangement was cancelled".into()),
             Err(e) => {
                 progress(&format!("sound check skipped: {e}"));
                 break;
@@ -270,13 +271,15 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
         progress(&report);
         turns.push(best.source.clone());
         turns.push(format!("{report}\nThat is how your Score sounds now (the parts rendered alone, then the mix). Judge each part against your sound brief for it: brightness (centroid), where its energy sits (bands), how fast it attacks and how long it rings, and its level against the others. If every part matches its brief and the mix has no problem, reply exactly SOUND OK. Otherwise fix the sounds (GM programs and kits, patches, Eq, filters, sends, levels), keep every note, and send the whole Score again."));
-        let reply = writer.chat(&system, &turns, cancel)?;
+        let reply = writer.chat(&system, &turns, &|| cancel.is_cancelled())?;
         turns.push(reply.clone());
         if reply.trim().starts_with("SOUND OK") {
             break;
         }
         let Some(source) = splash_block(&reply) else { break };
-        let Ok(arranged) = makepad_score_live::model::load(&source).map_err(|_| ()).and_then(|_| roll::from_score(&source).map_err(|_| ())) else {
+        let checked = makepad_score_live::load_controlled(&source, cancel);
+        if cancel.is_cancelled() { return Err("the arrangement was cancelled".into()); }
+        let Some(arranged) = checked.ok().and_then(|loaded| roll::from_loaded(loaded).ok()) else {
             progress("the sound revision does not load; kept the one before");
             break;
         };
@@ -289,6 +292,7 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
             break;
         }
     }
+    if cancel.is_cancelled() { return Err("the arrangement was cancelled".into()); }
     Ok(best)
 }
 
@@ -297,8 +301,8 @@ pub const SOUND_TURNS: usize = 2;
 
 /// Each part alone and the mix, measured over 40 s from the first chorus
 /// (else the start), with the mix's problems: the text the model judges.
-pub fn sound_report(source: &str) -> Result<String, String> {
-    let doc = makepad_score_live::model::load(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
+pub fn sound_report(source: &str, control: &makepad_score_live::PrepareControl) -> Result<String, String> {
+    let doc = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
     let per_bar = doc.beats_per_bar();
     let mut beat = 0.0;
     let mut start = 0.0;
@@ -310,7 +314,7 @@ pub fn sound_report(source: &str) -> Result<String, String> {
         }
         beat += s.bars * per_bar;
     }
-    let (stems, mix) = crate::sound::stems(source, start, 40.0)?;
+    let (stems, mix) = crate::sound::stems(source, start, 40.0, control)?;
     let mut out = format!("Measured over 40 s from beat {start}:\n");
     for (name, m) in &stems {
         out.push_str(&format!("- {name}: {}\n", m.line()));
@@ -359,7 +363,7 @@ mod tests {
     /// Score that is the song), so the check scores it as the song.
     struct Echo(String);
     impl Writer for Echo {
-        fn chat(&self, _: &str, _: &[String], _: &AtomicBool) -> Result<String, String> {
+        fn chat(&self, _: &str, _: &[String], _: &dyn Fn() -> bool) -> Result<String, String> {
             Ok(format!("Here it is.\n```splash\n{}```\n", self.0))
         }
         fn label(&self) -> String {
@@ -371,7 +375,7 @@ mod tests {
     fn the_song_itself_scores_as_the_song_and_a_wrong_one_does_not() {
         let bytes = crate::analyse::tests::band();
         let imported = crate::import::import(&bytes, &crate::import::About { title: "T".into(), ..Default::default() }, &crate::import::Options::default()).unwrap();
-        let out = arrange(&Echo(imported.source.clone()), &imported.arrangement, &imported.source, &AtomicBool::new(false), &|_| {}).unwrap();
+        let out = arrange(&Echo(imported.source.clone()), &imported.arrangement, &imported.source, &makepad_score_live::PrepareControl::default(), &|_| {}).unwrap();
         assert!(out.similarity.overall > 0.99, "{:?}", out.similarity);
         assert!(prompt(&imported.arrangement, &imported.source).contains("bass_sound = "));
         // A song with its bass moved up a tone drifts, bar by bar.

@@ -18,7 +18,8 @@
 
 use crate::schedule::{ClockChunk, Layout};
 use makepad_flow::live::plan::{LiveNode, PlanError};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A nested player's state as the audio thread runs it. `run` and
 /// `running` are called on the audio thread: they never allocate, lock or
@@ -27,6 +28,9 @@ pub trait NestedNode: Send {
     /// What it plays (its settings): a carried-over node whose key differs
     /// from the new revision's gives way to the new one.
     fn key(&self) -> u64;
+    /// The owner's published latency in frames. Prepare reads this cell and
+    /// the host watches it. Instances that carry over share the same cell.
+    fn latency(&self) -> Arc<AtomicU32>;
     /// One pass: `left` and `right` (the pass's frames) filled following
     /// `clock`.
     fn run(&mut self, clock: &ClockChunk, left: &mut [f32], right: &mut [f32]);

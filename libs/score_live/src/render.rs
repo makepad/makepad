@@ -8,6 +8,9 @@ use crate::model::{self, Diag, ScoreDoc};
 use crate::player::{sample_name, ClockMode, Player};
 use makepad_audio_engine::feed::{forget_instance, tempo_feed, tempo_seconds, TempoEvent};
 use makepad_audio_engine::CHUNK;
+use makepad_audio_engine::schedule::NodeState;
+use makepad_score_player::shader::ProbeRecord;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -32,9 +35,15 @@ impl Default for RenderOpts {
     }
 }
 
+/// Per score node and probe, the minimum, maximum and last value over the render.
+pub type ProbeRanges = BTreeMap<String, BTreeMap<String, [f32; 3]>>;
+
 pub struct Rendered {
+    pub plan_notes: Vec<String>,
     pub left: Vec<f32>,
     pub right: Vec<f32>,
+    /// Frames of schedule latency trimmed from the start of both channels.
+    pub latency: u64,
     pub rate: f32,
     pub bpm: f64,
     pub beats_per_bar: f64,
@@ -46,6 +55,48 @@ pub struct Rendered {
     pub tempo: Vec<TempoEvent>,
     /// Loops whose code failed (they rendered nothing for those cycles).
     pub errors: Vec<Diag>,
+    pub probes: ProbeRanges,
+}
+
+fn probe_ranges(player: &mut Player) -> ProbeRanges {
+    let mut nodes = ProbeRanges::new();
+    if player.layout.probe_taps.is_empty() {
+        return nodes;
+    }
+    let prefix = format!("{}/", player.name);
+    for node in &player.layout.nodes {
+        let Some(reader) = player.layout.probe_taps.get(&node.id) else { continue };
+        let mut ranges = vec![None; reader.names.len()];
+        let mut observe = |r: ProbeRecord| {
+            // Folded records can arrive after another voice's later call.
+            // Voices in a call render in increasing slot order.
+            let end = (r.frame as u64 + r.frames as u64, r.voice);
+            let (latest, values) = ranges[r.probe as usize].get_or_insert((end, [r.min, r.max, r.last]));
+            values[0] = values[0].min(r.min);
+            values[1] = values[1].max(r.max);
+            if end >= *latest {
+                *latest = end;
+                values[2] = r.last;
+            }
+        };
+        reader.drain(&mut observe);
+        // There may never be another audio call to flush a full ring.
+        let tap = match &mut player.schedule.states[node.state as usize] {
+            NodeState::ShaderFx(state) => state.fx.probe_tap_mut(),
+            NodeState::Loop(state) => state.engine.shader_mut().and_then(|s| s.probe_tap_mut()),
+            _ => None,
+        };
+        if let Some(tap) = tap {
+            tap.drain_spill(observe);
+        }
+        let reached: BTreeMap<_, _> = reader.names.iter().zip(ranges).filter_map(|(name, range)| {
+            range.map(|(_, values)| (name.clone(), values))
+        }).collect();
+        if !reached.is_empty() {
+            nodes.insert(node.id.strip_prefix(&prefix).unwrap_or(&node.id).to_owned(), reached);
+        }
+    }
+    nodes
 }
 
 impl Rendered {
@@ -60,7 +111,7 @@ impl Rendered {
 }
 
 /// How long a score is, in seconds, with a tail for its echoes.
-pub fn natural_length(doc: &ScoreDoc) -> f64 {
+pub fn natural_length(doc: &model::AuthoredDoc) -> f64 {
     let beats = doc.arrangement_beats();
     let beats = if beats > 0.0 { beats } else { 16.0 * doc.beats_per_bar() };
     tempo_seconds(transport_bpm(doc), &arrangement_tempo(doc), beats) + if doc.arrangement_beats() > 0.0 { tail_seconds(doc) } else { 0.0 }
@@ -68,7 +119,7 @@ pub fn natural_length(doc: &ScoreDoc) -> f64 {
 
 /// How long the music rings after its last bar: the longest reverb, a
 /// synth's release, the piano's decay, at least 2 s.
-pub fn tail_seconds(doc: &ScoreDoc) -> f64 {
+pub fn tail_seconds(doc: &model::AuthoredDoc) -> f64 {
     let mut tail: f64 = 2.0;
     for fx in &doc.fx {
         if fx.kind == makepad_score_player::FxKind::Reverb {
@@ -89,7 +140,7 @@ pub fn tail_seconds(doc: &ScoreDoc) -> f64 {
 
 /// The tempo changes the arrangement makes as written (its sections'
 /// `bpm`), once through.
-pub fn arrangement_tempo(doc: &ScoreDoc) -> Vec<TempoEvent> {
+pub fn arrangement_tempo(doc: &model::AuthoredDoc) -> Vec<TempoEvent> {
     let mut out = Vec::new();
     let mut beat = 0.0;
     for section in doc.arrange.iter().filter_map(|name| doc.sections.iter().find(|s| &s.name == name)) {
@@ -114,7 +165,7 @@ fn beat_at_seconds(bpm: f64, tempo: &[TempoEvent], seconds: f64) -> f64 {
 }
 
 /// The tempo a score plays at on a transport (its range).
-pub fn transport_bpm(doc: &ScoreDoc) -> f64 {
+pub fn transport_bpm(doc: &model::AuthoredDoc) -> f64 {
     doc.clock.bpm.clamp(40.0, 240.0)
 }
 
@@ -128,7 +179,7 @@ fn fail(message: impl Into<String>) -> Vec<Diag> {
 pub fn register_samples(doc: &ScoreDoc, samples: &dyn Samples) {
     for asset in doc.samples() {
         if let Some(sample) = samples.sample(&asset) {
-            makepad_audio_engine::feed::samples::register(&sample_name(&asset), sample);
+            register_sample(&asset, sample);
         }
     }
     for asset in doc.singers() {
@@ -153,7 +204,7 @@ pub fn register_file(asset: &crate::model::AssetRef, bytes: Arc<[u8]>) {
     makepad_audio_engine::feed::files::register(&sample_name(asset), bytes);
 }
 
-/// The samples `doc` plays that nobody registered yet.
+/// Recordings still needed by samplers, kit slots and shader tables.
 pub fn missing_samples(doc: &ScoreDoc) -> Vec<crate::model::AssetRef> {
     doc.samples().into_iter().filter(|asset| makepad_audio_engine::feed::samples::get(&sample_name(asset)).is_none()).collect()
 }
@@ -174,20 +225,27 @@ pub fn register_sample(asset: &crate::model::AssetRef, sample: Arc<makepad_score
 }
 
 /// Prepare `doc` as a player of its own (a fresh name) at `rate`.
-pub fn instantiate(doc: &ScoreDoc, rate: f32) -> Result<Player, Vec<Diag>> {
+pub fn instantiate(doc: &ScoreDoc, rate: f32, control: &crate::PrepareControl) -> Result<Player, crate::LoadError> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let name = format!("score_{}", NEXT.fetch_add(1, Ordering::Relaxed));
-    crate::player::prepare(doc, rate, &name, ClockMode::Own, None, 1)
+    let slice = crate::player::slice(doc, &name, ClockMode::Own);
+    crate::player::prepare(doc, slice, rate, &name, ClockMode::Own, None, 1, control)
 }
 
-pub fn render(source: &str, opts: &RenderOpts, samples: &dyn Samples) -> Result<Rendered, Vec<Diag>> {
-    render_with(source, opts, samples, &mut |_, _| {})
+pub fn render(source: &str, opts: &RenderOpts, samples: &dyn Samples, control: &crate::PrepareControl) -> Result<Rendered, crate::LoadError> {
+    render_with(source, opts, samples, control, &mut |_, _| {})
 }
 
-/// Render, calling `observe(frame, instance)` after every pass (the frame
-/// is the pass's end): how per-node levels are measured offline.
-pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, observe: &mut dyn FnMut(usize, &Player)) -> Result<Rendered, Vec<Diag>> {
-    let mut loaded = model::load(source)?;
+/// Render, calling `observe(frame, instance)` at each pass's end in the
+/// requested score window: how per-node levels are measured offline.
+pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, control: &crate::PrepareControl, observe: &mut dyn FnMut(usize, &Player)) -> Result<Rendered, crate::LoadError> {
+    let loaded = model::load_controlled(source, control)?;
+    render_loaded(loaded, opts, samples, control, observe)
+}
+
+/// Render a checked request without compiling its document a second time.
+pub fn render_loaded(mut loaded: model::Loaded, opts: &RenderOpts, samples: &dyn Samples, control: &crate::PrepareControl, observe: &mut dyn FnMut(usize, &Player)) -> Result<Rendered, crate::LoadError> {
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
     register_samples(&loaded.doc, samples);
     // The General MIDI SoundFont, from where the installer put it: a score
     // that plays it renders with it or not at all (never silently).
@@ -195,10 +253,10 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
         crate::gm_font::ensure().map_err(fail)?;
     }
     if let Some(seed) = opts.seed {
-        loaded.doc.clock.seed = seed;
+        loaded = loaded.with_seed(seed);
     }
     let rate = opts.rate;
-    let mut instance = instantiate(&loaded.doc, rate)?;
+    let mut instance = instantiate(&loaded.doc, rate, control)?;
     // Each held value's targets, in time order, applied at its pass.
     let mut held: Vec<(usize, Vec<crate::held::Target>, f32)> = opts.held.iter()
         .map(|h| ((h.at.max(0.0) * rate as f64) as usize, crate::held::targets(&loaded.doc, &h.node, &h.field), h.value))
@@ -207,7 +265,7 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
     let bpm = transport_bpm(&loaded.doc);
     let beats_per_bar = loaded.doc.beats_per_bar();
     let seconds = opts.seconds.unwrap_or_else(|| natural_length(&loaded.doc)).clamp(0.0, 3600.0);
-    let mut composer = Composer::new(loaded);
+    let mut composer = Composer::new(loaded.into_evaluated());
     composer.wait_for_phrases = true;
     for (name, value) in &opts.params {
         composer.set_param(name, *value);
@@ -216,6 +274,11 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
         composer.seek(start, 0.0, 0.0);
     }
     let total = (seconds * rate as f64).round() as usize;
+    let latency = instance.schedule.latency;
+    let Some(render_frames) = usize::try_from(latency).ok().and_then(|trim| trim.checked_add(total)) else {
+        forget_instance(&instance.name);
+        return Err(fail("the render and its latency exceed the addressable frame range").into());
+    };
     let mut left = vec![0.0f32; total];
     let mut right = vec![0.0f32; total];
     let mut events = Vec::new();
@@ -226,8 +289,15 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
     let reach = CHUNK as f64 * 400.0 / 60.0 / rate as f64;
     let mut frame = 0usize;
     let mut beat = 0.0f64;
-    while frame < total {
-        let n = CHUNK.min(total - frame);
+    let mut probes = ProbeRanges::new();
+    while frame < render_frames {
+        if control.is_cancelled() {
+            forget_instance(&instance.name);
+            return Err(crate::LoadError::Cancelled);
+        }
+        let in_score_window = frame < total;
+        let pass_end = if in_score_window { total } else { render_frames };
+        let n = CHUNK.min(pass_end - frame);
         composer.pump(beat + reach + 1e-9, &mut events);
         // A render sends no OSC.
         composer.osc_out.clear();
@@ -237,12 +307,16 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
         for (fx, event) in composer.automation_out.drain(..) {
             makepad_audio_engine::feed::automation_feed(&format!("{}/{fx}", instance.name)).send(event);
         }
-        played.extend(composer.history.drain(..));
+        if in_score_window {
+            played.extend(composer.history.drain(..));
+        } else {
+            composer.history.clear();
+        }
         for event in events.drain(..) {
             if let Some((_, feed)) = instance.feeds.iter().find(|(key, _)| *key == event.loop_key) {
                 if !feed.send(event) {
                     forget_instance(&instance.name);
-                    return Err(fail("too many events at once: a loop plays more than 4000 notes in a pass"));
+                    return Err(fail("too many events at once: a loop plays more than 4000 notes in a pass").into());
                 }
             }
         }
@@ -250,22 +324,32 @@ pub fn render_with(source: &str, opts: &RenderOpts, samples: &dyn Samples, obser
             let Some((_, targets, value)) = held.pop() else { break };
             crate::player::hold(&instance, &targets, value);
         }
-        let (l, r) = (&mut left[frame..frame + n], &mut right[frame..frame + n]);
+        // Write only the overlap with the requested output into the final buffers.
+        let skip = (latency as usize).saturating_sub(frame).min(n);
+        let start = frame.saturating_sub(latency as usize);
+        let end = start + (n - skip);
         instance.run(n, &mut |cue, a, b| {
             if !cue {
-                l.copy_from_slice(&a[..n]);
-                r.copy_from_slice(&b[..n]);
+                left[start..end].copy_from_slice(&a[skip..n]);
+                right[start..end].copy_from_slice(&b[skip..n]);
             }
         });
-        beat = instance.schedule.clocks.first().map_or(beat, |c| c.tempo.end_beat(n));
+        beat = instance.schedule.clocks.first().map_or(beat, |c| c.tempo.end_beat(instance.schedule.clock_frames));
         frame += n;
-        observe(frame, &instance);
+        if in_score_window {
+            observe(frame, &instance);
+            if frame == total {
+                probes = probe_ranges(&mut instance);
+            }
+        }
     }
     forget_instance(&instance.name);
     let tempo = composer.tempo_map.clone();
     let sections = sections_of(&mut composer, beat_at_seconds(bpm, &tempo, seconds), beats_per_bar);
     let errors = composer.errors();
-    Ok(Rendered { left, right, rate, bpm, beats_per_bar, played, sections, tempo, errors })
+    let plan_notes = instance.layout.plan_notes.iter().map(|note| note.message.clone()).collect();
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+    Ok(Rendered { plan_notes, left, right, latency, rate, bpm, beats_per_bar, played, sections, tempo, errors, probes })
 }
 
 /// Where each section starts (beats), bar by bar up to `end` beats.
@@ -309,7 +393,13 @@ impl Timing {
 /// cycle length, notes as (offset beat, note, velocity, hit), lengths).
 /// What a stopped score shows of its generated loops.
 pub fn cycle_notes(source: &str) -> Vec<(String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>)> {
-    let Ok(loaded) = model::load(source) else { return Vec::new() };
+    let Ok(loaded) = model::read_document(source) else { return Vec::new() };
+    cycle_notes_of(loaded)
+}
+
+/// Read the already evaluated score in its owning VM.
+pub fn cycle_notes_of(loaded: impl Into<model::EvaluatedDocument>) -> Vec<(String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>)> {
+    let loaded = loaded.into();
     let bar = loaded.doc.beats_per_bar();
     let end = loaded.doc.arrangement_beats().max(16.0 * bar).min(512.0);
     let mut composer = Composer::new(loaded);
@@ -332,7 +422,13 @@ pub fn cycle_notes(source: &str) -> Vec<(String, f64, f64, Vec<(f64, f32, f32, b
 /// The first error loop `node`'s code meets over the arrangement (1024
 /// beats at most), if any.
 pub fn loop_error(source: &str, node: &str) -> Option<String> {
-    let loaded = model::load(source).ok()?;
+    let loaded = model::read_document(source).ok()?;
+    loop_error_of(loaded, node)
+}
+
+/// Read the already evaluated score in its owning VM.
+pub fn loop_error_of(loaded: impl Into<model::EvaluatedDocument>, node: &str) -> Option<String> {
+    let loaded = loaded.into();
     let bar = loaded.doc.beats_per_bar();
     let end = loaded.doc.arrangement_beats().max(16.0 * bar).min(1024.0);
     let mut composer = Composer::new(loaded);
@@ -369,7 +465,13 @@ pub struct Phrase {
 /// each time: that cycle; one walking a melody bar by bar: the melody), at
 /// most `max_beats`.
 pub fn phrase_notes(source: &str, node: &str, max_beats: f64) -> Option<Phrase> {
-    let loaded = model::load(source).ok()?;
+    let loaded = model::read_document(source).ok()?;
+    phrase_notes_of(loaded, node, max_beats)
+}
+
+/// Read the already evaluated score in its owning VM.
+pub fn phrase_notes_of(loaded: impl Into<model::EvaluatedDocument>, node: &str, max_beats: f64) -> Option<Phrase> {
+    let loaded = loaded.into();
     let bar = loaded.doc.beats_per_bar();
     let step = loaded.doc.loop_def(node).and_then(|l| l.beats).unwrap_or(bar).min(bar).max(0.25);
     let end = loaded.doc.arrangement_beats().max(16.0 * bar).min(1024.0);
@@ -437,7 +539,7 @@ pub fn phrase_notes(source: &str, node: &str, max_beats: f64) -> Option<Phrase> 
 }
 
 pub fn timing(source: &str, seconds: Option<f64>) -> Result<Timing, Vec<Diag>> {
-    let loaded = model::load(source)?;
+    let loaded = model::read_document(source)?;
     let bpm = transport_bpm(&loaded.doc);
     let beats_per_bar = loaded.doc.beats_per_bar();
     let seconds = seconds.unwrap_or_else(|| natural_length(&loaded.doc)).clamp(0.0, 3600.0);

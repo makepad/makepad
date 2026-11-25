@@ -244,7 +244,7 @@ mod tests {
             let names: Vec<&str> = loaded.doc.loops.iter().map(|l| l.name.as_str()).collect();
             assert_eq!(names, vec!["drums", "bass", "keys", "melody"], "{}", out.source);
             // Every note of the file plays, at its beat.
-            let mut composer = makepad_score_live::compose::Composer::new(loaded);
+            let mut composer = makepad_score_live::compose::Composer::new(loaded.into_evaluated());
             let mut events = Vec::new();
             composer.pump(64.0, &mut events);
             let notes = events.iter().filter(|e| e.kind == makepad_score_player::EventKind::Note).count();

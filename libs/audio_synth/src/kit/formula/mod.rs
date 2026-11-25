@@ -376,10 +376,8 @@ impl Runner {
             unsafe { code.run(&mut self.ctx, state, self.shared.as_mut_ptr(), [&zeros, &zeros], [&mut o0, &mut o1], 1) };
             return;
         }
-        let zeros = [0f32; 1];
-        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
         let mut mem = ir::Mem { ctx: &mut self.ctx, state, shared: ir::Shared::Write(&mut self.shared), bufs: &[] };
-        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        let mut io = ir::Io::default();
         ir::run(&e.prog, &mut self.scratch[..e.scratch.max(1)], &mut mem, &mut io, 1);
     }
 

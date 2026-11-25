@@ -39,6 +39,8 @@ pub enum Ctl {
     Slide,
     /// A key's own slide (MPE: its channel's CC 74), 0..1.
     KeySlide(u8),
+    /// A numbered controller, 0..1.
+    Cc(u8),
     /// The sustain pedal (CC 64), 0..1: held at the source.
     Sustain,
     /// Every key let go (CC 123 / 120).
@@ -49,7 +51,7 @@ pub enum Ctl {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Msg {
     On { beat: f64, ch: u8, note: u8, vel: f32 },
-    Off { beat: f64, ch: u8, note: u8 },
+    Off { beat: f64, ch: u8, note: u8, vel: f32 },
     Ctl { beat: f64, ch: u8, ctl: Ctl, value: f32 },
 }
 
@@ -66,7 +68,8 @@ impl Msg {
         let (status, ch, a, b) = (data[0] & 0xf0, data[0] & 15, data[1] & 127, data[2] & 127);
         Some(match status {
             0x90 if b > 0 => Msg::On { beat, ch, note: a, vel: b as f32 / 127.0 },
-            0x80 | 0x90 => Msg::Off { beat, ch, note: a },
+            0x80 => Msg::Off { beat, ch, note: a, vel: b as f32 / 127.0 },
+            0x90 => Msg::Off { beat, ch, note: a, vel: 0.5 },
             0xa0 => Msg::Ctl { beat, ch, ctl: Ctl::KeyPressure(a), value: b as f32 / 127.0 },
             0xd0 => Msg::Ctl { beat, ch, ctl: Ctl::Pressure, value: a as f32 / 127.0 },
             0xe0 => Msg::Ctl { beat, ch, ctl: Ctl::Bend, value: ((((b as u16) << 7) | a as u16) as f32 - 8192.0) / 8192.0 },
@@ -75,7 +78,7 @@ impl Msg {
                 64 => Msg::Ctl { beat, ch, ctl: Ctl::Sustain, value: b as f32 / 127.0 },
                 74 => Msg::Ctl { beat, ch, ctl: Ctl::Slide, value: b as f32 / 127.0 },
                 120 | 123 => Msg::Ctl { beat, ch, ctl: Ctl::AllOff, value: 0.0 },
-                _ => return None,
+                _ => Msg::Ctl { beat, ch, ctl: Ctl::Cc(a), value: b as f32 / 127.0 },
             },
             _ => return None,
         })
@@ -129,11 +132,12 @@ pub struct StreamDef {
     pub stages: [Option<StageDef>; MAX_STAGES],
     pub bend_range: f32,
     pub mpe: bool,
+    pub master: Option<u8>,
 }
 
 impl Default for StreamDef {
     fn default() -> Self {
-        StreamDef { stages: [None; MAX_STAGES], bend_range: 2.0, mpe: false }
+        StreamDef { stages: [None; MAX_STAGES], bend_range: 2.0, mpe: false, master: Some(0) }
     }
 }
 
@@ -146,9 +150,10 @@ impl StreamDef {
     }
 
     /// The stream as a list of numbers (a `Loop` node's `stream` setting):
-    /// the bend range, MPE, then [`STAGE_WORDS`] per stage, its kind first.
+    /// bend range, per-note channels, the master channel (-1: none), then
+    /// [`STAGE_WORDS`] per stage.
     pub fn encode(&self) -> Vec<f64> {
-        let mut out = vec![self.bend_range as f64, self.mpe as u8 as f64];
+        let mut out = vec![self.bend_range as f64, self.mpe as u8 as f64, self.master.map_or(-1.0, f64::from)];
         for stage in self.stages.iter().flatten() {
             let mut w = [0.0f64; STAGE_WORDS];
             match *stage {
@@ -183,11 +188,16 @@ impl StreamDef {
     /// A stream from its encoding ([`StreamDef::encode`]); None for an
     /// empty list (the loop plays no stream).
     pub fn decode(words: &[f64]) -> Option<StreamDef> {
-        if words.len() < 2 {
+        if words.len() < 3 {
             return None;
         }
-        let mut def = StreamDef { bend_range: (words[0] as f32).clamp(0.0, 48.0), mpe: words[1] > 0.5, ..Default::default() };
-        for (k, w) in words[2..].chunks_exact(STAGE_WORDS).take(MAX_STAGES).enumerate() {
+        let master = match words[2] {
+            -1.0 => None,
+            n if n.fract() == 0.0 && (0.0..=15.0).contains(&n) => Some(n as u8),
+            _ => return None,
+        };
+        let mut def = StreamDef { bend_range: (words[0] as f32).clamp(0.0, 48.0), mpe: words[1] > 0.5, master, ..Default::default() };
+        for (k, w) in words[3..].chunks_exact(STAGE_WORDS).take(MAX_STAGES).enumerate() {
             let int = |x: f64, lo: i32, hi: i32| (x.round() as i32).clamp(lo, hi);
             def.stages[k] = match w[0] as u8 {
                 1 => Some(StageDef::Transpose(int(w[1], -48, 48) as i8)),
@@ -273,10 +283,13 @@ fn count(set: &[u64; 2]) -> u32 {
 /// two message lists a pass ping-pongs between.
 pub struct Stream {
     pub def: StreamDef,
+    /// Expand channel pressure and slide into individual keys for hosts that take key messages.
+    pub expand_key_controls: bool,
     /// Keys down at the source (per channel) and the ones the pedal holds.
     down: [[u64; 2]; 16],
     pedalled: [[u64; 2]; 16],
     pedal: [bool; 16],
+    pedal_lift: Box<[[f32; 128]; 16]>,
     arps: [Option<Box<ArpStage>>; MAX_STAGES],
     /// Notes sounding at the output, per channel, with how many keys hold
     /// each.
@@ -302,9 +315,9 @@ impl Stream {
                 arps[k] = Some(Box::new(ArpStage { arp: Arp::new(), down: [0; 2], cursor: f64::NAN, events: [(0.0, ArpEvent::Off(0)); 64], ch: 0 }));
             }
         }
-        let empty = Msg::Off { beat: 0.0, ch: 0, note: 0 };
+        let empty = Msg::Off { beat: 0.0, ch: 0, note: 0, vel: 0.5 };
         Stream {
-            def, down: [[0; 2]; 16], pedalled: [[0; 2]; 16], pedal: [false; 16], arps, sounding: [[0; 128]; 16],
+            def, expand_key_controls: false, pedal_lift: Box::new([[0.5; 128]; 16]), down: [[0; 2]; 16], pedalled: [[0; 2]; 16], pedal: [false; 16], arps, sounding: [[0; 128]; 16],
             a: vec![empty; MAX_MSGS].into_boxed_slice(), b: vec![empty; MAX_MSGS].into_boxed_slice(), na: 0, dropped: 0,
             recent: [(0.0, 0, 0); 8], nrecent: 0, started: 0,
         }
@@ -316,6 +329,7 @@ impl Stream {
     pub fn take_state(&mut self, old: &mut Stream) {
         self.down = old.down;
         self.pedalled = old.pedalled;
+        std::mem::swap(&mut self.pedal_lift, &mut old.pedal_lift);
         self.pedal = old.pedal;
         self.sounding = old.sounding;
         self.recent = old.recent;
@@ -391,7 +405,7 @@ impl Stream {
     /// One pass over beats `b0..b1` (`b1 > b0`): the queued messages through
     /// every stage; each note and controller to `note` and `ctl` in beat
     /// order. Notes as events of loop `loop_key` (held until let go).
-    pub fn run(&mut self, b0: f64, b1: f64, loop_key: u64, pan: f32, note: &mut dyn FnMut(Event), ctl: &mut dyn FnMut(u8, Ctl, f32)) {
+    pub fn run(&mut self, b0: f64, b1: f64, loop_key: u64, pan: f32, note: &mut dyn FnMut(Event), ctl: &mut dyn FnMut(f64, u8, Ctl, f32)) {
         // The source: the pedal holds keys let go under it.
         let (mut nb, mut dropped) = (0usize, 0u32);
         for i in 0..self.na {
@@ -402,16 +416,18 @@ impl Stream {
                     // A key that still sounds (pedalled, or no note-off came)
                     // starts again.
                     if bit(&self.down[c], note) || bit(&self.pedalled[c], note) {
-                        Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note });
+                        let vel = if bit(&self.pedalled[c], note) { self.pedal_lift[c][note as usize] } else { 0.5 };
+                        Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note, vel });
                     }
                     set_bit(&mut self.down[c], note, true);
                     set_bit(&mut self.pedalled[c], note, false);
                     Self::out(&mut self.b, &mut nb, &mut dropped, msg);
                 }
-                Msg::Off { ch, note, .. } => {
+                Msg::Off { ch, note, vel, .. } => {
                     let c = ch as usize & 15;
                     set_bit(&mut self.down[c], note, false);
                     if self.pedal[c] {
+                        self.pedal_lift[c][note as usize] = vel;
                         set_bit(&mut self.pedalled[c], note, true);
                     } else {
                         Self::out(&mut self.b, &mut nb, &mut dropped, msg);
@@ -423,7 +439,8 @@ impl Stream {
                     if self.pedal[c] && !down {
                         for note in 0..128u8 {
                             if bit(&self.pedalled[c], note) {
-                                Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note });
+                                let vel = self.pedal_lift[c][note as usize];
+                                Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note, vel });
                             }
                         }
                         self.pedalled[c] = [0; 2];
@@ -434,7 +451,8 @@ impl Stream {
                     let c = ch as usize & 15;
                     for note in 0..128u8 {
                         if bit(&self.down[c], note) || bit(&self.pedalled[c], note) {
-                            Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note });
+                            let vel = if bit(&self.pedalled[c], note) { self.pedal_lift[c][note as usize] } else { 0.5 };
+                            Self::out(&mut self.b, &mut nb, &mut dropped, Msg::Off { beat, ch, note, vel });
                         }
                     }
                     self.down[c] = [0; 2];
@@ -456,7 +474,7 @@ impl Stream {
                     for i in 0..na {
                         let shifted = match self.a[i] {
                             Msg::On { beat, ch, note, vel } => (note as i32 + semis as i32).try_into().ok().filter(|n: &u8| *n < 128).map(|note| Msg::On { beat, ch, note, vel }),
-                            Msg::Off { beat, ch, note } => (note as i32 + semis as i32).try_into().ok().filter(|n: &u8| *n < 128).map(|note| Msg::Off { beat, ch, note }),
+                            Msg::Off { beat, ch, note, vel } => (note as i32 + semis as i32).try_into().ok().filter(|n: &u8| *n < 128).map(|note| Msg::Off { beat, ch, note, vel }),
                             Msg::Ctl { beat, ch, ctl: Ctl::KeyPressure(note), value } => {
                                 (note as i32 + semis as i32).try_into().ok().filter(|n: &u8| *n < 128).map(|note| Msg::Ctl { beat, ch, ctl: Ctl::KeyPressure(note), value })
                             }
@@ -475,7 +493,7 @@ impl Stream {
                             let up = |note: u8| (note as i32 + *tone as i32).try_into().ok().filter(|n: &u8| *n < 128);
                             let more = match msg {
                                 Msg::On { beat, ch, note, vel } => up(note).map(|note| Msg::On { beat, ch, note, vel }),
-                                Msg::Off { beat, ch, note } => up(note).map(|note| Msg::Off { beat, ch, note }),
+                                Msg::Off { beat, ch, note, vel } => up(note).map(|note| Msg::Off { beat, ch, note, vel }),
                                 _ => None,
                             };
                             if let Some(more) = more {
@@ -511,7 +529,7 @@ impl Stream {
                             let beat = (st.cursor + e.0).min(to);
                             let msg = match e.1 {
                                 ArpEvent::On(note, vel) => Msg::On { beat, ch: st.ch, note, vel: vel as f32 / 127.0 },
-                                ArpEvent::Off(note) => Msg::Off { beat, ch: st.ch, note },
+                                ArpEvent::Off(note) => Msg::Off { beat, ch: st.ch, note, vel: 0.5 },
                             };
                             Self::out(list, nb, dropped, msg);
                         }
@@ -581,14 +599,14 @@ impl Stream {
                     self.nrecent += 1;
                     self.started += 1;
                 }
-                Msg::Off { beat, ch, note: key } => {
+                Msg::Off { beat, ch, note: key, vel } => {
                     let c = ch as usize & 15;
                     let held = &mut self.sounding[c][key as usize];
                     if *held > 0 {
                         *held -= 1;
                         if *held == 0 {
                             let opts = NoteOpts { handle: handle(ch, key), ..Default::default() };
-                            note(Event { beat, loop_key, kind: EventKind::Release, note: key as f32, vel: 0.0, pan, dur: 0.0, opts });
+                            note(Event { beat, loop_key, kind: EventKind::Release, note: key as f32, vel, pan, dur: 0.0, opts });
                         }
                     }
                 }
@@ -598,19 +616,20 @@ impl Stream {
                         if self.sounding[c][key as usize] > 0 {
                             self.sounding[c][key as usize] = 0;
                             let opts = NoteOpts { handle: handle(ch, key), ..Default::default() };
-                            note(Event { beat, loop_key, kind: EventKind::Release, note: key as f32, vel: 0.0, pan, dur: 0.0, opts });
+                            note(Event { beat, loop_key, kind: EventKind::Release, note: key as f32, vel: 0.5, pan, dur: 0.0, opts });
                         }
                     }
+                    ctl(beat, ch, Ctl::AllOff, 0.0);
                 }
-                // MPE: a channel's pressure and slide are its keys'.
-                Msg::Ctl { ch, ctl: c @ (Ctl::Pressure | Ctl::Slide), value, .. } if self.def.mpe => {
+                // Some instruments take pressure and slide on individual keys.
+                Msg::Ctl { beat, ch, ctl: c @ (Ctl::Pressure | Ctl::Slide), value } if self.def.mpe && self.expand_key_controls => {
                     for key in 0..128u8 {
                         if self.sounding[ch as usize & 15][key as usize] > 0 {
-                            ctl(ch, if c == Ctl::Pressure { Ctl::KeyPressure(key) } else { Ctl::KeySlide(key) }, value);
+                            ctl(beat, ch, if c == Ctl::Pressure { Ctl::KeyPressure(key) } else { Ctl::KeySlide(key) }, value);
                         }
                     }
                 }
-                Msg::Ctl { ch, ctl: c, value, .. } => ctl(ch, c, value),
+                Msg::Ctl { beat, ch, ctl: c, value } => ctl(beat, ch, c, value),
             }
         }
     }
@@ -634,9 +653,9 @@ impl Stream {
 mod tests {
     use super::*;
 
-    fn run(stream: &mut Stream, b0: f64, b1: f64) -> (Vec<(f64, EventKind, f32, f32)>, Vec<(u8, Ctl, f32)>) {
+    fn run(stream: &mut Stream, b0: f64, b1: f64) -> (Vec<(f64, EventKind, f32, f32)>, Vec<(f64, u8, Ctl, f32)>) {
         let (mut notes, mut ctls) = (Vec::new(), Vec::new());
-        stream.run(b0, b1, 1, 0.0, &mut |e| notes.push((e.beat, e.kind, e.note, e.vel)), &mut |ch, c, v| ctls.push((ch, c, v)));
+        stream.run(b0, b1, 1, 0.0, &mut |e| notes.push((e.beat, e.kind, e.note, e.vel)), &mut |beat, ch, c, v| ctls.push((beat, ch, c, v)));
         (notes, ctls)
     }
 
@@ -655,14 +674,24 @@ mod tests {
             StageDef::Transpose(-12),
             StageDef::Velocity { curve: VelCurve::Fixed(0.5), min: 0.0, max: 1.0 },
         ]);
-        assert_eq!(StreamDef::decode(&def.encode()), Some(def));
+        for master in [Some(0), Some(15), None] {
+            let def = StreamDef { master, ..def };
+            assert_eq!(StreamDef::decode(&def.encode()), Some(def));
+        }
         let mut s = Stream::new(def);
         s.push(Msg::On { beat: 1.0, ch: 0, note: 60, vel: 1.0 });
         let (notes, _) = run(&mut s, 1.0, 1.1);
         assert_eq!(notes, [(1.0, EventKind::Note, 48.0, 0.5), (1.0, EventKind::Note, 55.0, 0.5), (1.0, EventKind::Note, 60.0, 0.5)]);
-        s.push(Msg::Off { beat: 1.2, ch: 0, note: 60 });
-        let (notes, _) = run(&mut s, 1.1, 1.3);
+        s.push(Msg::from_midi([0xb0, 64, 127], 1.1).unwrap());
+        s.push(Msg::from_midi([0x80, 60, 96], 1.2).unwrap());
+        assert!(run(&mut s, 1.1, 1.3).0.is_empty());
+        s.push(Msg::from_midi([0xb0, 64, 0], 1.3).unwrap());
+        s.push(Msg::from_midi([0xb0, 7, 32], 1.35).unwrap());
+        let (notes, ctls) = run(&mut s, 1.3, 1.4);
         assert_eq!(notes.iter().map(|n| (n.1, n.2)).collect::<Vec<_>>(), [(EventKind::Release, 48.0), (EventKind::Release, 55.0), (EventKind::Release, 60.0)]);
+        assert!(notes.iter().all(|n| n.0 == 1.3 && n.3 == 96.0 / 127.0));
+        assert_eq!(ctls, [(1.35, 0, Ctl::Cc(7), 32.0 / 127.0)]);
+        assert_eq!(Msg::from_midi([0x90, 60, 0], 1.4), Some(Msg::Off { beat: 1.4, ch: 0, note: 60, vel: 0.5 }));
         assert!(!s.active());
     }
 
@@ -672,8 +701,8 @@ mod tests {
         let mut s = Stream::new(with(&[StageDef::Arp { settings, latch: true, sync: true }]));
         s.push(Msg::On { beat: 0.0, ch: 0, note: 60, vel: 0.8 });
         s.push(Msg::On { beat: 0.0, ch: 0, note: 64, vel: 0.8 });
-        s.push(Msg::Off { beat: 0.1, ch: 0, note: 60 });
-        s.push(Msg::Off { beat: 0.1, ch: 0, note: 64 });
+        s.push(Msg::Off { beat: 0.1, ch: 0, note: 60, vel: 0.5 });
+        s.push(Msg::Off { beat: 0.1, ch: 0, note: 64, vel: 0.5 });
         let (notes, _) = run(&mut s, 0.0, 2.0);
         let starts: Vec<(f64, f32)> = notes.iter().filter(|n| n.1 == EventKind::Note).map(|n| ((n.0 * 1e9).round() / 1e9, n.2)).collect();
         assert_eq!(starts, [(0.0, 60.0), (0.5, 64.0), (1.0, 60.0), (1.5, 64.0)]);
@@ -687,14 +716,15 @@ mod tests {
     #[test]
     fn mpe_pressure_goes_to_the_key_on_its_channel_and_bend_keeps_its_channel() {
         let mut s = Stream::new(StreamDef { mpe: true, ..Default::default() });
+        s.expand_key_controls = true;
         s.push(Msg::On { beat: 0.0, ch: 2, note: 60, vel: 0.8 });
         s.push(Msg::On { beat: 0.0, ch: 3, note: 64, vel: 0.8 });
         s.push(Msg::from_midi([0xd3, 100, 0], 0.01).unwrap());
         s.push(Msg::from_midi([0xe2, 0, 0x60], 0.02).unwrap());
         let (_, ctls) = run(&mut s, 0.0, 0.1);
         assert_eq!(ctls.len(), 2);
-        assert_eq!((ctls[0].0, ctls[0].1), (3, Ctl::KeyPressure(64)));
-        assert_eq!((ctls[1].0, ctls[1].1), (2, Ctl::Bend));
-        assert!((ctls[1].2 - 0.5).abs() < 1e-3);
+        assert_eq!((ctls[0].0, ctls[0].1, ctls[0].2), (0.01, 3, Ctl::KeyPressure(64)));
+        assert_eq!((ctls[1].0, ctls[1].1, ctls[1].2), (0.02, 2, Ctl::Bend));
+        assert!((ctls[1].3 - 0.5).abs() < 1e-3);
     }
 }

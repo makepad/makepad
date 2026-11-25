@@ -487,10 +487,10 @@ pub struct Check {
 }
 
 /// Play `source` through the composer and compare it with the file.
-pub fn check(bytes: &[u8], piece: &Piece, source: &str) -> Result<Check, String> {
+pub fn check(bytes: &[u8], piece: &Piece, source: &str, control: &crate::PrepareControl) -> Result<Check, String> {
     let (_, perf) = read(bytes, piece)?;
-    let loaded = crate::model::load(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?;
-    let mut composer = Composer::new(loaded);
+    let loaded = crate::model::load_controlled(source, control).map_err(|e| e.to_string())?;
+    let mut composer = Composer::new(loaded.into_evaluated());
     let mut events = Vec::new();
     composer.pump(perf.beat(perf.end) + 64.0, &mut events);
     let mut ours: Vec<(u8, f64, f64, u8)> = Vec::new();
@@ -579,7 +579,7 @@ mod lists {
     fn section_tempo_points_bend_time_and_code_moves_the_pedal() {
         let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet piano = Instrument{kind: @piano}\nlet p = Loop{play: piano beats: 4 code: fn(i) { play(@c4) pedal(1) sleep(1) play(@e4) pedal(0.5) sleep(1) pedal(0) play(@g4) sleep(2) }}\nlet a = Section{bars: 1 loops: [p] tempo: [[0 60] [1 30] [3 6]]}\nlet b = Section{bars: 1 loops: [p] next: @stop tempo: [[2 120]]}\nScore{arrange: [a b] clock piano p a b}";
         let loaded = crate::model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
-        let mut composer = crate::compose::Composer::new(loaded);
+        let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
         let mut events = Vec::new();
         composer.pump(16.0, &mut events);
         let pedal: Vec<(f64, f32)> = events.iter().filter(|e| e.kind == EventKind::Pedal).map(|e| (e.beat, e.vel)).collect();

@@ -1,0 +1,31 @@
+// A bipolar modulation source. Set center and depth in the destination's
+// units: center 900 and depth 600 sweep a filter between 300 and 1500 Hz.
+let out = output(1)
+let shape = param(sine, {choices: [sine triangle saw square hold]})
+let rate = param(1, 0, 100, {unit: hz})
+let beats = param(0, 0, 64, {unit: beats})
+let depth = param(1, 0, 24000)
+let center = param(0, -24000, 24000)
+let phase = param(0, 0, 1)
+
+var position = 0.0
+var last_phase = 2.0
+var last_cycle = -1.0
+var held = 0.0
+
+fn block() {
+    // A synced cycle follows the transport through tempo changes and seeks.
+    // Wrap the free-running oscillator to keep its precision on a long take.
+    let cycle = if beats > 0.0 { beat / beats + phase } else { position + phase }
+    let p = fract(cycle)
+    if p < last_phase || (beats > 0.0 && floor(cycle) != last_cycle) { held = rand() }
+    last_phase = p
+    last_cycle = floor(cycle)
+    position = fract(position + rate * 64.0 / sample_rate)
+    let wave = if shape < 0.5 { sin(TAU * p) }
+        elif shape < 1.5 { 1.0 - 4.0 * abs(p - 0.5) }
+        elif shape < 2.5 { 2.0 * p - 1.0 }
+        elif shape < 3.5 { if p < 0.5 { 1.0 } else { -1.0 } }
+        else { held }
+    out = center + depth * wave
+}

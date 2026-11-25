@@ -58,7 +58,8 @@ impl Compressor {
     }
 }
 
-const LOOKAHEAD: usize = 128;
+/// Number of frames the limiter delays its stereo input for look-ahead.
+pub const LOOKAHEAD: usize = 128;
 
 /// Look-ahead brickwall limiter: the gain is computed from the peak of the
 /// next ~1.3-2.7 ms (at 96-48 kHz), so transients are caught before they

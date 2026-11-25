@@ -335,14 +335,7 @@ impl Recipe {
                 if value.is_empty() {
                     // A bare word names the source: `saw`, `pink`, `pluck`.
                     if let Some(w) = Wave::parse(key) {
-                        layer.set_str("osc", match w {
-                            Wave::Sine => "sine",
-                            Wave::Triangle => "tri",
-                            Wave::Saw => "saw",
-                            Wave::Square => "square",
-                            Wave::Pulse => "pulse",
-                            Wave::SoftSaw => "softsaw",
-                        })?;
+                        layer.set_str("osc", wave_name(w))?;
                     } else if NoiseColor::parse(key).is_some() {
                         layer.set_str("noise", key)?;
                     } else if key == "pluck" {
@@ -373,6 +366,86 @@ impl Recipe {
             return Err(RecipeError("a recipe needs at least one layer".into()));
         }
         Ok(recipe)
+    }
+}
+
+fn wave_name(wave: Wave) -> &'static str {
+    match wave {
+        Wave::Sine => "sine",
+        Wave::Triangle => "tri",
+        Wave::Saw => "saw",
+        Wave::Square => "square",
+        Wave::Pulse => "pulse",
+        Wave::SoftSaw => "softsaw",
+    }
+}
+
+/// Write a parsed recipe as inline sound text, including an `=` even for
+/// a single default oscillator so sound playback recognises the result.
+impl std::fmt::Display for Recipe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Compare bits to preserve signed zero and omit the default NaN sweep sentinels.
+        // Debug's round-trip float spelling uses an exponent for extreme magnitudes.
+        macro_rules! fields {
+            ($emit:ident, $value:ident, $default:ident, $($key:literal => $field:ident),+ $(,)?) => {
+                $(if $value.$field.to_bits() != $default.$field.to_bits() {
+                    $emit(format_args!("{}={:?}", $key, $value.$field))?;
+                })+
+            };
+        }
+        let default = Layer::default();
+        for (i, layer) in self.layers().iter().enumerate() {
+            if i != 0 { f.write_str("; ")?; }
+            let mut separator = "";
+            let mut token = |value: std::fmt::Arguments<'_>| {
+                f.write_str(separator)?;
+                separator = " ";
+                f.write_fmt(value)
+            };
+            match layer.source {
+                Source::None | Source::Osc(Wave::Sine) => {}
+                Source::Osc(wave) => token(format_args!("osc={}", wave_name(wave)))?,
+                Source::Fm { carrier, ratio } => {
+                    token(format_args!("fm={ratio:?}"))?;
+                    if carrier != Wave::Sine { token(format_args!("osc={}", wave_name(carrier)))?; }
+                }
+                Source::Noise(color) => token(format_args!("noise={}", match color {
+                    NoiseColor::White => "white",
+                    NoiseColor::Pink => "pink",
+                    NoiseColor::Brown => "brown",
+                    NoiseColor::Blue => "blue",
+                    NoiseColor::Velvet => "velvet",
+                }))?,
+                Source::Pluck { damping } => token(format_args!("pluck={damping:?}"))?,
+            }
+            fields!(token, layer, default,
+                "freq" => freq, "to" => freq_to, "glide" => glide, "vib" => vib_hz,
+                "vib_depth" => vib_depth, "detune" => detune_cents, "index" => fm_index,
+                "index_to" => fm_index_to, "cutoff" => cutoff, "cutoff_to" => cutoff_to,
+                "q" => q, "drive" => drive, "a" => attack, "d" => decay, "s" => sustain,
+                "r" => release, "hold" => hold, "gain" => gain, "delay" => delay, "pan" => pan,
+                "width" => width, "pwm" => pwm_hz, "pwm_depth" => pwm_depth, "density" => density,
+                "every" => every, "falloff" => repeat_decay,
+            );
+            if layer.repeat != default.repeat { token(format_args!("repeat={}", layer.repeat))?; }
+            // Parsing a cutoff also switches an off filter to low-pass.
+            let implicit = if layer.cutoff != default.cutoff { FilterMode::Lowpass } else { default.filter };
+            if layer.filter != implicit {
+                token(format_args!("filter={}", match layer.filter {
+                    FilterMode::Off => "off",
+                    FilterMode::Lowpass => "lp",
+                    FilterMode::Highpass => "hp",
+                    FilterMode::Bandpass => "bp",
+                    FilterMode::Notch => "notch",
+                    FilterMode::Ladder => "ladder",
+                }))?;
+            }
+            if separator.is_empty() { f.write_str("osc=sine")?; }
+        }
+        let default = Recipe::default();
+        let mut token = |value: std::fmt::Arguments<'_>| write!(f, " {value}");
+        fields!(token, self, default, "volume" => volume, "jitter" => jitter, "reverb" => reverb, "pitch" => pitch);
+        Ok(())
     }
 }
 
@@ -740,11 +813,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_builtin_parses() {
+    fn every_builtin_round_trips_as_inline_text() {
+        fn round_trip(name: &str, text: &str) -> usize {
+            let recipe = Recipe::parse(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let line = recipe.to_string();
+            assert!(line.contains('='), "{name} remains recognisable as an inline sound");
+            let copy = Recipe::parse(&line).unwrap_or_else(|e| panic!("{name} canonical line: {e}"));
+            // Debug distinguishes every finite f32 (including -0). Unset sweeps
+            // in both parsed values carry Layer::default's identical NaN sentinel.
+            assert_eq!(format!("{copy:?}"), format!("{recipe:?}"), "{name} preserves every parsed field");
+            line.len()
+        }
         for name in BUILTIN_NAMES {
             let text = builtin(name).unwrap_or_else(|| panic!("{name} missing"));
-            Recipe::parse(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            round_trip(name, text);
         }
+        round_trip("default sine", "freq=440");
+        round_trip("disabled filter and signed zero", "blue cutoff=512 filter=off pan=-0");
+        let layer = concat!(
+            "osc=softsaw fm=1.2345679 freq=1234.5679 to=2345.6787 glide=3.4028235e38 ",
+            "vib=1.2345679 vib_depth=2.3456788 detune=-1.2345678e-32 index=1.2345679 index_to=2.3456788 ",
+            "ladder=1234.5679>2345.6787 q=1.2345679 drive=2.3456788 a=0.12345678 d=0.23456788 ",
+            "s=0.3456789 r=0.45678902 hold=1.2345679 gain=2.3456788 delay=0.12345678 pan=-0.12345678 ",
+            "width=0.3456789 pwm=2.3456788 pwm_depth=0.12345678 density=0.23456788 ",
+            "repeat=64 every=0.3456789 falloff=0.45678902",
+        );
+        let text = format!("volume=1.2345679 jitter=0.12345678 reverb=0.23456788 pitch=2.3456788; {}",
+            [layer; MAX_LAYERS].join("; "));
+        let bytes = round_trip("six fully specified layers", &text);
+        assert!(bytes < 4096, "six fully specified layers must fit under 4 KiB, got {bytes} bytes");
     }
 
     #[test]

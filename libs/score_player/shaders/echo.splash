@@ -2,8 +2,7 @@
 // side delay (Haas), each side's repeat feeds the other with its own
 // feedback (asymmetric, so the repeats wander), the loop is band-limited
 // (low-cut and high-cut, darker with every repeat), the returns get
-// mid/side width. The time is `division` beats at `bpm` (the song tempo).
-let bpm = param(120, 20, 300)
+// mid/side width. The time is `division` beats at `tempo` (the song tempo).
 let division = param(0.75, 0.0625, 4)
 let feedback_l = param(0.45, 0, 0.95)
 let feedback_r = param(0.6, 0, 0.95)
@@ -29,9 +28,10 @@ fn block() {
     onepole_set(hp_r, low_cut)
     onepole_set(lp_l, high_cut)
     onepole_set(lp_r, high_cut)
-    let target = min(60.0 / bpm * division * sample_rate, MAX - 4.0)
+    let target = min(60.0 / tempo * division * sample_rate, MAX - 4.0)
     // Glide to a new time instead of jumping (no clicks on tempo changes).
     d = if d == 0.0 { target } else { d + (target - d) * 0.2 }
+    probe(delay_samples, d)
 }
 
 fn effect(l, r) {

@@ -1,0 +1,21 @@
+// A stereo state-variable filter. The two channels share coefficients and
+// keep independent integrators. Cutoff follows the shader's smoothed Hz value.
+let mode = param(low, {choices: [low high band notch]})
+let cutoff = param(1200, 20, 20000, {unit: hz curve: log})
+let resonance = param(0.707, 0.1, 20, {curve: log})
+var left = Svf{}
+var right = Svf{}
+
+fn response(f, x) {
+    let v = svf_multi(f, x)
+    if mode < 0.5 { v.x } elif mode < 1.5 { v.z }
+    elif mode < 2.5 { v.y } else { x - v.y }
+}
+
+fn effect(l, r) {
+    let g = svf_prewarp(cutoff)
+    let k = 1.0 / resonance
+    svf_coefficients(left, g, k)
+    svf_coefficients(right, g, k)
+    vec2(response(left, l), response(right, r))
+}

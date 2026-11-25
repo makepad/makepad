@@ -20,12 +20,13 @@ use makepad_music_iter::{card, compare, render, render_song, Card};
 use std::path::Path;
 
 fn main() {
+    let control = makepad_score_live::PrepareControl::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     match args.first().map(String::as_str) {
-        Some("batch") => return batch(&args, &flag),
+        Some("batch") => return batch(&args, &flag, &control),
         Some("learn") => return learn(args.get(1)),
-        Some("recompose") => return recompose(args.get(1).expect("music_iter recompose <batch dir>")),
+        Some("recompose") => return recompose(args.get(1).expect("music_iter recompose <batch dir>"), &control),
         _ => {}
     }
     let (Some(src_path), Some(out)) = (args.first(), args.get(1)) else {
@@ -36,7 +37,7 @@ fn main() {
     let out = Path::new(out);
     std::fs::create_dir_all(out.join("stems")).expect("out dir");
     let name = Path::new(src_path).file_stem().unwrap().to_string_lossy().trim_end_matches(".score").to_string();
-    let song = match render_song(&src, &RenderOpts::default(), !args.iter().any(|a| a == "--no-stems")) {
+    let song = match render_song(&src, &RenderOpts::default(), !args.iter().any(|a| a == "--no-stems"), &control) {
         Ok(song) => song,
         Err(e) => {
             eprintln!("does not render: {e}");
@@ -61,17 +62,17 @@ fn main() {
     }
 }
 
-fn recompose(dir: &str) {
+fn recompose(dir: &str, control: &makepad_score_live::PrepareControl) {
     use makepad_music_iter::batch::Batch;
     use makepad_music_iter::gen::Concept;
     let old = Batch::open(Path::new(dir)).expect("no batch there");
     let cards: Vec<Concept> = old.songs.iter().filter(|e| !e.concept.is_empty()).map(|e| Concept { title: e.concept.lines().find_map(|l| l.strip_prefix("TITLE:")).unwrap_or("").trim().to_string(), card: e.concept.clone() }).collect();
     assert!(!cards.is_empty(), "the batch has no concept cards");
-    let (batch, run) = Batch::start_with(std::sync::Arc::new(makepad_music_iter::gen::ClaudeCode::default()), old.request.clone(), cards.len(), Some(cards)).unwrap_or_else(|e| panic!("{e}"));
+    let (batch, run) = Batch::start_with(std::sync::Arc::new(makepad_music_iter::gen::ClaudeCode::default()), old.request.clone(), cards.len(), Some(cards), control).unwrap_or_else(|e| panic!("{e}"));
     follow(batch, run);
 }
 
-fn batch(args: &[String], flag: &dyn Fn(&str) -> Option<String>) {
+fn batch(args: &[String], flag: &dyn Fn(&str) -> Option<String>, control: &makepad_score_live::PrepareControl) {
     use makepad_music_iter::batch::Batch;
     use makepad_music_iter::gen::{ClaudeCode, Request};
     let request = Request {
@@ -80,7 +81,7 @@ fn batch(args: &[String], flag: &dyn Fn(&str) -> Option<String>) {
         seconds: flag("--seconds").and_then(|v| v.parse().ok()).unwrap_or(30),
     };
     let n = flag("--n").and_then(|v| v.parse().ok()).unwrap_or(5);
-    let (batch, run) = Batch::start(std::sync::Arc::new(ClaudeCode::default()), request, n).unwrap_or_else(|e| panic!("{e}"));
+    let (batch, run) = Batch::start(std::sync::Arc::new(ClaudeCode::default()), request, n, control).unwrap_or_else(|e| panic!("{e}"));
     follow(batch, run);
 }
 

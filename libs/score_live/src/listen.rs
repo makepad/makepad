@@ -4,9 +4,9 @@
 //! render, which is exactly what plays live.
 
 use crate::build::Samples;
-use crate::model::{self, Diag};
+use crate::model;
 use crate::palette::{measure, Features};
-use crate::render::{render_with, RenderOpts};
+use crate::render::{render_loaded, RenderOpts};
 use crate::theory;
 use makepad_audio_engine::{schedule::SPAN, CHUNK};
 use makepad_audio_synth::dsp::{Filter, FilterMode};
@@ -21,12 +21,15 @@ pub struct Level {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Heard {
+    pub plan_notes: Vec<String>,
     pub from_bar: u32,
     pub bars: u32,
+    pub latency: u64,
     pub bpm: f64,
     pub master: Level,
     /// Per loop and FX, in document order.
     pub nodes: Vec<(String, Level)>,
+    pub probes: crate::render::ProbeRanges,
     /// Octave band centre (Hz) and its level relative to the loudest band.
     pub bands: Vec<(f32, f32)>,
     pub balance: Vec<String>,
@@ -67,8 +70,9 @@ fn round1(x: f32) -> f32 {
 
 /// Hear bars `from_bar..from_bar + bars` with Clock `params` set and
 /// fields `held` live from their moments ([`crate::held`]).
-pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>, held: Vec<crate::held::Held>, samples: &dyn Samples) -> Result<Heard, Vec<Diag>> {
-    let doc = model::ScoreDoc::load(source)?;
+pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>, held: Vec<crate::held::Held>, samples: &dyn Samples, control: &crate::PrepareControl) -> Result<Heard, crate::LoadError> {
+    let loaded = model::load_controlled(source, control)?;
+    let doc = loaded.doc.clone();
     let beats_per_bar = doc.beats_per_bar();
     let bpm = doc.clock.bpm;
     let seconds_per_beat = 60.0 / bpm;
@@ -81,7 +85,7 @@ pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>
         .map(|name| (name, NodeCapture::default())).collect();
     let max_frames = NODE_CAPTURE_SECONDS * rate as usize;
     let opts = RenderOpts { rate, seconds: Some(end_s), seed: None, params, start: None, held };
-    let rendered = render_with(source, &opts, samples, &mut |frame, instance| {
+    let rendered = render_loaded(loaded, &opts, samples, control, &mut |frame, instance| {
         let chunk_start = frame - instance.schedule.last_frames as usize;
         if chunk_start == 0 {
             for (name, node) in &mut nodes {
@@ -123,7 +127,7 @@ pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>
     let w1 = w1.min(rendered.left.len());
     let w0 = w0.min(w1);
     let mono: Vec<f32> = rendered.left[w0..w1].iter().zip(&rendered.right[w0..w1]).map(|(a, b)| (a + b) * 0.5).collect();
-    let mut heard = Heard { from_bar, bars, bpm, ..Heard::default() };
+    let mut heard = Heard { plan_notes: rendered.plan_notes, from_bar, bars, bpm, latency: rendered.latency, probes: rendered.probes, ..Heard::default() };
     let (mut peak, mut ms) = (0.0f32, 0.0f64);
     for (l, r) in rendered.left[w0..w1].iter().zip(&rendered.right[w0..w1]) {
         peak = peak.max(l.abs()).max(r.abs());
@@ -251,6 +255,7 @@ pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>
         }
         heard.notes.push((l.name.clone(), notes));
     }
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
     Ok(heard)
 }
 
@@ -259,9 +264,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_live_slot_reads_each_generations_probes() {
+        let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet kit = Drums{kit: @analog_hybrid}\nlet b = Synth{preset: @sub}\nlet kick = Loop{play: kit hits: \"x...x...x...x...\"}\nlet bass = Loop{play: b beats: 4 code: fn(i) { play(@a1, {dur: 3.5}) sleep(4) }}\nScore{clock kit b kick bass}\n";
+        let calls = (0..8).map(|i| format!("probe(p{i}, value)")).collect::<Vec<_>>().join("\n");
+        let effect = format!("var tick = int(0)\nfn block() {{\nlet value = if tick == 0 {{ -7 }} elif tick == 4498 {{ 12 }} else {{ (tick % 13) - 6 }}\n{calls}\ntick = tick + 1\n}}\nfn effect(l, r) {{ vec2(l, r) }}");
+        let src = src.replace("Score{clock kit b kick bass}", &format!("let meter = ShaderFx{{in: [bass] code: {effect:?}}}\nScore{{clock kit b kick bass meter}}"));
+        // A refresh keeps the sounding effect but the new generation has its own ring.
+        let slot = crate::node::slot("probe_readback");
+        slot.set_source(&src, &crate::PrepareControl::default()).unwrap();
+        let mut registry = makepad_flow::document::Registry::with_builtins();
+        makepad_audio_engine::nodes::register_nodes(&mut registry).unwrap();
+        crate::node::register(&mut registry).unwrap();
+        let score = crate::player::live_node(&crate::node::descriptor(), "score".into(),
+            &[("score", makepad_flow::Literal::Str(slot.name().into()))], &[]);
+        let mut live = makepad_audio_engine::nested::factory(crate::node::TYPE).unwrap()(&score, 48_000, 1, None).unwrap();
+        let node_id = format!("{}/meter", slot.name());
+        let (mut l, mut r) = ([0.0; CHUNK], [0.0; CHUNK]);
+        live.run(&Default::default(), &mut l, &mut r);
+        let first = slot.playing();
+        slot.refresh().unwrap();
+        let (names, records, folded) = slot.probes(&node_id).unwrap();
+        assert_eq!((names[0].as_str(), records.len(), records[0].frame, folded), ("p0", 8, 0, 0));
+        assert!(slot.probes(&node_id).unwrap().1.is_empty(), "the reader drains the playing generation");
+        live.run(&Default::default(), &mut l, &mut r);
+        assert_ne!(slot.playing(), first);
+        let (_, records, _) = slot.probes(&node_id).unwrap();
+        assert_eq!((records.len(), records[0].frame, records[0].last), (8, CHUNK as u32, 1.0));
+        slot.pump().unwrap();
+    }
+
+    #[test]
     fn hearing_a_beat_finds_its_kicks_and_its_bass() {
         let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet kit = Drums{kit: @analog_hybrid}\nlet b = Synth{preset: @sub}\nlet kick = Loop{play: kit hits: \"x...x...x...x...\"}\nlet bass = Loop{play: b beats: 4 code: fn(i) { play(@a1, {dur: 3.5}) sleep(4) }}\nScore{clock kit b kick bass}\n";
-        let heard = listen(src, 1, 2, Vec::new(), Vec::new(), &crate::NoSamples).unwrap();
+        // Eight probes per pass fill the ring before the end of this render.
+        // The first value is the minimum, the final spill holds the maximum.
+        let calls = (0..8).map(|i| format!("probe(p{i}, value)")).collect::<Vec<_>>().join("\n");
+        let effect = format!("var tick = int(0)\nfn block() {{\nlet value = if tick == 0 {{ -7 }} elif tick == 4498 {{ 12 }} else {{ (tick % 13) - 6 }}\n{calls}\ntick = tick + 1\n}}\nfn effect(l, r) {{ vec2(l, r) }}");
+        let src = src.replace("Score{clock kit b kick bass}", &format!("let meter = ShaderFx{{in: [bass] code: {effect:?}}}\nScore{{clock kit b kick bass meter}}"));
+        let heard = listen(&src, 1, 2, Vec::new(), Vec::new(), &crate::NoSamples, &crate::PrepareControl::default()).unwrap();
+        let answer = crate::tools::heard_json(&heard);
+        let probes = answer.get("probes").and_then(|nodes| nodes.get("meter")).expect("effect probe ranges");
+        for i in 0..8 {
+            let range = probes.get(&format!("p{i}")).expect("named probe").as_arr().unwrap();
+            assert_eq!(range, [-7.0, 12.0, -5.0].map(makepad_strict_json::Value::F64), "probe p{i}");
+        }
         assert_eq!(heard.onsets.len(), 2);
         assert_eq!(&heard.onsets[0][..1], "x", "{:?}", heard.onsets);
         assert_eq!(heard.onsets[0].matches('x').count(), 4, "{:?}", heard.onsets);

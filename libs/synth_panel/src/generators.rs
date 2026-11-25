@@ -11,6 +11,7 @@ use crate::host as synth;
 use makepad_score_live::generate::{self, ParamKind};
 use makepad_score_live::theory;
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::{a11y::semantic_rect, a11y_tree};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -88,6 +89,8 @@ pub struct SynthGen {
     #[rust]
     hots: Vec<(Rect, Hot)>,
     #[rust]
+    drawn_at: DVec2,
+    #[rust]
     drag: Option<(usize, f64, f64)>,
     /// A change not yet heard, since when.
     #[rust]
@@ -95,7 +98,7 @@ pub struct SynthGen {
     #[rust]
     next_frame: NextFrame,
     #[rust]
-    note: String,
+    request: synth::GeneratorRequest,
 }
 
 impl SynthGen {
@@ -150,6 +153,12 @@ impl SynthGen {
         self.values[row].1 = next;
     }
 
+    fn request(&mut self, cx: &mut Cx, write: bool) {
+        self.changed = None;
+        self.request = synth::generate(&self.node, &self.gen, &self.values, write);
+        self.redraw(cx);
+    }
+
     fn changed(&mut self, cx: &mut Cx) {
         self.changed = Some(Cx::time_now());
         self.next_frame = cx.new_next_frame();
@@ -158,13 +167,46 @@ impl SynthGen {
 }
 
 impl Widget for SynthGen {
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        let shift = self.draw_bg.area().rect(cx).pos - self.drawn_at;
+        for (rect, hot) in &self.hots {
+            let (key, verb) = match hot {
+                Hot::Hear => (1, "Hear"),
+                Hot::Write => (2, "Write"),
+                _ => continue,
+            };
+            out.push((key, None, a11y_tree::Node {
+                role: a11y_tree::Role::Button, name: format!("{verb} {} for {}", self.gen, self.node),
+                actions: a11y_tree::Actions::PRESS,
+                description: match &*self.request.borrow() {
+                    synth::GeneratorState::Idle => String::new(),
+                    synth::GeneratorState::Working => "Working…".into(),
+                    synth::GeneratorState::Failed(reason) => reason.clone(),
+                },
+                bounds: semantic_rect(Rect { pos: rect.pos + shift, ..*rect }), ..Default::default()
+            }));
+        }
+    }
+
+    fn handle_action(&mut self, cx: &mut Cx, request: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        if request.action != a11y_tree::Actions::PRESS { return a11y_tree::ActionResult::Unhandled; }
+        let write = match cx.a11y.action_part_key(request.node) {
+            Some(1) => false,
+            Some(2) => true,
+            _ => return a11y_tree::ActionResult::Unhandled,
+        };
+        synth::select(&self.node);
+        self.request(cx, write);
+        a11y_tree::ActionResult::Handled
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.next_frame.is_event(event).is_some() {
+            self.redraw(cx);
             // Heard once the choices rest a moment.
             match self.changed {
                 Some(at) if Cx::time_now() - at > 0.2 => {
-                    self.changed = None;
-                    synth::generate(&self.node, &self.gen, &self.values, false);
+                    self.request(cx, false);
                 }
                 Some(_) => self.next_frame = cx.new_next_frame(),
                 None => {}
@@ -174,7 +216,8 @@ impl Widget for SynthGen {
             Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 synth::select(&self.node);
-                match self.hots.iter().find(|(r, _)| r.contains(fe.abs)).map(|(_, h)| *h) {
+                let at = fe.abs - (self.draw_bg.area().rect(cx).pos - self.drawn_at);
+                match self.hots.iter().find(|(r, _)| r.contains(at)).map(|(_, h)| *h) {
                     Some(Hot::Prev(row)) => {
                         self.step(row, -1);
                         self.changed(cx);
@@ -187,12 +230,8 @@ impl Widget for SynthGen {
                         let v = self.values[row].1.parse::<f64>().unwrap_or(0.0);
                         self.drag = Some((row, fe.abs.x, v));
                     }
-                    Some(Hot::Write) => {
-                        synth::generate(&self.node, &self.gen, &self.values, true);
-                        self.note = "written".into();
-                        self.redraw(cx);
-                    }
-                    Some(Hot::Hear) => synth::generate(&self.node, &self.gen, &self.values, false),
+                    Some(Hot::Write) => self.request(cx, true),
+                    Some(Hot::Hear) => self.request(cx, false),
                     None => {}
                 }
             }
@@ -230,6 +269,7 @@ impl Widget for SynthGen {
         let rect = cx.walk_turtle(Walk { height: Size::Fixed(height), ..walk });
         self.draw_bg.color = color(p.well, 1.0);
         self.draw_bg.draw_abs(cx, rect);
+        self.drawn_at = rect.pos;
         self.hots.clear();
         let title = if self.label.is_empty() { spec.label.to_uppercase() } else { self.label.to_uppercase() };
         self.draw_bold.color = color(p.text_hi, 1.0);
@@ -286,9 +326,20 @@ impl Widget for SynthGen {
             self.draw_bold.draw_abs(cx, dvec2(r.pos.x + (r.size.x - tw) * 0.5, r.pos.y + 4.0), text);
             self.hots.push((r, hot));
         }
-        if !self.note.is_empty() {
-            self.draw_small.color = color(p.muted, 1.0);
-            self.draw_small.draw_abs(cx, dvec2(rect.pos.x + 8.0, y + 5.0), &self.note);
+        let state = self.request.borrow();
+        let note = match &*state {
+            synth::GeneratorState::Idle => None,
+            synth::GeneratorState::Working => {
+                self.next_frame = cx.new_next_frame();
+                Some(("Working…", p.muted))
+            }
+            synth::GeneratorState::Failed(reason) => Some((reason.as_str(), p.danger)),
+        };
+        if let Some((message, ink)) = note {
+            let x = rect.pos.x + 8.0;
+            let (text, _) = makepad_value_pickers::panel::control::fit_text(&self.draw_small, cx, message, (hear.pos.x - x - 4.0).max(0.0));
+            self.draw_small.color = color(ink, 1.0);
+            self.draw_small.draw_abs(cx, dvec2(x, y + 5.0), &text);
         }
         DrawStep::done()
     }

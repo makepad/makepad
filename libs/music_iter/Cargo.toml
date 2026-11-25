@@ -17,6 +17,8 @@ makepad-edit-values = { path = "../edit_values" }
 # The one loudness meter.
 makepad-audio-dsp = { path = "../audio_dsp" }
 makepad-score-live = { path = "../score_live" }
+# A model's reply is waited for off the host's CPU budget.
+makepad-core-util = { path = "../core_util" }
 makepad-score-player = { path = "../score_player" }
 makepad-score-voice = { path = "../score_voice" }
 # The model that writes and learns: Stage's chat provider (the claude CLI).

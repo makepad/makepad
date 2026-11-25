@@ -19,7 +19,7 @@ fn classics_round_trip() {
         makepad_score_live::load(&source).unwrap_or_else(|d| panic!("{stem}: {d:?}"));
         let bytes = read_midi(stem).expect("the performances are in apps/score/resources/performances");
         assert_eq!(midi::transcribe(&bytes, &piece).unwrap(), source, "{stem} is not what the transcriber writes: run transcribe_classics");
-        let c = midi::check(&bytes, &piece, &source).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let c = midi::check(&bytes, &piece, &source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(c.onset < 1e-3 && c.release < 1e-3 && c.pedal < 1e-3, "{stem}: {c:?}");
         assert!(c.velocity <= 1 && c.pedal_moves > 0, "{stem}: {c:?}");
     }

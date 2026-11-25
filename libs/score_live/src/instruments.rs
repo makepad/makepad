@@ -196,7 +196,7 @@ pub fn catalog(doc: Option<&ScoreDoc>, available: &Available) -> Vec<Choice> {
         out.push(choice("Voices", voice.to_string(), format!("a sung {voice} voice: sing(notes, \"lyrics\") in its loops"), "Voice", vec![("profile", format!("@{voice}"))]));
     }
     // The neural voice, when one is installed (`cantor_install`).
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
     if makepad_score_player::sung::neural::model_path().is_file() {
         out.push(choice("Neural singers", "Cantor".into(), "the neural singing voice: sing(notes, \"lyrics\") in its loops, each line rendered ahead".into(), "Voice", vec![("engine", "@neural".into())]));
     }
@@ -308,7 +308,12 @@ mod tests {
         let neural = makepad_edit_values::apply_splices(src, 0, &[switch(src, "vox", &cantor).unwrap()]).unwrap();
         assert!(neural.contains("let vox = Voice{engine: @neural vibrato: 0.2}"), "{neural}");
         assert_eq!(current_key(&neural, "vox"), Some("Voice:engine=@neural".into()));
-        assert!(crate::model::ScoreDoc::load(&neural).is_ok());
+        // a build with the neural voice loads it; one without says plainly how to get it, so
+        // nothing goes silent unsaid (main, 11-24)
+        match crate::model::ScoreDoc::load(&neural) {
+            Ok(_) => assert!(cfg!(feature = "neural"), "a build without the neural voice takes it unsaid"),
+            Err(diags) => assert!(!cfg!(feature = "neural") && diags.iter().any(|d| d.message == makepad_score_player::NEURAL_NEEDS_LOCALAI && d.node.as_deref() == Some("vox")), "{diags:?}"),
+        }
         let alto = Choice { group: "Voices", label: "alto".into(), detail: String::new(), type_name: "Voice", fields: vec![("profile".into(), "@alto".into())] };
         let back = makepad_edit_values::apply_splices(&neural, 0, &[switch(&neural, "vox", &alto).unwrap()]).unwrap();
         assert_eq!(back, src);

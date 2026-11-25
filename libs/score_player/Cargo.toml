@@ -8,12 +8,18 @@ description = "The realtime half of a Score (live-coded music): per-loop instrum
 [lib]
 name = "makepad_score_player"
 
+[features]
+# The neural singer (Cantor, `sung::neural`): its model runs in this process, so an app turns it on
+# only under its own `localai` (AGENTS.md); a browser build has none either way.
+neural = ["makepad-score-voice/neural"]
+
 [dependencies]
 makepad-audio-dsp = { path = "../audio_dsp" }
 makepad-audio-synth = { path = "../audio_synth", features = ["instruments"] }
+makepad-lock-free = { path = "../lock_free" }
 makepad-script-audio-aot = { path = "../../platform/script/audio_aot" }
 makepad-score-voice = { path = "../score_voice" }
 
-# The neural singer (its model runs natively; a browser build has none).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-makepad-score-voice = { path = "../score_voice", features = ["neural"] }
+[package.metadata.makepad]
+# the neural singer's tests run as a unit of their own (affected.py `variants`)
+test-variants = ["neural"]

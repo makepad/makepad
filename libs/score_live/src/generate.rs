@@ -554,7 +554,7 @@ pub fn map_notes(text: &str, f: &dyn Fn(f32) -> f32) -> String {
 
 /// `src` with generator edits applied to loop `node` (a field set, added
 /// or removed), as one new source.
-pub fn apply(src: &str, node: &str, edits: &[FieldEdit]) -> Result<String, String> {
+pub fn apply(src: &str, node: &str, edits: &[FieldEdit], control: &crate::PrepareControl) -> Result<String, String> {
     let mut next = src.to_string();
     for edit in edits {
         let splice = match &edit.value {
@@ -566,6 +566,6 @@ pub fn apply(src: &str, node: &str, edits: &[FieldEdit]) -> Result<String, Strin
         };
         next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
     }
-    ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
+    ScoreDoc::load_controlled(&next, control).map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
     Ok(next)
 }

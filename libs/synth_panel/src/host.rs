@@ -9,6 +9,7 @@
 //! held live and written once like any panel control's.
 
 use crate::live::LiveSource;
+use crate::spec::ParamSpec;
 use makepad_score_live::instruments::Choice;
 use makepad_widgets::WidgetUid;
 use std::cell::{Cell, RefCell};
@@ -75,9 +76,23 @@ pub enum VaryAction {
 }
 use std::sync::Arc;
 
+/// State of a single generator request, shared by the control and its host on the UI thread.
+#[derive(Clone, Default)]
+pub enum GeneratorState {
+    #[default]
+    Idle,
+    Working,
+    Failed(String),
+}
+
+pub type GeneratorRequest = std::rc::Rc<RefCell<GeneratorState>>;
+
 pub struct SynthHost {
     /// A node's type (`Synth`, `Shader`, `Drums`, `Instrument`, an FX, `Loop`).
     pub type_of: Box<dyn Fn(&str) -> Option<String>>,
+    /// The params a shader node's compiled shader declares, in order
+    /// (empty for any other node).
+    pub shader_params: Box<dyn Fn(&str) -> Vec<ParamSpec>>,
     /// The playing score's meters and scopes.
     pub live: Option<Arc<dyn LiveSource>>,
     /// What `node` could become, grouped as [`makepad_score_live::instruments::GROUPS`],
@@ -93,7 +108,7 @@ pub struct SynthHost {
     pub select: Box<dyn Fn(&str)>,
     /// Generator `gen` on loop `node` with these choices: heard (`false`)
     /// or written (`true`, one undo step).
-    pub generate: Box<dyn Fn(&str, &str, &[(String, String)], bool)>,
+    pub generate: Box<dyn Fn(&str, &str, &[(String, String)], bool, GeneratorRequest)>,
     /// The score's voices, in its order.
     pub tracks: Box<dyn Fn() -> Vec<Track>>,
     /// A voice's melody variants, and what is done with them.
@@ -301,6 +316,14 @@ pub fn type_of(node: &str) -> Option<String> {
     with(|h| (h.type_of)(node)).flatten()
 }
 
+pub fn shader_params(node: &str) -> Vec<ParamSpec> {
+    with(|h| (h.shader_params)(node)).unwrap_or_default()
+}
+
+pub fn shader_param(node: &str, field: &str) -> Option<ParamSpec> {
+    shader_params(node).into_iter().find(|s| s.key == field)
+}
+
 pub fn live() -> Option<Arc<dyn LiveSource>> {
     with(|h| h.live.clone()).flatten()
 }
@@ -347,8 +370,13 @@ pub fn vary(node: &str, action: VaryAction) {
     with(|h| (h.vary)(node, action));
 }
 
-pub fn generate(node: &str, gen: &str, choices: &[(String, String)], write: bool) {
-    with(|h| (h.generate)(node, gen, choices, write));
+pub fn generate(node: &str, gen: &str, choices: &[(String, String)], write: bool) -> GeneratorRequest {
+    let request = GeneratorRequest::default();
+    with(|h| {
+        *request.borrow_mut() = GeneratorState::Working;
+        (h.generate)(node, gen, choices, write, request.clone());
+    });
+    request
 }
 
 pub fn current(node: &str) -> Option<String> {

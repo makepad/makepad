@@ -10,7 +10,7 @@ use makepad_score_player::sung::tuning;
 #[test]
 fn a_voice_sings_its_style_in_tune() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet vox = Voice{profile: @alto vibrato: 0.3 vibrato_delay: 0.22 breath: 0.18 portamento: 0.06}\nlet line = Loop{play: vox beats: 8 code: fn(i) { sing([74], \"ah\", {dur: 6}) sleep(8) }}\nlet a = Section{bars: 2 loops: [line]}\nScore{clock vox line a arrange: [a]}\n";
-    let rendered = render(src, &RenderOpts::default(), &NoSamples).unwrap_or_else(|d| panic!("{d:?}"));
+    let rendered = render(src, &RenderOpts::default(), &NoSamples, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}"));
     let x = tuning::prepare(&rendered.left, rendered.rate);
     let hz = makepad_score_player::sung::pitch::midi_to_hz(74.0);
     // The held vowel after the vibrato has faded in: 0.8 s to 2.8 s.

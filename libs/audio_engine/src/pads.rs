@@ -43,9 +43,13 @@ pub fn take_hit(pads: &mut PadsState, hit: PadHit, rate: f32) {
     }
 }
 
+fn has_next_frame(voice: &PadVoice) -> bool {
+    (voice.pos as usize) + 1 < voice.sample.left.len()
+}
+
 /// One pass: every voice into `left`/`right` at the node's level `target`
-/// (smoothed across the pass), the voices that ended let go.
-pub fn render(pads: &mut PadsState, left: &mut [f32], right: &mut [f32], target: f32) {
+/// (sampled at absolute block starts), the voices that ended let go.
+pub fn render(pads: &mut PadsState, left: &mut [f32], right: &mut [f32], pass_frame: u32, target: &dyn Fn() -> f32) {
     left.fill(0.0);
     right.fill(0.0);
     let frames = left.len();
@@ -81,13 +85,14 @@ pub fn render(pads: &mut PadsState, left: &mut [f32], right: &mut [f32], target:
             voice.pos += voice.step;
         }
     }
-    pads.voices.retain(|voice| (voice.pos as usize) + 1 < voice.sample.left.len());
-    let step = if frames > 0 { (target - pads.gain) / frames as f32 } else { 0.0 };
+    pads.voices.retain(has_next_frame);
     pads.peak *= crate::run::PEAK_DECAY;
     for frame in 0..frames {
-        pads.gain += step;
-        left[frame] = if left[frame].is_finite() { left[frame] * pads.gain } else { 0.0 };
-        right[frame] = if right[frame].is_finite() { right[frame] * pads.gain } else { 0.0 };
+        let absolute = pass_frame.wrapping_add(frame as u32);
+        if absolute % 64 == 0 { pads.gain.target(target(), absolute); }
+        let gain = pads.gain.advance(false);
+        left[frame] = if left[frame].is_finite() { left[frame] * gain } else { 0.0 };
+        right[frame] = if right[frame].is_finite() { right[frame] * gain } else { 0.0 };
         pads.peak = pads.peak.max(left[frame].abs()).max(right[frame].abs());
     }
 }
@@ -106,7 +111,7 @@ mod tests {
             voices: Vec::with_capacity(PAD_VOICES),
             feed: None,
             serial: 0,
-            gain: 1.0,
+            gain: crate::schedule::GainRamp::new(1.0),
             peak: 0.0,
         }
     }
@@ -119,9 +124,9 @@ mod tests {
         take_hit(&mut state, PadHit { pad: 0, gain: 1.0, stop: false }, 48_000.0);
         take_hit(&mut state, PadHit { pad: 1, gain: 1.0, stop: false }, 48_000.0);
         assert_eq!(state.voices.len(), 2, "two voices of pad 0; the silent pad plays nothing");
-        render(&mut state, &mut l, &mut r, 1.0);
+        render(&mut state, &mut l, &mut r, 0, &|| 1.0);
         assert!((l[0] - 1.0).abs() < 1e-6, "two hits overlap: {}", l[0]);
-        render(&mut state, &mut l, &mut r, 1.0);
+        render(&mut state, &mut l, &mut r, 0, &|| 1.0);
         assert!(state.voices.is_empty(), "played out after its 100 frames");
         assert!(l[63].abs() < 1e-6);
     }
@@ -136,7 +141,7 @@ mod tests {
         assert_eq!(state.voices.iter().map(|voice| voice.serial).min(), Some(4), "the three oldest gave way");
         take_hit(&mut state, PadHit { pad: 0, gain: 1.0, stop: true }, 48_000.0);
         let (mut l, mut r) = (vec![0.0; PAD_FADE_FRAMES as usize + 8], vec![0.0; PAD_FADE_FRAMES as usize + 8]);
-        render(&mut state, &mut l, &mut r, 1.0);
+        render(&mut state, &mut l, &mut r, 0, &|| 1.0);
         assert!(state.voices.is_empty(), "faded and let go");
         assert!(l[0] > l[PAD_FADE_FRAMES as usize / 2], "a fade, not a cut");
     }

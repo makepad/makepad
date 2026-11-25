@@ -1,25 +1,24 @@
-// Drive at 4x oversampling: soft (rational tanh), hard clip, a wavefolder
-// or asymmetric tube-ish saturation, then a tone low-pass and a DC
-// blocker. At 1x the harmonics a clipper makes fold back as inharmonic
-// fizz; at 4x they are filtered away (58 dB down).
+// Stereo soft clip, hard clip, fold or asymmetric saturation at 4x.
+// The tone and DC filters keep their cutoff in Hz at every node rate.
+rate(4)
 let amount = param(0.5, 0, 1)
 let mode = param(0, 0, 3)
 let tone = param(9000, 500, 18000)
 let blend = param(1, 0, 1)
 let level = param(0.8, 0, 2)
 
-var os_l = Os4{}
-var os_r = Os4{}
 var tl = OnePole{}
 var tr = OnePole{}
-var dl = DcBlock{}
-var dr = DcBlock{}
+var dl = OnePole{}
+var dr = OnePole{}
 var pre = 1.0
 var post = 1.0
 
 fn block() {
     onepole_set(tl, tone)
     onepole_set(tr, tone)
+    onepole_set(dl, 10.0)
+    onepole_set(dr, 10.0)
     pre = exp2(amount * 5.0)
     post = 1.0 / soft_clip(pre)
 }
@@ -33,15 +32,8 @@ fn shape(x) {
     }
 }
 
-fn channel(o, x) {
-    for k in 0..4 {
-        os4_push(o, shape(os4_up(o, x * pre, k)))
-    }
-    os4_out(o) * post
-}
-
 fn effect(l, r) {
-    let yl = dc_block(dl, onepole_lp(tl, channel(os_l, l)))
-    let yr = dc_block(dr, onepole_lp(tr, channel(os_r, r)))
+    let yl = onepole_hp(dl, onepole_lp(tl, shape(l * pre) * post))
+    let yr = onepole_hp(dr, onepole_lp(tr, shape(r * pre) * post))
     vec2(mix(l, yl * level, blend), mix(r, yr * level, blend))
 }

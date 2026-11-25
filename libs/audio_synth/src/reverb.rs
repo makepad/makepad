@@ -140,6 +140,8 @@ pub struct Reverb {
     er_spacing: Smooth,
     wet: Smooth,
     coef: f32,
+    control_left: usize,
+    feedback: [f32; LINES],
     target: RoomParams,
 }
 
@@ -171,6 +173,8 @@ impl Reverb {
             er_spacing: Smooth::new(p.er_spacing_ms),
             wet: Smooth::new(p.wet),
             coef: Smooth::coef(0.8, rate / 64.0),
+            control_left: 0,
+            feedback: [0.0; LINES],
             target: p,
         }
     }
@@ -188,6 +192,7 @@ impl Reverb {
     /// Jump to a room without the crossfade (a fresh scene, offline renders).
     pub fn snap_room(&mut self, p: RoomParams) {
         self.set_room(p);
+        self.control_left = 0;
         for s in [
             &mut self.decay,
             &mut self.damp_hz,
@@ -205,6 +210,7 @@ impl Reverb {
     }
 
     pub fn clear(&mut self) {
+        self.control_left = 0;
         self.predelay.clear();
         self.diffusers.iter_mut().for_each(Allpass::clear);
         self.lines.iter_mut().for_each(DelayLine::clear);
@@ -216,20 +222,26 @@ impl Reverb {
         let n = send.len().min(out_l.len()).min(out_r.len());
         let mut i = 0;
         while i < n {
-            // Control rate: every 64 samples.
-            let decay = self.decay.next(self.coef);
-            let damp_hz = self.damp_hz.next(self.coef);
-            let predelay = self.predelay_ms.next(self.coef) * 0.001 * self.rate;
-            let er_level = self.er_level.next(self.coef);
-            let er_spacing = self.er_spacing.next(self.coef) * 0.001 * self.rate;
-            let wet = self.wet.next(self.coef);
-            let mut fb = [0.0f32; LINES];
-            for k in 0..LINES {
-                // Gain per pass for the requested RT60.
-                fb[k] = 10f32.powf(-3.0 * self.line_len[k] / (decay * self.rate));
-                self.damp[k].set(damp_hz * (1.0 - 0.04 * k as f32), self.rate);
+            if self.control_left == 0 {
+                let decay = self.decay.next(self.coef);
+                let damp_hz = self.damp_hz.next(self.coef);
+                self.predelay_ms.next(self.coef);
+                self.er_level.next(self.coef);
+                self.er_spacing.next(self.coef);
+                self.wet.next(self.coef);
+                for k in 0..LINES {
+                    self.feedback[k] = 10f32.powf(-3.0 * self.line_len[k] / (decay * self.rate));
+                    self.damp[k].set(damp_hz * (1.0 - 0.04 * k as f32), self.rate);
+                }
+                self.control_left = 64;
             }
-            let end = (i + 64).min(n);
+            let predelay = self.predelay_ms.value * 0.001 * self.rate;
+            let er_level = self.er_level.value;
+            let er_spacing = self.er_spacing.value * 0.001 * self.rate;
+            let wet = self.wet.value;
+            let count = self.control_left.min(n - i);
+            self.control_left -= count;
+            let end = i + count;
             for j in i..end {
                 let x = send[j];
                 self.predelay.push(x);
@@ -258,7 +270,7 @@ impl Reverb {
                 // Householder: y = x - 2/N * sum(x).
                 let sum: f32 = outs.iter().sum::<f32>() * (2.0 / LINES as f32);
                 for k in 0..LINES {
-                    let v = self.damp[k].lp(outs[k] - sum) * fb[k];
+                    let v = self.damp[k].lp(outs[k] - sum) * self.feedback[k];
                     let input = if k % 2 == 0 { d } else { -d };
                     self.lines[k].push(v + input * 0.9);
                 }
@@ -299,6 +311,37 @@ mod tests {
     #[test]
     fn dry_is_silent() {
         assert!(energy_after(RoomPreset::Dry, 0.0) < 1.0e-6);
+    }
+
+    #[test]
+    fn a_room_change_keeps_its_control_cadence_across_calls() {
+        let render = |pass| {
+            let mut room = Reverb::new(8192.0);
+            room.snap_room(RoomPreset::Room.params());
+            let send: Vec<_> = (0..2048).map(|i| if i % 97 == 0 { 0.75 } else { 0.0 }).collect();
+            let (mut l, mut r) = (vec![0.0; send.len()], vec![0.0; send.len()]);
+            for (start, end) in [(0, 256), (256, send.len())] {
+                if start == 256 { room.set_room(RoomPreset::Cave.params()); }
+                for i in (start..end).step_by(pass) {
+                    let stop = (i + pass).min(end);
+                    room.process(&send[i..stop], &mut l[i..stop], &mut r[i..stop]);
+                }
+            }
+            l.into_iter().zip(r).map(|(l, r)| [l.to_bits(), r.to_bits()]).collect::<Vec<_>>()
+        };
+        let aligned = render(256);
+        for pass in [64, 97, 1] {
+            for (i, (a, b)) in render(pass).iter().zip(&aligned).enumerate() {
+                assert_eq!(a, b, "room at frame {i}, pass {pass}");
+            }
+        }
+        let mut room = Reverb::new(8192.0);
+        room.set_room(RoomPreset::Cave.params());
+        room.process(&[0.0; 7], &mut [0.0; 7], &mut [0.0; 7]);
+        let before = room.decay.value;
+        room.clear();
+        room.process(&[0.0], &mut [0.0], &mut [0.0]);
+        assert!(room.decay.value > before, "clear starts a fresh control interval");
     }
 }
 

@@ -46,6 +46,14 @@ pub const EQ_TYPES: [&str; 6] = ["off", "peak", "lowshelf", "highshelf", "highpa
 pub const MAX_DELAY_SECS: f32 = 4.0;
 
 impl FxKind {
+    /// Frames this effect adds to the timing of its input.
+    pub fn latency(self) -> u32 {
+        match self {
+            Self::Limiter => makepad_audio_synth::dynamics::LOOKAHEAD as u32,
+            _ => 0,
+        }
+    }
+
     /// Parameter names by index, with defaults and ranges.
     pub fn params(self) -> &'static [(&'static str, f32, f32, f32)] {
         match self {
@@ -149,9 +157,54 @@ impl FxKind {
     }
 }
 
+/// The native delay follows the whole-frame tempo cuts, including when
+/// parameter automation divides the same pass into smaller calls.
+#[derive(Default)]
+pub struct DelayTempo {
+    cuts: [(usize, f32); crate::loop_engine::MAX_TEMPO_SPLITS + 1],
+    count: usize,
+    next: usize,
+    frame: usize,
+    seconds: f32,
+}
+
+impl DelayTempo {
+    pub fn begin(&mut self, tempo: &crate::Tempo, time: &crate::shader::SongTime, rate: f32) {
+        self.frame = 0;
+        self.next = 0;
+        self.count = 0;
+        if tempo.nsplits == 0 && time.count <= 1 { return; }
+        if time.count != 0 {
+            for &(_, frame, _, bpm) in &time.anchors[..time.count as usize] {
+                self.cuts[self.count] = (frame.max(0) as usize, 60.0 / bpm);
+                self.count += 1;
+            }
+        } else {
+            // An external clock may supply just its beat map.
+            self.cuts[0] = (0, (1.0 / (tempo.per_frame * rate as f64)) as f32);
+            self.count = 1;
+            for &(_, frame, speed) in &tempo.splits[..tempo.nsplits as usize] {
+                self.cuts[self.count] = (frame.ceil() as usize, (1.0 / (speed * rate as f64)) as f32);
+                self.count += 1;
+            }
+        }
+    }
+
+    fn segment(&mut self, frames: usize, fallback: f32) -> (usize, f32) {
+        if self.count == 0 { return (frames, fallback); }
+        while self.next < self.count && self.cuts[self.next].0 <= self.frame {
+            self.seconds = self.cuts[self.next].1;
+            self.next += 1;
+        }
+        let n = if self.next == self.count { frames } else { frames.min(self.cuts[self.next].0 - self.frame) };
+        self.frame += n;
+        (n, self.seconds)
+    }
+}
+
 pub enum FxState {
     Filter { l: Filter, r: Filter, cutoff: f32, res: f32 },
-    Delay { l: DelayLine, r: DelayLine, time: f32 },
+    Delay { l: DelayLine, r: DelayLine, time: f32, tempo: DelayTempo },
     Reverb { room: Box<Reverb>, send: Box<[f32]> },
     Drive { lp_l: f32, lp_r: f32 },
     Crush { hold_l: f32, hold_r: f32, count: f32 },
@@ -216,7 +269,7 @@ impl FxState {
                 let mode = match kind { FxKind::Highpass => FilterMode::Highpass, FxKind::Bandpass => FilterMode::Bandpass, _ => FilterMode::Lowpass };
                 FxState::Filter { l: Filter::new(mode), r: Filter::new(mode), cutoff: f32::NAN, res: f32::NAN }
             }
-            FxKind::Delay => FxState::Delay { l: DelayLine::new(max), r: DelayLine::new(max), time: f32::NAN },
+            FxKind::Delay => FxState::Delay { l: DelayLine::new(max), r: DelayLine::new(max), time: f32::NAN, tempo: DelayTempo::default() },
             FxKind::Reverb => {
                 let mut room = Box::new(Reverb::new(rate));
                 room.snap_room(room_of(0.6, 6000.0));
@@ -264,24 +317,29 @@ impl FxState {
                     r[i] += (fr.process(r[i]) - r[i]) * mix;
                 }
             }
-            FxState::Delay { l: dl, r: dr, time } => {
-                let target = (p[0] * seconds_per_beat * rate).clamp(2.0, (MAX_DELAY_SECS * rate) - 2.0);
-                if !time.is_finite() {
-                    *time = target;
-                }
-                let (feedback, mix, spread) = (p[1], p[2], p[3]);
-                for i in 0..n {
-                    *time += (target - *time) * 0.001;
-                    let a = dl.read(*time);
-                    let b = dr.read(*time);
-                    let (x, y) = (l[i], r[i]);
-                    // Spread crosses the feedback: 1 is a full ping-pong.
-                    let into_l = x + (a * (1.0 - spread) + b * spread) * feedback;
-                    let into_r = y + (b * (1.0 - spread) + a * spread) * feedback;
-                    dl.push(soft_clip(into_l));
-                    dr.push(soft_clip(into_r));
-                    l[i] = x + a * mix;
-                    r[i] = y + b * mix;
+            FxState::Delay { l: dl, r: dr, time, tempo } => {
+                let mut at = 0;
+                while at < n {
+                    let (frames, seconds_per_beat) = tempo.segment(n - at, seconds_per_beat);
+                    let target = (p[0] * seconds_per_beat * rate).clamp(2.0, (MAX_DELAY_SECS * rate) - 2.0);
+                    if !time.is_finite() {
+                        *time = target;
+                    }
+                    let (feedback, mix, spread) = (p[1], p[2], p[3]);
+                    for i in at..at + frames {
+                        *time += (target - *time) * 0.001;
+                        let a = dl.read(*time);
+                        let b = dr.read(*time);
+                        let (x, y) = (l[i], r[i]);
+                        // Spread crosses the feedback: 1 is a full ping-pong.
+                        let into_l = x + (a * (1.0 - spread) + b * spread) * feedback;
+                        let into_r = y + (b * (1.0 - spread) + a * spread) * feedback;
+                        dl.push(soft_clip(into_l));
+                        dr.push(soft_clip(into_r));
+                        l[i] = x + a * mix;
+                        r[i] = y + b * mix;
+                    }
+                    at += frames;
                 }
             }
             FxState::Reverb { room, send } => {
@@ -404,8 +462,7 @@ impl FxState {
             FxState::Duck { level } => {
                 let attack = 1.0 - (-1.0 / (0.004 * rate)).exp();
                 let release = 1.0 - (-1.0 / (p[1].max(0.01) * rate)).exp();
-                // The key level is one number per chunk: the ramp makes it
-                // a pump, not a gate.
+                // The host holds the previous complete block's key level.
                 let target = side.clamp(0.0, 1.0);
                 for i in 0..n {
                     let c = if target > *level { attack } else { release };
@@ -465,24 +522,20 @@ impl FxState {
                     if let Some((is_high, hz)) = corner {
                         let band = [if is_high { 4.0 } else { 5.0 }, hz, 0.0, p[1]];
                         if is_high { hp.design(band, rate) } else { lp.design(band, rate) }
-                        if is_high != *high && *wet < 1e-3 {
-                            *high = is_high;
-                        }
                     }
                 }
                 // Crossing the middle: the old side fades out before the
                 // new one comes in.
-                let target = match corner {
-                    Some((is_high, _)) if is_high == *high => 1.0,
-                    _ => 0.0,
-                };
-                if let Some((is_high, _)) = corner {
-                    if is_high != *high && *wet < 1e-3 {
-                        *high = is_high;
-                    }
-                }
+                let wanted = corner.map(|(is_high, _)| is_high);
+                let mut switching = wanted.is_some() && wanted != Some(*high);
+                let mut target = if wanted == Some(*high) { 1.0 } else { 0.0 };
                 let k = 1.0 - (-1.0 / (0.01 * rate)).exp();
                 for i in 0..n {
+                    if switching && *wet < 1e-3 {
+                        *high = !*high;
+                        target = 1.0;
+                        switching = false;
+                    }
                     *wet += (target - *wet) * k;
                     let (a, b) = if *high { hp.process(l[i], r[i]) } else { lp.process(l[i], r[i]) };
                     l[i] += (a - l[i]) * *wet;

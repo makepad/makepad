@@ -33,9 +33,9 @@ pub const GUIDE: ScoreToolDef = ScoreToolDef {
 pub const CHECK: ScoreToolDef = ScoreToolDef {
     name: "score.check",
     api_name: "score_check",
-    description: "Check a score's Splash source without playing it (default: the score open in the app): every problem with its line and column; once it loads, what it declares (label, bpm, params, sections, arrangement, stingers, loops) and the problems its loops raise over their first 8 bars (a code error shows only when the loop runs).",
+    description: "Check a score's Splash source without playing it (default: the score open in the app): every problem with its line and column, and nonfatal shader cost warnings separately; once it loads, what it declares (label, bpm, params, sections, arrangement, stingers, loops) and the problems its loops raise over their first 8 bars (a code error shows only when the loop runs).",
     input: r#"{"type": "object", "properties": {"source": {"type": "string", "description": "the score's Splash source (default: the open score)"}}}"#,
-    output: r#"{"type": "object", "additionalProperties": true, "properties": {"ok": {"type": "boolean", "description": "no problems"}, "problems": {"type": "array", "items": {"type": "object", "description": "{line, col, message, text}"}, "description": "the document's or its loops' problems"}}, "required": ["ok", "problems"]}"#,
+    output: r#"{"type": "object", "additionalProperties": true, "properties": {"ok": {"type": "boolean", "description": "no problems"}, "problems": {"type": "array", "items": {"type": "object", "description": "{line, col, message, text}"}, "description": "the document's or its loops' problems"}, "warnings": {"type": "array", "items": {"type": "object", "description": "{node, line, col, shader_start, shader_end, message}"},"description": "nonfatal shader warnings; byte spans are in the shader source"}}, "required": ["ok", "problems", "warnings"]}"#,
     args_doc: r#"{"source": "use mod.score.*\n..."}"#,
 };
 

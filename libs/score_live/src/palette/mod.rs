@@ -465,7 +465,7 @@ mod tool_tests {
     #[test]
     fn instrument_search_answers_with_code_and_measures() {
         let args = makepad_strict_json::parse(br#"{"query": "warm upright jazz bass", "limit": 3}"#).unwrap();
-        let out = crate::tools::call("instrument_search", &args, None).unwrap();
+        let out = crate::tools::call("instrument_search", &args, None, &crate::PrepareControl::default()).unwrap();
         let results = match out.get("results") {
             Some(makepad_strict_json::Value::Arr(r)) => r.clone(),
             other => panic!("{other:?}"),

@@ -231,6 +231,41 @@ fn skip_expr(src: &str, toks: &[Token], mut i: usize) -> usize {
     }
 }
 
+/// Byte ranges of the source expressions, keeping a whole Port object as
+/// one entry. The ranges let graph edits preserve comments and formatting.
+pub(crate) fn wire_entries(text: &str) -> Vec<Span> {
+    let toks = lex(text);
+    if !is(text, toks.first(), "[") {
+        return vec![Span { start: 0, end: text.len() }];
+    }
+    let mut entries = Vec::new();
+    let mut i = 1;
+    while i < toks.len() && !is(text, toks.get(i), "]") {
+        if toks[i].kind == Tok::Comment || is(text, toks.get(i), ",") {
+            i += 1;
+            continue;
+        }
+        let end = skip_expr(text, &toks, i).max(i + 1);
+        entries.push(Span { start: toks[i].start, end: toks[end - 1].end });
+        i = end;
+    }
+    entries
+}
+
+/// Remove an entry together with an adjacent delimiter, leaving comments
+/// and the remaining entries in place.
+pub(crate) fn wire_removal(text: &str, span: Span) -> std::ops::Range<usize> {
+    let mut start = text[..span.start].trim_end_matches([' ', '\t']).len();
+    let mut end = span.end;
+    if text[..start].ends_with(',') { start -= 1; }
+    else if let Some(rest) = text[end..].trim_start_matches([' ', '\t']).strip_prefix(',') {
+        end = text.len() - rest.trim_start_matches([' ', '\t']).len();
+    } else if start == span.start {
+        end = text.len() - text[end..].trim_start_matches([' ', '\t']).len();
+    }
+    start..end
+}
+
 /// The fields of the object body whose `{` is token `open`.
 fn fields(src: &str, toks: &[Token], open: usize, close: usize) -> Vec<Field> {
     let mut out = Vec::new();
@@ -491,14 +526,41 @@ fn add_member(src: &str, root: &Ctor, name: &str) -> Result<String, String> {
 pub fn remove_node(src: &str, name: &str) -> Result<String, String> {
     let outline = outline(src);
     let ctor = outline.node(name).ok_or_else(|| format!("no node `{name}`"))?;
-    for other in &outline.nodes {
+    let mut splices = Vec::new();
+    let mut edited_lists = Vec::new();
+    for other in outline.nodes.iter().filter(|other| other.name != name) {
         for field in other.fields.iter().filter(|f| !f.bare) {
-            if field.value.text(src).trim() == name {
+            let value = field.value.text(src);
+            let native_param = crate::model::native_param(&other.type_name, &field.key);
+            if value == name {
+                if (other.type_name == "Shader" || native_param) && crate::model::audio_source_type(&ctor.type_name) {
+                    splices.push(Splice { file: 0, range: field.value.start..field.value.end, text: "[]".into() });
+                    continue;
+                }
                 return Err(format!("`{}.{}` is `{name}`: change it first", other.name, field.key));
+            }
+            if !value.contains("Port") && !(native_param && value.starts_with('[')) { continue; }
+            let mut list = value.to_owned();
+            for entry in wire_entries(value).into_iter().rev() {
+                let expr = entry.text(value);
+                let tokens = lex(expr);
+                let reads_port = is(expr, tokens.first(), "Port") && is(expr, tokens.get(1), "{")
+                    && fields(expr, &tokens, 1, close_of(expr, &tokens, 1)).iter()
+                        .any(|f| f.key == "node" && f.value.text(expr) == name);
+                if reads_port || expr == name {
+                    if !value.starts_with('[') {
+                        list = "[]".to_owned();
+                        break;
+                    }
+                    list.replace_range(wire_removal(&list, entry), "");
+                }
+            }
+            if list != value {
+                edited_lists.push(field.value);
+                splices.push(Splice { file: 0, range: field.value.start..field.value.end, text: list });
             }
         }
     }
-    let mut splices = Vec::new();
     // The statement with its trailing newline (and a blank line after).
     let start = src[..ctor.span.start].rfind('\n').map_or(0, |nl| nl + 1);
     // Doc comments directly above go with it.
@@ -526,7 +588,7 @@ pub fn remove_node(src: &str, name: &str) -> Result<String, String> {
             let inside_list = outline.nodes.iter().chain(outline.root.iter()).any(|node| {
                 node.fields.iter().any(|f| (f.bare && f.value.start == token.start) || (!f.bare && f.value.start < token.start && token.end <= f.value.end && f.value.text(src).trim_start().starts_with('[')))
             });
-            if inside_list {
+            if inside_list && !edited_lists.iter().any(|span| span.start <= token.start && token.end <= span.end) {
                 let s = src[..token.start].trim_end_matches(' ').len();
                 splices.push(Splice { file: 0, range: s..token.end, text: String::new() });
             }

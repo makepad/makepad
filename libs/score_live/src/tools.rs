@@ -27,14 +27,21 @@ pub fn guide() -> String {
 /// against its schema by the registry). `open` is the app's open score, used when `args` has no
 /// `source`. Blocking: `score_listen` renders, so a UI thread hands it to a
 /// worker. `Err` is a refusal to show the model.
-pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, String> {
+pub fn call(name: &str, args: &Value, open: Option<&str>, control: &crate::PrepareControl) -> Result<Value, String> {
+    match find(name).map(|tool| tool.api_name) {
+        Some("score_check") => check(&source_of(args, open)?, control).map_err(|e| e.to_string()),
+        Some("score_listen") => listen_args(args, open, control).map(|(json, _)| json),
+        _ => metadata_only(name, args),
+    }
+}
+
+/// Answer a guide or catalogue query without reading or compiling a score.
+pub fn metadata_only(name: &str, args: &Value) -> Result<Value, String> {
     match find(name).map(|tool| tool.api_name) {
         Some("score_guide") => match args.get("section").and_then(Value::as_str) {
             Some(name) => crate::guide::section(name).map(|text| json::obj(vec![("guide", json::s(text))])).ok_or_else(|| format!("the guide has no section `{name}`")),
             None => Ok(json::obj(vec![("guide", json::s(guide()))])),
         },
-        Some("score_check") => Ok(check(&source_of(args, open)?)),
-        Some("score_listen") => listen_args(args, open).map(|(json, _)| json),
         Some("instrument_search") => Ok(instrument_search(args)),
         Some("morph_params") => Ok(morph_params(args)),
         Some("tandem_params") => Ok(tandem_params(args)),
@@ -46,7 +53,7 @@ pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, Strin
 
 /// `score_listen`: its answer and what was heard (for a host that also
 /// draws it), or its problems as the answer when the score does not load.
-pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<Heard>), String> {
+pub fn listen_args(args: &Value, open: Option<&str>, control: &crate::PrepareControl) -> Result<(Value, Option<Heard>), String> {
     let source = source_of(args, open)?;
     let int = |key: &str| match args.get(key) {
         Some(Value::Int(n)) => Some(*n as f64),
@@ -65,7 +72,9 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
     };
     // Fields held live from a bar on (a control moved mid-render): on the
     // one prepared graph, as the editor panel's knobs land.
-    let bar_seconds = crate::model::ScoreDoc::load(&source).map(|d| d.beats_per_bar() * 60.0 / d.clock.bpm.max(1.0)).unwrap_or(2.0);
+    if control.is_cancelled() { return Err("the listen was cancelled".into()); }
+    let doc = crate::model::read_document(&source).ok().map(|read| read.doc);
+    let bar_seconds = doc.as_ref().map(|d| d.beats_per_bar() * 60.0 / d.clock.bpm.max(1.0)).unwrap_or(2.0);
     let held: Vec<crate::held::Held> = match args.get("held") {
         Some(Value::Arr(items)) => items.iter().filter_map(|item| {
             let (node, field) = crate::held::node_field(item.get("path")?.as_str()?)?;
@@ -82,7 +91,6 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
         _ => Vec::new(),
     };
     // What each held field lands on (none: it is only heard once written).
-    let doc = crate::model::ScoreDoc::load(&source).ok();
     let landed: Vec<Value> = held.iter().map(|h| {
         let n = doc.as_ref().map_or(0, |d| crate::held::targets(d, &h.node, &h.field).len());
         json::obj(vec![
@@ -92,7 +100,7 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
             ("lands", json::s(if n > 0 { format!("live on {n} loop(s) or control(s)") } else { "nowhere live: write it to hear it".to_string() })),
         ])
     }).collect();
-    match listen::listen(&source, from_bar, bars, params, held, &NoSamples) {
+    match listen::listen(&source, from_bar, bars, params, held, &NoSamples, control) {
         Ok(mut heard) => {
             if let Some(doc) = &doc {
                 heard.warnings.extend(doc.missing_library_patches().map(|(_, patch)| crate::tandem_library::missing_patch_message(patch)));
@@ -103,7 +111,8 @@ pub fn listen_args(args: &Value, open: Option<&str>) -> Result<(Value, Option<He
             }
             Ok((answer, Some(heard)))
         }
-        Err(diags) => Ok((json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, &source))]), None)),
+        Err(crate::LoadError::Cancelled) => Err("the listen was cancelled".into()),
+        Err(crate::LoadError::Problems(diags)) => Ok((json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, &source))]), None)),
     }
 }
 
@@ -273,30 +282,45 @@ pub fn problems(diags: &[Diag], source: &str) -> Value {
     ])).collect())
 }
 
+fn shader_warnings(doc: &crate::model::ScoreDoc) -> Value {
+    let warnings = doc.warnings().iter().map(|w| json::obj(vec![
+        ("node", json::s(w.diag.node.as_deref().unwrap_or(""))),
+        ("line", Value::Int(w.diag.line as i64)),
+        ("col", Value::Int(w.diag.col as i64)),
+        ("shader_start", Value::Int(w.start as i64)),
+        ("shader_end", Value::Int(w.end as i64)),
+        ("message", json::s(w.diag.message.clone())),
+    ])).collect();
+    Value::Arr(warnings)
+}
+
 /// Load `source` and run its loop code for 8 bars: the document's
 /// problems, or the loops' runtime errors with what the score declares.
-pub fn check_diags(source: &str) -> Vec<Diag> {
-    match crate::model::load(source) {
-        Err(diags) => diags,
+pub fn check_diags(source: &str, control: &crate::PrepareControl) -> Result<Vec<Diag>, crate::LoadError> {
+    match crate::model::load_controlled(source, control) {
+        Err(crate::LoadError::Problems(diags)) => Ok(diags),
+        Err(cancelled) => Err(cancelled),
         Ok(loaded) => {
             let bar = loaded.doc.beats_per_bar();
-            let mut composer = crate::compose::Composer::new(loaded);
+            let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
             let mut events = Vec::new();
             composer.pump(bar * 8.0, &mut events);
-            composer.errors()
+            if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+            Ok(composer.errors())
         }
     }
 }
 
 /// `score_check`'s answer.
-pub fn check(source: &str) -> Value {
-    let loaded = match crate::model::load(source) {
+pub fn check(source: &str, control: &crate::PrepareControl) -> Result<Value, crate::LoadError> {
+    let loaded = match crate::model::load_controlled(source, control) {
         Ok(loaded) => loaded,
-        Err(diags) => return json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, source))]),
+        Err(crate::LoadError::Cancelled) => return Err(crate::LoadError::Cancelled),
+        Err(crate::LoadError::Problems(diags)) => return Ok(json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, source)), ("warnings", Value::Arr(Vec::new()))])),
     };
     let doc = loaded.doc.clone();
     let bar = doc.beats_per_bar();
-    let mut composer = crate::compose::Composer::new(loaded);
+    let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
     let mut events = Vec::new();
     composer.pump(bar * 8.0, &mut events);
     let mut errors = composer.errors();
@@ -307,9 +331,11 @@ pub fn check(source: &str) -> Value {
         errors.push(Diag { line, col: 1, node: Some(inst.to_string()), message: crate::tandem_library::missing_patch_message(patch) });
     }
     let names = |list: Vec<String>| Value::Arr(list.into_iter().map(json::s).collect());
-    json::obj(vec![
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+    Ok(json::obj(vec![
         ("ok", Value::Bool(errors.is_empty())),
         ("problems", problems(&errors, source)),
+        ("warnings", shader_warnings(&doc)),
         ("label", json::s(doc.label.clone())),
         ("bpm", num(doc.clock.bpm)),
         ("params", names(doc.clock.params.iter().map(|(n, v)| format!("{n} = {v}")).collect())),
@@ -321,7 +347,7 @@ pub fn check(source: &str) -> Value {
             format!("{}{follow}", l.name)
         }).collect())),
         ("notes_in_8_bars", Value::Int(events.len() as i64)),
-    ])
+    ]))
 }
 
 fn num(value: f64) -> Value {
@@ -350,10 +376,11 @@ pub fn heard_json(heard: &Heard) -> Value {
         json::obj(fields)
     };
     let texts = |list: &[String]| Value::Arr(list.iter().map(|t| json::s(t.clone())).collect());
-    json::obj(vec![
+    let mut fields = vec![
         ("ok", Value::Bool(true)),
         ("from_bar", Value::Int(heard.from_bar as i64)),
         ("bars", Value::Int(heard.bars as i64)),
+        ("latency_frames", Value::Int(heard.latency as i64)),
         ("bpm", num(heard.bpm)),
         ("master", level(&heard.master)),
         ("nodes", Value::Obj(heard.nodes.iter().map(|(n, l)| (n.clone(), level(l))).collect())),
@@ -365,7 +392,17 @@ pub fn heard_json(heard: &Heard) -> Value {
         }).collect())),
         ("per_bar", Value::Arr(heard.per_bar.iter().map(|(rms, bright)| json::obj(vec![("rms_db", num(*rms as f64)), ("bright_hz", num(*bright as f64))])).collect())),
         ("warnings", texts(&heard.warnings)),
-    ])
+        ("plan_notes", texts(&heard.plan_notes)),
+    ];
+    if !heard.probes.is_empty() {
+        fields.push(("probes", Value::Obj(heard.probes.iter().map(|(node, probes)| {
+            let ranges = probes.iter().map(|(name, values)| {
+                (name.clone(), Value::Arr(values.iter().map(|v| Value::F64(*v as f64)).collect()))
+            }).collect();
+            (node.clone(), Value::Obj(ranges))
+        }).collect())));
+    }
+    json::obj(fields)
 }
 
 #[cfg(test)]
@@ -374,22 +411,36 @@ mod tests {
 
     #[test]
     fn guide_check_and_listen_answer() {
-        let guide = call("score_guide", &Value::Obj(Vec::new()), None).unwrap();
+        let guide = call("score_guide", &Value::Obj(Vec::new()), None, &crate::PrepareControl::default()).unwrap();
         let text = guide.get("guide").and_then(Value::as_str).unwrap();
         assert!(text.starts_with("# Writing a score"));
         let source = crate::templates::template("techno").unwrap();
         let args = json::obj(vec![("source", json::s(source))]);
-        let checked = call("score_check", &args, None).unwrap();
+        let checked = call("score_check", &args, None, &crate::PrepareControl::default()).unwrap();
         assert_eq!(checked.get("ok").and_then(Value::as_bool), Some(true), "{}", checked.to_json());
+        let entry = "fn voice() { var x = gate if note > 120 { for i in 0..1000000 { x = fract(x + 0.125) } } x }";
+        let costly = format!("use mod.score.*\nlet clock = Clock{{}}\nlet lead = Shader{{code: {entry:?}}}\nlet line = Loop{{play: lead beats: 1 notes: [[0 @c4 0.5 1]]}}\nScore{{clock lead line}}");
+        let report = check(&costly, &crate::PrepareControl::default()).unwrap();
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true), "{}", report.to_json());
+        assert!(report.get("problems").unwrap().as_arr().unwrap().is_empty());
+        let warnings = report.get("warnings").unwrap().as_arr().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].get("node").and_then(Value::as_str), Some("lead"));
+        assert_eq!(warnings[0].get("line"), Some(&Value::Int(3)));
+        assert_eq!(warnings[0].get("shader_start"), Some(&Value::Int(0)));
+        assert_eq!(warnings[0].get("shader_end"), Some(&Value::Int(entry.len() as i64)));
+        assert!(warnings[0].get("message").unwrap().as_str().unwrap().contains("reduce loop sizes"));
+        assert!(check_diags(&costly, &crate::PrepareControl::default()).unwrap().is_empty(), "a warning permits writing the score");
         // The open score stands in for a missing source.
-        let open = call("score_check", &Value::Obj(Vec::new()), Some(source)).unwrap();
+        let open = call("score_check", &Value::Obj(Vec::new()), Some(source), &crate::PrepareControl::default()).unwrap();
         assert_eq!(open.to_json(), checked.to_json());
-        assert!(call("score_check", &Value::Obj(Vec::new()), None).is_err());
-        let broken = call("score_check", &json::obj(vec![("source", json::s("use mod.score.*\nlet x = Synth{preset: \n"))]), None).unwrap();
+        assert!(call("score_check", &Value::Obj(Vec::new()), None, &crate::PrepareControl::default()).is_err());
+        let broken = call("score_check", &json::obj(vec![("source", json::s("use mod.score.*\nlet x = Synth{preset: \n"))]), None, &crate::PrepareControl::default()).unwrap();
         assert_eq!(broken.get("ok").and_then(Value::as_bool), Some(false));
         assert!(broken.get("problems").and_then(Value::as_arr).is_some_and(|p| !p.is_empty()));
-        let heard = call("score_listen", &json::obj(vec![("source", json::s(source)), ("bars", Value::Int(1))]), None).unwrap();
+        let heard = call("score_listen", &json::obj(vec![("source", json::s(source)), ("bars", Value::Int(1))]), None, &crate::PrepareControl::default()).unwrap();
         assert_eq!(heard.get("ok").and_then(Value::as_bool), Some(true), "{}", heard.to_json());
+        assert_eq!(heard.get("latency_frames"), Some(&Value::Int(128)), "score_listen reports the master limiter's latency in frames");
         assert!(heard.get("master").is_some() && heard.get("bands_db").is_some());
     }
 }

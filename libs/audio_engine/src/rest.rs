@@ -45,24 +45,26 @@ impl Rest {
         self.quiet = 0;
     }
 
-    /// After a pass of `frames` whose outputs peaked at `peak`: whether the
-    /// schedule goes to rest now. `hold` is the frames of silence it needs
-    /// (computed lazily, only once a second of silence has passed) and
-    /// `quiescent` says no source runs; `snapshot` fills the control values
-    /// it will be woken by.
-    pub fn after_pass(&mut self, peak: f32, frames: usize, hold: impl FnOnce() -> u64, quiescent: impl FnOnce() -> bool, snapshot: impl FnOnce(&mut [u32])) -> bool {
-        if !(peak < SILENCE) {
-            // (a NaN is not silence either)
-            self.quiet = 0;
-            return false;
+    /// Do not render past the next possible sleep decision. After the hold
+    /// has elapsed, reconsider running sources only on the absolute 64 grid.
+    pub(crate) fn until_check(&self, frame: u64, hold: u64, frames: usize) -> usize {
+        let remaining = hold.saturating_sub(self.quiet);
+        let first = frame.wrapping_add(remaining);
+        let mut distance = remaining.saturating_add(first.wrapping_neg() % 64);
+        if distance == 0 { distance = 64; }
+        distance.min(frames as u64) as usize
+    }
+
+    pub(crate) fn observe(&mut self, peak: f32) {
+        self.quiet = if peak < SILENCE { self.quiet.saturating_add(1) } else { 0 };
+    }
+
+    pub(crate) fn settle(&mut self, frame: u64, hold: u64, quiescent: impl FnOnce() -> bool, snapshot: impl FnOnce(&mut [u32])) -> bool {
+        if frame % 64 == 0 && self.quiet >= hold && quiescent() {
+            snapshot(&mut self.controls);
+            self.asleep = true;
         }
-        self.quiet = self.quiet.saturating_add(frames as u64);
-        if self.quiet < hold() || !quiescent() {
-            return false;
-        }
-        snapshot(&mut self.controls);
-        self.asleep = true;
-        true
+        self.asleep
     }
 
     /// Before a pass: whether it is skipped. `controls_moved` compares the
@@ -86,10 +88,15 @@ mod tests {
 
     const HOLD: u64 = 48_000;
 
+    fn pass(rest: &mut Rest, peak: f32, frames: usize, hold: u64, quiescent: bool) -> bool {
+        for _ in 0..frames { rest.observe(peak); }
+        rest.settle(frames as u64, hold, || quiescent, |snapshot| snapshot.fill(7))
+    }
+
     fn quiet_for(rest: &mut Rest, passes: usize, peak: f32, quiescent: bool) -> bool {
         let mut slept = false;
         for _ in 0..passes {
-            slept = rest.after_pass(peak, 256, || HOLD, || quiescent, |snapshot| snapshot.fill(7));
+            slept = pass(rest, peak, 256, HOLD, quiescent);
         }
         slept
     }
@@ -110,7 +117,7 @@ mod tests {
         // time: it never rests while it is audible.
         let mut peak = 0.5f32;
         for _ in 0..1000 {
-            assert!(!rest.after_pass(peak, 256, || HOLD, || true, |_| {}));
+            assert!(!pass(&mut rest, peak, 256, HOLD, true));
             peak *= 0.99;
             if peak < SILENCE { break; }
         }
@@ -118,7 +125,7 @@ mod tests {
         // Once below audibility it needs the whole hold, and an echo that
         // returns inside the hold starts the count again.
         assert!(!quiet_for(&mut rest, 150, 0.0, true));
-        assert!(!rest.after_pass(0.2, 256, || HOLD, || true, |_| {}));
+        assert!(!pass(&mut rest, 0.2, 256, HOLD, true));
         assert!(!quiet_for(&mut rest, 150, 0.0, true));
         assert!(quiet_for(&mut rest, 60, 0.0, true));
     }

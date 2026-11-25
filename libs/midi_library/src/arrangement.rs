@@ -78,7 +78,7 @@ impl NoteFx {
     /// The options map a note list entry writes.
     pub fn text(&self) -> String {
         let mut out: Vec<String> = Vec::new();
-        let points = |pts: &[(f32, f32)], places: usize| pts.iter().map(|(b, v)| format!("[{} {}]", num(*b as f64, 4), num(*v as f64, places))).collect::<Vec<_>>().join(" ");
+        let points = |pts: &[(f32, f32)], places: usize| pts.iter().map(|(b, v)| format!("[{}, {}]", num(*b as f64, 4), num(*v as f64, places))).collect::<Vec<_>>().join(" ");
         if self.pan != 0.0 {
             out.push(format!("pan: {}", num(self.pan as f64, 2)));
         }
@@ -90,7 +90,7 @@ impl NoteFx {
             out.push(format!("vib: [{} {}{delay}]", num(self.vib.0 as f64, 2), num(self.vib.1 as f64, 3)));
         }
         if self.arp_n > 0 {
-            out.push(format!("arp: [{}] arp_step: {}", self.arp().iter().map(|v| num(*v as f64, 2)).collect::<Vec<_>>().join(" "), num(self.arp_step as f64, 5)));
+            out.push(format!("arp: [{}] arp_step: {}", self.arp().iter().map(|v| num(*v as f64, 2)).collect::<Vec<_>>().join(", "), num(self.arp_step as f64, 5)));
         }
         if self.level_n > 0 {
             out.push(format!("env: [{}]", points(self.level(), 3)));

@@ -18,11 +18,11 @@ pub struct Rendered {
 
 /// Render `source`, refit its master limiter's gain to `target_lufs` (the
 /// last Limiter of the chain; once, then render again), and score it.
-pub fn render(source: &str, target_lufs: f64) -> Result<Rendered, String> {
-    let doc = makepad_score_live::model::load(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
+pub fn render(source: &str, target_lufs: f64, control: &makepad_score_live::PrepareControl) -> Result<Rendered, String> {
+    let doc = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
     let mut source = source.to_string();
     if let Some(limiter) = doc.fx.iter().rev().find(|f| f.kind == makepad_score_player::FxKind::Limiter) {
-        let mix = makepad_music_iter::render::render_mix(&source, &RenderOpts::default())?;
+        let mix = makepad_music_iter::render::render_mix(&source, &RenderOpts::default(), control)?;
         let heard = loudness::measure(&mix.left, &mix.right, mix.rate as f64);
         drop(mix);
         // The gain moves the loudness about dB for dB until it limits hard.
@@ -34,7 +34,7 @@ pub fn render(source: &str, target_lufs: f64) -> Result<Rendered, String> {
             }
         }
     }
-    let song = render_song(&source, &RenderOpts::default(), false)?;
+    let song = render_song(&source, &RenderOpts::default(), false, control)?;
     let measured = loudness::measure(&song.mix.left, &song.mix.right, song.mix.rate as f64);
     let card = card::score(&song, &card::Opts { target_lufs: target_lufs as f32 });
     Ok(Rendered { source, song, card, lufs: measured.lufs, true_peak: measured.true_peak })

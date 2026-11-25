@@ -19,13 +19,11 @@ use crate::feed::streams::StreamView;
 use crate::schedule::ClockChunk;
 use makepad_lock_free::Consumer;
 use makepad_score_player::loop_engine::{Inst, LoopEngine, Tempo};
-use makepad_score_player::stream::{Ctl, Msg, Stream, StreamDef};
+use makepad_score_player::stream::{Ctl, Msg, Stream, StreamDef, MAX_MSGS};
 use std::sync::Arc;
 
 /// Messages read ahead of their pass that a node keeps.
 pub const WAITING: usize = 256;
-/// Controllers one pass applies.
-const CONTROLS: usize = 64;
 /// How far the pass-time estimate may be from the clock before it jumps
 /// (a device that stalled or restarted), in seconds.
 const RESYNC: f64 = 0.1;
@@ -154,18 +152,27 @@ impl StreamRun {
         self.nwaiting -= taken;
         let (b0, b1) = (tempo.beat_at(0.0), tempo.end_beat(frames));
         let def = self.stream.def;
-        let mut controls = [(0u8, Ctl::Mod, 0.0f32); CONTROLS];
+        let mut controls = [(0.0, 0u8, Ctl::Mod, 0.0f32); MAX_MSGS];
         let mut ncontrols = 0;
         let key = engine.key;
-        self.stream.run(b0, b1, key, 0.0, &mut |event| engine.push(event), &mut |ch, ctl, value| {
-            if ncontrols < CONTROLS {
-                controls[ncontrols] = (ch, ctl, value);
-                ncontrols += 1;
+        self.stream.expand_key_controls = matches!(inst, Inst::Midi { .. } | Inst::Morph { .. });
+        let engine = std::cell::RefCell::new(engine);
+        let apply = |batch: &[(f64, u8, Ctl, f32)]| {
+            let mut engine = engine.borrow_mut();
+            for &(beat, ch, ctl, value) in batch {
+                engine.control_with_master(inst, beat, ch, ctl, value, def.bend_range, def.mpe, def.master);
             }
+        };
+        self.stream.run(b0, b1, key, 0.0, &mut |event| engine.borrow_mut().push(event), &mut |beat, ch, ctl, value| {
+            // A channel message expanded to several individual keys can fill the batch.
+            if ncontrols == controls.len() {
+                apply(&controls);
+                ncontrols = 0;
+            }
+            controls[ncontrols] = (beat, ch, ctl, value);
+            ncontrols += 1;
         });
-        for (ch, ctl, value) in &controls[..ncontrols] {
-            engine.control(inst, *ch, *ctl, *value, def.bend_range, def.mpe);
-        }
+        apply(&controls[..ncontrols]);
         self.beat = b1;
         if let Some(view) = &self.view {
             let (recent, started) = self.stream.recent();

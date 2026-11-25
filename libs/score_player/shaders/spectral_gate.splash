@@ -1,0 +1,44 @@
+// Gate each stereo channel by bin amplitude. Floor sets the gain of quiet bins.
+let BLOCK = 1024
+let HOP = 256
+let threshold = param(-42, -96, 0, {unit: db label: "Threshold"})
+let floor = param(-24, -96, 0, {unit: db label: "Floor"})
+let win = [0.0; BLOCK]
+
+fn init() { fill_hann(win) }
+
+fn gate_bin(bin, limit, quiet) {
+    if bin.x*bin.x + bin.y*bin.y > limit*limit { bin } else { bin * quiet }
+}
+
+fn effect_block(l, r) {
+    for i in 0..BLOCK {
+        l[i] *= win[i]
+        r[i] *= win[i]
+    }
+    // Pack two real channels into one complex transform. Opposite bins
+    // recover each channel's real spectrum, so the gates stay independent.
+    fft(l, r)
+    let level = db_to_gain(threshold) * (BLOCK / 4)
+    let quiet = db_to_gain(floor)
+    for i in 0..(BLOCK/2 + 1) {
+        let j = (BLOCK - i) % BLOCK
+        // DC and Nyquist have no conjugate partner.
+        let limit = if i == j { 2 * level } else { level }
+        let left = vec2(l[i] + l[j], r[i] - r[j]) * 0.5
+        let right = vec2(r[i] + r[j], l[j] - l[i]) * 0.5
+        let a = gate_bin(left, limit, quiet)
+        let b = gate_bin(right, limit, quiet)
+        l[i] = a.x - b.y
+        r[i] = a.y + b.x
+        l[j] = a.x + b.y
+        r[j] = b.x - a.y
+    }
+    ifft(l, r)
+    // Four squared Hann windows sum to 3/2.
+    for i in 0..BLOCK {
+        let gain = win[i] * (2.0 / 3.0)
+        l[i] *= gain
+        r[i] *= gain
+    }
+}

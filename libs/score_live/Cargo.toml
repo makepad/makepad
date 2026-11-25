@@ -8,7 +8,22 @@ description = "Scores: live-coded music as one Splash document that is a flow gr
 [lib]
 name = "makepad_score_live"
 
+[features]
+# The neural voice (`Voice{engine: @neural}`): its model runs in this process, so an app turns it on
+# only under its own `localai` (AGENTS.md); a build without it refuses such a voice, saying so.
+neural = ["makepad-score-player/neural", "makepad-audio-engine/neural"]
+
+[[bin]]
+name = "neural_latency"
+path = "src/bin/neural_latency/main.rs"
+required-features = ["neural"]
+
+[package.metadata.makepad]
+# the neural voice's tests run as a unit of their own (affected.py `variants`)
+test-variants = ["neural"]
+
 [dependencies]
+makepad-core-util = { path = "../core_util" }
 makepad-edit-values = { path = "../edit_values" }
 makepad-score-player = { path = "../score_player" }
 makepad-audio-synth = { path = "../audio_synth" }

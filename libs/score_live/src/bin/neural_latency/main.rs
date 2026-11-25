@@ -10,7 +10,8 @@
 //! installed voice sings (`sung::neural::model_path`).
 //!
 //! The neural voice runs natively only (`makepad-score-player` leaves it out
-//! of a browser build), so on wasm the tool is an empty program.
+//! of a browser build), so on wasm the tool is an empty program; it builds
+//! only with the `neural` feature (its model runs in this process).
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

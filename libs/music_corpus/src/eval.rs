@@ -462,7 +462,7 @@ pub struct Report {
 
 /// Score the predictions in `pred` (JSONL) against `cases`; with `render`,
 /// write the first `n` parsed answers as WAV through the Score engine.
-pub fn evaluate(cases: &[Case], pred: &str, threads: usize, render: Option<(usize, &Path)>) -> Result<Report, String> {
+pub fn evaluate(cases: &[Case], pred: &str, threads: usize, render: Option<(usize, &Path)>, control: &makepad_score_live::PrepareControl) -> Result<Report, String> {
     let by_id: BTreeMap<&str, &Case> = cases.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut pairs: Vec<(&Case, String)> = Vec::new();
     let mut rep = Report::default();
@@ -522,7 +522,9 @@ pub fn evaluate(cases: &[Case], pred: &str, threads: usize, render: Option<(usiz
                     Err(_) => continue,
                 }
             };
-            if let Ok(r) = makepad_midi_library::cover::render(&score_text, -14.0) {
+            let rendered = makepad_midi_library::cover::render(&score_text, -14.0, control);
+            if control.is_cancelled() { return Err("the evaluation was cancelled".into()); }
+            if let Ok(r) = rendered {
                 let name: String = c.id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
                 std::fs::write(dir.join(format!("{name}.wav")), makepad_midi_library::cover::wav(&r.song)).map_err(|e| e.to_string())?;
                 done += 1;

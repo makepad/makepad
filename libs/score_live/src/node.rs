@@ -18,15 +18,16 @@
 //!   held controls go to it with [`Slot::set_control`].
 
 use crate::model::{Diag, ScoreDoc};
-use crate::player::{prepare_slice, slice as score_slice, ClockMode, Meters, Player};
+use crate::player::{prepare, slice as score_slice, ClockMode, Meters, Player};
 use makepad_audio_engine::nested::NestedNode;
 use makepad_audio_engine::nodes::{input, node, output, AUDIO, CLOCK, LEVEL};
-use makepad_audio_engine::schedule::{migrate_state, ClockChunk, ControlBank, Layout};
+use makepad_audio_engine::schedule::{ClockChunk, ControlBank, Layout};
 use makepad_flow::document::{ParamDescriptor, ParamType, Registry, TypeDescriptor};
+use makepad_flow::live::owner::PrepareControl;
 use makepad_flow::live::plan::{LiveNode, OwnerSlice, PlanError};
 use makepad_flow::Literal;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// The node type.
@@ -68,6 +69,8 @@ pub fn slot(name: &str) -> Arc<Slot> {
 
 /// What the audio thread and the host share.
 struct Shared {
+    /// Latency of the newest published player, shared with its parent layouts.
+    latency: Arc<AtomicU32>,
     /// The next player to play (the newest prepared), or null.
     next: AtomicPtr<Player>,
     /// Players the audio thread let go, for the host to free.
@@ -85,10 +88,74 @@ struct Watch {
     layout: Arc<Layout>,
     controls: Arc<ControlBank>,
     meters: Arc<Meters>,
+    params: Arc<PlayingControls>,
+}
+
+/// Native effect controls in one playing generation, indexed by score path.
+pub struct PlayingControls {
+    pub generation: u64,
+    params: HashMap<String, ControlReader>,
+}
+
+#[derive(Clone)]
+pub struct ControlReader {
+    bank: Arc<ControlBank>,
+    index: u16,
+    pub driver: Option<Arc<str>>,
+}
+
+impl ControlReader {
+    pub fn value(&self) -> f32 { self.bank.get(self.index) }
+}
+
+impl PlayingControls {
+    pub fn get(&self, path: &str) -> Option<&ControlReader> { self.params.get(path) }
+
+    pub fn driven(&self) -> impl Iterator<Item = (&str, &ControlReader)> {
+        self.params.iter().filter(|(_, reader)| reader.driver.is_some()).map(|(path, reader)| (path.as_str(), reader))
+    }
+
+    fn new(doc: &ScoreDoc, player: &Player) -> Self {
+        let mut params = HashMap::new();
+        for fx in doc.fx.iter().filter(|fx| fx.shader.is_none()) {
+            for (i, &(param, ..)) in fx.kind.params().iter().enumerate() {
+                let Some(index) = player.control(&fx.name, param) else { continue };
+                let driver = param_driver(fx, doc, i, param);
+                params.insert(format!("{}.{param}", fx.name), ControlReader {
+                    bank: player.schedule.controls.clone(), index, driver: driver.map(Into::into),
+                });
+            }
+        }
+        Self { generation: player.schedule.generation, params }
+    }
+}
+
+fn param_driver(fx: &crate::model::FxDef, doc: &ScoreDoc, i: usize, param: &str) -> Option<String> {
+    fx.sides.iter().find(|(field, sources)| field == param && !sources.is_empty())
+        .map(|(_, sources)| sources.ports().map(|(n, p)| format!("{n}.{p}")).collect::<Vec<_>>().join(", "))
+        .or_else(|| fx.follow.iter().find(|(slot, _)| *slot == i).map(|(_, follow)| format!("automation ({}.{})", doc.clock.name, follow.param)))
+}
+
+/// A new document can bind a field before the playing generation changes.
+/// Editors check this on writes so a pending binding survives a gesture.
+pub fn authored_driver(doc: &ScoreDoc, node: &str, field: &str) -> Option<String> {
+    let fx = doc.fx.iter().find(|fx| fx.name == node && fx.shader.is_none())?;
+    param_driver(fx, doc, fx.kind.param_index(field)?, field)
+}
+
+fn clock_bindings(doc: &ScoreDoc) -> impl Iterator<Item = (&str, usize, &str, &str)> {
+    doc.fx.iter().flat_map(move |fx| fx.follow.iter().map(move |(i, follow)| (fx.name.as_str(), *i, doc.clock.name.as_str(), follow.param.as_str())))
+}
+
+type SlotDoc = (Arc<ScoreDoc>, Arc<OwnerSlice>);
+
+struct PreparedFrom {
+    doc: SlotDoc,
+    resources: u64,
 }
 
 struct Host {
-    doc: Option<Arc<ScoreDoc>>,
+    doc: Option<SlotDoc>,
     /// The device rate the slot's node runs at (from its last prepare).
     rate: Option<u32>,
     generation: u64,
@@ -100,18 +167,69 @@ struct Host {
     pending: bool,
     /// What the newest player was prepared from (a score that makes the
     /// same graph needs none: its composer changes what it plays).
-    slice: Option<OwnerSlice>,
+    posted: Option<PreparedFrom>,
+    resources: u64,
+    rewinding: bool,
     /// The players prepared and not yet replaced twice: the playing one is
     /// among them.
     watches: Vec<Watch>,
-    /// A fresh player is being filled ([`Slot::prepare_fresh`]): what is
-    /// pending waits for it.
-    fresh: bool,
+    /// The latest wanted prepare, including a rewind waiting to post.
+    control: Option<PrepareControl>,
     /// One ordinary prepare is out, either through the runner or inline.
     in_flight: bool,
     runner: Option<Runner>,
     /// Prepare errors waiting for the host's next turn.
     diags: Vec<Diag>,
+}
+
+impl Host {
+    fn supersede(&mut self) {
+        if let Some(control) = self.control.take() { control.cancel(); }
+        self.diags.clear();
+    }
+
+    fn edit(&mut self) {
+        if self.rewinding { self.diags.clear(); } else { self.supersede(); }
+    }
+
+    fn invalidate(&mut self) {
+        self.edit();
+        self.resources += 1;
+        self.pending = true;
+    }
+
+    fn matches(&self, from: &PreparedFrom) -> bool {
+        self.resources == from.resources && self.doc.as_ref().is_some_and(|(doc, slice)| {
+            Arc::ptr_eq(doc, &from.doc.0) && Arc::ptr_eq(slice, &from.doc.1)
+                || slice == &from.doc.1 && clock_bindings(doc).eq(clock_bindings(&from.doc.0))
+        })
+    }
+
+    fn needs_prepare(&self) -> bool {
+        self.posted.as_ref().is_none_or(|posted| !self.matches(posted))
+    }
+
+    fn begin(&mut self, rewind: bool) -> (u64, PrepareControl) {
+        self.supersede();
+        self.rewinding = rewind;
+        self.reserved += 1;
+        let control = PrepareControl::default();
+        self.control = Some(control.clone());
+        self.pending = false;
+        (self.reserved, control)
+    }
+
+    fn wants(&self, generation: u64, control: &PrepareControl) -> bool {
+        !control.is_cancelled() && self.reserved == generation
+    }
+}
+
+/// A rewind keeps its player and observations private until the slot admits it.
+pub(crate) struct FreshPlayer {
+    from: PreparedFrom,
+    player: Player,
+    watch: Option<Watch>,
+    control: PrepareControl,
 }
 
 /// A score the `Score` nodes named after it play.
@@ -121,17 +239,30 @@ pub struct Slot {
     host: Mutex<Host>,
 }
 
+fn prepare_hosted(doc: &ScoreDoc, slice: OwnerSlice, rate: u32, name: &str, base: Option<&Layout>, generation: u64, control: &PrepareControl) -> Result<(Player, Option<Watch>), crate::LoadError> {
+    let player = prepare(doc, slice, rate as f32, name, ClockMode::Host, base, generation, control)?;
+    if player.schedule.latency > u64::from(u32::MAX) {
+        return Err(vec![Diag { line: 1, col: 1, node: Some(name.into()), message: "nested score latency exceeds the 32-bit frame range".into() }].into());
+    }
+    let watch = player.meters.as_ref().map(|meters| Watch {
+        generation, layout: player.layout.clone(), controls: player.schedule.controls.clone(),
+        meters: meters.clone(), params: Arc::new(PlayingControls::new(doc, &player)),
+    });
+    Ok((player, watch))
+}
+
 impl Slot {
     fn new(name: &str) -> Slot {
         Slot {
             name: name.to_string(),
             shared: Arc::new(Shared {
+                latency: Arc::new(AtomicU32::new(0)),
                 next: AtomicPtr::new(std::ptr::null_mut()),
                 retired: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
                 playing: AtomicU64::new(0),
                 wanted: AtomicBool::new(false),
             }),
-            host: Mutex::new(Host { doc: None, rate: None, generation: 0, reserved: 0, base: None, pending: false, slice: None, watches: Vec::new(), fresh: false, in_flight: false, runner: None, diags: Vec::new() }),
+            host: Mutex::new(Host { doc: None, rate: None, generation: 0, reserved: 0, base: None, pending: false, posted: None, resources: 0, rewinding: false, watches: Vec::new(), control: None, in_flight: false, runner: None, diags: Vec::new() }),
         }
     }
 
@@ -152,8 +283,8 @@ impl Slot {
     }
 
     /// Play `source` (loaded here: its problems come back).
-    pub fn set_source(&self, source: &str) -> Result<(), Vec<Diag>> {
-        self.set_doc(ScoreDoc::load(source)?)
+    pub fn set_source(&self, source: &str, control: &PrepareControl) -> Result<(), crate::LoadError> {
+        Ok(self.set_doc(ScoreDoc::load_controlled(source, control)?)?)
     }
 
     /// Play `doc`: when its graph differs from the one playing, its player
@@ -162,12 +293,19 @@ impl Slot {
     /// (`render::register_*`); after a later arrival, [`Slot::refresh`].
     pub fn set_doc(&self, doc: ScoreDoc) -> Result<(), Vec<Diag>> {
         let slice = score_slice(&doc, &self.name, ClockMode::Host);
+        self.set_slice(doc, slice)
+    }
+
+    /// Keep the submitted graph with its document so a refresh prepares the same graph.
+    pub(crate) fn set_slice(&self, doc: ScoreDoc, slice: OwnerSlice) -> Result<(), Vec<Diag>> {
         let doc = Arc::new(doc);
+        let slice = Arc::new(slice);
         let old = {
             let mut host = self.lock();
-            let same = host.slice.as_ref() == Some(&slice);
-            host.pending |= !same;
-            host.doc.replace(doc)
+            host.edit();
+            let old = host.doc.replace((doc, slice));
+            host.pending = host.rewinding || host.needs_prepare();
+            old
         };
         drop(old);
         self.kick();
@@ -177,7 +315,7 @@ impl Slot {
     /// Prepare the score again (samples, singers or files it plays arrived:
     /// its instruments look them up when prepared).
     pub fn refresh(&self) -> Result<(), Vec<Diag>> {
-        self.lock().pending = true;
+        self.lock().invalidate();
         self.kick();
         self.take_diags()
     }
@@ -194,16 +332,23 @@ impl Slot {
         }
         let mut host = self.lock();
         let playing = self.shared.playing.load(Ordering::Acquire);
-        if let Some(at) = host.watches.iter().position(|w| w.generation == playing) {
+        let report = if let Some(at) = host.watches.iter().position(|w| w.generation == playing) {
             host.watches.drain(..at);
-        }
-        if self.shared.wanted.swap(false, Ordering::AcqRel) && self.shared.next.load(Ordering::Acquire).is_null() {
+            host.watches[0].layout.take_report()
+        } else { None };
+        // A queued replacement will be checked when it starts playing. A
+        // second pump must not queue another job against the same old layout.
+        let nested_changed = playing != 0 && playing == host.generation && (host.rewinding || !host.in_flight && host.control.is_none())
+            && host.base.as_ref().is_some_and(|layout| layout.nested_changed());
+        let lost_player = self.shared.wanted.swap(false, Ordering::AcqRel) && host.base.is_some() && self.shared.next.load(Ordering::Acquire).is_null();
+        if lost_player {
             // The node lost its player (its host graph changed without
             // carrying it over): a fresh one.
             host.base = None;
-            host.pending = true;
         }
+        if nested_changed || lost_player { host.invalidate(); }
         drop(host);
+        if let Some(line) = report { eprintln!("{line}"); }
         self.kick();
         self.take_diags()
     }
@@ -213,95 +358,105 @@ impl Slot {
     /// (what waited in the old ones is gone). Fill its feeds, then
     /// [`Slot::post_fresh`] it. None before a node asked for a rate or the
     /// slot has a score.
-    pub(crate) fn prepare_fresh(&self) -> Result<Option<Player>, Vec<Diag>> {
-        let (doc, rate, generation, was_pending) = {
+    pub(crate) fn prepare_fresh(&self) -> Result<Option<FreshPlayer>, Vec<Diag>> {
+        let (from, rate, generation, control, was_pending) = {
             let mut host = self.lock();
             let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return Ok(None) };
-            host.reserved += 1;
-            host.fresh = true;
-            let was_pending = std::mem::replace(&mut host.pending, false);
-            (doc, rate, host.reserved, was_pending)
+            let was_pending = host.pending || host.in_flight;
+            let (generation, control) = host.begin(true);
+            (PreparedFrom { doc, resources: host.resources }, rate, generation, control, was_pending)
         };
-        let slice = score_slice(&doc, &self.name, ClockMode::Host);
-        let player = match prepare_slice(&doc, slice.clone(), rate as f32, &self.name, ClockMode::Host, None, generation) {
-            Ok(player) => player,
-            Err(diags) => {
-                // As before the move: a failed fresh player leaves what was pending pending.
-                let mut host = self.lock();
-                host.fresh = false;
-                host.pending |= was_pending;
-                return Err(diags);
+        let (doc, slice) = &from.doc;
+        let result = prepare_hosted(doc, (**slice).clone(), rate, &self.name, None, generation, &control);
+        let mut host = self.lock();
+        if !host.wants(generation, &control) {
+            drop(host);
+            drop(result);
+            self.kick();
+            return Ok(None);
+        }
+        match result {
+            Ok((player, watch)) => Ok(Some(FreshPlayer { from, player, watch, control })),
+            Err(crate::LoadError::Cancelled) => Ok(None),
+            Err(crate::LoadError::Problems(diags)) => {
+                host.control = None;
+                host.rewinding = false;
+                if !host.matches(&from) {
+                    host.pending = host.needs_prepare();
+                    drop(host);
+                    self.kick();
+                    Ok(None)
+                } else {
+                    host.pending |= was_pending;
+                    Err(diags)
+                }
             }
-        };
-        let old = {
-            let mut host = self.lock();
-            host.generation = generation;
-            host.slice.replace(slice)
-        };
-        drop(old);
-        Ok(Some(player))
+        }
     }
 
-    /// The node takes `player` at its next pass; what became pending
-    /// meanwhile is prepared on it.
-    pub(crate) fn post_fresh(&self, player: Player) {
-        let old = {
-            let mut host = self.lock();
-            host.fresh = false;
-            self.post(&mut host, player)
-        };
-        drop(old);
+    /// Publish only if this rewind still owns the requested generation.
+    pub(crate) fn post_fresh(&self, fresh: FreshPlayer) {
+        let generation = fresh.player.schedule.generation;
+        self.finish(self.lock(), generation, &fresh.control, fresh.from, Ok((fresh.player, fresh.watch)));
+    }
+
+    /// Check the identity and publish in the same critical section for both prepare paths.
+    fn finish(&self, mut host: std::sync::MutexGuard<'_, Host>, generation: u64, control: &PrepareControl, from: PreparedFrom,
+        result: Result<(Player, Option<Watch>), crate::LoadError>) {
+        if host.wants(generation, control) {
+            host.control = None;
+            host.rewinding = false;
+            let retired = match result {
+                Ok((player, watch)) => Some(self.post(&mut host, player, watch, from)),
+                Err(crate::LoadError::Problems(diags)) => { host.diags = diags; None }
+                Err(crate::LoadError::Cancelled) => None,
+            };
+            drop(host);
+            drop(retired);
+        } else {
+            drop(host);
+            drop(result);
+        }
         self.kick();
     }
 
     /// Prepare the pending score when the mailbox is empty (so the base is
     /// the player the node plays).
     fn kick(&self) {
-        let (doc, rate, base, generation, runner) = {
+        let (from, rate, base, generation, control, runner) = {
             let mut host = self.lock();
-            if host.fresh || !host.pending || host.in_flight || !self.shared.next.load(Ordering::Acquire).is_null() {
+            if !host.pending || host.in_flight || host.control.is_some() || !self.shared.next.load(Ordering::Acquire).is_null() {
                 return;
             }
             let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return };
-            host.reserved += 1;
+            let (generation, control) = host.begin(false);
             host.in_flight = true;
-            host.pending = false;
-            (doc, rate, host.base.clone(), host.reserved, host.runner.clone())
+            (PreparedFrom { doc, resources: host.resources }, rate, host.base.clone(), generation, control, host.runner.clone())
         };
         let name = self.name.clone();
-        let job = Box::new(move || {
-            let slice = score_slice(&doc, &name, ClockMode::Host);
-            let result = prepare_slice(&doc, slice.clone(), rate as f32, &name, ClockMode::Host, base.as_deref(), generation);
+        let worker_control = control.clone();
+        let job: Box<dyn FnOnce() + Send> = Box::new(move || {
+            let (doc, slice) = &from.doc;
+            let result = prepare_hosted(doc, (**slice).clone(), rate, &name, base.as_deref(), generation, &worker_control);
             let slot = slot(&name);
-            let retired = {
-                let mut host = slot.lock();
-                host.in_flight = false;
-                match result {
-                    // (stale: a fresh player took a newer generation, or the node's rate changed
-                    // while it was out; `attach` left the slot pending for the new rate)
-                    Ok(player) if !host.fresh && generation > host.generation && host.rate == Some(rate) => {
-                        host.generation = generation;
-                        let old_slice = host.slice.replace(slice);
-                        (None, slot.post(&mut host, player), old_slice)
-                    }
-                    Ok(player) => (Some(player), None, None),
-                    Err(diags) => {
-                        host.diags.extend(diags);
-                        (None, None, None)
-                    }
-                }
-            };
-            // Stale players and anything replaced are freed off the lock.
-            drop(retired);
-            slot.kick();
+            let mut host = slot.lock();
+            host.in_flight = false;
+            slot.finish(host, generation, &worker_control, from, result);
         });
         match runner {
             Some(runner) => {
                 if let Err(error) = runner(job) {
-                    eprintln!("score: prepare: {error}");
                     let mut host = self.lock();
                     host.in_flight = false;
-                    host.pending = true;
+                    if host.wants(generation, &control) {
+                        host.control = None;
+                        host.pending = true;
+                        drop(host);
+                        eprintln!("score: prepare: {error}");
+                    } else {
+                        drop(host);
+                        self.kick();
+                    }
                 }
             }
             None => job(),
@@ -316,28 +471,35 @@ impl Slot {
     }
 
     /// Put `player` in the mailbox; free the one replaced after unlocking.
-    fn post(&self, host: &mut Host, player: Player) -> Option<Box<Player>> {
+    fn post(&self, host: &mut Host, player: Player, watch: Option<Watch>, from: PreparedFrom) -> (Option<Box<Player>>, Option<PreparedFrom>) {
+        host.generation = player.schedule.generation;
+        host.watches.extend(watch);
+        let old_doc = host.posted.replace(from);
+        host.pending = host.needs_prepare();
         host.base = Some(player.layout.clone());
-        if let Some(meters) = &player.meters {
-            host.watches.push(Watch { generation: player.schedule.generation, layout: player.layout.clone(), controls: player.schedule.controls.clone(), meters: meters.clone() });
-        }
+        self.shared.latency.store(player.schedule.latency as u32, Ordering::Release);
         let old = self.shared.next.swap(Box::into_raw(Box::new(player)), Ordering::AcqRel);
-        if !old.is_null() {
+        let old_player = if !old.is_null() {
             // SAFETY: made by `Box::into_raw` here and never taken.
             Some(unsafe { Box::from_raw(old) })
-        } else { None }
+        } else { None };
+        (old_player, old_doc)
     }
 
     /// A node of this slot is prepared at `rate`: a player for it now,
     /// unless one at that rate plays or waits (the node carries it over).
     fn attach(&self, rate: u32) {
         let mut host = self.lock();
-        if host.rate == Some(rate) && host.base.is_some() {
+        if host.rate == Some(rate) && (host.base.is_some() || host.control.is_some()) {
             return;
         }
+        if host.rate != Some(rate) {
+            self.shared.latency.store(0, Ordering::Release);
+        }
+        host.rewinding = false;
+        host.invalidate();
         host.rate = Some(rate);
         host.base = None;
-        host.pending = true;
         // A score that does not prepare leaves the node silent; the host
         // collects its diagnostics at the next pump.
         let old = self.shared.next.swap(std::ptr::null_mut(), Ordering::AcqRel);
@@ -360,10 +522,31 @@ impl Slot {
         host.watches.iter().find(|w| w.generation == playing).and_then(read)
     }
 
+    /// The playing generation's layout gives its total latency and each
+    /// node's own latency and aligned input frame.
+    pub fn playing_layout(&self) -> Option<Arc<Layout>> {
+        self.with_watch(|watch| Some(watch.layout.clone()))
+    }
+
     /// The playing player's probe `node.port` (`node` its own id,
     /// `<slot>/<name>`): a loop's or an FX's `peak`, a Comp's `gr`.
     pub fn read(&self, node: &str, port: &str) -> Option<f32> {
         self.with_watch(|w| w.layout.probes.get(&format!("{node}.{port}")).map(|index| w.meters.probe(*index)))
+    }
+
+    /// The playing generation's probe reader of shader node `node`
+    /// (`<slot>/<name>`): resolve it once per generation, then drain it
+    /// each frame without allocating.
+    pub fn probe_reader(&self, node: &str) -> Option<Arc<makepad_audio_engine::schedule::ProbeReader>> {
+        self.with_watch(|watch| watch.layout.probe_taps.get(node).cloned())
+    }
+
+    /// Drain a playing shader node's records, with their names and cumulative fold count.
+    pub fn probes(&self, node: &str) -> Option<(Vec<String>, Vec<makepad_score_player::shader::ProbeRecord>, u64)> {
+        let tap = self.probe_reader(node)?;
+        let mut records = Vec::new();
+        let folded = tap.drain(|record| records.push(record));
+        Some((tap.names.clone(), records, folded))
     }
 
     /// The playing player's stream `node.audio` over its last published
@@ -391,6 +574,11 @@ impl Slot {
             w.meters.scope_into(span, out);
             Some(())
         }).is_some()
+    }
+
+    /// Resolve once on a generation change. Subsequent value reads only load the bank atomic.
+    pub fn playing_controls(&self) -> Option<Arc<PlayingControls>> {
+        self.with_watch(|w| Some(w.params.clone()))
     }
 
     /// Hold the playing player's control `node.param` at `value` (until
@@ -445,9 +633,7 @@ impl ScoreNode {
         }
         if let Some(current) = &mut self.player {
             if next.schedule.base == Some(current.schedule.generation) {
-                for (from, to) in next.schedule.migrate.iter() {
-                    migrate_state(&mut current.schedule.states[*from as usize], &mut next.schedule.states[*to as usize]);
-                }
+                next.schedule.take_over(&mut current.schedule);
             } else {
                 // Nothing carries over: its notes on MIDI outputs end here.
                 current.release_all();
@@ -461,6 +647,10 @@ impl ScoreNode {
 }
 
 impl NestedNode for ScoreNode {
+    fn latency(&self) -> Arc<AtomicU32> {
+        self.shared.latency.clone()
+    }
+
     fn key(&self) -> u64 {
         self.key
     }

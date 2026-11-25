@@ -114,6 +114,11 @@ fn library() -> Result<Vec<Entry>, String> {
 /// Run a tool; `open` is the app's open score (for `score_text` without a
 /// source). `Err` is a refusal to show the model.
 pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, String> {
+    call_with_shaders(name, args, open, None)
+}
+
+/// The open revision may supply its already compiled programs for transcription.
+pub fn call_with_shaders(name: &str, args: &Value, open: Option<&str>, programs: Option<&makepad_score_live::model::CompiledShaders>) -> Result<Value, String> {
     match name {
         "midi_lookup" => {
             let entries = library()?;
@@ -131,7 +136,13 @@ pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, Strin
         }
         "score_text" => {
             let source = args.get("source").and_then(Value::as_str).or(open).ok_or("give the score's `source` (no score is open)")?;
-            let a = roll::from_score(source)?;
+            let a = match programs.filter(|_| open == Some(source)) {
+                Some(programs) => {
+                    let loaded = programs.evaluate(source).map_err(|d| d.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))?;
+                    roll::from_loaded(loaded)?
+                }
+                None => roll::from_score(source)?,
+            };
             Ok(json::obj(vec![("text", json::s(roll::to_text(&a, &detail_of(args))))]))
         }
         "song_find_online" => {

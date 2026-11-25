@@ -6,10 +6,14 @@
 //! was written.
 
 use crate::key;
-use crate::model::{Diag, InstKind, ListKind, Loaded, ScoreDoc, Sync};
+use crate::model::{Diag, InstKind, ListKind, EvaluatedDocument, AuthoredDoc, Sync};
 use crate::vm::{Ctx, EmitKind, Evaluated};
+use makepad_core_util::ui_thread::WorkerOnly;
 use makepad_score_player::{Event, EventKind};
 use std::collections::VecDeque;
+
+static CONSTRUCT: WorkerOnly = WorkerOnly::new("a score composer construction");
+static PUMP: WorkerOnly = WorkerOnly::new("a score composer pump");
 
 /// Something a loop played, for the editor's lights and the AI's ears.
 #[derive(Clone, Debug, PartialEq)]
@@ -64,7 +68,7 @@ struct Timeline {
 }
 
 pub struct Composer {
-    pub doc: ScoreDoc,
+    pub doc: std::sync::Arc<AuthoredDoc>,
     vm: Evaluated,
     pub loops: Vec<LoopState>,
     timeline: Timeline,
@@ -134,8 +138,9 @@ fn cycle_seed(seed: u64, key: u64, cycle: u64) -> u64 {
 }
 
 impl Composer {
-    pub fn new(loaded: Loaded) -> Composer {
-        let Loaded { doc, vm } = loaded;
+    pub fn new(loaded: EvaluatedDocument) -> Composer {
+        CONSTRUCT.check();
+        let EvaluatedDocument { doc, vm } = loaded;
         let params = doc.clock.params.clone();
         let loops = doc.loops.iter().filter(|l| l.stinger.is_none()).map(|l| fresh(&l.name, 0.0)).collect();
         let mut composer = Composer {
@@ -156,8 +161,8 @@ impl Composer {
     /// Replace the document at `now` (the beat playing). Loops that stay
     /// keep their place, cycle count and ticks; new loops start on their
     /// sync point; params keep their current values.
-    pub fn reload(&mut self, loaded: Loaded, now: f64) {
-        let Loaded { doc, vm } = loaded;
+    pub fn reload(&mut self, loaded: EvaluatedDocument, now: f64) {
+        let EvaluatedDocument { doc, vm } = loaded;
         let bar = doc.beats_per_bar();
         let mut loops = Vec::new();
         for l in doc.loops.iter().filter(|l| l.stinger.is_none()) {
@@ -585,6 +590,7 @@ impl Composer {
     }
 
     pub fn pump(&mut self, until: f64, out: &mut Vec<Event>) {
+        PUMP.check();
         // After a jump, what cycles started before it play is dropped.
         let mut skip: Vec<(usize, f64)> = Vec::new();
         // Seeks and loop ends up to `until`: compose to each, then jump.
@@ -925,9 +931,9 @@ impl Composer {
             ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
         };
         let humanize = l.humanize;
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
         let neural = self.plays_neural(&l.name);
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
         let singer = if neural { makepad_score_player::sung::neural::shared() } else { None };
         let sampler_root = l.play.as_deref().and_then(|p| self.doc.inst(p)).and_then(|inst| match &inst.kind {
             InstKind::Sampler { root, .. } => Some(*root),
@@ -962,7 +968,7 @@ impl Composer {
             // A neural phrase: asked of the singer now, played at its own
             // start (never swung or humanized: its audio is one piece); a
             // loop on another instrument has no use for it.
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
             if let EmitKind::Phrase(key) = emit.what {
                 if !neural {
                     continue;

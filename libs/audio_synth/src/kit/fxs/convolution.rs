@@ -212,7 +212,7 @@ impl Convolver {
 }
 
 /// Band-limited windowed-sinc resampling by `ratio` = out rate / in rate.
-fn resample(x: &[f32], ratio: f64) -> Vec<f32> {
+pub fn resample(x: &[f32], ratio: f64) -> Vec<f32> {
     if (ratio - 1.0).abs() < 1e-9 || x.is_empty() {
         return x.to_vec();
     }

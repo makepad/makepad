@@ -14,7 +14,7 @@
 //! source is written. The release writes the source once; the revision it
 //! makes plays the same value, then the held values are let go.
 
-use crate::model::{InstKind, ScoreDoc, SYNTH_KEYS};
+use crate::model::{InstKind, AuthoredDoc, SYNTH_KEYS};
 
 /// Where a held field lands.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +27,7 @@ pub enum Target {
 
 /// Where `node.field` (a top-level field of a score node) lands when held,
 /// or nothing when it can only be written.
-pub fn targets(doc: &ScoreDoc, node: &str, field: &str) -> Vec<Target> {
+pub fn targets(doc: &AuthoredDoc, node: &str, field: &str) -> Vec<Target> {
     let playing = |inst: &str| -> Vec<String> { doc.loops.iter().filter(|l| l.play.as_deref() == Some(inst)).map(|l| l.name.clone()).collect() };
     if let Some(inst) = doc.inst(node) {
         return match &inst.kind {
@@ -35,7 +35,7 @@ pub fn targets(doc: &ScoreDoc, node: &str, field: &str) -> Vec<Target> {
                 Some((_, key)) => playing(node).into_iter().map(|l| Target::Params { node: l, key: key.to_string() }).collect(),
                 None => Vec::new(),
             },
-            InstKind::Shader { shader, .. } if shader.params.iter().any(|(name, _)| name == field) => {
+            InstKind::Shader { shader, .. } if shader.overrides.iter().any(|(name, _)| name == field) => {
                 playing(node).into_iter().map(|l| Target::Params { node: l, key: field.to_string() }).collect()
             }
             _ => Vec::new(),

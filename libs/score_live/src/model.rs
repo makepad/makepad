@@ -5,8 +5,14 @@
 use crate::source::{self, Outline};
 use crate::theory;
 use crate::vm::{self, Evaluated, Obj, V};
+use makepad_core_util::ui_thread::WorkerOnly;
 use makepad_audio_synth::recipe::{Layer, Recipe};
-use makepad_score_player::{presets, FxKind};
+use makepad_flow::Literal;
+use makepad_flow::live::owner::PrepareControl;
+use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+use makepad_score_player::{presets, shader::Steal, FxKind};
+
+static COMPILE: WorkerOnly = WorkerOnly::new("a score document compile");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diag {
@@ -14,6 +20,14 @@ pub struct Diag {
     pub col: u32,
     pub node: Option<String>,
     pub message: String,
+}
+
+/// A warning at a score field and its byte range in the resolved shader source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShaderWarning {
+    pub diag: Diag,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl std::fmt::Display for Diag {
@@ -83,7 +97,7 @@ pub enum InstKind {
     /// parameters the score sets over it (storage names, raw values).
     Tandem { patch: String, path: String, set: Vec<(String, f32)> },
     /// An audio shader instrument; `mono` plays one voice, legato.
-    Shader { shader: ShaderDef, mono: bool },
+    Shader { shader: ShaderDef, mono: Option<bool>, legato: bool, glide: f32, steal: Steal },
     /// Sung voices (`sing(...)`): a singer profile (a built-in name, or a
     /// library singer's `id@rev` with its `asset`), a choir of `singers` in
     /// `parts`, and style values (one per `VOICE_STYLE`, NaN = default);
@@ -144,9 +158,37 @@ pub const VOICE_STYLE: [&str; 8] = ["vibrato", "vibrato_rate", "vibrato_delay", 
 /// and the settings the score gives its params.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderDef {
+    /// Side and parameter wires authored on an instrument definition.
+    pub wires: Vec<(String, AudioSources)>,
     pub lib: Option<String>,
     pub code: String,
+    pub overrides: Vec<(String, Override)>,
+    /// Authored factor and conversion modes, empty when the shader selects its rate.
+    pub oversample: Vec<Literal>,
+    pub samples: Vec<(String, AssetRef)>,
+    /// The node's random stream selector, zero by default.
+    pub seed: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Override {
+    Num(f64),
+    Choice(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct CheckedShader {
+    pub shader: makepad_score_player::shader::AudioShaderRef,
     pub params: Vec<(String, f32)>,
+}
+
+/// A choice as written in a score, including names that need quotes.
+pub fn shader_choice(name: &str) -> String {
+    if name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        format!("@{name}")
+    } else {
+        format!("{name:?}")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -242,7 +284,7 @@ pub enum StreamKind {
     /// MIDI in: the device (part of a port's name; "any" for every input),
     /// the channel (1..16; 0 for every one), the bend range (semitones),
     /// MPE (a channel per key) and the delay a message plays at (ms).
-    MidiIn { device: String, channel: u8, bend: f32, mpe: bool, latency: f32 },
+    MidiIn { device: String, channel: u8, bend: f32, mpe: bool, master: Option<u8>, latency: f32 },
     Arp { settings: makepad_audio_synth::kit::arp::ArpSettings, latch: bool, sync: bool },
     Chord { tones: Vec<i8> },
     Transpose { semis: i8 },
@@ -347,17 +389,60 @@ pub fn fx_scopes(code: &str) -> (Vec<Vec<FxKind>>, Vec<String>) {
     (chains, unknown)
 }
 
+/// Ordered audio sources. The node-name view is also used by instrument pickers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AudioSources {
+    nodes: Vec<String>,
+    named: std::collections::BTreeMap<usize, String>,
+}
+
+impl std::ops::Deref for AudioSources {
+    type Target = [String];
+    fn deref(&self) -> &Self::Target { &self.nodes }
+}
+
+impl AudioSources {
+    pub fn ports(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.nodes.iter().enumerate().map(|(i, node)| {
+            (node.as_str(), self.named.get(&i).map_or("audio", String::as_str))
+        })
+    }
+
+    // Bare loop audio and Port{node: loop name: @audio} are distinct when
+    // the instrument declares an output called audio.
+    pub(crate) fn graph_ports<'a>(&'a self, doc: &'a ScoreDoc) -> impl Iterator<Item = (&'a str, &'a str)> {
+        self.ports().enumerate().map(move |(i, (node, port))| {
+            if matches!(port, "audio" | "peak") && self.named.contains_key(&i) {
+                let shader = doc.loops.iter().find(|l| l.name == node).and_then(|l| l.play.as_deref()).and_then(|n| doc.shader(n));
+                if shader.is_some_and(|s| (0..s.shader.port_count()).map(|i| s.shader.port_view(i)).any(|p| p.output && p.name == port)) {
+                    return (node, makepad_audio_engine::nodes::instrument_output(port));
+                }
+            }
+            (node, port)
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FxDef {
     pub name: String,
     pub kind: FxKind,
     pub params: [f32; makepad_score_player::fx::MAX_FX_PARAMS],
-    pub inputs: Vec<String>,
-    pub side: Option<String>,
+    pub inputs: AudioSources,
+    /// Named side inputs, including a native effect's key, and parameter wires.
+    pub sides: Vec<(String, AudioSources)>,
     /// A shader FX (`ShaderFx{…}`): its program; `kind` is then Bus.
     pub shader: Option<ShaderDef>,
     /// Settings that follow a Clock param: (setting index, how).
     pub follow: Vec<(usize, TempoFollow)>,
+}
+
+pub(crate) fn audio_source_type(ty: &str) -> bool {
+    matches!(ty, "Loop" | "Stinger" | "ShaderFx" | "ShaderControl") || FxKind::parse(ty).is_some()
+}
+
+pub(crate) fn native_param(ty: &str, field: &str) -> bool {
+    FxKind::parse(ty).and_then(|kind| kind.param_index(field)).is_some()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -379,8 +464,10 @@ pub struct SectionDef {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ScoreDoc {
+pub struct AuthoredDoc {
     pub source: String,
+    /// Host modules available to every audio shader in the score.
+    pub shader_modules: std::collections::BTreeMap<String, String>,
     pub label: String,
     pub clock: ClockDef,
     pub insts: Vec<InstDef>,
@@ -415,9 +502,19 @@ pub struct ScoreRights {
     pub terms: String,
 }
 
-impl ScoreDoc {
+impl AuthoredDoc {
     pub fn inst(&self, name: &str) -> Option<&InstDef> {
         self.insts.iter().find(|inst| inst.name == name)
+    }
+
+    pub fn shader_def(&self, node: &str) -> Option<&ShaderDef> {
+        if let Some(inst) = self.inst(node) {
+            return match &inst.kind {
+                InstKind::Shader { shader, .. } => Some(shader),
+                _ => None,
+            };
+        }
+        self.fx.iter().find(|fx| fx.name == node)?.shader.as_ref()
     }
 
     /// Every node that plays a loop's notes (each has a feed): the loops,
@@ -454,12 +551,12 @@ impl ScoreDoc {
             let Some(node) = self.stream(&at) else { return Some(Err(format!("`{at}` is not a stream node (MidiIn, Arp, Chord, Transpose, Velocity)"))) };
             path.push(at.clone());
             match &node.kind {
-                StreamKind::MidiIn { device, channel, bend, mpe, latency } => {
+                StreamKind::MidiIn { device, channel, bend, mpe, master, latency } => {
                     if stages.len() > MAX_STAGES {
                         return Some(Err(format!("a stream passes at most {MAX_STAGES} nodes on its way")));
                     }
                     stages.reverse();
-                    let mut def = StreamDef { bend_range: *bend, mpe: *mpe, ..Default::default() };
+                    let mut def = StreamDef { bend_range: *bend, mpe: *mpe, master: *master, ..Default::default() };
                     for (slot, stage) in def.stages.iter_mut().zip(stages) {
                         *slot = Some(stage);
                     }
@@ -501,7 +598,7 @@ impl ScoreDoc {
         out
     }
 
-    /// The library samples its samplers and kit slots play.
+    /// Recordings played by instruments, kit slots and shader tables.
     pub fn samples(&self) -> Vec<AssetRef> {
         let mut out: Vec<AssetRef> = Vec::new();
         for inst in &self.insts {
@@ -509,8 +606,12 @@ impl ScoreDoc {
                 InstKind::Sampler { src, .. } => out.push(src.clone()),
                 InstKind::Morph { srcs, .. } => out.extend(srcs.iter().flatten().cloned()),
                 InstKind::Drums { slots, .. } => out.extend(slots.iter().filter_map(|s| s.sample.clone())),
-                InstKind::Synth { .. } | InstKind::Tandem { .. } | InstKind::Ironfish { .. } | InstKind::Shader { .. } | InstKind::Voice { .. } | InstKind::Native { .. } | InstKind::Midi { .. } | InstKind::Input { .. } => {}
+                InstKind::Shader { shader, .. } => out.extend(shader.samples.iter().map(|(_, asset)| asset.clone())),
+                InstKind::Synth { .. } | InstKind::Tandem { .. } | InstKind::Ironfish { .. } | InstKind::Voice { .. } | InstKind::Native { .. } | InstKind::Midi { .. } | InstKind::Input { .. } => {}
             }
+        }
+        for shader in self.fx.iter().filter_map(|fx| fx.shader.as_ref()) {
+            out.extend(shader.samples.iter().map(|(_, asset)| asset.clone()));
         }
         out.sort_by(|a, b| (&a.id, &a.rev).cmp(&(&b.id, &b.rev)));
         out.dedup();
@@ -562,26 +663,346 @@ impl ScoreDoc {
     }
 }
 
+/// A successful load adds resolved programs and diagnostics to the authored revision.
+#[derive(Clone, Debug)]
+pub struct ScoreDoc {
+    authored: Arc<AuthoredDoc>,
+    checked: Arc<[(String, CheckedShader)]>,
+    warnings: Arc<[ShaderWarning]>,
+}
+
+impl std::ops::Deref for ScoreDoc {
+    type Target = AuthoredDoc;
+    fn deref(&self) -> &AuthoredDoc { &self.authored }
+}
+
+impl PartialEq for ScoreDoc {
+    fn eq(&self, other: &Self) -> bool {
+        self.authored == other.authored && self.checked.iter().map(|(_, s)| &s.params)
+            .eq(other.checked.iter().map(|(_, s)| &s.params))
+    }
+}
+
+impl ScoreDoc {
+    pub fn shader(&self, node: &str) -> Option<&CheckedShader> {
+        self.checked.iter().find(|(name, _)| name == node).map(|(_, shader)| shader)
+    }
+
+    pub fn warnings(&self) -> &[ShaderWarning] { &self.warnings }
+
+    pub fn is_control(&self, fx: &FxDef) -> bool {
+        fx.shader.is_some() && self.shader(&fx.name).is_some_and(|s| s.shader.kind() == makepad_score_player::shader::Kind::Control)
+    }
+}
+
+pub struct EvaluatedDocument {
+    pub doc: Arc<AuthoredDoc>,
+    pub vm: Evaluated,
+}
+
 /// A loaded score: the typed document and the live VM its functions run in.
 pub struct Loaded {
     pub doc: ScoreDoc,
     pub vm: Evaluated,
 }
 
+impl Loaded {
+    pub fn into_evaluated(self) -> EvaluatedDocument {
+        EvaluatedDocument { doc: self.doc.authored, vm: self.vm }
+    }
+
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        Arc::make_mut(&mut self.doc.authored).clock.seed = seed;
+        self
+    }
+}
+
+/// A cancelled request publishes neither a document nor diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadError {
+    Problems(Vec<Diag>),
+    Cancelled,
+}
+
+impl LoadError {
+    /// Format problems for the caller's diagnostic view, preserving cancellation as an answer.
+    pub fn describe(self, problems: impl FnOnce(Vec<Diag>) -> String) -> String {
+        match self {
+            Self::Problems(diags) => problems(diags),
+            Self::Cancelled => "the request was cancelled".into(),
+        }
+    }
+}
+
+impl From<Vec<Diag>> for LoadError {
+    fn from(problems: Vec<Diag>) -> Self { Self::Problems(problems) }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("the request was cancelled"),
+            Self::Problems(problems) => {
+                for (i, problem) in problems.iter().enumerate() {
+                    if i != 0 { writeln!(f)?; }
+                    write!(f, "{problem}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl From<Loaded> for EvaluatedDocument {
+    fn from(loaded: Loaded) -> Self { loaded.into_evaluated() }
+}
+
+pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    let result = read_checked(source, Some(control.word()), None, &mut false);
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    result.map_err(LoadError::Problems)
+}
+
 impl ScoreDoc {
+    pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Self, LoadError> {
+        load_controlled(source, control).map(|loaded| loaded.doc)
+    }
+
     /// Load and check; the VM is dropped (see [`load`] to keep it).
     pub fn load(source: &str) -> Result<ScoreDoc, Vec<Diag>> {
         load(source).map(|loaded| loaded.doc)
     }
 }
 
-struct Reader<'a> {
-    src: &'a str,
-    outline: &'a Outline,
+/// Programs produced while reading the shader definitions, in document order.
+#[derive(Debug, Default)]
+pub struct CompiledShaders {
+    modules: std::collections::BTreeMap<String, String>,
+    entries: Vec<(String, ShaderDef, CheckedShader)>,
+}
+
+fn evaluated_score(source: &str) -> Option<Obj> {
+    let mut evaluated = vm::evaluate(source);
+    if !evaluated.errors.is_empty() { return None; }
+    let V::Obj(root) = std::mem::replace(&mut evaluated.root, V::Nil) else { return None };
+    (root.proto.as_deref() == Some("Score")).then_some(root)
+}
+
+/// Evaluate the score's label without compiling its instruments.
+pub fn evaluated_label(source: &str) -> Option<String> {
+    evaluated_score(source)?.get("label").and_then(V::text).filter(|s| !s.trim().is_empty()).map(str::to_owned)
+}
+
+fn object_name(source: &str, outline: &Outline, obj: &Obj) -> Option<String> {
+    let (line, col) = obj.loc?;
+    let at = source::offset_of(source, line as usize, col as usize);
+    outline.nodes.iter().filter(|n| n.span.start <= at && at < n.span.end)
+        .min_by_key(|n| n.span.end - n.span.start).map(|n| n.name.clone())
+}
+
+/// Read the tempo and instrument descriptions of an already-written score.
+/// Its VM resolves computed field values. No program or player is needed.
+pub fn evaluated_palette(source: &str) -> Option<(f64, Vec<String>)> {
+    let root = evaluated_score(source)?;
+    let outline = source::outline(source);
+    let mut bpm = 120.0;
+    let mut palette = Vec::new();
+    for value in root.fields.iter().map(|(_, v)| v).chain(&root.items) {
+        let V::Obj(obj) = value else { continue };
+        let Some(kind) = obj.proto.as_deref() else { continue };
+        if kind == "Clock" {
+            bpm = obj.get("bpm").and_then(V::num).unwrap_or(120.0).clamp(20.0, 400.0);
+        }
+        if !crate::instruments::INSTRUMENT_TYPES.contains(&kind) { continue; }
+        let name = object_name(source, &outline, obj)?;
+        let text = |field| obj.get(field).and_then(V::text);
+        palette.push(match kind {
+            "Synth" | "Ironfish" | "Voice" => format!("{name} ({})", kind.to_ascii_lowercase()),
+            "Drums" => {
+                let kit = match obj.get("kit") {
+                    Some(V::Obj(_)) => "custom",
+                    value => value.and_then(V::text).unwrap_or(crate::palette::sounds::DEFAULT_KIT),
+                };
+                format!("drums {kit}")
+            }
+            "Instrument" => match text("kind").unwrap_or("piano") {
+                "soundfont" => {
+                    let program = text("program").and_then(crate::gm_font::program)
+                        .unwrap_or_else(|| obj.get("program").and_then(V::num).unwrap_or(0.0).clamp(0.0, 127.0) as u8);
+                    format!("{name} (GM {program})")
+                }
+                "midi" | "input" => name,
+                native => format!("{name} ({native})"),
+            },
+            "Shader" => format!("{name} (shader {})", text("lib").unwrap_or("own")),
+            _ => name,
+        });
+    }
+    Some((bpm, palette))
+}
+
+impl CompiledShaders {
+    pub(crate) fn from_doc(doc: &ScoreDoc) -> Arc<Self> {
+        let entries = doc.checked.iter().map(|(name, shader)|
+            (name.clone(), doc.shader_def(name).unwrap().clone(), shader.clone())).collect();
+        Arc::new(Self { modules: doc.shader_modules.clone(), entries })
+    }
+
+    /// Re-evaluate functions and captures in the calling VM, using this revision's programs.
+    pub fn evaluate(&self, source: &str) -> Result<Loaded, Vec<Diag>> {
+        read_checked(source, None, Some(self), &mut false)
+    }
+
+    /// Read a rewritten score without compiling. A changed shader definition
+    /// needs a new program. Ordinary score diagnostics keep their meaning.
+    pub(crate) fn evaluate_rewrite(&self, source: &str) -> Result<Option<Loaded>, Vec<Diag>> {
+        let mut changed = false;
+        let loaded = read_checked(source, None, Some(self), &mut changed);
+        if changed { Ok(None) } else { loaded.map(Some) }
+    }
+}
+
+/// The worker owns the evaluation and drops the VM before returning to the editor.
+#[derive(Clone)]
+pub struct RevisionLoad {
+    pub revision: u64,
+    pub source: Arc<str>,
+    control: PrepareControl,
+}
+
+pub enum LoadResult {
+    Ready(ScoreDoc, Arc<CompiledShaders>),
+    Invalid(Vec<Diag>),
+    Cancelled,
+}
+
+impl RevisionLoad {
+    pub fn run(&self) -> LoadResult {
+        match load_controlled(&self.source, &self.control) {
+            Ok(loaded) => {
+                let shaders = CompiledShaders::from_doc(&loaded.doc);
+                LoadResult::Ready(loaded.doc, shaders)
+            }
+            Err(LoadError::Problems(diags)) => LoadResult::Invalid(diags),
+            Err(LoadError::Cancelled) => LoadResult::Cancelled,
+        }
+    }
+}
+
+/// One editor's outstanding load and its most recently applied result.
+pub struct RevisionLoads<J> {
+    wanted: Option<RevisionLoad>,
+    job: Option<J>,
+    pub applied: Option<RevisionLoad>,
+    pub diags: Vec<Diag>,
+    pub warnings: Arc<[ShaderWarning]>,
+    pub shaders: Option<Arc<CompiledShaders>>,
+}
+
+impl<J> Default for RevisionLoads<J> {
+    fn default() -> Self {
+        Self { wanted: None, job: None, applied: None, diags: Vec::new(), warnings: Arc::default(), shaders: None }
+    }
+}
+
+impl<J> RevisionLoads<J> {
+    pub fn submit(&mut self, revision: u64, source: &str, cancel: impl FnOnce(J)) -> bool {
+        if self.wanted.as_ref().or(self.applied.as_ref()).is_some_and(|r| r.revision == revision) { return false; }
+        if let Some(old) = self.wanted.take() { old.control.cancel(); }
+        if let Some(job) = self.job.take() { cancel(job); }
+        self.wanted = Some(RevisionLoad { revision, source: Arc::from(source), control: PrepareControl::default() });
+        true
+    }
+
+    /// A refused pool submission stays pending for the next frame.
+    pub fn start(&mut self, start: impl FnOnce(RevisionLoad) -> Option<J>) {
+        if self.job.is_none() {
+            if let Some(wanted) = &self.wanted { self.job = start(wanted.clone()); }
+        }
+    }
+
+    pub fn take(&mut self, take: impl FnOnce(&mut J) -> Option<LoadResult>) -> Option<ScoreDoc> {
+        let result = take(self.job.as_mut()?)?;
+        self.job = None;
+        let request = self.wanted.take()?;
+        if request.control.is_cancelled() { return None; }
+        match result {
+            LoadResult::Ready(doc, shaders) => {
+                self.applied = Some(request);
+                self.diags.clear();
+                self.warnings = doc.warnings.clone();
+                self.shaders = Some(shaders);
+                Some(doc)
+            }
+            LoadResult::Invalid(diags) => {
+                self.applied = Some(request);
+                self.diags = diags;
+                self.warnings = Arc::default();
+                None
+            }
+            LoadResult::Cancelled => None,
+        }
+    }
+
+    pub fn pending(&self) -> bool { self.wanted.is_some() }
+}
+
+impl<J> Drop for RevisionLoads<J> {
+    fn drop(&mut self) {
+        if let Some(request) = &self.wanted { request.control.cancel(); }
+    }
+}
+
+// Per test thread. The one-shot hook synchronizes a worker already reading a shader.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SHADER_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static ON_SHADER_COMPILE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn compile_shader(code: &str, bindings: &makepad_score_player::shader::AudioBindings<'_>)
+    -> Result<makepad_score_player::shader::AudioShaderRef, Vec<makepad_score_player::shader::CompileError>>
+{
+    #[cfg(test)] {
+        SHADER_COMPILES.with(|count| count.set(count.get() + 1));
+        ON_SHADER_COMPILE.with(|hook| { if let Some(f) = hook.take() { f(); } });
+    }
+    makepad_score_player::shader::compile_with(code, bindings)
+}
+
+use makepad_score_player::shader;
+
+struct ShaderFields<'a> {
+    def: ShaderDef,
+    bindings: shader::AudioBindings<'a>,
+    ports: Vec<(String, bool)>,
+    param_wires: Vec<String>,
+    numeric_errors: Vec<(usize, String)>,
+    bad_seed: bool,
+    invalid_inventory: bool,
     diags: Vec<Diag>,
 }
 
+struct Reader<'a> {
+    control: Option<&'a AtomicU32>,
+    reuse: Option<&'a CompiledShaders>,
+    changed_shader: &'a mut bool,
+    shader_index: usize,
+    src: &'a str,
+    outline: &'a Outline,
+    diags: Vec<Diag>,
+    warnings: Vec<ShaderWarning>,
+}
+
 impl Reader<'_> {
+    fn cancelled(&self) -> bool { self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) }
+
+    fn shader_mismatch(&mut self, node: &str, why: &str) {
+        *self.changed_shader = true;
+        self.err(node, None, why);
+    }
+
     fn err(&mut self, node: &str, key: Option<&str>, message: impl Into<String>) {
         let (line, col) = self.at(node, key);
         self.diags.push(Diag { line, col, node: (!node.is_empty()).then(|| node.to_string()), message: message.into() });
@@ -598,9 +1019,7 @@ impl Reader<'_> {
     /// The node name an object value is (by where it was made).
     fn name_of(&self, value: &V) -> Option<String> {
         let V::Obj(obj) = value else { return None };
-        let (line, col) = obj.loc?;
-        let at = source::offset_of(self.src, line as usize, col as usize);
-        self.outline.nodes.iter().filter(|n| n.span.start <= at && at < n.span.end).min_by_key(|n| n.span.end - n.span.start).map(|n| n.name.clone())
+        object_name(self.src, self.outline, obj)
     }
 
     /// A reference field: a node, or a list of nodes.
@@ -622,6 +1041,43 @@ impl Reader<'_> {
                 }
             },
         }
+    }
+
+    fn audio_sources(&mut self, node: &str, field: &str, value: Option<&V>) -> AudioSources {
+        let values = match value {
+            None | Some(V::Nil) => &[][..],
+            Some(V::Arr(items)) => items.as_slice(),
+            Some(item) => std::slice::from_ref(item),
+        };
+        let mut sources = AudioSources::default();
+        for item in values {
+            let mut target = item;
+            let mut port = None;
+            if let V::Obj(obj) = item {
+                // A plain Clock-follow object or a Port extended with its
+                // fields cannot supply automation and an audio wire together.
+                if matches!(obj.proto.as_deref(), None | Some("Port")) && obj.get("param").is_some()
+                    && self.outline.node(node).is_some_and(|n| native_param(&n.type_name, field)) {
+                    self.err(node, Some(field), format!("choose either automation or source wires for `{field}`"));
+                    continue;
+                }
+                if obj.proto.as_deref() == Some("Port") {
+                    let (Some(source), Some(V::Id(name))) = (obj.get("node"), obj.get("name")) else {
+                        self.err(node, Some(field), format!("use Port{{node: source name: @port}} on `{field}`"));
+                        continue;
+                    };
+                    target = source;
+                    port = Some(name);
+                }
+            }
+            if let Some(id) = self.name_of(target) {
+                if let Some(port) = port { sources.named.insert(sources.nodes.len(), port.to_string()); }
+                sources.nodes.push(id);
+            } else {
+                self.err(node, Some(field), format!("each source on `{field}` names a node or its output port"));
+            }
+        }
+        sources
     }
 
     fn num(&mut self, node: &str, obj: &Obj, key: &str, default: f64, lo: f64, hi: f64) -> f64 {
@@ -769,6 +1225,16 @@ impl Reader<'_> {
                 channel: self.num(n, obj, "channel", 0.0, 0.0, 16.0) as u8,
                 bend: self.num(n, obj, "bend", 2.0, 0.0, 48.0) as f32,
                 mpe: self.flag(n, obj, "mpe"),
+                master: match obj.get("master") {
+                    None => Some(0),
+                    Some(V::Nil) => None,
+                    Some(v) if v.text() == Some("none") => None,
+                    Some(V::Num(ch)) if ch.fract() == 0.0 && (0.0..=15.0).contains(ch) => Some(*ch as u8),
+                    _ => {
+                        self.err(n, Some("master"), "`master` takes a channel from 0 to 15 or @none");
+                        None
+                    }
+                },
                 latency: self.num(n, obj, "latency", 8.0, 0.0, 100.0) as f32,
             },
             "Arp" => {
@@ -941,11 +1407,7 @@ impl Reader<'_> {
         }
     }
 
-    /// A `Shader` or `ShaderFx` node's program: `lib: "acid"` or
-    /// `code: "…"`, every other field one of its params. Compiled here so
-    /// a problem shows on its field.
-    fn shader(&mut self, node: &str, obj: &Obj, kind: makepad_score_player::shader::Kind) -> Option<ShaderDef> {
-        use makepad_score_player::shader;
+    fn read_shader<'b>(&mut self, node: &str, obj: &Obj, kind: shader::Kind, base: shader::AudioBindings<'b>) -> Option<ShaderFields<'b>> {
         let (lib, code) = match (obj.get("lib"), obj.get("code")) {
             (Some(V::Str(name)) | Some(V::Id(name)), _) => match shader::library(name) {
                 Some(code) => (Some(name.clone()), code.to_string()),
@@ -962,37 +1424,224 @@ impl Reader<'_> {
             }
         };
         let field = if lib.is_some() { "lib" } else { "code" };
-        let compiled = match shader::compile(&code) {
-            Ok(compiled) => compiled,
-            Err(errors) => {
-                for e in errors.iter().take(3) {
-                    let line = code[..e.start.min(code.len())].matches('\n').count() + 1;
-                    self.err(node, Some(field), format!("shader line {line}: {}", e.message));
-                }
+        let values = match obj.get("oversample") {
+            None => &[][..],
+            Some(v @ V::Num(_)) => std::slice::from_ref(v),
+            Some(V::Arr(v)) if matches!(v.len(), 2 | 3) => v.as_slice(),
+            _ => {
+                self.err(node, Some("oversample"), "use a factor, [factor @mode] or [factor @up @down]");
                 return None;
             }
         };
-        if compiled.kind() != kind {
-            let want = if kind == shader::Kind::Instrument { "an instrument (it has a voice()); effects go in ShaderFx" } else { "an effect; instruments go in Shader" };
-            self.err(node, Some(field), format!("this shader is not {want}"));
-            return None;
+        let oversample: Vec<_> = values.iter().map(|v| match v {
+            V::Num(n) => Literal::Num(*n),
+            V::Id(mode) | V::Str(mode) => Literal::Id(mode.clone()),
+            _ => Literal::Null,
+        }).collect();
+        let bindings = match makepad_audio_engine::schedule::with_shader_oversample(base, &oversample, kind) {
+            Ok(bindings) => bindings,
+            Err(why) => { self.err(node, Some("oversample"), why); return None; }
+        };
+        let decls = base.declarations(&code);
+        let mut fields = ShaderFields {
+            def: ShaderDef { lib, code, oversample, seed: 0, samples: Vec::new(), overrides: Vec::new(), wires: Vec::new() },
+            bindings, ports: Vec::new(), param_wires: Vec::new(), numeric_errors: Vec::new(),
+            bad_seed: false, invalid_inventory: false, diags: Vec::new(),
+        };
+        if decls.has_error() {
+            let error = decls.error();
+            let line = fields.def.code[..error.start.min(fields.def.code.len())].matches('\n').count() + 1;
+            self.err(node, Some(field), format!("shader line {line}: {}", error.message));
+            fields.invalid_inventory = true;
+            return Some(fields);
         }
-        let mut params = Vec::new();
+        fields.ports = (0..decls.port_count()).map(|i| {
+            let port = decls.port(i);
+            (port.name.to_owned(), port.output)
+        }).collect();
+        let seed = match obj.get("seed") {
+            None => 0,
+            Some(V::Num(n)) if n.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(n) => *n as u32,
+            _ => {
+                self.err(node, Some("seed"), "a shader seed is an integer from 0 to 4294967295");
+                fields.bad_seed = true;
+                0
+            }
+        };
+        fields.def.seed = seed;
+        if fields.bad_seed { return Some(fields); }
+        let first_diag = self.diags.len();
         for (name, value) in &obj.fields {
-            if ["lib", "code", "mono", "at", "in"].contains(&name.as_str()) {
+            if ["lib", "code", "mono", "at", "in", "seed", "oversample"].contains(&name.as_str())
+                || kind == shader::Kind::Instrument && ["legato", "glide", "steal"].contains(&name.as_str()) {
                 continue;
             }
-            let Some(info) = (0..compiled.param_count()).map(|index| compiled.param_view(index)).find(|p| p.name == name) else {
-                let names: Vec<&str> = (0..compiled.param_count()).map(|index| compiled.param_view(index).name).collect();
+            if (0..decls.sample_count()).any(|i| decls.sample(i) == name) {
+                if let Some(asset) = self.asset(node, name, Some(value)) {
+                    fields.def.samples.push((name.clone(), asset));
+                }
+                continue;
+            }
+            if let Some(port) = (0..decls.port_count()).map(|i| decls.port(i)).find(|p| p.name == name) {
+                if port.output {
+                    self.err(node, Some(name), format!("`{name}` is an output; this field needs an input port"));
+                } else if kind == shader::Kind::Instrument {
+                    fields.def.wires.push((name.clone(), self.audio_sources(node, name, Some(value))));
+                }
+                continue;
+            }
+            if matches!(value, V::Obj(_) | V::Arr(_)) {
+                if (0..decls.param_count()).position(|i| decls.param(i) == name).is_none() {
+                    self.err(node, Some(name), format!("unknown input port `{name}`"));
+                } else if kind == shader::Kind::Instrument {
+                    fields.def.wires.push((name.clone(), self.audio_sources(node, name, Some(value))));
+                } else {
+                    fields.param_wires.push(name.clone());
+                }
+                continue;
+            }
+            let Some(index) = (0..decls.param_count()).position(|i| decls.param(i) == name) else {
+                let names: Vec<&str> = (0..decls.param_count()).map(|i| decls.param(i)).collect();
                 self.err(node, Some(name), format!("the shader has no param `{name}` (it has {})", names.join(", ")));
                 continue;
             };
-            match value.num() {
-                Some(v) => params.push((name.clone(), (v as f32).clamp(info.min, info.max))),
-                None => self.err(node, Some(name), format!("`{name}` is a number from {} to {}", info.min, info.max)),
+            let authored = if let Some(number) = value.num() {
+                Override::Num(number)
+            } else if decls.choice_count(index) > 0 {
+                let choices = || (0..decls.choice_count(index)).map(|i| decls.choice(index, i));
+                let Some(word) = value.text().filter(|word| choices().any(|choice| choice == *word)) else {
+                    let names = choices().map(shader_choice).collect::<Vec<_>>();
+                    self.err(node, Some(name), format!("`{name}` is one of {}", names.join(" ")));
+                    continue;
+                };
+                Override::Choice(word.to_owned())
+            } else {
+                fields.numeric_errors.push((self.diags.len() - first_diag, name.clone()));
+                self.err(node, Some(name), format!("`{name}` is a number"));
+                continue;
+            };
+            fields.def.overrides.push((name.clone(), authored));
+        }
+        Some(fields)
+    }
+
+    fn finish_shader<'b>(&mut self, node: &str, kind: shader::Kind, read: (Option<ShaderFields<'b>>, Vec<Diag>),
+        resolve: bool, checked: &mut Vec<(String, CheckedShader)>) -> Option<ShaderFields<'b>> {
+        let (fields, diags) = read;
+        let Some(mut fields) = fields else { self.diags.extend(diags); return None };
+        fields.diags = diags;
+        if resolve {
+            let program = self.resolve_shader(node, kind, &mut fields)?;
+            checked.push((node.to_owned(), program));
+        } else {
+            self.diags.append(&mut fields.diags);
+        }
+        Some(fields)
+    }
+
+    fn resolve_shader(&mut self, node: &str, kind: shader::Kind, fields: &mut ShaderFields<'_>) -> Option<CheckedShader> {
+        let def = &fields.def;
+        let code = def.code.as_str();
+        let field = if def.lib.is_some() { "lib" } else { "code" };
+        let bindings = fields.bindings;
+        let entry = self.shader_index;
+        self.shader_index += 1;
+        let compiled = if let Some(set) = self.reuse {
+            let Some((name, previous, checked)) = set.entries.get(entry) else {
+                self.shader_mismatch(node, "internal error: missing compiled shader definition");
+                return None;
+            };
+            if name != node || previous.code != def.code || previous.lib != def.lib || previous.oversample != def.oversample || checked.shader.kind() != kind {
+                self.shader_mismatch(node, "internal error: shader definition differs from its compiled revision");
+                return None;
+            }
+            checked.shader.clone()
+        } else {
+            if self.cancelled() { return None; }
+            match compile_shader(code, &bindings) {
+                Ok(compiled) => compiled,
+                Err(errors) => {
+                    // Attribute errors introduced by the node to its field, even when a
+                    // different error (such as missing region latency) exists at base rate.
+                    if self.cancelled() { return None; }
+                    let other_errors = (!def.oversample.is_empty()).then(|| {
+                        let mut reference = shader::AudioBindings { oversample: Default::default(), ..bindings };
+                        if bindings.oversample.factor > 1 { reference.oversample.factor = 1; }
+                        compile_shader(code, &reference).err().unwrap_or_default()
+                    });
+                    if self.cancelled() { return None; }
+                    for e in errors.iter().take(3) {
+                        let introduced = other_errors.as_ref().is_some_and(|other| !other.iter().any(|d| d.start == e.start && d.message == e.message));
+                        let field = if introduced { "oversample" } else { field };
+                        let line = code[..e.start.min(code.len())].matches('\n').count() + 1;
+                        self.err(node, Some(field), format!("shader line {line}: {}", e.message));
+                    }
+                    return None;
+                }
+            }
+        };
+        if compiled.kind() != kind {
+            let want = match kind {
+                shader::Kind::Instrument => "an instrument (with voice()); use ShaderFx for effects or ShaderControl for controls",
+                shader::Kind::Effect => "an effect (with effect()); use Shader for instruments or ShaderControl for controls",
+                shader::Kind::Control => "a control (with block() and named outputs); use ShaderFx for effects or Shader for instruments",
+            };
+            self.err(node, Some(field), format!("this shader is not {want}"));
+            return None;
+        }
+        for warning in compiled.warnings() {
+            let (line, col) = self.at(node, Some(field));
+            let shader_line = code.as_bytes()[..warning.start.min(code.len())].iter().filter(|&&b| b == b'\n').count() + 1;
+            let diag = Diag { line, col, node: Some(node.to_string()), message: format!("shader line {shader_line}: {}", warning.message) };
+            self.warnings.push(ShaderWarning { diag, start: warning.start, end: warning.end });
+        }
+        for i in 0..compiled.port_count() {
+            let port = compiled.port_view(i);
+            if kind != shader::Kind::Instrument && makepad_audio_engine::nodes::reserved_shader_port(port.name) {
+                self.err(node, Some(field), format!("rename port `{}`: a ShaderFx already has that field", port.name));
             }
         }
-        Some(ShaderDef { lib, code, params })
+        for (at, name) in &fields.numeric_errors {
+            let Some(index) = compiled.param_index(name) else {
+                self.err(node, Some(name), format!("internal error: compiled shader is missing declared param `{name}`"));
+                return None;
+            };
+            let info = compiled.param_view(index);
+            let unit = compiled.param_meta(index).unit;
+            fields.diags[*at].message = format!("`{name}` is a number from {} to {}", unit.show(info.min), unit.show(info.max));
+        }
+        self.diags.append(&mut fields.diags);
+        if fields.bad_seed || fields.invalid_inventory { return None; }
+        let mut params = Vec::with_capacity(def.overrides.len());
+        for (name, value) in &def.overrides {
+            let Some(index) = compiled.param_index(name) else {
+                self.err(node, Some(name), format!("internal error: compiled shader is missing declared param `{name}`"));
+                return None;
+            };
+            let value = match value {
+                Override::Num(number) => {
+                    let info = compiled.param_view(index);
+                    let number = if number.is_finite() { number.clamp(info.min.into(), info.max.into()) } else { *number };
+                    compiled.param_value(index, number as f32)
+                }
+                Override::Choice(word) => {
+                    let Some(choice) = compiled.param_meta(index).choices.iter().position(|&choice| choice == word) else {
+                        self.err(node, Some(name), format!("internal error: compiled param `{name}` is missing declared choice `{word}`"));
+                        return None;
+                    };
+                    choice as f32
+                }
+            };
+            params.push((name.clone(), value));
+        }
+        if let Some(set) = self.reuse {
+            let (_, old, checked) = &set.entries[entry];
+            if old.wires != def.wires || old.samples != def.samples || old.seed != def.seed || checked.params != params {
+                self.shader_mismatch(node, "internal error: shader bindings differ from their compiled revision");
+                return None;
+            }
+        }
+        Some(CheckedShader { shader: compiled, params })
     }
 
     /// A note list: `[[beat note dur vel] ...]` (a note by number, name or
@@ -1232,7 +1881,7 @@ pub const SAMPLER_FIELDS: [&str; 5] = ["src", "root", "attack", "release", "at"]
 /// `label` and `color` (a palette name, `@amber`) are for the views: a
 /// track's name and colour; the player does not read them.
 pub const LOOP_FIELDS: [&str; 25] = ["play", "beats", "amp", "pan", "mute", "solo", "sync", "hits", "note", "step", "code", "when", "follow", "dur", "quant", "notes", "sends", "swing", "humanize", "in", "mute_voices", "solo_voices", "at", "label", "color"];
-pub const MIDI_IN_FIELDS: [&str; 6] = ["device", "channel", "bend", "mpe", "latency", "at"];
+pub const MIDI_IN_FIELDS: [&str; 7] = ["device", "channel", "bend", "mpe", "master", "latency", "at"];
 pub const ARP_FIELDS: [&str; 12] = ["in", "pattern", "rate", "octaves", "gate", "swing", "repeats", "chance", "interval", "latch", "sync", "at"];
 pub const CHORD_FIELDS: [&str; 4] = ["in", "chord", "tones", "at"];
 pub const TRANSPOSE_FIELDS: [&str; 3] = ["in", "semis", "at"];
@@ -1271,9 +1920,25 @@ fn param_list(value: Option<&V>) -> Vec<(String, f32)> {
 
 /// Load a score: evaluate it and read the typed document.
 pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
-    let outline = source::outline(source);
+    read_checked(source, None, None, &mut false)
+}
+
+pub fn read_document(source: &str) -> Result<EvaluatedDocument, Vec<Diag>> {
+    read(source, None, None, &mut false, false).map(|(document, _, _)| document)
+}
+
+fn read_checked(source: &str, control: Option<&AtomicU32>, reuse: Option<&CompiledShaders>, changed: &mut bool) -> Result<Loaded, Vec<Diag>> {
+    let (EvaluatedDocument { doc: authored, vm }, checked, warnings) = read(source, control, reuse, changed, true)?;
+    Ok(Loaded { doc: ScoreDoc { authored, checked: checked.into(), warnings: warnings.into() }, vm })
+}
+
+type ReadParts = (EvaluatedDocument, Vec<(String, CheckedShader)>, Vec<ShaderWarning>);
+
+fn read(source: &str, control: Option<&AtomicU32>, reuse: Option<&CompiledShaders>, changed_shader: &mut bool, resolve: bool) -> Result<ReadParts, Vec<Diag>> {
     let evaluated = vm::evaluate(source);
-    let mut r = Reader { src: source, outline: &outline, diags: Vec::new() };
+    if resolve && reuse.is_none() { COMPILE.check(); }
+    let outline = source::outline(source);
+    let mut r = Reader { src: source, outline: &outline, diags: Vec::new(), warnings: Vec::new(), control, reuse, changed_shader, shader_index: 0 };
     if !evaluated.errors.is_empty() {
         let diags = evaluated.errors.iter().map(|e| {
             let (line, col, message) = vm::split_error(e);
@@ -1295,13 +1960,36 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
         if obj.proto.as_deref().is_none_or(|p| !vm::NODE_TYPES.contains(&p) || p == "Score") {
             continue;
         }
-        match r.name_of(value) {
+        // A module can also be a named member directly inside Score{…}.
+        let module_name = field.filter(|_| obj.proto.as_deref() == Some("ShaderModule"));
+        match r.name_of(value).or_else(|| module_name.map(str::to_owned)) {
             Some(name) => members.push((name, obj.clone())),
             None => r.err("", field, "Score{…} lists nodes written `let name = Type{…}`"),
         }
     }
-    let mut doc = ScoreDoc {
+    // Collect modules first so a shader can import one declared later.
+    // Only playable and control nodes belong in the graph's ordering.
+    let mut shader_modules = std::collections::BTreeMap::new();
+    members.retain(|(name, obj)| {
+        if obj.proto.as_deref() != Some("ShaderModule") { return true; }
+        for (field, _) in &obj.fields {
+            if field != "code" {
+                r.err(name, Some(field), format!("unknown ShaderModule field `{field}`"));
+            }
+        }
+        match obj.get("code") {
+            Some(V::Str(code)) => {
+                if shader_modules.insert(name.clone(), code.clone()).is_some() {
+                    r.err(name, None, format!("two shader modules are named `{name}`"));
+                }
+            }
+            _ => r.err(name, Some("code"), "a ShaderModule needs a code string"),
+        }
+        false
+    });
+    let mut doc = AuthoredDoc {
         source: source.to_string(),
+        shader_modules,
         label: root.get("label").and_then(V::text).unwrap_or("").to_string(),
         clock: ClockDef::default(),
         insts: Vec::new(),
@@ -1331,8 +2019,31 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             }
         },
     };
+    if reuse.is_some_and(|set| set.modules != doc.shader_modules) {
+        r.shader_mismatch("", "internal error: shader modules differ from their compiled revision");
+    }
     let mut clocks = 0;
+    let modules: Vec<_> = doc.shader_modules.iter().map(|(path, source)| makepad_score_player::shader::Module { path, source }).collect();
+    // Classify every shader against its declarations before resolving any program.
+    // Keep each node's diagnostics with it until its turn in source order.
+    let mut shaders = Vec::new();
+    let base = shader::AudioBindings { modules: &modules, control, ..Default::default() };
     for (name, obj) in &members {
+        let kind = match obj.proto.as_deref() {
+            Some("Shader") => shader::Kind::Instrument,
+            Some("ShaderFx") => shader::Kind::Effect,
+            Some("ShaderControl") => shader::Kind::Control,
+            _ => continue,
+        };
+        if r.cancelled() { return Err(Vec::new()); }
+        let before = r.diags.len();
+        let fields = r.read_shader(name, obj, kind, base);
+        shaders.push((fields, r.diags.split_off(before)));
+    }
+    let mut shaders = shaders.into_iter();
+    let mut checked = Vec::new();
+    for (name, obj) in &members {
+        if r.cancelled() { return Err(Vec::new()); }
         let ty = obj.proto.clone().unwrap_or_default();
         doc.order.push((name.clone(), ty.clone()));
         if let Some(V::Obj(at)) = obj.get("at") {
@@ -1364,8 +2075,19 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             },
         };
         if !allowed.is_empty() {
-            for (field, _) in &obj.fields {
+            for (field, value) in &obj.fields {
+                if crate::instruments::INSTRUMENT_TYPES.contains(&ty.as_str()) && ty != "Shader" {
+                    let entry = |v: &V| matches!(v, V::Obj(o) if o.proto.as_deref().is_some_and(|ty| ty == "Port" || audio_source_type(ty)));
+                    if entry(value) || matches!(value, V::Arr(items) if items.iter().any(entry)) {
+                        r.err(n, Some(field), format!("wiring a built-in instrument's `{field}` is not supported yet; wire the port or param on a Shader instrument instead"));
+                        continue;
+                    }
+                }
                 if !allowed.contains(&field.as_str()) {
+                    if matches!(ty.as_str(), "Loop" | "Stinger") && matches!(value, V::Obj(_) | V::Arr(_)) {
+                        r.err(n, Some(field), format!("wire `{field}` on the Shader definition played by this loop"));
+                        continue;
+                    }
                     r.err(n, Some(field), format!("`{field}` is not a {ty} field ({ty} fields: {})", allowed.join(", ")));
                 }
             }
@@ -1755,7 +2477,12 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                 // rendered ahead); else the realtime singer.
                 let neural = match obj.get("engine") {
                     None | Some(V::Nil) => false,
-                    Some(V::Id(e)) | Some(V::Str(e)) if e == "neural" => true,
+                    Some(V::Id(e)) | Some(V::Str(e)) if e == "neural" => {
+                        // (a build without it says how to get it: nothing sings in its place)
+                        #[cfg(all(not(feature = "neural"), not(target_arch = "wasm32")))]
+                        r.err(n, Some("engine"), makepad_score_player::NEURAL_NEEDS_LOCALAI);
+                        true
+                    }
                     Some(V::Id(e)) | Some(V::Str(e)) if e == "dsp" => false,
                     Some(_) => {
                         r.err(n, Some("engine"), "a Voice's engine is @dsp (the realtime singer, the default) or @neural (the neural voice)".to_string());
@@ -1786,22 +2513,63 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                 doc.insts.push(InstDef { name: name.clone(), kind: InstKind::Voice { profile, asset, singers, parts, style, neural } });
             }
             "Shader" => {
-                if let Some(shader) = r.shader(n, obj, makepad_score_player::shader::Kind::Instrument) {
-                    doc.insts.push(InstDef { name: name.clone(), kind: InstKind::Shader { shader, mono: r.flag(n, obj, "mono") } });
+                if let Some(fields) = r.finish_shader(n, shader::Kind::Instrument, shaders.next().unwrap(), resolve, &mut checked) {
+                    let shader = fields.def;
+                    let mono = obj.get("mono").map(|_| r.flag(n, obj, "mono"));
+                    let legato = match obj.get("legato") {
+                        None | Some(V::Nil) => true,
+                        Some(v) if v.num() == Some(0.0) => false,
+                        Some(v) if v.num() == Some(1.0) => true,
+                        _ => {
+                            r.err(n, Some("legato"), "`legato` takes 0 or 1");
+                            true
+                        }
+                    };
+                    let glide = r.num(n, obj, "glide", 0.0, 0.0, f32::MAX as f64) as f32;
+                    let steal = match obj.get("steal") {
+                        None | Some(V::Nil) => Steal::Oldest,
+                        Some(v) => v.text().and_then(Steal::from_name).unwrap_or_else(|| {
+                            r.err(n, Some("steal"), "`steal` takes @oldest or @quietest");
+                            Steal::Oldest
+                        }),
+                    };
+                    doc.insts.push(InstDef { name: name.clone(), kind: InstKind::Shader { shader, mono, legato, glide, steal } });
                 }
             }
-            "ShaderFx" => {
-                if let Some(shader) = r.shader(n, obj, makepad_score_player::shader::Kind::Effect) {
-                    let inputs = r.refs(n, "in", obj.get("in"));
-                    doc.fx.push(FxDef { name: name.clone(), kind: FxKind::Bus, params: FxKind::Bus.defaults(), inputs, side: None, shader: Some(shader), follow: Vec::new() });
+            "ShaderFx" | "ShaderControl" => {
+                use makepad_score_player::shader::Kind;
+                let kind = if ty == "ShaderControl" { Kind::Control } else { Kind::Effect };
+                if kind == Kind::Control && obj.get("in").is_some() {
+                    r.err(n, Some("in"), "a ShaderControl has no main audio input for `in`; wire a param instead");
+                }
+                if let Some(fields) = r.finish_shader(n, kind, shaders.next().unwrap(), resolve, &mut checked) {
+                    let inputs = r.audio_sources(n, "in", obj.get("in"));
+                    let mut sides = Vec::new();
+                    for (name, output) in &fields.ports {
+                        if !output && obj.get(name).is_some() {
+                            sides.push((name.clone(), r.audio_sources(n, name, obj.get(name))));
+                        }
+                    }
+                    for field in fields.param_wires {
+                        sides.push((field.clone(), r.audio_sources(n, &field, obj.get(&field))));
+                    }
+                    let shader = fields.def;
+                    doc.fx.push(FxDef { name: name.clone(), kind: FxKind::Bus, params: FxKind::Bus.defaults(), inputs, sides, shader: Some(shader), follow: Vec::new() });
                 }
             }
             other => match FxKind::parse(other) {
                 Some(kind) => {
                     let mut params = kind.defaults();
                     let mut follow = Vec::new();
+                    let mut sides = Vec::new();
                     for (i, (param, ..)) in kind.params().iter().enumerate() {
                         match obj.get(param) {
+                            Some(v @ V::Obj(f)) if f.proto.is_some() || r.name_of(v).is_some_and(|id| id != n) => {
+                                sides.push(((*param).to_owned(), r.audio_sources(n, param, Some(v))));
+                            }
+                            Some(v @ V::Arr(_)) => {
+                                sides.push(((*param).to_owned(), r.audio_sources(n, param, Some(v))));
+                            }
                             // A setting that follows a Clock param (automation).
                             Some(V::Obj(f)) => {
                                 let name = f.get("param").and_then(V::text).unwrap_or("").to_string();
@@ -1844,12 +2612,16 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
                             }
                         }
                     }
-                    let inputs = r.refs(n, "in", obj.get("in"));
-                    let side = r.refs(n, "key", obj.get("key")).into_iter().next();
-                    if kind == FxKind::Duck && side.is_none() {
+                    let inputs = r.audio_sources(n, "in", obj.get("in"));
+                    let mut key = r.audio_sources(n, "key", obj.get("key"));
+                    // Native keys have always taken the first source in a list.
+                    key.nodes.truncate(1);
+                    key.named.retain(|&i, _| i == 0);
+                    if kind == FxKind::Duck && key.is_empty() {
                         r.err(n, None, "a Duck names what pushes it down: key: kick");
                     }
-                    doc.fx.push(FxDef { name: name.clone(), kind, params, inputs, side, shader: None, follow });
+                    if !key.is_empty() { sides.push(("key".into(), key)); }
+                    doc.fx.push(FxDef { name: name.clone(), kind, params, inputs, sides, shader: None, follow });
                 }
                 None => r.err(n, None, format!("`{other}` is not a score node")),
             },
@@ -1869,6 +2641,8 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
     }
     // References must be members of the right kind.
     let is = |name: &str, kinds: &[&str]| doc.order.iter().any(|(n, t)| n == name && kinds.contains(&t.as_str()));
+    let program = |node: &str| checked.iter().find(|(name, _)| name == node).map(|(_, s)| s);
+    let is_control = |node: &str| program(node).is_some_and(|s| s.shader.kind() == shader::Kind::Control);
     let fx_names: Vec<&str> = doc.fx.iter().map(|f| f.name.as_str()).collect();
     for l in &doc.loops {
         match &l.play {
@@ -1910,20 +2684,64 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
     }
     for l in &doc.loops {
         for (target, _) in &l.sends {
-            if !fx_names.contains(&target.as_str()) {
+            if doc.fx.iter().any(|f| f.name == *target && is_control(&f.name)) {
+                r.err(&l.name, Some("sends"), format!("control node `{target}` has no main audio input; wire a param instead"));
+            } else if !fx_names.contains(&target.as_str()) {
                 r.err(&l.name, Some("sends"), format!("`{target}` is not an FX in Score{{…}}{}", crate::assist::hint(target, fx_names.iter().copied())));
             }
         }
     }
-    for (i, fx) in doc.fx.iter().enumerate() {
-        for input in fx.inputs.iter().chain(fx.side.iter()) {
-            let is_loop = is(input, &["Loop", "Stinger"]);
-            let fx_at = fx_names.iter().position(|n| n == input);
-            if !is_loop && fx_at.is_none() {
-                r.err(&fx.name, Some("in"), format!("`{input}` is not a loop or an FX in Score{{…}}"));
-            } else if fx_at.is_some_and(|at| at >= i) {
-                r.err(&fx.name, Some("in"), format!("`{input}` comes after `{}` in Score{{…}}: list sources first", fx.name));
+    let graph_names: Vec<_> = fx_names.iter().copied().chain(doc.loops.iter().map(|l| l.name.as_str()))
+        .chain(doc.insts.iter().map(|i| i.name.as_str())).collect();
+    let index: std::collections::HashMap<_, _> = graph_names.iter().copied().enumerate().map(|(i, n)| (n, i)).collect();
+    let mut dependencies = vec![Vec::new(); graph_names.len()];
+    let mut forward = Vec::new();
+    let mut validate = |node: &str, field: &str, sources: &AudioSources| {
+        let i = index[node];
+        for (input, port) in sources.ports() {
+            let playing = doc.loops.iter().find(|l| l.name == input);
+            let fx_at = fx_names.iter().position(|&n| n == input);
+            if let Some(&at) = index.get(input) { dependencies[i].push(at); }
+            if doc.inst(input).is_some() {
+                r.err(node, Some(field), format!("instrument definition `{input}` has no rendered output; read the loop that plays it with Port{{node: loop_name name: @{port}}}"));
+            } else if playing.is_none() && fx_at.is_none() {
+                r.err(node, Some(field), format!("`{input}` is not a loop or an FX in Score{{…}}"));
+            } else if port == "audio" && fx_at.is_some_and(|at| is_control(&doc.fx[at].name)) {
+                r.err(node, Some(field), format!("wire `{field}` to a named output of control node `{input}`: use Port{{node: {input} name: @out}}"));
+            } else if resolve && port != "audio" {
+                let shader = if let Some(l) = playing { l.play.as_deref().and_then(program) } else { program(input) };
+                if playing.is_some() && shader.is_none() {
+                    r.err(node, Some(field), format!("`{input}.{port}` plays a built-in instrument; read its main audio or play a Shader instrument for named outputs"));
+                } else if !shader.is_some_and(|s| (0..s.shader.port_count()).map(|p| s.shader.port_view(p)).any(|p| p.output && p.name == port)) {
+                    r.err(node, Some(field), format!("unknown output port `{input}.{port}`"));
+                }
             }
+            if i < fx_names.len() && fx_at.is_some_and(|at| at >= i) {
+                forward.push((node.to_owned(), field.to_owned(), input.to_owned()));
+            }
+        }
+    };
+    for fx in &doc.fx {
+        validate(&fx.name, "in", &fx.inputs);
+        for (field, inputs) in &fx.sides { validate(&fx.name, field, inputs); }
+    }
+    for inst in &doc.insts {
+        if let InstKind::Shader { shader, .. } = &inst.kind {
+            for (field, inputs) in &shader.wires { validate(&inst.name, field, inputs); }
+        }
+    }
+    for l in &doc.loops {
+        if let Some(i) = l.play.as_deref().and_then(|n| index.get(n)) { dependencies[index[l.name.as_str()]].push(*i); }
+        for (fx, _) in &l.sends {
+            if let Some(i) = index.get(fx.as_str()) { dependencies[*i].push(index[l.name.as_str()]); }
+        }
+    }
+    if let Some(cycle) = makepad_audio_engine::schedule::wire_cycle(&dependencies) {
+        let names = cycle.iter().map(|&i| graph_names[i]).collect::<Vec<_>>().join(" -> ");
+        r.err(graph_names[cycle[0]], None, format!("audio wires make a cycle: {names}"));
+    } else {
+        for (node, field, input) in forward {
+            r.err(&node, Some(&field), format!("`{input}` comes after `{node}` in Score{{…}}: list sources first"));
         }
     }
     for section in &doc.sections {
@@ -1939,14 +2757,18 @@ pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
             r.err("", Some("arrange"), format!("`{name}` is not a Section"));
         }
     }
+    if reuse.is_some_and(|set| set.entries.len() != r.shader_index) {
+        r.shader_mismatch("", "internal error: shader count differs from its compiled revision");
+    }
     if !r.diags.is_empty() {
         let mut diags = r.diags;
         diags.sort_by_key(|d| (d.line, d.col));
         diags.dedup();
         return Err(diags);
     }
+    let warnings = r.warnings;
     doc.outline = outline;
-    Ok(Loaded { doc, vm: evaluated })
+    Ok((EvaluatedDocument { doc: Arc::new(doc), vm: evaluated }, checked, warnings))
 }
 
 /// Game parameters a score may declare (`Clock{params: {...}}`).

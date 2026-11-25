@@ -9,7 +9,8 @@
 //! before it, and after it when the phrase does not repeat); a pattern or
 //! a list becomes a `notes:` list.
 
-use crate::model::ScoreDoc;
+use crate::model::{self, CompiledShaders, EvaluatedDocument};
+use std::sync::Arc;
 use crate::source;
 use crate::theory;
 use makepad_score_player::presets::DRUM_SLOTS;
@@ -59,13 +60,23 @@ impl Part {
 
 /// What a loop plays in its first cycle, frozen (generated loops included).
 pub fn part_of(src: &str, node: &str) -> Result<Part, String> {
-    let doc = ScoreDoc::load(src).map_err(|d| d.first().map_or("the score does not load".to_string(), |d| d.message.clone()))?;
-    if doc.loop_def(node).is_none() {
+    part_from(model::read_document(src).map_err(diagnostic)?, node)
+}
+
+fn diagnostic(errors: Vec<model::Diag>) -> String {
+    errors.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")
+}
+
+/// A voice selection uses the programs of the revision and evaluates its loops once.
+pub fn part_from(loaded: impl Into<EvaluatedDocument>, node: &str) -> Result<Part, String> {
+    let loaded = loaded.into();
+    let bar = loaded.doc.beats_per_bar();
+    if loaded.doc.loop_def(node).is_none() {
         return Err(format!("`{node}` is not a loop"));
     }
     // Its phrase: the cycles it walks through before they repeat (32 bars
     // at most), so a melody written bar by bar is varied whole.
-    let phrase = crate::render::phrase_notes(src, node, 32.0 * doc.beats_per_bar()).ok_or_else(|| format!("`{node}` plays nothing in the score"))?;
+    let phrase = crate::render::phrase_notes_of(loaded, node, 32.0 * bar).ok_or_else(|| format!("`{node}` plays nothing in the score"))?;
     let (len, notes, durs) = (phrase.beats, phrase.notes, phrase.durs);
     let notes = notes.iter().enumerate().map(|(i, (beat, note, vel, hit))| Note {
         beat: *beat,
@@ -74,7 +85,7 @@ pub fn part_of(src: &str, node: &str) -> Result<Part, String> {
         vel: *vel,
         hit: *hit,
     }).collect();
-    Ok(Part { beats: len.max(1.0), beats_per_bar: doc.beats_per_bar(), notes, cycle: phrase.cycle.max(0.25), first: phrase.first, repeats: phrase.repeats })
+    Ok(Part { beats: len.max(1.0), beats_per_bar: bar, notes, cycle: phrase.cycle.max(0.25), first: phrase.first, repeats: phrase.repeats })
 }
 
 /// The `fn(i) { … }` of a loop's code: its parameter and its body.
@@ -92,10 +103,42 @@ fn code_of(src: &str, node: &str) -> Option<(String, String)> {
 
 /// `src` with loop `node` playing `part` (as a `notes:` list; its code,
 /// pattern and note go), checked to load.
-pub fn apply(src: &str, node: &str, part: &Part) -> Result<String, String> {
-    if let Some((param, body)) = code_of(src, node) {
-        return apply_code(src, node, part, &param, &body);
+pub fn apply(src: &str, node: &str, part: &Part, control: &crate::PrepareControl) -> Result<String, String> {
+    apply_prepared(src, node, part, None, control).map(|(source, _)| source)
+}
+
+/// Fully validate the rewrite and keep the exact programs its composer will use.
+pub fn apply_prepared(src: &str, node: &str, part: &Part, programs: Option<&Arc<CompiledShaders>>, control: &crate::PrepareControl) -> Result<(String, Arc<CompiledShaders>), String> {
+    if control.is_cancelled() { return Err("the variation was cancelled".into()); }
+    let code = code_of(src, node);
+    let next = if let Some((param, body)) = &code {
+        rewrite_code(src, node, part, param, body)?
+    } else {
+        rewrite_notes(src, node, part)?
+    };
+    let reused = if let Some(set) = programs {
+        set.evaluate_rewrite(&next).map_err(diagnostic)?.map(|loaded| (loaded, set.clone()))
+    } else {
+        None
+    };
+    let (loaded, shaders) = match reused {
+        Some(pair) => pair,
+        None => {
+            let loaded = model::load_controlled(&next, control).map_err(|e| e.describe(diagnostic))?;
+            let shaders = CompiledShaders::from_doc(&loaded.doc);
+            (loaded, shaders)
+        }
+    };
+    if code.is_some() {
+        if let Some(error) = crate::render::loop_error_of(loaded, node) {
+            return Err(format!("`{node}` would not play: {error}"));
+        }
     }
+    if control.is_cancelled() { return Err("the variation was cancelled".into()); }
+    Ok((next, shaders))
+}
+
+fn rewrite_notes(src: &str, node: &str, part: &Part) -> Result<String, String> {
     let mut next = src.to_string();
     for key in ["code", "hits", "note", "step"] {
         if let Ok(splice) = source::remove_field(&next, node, key) {
@@ -106,14 +149,13 @@ pub fn apply(src: &str, node: &str, part: &Part) -> Result<String, String> {
         let splice = source::set_field(&next, node, key, &value)?;
         next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
     }
-    ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
     Ok(next)
 }
 
 /// A loop with code made to play `part`: its cycles from `first` on take
 /// the phrase's notes, cycle by cycle; before it (and after it, when the
 /// phrase does not repeat) the loop's own code plays as it did.
-fn apply_code(src: &str, node: &str, part: &Part, param: &str, body: &str) -> Result<String, String> {
+fn rewrite_code(src: &str, node: &str, part: &Part, param: &str, body: &str) -> Result<String, String> {
     let cycles = ((part.beats / part.cycle).round() as usize).max(1);
     let slices: Vec<String> = (0..cycles).map(|k| {
         let (t0, t1) = (k as f64 * part.cycle, (k + 1) as f64 * part.cycle);
@@ -138,10 +180,6 @@ fn apply_code(src: &str, node: &str, part: &Part, param: &str, body: &str) -> Re
     for (key, value) in [("code", code), ("beats", cycle.clone())] {
         let splice = source::set_field(&next, node, key, &value)?;
         next = makepad_edit_values::apply_splices(&next, 0, &[splice])?;
-    }
-    ScoreDoc::load(&next).map_err(|d| d.iter().map(|d| d.message.clone()).collect::<Vec<_>>().join("; "))?;
-    if let Some(error) = crate::render::loop_error(&next, node) {
-        return Err(format!("`{node}` would not play: {error}"));
     }
     Ok(next)
 }
@@ -437,4 +475,29 @@ pub fn parse_notes(text: &str, like: &Part) -> Result<Part, String> {
     }
     notes.sort_by(|a, b| a.beat.total_cmp(&b.beat));
     Ok(Part { notes, ..like.clone() })
+}
+
+#[cfg(test)]
+#[test]
+fn a_voice_and_its_variation_reuse_the_loaded_shaders() {
+    let source = r#"use mod.score.*
+let clock = Clock{}
+let lead = Shader{code: "fn voice() { gate * velocity }"}
+let line = Loop{play: lead beats: 2 code: fn(i) { play(@c4) sleep(1) play(@g4) sleep(1) }}
+Score{clock lead line}"#;
+    let loaded = model::load(source).unwrap();
+    let programs = CompiledShaders::from_doc(&loaded.doc);
+    let compiles = model::SHADER_COMPILES.with(|n| n.get());
+    assert!(compiles > 0);
+    let part = part_from(programs.evaluate(source).unwrap(), "line").unwrap();
+    assert_eq!(part.notes.len(), 2);
+    assert_eq!(crate::render::cycle_notes_of(loaded).len(), 1);
+    let (_, reused) = apply_prepared(source, "line", &part, Some(&programs), &crate::PrepareControl::default()).unwrap();
+    assert!(Arc::ptr_eq(&programs, &reused));
+    assert_eq!(model::SHADER_COMPILES.with(|n| n.get()), compiles);
+    let changed = source.replace("gate * velocity", "gate * 0.5");
+    let (rewritten, fresh) = apply_prepared(&changed, "line", &part, Some(&programs), &crate::PrepareControl::default()).unwrap();
+    assert!(!Arc::ptr_eq(&programs, &fresh));
+    assert_eq!(model::SHADER_COMPILES.with(|n| n.get()), compiles + 1);
+    assert_eq!(part_from(fresh.evaluate(&rewritten).unwrap(), "line").unwrap().notes, part.notes);
 }

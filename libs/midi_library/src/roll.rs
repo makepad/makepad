@@ -750,8 +750,13 @@ pub fn from_text(text: &str) -> Result<Arrangement, String> {
 /// as an imported song (`score_text`); its instruments and code stay in
 /// the Score.
 pub fn from_score(source: &str) -> Result<Arrangement, String> {
+    let loaded = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?;
+    from_loaded(loaded)
+}
+
+pub fn from_loaded(loaded: impl Into<makepad_score_live::model::EvaluatedDocument>) -> Result<Arrangement, String> {
     use makepad_score_live::model::InstKind;
-    let loaded = makepad_score_live::model::load(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?;
+    let loaded = loaded.into();
     let doc = loaded.doc.clone();
     let per_bar = doc.beats_per_bar();
     let beats = if doc.arrangement_beats() > 0.0 { doc.arrangement_beats() } else { 16.0 * per_bar };
@@ -896,6 +901,14 @@ mod tests {
             Note { beat: 0.0, key: 60.0, dur: 1.0, vel: 0.95, fx: fx(&[0.0, 3.0, 7.0], true, 0.0) },
             Note { beat: 1.0, key: 64.0, dur: 1.0, vel: 0.7, fx: fx(&[], false, -12.0) },
         ], pedal: Vec::new(), programs: Vec::new(), amp: 0.6, pan: 0.0 });
+        let fx = a.parts[0].notes[1].fx.unwrap();
+        let options = makepad_script::syntax::parse_value(&fx.text()).unwrap();
+        let points = options.field("bend").unwrap().value.items().unwrap();
+        let parsed: Vec<_> = points.iter().map(|p| {
+            let [beat, semitones] = p.items().unwrap() else { panic!("a bend point needs two numbers") };
+            (beat.number().unwrap() as f32, semitones.number().unwrap() as f32)
+        }).collect();
+        assert_eq!(parsed, fx.bend(), "Splash preserves each bend point, including the downward slide");
         let text = to_text(&a, &Detail::default());
         assert!(text.contains("C4:arp=0.3.7:vib!") && text.contains("E4:bend=-12") && text.contains("marks :arp"), "{text}");
         let back = from_text(&text).unwrap();
@@ -941,7 +954,7 @@ mod tests {
         // The Score made from the text loads and plays every note it shows.
         let score = arrangement::to_score(&back);
         let loaded = makepad_score_live::model::load(&score).unwrap_or_else(|d| panic!("{d:?}\n{score}"));
-        let mut composer = makepad_score_live::compose::Composer::new(loaded);
+        let mut composer = makepad_score_live::compose::Composer::new(loaded.into_evaluated());
         let mut events = Vec::new();
         composer.pump(64.0, &mut events);
         let played = events.iter().filter(|e| e.kind == makepad_score_player::EventKind::Note).count();
@@ -949,6 +962,10 @@ mod tests {
         assert_eq!(played, imported.arrangement.parts.iter().map(|p| p.notes.len()).sum::<usize>(), "the test band sits on the grid: nothing merges");
         // And the Score read back by playing it says the same.
         let read = from_score(&score).unwrap();
+        let bad_shader = score.replacen("Score{", "let unused = ShaderControl{code: \"let out = output(1) fn block() { out = unknown_name }\"}\nScore{unused ", 1);
+        assert!(matches!(makepad_score_live::ScoreDoc::load_controlled(&bad_shader, &makepad_score_live::PrepareControl::default()), Err(makepad_score_live::LoadError::Problems(_))));
+        assert_eq!(to_text(&from_score(&bad_shader).unwrap(), &Detail::default()), to_text(&read, &Detail::default()),
+            "transcription preserves the same notes, meter and sections without compiling the unused shader");
         let only_notes = |t: &str| t.lines().filter(|l| l.starts_with("  ") || l.contains(" = ")).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(only_notes(&to_text(&read, &Detail { chords: false, ..Detail::default() })), only_notes(&to_text(&back, &Detail { chords: false, ..Detail::default() })));
     }

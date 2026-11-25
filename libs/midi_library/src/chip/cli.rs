@@ -17,7 +17,7 @@ use crate::chip::import::{self, About};
 use crate::{cover, roll};
 
 /// Run `midi_library chip <args>`.
-pub fn run(args: &[String]) -> Result<(), String> {
+pub fn run(args: &[String], control: &makepad_score_live::PrepareControl) -> Result<(), String> {
     if args.first().map(String::as_str) == Some("install-hvsc") {
         // The SID collection through the pinned installer, its notice first.
         use makepad_model_install::{self as models, InstallMsg};
@@ -151,7 +151,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("  tempo changes: {}", a.tempo.len());
         }
         "timing" => {
-            let doc = makepad_score_live::model::load(&imported.source).map_err(|d| format!("{d:?}"))?.doc;
+            let doc = makepad_score_live::model::read_document(&imported.source).map_err(|d| format!("{d:?}"))?.doc;
             println!("arrangement: {} beats; score: {} beats, natural length {:.1} s", a.beats(), doc.arrangement_beats(), makepad_score_live::render::natural_length(&doc));
             let mut t = 0.0;
             let mut beat = 0.0;
@@ -176,7 +176,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let out = args.get(2).ok_or("cover <file> <out.wav> [lufs]")?;
             let lufs: f64 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(-14.0);
             import::register(&imported);
-            let r = cover::render(&imported.source, lufs)?;
+            let r = cover::render(&imported.source, lufs, control)?;
             std::fs::write(out, cover::wav(&r.song)).map_err(|e| e.to_string())?;
             println!("{out}: {:.1} s, {:.1} LUFS, true peak {:.1} dBTP", r.song.mix.seconds(), r.lufs, r.true_peak);
         }
@@ -188,7 +188,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let stem = std::path::Path::new(file).file_name().and_then(|f| f.to_str()).unwrap_or("song").replace(['.', ' '], "_");
             import::register(&imported);
-            let r = cover::render(&imported.source, lufs)?;
+            let r = cover::render(&imported.source, lufs, control)?;
             let rate = r.song.mix.rate;
             let (mut ol, mut or) = import::original(&bytes, file, &about, rate)?;
             // The original from where the Score's beat 0 is.

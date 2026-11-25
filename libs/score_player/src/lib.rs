@@ -28,6 +28,11 @@ pub use event::{Env, Event, EventKind, NoteOpts, ARP_STEPS, ENV_POINTS};
 pub use fx::FxKind;
 pub use loop_engine::{Inst, KitSlot, LoopEngine, Sample, Tempo, MAX_LOOP_VOICES};
 pub use makepad_score_voice as sung;
+
+/// What a build without the neural singer says of a voice on it (`engine: @neural`): its model
+/// runs in this process, so it comes only with an app's `localai` (AGENTS.md), and the hub has no
+/// singer out of process to stand in for it.
+pub const NEURAL_NEEDS_LOCALAI: &str = "@neural needs a `localai` build: the neural voice runs its model in this process; @dsp sings in every build";
 pub use meters::Meters;
 pub use voice::pan_gains;
 

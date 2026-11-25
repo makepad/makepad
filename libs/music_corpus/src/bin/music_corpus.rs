@@ -95,7 +95,7 @@ fn run_eval(flag: &Flag, num: &Num) -> Result<(), String> {
     let pred = std::fs::read_to_string(&pred_path).map_err(|e| format!("{pred_path}: {e}"))?;
     let wav = flag("--wav").map(PathBuf::from);
     let render = flag("--render").and_then(|n| n.parse().ok()).zip(wav.as_deref());
-    let rep = eval::evaluate(&cases, &pred, num("--threads", 8), render)?;
+    let rep = eval::evaluate(&cases, &pred, num("--threads", 8), render, &makepad_score_live::PrepareControl::default())?;
     print!("{}", eval::report_text(&rep));
     if let Some(path) = flag("--json") {
         std::fs::write(&path, eval::report_json(&rep).to_json()).map_err(|e| format!("{path}: {e}"))?;

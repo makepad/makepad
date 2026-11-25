@@ -23,12 +23,12 @@ mod tests {
     fn every_template_loads_plays_and_raises_nothing() {
         for (name, source) in super::TEMPLATES {
             let loaded = crate::model::load(source).unwrap_or_else(|d| panic!("{name}: {d:?}"));
-            let mut composer = Composer::new(loaded);
+            let mut composer = Composer::new(loaded.into_evaluated());
             let mut events = Vec::new();
             composer.pump(64.0, &mut events);
             assert!(composer.errors().is_empty(), "{name}: {:?}", composer.errors());
             assert!(!events.is_empty(), "{name}: no events");
-            let r = render(source, &RenderOpts { seconds: Some(6.0), ..Default::default() }, &crate::NoSamples).unwrap();
+            let r = render(source, &RenderOpts { seconds: Some(6.0), ..Default::default() }, &crate::NoSamples, &crate::PrepareControl::default()).unwrap();
             let peak = r.left.iter().fold(0.0f32, |a, x| a.max(x.abs()));
             assert!(peak > 0.02, "{name}: silent ({peak})");
         }

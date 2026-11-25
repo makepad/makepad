@@ -4,20 +4,38 @@
 //! (`Knob{param: @cutoff min: 200 max: 4000}`).
 
 use makepad_score_player::FxKind;
+use makepad_score_player::shader::{AudioShaderRef, ParamCurve, ParamUnit};
+use std::borrow::Cow;
 
 /// How a control's travel (0..1) maps onto a field: Log is equal ratios
 /// for equal travel (frequencies, times; needs `min > 0`), Int whole numbers.
 use makepad_edit_values::Taper;
 
+const EXP_RATIO: f64 = 1000.0;
+
+/// A discrete shader parameter uses its compiled grid for panel edits.
+#[derive(Clone, Debug)]
+pub struct ShaderStep {
+    shader: AudioShaderRef,
+    index: usize,
+}
+
+impl PartialEq for ShaderStep {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self.shader.ptr_eq(&other.shader)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParamSpec {
     pub key: String,
     /// The silkscreen label, upper case on the panel.
-    pub label: &'static str,
+    pub label: Cow<'static, str>,
     pub min: f64,
     pub max: f64,
     pub default: f64,
     pub taper: Taper,
+    pub shader_step: Option<ShaderStep>,
     pub unit: Unit,
     /// A bipolar field (pan, detune) draws its arc from the middle.
     pub bipolar: bool,
@@ -26,11 +44,11 @@ pub struct ParamSpec {
     /// The module it belongs to (a Morph's `osc_a`, `filter1`, `lfo2` …;
     /// empty where a node type has no groups): what a lens or a panel
     /// gathers into one module.
-    pub group: &'static str,
+    pub group: Cow<'static, str>,
     /// A mod row may move it (a Morph's mod destinations).
     pub modulatable: bool,
     /// One line about it, for the AI and tooltips.
-    pub about: &'static str,
+    pub about: Cow<'static, str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,12 +91,54 @@ pub const CHORD_NAMES: [&str; 10] = ["major", "minor", "dim", "aug", "sus2", "su
 
 impl ParamSpec {
     fn num(key: &str, label: &'static str, min: f64, max: f64, default: f64, taper: Taper, unit: Unit) -> ParamSpec {
-        ParamSpec { key: key.to_string(), label, min, max, default, taper, unit, bipolar: false, options: Vec::new(), group: "", modulatable: false, about: "" }
+        ParamSpec { key: key.to_string(), label: label.into(), min, max, default, taper, shader_step: None, unit, bipolar: false, options: Vec::new(), group: "".into(), modulatable: false, about: "".into() }
     }
 
     fn choice(key: &str, label: &'static str, options: &[&str]) -> ParamSpec {
         let options: Vec<String> = options.iter().map(|o| o.to_string()).collect();
-        ParamSpec { key: key.to_string(), label, min: 0.0, max: (options.len().max(1) - 1) as f64, default: 0.0, taper: Taper::Int, unit: Unit::None, bipolar: false, options, group: "", modulatable: false, about: "" }
+        ParamSpec { key: key.to_string(), label: label.into(), min: 0.0, max: (options.len().max(1) - 1) as f64, default: 0.0, taper: Taper::Int, shader_step: None, unit: Unit::None, bipolar: false, options, group: "".into(), modulatable: false, about: "".into() }
+    }
+
+    /// Read the range and presentation from the same compiled parameter.
+    pub fn from_shader(shader: &AudioShaderRef, index: usize) -> ParamSpec {
+        let info = shader.param_view(index);
+        let meta = shader.param_meta(index);
+        let whole_steps = meta.step >= 1.0 && meta.step.fract() == 0.0 && info.min.fract() == 0.0 && info.max.fract() == 0.0;
+        let taper = if !meta.choices.is_empty() || whole_steps {
+            Taper::Int
+        } else {
+            match meta.curve {
+                ParamCurve::Linear => Taper::Linear,
+                ParamCurve::Log => Taper::Log,
+                ParamCurve::Exp => Taper::Exp,
+            }
+        };
+        let unit = match meta.unit {
+            ParamUnit::None => Unit::None,
+            ParamUnit::Hz => Unit::Hz,
+            ParamUnit::Secs => Unit::Secs,
+            ParamUnit::Ms => Unit::Ms,
+            ParamUnit::Beats => Unit::Beats,
+            ParamUnit::Db => Unit::Db,
+            ParamUnit::Semis => Unit::Semis,
+            ParamUnit::Cents => Unit::Cents,
+            ParamUnit::Percent => Unit::Percent,
+        };
+        ParamSpec {
+            key: info.name.into(),
+            label: if meta.label.is_empty() { info.name.replace('_', " ").to_uppercase() } else { meta.label.to_owned() }.into(),
+            group: meta.group.to_owned().into(),
+            about: makepad_score_live::assist::shader_field_doc(shader, index).into(),
+            min: info.min.into(),
+            max: info.max.into(),
+            default: info.default.into(),
+            taper,
+            shader_step: (meta.step > 0.0).then(|| ShaderStep { shader: shader.clone(), index }),
+            unit,
+            bipolar: info.min < 0.0 && info.max > 0.0,
+            options: meta.choices.iter().map(|s| (*s).to_owned()).collect(),
+            modulatable: false,
+        }
     }
 
     /// Only these choices, in this order (`Switch{param: @osc options: [@saw @square]}`).
@@ -101,11 +161,28 @@ impl ParamSpec {
             Some(v) if v < 0.0 => (v * 2.0, -v * 2.0),
             _ => (0.0, 1.0),
         };
-        ParamSpec { key: key.to_string(), label: "", min, max, default: value.unwrap_or(0.0), taper: Taper::Linear, unit: Unit::None, bipolar: min < 0.0, options: Vec::new(), group: "", modulatable: false, about: "" }
+        ParamSpec { key: key.to_string(), label: "".into(), min, max, default: value.unwrap_or(0.0), taper: Taper::Linear, shader_step: None, unit: Unit::None, bipolar: min < 0.0, options: Vec::new(), group: "".into(), modulatable: false, about: "".into() }
     }
 
     pub fn is_choice(&self) -> bool {
         !self.options.is_empty()
+    }
+
+    pub(crate) fn step(&self) -> f64 {
+        match &self.shader_step {
+            Some(p) => p.shader.param_meta(p.index).step.into(),
+            None if self.taper == Taper::Int => 1.0,
+            None => 0.0,
+        }
+    }
+
+    pub(crate) fn constrain(&self, value: f64) -> f64 {
+        if let Some(p) = &self.shader_step {
+            let v = if value.is_finite() { value.clamp(self.min, self.max) } else { value };
+            return p.shader.param_value(p.index, v as f32).into();
+        }
+        let v = value.clamp(self.min.min(self.max), self.max.max(self.min));
+        if self.taper == Taper::Int { v.round() } else { v }
     }
 
     /// Travel 0..1 for a value.
@@ -119,6 +196,7 @@ impl ParamSpec {
         let v = value.clamp(self.min, self.max);
         match self.taper {
             Taper::Log if self.min > 0.0 => (v / self.min).ln() / (self.max / self.min).ln(),
+            Taper::Exp => ((EXP_RATIO - 1.0) * ((v - self.min) / (self.max - self.min))).ln_1p() / EXP_RATIO.ln(),
             _ => (v - self.min) / (self.max - self.min),
         }
     }
@@ -129,18 +207,24 @@ impl ParamSpec {
         if self.unit == Unit::Note {
             return NOTE_VALUES[(t * (NOTE_VALUES.len() - 1) as f64).round() as usize].0;
         }
-        match self.taper {
+        let value = match self.taper {
             Taper::Log if self.min > 0.0 => self.min * (self.max / self.min).powf(t),
-            Taper::Int => (self.min + t * (self.max - self.min)).round(),
+            Taper::Exp if t == 1.0 => self.max,
+            Taper::Exp => self.min + (self.max - self.min) * (EXP_RATIO.ln() * t).exp_m1() / (EXP_RATIO - 1.0),
             _ => self.min + t * (self.max - self.min),
-        }
+        };
+        self.constrain(value)
     }
 
     /// The value as the source writes it: as few digits as the range needs
     /// (a cutoff is `812`, a resonance `0.62`, an attack `0.004`).
     pub fn source_text(&self, value: f64) -> String {
-        if let Some(name) = self.options.get(value.round().max(0.0) as usize).filter(|_| self.is_choice()) {
-            return format!("@{name}");
+        let value = if self.shader_step.is_some() { self.constrain(value) } else { value };
+        if let Some(name) = self.options.get(value.round().max(0.0) as usize) {
+            return makepad_score_live::model::shader_choice(name);
+        }
+        if self.shader_step.is_some() {
+            return (value as f32).to_string();
         }
         if self.unit == Unit::Bool {
             return if value > 0.5 { "true" } else { "false" }.to_string();
@@ -181,8 +265,8 @@ impl ParamSpec {
     pub fn parse(&self, text: &str, current: f64) -> Result<f64, String> {
         let t = text.trim();
         if self.is_choice() {
-            let name = t.trim_start_matches('@').to_ascii_lowercase();
-            if let Some(i) = self.options.iter().position(|o| o.to_ascii_lowercase() == name) {
+            let name = t.trim_start_matches('@');
+            if let Some(i) = self.options.iter().position(|o| o.eq_ignore_ascii_case(name) || (t.starts_with('"') && format!("{o:?}") == t)) {
                 return Ok(i as f64);
             }
         }
@@ -208,8 +292,7 @@ impl ParamSpec {
         if self.unit == Unit::Percent && !has_unit && v.abs() > 1.0 {
             v /= 100.0;
         }
-        let v = v.clamp(self.min.min(self.max), self.max.max(self.min));
-        Ok(if self.taper == Taper::Int { v.round() } else { v })
+        Ok(self.constrain(v))
     }
 
     /// The value for a person: `812 Hz`, `3.5 ms`, `62%`.
@@ -260,17 +343,18 @@ fn morph_spec(key: &str) -> Option<ParamSpec> {
     };
     Some(ParamSpec {
         key: key.to_string(),
-        label: p.label.as_str(),
+        label: p.label.as_str().into(),
         min: p.min as f64,
         max: p.max as f64,
         default: p.default as f64,
         taper,
+        shader_step: None,
         unit,
         bipolar: p.bipolar,
         options: p.options.iter().map(|o| o.to_string()).collect(),
-        group: p.group.as_str(),
+        group: p.group.as_str().into(),
         modulatable: p.modulatable,
-        about: p.about,
+        about: p.about.into(),
     })
 }
 

@@ -5,9 +5,12 @@
 //! the loops' functions in it, once per cycle.
 
 use crate::theory;
+use makepad_core_util::ui_thread::WorkerOnly;
 use makepad_script::*;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+static EVALUATE: WorkerOnly = WorkerOnly::new("a score evaluation");
 
 pub const DOC_FILE: &str = "score.splash";
 const PRELUDE_FILE: &str = "score_prelude.splash";
@@ -17,9 +20,9 @@ const EVAL_LIMIT: usize = 4_000_000;
 pub const CYCLE_LIMIT: usize = 1_000_000;
 
 /// The node types a score is made of.
-pub const NODE_TYPES: [&str; 37] = [
+pub const NODE_TYPES: [&str; 40] = [
     "Clock", "Synth", "Drums", "Sampler", "Ironfish", "Morph", "Tandem", "Loop", "Stinger", "Section", "Lowpass", "Highpass", "Bandpass", "Filter", "Delay", "Reverb",
-    "Drive", "Crush", "Chorus", "Comp", "Duck", "Bus", "Limiter", "Eq", "Width", "Voice", "Shader", "ShaderFx", "Instrument", "MidiIn", "Arp", "Chord",
+    "Drive", "Crush", "Chorus", "Comp", "Duck", "Bus", "Limiter", "Eq", "Width", "Voice", "Shader", "ShaderFx", "ShaderControl", "Port", "ShaderModule", "Instrument", "MidiIn", "Arp", "Chord",
     "Transpose", "Velocity", "Score", "Isolator", "DjFilter",
 ];
 
@@ -285,6 +288,7 @@ fn id_string(id: LiveId) -> String {
 
 /// Evaluate a document in a fresh VM with `mod.score`.
 pub fn evaluate(source: &str) -> Evaluated {
+    EVALUATE.check();
     let mut host = Box::new(ScriptVmHost::new((), ()));
     let bx = Box::new(ScriptVmBase::new());
     let ctx: Shared = Rc::new(RefCell::new(Ctx::default()));
@@ -798,7 +802,7 @@ fn install(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
         }
         // The line as a neural phrase too (a loop on a neural voice plays it;
         // the others drop it): its score goes in the phrase book.
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
         if let Some((key, score, first)) = makepad_score_player::sung::neural::phrase_of(&lowered, ctx.bpm, makepad_score_player::sung::neural::SINGER) {
             makepad_score_player::sung::neural::remember(key, score);
             let lead = makepad_score_player::sung::neural::LEAD as f64 * ctx.bpm / 60.0;

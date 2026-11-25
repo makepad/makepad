@@ -23,13 +23,13 @@
 use crate::compose::Composer;
 use crate::live::{ClockSource, Cmd, LiveConfig, LiveScore, LiveThread};
 use crate::model::{self, Diag, ScoreDoc};
-use crate::player::{prepare, prepare_slice, transport, ClockMode, Player};
+use crate::player::{prepare, transport, ClockMode, Player};
 use crate::render::transport_bpm;
 use makepad_audio_synth::instrument::Instrument;
 use makepad_flow::live::plan::OwnerSlice;
 use makepad_lock_free::{ring, Consumer, Producer};
 use makepad_audio_engine::feed::{loop_feed, LoopFeed};
-use makepad_audio_engine::schedule::{migrate_state, ClockChunk, Layout};
+use makepad_audio_engine::schedule::{ClockChunk, Layout};
 use makepad_audio_engine::CHUNK;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -115,6 +115,7 @@ enum Swap {
 
 /// The game's handle on its music.
 pub struct GameMusic {
+    control: crate::PrepareControl,
     shared: Arc<Shared>,
     live: Option<LiveScore>,
     /// Headless: the composer, run by `advance`.
@@ -167,6 +168,7 @@ struct Inline {
 /// a host prepares it on a worker, may launch it there too ([`PreparedMusic::launch`]), and
 /// starts it ([`PreparedMusic::start`]) where its music plays.
 pub struct PreparedMusic {
+    control: crate::PrepareControl,
     source: String,
     rate: f32,
     doc: ScoreDoc,
@@ -202,12 +204,18 @@ struct Parts {
 const _: fn() = || { fn send<T: Send>() {} send::<PreparedMusic>(); };
 
 /// Load `source` and prepare its graph at `rate`: the costly half of [`music`].
-pub fn prepare_music(source: &str, rate: f32) -> Result<PreparedMusic, Vec<Diag>> {
+pub fn prepare_music(source: &str, rate: f32) -> Result<PreparedMusic, crate::LoadError> {
+    // not cancellable yet: game::Music's supersession slot takes it in 3b
+    prepare_with_control(source, rate, &crate::PrepareControl::default())
+}
+
+fn prepare_with_control(source: &str, rate: f32, control: &crate::PrepareControl) -> Result<PreparedMusic, crate::LoadError> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
-    let loaded = model::load(source)?;
+    let loaded = model::load_controlled(source, control)?;
     let name = format!("music_{}", NEXT.fetch_add(1, Ordering::Relaxed));
-    let instance = prepare(&loaded.doc, rate, &name, ClockMode::Own, None, 1)?;
-    Ok(PreparedMusic { source: source.to_string(), rate, doc: loaded.doc, name, stage: Stage::Graph(instance) })
+    let slice = crate::player::slice(&loaded.doc, &name, ClockMode::Own);
+    let instance = prepare(&loaded.doc, slice, rate, &name, ClockMode::Own, None, 1, control)?;
+    Ok(PreparedMusic { control: control.clone(), source: source.to_string(), rate, doc: loaded.doc, name, stage: Stage::Graph(instance) })
 }
 
 impl PreparedMusic {
@@ -219,7 +227,7 @@ impl PreparedMusic {
         self.rate
     }
 
-    pub fn doc(&self) -> &ScoreDoc {
+    pub fn doc(&self) -> &model::AuthoredDoc {
         &self.doc
     }
 
@@ -228,7 +236,7 @@ impl PreparedMusic {
     /// source the start sends. Without threads ([`crate::live::threads_available`]) it stays a
     /// graph.
     pub fn launch(self) -> PreparedMusic {
-        let Self { source, rate, doc, name, stage } = self;
+        let Self { control, source, rate, doc, name, stage } = self;
         let stage = match stage {
             Stage::Graph(instance) if crate::live::threads_available() => {
                 let parts = Parts::new(instance, &doc, &name, rate, Clocking::Realtime);
@@ -237,22 +245,22 @@ impl PreparedMusic {
             }
             stage => stage,
         };
-        PreparedMusic { source, rate, doc, name, stage }
+        PreparedMusic { control, source, rate, doc, name, stage }
     }
 
     /// The handle and the instrument (what [`music`] returns). Headless clocking loads the source
     /// again for its composer (the composer's VM stays on the thread that runs it).
-    pub fn start(self, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), Vec<Diag>> {
-        let Self { source, rate, doc, name, stage } = self;
+    pub fn start(self, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
+        let Self { control, source, rate, doc, name, stage } = self;
         let instance = match (stage, clocking) {
             (Stage::Launched(launched), Clocking::Realtime) => {
                 let Launched { parts, live } = *launched;
                 let live = LiveScore::from_thread(live);
-                live.set_source(&source);
-                return Ok(parts.finish(name, rate, Some(live), None));
+                live.set_source(&source, &control);
+                return Ok(parts.finish(control, name, rate, Some(live), None));
             }
             // Launched for the bus, its graph is not a headless one: prepare that.
-            (Stage::Launched(_), Clocking::Headless) => return prepare_music(&source, rate)?.start(clocking),
+            (Stage::Launched(_), Clocking::Headless) => return prepare_with_control(&source, rate, &control)?.start(clocking),
             (Stage::Graph(instance), _) => instance,
         };
         let feeds = (clocking == Clocking::Headless).then(|| instance.feeds.clone());
@@ -260,16 +268,16 @@ impl PreparedMusic {
         let (live, inline) = match feeds {
             None => {
                 let live = LiveScore::new(live_config(&name, &parts.shared));
-                live.set_source(&source);
+                live.set_source(&source, &control);
                 (Some(live), None)
             }
             Some(feeds) => {
-                let loaded = model::load(&source)?;
+                let loaded = model::load_controlled(&source, &control)?;
                 let tempo = makepad_audio_engine::feed::tempo_feed(&transport(&name));
-                (None, Some(Box::new(Inline { composer: Composer::new(loaded), feeds, tempo })))
+                (None, Some(Box::new(Inline { composer: Composer::new(loaded.into_evaluated()), feeds, tempo })))
             }
         };
-        Ok(parts.finish(name, rate, live, inline))
+        Ok(parts.finish(control, name, rate, live, inline))
     }
 }
 
@@ -307,15 +315,15 @@ impl Parts {
         Parts { shared, events, swaps, retired, slice, layout, instrument }
     }
 
-    fn finish(self, name: String, rate: f32, live: Option<LiveScore>, inline: Option<Box<Inline>>) -> (GameMusic, MusicInstrument) {
+    fn finish(self, control: crate::PrepareControl, name: String, rate: f32, live: Option<LiveScore>, inline: Option<Box<Inline>>) -> (GameMusic, MusicInstrument) {
         let Parts { shared, events, swaps, retired, slice, layout, instrument } = self;
-        let handle = GameMusic { shared, live, inline, events, swaps, retired, name, slice, layout, generation: 1, rate, section: None, cued: f64::NEG_INFINITY };
+        let handle = GameMusic { control, shared, live, inline, events, swaps, retired, name, slice, layout, generation: 1, rate, section: None, cued: f64::NEG_INFINITY };
         (handle, instrument)
     }
 }
 
 /// Prepare `source` as a game's music at the bus's `rate`.
-pub fn music(source: &str, rate: f32, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), Vec<Diag>> {
+pub fn music(source: &str, rate: f32, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
     prepare_music(source, rate)?.start(clocking)
 }
 
@@ -329,9 +337,9 @@ impl GameMusic {
         let Some(inline) = &mut self.inline else { return };
         let composer = &mut inline.composer;
         match cmd {
-            Cmd::Source(source) => {
-                if let Ok(loaded) = model::load(&source) {
-                    composer.reload(loaded, now);
+            Cmd::Source(source, control) => {
+                if let Ok(loaded) = model::load_controlled(&source, &control) {
+                    composer.reload(loaded.into_evaluated(), now);
                     for name in composer.doc.feed_names() {
                         let key = crate::key(&name);
                         if !inline.feeds.iter().any(|(k, _)| *k == key) {
@@ -410,20 +418,20 @@ impl GameMusic {
     /// instruments or effects changed, a new graph takes over at the next
     /// block, staying loops keeping their voices. A problem leaves the
     /// music playing as it was.
-    pub fn set_source(&mut self, source: &str) -> Result<(), Vec<Diag>> {
-        let loaded = model::load(source)?;
+    pub fn set_source(&mut self, source: &str) -> Result<(), crate::LoadError> {
+        let loaded = model::load_controlled(source, &self.control)?;
         let slice = crate::player::slice(&loaded.doc, &self.name, ClockMode::Own);
         if slice != self.slice {
             self.generation += 1;
-            let next = prepare_slice(&loaded.doc, slice.clone(), self.rate, &self.name, ClockMode::Own, Some(&self.layout), self.generation)?;
+            let next = prepare(&loaded.doc, slice.clone(), self.rate, &self.name, ClockMode::Own, Some(&self.layout), self.generation, &self.control)?;
             self.layout = next.layout.clone();
             if self.swaps.push(Swap::Next(Box::new(next))).is_err() {
-                return Err(vec![Diag { line: 1, col: 1, node: None, message: "the music is still taking the last change".into() }]);
+                return Err(vec![Diag { line: 1, col: 1, node: None, message: "the music is still taking the last change".into() }].into());
             }
             self.slice = slice;
         }
         self.shared.bar.store(loaded.doc.beats_per_bar().to_bits(), Ordering::Release);
-        self.command(Cmd::Source(source.into()));
+        self.command(Cmd::Source(source.into(), self.control.clone()));
         Ok(())
     }
 
@@ -504,6 +512,7 @@ impl Drop for GameMusic {
     /// instrument keeps its rings until the bus drops it).
     fn drop(&mut self) {
         // The composer thread first, so nothing sends to them again.
+        self.control.cancel();
         self.live = None;
         makepad_audio_engine::feed::forget_instance(&self.name);
     }
@@ -513,9 +522,7 @@ impl MusicInstrument {
     fn take_swap(&mut self) {
         let Some(Swap::Next(mut next)) = self.swaps.pop() else { return };
         if next.schedule.base == Some(self.instance.schedule.generation) {
-            for (from, to) in next.schedule.migrate.iter() {
-                migrate_state(&mut self.instance.schedule.states[*from as usize], &mut next.schedule.states[*to as usize]);
-            }
+            next.schedule.take_over(&mut self.instance.schedule);
         }
         self.playing_index = next.layout.controls.get(&format!("{}.playing", transport(&next.name))).map(|c| c.0);
         if let (true, Some(index)) = (self.parked || !self.started, self.playing_index) {

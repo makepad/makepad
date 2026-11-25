@@ -11,9 +11,10 @@ use makepad_audio_synth::tandem::{program::Program as TandemProgram, Tandem, Tan
 use makepad_audio_synth::instrument::{Control, Instrument as NativeInstrument};
 use makepad_audio_synth::instruments::InstrumentKind;
 use makepad_audio_synth::recipe::Recipe;
-use makepad_script_audio_aot::{AudioShaderRef};
-use crate::shader::{ShaderInst, SHADER_VOICES};
-#[cfg(not(target_arch = "wasm32"))]
+use makepad_script_audio_aot::{AudioShaderRef, Expression};
+use crate::shader::{ShaderInst, Steal, SHADER_VOICES};
+use crate::stream::{self, Ctl};
+#[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
 use makepad_score_voice::neural::NeuralSinger;
 use makepad_score_voice::{Choir, ChoirStyle, PhonemeSeq, SungNote, VoiceProfile};
 use std::sync::Arc;
@@ -22,13 +23,13 @@ use crate::voice::{pan_gains, with_opts, SamplePlay, Voice};
 
 pub const MAX_LOOP_VOICES: usize = 12;
 
-/// Tempo changes one pass may hold.
+/// Storage per internal render pass. A host buffer may span any number of passes.
 pub const MAX_TEMPO_SPLITS: usize = 4;
 
 /// Where the beats fall in one pass: the beat at its first frame and beats
 /// per frame, changing at up to [`MAX_TEMPO_SPLITS`] beats (a tempo map's
-/// steps). Frames are fractional pass frames, so a change lands between
-/// samples exactly where the tempo map puts it, whatever the pass size.
+/// steps). Split frames are relative to the pass start.
+/// The map preserves whole-frame beats and each sample's first change, then interpolates linearly to the next whole frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tempo {
     pub beat0: f64,
@@ -178,6 +179,21 @@ impl Default for KitSlot {
     }
 }
 
+/// How the loop plays its shader instrument.
+#[derive(Clone, Copy, Debug)]
+pub struct ShaderMode {
+    pub mono: bool,
+    pub legato: bool,
+    pub glide: f32,
+    pub steal: Steal,
+}
+
+impl Default for ShaderMode {
+    fn default() -> Self {
+        Self { mono: false, legato: true, glide: 0.0, steal: Steal::Oldest }
+    }
+}
+
 /// A loop's instrument. `key` names the instrument node, so a knob on it
 /// reaches every loop that plays it.
 #[derive(Clone)]
@@ -197,7 +213,7 @@ pub enum Inst {
     Tandem { key: u64, prog: Arc<TandemProgram> },
     /// An audio shader instrument: its voices live in the loop's engine;
     /// `params` are (index, value) pairs set on it.
-    Shader { key: u64, shader: AudioShaderRef, params: Arc<[(u16, f32)]>, mono: bool },
+    Shader { key: u64, seed: u32, shader: AudioShaderRef, params: Arc<[(u16, f32)]>, mode: ShaderMode },
     /// Sung voices: a choir of `singers` (1 = a solo voice), their
     /// profiles cycled; lives in the loop's engine.
     Voice { key: u64, profiles: Arc<[Arc<VoiceProfile>]>, singers: u8, style: ChoirStyle },
@@ -205,7 +221,7 @@ pub enum Inst {
     /// ahead by the singer's own thread, from where each starts; a phrase
     /// not rendered yet joins at the place it has reached when it arrives.
     /// (Native builds: the browser has no singer model.)
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
     Neural { key: u64, singer: NeuralSinger },
     /// A native Makepad instrument (the modelled piano, the modelled drum
     /// kit, a SoundFont program...), one per General MIDI program the loop
@@ -227,7 +243,7 @@ impl Inst {
     pub fn key(&self) -> u64 {
         match self {
             Inst::Synth { key, .. } | Inst::Drums { key, .. } | Inst::Sampler { key, .. } | Inst::Ironfish { key, .. } | Inst::Morph { key, .. } | Inst::Tandem { key, .. } | Inst::Shader { key, .. } | Inst::Voice { key, .. } | Inst::Native { key, .. } | Inst::Midi { key, .. } | Inst::Input { key, .. } => *key,
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
             Inst::Neural { key, .. } => *key,
             Inst::Silent => 0,
         }
@@ -247,7 +263,7 @@ pub const MAX_PHRASES: usize = 16;
 /// A neural phrase playing: its audio once it is there, where the next
 /// frame reads it (samples of the phrase's rate; below 0 it has not begun),
 /// and its level.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg_attr(not(all(feature = "neural", not(target_arch = "wasm32"))), allow(dead_code))]
 struct PhrasePlay {
     key: u64,
     audio: Option<Arc<[f32]>>,
@@ -260,6 +276,71 @@ struct Act {
     frame: u16,
     event: Option<Event>,
     release: u8,
+}
+
+#[derive(Clone, Copy)]
+struct ShaderControl {
+    beat: f64,
+    ch: u8,
+    ctl: Ctl,
+    value: f32,
+    bend_range: f32,
+    mpe: bool,
+    master: Option<u8>,
+}
+
+#[derive(Default)]
+struct ShaderExpression {
+    channel: [[f32; 16]; 3],
+    zone_bend: f32,
+}
+
+impl ShaderExpression {
+    fn value(&self, which: Expression, channel: usize) -> f32 {
+        let value = self.channel[which as usize][channel];
+        if matches!(which, Expression::Bend) { value + self.zone_bend } else { value }
+    }
+}
+
+impl ShaderControl {
+    fn apply(self, shader: &mut ShaderInst, expression: &mut ShaderExpression) {
+        let (which, value, key) = match self.ctl {
+            Ctl::Bend => (Expression::Bend, self.value.clamp(-1.0, 1.0) * self.bend_range, None),
+            Ctl::Pressure => (Expression::Pressure, self.value, None),
+            Ctl::Slide => {
+                shader.set_cc(74, self.value);
+                (Expression::Slide, self.value, None)
+            }
+            Ctl::KeyPressure(n) => (Expression::Pressure, self.value, Some(n)),
+            Ctl::KeySlide(n) => (Expression::Slide, self.value, Some(n)),
+            Ctl::Mod => return shader.set_cc(1, self.value),
+            Ctl::Cc(n) => return shader.set_cc(n, self.value),
+            Ctl::AllOff => return shader.clear_spares(),
+            Ctl::Sustain => return,
+        };
+        let master = self.mpe && self.master == Some(self.ch);
+        if key.is_none() {
+            let values = &mut expression.channel[which as usize];
+            if master && matches!(which, Expression::Bend) {
+                expression.zone_bend = value;
+            } else if self.mpe && !master {
+                values[self.ch as usize] = value;
+            } else {
+                values.fill(value);
+                if matches!(which, Expression::Bend) {
+                    expression.zone_bend = 0.0;
+                }
+            }
+        }
+        shader.update_expression(which, |handle| {
+            let channel = stream::handle_channel(handle);
+            let applies = match key {
+                Some(note) => handle == stream::handle(self.ch, note),
+                None => master || !self.mpe || channel == Some(self.ch),
+            };
+            applies.then(|| if key.is_some() { value } else { expression.value(which, channel.unwrap_or(0) as usize) })
+        });
+    }
 }
 
 pub struct LoopEngine {
@@ -291,11 +372,12 @@ pub struct LoopEngine {
     /// The program a carried Tandem loop takes over in [`LoopEngine::take_program`], made ready
     /// off the audio thread; after it, what it replaced.
     tandem_next: Option<Box<TandemInstall>>,
-    /// A shader loop's instrument; per voice (end beat, serial); the
-    /// params last set (their list's address).
+    /// A shader loop's instrument, note end beats, handles and release velocities.
     shader: Option<Box<ShaderInst>>,
-    shader_voices: Box<[(f64, u32)]>,
-    shader_handles: Box<[u32]>,
+    shader_offs: Box<[f64]>,
+    shader_lift: Box<[f32]>,
+    shader_controls: Vec<ShaderControl>,
+    shader_expression: ShaderExpression,
     shader_params: usize,
     /// A sung loop's choir; its held notes as (end beat, choir serial).
     choir: Option<Box<Choir>>,
@@ -331,7 +413,7 @@ const MAX_IRON_HELD: usize = 64;
 /// How long an Ironfish or shader note without a length holds, in beats.
 const HELD_DEFAULT_BEATS: f64 = 0.25;
 
-fn mix_seed(key: u64, beat: f64, note: f32) -> u32 {
+fn event_seed(key: u64, beat: f64, note: f32) -> u32 {
     let mut h = key ^ beat.to_bits().rotate_left(17) ^ (note.to_bits() as u64).rotate_left(41);
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
@@ -382,8 +464,10 @@ impl LoopEngine {
             tandem: None,
             tandem_next: None,
             shader: None,
-            shader_voices: Box::new([]),
-            shader_handles: Box::new([]),
+            shader_offs: Box::new([]),
+            shader_lift: Box::new([]),
+            shader_controls: Vec::new(),
+            shader_expression: ShaderExpression::default(),
             shader_params: 0,
             choir: None,
             choir_offs: Box::new([]),
@@ -485,17 +569,19 @@ impl LoopEngine {
             engine.tandem = Some(t);
             engine.iron_offs = vec![(f64::INFINITY, 0); MAX_IRON_HELD].into_boxed_slice();
         }
-        if let Inst::Shader { shader, params, .. } = inst {
-            let mut voices = Box::new(ShaderInst::new(shader.clone(), rate));
+        if let Inst::Shader { shader, params, seed, .. } = inst {
+            let mut voices = Box::new(ShaderInst::try_new(shader.clone(), rate)?);
+            voices.set_seed(*seed);
             for (index, value) in params.iter() {
                 voices.set_param(*index as usize, *value);
             }
             engine.shader = Some(voices);
-            engine.shader_voices = vec![(f64::INFINITY, 0); SHADER_VOICES].into_boxed_slice();
-            engine.shader_handles = vec![0; SHADER_VOICES].into_boxed_slice();
+            engine.shader_offs = vec![f64::INFINITY; SHADER_VOICES].into_boxed_slice();
+            engine.shader_lift = vec![0.5; SHADER_VOICES].into_boxed_slice();
+            engine.shader_controls = Vec::with_capacity(stream::MAX_MSGS);
             engine.shader_params = Arc::as_ptr(params) as *const u8 as usize;
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
         if let Inst::Neural { .. } = inst {
             engine.phrases = (0..MAX_PHRASES).map(|_| None).collect();
         }
@@ -505,6 +591,25 @@ impl LoopEngine {
             engine.choir_offs = vec![(f64::INFINITY, 0); MAX_IRON_HELD].into_boxed_slice();
         }
         Ok(engine)
+    }
+
+    pub fn shader_mut(&mut self) -> Option<&mut ShaderInst> {
+        self.shader.as_deref_mut()
+    }
+
+    /// Align a shader instrument to the first frame of the schedule's pass.
+    pub fn set_frame(&mut self, frame: u32) {
+        if let Some(shader) = self.shader_mut() {
+            shader.sync_frame(frame);
+        }
+    }
+
+    /// Hands the song's time over the schedule's pass to the shader
+    /// instrument (after [`LoopEngine::set_frame`]).
+    pub fn set_song_time(&mut self, time: &crate::shader::SongTime) {
+        if let Some(shader) = self.shader_mut() {
+            shader.set_song_time(time);
+        }
     }
 
     /// Hot swap of a shader, Morph or Tandem loop: `self` carried the loop's
@@ -526,10 +631,13 @@ impl LoopEngine {
             }
         }
         if let (Some(old), Some(new)) = (&mut self.shader, &mut fresh.shader) {
-            if !old.shader().ptr_eq(new.shader()) {
+            if !old.same_program_and_seed(new) {
                 new.swap_from(old);
                 std::mem::swap(old, new);
                 self.shader_params = 0;
+            } else {
+                old.take_prepared_wires(new);
+                old.swap_probes(new);
             }
         }
     }
@@ -572,6 +680,7 @@ impl LoopEngine {
         let start = self.npending - keep;
         self.pending.copy_within(start..self.npending, 0);
         self.npending = keep;
+        self.shader_controls.retain(|c| c.beat >= beat - 1e-9);
     }
 
     pub fn release_all(&mut self) {
@@ -601,9 +710,11 @@ impl LoopEngine {
             *play = None;
         }
         if let Some(shader) = &mut self.shader {
-            for (voice, (off, _)) in self.shader_voices.iter_mut().enumerate() {
+            shader.set_pedal(false);
+            shader.clear_spares();
+            for (voice, off) in self.shader_offs.iter_mut().enumerate() {
                 if off.is_finite() {
-                    shader.note_off(voice as u8);
+                    shader.note_off(voice as u8, 0.5);
                 }
                 *off = f64::INFINITY;
             }
@@ -617,11 +728,6 @@ impl LoopEngine {
         if handle != 0 {
             for voice in self.voices.iter_mut().filter(|v| v.active && !v.released && v.handle == handle) {
                 voice.off_beat = voice.off_beat.min(at);
-            }
-            for (i, h) in self.shader_handles.iter().enumerate() {
-                if *h == handle && self.shader_voices[i].0.is_finite() {
-                    self.shader_voices[i].0 = self.shader_voices[i].0.min(at);
-                }
             }
         }
         for (off, n) in self.iron_offs.iter_mut().chain(self.midi_offs.iter_mut()) {
@@ -672,16 +778,31 @@ impl LoopEngine {
         beat1
     }
 
-    /// A keyboard's controller on channel `ch` (0..15), at once: pitch bend
+    /// A keyboard's controller on channel `ch` (0..15): pitch bend
     /// (-1..1, `bend_range` semitones at full travel), the mod wheel,
     /// pressure (the channel's, or a key's), slide. With `mpe` a channel's
     /// bend, pressure and slide move only the notes on it. Each instrument
     /// takes what it has: recipe voices and native instruments bend, Morph
-    /// takes all of them (its own bend range), a MIDI loop sends them on;
-    /// the rest ignore them. No allocation.
-    pub fn control(&mut self, inst: &Inst, ch: u8, ctl: crate::stream::Ctl, value: f32, bend_range: f32, mpe: bool) {
-        use crate::stream::{handle_channel, Ctl};
+    /// takes them with its own bend range and a MIDI loop sends them on.
+    /// A shader queues the change for its beat. No allocation.
+    pub fn control(&mut self, inst: &Inst, beat: f64, ch: u8, ctl: Ctl, value: f32, bend_range: f32, mpe: bool) {
+        self.control_with_master(inst, beat, ch, ctl, value, bend_range, mpe, Some(0));
+    }
+
+    pub fn control_with_master(&mut self, inst: &Inst, beat: f64, ch: u8, ctl: Ctl, value: f32, bend_range: f32, mpe: bool, master: Option<u8>) {
+        use crate::stream::handle_channel;
         let ch = ch & 15;
+        if let Some(shader) = self.shader.as_mut() {
+            let control = ShaderControl { beat, ch, ctl, value, bend_range, mpe, master };
+            if self.shader_controls.len() == stream::MAX_MSGS {
+                control.apply(shader, &mut self.shader_expression);
+                self.late += 1;
+            } else {
+                let at = self.shader_controls.partition_point(|c| c.beat <= beat);
+                self.shader_controls.insert(at, control);
+            }
+            return;
+        }
         let on_channel = |handle: u32| !mpe || handle_channel(handle) == Some(ch);
         match ctl {
             Ctl::Bend => {
@@ -746,7 +867,7 @@ impl LoopEngine {
                     self.send_midi(0, bytes);
                 }
             }
-            Ctl::Sustain | Ctl::AllOff => {}
+            Ctl::Cc(_) | Ctl::Sustain | Ctl::AllOff => {}
         }
     }
 
@@ -972,7 +1093,7 @@ impl LoopEngine {
     /// (fractional) frame; every play adds its audio, resampled to `rate`,
     /// at its event's level. A play whose audio is not rendered yet asks for
     /// it each chunk and keeps its place, so it joins where it has reached.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
     fn render_neural(&mut self, singer: &NeuralSinger, l: &mut [f32], r: &mut [f32], frames: usize, rate: f32, t: &Tempo) {
         let step = makepad_score_voice::neural::RATE as f64 / rate as f64;
         if !t.moving() {
@@ -1033,9 +1154,53 @@ impl LoopEngine {
         }
     }
 
-    /// A shader loop's chunk: its notes on and off on their frames.
-    fn render_shader(&mut self, params: &Arc<[(u16, f32)]>, mono: bool, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
+    fn shader_note(&mut self, shader: &mut ShaderInst, event: Event, mode: ShaderMode, rate: f32, t: &Tempo) {
+        let handle = event.opts.handle;
+        let seed = event_seed(self.key, event.beat, event.note);
+        match event.kind {
+            EventKind::Program(_) | EventKind::Pedal | EventKind::Release => return,
+            EventKind::Glide => {
+                if handle == 0 { return; }
+                let seconds = if event.dur > 0.0 {
+                    ((t.frame_of(event.beat + f64::from(event.dur)) - t.frame_of(event.beat)) / f64::from(rate)) as f32
+                } else {
+                    mode.glide
+                };
+                for (voice, off) in self.shader_offs.iter().enumerate() {
+                    if off.is_finite() && shader.active(voice as u8) && shader.handle(voice) == handle {
+                        shader.glide_held(voice, event.note, event.opts.glide_from, event.vel, seconds);
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        let slot = if mode.mono { 0 } else { shader.pick_voice() };
+        let voice = slot as usize;
+        let note = if matches!(event.kind, EventKind::Hit(..)) { 60.0 + event.note } else { event.note };
+        if mode.mono && mode.legato && shader.active(slot) && self.shader_offs[voice].is_finite() {
+            shader.glide(note, event.vel, slot, seed, mode.glide);
+        } else {
+            shader.note_on(note, event.vel, slot, seed);
+        }
+        let ch = stream::handle_channel(event.opts.handle).unwrap_or(0) as usize;
+        for which in [Expression::Bend, Expression::Pressure, Expression::Slide] {
+            shader.set_expression(slot, which, self.shader_expression.value(which, ch));
+        }
+        let len = if event.dur > 0.0 { event.dur as f64 } else { HELD_DEFAULT_BEATS };
+        self.shader_offs[voice] = event.beat + len;
+        shader.set_handle(voice, handle);
+        self.shader_lift[voice] = 0.5;
+    }
+
+    /// Render between the ordered controller, release and note acts of this chunk.
+    fn render_shader(&mut self, direct: &crate::shader::DirectSide<'_>, value: &dyn Fn(usize, usize) -> f32, params: &Arc<[(u16, f32)]>, mode: ShaderMode, rate: f32, l: &mut [f32], r: &mut [f32], frames: usize, t: &Tempo) {
+        if frames == 0 {
+            return;
+        }
         let Some(mut shader) = self.shader.take() else { return };
+        shader.begin_pass(frames, direct);
+        shader.set_steal(mode.steal);
         let address = Arc::as_ptr(params) as *const u8 as usize;
         if self.shader_params != address {
             for (index, value) in params.iter() {
@@ -1043,71 +1208,69 @@ impl LoopEngine {
             }
             self.shader_params = address;
         }
-        if t.moving() {
-            let beat1 = self.take_events(frames, t);
-            for (index, (off, _)) in self.shader_voices.iter().enumerate() {
-                if *off < beat1 && self.nacts < MAX_LOOP_ACTS {
-                    let f = (t.frame_of(*off) - 1e-6).ceil().max(0.0) as usize;
-                    self.acts[self.nacts] = Act { frame: f.min(frames - 1) as u16, event: None, release: index as u8 };
-                    self.nacts += 1;
+        let moving = t.moving();
+        let beat1 = t.end_beat(frames);
+        let frame_of = |beat| ((t.frame_of(beat) - 1e-6).ceil() as usize).min(frames - 1);
+        let controls = self.shader_controls.partition_point(|c| !moving || c.beat < beat1);
+        let events = self.pending[..self.npending].partition_point(|e| moving && e.beat < beat1 - 1e-12);
+        let control_frame = |c: &ShaderControl| if moving { frame_of(c.beat) } else { 0 };
+        let mut control = 0;
+        let mut event = 0;
+        let mut pos = 0;
+        loop {
+            let next_control = self.shader_controls[control..controls].first().map_or(frames, control_frame);
+            let next_event = self.pending[event..events].first().map_or(frames, |e| frame_of(e.beat));
+            // Notes that start or are stolen in this chunk can change the next release.
+            let off = self.shader_offs.iter().copied().fold(f64::INFINITY, f64::min);
+            let next_release = if moving && off < beat1 { frame_of(off) } else { frames };
+            let end = next_control.min(next_event).min(next_release);
+            if pos < end {
+                shader.render_piece(&mut l[pos..end], &mut r[pos..end], pos, direct, value);
+                pos = end;
+            }
+            if end == frames {
+                break;
+            }
+            while control < controls && control_frame(&self.shader_controls[control]) == pos {
+                self.shader_controls[control].apply(&mut shader, &mut self.shader_expression);
+                control += 1;
+            }
+            let first = event;
+            while event < events && frame_of(self.pending[event].beat) == pos {
+                let e = self.pending[event];
+                if t.frame_of(e.beat) < -2.0 {
+                    self.late += 1;
                 }
-            }
-        }
-        self.acts[..self.nacts].sort_unstable_by_key(|a| (a.frame, a.event.is_some()));
-        let mut t = 0usize;
-        for a in 0..=self.nacts {
-            let end = if a < self.nacts { self.acts[a].frame as usize } else { frames };
-            if end > t {
-                shader.render(&mut l[t..end], &mut r[t..end]);
-                t = end;
-            }
-            if a < self.nacts {
-                let act = self.acts[a];
-                match act.event {
-                    None => {
-                        let voice = act.release;
-                        if self.shader_voices[voice as usize].0.is_finite() {
-                            self.shader_voices[voice as usize].0 = f64::INFINITY;
-                            shader.note_off(voice);
-                        }
-                    }
-                    Some(event) => {
-                        if matches!(event.kind, EventKind::Program(_) | EventKind::Pedal) {
-                            continue;
-                        }
-                        // A glide on a shader voice: a legato to its new
-                        // note (the shader slides it).
-                        if let EventKind::Glide = event.kind {
-                            if event.note.is_finite() && event.opts.handle != 0 {
-                                if let Some(v) = self.shader_handles.iter().position(|h| *h == event.opts.handle) {
-                                    let vel = if event.vel.is_finite() { event.vel } else { 0.8 };
-                                    shader.legato(event.note, vel, v as u8);
-                                }
+                match e.kind {
+                    EventKind::Release if e.opts.handle != 0 => {
+                        for (i, off) in self.shader_offs.iter_mut().enumerate() {
+                            if off.is_finite() && shader.handle(i) == e.opts.handle {
+                                *off = off.min(e.beat);
+                                self.shader_lift[i] = e.vel;
                             }
-                            continue;
                         }
-                        let note = match event.kind {
-                            EventKind::Hit(..) => 60.0 + event.note,
-                            _ => event.note,
-                        };
-                        let len = if event.dur > 0.0 { event.dur as f64 } else { HELD_DEFAULT_BEATS };
-                        let serial = self.serial;
-                        self.serial = self.serial.wrapping_add(1);
-                        let voice = if mono {
-                            shader.legato(note, event.vel, 0);
-                            0
-                        } else {
-                            let voice = (0..self.shader_voices.len()).find(|&v| !shader.active(v as u8))
-                                .unwrap_or_else(|| (0..self.shader_voices.len()).min_by_key(|&v| self.shader_voices[v].1).unwrap_or(0));
-                            shader.note_on(note, event.vel, voice as u8);
-                            voice
-                        };
-                        self.shader_voices[voice] = (event.beat + len, serial);
-                        self.shader_handles[voice] = event.opts.handle;
                     }
+                    EventKind::Pedal => shader.set_pedal(e.vel >= 0.5),
+                    _ => {}
+                }
+                event += 1;
+            }
+            for (i, off) in self.shader_offs.iter_mut().enumerate() {
+                if moving && *off < beat1 && frame_of(*off) <= pos {
+                    shader.note_off(i as u8, self.shader_lift[i]);
+                    *off = f64::INFINITY;
+                }
+            }
+            for i in first..event {
+                let e = self.pending[i];
+                if !matches!(e.kind, EventKind::Release) {
+                    self.shader_note(&mut shader, e, mode, rate, t);
                 }
             }
         }
+        self.shader_controls.drain(..controls);
+        self.pending.copy_within(events..self.npending, 0);
+        self.npending -= events;
         self.shader = Some(shader);
     }
 
@@ -1302,6 +1465,12 @@ impl LoopEngine {
     /// OVERWRITING `l`/`r`. The instrument belongs to the caller (a new
     /// revision's patch plays the voices it starts from then on).
     pub fn render(&mut self, inst: &Inst, l: &mut [f32], r: &mut [f32], rate: f32, t: &Tempo) {
+        self.render_with_ports(inst, l, r, rate, t, &|_| None, &|_, _| 0.0);
+    }
+
+    /// Render one loop pass with its prepared instrument side spans and param sources.
+    pub fn render_with_ports(&mut self, inst: &Inst, l: &mut [f32], r: &mut [f32], rate: f32, t: &Tempo,
+        direct: &crate::shader::DirectSide<'_>, value: &dyn Fn(usize, usize) -> f32) {
         let per_frame = t.per_frame;
         let frames = l.len().min(r.len()).min(MAX_LOOP_FRAMES);
         l[..frames].fill(0.0);
@@ -1311,9 +1480,9 @@ impl LoopEngine {
             Inst::Ironfish { patch, .. } => return self.render_iron(patch, l, r, frames, t),
             Inst::Morph { .. } => return self.render_morph(l, r, frames, rate, t),
             Inst::Tandem { .. } => return self.render_tandem(l, r, frames, t),
-            Inst::Shader { params, mono, .. } => return self.render_shader(params, *mono, l, r, frames, t),
+            Inst::Shader { params, mode, .. } => return self.render_shader(direct, value, params, *mode, rate, l, r, frames, t),
             Inst::Voice { .. } => return self.render_voice(l, r, frames, rate, t),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(all(feature = "neural", not(target_arch = "wasm32")))]
             Inst::Neural { singer, .. } => return self.render_neural(singer, l, r, frames, rate, t),
             Inst::Native { gain, .. } => return self.render_native(*gain, l, r, frames, t),
             Inst::Midi { channel, .. } => return self.render_midi(*channel, frames, t),
@@ -1389,7 +1558,7 @@ impl LoopEngine {
             }
             return;
         }
-        let seed = mix_seed(self.key, event.beat, event.note);
+        let seed = event_seed(self.key, event.beat, event.note);
         let (pl, pr) = pan_gains(event.pan);
         let serial = self.serial;
         self.serial = self.serial.wrapping_add(1);
@@ -1526,6 +1695,7 @@ mod tests {
         assert_eq!(a, render(&[100, 256, 37, 1]));
     }
 
+    #[cfg(feature = "neural")]
     #[test]
     fn a_neural_phrase_plays_from_its_frame_and_a_late_one_joins_where_it_has_reached() {
         use makepad_score_voice::lyrics::{builtin_pronounce, lower_sing, NoteIn, SingOpts};
@@ -1633,10 +1803,120 @@ mod tests {
     }
 
     #[test]
+    fn stream_expression_reaches_shader_voices_on_its_frame() {
+        use crate::stream::{Msg, Stream, StreamDef};
+
+        let beat = |frame: f64| frame / 1024.0;
+        for keys in [false, true] {
+            for (source, controllers) in [
+                ("fn voice() { vec2(pressure, bend) }", false),
+                ("fn voice() { vec2(cc(7), release_velocity) }", true),
+            ] {
+                let inst = Inst::Shader { key: 1, seed: 0, shader: crate::shader::compile(source).unwrap(), params: Arc::new([]), mode: ShaderMode::default() };
+                let mut engine = LoopEngine::for_inst(1, &inst, 48_000.0, false).unwrap();
+                let mut stream = Stream::new(StreamDef { mpe: keys, ..Default::default() });
+                let mut play = |stream: &mut Stream, start: usize| {
+                    let tempo = Tempo::linear(beat(start as f64), beat(1.0));
+                    let mut controls = Vec::new();
+                    stream.run(tempo.beat0, tempo.end_beat(16), 1, 0.0, &mut |e| engine.push(e), &mut |b, ch, c, v| controls.push((b, ch, c, v)));
+                    for (beat, ch, ctl, value) in controls {
+                        engine.control(&inst, beat, ch, ctl, value, 2.0, keys);
+                    }
+                    let (mut l, mut r) = ([0.0; 16], [0.0; 16]);
+                    engine.render(&inst, &mut l, &mut r, 48_000.0, &tempo);
+                    (l, r)
+                };
+                stream.push(Msg::On { beat: 0.0, ch: 2, note: 60, vel: 1.0 });
+                stream.push(Msg::On { beat: 0.0, ch: 3, note: 64, vel: 1.0 });
+                assert_eq!(play(&mut stream, 0), ([0.0; 16], [0.0; 16]));
+                stream.push(Msg::Ctl { beat: beat(20.25), ch: 2, ctl: Ctl::Pressure, value: 0.25 });
+                stream.push(Msg::Ctl { beat: beat(22.0), ch: 2, ctl: Ctl::Bend, value: 0.5 });
+                stream.push(Msg::Ctl { beat: beat(24.5), ch: 2, ctl: Ctl::Cc(7), value: 0.5 });
+                stream.push(Msg::On { beat: beat(25.0), ch: 2, note: 67, vel: 1.0 });
+                stream.push(Msg::Off { beat: beat(27.5), ch: 3, note: 64, vel: 0.875 });
+                stream.push(Msg::Ctl { beat: beat(30.0), ch: 2, ctl: Ctl::KeyPressure(60), value: 0.75 });
+                let (l, r) = play(&mut stream, 16);
+                for i in 0..16 {
+                    let frame = i + 16;
+                    let voices = if keys { 1.0 } else { 2.0 } + if frame >= 25 { 1.0 } else { 0.0 };
+                    let expected = if controllers {
+                        (if frame >= 25 { 1.5 } else { 0.0 }, if frame >= 28 { 0.875 } else { 0.0 })
+                    } else {
+                        let pressure = if frame >= 21 { voices * 0.25 } else { 0.0 };
+                        (pressure + if frame >= 30 { 0.5 } else { 0.0 }, if frame >= 22 { voices } else { 0.0 })
+                    };
+                    assert_eq!((l[i], r[i]), expected, "frame {frame}, per-note channels {keys}, {source}");
+                }
+                if controllers && keys {
+                    for _ in 0..stream::MAX_MSGS {
+                        engine.control(&inst, 1.0, 2, Ctl::Cc(7), 1.0, 2.0, keys);
+                    }
+                    engine.control(&inst, 1.0, 2, Ctl::Cc(7), 0.25, 2.0, keys);
+                    assert_eq!(engine.late, 1, "a full queue applies the extra controller early");
+                    let (mut l, mut r) = ([0.0], [0.0]);
+                    engine.render(&inst, &mut l, &mut r, 48_000.0, &Tempo::linear(beat(32.0), beat(1.0)));
+                    assert_eq!(l, [0.75], "the future controls wait while the extra one sounds");
+                    engine.render(&inst, &mut l, &mut r, 48_000.0, &Tempo::linear(beat(33.0), 0.0));
+                    assert_eq!(l, [3.0], "the stopped transport applies queued controls at frame zero");
+                }
+            }
+        }
+
+        // Separate the two member channels into left and right to check each sum.
+        let shader = crate::shader::compile("fn voice() { let v = bend + 4.0 * pressure + 8.0 * slide\n if voice_index == 0 { vec2(v,0) } else { vec2(0,v) } }").unwrap();
+        let inst = Inst::Shader { key: 1, seed: 0, shader, params: Arc::new([]), mode: ShaderMode::default() };
+        for master in [Some(0), Some(15), None] {
+            let ch = master.unwrap_or(15);
+            let mut engine = LoopEngine::for_inst(1, &inst, 48_000.0, false).unwrap();
+            for (frame, channel, note) in [(0.0, 1, 60), (4.0, 2, 64)] {
+                engine.push(Event { beat: beat(frame), loop_key: 1, kind: EventKind::Note, note: note as f32, vel: 1.0, pan: 0.0, dur: 1.0,
+                    opts: NoteOpts { handle: stream::handle(channel, note), ..Default::default() } });
+            }
+            for (frame, channel, bend) in [(1.0, ch, 0.5), (2.0, 1, 0.25), (5.0, ch, -0.5)] {
+                engine.control_with_master(&inst, beat(frame), channel, Ctl::Bend, bend, 2.0, true, master);
+            }
+            engine.control_with_master(&inst, beat(6.0), ch, Ctl::Pressure, 0.5, 2.0, true, master);
+            engine.control_with_master(&inst, beat(7.0), ch, Ctl::Slide, 0.5, 2.0, true, master);
+            let (mut l, mut r) = ([0.0; 8], [0.0; 8]);
+            engine.render(&inst, &mut l, &mut r, 48_000.0, &Tempo::linear(0.0, beat(1.0)));
+            let zone = if master.is_some() { 1.0 } else { 0.0 };
+            assert_eq!(l, [0.0, zone, zone + 0.5, zone + 0.5, zone + 0.5, 0.5 - zone, 0.5 + zone, 0.5 + 5.0 * zone], "first member, master {master:?}");
+            assert_eq!(r, [0.0, 0.0, 0.0, 0.0, zone, -zone, zone, 5.0 * zone], "new member inherits the master");
+        }
+    }
+
+    #[test]
+    fn mono_notes_glide_or_retrigger_and_written_slides_keep_their_duration() {
+        let shader = crate::shader::compile("fn voice() { vec2(note, if trigger { 1.0 } else { 0.0 }) }").unwrap();
+        let rate = 1024.0;
+        let tempo = Tempo::linear(0.0, 1.0 / 1024.0);
+        let event = |frame, kind, note, dur, handle| Event {
+            beat: tempo.beat_at(frame), loop_key: 1, kind, note, vel: 1.0, pan: 0.0, dur,
+            opts: NoteOpts { handle, ..Default::default() },
+        };
+        for legato in [true, false] {
+            let mode = ShaderMode { mono: true, legato, glide: 4.0 / rate, ..Default::default() };
+            let inst = Inst::Shader { key: 1, seed: 0, shader: shader.clone(), params: Arc::new([]), mode };
+            let mut engine = LoopEngine::for_inst(1, &inst, rate, false).unwrap();
+            engine.push(event(0.0, EventKind::Note, 48.0, 1.0, 1));
+            engine.push(event(1.0, EventKind::Note, 60.0, 1.0, 2));
+            engine.push(Event { vel: 0.5, ..event(3.0, EventKind::Glide, f32::NAN, 0.0, 2) });
+            engine.push(event(5.0, EventKind::Glide, 48.0, 2.0 / rate, 2));
+            let (mut l, mut r) = ([0.0; 8], [0.0; 8]);
+            engine.render(&inst, &mut l, &mut r, rate, &tempo);
+            assert_eq!(r[0], 1.0);
+            assert_eq!(r[1], if legato { 0.0 } else { 1.0 }, "overlap retriggers when legato is off");
+            if legato {
+                assert_eq!(l, [48.0, 51.0, 54.0, 57.0, 60.0, 54.0, 48.0, 48.0]);
+            }
+        }
+    }
+
+    #[test]
     fn a_new_shader_program_takes_over_the_sounding_voices() {
         let program = |code: &str| {
             let shader = crate::shader::compile(code).unwrap_or_else(|e| panic!("{e:?}"));
-            Inst::Shader { key: 3, shader, params: Arc::new([]), mono: false }
+            Inst::Shader { key: 3, seed: 0, shader, params: Arc::new([]), mode: ShaderMode::default() }
         };
         let code = crate::shader::library("epiano").unwrap();
         let (a, b) = (program(code), program(&code.replace("0.", "0.0")));
@@ -1730,7 +2010,7 @@ mod tests {
     }
 
     #[test]
-    fn the_pedal_holds_a_released_piano_note() {
+    fn the_pedal_holds_released_piano_and_shader_notes() {
         let bpf = 2.0 / 48_000.0;
         let ev = |beat: f64, kind: EventKind, vel: f32| Event { beat, loop_key: 7, kind, note: 60.0, vel, pan: 0.0, dur: 0.25, opts: Default::default() };
         let piano = Inst::Native { key: 7, kinds: Arc::new([(0, InstrumentKind::Piano { preset: None })]), gain: 1.0 };
@@ -1747,6 +2027,18 @@ mod tests {
         let (damped, half, held) = (tail(None), tail(Some(0.5)), tail(Some(1.0)));
         assert!(held > damped * 4.0, "pedal down {held} vs damped {damped}");
         assert!(half > damped && half.is_finite(), "half pedal {half} vs damped {damped}");
+
+        let shader = crate::shader::compile("fn voice() { vec2(gate, release_velocity) }").unwrap();
+        let inst = Inst::Shader { key: 7, seed: 0, shader, params: Arc::new([]), mode: ShaderMode::default() };
+        let mut engine = LoopEngine::for_inst(7, &inst, 48_000.0, false).unwrap();
+        let tempo = Tempo::linear(0.0, 1.0 / 16.0);
+        engine.push(ev(0.0, EventKind::Note, 1.0));
+        engine.push(ev(0.25, EventKind::Pedal, 1.0));
+        engine.push(ev(0.4, EventKind::Pedal, 0.0));
+        let (mut gate, mut lift) = ([0.0; 9], [0.0; 9]);
+        engine.render(&inst, &mut gate, &mut lift, 48_000.0, &tempo);
+        assert_eq!(gate, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0], "gate releases on the pedal-up sample");
+        assert_eq!(lift, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5], "release velocity follows the deferred release");
     }
 
     #[test]

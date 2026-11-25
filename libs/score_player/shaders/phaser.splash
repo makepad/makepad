@@ -2,11 +2,10 @@
 // on an exponential scale, feedback around the chain, the right side's
 // LFO a quarter cycle behind for width. Slow on pads is the 70s string
 // machine; fast with feedback is a swirl. `sync` > 0 locks the LFO to
-// that many beats.
+// that many beats of the song tempo.
 let N = 6
 let rate = param(0.25, 0.01, 8)
 let sync = param(0, 0, 16)
-let bpm = param(120, 20, 300)
 let depth = param(0.8, 0, 1)
 let center = param(900, 100, 4000)
 let feedback = param(0.5, 0, 0.95)
@@ -34,7 +33,7 @@ fn chain(a, x, c) {
 }
 
 fn effect(l, r) {
-    let hz = if sync > 0.0 { bpm / (60.0 * sync) } else { rate }
+    let hz = if sync > 0.0 { tempo / (60.0 * sync) } else { rate }
     lfo = advance(lfo, hz / sample_rate)
     let cl = coef(lfo)
     let cr = coef(lfo + 0.25)

@@ -488,7 +488,7 @@ mod tests {
         assert!(doc.loops.iter().map(|l| l.note_opts.len()).sum::<usize>() >= 2);
         // And it plays: the samples registered, the render is not silent.
         tracker::arrange::register(&imported.samples);
-        let r = makepad_score_live::render(&imported.source, &makepad_score_live::RenderOpts { seconds: Some(2.0), ..Default::default() }, &makepad_score_live::NoSamples).unwrap();
+        let r = makepad_score_live::render(&imported.source, &makepad_score_live::RenderOpts { seconds: Some(2.0), ..Default::default() }, &makepad_score_live::NoSamples, &makepad_score_live::PrepareControl::default()).unwrap();
         assert!(r.left.iter().any(|x| x.abs() > 0.01));
         let _ = (Cell::EMPTY, Fx::None, Vol::None, Loop { from: 0, to: 1, pingpong: false }, Sample::silent(String::new()), Instrument::of_sample(String::new(), 0));
     }
