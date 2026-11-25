@@ -95,7 +95,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         // so the poses keep the display's rate whatever the loop's work and sleeps take.
         let period = Duration::from_micros(1_000_000 / hz as u64);
         let mut next = start;
-        // MAKEPAD_XR_REMOTE_SELFTEST_DECODE=1 (macOS): the encoded stream decoded here, the 300th
+        // MAKEPAD_XR_REMOTE_SELFTEST_DECODE=1 (macOS): the encoded stream decoded here, the dumped
         // picture's numbers beside the dump's (what the encode and decode did to them)
         #[cfg(target_os = "macos")]
         let mut decoded = (std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_DECODE").as_deref() == Ok("1")).then(Decoded::default);
@@ -276,7 +276,11 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
 /// `MAKEPAD_XR_REMOTE_DUMP=<dir>`: the 300th picture's planes (the nth with
 /// `MAKEPAD_XR_REMOTE_DUMP_AT=<n>`) as `<dir>/picture.pgm` (its luma: its views side by side,
 /// each its colour over its band of coverage and inverse depth) once its GPU work completed, and
-/// a line of each eye's numbers. A check of what the GPU packed.
+/// a line of each eye's numbers. A check of what the GPU packed. With
+/// `MAKEPAD_XR_REMOTE_DUMP_AT=asked` the picture is the first one packed after
+/// `<dir>/dump-request` appeared (the file goes once seen; a new one asks again): a test asks
+/// once its scene has drawn, so a slow start never hands it a picture from before it drew (on a
+/// box with two cores the 300th picture came blank, 11-22).
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn dump_picture(_dir: &std::ffi::OsStr, _p: &Picture, _size: [u32; 2], _views: u32, _log: &Log) {}
 
@@ -287,10 +291,34 @@ static DUMPED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn dump_picture(dir: &std::ffi::OsStr, p: &Picture, size: [u32; 2], views: u32, log: &Log) {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    static AT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    let at = *AT.get_or_init(|| std::env::var("MAKEPAD_XR_REMOTE_DUMP_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(300));
-    if N.fetch_add(1, Ordering::AcqRel) != at {
-        return;
+    // the nth picture, or None: the first packed after a request
+    static AT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    // when the request at hand was seen
+    static ASKED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let at = *AT.get_or_init(|| match std::env::var("MAKEPAD_XR_REMOTE_DUMP_AT").as_deref() {
+        Ok("asked") => None,
+        v => Some(v.ok().and_then(|v| v.parse().ok()).unwrap_or(300)),
+    });
+    match at {
+        Some(at) => {
+            if N.fetch_add(1, Ordering::AcqRel) != at {
+                return;
+            }
+        }
+        None => {
+            let mut asked = ASKED.lock().unwrap();
+            match *asked {
+                // this picture was packed before the request was seen; the next ones after it
+                None => {
+                    if std::fs::remove_file(std::path::Path::new(dir).join("dump-request")).is_ok() {
+                        *asked = Some(Instant::now());
+                    }
+                    return;
+                }
+                Some(seen) if p.built_at < seen => return,
+                Some(_) => *asked = None,
+            }
+        }
     }
     if p.ready.wait(Duration::from_secs(2)).is_err() {
         return log("xr host: dump: the picture's GPU work did not complete");
@@ -427,12 +455,21 @@ pub(crate) fn tune() -> Tune {
 #[derive(Default)]
 struct Decoded {
     decoder: Option<makepad_widgets::makepad_platform::video_file::VideoStreamDecoder>,
-    measured: bool,
+    /// The dumped picture it waits for: the pts its packet went in with, and its display time.
+    want: Option<(i64, u64)>,
+    /// The display time of the dumped picture it measured last (one line per dump).
+    measured_ns: u64,
 }
 
 #[cfg(target_os = "macos")]
 impl Decoded {
     fn take(&mut self, head: &VideoHead, data: &[u8], views: u32, log: &Log) {
+        // the first tile's stream alone (the left eye, or every view in one picture): each tile is
+        // an encoder of its own, and one decoder fed two streams decodes each picture against the
+        // other's references
+        if head.tile != 0 {
+            return;
+        }
         let codec = if head.codec == CODEC_HEVC { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
         if self.decoder.is_none() {
             match makepad_widgets::makepad_platform::video_file::VideoStreamDecoder::new(codec) {
@@ -441,15 +478,24 @@ impl Decoded {
             }
         }
         let Some(decoder) = self.decoder.as_mut() else { return };
-        let frames = match decoder.push_packet(data, head.seq as i64 * 10) {
+        let pts = head.seq as i64 * 10;
+        // the picture the dump measured, by its own pts (a decoder may hand a picture out a
+        // packet or more after the one that brought it)
+        let dumped = DUMPED_NS.load(Ordering::Acquire);
+        if dumped != 0 && dumped != self.measured_ns && head.display_ns == dumped {
+            self.want = Some((pts, dumped));
+        }
+        let frames = match decoder.push_packet(data, pts) {
             Ok(f) => f,
             Err(e) => return log(&format!("xr selftest: decode: {e:?}")),
         };
-        // the picture the dump measured (the first decoded at or after its display time)
-        let dumped = DUMPED_NS.load(Ordering::Acquire);
         for f in frames {
-            if !self.measured && dumped != 0 && head.display_ns >= dumped {
-                self.measured = true;
+            let Some((want, ns)) = self.want else { break };
+            if f.pts_100ns > want {
+                self.want = None;
+                log("xr selftest: the dumped picture was not decoded (a later one came first)");
+            } else if f.pts_100ns == want {
+                (self.want, self.measured_ns) = (None, ns);
                 let columns = (f.width * views / head.size[0].max(1)).clamp(1, views);
                 log(&format!("xr selftest: decoded ({}x{}){}", f.width, f.height, picture_numbers(&f.nv12, f.width, f.height, columns)));
             }
