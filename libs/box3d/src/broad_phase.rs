@@ -68,6 +68,12 @@ pub struct BroadPhase {
     /// move_results. Not serialized by snapshots.
     pub(crate) pair_scratch: Vec<PairScratch>,
 
+    /// Transient candidates for waking sleepers after a shape edit.
+    wake_candidates: Vec<i32>,
+
+    /// Empty job returned by finish_tree_task for the next parallel rebuild.
+    rebuild_job_scratch: Option<Box<TreeRebuildJob>>,
+
     /// Tracks shape pairs that have a Contact.
     pub pair_set: crate::table::HashSet,
 
@@ -90,7 +96,7 @@ pub(crate) struct PairScratch {
 /// TAKES the two trees out of the world for the task's lifetime (so there is
 /// no aliasing at all: the task owns them) and finish_tree_task puts them
 /// back. Nothing queries these trees inside the overlap window.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TreeRebuildJob {
     pub dynamic_tree: DynamicTree,
     pub kinematic_tree: DynamicTree,
@@ -117,6 +123,7 @@ pub fn finish_tree_task(world: &mut World) {
         world.task_system.finish(handle);
         world.broad_phase.trees[BodyType::Dynamic as usize] = std::mem::take(&mut job.dynamic_tree);
         world.broad_phase.trees[BodyType::Kinematic as usize] = std::mem::take(&mut job.kinematic_tree);
+        world.broad_phase.rebuild_job_scratch = Some(job);
     }
 }
 
@@ -365,40 +372,8 @@ fn filter_and_emit_pair(
         return;
     }
 
-    let shape_a = &world.shapes[shape_id_a as usize];
-    let shape_b = &world.shapes[shape_id_b as usize];
-    let body_id_a = shape_a.body_id;
-    let body_id_b = shape_b.body_id;
-
-    // Are the shapes on the same body?
-    if body_id_a == body_id_b {
+    if !shape_pair_passes_filters(world, custom_filter, shape_id_a, shape_id_b) {
         return;
-    }
-
-    // Sensors are handled elsewhere
-    if shape_a.sensor_index != NULL_INDEX || shape_b.sensor_index != NULL_INDEX {
-        return;
-    }
-
-    if !should_shapes_collide(shape_a.filter, shape_b.filter) {
-        return;
-    }
-
-    // Does a joint override collision?
-    if !crate::body::should_bodies_collide(world, body_id_a, body_id_b) {
-        return;
-    }
-
-    // Custom user filter
-    if shape_a.enable_custom_filtering || shape_b.enable_custom_filtering {
-        if let Some(fcn) = custom_filter.as_mut() {
-            let id_a = ShapeId { index1: shape_id_a + 1, world0: world.world_id, generation: shape_a.generation };
-            let id_b = ShapeId { index1: shape_id_b + 1, world0: world.world_id, generation: shape_b.generation };
-            let should_collide = fcn(id_a, id_b);
-            if !should_collide {
-                return;
-            }
-        }
     }
 
     // C claims a slot with an atomic fetch-add and ignores pairs beyond capacity.
@@ -414,6 +389,97 @@ fn filter_and_emit_pair(
         shape_index_b: shape_id_b,
         child_index,
     });
+}
+
+fn shape_pair_passes_filters(
+    world: &World,
+    custom_filter: &mut Option<Box<CustomFilterFcn>>,
+    shape_id_a: i32,
+    shape_id_b: i32,
+) -> bool {
+    let shape_a = &world.shapes[shape_id_a as usize];
+    let shape_b = &world.shapes[shape_id_b as usize];
+    let body_id_a = shape_a.body_id;
+    let body_id_b = shape_b.body_id;
+
+    // Are the shapes on the same body?
+    if body_id_a == body_id_b {
+        return false;
+    }
+
+    // Sensors are handled elsewhere
+    if shape_a.sensor_index != NULL_INDEX || shape_b.sensor_index != NULL_INDEX {
+        return false;
+    }
+
+    if !should_shapes_collide(shape_a.filter, shape_b.filter) {
+        return false;
+    }
+
+    // Does a joint override collision?
+    if !crate::body::should_bodies_collide(world, body_id_a, body_id_b) {
+        return false;
+    }
+
+    // Custom user filter
+    if shape_a.enable_custom_filtering || shape_b.enable_custom_filtering {
+        if let Some(fcn) = custom_filter.as_mut() {
+            let id_a = ShapeId { index1: shape_id_a + 1, world0: world.world_id, generation: shape_a.generation };
+            let id_b = ShapeId { index1: shape_id_b + 1, world0: world.world_id, generation: shape_b.generation };
+            let should_collide = fcn(id_a, id_b);
+            if !should_collide {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+/// Wake sleepers eligible to collide with the edited shape in one world-space
+/// region. An existing non-touching pair is eligible too.
+pub(crate) fn wake_sleeping_bodies_overlapping_shape(world: &mut World, shape_id: i32, bounds: AABB) {
+    use crate::dynamic_tree::{dynamic_tree_get_height, TREE_STACK_SIZE};
+    use crate::physics_world::FIRST_SLEEPING_SET;
+
+    let filter = world.shapes[shape_id as usize].filter;
+    let mask = if filter.group_index == 0 { filter.mask_bits } else { DEFAULT_MASK_BITS };
+    let mut candidates = std::mem::take(&mut world.broad_phase.wake_candidates);
+    candidates.clear();
+    for kind in [BodyType::Dynamic, BodyType::Kinematic] {
+        let tree = &world.broad_phase.trees[kind as usize];
+        let mut collect = |_: i32, data: u64| {
+            let other = &world.shapes[data as usize];
+            if world.bodies[other.body_id as usize].set_index >= FIRST_SLEEPING_SET {
+                candidates.push(other.id);
+            }
+            true
+        };
+        if dynamic_tree_get_height(tree) < TREE_STACK_SIZE as i32 {
+            dynamic_tree_query(tree, bounds, mask, false, &mut collect);
+        } else {
+            crate::core::log("Edit wake query is scanning leaves because the tree exceeds its traversal stack.");
+            for node in &tree.nodes {
+                if node.flags & crate::types::LEAF_NODE != 0
+                    && node.category_bits & mask != 0
+                    && aabb_overlaps(node.aabb, bounds)
+                {
+                    collect(0, node.user_data);
+                }
+            }
+        }
+    }
+    let mut custom_filter = world.custom_filter_fcn.take();
+    for &other in &candidates {
+        let body_id = world.shapes[other as usize].body_id;
+        if world.bodies[body_id as usize].set_index >= FIRST_SLEEPING_SET
+            && shape_pair_passes_filters(world, &mut custom_filter, other, shape_id)
+        {
+            crate::body::wake_body(world, body_id);
+        }
+    }
+    world.custom_filter_fcn = custom_filter;
+    world.broad_phase.wake_candidates = candidates;
 }
 
 // One tree query of the C b3FindPairsTask. Mirrors C's b3PairQueryCallback:
@@ -920,11 +986,10 @@ pub fn update_broad_phase_pairs(world: &mut World) {
     // restores the trees.)
     if world.worker_count > 1 && world.task_system.is_parallel() {
         b3_assert!(world.tree_rebuild_task.is_none());
-        let mut job = Box::new(TreeRebuildJob {
-            dynamic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Dynamic as usize]),
-            kinematic_tree: std::mem::take(&mut world.broad_phase.trees[BodyType::Kinematic as usize]),
-            use_refit: use_refit_dynamic,
-        });
+        let mut job = world.broad_phase.rebuild_job_scratch.take().unwrap_or_default();
+        job.dynamic_tree = std::mem::take(&mut world.broad_phase.trees[BodyType::Dynamic as usize]);
+        job.kinematic_tree = std::mem::take(&mut world.broad_phase.trees[BodyType::Kinematic as usize]);
+        job.use_refit = use_refit_dynamic;
         let job_ptr = &mut *job as *mut TreeRebuildJob as *mut ();
         // SAFETY: the boxed job is stored on the world and outlives the
         // task; finish_tree_task joins before the trees are used again.

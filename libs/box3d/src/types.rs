@@ -362,10 +362,12 @@ pub enum ShapeType {
     Tube = 6,
     /// A solid given by a distance query.
     Field = 7,
+    /// An editable set of axis-aligned boxes in one local frame.
+    BoxSet = 8,
 }
 
 /// The number of shape types.
-pub const SHAPE_TYPE_COUNT: usize = 8;
+pub const SHAPE_TYPE_COUNT: usize = 9;
 
 /// Used to create a shape.
 #[derive(Clone, Debug)]
@@ -894,6 +896,10 @@ pub struct ContactHitEvent {
     pub shape_id_b: ShapeId,
     /// Id of the contact. May have been destroyed.
     pub contact_id: ContactId,
+    /// Child slot of the winning point on shape A, or NULL_INDEX for an ordinary shape.
+    pub child_index_a: i32,
+    /// Child slot of the winning point on shape B, or NULL_INDEX for an ordinary shape.
+    pub child_index_b: i32,
     /// Point where the shapes hit at the beginning of the time step.
     pub point: Pos,
     /// Normal vector pointing from shape A to shape B.

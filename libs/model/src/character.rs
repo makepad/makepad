@@ -299,6 +299,7 @@ impl Mats {
         use crate::{PatternKind, SurfaceAlpha, SurfaceChannel, SurfaceDerivation, SurfaceLayer, SurfaceMaterial, SurfaceOperation, SurfacePattern};
         let mut out = Vec::new();
         for (i, m) in self.list.iter().enumerate() {
+            crate::mesh::pace();
             let id = i as u32 + self.base;
             out.push(Operation::SetMaterial { material: id, value: crate::Material { color: m.color, base_color_png: Vec::new() } });
             let (base, pattern): ([f64; 4], Option<(PatternKind, [f64; 3], [f64; 3], [f64; 2], f64)>) = {
@@ -395,6 +396,7 @@ pub fn build_from_spec(spec: &CharacterSpec, limits: &Limits) -> Result<Characte
     });
     let rig = clips::RigInfo::new(&g.b);
     for name in &wanted {
+        crate::mesh::pace();
         match clips::clip(name, &rig) { Some(c) => operations.push(Operation::SetClip { clip: c }), None => return Err(Error::Invalid("unknown character clip")) }
     }
     // Sockets: weapon grip on the right hand, and named gear anchors.

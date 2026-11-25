@@ -311,11 +311,34 @@ impl System {
         let scale = self.scale();
         let tol = opts.tolerance * scale;
         let branches = self.branches();
+        let (r, jac, rows, iterations) = self.iterate_weighted(w, scale, &branches, tol, opts.max_iterations);
+        let residual = max_abs(&r);
+        let converged = residual <= tol;
+        let failing = if converged {
+            Vec::new()
+        } else {
+            let mut f: Vec<usize> = rows.iter().zip(&r).filter(|(_, v)| v.abs() > tol).map(|(c, _)| *c).collect();
+            f.dedup();
+            f
+        };
+        let qr = DragQr::new(&jac, n);
+        let dof = n - qr.rank();
+        let determined = (0..n).map(|j| qr.determined(j)).collect();
+        let redundant = redundant_constraints(&jac, &rows, n);
+        Report { converged, iterations, residual, dof, determined, redundant, failing }
+    }
+
+    /// The weighted, damped min-norm Newton iteration of [`Self::solve_weighted`] without its
+    /// report: the last residuals, Jacobian, each row's constraint and the iteration count.
+    fn iterate_weighted(
+        &mut self, w: &[f64], scale: f64, branches: &[f64], tol: f64, max_iterations: usize,
+    ) -> (Vec<f64>, Vec<f64>, Vec<usize>, usize) {
+        let n = self.x.len();
         let winv: Vec<f64> = w.iter().map(|w| 1.0 / w).collect();
-        let (mut r, mut jac, mut rows) = self.evaluate(&self.x, scale, &branches);
+        let (mut r, mut jac, mut rows) = self.evaluate(&self.x, scale, branches);
         let mut lambda = 1e-9;
         let mut iterations = 0;
-        while iterations < opts.max_iterations && max_abs(&r) > tol {
+        while iterations < max_iterations && max_abs(&r) > tol {
             iterations += 1;
             let m = r.len();
             // A = J W⁻¹ Jᵀ
@@ -348,7 +371,7 @@ impl System {
                         }
                         trial[k] -= winv[k] * s;
                     }
-                    let (tr, tj, trows) = self.evaluate(&trial, scale, &branches);
+                    let (tr, tj, trows) = self.evaluate(&trial, scale, branches);
                     if dot(&tr, &tr) < cost {
                         self.x = trial;
                         r = tr;
@@ -365,18 +388,7 @@ impl System {
                 break;
             }
         }
-        let residual = max_abs(&r);
-        let converged = residual <= tol;
-        let failing = if converged {
-            Vec::new()
-        } else {
-            let mut f: Vec<usize> = rows.iter().zip(&r).filter(|(_, v)| v.abs() > tol).map(|(c, _)| *c).collect();
-            f.dedup();
-            f
-        };
-        let (rank, determined) = analyse(&jac, r.len(), n);
-        let redundant = redundant_constraints(&jac, &rows, n);
-        Report { converged, iterations, residual, dof: n - rank, determined, redundant, failing }
+        (r, jac, rows, iterations)
     }
 
     /// Residuals, their Jacobian (row-major, rows x unknowns) and each row's
@@ -674,6 +686,82 @@ fn max_abs(a: &[f64]) -> f64 {
     a.iter().fold(0.0, |m, v| m.max(v.abs()))
 }
 
+/// Column-pivoted Householder QR of Jᵀ. The independent columns give the drag
+/// its constraint normals Y. Each stores R above the tail of its reflector.
+struct DragQr {
+    columns: Vec<Vec<f64>>,
+    tau: Vec<f64>,
+    /// Columns of Z, the orthonormal directions in which the drag can move to first order.
+    z: Vec<Vec<f64>>,
+}
+
+impl DragQr {
+    /// Keep pivots larger than 1e-9 times the first pivot's magnitude.
+    fn new(jac: &[f64], n: usize) -> Self {
+        let mut columns: Vec<_> = jac.chunks_exact(n.max(1)).map(|row| row.to_vec()).collect();
+        let mut tau = Vec::new();
+        for k in 0..n.min(columns.len()) {
+            let (mut best, mut squared) = (k, 0.0);
+            for (j, col) in columns.iter().enumerate().skip(k) {
+                let length2 = dot(&col[k..], &col[k..]);
+                if length2 > squared {
+                    (best, squared) = (j, length2);
+                }
+            }
+            let length = squared.sqrt();
+            if length == 0.0 || (k > 0 && length <= 1e-9 * columns[0][0].abs()) {
+                break;
+            }
+            columns.swap(k, best);
+            let (done, trailing) = columns.split_at_mut(k + 1);
+            let v = &mut done[k];
+            let first = v[k];
+            let pivot = -length.copysign(first);
+            let t = (pivot - first) / pivot;
+            for entry in &mut v[k + 1..] {
+                *entry /= first - pivot;
+            }
+            v[k] = pivot;
+            tau.push(t);
+            for col in trailing {
+                Self::reflect(v, t, k, col);
+            }
+        }
+        let rank = tau.len();
+        let mut qr = Self { columns, tau, z: Vec::with_capacity(n - rank) };
+        for j in rank..n {
+            let mut v = vec![0.0; n];
+            v[j] = 1.0;
+            qr.apply_q(&mut v);
+            qr.z.push(v);
+        }
+        qr
+    }
+
+    fn reflect(v: &[f64], tau: f64, k: usize, x: &mut [f64]) {
+        let a = tau * (x[k] + dot(&v[k + 1..], &x[k + 1..]));
+        x[k] -= a;
+        for (xi, vi) in x[k + 1..].iter_mut().zip(&v[k + 1..]) {
+            *xi -= a * vi;
+        }
+    }
+
+    fn apply_q(&self, x: &mut [f64]) {
+        for k in (0..self.rank()).rev() {
+            Self::reflect(&self.columns[k], self.tau[k], k, x);
+        }
+    }
+
+    fn rank(&self) -> usize {
+        self.tau.len()
+    }
+
+    /// An unknown is determined if its row in the orthonormal null basis has length below 1e-7.
+    fn determined(&self, j: usize) -> bool {
+        self.z.iter().map(|v| v[j] * v[j]).sum::<f64>().sqrt() < 1e-7
+    }
+}
+
 /// Solves `A y = b` for a symmetric positive definite `A` (overwritten).
 fn cholesky_solve(a: &mut [f64], b: &[f64], m: usize) -> Option<Vec<f64>> {
     for j in 0..m {
@@ -708,65 +796,6 @@ fn cholesky_solve(a: &mut [f64], b: &[f64], m: usize) -> Option<Vec<f64>> {
         y[i] /= a[i * m + i];
     }
     Some(y)
-}
-
-/// Rank of the Jacobian and, per unknown, whether every null-space
-/// direction leaves it still (it is determined).
-fn analyse(jac: &[f64], m: usize, n: usize) -> (usize, Vec<bool>) {
-    let mut a = jac.to_vec();
-    let eps = 1e-9 * a.iter().fold(1.0f64, |s, v| s.max(v.abs()));
-    let mut pivots: Vec<usize> = Vec::new();
-    let mut row = 0;
-    for col in 0..n {
-        if row >= m {
-            break;
-        }
-        let (mut best, mut best_v) = (row, 0.0);
-        for i in row..m {
-            if a[i * n + col].abs() > best_v {
-                best = i;
-                best_v = a[i * n + col].abs();
-            }
-        }
-        if best_v <= eps {
-            continue;
-        }
-        for k in 0..n {
-            a.swap(row * n + k, best * n + k);
-        }
-        let p = a[row * n + col];
-        for k in 0..n {
-            a[row * n + k] /= p;
-        }
-        for i in 0..m {
-            if i != row {
-                let f = a[i * n + col];
-                if f != 0.0 {
-                    for k in 0..n {
-                        a[i * n + k] -= f * a[row * n + k];
-                    }
-                }
-            }
-        }
-        pivots.push(col);
-        row += 1;
-    }
-    let rank = pivots.len();
-    // Null-space basis: one vector per free column f, v[f] = 1 and
-    // v[pivot_k] = -R[k][f]. An unknown is determined when it is zero in all.
-    let mut determined = vec![true; n];
-    for f in 0..n {
-        if pivots.contains(&f) {
-            continue;
-        }
-        determined[f] = false;
-        for (k, &pc) in pivots.iter().enumerate() {
-            if a[k * n + f].abs() > 1e-7 {
-                determined[pc] = false;
-            }
-        }
-    }
-    (rank, determined)
 }
 
 /// Constraints whose rows lie in the span of the rows before them.
@@ -1015,5 +1044,77 @@ mod tests {
         }
         let r = s.solve(&Options::default());
         assert!(r.converged && r.dof == 0, "{:?} {} {}", r.converged, r.dof, r.residual);
+    }
+
+    fn check_null_basis(qr: &DragQr, jac: &[f64], scale: f64) {
+        for (i, zi) in qr.z.iter().enumerate() {
+            for (j, zj) in qr.z.iter().enumerate().take(i + 1) {
+                let error = (dot(zi, zj) - if i == j { 1.0 } else { 0.0 }).abs();
+                assert!(error <= 8.0 * f64::EPSILON, "ZᵀZ differs from I at ({i}, {j}) by {error:e}");
+            }
+            for (j, row) in jac.chunks_exact(zi.len()).enumerate() {
+                let error = dot(row, zi).abs();
+                assert!(error <= 8.0 * f64::EPSILON * scale, "JZ differs from zero at ({j}, {i}) by {error:e}");
+            }
+        }
+    }
+
+    #[test]
+    fn redundant_rectangle_null_basis_and_report() {
+        let mut s = System::new();
+        let (p, l) = rect(&mut s);
+        s.constrain(Constraint::Fix(p[0], [0.0, 0.0]));
+        s.constrain(Constraint::Length(l[0], 40.0));
+        s.constrain(Constraint::Parallel(l[0], l[2]));
+        s.constrain(Constraint::Length(l[0], 40.0));
+        s.x.copy_from_slice(&[0.0, 0.0, 40.0, 0.0, 40.0, 25.0, 0.0, 25.0]);
+        let scale = s.scale();
+        let branches = s.branches();
+        let (r, jac, _) = s.evaluate(&s.x, scale, &branches);
+        let qr = DragQr::new(&jac, s.x.len());
+        assert_eq!(r.len(), 9, "redundant rectangle has nine scalar rows");
+        assert_eq!(qr.rank(), 7, "redundant rectangle has seven independent rows");
+        assert_eq!(qr.z.len(), 1, "rectangle has one free height");
+        check_null_basis(&qr, &jac, scale);
+
+        let report = s.solve(&Options::default());
+        assert_eq!(report.dof, 1, "the rectangle report must leave its height free");
+        assert_eq!(report.determined, [true, true, true, true, true, false, true, false],
+            "only the two top y coordinates can move");
+    }
+
+    #[test]
+    fn chain_null_basis_and_report() {
+        let mut s = System::new();
+        let mut end = s.point([0.0, 0.0]);
+        s.constrain(Constraint::Fix(end, [0.0, 0.0]));
+        let mut lines = Vec::new();
+        let headings = [0.0_f64, 6.0, 12.0, 18.0, 0.0, 0.0, 0.0, 90.0];
+        for (i, degrees) in headings.iter().enumerate() {
+            let a = degrees.to_radians();
+            let [x, y] = s.at(end);
+            let next = s.point([x + 4.0 * a.cos(), y + 4.0 * a.sin()]);
+            let line = s.line(end, next);
+            s.constrain(Constraint::Length(line, 4.0));
+            if i == 0 {
+                s.constrain(Constraint::Horizontal(line));
+            } else if i != 4 && i != headings.len() - 1 {
+                s.constrain(Constraint::Angle(lines[i - 1], line, a - headings[i - 1].to_radians()));
+            }
+            lines.push(line);
+            end = next;
+        }
+        let scale = s.scale();
+        let branches = s.branches();
+        let (_, jac, _) = s.evaluate(&s.x, scale, &branches);
+        let qr = DragQr::new(&jac, s.x.len());
+        assert_eq!(qr.z.len(), 2, "the two free joints must give two tangent directions");
+        check_null_basis(&qr, &jac, scale);
+
+        let report = s.solve(&Options::default());
+        assert_eq!(report.dof, 2, "the chain report must count both free joints");
+        assert_eq!(&report.determined[..10], &[true; 10], "the first four links and their base are fixed");
+        assert_eq!(&report.determined[10..], &[true, false, true, false, true, false, false, false],
+            "the horizontal arm can swing vertically and the tip can also move sideways");
     }
 }

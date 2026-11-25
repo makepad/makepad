@@ -17,6 +17,85 @@ fn triangle() -> StaticModel {
 }
 
 #[test]
+fn pbr_screen_cache_is_enabled_only_for_terrain_on_fast() {
+    use crate::GiReceivers;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
+
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let mut pbr = cx.with_vm(|vm| {
+        makepad_draw::script_mod(vm);
+        vm.heap_mut().new_module(id!(prelude));
+        script_eval!(vm, { mod.prelude.widgets_internal = {
+            ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw
+        } });
+        vm.heap_mut().new_module(id!(widgets));
+        crate::script_mod(vm);
+        DrawScenePbr::script_new_with_default(vm)
+    });
+    let mut renderer = Renderer::default();
+    renderer.pbr_ready = true;
+    let mut model = triangle();
+    model.pbr.roughness = 0.5;
+    let prepared = PreparedStaticPreview::prepare(model).expect("the PBR triangle must prepare");
+    let names = ["gen/surface/level-terrain-0", "prop"];
+    let [tile, prop] = names.map(|name| {
+        let uploaded = renderer.upload_static_preview(&mut cx, prepared.clone());
+        let geometry = uploaded.geometry.geometry_id();
+        renderer.install_uploaded_static(name, uploaded);
+        geometry
+    });
+    let instances = names.map(|name| ModelInstance {
+        model: name.into(), transform: Mat4f::identity(), dynamic: false,
+        tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
+        depth_order: 0.0, custom_material: None, layer_materials: Vec::new(),
+        part_poses: Vec::new(), lamps: Default::default(),
+    });
+    renderer.placed_blocks.refresh(&renderer.static_models, &instances, None);
+    let origin = vec3f(0.0, 1.0, 4.0);
+    renderer.gi.last_scene_origin = origin;
+    renderer.gi.install_screen_fill_for_test(&mut cx, origin);
+
+    let pass = DrawPass::new(&mut cx);
+    for receivers in [GiReceivers::Fast, GiReceivers::Exact] {
+        renderer.set_gi_receivers(receivers);
+        let mut list = DrawList::new(&mut cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        draw.begin_pass(&pass, Some(1.0));
+        list.begin_always(&mut draw);
+        renderer.draw_models_inner(
+            &mut Cx3d::new(&mut draw), ModelDraw::Pbr(&mut pbr), super::draw_models::LayerPhase::Opaque,
+            origin, 1.0, &instances, WorldModelLane::Placed, (Vec3f::default(), 0.0),
+            &SunLight::default(), None, &mut RenderStats::default(),
+        );
+        list.end(&mut draw);
+        draw.end_pass(&pass);
+
+        let items = &draw.draw_lists[list.id()].draw_items;
+        assert_eq!(items.len(), 2, "{receivers:?} must submit both single-triangle models to the PBR lane");
+        let cache_switch = |geometry, name| {
+            let call = (0..items.len()).filter_map(|i| items[i].draw_call())
+                .find(|call| call.geometry_id == Some(geometry))
+                .unwrap_or_else(|| panic!("{receivers:?} must submit the {name} geometry"));
+            let layout = &draw.draw_shaders[call.draw_shader_id.index].mapping;
+            let ctl = layout.dyn_uniforms.find(live_id!(gi_screen_ctl))
+                .expect("the PBR draw must expose gi_screen_ctl");
+            call.dyn_uniforms[ctl.offset]
+        };
+        let tile_ctl = cache_switch(tile, "terrain tile");
+        let prop_ctl = cache_switch(prop, "prop");
+        match receivers {
+            GiReceivers::Fast => {
+                assert_eq!(tile_ctl, 1.0, "Fast must read the screen cache on the unpainted PBR tile");
+                assert_eq!(prop_ctl, 0.0, "Fast must gather on an ordinary prop in the same PBR draw");
+            }
+            GiReceivers::Exact => assert_eq!([tile_ctl, prop_ctl], [0.0; 2],
+                "Exact must gather on every PBR item even when the screen fill matches the scene origin"),
+        }
+    }
+}
+
+#[test]
 fn texture_book_separates_shared_lod_atlas_from_geometry() {
     let png = Cx::encode_rgba_as_png(2, 2, &[180; 16]).unwrap();
     let prepare = || {
@@ -240,7 +319,7 @@ fn morph_shadow_casters_share_visible_weights_and_exclude_rest_duplicates() {
     renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();
     renderer.set_model_clip_weighted(ModelTarget::Attachment(0),Some("pulse".into()),1.,false,0.5).unwrap();
     let mut movers=Vec::new();
-    renderer.collect_lm_movers(&World::default(),vec3f(0.,0.,0.),1.,None,&mut movers);
+    renderer.collect_lm_movers(&World::default(),vec3f(0.,0.,0.),1.,None,&mut Default::default(),&mut movers);
     assert_eq!(movers.len(),2);
     assert_eq!(movers[0].morph.as_ref().unwrap().weights[0].x,0.75);
     assert_eq!(movers[1].morph.as_ref().unwrap().weights[0].x,0.625);
@@ -262,10 +341,10 @@ fn entity_casters_keep_their_primitive_shape(){
     world.entities=vec![body(1,Shape::Sphere),body(2,Shape::Box),body(3,Shape::Cylinder)];
     // No geometry resident yet: nothing is drawn as the wrong shape.
     let mut movers=Vec::new();
-    renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None,&mut movers);
+    renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None,&mut Default::default(),&mut movers);
     assert!(movers.is_empty());
     renderer.ensure_entity_caster_geometries(&mut cx);
-    renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None,&mut movers);
+    renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None,&mut Default::default(),&mut movers);
     assert_eq!(movers.len(),3);
     let id=|shape:Shape|renderer.shadow_shape_geometries[shape.index()].as_ref().unwrap().geometry_id();
     assert_eq!(movers[0].geometry,id(Shape::Sphere));

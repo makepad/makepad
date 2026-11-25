@@ -191,8 +191,14 @@ pub struct UpstreamFixes {
     pub offset_clip_right_side_out: bool,
     /// `SmSurfOfRevolution::CreateOffsetSurface` cuts the offset generator at the axis on either side of the frame origin (WR-343, #973).
     pub revolution_offset_axis_both_sides: bool,
+    /// Offset a right extrusion's line or circular generator in its plane where upstream's commented-out `SmSurfOfExtrusion` override leaves every extrusion a numeric `SmOffsetSurface` (not upstream, WR-573).
+    pub extrusion_offset_offsets_generator: bool,
+    /// Keep successful face surface caches across solves of one Boolean, validating their build inputs on the next request (WR-574).
+    pub face_caches_kept_per_boolean: bool,
     /// With extended convex edges, `piecewise_merge` relates the mated offsets of a manifold edge instead of intersecting them again (WR-344, #469).
     pub offset_extended_edges_mated: bool,
+    /// `PiecewiseMerge` also relates the offsets of the faces round a vertex where the body is smooth all round (no vertex or edge face there, every edge at it a manifold tangent sector, one live offset per face), as it relates edge neighbours: they meet only at the offset of that vertex, which upstream finds by intersecting them, at the cost of a branch point the marcher resolves (not upstream, WR-572).
+    pub offset_smooth_vertex_neighbours_related: bool,
     /// The extended offset (`SmOffsetExecutive::GetCreateExtendedSurface`) extends a cone or cylinder as itself, along its rulings and around its axis with `SM_CT_CINFINITY` (around by no more than half the turn it leaves open on each side), where upstream extends every surface by a tangent extension (`SM_CT_G1R`) that leaves a cylinder at once; a face that reaches a hair into that extension is later fitted back into a cylinder off its radius (WR-532; the fork's source fork@b283ea2).
     pub offset_extends_cones_as_themselves: bool,
     /// Thickening a sheet (`ShellBrep` with `bCreateOffsetSolid` on a non-manifold input) puts every planar side wall onto its plane (the fork's `sm_PutPlanarFaceOnItsPlane`) and deletes the old surface's seam it leaves as a slit, where upstream keeps each wall as the ruled surface between the lamina edge and its offset: a tube's end rings are `SmPlane`s with two loops, not `SmSurfOfRevolution`s (WR-564, #1599; the fork's source fork#62).
@@ -397,6 +403,8 @@ pub struct UpstreamFixes {
     pub curve_contacts_at_curve_ends: bool,
     /// `SmOffsetExecutive::ShellBrep` of a solid inward fails when the inset leaves no cavity (an empty offset, `SM_ERR_INVALID_INPUT`) or the offset is not a closed solid (`SM_ERR`), instead of handing the input back unhollowed as a success (WR-454, #380; the fork's source fork@fbe43bb).
     pub shell_empty_cavity_fails: bool,
+    /// `SmOffsetExecutive::BuildOffsetOfEdgeuses` of an inset shell pairs, across a tangent edge between a face it offsets and a face it copies (a fillet running smoothly onto the open face), the offset face's mapped use with the copied face's mapped use (the mate of the radial partner). Upstream maps a copied face's edges from the face use opposite the one its inset neighbours map from (copied faces take no inset), so the two offsets of such an edge never meet in one pair, `EdgeuseOffset`'s tangent-gap bridge never runs, and the offset is left open along the edge: a shell of a box rounded where its open face meets the walls fails with status 1001. Paired, the bridge closes it with the ruled strip from the inner round's edge to the rim (not upstream; no fork source).
+    pub shell_tangent_open_face_bridge: bool,
     /// `create_fillet_brep` refuses a blend whose rolling ball does not fit the faces it rolls on (a face curves tighter than the ball at a section of the edge: `BallFitsItsFaces`) before the corners, with `FilletErrorType::NoRoom` (error info code 8, not an upstream code), where the corners fail with the generic status looking for a rail end that is not there (WR-462, #1172; source change, diff `2c5baae..e5696ca` in the issue).
     pub fillet_refuse_ball_not_fitting: bool,
     /// `SmMerge::BooleanLists` copies its surface operands with the virtual `Copy` (the derived surface, its natural domain and its kind), where upstream's base copy constructor slices every surface to a geometry-less `SmSurface`, so a surface list always fails with `SM_ERR` and the planar 2D path is never taken (WR-196; `plan/upstream-issues/WR-196--booleanlists-slices-derived-surfaces-into-base-smsurface.md`).
@@ -447,7 +455,9 @@ impl UpstreamFixes {
             offset_excess_faces_after_merge: true,
             offset_clip_right_side_out: true,
             revolution_offset_axis_both_sides: true,
+            extrusion_offset_offsets_generator: true,
             offset_extended_edges_mated: true,
+            offset_smooth_vertex_neighbours_related: true,
             offset_extends_cones_as_themselves: true,
             thicken_planar_side_walls: true,
             remove_slit_loops_where_solids_touch: true,
@@ -549,6 +559,7 @@ impl UpstreamFixes {
             offset_stitch_at_body_tolerance: true,
             curve_contacts_at_curve_ends: true,
             shell_empty_cavity_fails: true,
+            shell_tangent_open_face_bridge: true,
             fillet_refuse_ball_not_fitting: true,
             boolean_lists_virtual_surface_copies: true,
             sphere_small_circle_not_touching: true,
@@ -561,6 +572,7 @@ impl UpstreamFixes {
             fillet_trace_rejects_short_step: true,
             curve_tight_box_interval_knots: true,
             boolean_skips_faces_apart: true,
+            face_caches_kept_per_boolean: true,
         }
     }
 }

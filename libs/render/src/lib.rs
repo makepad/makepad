@@ -77,7 +77,7 @@ pub use bake::*;
 pub use custom_material::{DrawSceneCustom, DrawMaterialShadow};
 pub use makepad_render_material;
 pub use clustered::{ClusterConfig, ClusterStats};
-pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug, GiInstance, GiMesh, GiField};
+pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug, GiReceivers, GiScreenView, GiScreenCache, GiInstance, GiMesh, GiField};
 pub use local_shadows::{LocalShadowConfig, LocalShadowStats};
 pub use gpu_lightmap::{
     dynamic_shadow_tiers, CascadeCasters, CascadeTile, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
@@ -140,6 +140,7 @@ pub fn script_mod_steps() -> impl Iterator<Item = ScriptModStep> {
     ];
     const AFTER_SHADERS: &[ScriptModStep] = &[
         ("volume_fog", volume_fog::script_mod),
+        ("gi screen fill", fast_gi::screen_fill_script_mod),
         ("ssr", ssr::script_mod),
         ("trample", trample::script_mod),
         ("local_shadows", local_shadows::script_mod),

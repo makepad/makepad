@@ -615,6 +615,42 @@ fn oriented_normal(k: &Kernel, b: &Body, f: FaceId, uv: Point2) -> Result<Vec3, 
     Ok(if material_use(b, f)?.1 { n } else { -n })
 }
 
+/// How tightly a face rounds outward at the middle of its domain: the radius of the round it
+/// is there (a fillet, a sphere's patch, the outside of a torus) and that point, or `None` for a
+/// face flat there or curving inward (a hole's wall, a cove). Read from the normal's turn over a
+/// small step along each parameter: two surface evaluations more than the point's own.
+pub fn convex_radius(k: &Kernel, b: &Body, f: FaceId) -> Result<Option<(f64, [f64; 3])>, BrepError> {
+    let surface = b.face(f)?.surface.as_ref().ok_or_else(|| BrepError::Kernel("a face without a surface".into()))?;
+    if matches!(surface.kind(), SurfaceKind::Plane(_)) {
+        return Ok(None);
+    }
+    let outward = material_use(b, f)?.1;
+    let at = |uv: Point2| -> Result<(Vec3, Vec3), BrepError> {
+        let (p, du, dv) = surface.evaluate_1st_derivatives(k, uv, false, false)?;
+        let n = du.cross(dv);
+        let n = if outward { n } else { -n };
+        Ok((p, n * (1.0 / n.length().max(1e-30))))
+    };
+    let domain = b.face(f)?.uv_domain;
+    let (mid, span) = (domain.mid(), domain.max() - domain.min());
+    let (p0, n0) = at(mid)?;
+    let mut tightest: Option<f64> = None;
+    for (su, sv) in [(1e-4, 0.0), (0.0, 1e-4)] {
+        let (p1, n1) = at(Point2::new(mid.x + su * span.x, mid.y + sv * span.y))?;
+        let (dp, dn) = (p1 - p0, n1 - n0);
+        let step = dp.dot(dp);
+        if step < 1e-24 {
+            continue;
+        }
+        // the normal turns with the step on a round (outward), against it in a cove
+        let curvature = dn.dot(dp) / step;
+        if curvature > 1e-9 {
+            tightest = Some(tightest.map_or(1.0 / curvature, |r: f64| r.min(1.0 / curvature)));
+        }
+    }
+    Ok(tightest.map(|r| (r, [p0.x, p0.y, p0.z])))
+}
+
 /// Whether the solid's angle across an edge is under 180 degrees, and whether it is smooth.
 pub fn edge_is_convex(k: &Kernel, b: &mut Body, e: EdgeId) -> Result<(bool, bool), BrepError> {
     let uses = edge::edgeuses(b, e, None, None)?;

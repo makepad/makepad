@@ -15,24 +15,23 @@
 //! Output is the original [`crate::apply_dmx_mapping`] room patch, with any
 //! [`crate::RigColors`] an application lays over it.
 
+use crate::{clamp01, ControllerButtons, ControllerState, RigColors};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::{
-    apply_dmx_mapping_with_colors, clamp01, ArtNetPacket, ControllerButtons, ControllerState,
-    RigColors, ARTNET_BIND_ADDR, ARTNET_BROADCAST_ADDR, CONTROLLER_INSTANCE_LOCK_ADDR,
+    ArtNetPacket, ARTNET_BIND_ADDR, ARTNET_BROADCAST_ADDR, CONTROLLER_INSTANCE_LOCK_ADDR,
     DMX_FRAME_DT, DMX_FRAME_HZ,
 };
 use makepad_micro_serde::*;
 use makepad_platform::Cx;
 use std::{
-    net::UdpSocket,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use std::thread::JoinHandle;
+use std::{net::UdpSocket, thread::JoinHandle, time::Duration};
 
 /// Clip grid + VJ mixer slider. Lighting must not consume these.
 pub const VJ_CLIP_NOTE_MAX: u8 = 39;
@@ -284,9 +283,10 @@ impl DeskState {
     }
 
     /// One whole universe as the writer sends it.
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     fn render_frame(&self, dmx: &mut [u8], clock: f64) {
         dmx.fill(0);
-        apply_dmx_mapping_with_colors(&self.state, &self.buttons, dmx, clock, &self.colors);
+        crate::apply_dmx_mapping_with_colors(&self.state, &self.buttons, dmx, clock, &self.colors);
     }
 }
 

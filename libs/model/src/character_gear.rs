@@ -316,6 +316,7 @@ pub(crate) fn build(g: &mut Gen) {
     let body = g.b.clone_layout();
     let b: &Body = &body;
     for l in &outfit {
+        crate::mesh::pace();
         let mat = |g: &mut Gen, t: Tex| g.mats.id(MatDef { color2: Some(l.color2), ..MatDef::new(l.color, tex_for(l, t)) });
         match l.kind.as_str() {
             "jacket" => {

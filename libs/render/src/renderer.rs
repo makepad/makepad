@@ -4,7 +4,7 @@
 //! `world.render_rev`; dynamics re-pack every frame.
 
 use makepad_draw::*;
-use crate::custom_material::CustomMaterial;
+use crate::custom_material::{CustomMaterial, TracedLayerRole, TracedProgram, TracedSurfaceRecipe, TracedSurfaceState};
 use makepad_scene::{
     entity_index_sorted, BodyKind, ChunkKey, Entity, World, Part, Shape, Terrain, TerrainMaterials,
     VoxelView, WaterView, WaterSurface, MAX_WAVES,
@@ -228,6 +228,8 @@ pub struct RenderStats {
     /// Caster instances the cascades drew after per-cascade culling, and the
     /// cascade pass's smoothed GPU time.
     pub csm_draws: u64,
+    /// The current cascades reuse the preceding whole-atlas recording.
+    pub csm_kept: bool,
     pub csm_gpu_ms: f32,
     /// Dynamic shadows drawn through the GPU SDF-silhouette quad
     /// (characters + driven cars).
@@ -251,10 +253,28 @@ struct LmRemapOwner {
     transform: [u32; 16],
 }
 
+/// Frames in which this renderer recorded both reflections and fog.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PostApplyCounts {
+    pub merged: u64,
+    pub apart: u64,
+    pub last_reason: Option<&'static str>,
+}
+
+/// An immediate lit box. The rigid transform supplies its orientation and world centre.
+#[derive(Clone, Copy, Debug)]
+pub struct LooseBox {
+    pub transform: Mat4f,
+    pub size: Vec3f,
+    pub color: Vec4f,
+}
+
 /// GPU-side caches for one view family: unit shape geometries, the packed
 /// static instance slabs, and the terrain mesh. Owns no draw structs — see
 /// [`SceneDraws`].
 pub struct Renderer {
+    loose_boxes: Vec<LooseBox>,
+    deferred_alpha: [Vec<frame_util::DeferredAlphaCube>; 5],
     // PERF: unit shape geometries, built once (index = Shape::index()).
     shape_geometries: [Option<Geometry>; 5],
     /// Primitive positions in the shadow shader's packed mesh layout.
@@ -353,7 +373,10 @@ pub struct Renderer {
     /// nothing and behaves exactly as it did before doors existed.
     model_anim_state: ModelStates,
     /// Stock props placed for this frame, set by the host before drawing.
-    placed_models: Vec<ModelInstance>,
+    placed_models: realm::PlacedModels,
+    /// Pre-sort ranges per placed slot and the permutation to final caster indices.
+    placed_static_slots: Vec<realm::StaticCopy>,
+    placed_caster_indices: Vec<usize>,
     /// Static placed-model layers that have no lightmap layout of their own.
     /// They are registered when the placed scene changes and feed Realtime
     /// CSM directly, rather than waiting for an atlas layout that may never
@@ -388,9 +411,11 @@ pub struct Renderer {
     /// transforms are deliberately excluded: cars move every frame without
     /// changing the baked scene.
     placed_scene_signature: Option<u64>,
+    /// RGB tints of the static copies in the GI snapshot, in placed order.
+    placed_paint_signature: Option<u64>,
     /// `rebuild_models_with_prefix`: the host's key for the list's leading
-    /// copies, how many they are and their signature.
-    placed_prefix: Option<(u64, usize, u64)>,
+    /// copies, how many they are and their scene and paint signatures.
+    placed_prefix: Option<(u64, usize, (u64, u64))>,
     /// How this device projects the world (flat / VR 1:1 / MR diorama).
     /// Applied as the scene draw list's view transform, so it costs one
     /// uniform and never invalidates the static slabs. See stage.rs.
@@ -474,6 +499,7 @@ pub struct Renderer {
     /// See [`Self::set_element_reach`].
     element_reach: Option<(Vec3f, Vec3f)>,
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
+    traced_programs: std::collections::BTreeMap<String, TracedProgram>,
     /// Bumped whenever `custom_draws` gains, replaces or drops a program
     /// with a derived shadow caster; it travels with them through
     /// `swap_review_materials`.
@@ -516,7 +542,11 @@ pub struct Renderer {
     /// The tier's reach of terrain paint blending (quality_tier.rs).
     terrain_blend_reach: f32,
     relief_steps: f32,
+    fog_steps: f32,
+    /// The tier's GI probe budget, ms: kept through a host's GI settings (renderer/gi.rs).
+    gi_budget_ms: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
+    pending_max_anisotropy: Option<u8>,
     grass_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
     grass_flower_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
@@ -601,6 +631,7 @@ pub struct Renderer {
     grade: makepad_scene::ColorGrade,
     volume_fog: volume_fog::VolumeFogState,
     ssr: ssr::SsrState,
+    post_apply_counts: PostApplyCounts,
     /// The baked lightmap's KILL SWITCH (F9 in the sandbox,
     /// `MAKEPAD_LIGHTMAP=off` at launch). Off binds the 1x1 "fully sunlit,
     /// no lamps" stand-in instead of the atlas, so every static falls back
@@ -630,6 +661,7 @@ pub struct Renderer {
     /// (`collect_lm_movers`, `collect_local_static_casters`): rebuilt per
     /// frame into the same buffers, which keep their capacity.
     frame_movers: Vec<crate::gpu_lightmap::GpuLmMover>,
+    frame_static_movers: std::collections::HashSet<u64>,
     frame_local_statics: Vec<crate::gpu_lightmap::GpuBakeMesh>,
     /// Host-supplied transient lights ([`Self::add_frame_lights`]), drained
     /// into `frame_lights` each frame.
@@ -735,6 +767,10 @@ pub struct Renderer {
     /// Bumped when the placed-prop list changes, so it can join the settle
     /// cache key.
     models_rev: u64,
+    /// Bumped for GI-visible changes to static copies, including an RGB tint
+    /// or a replaced asset under a placed id. GI requests a new snapshot
+    /// even when `models_rev` stays steady and the lightmap keeps its bake.
+    models_gi_rev: u64,
     /// CPU-baked occlusion (bake.rs), folded into instance colours. Renderer
     /// state by construction: the sim has no field for it, so a device may
     /// bake at a different quality than its peers without diverging.
@@ -801,6 +837,12 @@ pub use frame_util::*;
 pub use stream_draw::StreamStats;
 
 impl Renderer {
+    /// Replace the boxes for this frame, retaining the instance-list capacity.
+    pub fn set_loose_boxes(&mut self, boxes: &[LooseBox]) {
+        self.loose_boxes.clear();
+        self.loose_boxes.extend_from_slice(boxes);
+    }
+
     /// Install or clear this renderer's background program. A second view may borrow it
     /// for one draw and put the previous program back afterwards.
     pub fn set_sky_hook(&mut self, hook: Option<crate::custom_sky::SkyHook>) -> Option<crate::custom_sky::SkyHook> {
@@ -823,6 +865,8 @@ impl Renderer {
 impl Default for Renderer {
     fn default() -> Self {
         Self {
+            loose_boxes: Vec::new(),
+            deferred_alpha: Default::default(),
             shape_geometries: Default::default(),
             shadow_shape_geometries: Default::default(),
             static_chunks: Vec::new(),
@@ -857,7 +901,9 @@ impl Default for Renderer {
             model_lod_chains: std::collections::BTreeMap::new(),
             model_lod_chains_dirty: false,
             model_anim_state: ModelStates::default(),
-            placed_models: Vec::new(),
+            placed_models: Default::default(),
+            placed_static_slots: Vec::new(),
+            placed_caster_indices: Vec::new(),
             csm_static_casters: Vec::new(),
             csm_material_sources: Vec::new(),
             csm_static_blocks: Vec::new(),
@@ -869,6 +915,7 @@ impl Default for Renderer {
             view_models: Vec::new(),
             view_model_sun: 1.0,
             placed_scene_signature: None,
+            placed_paint_signature: None,
             placed_prefix: None,
             stage: Stage::default(),
             lod_bias: 1.0,
@@ -902,6 +949,7 @@ impl Default for Renderer {
             host_box: None,
             element_reach: None,
             custom_draws: Default::default(),
+            traced_programs: Default::default(),
             custom_casters_rev: 0,
             csm_custom_casters_rev: 0,
             ibl: Default::default(),
@@ -920,7 +968,10 @@ impl Default for Renderer {
             grass_pixels: crate::quality_tier::GraphicsTier::High.budget().grass_pixels,
             terrain_blend_reach: f32::MAX,
             relief_steps: 24.0,
+            fog_steps: 24.0,
+            gi_budget_ms: crate::quality_tier::GraphicsTier::High.budget().gi_budget_ms,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
+            pending_max_anisotropy: None,
             grass_rings: Default::default(),
             grass_flower_rings: Default::default(),
             pbr_ready: false,
@@ -964,6 +1015,7 @@ impl Default for Renderer {
             grade: Default::default(),
             volume_fog: Default::default(),
             ssr: Default::default(),
+            post_apply_counts: Default::default(),
             star_map_loaded: false,
             star_texture: None,
             gpu_baker: {
@@ -982,6 +1034,7 @@ impl Default for Renderer {
             frame_lights: Vec::new(),
             frame_baked_count: 0,
             frame_movers: Vec::new(),
+            frame_static_movers: std::collections::HashSet::new(),
             frame_local_statics: Vec::new(),
             host_lights: Vec::new(),
             host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),light_daylight:SunLight::default().dir,camera_relative:false,
@@ -1021,6 +1074,7 @@ impl Default for Renderer {
             shadow_points: Vec::new(),
             shadow_gate: ShadowRebuildGate::default(),
             models_rev: 0,
+            models_gi_rev: 0,
             bake: LightBake::default(),
             csm_focus: None,
             csm_fit_projection: None,
@@ -1035,6 +1089,8 @@ mod shell_bucket_tests;
 mod realm_lifecycle_tests;
 #[cfg(test)]
 mod sun_tests;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod post_tests;
 #[cfg(test)]
 mod env_prepare_tests;
 #[cfg(test)]

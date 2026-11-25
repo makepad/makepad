@@ -849,6 +849,7 @@ fn tags_cross_the_exact_body_engine_boundary() {
     let engine = Arc::new(replies);
     let mut e = Evaluator::with_brep(engine.clone());
     let chord = 0.125;
+    let (kept, aged) = (ids[0].1, ids[1].1);
     for (label, id) in ids {
         let out = e.brep_mesh(&g, id, chord, None).unwrap().unwrap();
         assert_eq!(out.tags, vec![47; out.triangle_count()], "{label}: the outer Tag reaches the new tessellation");
@@ -859,6 +860,17 @@ fn tags_cross_the_exact_body_engine_boundary() {
         assert_eq!(engine.calls.lock().unwrap().len(), calls, "{label}: a cache hit makes no engine request");
     }
     assert!(engine.calls.lock().unwrap().iter().all(|(_, c)| *c == chord), "exact tags: source tessellations use the requested chord");
+    // the build the person has keeps its meshes however many rounds (a drag's drafts) pass
+    e.keep([g.node(kept).key]);
+    let kept_mesh = e.brep_mesh(&g, kept, chord, None).unwrap().unwrap();
+    for _ in 0..=crate::eval::KEEP_ROUNDS {
+        e.begin();
+    }
+    let calls = engine.calls.lock().unwrap().len();
+    assert!(Arc::ptr_eq(&e.brep_mesh(&g, kept, chord, None).unwrap().unwrap(), &kept_mesh), "kept build: its mesh outlives the rounds");
+    assert_eq!(engine.calls.lock().unwrap().len(), calls, "kept build: its mesh makes no engine request");
+    e.brep_mesh(&g, aged, chord, None).unwrap().unwrap();
+    assert!(engine.calls.lock().unwrap().len() > calls, "kept build: a mesh of no kept node ages out");
     for (label, id) in [("untagged body", plain), ("Tag 0 body", zero)] {
         engine.calls.lock().unwrap().clear();
         let out = Evaluator::with_brep(engine.clone()).brep_mesh(&g, id, chord, None).unwrap().unwrap();

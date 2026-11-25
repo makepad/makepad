@@ -62,6 +62,9 @@ pub struct ManifoldConstraintPoint {
 pub struct ManifoldConstraint {
     pub points: [ManifoldConstraintPoint; 4],
     pub point_count: i32,
+    pub friction: f32,
+    pub restitution: f32,
+    pub rolling_resistance: f32,
     pub normal: Vec3,
     pub tangent1: Vec3,
     pub tangent2: Vec3,
@@ -94,6 +97,7 @@ pub struct ContactConstraint {
     pub restitution: f32,
     pub rolling_resistance: f32,
     pub manifold_count: i32,
+    pub has_restitution: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +222,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
             }
 
             let manifold_count = contact.manifold_count();
-            let contact_constraint = ContactConstraint {
+            let mut contact_constraint = ContactConstraint {
                 constraint_start: spec.manifold_start,
                 contact_id,
                 manifold_count,
@@ -238,8 +242,8 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 friction: contact.friction,
                 restitution: contact.restitution,
                 rolling_resistance: contact.rolling_resistance,
+                has_restitution: contact.restitution != 0.0,
             };
-            *unsafe { contact_constraints.get_mut(((base_offset + index) as usize) as usize) } = contact_constraint;
 
             for manifold_index in 0..manifold_count {
                 let manifold = &contact.manifolds[manifold_index as usize];
@@ -249,6 +253,16 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 let tangent1 = perp(normal);
                 let tangent2 = cross(tangent1, normal);
 
+                if let Some(set) = &contact.set_contact {
+                    (constraint.friction, constraint.restitution, constraint.rolling_resistance) =
+                        set.material_coefficients(manifold_index as usize);
+                    // A point-weighted contact mean can round to zero.
+                    contact_constraint.has_restitution |= constraint.restitution != 0.0;
+                } else {
+                    constraint.friction = contact_constraint.friction;
+                    constraint.restitution = contact_constraint.restitution;
+                    constraint.rolling_resistance = contact_constraint.rolling_resistance;
+                }
                 constraint.point_count = point_count;
                 constraint.normal = normal;
                 constraint.tangent1 = tangent1;
@@ -327,6 +341,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 }
             }
 
+            *unsafe { contact_constraints.get_mut(((base_offset + index) as usize) as usize) } = contact_constraint;
             index += 1;
         }
 
@@ -478,12 +493,12 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
 
         let dp = sub(state_b.delta_position, state_a.delta_position);
         let softness = contact_constraint.softness;
-        let friction = contact_constraint.friction;
-        let rolling_resistance = contact_constraint.rolling_resistance;
 
         for j in 0..manifold_count {
             let constraint = unsafe { manifold_constraints.get_mut(((contact_constraint.constraint_start + j) as usize) as usize) };
 
+            let friction = constraint.friction;
+            let rolling_resistance = constraint.rolling_resistance;
             let point_count = constraint.point_count;
             let normal = constraint.normal;
 
@@ -655,8 +670,7 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
 
     for constraint_index in start_index..end_index {
         let contact_constraint = *unsafe { contact_constraints.get_ref(((cc_start + constraint_index) as usize) as usize) };
-        let restitution = contact_constraint.restitution;
-        if restitution == 0.0 {
+        if !contact_constraint.has_restitution {
             continue;
         }
 
@@ -679,6 +693,10 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
         let manifold_count = contact_constraint.manifold_count;
         for manifold_index in 0..manifold_count {
             let cm = unsafe { manifold_constraints.get_mut(((contact_constraint.constraint_start + manifold_index) as usize) as usize) };
+            let restitution = cm.restitution;
+            if restitution == 0.0 {
+                continue;
+            }
 
             let normal = cm.normal;
             let point_count = cm.point_count;

@@ -3,6 +3,12 @@
 use super::*;
 
 impl Renderer {
+    pub(super) fn admit_traced_casters(&mut self, scene: crate::custom_material::TracedScene) {
+        self.gpu_baker.traced_casters.clear();
+        self.gpu_baker.traced_casters.extend(self.traced_programs.values()
+            .filter_map(|p| p.sun(scene)).filter(|b| !b.borrow().groups.is_empty()).cloned());
+    }
+
     /// Local lights must see all opaque architecture, not just the subset
     /// owned by CSM when a world atlas is present. Reuse resident geometry;
     /// terrain/voxel conversions are cached with each tile's revision.
@@ -11,12 +17,15 @@ impl Renderer {
     pub(super) fn collect_local_static_casters(&mut self, cx: &mut Cx, world: &World, out: &mut Vec<crate::gpu_lightmap::GpuBakeMesh>) {
         use crate::gpu_lightmap::GpuBakeMesh;
         out.clear();
-        for inst in self.placed_models.iter().filter(|i| !i.dynamic) {
+        for (_, inst) in self.placed_models.live().filter(|(_, i)| !i.dynamic) {
             if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
             let Some((_,model)) = self.static_models.iter().find(|(id,_)|id == &inst.model) else {continue;};
             if model.morph.is_some(){continue;}
-            let (min,max) = crate::lightmap::world_bounds(&inst.transform,(model.min,model.max));
-            for geometry in std::iter::once(model.geometry.as_ref()).chain(model.extra_draws.iter().map(|(g,..)|g.as_ref())) {
+            let Some(bounds) = model.fixed_shadow_bounds() else { continue };
+            let (min,max) = crate::lightmap::world_bounds(&inst.transform,bounds);
+            for (geometry, material) in std::iter::once((&model.geometry, &model.material))
+                .chain(model.extra_draws.iter().map(|(g, _, _, _, m)| (g, m))) {
+                if material.traced_required.is_some() { continue }
                 out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, material: None, cutout: None, msdf: None, band: Default::default() });
             }
         }
@@ -124,25 +133,48 @@ impl Renderer {
         eye:Vec3f,
         lod_scale:f32,
         skinned_items: Option<&[SkinnedDraw]>,
+        static_movers: &mut std::collections::HashSet<u64>,
         out: &mut Vec<crate::gpu_lightmap::GpuLmMover>,
     ) {
         out.clear();
+        let trace = self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::Realtime
+            && self.traced_programs.values().any(TracedProgram::wants_sun);
+        if trace {
+            for batch in self.traced_programs.values().filter_map(|p| p.sun_batch.as_ref()) {
+                batch.borrow_mut().groups.clear();
+            }
+        }
         // A static placed copy casts here only through its parts or a
         // morph; the models that have either at some level (usually none).
         // The rest (a scattered forest: thousands of copies) are skipped
         // before any lookup.
-        let static_movers: std::collections::HashSet<&str> = self.static_models.iter()
-            .filter(|(_, root)| std::iter::once(root).chain(root.lods.iter().map(|(_, m)| m))
-                .any(|m| !m.anim_parts.is_empty() || !m.driven_parts.is_empty() || m.morph.is_some()))
-            .map(|(k, _)| k.as_str()).collect();
+        // Hash collisions only add lookups since static copies without parts or morphs push nothing.
+        static_movers.clear();
+        for (at, (name, root)) in self.static_models.iter().enumerate() {
+            let levels = || std::iter::once(root).chain(root.lods.iter().map(|(_, m)| m));
+            if levels().any(|m| !m.anim_parts.is_empty() || !m.driven_parts.is_empty() || m.morph.is_some()) {
+                static_movers.insert(LiveId::from_str(name).0);
+            }
+            if trace && levels().any(|m| m.ordinary_shadow_bounds.is_some()) && self.model_casts_shadow.get(name) != Some(&false) {
+                // Fixed traced layers can belong to blocks with no ordinary movers.
+                for &slot in self.placed_models.static_by_model.get(at).into_iter().flatten() {
+                    let Some(inst) = self.placed_models.get(slot) else { continue };
+                    let distance = crate::asset_lod::instance_distance(&inst.transform, eye) * lod_scale;
+                    let model = root.visible_shadow_level(distance);
+                    model.collect_traced_groups(inst, &ModelTarget::Instance(slot), &self.model_anim_state, &self.traced_programs);
+                }
+            }
+        }
         // A placed copy in a static block has no parts and no morph: it
         // pushes nothing here, so only the loose ones are walked.
         // Without blocks every placed copy is loose (walked by index, not listed).
         let loose = self.placed_blocks.loose_for(self.placed_models.len(), self.placed_scene_signature);
-        let every = if loose.is_none() { self.placed_models.len() as u32 } else { 0 };
-        for (target,inst) in loose.into_iter().flatten().copied().chain(0..every).map(|i|(ModelTarget::Instance(i as usize),&self.placed_models[i as usize]))
+        let indexed = loose.into_iter().flat_map(|slots| slots.iter())
+            .filter_map(|slot| self.placed_models.get(slot as usize).map(|m| (slot as usize, m)));
+        let fallback = loose.is_none().then(|| self.placed_models.live()).into_iter().flatten();
+        for (target,inst) in indexed.chain(fallback).map(|(i, m)| (ModelTarget::Instance(i), m))
             .chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))) {
-            if !inst.dynamic && matches!(target, ModelTarget::Instance(_)) && (static_movers.is_empty() || !static_movers.contains(inst.model.as_str())) {
+            if !inst.dynamic && matches!(target, ModelTarget::Instance(_)) && (static_movers.is_empty() || !static_movers.contains(&LiveId::from_str(&inst.model).0)) {
                 continue;
             }
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model)
@@ -152,10 +184,15 @@ impl Renderer {
             if self.model_casts_shadow.get(&inst.model)==Some(&false){continue;}
             let root=&self.static_models[at].1;
             let distance=crate::asset_lod::instance_distance(&inst.transform,eye)*lod_scale;
+            let visible = root.visible_shadow_level(distance);
+            if trace && (inst.dynamic || matches!(target, ModelTarget::Attachment(_))) {
+                visible.collect_traced_groups(inst, &target, &self.model_anim_state, &self.traced_programs);
+            }
             // A chained base (hand-built LOD models) casts from its last,
             // cheapest level: a car's shadow is its silhouette on the road.
-            let lod=if self.is_lod_chain_base(&inst.model)&&!root.lods.is_empty(){root.lods.len()}else{root.lods.partition_point(|(threshold,_)|*threshold<=distance)};
-            let m=if lod==0{root}else{&root.lods[lod-1].1};
+            let m = if self.is_lod_chain_base(&inst.model) {
+                root.lods.last().map_or(visible, |(_, model)| model)
+            } else { visible };
             let morph=m.morph.as_ref().map(|m|m.depth(self.model_anim_state.morph_weights(&target,&inst.model,&m.source)));
             let caster_for = |binding: &CustomMaterialInstance| {
                 let program = self.custom_draws.get(&binding.name)?;
@@ -164,6 +201,7 @@ impl Renderer {
             let shared_caster = inst.layer_materials.is_empty().then(|| inst.material_of("").and_then(caster_for));
             let mut push_layer = |geometry: &Geometry, texture: &Texture, layer: &LayerMaterial,
                                   transform: Mat4f, min: Vec3f, max: Vec3f| {
+                if layer.traced_required.is_some() { return }
                 let caster = shared_caster.unwrap_or_else(|| inst.material_of(&layer.name).and_then(caster_for));
                 let pad = vec3f(1.0, 1.0, 1.0) * caster.map_or(0.0, |c| c.3);
                 out.push(crate::gpu_lightmap::GpuLmMover {
@@ -437,6 +475,15 @@ impl Renderer {
                 SETTLED_FRAMES.store(0, Ordering::Relaxed);
             }
         }
+        self.gpu_baker.set_cascade_daylight(sun.dir);
+        if self.gpu_baker.realtime_sun_active() && self.traced_programs.values().any(TracedProgram::wants_sun) {
+            if self.gpu_baker.realtime_cascade_pass().is_none() { self.gpu_baker.sync_csm_targets(cx.cx); }
+            let scene = self.traced_caster_scene(cx.cx, cx.current_pass_id());
+            for (name, program) in &mut self.traced_programs {
+                if program.wants_sun() { program.prepare(cx.cx, scene, name); }
+            }
+            self.admit_traced_casters(scene);
+        }
         let csm_scene_bounds = self.csm_scene_bounds.or_else(|| {
             if self.world_atlas_required() { return None; }
             // An atlas no longer supplies the world bound. Include every
@@ -457,7 +504,7 @@ impl Renderer {
         // copied into a scratch list every frame).
         // Only the cascades take the disc sample: `sun` stays at the centre,
         // so moving the sample never re-bakes the lightmap atlas.
-        if let Some(d) = self.gpu_baker.run_frame(
+        let delivery = self.gpu_baker.run_frame(
             cx,
             sun.dir,
             self.sun_disc_sample.map(|point| (point, cos_radius)),
@@ -469,10 +516,12 @@ impl Renderer {
             csm_view,
             eye,
             csm_scene_bounds,
-        ) {
+        );
+        self.gpu_baker.traced_casters.clear();
+        if let Some(d) = delivery {
             // Geometry can change during the settle debounce while an older
             // atlas finishes. Its remaps index the old model list.
-            if d.world_revision != (world.render_rev, self.models_rev) {
+            if d.world_revision != (world.render_rev, self.bake_models_revision()) {
                 return;
             }
             self.lightmap = Some(d.atlas);
@@ -620,6 +669,7 @@ impl Renderer {
         if !pbr.is_shiny() {
             return LayerMaterial {
                 name,
+                traced_required: None,
                 surface: None,
                 metallic: 0.0,
                 roughness: 1.0,
@@ -638,6 +688,7 @@ impl Renderer {
         match orm {
             Some(tex) => LayerMaterial {
                 name,
+                traced_required: None,
                 surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,
@@ -649,6 +700,7 @@ impl Renderer {
             },
             None => LayerMaterial {
                 name,
+                traced_required: None,
                 surface: None,
                 metallic: pbr.metallic,
                 roughness: pbr.roughness,

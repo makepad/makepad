@@ -1,7 +1,6 @@
 //! Per-view scheduling; hosts own the two optional scene attachments.
 use super::*;
-use crate::ssr::{SsrFrame, SsrPass, SsrSettings};
-use crate::volume_fog::VolumeFogCamera;
+use crate::ssr::{SsrApply, SsrFrame, SsrPass, SsrSettings};
 
 struct PendingSsr {
     scene: DrawPassId, depth: Texture, surface: Texture, envspec: Texture, size: DVec2,
@@ -84,36 +83,14 @@ impl Renderer {
         }
     }
 
-    pub(super) fn record_ssr(&mut self, cx: &mut Cx2d, scene: &Texture, parent: DrawPassId) -> Option<DrawPassId> {
+    pub(super) fn record_ssr(&mut self, cx: &mut Cx2d, scene: &Texture, parent: DrawPassId) -> Option<SsrApply> {
         let pending = self.ssr.pending.take();
         let Some(pending) = pending.filter(|_| self.ssr_available(cx.cx)) else {
             self.ssr.pass.disable(cx.cx);
             return None;
         };
-        let pass = &cx.passes[pending.scene].pass_uniforms;
-        let relative_clip = Mat4f::mul(&pass.camera_projection, &pass.camera_view);
-        let mut camera = VolumeFogCamera::from_clip(relative_clip);
-        let origin = self.ssr.origin;
-        let mut shift = Mat4f::identity();
-        shift.v[12] = -origin.x;
-        shift.v[13] = -origin.y;
-        shift.v[14] = -origin.z;
-        let mut unshift = Mat4f::identity();
-        unshift.v[12] = origin.x;
-        unshift.v[13] = origin.y;
-        unshift.v[14] = origin.z;
-        camera.general.clip_from_world = Mat4f::mul(&relative_clip, &shift).v;
-        camera.general.world_from_clip = Mat4f::mul(&unshift, &Mat4f { v: camera.general.world_from_clip }).v;
-        if camera.eye[3] > 0.5 {
-            camera.eye[0] += origin.x;
-            camera.eye[1] += origin.y;
-            camera.eye[2] += origin.z;
-        } else {
-            let near = match cx.cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => -1.0, _ => 0.0 };
-            let h = Mat4f { v: camera.general.world_from_clip }.transform_vec4(vec4(0.0, 0.0, near, 1.0));
-            if h.w.abs() > 1e-7 { camera.reference = [h.x / h.w, h.y / h.w, h.z / h.w, 0.0]; }
-        }
-        self.ssr.pass.run(cx, SsrFrame {
+        let camera = Self::post_camera(cx.cx, pending.scene, self.ssr.origin);
+        self.ssr.pass.record(cx, SsrFrame {
             settings: self.ssr.settings, gloss_floor: self.ssr.gloss_floor, camera, depth: &pending.depth, scene,
             surface: &pending.surface, envspec: &pending.envspec, size: pending.size, parent,
         })

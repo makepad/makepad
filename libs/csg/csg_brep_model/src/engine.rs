@@ -1,14 +1,14 @@
 //! Exact bodies for the solid graph, on a thread of their own.
 //!
 //! The kernel recurses deeply, so one long-lived worker with a big stack runs every job: the
-//! caller never does kernel work and can cancel. The worker keeps one body per step key,
-//! whoever asked for it. No step depends on the chord, only a tessellation does: a drag's
-//! preview, its commit and a slice at print detail build a body once and each cut their own
-//! mesh from it, and a body's exact measure and entities are worked out once. An edit
-//! rebuilds only the steps it changed.
+//! caller never does kernel work and can cancel. The worker keeps bodies by step key.
+//! An identity placement shares its input's body and keeps its own face names.
+//! A drag's preview, its commit and a slice at print detail build a body once and each cut
+//! their own mesh at the requested chord. Each key caches its exact measure and entities.
+//! An edit rebuilds only the steps it changed.
 //!
 //! A body depends on its step and its inputs alone, never on what the worker did before:
-//! each step builds on a renewed kernel (`Kernel::renewed`: nothing an earlier call left on
+//! each new body builds on a renewed kernel (`Kernel::renewed`: nothing an earlier call left on
 //! it, its random draws seeded from the step's key), from copies of its inputs as their steps
 //! made them. A mesh or a query reads a copy of its own on a renewed kernel too: what it works
 //! out on the body it reads (a tessellation keeps its trim curves there) reaches no other.
@@ -27,19 +27,23 @@ use crate::profile::Frame;
 use crate::query::{self, EdgeInfo, EdgeShape};
 use crate::tess::{tessellate, TessOptions};
 use makepad_csg_brep::kernel::Kernel;
+use makepad_csg_brep::math::{Point3, Vec3, EFF_ZERO};
+use makepad_csg_brep::query::api_queries::face_internal_point;
 use makepad_csg_brep::topology::{brep, FaceId};
 use makepad_csg_cad::split;
 use makepad_csg_graph::edges::{EdgeFilter, EdgeKind, EdgeSel, Face, FaceName, Role};
 use makepad_csg_graph::eval::plane_frame;
-use makepad_csg_graph::{BoolMode, BrepAt, BrepEngine, BrepEntity, BrepFailure, BrepMeasure, BrepOp, BrepStep, BrepTaken, Key, MirrorPlane, Open, SplitPiece, SplitPins, StepNote, TriMesh};
+use makepad_csg_graph::{BoolMode, BrepAt, BrepEngine, BrepEntity, BrepFailure, BrepMeasure, BrepOp, BrepStep, BrepTaken, HoleKind, Key, MirrorPlane, Open, SplitPiece, SplitPins, StepNote, TriMesh};
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-/// How many bodies stay on the worker, least recently used out first: a drag revisits few.
+/// How many distinct bodies stay on the worker. The committed build's steps go out last.
 const KEEP_BODIES: usize = 64;
 /// How many meshes stay on the worker, likewise: a few bodies' display and print detail.
 const KEEP_MESHES: usize = 32;
@@ -102,6 +106,8 @@ struct Shared {
     /// The step keys of the bodies the worker keeps, with what each step's written selections
     /// took ([`BrepEngine::taken`]).
     held: Mutex<HashMap<Key, Vec<BrepTaken>>>,
+    /// The bed's committed step keys. The worker takes a snapshot when it needs to evict.
+    committed: Mutex<Arc<HashSet<Key>>>,
     /// What steps noted when built ([`BrepEngine::note`]), with when each was last built or asked
     /// for, and the clock of those: kept past the step's body, since a mesh made from it may
     /// still show.
@@ -113,6 +119,10 @@ struct Shared {
 }
 
 impl Shared {
+    fn committed(&self) -> MutexGuard<'_, Arc<HashSet<Key>>> {
+        self.committed.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The held keys: an insert or a removal leaves the set whole, whatever unwound meanwhile.
     fn held(&self) -> MutexGuard<'_, HashMap<Key, Vec<BrepTaken>>> {
         self.held.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -229,6 +239,10 @@ impl BrepEngine for Engine {
         let held = self.shared.held();
         keys.iter().all(|k| held.contains_key(k))
     }
+    fn keep(&self, keys: Vec<Key>) {
+        let mut next = Arc::new(keys.into_iter().collect());
+        std::mem::swap(&mut *self.shared.committed(), &mut next);
+    }
     fn taken(&self, key: Key) -> Option<Vec<BrepTaken>> {
         self.shared.held().get(&key).cloned()
     }
@@ -326,11 +340,10 @@ fn checkpoint() {
 /// faces) of every triangle, and when it was last used.
 type Meshes = HashMap<(Key, u64), (Arc<TriMesh>, Arc<Vec<u32>>, u64)>;
 
-/// A body the worker keeps.
+/// A step the worker keeps.
 struct Kept {
-    /// As its step made it: the steps, meshes and queries that read it copy it. Nothing
-    /// changes it.
-    body: Body,
+    /// Shared with identity placements. Kernel work that changes a body takes a private copy.
+    body: Rc<Body>,
     used: u64,
     measure: Option<BrepMeasure>,
     entities: Option<(Vec<BrepEntity>, Vec<BrepEntity>)>,
@@ -347,6 +360,8 @@ struct Worker {
     /// Copies of inputs the step being built took: each its own key domain.
     serial: u64,
     bodies: HashMap<Key, Kept>,
+    /// Distinct allocations in `bodies`. Only kept keys own references between steps.
+    body_count: usize,
     meshes: Meshes,
     clock: u64,
     /// The names of the first input of the step being built, when its selection names faces.
@@ -444,7 +459,7 @@ fn seed(key: &Key) -> u64 {
 
 impl Worker {
     fn new(shared: Arc<Shared>) -> Worker {
-        Worker { shared, failing: None, kernel: ops::new_kernel(), serial: 0, bodies: HashMap::new(), meshes: HashMap::new(), clock: 0, input_names: None, taken: Vec::new(), note: None }
+        Worker { shared, failing: None, kernel: ops::new_kernel(), serial: 0, bodies: HashMap::new(), body_count: 0, meshes: HashMap::new(), clock: 0, input_names: None, taken: Vec::new(), note: None }
     }
 
     fn serve(&mut self, job: &Job) -> Served {
@@ -466,11 +481,13 @@ impl Worker {
         let Some(last) = steps.last() else { return Err(BrepError::Input("an empty recipe".into())) };
         // What is left to build, by kind: the job says "fillets 3/7".
         let job = if matches!(want, Want::Mesh(chord) if *chord < PRINT_DETAIL) { None } else { makepad_jobs::current() };
-        let todo: Vec<&BrepStep> = steps.iter().filter(|s| !self.bodies.contains_key(&s.key)).collect();
-        let total = todo.len();
+        let mut total = 0usize;
         let mut kinds: HashMap<&'static str, (u32, u32)> = HashMap::new();
-        for s in &todo {
-            kinds.entry(op_kind(&s.op)).or_default().1 += 1;
+        for s in steps.iter().filter(|s| !self.bodies.contains_key(&s.key)) {
+            if let Some(kind) = op_kind(&s.op) {
+                kinds.entry(kind).or_default().1 += 1;
+                total += 1;
+            }
         }
         let mut built = 0usize;
         for step in steps {
@@ -480,14 +497,13 @@ impl Worker {
                 continue;
             }
             checkpoint();
-            if let Some(job) = &job {
-                let kind = op_kind(&step.op);
+            if let (Some(job), Some(kind)) = (&job, op_kind(&step.op)) {
                 let count = kinds.entry(kind).or_default();
                 count.0 += 1;
                 let (i, n) = *count;
                 job.stage(kind, (n > 1).then_some((i, n)), Some(built as f32 / total.max(1) as f32));
+                built += 1;
             }
-            built += 1;
             self.failing = Some(step.key);
             // A selection that names faces reads its input's names, built first on their own kernel.
             self.input_names = match (names_by(&step.op), step.inputs.first()) {
@@ -502,6 +518,9 @@ impl Worker {
             }
             self.input_names = None;
             self.failing = None;
+            if Rc::strong_count(&body) == 1 {
+                self.body_count += 1;
+            }
             self.bodies.insert(step.key, Kept { body, used: self.clock, measure: None, entities: None, names: None });
             self.shared.held().insert(step.key, std::mem::take(&mut self.taken));
         }
@@ -519,11 +538,23 @@ impl Worker {
             },
             _ => None,
         };
-        while self.bodies.len() > KEEP_BODIES {
-            let oldest = self.bodies.iter().min_by_key(|(_, kept)| kept.used).map(|(k, _)| *k);
-            if let Some(k) = oldest {
-                self.bodies.remove(&k);
-                self.shared.held().remove(&k);
+        if self.body_count > KEEP_BODIES {
+            let committed = self.shared.committed().clone();
+            let mut warned = false;
+            while self.body_count > KEEP_BODIES {
+                let oldest = self.bodies.iter()
+                    .filter(|(key, _)| *key != &last.key)
+                    .min_by_key(|(key, kept)| (committed.contains(*key), kept.used));
+                let Some((&key, kept)) = oldest else { break };
+                if !warned && committed.contains(&key) {
+                    eprintln!("[brep] the committed build and current answer exceed the {KEEP_BODIES}-body budget; evicting committed steps");
+                    warned = true;
+                }
+                if Rc::strong_count(&kept.body) == 1 {
+                    self.body_count -= 1;
+                }
+                self.bodies.remove(&key);
+                self.shared.held().remove(&key);
             }
         }
         let Worker { kernel, bodies, meshes, clock, .. } = self;
@@ -618,7 +649,7 @@ impl Worker {
         let in_names: Vec<Arc<Vec<Names>>> = step.inputs.iter().map(|i| self.names_of(steps, i)).collect::<Result<_, _>>()?;
         checkpoint();
         fn body<'a>(w: &'a Worker, key: &Key) -> Result<&'a Body, BrepError> {
-            w.bodies.get(key).map(|k| &k.body).ok_or_else(|| BrepError::Input("names: a step's body is gone".into()))
+            w.bodies.get(key).map(|k| k.body.as_ref()).ok_or_else(|| BrepError::Input("names: a step's body is gone".into()))
         }
         let mut k = self.kernel.renewed(seed(key));
         let mut out = ops::copy_body(&mut k, body(self, key)?, 1)?;
@@ -626,13 +657,22 @@ impl Worker {
             BrepOp::Box { .. } | BrepOp::Sphere { .. } | BrepOp::Cylinder { .. } | BrepOp::Torus { .. } | BrepOp::Extrude { .. } | BrepOp::Revolve { .. } | BrepOp::Sweep { .. } | BrepOp::Loft { .. } => {
                 names::classify(&k, &mut out, *key, &step.op)?
             }
-            // Moved, not changed: the same faces in the same order.
+            // The faces keep their order and names. The placement also names its input's own roles.
             BrepOp::Place { .. } | BrepOp::Mirror { keep: false, .. } => {
                 let input = in_names.first().ok_or_else(|| BrepError::Input("names: a step without its input".into()))?;
                 if names::faces_of(&out)?.len() != input.len() {
                     return Err(BrepError::Kernel("names: a moved body lists other faces than its input".into()));
                 }
-                (**input).clone()
+                let input_key = step.inputs[0];
+                let mut moved = (**input).clone();
+                for (before, after) in input.iter().zip(&mut moved) {
+                    for name in before {
+                        if name.origin == input_key {
+                            after.insert(FaceName { origin: *key, role: name.role.clone() });
+                        }
+                    }
+                }
+                moved
             }
             op => {
                 let mut inputs = Vec::new();
@@ -658,6 +698,28 @@ impl Worker {
                     }
                     BrepOp::Shell { thickness, .. } => rec.shell = *thickness,
                     BrepOp::Offset { distance } => rec.offset = *distance,
+                    // The moved face lies on its prism's far cap: the cap carries the pulled
+                    // face's names; the prism's sides are the pull's own and go unnamed (where
+                    // they lie on a face beside it, that face's names hold).
+                    BrepOp::Pull { face, by } => {
+                        let found = names::faces_named(&lists[0], face);
+                        let order = names::faces_of(&inputs[0])?;
+                        let faces: Vec<FaceId> = found.iter().map(|i| order[*i]).collect();
+                        let pulled: Names = found.iter().flat_map(|i| lists[0][*i].iter().cloned()).collect();
+                        let prisms = ops::pull_prisms(&mut k, &mut inputs[0], &faces, *by)?;
+                        for (mut prism, normal, on) in prisms {
+                            lists.push(names::pull_caps(&k, &mut prism, normal, on, *by, &pulled)?);
+                            inputs.push(prism);
+                        }
+                    }
+                    BrepOp::Hole { diameter, depth, at, dir, on, .. } => {
+                        let (points, axis) = hole_starts(&k, &mut inputs[0], Some(&lists[0]), on.as_ref(), at, *dir, None)?;
+                        let shafts = ops::hole_cutters(&mut k, &inputs[0], HoleKind::Simple, *diameter, *depth, &points, axis)?;
+                        for mut shaft in shafts {
+                            lists.push(names::hole_faces(&k, &mut shaft, *key, axis, depth.is_some())?);
+                            inputs.push(shaft);
+                        }
+                    }
                     // The cut's faces lie on the slab's face on the plane: the slab's names, `cut`.
                     // A pin's faces, and a hole's, are the split's own and go unnamed.
                     BrepOp::Split { center, normal, pins, .. } => {
@@ -686,12 +748,22 @@ impl Worker {
         ops::copy_body(&mut self.kernel, &kept.body, self.serial)
     }
 
-    fn step(&mut self, step: &BrepStep) -> Result<Body, BrepError> {
-        // A kernel of its own: what the step builds depends on its inputs alone.
-        self.kernel = self.kernel.renewed(seed(&step.key));
-        self.serial = 0;
+    fn step(&mut self, step: &BrepStep) -> Result<Rc<Body>, BrepError> {
+        let body = if identity_place(&step.op) {
+            match step.inputs.first() {
+                Some(key) => self.bodies.get(key)
+                    .map(|kept| Rc::clone(&kept.body))
+                    .ok_or_else(|| BrepError::Input("a step's input is missing".into())),
+                None => Err(BrepError::Input("needs a body".into())),
+            }
+        } else {
+            // A kernel of its own: what the step builds depends on its inputs alone.
+            self.kernel = self.kernel.renewed(seed(&step.key));
+            self.serial = 0;
+            self.build(step).map(Rc::new)
+        };
         let name = op_name(&step.op);
-        self.build(step).map_err(|e| match e {
+        body.map_err(|e| match e {
             BrepError::Kernel(m) => BrepError::Kernel(format!("{name}: {m}")),
             BrepError::Input(m) => BrepError::Input(format!("{name}: {m}")),
             BrepError::Lost { index, message } => BrepError::Lost { index, message: format!("{name}: {message}") },
@@ -771,6 +843,16 @@ impl Worker {
             BrepOp::Offset { distance } => {
                 let mut b = first(self)?;
                 ops::offset(&mut self.kernel, &mut b, *distance)
+            }
+            BrepOp::Pull { face, by } => {
+                let mut b = first(self)?;
+                let faces = select_faces(&self.kernel, &mut b, self.input_names.as_deref().map(Vec::as_slice), face, "pull", Some(&mut self.taken))?;
+                ops::pull(&mut self.kernel, b, &faces, *by)
+            }
+            BrepOp::Hole { kind, diameter, depth, at, dir, on } => {
+                let mut b = first(self)?;
+                let (points, dir) = hole_starts(&self.kernel, &mut b, self.input_names.as_deref().map(Vec::as_slice), on.as_ref(), at, *dir, Some(&mut self.taken))?;
+                ops::hole(&mut self.kernel, b, *kind, *diameter, *depth, &points, dir)
             }
             BrepOp::Place { at, rotate, scale } => {
                 let mut b = first(self)?;
@@ -855,6 +937,57 @@ fn split_rod(k: &mut Kernel, rod: &split::Rod) -> Result<Body, BrepError> {
     Ok(b)
 }
 
+/// The pieces left of a named face, recording the selection when building the body.
+fn select_faces(k: &Kernel, b: &mut Body, names: Option<&[Names]>, face: &FaceName, verb: &str, taken: Option<&mut Vec<BrepTaken>>) -> Result<Vec<FaceId>, BrepError> {
+    let names = names.ok_or_else(|| BrepError::Input(format!("the face to {verb} has no names to be found by")))?;
+    let order = names::faces_of(b)?;
+    let faces: Vec<_> = names::faces_named(names, face).into_iter().map(|i| order[i]).collect();
+    if faces.is_empty() {
+        return Err(BrepError::Lost { index: 0, message: format!("no face named {} is left on this body to {verb}", names::describe(face)) });
+    }
+    if let Some(taken) = taken {
+        let mut kinds = Vec::with_capacity(faces.len());
+        for &f in &faces {
+            kinds.push(crate::tess::face_kind(k, b, f)?.0);
+        }
+        kinds.sort_unstable();
+        taken.push(BrepTaken { named: names::describe(face), kinds });
+    }
+    Ok(faces)
+}
+
+/// A named face supplies one starting plane even when the face has split into pieces.
+fn hole_starts<'a>(
+    k: &Kernel, b: &mut Body, names: Option<&[Names]>, on: Option<&FaceName>,
+    at: &'a [[f64; 3]], dir: Option<[f64; 3]>, taken: Option<&mut Vec<BrepTaken>>,
+) -> Result<(Cow<'a, [[f64; 3]]>, [f64; 3]), BrepError> {
+    let Some(face) = on else { return Ok((Cow::Borrowed(at), dir.unwrap_or([0.0, -1.0, 0.0]))) };
+    let faces = select_faces(k, b, names, face, "drill", taken)?;
+    let mut plane = |f| {
+        let (_, n) = crate::tess::face_kind(k, b, f)?;
+        let n = n.ok_or_else(|| BrepError::Input("a hole starts on a flat face: the selected face is curved".into()))?;
+        Ok::<_, BrepError>((face_internal_point(k, b, f)?, Vec3::from_array(n)))
+    };
+    let (origin, normal) = plane(faces[0])?;
+    for &f in &faces[1..] {
+        let (p, n) = plane(f)?;
+        let coplanar = normal.cross(n).length() <= EFF_ZERO && (p - origin).dot(normal).abs() <= k.tolerances.zone_tol_3d;
+        if !coplanar || (dir.is_none() && n.dot(normal) < 0.0) {
+            return Err(BrepError::Input("the named faces do not give this hole one starting plane and direction".into()));
+        }
+    }
+    let axis = ops::drill_direction(dir.unwrap_or((-normal).to_array()))?;
+    let along = axis.dot(normal);
+    if along.abs() <= EFF_ZERO {
+        return Err(BrepError::Input("the hole direction is parallel to its starting face".into()));
+    }
+    let points = at.iter().map(|p| {
+        let p = Point3::from_array(*p);
+        (p + axis * ((origin - p).dot(normal) / along)).to_array()
+    }).collect();
+    Ok((Cow::Owned(points), axis.to_array()))
+}
+
 fn mirror_normal(plane: MirrorPlane) -> [f64; 3] {
     match plane {
         MirrorPlane::Yz => [1.0, 0.0, 0.0],
@@ -868,13 +1001,18 @@ fn names_by(op: &BrepOp) -> bool {
     match op {
         BrepOp::Fillet { edges, .. } | BrepOp::Chamfer { edges, .. } => !edges.named.is_empty(),
         BrepOp::Shell { open: Open::Faces(_), .. } => true,
+        BrepOp::Pull { .. } | BrepOp::Hole { on: Some(_), .. } => true,
         _ => false,
     }
 }
 
-/// A step's kind as a job stage names it, counted: "fillets", "booleans".
-fn op_kind(op: &BrepOp) -> &'static str {
-    match op {
+fn identity_place(op: &BrepOp) -> bool {
+    matches!(op, BrepOp::Place { at, rotate, scale } if *at == [0.0; 3] && *rotate == [0.0; 3] && *scale == [1.0; 3])
+}
+
+/// A step's visible job stage. An identity placement shares an existing body.
+fn op_kind(op: &BrepOp) -> Option<&'static str> {
+    Some(match op {
         BrepOp::Box { .. } | BrepOp::Sphere { .. } | BrepOp::Cylinder { .. } | BrepOp::Torus { .. } => "primitives",
         BrepOp::Extrude { .. } => "extrusions",
         BrepOp::Revolve { .. } => "revolves",
@@ -885,10 +1023,13 @@ fn op_kind(op: &BrepOp) -> &'static str {
         BrepOp::Chamfer { .. } => "chamfers",
         BrepOp::Shell { .. } => "shells",
         BrepOp::Offset { .. } => "offsets",
+        BrepOp::Pull { .. } => "pulls",
+        BrepOp::Hole { .. } => "drills",
+        BrepOp::Place { .. } if identity_place(op) => return None,
         BrepOp::Place { .. } => "placements",
         BrepOp::Mirror { .. } => "mirrors",
         BrepOp::Split { .. } => "splits",
-    }
+    })
 }
 
 fn op_name(op: &BrepOp) -> &'static str {
@@ -906,6 +1047,8 @@ fn op_name(op: &BrepOp) -> &'static str {
         BrepOp::Chamfer { .. } => "chamfer",
         BrepOp::Shell { .. } => "shell",
         BrepOp::Offset { .. } => "offset",
+        BrepOp::Pull { .. } => "pull",
+        BrepOp::Hole { .. } => "hole",
         BrepOp::Place { .. } => "placement",
         BrepOp::Mirror { .. } => "mirror",
         BrepOp::Split { .. } => "split",

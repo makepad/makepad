@@ -22,9 +22,9 @@ use crate::material_surface::{PreparedTexture, STORE_ENCODES};
 use makepad_draw::makepad_platform::thread::{Class, TaskHandle};
 #[cfg(not(target_arch = "wasm32"))]
 use makepad_draw::log;
-use makepad_draw::makepad_platform::{Cx, Texture, TextureId};
+use makepad_draw::makepad_platform::{Cx, Texture, TextureFormat, TextureId};
 #[cfg(not(target_arch = "wasm32"))]
-use makepad_draw::makepad_platform::{CompressedTextureFormat, TextureFormat, TextureUpdated};
+use makepad_draw::makepad_platform::{CompressedTextureFormat, TextureUpdated};
 #[cfg(not(target_arch = "wasm32"))]
 use std::cell::RefCell;
 #[cfg(not(target_arch = "wasm32"))]
@@ -42,8 +42,7 @@ pub fn drops_cpu_chain(compressed: bool, stored: &[u64]) -> bool {
 
 /// A texture that drops its CPU chain keeps its levels of at most this many texels on a side
 /// (about 22 KB of a BC7 chain, per array layer).
-#[cfg(not(target_arch = "wasm32"))]
-const TAIL_EDGE: usize = 128;
+pub(crate) const TAIL_EDGE: usize = 128;
 
 /// What remakes a texture that dropped its CPU chain: its stored-form keys (one, or one per
 /// array layer), the first mip it holds, its content key, the device generation its chain
@@ -130,6 +129,38 @@ fn device_generation(cx: &Cx) -> u64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn mib(bytes: usize) -> f64 { bytes as f64 / 1048576.0 }
 
+fn first_coarse_level(width: usize, height: usize, max_level: usize) -> Option<usize> {
+    (0..=max_level).find(|&level| (width.max(height) >> level) <= TAIL_EDGE)
+}
+
+/// Borrow just the finest level that fits the tail. The size function counts slice elements
+/// (BGRA words or block bytes). A short chain may have no level that fits.
+pub(crate) fn coarse_level<T>(
+    mut width: usize, mut height: usize, max_level: Option<usize>, mut data: &[T],
+    size: fn(usize, usize) -> usize,
+) -> Option<(usize, usize, &[T])> {
+    if width == 0 || height == 0 { return None; }
+    let first = first_coarse_level(width, height, max_level.unwrap_or(0))?;
+    for _ in 0..first {
+        data = data.get(size(width, height)..)?;
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    Some((width, height, data.get(..size(width, height))?))
+}
+
+/// The device restore's kept tail. Cloning its block buffer shares the allocation.
+pub(crate) fn held_tail(id: TextureId) -> Option<TextureFormat> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return RESTORES.with(|restores| {
+        let restores = restores.borrow();
+        let (tail, _) = restores.held.get(&id)?.tail.as_ref()?;
+        Some(tail.clone())
+    });
+    #[cfg(target_arch = "wasm32")]
+    { let _ = id; None }
+}
+
 /// The coarsest levels of a block chain (each layer's levels whose larger side is at most
 /// [`TAIL_EDGE`]), as a format to write into the texture, with whether they are all of it.
 #[cfg(not(target_arch = "wasm32"))]
@@ -141,7 +172,7 @@ fn coarse_tail(format: &TextureFormat) -> Option<(TextureFormat, bool)> {
             (*width, *height, *layers, *format, data, max_level.unwrap_or(0), *wrap, true),
         _ => return None,
     };
-    let first = (0..=max_level).find(|&level| (width >> level).max(height >> level) <= TAIL_EDGE).unwrap_or(max_level);
+    let first = first_coarse_level(width, height, max_level).unwrap_or(max_level);
     let size = |level: usize| CompressedTextureFormat::level_bytes((width >> level).max(1), (height >> level).max(1));
     let stride: usize = (0..=max_level).map(size).sum();
     let skip: usize = (0..first).map(size).sum();

@@ -15,7 +15,8 @@
 // - Free/live slot detection matches C (body.id == i, shape.id == i,
 //   contact.contact_id == i); free slots write their POD fields (generations
 //   must survive) but no geometry/heap payload, exactly like C.
-// - userData is scrubbed to 0 on write like C scrubs pointers to NULL.
+// - Body, shape and joint userData is scrubbed to 0 like C's host pointers.
+//   Box-set children carry numeric tags, which survive the round trip.
 // - The C renderer-handle preservation in b3DesShapes (userShape) is not
 //   ported: debug draw handles do not exist in the port.
 // - b3FreeLiveSimElements collapses to releasing hull database references;
@@ -41,7 +42,10 @@ use crate::joint::{
 use crate::constants::MAX_MANIFOLD_POINTS;
 use crate::math_functions::{Pos, Vec2, WorldTransform};
 use crate::physics_world::World;
-use crate::recording::{rec_intern_compound, rec_intern_height_field, rec_intern_hull, rec_intern_mesh, RecBuffer, Recording};
+use crate::recording::{
+    rec_intern_box_set, rec_intern_compound, rec_intern_height_field, rec_intern_hull, rec_intern_mesh, RecBuffer,
+    Recording,
+};
 use crate::recording_replay::{RecCursor, RecReader, RegistryGeometry};
 use crate::sensor::{Sensor, Visitor};
 use crate::shape::{Shape, ShapeGeometry};
@@ -57,7 +61,9 @@ use crate::types::{
 pub const SNAP_MAGIC: u32 = 0x33534E42;
 // 2: free contact slots carry only their generation; the pair set writes
 // its occupied slots only.
-pub const SNAP_VERSION: u32 = 3;
+// 4: graph contact manifold counts are signed 32-bit integers.
+// 5: box set geometry registry references and set contact caches.
+pub const SNAP_VERSION: u32 = 5;
 
 pub const SNAP_FLAG_VALIDATION: u32 = 0x1;
 pub const SNAP_FLAG_DOUBLE_PRECISION: u32 = 0x2;
@@ -246,12 +252,12 @@ fn joint_type_from_u8(v: u8, r: &mut RecCursor) -> JointType {
 }
 
 // Id pool: nextIndex + freeArray
-fn ser_id_pool(buf: &mut RecBuffer, pool: &IdPool) {
+pub(crate) fn ser_id_pool(buf: &mut RecBuffer, pool: &IdPool) {
     buf.w_i32(pool.next_index);
     ser_i32_array(buf, &pool.free_array);
 }
 
-fn des_id_pool(r: &mut RecCursor, pool: &mut IdPool) {
+pub(crate) fn des_id_pool(r: &mut RecCursor, pool: &mut IdPool) {
     pool.next_index = r.r_i32();
     pool.free_array = des_i32_array(r);
 }
@@ -346,7 +352,7 @@ fn des_hash_set(r: &mut RecCursor, hs: &mut HashSet) {
 }
 
 // DynamicTree: version, scalars, full node array (rebuild scratch excluded)
-fn ser_tree(buf: &mut RecBuffer, tree: &DynamicTree) {
+pub(crate) fn ser_tree(buf: &mut RecBuffer, tree: &DynamicTree) {
     buf.w_u64(DYNAMIC_TREE_VERSION);
     buf.w_i32(tree.root);
     buf.w_i32(tree.node_count);
@@ -359,8 +365,11 @@ fn ser_tree(buf: &mut RecBuffer, tree: &DynamicTree) {
     }
 }
 
-fn des_tree(r: &mut RecCursor, tree: &mut DynamicTree) {
-    let _version = r.r_u64();
+pub(crate) fn des_tree(r: &mut RecCursor, tree: &mut DynamicTree) {
+    if r.r_u64() != DYNAMIC_TREE_VERSION {
+        r.ok = false;
+        return;
+    }
     let root = r.r_i32();
     let node_count = r.r_i32();
     let node_capacity = r.r_i32();
@@ -1248,7 +1257,7 @@ fn des_manifold(r: &mut RecCursor) -> Manifold {
     }
 }
 
-fn ser_contact_cache(buf: &mut RecBuffer, c: &ContactCache) {
+pub(crate) fn ser_contact_cache(buf: &mut RecBuffer, c: &ContactCache) {
     buf.w_f32(c.sat_cache.separation);
     buf.w_u8(c.sat_cache.type_);
     buf.w_u8(c.sat_cache.index_a);
@@ -1263,7 +1272,7 @@ fn ser_contact_cache(buf: &mut RecBuffer, c: &ContactCache) {
     buf.append(&c.simplex_cache.index_b);
 }
 
-fn des_contact_cache(r: &mut RecCursor) -> ContactCache {
+pub(crate) fn des_contact_cache(r: &mut RecCursor) -> ContactCache {
     let mut cache = ContactCache {
         sat_cache: SATCache {
             separation: r.r_f32(),
@@ -1345,6 +1354,9 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
                 buf.w_i32(t.triangle_index);
                 ser_contact_cache(buf, &t.cache);
             }
+        }
+        if let Some(set) = &c.set_contact {
+            set.write_snapshot(buf);
         }
     }
 }
@@ -1433,6 +1445,13 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
             }
         }
 
+        if c.flags & crate::contact::SIM_SET_CONTACT != 0 {
+            let Some(set) = crate::set_contact::SetContact::read_snapshot(r, &c.manifolds) else {
+                r.ok = false;
+                break;
+            };
+            c.set_contact = Some(Box::new(set));
+        }
         contacts.push(c);
     }
 
@@ -1456,6 +1475,7 @@ fn shape_geo_kind(geom: &ShapeGeometry) -> i32 {
         ShapeGeometry::Sphere(_) => 5,
         ShapeGeometry::Tube(_) => 6,
         ShapeGeometry::Field(_) => 7,
+        ShapeGeometry::BoxSet(_) => 8,
     }
 }
 
@@ -1519,6 +1539,7 @@ fn ser_shapes(buf: &mut RecBuffer, world: &World, rec: &mut Recording) {
             }
             ShapeGeometry::Tube(tube) => buf.w_tube(tube),
             ShapeGeometry::Field(_) => {}
+            ShapeGeometry::BoxSet(set) => buf.w_u32(rec_intern_box_set(rec, set)),
             ShapeGeometry::Hull(hull) => {
                 let gid = rec_intern_hull(rec, hull);
                 buf.w_u32(gid);
@@ -1624,7 +1645,17 @@ fn des_shapes(r: &mut RecCursor, world: &mut World, rdr: &RecReader) {
                 }
                 shape.geom = ShapeGeometry::Tube(Arc::new(tube));
             }
-            // A field is code, with nothing written to read back.
+            8 => {
+                let gid = r.r_u32() as usize;
+                match rdr.slots.get(gid).map(|slot| &slot.geometry) {
+                    Some(RegistryGeometry::BoxSet(set)) => shape.geom = ShapeGeometry::BoxSet(Arc::clone(set)),
+                    _ => {
+                        r.ok = false;
+                        break;
+                    }
+                }
+            }
+            // A field has no data representation.
             7 => {
                 r.ok = false;
                 break;
@@ -1800,7 +1831,7 @@ fn ser_graph_color(buf: &mut RecBuffer, color: &GraphColor, is_overflow: bool) {
     for c in &color.contacts {
         buf.w_i32(c.contact_id);
         buf.w_i32(c.manifold_start);
-        buf.w_u16(c.manifold_count);
+        buf.w_i32(c.manifold_count);
     }
     // The transient constraint ranges (C: constraint pointers) are not serialized
 }
@@ -1827,16 +1858,21 @@ fn des_graph_color(r: &mut RecCursor, color: &mut GraphColor, is_overflow: bool)
     color.convex_contacts = des_i32_array(r);
 
     let contact_count = r.r_i32();
-    if !r.check_count(contact_count, 10) {
+    if !r.check_count(contact_count, 12) {
         return;
     }
     color.contacts.reserve(contact_count as usize);
     for _ in 0..contact_count {
-        color.contacts.push(ContactSpec {
+        let spec = ContactSpec {
             contact_id: r.r_i32(),
             manifold_start: r.r_i32(),
-            manifold_count: r.r_u16(),
-        });
+            manifold_count: r.r_i32(),
+        };
+        if spec.manifold_count < 0 {
+            r.ok = false;
+            return;
+        }
+        color.contacts.push(spec);
     }
 }
 

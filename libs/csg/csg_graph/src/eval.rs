@@ -38,8 +38,8 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// Rounds a mesh stays cached after its last use.
-const KEEP_ROUNDS: u64 = 4;
+/// Rounds a mesh stays cached after its last use, unless it is the kept build's ([`Evaluator::keep`]).
+pub(crate) const KEEP_ROUNDS: u64 = 4;
 
 /// The most holes one Hole drills (each is a boolean).
 const MAX_HOLES: usize = 256;
@@ -48,7 +48,8 @@ const MAX_HOLES: usize = 256;
 const MAX_TRIANGLES: usize = 4_000_000;
 
 /// Builds nodes into meshes and keeps every mesh it built by key (and, for
-/// meshed fields, by draft), dropping those no evaluation used for two rounds.
+/// meshed fields, by draft), dropping those no evaluation used for [`KEEP_ROUNDS`] rounds
+/// unless they are the kept build's.
 pub struct Evaluator {
     pub tolerance: Tolerance,
     /// Field and shell cells are multiplied by this (a live drag's coarse
@@ -57,6 +58,9 @@ pub struct Evaluator {
     /// The finest default field cell.
     pub finest_cell: f64,
     cache: HashMap<(Key, u64), (Arc<TriMesh>, u64)>,
+    /// The node keys of the build the person has ([`Self::keep`]): their meshes stay however
+    /// many rounds pass.
+    kept: HashSet<Key>,
     round: u64,
     /// Meshes built (not found in the cache) since the last `begin`.
     pub built: usize,
@@ -75,7 +79,7 @@ pub const PRINT_CHORD: f64 = 0.05;
 
 impl Default for Evaluator {
     fn default() -> Self {
-        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: PRINT_CHORD, notes: HashMap::new() }
+        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), kept: HashSet::new(), round: 0, built: 0, brep: None, brep_chord: PRINT_CHORD, notes: HashMap::new() }
     }
 }
 
@@ -107,6 +111,31 @@ fn mul3(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
 pub fn transform_matrix(at: P3, rotate: P3, scale: P3) -> [[f64; 4]; 3] {
     let r = rotation_xyz(rotate);
     std::array::from_fn(|i| [r[i][0] * scale[0], r[i][1] * scale[1], r[i][2] * scale[2], at[i]])
+}
+
+/// The frame a body's hole points are written in. A hole with an identity placement
+/// inherits its source's drilling frame, including through a chain of holes.
+pub fn drill_frame(graph: &Graph, mut node: NodeId) -> [[f64; 4]; 3] {
+    loop {
+        match &graph.node(brep_source(graph, node)).op {
+            Op::Brep { op: BrepOp::Place { at, rotate, scale }, inputs } => {
+                if *at != [0.0; 3] || *rotate != [0.0; 3] || *scale != [1.0; 3] {
+                    return transform_matrix(*at, *rotate, *scale);
+                }
+                let [input] = inputs.as_slice() else { break };
+                node = brep_source(graph, *input);
+                if !matches!(graph.node(node).op, Op::Brep { op: BrepOp::Hole { .. }, .. }) {
+                    break;
+                }
+            }
+            Op::Brep { op: BrepOp::Hole { .. }, inputs } => {
+                let [input] = inputs.as_slice() else { break };
+                node = *input;
+            }
+            _ => break,
+        }
+    }
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]
 }
 
 fn place(mut m: TriMesh, frame: (Vec3d, Vec3d, Vec3d)) -> TriMesh {
@@ -269,12 +298,18 @@ impl Evaluator {
         Evaluator::default()
     }
 
+    /// The node keys of the build the person has: their meshes stay in the cache however many
+    /// rounds (a drag's drafts) pass, until a later call names others.
+    pub fn keep(&mut self, keys: impl IntoIterator<Item = Key>) {
+        self.kept = keys.into_iter().collect();
+    }
+
     /// Start an evaluation round: meshes none of the last few rounds used are dropped (the
     /// ones before stay for an undo and for a value dragged back).
     pub fn begin(&mut self) {
         self.round += 1;
-        let keep = self.round.saturating_sub(KEEP_ROUNDS);
-        self.cache.retain(|_, (_, used)| *used >= keep);
+        let (keep, kept) = (self.round.saturating_sub(KEEP_ROUNDS), &self.kept);
+        self.cache.retain(|(key, _), (_, used)| *used >= keep || kept.contains(key));
         let cache = &self.cache;
         self.notes.retain(|at, _| cache.contains_key(at));
         self.built = 0;
@@ -367,7 +402,7 @@ impl Evaluator {
         }
         let (tolerance, draft, finest_cell, round, brep_chord) = (self.tolerance, self.draft, self.finest_cell, self.round, self.brep_chord);
         let build = move |g: &Graph, group: Group, cancelled: &dyn Fn() -> bool| {
-            let mut e = Evaluator { tolerance, draft, finest_cell, cache: group.reads, round, built: 0, brep: None, brep_chord, notes: HashMap::new() };
+            let mut e = Evaluator { tolerance, draft, finest_cell, cache: group.reads, kept: HashSet::new(), round, built: 0, brep: None, brep_chord, notes: HashMap::new() };
             for id in group.ids {
                 if e.mesh(g, id, Some(cancelled)).is_err() {
                     break;

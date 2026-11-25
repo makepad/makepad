@@ -39,7 +39,7 @@ const DEFAULT_TREE_NODE: TreeNode = TreeNode {
 };
 
 #[inline]
-fn is_leaf(node: &TreeNode) -> bool {
+pub(crate) fn is_leaf(node: &TreeNode) -> bool {
     node.flags & LEAF_NODE != 0
 }
 

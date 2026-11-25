@@ -74,7 +74,7 @@ pub enum Role {
 
 /// A generator's faces: `top bottom left right front back` (box), `wall top bottom` (cylinder,
 /// cone), `wall` (sphere, torus), `top bottom` (extrude), `start end` (revolve, sweep, loft),
-/// `cut` (a split's halves).
+/// `cut` (a split's halves), `wall floor` (a hole, with a floor only when blind).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Face {
     Top,
@@ -88,10 +88,12 @@ pub enum Face {
     End,
     /// The faces a split's plane cut.
     Cut,
+    /// The flat bottom of a blind hole.
+    Floor,
 }
 
 impl Face {
-    pub const ALL: [Face; 10] = [Face::Top, Face::Bottom, Face::Left, Face::Right, Face::Front, Face::Back, Face::Wall, Face::Start, Face::End, Face::Cut];
+    pub const ALL: [Face; 11] = [Face::Top, Face::Bottom, Face::Left, Face::Right, Face::Front, Face::Back, Face::Wall, Face::Start, Face::End, Face::Cut, Face::Floor];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -105,6 +107,7 @@ impl Face {
             Face::Start => "start",
             Face::End => "end",
             Face::Cut => "cut",
+            Face::Floor => "floor",
         }
     }
 

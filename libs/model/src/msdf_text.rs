@@ -293,6 +293,9 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
     let mut fields = BTreeMap::new();
     for (glyphs, row) in [(&top.glyphs, 0), (&strip, rh)] {
         for glyph in glyphs {
+            // A text layer rendered for 0.4 s at a 2-core share: the host's pool gets a turn
+            // between glyphs (no lock is held here; the glyph cache is this thread's).
+            crate::mesh::pace();
             let b = glyph.outline.bounds_in_ems();
             let iw = (b.size.width * res).ceil() as usize;
             let ih = (b.size.height * res).ceil() as usize;

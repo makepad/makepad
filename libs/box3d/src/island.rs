@@ -3,7 +3,7 @@
 use crate::b3_assert;
 use crate::b3_validate;
 use crate::container::array_remove_swap;
-use crate::core::NULL_INDEX;
+use crate::core::{get_two_mut, NULL_INDEX};
 use crate::id_pool::{alloc_id, free_id};
 use crate::physics_world::{World, AWAKE_SET, DISABLED_SET, FIRST_SLEEPING_SET, STATIC_SET};
 
@@ -78,9 +78,9 @@ pub fn create_island(world: &mut World, set_index: i32) -> i32 {
         island.set_index = set_index;
         island.local_index = local_index;
         island.island_id = island_id;
-        island.bodies = Vec::new();
-        island.contacts = Vec::new();
-        island.joints = Vec::new();
+        island.bodies.clear();
+        island.contacts.clear();
+        island.joints.clear();
         island.constraint_remove_count = 0;
     }
 
@@ -94,7 +94,6 @@ pub fn destroy_island(world: &mut World, island_id: i32) {
         world.split_island_id = NULL_INDEX;
     }
 
-    // assume island is empty
     let (set_index, local_index) = {
         let island = &world.islands[island_id as usize];
         (island.set_index, island.local_index)
@@ -110,12 +109,12 @@ pub fn destroy_island(world: &mut World, island_id: i32) {
     }
     world.islands[move_island_id as usize].local_index = local_index;
 
-    // Free island and id (preserve island generation)
+    // All memberships have been removed or reassigned. Keep storage on this slot.
     {
         let island = &mut world.islands[island_id as usize];
-        island.bodies = Vec::new();
-        island.contacts = Vec::new();
-        island.joints = Vec::new();
+        island.bodies.clear();
+        island.contacts.clear();
+        island.joints.clear();
         island.constraint_remove_count = 0;
         island.local_index = NULL_INDEX;
         island.island_id = NULL_INDEX;
@@ -151,59 +150,38 @@ fn merge_islands(world: &mut World, island_id_a: i32, island_id_b: i32) -> i32 {
         }
     };
 
-    // Detach the small island's arrays (C keeps pointers; the arrays are not
-    // mutated while elements migrate).
-    let small_bodies = std::mem::take(&mut world.islands[small_island_id as usize].bodies);
-    let small_contacts = std::mem::take(&mut world.islands[small_island_id as usize].contacts);
-    let small_joints = std::mem::take(&mut world.islands[small_island_id as usize].joints);
-    let small_remove_count = world.islands[small_island_id as usize].constraint_remove_count;
-
-    world.islands[big_island_id as usize].bodies.reserve(small_bodies.len());
+    let (big, small) = get_two_mut(&mut world.islands, big_island_id, small_island_id);
+    big.bodies.reserve(small.bodies.len());
 
     // Move bodies from smaller island to larger island
-    for &body_id in &small_bodies {
-        let big_count = world.islands[big_island_id as usize].bodies.len() as i32;
-        {
-            let body = &mut world.bodies[body_id as usize];
-            b3_validate!(body.island_id == small_island_id);
-            body.island_id = big_island_id;
-            body.island_index = big_count;
-        }
-        world.islands[big_island_id as usize].bodies.push(body_id);
+    for &body_id in &small.bodies {
+        let body = &mut world.bodies[body_id as usize];
+        b3_validate!(body.island_id == small_island_id);
+        body.island_id = big_island_id;
+        body.island_index = big.bodies.len() as i32;
+        big.bodies.push(body_id);
     }
 
     // Migrate contacts from smaller island to larger island
-    if !small_contacts.is_empty() {
-        world.islands[big_island_id as usize].contacts.reserve(small_contacts.len());
-
-        for link in &small_contacts {
-            let big_count = world.islands[big_island_id as usize].contacts.len() as i32;
-            {
-                let contact = &mut world.contacts[link.contact_id as usize];
-                contact.island_id = big_island_id;
-                contact.island_index = big_count;
-            }
-            world.islands[big_island_id as usize].contacts.push(*link);
-        }
+    big.contacts.reserve(small.contacts.len());
+    for link in &small.contacts {
+        let contact = &mut world.contacts[link.contact_id as usize];
+        contact.island_id = big_island_id;
+        contact.island_index = big.contacts.len() as i32;
+        big.contacts.push(*link);
     }
 
     // Migrate joints from smaller island to larger island
-    if !small_joints.is_empty() {
-        world.islands[big_island_id as usize].joints.reserve(small_joints.len());
-
-        for link in &small_joints {
-            let big_count = world.islands[big_island_id as usize].joints.len() as i32;
-            {
-                let joint = &mut world.joints[link.joint_id as usize];
-                joint.island_id = big_island_id;
-                joint.island_index = big_count;
-            }
-            world.islands[big_island_id as usize].joints.push(*link);
-        }
+    big.joints.reserve(small.joints.len());
+    for link in &small.joints {
+        let joint = &mut world.joints[link.joint_id as usize];
+        joint.island_id = big_island_id;
+        joint.island_index = big.joints.len() as i32;
+        big.joints.push(*link);
     }
 
     // Track removed constraints
-    world.islands[big_island_id as usize].constraint_remove_count += small_remove_count;
+    big.constraint_remove_count += small.constraint_remove_count;
 
     destroy_island(world, small_island_id);
 
@@ -459,9 +437,31 @@ fn island_union(
     }
 }
 
-// This uses union-find.
-// https://en.wikipedia.org/wiki/Disjoint-set_data_structure
+struct SplitComponent {
+    body_count: i32,
+    contact_count: i32,
+    joint_count: i32,
+    island_id: i32,
+}
+
+#[derive(Default)]
+pub(crate) struct IslandSplitScratch {
+    parents: Vec<i32>,
+    ranks: Vec<i32>,
+    contact_counts: Vec<i32>,
+    joint_counts: Vec<i32>,
+    components: Vec<SplitComponent>,
+}
+
 pub fn split_island(world: &mut World, base_id: i32) {
+    // Creating the new islands needs the whole world. Return the workspace
+    // on both paths, including when union-find discovers no split.
+    let mut scratch = std::mem::take(&mut world.island_split_scratch);
+    split_island_with_scratch(world, base_id, &mut scratch);
+    world.island_split_scratch = scratch;
+}
+
+fn split_island_with_scratch(world: &mut World, base_id: i32, scratch: &mut IslandSplitScratch) {
     {
         let base_island = &world.islands[base_id as usize];
         b3_assert!(base_island.constraint_remove_count > 0);
@@ -474,17 +474,15 @@ pub fn split_island(world: &mut World, base_id: i32) {
     let base_contact_count = world.islands[base_id as usize].contacts.len() as i32;
     let base_joint_count = world.islands[base_id as usize].joints.len() as i32;
 
-    // The C version uses the world arena; plain Vecs here.
-    let mut parents: Vec<i32> = Vec::with_capacity(base_body_count as usize);
-    let mut ranks: Vec<i32> = Vec::with_capacity(base_body_count as usize);
-    let mut contact_counts: Vec<i32> = Vec::with_capacity(base_body_count as usize);
-    let mut joint_counts: Vec<i32> = Vec::with_capacity(base_body_count as usize);
-    for i in 0..base_body_count {
-        parents.push(i);
-        ranks.push(0);
-        contact_counts.push(0);
-        joint_counts.push(0);
-    }
+    let IslandSplitScratch { parents, ranks, contact_counts, joint_counts, components } = scratch;
+    parents.clear();
+    parents.extend(0..base_body_count);
+    ranks.clear();
+    ranks.resize(base_body_count as usize, 0);
+    contact_counts.clear();
+    contact_counts.resize(base_body_count as usize, 0);
+    joint_counts.clear();
+    joint_counts.resize(base_body_count as usize, 0);
 
     // Union over contacts, tracking per-component contact counts
     for i in 0..base_contact_count {
@@ -500,19 +498,12 @@ pub fn split_island(world: &mut World, base_id: i32) {
         if island_index_a != NULL_INDEX && island_index_b != NULL_INDEX {
             b3_validate!(0 <= island_index_a && island_index_a < base_body_count);
             b3_validate!(0 <= island_index_b && island_index_b < base_body_count);
-            island_union(
-                &mut parents,
-                &mut ranks,
-                island_index_a,
-                island_index_b,
-                &mut contact_counts,
-                &mut joint_counts,
-            );
-            let root = island_find_parent(&mut parents, island_index_a);
+            island_union(parents, ranks, island_index_a, island_index_b, contact_counts, joint_counts);
+            let root = island_find_parent(parents, island_index_a);
             contact_counts[root as usize] += 1;
         } else {
             let island_index = if island_index_a != NULL_INDEX { island_index_a } else { island_index_b };
-            let root = island_find_parent(&mut parents, island_index);
+            let root = island_find_parent(parents, island_index);
             contact_counts[root as usize] += 1;
         }
     }
@@ -531,30 +522,20 @@ pub fn split_island(world: &mut World, base_id: i32) {
         if island_index_a != NULL_INDEX && island_index_b != NULL_INDEX {
             b3_validate!(0 <= island_index_a && island_index_a < base_body_count);
             b3_validate!(0 <= island_index_b && island_index_b < base_body_count);
-            island_union(
-                &mut parents,
-                &mut ranks,
-                island_index_a,
-                island_index_b,
-                &mut contact_counts,
-                &mut joint_counts,
-            );
-            let root = island_find_parent(&mut parents, island_index_a);
+            island_union(parents, ranks, island_index_a, island_index_b, contact_counts, joint_counts);
+            let root = island_find_parent(parents, island_index_a);
             joint_counts[root as usize] += 1;
         } else {
             let island_index = if island_index_a != NULL_INDEX { island_index_a } else { island_index_b };
-            let root = island_find_parent(&mut parents, island_index);
+            let root = island_find_parent(parents, island_index);
             joint_counts[root as usize] += 1;
         }
     }
 
-    // Done with ranks
-    drop(ranks);
-
     // Flatten all parent indices and count connected components.
     let mut component_count = 0;
     for i in 0..base_body_count {
-        parents[i as usize] = island_find_parent(&mut parents, i);
+        parents[i as usize] = island_find_parent(parents, i);
         if parents[i as usize] == i {
             component_count += 1;
         }
@@ -566,56 +547,46 @@ pub fn split_island(world: &mut World, base_id: i32) {
         return;
     }
 
-    // Detach body/contact/joint arrays from base island so destroy_island won't free them
-    let base_body_ids = std::mem::take(&mut world.islands[base_id as usize].bodies);
-    let base_contacts = std::mem::take(&mut world.islands[base_id as usize].contacts);
-    let base_joints = std::mem::take(&mut world.islands[base_id as usize].joints);
+    // Union is finished. Reuse the ranks to map root body indices to components.
+    let root_map = ranks;
+    root_map.fill(NULL_INDEX);
+    components.clear();
+    components.reserve(component_count);
 
-    // Map from body index to new island index. Only set for root bodies.
-    let mut root_map = vec![NULL_INDEX; base_body_count as usize];
-
-    let mut component_body_counts = vec![0i32; component_count as usize];
-    let mut component_contact_counts = vec![0i32; component_count as usize];
-    let mut component_joint_counts = vec![0i32; component_count as usize];
-    let mut island_count: i32 = 0;
-
-    // Find the root body for each body and create islands as needed.
-    // Extract per-component counts from the root nodes' accumulated counts.
+    // Keep components in first-body order for deterministic island ID allocation.
     for i in 0..base_body_count {
         let root_index = parents[i as usize];
         if root_map[root_index as usize] == NULL_INDEX {
-            root_map[root_index as usize] = island_count;
-            component_body_counts[island_count as usize] = 0;
-            component_contact_counts[island_count as usize] = contact_counts[root_index as usize];
-            component_joint_counts[island_count as usize] = joint_counts[root_index as usize];
-            island_count += 1;
+            root_map[root_index as usize] = components.len() as i32;
+            components.push(SplitComponent {
+                body_count: 0,
+                contact_count: contact_counts[root_index as usize],
+                joint_count: joint_counts[root_index as usize],
+                island_id: NULL_INDEX,
+            });
         }
 
-        component_body_counts[root_map[root_index as usize] as usize] += 1;
+        components[root_map[root_index as usize] as usize].body_count += 1;
     }
 
-    b3_assert!(island_count == component_count);
-
-    // Map from new island index to island id
-    let mut island_ids: Vec<i32> = Vec::with_capacity(island_count as usize);
+    b3_assert!(components.len() == component_count);
 
     // Create new islands and reserve body/contact/joint arrays
-    for i in 0..island_count {
-        let new_island_id = create_island(world, AWAKE_SET);
-        island_ids.push(new_island_id);
+    for component in components.iter_mut() {
+        component.island_id = create_island(world, AWAKE_SET);
 
         // Reserve arrays to avoid wasteful growth and memcpy.
-        let new_island = &mut world.islands[new_island_id as usize];
-        new_island.bodies.reserve(component_body_counts[i as usize] as usize);
-        new_island.contacts.reserve(component_contact_counts[i as usize] as usize);
-        new_island.joints.reserve(component_joint_counts[i as usize] as usize);
+        let new_island = &mut world.islands[component.island_id as usize];
+        new_island.bodies.reserve(component.body_count as usize);
+        new_island.contacts.reserve(component.contact_count as usize);
+        new_island.joints.reserve(component.joint_count as usize);
     }
 
     // Assign bodies to new islands
     for i in 0..base_body_count {
-        let body_id = base_body_ids[i as usize];
-        let root = island_find_parent(&mut parents, i);
-        let new_island_id = island_ids[root_map[root as usize] as usize];
+        let body_id = world.islands[base_id as usize].bodies[i as usize];
+        let root = parents[i as usize]; // Already flattened.
+        let new_island_id = components[root_map[root as usize] as usize].island_id;
 
         let new_count = world.islands[new_island_id as usize].bodies.len() as i32;
         {
@@ -634,7 +605,7 @@ pub fn split_island(world: &mut World, base_id: i32) {
 
     // Assign contacts to the island of their bodies
     for i in 0..base_contact_count {
-        let link = base_contacts[i as usize];
+        let link = world.islands[base_id as usize].contacts[i as usize];
 
         // Static bodies don't have an island id.
         let island_id_a = world.bodies[link.body_id_a as usize].island_id;
@@ -658,7 +629,7 @@ pub fn split_island(world: &mut World, base_id: i32) {
 
     // Assign joints to the island of their bodies
     for i in 0..base_joint_count {
-        let link = base_joints[i as usize];
+        let link = world.islands[base_id as usize].joints[i as usize];
 
         // Static bodies don't have an island id.
         let island_id_a = world.bodies[link.body_id_a as usize].island_id;
@@ -680,10 +651,8 @@ pub fn split_island(world: &mut World, base_id: i32) {
         world.islands[target_island_id as usize].joints.push(link);
     }
 
-    // Destroy the base island
+    // The base slot retains its original membership arrays for the next island.
     destroy_island(world, base_id);
-
-    // The detached arrays drop here (C frees them manually).
 }
 
 // Split an island because some contacts and/or joints have been removed.

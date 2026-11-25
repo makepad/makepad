@@ -136,10 +136,27 @@ pub fn get_height(mesh: &MeshData) -> i32 {
     get_node_height(&mesh.nodes, 0)
 }
 
-fn is_degenerate_triangle(v1: Vec3, v2: Vec3, v3: Vec3, min_area: f32) -> bool {
-    let normal = cross(sub(v2, v1), sub(v3, v1));
-    let length_sq = length_squared(normal);
-    length_sq < min_area * min_area
+/// How thin a triangle may be for its size: twice its area against its longest edge
+/// squared (its height over that edge's length). The fused cross product's rounding is about
+/// 1e-7 of the longest edge squared, so a kept triangle's normal is good to about 1%.
+const MIN_THINNESS: f32 = 1.0e-5;
+
+/// The one test of a degenerate triangle, shared by [`create_mesh`]'s filter and its
+/// validation, so whatever the build keeps validates. Corners welded into one first; then
+/// an area under `min_area`; then a sliver too thin for its size, whose cross product is
+/// rounding residue rather than a normal (two equal edges give a residue, not zero, and at
+/// a kilometre from the origin that passed an absolute area test). The rounding scales with
+/// the edges' lengths squared, so this test does too. NaN corners are not degenerate here
+/// (the build's bounds check rejects them, as before).
+#[inline]
+fn is_degenerate_triangle(index1: i32, index2: i32, index3: i32, v1: Vec3, v2: Vec3, v3: Vec3, min_area: f32) -> bool {
+    if index1 == index2 || index1 == index3 || index2 == index3 {
+        return true;
+    }
+    let (e1, e2) = (sub(v2, v1), sub(v3, v1));
+    let twice_area_sq = length_squared(cross(e1, e2));
+    let longest_sq = length_squared(e1).max(length_squared(e2)).max(length_squared(sub(v3, v2)));
+    twice_area_sq < 4.0 * min_area * min_area || twice_area_sq < MIN_THINNESS * MIN_THINNESS * longest_sq * longest_sq
 }
 
 fn is_non_degenerate(mesh: &MeshData, min_area: f32) -> bool {
@@ -175,7 +192,7 @@ fn is_non_degenerate(mesh: &MeshData, min_area: f32) -> bool {
         let vertex1 = mesh.vertices[triangle.index1 as usize];
         let vertex2 = mesh.vertices[triangle.index2 as usize];
         let vertex3 = mesh.vertices[triangle.index3 as usize];
-        if is_degenerate_triangle(vertex1, vertex2, vertex3, min_area) {
+        if is_degenerate_triangle(triangle.index1, triangle.index2, triangle.index3, vertex1, vertex2, vertex3, min_area) {
             return false;
         }
     }
@@ -1124,7 +1141,7 @@ pub fn create_mesh(def: &MeshDef, mut degenerate_triangle_indices: Option<&mut V
         let normal = cross(sub(vertex2, vertex1), sub(vertex3, vertex1));
         let area = 0.5 * length(normal);
 
-        if area < min_area {
+        if is_degenerate_triangle(index1, index2, index3, vertex1, vertex2, vertex3, min_area) {
             if index1 != index2 && index1 != index3 && index2 != index3 {
                 degenerate_count += 1;
                 if let Some(out) = degenerate_triangle_indices.as_deref_mut() {
@@ -2168,5 +2185,35 @@ pub fn query_mesh(mesh: &Mesh, bounds: AABB, fcn: &mut dyn FnMut(Vec3, Vec3, Vec
         }
         count -= 1;
         node_index = stack[count];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The build drops what its validation would refuse, a kilometre from the origin too.
+    /// A triangle whose last two corners weld into one: the cross product of its two equal
+    /// edges is a rounding residue above the area test (a generated road bank: a debug
+    /// build's validation failed and a release build kept a triangle with a repeated
+    /// corner). A 12 m sliver 0.05 mm high, three distinct corners: its area passes the
+    /// absolute test, but its normal is rounding. A 12 m kerb strip 2 mm wide is kept.
+    #[test]
+    fn degenerate_triangles_are_dropped_far_from_the_origin_and_thin_sound_ones_kept() {
+        let (a, b) = (vec3(-969.4989, 3.1070473, -1070.1708), vec3(-975.55176, -2.2753255, -1061.2689));
+        let vertices = [
+            a, b, vec3(b.x, b.y, b.z + 2.0e-6), vec3(a.x, a.y, -1060.0),
+            vec3(-975.5, 3.1070473, -1080.0), vec3(-963.5, 3.1070473, -1080.0), vec3(-969.5, 3.1070973, -1080.0),
+            vec3(-975.5, 3.0, -1085.0), vec3(-963.5, 3.0, -1085.0), vec3(-969.5, 3.0, -1085.002),
+        ];
+        let def = MeshDef { vertices: &vertices, indices: &[0, 1, 2, 0, 3, 1, 4, 5, 6, 7, 8, 9], weld_tolerance: 1.0e-5, weld_vertices: true, ..Default::default() };
+        let mesh = create_mesh(&def, None).expect("the sound triangles make a mesh");
+        assert_eq!(mesh.triangle_count(), 2, "the welded triangle and the sliver are dropped, the sound one and the kerb kept");
+        assert_eq!(mesh.degenerate_count, 1, "the sliver counts as degenerate (the welded one repeats a corner)");
+        for t in &mesh.triangles {
+            assert!(t.index1 != t.index2 && t.index1 != t.index3 && t.index2 != t.index3, "no kept triangle repeats a corner");
+        }
+        let kerb = mesh.triangles.iter().any(|t| [t.index1, t.index2, t.index3].iter().all(|&i| mesh.vertices[i as usize].z < -1084.0));
+        assert!(kerb, "the 2 mm kerb strip is kept");
     }
 }

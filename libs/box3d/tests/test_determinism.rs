@@ -687,12 +687,56 @@ fn run_scenario_with_def(world_def: makepad_box3d::types::WorldDef) -> (i32, u32
 // same sleep step and hash for every worker count (thread-count determinism).
 #[test]
 fn determinism_across_worker_counts() {
+    // Independent simultaneous impacts over several ticks. Compare the
+    // published order directly, without sorting or folding it into the pose hash.
+    let hit_sequence = |workers| {
+        use makepad_box3d::shape::create_box_set_shape;
+        use makepad_box3d::{create_box_set, pos, SetBox, AABB};
+        let mut w = create_world(&WorldDef { worker_count: workers, gravity: Vec3::ZERO, ..default_world_def() });
+        let fixed = create_body(&mut w, &default_body_def());
+        let def = ShapeDef { enable_hit_events: true, ..default_shape_def() };
+        let box_at = |x, y| SetBox {
+            bounds: AABB { lower_bound: vec3(x - 0.2, y, -0.2), upper_bound: vec3(x + 0.2, y + 0.2, 0.2) },
+            material: 0, user_data: 0,
+        };
+        let tiles: Vec<_> = (0..48).map(|x| box_at(x as f32, -0.2)).collect();
+        create_box_set_shape(&mut w, fixed, &def, &create_box_set(&tiles));
+        let striker = create_box_set(&[box_at(0.0, 0.2), box_at(0.0, 0.0)]);
+        for x in 0..tiles.len() {
+            let body = create_body(&mut w, &BodyDef {
+                body_type: BodyType::Dynamic, position: pos(x as f32, if x % 2 == 0 { 0.0 } else { 0.1 }, 0.0),
+                linear_velocity: vec3(0.0, -3.0, 0.0), ..default_body_def()
+            });
+            create_box_set_shape(&mut w, body, &def, &striker);
+        }
+        let mut sequence = Vec::new();
+        let mut hit_ticks = 0;
+        for tick in 0..5 {
+            world_step(&mut w, 1.0 / 60.0, 4);
+            hit_ticks += usize::from(!w.contact_hit_events.is_empty());
+            for h in &w.contact_hit_events {
+                sequence.push((
+                    tick, (h.contact_id.index1, h.contact_id.generation),
+                    (h.shape_id_a.index1, h.shape_id_a.generation, h.child_index_a),
+                    (h.shape_id_b.index1, h.shape_id_b.generation, h.child_index_b),
+                    [h.point.x.to_bits(), h.point.y.to_bits(), h.point.z.to_bits()],
+                    [h.normal.x.to_bits(), h.normal.y.to_bits(), h.normal.z.to_bits()], h.approach_speed.to_bits(),
+                    (h.user_material_id_a, h.user_material_id_b),
+                ));
+            }
+        }
+        assert!(hit_ticks >= 2 && sequence.len() >= tiles.len(), "both batches of set impacts must contribute to the sequence");
+        destroy_world(w);
+        sequence
+    };
+    let hits = hit_sequence(1);
     let (sleep_step1, hash1) = run_scenario_with_workers(1);
     println!("workers=1: sleepStep={} hash=0x{:08X}", sleep_step1, hash1);
 
     for worker_count in [2u32, 4u32] {
         let (sleep_step, hash) = run_scenario_with_workers(worker_count);
         println!("workers={}: sleepStep={} hash=0x{:08X}", worker_count, sleep_step, hash);
+        assert_eq!(hit_sequence(worker_count), hits, "hit-event order, winning children and payload at {worker_count} workers");
         ensure!(sleep_step == sleep_step1);
         ensure!(hash == hash1);
     }

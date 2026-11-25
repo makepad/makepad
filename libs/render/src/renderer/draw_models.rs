@@ -1,6 +1,7 @@
 //! World-model lanes: diffuse/PBR/custom model draws, sky faces, view models.
 
 use super::*;
+use super::realm::ModelList;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum LayerPhase {
@@ -37,7 +38,7 @@ impl LayerLane {
             ModelDraw::Splat(_) => Self::Splat,
             ModelDraw::Foliage(_) => Self::Foliage,
             ModelDraw::Custom(name, _) => Self::Custom((*name).to_string()),
-            ModelDraw::City(_) | ModelDraw::Grass(_) => unreachable!("not a world-model lane"),
+            ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Traced(..) => unreachable!("not a deferred model lane"),
         }
     }
 }
@@ -194,6 +195,28 @@ pub(super) struct ModelOrder {
     pass_buf: Vec<(usize, usize, f32)>,
 }
 
+/// Loose slots are inserted in ascending order. Vacating their indexed cells
+/// preserves that order without shifting an arbitrarily large loose tail.
+#[derive(Default, Debug)]
+pub(super) struct LooseSlots(Vec<Option<u32>>);
+
+impl LooseSlots {
+    pub(super) fn iter(&self) -> impl Iterator<Item = u32> + '_ { self.0.iter().flatten().copied() }
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool { self.iter().next().is_none() }
+}
+
+#[cfg(test)]
+impl<const N: usize> PartialEq<[u32; N]> for LooseSlots {
+    fn eq(&self, other: &[u32; N]) -> bool { self.iter().eq(other.iter().copied()) }
+}
+
+#[derive(Clone, Copy)]
+enum PlacedMember {
+    Block(usize),
+    Loose(usize),
+}
+
 /// The placed list's static copies grouped by place (64 m cells) with
 /// their world bounds, so the once-per-frame cull skips a whole patch of a
 /// forest at once. Rebuilt when the placed scene, the loaded models or the
@@ -205,17 +228,51 @@ pub(super) struct PlacedBlocks {
     blocks: Vec<(Vec3f, Vec3f, Vec<(u32, u32)>)>,
     /// Copies no block holds (dynamic, Splash material, parts or a morph,
     /// model not loaded): tested one by one every frame. Ascending.
-    loose: Vec<u32>,
+    loose: LooseSlots,
+    membership: Vec<Option<PlacedMember>>,
 }
 
 impl PlacedBlocks {
     /// The loose copies, when the blocks were built for this very list (a
     /// list of `len` copies with this signature); None otherwise.
-    pub(super) fn loose_for(&self, len: usize, signature: Option<u64>) -> Option<&[u32]> {
-        self.key.filter(|k| Some(k.0) == signature && k.3 == len).map(|_| self.loose.as_slice())
+    pub(super) fn loose_for(&self, len: usize, signature: Option<u64>) -> Option<&LooseSlots> {
+        self.key.filter(|k| Some(k.0) == signature && k.3 == len).map(|_| &self.loose)
     }
 
-    pub(super) fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], signature: Option<u64>) {
+    pub(super) fn invalidate(&mut self) { self.key = None; }
+
+    #[cfg(test)]
+    pub(super) fn snapshot(&self, renderer: &Renderer) -> (Vec<(Vec3f, Vec3f, Vec<(u32, u32)>)>, Vec<u32>, Vec<usize>) {
+        let mut order = ModelOrder::default();
+        order.build(&renderer.static_models, &renderer.placed_models, Vec3f::default(), 1.0,
+            renderer.placed_models.view().key(), &|_| false, None, None, Some(self));
+        let visible = order.order.iter().map(|entry| entry.0).collect();
+        (self.blocks.clone(), self.loose.iter().collect(), visible)
+    }
+
+    fn custom_slot_key(slot: usize) -> u64 {
+        use std::hash::Hasher;
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        hash.write_usize(slot);
+        hash.finish()
+    }
+
+    pub(super) fn remove(&mut self, slot: usize, custom: bool) {
+        let Some(member) = self.membership.get_mut(slot).and_then(Option::take) else { return };
+        if custom {
+            if let Some(key) = &mut self.key { key.2 ^= Self::custom_slot_key(slot); }
+        }
+        match member {
+            PlacedMember::Block(index) => {
+                let members = &mut self.blocks[index].2;
+                if let Ok(at) = members.binary_search_by_key(&(slot as u32), |m| m.0) { members.remove(at); }
+            }
+            PlacedMember::Loose(index) => self.loose.0[index] = None,
+        }
+    }
+
+    pub(super) fn refresh(&mut self, models: &[(String, LoadedModel)], instances: &(impl ModelList + ?Sized), signature: Option<u64>) {
+        let instances = instances.view();
         let fingerprint = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -228,30 +285,36 @@ impl PlacedBlocks {
             }
             h.finish()
         };
-        let custom = instances.iter().enumerate().filter(|(_, inst)| inst.has_custom())
-            .fold(0u64, |h, (i, _)| (h ^ (i as u64 + 1)).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        let custom = instances.live().filter(|(_, inst)| inst.has_custom())
+            .fold(0u64, |h, (i, _)| h ^ Self::custom_slot_key(i));
         let key = signature.map(|signature| (signature, fingerprint, custom, instances.len()));
         if key.is_some() && key == self.key {
             return;
         }
         self.key = key;
         self.blocks.clear();
-        self.loose.clear();
+        self.loose.0.clear();
+        self.membership.clear();
+        self.membership.resize(instances.len(), None);
         if key.is_none() {
-            self.loose.extend(0..instances.len() as u32);
+            for (i, _) in instances.live() {
+                self.membership[i] = Some(PlacedMember::Loose(self.loose.0.len()));
+                self.loose.0.push(Some(i as u32));
+            }
             return;
         }
         let index: std::collections::HashMap<&str, usize> =
             models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
         let mut cells: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
-        for (i, inst) in instances.iter().enumerate() {
+        for (i, inst) in instances.live() {
             let slot = index.get(inst.model.as_str()).copied();
             let root = slot.map(|at| &models[at].1);
             let Some((at, root)) = slot.zip(root).filter(|(_, root)| {
                 !inst.dynamic && !inst.has_custom()
                     && std::iter::once(*root).chain(root.lods.iter().map(|(_, m)| m)).all(|m| m.anim_parts.is_empty() && m.driven_parts.is_empty() && m.morph.is_none())
             }) else {
-                self.loose.push(i as u32);
+                self.membership[i] = Some(PlacedMember::Loose(self.loose.0.len()));
+                self.loose.0.push(Some(i as u32));
                 continue;
             };
             // The copy's world box, padded as the lanes' own test pads it.
@@ -270,6 +333,7 @@ impl PlacedBlocks {
                 self.blocks.push((lo, hi, Vec::new()));
                 self.blocks.len() - 1
             });
+            self.membership[i] = Some(PlacedMember::Block(b));
             let block = &mut self.blocks[b];
             block.0 = vec3f(block.0.x.min(lo.x), block.0.y.min(lo.y), block.0.z.min(lo.z));
             block.1 = vec3f(block.1.x.max(hi.x), block.1.y.max(hi.y), block.1.z.max(hi.z));
@@ -279,7 +343,8 @@ impl PlacedBlocks {
 }
 
 impl ModelOrder {
-    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, lod_scale: f32, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>, blocks: Option<&PlacedBlocks>) -> u64 {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &(impl ModelList + ?Sized), eye: Vec3f, lod_scale: f32, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>, blocks: Option<&PlacedBlocks>) -> u64 {
+        let instances = instances.view();
         // Model slot per instance, resolved once through a map: a linear
         // search per instance is O(instances x models), which a streamed or
         // prop-heavy world turns into milliseconds.
@@ -316,9 +381,9 @@ impl ModelOrder {
                 }
             };
             match blocks {
-                None => (0..n).for_each(|i| visit(i, slot_of(i))),
+                None => instances.live().for_each(|(i, _)| visit(i, slot_of(i))),
                 Some(blocks) => {
-                    for &i in &blocks.loose {
+                    for i in blocks.loose.iter() {
                         visit(i as usize, slot_of(i as usize));
                     }
                     // A block wholly offscreen or hidden holds only copies
@@ -408,11 +473,19 @@ impl Renderer {
         &mut self, cx: &mut Cx3d, diffuse: &mut DrawSceneSkinned, eye: Vec3f, lod_scale: f32,
         fog: (Vec3f, f32), sun: &SunLight, frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
+        enum Copies {
+            Placed(super::realm::PlacedModels),
+            Attachments(Vec<ModelInstance>),
+        }
         let active = std::mem::take(&mut self.blended_models.active);
         for list in [WorldModelLane::Placed, WorldModelLane::Attachment] {
-            let instances = match list {
-                WorldModelLane::Placed => std::mem::take(&mut self.placed_models),
-                WorldModelLane::Attachment => std::mem::take(&mut self.world_attachments),
+            let held = match list {
+                WorldModelLane::Placed => Copies::Placed(std::mem::take(&mut self.placed_models)),
+                WorldModelLane::Attachment => Copies::Attachments(std::mem::take(&mut self.world_attachments)),
+            };
+            let instances = match &held {
+                Copies::Placed(placed) => placed.view(),
+                Copies::Attachments(attachments) => attachments.view(),
             };
             for &at in &active {
                 if self.blended_models.lanes[at].list != list { continue; }
@@ -451,9 +524,9 @@ impl Renderer {
                     }
                 }
             }
-            match list {
-                WorldModelLane::Placed => self.placed_models = instances,
-                WorldModelLane::Attachment => self.world_attachments = instances,
+            match held {
+                Copies::Placed(placed) => self.placed_models = placed,
+                Copies::Attachments(attachments) => self.world_attachments = attachments,
             }
         }
         self.blended_models.active = active;
@@ -482,7 +555,7 @@ impl Renderer {
         phase: LayerPhase,
         eye: Vec3f,
         lod_scale: f32,
-        instances: &[ModelInstance],
+        instances: &(impl ModelList + ?Sized),
         lane: WorldModelLane,
         fog: (Vec3f, f32),
         sun: &SunLight,
@@ -492,7 +565,8 @@ impl Renderer {
         if phase == LayerPhase::Opaque {
             self.apply_model_lod_chains();
         }
-        if instances.is_empty() {
+        let instances = instances.view();
+        if instances.len() == 0 {
             if let (WorldModelLane::Placed, LayerPhase::Opaque, ModelDraw::Diffuse(diffuse)) = (lane, phase, &mut draw) {
                 // Request this pass's fallback pipeline before its first model arrives.
                 let _ = self.select_model_shader(cx, &mut diffuse.draw_vars, variants::ModelLane::Diffuse);
@@ -504,7 +578,7 @@ impl Renderer {
         // compiles asynchronously), rather than vanishing. Decided in the
         // diffuse pass; the PBR pass that follows reads the same answer.
         if phase == LayerPhase::Opaque && !pbr_lane {
-            if self.pbr_materials_enabled && self.pbr_draw.is_none() && self.has_pbr_instances(instances) {
+            if self.pbr_materials_enabled && self.pbr_draw.is_none() && self.has_pbr_copy(&instances, |_| true) {
                 // Held VM (a script-driven draw is mid-apply): try again next
                 // frame rather than drawing with no shader.
                 self.pbr_draw = cx
@@ -531,6 +605,7 @@ impl Renderer {
             ModelDraw::Custom(name, _) => Some(*name),
             _ => None,
         };
+        let traced_name = match &draw { ModelDraw::Traced(name, _) => Some(*name), _ => None };
         // Shiny stock models under an environment leave the PBR lane for
         // the engine's IBL program (renderer/stock_ibl.rs): decided in the
         // diffuse pass above, read here by every lane so exactly one of
@@ -540,7 +615,7 @@ impl Renderer {
         // A program's lane draws its layers only once this frame's decision
         // made it ready (realm.rs `prepare_custom_lanes`).
         let custom_ready = matches!(&draw, ModelDraw::Custom(_, m) if m.lane_ready);
-        self.bind_model_lane(cx, &mut draw, eye, fog, sun);
+        let screen_ctl = self.bind_model_lane(cx, &mut draw, eye, fog, sun);
         // The lane draws through the shader variant for this frame's
         // features, and draws that cut no pixel through the one without
         // `clip` (variants.rs).
@@ -564,6 +639,15 @@ impl Renderer {
             }
             _ => None,
         };
+        let lane_shader = draw.base().draw_vars.draw_shader_id;
+        let (hoisted, hoisted_opaque) = match (screen_ctl, model_lane, lane_shader) {
+            (Some(_), Some(lane), Some(shader)) => self.hoisted_lane_shaders(cx, lane, shader),
+            _ => (None, None),
+        };
+        // The copies that read the GI screen cache draw through the hoisted
+        // variant: terrain tiles in any lane, and every copy of the splat
+        // lane (the level's surfaces).
+        let cache_shaders = (hoisted.or(lane_shader), hoisted_opaque.or(opaque));
         // Swaying models (a layer with wind) draw in the foliage lane once
         // its shader is ready, and in no other.
         let foliage_lane = matches!(draw, ModelDraw::Foliage(_));
@@ -580,11 +664,11 @@ impl Renderer {
         // the stand-in's quad is not a picture on its own. The frame builds
         // it as soon as a resident model has a stand-in (realm.rs
         // `prepare_impostor_lane`).
-        let lane_shader = draw.base().draw_vars.draw_shader_id;
         let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) { self.impostor_shader } else { None };
         let impostor_scale = self.impostor_scale;
         let terrain_blend_reach = self.terrain_blend_reach;
         let relief_steps = self.relief_steps;
+        let ssr_floor = self.ssr.gloss_floor;
         let occluder_focus = self.occluder.focus();
         // Dynamic lights. STATICS share one transient-only block (their
         // lamp light is baked; only the dl_split prefix reaches them, so a
@@ -598,7 +682,7 @@ impl Renderer {
         let which = matches!(lane, WorldModelLane::Attachment) as usize;
         let anchor_all = if phase == LayerPhase::Opaque {
             let (mut anch_x, mut anch_z, mut anch_n) = (0.0f64, 0.0f64, 0u32);
-            for inst in instances {
+            for (_, inst) in instances.live() {
                 anch_x += inst.transform.v[12] as f64;
                 anch_z += inst.transform.v[14] as f64;
                 anch_n += 1;
@@ -634,7 +718,7 @@ impl Renderer {
         // thousands of draws a frame). Resolved once per list per frame:
         // the diffuse lane builds it and the PBR, foliage and custom lanes
         // that walk the same list after it reuse it.
-        let key = (instances.as_ptr() as usize, instances.len());
+        let key = instances.key();
         // The same list can be drawn with a different projection or detail bias.
         if phase == LayerPhase::Opaque && (matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != (key.0, key.1, lod_scale.to_bits())) {
             let mut built = std::mem::take(&mut self.model_orders[which]);
@@ -642,7 +726,7 @@ impl Renderer {
             let occluders = self.stream.as_ref().map(|st| st.occluders());
             // Refreshed for this frame's placed list by draw_scene_inner.
             let blocks = matches!(lane, WorldModelLane::Placed).then_some(&self.placed_blocks);
-            let culled = built.build(&self.static_models, instances, eye, lod_scale, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
+            let culled = built.build(&self.static_models, &instances, eye, lod_scale, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
             match lane {
                 WorldModelLane::Placed => stats.model_culled += culled,
                 WorldModelLane::Attachment => stats.world_attachment_culled += culled,
@@ -720,7 +804,7 @@ impl Renderer {
             };
             let (i, lod_index, window) = entry;
             let count_copy = phase == LayerPhase::Opaque && layer == ModelLayer::Body(0);
-            let inst = &instances[i];
+            let Some(inst) = instances.get(i) else { continue };
             let dynamic = lane.is_dynamic(inst);
             let Some(at) = slots[i] else {
                 continue;
@@ -744,10 +828,23 @@ impl Renderer {
             }
             let layer_draw = loaded.layer_draw(layer);
             let layer_material = layer_draw.map(|draw| draw.4);
-            let effective = inst.material_of(layer_material.map_or("", |m| m.name.as_ref()));
-            if phase == LayerPhase::Opaque {
+            // A required layer has a single owner even if its program was never
+            // installed. Test this before stock IBL, held shaders or custom lookup.
+            let required = layer_material.and_then(|m| m.traced_required.as_ref());
+            let owns_layer = match (required, traced_name) {
+                (None, None) => true,
+                (Some((program, TracedLayerRole::Outside)), Some(name)) => program.as_ref() == name,
+                _ => false,
+            };
+            if !owns_layer { continue; }
+            let effective = if traced_name.is_none() {
+                inst.material_of(layer_material.map_or("", |m| m.name.as_ref()))
+            } else {
+                None
+            };
+            if traced_name.is_none() && phase == LayerPhase::Opaque {
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
-                    .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
+                    .any(|m| m.traced_required.is_none() && m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
                 let paints = splat_ready && layer_material.is_some_and(|m| m.surface.as_ref().is_some_and(|s| s.splat.is_some()));
                 // Lane filter. Both passes walk the same instance list — indices
                 // address `lm_remaps` / `model_ground` / the light-cell key, so
@@ -874,7 +971,7 @@ impl Renderer {
                 .find(|(m, _)| *m == inst.model)
                 .and_then(|(_, pack)| self.ao_textures.iter().position(|(k, _)| k == pack)));
             let ao_tex = ao_at.map(|k| &self.ao_textures[k].1);
-            if let Some(t) = ao_tex.filter(|_|lod_index==0) {
+            if let Some(t) = ao_tex.filter(|_| lod_index == 0 && traced_name.is_none()) {
                 draw.base().draw_vars.set_texture(1, t);
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[1.0]);
                 stats.ao_bound += count_copy as u64;
@@ -1010,10 +1107,10 @@ impl Renderer {
             // Only the fixed geometry crossfades to the model's far stand-in.
             let impostor_at = impostor_shader.filter(|_| body_layer.is_some()).map_or(0.0, |_| {
                 std::iter::once(&loaded.material).chain(loaded.extra_draws.iter().map(|l| &l.4))
-                    .filter_map(|m| m.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale
+                    .filter(|m| m.traced_required.is_none()).filter_map(|m| m.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale
             });
             'submit: {
-                let stand_in = body_layer.is_some() && material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+                let stand_in = traced_name.is_none() && body_layer.is_some() && material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
                 let mut layer_window = 0.0f32;
                 if impostor_at > 0.0 {
                     match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
@@ -1024,7 +1121,18 @@ impl Renderer {
                     break 'submit;
                 }
                 draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
-                draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
+                // A splat-lane surface reads the cache like a terrain tile: a
+                // gather per pixel cost a view filled with level surfaces
+                // 2-3 ms at the bench Mac's p95.
+                let cached = terrain || (splat_lane && !stand_in);
+                let (shader, item_opaque) = if stand_in {
+                    (impostor_shader, None)
+                } else if cached {
+                    cache_shaders
+                } else {
+                    (lane_shader, opaque)
+                };
+                draw.base().draw_vars.draw_shader_id = shader;
                 draw.base().draw_vars.geometry_id = Some(geometry_id);
                 // A static copy's own layers take no shadow from its stand-in,
                 // which casts for it past the first cascade (shaders/csm.rs
@@ -1034,7 +1142,17 @@ impl Renderer {
                 // (shaders/impostor.rs).
                 let own = match root.stand_in { Some(c) if body_layer.is_some() && (stand_in || !dynamic) => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
-                draw.base().draw_vars.set_texture(0, texture);
+                // Terrain tiles and splat-lane surfaces read the GI screen
+                // cache; every other copy gathers.
+                if let Some(ctl) = screen_ctl {
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(gi_screen_ctl), &[if cached { ctl[0] } else { 0.0 }, ctl[1], ctl[2], ctl[3]]);
+                }
+                // The reflection capture finishes only what the reflection passes read (shaders/pbr.rs).
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(ssr_pass_floor), &[ssr_floor]);
+                if traced_name.is_none() {
+                    draw.base().draw_vars.set_texture(0, texture);
+                    draw.base().draw_vars.set_texture(5, detail);
+                }
                 // A painted tile's slot 0 is its layers' albedo array; a
                 // far one paints its heaviest layer only, beyond the
                 // tier's reach.
@@ -1042,8 +1160,8 @@ impl Renderer {
                     draw.base().draw_vars.set_texture(0, &p.albedo);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_blend), &[if tile_distance > terrain_blend_reach { 0.0 } else { 1.0 }]);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_relief_steps), &[relief_steps]);
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_ssr_floor), &[ssr_floor]);
                 }
-                draw.base().draw_vars.set_texture(5, detail);
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
                 // An IBL material reads its environment on the detail slot.
                 if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
@@ -1052,6 +1170,19 @@ impl Renderer {
                     draw.set_material(cx.cx, material);
                     held_material = material;
                     if splat_lane { self.bind_grass_cover(cx.cx, &mut draw); }
+                }
+                if traced_name.is_some() {
+                    // set_material resets the raster options. This lane keeps
+                    // its own draw struct, so a mesh sibling keeps its options.
+                    let base = draw.base();
+                    base.draw_vars.options.backface_culling = false;
+                    base.draw_vars.options.depth_write = true;
+                    base.draw_vars.options.alpha_blend = false;
+                    base.lm_rect = Vec4f::default();
+                    base.draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
+                    base.draw_vars.set_uniform(cx.cx, live_id!(surface_on), &[1.0]);
+                    base.draw_vars.set_uniform(cx.cx, live_id!(alpha_mode), &[0.0]);
+                    base.draw_vars.set_uniform(cx.cx, live_id!(fur), &[0.0; 4]);
                 }
                 draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
                 if phase == LayerPhase::Opaque && draw.base().draw_vars.options.alpha_blend {
@@ -1096,7 +1227,7 @@ impl Renderer {
                     0
                 };
                 stats.fur_triangles += if body_layer.is_some() {
-                    draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut))
+                    draw.submit_as(cx, distance, &mut fur_budget, item_opaque.filter(|_| !cut))
                 } else {
                     draw.submit(cx, distance, &mut fur_budget)
                 };
@@ -1121,6 +1252,9 @@ impl Renderer {
     /// screen-space AO, the lightmap atlas, the cascades and the ground
     /// light field. Shared by the placed/attachment lanes and the streamed
     /// world lane (stream_draw.rs), so they can never shade differently.
+    /// Returns the GI screen cache's switch for the lane's terrain tiles and
+    /// splat-lane surfaces
+    /// (`FastGi::bind_screen_cache`).
     pub(super) fn bind_model_lane(
         &mut self,
         cx: &mut Cx3d,
@@ -1128,10 +1262,27 @@ impl Renderer {
         eye: Vec3f,
         fog: (Vec3f, f32),
         sun: &SunLight,
-    ) {
+    ) -> Option<[f32; 4]> {
         let pbr_lane = draw.is_pbr();
+        // Mesh lanes share a fixed layout. A traced pass owns its binding
+        // layout; resolve the lighting slots once for this list of instances.
+        let [light_slot, top_slot, csm_slot, ssao_slot] = if matches!(draw, ModelDraw::Traced(..)) {
+            let vars = &mut draw.base().draw_vars;
+            let depth_map = match cx.gpu_backend() {
+                GpuBackend::OpenGl | GpuBackend::WebGl => [0.5, 0.5],
+                _ => [1.0, 0.0],
+            };
+            vars.set_uniform(cx.cx, live_id!(trace_depth_map), &depth_map);
+            let shader = vars.draw_shader_id.expect("ready traced surface");
+            let textures = &cx.draw_shaders[shader.index].mapping.textures;
+            [live_id!(light_map), live_id!(top_map), live_id!(csm_map), live_id!(ssao_map)]
+                .map(|name| textures.iter().position(|t| t.id == name))
+        } else {
+            [Some(2), Some(3), Some(4), Some(7)]
+        };
         self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
+        let screen_ctl = self.gi.bind_screen_cache(cx.cx, &mut draw.base().draw_vars, self.gi.last_scene_origin);
         self.bind_output_dither(cx.cx, &mut draw.base().draw_vars);
         // An IBL program's control of its two lookups: the lane's scale,
         // and for the stock IBL program whether the fill comes from the
@@ -1184,7 +1335,7 @@ impl Renderer {
             let vars = &mut draw.base().draw_vars;
             match &ssao {
                 Some((tex, strength)) => {
-                    vars.set_texture(7, tex);
+                    if let Some(slot) = ssao_slot { vars.set_texture(slot, tex); }
                     vars.set_uniform(cx.cx, live_id!(ssao_ctl), &[*strength, 0.0, 0.0, 0.0]);
                 }
                 None => {
@@ -1198,10 +1349,10 @@ impl Renderer {
         // One atlas for the whole static scene, so binding it here costs
         // nothing per instance and never breaks batching.
         let lm_tex = self.lightmap_texture(cx.cx);
-        draw.base().draw_vars.set_texture(2, &lm_tex);
-        {
+        if let Some(slot) = light_slot { draw.base().draw_vars.set_texture(slot, &lm_tex); }
+        if let Some(slot) = csm_slot {
             let csm = self.gpu_baker.csm_binding();
-            Self::write_csm_uniforms(cx.cx, &mut draw.base().draw_vars, &csm, &lm_tex, 4, self.shadow_debug);
+            Self::write_csm_uniforms(cx.cx, &mut draw.base().draw_vars, &csm, &lm_tex, slot, self.shadow_debug);
         }
         // The ground region, for DYNAMIC instances' baked sun shadow (a
         // driven car crossing a house's shadow darkens). A channel only —
@@ -1209,7 +1360,7 @@ impl Renderer {
         // a dynamic lifted above the blocker rejects the ground's shadow.
         {
             let (top_tex, top_base, top_range) = self.lm_top_binding(cx.cx);
-            draw.base().draw_vars.set_texture(3, &top_tex);
+            if let Some(slot) = top_slot { draw.base().draw_vars.set_texture(slot, &top_tex); }
             draw.base().draw_vars.set_uniform(
                 cx.cx,
                 live_id!(lm_top_decode),
@@ -1227,12 +1378,13 @@ impl Renderer {
                 &[g_world.x, g_world.y, g_world.z, g_world.w],
             );
         }
+        screen_ctl
     }
 
-    fn has_pbr_instances(&self, instances: &[ModelInstance]) -> bool {
+    pub(super) fn has_pbr_copy(&self, instances: &(impl ModelList + ?Sized), eligible: impl Fn(&ModelInstance) -> bool) -> bool {
         let shiny: std::collections::HashSet<&str> = self.static_models.iter()
             .filter(|(_, m)| m.wants_pbr).map(|(k, _)| k.as_str()).collect();
-        !shiny.is_empty() && instances.iter().any(|inst| shiny.contains(inst.model.as_str()))
+        !shiny.is_empty() && instances.view().live().any(|(_, inst)| shiny.contains(inst.model.as_str()) && eligible(inst))
     }
 
     /// The specular half of the model pass: the same instance list, walked
@@ -1253,13 +1405,14 @@ impl Renderer {
         cx: &mut Cx3d,
         eye: Vec3f,
         lod_scale: f32,
-        instances: &[ModelInstance],
+        instances: &(impl ModelList + ?Sized),
         lane: WorldModelLane,
         fog: (Vec3f, f32),
         sun: &SunLight,
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
     ) {
+        let instances = instances.view();
         if !self.pbr_materials_enabled {
             return;
         }
@@ -1268,10 +1421,10 @@ impl Renderer {
         let which = matches!(lane, WorldModelLane::Attachment) as usize;
         let any = {
             let order = &self.model_orders[which];
-            if order.key == (instances.as_ptr() as usize, instances.len(), lod_scale.to_bits()) {
+            if order.key == (instances.key().0, instances.len(), lod_scale.to_bits()) {
                 order.slots.iter().any(|slot| slot.is_some_and(|at| self.static_models[at].1.wants_pbr))
             } else {
-                self.has_pbr_instances(instances)
+                self.has_pbr_copy(&instances, |_| true)
             }
         };
         if !any {
@@ -1300,7 +1453,7 @@ impl Renderer {
             LayerPhase::Opaque,
             eye,
             lod_scale,
-            instances,
+            &instances,
             lane,
             fog,
             sun,
@@ -1329,8 +1482,8 @@ impl Renderer {
         if !self.static_models.iter().any(|(_, m)| m.sky.is_some())
             || !self
                 .placed_models
-                .iter()
-                .any(|inst| self.model_sky(&inst.model).is_some())
+                .live()
+                .any(|(_, inst)| self.model_sky(&inst.model).is_some())
         {
             return;
         }
@@ -1352,7 +1505,7 @@ impl Renderer {
         let time = self.sky_time;
         let lin = self.lin_ctl();
         let instances = std::mem::take(&mut self.placed_models);
-        for inst in &instances {
+        for (_, inst) in instances.live() {
             let Some((_, loaded)) = self.static_models.iter_mut().find(|(k, _)| *k == inst.model)
             else {
                 continue;
@@ -1507,6 +1660,7 @@ impl Renderer {
         cx: &mut Cx3d, draw: &mut DrawSceneViewModel, geometry_id: GeometryId,
         texture: &Texture, material: &LayerMaterial,
     ) {
+        if material.traced_required.is_some() { return }
         draw.draw_vars.geometry_id = Some(geometry_id);
         draw.draw_vars.set_texture(0, texture);
         Self::bind_view_model_material(cx, draw, material);
@@ -1531,6 +1685,11 @@ impl Renderer {
         if self.view_models.is_empty() {
             return;
         }
+        // SSR reconstructs position from depth. The view model squeezes depth
+        // into a near band, so a receiver here would trace from the camera.
+        draw.draw_vars.refresh_after_reload(cx.cx);
+        let stock = draw.draw_vars.draw_shader_id;
+        draw.draw_vars.draw_shader_id = self.no_receiver_shader(cx, stock);
         sun.write_into(
             &mut draw.light_dir,
             &mut draw.sun_color,
@@ -1578,6 +1737,7 @@ impl Renderer {
             stats.view_model_instances += 1;
             stats.view_model_triangles += loaded.triangles;
         }
+        draw.draw_vars.draw_shader_id = stock;
     }
 }
 
@@ -1605,7 +1765,7 @@ mod chain_fade_tests {
         let eye = vec3f(0.0, 0.0, 0.0);
         let view_scale = crate::lod_view::lod_projection_scale(
             &Mat4f::perspective(62.0, 1.5, 0.1, 500.0), crate::lod_view::LOD_REFERENCE_HEIGHT_PX);
-        let key = (renderer.placed_models.as_ptr() as usize, renderer.placed_models.len());
+        let key = renderer.placed_models.view().key();
         let mut order = ModelOrder::default();
         for (bias, expected) in [(0.995, 0), (1.005, 1), (0.995, 0)] {
             renderer.set_lod_bias(bias);
@@ -1619,7 +1779,7 @@ mod chain_fade_tests {
             let root = &renderer.static_models[0].1;
             let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
             let mut casters = Vec::new();
-            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut casters);
+            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut Default::default(), &mut casters);
             assert_eq!(casters.len(), 1);
             assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows bias {bias}");
         }
@@ -1660,12 +1820,12 @@ mod chain_fade_tests {
             let root = &renderer.static_models[0].1;
             let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
             let mut casters = Vec::new();
-            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut casters);
+            renderer.collect_lm_movers(&World::default(), eye, lod_scale, None, &mut Default::default(), &mut casters);
             assert_eq!(casters.len(), 1);
             assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows view at FOV {fov}");
         }
         // The dissolve band moves with the threshold, too.
-        renderer.placed_models[0].transform.v[14] = 28.5 / scale(55.0);
+        renderer.rebuild_models(|copies| copies[0].transform.v[14] = 28.5 / scale(55.0));
         order.build(&renderer.static_models, &renderer.placed_models, eye, scale(55.0),
             (0, 1), &|_| true, None, None, None);
         assert_eq!(order.order.len(), 2, "both levels draw in the scaled crossfade band");

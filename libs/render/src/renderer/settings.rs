@@ -180,21 +180,55 @@ impl Renderer {
         pass.set_own_time(cx, self.scene_time);
     }
 
+    pub fn post_apply_counts(&self) -> PostApplyCounts { self.post_apply_counts }
+
+    fn post_apply_mismatch(ssr: &crate::ssr::SsrApply, fog: &crate::volume_fog::FogApply) -> Option<&'static str> {
+        if ssr.pixels != fog.pixels { return Some("pixel grid"); }
+        if ssr.depth.texture_id() != fog.depth.texture_id() { return Some("depth texture"); }
+        let (a, b) = (&ssr.uniforms.camera, &fog.uniforms.camera);
+        if a == b { return None; }
+        Some(if a.general.world_from_clip != b.general.world_from_clip { "camera world_from_clip" }
+            else if a.general.clip_from_world != b.general.clip_from_world { "camera clip_from_world" }
+            else if a.eye != b.eye { "camera eye" }
+            else if a.axis != b.axis { "camera axis" }
+            else if a.reference != b.reference { "camera reference" }
+            else { "camera" })
+    }
+
     /// Record the HDR post chain (reflections, volume fog, bloom + auto-exposure) for this frame.
     /// `scene` is the host's RGBA16F scene target of logical `size`,
     /// `parent` the pass that composites it. Returns the pass the host must
     /// parent its scene pass under, so the scene renders before the chain.
     pub fn run_post(&mut self, cx: &mut Cx2d, size: DVec2, scene: &Texture, parent: DrawPassId) -> Option<DrawPassId> {
-        let ssr_first = self.record_ssr(cx, scene, parent);
-        let reflected = self.ssr.pass.applied().cloned();
-        let scene = reflected.as_ref().unwrap_or(scene);
-        let fog_first = self.record_volume_fog(cx, scene, parent);
-        if let Some(first) = fog_first { self.ssr.pass.parent_apply(cx.cx, first); }
+        let ssr = self.record_ssr(cx, scene, parent);
+        let fog = self.record_volume_fog(cx, scene, parent);
+        let ssr_first = ssr.as_ref().map(|s| s.first);
+        let fog_first = fog.as_ref().map(|f| f.first);
+        let both = ssr.as_ref().zip(fog.as_ref());
+        let mismatch = both.and_then(|(s, f)| Self::post_apply_mismatch(s, f));
+        if let Some((s, f)) = both.filter(|_| mismatch.is_none()) {
+            self.volume_fog.pass.apply(cx, f, scene, Some(s));
+            self.ssr.pass.applied_by_fog(cx.cx, s, f.first);
+            self.post_apply_counts.merged += 1;
+        } else {
+            if let Some(reason) = mismatch {
+                if self.post_apply_counts.apart == 0 && first_report(live_id!(post_apply_mismatch).0) {
+                    log!("reflections and fog ran apart because the {reason} differs");
+                }
+                self.post_apply_counts.apart += 1;
+                self.post_apply_counts.last_reason = Some(reason);
+            }
+            if let Some(s) = &ssr {
+                self.ssr.pass.apply(cx, s, fog_first.unwrap_or(parent));
+            }
+            if let Some(f) = &fog {
+                self.volume_fog.pass.apply(cx, f, self.ssr.pass.applied().unwrap_or(scene), None);
+            }
+        }
         if !self.hdr_output || (self.bloom <= 0.0 && !self.auto_exposure) {
             return ssr_first.or(fog_first);
         }
-        let fogged = self.volume_fog.pass.applied().cloned();
-        let source = fogged.as_ref().unwrap_or(scene);
+        let source = self.volume_fog.pass.applied().or_else(|| self.ssr.pass.applied()).unwrap_or(scene);
         let dt = match self.scene_time {
             Some(now) => self.last_post_time.map_or(0.0, |last| (now - last).max(0.0)),
             None => self.post.frame_clock_dt(cx),
@@ -359,6 +393,8 @@ impl Renderer {
     pub fn set_gi_mode(&mut self,mode:crate::GiMode){self.gi.set_mode(mode);}
     pub fn set_gi_config(&mut self,config:crate::GiConfig){self.gi.set_config(config);}
     pub fn gi_stats(&self)->crate::GiStats{self.gi.stats}
+    /// What the light field still owes this view before its light is in place (see the fast GI field's `owes`).
+    pub fn gi_owes(&self)->Option<&'static str>{self.gi.owes()}
     pub fn set_cluster_config(&mut self, config: crate::clustered::ClusterConfig) {
         self.clustered.set_config(config);
     }
@@ -491,13 +527,23 @@ impl Renderer {
     pub fn set_graphics_tier(&mut self, tier: crate::quality_tier::GraphicsTier) {
         let b = tier.budget();
         self.graphics_tier = tier;
+        self.pending_max_anisotropy = Some(b.max_anisotropy as u8);
         self.impostor_scale = b.impostor_scale;
         self.grass_pixels = b.grass_pixels;
+        self.gi.set_receivers(b.gi_receivers);
         self.ssr.gloss_floor = b.reflection_gloss_floor;
         self.terrain_blend_reach = b.terrain_blend_reach;
         self.relief_steps = b.relief_steps;
+        self.fog_steps = b.fog_steps;
+        self.gi_budget_ms = b.gi_budget_ms;
+        let gi = self.gi_config();
+        if gi.gpu_budget_ms != b.gi_budget_ms { self.set_gi_config(crate::GiConfig { gpu_budget_ms: b.gi_budget_ms, ..gi }); }
         self.trample.set_budget(b.trample);
         self.set_csm_config(b.csm_resolution, b.csm_range);
+    }
+
+    pub(super) fn apply_pending_sampler_clamp(&mut self, cx: &mut Cx) -> usize {
+        self.pending_max_anisotropy.take().map_or(0, |n| cx.set_max_sampler_anisotropy(n))
     }
 
     pub fn graphics_tier(&self) -> crate::quality_tier::GraphicsTier {
@@ -515,6 +561,13 @@ impl Renderer {
 
     pub fn csm_config(&self) -> crate::gpu_lightmap::CsmConfig {
         self.gpu_baker.csm_config()
+    }
+
+    /// The cascades the sun's shadows are received through, while they are on: each
+    /// cascade's world-to-map rows and the world size of its shadow texel. A host that checks
+    /// what a receiver's filter can reach reads them here.
+    pub fn csm_frame(&self) -> Option<crate::shadow_csm::CsmFrame> {
+        self.gpu_baker.csm_binding().map(|(frame, _, _)| frame).filter(|frame| frame.on)
     }
 
     /// Set the orbit-camera look-at depth the Realtime cascades tighten

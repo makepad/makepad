@@ -62,7 +62,7 @@ pub struct ConstraintGraph {
 use crate::b3_assert;
 use crate::bitset::{clear_bit, create_bit_set, destroy_bit_set, get_bit, set_bit_count_and_clear, set_bit_grow};
 use crate::container::array_remove_swap;
-use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT, SIM_TUBE_CONTACT};
+use crate::contact::{contact_requires_scalar_solver, CONTACT_TOUCHING_FLAG};
 use crate::core::NULL_INDEX;
 use crate::math_functions::max_int;
 use crate::physics_world::{HexColor, World, AWAKE_SET};
@@ -210,7 +210,7 @@ pub fn add_contact_to_graph(world: &mut World, contact_id: i32) {
         }
     }
 
-    let is_scalar = (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT) != 0) || color_index == OVERFLOW_INDEX;
+    let is_scalar = contact_requires_scalar_solver(contact_flags) || color_index == OVERFLOW_INDEX;
 
     let color = &mut graph.colors[color_index as usize];
     let local_index = if is_scalar {
@@ -220,11 +220,10 @@ pub fn add_contact_to_graph(world: &mut World, contact_id: i32) {
     };
 
     if is_scalar {
-        b3_assert!(manifold_count < u16::MAX as i32);
         let spec = crate::contact::ContactSpec {
             contact_id,
             manifold_start: 0,
-            manifold_count: manifold_count as u16,
+            manifold_count,
         };
         color.contacts.push(spec);
     } else {
@@ -279,7 +278,7 @@ pub fn remove_contact_from_graph(
             b3_assert!(moved_contact.set_index == AWAKE_SET);
             b3_assert!(moved_contact.color_index == color_index);
             b3_assert!(moved_contact.local_index == moved_index);
-            b3_assert!(moved_contact.flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT) == 0);
+            b3_assert!(!contact_requires_scalar_solver(moved_contact.flags));
             moved_contact.local_index = local_index;
         }
     }

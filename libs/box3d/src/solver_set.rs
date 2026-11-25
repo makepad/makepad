@@ -5,7 +5,7 @@ use crate::bitset::clear_bit;
 use crate::body::{BodySim, BodyState, HAD_TIME_OF_IMPACT, IDENTITY_BODY_STATE, IS_FAST, IS_SPEED_CAPPED};
 use crate::constants::GRAPH_COLOR_COUNT;
 use crate::constraint_graph::OVERFLOW_INDEX;
-use crate::contact::{CONTACT_TOUCHING_FLAG, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_TOUCHING_FLAG};
+use crate::contact::{contact_requires_scalar_solver, CONTACT_TOUCHING_FLAG, SIM_TOUCHING_FLAG};
 use crate::container::array_remove_swap;
 use crate::core::NULL_INDEX;
 use crate::id_pool::{alloc_id, free_id};
@@ -51,7 +51,12 @@ pub struct SolverSet {
 pub fn destroy_solver_set(world: &mut World, set_index: i32) {
     {
         let set = &mut world.solver_sets[set_index as usize];
-        *set = SolverSet::default();
+        // The ID pool reuses this slot on the next sleep or sleeping body creation.
+        set.body_sims.clear();
+        set.body_states.clear();
+        set.joint_sims.clear();
+        set.contact_indices.clear();
+        set.island_sims.clear();
         set.set_index = NULL_INDEX;
     }
     free_id(&mut world.solver_set_id_pool, set_index);
@@ -227,7 +232,7 @@ pub fn try_sleep_island(world: &mut World, island_id: i32) {
         let joint_count = island.joints.len();
 
         let sleep_set = &mut world.solver_sets[sleep_set_id as usize];
-        *sleep_set = SolverSet::default();
+        b3_assert!(sleep_set.set_index == NULL_INDEX);
         sleep_set.set_index = sleep_set_id;
         sleep_set.body_sims.reserve(body_count);
         sleep_set.contact_indices.reserve(contact_count);
@@ -399,7 +404,7 @@ pub fn try_sleep_island(world: &mut World, island_id: i32) {
             let sleep_contact_index = world.solver_sets[sleep_set_id as usize].contact_indices.len() as i32;
             world.solver_sets[sleep_set_id as usize].contact_indices.push(contact_id);
 
-            if (flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 || color_index == OVERFLOW_INDEX {
+            if contact_requires_scalar_solver(flags) || color_index == OVERFLOW_INDEX {
                 let moved_local_index = array_remove_swap(
                     &mut world.constraint_graph.colors[color_index as usize].contacts,
                     local_index,

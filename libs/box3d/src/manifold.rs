@@ -9,8 +9,16 @@ use crate::math_functions::{
 };
 use crate::math_internal::plane_separation;
 use crate::types::{FeaturePair, HullData};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const MAX_CLIP_POINTS: usize = 64;
+// hull.rs enforces HULL_LIMIT (fewer than u8::MAX half-edges) in create_hull.
+// Each face edge has a distinct twin on another face, and each reference edge
+// can add one vertex when clipping a convex polygon. These are stack bounds
+// for builder-made hulls. Hulls from other sources can spill to the heap.
+pub(crate) const MAX_HULL_FACE_EDGES: usize = u8::MAX as usize / 2;
+pub const MAX_CLIP_POINTS: usize = 2 * MAX_HULL_FACE_EDGES;
+
+static CLIP_SPILL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FaceQuery {
@@ -31,6 +39,75 @@ pub struct ClipVertex {
     pub position: Vec3,
     pub separation: f32,
     pub pair: FeaturePair,
+}
+
+// Only the written stack prefix is initialized. Once it fills and spills,
+// inline_len stays at N and subsequent clipping passes reuse the Vec.
+pub(crate) struct ClipBuffer<T: Copy, const N: usize> {
+    slots: [std::mem::MaybeUninit<T>; N],
+    inline_len: usize,
+    spill: Option<Vec<T>>,
+}
+
+impl<T: Copy, const N: usize> ClipBuffer<T, N> {
+    pub(crate) fn new() -> Self {
+        Self { slots: [std::mem::MaybeUninit::uninit(); N], inline_len: 0, spill: None }
+    }
+
+    pub(crate) fn push(&mut self, value: T) {
+        if let Some(slot) = self.slots.get_mut(self.inline_len) {
+            slot.write(value);
+            self.inline_len += 1;
+        } else if let Some(spill) = &mut self.spill {
+            spill.push(value);
+        } else {
+            self.start_spill(value);
+        }
+    }
+
+    #[cold]
+    fn start_spill(&mut self, value: T) {
+        let mut spill = Vec::with_capacity(N + 1);
+        spill.extend_from_slice(self.as_slice());
+        spill.push(value);
+        self.spill = Some(spill);
+        if !CLIP_SPILL_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::core::log(&format!("Clip buffer exceeded its stack capacity of {N} and spilled to the heap"));
+        }
+    }
+
+    fn clear(&mut self) {
+        if let Some(spill) = &mut self.spill {
+            spill.clear();
+        } else {
+            self.inline_len = 0;
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[T] {
+        if let Some(spill) = &self.spill {
+            return spill;
+        }
+        // SAFETY: push writes each slot before extending inline_len; MaybeUninit<T>
+        // has T's layout. The slice borrows precisely that initialized prefix.
+        unsafe { std::slice::from_raw_parts(self.slots.as_ptr().cast::<T>(), self.inline_len) }
+    }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        if let Some(spill) = &mut self.spill {
+            return spill;
+        }
+        // SAFETY: same initialized prefix, exclusively borrowed through self.
+        unsafe { std::slice::from_raw_parts_mut(self.slots.as_mut_ptr().cast::<T>(), self.inline_len) }
+    }
+}
+
+impl<const N: usize> ClipBuffer<ClipVertex, N> {
+    pub(crate) fn clip_from(&mut self, polygon: &[ClipVertex], plane: Plane, edge: i32, ref_plane: Plane) {
+        self.clear();
+        clip_polygon_to(polygon, plane, edge, ref_plane, |vertex| self.push(vertex));
+        b3_validate!(validate_polygon(self.as_slice(), self.as_slice().len() as i32));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -204,21 +281,28 @@ pub fn validate_polygon(polygon: &[ClipVertex], count: i32) -> bool {
 }
 
 pub fn clip_polygon(out: &mut [ClipVertex], polygon: &[ClipVertex], count: i32, clip_plane: Plane, edge: i32, ref_plane: Plane) -> i32 {
-    b3_assert!(count >= 3);
+    let mut count_out = 0;
+    clip_polygon_to(&polygon[..count as usize], clip_plane, edge, ref_plane, |vertex| {
+        out[count_out] = vertex;
+        count_out += 1;
+    });
+    b3_validate!(validate_polygon(out, count_out as i32));
+    count_out as i32
+}
 
-    let mut vertex1 = polygon[count as usize - 1];
+fn clip_polygon_to(polygon: &[ClipVertex], clip_plane: Plane, edge: i32, ref_plane: Plane, mut emit: impl FnMut(ClipVertex)) {
+    b3_assert!(polygon.len() >= 3);
+
+    let mut vertex1 = polygon[polygon.len() - 1];
     let mut distance1 = plane_separation(clip_plane, vertex1.position);
-    let mut out_count: i32 = 0;
 
-    for index in 0..count {
-        let vertex2 = polygon[index as usize];
+    for &vertex2 in polygon {
         let distance2 = plane_separation(clip_plane, vertex2.position);
 
         // Clip edge against plane (Sutherland-Hodgman clipping)
         if distance1 <= 0.0 && distance2 <= 0.0 {
             // Both vertices are behind the plane - keep vertex2
-            out[out_count as usize] = vertex2;
-            out_count += 1;
+            emit(vertex2);
         } else if distance1 <= 0.0 && distance2 > 0.0 {
             // Vertex1 is behind of the plane, vertex2 is in front -> intersection point
             let fraction = distance1 / (distance1 - distance2);
@@ -231,8 +315,7 @@ pub fn clip_polygon(out: &mut [ClipVertex], polygon: &[ClipVertex], count: i32, 
             vertex.pair = vertex2.pair;
             vertex.pair.owner2 = FeatureOwner::ShapeA as u8;
             vertex.pair.index2 = edge as u8;
-            out[out_count as usize] = vertex;
-            out_count += 1;
+            emit(vertex);
         } else if distance2 <= 0.0 && distance1 > 0.0 {
             // Vertex1 is in front, vertex2 is behind of the plane, -> intersection point
             let fraction = distance1 / (distance1 - distance2);
@@ -245,20 +328,41 @@ pub fn clip_polygon(out: &mut [ClipVertex], polygon: &[ClipVertex], count: i32, 
             vertex.pair = vertex1.pair;
             vertex.pair.owner1 = FeatureOwner::ShapeA as u8;
             vertex.pair.index1 = edge as u8;
-            out[out_count as usize] = vertex;
-            out_count += 1;
+            emit(vertex);
 
             // And also keep vertex2
-            out[out_count as usize] = vertex2;
-            out_count += 1;
+            emit(vertex2);
         }
 
         // Keep vertex2 as starting vertex for next edge
         vertex1 = vertex2;
         distance1 = distance2;
     }
+}
 
-    b3_validate!(validate_polygon(out, out_count));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    out_count
+    #[test]
+    fn clip_buffer_spill_preserves_vertex_order() {
+        let mut vertices = [Vec3::ZERO, Vec3::AXIS_X, Vec3::AXIS_Y, Vec3::AXIS_Z, Vec3::ONE];
+        let mut buffer = ClipBuffer::<Vec3, 2>::new();
+        for &vertex in &vertices[..2] {
+            buffer.push(vertex);
+        }
+        assert!(buffer.spill.is_none(), "filling the stack exactly must not allocate a spill");
+        for &vertex in &vertices[2..] {
+            buffer.push(vertex);
+        }
+        assert_eq!(buffer.as_slice(), &vertices[..], "the stack prefix and later vertices must retain their order");
+        buffer.as_mut_slice().reverse();
+        vertices.reverse();
+        assert_eq!(buffer.as_slice(), &vertices[..], "point reduction must be able to mutate the entire spilled slice");
+
+        buffer.clear();
+        assert!(buffer.as_slice().is_empty(), "a new pass must start with no vertices");
+        buffer.push(Vec3::AXIS_Y);
+        assert_eq!(buffer.as_slice(), &[Vec3::AXIS_Y], "a shorter pass must expose only its own vertices");
+    }
 }

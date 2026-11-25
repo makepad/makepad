@@ -12,13 +12,17 @@
 //!   (`dependencies`, `build-dependencies` and each `target.*` variant of
 //!   both; never `dev-dependencies`) that resolve inside the repository;
 //!   paths that leave it point into Makepad, which the public repository
-//!   provides. A root's optional dependencies count only when the slice's
-//!   features turn them on, as the Runner builds the app: `cargo build -p
-//!   <root> --no-default-features --features <features>` (see
-//!   [`Crate::enabled_deps`]); every other crate's optional dependencies
-//!   count, since which of their features the build enables is not
-//!   followed;
-//! - for each optional dependency of a root that the features leave off and
+//!   provides. A root's optional dependency counts when one of the root's
+//!   own features turns it on (`dep:x`, `x/f`), whatever the slice's
+//!   features: a release may turn any of them on where it is built (the
+//!   Runner builds Stage's `localai` where it compiles with CUDA), so what
+//!   they name ships as source. One that only its implicit feature turns on
+//!   counts when the slice's features turn it on, as the Runner builds the
+//!   app: `cargo build -p <root> --no-default-features --features
+//!   <features>` (see [`Crate::enabled_deps`]). Every other crate's optional
+//!   dependencies count, since which of their features the build enables is
+//!   not followed;
+//! - for each optional dependency of a root that the slice leaves off and
 //!   that lies in the repository, a placeholder package in its directory
 //!   instead of its source: Cargo reads the manifest of every path
 //!   dependency, optional or not, to load the workspace. The placeholder has
@@ -573,7 +577,8 @@ impl Source {
     }
 
     /// The root packages' dependency directories with `features`: each
-    /// root's required ones and the optional ones the features turn on. A
+    /// root's required ones, the optional ones its own features turn on,
+    /// and those `features` turn on (an implicit feature among them). A
     /// feature applies to every root that has it; one no root has is an
     /// error.
     fn root_deps(&self, roots: &[String], features: &[String]) -> Result<BTreeMap<String, Vec<String>>, String> {
@@ -583,7 +588,10 @@ impl Source {
             let krate = self.named(root)?;
             let own: Vec<String> = features.iter().filter(|f| krate.has_feature(f)).cloned().collect();
             used.extend(own.iter().cloned());
-            out.insert(krate.dir.clone(), krate.enabled_deps(&own)?);
+            // Every feature of the root's table may be on where a release
+            // builds, so what they name ships as source, not a placeholder.
+            let on: Vec<String> = own.into_iter().chain(krate.features.keys().cloned()).collect();
+            out.insert(krate.dir.clone(), krate.enabled_deps(&on)?);
         }
         if let Some(feature) = features.iter().find(|f| !used.contains(*f)) {
             return Err(format!("No root package ({}) has the feature {feature}", roots.join(", ")));
@@ -594,7 +602,8 @@ impl Source {
     /// The crates `roots` (package names) reach through path dependencies
     /// inside the repository when built with `features` and no default
     /// features, sorted by directory. The roots' optional dependencies are
-    /// followed only as far as the features turn them on; every other
+    /// followed as far as their own features or `features` turn them on
+    /// (see [`Source::root_deps`]); every other
     /// crate's are all followed (which features a build enables in them is
     /// not tracked, so the slice errs on the side of shipping them).
     pub fn closure(&self, roots: &[String], features: &[String]) -> Result<Vec<&Crate>, String> {

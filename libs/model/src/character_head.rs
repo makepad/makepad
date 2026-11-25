@@ -124,6 +124,7 @@ pub(crate) fn place_face_joints(sp: &CharacterSpec, b: &mut body::Body) {
 }
 
 pub(crate) fn build(g: &mut Gen) {
+    crate::mesh::pace();
     let sp = g.spec;
     let face = Face::new(sp, &g.b);
     let u = g.b.u;
@@ -177,7 +178,7 @@ pub(crate) fn build(g: &mut Gen) {
     let beard_shadow = matches!(sp.facial_hair.as_str(), "stubble");
     let f5 = face.clone();
     let on_skin = move |d: [f64; 3]| !bal || (d[2] < -0.3 && d[1] - f5.eye_y < f5.re / f5.r[1] * 3.4 && f5.eye_y - d[1] < f5.re / f5.r[1] * 1.5 && d[0].abs() < f5.eye_x + 0.34);
-    for row in &grid { for &v in row {
+    for row in &grid { crate::mesh::pace(); for &v in row {
         let p = head.positions[v as usize];
         let d = norm(std::array::from_fn(|i| (p[i] - face.c[i]) / face.r[i]));
         let (fx, fy) = (d[0], d[1]);
@@ -563,6 +564,7 @@ fn hair(g: &mut Gen, face: &Face) {
     let weight = |p: [f64; 3]| { let k = smooth01(chin_y - 0.02 * u, nb - 0.06 * u, p[1]); if k <= 0. { headw.clone() } else { wmix(&wmix(&headw, &neck, k.min(0.5) * 2.), &chest, (k - 0.5).max(0.) * 2.) } };
     let mut outer = Vec::new(); let mut inner = Vec::new();
     for i in 0..=nph {
+        crate::mesh::pace();
         let t = i as f64 / nph as f64;
         let mut ro = Vec::new(); let mut ri = Vec::new();
         for k in 0..nth {
@@ -592,6 +594,7 @@ fn hair(g: &mut Gen, face: &Face) {
     };
     let perim = TAU * a * 1.1;
     for i in 0..nph {
+        crate::mesh::pace();
         for k in 0..nth {
             let k1 = (k + 1) % nth;
             let theta = TAU * (k as f64 + 0.5) / nth as f64;

@@ -98,11 +98,9 @@ script_mod! {
             // At the texel's centre, level zero: its exact value.
             return self.gi_field.sample_lod(p/self.gi_atlas.xy,0.0)
         }
-        // One probe's contribution under the receiver's own ambient
-        // `fallback`: vec4((bounce + open share x fallback)*weight, weight).
-        gi_probe: fn(k:float,cell:vec3,info:vec4,wp:vec3,n:vec3,w:float,fallback:vec3)->vec4 {
-            if w<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
-            let slot=self.gi_slot(cell)
+        // One probe's trilinear and maturity weight, adjusted for visibility and facing.
+        gi_probe_weight: fn(k:float,cell:vec3,slot:float,info:vec4,wp:vec3,n:vec3,w:float)->float {
+            if w<=0.0 {return 0.0}
             let s=self.gi_cascade(k).w
             let probe=(cell+self.gi_home.xyz+info.xyz)*s
             // Do not push the receiver past a nearby probe: a fixed normal
@@ -133,79 +131,98 @@ script_mod! {
             // each probe's crossing of a curved surface's tangent planes as
             // a seam (a vertical line down a vase, a circle round a belly).
             if self.gi_back_cut>0.5 {weight=weight*smoothstep(0.0,0.3,dot(n,to_probe)/max(probe_distance,s*0.25))}
+            return weight
+        }
+        // Probe bounce in RGB and the open share for the receiver's own ambient in A.
+        gi_probe_light: fn(k:float,slot:float,n:vec3)->vec4 {
+            if self.gi_debug>2.5 && self.gi_debug<3.5 {return vec4(self.gi_hash(vec3(slot,k,1.0)),0.0)}
             let t=self.gi_tile_sample(k,slot,0.0,n)
-            var light=max(t.xyz,vec3(0.0,0.0,0.0))+fallback*clamp(t.w,0.0,1.0)
-            if self.gi_debug>2.5 && self.gi_debug<3.5 {light=self.gi_hash(vec3(slot,k,1.0))}
-            return vec4(light*weight,weight)
+            return vec4(max(t.xyz,vec3(0.0,0.0,0.0)),clamp(t.w,0.0,1.0))
         }
-        // One cascade: vec4(ambient, confidence incl. the window fade).
-        gi_cascade_sample: fn(k:float,wp:vec3,n:vec3,fallback:vec3)->vec4 {
-            let c=self.gi_cascade(k)
-            if c.w<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
-            // Interpolate on the AIR side of the receiver.
-            let local=(wp+n*(c.w*0.1))/c.w-self.gi_home.xyz-c.xyz
-            let g=self.gi_grid.xyz-vec3(1.0,1.0,1.0)-local
-            let edge=min(min(min(local.x,local.y),local.z),min(min(g.x,g.y),g.z))
-            if edge<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
-            let base=floor(local)
-            let f=local-base
-            let b0=c.xyz+base
-            // The eight corners in one loop (one call site each: a D3D
-            // compile inlines every site). Trilinear weight x maturity (a
-            // new probe fades in).
-            var available=0.0
-            var sum=vec4(0.0,0.0,0.0,0.0)
-            for corner in 0..8 {
-                let q=float(corner)
-                let o=vec3(fract(q*0.5)*2.0,fract(floor(q*0.5)*0.5)*2.0,floor(q*0.25))
-                let tw=mix(vec3(1.0,1.0,1.0)-f,f,o)
-                let cell=b0+o
-                let info=self.gi_info(k,cell)
-                let w=tw.x*tw.y*tw.z*max(info.w,0.0)
-                available=available+w
-                sum=sum+self.gi_probe(k,cell,info,wp,n,w,fallback)
-            }
-            if available<=0.000001 {return vec4(0.0,0.0,0.0,0.0)}
-            if sum.w<=0.00000001 {return vec4(0.0,0.0,0.0,0.0)}
-            // Coverage (enough traced, valid probes) times visibility (the
-            // receiver is not hidden from all of them); both fade to the
-            // next cascade, never to black.
-            let confidence=smoothstep(0.05,0.4,available)*smoothstep(0.0,0.05,sum.w/available)
-            return vec4(sum.xyz/sum.w,confidence*clamp(edge,0.0,1.0))
-        }
-        // Finest confident cascade first, then coarser, then the ordinary
-        // ambient: an untraced, occluded or out-of-volume receiver keeps
-        // the look it has with GI off. `weights` 1 returns each cascade's
-        // share instead (the debug views): one cascade sample, in a loop,
-        // serves both.
-        gi_gather: fn(wp:vec3,n:vec3,fallback:vec3,weights:float)->vec3 {
-            var acc=vec3(0.0,0.0,0.0)
-            var w=vec3(0.0,0.0,0.0)
+        // Finest confident cascade first, then coarser, then the receiver's own
+        // ambient: an untraced, occluded or out-of-volume receiver keeps the
+        // look it has with GI off. The gather is linear in that ambient F:
+        // `gi_gather(wp,n,F)` = rgb + F x a, rgb the bounce, a the open share
+        // with the fallback floor and the GI blend folded in, so a cache can
+        // hold (rgb, a) and each pixel add its own F. `weights` 1 returns
+        // each cascade's share instead (the debug views): one loop serves both.
+        gi_gather_split: fn(wp:vec3,n:vec3,weights:float)->vec4 {
+            var acc=vec4(0.0,0.0,0.0,0.0)
+            var shares=vec3(0.0,0.0,0.0)
             var remain=1.0
             for k in 0..3 {
                 let kf=float(k)
                 // Cascade 0 always; a coarser one while weight remains and
                 // the volume has it.
                 if kf<0.5 || (remain>0.002 && self.gi_home.w>kf+0.5) || weights>0.5 {
-                    let sc=self.gi_cascade_sample(kf,wp,n,fallback)
-                    acc=acc+sc.xyz*(sc.w*remain)
-                    w=w+vec3(1.0-step(0.5,kf),step(0.5,kf)-step(1.5,kf),step(1.5,kf))*(sc.w*remain)
-                    remain=remain*(1.0-sc.w)
+                    let c=self.gi_cascade(kf)
+                    if c.w>0.0 {
+                        // Interpolate on the AIR side of the receiver.
+                        let local=(wp+n*(c.w*0.1))/c.w-self.gi_home.xyz-c.xyz
+                        let upper=self.gi_grid.xyz-vec3(1.0,1.0,1.0)-local
+                        let edge=min(min(min(local.x,local.y),local.z),min(min(upper.x,upper.y),upper.z))
+                        if edge>0.0 {
+                            let base=floor(local)
+                            let f=local-base
+                            let b0=c.xyz+base
+                            // The eight corners in one loop (one call site each: a D3D
+                            // compile inlines every site). Trilinear weight x maturity (a
+                            // new probe fades in).
+                            var available=0.0
+                            var sum=vec4(0.0,0.0,0.0,0.0)
+                            var total=0.0
+                            for corner in 0..8 {
+                                let q=float(corner)
+                                let o=vec3(fract(q*0.5)*2.0,fract(floor(q*0.5)*0.5)*2.0,floor(q*0.25))
+                                let tw=mix(vec3(1.0,1.0,1.0)-f,f,o)
+                                let cell=b0+o
+                                let slot=self.gi_slot(cell)
+                                let info=self.gi_info(kf,cell)
+                                let w=tw.x*tw.y*tw.z*max(info.w,0.0)
+                                available=available+w
+                                let pw=self.gi_probe_weight(kf,cell,slot,info,wp,n,w)
+                                if w>0.0 {
+                                    sum=sum+self.gi_probe_light(kf,slot,n)*pw
+                                    total=total+pw
+                                }
+                            }
+                            if available>0.000001 && total>0.00000001 {
+                                // Coverage (enough traced, valid probes) times visibility (the
+                                // receiver is not hidden from all of them); both fade to the
+                                // next cascade, never to black.
+                                let support=smoothstep(0.05,0.4,available)*smoothstep(0.0,0.05,total/available)
+                                let confidence=support*clamp(edge,0.0,1.0)
+                                let share=confidence*remain
+                                acc=acc+(sum/total)*share
+                                shares=shares+vec3(1.0-step(0.5,kf),step(0.5,kf)-step(1.5,kf),step(1.5,kf))*share
+                                remain=remain*(1.0-confidence)
+                            }
+                        }
+                    }
                 }
             }
-            if weights>0.5 {return w}
-            let gi=acc+fallback*(self.gi_fallback_floor*remain)
-            return mix(fallback,gi,min(self.gi_on,1.0))
+            if weights>0.5 {return vec4(shares,0.0)}
+            let g=min(self.gi_on,1.0)
+            return vec4(g*acc.xyz,(1.0-g)+g*(acc.w+self.gi_fallback_floor*remain))
         }
-        // What a host's screen cache (`FastGiScreen`) stores for one surface
-        // point: the ambient `gi_ambient` returns there under `fallback`, the
-        // ambient the host's receivers pass for it.
-        gi_screen_value: fn(wp:vec3,n:vec3,view_distance:float,fallback:vec3)->vec4 {
-            return vec4(self.gi_gather(wp,normalize(n),fallback,0.0),view_distance)
+        gi_gather: fn(wp:vec3,n:vec3,fallback:vec3,weights:float)->vec3 {
+            let g=self.gi_gather_split(wp,n,weights)
+            if weights>0.5 {return g.xyz}
+            return g.xyz+fallback*g.w
+        }
+        // The screen fill and a host's own G-buffer store bounce in RGB. Alpha
+        // packs the rounded open share and the log distance from the cache eye.
+        gi_screen_value: fn(wp:vec3,n:vec3,view_distance:float)->vec4 {
+            let g=self.gi_gather_split(wp,normalize(n),0.0)
+            return vec4(g.xyz,floor(clamp(g.w,0.0,1.0)*255.0+0.5)+log2(1.0+view_distance)/16.0)
         }
         gi_ambient: fn(wp:vec3,normal:vec3,fallback:vec3)->vec3 {
             if self.gi_on<=0.0 {return fallback}
             return self.gi_gather(wp,normalize(normal),fallback,0.0)
+        }
+        gi_screen_hit: fn(wp:vec3,n_geo:vec3)->float {return -1.0}
+        gi_ambient_at: fn(wp:vec3,n_geo:vec3,n:vec3,fallback:vec3)->vec3 {
+            return self.gi_ambient(wp,n,fallback)
         }
         // Reuse the diffuse sample, including its cascade confidence and
         // fallback. No additional field or environment texture reads.
@@ -220,6 +237,7 @@ script_mod! {
             if color.w<0.999 {return color}
             if self.gi_on<=0.0 {return vec4(self.output_dither(color.xyz,wp),color.w)}
             if self.gi_debug>0.5 {
+                if self.gi_debug>6.5 {return vec4(0.3,0.3,0.3,1.0)}
                 let nn=normalize(n)
                 // Each cascade's share (views 1, 2), or the GI under a
                 // uniform grey ambient (3, 4): bounce + open share x 0.5.
@@ -255,86 +273,140 @@ script_mod! {
             }
             return vec4(self.output_dither(color.xyz,wp),color.w)
         }
+        gi_display_at: fn(color:vec4,wp:vec3,n_geo:vec3,n:vec3)->vec4 {
+            if self.gi_on>0.0 && color.w>=0.999 && self.gi_debug>6.5 {
+                let hit=self.gi_screen_hit(wp,n_geo)
+                if hit>0.5 {return vec4(0.1,0.8,0.1,1.0)}
+                if hit>(-0.5) {return vec4(0.9,0.15,0.1,1.0)}
+                return vec4(0.3,0.3,0.3,1.0)
+            }
+            return self.gi_display(color,wp,n)
+        }
     }
-    // A host's screen cache of the field for its own receivers, beside
-    // `FastGiSampling` (after it: its `gi_ambient` reads the cache where it
-    // answers). Not in the renderer's scene shaders: their families have no
-    // texture slot to spare (see the texture budget tests).
+    // Spread BEFORE FastGiSampling: a spread adds only missing keys, so this
+    // gi_ambient_at (reprojecting into the fill's view) and gi_screen_hit win.
     let FastGiScreen = {
-        // The field gathered once per pixel of a lower-resolution view
-        // (`FastGiSampling::gi_screen_value`, a host's pass over its G-buffer): x = on, yz =
-        // its size in pixels. RGB the ambient `gi_ambient` returns there, A
-        // the view distance it holds (0: nothing there).
         gi_screen: texture_2d(float)
+        // x enables the cache, yz gives its dimensions in texels.
         gi_screen_ctl: uniform(vec4(0.0,0.0,0.0,0.0))
-        // The cache's ambient at wp (normal n): its four texels around the
-        // pixel, those off this surface left out: at another depth, or (a
-        // crease: the bed under a wall) off this point's tangent plane; w 0
-        // where it cannot answer (an edge).
-        gi_screen_fetch: fn(wp:vec3,n:vec3)->vec4 {
-            let vp=self.draw_pass.camera_view*vec4(wp,1.0)
-            let cp=self.draw_pass.camera_projection*vp
+        gi_screen_clip: uniform(mat4x4f(1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0))
+        gi_screen_eye: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_screen_ray0: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_screen_ray_u: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_screen_ray_v: uniform(vec4(0.0,0.0,0.0,0.0))
+        gi_screen_fetch: fn(wp:vec3,n_geo:vec3)->vec4 {
+            let cp=self.gi_screen_clip*vec4(wp,1.0)
+            if cp.w<=0.0 {return vec4(0.0,0.0,0.0,-1.0)}
             let uv=vec2(cp.x/cp.w*0.5+0.5,0.5-cp.y/cp.w*0.5)
-            let d=length(vp.xyz)
-            let nv=(self.draw_pass.camera_view*vec4(n,0.0)).xyz
-            // the projection's scale and centre (its columns 0, 1, 2) for the texels' view rays
-            let c0=self.draw_pass.camera_projection*vec4(1.0,0.0,0.0,0.0)
-            let c1=self.draw_pass.camera_projection*vec4(0.0,1.0,0.0,0.0)
-            let c2=self.draw_pass.camera_projection*vec4(0.0,0.0,1.0,0.0)
-            let px=uv*self.gi_screen_ctl.yz-vec2(0.5,0.5)
+            let eye=self.gi_screen_eye.xyz
+            let d=length(wp-eye)
+            let size=self.gi_screen_ctl.yz
+            let px=uv*size-vec2(0.5,0.5)
             let b=floor(px)
             let f=px-b
-            var sum=vec3(0.0,0.0,0.0)
+            var sum=vec4(0.0,0.0,0.0,0.0)
             var wsum=0.0
             for i in 0..4 {
                 let q=float(i)
                 let o=vec2(fract(q*0.5)*2.0,floor(q*0.5))
-                let tuv=(b+o+vec2(0.5,0.5))/self.gi_screen_ctl.yz
-                let t=self.gi_screen.sample_lod(tuv,0.0)
-                let tw=mix(vec2(1.0,1.0)-f,f,o)
-                let near=clamp(1.0-abs(t.w-d)/(d*0.015),0.0,1.0)
-                // the texel's point: its view ray at the distance it holds
-                let ndc=vec2(tuv.x*2.0-1.0,1.0-tuv.y*2.0)
-                let ray=normalize(vec3((ndc.x-c2.x*c2.w)/c0.x,(ndc.y-c2.y*c2.w)/c1.y,c2.w))
-                let plane=clamp(1.0-abs(dot(nv,ray*t.w-vp.xyz))/(d*0.002),0.0,1.0)
-                let w=tw.x*tw.y*near*plane
-                sum=sum+t.xyz*w
-                wsum=wsum+w
+                let texel=b+o
+                if texel.x>=0.0 && texel.y>=0.0 && texel.x<size.x && texel.y<size.y {
+                    let tuv=(texel+vec2(0.5,0.5))/size
+                    // Level zero, as the probe gather reads: an implicit-derivative
+                    // read in a loop under per-pixel branches has no defined gradients.
+                    let t=self.gi_screen.sample_nearest(tuv,0.0)
+                    if t.w>=0.0 {
+                        let td=exp2(fract(t.w)*16.0)-1.0
+                        let ray=self.gi_screen_ray0.xyz+tuv.x*self.gi_screen_ray_u.xyz+tuv.y*self.gi_screen_ray_v.xyz
+                        let tp=eye+normalize(ray)*td
+                        if abs(dot(n_geo,tp-wp))<=0.002*d {
+                            let tw=mix(vec2(1.0,1.0)-f,f,o)
+                            let w=tw.x*tw.y
+                            sum=sum+w*vec4(t.xyz,floor(t.w)/255.0)
+                            wsum=wsum+w
+                        }
+                    }
+                }
             }
-            if wsum<0.2 {return vec4(0.0,0.0,0.0,0.0)}
-            return vec4(sum/wsum,1.0)
+            if wsum<0.2 {return vec4(0.0,0.0,0.0,-1.0)}
+            return sum/wsum
         }
-        gi_ambient: fn(wp:vec3,normal:vec3,fallback:vec3)->vec3 {
+        gi_screen_hit: fn(wp:vec3,n_geo:vec3)->float {
+            if self.gi_screen_ctl.x<0.5 {return -1.0}
+            if self.gi_screen_fetch(wp,n_geo).w<0.0 {return 0.0}
+            return 1.0
+        }
+        gi_ambient_at: fn(wp:vec3,n_geo:vec3,n:vec3,fallback:vec3)->vec3 {
             if self.gi_on<=0.0 {return fallback}
-            if self.gi_screen_ctl.x>0.5 {
-                // the cache holds what the gather below returns
-                let c=self.gi_screen_fetch(wp,normalize(normal))
-                if c.w>0.5 {return c.xyz}
-            }
-            return self.gi_gather(wp,normalize(normal),fallback,0.0)
+            if self.gi_screen_ctl.x<0.5 {return self.gi_gather(wp,normalize(n),fallback,0.0)}
+            let c=self.gi_screen_fetch(wp,n_geo)
+            if c.w>=0.0 {return c.xyz+fallback*c.w}
+            let g=self.gi_gather_split(wp,n_geo,0.0)
+            return g.xyz+fallback*g.w
+        }
+        // Receive once at the top of the pixel. Shading adds the surface's own fill as rgb + fallback * a.
+        gi_receive_hoisted: fn(wp:vec3,n_geo:vec3)->vec4 {
+            if self.gi_on<=0.0 {return vec4(0.0,0.0,0.0,1.0)}
+            if self.gi_screen_ctl.x<0.5 {return self.gi_gather_split(wp,n_geo,0.0)}
+            let c=self.gi_screen_fetch(wp,n_geo)
+            if c.w>=0.0 {return c}
+            return self.gi_gather_split(wp,n_geo,0.0)
         }
     }
-    // This frame's probe list: row r = (slot, cascade, hysteresis, -),
-    // (cell xyz, -). gi_pass = (rows, row capacity, ray length, frame seed).
+    // All four passes share the same row map for this issue. Only the three
+    // render targets have gaps; the scheduler's two-column list stays dense.
+    let GiBatchLayout = {
+        gi_batch: texture_2d(float)
+        gi_batch_height: uniform(1.0)
+        // Band height, render target height, ray length, frame seed.
+        gi_pass: uniform(vec4(1.0,1.0,32.0,0.0))
+        batch_y: fn(row:float)->float {return (row+0.5)/self.gi_batch_height}
+        target_y: fn(row:float)->float {
+            let band=floor(row/self.gi_pass.x)
+            let physical=band*#(super::BAND_PITCH as f64)+(row-band*self.gi_pass.x)
+            return (physical+0.5)/self.gi_pass.y
+        }
+    }
+    // Logical batch row = (slot, cascade, hysteresis, -), (cell xyz, -).
     let GiBatch = {
         ..GiCascades,
-        gi_batch: texture_2d(float)
-        gi_pass: uniform(vec4(1.0,1.0,32.0,0.0))
-        batch_row: fn()->float {return min(floor(self.pos.y*self.gi_pass.x),self.gi_pass.x-1.0)}
-        batch_a: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.25,(row+0.5)/self.gi_pass.y))}
-        batch_b: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.75,(row+0.5)/self.gi_pass.y))}
+        ..GiBatchLayout,
+        gi_frag_pos: fragment_position()
+        batch_row: fn()->float {
+            let physical=floor(self.gi_frag_pos.y)
+            let pitch=#(super::BAND_PITCH as f64)
+            let band=floor(physical/pitch)
+            return band*self.gi_pass.x+(physical-band*pitch)
+        }
+        batch_a: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.25,self.batch_y(row)))}
+        batch_b: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.75,self.batch_y(row)))}
         // Spherical Fibonacci set under a random rotation per probe and
         // update: fixed directions printed probe-aligned stripes.
         gi_ray: fn(r:float,a:vec4)->vec3 {
+            let v=self.gi_fib(r)
+            let qv=self.gi_quat(a)
+            return normalize(v+cross(qv.xyz,cross(qv.xyz,v)+v*qv.w)*2.0)
+        }
+        // Ray r of the unrotated set.
+        gi_fib: fn(r:float)->vec3 {
             let z=1.0-(2.0*r+1.0)/64.0
             let q=sqrt(max(1.0-z*z,0.0))
             let phi=r*2.3999632
-            let v=vec3(q*cos(phi),z,q*sin(phi))
+            return vec3(q*cos(phi),z,q*sin(phi))
+        }
+        // The probe's rotation for this update, a unit quaternion.
+        gi_quat: fn(a:vec4)->vec4 {
             let u=self.gi_hash(vec3(a.x+0.5,a.y*7.0+1.0,self.gi_pass.w))
             let s1=sqrt(1.0-u.x)
             let s2=sqrt(u.x)
-            let qv=vec4(s1*sin(6.2831853*u.y),s1*cos(6.2831853*u.y),s2*sin(6.2831853*u.z),s2*cos(6.2831853*u.z))
-            return normalize(v+cross(qv.xyz,cross(qv.xyz,v)+v*qv.w)*2.0)
+            return vec4(s1*sin(6.2831853*u.y),s1*cos(6.2831853*u.y),s2*sin(6.2831853*u.z),s2*cos(6.2831853*u.z))
+        }
+        // d turned back by the probe's rotation, so dot(gi_ray_axis(d,a), gi_fib(r)) is
+        // dot(d, gi_ray(r,a)) to float rounding: the gather builds the rotation once per
+        // texel instead of once per ray.
+        gi_ray_axis: fn(d:vec3,a:vec4)->vec3 {
+            let qv=self.gi_quat(a)
+            return d+cross(qv.xyz,cross(qv.xyz,d)-d*qv.w)*2.0
         }
         gi_unpack: fn(p:float)->vec3 {
             let x=abs(p)
@@ -374,6 +446,34 @@ script_mod! {
             return c.x>=o.x && c.y>=o.y && c.z>=o.z && c.x<o.x+d.x && c.y<o.y+d.y && c.z<o.z+d.z
         }
         vox_solid: fn(l:float,c:vec3)->bool {return self.gi_vox_a.sample_nearest(self.vox_uv(l,c)).w>0.5}
+        // Sample from the cell already wrapped into the window's texels (m in [0, dims)).
+        vox_uv_wrapped: fn(l:float,m:vec3)->vec2 {
+            let d=self.gi_vox_dims.xyz
+            let tile=floor(m.z/self.gi_vox_tex.w)
+            let x=m.x+d.x*(m.z-tile*self.gi_vox_tex.w)
+            let y=m.y+d.y*tile+l*self.gi_vox_tex.z
+            return vec2((x+0.5)/self.gi_vox_tex.x,(y+0.5)/self.gi_vox_tex.y)
+        }
+        // A fine step or at most one brick: a single wrap suffices.
+        vox_wrap_step: fn(m:float,s:float,d:float)->float {
+            let n=m+s
+            if n<0.0 {return n+d}
+            if n>=d {return n-d}
+            return n
+        }
+        // A window face is also a coarser cell face. Its last distance bit
+        // can change floor((ro+rd*t)/voxel) and thus the cell skipped at entry.
+        // Replay just the exiting axis, once per window that used a jump.
+        vox_window_exit: fn(first:float,delta:float,left:float)->float {
+            var t=first
+            var i=0.0
+            loop {
+                if i>=left {break}
+                t=t+delta
+                i=i+1.0
+            }
+            return t
+        }
         // Finest level holding p: vec4(level, cell), level = -1 if none.
         vox_find: fn(p:vec3,first:float)->vec4 {
             var l=first
@@ -415,35 +515,103 @@ script_mod! {
             loop {
                 if level>=self.gi_vox_dims.w || t>=tmax {break}
                 let v=self.vox_level(level)
-                var cell=floor((ro+rd*t)/max(v.w,0.000001))
+                let cell=floor((ro+rd*t)/max(v.w,0.000001))
                 if v.w>0.0 && self.vox_inside(level,cell) {
-                    var next=((cell+max(stp,vec3(0.0,0.0,0.0)))*v.w-ro)*inv
+                    let first_next=((cell+max(stp,vec3(0.0,0.0,0.0)))*v.w-ro)*inv
+                    var next=first_next
                     let delta=abs(inv)*v.w
+                    let rate=vec3(1.0)/delta
+                    var jumped=false
                     var axis=0.0
+                    // The window test and the texel are carried from step to step instead of
+                    // recomputed: the cells left ahead of the ray in the window on each axis,
+                    // and the cell wrapped into the window's texels. Cells are whole numbers in
+                    // floats, so both are exact: the same voxels, hit, axis and distance.
+                    let d=self.gi_vox_dims.xyz
+                    let ahead=step(vec3(0.0,0.0,0.0),stp)
+                    let first_left=(v.xyz+d-vec3(1.0,1.0,1.0)-cell)*ahead+(cell-v.xyz)*(vec3(1.0,1.0,1.0)-ahead)
+                    var left=first_left
+                    var m=cell-floor(cell/d)*d
                     loop {
                         steps=steps+1.0
                         if steps>320.0 {return vec4(t,level,axis,-1.0)}
                         // Entering a coarser level mid-ray, the voxel we are
                         // already in holds the finer geometry we just passed.
-                        if !skip && self.vox_solid(level,cell) {return vec4(t,level,axis,1.0)}
+                        var code=0.0
+                        if !skip {
+                            let w=self.gi_vox_a.sample_nearest(self.vox_uv_wrapped(level,m)).w
+                            if w>0.5 {return vec4(t,level,axis,1.0)}
+                            code=floor(w*255.0+0.5)
+                        }
                         skip=false
+                        if code==32.0 || code==64.0 {
+                            let s=code*0.125
+                            let offset=m-floor(m/s)*s
+                            let n=mix(offset+vec3(1.0),vec3(s)-offset,ahead)
+                            let face=next+(n-vec3(1.0))*delta
+                            let exit_t=min(face.x,min(face.y,face.z))
+                            if exit_t<tmax {
+                                // k is the index of the nearest crossing. Count it if it
+                                // precedes the exit, including equal times on axes that
+                                // the fine step would take first (z, then y, then x).
+                                let k=clamp(floor((vec3(exit_t)-next)*rate+vec3(0.5)),vec3(0.0),n-vec3(1.0))
+                                let near_t=next+k*delta
+                                var crossed=k+step(near_t,vec3(exit_t))
+                                var entry=stp.x
+                                if face.x<face.y && face.x<face.z {
+                                    crossed.x=n.x
+                                } else if face.y<face.z {
+                                    crossed.x=k.x+1.0-step(exit_t,near_t.x)
+                                    crossed.y=n.y
+                                    entry=stp.y*2.0
+                                } else {
+                                    crossed.x=k.x+1.0-step(exit_t,near_t.x)
+                                    crossed.y=k.y+1.0-step(exit_t,near_t.y)
+                                    crossed.z=n.z
+                                    entry=stp.z*3.0
+                                }
+                                // The current fine step has already been charged. Walk a
+                                // partial brick normally if the budget ends inside it.
+                                let after=steps-1.0+crossed.x+crossed.y+crossed.z
+                                if after<=320.0 {
+                                    jumped=true
+                                    steps=after
+                                    t=exit_t
+                                    axis=entry
+                                    let move_by=crossed*stp
+                                    m=vec3(self.vox_wrap_step(m.x,move_by.x,d.x),self.vox_wrap_step(m.y,move_by.y,d.y),self.vox_wrap_step(m.z,move_by.z,d.z))
+                                    left=left-crossed
+                                    next=next+crossed*delta
+                                    if min(min(left.x,left.y),left.z)<0.0 {break}
+                                    continue
+                                }
+                            }
+                        }
                         if next.x<next.y && next.x<next.z {
                             t=next.x
-                            cell.x=cell.x+stp.x
+                            m.x=self.vox_wrap_step(m.x,stp.x,d.x)
+                            left.x=left.x-1.0
                             next.x=next.x+delta.x
                             axis=stp.x
                         } else if next.y<next.z {
                             t=next.y
-                            cell.y=cell.y+stp.y
+                            m.y=self.vox_wrap_step(m.y,stp.y,d.y)
+                            left.y=left.y-1.0
                             next.y=next.y+delta.y
                             axis=stp.y*2.0
                         } else {
                             t=next.z
-                            cell.z=cell.z+stp.z
+                            m.z=self.vox_wrap_step(m.z,stp.z,d.z)
+                            left.z=left.z-1.0
                             next.z=next.z+delta.z
                             axis=stp.z*3.0
                         }
-                        if t>=tmax || !self.vox_inside(level,cell) {break}
+                        if t>=tmax || min(min(left.x,left.y),left.z)<0.0 {break}
+                    }
+                    if jumped {
+                        if left.x<0.0 {t=self.vox_window_exit(first_next.x,delta.x,first_left.x)}
+                        else if left.y<0.0 {t=self.vox_window_exit(first_next.y,delta.y,first_left.y)}
+                        else if left.z<0.0 {t=self.vox_window_exit(first_next.z,delta.z,first_left.z)}
                     }
                 }
                 level=level+1.0
@@ -575,7 +743,7 @@ script_mod! {
         gi_bounce: uniform(1.0)
         gi_light_ids0: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
         gi_light_ids1: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
-        hit_at: fn(ray:float,row:float)->vec4 {return self.gi_hits.sample_nearest(vec2((ray+0.5)/65.0,(row+0.5)/self.gi_pass.y))}
+        hit_at: fn(ray:float,target_y:float)->vec4 {return self.gi_hits.sample_nearest(vec2((ray+0.5)/65.0,target_y))}
         local_bounce: fn(p:vec3,n:vec3,index:float)->vec3 {
             if index<0.0 {return vec3(0.0,0.0,0.0)}
             let pos=self.cluster_fetch(self.cluster_z.w+index*3.0)
@@ -604,8 +772,9 @@ script_mod! {
         pixel: fn(){
             let row=self.batch_row()
             let ray=min(floor(self.pos.x*64.0),63.0)
-            let probe=self.hit_at(64.0,row)
-            let hit=self.hit_at(ray,row)
+            let target_y=self.target_y(row)
+            let probe=self.hit_at(64.0,target_y)
+            let hit=self.hit_at(ray,target_y)
             // radiance: (rgb, distance); w = -1 backface, -2 invalid.
             // Sky has x = -1 for the receiver's ambient. Closed far has
             // zero RGB and a positive blocker distance for visibility.
@@ -665,7 +834,7 @@ script_mod! {
         color_format: @Rgba16F
         gi_hits: texture_2d(float)
         gi_radiance: texture_2d(float)
-        radiance: fn(r:float,row:float)->vec4 {return self.gi_radiance.sample_nearest(vec2((r+0.5)/64.0,(row+0.5)/self.gi_pass.y))}
+        radiance: fn(r:float,target_y:float)->vec4 {return self.gi_radiance.sample_nearest(vec2((r+0.5)/64.0,target_y))}
         // Direction of texel (x, y) of an n x n interior with a guard ring:
         // guard texels fold onto their octahedral neighbours.
         tile_dir: fn(x:float,y:float,n:float)->vec3 {
@@ -682,16 +851,17 @@ script_mod! {
         // Around d, cosine-weighted: the radiance the surfaces send (E/pi)
         // and the share of rays that left the scene. w < 0 (including
         // ran out) contributes to neither sum nor the normalization.
-        irradiance: fn(d:vec3,row:float,a:vec4)->vec4 {
+        irradiance: fn(d:vec3,target_y:float,a:vec4)->vec4 {
+            let axis=self.gi_ray_axis(d,a)
             var sum=vec3(0.0,0.0,0.0)
             var open=0.0
             var total=0.0
             var r=0.0
             loop {
                 if r>63.5 {break}
-                let sample=self.radiance(r,row)
+                let sample=self.radiance(r,target_y)
                 if sample.w>=0.0 {
-                    let w=max(dot(d,self.gi_ray(r,a)),0.0)
+                    let w=max(dot(axis,self.gi_fib(r)),0.0)
                     if sample.x<0.0 {open=open+w} else {sum=sum+sample.xyz*w}
                     total=total+w
                 }
@@ -702,15 +872,16 @@ script_mod! {
         }
         // Filtered (E[d], E[d^2]) around d from this update's valid rays;
         // ran-out rays have w = -2 and carry no distance or weight.
-        moments: fn(d:vec3,row:float,a:vec4,s:float)->vec4 {
+        moments: fn(d:vec3,target_y:float,a:vec4,s:float)->vec4 {
+            let axis=self.gi_ray_axis(d,a)
             var m=vec2(0.0,0.0)
             var total=0.0
             var r=0.0
             loop {
                 if r>63.5 {break}
-                let sample=self.radiance(r,row)
+                let sample=self.radiance(r,target_y)
                 if sample.w>=0.0 {
-                    let c=max(dot(d,self.gi_ray(r,a)),0.0)
+                    let c=max(dot(axis,self.gi_fib(r)),0.0)
                     let c2=c*c
                     let c4=c2*c2
                     let w=c4*c4*c4
@@ -732,7 +903,8 @@ script_mod! {
             let b=self.batch_b(row)
             let k=a.y
             let s=self.gi_cascade(k).w
-            let probe=self.gi_hits.sample_nearest(vec2(64.5/65.0,(row+0.5)/self.gi_pass.y))
+            let target_y=self.target_y(row)
+            let probe=self.gi_hits.sample_nearest(vec2(64.5/65.0,target_y))
             let home=(b.xyz+self.gi_home.xyz)*s
             let offset=(probe.xyz-home)/s
             let old_info=self.gi_field.sample_nearest((self.gi_tile(k,a.x,2.0)+vec2(0.5,0.5))/self.gi_atlas.xy)
@@ -747,7 +919,7 @@ script_mod! {
                 var r=0.0
                 loop {
                     if r>63.5 {break}
-                    let w=self.radiance(r,row).w
+                    let w=self.radiance(r,target_y).w
                     if w<(-0.5) && w>(-1.5) {back=back+1.0}
                     r=r+1.0
                 }
@@ -763,7 +935,7 @@ script_mod! {
                 let x=col-floor(col/8.0)*8.0
                 let y=floor(col/8.0)
                 let old=self.gi_field.sample_nearest((self.gi_tile(k,a.x,0.0)+vec2(x+0.5,y+0.5))/self.gi_atlas.xy)
-                let v=self.irradiance(self.tile_dir(x,y,6.0),row,a)
+                let v=self.irradiance(self.tile_dir(x,y,6.0),target_y,a)
                 if v.w<0.0 {
                     if h>0.0 {return old}
                     return vec4(0.0,0.0,0.0,0.0)
@@ -774,7 +946,7 @@ script_mod! {
             let x=c-floor(c/10.0)*10.0
             let y=floor(c/10.0)
             let old=self.gi_field.sample_nearest((self.gi_tile(k,a.x,1.0)+vec2(x+0.5,y+0.5))/self.gi_atlas.xy)
-            let m=self.moments(self.tile_dir(x,y,8.0),row,a,s)
+            let m=self.moments(self.tile_dir(x,y,8.0),target_y,a,s)
             if m.w<0.0 {
                 if h>0.0 {return old}
                 return vec4(0.0,0.0,0.0,0.0)
@@ -789,16 +961,16 @@ script_mod! {
     // info texel of a slot that just changed cells).
     mod.draw.DrawGiScatter = set_type_default() do #(DrawGiScatter::script_shader(vm)) {
         ..mod.draw.DrawQuad,
+        ..GiBatchLayout,
         alpha_blend: false
         color_format: @Rgba16F
-        gi_batch: texture_2d(float)
         gi_atlas: uniform(vec4(640.0,1824.0,64.0,32.0))
         // Immutable instances identify a batch row and tile region; only
         // the two-column batch texture changes from one frame to the next.
         vertex: fn() {
             var p=self.rect_pos
             if self.gi_tile.x>=0.0 {
-                let a=self.gi_batch.sample_nearest(vec2(0.25,(self.gi_tile.x+0.5)/self.gi_update_size.y),0.0)
+                let a=self.gi_batch.sample_nearest(vec2(0.25,self.batch_y(self.gi_tile.x)),0.0)
                 let x=a.x-floor(a.x/self.gi_atlas.z)*self.gi_atlas.z
                 let y=floor(a.x/self.gi_atlas.z)
                 let base=a.y*self.gi_atlas.w*19.0
@@ -817,12 +989,11 @@ script_mod! {
             self.vertex_pos=self.draw_pass.camera_projection*(self.draw_pass.camera_view*self.world)
         }
         gi_update: texture_2d(float)
-        gi_update_size: uniform(vec2(165.0,1.0))
         pixel: fn(){
             if self.gi_tile.x<0.0 {return vec4(0.0,0.0,0.0,0.0)}
             let w=self.gi_tile.z
             let col=self.gi_tile.y+min(floor(self.pos.x*w),w-1.0)+min(floor(self.pos.y*w),w-1.0)*w
-            return self.gi_update.sample_nearest(vec2((col+0.5)/self.gi_update_size.x,(self.gi_tile.x+0.5)/self.gi_update_size.y))
+            return self.gi_update.sample_nearest(vec2((col+0.5)/#(super::GATHER_WIDTH as f64),self.target_y(self.gi_tile.x)))
         }
         fragment: fn(){self.fb0=self.pixel()}
     }
@@ -862,8 +1033,70 @@ script_mod! {
     mod.draw.FastGiScreen = FastGiScreen
     mod.draw.FastGiSampling = FastGiSampling
 }
+
+// The screen fill spreads VolumeFogCamera, which registers after the scene shaders (they spread
+// FastGiSampling), so the fill is its own step after volume_fog (`script_mod_steps`).
+pub mod screen_fill {
+    use super::*;
+    script_mod! {
+        use mod.prelude.widgets_internal.*
+
+        mod.draw.DrawGiScreenFill = set_type_default() do #(DrawGiScreenFill::script_shader(vm)) {
+            ..mod.draw.DrawQuad,
+            ..mod.draw.FastGiSampling,
+            ..mod.draw.VolumeFogCamera,
+            alpha_blend: false
+            color_format: @Rgba32F
+            depth_tex: texture_2d(float)
+            // The cache's size in texels: the normal's depth neighbours are one texel apart.
+            gi_fill_ctl: uniform(vec2(0.0, 0.0))
+
+            gi_fill_distance: fn(p: vec3) -> float {
+                return length(p - self.u_eye.xyz)
+            }
+            gi_fill_position: fn(uv: vec2) -> vec4 {
+                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 { return vec4(0.0, 0.0, 0.0, 0.0) }
+                let raw = self.depth_tex.sample_nearest(uv).x
+                if self.background(raw) > 0.5 { return vec4(0.0, 0.0, 0.0, 0.0) }
+                let p = self.unproject(uv, raw)
+                return vec4(p, self.gi_fill_distance(p))
+            }
+            // SSR's depth normal: choose the smaller valid depth jump on each axis.
+            gi_fill_normal: fn(uv: vec2, p: vec3, d: float) -> vec3 {
+                let texel = vec2(1.0, 1.0) / self.gi_fill_ctl
+                let l = self.gi_fill_position(uv - vec2(texel.x, 0.0))
+                let r = self.gi_fill_position(uv + vec2(texel.x, 0.0))
+                let t = self.gi_fill_position(uv - vec2(0.0, texel.y))
+                let b = self.gi_fill_position(uv + vec2(0.0, texel.y))
+                var dx = r.xyz - p
+                var dy = b.xyz - p
+                if r.w <= 0.0 || (l.w > 0.0 && abs(l.w - d) < abs(r.w - d)) { dx = p - l.xyz }
+                if b.w <= 0.0 || (t.w > 0.0 && abs(t.w - d) < abs(b.w - d)) { dy = p - t.xyz }
+                var n = cross(dy, dx)
+                let incident = self.ray_dir(uv)
+                if length(n) <= 0.000001 * length(dx) * length(dy) { n = incident * -1.0 }
+                n = normalize(n)
+                if dot(n, incident) > 0.0 { n = n * -1.0 }
+                return n
+            }
+            pixel: fn() -> vec4 {
+                let texel = floor(self.pos * self.rect_size)
+                // Use the same texel-centre ray the receiver uses to reconstruct p.
+                let uv = (texel + vec2(0.5, 0.5)) / self.rect_size
+                let raw = self.depth_tex.sample_nearest(uv).x
+                if self.background(raw) > 0.5 { return vec4(0.0, 0.0, 0.0, -1.0) }
+                let p = self.unproject(uv, raw)
+                let d = self.gi_fill_distance(p)
+                let n = self.gi_fill_normal(uv, p, d)
+                return self.gi_screen_value(p, n, d)
+            }
+            fragment: fn() { self.fb0 = self.pixel() }
+        }
+    }
+}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiTrace {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiRelight {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiGather {#[deref] pub quad:DrawQuad}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiScatter {#[deref] pub quad:DrawQuad, #[live(vec4(0.0,0.0,1.0,0.0))] pub gi_tile:Vec4f}
 #[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiProbeCounts {#[deref] pub quad:DrawQuad}
+#[derive(Script,ScriptHook)] #[repr(C)] pub struct DrawGiScreenFill {#[deref] pub quad:DrawQuad}

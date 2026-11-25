@@ -1470,8 +1470,10 @@ pub(crate) fn tilt_axis(axis: P3, up: P3) -> P3 {
     }
 }
 
-/// Set joints to angles by turning each joint's moving side about it (in joint order).
-fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
+/// Turn or slide the joints in order. Each body's pair `(c, R)` gives its current centre of mass
+/// and the row-major rotation from its as-built pose. A model point `p` of body `i` moves to
+/// `c + R (p - rest_com_i)`, where `rest_com_i` is `asm.bodies[i].mass.com`.
+pub fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
     let mut out: Vec<(P3, [[f64; 3]; 3])> = asm.bodies.iter().map(|b| (b.mass.com, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])).collect();
     for (j, ang) in angles.iter().enumerate().take(asm.joints.len()) {
         let js = &asm.joints[j];

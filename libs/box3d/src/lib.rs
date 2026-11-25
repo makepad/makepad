@@ -32,6 +32,7 @@ pub mod timer;
 
 // Geometry / collision
 pub mod aabb;
+pub mod box_set;
 pub mod capsule;
 pub mod compound;
 pub mod distance;
@@ -47,6 +48,7 @@ pub mod tube;
 pub mod convex_manifold;
 pub mod manifold;
 pub mod mesh_contact;
+pub mod set_contact;
 pub mod triangle_manifold;
 pub mod tube_contact;
 
@@ -91,6 +93,7 @@ pub use crate::math_functions::*;
 pub use crate::types::*;
 
 pub use crate::aabb::*;
+pub use crate::box_set::*;
 pub use crate::capsule::*;
 pub use crate::distance::*;
 pub use crate::dynamic_tree::*;

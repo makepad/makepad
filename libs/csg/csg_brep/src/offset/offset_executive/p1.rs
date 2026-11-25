@@ -71,6 +71,10 @@
 //! The lamina clean-up's `DeleteFaces` runs through merge p4's arena intersector over
 //! the offset B-rep alone (both upstream operands are that B-rep); it notifies under
 //! `DELETE_FACES_NAMESPACE` rather than the caller's offset keys.
+//! Not upstream (WR-572, opt-in `Kernel::fixes.offset_smooth_vertex_neighbours_related`):
+//! `PiecewiseMerge` also relates the offsets of the faces round a vertex where the body is
+//! smooth all round, as it relates edge neighbours, so the merge does not intersect them to
+//! find the one point they share.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1169,6 +1173,12 @@ impl OffsetExecutive {
         offset_key_of: &dyn Fn(EntityRef) -> ObjectRef,
         offset_curve_ref: &dyn Fn(EdgeId, i64) -> ObjectRef,
     ) -> Result<()> {
+        // (not upstream) across a tangent edge the copied face's other use pairs with the offset
+        let other = if kernel.fixes.shell_tangent_open_face_bridge {
+            self.shell_tangent_partner(kernel, original, edgeuse, other)?.unwrap_or(other)
+        } else {
+            other
+        };
         let Some((edge, synchronized)) = self.prepare_offset_edgeuses(
             kernel,
             original,
@@ -1272,6 +1282,38 @@ impl OffsetExecutive {
     fn geometry_creator(&self) -> OffsetGeometryCreation {
         OffsetGeometryCreation::new(self.offset_distance, self.approximation_tol_3d)
             .with_tangency_tol_radians(self.tangency_tol_radians)
+    }
+
+    /// Not upstream ([`crate::kernel::UpstreamFixes::shell_tangent_open_face_bridge`]): the
+    /// copied shell face's use to pair with `edgeuse` across a tangent edge between a face the
+    /// inset offsets and one it copies, where `other` (the radial partner) has no mapped
+    /// offset and its mate has: the copy maps from the opposite face use. `None`: pair as
+    /// upstream does.
+    ///
+    /// # Errors
+    ///
+    /// Those of the topology queries and of the tangency test.
+    fn shell_tangent_partner(&self, kernel: &Kernel, original: &mut Brep, edgeuse: EdgeuseId, other: EdgeuseId) -> Result<Option<EdgeuseId>> {
+        if self.extend_convex_edges || !self.inset || self.shell_faces.is_empty() {
+            return Ok(None);
+        }
+        let copied = |f: Option<FaceId>| f.is_some_and(|id| self.shell_faces.contains(&id));
+        if copied(eu::face(original, edgeuse)?) == copied(eu::face(original, other)?) {
+            return Ok(None);
+        }
+        if self.edgeuse_to_edgeuses.seconds(edgeuse).is_empty() || !self.edgeuse_to_edgeuses.seconds(other).is_empty() {
+            return Ok(None);
+        }
+        let Some(mate) = eu::mate(original, other)? else {
+            return Ok(None);
+        };
+        if self.edgeuse_to_edgeuses.seconds(mate).is_empty() {
+            return Ok(None);
+        }
+        if !eu2::is_tangent_sector(kernel, original, edgeuse, self.tangency_tol_degrees(), false, true)? {
+            return Ok(None);
+        }
+        Ok(Some(mate))
     }
 
     /// Shared prefix; synchronization mutates/notifies the result exactly once.
@@ -1765,6 +1807,20 @@ impl OffsetExecutive {
         // of each surface pair; no geometry is copied to build this heuristic.
         let result = self.required_offset_brep()?;
         let mut no_ssi: Relation<FaceId, FaceId> = Relation::default();
+        // Not upstream (WR-572), opt-in `Kernel::fixes.offset_smooth_vertex_neighbours_related`:
+        // each face's live offsets, and per vertex the offsets round it when the body is smooth
+        // all round it ([`Self::smooth_vertex_offsets`]).
+        let smooth_round = kernel.fixes.offset_smooth_vertex_neighbours_related;
+        let mut offsets_of: BTreeMap<FaceId, Vec<FaceId>> = BTreeMap::new();
+        if smooth_round {
+            let live = |id: FaceId| result.faces().get(id).is_some_and(|f| f.surface.is_some());
+            for faceuse in self.faceuse_to_faces.all_firsts() {
+                let face = required(original.faceuse(faceuse)?.face)?;
+                let offsets = self.faceuse_to_faces.seconds(faceuse).into_iter().filter(|&f| live(f));
+                offsets_of.entry(face).or_default().extend(offsets);
+            }
+        }
+        let mut smooth: BTreeMap<VertexId, Vec<FaceId>> = BTreeMap::new();
         for faceuse in self.faceuse_to_faces.all_firsts() {
             let face = required(original.faceuse(faceuse)?.face)?;
             for offset_face in self.faceuse_to_faces.seconds(faceuse) {
@@ -1827,6 +1883,16 @@ impl OffsetExecutive {
                 for vertex in face_vertices(original, face)? {
                     if let Some(vertex_face) = self.vertex_to_faces.second(vertex) {
                         relate_surface_pair(result, &mut no_ssi, offset_face, vertex_face)?;
+                    } else if smooth_round {
+                        if !smooth.contains_key(&vertex) {
+                            let round = self.smooth_vertex_offsets(kernel, original, vertex, &offsets_of)?;
+                            smooth.insert(vertex, round);
+                        }
+                        for &other in &smooth[&vertex] {
+                            if other != offset_face {
+                                relate_surface_pair(result, &mut no_ssi, offset_face, other)?;
+                            }
+                        }
                     }
                 }
             }
@@ -1848,6 +1914,43 @@ impl OffsetExecutive {
         );
         self.offset_brep = offset;
         result
+    }
+
+    /// The live offsets of the faces round `vertex` when the body is smooth all round it, else
+    /// none (not upstream, WR-572, opt-in
+    /// `Kernel::fixes.offset_smooth_vertex_neighbours_related`). All round means: no vertex face
+    /// there; every edge at it manifold, without edge faces, and a tangent sector by the test the
+    /// edge rule of [`Self::piecewise_merge`] uses; and every face round it with exactly one live
+    /// offset (`offsets_of`), so no round collapsed there. The surface is then G1 all round the
+    /// vertex, its offset G1 round the vertex's offset, and those offsets meet there as the faces
+    /// meet at the vertex: [`Self::piecewise_merge`] relates them as it relates edge neighbours.
+    fn smooth_vertex_offsets(
+        &self,
+        kernel: &Kernel,
+        original: &mut Brep,
+        vertex: VertexId,
+        offsets_of: &BTreeMap<FaceId, Vec<FaceId>>,
+    ) -> Result<Vec<FaceId>> {
+        if self.vertex_to_faces.second(vertex).is_some() {
+            return Ok(Vec::new());
+        }
+        for edge_id in vertex::edges(original, vertex, None)? {
+            if !self.edge_to_faces.seconds(edge_id).is_empty() || !edge::is_manifold(original, edge_id)? {
+                return Ok(Vec::new());
+            }
+            let primary = required(eu::primary_edgeuse(original, edge_id)?)?;
+            if !eu2::is_tangent_sector(kernel, original, primary, self.tangency_tol_degrees(), false, true)? {
+                return Ok(Vec::new());
+            }
+        }
+        let mut round = Vec::new();
+        for face in vertex::faces(original, vertex)? {
+            match offsets_of.get(&face).map(Vec::as_slice) {
+                Some(&[one]) => round.push(one),
+                _ => return Ok(Vec::new()),
+            }
+        }
+        Ok(round)
     }
 
     /// Builds a face from the supplied offset surface (`BuildOffsetOfFaceuse`).

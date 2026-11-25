@@ -51,10 +51,28 @@ impl Default for Limits {
     }
 }
 
+static PACE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// A host running mesh work on a cooperative pool installs its "give way if due"
+/// function here. Returns true for the first installation in the process.
+pub fn install_pace(pace: fn()) -> bool {
+    PACE.set(pace).is_ok()
+}
+
+/// Give the host's cooperative pool a turn if due. The host may park the thread here, so call it
+/// only where no lock is held that a job holding a CPU token could wait on: generators building
+/// new data, not edits of shared state.
+#[inline]
+pub fn pace() {
+    if let Some(pace) = PACE.get() { pace(); }
+}
+
 pub struct Context<'a> {
     pub limits: Limits,
     cancelled: Option<&'a dyn Fn() -> bool>,
     work: u64,
+    /// Its polls give the host's pool a turn when due (`pacing`).
+    pacing: bool,
 }
 pub type OpContext<'a> = Context<'a>;
 impl Default for Context<'_> {
@@ -68,7 +86,15 @@ impl<'a> Context<'a> {
             limits,
             cancelled,
             work: 0,
+            pacing: false,
         }
+    }
+    /// A context whose ops build new data and hold no lock that a job holding a CPU token could wait
+    /// on (a generator's own mesh, not an edit of shared state): its polls give the host's
+    /// cooperative pool a turn when due (`pace`), at an op's start and every 256 units of work.
+    pub fn pacing(mut self) -> Self {
+        self.pacing = true;
+        self
     }
     pub fn work_used(&self) -> u64 {
         self.work
@@ -77,7 +103,11 @@ impl<'a> Context<'a> {
         if self.cancelled.is_some_and(|f| f()) {
             return Err(MeshError::Cancelled);
         }
+        let before = self.work;
         self.work = self.work.saturating_add(work);
+        if self.pacing && (work == 0 || before >> 8 != self.work >> 8) {
+            pace();
+        }
         Ok(())
     }
     pub(crate) fn limit(&self, resource: &'static str, requested: u64, limit: u64) -> Result<()> {

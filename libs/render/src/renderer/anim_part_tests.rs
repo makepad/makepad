@@ -340,8 +340,18 @@ fn a_slot_command_wins_over_a_model_command() {
     let offset = layout.dyn_uniforms.find(live_id!(params)).unwrap().offset;
     assert_eq!(&call.dyn_uniforms[offset..offset + 4], &[params.x, params.y, params.z, params.w]);
 
+    let world = World::default();
+    let mut static_movers = Default::default();
     let mut movers = Vec::new();
-    renderer.collect_lm_movers(&World::default(), eye, 1.0, None, &mut movers);
+    renderer.collect_lm_movers(&world, eye, 1.0, None, &mut static_movers, &mut movers);
+    // The caster-log lookup is allocation-free on Unix when the variable is unset.
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    if std::env::var_os("MAKEPAD_CSM_CASTER_LOG").is_none() {
+        use crate::shaders::shader_registration_tests::allocations;
+        let before = allocations::count();
+        renderer.collect_lm_movers(&world, eye, 1.0, None, &mut static_movers, &mut movers);
+        assert_eq!(allocations::count(), before, "collecting the same door casters allocated");
+    }
     let mut derived = movers.iter().filter_map(|m| m.material.as_ref().map(|caster| (m, caster)));
     let (door, caster) = derived.next().expect("the overridden door casts through its vertex hook");
     assert!(derived.next().is_none(), "only the overridden door uses the derived caster");

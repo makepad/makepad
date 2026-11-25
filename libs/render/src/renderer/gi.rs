@@ -2,6 +2,7 @@
 //! volume's centre, and the per-frame GI run.
 
 use super::*;
+use crate::GiReceivers;
 
 /// Screen AO for one view. The host supplies its frame/sample index and
 /// resets history on camera cuts; radius is in world units.
@@ -22,7 +23,7 @@ impl Renderer {
     /// an unchanged field. Soft local shadows stay enabled after GI is disabled.
     pub fn set_gi_settings(&mut self, settings: Option<makepad_scene::GiSettings>) {
         if let Some(settings) = settings {
-            let config = crate::GiConfig::from(settings);
+            let config = crate::GiConfig { gpu_budget_ms: self.gi_budget_ms, ..crate::GiConfig::from(settings) };
             if self.gi_config() != config {
                 self.set_gi_config(config);
             }
@@ -45,7 +46,7 @@ impl Renderer {
 
     /// Hosts that light in linear space (HDR output) tell GI their albedo
     /// inputs are sRGB-encoded, so bounce light is computed on decoded
-    /// albedo. Relights the field; nothing is re-traced.
+    /// albedo. Changing the decode wakes the probe field.
     pub fn set_gi_linear_albedo(&mut self, on: bool) { self.gi.set_linear_albedo(on); }
 
     /// Screen-space ambient occlusion for a host WITHOUT a depth prepass:
@@ -64,6 +65,26 @@ impl Renderer {
         let out = if strength > 0.0 { self.gi.run_screen_ao(cx, scene_pass.draw_pass_id(), depth, size, params) } else { None };
         self.set_ssao(out.map(|t| (t, strength.min(1.0))));
     }
+
+    /// Choose how the scene's receivers obtain their GI ambient.
+    pub fn set_gi_receivers(&mut self, receivers: GiReceivers) { self.gi.set_receivers(receivers); }
+
+    /// The scene's current GI receiver setting.
+    pub fn gi_receivers(&self) -> GiReceivers { self.gi.receivers() }
+
+    /// Gather GI into a quarter-resolution cache. Call once per frame beside
+    /// `run_screen_ao`, after `make_child_pass(scene_pass)` and before
+    /// `draw_scene_full`. The sampled scene depth (`DepthD32Sampled`), pass
+    /// camera and render origin are from the previous scene draw. Returns
+    /// true when the fill is recorded. A new target waits one frame for depth.
+    /// In [`GiReceivers::Exact`] (the default), it records nothing and every receiver gathers.
+    pub fn run_gi_screen(&mut self, cx: &mut Cx2d, scene_pass: &DrawPass, depth: &Texture, size: DVec2) -> bool {
+        self.gi.run_gi_screen(cx, scene_pass.draw_pass_id(), depth, size, self.gi.last_scene_origin)
+    }
+
+    /// Call instead of [`Self::run_gi_screen`] when the frame cannot use a
+    /// single camera's cache, as in a split view, XR or an auxiliary scope.
+    pub fn skip_gi_screen(&mut self, cx: &mut Cx) { self.gi.skip_gi_screen(cx); }
 
     /// The last `run_screen_ao` bound nothing only because the AO's pipelines
     /// are still being made (native compiles them in the background, and
@@ -86,16 +107,16 @@ impl Renderer {
 
     /// Binds what a host's own shader needs to sample the GI
     /// (`mod.draw.FastGiSampling`); `gi_shading` says whether it reads anything.
-    pub fn bind_gi(&self, cx: &Cx, draw: &mut DrawVars) { self.gi.bind(cx, draw); }
+    pub fn bind_gi(&self, cx: &Cx, draw: &mut DrawVars) {
+        self.gi.bind(cx, draw);
+        self.gi.bind_host_screen(cx, draw);
+    }
 
-    /// A host's screen cache of the field: the host's receivers that sample
-    /// it (`mod.draw.FastGiScreen`, bound through `bind_gi`) read it where it
-    /// answers instead of gathering per pixel (`mod.draw.FastGiSampling`'s
-    /// `gi_screen_value` fills it, at the view the scene pass draws with,
-    /// under the ambient those receivers pass to `gi_ambient`; `size` its
-    /// pixels). None: they gather. The renderer's own scene
-    /// shaders always gather (their families have no texture slot for it).
-    pub fn set_gi_screen(&mut self, screen: Option<(Texture, [f32; 2])>) { self.gi.set_screen(screen); }
+    /// The host fills this cache with `gi_screen_value` over its own G-buffer at
+    /// `view`, in its receivers' coordinate frame. Its receivers spread
+    /// `mod.draw.FastGiScreen`, bind through `bind_gi` and call `gi_ambient_at`.
+    /// Pass `None` to gather directly on every pixel.
+    pub fn set_gi_screen(&mut self, screen: Option<crate::GiScreenCache>) { self.gi.set_screen(screen); }
 
     /// Whether the GI has something to sample this frame.
     pub fn gi_shading(&self) -> bool { self.gi.shader_features().0 }
@@ -119,6 +140,15 @@ impl Renderer {
         self.gi.poll_probe_counts(cx)
     }
 
+    /// World and placed-model revisions used to request a GI snapshot.
+    pub(crate) fn gi_scene_key(&self, world: &World) -> crate::fast_gi::SceneKey {
+        let terrain_rev = world.terrain.as_deref().map_or(0, |t| t.revision);
+        let voxel_rev = world.voxel.as_ref().map_or(0, |v| v.meshes.iter().fold(0xcbf29ce484222325u64, |h, (key, mesh)| {
+            [key.x as u64, key.y as u64, key.z as u64, mesh.rev].into_iter().fold(h, |h, value| h.wrapping_mul(1099511628211) ^ value)
+        }));
+        [world.render_rev, world.paint_rev, terrain_rev, voxel_rev, self.models_rev, self.models_gi_rev]
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_fast_gi(
         &mut self,
@@ -130,10 +160,6 @@ impl Renderer {
         sun: &SunLight,
         stats: &mut RenderStats,
     ) {
-        let terrain_rev=world.terrain.as_deref().map_or(0,|t|t.revision);
-        let voxel_rev=world.voxel.as_ref().map_or(0,|v|v.meshes.iter().fold(0xcbf29ce484222325u64, |h, (key, mesh)| {
-            [key.x as u64, key.y as u64, key.z as u64, mesh.rev].into_iter().fold(h, |h, value| h.wrapping_mul(1099511628211) ^ value)
-        }));
         // Orbit cameras shade their subject, not empty space around a
         // distant lens. Player views use the followed body; XR falls
         // back to its world-space eye when no game camera is active.
@@ -141,17 +167,16 @@ impl Renderer {
             camera_pos-vec3f(scene_state.view.v[2],scene_state.view.v[6],scene_state.view.v[10])*focus
         }else if let Some(e)=world.entity(world.camera.third).or_else(||world.entity(world.camera.follow)) {e.pos+vec3f(0.0,1.0,0.0)}
         else if self.stage.mode==StageMode::Flat {world.camera.target}else{camera_pos};
-        // Paint (traffic lights, recolours) is part of the key: the voxel
-        // worker's diff re-voxelizes only the recoloured bricks and the
-        // probes near them relight; nothing else is re-traced.
-        let key=[world.render_rev,world.paint_rev,terrain_rev,voxel_rev,self.models_rev];
+        // A paint revision takes a new snapshot. Its diff re-voxelizes the
+        // changed bricks and nearby probes get the first re-traces.
+        let key=self.gi_scene_key(world);
         let center=self.gi.config().anchor.unwrap_or(center);
         // A host's scene has its own key: nothing of the world's enters it.
-        let key=self.gi_host_scene.as_ref().map_or(key,|(host,_)|[*host,0,0,0,0]);
+        let key=self.gi_host_scene.as_ref().map_or(key,|(host,_)|[*host,0,0,0,0,0]);
         if self.gi.wants_scene(key,center) {
             let start=Cx::monotonic_now();
             let snapshot=match &self.gi_host_scene {
-                Some((_,instances))=>{let triangles=instances.iter().map(|i|i.triangles()).sum();crate::fast_gi::Snapshot{instances:instances.clone(),triangles}},
+                Some((_,instances))=>{let triangles=instances.iter().map(|i|i.triangles()).sum();crate::fast_gi::Snapshot{instances:instances.clone(),triangles,region:None}},
                 None=>self.gi_snapshot(cx.cx,world,self.gi.region(center)),
             };
             self.gi.submit_scene(key,center,snapshot);
@@ -201,8 +226,27 @@ mod tests {
         renderer.set_gi_settings(Some(settings));
         assert_eq!(renderer.gi_config(), config, "unchanged config");
         assert_eq!(renderer.gi_stats().probes, probes, "unchanged settings keep the field");
-        renderer.set_gi_settings(Some(GiSettings { strength: 0.4, bounce: 0.0, ..settings }));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut issue = |r: &mut Renderer| r.gi.test_transport_issue(&mut cx, &r.clustered);
+        for _ in 0..39 { assert!(issue(&mut renderer).is_some(), "the initial cold field must converge"); }
+        assert_eq!(issue(&mut renderer), None, "the unchanged field sleeps");
+        let dim = GiSettings { strength: 0.4, ..settings };
+        renderer.set_gi_settings(Some(dim));
+        assert_eq!(issue(&mut renderer), None, "receiver strength alone must issue nothing");
+        renderer.set_gi_settings(Some(GiSettings { bounce: 0.0, ..dim }));
+        for _ in 0..19 {
+            assert_eq!(issue(&mut renderer), Some(0.85), "a feedback change must restart warm transport");
+        }
+        assert_eq!(issue(&mut renderer), None, "the field sleeps again after its warm issues");
+        renderer.set_gi_config(crate::GiConfig { gpu_budget_ms: 3.0, ..renderer.gi_config() });
+        assert_eq!(issue(&mut renderer), None, "the GPU budget alone must issue nothing");
         assert_eq!(renderer.gi_stats().probes, probes, "lighting changes keep the field");
+        let medium = crate::quality_tier::GraphicsTier::Medium;
+        renderer.set_graphics_tier(medium);
+        assert_eq!(issue(&mut renderer), None, "the tier's GPU budget alone must issue nothing");
+        renderer.set_gi_settings(Some(settings));
+        assert_eq!(renderer.gi_config().gpu_budget_ms, medium.budget().gi_budget_ms, "the host's GI settings must keep the tier's budget");
+        assert_eq!(renderer.gi_stats().probes, probes, "the tier's budget keeps the field");
         renderer.set_gi_settings(Some(GiSettings { spacing: 1.5, ..settings }));
         assert_eq!(renderer.gi_stats().probes, 0, "spacing rebuilds the field");
         renderer.set_gi_settings(None);

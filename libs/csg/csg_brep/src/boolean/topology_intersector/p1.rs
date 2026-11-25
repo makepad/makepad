@@ -80,7 +80,10 @@
 //!   with a preparation request; the cache is built on the owner's B-rep
 //!   ([`IntersectorBrep::face_cache_target`]) and the solve runs again from its start,
 //!   once per face. A solve has no other effect, so the last attempt is the solve
-//!   upstream runs with the caches made where it asks for them.
+//!   upstream runs with the caches made where it asks for them. Upstream keeps the
+//!   cache with the surface. With `face_caches_kept_per_boolean` (WR-574), the pair
+//!   keeps successful builds across calls until an edit of their B-rep. A solve
+//!   checks a kept cache's build inputs at its first request and can use it there.
 //! - **Pointer maps.** `m_pBToO` / `m_pOToB` (`SmMapPtrToPtr`, an
 //!   `std::unordered_map` keyed by address) are `BTreeMap`s over the handles.
 //!   `GetMappedBrepObjects` lists the map's values in upstream's *hash order*
@@ -198,7 +201,7 @@ use crate::math::{max2, min2, Point2, Point3, BIG_DOUBLE, EFF_ZERO, PI};
 use crate::nurbs::b_spline_surface::p1::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use crate::surface::surface::p1::SurfaceSolveContext;
-use crate::surface::surface::p2::surface_cache;
+use crate::surface::surface::p2::{surface_cache, CacheTreeState};
 use crate::surface::surface::p2::TsectCurveType;
 use crate::surface::surface::p5::{DropPoint, DropPointOptions};
 use crate::surface::surface::Surface;
@@ -503,6 +506,12 @@ pub trait IntersectorBrep<O>:
     /// Those of the implementer for a handle that names no face of a B-rep or a face
     /// without a surface.
     fn face_cache_target(&mut self, face: O) -> Result<FaceCacheTarget<'_, O>>;
+    /// Takes the owner's kept face caches for the duration of one solve.
+    fn take_kept_face_caches(&mut self) -> KeptFaceCaches<O> {
+        KeptFaceCaches::default()
+    }
+    /// Returns the kept caches, including the successful builds of this solve.
+    fn put_kept_face_caches(&mut self, _kept: KeptFaceCaches<O>) {}
     /// The handle of each entity of the B-rep of `face` (the forward mapping of
     /// [`IntersectorBrep::face_cache_target`]), for the classifications of a face
     /// whose surface cache was prepared.
@@ -3566,6 +3575,125 @@ impl<O> core::fmt::Debug for FaceCacheTarget<'_, O> {
 
 const OP_FACE_CACHES: &str = "boolean::topology_intersector::p1::solve_with_face_caches";
 
+/// Inputs a cache build or classification can change without an edit of the operand.
+/// Keep the boundary in implantation order and compare floating-point inputs bitwise.
+#[derive(Debug, PartialEq, Eq)]
+struct FaceCacheFingerprint {
+    editing_enabled: bool,
+    doing_boolean: bool,
+    tree_state: CacheTreeState,
+    natural_uv_domain: [u64; 4],
+    tolerance: u64,
+    loops: Vec<LoopFingerprint>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LoopFingerprint {
+    edgeuses: Vec<EdgeuseFingerprint>,
+    vertices: Vec<(VertexId, u64)>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EdgeuseFingerprint {
+    edgeuse: crate::topology::EdgeuseId,
+    edge: EdgeId,
+    edge_tolerance: u64,
+    edgeuse_tolerance: u64,
+    has_uv_trim: bool,
+}
+
+impl FaceCacheFingerprint {
+    /// An unreadable input makes the entry ineligible for reuse. In particular, a
+    /// state-only build can succeed without ever walking the boundary.
+    fn read<O>(k: &Kernel, objects: &dyn TopologyObjects<O>, face: O) -> Option<Self> {
+        use crate::topology::{edgeuse::p1 as eu, face::p2 as fp, face::p4, loopuse, vertexuse};
+
+        let (b, f) = objects.face_entity(face)?;
+        let surface = fp::surface(b, f).ok()??;
+        let domain = surface.natural_uv_domain_if_built();
+        let loopuses = p4::upward_loopuses(b, f, false, None).ok()?;
+        let mut loops = Vec::with_capacity(loopuses.len());
+        for lu in loopuses {
+            let ids = loopuse::edgeuses(b, lu, None, None).ok()?;
+            let mut edgeuses = Vec::with_capacity(ids.len());
+            for id in ids {
+                let edge = eu::edge(b, id).ok()??;
+                edgeuses.push(EdgeuseFingerprint {
+                    edgeuse: id,
+                    edge,
+                    edge_tolerance: edge::tolerance(b, edge).ok()?.to_bits(),
+                    edgeuse_tolerance: eu::tolerance(b, id).ok()?.to_bits(),
+                    has_uv_trim: eu::uv_trim_curve(b, id).ok()?.0.is_some(),
+                });
+            }
+            let vertexuses = loopuse::vertexuses(b, lu, None).ok()?;
+            let mut vertices = Vec::with_capacity(vertexuses.len());
+            for vu in vertexuses {
+                let vertex = vertexuse::vertex(b, vu?).ok()??;
+                vertices.push((vertex, vertex::tolerance(b, vertex).ok()?.to_bits()));
+            }
+            loops.push(LoopFingerprint { edgeuses, vertices });
+        }
+        Some(Self {
+            editing_enabled: b.editing_enabled(),
+            doing_boolean: k.context.doing_boolean(),
+            tree_state: surface.cache_tree_state(),
+            natural_uv_domain: [
+                domain.min.x.to_bits(), domain.min.y.to_bits(),
+                domain.max.x.to_bits(), domain.max.y.to_bits(),
+            ],
+            tolerance: fp::tolerance(b, f).ok()?.to_bits(),
+            loops,
+        })
+    }
+}
+
+type KeptFaceMap<O> = BTreeMap<O, (FaceCacheFingerprint, SurfaceCache<O>)>;
+
+#[derive(Debug)]
+struct PairFaceCaches<O> {
+    second_operand: fn(O) -> bool,
+    built: [KeptFaceMap<O>; 2],
+    states: [KeptFaceMap<O>; 2],
+    /// Validated for the current call, across restarts. Cleared before put.
+    promoted: RefCell<BTreeSet<(O, bool)>>,
+    /// Inputs of successful builds taken before the next attempt. Drained on put.
+    fingerprints: Vec<(O, bool, FaceCacheFingerprint)>,
+}
+
+/// Successful face surface cache builds of a Boolean, partitioned by operand.
+/// The default is empty for owners that keep caches only within a single call.
+#[derive(Debug)]
+pub struct KeptFaceCaches<O> {
+    pair: Option<Box<PairFaceCaches<O>>>,
+}
+
+impl<O> Default for KeptFaceCaches<O> {
+    fn default() -> Self {
+        Self { pair: None }
+    }
+}
+
+impl<O> KeptFaceCaches<O> {
+    pub(crate) fn take_pair(&mut self, second_operand: fn(O) -> bool) -> Self {
+        self.pair.get_or_insert_with(|| Box::new(PairFaceCaches {
+            second_operand,
+            built: Default::default(),
+            states: Default::default(),
+            promoted: RefCell::new(BTreeSet::new()),
+            fingerprints: Vec::new(),
+        }));
+        core::mem::take(self)
+    }
+
+    pub(crate) fn clear_slot(&mut self, slot: usize) {
+        if let Some(pair) = &mut self.pair {
+            pair.built[slot].clear();
+            pair.states[slot].clear();
+        }
+    }
+}
+
 /// The face surface caches a topology solve has asked for, by face handle: each
 /// built once on the face's B-rep by [`solve_with_face_caches`] (or the failure of
 /// that build), and the face the solve is waiting for (with whether it asked for the
@@ -3576,6 +3704,7 @@ struct FaceCaches<O> {
     /// The caches as `smsurf_GetSurfaceCache` hands them to `GlobalPointSolve`'s
     /// fast-drop face test before any `GetTree` ([`prepare_face_surface_cache_state`]).
     states: BTreeMap<O, Result<SurfaceCache<O>>>,
+    carried: KeptFaceCaches<O>,
     /// The faces whose cache the attempt has asked for with its tree so far: from then
     /// on upstream's cache, kept with the surface, has its tree.
     tree_requested: RefCell<BTreeSet<O>>,
@@ -3599,6 +3728,37 @@ impl<O: ClassObject + SolutionObject + Ord, G: IntersectorBrep<O> + ?Sized>
 {
     fn inner(&self) -> &dyn TopologyObjects<O> {
         self.geometry.topology_objects()
+    }
+
+    fn carried_cache(&self, k: &Kernel, face: O, get_tree: bool) -> Option<&SurfaceCache<O>> {
+        let pair = self.caches.carried.pair.as_ref()?;
+        let maps = if get_tree { &pair.built } else { &pair.states };
+        let (saved, cache) = maps[usize::from((pair.second_operand)(face))].get(&face)?;
+        let mut promoted = pair.promoted.borrow_mut();
+        if !promoted.contains(&(face, get_tree)) {
+            if *saved != FaceCacheFingerprint::read(k, self.inner(), face)? {
+                return None;
+            }
+            promoted.insert((face, get_tree));
+        }
+        Some(cache)
+    }
+
+    fn requested_cache(&self, k: &Kernel, face: O, get_tree: bool) -> Result<SurfaceCache<O>> {
+        let made = if get_tree { &self.caches.built } else { &self.caches.states };
+        let cache = match made.get(&face) {
+            Some(Ok(cache)) => Some(cache),
+            Some(Err(e)) => return Err(e.clone()),
+            None => self.carried_cache(k, face, get_tree),
+        };
+        if let Some(cache) = cache {
+            if get_tree {
+                self.caches.tree_requested.borrow_mut().insert(face);
+            }
+            return cache.map_handles(Ok);
+        }
+        self.caches.pending.set(Some((face, get_tree)));
+        Err(SolidError::PreparationRequired { operation: OP_FACE_CACHES })
     }
 }
 
@@ -3633,19 +3793,7 @@ impl<O: ClassObject + SolutionObject + Ord, G: IntersectorBrep<O> + ?Sized> Surf
             .inner()
             .surface_face(handle)?
             .ok_or(SolidError::null_pointer(OP_FACE_CACHES))?;
-        match self.0.caches.built.get(&face) {
-            Some(Ok(cache)) => {
-                self.0.caches.tree_requested.borrow_mut().insert(face);
-                cache.map_handles(Ok)
-            }
-            Some(Err(e)) => Err(e.clone()),
-            None => {
-                self.0.caches.pending.set(Some((face, true)));
-                Err(SolidError::PreparationRequired {
-                    operation: OP_FACE_CACHES,
-                })
-            }
-        }
+        self.0.requested_cache(k, face, true)
     }
 
     fn surface_cache_state(
@@ -3670,16 +3818,7 @@ impl<O: ClassObject + SolutionObject + Ord, G: IntersectorBrep<O> + ?Sized> Surf
         if self.0.caches.tree_requested.borrow().contains(&face) {
             return self.build_surface_cache(k, surface, Some(handle));
         }
-        match self.0.caches.states.get(&face) {
-            Some(Ok(cache)) => cache.map_handles(Ok),
-            Some(Err(e)) => Err(e.clone()),
-            None => {
-                self.0.caches.pending.set(Some((face, false)));
-                Err(SolidError::PreparationRequired {
-                    operation: OP_FACE_CACHES,
-                })
-            }
-        }
+        self.0.requested_cache(k, face, false)
     }
 
     fn face_queries(&self) -> Option<&dyn FaceQueries<O>> {
@@ -4011,7 +4150,7 @@ fn trim_owner_face<O: Copy>(
 fn with_face_caches<O, G, R>(
     k: &Kernel,
     geometry: &mut G,
-    mut solve: impl FnMut(&FaceCacheObjects<'_, O, G>) -> Result<R>,
+    solve: impl FnMut(&FaceCacheObjects<'_, O, G>) -> Result<R>,
 ) -> Result<R>
 where
     O: ClassObject + SolutionObject + Ord,
@@ -4021,16 +4160,52 @@ where
         pending: Cell::new(None),
         built: BTreeMap::new(),
         states: BTreeMap::new(),
+        carried: if k.fixes.face_caches_kept_per_boolean {
+            geometry.take_kept_face_caches()
+        } else {
+            KeptFaceCaches::default()
+        },
         tree_requested: RefCell::new(BTreeSet::new()),
         trims: crate::query::brep::RayPreparation::default(),
         classified_faces: RefCell::new(Vec::new()),
     };
+    let result = run_face_cache_attempts(k, geometry, &mut caches, solve);
+    if k.fixes.face_caches_kept_per_boolean {
+        if let Some(pair) = caches.carried.pair.as_deref_mut() {
+            pair.promoted.get_mut().clear();
+            for (face, get_tree, fingerprint) in pair.fingerprints.drain(..) {
+                let slot = usize::from((pair.second_operand)(face));
+                let (made, kept) = if get_tree {
+                    (&mut caches.built, &mut pair.built[slot])
+                } else {
+                    (&mut caches.states, &mut pair.states[slot])
+                };
+                if let Some(Ok(cache)) = made.remove(&face) {
+                    kept.insert(face, (fingerprint, cache));
+                }
+            }
+        }
+        geometry.put_kept_face_caches(caches.carried);
+    }
+    result
+}
+
+fn run_face_cache_attempts<O, G, R>(
+    k: &Kernel,
+    geometry: &mut G,
+    caches: &mut FaceCaches<O>,
+    mut solve: impl FnMut(&FaceCacheObjects<'_, O, G>) -> Result<R>,
+) -> Result<R>
+where
+    O: ClassObject + SolutionObject + Ord,
+    G: IntersectorBrep<O> + ?Sized,
+{
     loop {
         caches.classified_faces.borrow_mut().clear();
         caches.tree_requested.borrow_mut().clear();
         let result = solve(&FaceCacheObjects {
             geometry: &*geometry,
-            caches: &caches,
+            caches,
         });
         // (a request is answered even when the solve did not stop at it: upstream's
         // solve has the cache there)
@@ -4039,7 +4214,7 @@ where
         if let (Err(SolidError::PreparationRequired { .. }), Some(request)) =
             (&result, caches.trims.take_request())
         {
-            let face = trim_request_face(geometry, &caches, request)?;
+            let face = trim_request_face(geometry, caches, request)?;
             let target = geometry.face_cache_target(face)?;
             caches.trims.prepare(k, target.brep, request)?;
             continue;
@@ -4072,6 +4247,16 @@ where
             ),
             Err(e) => Err(e),
         };
+        if let Some(pair) = &mut caches.carried.pair {
+            // This build supersedes any refused entry, even when the build failed.
+            let maps = if get_tree { &mut pair.built } else { &mut pair.states };
+            maps[usize::from((pair.second_operand)(face))].remove(&face);
+            if cache.is_ok() {
+                if let Some(inputs) = FaceCacheFingerprint::read(k, geometry.topology_objects(), face) {
+                    pair.fingerprints.push((face, get_tree, inputs));
+                }
+            }
+        }
         made.insert(face, cache);
     }
 }

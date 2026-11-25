@@ -1,31 +1,60 @@
 //! GI scene snapshots: the static world as instances over SHARED meshes.
 //!
-//! A snapshot copies transforms and materials, not geometry: each render
-//! mesh is copied into the GI mesh cache once (per geometry, texture and
-//! terrain/voxel revision) and reused by every later snapshot, so a script
+//! A snapshot copies transforms and materials. Each render mesh is cached
+//! by geometry id, geometry data generation and albedo texture id.
+//! Later snapshots reuse the mesh while those inputs match, so a script
 //! edit or hot reload costs O(instances) here and the voxel worker does the
 //! rest. Only instances overlapping the region around the camera are sent;
 //! the others are counted, never a reason to switch GI off.
 use super::*;
-use crate::fast_gi::{Instance,Mesh,Snapshot,voxels::gi_image};
+use crate::fast_gi::{Instance, Mesh, Snapshot, voxels::{gi_image, MeshImage}};
+use crate::texture_restore::{coarse_level, held_tail};
 use std::sync::Arc;
 fn rgb(c:Vec4f)->Vec3f{vec3f(c.x,c.y,c.z)}
 fn scaled(mut t:Mat4f,size:Vec3f)->Mat4f{for j in 0..3{t.v[j]*=size.x;t.v[4+j]*=size.y;t.v[8+j]*=size.z;}t}
 // The loader has already multiplied emissiveFactor by emissiveStrength.
 // Read only this draw layer's material; coverage is applied by the worker.
 fn material(m:&LayerMaterial)->(Vec3f,f32){let e=m.surface.as_ref().map(|s|s.definition.emissive).unwrap_or([0.0;3]);(vec3f(e[0],e[1],e[2]),if m.surface.is_some(){1.0-m.metallic.clamp(0.0,1.0)}else{1.0})}
-fn overlaps(i:&Instance,(lo,hi):(Vec3f,Vec3f))->bool{!(i.hi.x<lo.x||i.lo.x>hi.x||i.hi.y<lo.y||i.lo.y>hi.y||i.hi.z<lo.z||i.lo.z>hi.z)}
+
+impl MeshImage {
+    pub(crate) fn from_texture(cx: &mut Cx, texture: &Texture) -> Option<Self> {
+        let held;
+        let format = match texture.get_format(cx) {
+            TextureFormat::VecMipCompressed { data: None, .. } => {
+                held = held_tail(texture.texture_id())?;
+                &held
+            }
+            format => &*format,
+        };
+        match format {
+            TextureFormat::VecBGRAu8_32 { width, height, data: Some(data), .. } =>
+                gi_image(*width, *height, data).map(Self::bgra),
+            // A chain without a level that small is sampled like an unmipped texture.
+            TextureFormat::VecMipBGRAu8_32 { width, height, max_level, data: Some(data), .. } =>
+                coarse_level(*width, *height, *max_level, data.as_slice(), usize::saturating_mul)
+                    .map(|(w, h, words)| (w, h, words.to_vec()))
+                    .or_else(|| gi_image(*width, *height, data.as_slice()))
+                    .map(Self::bgra),
+            TextureFormat::VecMipCompressed { width, height, max_level, format, data: Some(data), .. } => {
+                if !matches!(format, CompressedTextureFormat::Astc4x4 | CompressedTextureFormat::Bc7) { return None; }
+                let (w, h, blocks) = coarse_level(*width, *height, *max_level, data.as_slice(), CompressedTextureFormat::level_bytes)?;
+                Some(Self::compressed(w, h, *format, blocks))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// The cached GI copy of a render geometry (+ its albedo texture).
-fn gi_mesh(cache:&mut crate::fast_gi::MeshCache,cx:&mut Cx,geometry:&Geometry,rev:u64,stride:usize,color_lane:i32,texture:Option<&Texture>)->Option<Arc<Mesh>>{
+fn gi_mesh(cache:&mut crate::fast_gi::MeshCache,cx:&mut Cx,geometry:&Geometry,stride:usize,color_lane:i32,texture:Option<&Texture>)->Option<Arc<Mesh>>{
     let generation=cache.generation;
-    let key=(geometry.geometry_id(),rev);let texture_id=texture.map(|t|t.texture_id());
+    let geometry_id = geometry.geometry_id();
+    let key = (geometry_id, cx.geometries[geometry_id].data_generation);
+    let texture_id=texture.map(|t|t.texture_id());
     if let Some(e)=cache.geometry.get_mut(&key).and_then(|v|v.iter_mut().find(|e|e.0==texture_id)){e.2=generation;return Some(e.1.clone());}
-    let image=texture.and_then(|t|match t.get_format(cx){
-        TextureFormat::VecBGRAu8_32{width,height,data:Some(data),..}=>gi_image(*width,*height,data.as_slice()),
-        TextureFormat::VecMipBGRAu8_32{width,height,data:Some(data),..}=>gi_image(*width,*height,data.as_slice()),_=>None
-    });
+    let image = texture.and_then(|t| MeshImage::from_texture(cx, t));
     let (indices,vertices)=geometry.cpu_buffers(cx);
-    let mesh=Arc::new(Mesh::new(vertices.as_f32()?.to_vec(),indices.as_u32()?.to_vec(),stride,color_lane,image)?);
+    let mesh=Arc::new(Mesh::with_image(vertices.as_f32()?.to_vec(),indices.as_u32()?.to_vec(),stride,color_lane,image)?);
     cache.geometry.entry(key).or_default().push((texture_id,mesh.clone(),generation));
     Some(mesh)
 }
@@ -42,16 +71,14 @@ impl Renderer {
     pub(super) fn gi_snapshot(&mut self,cx:&mut Cx,world:&World,region:(Vec3f,Vec3f))->Snapshot{
         self.gi.meshes.generation+=1;
         let mut out=Vec::new();let mut omitted=0usize;
-        let mut push=|i:Option<Instance>,out:&mut Vec<Instance>|if let Some(i)=i{if overlaps(&i,region){out.push(i)}else{omitted+=1}};
+        let mut push=|i:Option<Instance>,out:&mut Vec<Instance>|if let Some(i)=i{if i.overlaps(region){out.push(i)}else{omitted+=1}};
         if self.stage.shows_environment(){
             if let Some(terrain)=world.terrain.as_deref(){self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());}
             self.ensure_voxel_tiles(cx,world.voxel.as_deref());
-            // Revisions restart per realm: the epoch keeps them apart.
-            let epoch=self.gi.meshes.epoch.rotate_left(40);
-            let terrain_rev=world.terrain.as_deref().map_or(0,|t|t.revision)^epoch;
-            let tiles=self.terrain_tiles.iter().map(|t|(&t.geometry,terrain_rev)).chain(self.voxel_tiles.iter().map(|t|(&t.geometry,t.rev^epoch)));
-            for (g,rev) in tiles {
-                let m=gi_mesh(&mut self.gi.meshes,cx,g,rev,16,8,None);
+            let tiles = self.terrain_tiles.iter().map(|t| &t.geometry)
+                .chain(self.voxel_tiles.iter().map(|t| &t.geometry));
+            for g in tiles {
+                let m=gi_mesh(&mut self.gi.meshes,cx,g,16,8,None);
                 push(m.and_then(|m|Instance::new(m,Mat4f::identity(),vec3f(1.0,1.0,1.0),Vec3f::default(),1.0)),&mut out);
             }
         }
@@ -71,15 +98,15 @@ impl Renderer {
         // Movers, animated parts and skinned actors are not GI occluders:
         // as solid boxes they left ghosts; they still RECEIVE GI.
         let models:std::collections::HashMap<&str,usize>=self.static_models.iter().enumerate().map(|(i,(id,_))|(id.as_str(),i)).collect();
-        for inst in &self.placed_models {
+        for (_, inst) in self.placed_models.live() {
             if inst.dynamic||self.model_casts_shadow.get(&inst.model)==Some(&false){continue;}
             let Some(&mi)=models.get(inst.model.as_str())else{continue;};
             let m=&self.static_models[mi].1;
-            if m.morph.is_some(){continue;}
+            if m.morph.is_some() || m.fixed_shadow_bounds().is_none(){continue;}
             for (g,t,mat) in std::iter::once((&m.geometry,&m.texture,&m.material)).chain(m.extra_draws.iter().map(|(g,t,_,_,mat)|(g,t,mat))){
-                if mat.surface.as_ref().is_some_and(|s|s.definition.alpha_mode==2){continue;}
+                if mat.traced_required.is_some() || mat.surface.as_ref().is_some_and(|s|s.definition.alpha_mode==2){continue;}
                 let (emission,diffuse)=material(mat);
-                let m=gi_mesh(&mut self.gi.meshes,cx,g,0,7,5,Some(t));
+                let m=gi_mesh(&mut self.gi.meshes,cx,g,7,5,Some(t));
                 push(m.and_then(|m|Instance::new(m,inst.transform,rgb(inst.tint),emission,diffuse)),&mut out);
             }
         }
@@ -87,7 +114,7 @@ impl Renderer {
         if omitted>0&&omitted!=self.gi_snapshot_omitted&&std::env::var_os("MAKEPAD_GI_STATS").is_some(){log!("fast GI: {omitted} instance(s) outside the GI region around the camera");}
         self.gi_snapshot_omitted=omitted;self.gi.stats.omitted_instances=omitted;
         let triangles=out.iter().map(|i|i.triangles()).sum();
-        Snapshot{instances:out,triangles}
+        Snapshot{instances:out,triangles,region:Some(region)}
     }
 }
 
@@ -147,5 +174,9 @@ mod tests {
         assert_ne!(voxels.emission[layout.texel(0, [0, 0, 0])], 0, "the emitting layer contributes light");
         assert_eq!(voxels.solid(0, [2, 0, 0]), Some(true), "the non-emitting layer is present");
         assert_eq!(voxels.emission[layout.texel(0, [2, 0, 0])], 0, "emission never spreads to the other layer");
+
+        renderer.static_models[0].1.geometry.update_indices(&mut cx, vec![0, 1, 2]);
+        let edited = renderer.gi_snapshot(&mut cx, &World::default(), (Vec3f::default(), vec3f(8.0, 8.0, 8.0)));
+        assert_eq!(edited.instances[0].triangles(), 1, "the GI copy must follow an in-place geometry edit");
     }
 }

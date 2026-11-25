@@ -156,6 +156,13 @@ pub enum BrepOp {
     /// Hollow, walls `thickness` inward.
     Shell { thickness: f64, open: Open },
     Offset { distance: f64 },
+    /// The flat face named `face` moved along its outward normal by `by` (into the body below
+    /// 0): its outline swept into a prism, joined on or cut away. The moved face keeps the
+    /// face's names.
+    Pull { face: edges::FaceName, by: f64 },
+    /// Drill from each point along `dir`, to `depth` or through the body. With `on`, project
+    /// the points onto that named flat face and default to its inward normal.
+    Hole { kind: HoleKind, diameter: f64, depth: Option<f64>, at: Vec<P3>, dir: Option<P3>, on: Option<edges::FaceName> },
     /// Scale, then rotate X, Y, Z (degrees), then move by `at`.
     Place { at: P3, rotate: P3, scale: P3 },
     /// The mirror image across the plane through `center`; `keep` joins it with the original.
@@ -269,6 +276,9 @@ pub trait BrepEngine: Send + Sync {
     /// Whether the engine holds the body of every step keyed in `keys`: a recipe of those steps
     /// builds nothing. Answered at once, whatever the engine is building.
     fn built(&self, keys: &[Key]) -> bool;
+    /// The steps of the person's committed build. Evict other steps first when making room.
+    /// Each call replaces the previous set.
+    fn keep(&self, _keys: Vec<Key>) {}
     /// What the written selections of step `key` took when it was built, in the order written;
     /// `None` when the engine does not hold its body. Answered at once, building nothing.
     fn taken(&self, key: Key) -> Option<Vec<BrepTaken>>;

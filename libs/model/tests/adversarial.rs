@@ -85,6 +85,22 @@ fn cancellation_midway_does_not_commit() {
     );
     assert_eq!(bytes(&doc), snapshot);
     assert_eq!(doc.head(), head);
+
+    // Both arms flush the pending cube. With no skeleton, bind_all stops just after
+    // that flush, so its poll count locates the first poll inside weathering.
+    let mut ops = [ProgramOp::Op(cube("body")), ProgramOp::BindAll, ProgramOp::Impostor { distance: 10., cell: 32 }];
+    let failure = |ops: &[ProgramOp], cancel: &dyn Fn() -> bool| {
+        build_program(ops, Limits::default(), &mut |_| panic!("the fixture has no imports"), Some(cancel))
+            .err().expect("the program must stop at the tested arm")
+    };
+    calls.set(0);
+    let control = failure(&ops, &|| { calls.set(calls.get() + 1); false });
+    assert_eq!((control.index, control.op.as_str()), (1, "bind_all"), "the control must reach the arm that flushes the cube");
+    let through_flush = calls.replace(0);
+    ops[1] = ProgramOp::Weathering { ao: 0.5, distance: 1., edges: 1., samples: 1, objects: None };
+    let stopped = failure(&ops, &|| { calls.set(calls.get() + 1); calls.get() > through_flush });
+    assert_eq!((stopped.index, stopped.op.as_str(), stopped.message.as_str()), (1, "weathering", "cancelled"),
+        "weathering must report cancellation at its own index before the next operation runs");
 }
 
 #[test]

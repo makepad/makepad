@@ -274,13 +274,13 @@ fn is_better_cull_candidate(
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct Point2D {
-    p: Vec2,
-    separation: f32,
-    original_index: i32,
+pub(crate) struct Point2D {
+    pub(crate) p: Vec2,
+    pub(crate) separation: f32,
+    pub(crate) original_index: i32,
 }
 
-fn cull_points(points: &mut [Point2D]) -> i32 {
+pub(crate) fn cull_points(points: &mut [Point2D]) -> i32 {
     let count = points.len() as i32;
     if count <= 1 {
         return count;

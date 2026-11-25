@@ -11,6 +11,8 @@ mod effects;
 mod sky_dome;
 mod skinned;
 mod pbr;
+mod traced;
+mod traced_tiles;
 mod city;
 mod grass;
 mod foliage;
@@ -34,6 +36,8 @@ pub(crate) const SCRIPT_MOD_STEPS: &[crate::ScriptModStep] = &[
     ("shaders: sky_dome", sky_dome::script_mod),
     ("shaders: skinned", skinned::script_mod),
     ("shaders: pbr", pbr::script_mod),
+    ("shaders: traced", traced::script_mod),
+    ("shaders: traced tiles", traced_tiles::script_mod),
     ("shaders: city", city::script_mod),
     ("shaders: grass", grass::script_mod),
     ("shaders: foliage", foliage::script_mod),
@@ -867,6 +871,20 @@ pub struct DrawLmSunDepth {
 
 }
 
+/// A traced layer in a cascade, with the same projection, tile and depth window as
+/// [`DrawLmSunDepth`]. The fitted z row points along the incoming light ray.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTracedSun {
+    #[deref] pub draw_vars: DrawVars,
+    #[live] pub transform: Mat4f,
+    #[live(vec4(1.0, 0.0, 0.0, 0.0))] pub sun_rx: Vec4f,
+    #[live(vec4(0.0, 1.0, 0.0, 0.0))] pub sun_ry: Vec4f,
+    #[live(vec4(0.0, 0.0, 1.0, 0.0))] pub sun_rz: Vec4f,
+    #[live(vec4(1.0, 1.0, 0.0, 0.0))] pub tile_a: Vec4f,
+    #[live] pub flip_a: Vec4f,
+}
+
 /// [`DrawLmSunDepth`] for cut-out casters (leaf cards, fences): the same
 /// projection, plus the layer's base-colour alpha tested per fragment, so a
 /// card casts its leaves and not its rectangle. Only cut-out layers draw
@@ -1230,6 +1248,159 @@ pub struct DrawLmTopDilate {
 /// the window would darken at all must carry a blocker height.
 pub const LM_SUN_SOFT: (f32, f32) = (0.2, 0.8);
 
+/// Compile the same draw object with the WebGL2 instance layout used by the browser.
+#[cfg(test)]
+pub(crate) fn compile_scene_webgl2(vm: &mut ScriptVm, program: ScriptObject, name: &str)
+    -> makepad_draw::makepad_platform::makepad_script::shader_compile::CompiledShader
+{
+    use makepad_draw::makepad_platform::makepad_script::{
+        shader_backend::ShaderBackend, shader_compile::{compile_shader, ShaderCompileOptions},
+    };
+    let opts = ShaderCompileOptions::new(ShaderBackend::Glsl, false, false, true, false);
+    let compiled = compile_shader(vm, program, &opts);
+    let view = compiled.view();
+    assert!(!view.has_errors, "{name} WebGL2: {}", view.error_report);
+    assert!(!view.glsl_vertex.is_empty() && !view.glsl_fragment.is_empty(), "{name}: missing WebGL2 stages");
+    compiled
+}
+
+#[cfg(test)]
+pub(crate) fn check_scene_backends(vm: &mut ScriptVm, program: ScriptObject, name: &str) {
+    inspect_scene_backends(vm, program, name, None);
+}
+
+#[cfg(test)]
+pub(crate) fn inspect_scene_backends(vm: &mut ScriptVm, program: ScriptObject, name: &str, traced_ssr: Option<bool>) {
+    inspect_draw_backends(vm, program, name, traced_ssr.map(TracedOutput::Scene));
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum TracedOutput {
+    Scene(bool),
+    Sun,
+}
+
+#[cfg(test)]
+pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, name: &str, traced: Option<TracedOutput>) {
+    use makepad_draw::makepad_platform::makepad_script::{
+        shader_backend::ShaderBackend, shader_compile::{compile_shader, ShaderCompileOptions},
+    };
+    for (target, backend) in [
+        ("Metal", ShaderBackend::Metal), ("HLSL", ShaderBackend::Hlsl),
+        ("GL", ShaderBackend::Glsl), ("GLES", ShaderBackend::Glsl),
+        ("SPIR-V", ShaderBackend::Glsl), ("WGSL", ShaderBackend::Wgsl),
+    ] {
+        let mut opts = ShaderCompileOptions::new(backend, false, matches!(target, "SPIR-V" | "WGSL"), false, false);
+        opts.gles_complete = target == "GLES";
+        opts.xr = target == "SPIR-V";
+        opts.pick = matches!(traced, Some(TracedOutput::Scene(_))) && backend == ShaderBackend::Metal;
+        let compiled = compile_shader(vm, program, &opts);
+        let view = compiled.view();
+        assert!(!view.has_errors, "{name} {target}: {}", view.error_report);
+        if opts.xr {
+            let result = view.spirv.expect("SPIR-V compiler output").view();
+            assert!(result.error.is_none(), "{name} SPIR-V: {:?}", result.error);
+            for stage in &result.stages {
+                assert!(!stage.vertex.is_empty() && !stage.fragment.is_empty(), "{name}: incomplete SPIR-V program");
+                if traced.is_some() {
+                    use makepad_draw::makepad_platform::makepad_script::makepad_shader::spirv::*;
+                    // Walk instructions after the five-word module header. An operand
+                    // with the value of an opcode is not an instruction.
+                    let mut words = &stage.fragment[5..];
+                    let (mut replacing, mut greater, mut kill) = (false, false, false);
+                    let (mut volume, mut fetch) = (false, false);
+                    let mut location_zero = Vec::new();
+                    let (mut scratch, mut depth) = (None, None);
+                    let (mut writes_scratch, mut writes_depth) = (false, false);
+                    while let Some(&header) = words.first() {
+                        let size = (header >> 16) as usize;
+                        assert!(size > 0 && size <= words.len(), "{name}: invalid SPIR-V instruction length");
+                        match (header & 0xffff, &words[1..size]) {
+                            (OP_EXECUTION_MODE, [_, EXEC_MODE_DEPTH_REPLACING]) => replacing = true,
+                            (OP_EXECUTION_MODE, [_, EXEC_MODE_DEPTH_GREATER]) => greater = true,
+                            (OP_KILL, []) => kill = true,
+                            (OP_TYPE_IMAGE, [_, _, DIM_3D, _, 0, ..]) => volume = true,
+                            (OP_IMAGE_FETCH, _) => fetch = true,
+                            (OP_DECORATE, [id, DECO_LOCATION, 0]) => location_zero.push(*id),
+                            (OP_DECORATE, [id, DECO_BUILT_IN, BUILTIN_FRAG_DEPTH]) => depth = Some(*id),
+                            (OP_VARIABLE, [_, id, SC_OUTPUT, ..]) if location_zero.contains(id) => scratch = Some(*id),
+                            (OP_STORE, [id, ..]) => {
+                                writes_scratch |= scratch == Some(*id);
+                                writes_depth |= depth == Some(*id);
+                            }
+                            _ => {}
+                        }
+                        words = &words[size..];
+                    }
+                    assert!(replacing && greater && kill, "{name}: SPIR-V needs DepthReplacing, DepthGreater and OpKill");
+                    if matches!(traced, Some(TracedOutput::Sun)) {
+                        assert!(volume && fetch, "{name}: SPIR-V needs an integer fetch from the tile volume");
+                        assert!(writes_depth && writes_scratch, "{name}: SPIR-V must store FragDepth and color 0");
+                    }
+                }
+            }
+        } else if backend == ShaderBackend::Glsl {
+            assert!(!view.glsl_vertex.is_empty() && !view.glsl_fragment.is_empty(), "{name}: missing {target} stages");
+        } else {
+            assert!(!view.combined.is_empty(), "{name}: no {target} program");
+        }
+        if let Some(output) = traced.filter(|_| !opts.xr) {
+            let (source, depth, discard) = match backend {
+                ShaderBackend::Metal => (view.combined, "[[depth(greater)]]", "discard_fragment();"),
+                ShaderBackend::Hlsl => (view.combined, "SV_DepthGreaterEqual", "discard;"),
+                ShaderBackend::Glsl => (view.glsl_fragment, "gl_FragDepth =", "discard;"),
+                ShaderBackend::Wgsl => (view.combined, "@builtin(frag_depth)", "discard;"),
+                _ => unreachable!(),
+            };
+            let check = |source: &str| {
+                assert!(source.contains(depth), "{name} {target}: missing {depth}");
+                let body = lowered_fn_body(source, "fragment").expect("traced fragment entry");
+                let (face, hit) = body.split_once("io_traced_hit(").expect("entry calls the hit hook");
+                let (_, reject) = face.split_once("io_trace_entry_face(").expect("entry checks the proxy face");
+                assert!(reject.contains(discard), "{name} {target}: wrong face reaches the hit hook");
+                let (miss, surface) = hit.split_once("frag_depth_out =").expect("entry writes hit depth");
+                assert!(miss.contains(discard), "{name} {target}: miss must discard before writing depth");
+                match output {
+                    TracedOutput::Scene(_) => assert!(surface.contains("io_shade_mr_surface_at("),
+                        "{name} {target}: missing surface shading"),
+                    TracedOutput::Sun => {
+                        let load = match backend {
+                            ShaderBackend::Metal => ".read(uint3(",
+                            ShaderBackend::Hlsl => ".Load(int4(",
+                            ShaderBackend::Glsl => "texelFetch(tex_trace_volume,",
+                            ShaderBackend::Wgsl => "textureLoad(tex_trace_volume,",
+                            _ => unreachable!(),
+                        };
+                        let march = lowered_fn_body(source, "traced_hit").expect("tile intersection");
+                        assert!(march.contains(load) && !source.contains("tex_trace_palette"),
+                            "{name} {target}: the tile march must read the volume alone");
+                        let before_depth = test_source(miss);
+                        assert!(before_depth.lines().any(|line| line.contains("l_z01") && line.contains("l_hit.x")),
+                            "{name} {target}: cascade z01 must include the traced hit distance");
+                        let depth_and_color = test_source(surface);
+                        let (depth, color) = depth_and_color.split_once("frag_fb0 =").expect("Sun scratch output");
+                        assert!(depth.contains("io_cascade_depth(") && depth.contains("l_z01") && color.contains("(l_z01,"),
+                            "{name} {target}: depth needs the windowed hit and scratch color needs the raw hit");
+                    }
+                }
+            };
+            check(source);
+            if opts.pick {
+                let TracedOutput::Scene(reflections) = output else { unreachable!() };
+                let pick = view.pick_code.expect("Metal pick program");
+                check(pick);
+                let (_, entry) = pick.split_once("fragment PickOut fragment_main(").expect("Metal pick entry point");
+                assert!(entry.contains("io_fragment(") && pick.contains("o.frag_depth = c.frag_depth;"),
+                    "{name}: Metal pick must forward the surface depth alongside the pick ID");
+                for color in ["[[color(1)]]", "[[color(2)]]"] {
+                    assert_eq!(source.contains(color), reflections, "{name}: Metal reflection output {color}");
+                }
+            }
+        }
+    }
+}
+
 /// The body of the function `name` in a lowered shader source a compile
 /// test emitted (GLSL and HLSL both define it as `io_<name>(`): the lines
 /// between its opening line and its closing brace.
@@ -1318,20 +1489,20 @@ pub(crate) fn test_sky_hook(vm: &mut ScriptVm, kinds: &[crate::custom_sky::SkyKi
 }
 
 #[cfg(test)]
-mod shader_registration_tests {
+pub(crate) mod shader_registration_tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
 
     // Count only allocations on the thread taking the two readings. Other renderer tests
     // can prepare shaders and textures concurrently. The web has its own global allocator.
     #[cfg(not(target_arch = "wasm32"))]
-    mod allocations {
+    pub(crate) mod allocations {
         use std::alloc::{GlobalAlloc, Layout, System};
         use std::cell::Cell;
 
         thread_local! { static COUNT: Cell<usize> = const { Cell::new(0) }; }
 
-        pub(super) fn count() -> usize { COUNT.with(Cell::get) }
+        pub(crate) fn count() -> usize { COUNT.with(Cell::get) }
 
         fn note() { let _ = COUNT.try_with(|c| c.set(c.get().wrapping_add(1))); }
 
@@ -1801,8 +1972,7 @@ mod shader_registration_tests {
             assert!(!textures.iter().any(|t|t.id==live_id!(gi_positions)||t.id==live_id!(gi_movers)),"GI preparation textures leaked into the scene shader");
             assert!(textures.iter().any(|texture|texture.id==live_id!(gi_field)));
             assert_eq!(textures[8].id, live_id!(cluster_data));
-            assert_eq!(textures[9].id, live_id!(local_shadow_data));
-            assert_eq!(textures[10].id, live_id!(local_shadow_map));
+            assert_eq!(textures[9].id, live_id!(local_shadow_map));
             assert!(textures.iter().any(|texture|texture.id==live_id!(orm_map)));
             assert!(textures.iter().any(|texture|texture.id==live_id!(morph_map)));
             // The grass lane instantiates (its field rides the instance

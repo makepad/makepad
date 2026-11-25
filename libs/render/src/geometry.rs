@@ -294,7 +294,13 @@ mod shape_tests {
             "let dp = max(dot(world_normal, normalize(self.light_dir)), 0.0)",
             "self.v_ambient = mix(self.sun_ground, self.sun_sky, hemi)",
             "self.v_direct = self.sun_color * dp",
-            "self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)",
+            // Follow the interpolated lighting point, geometric normal and sun cosine
+            // from the imported mesh pixel through the lightmap and cascade helpers.
+            "let lm = self.model_lightmap()",
+            "return self.model_lightmap_at(self.v_csm, self.v_csm_n, self.v_lm_uv, self.v_lmg)",
+            "sun = self.model_cascade_at(light_p_ndl, geo_n)",
+            "return self.csm_vis(light_p_ndl.xyz, geo_n, light_p_ndl.w)",
+            "let sun_lit = self.sun_filled(lm.w, local)",
             // Baked AO and screen-space AO both gate the AMBIENT fill only;
             // the direct sun term must never carry the screen-space factor.
             "self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * (ao * sao)",

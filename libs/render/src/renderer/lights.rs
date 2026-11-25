@@ -6,7 +6,196 @@ use super::*;
 const HDR_LAMP_GAIN: f32 = 4.0;
 const HDR_CANDELA_GAIN: f32 = 0.02;
 
+type Bounds = (Vec3f, Vec3f);
+
+/// Present only on a level with required layers. A missing footprint means
+/// that pass has no ordinary geometry left to submit.
+pub(super) struct OrdinaryShadowBounds {
+    fixed: Option<Bounds>,
+    pub(super) contact: Option<Bounds>,
+    /// Indexed geometry bounds measured at marking, in each layer's own coordinates.
+    traced: Vec<(TracedLayer, GeometryId, Bounds)>,
+}
+
+enum TracedLayer {
+    Main,
+    Extra(usize),
+    Animated(usize, usize),
+    Driven(usize, usize),
+}
+
+fn include(bounds: &mut Option<Bounds>, (lo, hi): Bounds) {
+    *bounds = Some(match *bounds {
+        Some((a, b)) => (Vec3f::min_componentwise(a, lo), Vec3f::max_componentwise(b, hi)),
+        None => (lo, hi),
+    });
+}
+
+fn position(v: &[f32]) -> Vec3f { vec3f(v[0], v[1], v[2]) }
+
+/// Visit referenced corners only. A layer's index buffer can address a
+/// larger shared vertex stream, including positions owned by another layer.
+fn layer_corners<'a>(cx: &'a Cx, geometry: &Geometry) -> impl Iterator<Item = &'a [f32]> {
+    let (indices, vertices) = geometry.cpu_buffers(cx);
+    let stride = crate::model::MODEL_VERTEX_FLOATS;
+    let indices = indices.as_u32().expect("uploaded model indices");
+    let vertices = vertices.as_f32().expect("uploaded model vertices");
+    indices.iter().map(move |&i| &vertices[i as usize * stride..(i as usize + 1) * stride])
+}
+
+/// Match the prepared chart's flat winding normals. All other packed
+/// lanes retain the bits of the ordinary draw.
+fn flat_bake_stream(mut vertices: Vec<f32>) -> (Vec<u32>, Vec<f32>) {
+    let stride = crate::model::MODEL_VERTEX_FLOATS;
+    for tri in vertices.chunks_exact_mut(3 * stride) {
+        let a = position(tri);
+        let n = Vec3f::cross(position(&tri[stride..]) - a, position(&tri[2 * stride..]) - a);
+        let len = n.length();
+        let n = if len > 1.0e-12 { n * (1.0 / len) } else { vec3f(0.0, 1.0, 0.0) };
+        let (x, y) = crate::skin::oct_encode(n);
+        let packed = makepad_draw::pack_pair_f16(x, y);
+        for corner in tri.chunks_exact_mut(stride) { corner[3] = packed; }
+    }
+    ((0..(vertices.len() / stride) as u32).collect(), vertices)
+}
+
+impl UploadedStaticPreview {
+    /// Rebuild shared lighting inputs once at marking, before installation.
+    /// Geometry and collision handles on other clones still refer to the
+    /// original asset. Frame submission only reads the resulting handles.
+    pub(super) fn exclude_traced_from_shadows(&mut self, cx: &mut Cx) {
+        let chart = self.lm_source.as_ref().map(|s| (s.ao_w, s.ao_h));
+        let mut corners = Vec::new();
+        let mut fixed = None;
+        for (g, mat) in std::iter::once((&self.geometry, &self.material))
+            .chain(self.extra_draws.iter().map(|l| (&l.0, &l.4))) {
+            if mat.traced_required.is_some() { continue; }
+            for v in layer_corners(cx, g) {
+                let p = position(v);
+                include(&mut fixed, (p, p));
+                if chart.is_some() { corners.extend_from_slice(v); }
+            }
+        }
+        if let Some((w, h)) = chart {
+            self.lm_source = None;
+            self.bake_geometry = None;
+            if let Some((lo, hi)) = fixed {
+                let (indices, corners) = flat_bake_stream(corners);
+                let vertices = corners.chunks_exact(crate::model::MODEL_VERTEX_FLOATS);
+                let caster = crate::ao::MeshRaycaster::new(vertices.clone().map(position).collect(), indices.clone(), lo, hi);
+                let ao_uv = vertices.clone().map(|v| crate::model::unpack_ao_uv(v[6])).collect();
+                let albedo = vertices.map(|v| {
+                    let [r, g, b, _] = v[5].to_bits().to_le_bytes();
+                    vec3f(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+                }).collect();
+                self.lm_source = Some(std::sync::Arc::new(crate::lightmap::LmMeshSource::new(caster, ao_uv, albedo, w, h)));
+                let geometry = Geometry::new(cx);
+                geometry.update(cx, indices, corners);
+                self.bake_geometry = Some(std::rc::Rc::new(geometry));
+            }
+        }
+        let mut contact = fixed;
+        let part_bounds = |draws: &[(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2], LayerMaterial)]| {
+            let mut bounds = None;
+            for (g, _, _, _, mat) in draws {
+                if mat.traced_required.is_some() { continue; }
+                for v in layer_corners(cx, g) {
+                    let p = position(v);
+                    include(&mut bounds, (p, p));
+                }
+            }
+            bounds
+        };
+        for part in &self.anim_parts {
+            if let Some(bounds) = part_bounds(&part.draws) {
+                for pose in std::iter::once(part.def.rest_transform())
+                    .chain(part.def.clip.times.iter().map(|t| part.def.transform_at(*t))) {
+                    include(&mut contact, crate::lightmap::world_bounds(&pose, bounds));
+                }
+            }
+        }
+        for part in &self.driven_parts {
+            if let Some(bounds) = part_bounds(&part.draws) {
+                include(&mut contact, crate::lightmap::world_bounds(&part.def.rest_transform(), bounds));
+            }
+        }
+        let mut traced = Vec::new();
+        let mut measure = |layer, geometry: &Geometry, material: &LayerMaterial| {
+            if material.traced_required.is_none() { return; }
+            let mut bounds = None;
+            for p in layer_corners(cx, geometry).map(position) { include(&mut bounds, (p, p)); }
+            if let Some(bounds) = bounds { traced.push((layer, geometry.geometry_id(), bounds)); }
+        };
+        if self.triangles > 0 { measure(TracedLayer::Main, &self.geometry, &self.material); }
+        for (i, layer) in self.extra_draws.iter().enumerate() {
+            measure(TracedLayer::Extra(i), &layer.0, &layer.4);
+        }
+        for (i, part) in self.anim_parts.iter().enumerate() {
+            for (j, layer) in part.draws.iter().enumerate() {
+                measure(TracedLayer::Animated(i, j), &layer.0, &layer.4);
+            }
+        }
+        for (i, part) in self.driven_parts.iter().enumerate() {
+            for (j, layer) in part.draws.iter().enumerate() {
+                measure(TracedLayer::Driven(i, j), &layer.0, &layer.4);
+            }
+        }
+        self.ordinary_shadow_bounds = Some(std::rc::Rc::new(OrdinaryShadowBounds { fixed, contact, traced }));
+    }
+}
+
+impl LoadedModel {
+    pub(super) fn visible_shadow_level(&self, distance: f32) -> &Self {
+        let level = self.lods.partition_point(|(threshold, _)| *threshold <= distance);
+        if level == 0 { self } else { &self.lods[level - 1].1 }
+    }
+
+    pub(super) fn collect_traced_groups(&self, inst: &ModelInstance, target: &ModelTarget, states: &ModelStates,
+        programs: &std::collections::BTreeMap<String, TracedProgram>,
+    ) {
+        let Some(bounds) = &self.ordinary_shadow_bounds else { return };
+        for (layer, geometry, local) in &bounds.traced {
+            let material = match *layer {
+                TracedLayer::Main => &self.material,
+                TracedLayer::Extra(i) => &self.extra_draws[i].4,
+                TracedLayer::Animated(i, j) => &self.anim_parts[i].draws[j].4,
+                TracedLayer::Driven(i, j) => &self.driven_parts[i].draws[j].4,
+            };
+            let Some((name, TracedLayerRole::Outside)) = &material.traced_required else { continue };
+            let Some(batch) = programs.get(name.as_ref()).and_then(|p| p.sun_batch.as_ref()) else { continue };
+            let transform = match *layer {
+                TracedLayer::Main | TracedLayer::Extra(_) => inst.transform,
+                TracedLayer::Animated(i, _) => Mat4f::mul(&inst.transform, &states.transform(target, &inst.model, &self.anim_parts[i].def)),
+                TracedLayer::Driven(i, _) => {
+                    let def = &self.driven_parts[i].def;
+                    let pose = inst.part_poses.iter().find(|p| p.connection == def.connection)
+                        .map_or_else(|| def.rest_transform(), |p| p.transform);
+                    Mat4f::mul(&inst.transform, &pose)
+                }
+            };
+            let (min, max) = crate::lightmap::world_bounds(&transform, *local);
+            batch.borrow_mut().groups.push(crate::gpu_lightmap::TracedGroup { geometry: *geometry, transform, min, max });
+        }
+    }
+
+    pub(super) fn fixed_shadow_bounds(&self) -> Option<Bounds> {
+        self.ordinary_shadow_bounds.as_ref().map_or(Some((self.min, self.max)), |s| s.fixed)
+    }
+
+    pub(super) fn same_shadow_layers(&self, other: &Self) -> bool {
+        self.ordinary_shadow_bounds.as_ref().map(std::rc::Rc::as_ptr)
+            == other.ordinary_shadow_bounds.as_ref().map(std::rc::Rc::as_ptr)
+            && self.lods.len() == other.lods.len()
+            && self.lods.iter().zip(&other.lods).all(|((_, a), (_, b))| a.same_shadow_layers(b))
+    }
+}
+
 impl Renderer {
+    pub(super) fn harvests_lamp(model: &str) -> bool {
+        let name = model.rsplit('/').next().unwrap_or(model);
+        name.contains("lamp") || name.contains("lantern") || name.contains("light")
+    }
+
     /// Last frame's dynamic shadow-mesh triangles (entity hull drapes +
     /// pre-sidecar blobs) — the budget the unattended debug cycle watches.
     pub fn dynamic_shadow_triangles(&self) -> usize {
@@ -49,12 +238,11 @@ impl Renderer {
         /// — `lamp_photometry` supplies the strength it is scaled by.
         const TINT: Vec3f = Vec3f { x: 1.0, y: 0.775, z: 0.475 };
         let mut out = Vec::new();
-        for inst in &self.placed_models {
+        for (_, inst) in self.placed_models.live() {
             if inst.dynamic {
                 continue;
             }
-            let name = inst.model.rsplit('/').next().unwrap_or(&inst.model);
-            if !(name.contains("lamp") || name.contains("lantern") || name.contains("light")) {
+            if !Self::harvests_lamp(&inst.model) {
                 continue;
             }
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model)
@@ -259,7 +447,7 @@ impl Renderer {
         // and a scattered forest is thousands of copies a frame).
         let emitting: Vec<&(String, LoadedModel)> = self.static_models.iter().filter(|(_, m)| !m.emitters.is_empty()).collect();
         if !emitting.is_empty() {
-        for(target,instance)in self.placed_models.iter().enumerate().map(|(i,m)|(ModelTarget::Instance(i),m)).chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))){
+        for(target,instance)in self.placed_models.live().map(|(i,m)|(ModelTarget::Instance(i),m)).chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))){
             if let Some((_, model)) = emitting.iter().copied().find(|(id,_)|id == &instance.model) {
                 for emitter in model.emitters.iter() {
                     let node=emitter.animation.as_ref().and_then(|hierarchy|self.model_anim_state.clip(&target,&instance.model).map(|playback|hierarchy.transform_named_weighted(playback.name.as_deref(),playback.name.as_ref().map(|_|playback.time),playback.looping,playback.weight)));
@@ -294,13 +482,23 @@ impl Renderer {
     ) {
         if self.atlas_borrowed || !self.world_atlas_required() { return; }
         self.gpu_baker.caster_ready_kick = false;
+        if let Some(job) = self.lightmap_bake_job(world, sun, trigger) {
+            self.gpu_baker.schedule(job);
+        } else {
+            self.clear_delivered_lightmap();
+        }
+    }
+
+    pub(super) fn lightmap_bake_job(
+        &self, world: &World, sun: &SunLight, trigger: crate::gpu_lightmap::BakeTrigger,
+    ) -> Option<crate::gpu_lightmap::GpuBakeJob> {
         let mut meshes = Vec::new();
         let mut mesh_map = Vec::new();
         let mut mesh_geometry = Vec::new();
         let mut mesh_materials = Vec::new();
         let mut casters_only = Vec::new();
         let mut extra_layers = Vec::new();
-        for (pi, inst) in self.placed_models.iter().enumerate() {
+        for (pi, inst) in self.placed_models.live() {
             if inst.dynamic {
                 continue;
             }
@@ -313,18 +511,18 @@ impl Renderer {
                 // No AO layout, no region — but it still casts: sun-depth
                 // passes take its render geometry at its transform.
                 let m = &self.static_models[at].1;
-                let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, (m.min, m.max));
-                if casts_as_caster_only(
-                    self.model_casts_shadow.get(&inst.model).copied(),
-                    m.prelit,
-                    lo,
-                    hi,
-                ) {
-                    let first = casters_only.len();
+                let first = casters_only.len();
+                if let Some(bounds) = m.fixed_shadow_bounds() {
+                    let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, bounds);
+                    if !casts_as_caster_only(self.model_casts_shadow.get(&inst.model).copied(), m.prelit, lo, hi) {
+                        continue;
+                    }
                     Self::push_static_caster_layers(
                         &self.custom_draws, m, inst, (lo, hi), &mut casters_only, None,
                     );
-                    // Each copy contributes one footprint to the ground field, regardless of layers.
+                }
+                // At most one footprint per copy. A required-only copy contributes none.
+                if casters_only.len() > first + 1 {
                     extra_layers.extend(casters_only.drain(first + 1..));
                 }
                 continue;
@@ -378,7 +576,12 @@ impl Renderer {
             let m = &self.static_models[at].1;
             let material = if inst.layer_materials.is_empty() {
                 inst.material_of("").and_then(|b| Self::caster_for(&self.custom_draws, b))
-                    .map(|caster| caster.material(&m.texture))
+                    .and_then(|caster| {
+                        std::iter::once((&m.texture, &m.material))
+                            .chain(m.extra_draws.iter().map(|draw| (&draw.1, &draw.4)))
+                            .find(|(_, layer)| layer.traced_required.is_none())
+                            .map(|(base, _)| caster.material(base))
+                    })
             } else {
                 None
             };
@@ -468,8 +671,7 @@ impl Renderer {
             }
         }
         if meshes.is_empty() && planars.is_empty() {
-            self.clear_delivered_lightmap();
-            return;
+            return None;
         }
         // Clustered lights are evaluated at the receiving fragment. The
         // optional OnChange atlas stores SUN visibility only, never lamps.
@@ -489,8 +691,8 @@ impl Renderer {
         // The snapshot becomes render passes on the next frame
         // (gpu_lightmap.rs); delivery is a texture handle swap, no upload.
         casters_only.append(&mut extra_layers);
-        self.gpu_baker.schedule(crate::gpu_lightmap::GpuBakeJob {
-            world_revision: (world.render_rev, self.models_rev),
+        Some(crate::gpu_lightmap::GpuBakeJob {
+            world_revision: (world.render_rev, self.bake_models_revision()),
             scene,
             mesh_geometry,
             mesh_materials,
@@ -498,7 +700,7 @@ impl Renderer {
             casters_only,
             terrain_world,
             trigger,
-        });
+        })
     }
 }
 

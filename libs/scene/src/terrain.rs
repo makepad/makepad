@@ -47,30 +47,57 @@ impl TerrainMaterials {
     }
 }
 
-impl Terrain {
-    /// Piecewise-planar ground height at (x, z): the two triangles per cell,
-    /// same split the mesh uses, so collision and pixels agree. None outside.
-    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
-        let fx = (x - self.origin) / self.cell_size;
-        let fz = (z - self.origin) / self.cell_size;
-        if fx < 0.0 || fz < 0.0 {
+/// Gives [`Terrain::height_at`] results for samples sharing one z, NaN payloads aside.
+#[derive(Clone, Copy)]
+pub struct TerrainRow<'a> {
+    terrain: &'a Terrain,
+    fz: f32,
+    iz: usize,
+    v: f32,
+}
+
+impl TerrainRow<'_> {
+    #[inline]
+    pub fn height_at(&self, x: f32) -> Option<f32> {
+        let Self { terrain, fz, iz, v } = *self;
+        let fx = (x - terrain.origin) / terrain.cell_size;
+        if fx < 0.0 {
             return None;
         }
-        let max = (self.cells - 1) as f32;
+        let max = (terrain.cells - 1) as f32;
         if fx >= max || fz >= max {
             return None;
         }
         let ix = fx.floor() as usize;
-        let iz = fz.floor() as usize;
         let u = fx - ix as f32;
-        let v = fz - iz as f32;
-        let h = |gx: usize, gz: usize| self.heights[gz * self.cells + gx];
+        let h = |gx: usize, gz: usize| terrain.heights[gz * terrain.cells + gx];
         let (h00, h10, h01, h11) = (h(ix, iz), h(ix + 1, iz), h(ix, iz + 1), h(ix + 1, iz + 1));
         Some(if u + v < 1.0 {
             h00 + (h10 - h00) * u + (h01 - h00) * v
         } else {
             h11 + (h01 - h11) * (1.0 - u) + (h10 - h11) * (1.0 - v)
         })
+    }
+}
+
+impl Terrain {
+    /// Prepare the shared z terms for a row of height samples.
+    #[inline]
+    pub fn row(&self, z: f32) -> Option<TerrainRow<'_>> {
+        let fz = (z - self.origin) / self.cell_size;
+        if fz < 0.0 {
+            return None;
+        }
+        let iz = fz.floor() as usize;
+        let v = fz - iz as f32;
+        Some(TerrainRow { terrain: self, fz, iz, v })
+    }
+
+    /// Piecewise-planar ground height at (x, z): the two triangles per cell,
+    /// same split the mesh uses, so collision and pixels agree. None outside.
+    #[inline]
+    pub fn height_at(&self, x: f32, z: f32) -> Option<f32> {
+        self.row(z)?.height_at(x)
     }
 
     /// Surface normal of the triangle under (x, z) — the SAME triangle

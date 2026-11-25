@@ -485,7 +485,13 @@ pub(super) fn lightmap_sun_changed(previous: Option<Vec3f>, dir: Vec3f, mode: cr
     was_up != is_up || (is_up && previous.normalize().dot(dir.normalize()) < 0.03_f32.cos())
 }
 
+#[cfg(test)]
 pub(super) fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
+    placed_scene_signatures(instances).0
+}
+
+/// The baked scene signature and the static tint RGB signature used by GI.
+pub(super) fn placed_scene_signatures(instances: &[ModelInstance]) -> (u64, u64) {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     // Word at a time: this runs over every placed instance on every drawn
@@ -507,6 +513,7 @@ pub(super) fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
     }
 
     let mut hash = OFFSET;
+    let mut paint_hash = OFFSET;
     word(&mut hash, instances.len() as u64);
     for instance in instances {
         word(&mut hash, instance.model.len() as u64);
@@ -517,9 +524,12 @@ pub(super) fn placed_scene_signature(instances: &[ModelInstance]) -> u64 {
                 word(&mut hash, pair[0].to_bits() as u64 | (pair[1].to_bits() as u64) << 32);
             }
             word(&mut hash, instance.depth_order.to_bits() as u64);
+            let tint = instance.tint;
+            word(&mut paint_hash, u64::from(tint.x.to_bits()) | (u64::from(tint.y.to_bits()) << 32));
+            word(&mut paint_hash, u64::from(tint.z.to_bits()));
         }
     }
-    hash
+    (hash, paint_hash)
 }
 
 impl ModelInstance {

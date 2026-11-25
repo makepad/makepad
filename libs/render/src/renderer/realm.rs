@@ -3,10 +3,138 @@
 use super::*;
 use super::draw_models::LayerPhase;
 use super::model_instance::refill_from_slice;
+use crate::custom_material::{TracedScene, TracedSurfacePasses};
 
+struct TracedScenes {
+    caster: TracedScene,
+    outside: TracedScene,
+}
+
+impl TracedScenes {
+    fn for_program(&self, program: &TracedProgram) -> TracedScene {
+        if program.wants_sun() { self.caster } else { self.outside }
+    }
+}
+
+/// Authoritative slots keep their identity across identical submissions. Transient
+/// item instances may follow them for the duration of a frame.
+#[derive(Default)]
+pub(super) struct PlacedModels {
+    copies: Vec<ModelInstance>,
+    retired: Vec<bool>,
+    retired_count: usize,
+    /// Static slots by resident model. The mover walk can visit the copies of a
+    /// traced level even when their ordinary geometry belongs to a static block.
+    pub(super) static_by_model: Vec<Vec<usize>>,
+    retired_lamp: bool,
+    retirement_revision: u64,
+    warned_dynamic: bool,
+    warned_missing: bool,
+}
+
+impl PlacedModels {
+    pub(super) fn len(&self) -> usize { self.copies.len() }
+    pub(super) fn get(&self, slot: usize) -> Option<&ModelInstance> {
+        self.view().get(slot)
+    }
+    pub(super) fn live(&self) -> impl Iterator<Item = (usize, &ModelInstance)> {
+        self.view().live()
+    }
+    // The temporary item tail belongs to this draw, outside the host's submitted list.
+    fn all_including_retired(&self) -> &[ModelInstance] { &self.copies[..self.retired.len()] }
+
+    pub(super) fn append_items(&mut self, items: Vec<ModelInstance>) { self.copies.extend(items); }
+    pub(super) fn truncate_items(&mut self, keep: usize) { self.copies.truncate(keep); }
+
+    fn take_all_including_retired(&mut self) -> Vec<ModelInstance> { std::mem::take(&mut self.copies) }
+
+    fn replace(&mut self, copies: Vec<ModelInstance>, restore: bool) {
+        if restore {
+            self.retired_count = 0;
+            self.retired_lamp = false;
+            self.retirement_revision = self.retirement_revision.wrapping_add(1);
+            self.retired.fill(false);
+        }
+        self.retired.resize(copies.len(), false);
+        self.copies = copies;
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool { self.copies.is_empty() }
+    #[cfg(test)]
+    pub(super) fn last(&self) -> Option<&ModelInstance> { self.live().last().map(|(_, m)| m) }
+}
+
+#[cfg(test)]
+impl std::ops::Index<usize> for PlacedModels {
+    type Output = ModelInstance;
+    fn index(&self, slot: usize) -> &ModelInstance { &self.copies[slot] }
+}
+
+/// Both draw lanes address copies by their original slot. Attachment lists
+/// have no retired slots and always form a single contiguous live run.
+#[derive(Clone, Copy)]
+pub(super) struct CopyView<'a> {
+    copies: &'a [ModelInstance],
+    retired: &'a [bool],
+}
+
+pub(super) trait ModelList {
+    fn view(&self) -> CopyView<'_>;
+}
+
+impl<T: AsRef<[ModelInstance]> + ?Sized> ModelList for T {
+    fn view(&self) -> CopyView<'_> { CopyView { copies: self.as_ref(), retired: &[] } }
+}
+
+impl ModelList for PlacedModels {
+    fn view(&self) -> CopyView<'_> {
+        CopyView { copies: &self.copies, retired: if self.retired_count == 0 { &[] } else { &self.retired } }
+    }
+}
+
+impl ModelList for CopyView<'_> {
+    fn view(&self) -> CopyView<'_> { *self }
+}
+
+impl<'a> CopyView<'a> {
+    pub(super) fn len(self) -> usize { self.copies.len() }
+    pub(super) fn key(self) -> (usize, usize) { (self.copies.as_ptr() as usize, self.len()) }
+
+    fn is_live(self, slot: usize) -> bool { !self.retired.get(slot).copied().unwrap_or(false) }
+
+    pub(super) fn get(self, slot: usize) -> Option<&'a ModelInstance> {
+        self.copies.get(slot).filter(|_| self.is_live(slot))
+    }
+
+    fn live_from(self, start: usize) -> impl Iterator<Item = (usize, &'a ModelInstance)> {
+        self.copies.iter().enumerate().skip(start)
+            .filter(move |(slot, _)| self.is_live(*slot))
+    }
+
+    pub(super) fn live(self) -> impl Iterator<Item = (usize, &'a ModelInstance)> { self.live_from(0) }
+
+    /// Slice-only consumers can take the dense path while every slot is live.
+    fn contiguous_live(self) -> Option<&'a [ModelInstance]> {
+        self.retired.is_empty().then_some(self.copies)
+    }
+}
+
+impl std::ops::Index<usize> for CopyView<'_> {
+    type Output = ModelInstance;
+    fn index(&self, slot: usize) -> &ModelInstance { &self.copies[slot] }
+}
+
+#[derive(Default)]
+pub(super) struct StaticCopy {
+    casters: std::ops::Range<usize>,
+    lamp: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StaticMaterialSource {
-    caster: usize,
-    instance: usize,
+    pub(super) caster: usize,
+    pub(super) instance: usize,
     /// An instance-wide source uses the empty lookup name. Keep the mesh layer for later overrides.
     instance_wide: bool,
     layer: std::sync::Arc<str>,
@@ -40,11 +168,11 @@ pub(super) struct ProgramWalk {
 impl ProgramWalk {
     pub(super) fn begin(
         &mut self, programs: &std::collections::BTreeMap<String, Box<CustomMaterial>>,
-        instances: &[ModelInstance], stock_ibl_on: bool,
+        instances: &(impl ModelList + ?Sized), stock_ibl_on: bool,
     ) {
         for (index, (name, material)) in programs.iter().enumerate() {
             let selected = (stock_ibl_on && name == stock_ibl::STOCK_IBL_MATERIAL)
-                || instances.iter().any(|inst| inst.material_names().any(|program| program == name.as_str()));
+                || instances.view().live().any(|(_, inst)| inst.material_names().any(|program| program == name.as_str()));
             // A draw can change its blend state as it binds layers. Decide the order
             // before drawing any of them, and keep the stock IBL lane in the opaque group.
             let order = selected.then(|| {
@@ -81,13 +209,25 @@ impl ProgramWalk {
 }
 
 impl crate::gpu_lightmap::StaticCasterBindings {
+    /// Retiring a copy leaves its sorted casters and binding record in place.
+    /// Compare the resubmitted suffix through the same live mask on both sides.
+    fn live_suffix_matches(&self, instances: &PlacedModels, start: usize) -> bool {
+        let view = instances.view();
+        let base = self.copies.partition_point(|entry| entry.slot < start);
+        let old = self.copies[base..].iter().filter(|c| view.get(c.slot).is_some())
+            .map(|c| (c.slot, &c.material, &c.layers));
+        let new = view.live_from(start).filter(|(_, m)| !m.dynamic && m.has_custom())
+            .map(|(i, m)| (i, &m.custom_material, &m.layer_materials));
+        old.eq(new)
+    }
+
     /// Inspect only the submitted part. A retained prefix costs no comparisons, and
     /// a repeated submission reuses its records without hashing or allocating.
-    fn update(&mut self, instances: &[ModelInstance], start: usize, model_index: impl Fn(&str) -> Option<usize>) -> bool {
+    fn update(&mut self, instances: &PlacedModels, start: usize, model_index: impl Fn(&str) -> Option<usize>) -> bool {
         if !self.tracking { return false; }
         let mut next = self.copies.partition_point(|entry| entry.slot < start);
         let mut changed = false;
-        for (slot, inst) in instances.iter().enumerate().skip(start).filter(|(_, m)| !m.dynamic && m.has_custom()) {
+        for (slot, inst) in instances.view().live_from(start).filter(|(_, m)| !m.dynamic && m.has_custom()) {
             if let Some(copy) = self.copies.get_mut(next) {
                 if copy.slot != slot {
                     copy.slot = slot;
@@ -131,6 +271,7 @@ impl Renderer {
         self.volume_fog.reset();
         self.ssr.reset();
         self.custom_draws.clear();
+        self.traced_programs.clear();
         // The stock IBL program went with them: a build of it that failed
         // may be made again (renderer/stock_ibl.rs).
         self.stock_ibl_forget_failure();
@@ -147,7 +288,12 @@ impl Renderer {
         // Keep resident rig geometry and the palette texture allocation;
         // only their frame-to-instance mapping belongs to the old realm.
         self.skin_joint_bases.clear();
-        self.placed_models.clear();
+        // Preserve the monotonic bake key across realms, including any retirement edits.
+        self.placed_models.replace(Vec::new(), self.placed_models.retired_count != 0);
+        self.placed_models.static_by_model.clear();
+        self.placed_blocks = Default::default();
+        self.placed_static_slots.clear();
+        self.placed_caster_indices.clear();
         self.placed_prefix = None;
         self.csm_static_casters.clear();
         self.csm_material_sources.clear();
@@ -502,16 +648,17 @@ impl Renderer {
         mut sources: Option<(usize, &mut Vec<StaticMaterialSource>)>,
     ) {
         use crate::gpu_lightmap::{CasterBand, GpuBakeMesh};
+        let Some((local_min, local_max)) = model.fixed_shadow_bounds() else { return };
         let cascades = sources.is_some();
         let layers = || std::iter::once((model.geometry.as_ref(), &model.texture, &model.material))
             .chain(model.extra_draws.iter().map(|(g, t, _, _, m)| (g.as_ref(), t, m)));
         let stand_in = |m: &LayerMaterial| m.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
-        let has_stand_in = cascades && layers().any(|(_, _, m)| stand_in(m));
+        let has_stand_in = cascades && layers().any(|(_, _, m)| m.traced_required.is_none() && stand_in(m));
         let resolve = |binding: &CustomMaterialInstance| {
             let caster = Self::caster_for(programs, binding)?;
             let bounds = if cascades && caster.bounds_pad > 0.0 {
                 let pad = Vec3f::all(caster.bounds_pad);
-                let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, (model.min - pad, model.max + pad));
+                let (lo, hi) = crate::lightmap::world_bounds(&inst.transform, (local_min - pad, local_max + pad));
                 (Vec3f::min_componentwise(bounds.0, lo), Vec3f::max_componentwise(bounds.1, hi))
             } else {
                 bounds
@@ -519,7 +666,7 @@ impl Renderer {
             Some((caster, bounds))
         };
         let shared = inst.layer_materials.is_empty().then(|| inst.material_of("").and_then(resolve));
-        for (index, (geometry, texture, layer)) in layers().enumerate() {
+        for (index, (geometry, texture, layer)) in layers().filter(|(_, _, m)| m.traced_required.is_none()).enumerate() {
             let caster = shared.unwrap_or_else(|| inst.material_of(&layer.name).and_then(resolve));
             if !cascades && index != 0 && (caster.is_none() || stand_in(layer)) { continue; }
             let (material, (min, max)) = match caster {
@@ -553,7 +700,7 @@ impl Renderer {
         let mut values = DefaultHasher::new();
         let mut bound = false;
         for copy in &self.gpu_baker.caster_bindings.copies {
-            let inst = &self.placed_models[copy.slot];
+            if self.placed_models.get(copy.slot).is_none() { continue }
             let Some(index) = copy.model else { continue };
             let model = &self.static_models[index].1;
             if model.morph.is_some() { continue; }
@@ -565,16 +712,66 @@ impl Renderer {
                     [p.x, p.y, p.z, p.w].map(f32::to_bits).hash(&mut values);
                 }
             };
-            if inst.layer_materials.is_empty() {
-                record(None, inst.material_of(""));
+            // Use the submitted binding snapshot. This also lets a refill compare
+            // its old and new layouts with exactly the same retirements applied.
+            if copy.layers.is_empty() {
+                record(None, copy.material.as_ref());
             } else {
                 let layers = std::iter::once(&model.material).chain(model.extra_draws.iter().map(|draw| &draw.4));
                 for (i, layer) in layers.enumerate() {
-                    record(Some(i), inst.material_of(&layer.name));
+                    let binding = copy.layers.iter().find(|entry| !layer.name.is_empty() && entry.layer == layer.name)
+                        .map(|entry| &entry.material).or(copy.material.as_ref());
+                    record(Some(i), binding);
                 }
             }
         }
         if bound { (layout.finish(), (layout.finish() ^ values.finish()).max(1)) } else { (0, 0) }
+    }
+
+    /// Remove a static placed copy from rendering, shadow casting, lighting and
+    /// bake inputs until the host hands a changed list (a different placed scene
+    /// signature or length). Identical refills and tint changes keep it retired.
+    pub fn retire_placed_copy(&mut self, slot: usize) {
+        let placed = &mut self.placed_models;
+        // Only the host's list can retire; the frame's transient item tail cannot.
+        let Some(copy) = placed.copies.get(slot).filter(|_| slot < placed.retired.len()) else {
+            if !placed.warned_missing {
+                log!("cannot retire missing placed slot {slot}");
+                placed.warned_missing = true;
+            }
+            return;
+        };
+        if copy.dynamic {
+            if !placed.warned_dynamic {
+                log!("cannot retire dynamic placed slot {slot}");
+                placed.warned_dynamic = true;
+            }
+            return;
+        }
+        if placed.retired[slot] { return }
+        placed.retired[slot] = true;
+        placed.retired_count += 1;
+        placed.retirement_revision = placed.retirement_revision.wrapping_add(1);
+        // A slot the caster table has not yet covered has no casters to empty.
+        let statics = self.placed_static_slots.get(slot);
+        if statics.is_some_and(|s| s.lamp) {
+            placed.retired_lamp = true;
+            if self.lm_lights.is_empty() { self.lamp_cache_rev = None; }
+        }
+        let casters = statics.and_then(|s| self.placed_caster_indices.get(s.casters.clone())).unwrap_or(&[]);
+        for &index in casters {
+            if let Some(caster) = self.csm_static_casters.get_mut(index) {
+                caster.min = Vec3f::all(f32::INFINITY);
+                caster.max = Vec3f::all(f32::NEG_INFINITY);
+            }
+        }
+        self.placed_blocks.remove(slot, copy.has_custom());
+        self.gpu_baker.csm_casters_changed();
+        self.models_gi_rev = self.models_gi_rev.wrapping_add(1);
+    }
+
+    pub(super) fn bake_models_revision(&self) -> u64 {
+        self.models_rev.wrapping_add(self.placed_models.retirement_revision)
     }
 
     /// Rebuild the static half of Realtime's CSM caster list.
@@ -594,16 +791,29 @@ impl Renderer {
         for (i, (id, _)) in self.static_models.iter().enumerate() {
             by_id.entry(id.as_str()).or_insert(i);
         }
-        for (instance, inst) in self.placed_models.iter().enumerate().filter(|(_, inst)| !inst.dynamic) {
-            let Some((_, model)) = by_id.get(inst.model.as_str()).map(|&i| &self.static_models[i]) else {
-                continue;
-            };
+        self.placed_static_slots.clear();
+        self.placed_static_slots.resize_with(self.placed_models.len(), Default::default);
+        let mut static_by_model = std::mem::take(&mut self.placed_models.static_by_model);
+        let has_traced = self.static_models.iter().any(|(_, root)| std::iter::once(root)
+            .chain(root.lods.iter().map(|(_, m)| m)).any(|m| m.ordinary_shadow_bounds.is_some()));
+        if has_traced {
+            static_by_model.resize_with(self.static_models.len(), Vec::new);
+            for slots in &mut static_by_model { slots.clear(); }
+        } else {
+            static_by_model.clear();
+        }
+        for (instance, inst) in self.placed_models.live().filter(|(_, inst)| !inst.dynamic) {
+            let Some(&index) = by_id.get(inst.model.as_str()) else { continue };
+            let model = &self.static_models[index].1;
+            if has_traced { static_by_model[index].push(instance); }
+            self.placed_static_slots[instance].lamp = Self::harvests_lamp(&inst.model);
             if model.morph.is_some(){continue;}
             if model.lm_source.is_some() && self.world_atlas_required() {
                 // This copy casts through its region mesh in the realized atlas.
                 continue;
             }
-            let (mut min, mut max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
+            let Some(bounds) = model.fixed_shadow_bounds() else { continue };
+            let (mut min, mut max) = crate::lightmap::world_bounds(&inst.transform, bounds);
             if model.lm_source.is_none() && !casts_as_caster_only(
                 self.model_casts_shadow.get(&inst.model).copied(),
                 model.prelit,
@@ -617,11 +827,14 @@ impl Renderer {
                 min = vec3f(min.x.min(lo.x), min.y.min(lo.y), min.z.min(lo.z));
                 max = vec3f(max.x.max(hi.x), max.y.max(hi.y), max.z.max(hi.z));
             }
+            let first = self.csm_static_casters.len();
             Self::push_static_caster_layers(
                 &self.custom_draws, model, inst, (min, max), &mut self.csm_static_casters,
                 Some((instance, &mut self.csm_material_sources)),
             );
+            self.placed_static_slots[instance].casters = first..self.csm_static_casters.len();
         }
+        self.placed_models.static_by_model = static_by_model;
         // Equal geometry adjacent, opaque first: a cascade then appends a
         // forest's copies of one layer into ONE instanced draw instead of
         // alternating trunk, crown, trunk, crown (a draw each). Within a
@@ -645,13 +858,17 @@ impl Renderer {
         let key = |m: &crate::gpu_lightmap::GpuBakeMesh| {
             (m.cutout.is_some() || m.material.is_some(), first[&m.geometry], cell(m))
         };
-        // Both sorts are stable, so even equal keys keep their sources in caster order.
-        self.csm_material_sources.sort_by_cached_key(|s| key(&self.csm_static_casters[s.caster]));
-        self.csm_static_casters.sort_by_cached_key(key);
-        let material_indices = self.csm_static_casters.iter().enumerate().filter_map(|(i, m)| m.material.is_some().then_some(i));
-        for (source, index) in self.csm_material_sources.iter_mut().zip(material_indices) {
-            source.caster = index;
+        let mut numbered: Vec<_> = self.csm_static_casters.drain(..).enumerate().collect();
+        numbered.sort_by_cached_key(|(_, mesh)| key(mesh));
+        self.placed_caster_indices.resize(numbered.len(), 0);
+        for (index, (old, mesh)) in numbered.into_iter().enumerate() {
+            self.placed_caster_indices[old] = index;
+            self.csm_static_casters.push(mesh);
         }
+        for source in &mut self.csm_material_sources {
+            source.caster = self.placed_caster_indices[source.caster];
+        }
+        self.csm_material_sources.sort_unstable_by_key(|s| s.caster);
         self.csm_static_blocks = crate::gpu_lightmap::caster_blocks(&self.csm_static_casters);
         self.csm_custom_casters_rev = self.custom_casters_rev;
         let bindings = &mut self.gpu_baker.caster_bindings;
@@ -660,7 +877,7 @@ impl Renderer {
             bindings.update(&self.placed_models, 0, |id| by_id.get(id).copied());
             // A model upload or replacement can also move an existing slot in the catalogue.
             for copy in &mut bindings.copies {
-                copy.model = by_id.get(self.placed_models[copy.slot].model.as_str()).copied();
+                copy.model = self.placed_models.get(copy.slot).and_then(|m| by_id.get(m.model.as_str()).copied());
             }
         } else {
             bindings.copies.clear();
@@ -678,7 +895,8 @@ impl Renderer {
     /// `clone_from`, which keeps each copy's strings), and the result is
     /// set exactly as `set_models` would.
     pub fn rebuild_models(&mut self, fill: impl FnOnce(&mut Vec<ModelInstance>)) {
-        let mut instances = std::mem::take(&mut self.placed_models);
+        // The host refills the complete authoritative list, preserving its slot numbers.
+        let mut instances = self.placed_models.take_all_including_retired();
         fill(&mut instances);
         self.set_models(instances);
     }
@@ -709,30 +927,31 @@ impl Renderer {
     }
 
     fn rebuild_model_parts(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>) -> usize, tail: impl FnOnce(&mut ModelTail)) {
-        let mut instances = std::mem::take(&mut self.placed_models);
-        let (len, signature, kept) = match self.placed_prefix {
-            Some((key, len, signature)) if key == prefix_key && instances.len() >= len => {
-                (len, signature, len)
+        // The host refills the complete authoritative list, preserving its slot numbers.
+        let mut instances = self.placed_models.take_all_including_retired();
+        let (len, prefix_signatures, kept) = match self.placed_prefix {
+            Some((key, len, signatures)) if key == prefix_key && instances.len() >= len => {
+                (len, signatures, len)
             }
             _ => {
                 let len = prefix(&mut instances);
-                (len, placed_scene_signature(&instances[..len]), 0)
+                (len, extend_placed_signatures((0, 0), &instances[..len]), 0)
             }
         };
-        self.placed_prefix = Some((prefix_key, len, signature));
+        self.placed_prefix = Some((prefix_key, len, prefix_signatures));
         let mut t = ModelTail { list: &mut instances, start: len, at: len };
         tail(&mut t);
         let end = t.at;
         instances.truncate(end);
-        let signature = signature.rotate_left(17) ^ (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ placed_scene_signature(&instances[len..]);
-        if let Err(error) = self.try_set_models_signed(instances, signature, kept) {
+        let signatures = extend_placed_signatures(prefix_signatures, &instances[len..]);
+        if let Err(error) = self.try_set_models_signed(instances, signatures, kept) {
             self.report_asset_light_error(error);
         }
     }
 
-    /// This frame's placed list (as last set).
+    /// The host's list as handed, in slot order, including retired copies.
     pub fn placed_models(&self) -> &[ModelInstance] {
-        &self.placed_models
+        self.placed_models.all_including_retired()
     }
 
     pub(super) fn lm_remap_owner(&self, copy: &ModelInstance) -> Option<LmRemapOwner> {
@@ -758,7 +977,9 @@ impl Renderer {
                 regions.push((rect, next));
             }
         }
-        for copy in &self.placed_models {
+        self.lm_remaps.resize(self.placed_models.len(), Vec4f::default());
+        self.lm_remap_owners.resize(self.placed_models.len(), None);
+        for (slot, copy) in self.placed_models.live() {
             let owner = self.lm_remap_owner(copy);
             let rect = owner.and_then(|owner| {
                 let head = heads.get_mut(&owner)?;
@@ -766,8 +987,8 @@ impl Renderer {
                 *head = next;
                 Some(rect)
             });
-            self.lm_remaps.push(rect.unwrap_or_default());
-            self.lm_remap_owners.push(owner.filter(|_| rect.is_some()));
+            self.lm_remaps[slot] = rect.unwrap_or_default();
+            self.lm_remap_owners[slot] = owner.filter(|_| rect.is_some());
         }
         self.lm_remaps_rev = Some(self.models_rev);
         self.lm_remaps_generation = self.lm_remaps_generation.wrapping_add(1);
@@ -788,13 +1009,24 @@ impl Renderer {
         if count>0&&!self.clustered_enabled{return Err("authored punctual lights need the clustered renderer; they are skipped".into())}Ok(())
     }
     pub fn try_set_models(&mut self, instances: Vec<ModelInstance>)->Result<(),String> {
-        let signature = placed_scene_signature(&instances);
+        let signatures = extend_placed_signatures((0, 0), &instances);
         self.placed_prefix = None;
-        self.try_set_models_signed(instances, signature, 0)
+        self.try_set_models_signed(instances, signatures, 0)
     }
 
-    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, signature: u64, kept: usize) -> Result<(), String> {
-        let scene_changed = self.placed_scene_signature != Some(signature);
+    fn try_set_models_signed(&mut self, instances: Vec<ModelInstance>, (signature, paint_signature): (u64, u64), kept: usize) -> Result<(), String> {
+        self.install_placed_list(instances, signature, paint_signature, kept, false);
+        Ok(())
+    }
+
+    fn install_placed_list(&mut self, instances: Vec<ModelInstance>, signature: u64, paint_signature: u64, kept: usize, restore_review_slots: bool) {
+        let scene_changed = self.placed_scene_signature != Some(signature)
+            || instances.len() != self.placed_models.retired.len();
+        let restoring = self.placed_models.retired_count != 0 && (scene_changed || restore_review_slots);
+        if restoring || self.placed_paint_signature != Some(paint_signature) {
+            self.models_gi_rev = self.models_gi_rev.wrapping_add(1);
+            self.placed_paint_signature = Some(paint_signature);
+        }
         // Statics are cached against a key; any meaningful placed-scene
         // change must break it or an equal-length replacement would retain
         // the previous realm's lamps and shadows.
@@ -809,21 +1041,36 @@ impl Renderer {
             // level keeps its doors open across a harmless list rebuild.
             self.model_anim_state.forget_slots();
         }
-        self.placed_models = instances;
-        if scene_changed || self.custom_casters_rev != self.csm_custom_casters_rev {
+        if restoring {
+            self.placed_blocks.invalidate();
+            if self.placed_models.retired_lamp && self.lm_lights.is_empty() { self.lamp_cache_rev = None; }
+        }
+        self.placed_models.replace(instances, restoring);
+        if restoring || scene_changed || self.custom_casters_rev != self.csm_custom_casters_rev {
             self.rebuild_csm_static_casters();
-        } else if self.gpu_baker.caster_bindings.update(&self.placed_models, kept, |id| {
+            return;
+        }
+        let bindings = &self.gpu_baker.caster_bindings;
+        if !bindings.tracking { return; }
+        let previous_layout = if self.placed_models.retired_count == 0 {
+            bindings.layout
+        } else {
+            if bindings.live_suffix_matches(&self.placed_models, kept) { return; }
+            // The cached layout can include a caster that has since retired.
+            // Compare live layouts only when a submitted live binding changed.
+            self.static_caster_keys().0
+        };
+        if self.gpu_baker.caster_bindings.update(&self.placed_models, kept, |id| {
             self.static_models.iter().position(|(name, _)| name == id)
         }) {
             let (layout, key) = self.static_caster_keys();
-            if layout != self.gpu_baker.caster_bindings.layout {
+            if layout != previous_layout {
                 self.rebuild_csm_static_casters();
             } else if key != self.gpu_baker.caster_bindings.key {
                 self.gpu_baker.set_caster_keys(layout, key);
                 self.refresh_csm_materials();
             }
         }
-        Ok(())
     }
 
     /// Rebuild the static casters when a program with a derived caster was
@@ -840,7 +1087,7 @@ impl Renderer {
     fn refresh_csm_materials(&mut self) {
         let mut params_changed = false;
         for source in &self.csm_material_sources {
-            let inst = &self.placed_models[source.instance];
+            let Some(inst) = self.placed_models.get(source.instance) else { continue };
             let layer = if source.instance_wide && inst.layer_materials.is_empty() { "" } else { source.layer.as_ref() };
             let binding = inst.material_of(layer);
             let Some(binding) = binding.filter(|binding| binding.name == source.program) else {
@@ -882,8 +1129,9 @@ impl Renderer {
         review.skin_lods = self.skin_lods.clone();
         review.skin_morphs = self.skin_morphs.clone();
         review.skin_prepared_sdf = self.skin_prepared_sdf.clone();
-        review.set_models(self.placed_models.clone());
+        review.copy_review_models(self);
         review.set_world_attachments(self.world_attachments.clone());
+        review.mirror_traced_programs_from(self);
         review.host_lights = self.host_lights.clone();
         review.host_asset_lights = self.host_asset_lights.clone();
         review.sky_time = self.sky_time;
@@ -952,7 +1200,16 @@ impl Renderer {
     /// Whether resident specialized material lanes could actually draw.
     pub fn review_materials_ready(&self) -> bool {
         if !self.pbr_materials_enabled { return true; }
-        let used: std::collections::HashSet<&str> = self.placed_models.iter().chain(&self.world_attachments)
+        // A traced exterior draws nothing until its program is ready on this renderer's target.
+        // Only programs the live renderer itself has ready can be waited for: one it never
+        // gets ready (or has failed) must not hold a review forever.
+        if self.traced_programs.iter().any(|(name, program)| {
+            program.source_ready && program.passes.failure(self.gpu_baker.realtime_sun_active()).is_none()
+                && !matches!(self.traced_surface_state(name), TracedSurfaceState::Ready)
+        }) {
+            return false;
+        }
+        let used: std::collections::HashSet<&str> = self.placed_models.live().map(|(_, m)| m).chain(&self.world_attachments)
             .map(|m| m.model.as_str()).collect();
         self.static_models.iter().filter(|(id, _)| used.contains(id.as_str())).all(|(_, model)| {
             std::iter::once(model).chain(model.lods.iter().map(|(_, m)| m)).all(|m| {
@@ -1008,15 +1265,35 @@ impl Renderer {
         }
     }
 
+    fn copy_review_models(&mut self, live: &Self) {
+        // Review cameras address animation, pick IDs and atlas regions by the host's original slots.
+        let source = live.placed_models.all_including_retired();
+        let mut copies = self.placed_models.take_all_including_retired();
+        refill_from_slice(&mut copies, source);
+        let (scene, paint) = live.placed_scene_signature.zip(live.placed_paint_signature)
+            .unwrap_or_else(|| extend_placed_signatures((0, 0), &copies));
+        // A review can miss a host edit and its reversal between frames. Restore
+        // stale review tombstones if the host now shows any of those slots.
+        let restore = self.placed_models.retired_count != 0 && self.placed_models.retired.iter()
+            .zip(&live.placed_models.retired).any(|(&old, &new)| old && !new);
+        self.placed_prefix = None;
+        self.install_placed_list(copies, scene, paint, 0, restore);
+        if self.placed_models.retired_count < live.placed_models.retired_count {
+            for (slot, &retired) in live.placed_models.retired.iter().enumerate() {
+                if retired { self.retire_placed_copy(slot); }
+            }
+        }
+    }
+
     /// Current poses and resolved lights for another camera. Called only
     /// when that camera renders, after the source scene has resolved them.
     pub fn mirror_review_frame_from(&mut self, live: &Self) {
-        // Reuse each placed model's layer list and name storage between frames.
-        self.rebuild_models(|models| refill_from_slice(models, &live.placed_models));
+        self.copy_review_models(live);
         self.mirror_review_shadows_from(live, true);
         let mut attachments = std::mem::take(&mut self.world_attachments);
         refill_from_slice(&mut attachments, &live.world_attachments);
         self.set_world_attachments(attachments);
+        self.mirror_traced_programs_from(live);
         self.model_anim_state = live.model_anim_state.clone();
         self.sky_time = live.sky_time;
         self.wind = live.wind;
@@ -1041,8 +1318,16 @@ impl Renderer {
         let same = self.static_models.len() == live.static_models.len()
             && self.static_models.iter().zip(&live.static_models).all(|((id, a), (other, b))| {
                 id == other && a.geometry.geometry_id() == b.geometry.geometry_id()
-                    && a.texture.texture_id() == b.texture.texture_id() && a.lods.len() == b.lods.len()
+                    && a.texture.texture_id() == b.texture.texture_id() && a.same_shadow_layers(b)
             });
+        // A change of which models cast does not change the models themselves.
+        // Same invalidation as `set_model_casts_shadow`.
+        if self.model_casts_shadow != live.model_casts_shadow {
+            self.model_casts_shadow.clone_from(&live.model_casts_shadow);
+            self.placed_scene_signature = None;
+            self.models_rev = self.models_rev.wrapping_add(1);
+            self.rebuild_csm_static_casters();
+        }
         if same { return; }
         self.static_models.clone_from(&live.static_models);
         self.lm_model_charts.clone_from(&live.lm_model_charts);
@@ -1052,18 +1337,19 @@ impl Renderer {
         self.model_lod_chains.clone_from(&live.model_lod_chains);
         self.model_lod_chains_dirty = live.model_lod_chains_dirty;
         self.models_rev = self.models_rev.wrapping_add(1);
+        self.models_gi_rev = self.models_gi_rev.wrapping_add(1);
         self.rebuild_csm_static_casters();
     }
 
     pub fn review_models_ready(&self) -> bool {
-        self.placed_models.iter().chain(&self.world_attachments).all(|instance|self.model_is_loaded(&instance.model))
+        self.placed_models.live().map(|(_, m)| m).chain(&self.world_attachments).all(|instance|self.model_is_loaded(&instance.model))
     }
 
     /// Visible resident model bounds, including rotation and instance scale.
     pub fn placed_scene_bounds(&self) -> Option<(Vec3f, Vec3f)> {
         let mut min = vec3f(f32::INFINITY, f32::INFINITY, f32::INFINITY);
         let mut max = vec3f(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for instance in self.placed_models.iter().chain(&self.world_attachments) {
+        for instance in self.placed_models.live().map(|(_, m)| m).chain(&self.world_attachments) {
             let Some((a,b)) = self.model_bounds(&instance.model) else { continue; };
             for x in [a.x,b.x] { for y in [a.y,b.y] { for z in [a.z,b.z] {
                 let p = instance.transform.transform_vec4(vec4(x,y,z,1.));
@@ -1196,7 +1482,7 @@ impl Renderer {
     /// list, taking only the models with a wind layer. Until its pipeline
     /// exists (Metal compiles asynchronously) they stay on the PBR lane.
     pub(super) fn draw_foliage_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &(impl ModelList + ?Sized),
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
@@ -1211,7 +1497,7 @@ impl Renderer {
     /// exists they stay on the PBR lane (their main layer). `focal_px`: the
     /// view's, for the grass's far carpet (`set_grass_carpet`).
     pub(super) fn draw_splat_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &(impl ModelList + ?Sized),
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, focal_px: f32, stats: &mut RenderStats,
     ) {
@@ -1253,15 +1539,17 @@ impl Renderer {
         self.splat_ready = shader.is_some_and(|id| self.recorded_shader_ready(cx, id));
     }
 
-    /// Decide once per frame, before any model pass, which installed
-    /// programs draw the layers that name them: those whose variant for
-    /// this frame's features is built and whose pipeline is made. The stock
-    /// lanes draw the other programs' layers (`drew_fallback`) and each
-    /// program's lane leaves them, so every layer has exactly one lane: a
-    /// draw the HAL would skip never stands in for one it would show. Nothing
-    /// is built here; a program's lane builds its variant on first use, as
-    /// it did. One lookup per installed program and frame.
+    /// Prewarm installed traced surfaces on the current scene target before
+    /// the model passes. Ordinary custom materials also check whether their
+    /// current variant can take their layers from the stock lanes this frame.
     pub(super) fn prepare_custom_lanes(&mut self, cx: &mut Cx) {
+        if let Some(pass) = self.items.recorded_pass.filter(|_| !self.traced_programs.is_empty()) {
+            let scenes = self.traced_scenes(cx, pass);
+            for (name, program) in &mut self.traced_programs {
+                let scene = scenes.for_program(program);
+                if !program.prepared_this_draw(cx, scene) { program.prepare(cx, scene, name); }
+            }
+        }
         let features = self.lane_features();
         let pass = self.items.recorded_pass;
         for material in self.custom_draws.values_mut() {
@@ -1270,6 +1558,122 @@ impl Renderer {
                 material.draw.draw_vars.draw_shader_id = shader;
             }
             material.lane_ready = shader.is_some_and(|id| super::stock_ibl::material_pipeline_ready(cx, id, pass, self.hdr_output));
+        }
+    }
+
+    /// Install a generation that requires all four passes.
+    pub fn install_traced_surface(&mut self, name: String, recipe: TracedSurfaceRecipe) {
+        self.install_traced_surface_for_passes(name, recipe, TracedSurfacePasses::ALL);
+    }
+
+    /// Install a generation with the passes it needs to draw. Use
+    /// [`TracedSurfacePasses::OUTSIDE`] for an exterior drawn only in the scene.
+    /// The program can be prewarmed before placing any of its layers.
+    pub fn install_traced_surface_for_passes(
+        &mut self, name: String, recipe: TracedSurfaceRecipe, required: TracedSurfacePasses,
+    ) {
+        self.install_traced_program(name, recipe, required, false, cfg!(target_arch = "wasm32"));
+    }
+
+    /// Inspect the outside pass in isolation while the other passes are being
+    /// developed. The host still sees the state of the complete program.
+    pub fn install_traced_outside_preview(&mut self, name: String, recipe: TracedSurfaceRecipe) {
+        self.install_traced_program(name, recipe, TracedSurfacePasses::ALL, true, cfg!(target_arch = "wasm32"));
+    }
+
+    pub(super) fn install_traced_program(
+        &mut self, name: String, recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool, webgl: bool,
+    ) {
+        let mut program = TracedProgram::new(recipe, required, preview, webgl);
+        program.serial = crate::custom_material::next_traced_serial();
+        if let Some(reason) = program.passes.failure(self.gpu_baker.realtime_sun_active()) {
+            log!("render: traced surface {name} unavailable: {reason}");
+        }
+        self.traced_programs.insert(name, program);
+    }
+
+    /// Keep this renderer's traced programs in step with the live renderer's: the same names
+    /// from the same installs, each one built and prewarmed here for this renderer's own pass
+    /// target. A program the live renderer dropped or replaced goes; one it lacks is installed
+    /// again from the recipe; a failure it reached is reported here too. An unchanged set costs
+    /// one comparison per program.
+    pub(super) fn mirror_traced_programs_from(&mut self, live: &Self) {
+        let mut same = self.traced_programs.len() == live.traced_programs.len();
+        for ((mine, own), (name, theirs)) in self.traced_programs.iter_mut().zip(&live.traced_programs) {
+            if mine != name || own.serial != theirs.serial {
+                same = false;
+                break;
+            }
+            own.follow_failure_of(theirs);
+            own.source_ready = live.traced_program_ready(name);
+        }
+        if same { return; }
+        self.traced_programs.retain(|name, own| live.traced_programs.get(name).is_some_and(|theirs| theirs.serial == own.serial));
+        for (name, theirs) in &live.traced_programs {
+            if !self.traced_programs.contains_key(name) {
+                self.traced_programs.insert(name.clone(), theirs.installed_again());
+            }
+        }
+        for (name, own) in &mut self.traced_programs {
+            own.follow_failure_of(&live.traced_programs[name]);
+            own.source_ready = live.traced_program_ready(name);
+        }
+    }
+
+    /// Whether the program is ready here, without building a failure message to say so.
+    fn traced_program_ready(&self, name: &str) -> bool {
+        let realtime_sun = self.gpu_baker.realtime_sun_active();
+        self.traced_programs.get(name).is_some_and(|p| p.passes.failure(realtime_sun).is_none()
+            && matches!(p.passes.state(self.traced_features(p), realtime_sun, self.gpu_baker.realtime_cascade_pass()), TracedSurfaceState::Ready))
+    }
+
+    /// The value recorded for whether `id` casts shadows, if any was set.
+    pub fn model_casts_shadow_value(&self, id: &str) -> Option<bool> {
+        self.model_casts_shadow.get(id).copied()
+    }
+
+    /// Release a registered program and its bindings after its last user switches.
+    /// Layers that still require this name remain on the traced route.
+    pub fn remove_traced_surface(&mut self, name: &str) -> bool {
+        self.traced_programs.remove(name).is_some()
+    }
+
+    /// Readiness for the current scene features on the most recently prewarmed target.
+    /// Prewarm again after changing the target or its attachments.
+    pub fn traced_surface_state(&self, name: &str) -> TracedSurfaceState {
+        self.traced_programs.get(name).map_or_else(|| {
+            self.traced_surface_failure(name).map_or(TracedSurfaceState::Waiting, |reason| TracedSurfaceState::Failed(reason.to_owned()))
+        }, |p| p.passes.state(self.traced_features(p), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass()))
+    }
+
+    /// The terminal reason for this program generation, including backend unavailability.
+    pub fn traced_surface_failure(&self, name: &str) -> Option<&str> {
+        if cfg!(target_arch = "wasm32") { return Some(crate::custom_material::TRACED_WEBGL_FAILURE); }
+        self.traced_programs.get(name)?.passes.failure(self.gpu_baker.realtime_sun_active())
+    }
+
+    fn traced_features(&self, program: &TracedProgram) -> super::variants::Features {
+        if program.wants_sun() { self.traced_caster_features() } else { self.lane_features() }
+    }
+
+    pub(super) fn traced_caster_scene(&self, cx: &Cx, pass: DrawPassId) -> TracedScene {
+        TracedScene::new(cx, pass, self.traced_caster_features(), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass())
+    }
+
+    fn traced_scenes(&self, cx: &Cx, pass: DrawPassId) -> TracedScenes {
+        let caster = self.traced_caster_scene(cx, pass);
+        TracedScenes { caster, outside: caster.with_features(self.lane_features()) }
+    }
+
+    pub fn prewarm_traced_surfaces(&mut self, cx: &mut Cx, scene: DrawPassId) {
+        if self.traced_programs.is_empty() { return; }
+        if self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::Realtime && self.gpu_baker.realtime_cascade_pass().is_none()
+            && self.traced_programs.values().any(TracedProgram::wants_sun) {
+            self.gpu_baker.sync_csm_targets(cx);
+        }
+        let scenes = self.traced_scenes(cx, scene);
+        for (name, program) in &mut self.traced_programs {
+            program.prepare(cx, scenes.for_program(program), name);
         }
     }
 
@@ -1311,10 +1715,22 @@ impl Renderer {
     }
 
     pub(super) fn draw_custom_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &(impl ModelList + ?Sized),
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
+        if !self.traced_programs.is_empty() && instances.view().len() != 0 {
+            let pass = cx.current_pass_id();
+            let scenes = self.traced_scenes(cx.cx, pass);
+            let mut programs = std::mem::take(&mut self.traced_programs);
+            for (name, program) in &mut programs {
+                if let Some(draw) = program.outside(scenes.for_program(program)) {
+                    self.draw_models_inner(cx, ModelDraw::Traced(name, draw), LayerPhase::Opaque,
+                        eye, lod_scale, instances, lane, fog, sun, frustum, stats);
+                }
+            }
+            self.traced_programs = programs;
+        }
         // The stock IBL program draws when the frame routes through it and
         // a shiny stock model is in the list, whether or not an instance
         // names it (renderer/stock_ibl.rs). The list check is the name scan
@@ -1324,7 +1740,12 @@ impl Renderer {
         // with no shiny stock model draws nothing through the program.
         // While the frame does not route (no environment) nothing is
         // scanned.
-        let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
+        let stock_ibl_on = self.stock_ibl_active() && match instances.view().contiguous_live() {
+            Some(copies) => self.lists_a_stock_ibl_model(copies),
+            None => self.has_pbr_copy(instances, |inst| {
+                !inst.layer_materials.is_empty() || !self.has_own_material(inst.material_of(""), None)
+            }),
+        };
         // Keep opaque programs before blended ones, each group in name
         // order; their deferred layers replay the same program order.
         let mut programs = std::mem::take(&mut self.custom_draws);
@@ -1344,9 +1765,9 @@ impl Renderer {
     /// Hand this frame's actor-attached world props to the renderer.
     ///
     /// Attachments receive ordinary world depth, fog, sunlight, AO and
-    /// dynamic lights. Their transforms may change every frame without
-    /// touching placed-scene identity, lightmap scheduling, CSM caster
-    /// capture, shadow-mesh generation, lamp harvesting or replication.
+    /// dynamic lights. Realtime cascades collect their current poses each
+    /// frame, including layers with an admitted traced Sun draw. Moving an
+    /// attachment preserves placed-scene identity and the static lightmap.
     /// They are always lit as dynamic geometry regardless of the supplied
     /// [`ModelInstance::dynamic`] value; that flag remains meaningful only
     /// in the placed-model lane.
@@ -1392,6 +1813,21 @@ impl Renderer {
     }
 }
 
+/// Fold copies in host slot order. The cached pair is the state just before
+/// the tail, so continuing it gives the same result at every prefix boundary.
+/// The list length is checked separately when these signatures are installed.
+fn extend_placed_signatures((mut scene, mut paint): (u64, u64), copies: &[ModelInstance]) -> (u64, u64) {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    for copy in copies {
+        let (copy_scene, copy_paint) = placed_scene_signatures(std::slice::from_ref(copy));
+        scene = scene.wrapping_mul(PRIME) ^ copy_scene;
+        if !copy.dynamic {
+            paint = paint.wrapping_mul(PRIME) ^ copy_paint;
+        }
+    }
+    (scene, paint)
+}
+
 /// A portion of the placed list being refilled. Each push overwrites the
 /// previous frame's copy at that position, reusing its string storage.
 pub struct ModelTail<'a> {
@@ -1411,5 +1847,58 @@ impl ModelTail<'_> {
     /// The copies pushed in this portion of the list so far.
     pub fn pushed(&mut self) -> &mut [ModelInstance] {
         &mut self.list[self.start..self.at]
+    }
+}
+
+#[cfg(test)]
+mod traced_fork_tests {
+    use super::*;
+    use crate::custom_material::TracedSurfaceRecipe;
+
+    #[test]
+    fn review_fork_follows_traced_programs() {
+        let mut live = Renderer::default();
+        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE);
+        let mut fork = live.fork_scene_for_review();
+        assert!(fork.traced_programs.contains_key("body"), "a fork carries the live renderer's traced program");
+        assert!(matches!(fork.traced_surface_state("body"), TracedSurfaceState::Waiting),
+            "the fork waits until it has prewarmed the program on its own target");
+        assert!(fork.review_materials_ready(), "a program the live renderer has not got ready does not hold a review");
+        assert!(live.traced_programs["body"].serial == fork.traced_programs["body"].serial, "the fork holds the same install");
+
+        // Serials never repeat across renderers, so a rebuilt renderer cannot pass for the one a fork follows.
+        let mut rebuilt = Renderer::default();
+        rebuilt.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.2), TracedSurfacePasses::OUTSIDE);
+        assert!(rebuilt.traced_programs["body"].serial != live.traced_programs["body"].serial, "install serials are process-wide");
+        let mut stale = rebuilt.fork_scene_for_review();
+        stale.mirror_review_frame_from(&live);
+        assert!(stale.traced_programs["body"].serial == live.traced_programs["body"].serial, "a fork takes the live renderer's program even under the same name");
+
+        // Replacing a program under the same name replaces the fork's copy; a new name is added.
+        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.1), TracedSurfacePasses::OUTSIDE);
+        live.install_traced_surface_for_passes("wheel".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE);
+        fork.mirror_review_frame_from(&live);
+        assert_eq!(fork.traced_programs.len(), 2, "a program the fork lacked is installed");
+        assert!(fork.traced_programs["body"].serial == live.traced_programs["body"].serial, "a replaced program is installed again");
+
+        // A program the live renderer dropped goes from the fork on the next mirror.
+        assert!(live.remove_traced_surface("wheel"));
+        fork.mirror_review_frame_from(&live);
+        assert!(!fork.traced_programs.contains_key("wheel") && fork.traced_programs.len() == 1, "a dropped program leaves the fork");
+
+        // A program with a terminal failure reports the same failure in the fork.
+        live.install_traced_program("lost".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE, false, true);
+        fork.mirror_review_frame_from(&live);
+        assert!(matches!(fork.traced_surface_state("lost"), TracedSurfaceState::Failed(_)), "a failed program fails in the fork too");
+        assert_eq!(fork.traced_surface_failure("lost"), live.traced_surface_failure("lost"), "with the same reason");
+
+        // An unchanged set costs no allocation.
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        {
+            use crate::shaders::shader_registration_tests::allocations;
+            let before = allocations::count();
+            fork.mirror_traced_programs_from(&live);
+            assert_eq!(allocations::count(), before, "mirroring an unchanged set allocated");
+        }
     }
 }

@@ -266,6 +266,8 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
     let mut depth = vec![f32::MIN; cell * cell];
     for j in 0..GRID {
         for i in 0..GRID {
+            // A follow-up's bake took 0.41 s at a 2-core share: its job gives way between views.
+            let _ = makepad_draw::makepad_platform::thread::checkpoint_when_due();
             let f = frame_dir(i, j);
             let (right, up) = frame_basis(f);
             let (x_off, y_off) = (i * cell, j * cell);

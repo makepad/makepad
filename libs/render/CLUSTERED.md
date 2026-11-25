@@ -67,8 +67,10 @@ store scalar index offset/count. CPU list storage and texture upload vectors are
 reused. Integer-valued floats are exactly representable within the hard caps.
 The shader mixin and CPU packing live together in `src/clustered.rs`.
 
-Local shadows use a separate nearest-sampled metadata texture (one light header,
-four camera rows per face) and a depth atlas, preserving the light-data stride.
+Local shadow metadata follows the light rows in the same texture. One header per
+light gives the face offset in texels from the start of the shadow headers.
+Each face uses five texels for three camera rows, the atlas UV rectangle and
+the depth generation window. The shader samples depth from the shadow atlas.
 Inherited texture bindings are resolved by name for derived PBR materials.
 
 ## Reproduce

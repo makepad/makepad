@@ -284,6 +284,10 @@ script_mod! {
         // lamp pass (SPILL = 0.35, squared, mixed by lc.w) with the
         // emission axis fixed straight DOWN — the street-lamp convention.
         ..mod.draw.ClusteredLighting,
+        // A spread adds only the keys the object lacks, so the screen cache's
+        // reader (gi_ambient_at, gi_screen_hit) goes before the sampling
+        // stubs it replaces.
+        ..mod.draw.FastGiScreen,
         ..mod.draw.FastGiSampling,
         ..mod.draw.SceneOutputDither,
         // ---- material paint, OFF by default ----
@@ -304,8 +308,11 @@ script_mod! {
         }
 
         // Texel k of the element's entry in the table.
+        paint_elem_at: fn(element: float, k: u32) -> vec4 {
+            return self.paint_texel(u32(element) * u32(self.elem_ctl.z) + k)
+        }
         paint_elem: fn(k: u32) -> vec4 {
-            return self.paint_texel(u32(self.v_paint.w) * u32(self.elem_ctl.z) + k)
+            return self.paint_elem_at(self.v_paint.w, k)
         }
 
         // The element's paint header, as the atlas stores texel numbers; -1 for none.
@@ -398,34 +405,38 @@ script_mod! {
             return dl
         }
 
-        model_cascade: fn() -> float {
-            return self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w)
+        model_cascade_at: fn(light_p_ndl: vec4, geo_n: vec3) -> float {
+            return self.csm_vis(light_p_ndl.xyz, geo_n, light_p_ndl.w)
         }
 
         // RGB is baked lamp light, A is sun visibility. A chart lives on
         // the instance, so copies in the same draw can use different sun sources.
-        model_lightmap: fn() -> vec4 {
+        model_lightmap_at: fn(light_p_ndl: vec4, geo_n: vec3, lm_uv: vec2, ground: vec4) -> vec4 {
             let has_lm = step(0.000001, self.lm_rect.z)
             let csm_on = self.csm_p.x >= 0.5
             let settled = self.csm_p.x >= 1.5
             var lm = vec4(0.0, 0.0, 0.0, 0.0)
             if has_lm > 0.5 && (!csm_on || self.cluster_on < 0.5 || settled) {
-                lm = self.light_map.sample(self.v_lm_uv)
+                lm = self.light_map.sample(lm_uv)
             }
             var sun = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
             if csm_on && (!settled || has_lm < 0.5) {
-                sun = self.model_cascade()
-            } else if !csm_on && self.v_lmg.z > 0.0 {
+                sun = self.model_cascade_at(light_p_ndl, geo_n)
+            } else if !csm_on && ground.z > 0.0 {
                 // With cascades off, a dynamic copy reads the ground shadow
                 // only below its blocker. Charted statics have v_lmg.z = 0.
-                let lmg = self.light_map.sample(self.v_lmg.xy)
+                let lmg = self.light_map.sample(ground.xy)
                 let top_g = self.lm_top_decode.x
-                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-                sun = sun * mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+                    + self.top_map.sample(ground.xy).x * self.lm_top_decode.y
+                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, ground.w)
+                sun = sun * mix(1.0, smoothstep(0.2, 0.8, lmg.w), ground.z * occ_g)
             }
             // 0.9 = lightmap::LM_LAMP_CEIL, the atlas RGB decode.
             return vec4(lm.xyz * (0.9 * has_lm) * (1.0 - self.cluster_on), sun)
+        }
+
+        model_lightmap: fn() -> vec4 {
+            return self.model_lightmap_at(self.v_csm, self.v_csm_n, self.v_lm_uv, self.v_lmg)
         }
 
         // Sun visibility with a lamp pool's fill of its own shadow folded in.
@@ -703,27 +714,35 @@ script_mod! {
             return self.tex.sample_repeat(suv)
         }
 
+        host_cut_at: fn(wp: vec3, element: float) {
+            if dot(self.host_clip.xyz, wp) + self.host_clip.w < 0.0 { self.clip() }
+            let p = vec4(wp, 1.0)
+            if max(max(abs(dot(self.host_box0, p)), abs(dot(self.host_box1, p))), abs(dot(self.host_box2, p))) > 1.0 {
+                if element < 0.0 || self.paint_elem_at(element, 3u).w > 0.0 - 0.5 { self.clip() }
+            }
+        }
+        host_cut: fn() {
+            self.host_cut_at(self.v_csm.xyz, self.v_paint.w)
+        }
+
+        model_screen_uv: fn(spos: vec4) -> vec2 {
+            let sp = spos.xy / max(spos.w, 0.000001)
+            return vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
+        }
+
         // Crossfade windows (stream.rs `Dither`, the model chains' and the
         // stand-ins' dissolves): a screen-space noise window. 0 = no
         // dither; else 1 + lo8 * 256 + hi8 and a pixel shows only while
         // lo <= noise < hi, so the two levels of a transition cover
         // complementary pixels.
-        host_cut: fn() {
-            if dot(self.host_clip.xyz, self.v_csm.xyz) + self.host_clip.w < 0.0 { self.clip() }
-            let p = vec4(self.v_csm.xyz, 1.0)
-            if max(max(abs(dot(self.host_box0, p)), abs(dot(self.host_box1, p))), abs(dot(self.host_box2, p))) > 1.0 {
-                if self.v_paint.w < 0.0 || self.paint_elem(3u).w > 0.0 - 0.5 { self.clip() }
-            }
-        }
-        door_window: fn() {
+        door_window_at: fn(spos: vec4) {
             if self.color_adjust_ctl.w > 0.5 {
-                let dsp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
                 // A cell grid commensurate with no real target: two draws
                 // that must cover complementary pixels read the same cell
                 // (at 1920 cells a 2720-px target put every 17th column's
                 // centre exactly on a cell edge, where the two meshes'
                 // interpolated positions round apart: a hole in both).
-                let dpx = floor(vec2(dsp.x * 0.5 + 0.5, 0.5 - dsp.y * 0.5) * vec2(1913.37, 1071.93))
+                let dpx = floor(self.model_screen_uv(spos) * vec2(1913.37, 1071.93))
                 let dn = fract(52.9829189 * fract(dot(dpx, vec2(0.06711056, 0.00583715))))
                 let dv = self.color_adjust_ctl.w - 1.0
                 let dlo = floor(dv / 256.0)
@@ -731,23 +750,29 @@ script_mod! {
                 if dn < dlo / 255.0 || dn >= dhi / 255.0 { self.clip() }
             }
         }
+        door_window: fn() {
+            self.door_window_at(self.v_spos)
+        }
 
-        pixel: fn() {
-            self.host_cut()
-            self.door_window()
+        occluder_fade_at: fn(wp: vec3, spos: vec4) {
             if self.occ_focus.w > 0.0 {
                 let oe = self.occ_eye.xyz
                 let of = self.occ_focus.xyz - oe
                 let ol = max(length(of), 0.001)
-                let op = self.v_csm.xyz - oe
+                let op = wp - oe
                 let ot = clamp(dot(op, of) / ol, 0.0, ol - self.occ_focus.w)
                 let orad = length(op - of * (ot / ol))
                 let ocone = 0.55 + 0.22 * (ol - ot)
                 let ofade = max((1.0 - smoothstep(ocone, ocone + 0.5, orad)) * step(0.0, ol - self.occ_focus.w - dot(op, of) / ol), 1.0 - clamp(length(op) / 1.2, 0.0, 1.0))
-                let osp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
-                let opx = floor(vec2(osp.x * 0.5 + 0.5, 0.5 - osp.y * 0.5) * vec2(1920.0, 1080.0))
+                let opx = floor(self.model_screen_uv(spos) * vec2(1920.0, 1080.0))
                 if fract(52.9829189 * fract(dot(opx, vec2(0.06711056, 0.00583715)))) < ofade * 0.8 { self.clip() }
             }
+        }
+
+        pixel: fn() {
+            self.host_cut()
+            self.door_window()
+            self.occluder_fade_at(self.v_csm.xyz, self.v_spos)
             // Atlas x vertex tint. Kenney ships both conventions — most packs
             // UV-map into one colormap (tint = white), nature-kit and friends
             // carry no texture and colour per material (atlas = white 1x1).

@@ -132,6 +132,8 @@ pub struct ClusteredLights {
     texture: Option<Texture>,
     texture_height: usize,
     light_texel: usize,
+    shadow_texel: usize,
+    wrote_shadow_rows: bool,
     stats: ClusterStats,
     /// The texture holds an empty grid (no light in any cluster): a frame
     /// with no lights again has nothing new to pack or upload.
@@ -176,6 +178,8 @@ impl Default for ClusteredLights {
             texture: None,
             texture_height: 0,
             light_texel: 0,
+            shadow_texel: 0,
+            wrote_shadow_rows: false,
             stats: ClusterStats::default(),
             uploaded_empty: false,
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
@@ -205,6 +209,16 @@ impl ClusteredLights {
         }
         ranked.map(|(_, id)| id)
     }
+    /// The three RGBA texels per lamp that relight reads, in its light-index order.
+    pub(crate) fn gi_light_texels<'a>(&self, cx: &'a mut Cx) -> &'a [f32] {
+        let Some(texture) = &self.texture else { return &[] };
+        match texture.get_format(cx) {
+            TextureFormat::VecRGBAf32 { data: Some(table), .. } => {
+                table.get(self.light_texel * 4..self.shadow_texel * 4).unwrap_or(&[])
+            }
+            _ => &[],
+        }
+    }
     pub(crate) fn parent_shadows(&self,cx:&mut Cx,parent:DrawPassId){self.shadows.parent_to(cx,parent);}
     pub fn set_config(&mut self, config: ClusterConfig) {
         self.config = config.clamped();
@@ -223,6 +237,12 @@ impl ClusteredLights {
         }
         self.shadows.render(cx,&self.lights,&self.active,eye,statics,movers);
         self.stats.shadows=self.shadows.stats;
+        let Some(texture) = &self.texture else { return };
+        if self.shadows.metadata().is_empty() && !self.wrote_shadow_rows { return; }
+        let old_height = self.texture_height;
+        let mut data = texture.take_vec_f32(cx.cx);
+        self.write_shadow_metadata(&mut data);
+        self.upload(cx.cx, data, old_height);
     }
 
     fn slice(&self, depth: f32) -> usize {
@@ -541,13 +561,27 @@ impl ClusteredLights {
         self.stats.max_lights_in_cluster = self.counts.iter().copied().max().unwrap_or(0);
     }
 
+    fn resize_table(&mut self, data: &mut Vec<f32>) {
+        let texels = self.shadow_texel + self.shadows.metadata().len() / 4;
+        let height = texels.max(1).div_ceil(TEXTURE_WIDTH).next_power_of_two();
+        self.texture_height = self.texture_height.max(height);
+        data.resize(TEXTURE_WIDTH * self.texture_height * 4, 0.0);
+    }
+
+    fn write_shadow_metadata(&mut self, data: &mut Vec<f32>) {
+        self.resize_table(data);
+        let metadata = self.shadows.metadata();
+        let (rows, padding) = data[self.shadow_texel * 4..].split_at_mut(metadata.len());
+        rows.copy_from_slice(metadata);
+        padding.fill(0.0);
+        self.wrote_shadow_rows = !metadata.is_empty();
+    }
+
     fn pack(&mut self, data: &mut Vec<f32>) {
         let c = self.config;
         self.light_texel = c.count() + (self.stats.references + 3) / 4;
-        let texels = self.light_texel + self.lights.len() * 3;
-        let height = ((texels.max(1) + TEXTURE_WIDTH - 1) / TEXTURE_WIDTH).next_power_of_two();
-        self.texture_height = self.texture_height.max(height);
-        data.resize(TEXTURE_WIDTH * self.texture_height * 4, 0.0);
+        self.shadow_texel = self.light_texel + self.lights.len() * 3;
+        self.resize_table(data);
         data.fill(0.0);
         let mut offset = 0;
         for ci in 0..c.count() {
@@ -618,6 +652,12 @@ impl ClusteredLights {
             .map(|t| t.take_vec_f32(cx))
             .unwrap_or_default();
         self.pack(&mut data);
+        self.upload(cx, data, old_height);
+        self.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
+        self.stats
+    }
+
+    fn upload(&mut self, cx: &mut Cx, data: Vec<f32>, old_height: usize) {
         self.stats.upload_bytes = data.len() * 4;
         if self.texture.is_none() || old_height != self.texture_height {
             self.texture = Some(Texture::new_with_format(
@@ -635,8 +675,6 @@ impl ClusteredLights {
                 .unwrap()
                 .put_back_vec_f32(cx, data, None);
         }
-        self.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
-        self.stats
     }
 
     /// Whether `bind` switches the clustered lights on (`cluster_on`).
@@ -665,7 +703,7 @@ impl ClusteredLights {
         if !on {
             return;
         }
-        self.shadows.bind(cx,vars,self.texture.as_ref().unwrap());
+        self.shadows.bind(cx,vars,self.texture.as_ref().unwrap(),self.shadow_texel);
         if let Some(id) = vars.draw_shader_id {
             if let Some(slot) = cx.draw_shaders[id.index]
                 .mapping
@@ -1169,9 +1207,29 @@ mod tests {
     #[test]
     fn empty_frame_removes_old_lights_and_packed_references_are_valid() {
         let mut c = ClusteredLights::default();
-        c.build(&[light(vec3f(0.0, 0.0, -8.0), 5.0)], camera());
+        // The grid and light fit in one texture row, but the spot's face crosses into the next.
+        c.set_config(ClusterConfig { tiles_x: 25, tiles_y: 5, slices: 2, ..Default::default() });
+        let spot = LmLight {
+            dir: vec3f(0.0, 0.0, -1.0), cone: Some((10.0, 25.0)), shadows: true,
+            ..light(vec3f(0.0, 0.0, -8.0), 0.5)
+        };
+        c.build(&[spot], camera());
+        assert!(c.stats.references > 0, "the spot has packed cluster references");
+        c.shadows.prepare(&c.lights, &[true], Vec3f::default());
+        c.shadows.pack_metadata();
         let mut data = Vec::new();
         c.pack(&mut data);
+        assert_eq!(c.shadow_texel, c.light_texel + c.lights.len() * 3, "shadow headers follow the light rows");
+        let start = c.shadow_texel * 4;
+        let end = start + c.shadows.metadata().len();
+        assert_eq!(end - start, 6 * 4, "one spot header and five face texels");
+        assert!(start < TEXTURE_WIDTH * 4 && end > TEXTURE_WIDTH * 4, "shadow rows cross the texture row boundary");
+        assert!(data.len() >= end, "pack reserves the shadow rows");
+        data[start..].fill(f32::NAN);
+        c.write_shadow_metadata(&mut data);
+        assert_eq!(&data[start..end], c.shadows.metadata(), "shadow rows land at the shader's base texel");
+        assert_eq!(data[start + 2], 1.0, "the face offset is relative to the shadow headers");
+        assert!(data[end..].iter().all(|&v| v == 0.0), "unused texels after the face are cleared");
         for i in 0..c.config.count() {
             let start = data[i * 4] as usize;
             let count = data[i * 4 + 1] as usize;
@@ -1182,6 +1240,11 @@ mod tests {
         }
         c.build(&[], camera());
         c.pack(&mut data);
+        c.shadows.prepare(&c.lights, &[], Vec3f::default());
+        c.shadows.pack_metadata();
+        c.write_shadow_metadata(&mut data);
+        assert!(c.shadows.metadata().is_empty(), "an empty frame has no shadow rows");
+        assert!(data[start..end].iter().all(|&v| v == 0.0), "the previous spot's rows are cleared");
         assert_eq!(c.stats.references, 0);
         assert_eq!(c.stats.lights, 0);
         assert!(c.counts.iter().all(|&n| n == 0));

@@ -172,7 +172,7 @@ struct LayerImages {
     base: std::rc::Rc<LayerMap>,
     detail: std::rc::Rc<LayerMap>,
     orm: std::rc::Rc<LayerMap>,
-    surface: Option<SurfacePlan>,
+    surface: Option<std::rc::Rc<SurfacePlan>>,
 }
 
 impl PreparedStaticPreview {
@@ -260,7 +260,9 @@ impl PreparedStaticPreview {
     }
 
     pub(super) fn prepare_with_budget(mut model: StaticModel, ao_png: Option<&[u8]>, sdf_bytes: Option<&[u8]>, budget: usize) -> Result<Self, String> {
-        use crate::material_surface::{PixelSemantic, TextureWork, image_content_hash, texture_work};
+        use crate::material_surface::{PixelSemantic, TextureWork, fetch_ahead, image_content_hash, texture_work};
+        use std::rc::Rc;
+        enum Charge { Map(Rc<LayerMap>), Surface(Rc<SurfacePlan>) }
         let _preparing = crate::material_surface::Preparing::begin();
         let sdf = sdf_bytes.and_then(|bytes| crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v| v.0));
         if model.texture_uri.is_some() && model.texture_png.is_none() { return Err("model references an external texture without supplied pixels".into()); }
@@ -271,22 +273,26 @@ impl PreparedStaticPreview {
             Ok(())
         };
         check(&model.vertices,&model.indices)?;
-        let mut inventory = ImageBudget::default();
+        let mut charges = Vec::new();
         let mut shared = std::collections::HashMap::new();
         let mut geometry = sdf.as_ref().map_or(0, |s| s.pixels.len());
         let mut plan_layer = |vertices: &[f32], indices: &[u32], base: Option<&[u8]>, detail: Option<&[u8]>, pbr: &crate::model::PbrMaterial| -> Result<LayerImages, String> {
             geometry += (vertices.len() + indices.len()) * 4;
-            let mut map = |bytes: Option<&[u8]>, fallback, semantic: PixelSemantic, store| -> Result<std::rc::Rc<LayerMap>, String> {
+            let mut map = |bytes: Option<&[u8]>, fallback, semantic: PixelSemantic, store| -> Result<Rc<LayerMap>, String> {
                 let ktx = bytes.is_some_and(crate::texture_pack::is_ktx2);
                 let hash = bytes.map_or(0, |b| crate::texture_pack::content_id(b)
                     .unwrap_or_else(|| texture_work(TextureWork::Hash, || image_content_hash(b))));
                 let key = (hash, bytes.map_or(0, <[u8]>::len), ktx, bytes.is_none().then_some(fallback), semantic as u8, store);
                 let entry = match shared.entry(key) {
                     std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(e) => e.insert(std::rc::Rc::new(LayerMap {
-                        plan: MapPlan::with_hash(bytes, hash, fallback, semantic, store, &mut inventory)?,
-                        texture: Default::default(),
-                    })),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let map = Rc::new(LayerMap {
+                            plan: MapPlan::planned(bytes, hash, fallback, semantic, store)?,
+                            texture: Default::default(),
+                        });
+                        charges.push(Charge::Map(map.clone()));
+                        e.insert(map)
+                    }
                 };
                 Ok(entry.clone())
             };
@@ -294,7 +300,12 @@ impl PreparedStaticPreview {
             let base = map(base, 0xffff_ffff, surface.map_or(PixelSemantic::Color, |s| s.base_semantic()), !surface.is_some_and(|s| s.msdf.is_some()))?;
             let detail = map(detail, 0xff80_8080, PixelSemantic::Color, true)?;
             let orm = map(pbr.orm_png.as_deref(), 0xffff_ffff, PixelSemantic::Data, true)?;
-            Ok(LayerImages { base, detail, orm, surface: surface.map(|s| SurfacePlan::new(s, &mut inventory)).transpose()? })
+            let surface = surface.map(SurfacePlan::planned).transpose()?.map(|plan| {
+                let plan = Rc::new(plan);
+                charges.push(Charge::Surface(plan.clone()));
+                plan
+            });
+            Ok(LayerImages { base, detail, orm, surface })
         };
         let merged = if model.draw_layers.is_empty() {
             Some(plan_layer(&model.vertices, &model.indices, model.texture_png.as_deref(), model.detail_png.as_deref(), &model.pbr)?)
@@ -309,6 +320,22 @@ impl PreparedStaticPreview {
             if plans.is_empty() { plans.push(plan_layer(&part.vertices, &part.indices, None, None, &Default::default())?); }
         }
         drop(shared); // each binding now holds its plan until its layer is prepared
+        let mut maps = Vec::with_capacity(charges.len());
+        for charge in &charges {
+            match charge {
+                Charge::Map(map) => maps.push(&map.plan),
+                Charge::Surface(surface) => maps.extend(surface.maps()),
+            }
+        }
+        fetch_ahead(&maps);
+        drop(maps);
+        let mut inventory = ImageBudget::default();
+        for charge in charges {
+            match charge {
+                Charge::Map(map) => map.plan.charge(&mut inventory),
+                Charge::Surface(surface) => surface.charge(&mut inventory),
+            }
+        }
         if let Some(sky) = &model.sky {
             geometry += (sky.vertices.len() + sky.indices.len()) * 4;
             for bytes in sky.images.iter().take(2) { inventory.pixels(bytes, 4096)?; }
@@ -489,6 +516,7 @@ pub(super) struct PreparedSky {pub(super) part:std::sync::Arc<crate::model::SkyP
 #[derive(Clone)]
 pub struct UploadedStaticPreview {
     pub(super) lods:Vec<(f32,UploadedStaticPreview)>,
+    pub(super) ordinary_shadow_bounds: Option<std::rc::Rc<super::lights::OrdinaryShadowBounds>>,
     pub(super) morph:Option<crate::asset_morph::UploadedMorph>,
     pub(super) ao:Option<Texture>,pub(super) lm_source:Option<std::sync::Arc<crate::lightmap::LmMeshSource>>,pub(super) bake_geometry:Option<std::rc::Rc<Geometry>>,pub(super) sdf:Option<(Texture,SdfMeta)>,
     pub(super) emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,
@@ -513,6 +541,32 @@ pub struct UploadedStaticPreview {
     pub(super) anim_parts: Vec<LoadedAnimPart>,
     pub(super) driven_parts: Vec<LoadedDrivenPart>,
     pub(super) sky: Option<LoadedSky>,
+}
+
+impl UploadedStaticPreview {
+    /// Route every occurrence of this named layer, including its LODs and rigid
+    /// parts, before installing the model. Refreshes the lighting geometry
+    /// when a layer is first excluded. Returns the number of marked layers.
+    pub fn require_traced_layer(&mut self, cx: &mut Cx, layer: &str, program: &str, role: TracedLayerRole) -> usize {
+        let mut count = 0;
+        let mut changed = false;
+        let program: std::sync::Arc<str> = program.into();
+        for material in std::iter::once(&mut self.material)
+            .chain(self.extra_draws.iter_mut().map(|l| &mut l.4))
+            .chain(self.anim_parts.iter_mut().flat_map(|p| p.draws.iter_mut().map(|l| &mut l.4)))
+            .chain(self.driven_parts.iter_mut().flat_map(|p| p.draws.iter_mut().map(|l| &mut l.4))) {
+            if material.name.as_ref() == layer {
+                changed |= material.traced_required.is_none();
+                material.traced_required = Some((program.clone(), role));
+                count += 1;
+            }
+        }
+        if changed {
+            self.exclude_traced_from_shadows(cx);
+        }
+        for (_, lod) in &mut self.lods { count += lod.require_traced_layer(cx, layer, &program, role); }
+        count
+    }
 }
 
 #[derive(Clone)]
@@ -562,6 +616,7 @@ impl UploadedSkinRig {
 #[derive(Clone)]
 pub(super) struct LoadedModel {
     pub(super) lods:Vec<(f32,LoadedModel)>,
+    pub(super) ordinary_shadow_bounds: Option<std::rc::Rc<super::lights::OrdinaryShadowBounds>>,
     pub(super) morph:Option<crate::asset_morph::UploadedMorph>,
     pub(super) prepared_sdf:Option<Option<(Texture,SdfMeta)>>,
     pub(super) emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,

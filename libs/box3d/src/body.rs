@@ -1919,6 +1919,16 @@ pub fn body_set_mass_data(world: &mut World, body_id: BodyId, mass_data: MassDat
     // before the next step see a stale rotational response.
     let rotation_matrix = make_matrix_from_quat(body_sim.transform.q);
     body_sim.inv_inertia_world = mul_mm(mul_mm(rotation_matrix, body_sim.inv_inertia_local), transpose(rotation_matrix));
+
+    let mut id = world.bodies[body_index as usize].head_shape_id;
+    while id != NULL_INDEX {
+        let shape = &world.shapes[id as usize];
+        if shape.shape_type() == ShapeType::BoxSet {
+            crate::shape::refresh_body_shape_extents(world, body_index);
+            break;
+        }
+        id = shape.next_shape_id;
+    }
 }
 
 pub fn body_get_mass_data(world: &World, body_id: BodyId) -> MassData {

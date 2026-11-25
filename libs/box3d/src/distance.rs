@@ -960,6 +960,10 @@ pub fn shape_distance(
 /// so the hit point and normal are returned in frame A. Initially touching
 /// shapes are a miss (unless can_encroach applies).
 pub fn shape_cast(input: &ShapeCastPairInput) -> CastOutput {
+    shape_cast_with_simplex_cache::<true>(input)
+}
+
+pub(crate) fn shape_cast_with_simplex_cache<const REUSE_SIMPLEX: bool>(input: &ShapeCastPairInput) -> CastOutput {
     // Compute tolerance
     let linear_slop = linear_slop();
     let total_radius = input.proxy_a.radius + input.proxy_b.radius;
@@ -991,6 +995,9 @@ pub fn shape_cast(input: &ShapeCastPairInput) -> CastOutput {
     for iteration in 0..max_iterations {
         output.iterations += 1;
 
+        if !REUSE_SIMPLEX {
+            cache.count = 0;
+        }
         let distance_output = shape_distance(&distance_input, &mut cache, None);
 
         if distance_output.distance < target + tolerance {

@@ -5,6 +5,7 @@
 //! timers, smoothed IK offsets) belongs to the caller, as with the rest of
 //! this module.
 use super::*;
+pub use makepad_draw::makepad_math::two_bone_knee;
 
 /// A rotation+translation frame in model space (skeleton scale is carried
 /// by the local TRS and applied when positions are composed).
@@ -57,7 +58,6 @@ fn add3(a: Vec3f, b: Vec3f) -> Vec3f { Vec3f { x: a.x + b.x, y: a.y + b.y, z: a.
 fn sub3(a: Vec3f, b: Vec3f) -> Vec3f { Vec3f { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } }
 fn scale3(a: Vec3f, s: f32) -> Vec3f { Vec3f { x: a.x * s, y: a.y * s, z: a.z * s } }
 fn len3(a: Vec3f) -> f32 { (a.x * a.x + a.y * a.y + a.z * a.z).sqrt() }
-fn dot3(a: Vec3f, b: Vec3f) -> f32 { a.x * b.x + a.y * b.y + a.z * b.z }
 
 /// One entry of a 1D blend space: the parameter value (usually ground
 /// speed) at which `clip` plays at rate 1.
@@ -167,14 +167,7 @@ impl SkinnedModel {
         let (a, b, c) = (frames[upper].t, frames[lower].t, frames[end].t);
         let (l1, l2) = (len3(sub3(b, a)), len3(sub3(c, b)));
         if l1 < 1.0e-6 || l2 < 1.0e-6 { return false; }
-        let to = sub3(target, a);
-        let d = len3(to).clamp((l1 - l2).abs() + 1.0e-4, l1 + l2 - 1.0e-4);
-        let dt = norm3(to);
-        let pole = if len3(pole) < 1.0e-6 { norm3(sub3(b, add3(a, scale3(dt, dot3(sub3(b, a), dt))))) } else { pole };
-        let pn = norm3(sub3(pole, scale3(dt, dot3(pole, dt))));
-        let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
-        let knee = add3(a, add3(scale3(dt, l1 * cos_a), scale3(pn, l1 * (1.0 - cos_a * cos_a).max(0.0).sqrt())));
-        let end_pos = add3(a, scale3(dt, d));
+        let (knee, end_pos, _) = two_bone_knee(a, target, l1, l2, pole, b);
         let (orig_u, orig_l) = (pose[upper].r, pose[lower].r);
         let g_upper = quat_mul(quat_from_to(sub3(b, a), sub3(knee, a)), frames[upper].r);
         self.set_global_rotation(pose, frames, upper, g_upper);

@@ -136,10 +136,8 @@ pub unsafe fn parallel_for(
         context,
     };
 
-    let mut tasks: Vec<ParallelForTask> = Vec::with_capacity(task_count as usize);
-    for i in 0..task_count {
-        tasks.push(ParallelForTask { shared: &shared as *const ParallelForShared, worker_index: i });
-    }
+    let tasks: [_; MAX_WORKERS] =
+        std::array::from_fn(|i| ParallelForTask { shared: &shared, worker_index: i as i32 });
 
     // C: handles[i] == NULL marks tasks that ran inline (task ring budget
     // exhausted, or an external system that executed synchronously). The

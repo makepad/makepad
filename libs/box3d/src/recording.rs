@@ -198,6 +198,7 @@ pub enum GeometryKind {
     Mesh = 1,
     HeightField = 2,
     Compound = 3,
+    BoxSet = 4,
 }
 
 pub fn geometry_kind_from_u8(v: u8) -> Option<GeometryKind> {
@@ -206,6 +207,7 @@ pub fn geometry_kind_from_u8(v: u8) -> Option<GeometryKind> {
         1 => Some(GeometryKind::Mesh),
         2 => Some(GeometryKind::HeightField),
         3 => Some(GeometryKind::Compound),
+        4 => Some(GeometryKind::BoxSet),
         _ => None,
     }
 }
@@ -254,7 +256,9 @@ pub fn intern_geometry(reg: &mut GeometryRegistry, kind: GeometryKind, content_h
         let mut idx = head as i32;
         while idx != NULL_INDEX {
             let e = &reg.entries[idx as usize];
-            if e.bytes == bytes {
+            // Keep the legacy kinds' byte-identity rule. A set needs a slot
+            // handled by its own decoder even if another blob has the same bytes.
+            if e.bytes == bytes && (e.kind == GeometryKind::BoxSet) == (kind == GeometryKind::BoxSet) {
                 // Duplicate: return the existing id
                 return e.id;
             }
@@ -296,6 +300,7 @@ pub struct Recording {
     /// Union of world bounds over every recorded step, written at stop.
     pub accumulated_bounds: AABB,
     pub have_bounds: bool,
+    saw_box_set: bool,
 }
 
 /// Query tag from QueryFilter (C: b3RecTag). Stored once per key in the
@@ -313,6 +318,13 @@ pub struct RecTag {
 impl Recording {
     pub fn new() -> Recording {
         Recording::default()
+    }
+
+    pub(crate) fn mark_box_set_unsupported(&mut self) {
+        if !self.saw_box_set {
+            self.saw_box_set = true;
+            crate::core::log("Recording unavailable: this capture contains a box set.");
+        }
     }
 }
 
@@ -555,6 +567,13 @@ pub fn rec_intern_mesh(rec: &mut Recording, mesh: &Arc<MeshData>) -> u32 {
     let bytes = buf.data;
     let h = hash64_blob(&bytes);
     intern_geometry(&mut rec.registry, GeometryKind::Mesh, h, bytes)
+}
+
+pub(crate) fn rec_intern_box_set(rec: &mut Recording, set: &crate::box_set::BoxSetData) -> u32 {
+    let mut buf = RecBuffer::new();
+    set.write_snapshot(&mut buf);
+    let h = hash64_blob(&buf.data);
+    intern_geometry(&mut rec.registry, GeometryKind::BoxSet, h, buf.data)
 }
 
 pub fn rec_intern_height_field(rec: &mut Recording, hf: &Arc<HeightFieldData>) -> u32 {
@@ -1494,6 +1513,10 @@ pub fn world_start_recording(world: &mut World) {
 
     let mut rec = Recording::new();
 
+    if world.shapes.iter().any(|s| s.id != NULL_INDEX && s.shape_type() == crate::types::ShapeType::BoxSet) {
+        rec.mark_box_set_unsupported();
+    }
+
     // Every recording is snapshot-seeded. The seed blob follows the header so
     // replay restores in place and the world id stays stable across a restart
     // or backward scrub. An empty world still serializes a valid blob.
@@ -1517,10 +1540,13 @@ pub fn world_start_recording(world: &mut World) {
 }
 
 /// Stop recording and return the finished, self-contained recording.
-/// Returns None if no recording is active.
+/// Returns None if no recording is active or the capture saw an unsupported box set.
 pub fn world_stop_recording(world: &mut World) -> Option<Recording> {
     let cell = world.recording.take()?;
     let mut rec = cell.into_inner();
+    if rec.saw_box_set {
+        return None;
+    }
 
     // Write accumulated bounds so a viewer can frame the whole recorded motion.
     let bounds = if rec.have_bounds { rec.accumulated_bounds } else { AABB::default() };

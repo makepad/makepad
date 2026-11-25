@@ -574,12 +574,12 @@ impl Renderer {
             }
         }
         self.items.appended = out.len();
-        self.placed_models.extend(out);
+        self.placed_models.append_items(out);
     }
 
     pub(super) fn pop_item_instances(&mut self) {
         let keep = self.placed_models.len().saturating_sub(self.items.appended);
-        self.placed_models.truncate(keep);
+        self.placed_models.truncate_items(keep);
         self.items.appended = 0;
         self.items.glow.clear();
     }

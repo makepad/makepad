@@ -13,6 +13,8 @@
 //! control and the user's pick overrides it.
 
 use crate::cortao::CortaoTier;
+use crate::GiReceivers;
+use makepad_draw::Cx;
 
 /// One of the quality tiers, cheapest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -37,6 +39,10 @@ pub struct TierBudget {
     pub csm_range: f32,
     /// Screen-space ambient occlusion.
     pub ao: Option<CortaoTier>,
+    /// GI receivers for this tier's scenes: every tier reads the screen cache, whose grabs match
+    /// the exact gather's within launch-to-launch noise at about 2 ms less scene time on an
+    /// M-series Metal GPU. A host that records no fill (`run_gi_screen`) keeps the gather.
+    pub gi_receivers: GiReceivers,
     /// Receiver gloss at which screen-space reflection strength starts rising from zero.
     pub reflection_gloss_floor: f32,
     /// The largest render scale the host's automatic scale may use.
@@ -45,8 +51,19 @@ pub struct TierBudget {
     /// lane's per-pixel layer walk, a texture read per candidate layer);
     /// beyond it the heaviest layer alone.
     pub terrain_blend_reach: f32,
+    /// The most anisotropic samples a scene shader takes (the context's sampler clamp,
+    /// `Cx::set_max_sampler_anisotropy`). Only the ground's splat lane samples
+    /// anisotropically today; at play distance 8x looks the same as 16x.
+    pub max_anisotropy: u32,
     /// The most steps a pixel's relief march takes.
     pub relief_steps: f32,
+    /// The steps of the height fog's half-resolution march. The march is jittered per frame
+    /// and its resolve keeps most of its history, so fewer steps still integrate over about ten frames.
+    pub fog_steps: f32,
+    /// GPU time per frame GI's probe updates aim at, ms (`GiConfig::gpu_budget_ms`). Half the
+    /// default bought 0.73 ms of p95 in a busy lit scene on an M-series GPU; the bounce light
+    /// then settles in about twice the frames.
+    pub gi_budget_ms: f32,
     /// The trampled-grass field around the focus (crate::trample): its side
     /// in metres and texels; None: the blades are never pressed.
     pub trample: Option<crate::trample::TrampleBudget>,
@@ -64,12 +81,18 @@ impl GraphicsTier {
         }
     }
 
+    /// Call when first setting up a view, before its scene shaders compile, so
+    /// a Medium launch compiles each splat program once with 8x anisotropy.
+    pub fn apply_sampler_clamp(self, cx: &mut Cx) -> usize {
+        cx.set_max_sampler_anisotropy(self.budget().max_anisotropy as u8)
+    }
+
     pub fn budget(self) -> TierBudget {
         match self {
-            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_pixels: 6.0, csm_resolution: 1024, csm_range: 40.0, ao: None, reflection_gloss_floor: 0.5, render_scale: 0.75, terrain_blend_reach: 150.0, relief_steps: 8.0, trample: None },
-            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_pixels: 4.0, csm_resolution: 1536, csm_range: 60.0, ao: None, reflection_gloss_floor: 0.5, render_scale: 1.0, terrain_blend_reach: 450.0, relief_steps: 12.0, trample: Some(crate::trample::TrampleBudget { extent: 64.0, texels: 512 }) },
-            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_pixels: 2.5, csm_resolution: 2048, csm_range: 80.0, ao: Some(CortaoTier::High), reflection_gloss_floor: 0.35, render_scale: 1.0, terrain_blend_reach: f32::MAX, relief_steps: 24.0, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
-            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_pixels: 1.6, csm_resolution: 4096, csm_range: 120.0, ao: Some(CortaoTier::Ultra), reflection_gloss_floor: 0.35, render_scale: 1.0, terrain_blend_reach: f32::MAX, relief_steps: 24.0, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
+            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_pixels: 6.0, csm_resolution: 1024, csm_range: 40.0, ao: None, gi_receivers: GiReceivers::Fast, reflection_gloss_floor: 0.6, render_scale: 0.75, terrain_blend_reach: 150.0, max_anisotropy: 8, relief_steps: 8.0, fog_steps: 12.0, gi_budget_ms: 1.0, trample: None },
+            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_pixels: 4.0, csm_resolution: 1536, csm_range: 60.0, ao: None, gi_receivers: GiReceivers::Fast, reflection_gloss_floor: 0.6, render_scale: 1.0, terrain_blend_reach: 450.0, max_anisotropy: 8, relief_steps: 12.0, fog_steps: 12.0, gi_budget_ms: 1.0, trample: Some(crate::trample::TrampleBudget { extent: 64.0, texels: 512 }) },
+            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_pixels: 2.5, csm_resolution: 2048, csm_range: 80.0, ao: Some(CortaoTier::High), gi_receivers: GiReceivers::Fast, reflection_gloss_floor: 0.35, render_scale: 1.0, terrain_blend_reach: f32::MAX, max_anisotropy: 16, relief_steps: 24.0, fog_steps: 24.0, gi_budget_ms: 2.0, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
+            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_pixels: 1.6, csm_resolution: 4096, csm_range: 120.0, ao: Some(CortaoTier::Ultra), gi_receivers: GiReceivers::Fast, reflection_gloss_floor: 0.35, render_scale: 1.0, terrain_blend_reach: f32::MAX, max_anisotropy: 16, relief_steps: 24.0, fog_steps: 24.0, gi_budget_ms: 2.0, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
         }
     }
 
@@ -128,7 +151,10 @@ mod tests {
             let (a, b) = (w[0].budget(), w[1].budget());
             assert!(a.impostor_scale < b.impostor_scale && a.grass_pixels > b.grass_pixels && a.csm_resolution < b.csm_resolution, "{:?} -> {:?}", w[0], w[1]);
             assert!(a.reflection_gloss_floor >= b.reflection_gloss_floor, "higher tiers must reflect at least as much of the gloss range");
+            assert!(a.max_anisotropy <= b.max_anisotropy, "scene anisotropy cap fell from {:?} to {:?}", w[0], w[1]);
             assert!(a.relief_steps <= b.relief_steps, "relief step ceiling fell from {:?} to {:?}", w[0], w[1]);
+            assert!(a.fog_steps <= b.fog_steps, "fog step count fell from {:?} to {:?}", w[0], w[1]);
+            assert!(a.gi_budget_ms <= b.gi_budget_ms, "GI probe budget fell from {:?} to {:?}", w[0], w[1]);
         }
     }
 }

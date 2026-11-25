@@ -19,7 +19,6 @@ pub use desk::{
 use makepad_micro_serde::*;
 use makepad_platform::Cx;
 use std::{
-    net::UdpSocket,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -27,7 +26,7 @@ use std::{
     time::Duration,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use std::thread::JoinHandle;
+use std::{net::UdpSocket, thread::JoinHandle};
 
 pub const DMX_FRAME_HZ: f64 = 44.0;
 pub const DMX_FRAME_DT: f64 = 1.0 / DMX_FRAME_HZ;
@@ -1065,6 +1064,7 @@ impl Default for PerformanceConfig {
     }
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Copy, Debug, Default)]
 struct SafetySnapshot {
     control_live: bool,
@@ -1072,6 +1072,7 @@ struct SafetySnapshot {
     arms: HazardArms,
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 fn rgb_to_hue(rgb: [f32; 3]) -> f32 {
     let rgb = rgb.map(clamp01);
     let peak = rgb[0].max(rgb[1]).max(rgb[2]);
@@ -1079,11 +1080,13 @@ fn rgb_to_hue(rgb: [f32; 3]) -> f32 {
     rgb_hue(rgb, peak, low)
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 fn render_terminal_blackout(dmx: &mut [u8], mover_park: [[f32; 2]; 2]) {
     dmx.fill(0);
     park_movers(dmx, mover_park);
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 fn render_performance_lights(
     sample: SpatialLightSample,
     state: PerformanceState,
@@ -1224,6 +1227,7 @@ struct PerformanceWorkerState {
     last_control_update: f64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn safety_snapshot_at(
     state: PerformanceWorkerState,
     now: f64,
@@ -2237,6 +2241,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn artnet_worker_is_single_writer_and_blackouts_on_drop() {
         let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();

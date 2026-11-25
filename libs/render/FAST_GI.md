@@ -141,6 +141,20 @@ weighting. Direct lighting and reflections retain their existing
 render paths. Probes are shared between eyes, not reconstructed from screen
 depth. Compute shaders and hardware ray-tracing support are not required.
 
+The host chooses GI receivers through `set_gi_receivers` or its graphics tier.
+`Exact` (the default) gathers per pixel, while `Fast` reads the screen cache where available.
+`run_gi_screen` gathers at the geometric normal from the previous scene depth, once
+per 4×4 pixels. Each RGBA32F texel stores bounce B′ in RGB and
+`round(255 × O′) + log₂(1 + eye distance) / 16` in alpha. O′ is the ambient
+multiplier. Sky has alpha −1. Terrain tiles read this cache on the next scene draw,
+in whichever model lane draws them (painted tiles in the splat lane, the others in the
+PBR lane); every other surface gathers. It reprojects into the fill view and checks the four neighbouring
+texels against the receiver's tangent plane. It keeps surface points within
+0.002 × the receiver's distance from the cache eye and blends their bilinear weights.
+If those weights sum to less than 0.2, it gathers at the geometric normal. Both paths
+return B′ + ambient × O′. `ScreenHits` shows hits in green, misses in red and
+disabled caches in grey.
+
 Thin moving blockers and actual static box primitives also receive an explicit
 probe-to-receiver OBB segment test, both for display and feedback. This rejects
 dark exterior probes as well as bright leaking probes: distance moments alone

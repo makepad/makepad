@@ -1,7 +1,7 @@
 //! Host scheduling of the shared fog chain. Like soft VFX, inputs are
 //! prepared while the scene is recorded and the passes run after the scene.
 use super::*;
-use crate::volume_fog::{VolumeFogCamera, VolumeFogFrame, VolumeFogPass};
+use crate::volume_fog::{FogApply, VolumeFogCamera, VolumeFogFrame, VolumeFogPass};
 
 pub(super) struct PendingFog {
     scene: DrawPassId,
@@ -73,7 +73,7 @@ impl Renderer {
         self.volume_fog.pass.set_lights(&self.frame_lights, eye);
     }
 
-    pub(super) fn record_volume_fog(&mut self, cx: &mut Cx2d, scene: &Texture, parent: DrawPassId) -> Option<DrawPassId> {
+    pub(super) fn record_volume_fog(&mut self, cx: &mut Cx2d, scene: &Texture, parent: DrawPassId) -> Option<FogApply> {
         let pending = self.volume_fog.pending.take();
         let sun = self.volume_fog.sun.take();
         let (Some(pending), Some(sun)) = (pending, sun) else {
@@ -81,17 +81,30 @@ impl Renderer {
             return None;
         };
         if !self.hdr_output { self.volume_fog.pass.disable(cx.cx); return None; }
+        let camera = Self::post_camera(cx.cx, pending.scene, self.volume_fog.origin);
+        let binding = self.gpu_baker.csm_binding();
+        if let Some(vars) = self.volume_fog.pass.march_draw_vars() {
+            // Scene depth is a valid depth-kind fallback when CSM is off;
+            // the shader's csm_p early-out ensures it is never sampled.
+            Self::write_csm_uniforms(cx.cx, vars, &binding, &pending.depth, 1, false);
+        }
+        self.volume_fog.pass.record(cx, VolumeFogFrame {
+            fog: self.volume_fog.params, steps: self.fog_steps, camera, sun, depth: &pending.depth,
+            scene, size: pending.size, parent,
+        })
+    }
+
+    pub(super) fn post_camera(cx: &Cx, scene: DrawPassId, origin: Vec3f) -> VolumeFogCamera {
         // Camera uniforms are the ones used by the actual depth producer.
         // Its view may be relative to a snapped render origin; CSM and
         // authored medium height are absolute world quantities.
-        let pass = &cx.passes[pending.scene].pass_uniforms;
+        let pass = &cx.passes[scene].pass_uniforms;
         let mut shift = Mat4f::identity();
-        shift.v[12] = -self.volume_fog.origin.x;
-        shift.v[13] = -self.volume_fog.origin.y;
-        shift.v[14] = -self.volume_fog.origin.z;
+        shift.v[12] = -origin.x;
+        shift.v[13] = -origin.y;
+        shift.v[14] = -origin.z;
         let relative_clip = Mat4f::mul(&pass.camera_projection, &pass.camera_view);
         let mut camera = VolumeFogCamera::from_clip(relative_clip);
-        let origin = self.volume_fog.origin;
         let mut unshift = Mat4f::identity();
         unshift.v[12] = origin.x;
         unshift.v[13] = origin.y;
@@ -106,19 +119,10 @@ impl Renderer {
             camera.eye[2] += origin.z;
         }
         if camera.eye[3] == 0.0 {
-            let near = match cx.cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => -1.0, _ => 0.0 };
+            let near = match cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => -1.0, _ => 0.0 };
             let h = Mat4f { v: camera.general.world_from_clip }.transform_vec4(vec4(0.0, 0.0, near, 1.0));
             if h.w.abs() > 1e-7 { camera.reference = [h.x / h.w, h.y / h.w, h.z / h.w, 0.0]; }
         }
-        let binding = self.gpu_baker.csm_binding();
-        if let Some(vars) = self.volume_fog.pass.march_draw_vars() {
-            // Scene depth is a valid depth-kind fallback when CSM is off;
-            // the shader's csm_p early-out ensures it is never sampled.
-            Self::write_csm_uniforms(cx.cx, vars, &binding, &pending.depth, 1, false);
-        }
-        self.volume_fog.pass.run(cx, VolumeFogFrame {
-            fog: self.volume_fog.params, camera, sun, depth: &pending.depth,
-            scene, size: pending.size, parent,
-        })
+        camera
     }
 }

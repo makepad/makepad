@@ -399,6 +399,7 @@ pub(super) fn sdf_quad_ground(anchor: Vec3f, receiver: &Receiver, gx: f32, gz: f
 #[derive(Clone)]
 pub(super) struct LayerMaterial {
     pub(super) name: std::sync::Arc<str>,
+    pub(super) traced_required: Option<(std::sync::Arc<str>, TracedLayerRole)>,
     pub(super) surface: Option<crate::material_surface::UploadedSurface>,
     pub(super) metallic: f32,
     pub(super) roughness: f32,
@@ -425,6 +426,7 @@ pub(super) struct LayerMaterial {
 pub(super) enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
+    Traced(&'a str, &'a mut DrawScenePbr),
     Custom(&'a str, &'a mut crate::custom_material::CustomMaterial),
     /// The streamed world's surfaces (stream_draw.rs).
     City(&'a mut crate::shaders::DrawSceneCity),
@@ -440,7 +442,7 @@ impl ModelDraw<'_> {
     pub(super) fn base(&mut self) -> &mut DrawSceneSkinned {
         match self {
             ModelDraw::Diffuse(d) => d,
-            ModelDraw::Pbr(d) => &mut d.skinned,
+            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d) => &mut d.skinned,
             ModelDraw::Custom(_, d) => &mut d.draw.pbr.skinned,
             ModelDraw::City(d) => &mut d.pbr.skinned,
             ModelDraw::Grass(d) => &mut d.pbr.skinned,
@@ -452,13 +454,13 @@ impl ModelDraw<'_> {
     /// The PBR shader and its game.material variant: both bind the eye and
     /// each layer's metallic-roughness.
     pub(super) fn is_pbr(&self) -> bool {
-        matches!(self, ModelDraw::Pbr(_) | ModelDraw::Custom(..) | ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Foliage(_) | ModelDraw::Splat(_))
+        !matches!(self, ModelDraw::Diffuse(_))
     }
 
     fn pbr(&mut self) -> Option<&mut DrawScenePbr> {
         match self {
             ModelDraw::Diffuse(_) => None,
-            ModelDraw::Pbr(d) => Some(d),
+            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d) => Some(d),
             ModelDraw::Custom(_, d) => Some(&mut d.draw.pbr),
             ModelDraw::City(d) => Some(&mut d.pbr),
             ModelDraw::Grass(d) => Some(&mut d.pbr),

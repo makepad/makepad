@@ -1179,13 +1179,15 @@ mod tests {
         }
     }
 
-    /// The four shader composites solve the same fill against the same
-    /// constant. The number lives twice — once as [`LM_LAMP_SHADOW_FILL_AT`],
-    /// once as a literal in each `sun_filled`, because a shader function
-    /// cannot read a Rust const — so pin them together: a lamp that fills to a
-    /// different depth on terrain than on a wall is the bug this catches.
+    /// All four implementations of `sun_filled` use [`LM_LAMP_SHADOW_FILL_AT`]
+    /// so the same lamp fills a sun shadow equally on a wall and on terrain.
     #[test]
     fn every_composite_fills_the_sun_shadow_from_the_same_constant() {
+        use crate::renderer::variants::{variant_object, Features};
+        use crate::shaders::{compile_scene_webgl2, lowered_fn_body};
+        use makepad_draw::makepad_platform::makepad_script::script_eval;
+        use makepad_draw::*;
+
         let src = crate::shaders::SHADER_SOURCE;
         let at = format!("/ {LM_LAMP_SHADOW_FILL_AT:.3}, 0.0, 1.0)");
         assert_eq!(
@@ -1198,15 +1200,39 @@ mod tests {
             4,
             "a sun_filled declaration appeared or vanished"
         );
-        // DrawSceneCube, DrawSceneSkinned, DrawScenePbr (inherited),
-        // DrawSceneSkinnedGpu and DrawSceneTerrain each call it once; so does
-        // the reflections variant of the PBR composite (`pbr_reflections`),
-        // which shades the same surface while writing the reflection targets.
+        // DrawSceneCube, DrawSceneSkinned, DrawSceneSkinnedGpu, DrawSceneTerrain
+        // and the shared PBR composition each call sun_filled once. Stock PBR
+        // and its reflections variant both go through shade_mr_surface_at.
         assert_eq!(
             src.matches("self.sun_filled(").count(),
-            6,
+            5,
             "a composite stopped filling the sun shadow, or gained a call"
         );
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_draw::script_mod(vm);
+            vm.heap_mut().new_module(id!(prelude));
+            script_eval!(vm, { mod.prelude.widgets_internal = {
+                ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw
+            } });
+            vm.heap_mut().new_module(id!(widgets));
+            crate::script_mod(vm);
+            let stock = script_eval!(vm, { mod.draw.DrawScenePbr }).as_object().expect("stock PBR");
+            let features = Features { reflections: true, ..Default::default() };
+            let reflections = variant_object(vm, stock, features, true).expect("opaque PBR reflections variant");
+            for (name, program) in [("stock PBR", stock), ("PBR reflections", reflections)] {
+                let shader = compile_scene_webgl2(vm, program, name);
+                let fragment = shader.view().glsl_fragment;
+                for (caller, callee) in [
+                    ("shade_mr_surface", "io_shade_mr_surface_at("),
+                    ("shade_mr_surface_at", "io_sun_filled("),
+                ] {
+                    let body = lowered_fn_body(fragment, caller).unwrap_or_else(|| panic!("{name} lost {caller}"));
+                    assert!(body.contains(callee), "{name}: {caller} lost its call to {callee}");
+                }
+            }
+        });
     }
 
     /// The other half of "a lamp lights its street at any scale": the near

@@ -8,6 +8,11 @@ script_mod! {
     use mod.widgets.*
     use mod.geom
 
+    let SplatSample = struct {
+        texel: vec4
+        hex_weights: vec3
+    }
+
     // A terrain tile (gen level terrain_mesh: one part of triplanar
     // triangles, one of flat ones) draws here: DrawScenePbr's vertex stage,
     // binding and lighting (`shade_mr`), with a pixel that paints the
@@ -68,6 +73,9 @@ script_mod! {
         // x: relief metres, y: wet, z: puddle share, w: height quantile.
         splat_relief_on: uniform(0.0)
         splat_relief_steps: uniform(24.0)
+        // The tier's reflection gloss floor: a layer at or under it never
+        // reaches the screen-space reflection passes (renderer/draw_models.rs).
+        splat_ssr_floor: uniform(1.0)
         splat_s0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_s1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_s2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -399,6 +407,27 @@ script_mod! {
             return self.splat_m7
         }
 
+        // The macro field's lattice hash and value noise: a hash of three
+        // fract/dot rounds instead of `tn_hash`'s sine. The sine of these
+        // large arguments costs more (about a quarter millisecond of a busy
+        // native-resolution frame on an M-series GPU), and its f32 rounding
+        // gave each GPU its own pattern; this one is the same everywhere.
+        splat_macro_hash: fn(p: vec2) -> float {
+            var p3 = fract(vec3(p.x, p.y, p.x) * 0.1031)
+            let k = dot(p3, vec3(p3.y, p3.z, p3.x) + vec3(33.33, 33.33, 33.33))
+            p3 = p3 + vec3(k, k, k)
+            return fract((p3.x + p3.y) * p3.z)
+        }
+        splat_macro_noise: fn(p: vec2) -> float {
+            let i = floor(p)
+            let f = fract(p)
+            let u = f * f * (vec2(3.0, 3.0) - f * 2.0)
+            let a = self.splat_macro_hash(i)
+            let b = self.splat_macro_hash(i + vec2(1.0, 0.0))
+            let c = self.splat_macro_hash(i + vec2(0.0, 1.0))
+            let d = self.splat_macro_hash(i + vec2(1.0, 1.0))
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+        }
         // World macro variation at wp (xz) for a layer's `mv`: x the
         // brightness field, y the roughness field (both about -1..1), z the
         // hue field (-0.5..0.5). Three octaves of world value noise at 4.7x,
@@ -414,12 +443,12 @@ script_mod! {
             let s = span / mv.w
             let k2 = 1.0 - smoothstep(0.12, 0.25, s)
             let k3 = 1.0 - smoothstep(0.024, 0.05, s)
-            let a1 = self.tn_noise(q * 0.21 + vec2(3.7, 1.3)) - 0.5
-            let a2 = (self.tn_noise(q + vec2(7.1, 2.9)) - 0.5) * k2
-            let a3 = (self.tn_noise(q * 5.0 + vec2(1.9, 5.3)) - 0.5) * k3
-            let r2 = (self.tn_noise(q * 1.3 + vec2(13.7, 8.3)) - 0.5) * k2
-            let r3 = (self.tn_noise(q * 4.3 + vec2(5.9, 17.1)) - 0.5) * k3
-            let hue = self.tn_noise(q * 0.47 + vec2(11.3, 4.1)) - 0.5
+            let a1 = self.splat_macro_noise(q * 0.21 + vec2(3.7, 1.3)) - 0.5
+            let a2 = (self.splat_macro_noise(q + vec2(7.1, 2.9)) - 0.5) * k2
+            let a3 = (self.splat_macro_noise(q * 5.0 + vec2(1.9, 5.3)) - 0.5) * k3
+            let r2 = (self.splat_macro_noise(q * 1.3 + vec2(13.7, 8.3)) - 0.5) * k2
+            let r3 = (self.splat_macro_noise(q * 4.3 + vec2(5.9, 17.1)) - 0.5) * k3
+            let hue = self.splat_macro_noise(q * 0.47 + vec2(11.3, 4.1)) - 0.5
             return vec3((a1 * 0.5 + a2 * 0.33 + a3 * 0.22) * 2.0, (a1 * -0.4 + r2 * 0.4 + r3 * 0.3) * 2.0, hue)
         }
 
@@ -522,8 +551,8 @@ script_mod! {
             return w / max(w.x + w.y + w.z, 0.000001)
         }
 
-        // Layer l's hex-tiled texel (albedo, height in w) at uv, tile units.
-        splat_hex_texel: fn(l: float, uv: vec2, du1: vec2, du2: vec2, af: float) -> vec4 {
+        // Layer l's hex-tiled texel (albedo, height in w) and its corner weights.
+        splat_hex_texel: fn(l: float, uv: vec2, du1: vec2, du2: vec2, af: float) -> SplatSample {
             let st = uv * 3.4641016
             let c0 = self.splat_hex_corner(st, 0.0)
             let c1 = self.splat_hex_corner(st, 1.0)
@@ -535,13 +564,12 @@ script_mod! {
             let t1 = self.splat_read(vec3(p1.x, p1.y, l), du1, du2, af)
             let t2 = self.splat_read(vec3(p2.x, p2.y, l), du1, du2, af)
             let w = self.splat_hex_weights(vec3(c0.z, c1.z, c2.z), vec3(t0.w, t1.w, t2.w))
-            return t0 * w.x + t1 * w.y + t2 * w.z
+            return SplatSample(texel: t0 * w.x + t1 * w.y + t2 * w.z, hex_weights: w)
         }
 
-        // Its normal-map texel (encoded normal, roughness in w), weighted as
-        // the texel (the heights are the shown texel's anisotropic reads
-        // again, from a warm cache).
-        splat_hex_normal: fn(l: float, uv: vec2, du1: vec2, du2: vec2) -> vec4 {
+        // The normal-map texel (encoded normal, roughness in w) uses the corner
+        // weights from the shown texel's anisotropic hex read at this UV.
+        splat_hex_normal: fn(l: float, uv: vec2, du1: vec2, du2: vec2, w: vec3) -> vec4 {
             let st = uv * 3.4641016
             let c0 = self.splat_hex_corner(st, 0.0)
             let c1 = self.splat_hex_corner(st, 1.0)
@@ -552,10 +580,6 @@ script_mod! {
             let p1 = vec3(u1.x, u1.y, l)
             let u2 = self.splat_hex_uv(c2, uv)
             let p2 = vec3(u2.x, u2.y, l)
-            let w = self.splat_hex_weights(vec3(c0.z, c1.z, c2.z), vec3(
-                self.tex.sample_grad_aniso_repeat(p0, du1, du2).w,
-                self.tex.sample_grad_aniso_repeat(p1, du1, du2).w,
-                self.tex.sample_grad_aniso_repeat(p2, du1, du2).w))
             return self.normal_map.sample_grad_aniso_repeat(p0, du1, du2) * w.x
                 + self.normal_map.sample_grad_aniso_repeat(p1, du1, du2) * w.y
                 + self.normal_map.sample_grad_aniso_repeat(p2, du1, du2) * w.z
@@ -575,7 +599,7 @@ script_mod! {
         // hex: splat_hex_amount (terrain: on its top projection, where uv is
         // that projection's; the side projections stay single reads). af:
         // splat_read's.
-        splat_relief_read: fn(l: float, wp: vec3, uv: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, hex: float, af: float) -> vec4 {
+        splat_relief_sample: fn(l: float, wp: vec3, uv: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, hex: float, af: float) -> SplatSample {
             var t = vec4(0.0, 0.0, 0.0, 0.0)
             if hex < 1.0 {
                 if self.triplanar == 0.0 {
@@ -585,16 +609,21 @@ script_mod! {
                 }
             }
             if hex > 0.0 {
-                var tiled = self.splat_hex_texel(l, uv, du1, du2, af)
+                let top = self.splat_hex_texel(l, uv, du1, du2, af)
+                var tiled = top.texel
                 if self.triplanar > 0.0 {
                     let s = self.splat_param(l).x
                     let tx = self.splat_read(vec3(wp.z * s, (0.0 - wp.y) * s, l), vec2(dx.z, 0.0 - dx.y) * s, vec2(dy.z, 0.0 - dy.y) * s, af)
                     let tz = self.splat_read(vec3(wp.x * s, (0.0 - wp.y) * s, l), vec2(dx.x, 0.0 - dx.y) * s, vec2(dy.x, 0.0 - dy.y) * s, af)
                     tiled = tx * bw.x + tiled * bw.y + tz * bw.z
                 }
-                t = mix(t, tiled, hex)
+                return SplatSample(texel: mix(t, tiled, hex), hex_weights: top.hex_weights)
             }
-            return t
+            return SplatSample(texel: t, hex_weights: vec3(0.0))
+        }
+
+        splat_relief_read: fn(l: float, wp: vec3, uv: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, hex: float, af: float) -> vec4 {
+            return self.splat_relief_sample(l, wp, uv, bw, dx, dy, du1, du2, hex, af).texel
         }
 
         // Linear POM in normalised depth (0 at the top, 1 at the bottom).
@@ -641,10 +670,17 @@ script_mod! {
             return vec4(l, 0.0, 0.0, l)
         }
 
+        // Stock and non-reflection variants: no reflection outputs to gate.
+        ssr_gloss_none: fn() {}
+
+        // The lit screen-cache variant installs gi_receive_hoisted here (renderer/variants.rs).
+        gi_receive_early: fn(wp: vec3, n_geo: vec3) -> vec4 { return vec4(0.0, 0.0, 0.0, 1.0) }
+
         pixel: fn() {
-            self.host_cut()
-            self.door_window()
             let wp = self.v_csm.xyz
+            self.host_cut_at(wp, self.v_paint.w)
+            self.door_window_at(self.v_spos)
+            let gi_pre = self.gi_receive_early(self.v_csm.xyz, normalize(self.v_csm_n))
             let dx = dFdx(wp)
             let dy = dFdy(wp)
             let carpet = self.grass_carpet_at(wp)
@@ -739,7 +775,9 @@ script_mod! {
             // Hex tiling on the mesh-UV path and terrain's top projection.
             var hex = 0.0
             if self.triplanar == 0.0 || n.y >= 0.6 { hex = self.splat_hex_amount(l, du1, du2) }
-            var tex = self.splat_relief_read(l, wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
+            let first_sample = self.splat_relief_sample(l, wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
+            var tex = first_sample.texel
+            var hex_weights = first_sample.hex_weights
             var sun_visibility = 1.0
             // Uniform gate: no ray construction, march or shadow taps for
             // draws without relief. Only the visible winning layer marches.
@@ -782,7 +820,9 @@ script_mod! {
                             let hit = self.splat_relief_trace(l, wp, uv, ray, uv_ray, bw, dx, dy, du1, du2, tex.w, steps, hex)
                             let hit_wp = wp - ray * hit
                             uv = uv - uv_ray * hit
-                            tex = self.splat_relief_read(l, hit_wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
+                            let hit_sample = self.splat_relief_sample(l, hit_wp, uv, bw, dx, dy, du1, du2, hex, 1.0)
+                            tex = hit_sample.texel
+                            hex_weights = hit_sample.hex_weights
                             if dist < 8.0 {
                                 let light = normalize(self.light_dir)
                                 let nl = dot(n, light)
@@ -854,7 +894,7 @@ script_mod! {
             // One read for both the normal and roughness, at the same hit.
             var normal_rough = vec4(0.5, 0.5, 1.0, 0.5)
             if hex < 1.0 { normal_rough = self.normal_map.sample_grad_aniso_repeat(vec3(uv.x, uv.y, l), du1, du2) }
-            if hex > 0.0 { normal_rough = mix(normal_rough, self.splat_hex_normal(l, uv, du1, du2), hex) }
+            if hex > 0.0 { normal_rough = mix(normal_rough, self.splat_hex_normal(l, uv, du1, du2, hex_weights), hex) }
             let determinant = du1.x * du2.y - du1.y * du2.x
             if p.w > 0.00001 && abs(determinant) > 0.00000001 {
                 let orientation = sign(determinant)
@@ -870,7 +910,14 @@ script_mod! {
             let wet_rough = mix(dry_rough, 0.08, wet)
             let mr = self.mat_metal_rough(vec2(clamp(p.z, 0.0, 1.0) * (1.0 - water), mix(wet_rough, 0.03, water)))
             let f0 = mix(mix(vec3(0.04, 0.04, 0.04), surf.xyz, mr.x), vec3(0.02, 0.02, 0.02), water)
-            let lit = self.shade_mr_surface(surf.xyz, surf.w, mr, n, vec3(0.0, 0.0, 0.0), f0, sun_visibility)
+            let lit = self.shade_mr_surface(surf.xyz, surf.w, mr, n, vec3(0.0, 0.0, 0.0), f0, sun_visibility, gi_pre)
+            // Reflection eligibility from the layer, not the texel: the
+            // normal map's roughness swing lifts single texels of a dry
+            // layer over the floor, and their traces change almost nothing.
+            // Wet ground and standing water count, as in the shading above.
+            let layer_rough = clamp(p.y + macro_field.y * mv.z + band_wear.y, 0.04, 1.0)
+            let layer_gloss = 1.0 - mix(mix(layer_rough, 0.08, wet), 0.03, water)
+            if layer_gloss <= self.splat_ssr_floor { self.ssr_gloss_none() }
             if carpet.w > 0.0 {
                 // The paint's grain carries into the carpet: the shown texel
                 // against a read of eight times its footprint (three mips up).
@@ -883,7 +930,7 @@ script_mod! {
         }
 
         fragment: fn() {
-            self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
+            self.fb0 = self.surface_depth_clip_at(self.world, self.pixel())
         }
     }
 }

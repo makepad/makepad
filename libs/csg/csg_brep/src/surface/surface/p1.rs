@@ -2491,8 +2491,10 @@ impl Surface {
     /// The offset of this surface by `signed_offset_distance` (`CreateOffsetSurface`,
     /// virtual): a plane moves a copy along its normal, a surface of revolution offsets
     /// its generator within `approx_tol_3d`, a cone offsets its radii within
-    /// `approx_tol_3d`, an offset surface offsets its base by the compound distance;
-    /// the other kinds run the base body (also what `SmBSplineSurface`'s override
+    /// `approx_tol_3d`, and an offset surface offsets its base by the compound distance.
+    /// With `extrusion_offset_offsets_generator`, a right extrusion offsets its line
+    /// or circular generator, falling back to the base body for a collapsed arc.
+    /// The remaining cases run the base body (also what `SmBSplineSurface`'s override
     /// calls), an `SmOffsetSurface` that owns a copy of this surface (default
     /// singularities). A fully collapsed cone offset succeeds with no surface
     /// (`Ok(None)`, upstream's `SM_OK` with a `NULL` output).
@@ -2540,6 +2542,15 @@ impl Surface {
             SurfaceKind::Torus(s) => Ok(s
                 .create_offset_surface(k, signed_offset_distance, approx_tol_3d)?
                 .map(Self::from)),
+            SurfaceKind::SurfOfExtrusion(s) if k.fixes.extrusion_offset_offsets_generator => {
+                if let Some(offset) =
+                    s.create_offset_surface(k, signed_offset_distance, approx_tol_3d)?
+                {
+                    Ok(Some(Self::from(offset)))
+                } else {
+                    base_create_offset_surface(k, self, signed_offset_distance).map(Some)
+                }
+            }
             // (SmSurfOfExtrusion's override is commented out upstream)
             SurfaceKind::BSpline(_)
             | SurfaceKind::SurfOfExtrusion(_)

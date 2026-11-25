@@ -320,6 +320,38 @@ fn carriers(
     Ok(kept)
 }
 
+/// The names of a pull's prism (`normal` and `on` the pulled face's, moved `by`), face by face:
+/// its far cap, where the moved face lies, takes the pulled face's names `pulled`; the rest none.
+pub fn pull_caps(k: &Kernel, prism: &mut Body, normal: [f64; 3], on: [f64; 3], by: f64, pulled: &Names) -> Result<Vec<Names>, BrepError> {
+    let faces = faces_of(prism)?;
+    let mut out = Vec::with_capacity(faces.len());
+    for f in faces {
+        let (_, n) = face_kind(k, prism, f)?;
+        let cap = match n {
+            Some(n) if dot(n, normal).abs() > 0.999 => (dot(sub(p3(face_internal_point(k, prism, f)?), on), normal) - by).abs() < ON * 10.0,
+            _ => false,
+        };
+        out.push(if cap { pulled.clone() } else { Names::new() });
+    }
+    Ok(out)
+}
+
+/// Only the narrow cylinder carries names into the drilled body. Its far cap faces along
+/// the drill direction, and supplies the floor of a blind hole.
+pub fn hole_faces(k: &Kernel, shaft: &mut Body, key: Key, dir: [f64; 3], blind: bool) -> Result<Vec<Names>, BrepError> {
+    let mut out = Vec::new();
+    for f in faces_of(shaft)? {
+        let (_, normal) = face_kind(k, shaft, f)?;
+        let face = match normal {
+            None => Some(Face::Wall),
+            Some(n) if blind && dot(n, dir) > 0.0 => Some(Face::Floor),
+            _ => None,
+        };
+        out.push(face.map(|f| Names::from([FaceName { origin: key, role: Role::Named(f) }])).unwrap_or_default());
+    }
+    Ok(out)
+}
+
 /// An edge a fillet or chamfer took: its points, and the names of its two faces.
 #[derive(Clone, Debug)]
 pub struct Picked {

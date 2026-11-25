@@ -8,12 +8,12 @@ use crate::contact::FORCE_GHOST_COLLISIONS;
 use crate::core::NULL_INDEX;
 use crate::distance::shape_distance;
 use crate::manifold::{
-    clip_polygon, edge_edge_separation, find_incident_face, flip_pair, make_feature_pair,
-    ClipVertex, EdgeQuery, FaceQuery, FeatureOwner, FEATURE_PAIR_SINGLE, MAX_CLIP_POINTS,
+    edge_edge_separation, find_incident_face, flip_pair, make_feature_pair,
+    ClipBuffer, ClipVertex, EdgeQuery, FaceQuery, FeatureOwner, FEATURE_PAIR_SINGLE, MAX_HULL_FACE_EDGES,
 };
 use crate::math_functions::{
     abs_float, add, closest_point_on_triangle, cross, distance_squared, dot, lerp, line_distance,
-    max_float, min_float, min_int, mul_sub, mul_sv, neg, normalize, sub, Plane, Transform, Vec3,
+    max_float, min_float, mul_sub, mul_sv, neg, normalize, sub, Plane, Transform, Vec3,
 };
 use crate::math_internal::{make_plane_from_normal_and_point, make_plane_from_points, plane_separation};
 use crate::types::{
@@ -599,6 +599,9 @@ fn test_edge_pairs(triangle: &TriangleData, hull: &HullData) -> EdgeQuery {
     result
 }
 
+// Either face may be the reference. A half-plane adds at most one vertex.
+const TRIANGLE_CLIP_CAPACITY: usize = 3 + MAX_HULL_FACE_EDGES;
+
 fn collide_hull_face(
     manifold: &mut LocalManifold,
     point_capacity: i32,
@@ -613,25 +616,17 @@ fn collide_hull_face(
     let ref_face = query.face_index;
     let ref_plane = hull.planes[ref_face as usize];
 
-    // Build clip polygon from triangle face (the incident face).
-    // The C version ping-pongs between two buffers; the port clips into a
-    // scratch buffer and copies back (ClipVertex is Copy).
-    let mut polygon = [ClipVertex::default(); MAX_CLIP_POINTS];
-    let mut scratch = [ClipVertex::default(); MAX_CLIP_POINTS];
-
-    let v1 = triangle.v1;
-    let v2 = triangle.v2;
-    let v3 = triangle.v3;
-    polygon[0].position = v1;
-    polygon[0].separation = plane_separation(ref_plane, v1);
-    polygon[0].pair = make_feature_pair(FeatureOwner::ShapeB, 2, FeatureOwner::ShapeB, 0);
-    polygon[1].position = v2;
-    polygon[1].separation = plane_separation(ref_plane, v2);
-    polygon[1].pair = make_feature_pair(FeatureOwner::ShapeB, 0, FeatureOwner::ShapeB, 1);
-    polygon[2].position = v3;
-    polygon[2].separation = plane_separation(ref_plane, v3);
-    polygon[2].pair = make_feature_pair(FeatureOwner::ShapeB, 1, FeatureOwner::ShapeB, 2);
-    let mut point_count: i32 = 3;
+    // Start with the three incident vertices, in winding order.
+    let mut buffer1 = ClipBuffer::<ClipVertex, TRIANGLE_CLIP_CAPACITY>::new();
+    let mut buffer2 = ClipBuffer::new();
+    let (mut polygon, mut scratch) = (&mut buffer1, &mut buffer2);
+    for (position, incoming, outgoing) in [(triangle.v1, 2, 0), (triangle.v2, 0, 1), (triangle.v3, 1, 2)] {
+        polygon.push(ClipVertex {
+            position,
+            separation: plane_separation(ref_plane, position),
+            pair: make_feature_pair(FeatureOwner::ShapeB, incoming, FeatureOwner::ShapeB, outgoing),
+        });
+    }
 
     // Clip triangle face against side planes of reference face
     let face_edge = hull.faces[ref_face as usize].edge as i32;
@@ -648,29 +643,23 @@ fn collide_hull_face(
 
         let clip_plane = make_plane_from_normal_and_point(binormal, vertex1);
 
-        point_count = clip_polygon(&mut scratch, &polygon, point_count, clip_plane, edge_index, ref_plane);
-        b3_assert!(point_count <= MAX_CLIP_POINTS as i32);
-
-        if point_count < 3 {
+        scratch.clip_from(polygon.as_slice(), clip_plane, edge_index, ref_plane);
+        std::mem::swap(&mut polygon, &mut scratch);
+        if polygon.as_slice().len() < 3 {
             // Using a stale cache
             *cache = SATCache::default();
             return query.separation;
         }
 
-        // Swap buffers, output becomes input for the next clipping plane
-        polygon[..point_count as usize].copy_from_slice(&scratch[..point_count as usize]);
         edge_index = next_edge_index;
         if edge_index == face_edge {
             break;
         }
     }
 
-    let point_count = min_int(point_count, point_capacity);
     let mut min_separation = f32::MAX;
 
-    for i in 0..point_count {
-        let clip_point = &polygon[i as usize];
-
+    for clip_point in polygon.as_slice().iter().take(point_capacity as usize) {
         // Move point onto hull face improved culling
         let point = mul_sub(clip_point.position, clip_point.separation, ref_plane.normal);
 
@@ -720,9 +709,9 @@ fn collide_triangle_face(
     let inc_face = find_incident_face(hull, ref_plane.normal, query.vertex_index);
 
     // Build clip polygon from incident face
-    let mut polygon = [ClipVertex::default(); 2 * MAX_CLIP_POINTS];
-    let mut scratch = [ClipVertex::default(); 2 * MAX_CLIP_POINTS];
-    let mut point_count: i32 = 0;
+    let mut buffer1 = ClipBuffer::<ClipVertex, TRIANGLE_CLIP_CAPACITY>::new();
+    let mut buffer2 = ClipBuffer::new();
+    let (mut polygon, mut scratch) = (&mut buffer1, &mut buffer2);
     let face_edge = hull.faces[inc_face as usize].edge as i32;
     let mut hull_edge_index = face_edge;
 
@@ -733,51 +722,44 @@ fn collide_triangle_face(
         let next = &hull.edges[next_edge_index as usize];
 
         let hull_point = hull.points[next.origin as usize];
-        polygon[point_count as usize].position = hull_point;
-        polygon[point_count as usize].separation = plane_separation(ref_plane, hull_point);
-        polygon[point_count as usize].pair =
-            make_feature_pair(FeatureOwner::ShapeB, hull_edge_index, FeatureOwner::ShapeB, next_edge_index);
-
-        point_count += 1;
+        polygon.push(ClipVertex {
+            position: hull_point,
+            separation: plane_separation(ref_plane, hull_point),
+            pair: make_feature_pair(FeatureOwner::ShapeB, hull_edge_index, FeatureOwner::ShapeB, next_edge_index),
+        });
         hull_edge_index = next_edge_index;
-        if !(hull_edge_index != face_edge && point_count < 2 * MAX_CLIP_POINTS as i32) {
+        if hull_edge_index == face_edge {
             break;
         }
     }
 
-    b3_assert!(point_count >= 3);
+    b3_assert!(polygon.as_slice().len() >= 3);
 
     // Clip incident face against side planes of reference face (triangle)
     let triangle_points = [triangle.v1, triangle.v2, triangle.v3];
     let triangle_edges = [triangle.e1, triangle.e2, triangle.e3];
 
     let mut i: i32 = 0;
-    while i < 3 && point_count > 0 {
+    while i < 3 && !polygon.as_slice().is_empty() {
         let mut side_normal = cross(triangle_edges[i as usize], ref_plane.normal);
         side_normal = normalize(side_normal);
 
         let clip_plane = make_plane_from_normal_and_point(side_normal, triangle_points[i as usize]);
 
-        point_count = clip_polygon(&mut scratch, &polygon, point_count, clip_plane, i, ref_plane);
-        b3_assert!(point_count <= 2 * MAX_CLIP_POINTS as i32);
-
-        polygon[..point_count as usize].copy_from_slice(&scratch[..point_count as usize]);
+        scratch.clip_from(polygon.as_slice(), clip_plane, i, ref_plane);
+        std::mem::swap(&mut polygon, &mut scratch);
         i += 1;
     }
 
-    if point_count == 0 {
+    if polygon.as_slice().is_empty() {
         // Triangle face clipped away. Invalidate cache.
         *cache = SATCache::default();
         return f32::MAX;
     }
 
-    let point_count = min_int(point_count, point_capacity);
-
     let mut min_separation = f32::MAX;
 
-    for i in 0..point_count {
-        let clip_point = &polygon[i as usize];
-
+    for clip_point in polygon.as_slice().iter().take(point_capacity as usize) {
         // Move point onto triangle surface for improved culling
         // b3Vec3 point = b3MulSub( clipPoint->position, clipPoint->separation, refPlane.normal );
         let point = clip_point.position;
@@ -912,7 +894,8 @@ fn is_triangle_minkowski_face(
     cab * dab < 0.0 && cab * bcd > 0.0
 }
 
-// Computes the manifold in the local space of the hull
+/// Compute the manifold in the local space of the hull. Clip the complete
+/// faces before writing up to `capacity` points in their original order.
 pub fn collide_hull_and_triangle(
     manifold: &mut LocalManifold,
     capacity: i32,

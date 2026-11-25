@@ -13,7 +13,9 @@ use makepad_draw::makepad_platform::makepad_script::makepad_shader::ReturnCompon
 use makepad_render_material::{self as material, builtin, Builtin, HookMask, HookSet, MaterialDesc, MaterialError, ShadowVariant, VariantPlan};
 use makepad_scene::{BaseKind, Blend};
 use crate::renderer::variants::{self, Features};
-use crate::shaders::{DrawLmSunDepthCutout, DrawScenePbr};
+use crate::gpu_lightmap::TracedSunBatch;
+use crate::shaders::{DrawLmSunDepthCutout, DrawScenePbr, DrawTracedSun};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -78,8 +80,8 @@ script_mod! {
         // fill. Only a program with Builtin::Ibl reads it.
         ibl_ctl: uniform(vec4(1.0, 1.0, 1.0, 0.0))
         surface: fn(base: vec4) -> vec4 { return base }
-        // What a hook may read besides its arguments: the clock, the true
-        // world position, the mesh uv and the geometric normal.
+        // Mesh hook ABI: these values belong to the interpolated surface.
+        // The shared PBR composition takes its own point and normal.
         mat_time: fn() -> float { return self.draw_pass.time }
         // The same clock for the vertex hook: a helper binds to one stage.
         mat_vtime: fn() -> float { return self.draw_pass.time }
@@ -231,6 +233,513 @@ impl Registration {
 /// Runs `f` in the VM that owns a material's program (a level isolate's);
 /// false when that VM is busy. A material without one uses the Cx's VM.
 pub type MaterialVm = Rc<dyn Fn(&mut Cx, &mut dyn FnMut(&mut ScriptVm)) -> bool>;
+
+/// Direction of the camera ray at the rasterised face of a closed proxy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TracedLayerRole {
+    Outside,
+    Inside,
+}
+
+/// Availability of the program's required passes for the current device and pass layouts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TracedSurfaceState {
+    Waiting,
+    Ready,
+    Failed(String),
+}
+
+/// The outside scene pass is required by every surface. Include the other
+/// passes that must be ready before the surface can draw. Sun is required
+/// for a tile volume only while daylight Realtime cascades are active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TracedSurfacePasses {
+    pub inside: bool,
+    pub sun: bool,
+    pub lamp: bool,
+}
+
+impl TracedSurfacePasses {
+    pub const OUTSIDE: Self = Self { inside: false, sun: false, lamp: false };
+    pub const ALL: Self = Self { inside: true, sun: true, lamp: true };
+
+    fn requires(self, pass: TracedPass) -> bool {
+        match pass {
+            TracedPass::Outside => true,
+            TracedPass::Inside => self.inside,
+            TracedPass::Sun => self.sun,
+            TracedPass::Lamp => self.lamp,
+        }
+    }
+}
+
+pub(crate) const TRACED_WEBGL_FAILURE: &str = "ray-traced surfaces aren't available on WebGL2 yet";
+
+/// One occupied 8³ tile. Bounds are in tile-local cells, with an exclusive upper end.
+#[derive(Clone, Copy, Debug)]
+pub struct TracedTile {
+    /// Model-grid coordinates of this tile's cell (0,0,0).
+    pub origin_cells: [i32; 3],
+    pub lo: [u8; 3],
+    pub hi: [u8; 3],
+    pub atlas_tile: [u8; 3],
+    pub dominant_material: u8,
+    pub palette_page: u8,
+}
+
+impl TracedTile {
+    /// Append one conservative box to a static model's seven-float vertex stream.
+    /// Adjacent boxes convert a shared grid corner to the same model-space metres.
+    pub fn append_box(&self, vertices: &mut Vec<f32>, indices: &mut Vec<u32>, cell_pitch: f32) {
+        assert!((0..3).all(|i| self.lo[i] < self.hi[i] && self.hi[i] <= 8));
+        assert!(cell_pitch.is_finite() && cell_pitch > 0.0);
+        let stride = crate::model::MODEL_VERTEX_FLOATS;
+        assert_eq!(vertices.len() % stride, 0);
+        let start = u32::try_from(vertices.len() / stride).expect("tile vertex index");
+        assert!(start <= u32::MAX - 7, "tile vertex indices exceed the model index format");
+        let [x, y, z] = self.atlas_tile;
+        let tile = f32::from_bits(u32::from_le_bytes([x, y, z, self.dominant_material]));
+        let bounds = |i: usize| self.lo[i] | (self.hi[i] << 4);
+        let aux = f32::from_bits(u32::from_le_bytes([bounds(0), bounds(1), bounds(2), self.palette_page]));
+        for corner in 0..8 {
+            let cell = [0, 1, 2].map(|i| f32::from(if corner & (1 << i) == 0 { self.lo[i] } else { self.hi[i] }));
+            let [px, py, pz] = [0, 1, 2].map(|i| {
+                let grid = f64::from(self.origin_cells[i]) + f64::from(cell[i]);
+                (grid * f64::from(cell_pitch)) as f32
+            });
+            vertices.extend([px, py, pz, pack_pair_f16(cell[2], 0.0), pack_pair_f16(cell[0], cell[1]), tile, aux]);
+        }
+        for [a, b, c, d] in [[0,2,3,1], [4,5,7,6], [0,4,6,2], [1,3,7,5], [0,1,5,4], [2,6,7,3]] {
+            indices.extend([a, b, c, a, c, d].map(|i| start + i));
+        }
+    }
+}
+
+/// A unit sphere by default. A material can replace the trace-space hooks
+/// while the renderer retains its ray, clipping, depth and pass entry points.
+#[derive(Clone, Default)]
+pub struct TracedSurfaceRecipe {
+    hooks: Vec<(LiveId, ScriptObjectRef)>,
+    tile_cells_per_unit: Option<f32>,
+    /// Material inputs shared by the program's passes. Each compiled pass
+    /// resolves these names in its own texture layout.
+    pub textures: Rc<[(LiveId, Texture)]>,
+    pub host_vm: Option<MaterialVm>,
+}
+
+#[derive(Debug)]
+pub(crate) enum TracedDrawError {
+    VolumeBinding(&'static str),
+    Other(String),
+}
+
+const DUPLICATE_TRACE_VOLUME: &str = "duplicate traced texture binding trace_volume";
+
+impl From<String> for TracedDrawError {
+    fn from(reason: String) -> Self { Self::Other(reason) }
+}
+
+impl TracedSurfaceRecipe {
+    fn build_in_vm<T>(&self, cx: &mut Cx, mut build: impl FnMut(&mut ScriptVm) -> T) -> Option<T> {
+        let mut result = None;
+        let mut run = |vm: &mut ScriptVm| result = Some(build(vm));
+        let ran = match &self.host_vm {
+            Some(host) => host(cx, &mut run),
+            None => cx.try_with_vm(&mut run).is_some(),
+        };
+        result.filter(|_| ran)
+    }
+
+    /// March an R8 atlas of 8³ tiles with a 256-wide palette. Bind them as
+    /// `trace_volume` and `trace_palette` in `textures`. Each palette page has
+    /// three rows: sRGB base colour and alpha, linear metallic/roughness in RG, and linear emission RGB.
+    /// Use the same model-space cell pitch for [`TracedTile::append_box`].
+    pub fn tiles(cell_pitch: f32) -> Self {
+        assert!(cell_pitch > 0.0 && cell_pitch.is_finite() && cell_pitch.recip().is_finite());
+        Self { tile_cells_per_unit: Some(cell_pitch.recip()), ..Self::default() }
+    }
+
+    pub fn set_hook(&mut self, vm: &mut ScriptVm, name: LiveId, function: ScriptObject) -> Result<(), String> {
+        let allowed = [
+            live_id!(traced_point), live_id!(traced_scale), live_id!(traced_min), live_id!(traced_max),
+            live_id!(traced_hit), live_id!(traced_base), live_id!(traced_mr), live_id!(traced_emission),
+        ];
+        if !allowed.contains(&name) || !vm.is_fn(function) {
+            return Err(format!("invalid traced surface hook {name}"));
+        }
+        self.hooks.retain(|(key, _)| *key != name);
+        self.hooks.push((name, vm.new_object_ref(function)));
+        Ok(())
+    }
+
+    fn shader_object(&self, vm: &mut ScriptVm, shader: LiveId) -> Result<ScriptObject, String> {
+        let module = vm.value(vm.modules(), id!(draw)).as_object().ok_or("missing draw module")?;
+        let base = vm.value(module, shader).as_object().ok_or_else(|| format!("missing traced surface shader {shader}"))?;
+        let obj = vm.heap_mut().new_with_proto_no_vec(base.into());
+        for (name, hook) in &self.hooks {
+            if hook.heap_key() != vm.heap_key() || !vm.set_value(obj, *name, hook.as_object()).is_nil() {
+                return Err(format!("could not install traced surface hook {name} in its VM"));
+            }
+        }
+        Ok(obj)
+    }
+
+    pub(crate) fn outside_object(&self, vm: &mut ScriptVm, features: Features) -> Result<ScriptObject, String> {
+        let shader = if self.tile_cells_per_unit.is_some() { id!(DrawSceneTracedTiles) } else { id!(DrawSceneTraced) };
+        let obj = self.shader_object(vm, shader)?;
+        variants::scene_variant(vm, obj, features, true, features.reflections)
+            .ok_or_else(|| "could not specialize the outside surface shader".to_owned())
+    }
+
+    fn outside_draw(&self, vm: &mut ScriptVm, features: Features) -> Result<Box<DrawScenePbr>, TracedDrawError> {
+        let obj = self.outside_object(vm, features)?;
+        let mut draw = Box::new(DrawScenePbr::script_new(vm));
+        draw.skinned.draw_vars.draw_shader_id = None;
+        draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+        let vars = &mut draw.skinned.draw_vars;
+        let id = vars.draw_shader_id.ok_or_else(|| makepad_draw::makepad_platform::shader_error::take()
+            .unwrap_or_else(|| "outside surface shader did not compile".to_owned()))?;
+        Self::bind_textures(vm.cx(), vars, id, &self.textures)?;
+        if let Some(scale) = self.tile_cells_per_unit {
+            vars.set_uniform(vm.cx(), live_id!(trace_cells_per_unit), &[scale]);
+        }
+        Ok(draw)
+    }
+
+    fn sun_binding(&self) -> Result<usize, &'static str> {
+        self.tile_cells_per_unit.ok_or("the traced Sun draw requires a tile recipe")?;
+        let mut volumes = self.textures.iter().enumerate().filter(|(_, (name, _))| *name == live_id!(trace_volume));
+        let (binding, _) = volumes.next().ok_or("missing traced texture binding trace_volume")?;
+        if volumes.next().is_some() {
+            return Err(DUPLICATE_TRACE_VOLUME);
+        }
+        Ok(binding)
+    }
+
+    fn build_sun_draw(&self, vm: &mut ScriptVm, binding: usize) -> Result<DrawTracedSun, TracedDrawError> {
+        let obj = self.shader_object(vm, id!(DrawTracedSunTiles))?;
+        let mut draw = DrawTracedSun::script_new(vm);
+        draw.draw_vars.draw_shader_id = None;
+        draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+        let vars = &mut draw.draw_vars;
+        let id = vars.draw_shader_id.ok_or_else(|| makepad_draw::makepad_platform::shader_error::take()
+            .unwrap_or_else(|| "traced Sun shader did not compile".to_owned()))?;
+        Self::bind_textures(vm.cx(), vars, id, std::slice::from_ref(&self.textures[binding]))?;
+        vars.set_uniform(vm.cx(), live_id!(trace_cells_per_unit), &[self.tile_cells_per_unit.unwrap()]);
+        Ok(draw)
+    }
+
+    fn bind_textures(cx: &Cx, vars: &mut DrawVars, id: DrawShaderId, textures: &[(LiveId, Texture)]) -> Result<(), TracedDrawError> {
+        let inputs = &cx.draw_shaders[id.index].mapping.textures;
+        for (i, (name, texture)) in textures.iter().enumerate() {
+            let slot = inputs.iter().position(|input| input.id == *name)
+                .filter(|&slot| slot < vars.texture_slots.len())
+                .ok_or_else(|| format!("surface pass has no texture slot for {name}"))?;
+            if textures[..i].iter().any(|(other, _)| other == name) {
+                // Outside can find the duplicate before Sun checks its binding.
+                if *name == live_id!(trace_volume) {
+                    return Err(TracedDrawError::VolumeBinding(DUPLICATE_TRACE_VOLUME));
+                }
+                return Err(format!("duplicate traced texture binding {name}").into());
+            }
+            vars.set_texture(slot, texture);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TracedPass { Outside, Inside, Sun, Lamp }
+
+const TRACED_PASSES: [TracedPass; 4] = [TracedPass::Outside, TracedPass::Inside, TracedPass::Sun, TracedPass::Lamp];
+
+/// A pass can replace its attachments without changing its ID.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TracedScene {
+    features: Features,
+    pass: DrawPassId,
+    layout: Option<PassLayout>,
+    realtime_sun: bool,
+    sun: Option<(DrawPassId, PassLayout)>,
+}
+
+impl TracedScene {
+    pub(crate) fn new(cx: &Cx, pass: DrawPassId, features: Features, realtime_sun: bool, sun: Option<DrawPassId>) -> Self {
+        Self { features, pass, layout: cx.pass_layout(pass), realtime_sun,
+            sun: sun.and_then(|id| cx.pass_layout(id).map(|layout| (id, layout))) }
+    }
+
+    fn same_exterior(self, other: Self) -> bool {
+        self.features == other.features && self.pass == other.pass && self.layout == other.layout
+    }
+
+    pub(crate) fn with_features(self, features: Features) -> Self { Self { features, ..self } }
+}
+
+pub(crate) struct TracedPasses {
+    required: TracedSurfacePasses,
+    active: Option<TracedScene>,
+    shaders: [Option<DrawShaderId>; 4],
+    ready: [bool; 4],
+    failure: Option<String>,
+    sun_failure: Option<String>,
+}
+
+impl TracedPasses {
+    fn new(required: TracedSurfacePasses) -> Self {
+        Self { required, active: None, shaders: [None; 4], ready: [false; 4], failure: None, sun_failure: None }
+    }
+
+    pub(crate) fn failure(&self, realtime_sun: bool) -> Option<&str> {
+        self.failure.as_deref().or(self.sun_failure.as_deref().filter(|_| realtime_sun))
+    }
+
+    fn required_for(&self, realtime_sun: bool) -> TracedSurfacePasses {
+        TracedSurfacePasses { sun: self.required.sun && realtime_sun, ..self.required }
+    }
+
+    fn ready_for(&self, passes: TracedSurfacePasses) -> bool {
+        TRACED_PASSES.into_iter().all(|pass| !passes.requires(pass) || self.ready[pass as usize])
+    }
+
+    pub(crate) fn state(&self, features: Features, realtime_sun: bool, sun: Option<DrawPassId>) -> TracedSurfaceState {
+        let required = self.required_for(realtime_sun);
+        if let Some(reason) = self.failure(realtime_sun) {
+            TracedSurfaceState::Failed(reason.to_owned())
+        } else if self.active.is_some_and(|scene| scene.features == features
+            && (!required.sun || scene.sun.is_some_and(|(id, _)| Some(id) == sun))) && self.ready_for(required) {
+            TracedSurfaceState::Ready
+        } else {
+            TracedSurfaceState::Waiting
+        }
+    }
+
+    pub(crate) fn refresh(&mut self, mut probe: impl FnMut(TracedPass, DrawShaderId, Option<DrawPassId>) -> Result<bool, String>) {
+        let Some(scene) = self.active else { return };
+        if self.failure(scene.realtime_sun).is_some() { return; }
+        for pass in TRACED_PASSES {
+            if !self.required.requires(pass) || (pass == TracedPass::Sun && self.sun_failure.is_some()) { continue; }
+            let i = pass as usize;
+            let Some(shader) = self.shaders[i] else { continue };
+            let target = match pass {
+                TracedPass::Outside | TracedPass::Inside => Some(scene.pass),
+                TracedPass::Sun => {
+                    let Some((id, _)) = scene.sun else { self.ready[i] = false; continue };
+                    Some(id)
+                }
+                TracedPass::Lamp => None,
+            };
+            match probe(pass, shader, target) {
+                Ok(ready) => self.ready[i] = ready,
+                Err(reason) => {
+                    if pass == TracedPass::Sun {
+                        self.sun_failure = Some(reason);
+                        if !scene.realtime_sun { continue; }
+                    } else {
+                        self.failure = Some(reason);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_shader(&mut self, pass: TracedPass, shader: DrawShaderId) {
+        let index = pass as usize;
+        if self.shaders[index] != Some(shader) {
+            self.shaders[index] = Some(shader);
+            self.ready[index] = false;
+        }
+    }
+}
+
+pub(crate) struct TracedProgram {
+    recipe: Option<TracedSurfaceRecipe>,
+    pub(crate) passes: TracedPasses,
+    outside: HashMap<Features, Box<DrawScenePbr>>,
+    pub(crate) sun_batch: Option<Rc<RefCell<TracedSunBatch>>>,
+    sun_binding: Result<usize, &'static str>,
+    prepared_redraw: Option<u64>,
+    generation: u64,
+    /// Preview can draw Outside while the full program still reports Waiting.
+    preview: bool,
+    /// The install this program came from, from one counter for the whole process. A copy for
+    /// another renderer keeps it, so each side can tell a replaced program from the same one,
+    /// even across renderers rebuilt from scratch.
+    pub(crate) serial: u64,
+    /// On a copy: whether the source renderer itself had this program ready when last mirrored.
+    pub(crate) source_ready: bool,
+}
+
+static TRACED_SERIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Unique to one program install or one build of its Sun draw.
+pub(crate) fn next_traced_serial() -> u64 {
+    TRACED_SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+impl TracedProgram {
+    pub(crate) fn new(recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool, webgl: bool) -> Self {
+        let mut passes = TracedPasses::new(TracedSurfacePasses { sun: required.sun && recipe.tile_cells_per_unit.is_some(), ..required });
+        let sun_binding = recipe.sun_binding();
+        if webgl { passes.failure = Some(TRACED_WEBGL_FAILURE.into()); }
+        let sun_batch = (passes.required.sun && !webgl).then(Default::default);
+        Self { recipe: (!webgl).then_some(recipe), passes, outside: Default::default(), sun_batch, sun_binding,
+            prepared_redraw: None, generation: 0, preview, serial: 0, source_ready: false }
+    }
+
+    /// The same install for another renderer: the recipe is shared, and nothing compiled is.
+    /// The copy builds and prewarms its own draws for its own pass target.
+    pub(crate) fn installed_again(&self) -> Self {
+        let webgl = self.recipe.is_none();
+        let mut copy = Self::new(self.recipe.clone().unwrap_or_default(), self.passes.required, self.preview, webgl);
+        copy.serial = self.serial;
+        copy.passes.failure.clone_from(&self.passes.failure);
+        copy.passes.sun_failure.clone_from(&self.passes.sun_failure);
+        copy
+    }
+
+    /// Carry a failure the source program reached before this copy could.
+    pub(crate) fn follow_failure_of(&mut self, source: &Self) {
+        if self.passes.failure.is_none() && source.passes.failure.is_some() {
+            self.passes.failure.clone_from(&source.passes.failure);
+        }
+        if self.passes.sun_failure.is_none() && source.passes.sun_failure.is_some() {
+            self.passes.sun_failure.clone_from(&source.passes.sun_failure);
+        }
+    }
+
+    pub(crate) fn wants_sun(&self) -> bool { self.passes.required.sun }
+
+    pub(crate) fn sun(&self, scene: TracedScene) -> Option<&Rc<RefCell<TracedSunBatch>>> {
+        let required = self.passes.required_for(scene.realtime_sun);
+        if !required.sun || scene.sun.is_none()
+            || !self.passes.active.is_some_and(|active| active.same_exterior(scene) && active.sun == scene.sun)
+            || self.passes.failure(true).is_some() || !self.passes.ready_for(required) {
+            return None;
+        }
+        self.sun_batch.as_ref().filter(|batch| batch.borrow().draw.is_some())
+    }
+
+    pub(crate) fn prepared_this_draw(&self, cx: &Cx, scene: TracedScene) -> bool {
+        self.prepared_redraw == Some(cx.redraw_id()) && self.generation == cx.reload_generation
+            && self.passes.active == Some(scene)
+    }
+
+    pub(crate) fn prepare_sun(&mut self, cx: &mut Cx,
+        has_volume_format: impl FnOnce(&TextureFormat) -> Result<bool, &'static str>,
+    ) -> Result<(), TracedDrawError> {
+        let Some(batch) = &self.sun_batch else { return Ok(()) };
+        if batch.borrow().draw.is_some() { return Ok(()); }
+        let recipe = self.recipe.as_ref().expect("installed Sun recipe");
+        let binding = self.sun_binding.map_err(TracedDrawError::VolumeBinding)?;
+        // Both passes bind the handle. Its owner decides when to publish its texels.
+        if !has_volume_format(recipe.textures[binding].1.get_format(cx)).map_err(TracedDrawError::VolumeBinding)? { return Ok(()); }
+        if let Some(draw) = recipe.build_in_vm(cx, |vm| recipe.build_sun_draw(vm, binding)).transpose()? {
+            self.passes.set_shader(TracedPass::Sun, draw.draw_vars.draw_shader_id.expect("compiled Sun draw"));
+            let mut batch = batch.borrow_mut();
+            batch.draw_serial = next_traced_serial();
+            batch.draw = Some(draw);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare(&mut self, cx: &mut Cx, scene: TracedScene, name: &str) {
+        self.prepare_with_volume_support(cx, scene, name, Cx::sampled_volume_support);
+    }
+
+    pub(crate) fn prepare_with_volume_support(
+        &mut self, cx: &mut Cx, scene: TracedScene, name: &str, volume_support: impl Fn(&Cx) -> Option<Result<(), &'static str>>,
+    ) {
+        self.prepared_redraw = Some(cx.redraw_id());
+        let Some(recipe) = &self.recipe else { return };
+        if self.generation != cx.reload_generation {
+            self.generation = cx.reload_generation;
+            self.outside.clear();
+            if let Some(batch) = &self.sun_batch { batch.borrow_mut().draw = None; }
+            self.passes = TracedPasses::new(self.passes.required);
+        }
+        if self.passes.failure(scene.realtime_sun).is_some() { return }
+        let wants_sun = self.wants_sun();
+        let diagnostic = |cx: &Cx, error| match error {
+            TracedDrawError::VolumeBinding(binding) => {
+                let device = if wants_sun { volume_support(cx).and_then(Result::err) } else { None };
+                device.unwrap_or(binding).to_owned()
+            }
+            TracedDrawError::Other(reason) => reason,
+        };
+        let features = scene.features;
+        if !self.outside.contains_key(&features) {
+            match recipe.build_in_vm(cx, |vm| recipe.outside_draw(vm, features)) {
+                Some(Ok(draw)) => { self.outside.insert(features, draw); }
+                Some(Err(error)) => {
+                    let reason = diagnostic(cx, error);
+                    log!("render: traced surface {name} outside shader failed: {reason}");
+                    self.passes.failure = Some(reason);
+                    return;
+                }
+                None => { self.passes.active = None; return }
+            }
+        }
+        let id = self.outside[&features].skinned.draw_vars.draw_shader_id.unwrap();
+        self.passes.set_shader(TracedPass::Outside, id);
+        if self.passes.sun_failure.is_none() {
+            if let Err(error) = self.prepare_sun(cx, |format| match format {
+                TextureFormat::Unknown => Ok(false),
+                TextureFormat::VecVolume(_) => Ok(true),
+                _ => Err("trace_volume must be a sampled 3D texture"),
+            }) {
+                let reason = diagnostic(cx, error);
+                log!("render: traced surface {name} Sun draw failed: {reason}");
+                self.passes.sun_failure = Some(reason);
+            }
+        }
+        // Off has no attachments. Warm their layout without retaining an atlas.
+        if scene.sun.is_none() && self.passes.sun_failure.is_none() {
+            if let Some(id) = self.passes.shaders[TracedPass::Sun as usize] {
+                cx.draw_shader_ready_for(id, &crate::gpu_lightmap::cascade_layout());
+            }
+        }
+        self.passes.active = Some(scene);
+        self.passes.refresh(|pass, shader, target| {
+            let layout = match pass {
+                TracedPass::Sun => scene.sun.map(|(_, layout)| layout),
+                TracedPass::Outside | TracedPass::Inside => scene.layout,
+                TracedPass::Lamp => None,
+            };
+            if layout.is_some_and(|layout| cx.draw_shader_ready_for(shader, &layout)) { return Ok(true); }
+            let reason = match target {
+                Some(pass) => cx.draw_shader_failure_in(shader, pass),
+                None => cx.draw_shader_failure(shader),
+            };
+            if let Some(reason) = reason {
+                log!("render: traced surface {name} {pass:?} pipeline failed: {reason}");
+                return Err(reason.to_owned());
+            }
+            Ok(false)
+        });
+    }
+
+    pub(crate) fn outside(&mut self, scene: TracedScene) -> Option<&mut DrawScenePbr> {
+        let required = if self.preview { TracedSurfacePasses::OUTSIDE } else { self.passes.required_for(scene.realtime_sun) };
+        let matches = self.passes.active.is_some_and(|active| {
+            active.same_exterior(scene) && (!required.sun || active.sun == scene.sun)
+        });
+        if !matches {
+            self.passes.active = None;
+            return None;
+        }
+        if required.sun {
+            self.sun(scene)?;
+        } else if self.passes.failure(scene.realtime_sun).is_some() || !self.passes.ready_for(required) {
+            return None;
+        }
+        let active = self.passes.shaders[TracedPass::Outside as usize];
+        self.outside.get_mut(&scene.features)
+            .filter(|draw| draw.skinned.draw_vars.draw_shader_id == active)
+            .map(Box::as_mut)
+    }
+}
 
 /// How a material was built: what builds it again on the lanes' defaults as
 /// they are after a live edit (`CustomMaterial::rebuild`). The objects it
@@ -690,6 +1199,50 @@ mod tests {
         value.as_object().unwrap_or_else(|| panic!("spec did not evaluate: {:?}", vm.take_errors()))
     }
 
+    #[test]
+    fn traced_tile_march_variants() {
+        with_vm(|vm| {
+            let recipe = TracedSurfaceRecipe::tiles(0.125);
+            let features = Features { clip: true, reflections: true, gi: true, gi_debug: true,
+                csm: true, csm_debug: true, cluster: true, local_shadows: true, ..Default::default() };
+            let program = recipe.outside_object(vm, features).expect("tiled outside scene");
+            crate::shaders::inspect_scene_backends(vm, program, "tile march", Some(true));
+            let compiled = crate::shaders::compile_scene_webgl2(vm, program, "tile march");
+            let frag = compiled.view().glsl_fragment;
+            let hit = crate::shaders::lowered_fn_body(frag, "traced_hit").expect("tile intersection");
+            let (_, walk) = hit.split_once("for (").expect("tile walk must reach the emitted shader");
+            assert!(walk.lines().next().unwrap().contains("24") && walk.contains("texelFetch(tex_trace_volume,"),
+                "bounded integer volume load must occur inside the walk");
+            let read: std::collections::HashSet<_> = frag.lines()
+                .filter(|line| !line.trim_start().starts_with("uniform "))
+                .flat_map(|line| line.split(|c: char| c != '_' && !c.is_ascii_alphanumeric()))
+                .filter(|word| word.starts_with("tex_")).collect();
+            assert!(read.contains("tex_trace_volume") && read.contains("tex_trace_palette"), "both tile resources must contribute");
+            let draw = recipe.outside_draw(vm, features).expect("tiled scene binding layout");
+            let id = draw.skinned.draw_vars.draw_shader_id.unwrap();
+            let mut cells_per_unit = [0.0];
+            draw.skinned.draw_vars.get_uniform(vm.cx_mut(), live_id!(trace_cells_per_unit), &mut cells_per_unit);
+            assert_eq!(cells_per_unit, [8.0], "the scene must convert cell distance back to model-space depth");
+            let slots = &vm.cx().draw_shaders[id.index].mapping.textures;
+            let names: std::collections::HashSet<_> = slots.iter().map(|slot| format!("tex_{}", slot.id)).collect();
+            assert!(read.iter().all(|name| names.contains(*name)), "emitted fragment sampler without a binding");
+            let vertex_only = slots.iter().any(|s| s.id == live_id!(morph_map)) && !read.contains("tex_morph_map");
+            let fragment_slots = slots.len() - usize::from(vertex_only);
+            assert!(slots.len() <= makepad_draw::DRAW_CALL_TEXTURE_SLOTS && fragment_slots <= 16 && read.len() <= 16,
+                "tile scene uses {} fragment units, {fragment_slots} fragment slots and {} combined slots", read.len(), slots.len());
+            println!("tile march: {} fragment units, {fragment_slots} fragment slots, {} combined slots", read.len(), slots.len());
+
+            let sun = recipe.shader_object(vm, id!(DrawTracedSunTiles)).expect("tiled Sun shader");
+            crate::shaders::inspect_draw_backends(vm, sun, "tile Sun", Some(crate::shaders::TracedOutput::Sun));
+            let mut draw = DrawTracedSun::script_new(vm);
+            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), sun.into());
+            let id = draw.draw_vars.draw_shader_id.expect("tiled Sun binding layout");
+            let slots = &vm.cx().draw_shaders[id.index].mapping.textures;
+            assert!(matches!(slots.as_slice(), [volume] if volume.id == live_id!(trace_volume)),
+                "the only Sun texture slot must be the volume");
+        });
+    }
+
     const EVERY_HOOK: &str = r#"
         vertex: fn(p: vec3, n: vec3, uv: vec2) -> vec3 { return p + n * (0.05 * sin(p.y * 8.0 + self.mat_vtime())) }
         surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * vec3(1.0, 0.5, 0.2), base.w) }
@@ -698,7 +1251,7 @@ mod tests {
         metal_rough: fn(mr: vec2) -> vec2 { return vec2(mr.x, clamp(mr.y * 0.5, 0.05, 1.0)) }
         light: fn(radiance: vec3, l: vec3, n: vec3, v: vec3, brdf: vec3) -> vec3 { return radiance * step(0.3, dot(n, l)) }
         lighting: fn(direct: vec3, ambient: vec3) -> vec3 { return direct * 0.8 + ambient }
-        finish: fn(c: vec4) -> vec4 { return vec4(c.xyz + vec3(0.02, 0.0, 0.0) * fract(self.mat_pos().x), c.w) }
+        finish: fn(c: vec4) -> vec4 { return vec4(c.xyz + 0.02 * self.mat_geo_normal() * fract(self.mat_pos().x + self.mat_uv().x), c.w) }
         bounds_pad: 0.05
     "#;
 
@@ -720,14 +1273,16 @@ mod tests {
             assert!(m.ibl && !m.cuts_no_pixel(vm.cx()), "a masked surface hook can cut pixels");
             assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
             assert_eq!((m.cutoff, m.alpha_mode(vm.cx()), m.bounds_pad), (0.4, 1.0, 0.05));
-            // The same program lowers for every backend, not only Metal.
-            let base = vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).unwrap();
-            let mut overrides = builtin::overrides(vm, Builtin::HookedCompose);
-            overrides.extend(builtin::overrides(vm, Builtin::Ibl));
-            let prog = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Pbr, hooks: &hooks, mask: HookMask::ALL, overrides: &overrides }).unwrap();
-            for backend in [ShaderBackend::Metal, ShaderBackend::Hlsl, ShaderBackend::Glsl, ShaderBackend::Wgsl] {
-                let errors = frontend_errors_for(vm, prog, backend);
-                assert!(errors.is_empty(), "{backend:?}: {errors:?}");
+            let program = m.program.as_ref().expect("hooked PBR recipe").as_object();
+            for features in [
+                Features::default(),
+                Features { csm: true, cluster: true, local_shadows: true, gi: true, reflections: true, ..Default::default() },
+            ] {
+                let features = m.variant_key(features);
+                let obj = variants::variant_object(vm, program, features, m.lit()).unwrap_or(program);
+                let label = format!("hooked PBR {features:?}");
+                crate::shaders::check_scene_backends(vm, obj, &label);
+                crate::shaders::compile_scene_webgl2(vm, obj, &label);
             }
             for (body, expected) in [
                 ("base", SurfaceAlpha::Base),
@@ -789,7 +1344,7 @@ mod tests {
                 assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
                 assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
                 // Nothing in the lit surface or the coat reads the map past them.
-                for stage in ["shade", "clear_coat"] {
+                for stage in ["shade_mr_surface_at", "clear_coat"] {
                     let body = lowered_fn_body(&source, stage).unwrap_or_else(|| panic!("glsl {glsl}: no {stage}"));
                     assert!(!body.contains("mat_ibl_"), "glsl {glsl}: {stage} takes a lookup at the map's raw scale");
                 }
@@ -875,7 +1430,7 @@ mod tests {
             let program = m.program.as_ref().unwrap().as_object();
             // Every feature on but `clip`, and every feature off: each has
             // the stock layout (build_variant checks it).
-            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, settled: false, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
+            let all = Features { clip: false, gi: true, gi_screen: true, gi_debug: true, csm: true, settled: false, csm_debug: true, cluster: true, local_shadows: true, reflections: false };
             for features in [all, Features { settled: true, ..all }, Features::default()] {
                 let variant = build_variant(vm, program, stock, features, true).ok().flatten().expect("the stock layout");
                 assert_ne!(stock, variant);

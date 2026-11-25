@@ -623,6 +623,159 @@ impl SurfOfExtrusion {
         Ok(surf)
     }
 
+    /// Offsets a right extrusion of a line or circular arc by offsetting its generator
+    /// (WR-573). `None` leaves the offset to the base surface, including a collapsed arc.
+    ///
+    /// # Errors
+    ///
+    /// Those of the generator queries, offset construction and NURB rebuild.
+    pub fn create_offset_surface(
+        &self,
+        k: &Kernel,
+        signed_offset_distance: f64,
+        approx_tol_3d: f64,
+    ) -> Result<Option<Self>> {
+        let Some(gen) = self.gen_curve() else {
+            return Ok(None);
+        };
+        let Ok(axis) = self.extrusion_vec.unitize() else {
+            return Ok(None);
+        };
+        // Su x Sv is C' x E. Swapping the NURB directions reverses the normal.
+        let distance = if self.swap_uv {
+            -signed_offset_distance
+        } else {
+            signed_offset_distance
+        };
+        let mut off_gen = match gen.kind() {
+            CurveKind::Line(line)
+                if self.orientation == CurveOrientType::Linear
+                    && line.line_vector().is_perpendicular_to(axis, crate::math::EFF_ZERO_DEG) =>
+            {
+                // CreateSimpleOffset uses the stored line vector. Its NURB tangent
+                // also includes the signed scale and the inside-out direction.
+                let d = if line.inside_out() ^ (line.line_scale() < 0.0) {
+                    -distance
+                } else {
+                    distance
+                };
+                let (mut offset, _) = line.create_simple_offset(axis, d)?;
+                // An imported line can carry a rational or multi-span NURB.
+                if line.base().gw_nurb().is_some_and(|n| n.n() != 1 || n.is_rational()) {
+                    let mut translation = Axis2Placement::IDENTITY;
+                    translation.translate(offset.line_point() - line.line_point());
+                    offset.base = line.base().clone_exact();
+                    offset.base.transform(&translation, None)?;
+                }
+                Curve::from(offset)
+            }
+            CurveKind::BSpline(b)
+                if self.orientation == CurveOrientType::Perpendicular && b.is_rational()? =>
+            {
+                let tol = EFF_ZERO
+                    * (1.0 + self.origin.max_dimension() + self.curve_point.max_dimension());
+                let Some(arc @ (frame, radius, _, _)) = gen.is_arc(k, 11, tol)? else {
+                    return Ok(None);
+                };
+                let tilt = frame.z_axis().cross(axis).length();
+                if tilt > EFF_ZERO_RAD.sin() || tilt * distance.abs() > tol {
+                    return Ok(None);
+                }
+                let tangent = b.evaluate(b.natural_interval().min(), 1, true, false)?[1];
+                let radial_delta = if tangent.cross(axis).dot(frame.x_axis()) < 0.0 {
+                    -distance
+                } else {
+                    distance
+                };
+                if radius + radial_delta <= approx_tol_3d.max(tol) {
+                    return Ok(None);
+                }
+
+                // A clamped quadratic Bezier arc with equal end weights has the
+                // circle factory's parameter law. For other weights, knots or degrees,
+                // scale the original control polygon about the centre. The knots and
+                // weights then give the same rational basis at every parameter.
+                let nurb = b.gw_nurb().ok_or_else(not_b_spline)?;
+                let simple = if nurb.degree() == 2 && matches!(nurb.cpts(), [a, _, c] if a.w == c.w) {
+                    // Reuse the arc test above in CreateSimpleOffset's exact branch.
+                    let (c, _) = b.create_simple_offset_with(
+                        k,
+                        approx_tol_3d,
+                        frame.z_axis(),
+                        radial_delta,
+                        true,
+                        &|_, _, _| Ok(Some(arc)),
+                    )?;
+                    c.gw_nurb()
+                        .is_some_and(|n| n.knots() == nurb.knots())
+                        .then_some(c)
+                } else {
+                    None
+                };
+                let offset = if let Some(c) = simple {
+                    c
+                } else {
+                    let factor = radial_delta / radius;
+                    let mut translation = Axis2Placement::IDENTITY;
+                    translation.translate(-factor * frame.origin());
+                    let mut offset = b.clone_exact();
+                    let scale = Vec3::new(1.0 + factor, 1.0 + factor, 1.0 + factor);
+                    offset.transform(&translation, Some(scale))?;
+                    offset
+                };
+                Curve::from(offset)
+            }
+            _ => return Ok(None),
+        };
+
+        let source = self.base_with_nurb(k)?;
+        let domain = source.natural_uv_domain();
+        let gen_ivl = if self.swap_uv {
+            domain.v_interval()
+        } else {
+            domain.u_interval()
+        };
+        // MakeNurb trims a B-spline in STEP coordinates. Undo a surface
+        // reparameterization for the build, then restore both original NURB intervals.
+        if matches!(gen.kind(), CurveKind::BSpline(_)) && gen.natural_interval() == gen_ivl {
+            off_gen.edit_parameterization(k, &self.anal_uv_domain.u_interval())?;
+        }
+        let mut result = Self {
+            gen_curve: Some(off_gen),
+            extrusion_vec: self.extrusion_vec,
+            anal_uv_domain: self.anal_uv_domain,
+            orientation: self.orientation,
+            swap_uv: self.swap_uv,
+            curve_vec: self.curve_vec,
+            ..Self::empty()
+        };
+        result.set_out_of_bounds_enabled(self.is_out_of_bounds_enabled());
+        result.make_nurb(k)?;
+        if result.base.natural_uv_domain() != domain {
+            result.base.reparameterize(&domain)?;
+            result.gen_curve
+                .as_mut()
+                .ok_or_else(|| SolidError::null_pointer(OP_GEN))?
+                .edit_parameterization(k, &gen_ivl)?;
+        }
+        let gen = result.gen()?;
+        let start = gen.evaluate_point(k, gen.natural_interval().min())?;
+        result.origin = start;
+        result.curve_point = start;
+
+        // Reverse can edit just the surface NURB, leaving the analytic generator
+        // and swap bit alone. Check an off-centre UV against that actual NURB.
+        let uv = domain.evaluate(0.25, 0.25);
+        let mut ders = [[Vec3::ZERO; 2]; 2];
+        source.evaluate_simple_first_into(uv, true, true, true, &mut ders)?;
+        let Ok(normal) = ders[1][0].cross(ders[0][1]).unitize() else {
+            return Ok(None);
+        };
+        let expected = ders[0][0] + signed_offset_distance * normal;
+        let error = result.base.evaluate_point(uv)?.distance(expected);
+        Ok((error <= EFF_ZERO * (1.0 + expected.max_dimension())).then_some(result))
+    }
+
     /// Builds the NURB (`MakeNurb`): the generator trimmed to the domain's U interval
     /// (status ignored), its control points translated by the extrusion vector times
     /// the V domain ends (knots `{v0, v0, v1, v1}`, degree 1), over the generator's
@@ -2309,6 +2462,102 @@ mod tests {
 
     fn k() -> Kernel {
         Kernel::default()
+    }
+
+    #[test]
+    fn offset_generator_preserves_face_uvs() -> Result<()> {
+        use crate::nurbs::b_spline_curve::NurbCircleParam;
+        use crate::nurbs::knots::Side;
+        use crate::surface::surface::{Surface, SurfaceKind};
+
+        let upstream = k();
+        let mut k = k();
+        k.fixes.extrusion_offset_offsets_generator = true;
+        let tol = 1e-6;
+        let frame = Axis2Placement::new(Vec3::new(3.0, -4.0, 5.0), Vec3::X, Vec3::Y);
+        let arc = Curve::from(BSplineCurve::create_circle_segment(
+            3, &frame, 10.0, 0.0, 90.0, NurbCircleParam::Quadratic,
+        )?);
+        let line = Curve::from(Line::create_line_segment(
+            3, frame.origin(), frame.origin() + Vec3::new(6.0, 8.0, 0.0), None,
+        )?);
+        // An asymmetric trim changes the end weights. Reversing it also changes winding.
+        let mut trimmed = arc.copy(&k)?;
+        let mut trim = Extent1d::from_min_max(0.125, 0.75);
+        trimmed.trim(&k, &mut trim, TrimMode::Silent)?;
+        trimmed.reverse_parameterization(&k, &trim)?;
+        let make = |gen: &Curve, sweep, swap| -> Result<SurfOfExtrusion> {
+            let ivl = gen.natural_interval();
+            let origin = gen.evaluate_point(&k, ivl.min())?;
+            let domain = Extent2d::from_bounds(ivl.min(), 0.0, ivl.max(), 1.0);
+            let mut s = SurfOfExtrusion::new(&k, gen.copy(&k)?, origin, sweep, domain, swap)?;
+            s.make_nurb(&k)?;
+            if swap {
+                s.reparameterize(&k, &Extent2d::from_bounds(2.0, -3.0, 5.0, 7.0))?;
+            }
+            Ok(s)
+        };
+        let sweep = 30.0 * Vec3::Z;
+        for (name, gen) in [
+            ("quarter arc", &arc),
+            ("line", &line),
+            ("trimmed clockwise arc", &trimmed),
+        ] {
+            for swap in [false, true] {
+                let s = make(gen, sweep, swap)?;
+                let orientation = s.orientation();
+                let surface = Surface::from(s);
+                let domain = surface.natural_uv_domain_with_nurb(&k)?;
+                for d in [-2.4, 2.4] {
+                    let offset = surface
+                        .create_offset_surface(&k, d, tol)?
+                        .expect("a regular offset must produce a surface");
+                    let SurfaceKind::SurfOfExtrusion(e) = offset.kind() else {
+                        panic!("{name}, swap {swap}, d {d}: expected an offset extrusion");
+                    };
+                    assert_eq!(e.orientation(), orientation, "{name}: orientation changed");
+                    assert_eq!(e.swap_uv(), swap, "{name}: UV order changed");
+                    assert_eq!(e.extrusion_vector(), sweep, "{name}: sweep vector changed");
+                    assert_eq!(
+                        e.step_uv_domain(), surface.step_uv_domain(), "{name}: STEP domain changed"
+                    );
+                    assert_eq!(e.base().natural_uv_domain(), domain, "{name}: NURB domain changed");
+                    for i in 0..5 {
+                        for j in 0..5 {
+                            let uv = domain.evaluate(i as f64 / 4.0, j as f64 / 4.0);
+                            let expected = surface.evaluate_point(&k, uv)?
+                                + d * surface.evaluate_normal(&k, uv, Side::Left, Side::Left)?;
+                            let error = offset.evaluate_point(&k, uv)?.distance(expected);
+                            assert!(
+                                error <= 1e-9,
+                                "{name}, swap {swap}, d {d}, UV {uv:?}: point error {error:e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let s = make(&arc, sweep, false)?;
+        for d in [-10.0, -12.0] {
+            assert!(
+                s.create_offset_surface(&k, d, tol)?.is_none(),
+                "an inward offset of {} must fall back", -d
+            );
+        }
+        let oblique = make(&arc, Vec3::new(1.0, 0.0, 30.0), false)?;
+        assert!(
+            oblique.create_offset_surface(&k, 2.4, tol)?.is_none(), "a skew arc must fall back"
+        );
+        let surface = Surface::from(s);
+        for (kernel, d) in [(&upstream, -2.4), (&k, -10.0)] {
+            let offset = surface.create_offset_surface(kernel, d, tol)?
+                .expect("the base offset must exist");
+            assert!(
+                matches!(offset.kind(), SurfaceKind::OffsetSurface(_)),
+                "d {d}: fallback must use the numeric offset"
+            );
+        }
+        Ok(())
     }
 
     #[test]

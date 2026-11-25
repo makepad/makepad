@@ -18,6 +18,12 @@ use makepad_draw::*;
 pub use makepad_scene::SsrSettings;
 use crate::volume_fog::VolumeFogCamera as SsrCamera;
 
+/// The surface target's alpha on a held model's pixels (the first-person view model). It is
+/// under the receiver flag's 0.5, so no pass takes the pixel as a receiver. The trace also
+/// refuses a hit on it: a held model's depth is squeezed into a near band, so it is no
+/// world position and never a reflection source. 0.25 is 64/255 in the 8-bit target.
+pub const SSR_HELD_SURFACE: f64 = 0.25;
+
 script_mod! {
     use mod.pod.*
     use mod.math.*
@@ -160,6 +166,7 @@ script_mod! {
                     if hit_gap > 0.3 { return none }
                     let hit = self.unproject(hit_uv, hit_raw)
                     let hit_surface = self.surface_tex.sample_nearest(hit_uv)
+                    if abs(hit_surface.w - #(crate::ssr::SSR_HELD_SURFACE)) < 0.125 { return none }
                     var hit_n = vec3(0.0, 1.0, 0.0)
                     if hit_surface.w > 0.5 { hit_n = self.ssr_normal(hit_surface.xy) }
                     else { hit_n = self.ssr_hit_normal(hit_uv, hit) }
@@ -305,11 +312,11 @@ script_mod! {
             if weight > 0.000001 { return sum / weight }
             return closest
         }
-        pixel: fn() -> vec4 {
-            let scene = self.scene_tex.sample(self.pos)
+        ssr_skip: fn() -> bool {
             let surface = self.surface_tex.sample_nearest(self.pos)
-            if surface.w <= 0.5 || surface.z <= self.u_ssr_gloss { return scene }
-            let raw = self.depth_tex.sample_nearest(self.pos).x
+            return surface.w <= 0.5 || surface.z <= self.u_ssr_gloss
+        }
+        ssr_replace: fn(scene: vec4, raw: float) -> vec4 {
             if self.background(raw) > 0.5 { return scene }
             let depth = self.ssr_distance(self.unproject(self.pos, raw))
             let reflection = self.ssr_upsample(self.pos, depth)
@@ -320,7 +327,27 @@ script_mod! {
             // ENVSPEC.a is achromatic, including for coloured metals.
             return vec4(max(scene.xyz - env.xyz * c + radiance * (env.w * c), vec3(0.0, 0.0, 0.0)), scene.w)
         }
+        pixel: fn() -> vec4 {
+            let scene = self.scene_tex.sample(self.pos)
+            if self.ssr_skip() { return scene }
+            return self.ssr_replace(scene, self.depth_tex.sample_nearest(self.pos).x)
+        }
         fragment: fn() { self.fb0 = self.pixel() }
+    }
+
+    mod.draw.DrawSsrFogApply = mod.std.set_type_default() do #(DrawSsrFogApply::script_shader(vm)){
+        ..mod.draw.DrawSsrApply,
+        fb1: fragment_output(1, vec4f)
+        fog_tex: texture_2d(float)
+        fog_depth: texture_2d(float)
+        fog_apply: mod.draw.DrawVolumeFogApply.fog_apply
+        fragment: fn() {
+            let raw = self.depth_tex.sample_nearest(self.pos).x
+            var scene = self.scene_tex.sample(self.pos)
+            if !self.ssr_skip() { scene = self.ssr_replace(scene, raw) }
+            self.fb1 = scene
+            self.fb0 = self.fog_apply(scene, raw)
+        }
     }
 }
 
@@ -333,6 +360,9 @@ pub struct DrawSsrResolve { #[deref] pub draw_super: DrawQuad }
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSsrApply { #[deref] pub draw_super: DrawQuad }
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSsrFogApply { #[deref] pub draw_super: DrawQuad }
 
 #[derive(Default)]
 pub struct SsrHistory { previous: Option<SsrCamera>, frame: u32 }
@@ -346,6 +376,10 @@ pub struct SsrUniforms {
 }
 impl SsrUniforms {
     pub fn active(&self) -> bool { self.settings.active() && self.mixed_output_passes }
+    fn bind_settings(&self, cx: &Cx, dv: &mut DrawVars, gloss_floor: f32) {
+        dv.set_uniform(cx, live_id!(u_ssr), &[self.settings.strength, self.settings.max_distance, (self.frame % 4096) as f32, if self.history { 1.0 } else { 0.0 }]);
+        dv.set_uniform(cx, live_id!(u_ssr_gloss), &[gloss_floor]);
+    }
 }
 impl SsrHistory {
     pub fn uniforms(&self, settings: SsrSettings, camera: SsrCamera, mixed_output_passes: bool) -> SsrUniforms {
@@ -432,6 +466,13 @@ impl SsrPass {
         if let Some(r) = &self.resources { r.apply.pass.set_pass_parent(cx, parent); }
     }
     pub fn run(&mut self, cx: &mut Cx2d, frame: SsrFrame<'_>) -> Option<DrawPassId> {
+        let parent = frame.parent;
+        let apply = self.record(cx, frame)?;
+        self.apply(cx, &apply, parent);
+        Some(apply.first)
+    }
+
+    pub(crate) fn record(&mut self, cx: &mut Cx2d, frame: SsrFrame<'_>) -> Option<SsrApply> {
         if !frame.settings.active() || !cx.cx.gpu_info().mixed_output_passes { self.disable(cx.cx); return None; }
         if !self.ensure(cx.cx) { return None; }
         let pixels = frame.size * cx.current_dpi_factor();
@@ -443,22 +484,14 @@ impl SsrPass {
         self.flip ^= 1;
         let r = self.resources.as_mut().unwrap();
         r.trace.pass.set_pass_parent(cx.cx, r.resolve.pass.draw_pass_id());
-        r.resolve.pass.set_pass_parent(cx.cx, r.apply.pass.draw_pass_id());
-        r.apply.pass.set_pass_parent(cx.cx, frame.parent);
-        let depth_map = match cx.cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => [2.0, -1.0], _ => [1.0, 0.0] };
-        for dv in [&mut r.draw_trace.draw_super.draw_vars, &mut r.draw_resolve.draw_super.draw_vars, &mut r.draw_apply.draw_super.draw_vars] {
-            dv.set_uniform(cx.cx, live_id!(u_world_from_clip), &uniforms.camera.general.world_from_clip);
+        for dv in [&mut r.draw_trace.draw_super.draw_vars, &mut r.draw_resolve.draw_super.draw_vars] {
+            uniforms.camera.bind(cx.cx, dv);
             dv.set_uniform(cx.cx, live_id!(u_clip), &uniforms.camera.general.clip_from_world);
-            dv.set_uniform(cx.cx, live_id!(u_eye), &uniforms.camera.eye);
-            dv.set_uniform(cx.cx, live_id!(u_axis), &uniforms.camera.axis);
-            dv.set_uniform(cx.cx, live_id!(u_ref), &uniforms.camera.reference);
             dv.set_uniform(cx.cx, live_id!(u_previous_clip), &uniforms.previous.general.clip_from_world);
             dv.set_uniform(cx.cx, live_id!(u_previous_eye), &uniforms.previous.eye);
             dv.set_uniform(cx.cx, live_id!(u_previous_axis), &uniforms.previous.axis);
             dv.set_uniform(cx.cx, live_id!(u_previous_ref), &uniforms.previous.reference);
-            dv.set_uniform(cx.cx, live_id!(u_depth_map), &depth_map);
-            dv.set_uniform(cx.cx, live_id!(u_ssr), &[uniforms.settings.strength, uniforms.settings.max_distance, (uniforms.frame % 4096) as f32, if uniforms.history { 1.0 } else { 0.0 }]);
-            dv.set_uniform(cx.cx, live_id!(u_ssr_gloss), &[frame.gloss_floor]);
+            uniforms.bind_settings(cx.cx, dv, frame.gloss_floor);
         }
         let dv = &mut r.draw_trace.draw_super.draw_vars;
         dv.set_texture(0, frame.depth);
@@ -473,19 +506,49 @@ impl SsrPass {
         dv.set_texture(3, frame.depth);
         dv.set_texture(4, frame.surface);
         r.resolve.record(cx, half, &[&r.reflection[self.flip], &r.depth[self.flip]], &mut r.draw_resolve.draw_super);
-        let dv = &mut r.draw_apply.draw_super.draw_vars;
-        dv.set_texture(0, frame.scene);
-        dv.set_texture(1, &r.reflection[self.flip]);
-        dv.set_texture(2, &r.depth[self.flip]);
-        dv.set_texture(3, frame.depth);
-        dv.set_texture(4, frame.surface);
-        dv.set_texture(5, frame.envspec);
-        // The applied target IS the pass's private HDR copy for the next
-        // trace; writing the other half avoids a redundant full-screen copy.
-        r.apply.record(cx, pixels, &[&r.applied[self.flip]], &mut r.draw_apply.draw_super);
-        self.history.commit(&uniforms);
+        Some(SsrApply {
+            first: r.trace.pass.draw_pass_id(), pixels, uniforms, gloss_floor: frame.gloss_floor,
+            scene: frame.scene.clone(), depth: frame.depth.clone(), surface: frame.surface.clone(), envspec: frame.envspec.clone(),
+            reflection: r.reflection[self.flip].clone(), reflection_depth: r.depth[self.flip].clone(), target: r.applied[self.flip].clone(),
+        })
+    }
+
+    pub(crate) fn apply(&mut self, cx: &mut Cx2d, apply: &SsrApply, parent: DrawPassId) {
+        let r = self.resources.as_mut().unwrap();
+        r.resolve.pass.set_pass_parent(cx.cx, r.apply.pass.draw_pass_id());
+        r.apply.pass.set_pass_parent(cx.cx, parent);
+        let draw = &mut r.draw_apply.draw_super;
+        apply.uniforms.camera.bind(cx.cx, &mut draw.draw_vars);
+        apply.bind(cx.cx, &mut draw.draw_vars);
+        r.apply.record(cx, apply.pixels, &[&apply.target], draw);
+        self.commit_apply(apply);
+    }
+
+    pub(crate) fn applied_by_fog(&mut self, cx: &mut Cx, apply: &SsrApply, march: DrawPassId) {
+        let r = self.resources.as_ref().unwrap();
+        // A retained repaint must not overwrite the other writer's history.
+        r.apply.pass.clear_color_textures(cx);
+        r.apply.pass.withdraw(cx);
+        r.resolve.pass.set_pass_parent(cx, march);
+        self.commit_apply(apply);
+    }
+
+    fn commit_apply(&mut self, apply: &SsrApply) {
+        self.history.commit(&apply.uniforms);
         self.output_valid = true;
-        Some(r.trace.pass.draw_pass_id())
+    }
+}
+
+pub(crate) struct SsrApply {
+    pub first: DrawPassId, pub pixels: DVec2, pub uniforms: SsrUniforms, pub depth: Texture, pub target: Texture,
+    gloss_floor: f32, scene: Texture, reflection: Texture, reflection_depth: Texture, surface: Texture, envspec: Texture,
+}
+impl SsrApply {
+    pub(crate) fn bind(&self, cx: &Cx, dv: &mut DrawVars) {
+        self.uniforms.bind_settings(cx, dv, self.gloss_floor);
+        for (slot, tex) in [&self.scene, &self.reflection, &self.reflection_depth, &self.depth, &self.surface, &self.envspec].into_iter().enumerate() {
+            dv.set_texture(slot, tex);
+        }
     }
 }
 pub struct SsrFrame<'a> {
@@ -537,5 +600,7 @@ mod tests {
         for (name, source) in [("trace", trace), ("resolve", resolve), ("apply", apply)] {
             assert!(source.contains("self.u_ssr_gloss"), "{name} must read the tier's reflection gloss floor");
         }
+        assert!(trace.contains("hit_surface.w - #(crate::ssr::SSR_HELD_SURFACE)"),
+            "the trace must refuse a hit on a held model by its surface marker");
     }
 }

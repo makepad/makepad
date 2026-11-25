@@ -2,6 +2,26 @@
 
 use super::*;
 
+impl UploadedStaticPreview {
+    /// Assign a pick id to the geometry of a named layer in this asset and its LODs.
+    /// Copies of the asset share these index ranges just as they share its geometry.
+    pub fn set_layer_pick_id(&self, cx: &mut Cx, layer: &str, id: u32) {
+        let mut assign = |geometry: &Geometry, material: &LayerMaterial| {
+            if material.name.as_ref() == layer {
+                geometry.set_pick_ranges(cx, &mut vec![[0, id]]);
+            }
+        };
+        assign(&self.geometry, &self.material);
+        for (geometry, _, _, _, material) in self.extra_draws.iter()
+            .chain(self.anim_parts.iter().flat_map(|p| p.draws.iter()))
+            .chain(self.driven_parts.iter().flat_map(|p| p.draws.iter()))
+        {
+            assign(geometry, material);
+        }
+        for (_, lod) in &self.lods { lod.set_layer_pick_id(cx, layer, id); }
+    }
+}
+
 impl Renderer {
     /// Keys held by this renderer's content cache, for host residency reconciliation.
     pub fn cached_texture_keys(&self) -> impl Iterator<Item = u64> + '_ {
@@ -190,6 +210,7 @@ impl Renderer {
         self.restore_walk = true;
         let previous = if let Some(at) = at { Some(std::mem::replace(&mut self.static_models[at].1, model)) }
             else { self.static_models.push((id.to_string(), model)); if transient { self.preview_new.insert(id.to_string()); } None };
+        let previous_layers = previous.as_ref().and_then(|m| m.ordinary_shadow_bounds.clone());
         let old_ao_key = self.model_pack.iter().find(|(key, _)| key == id).map(|(_, key)| key.clone());
         self.model_pack.retain(|(key, _)| key != id);
         if let Some(ao)=ao{self.ao_textures.retain(|(key,_)|key!=id);self.ao_textures.push((id.to_string(),ao));self.model_pack.push((id.to_string(),id.to_string()));}
@@ -200,7 +221,7 @@ impl Renderer {
         } else {
             self.preview_originals.remove(id);
         }
-        self.static_model_changed(id);
+        self.static_model_changed(id, previous_layers);
         Some(triangles)
     }
 
@@ -249,7 +270,7 @@ impl Renderer {
             let surface=layer.surface.map(|s|crate::material_surface::UploadedSurface{definition:std::sync::Arc::new(s.definition),
                 normal:shared(cx,cache,std::sync::Arc::new(s.normal),first_level),occlusion:shared(cx,cache,std::sync::Arc::new(s.occlusion),first_level),emissive:shared(cx,cache,std::sync::Arc::new(s.emissive),first_level),
                 splat:s.splat.map(|p|p.upload(cx,cache,first_level))});
-            let material=LayerMaterial{name:layer.name,surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
+            let material=LayerMaterial{name:layer.name,traced_required:None,surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
                 orm:shared(cx,cache,layer.orm,first_level),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
             (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture,first_level),shared(cx,cache,layer.detail,first_level),layer.detail_scale,material)
         };
@@ -272,7 +293,7 @@ impl Renderer {
         let bake_geometry=prepared.bake_stream.map(|(indices,vertices)|{let g=Geometry::new(cx);g.update(cx,indices,vertices);std::rc::Rc::new(g)});
         let morph=prepared.morph.map(|m|m.upload(cx));
         let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview_levels(cx,model))).collect();
-        UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
+        UploadedStaticPreview{lods,ordinary_shadow_bounds:None,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
             prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,stand_in,
             authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
             extra_draws,anim_parts,driven_parts,sky,liquids:prepared.liquids}
@@ -282,7 +303,7 @@ impl Renderer {
             extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
             min:uploaded.min,max:uploaded.max,stand_in:uploaded.stand_in,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
             anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:uploaded.liquids,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
-            lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
+            ordinary_shadow_bounds:uploaded.ordinary_shadow_bounds,lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
     }
 
     /// Register pre-uploaded generated geometry. Payload clones contain only
@@ -294,34 +315,51 @@ impl Renderer {
         let model = Self::uploaded_static_model(uploaded);
         self.model_lod_chains_dirty = true;
         self.restore_walk = true;
-        if let Some((_, old)) = self.static_models.iter_mut().find(|(key, _)| key == id) { *old = model; }
-        else { self.static_models.push((id.to_string(), model)); }
+        let previous_layers = if let Some((_, old)) = self.static_models.iter_mut().find(|(key, _)| key == id) {
+            std::mem::replace(old, model).ordinary_shadow_bounds
+        } else {
+            self.static_models.push((id.to_string(), model));
+            None
+        };
         self.model_pack.retain(|(key, _)| key != id);
         if let Some(ao)=ao{self.ao_textures.retain(|(key,_)|key!=id);self.ao_textures.push((id.to_string(),ao));self.model_pack.push((id.to_string(),id.to_string()));}
         self.preview_originals.remove(id);
         self.preview_new.remove(id);
-        self.static_model_changed(id);
+        self.static_model_changed(id, previous_layers);
         self.prune_texture_cache();
         triangles
     }
 
-    fn static_model_changed(&mut self, id: &str) {
+    fn static_model_changed(&mut self, id: &str, previous_layers: Option<std::rc::Rc<super::lights::OrdinaryShadowBounds>>) {
         self.model_asset_revision = self.model_asset_revision.wrapping_add(1);
-        let chart = self.static_models.iter().find(|(name, _)| name == id)
+        let placed_static = self.placed_models.live().any(|(_, copy)| !copy.dynamic && copy.model == id);
+        if placed_static {
+            self.models_gi_rev = self.models_gi_rev.wrapping_add(1);
+        }
+        let model = self.static_models.iter().find(|(name, _)| name == id);
+        let layers = model.and_then(|(_, m)| m.ordinary_shadow_bounds.as_ref());
+        let layers_changed = previous_layers.as_ref().map(std::rc::Rc::as_ptr) != layers.map(std::rc::Rc::as_ptr);
+        let chart = model
             .filter(|(_, model)| model.morph.is_none())
             .and_then(|(_, model)| model.lm_source.as_ref())
             .map(|source| source.chart_key);
-        if self.lm_model_charts.get(id).copied() != chart {
+        let chart_changed = self.lm_model_charts.get(id).copied() != chart;
+        if chart_changed {
             if let Some(key) = chart {
                 self.lm_model_charts.insert(id.to_owned(), key);
             } else {
                 self.lm_model_charts.remove(id);
             }
-            // An upload can replace a placed chart without changing its name
-            // or transform. An in-flight bake still belongs to the old chart.
-            if self.placed_models.iter().any(|copy| !copy.dynamic && copy.model == id) {
-                self.models_rev = self.models_rev.wrapping_add(1);
-            }
+        }
+        if placed_static && (chart_changed || layers_changed) {
+            self.models_rev = self.models_rev.wrapping_add(1);
+        }
+        if placed_static && layers_changed {
+            // The old job can still *draw* its casters during the settle
+            // debounce. Rejecting only its eventual delivery is too late.
+            self.gpu_baker.enter_realm();
+            self.clear_delivered_lightmap();
+            self.lm_kick_key = None;
         }
         self.rebuild_csm_static_casters();
     }
@@ -352,13 +390,13 @@ impl Renderer {
     /// A cleared or unsupported draft restores its resident durable model
     /// without any synchronous network read or GLB/skin parse.
     pub fn restore_static_preview(&mut self, id: &str) {
-        if self.preview_new.remove(id) { self.static_models.retain(|(key, _)| key != id); self.static_model_changed(id); }
+        if self.preview_new.remove(id) { self.static_models.retain(|(key, _)| key != id); self.static_model_changed(id, None); }
         if let Some((original, ao_key)) = self.preview_originals.remove(id) {
             if let Some((_, model)) = self.static_models.iter_mut().find(|(key, _)| key == id) {
-                *model = original;
+                let previous_layers = std::mem::replace(model, original).ordinary_shadow_bounds;
                 self.restore_walk = true;
                 if let Some(key) = ao_key { self.model_pack.push((id.to_string(), key)); }
-                self.static_model_changed(id);
+                self.static_model_changed(id, previous_layers);
             }
         }
     }
@@ -844,6 +882,7 @@ impl Renderer {
             id.to_string(),
             LoadedModel {
                 lods:Vec::new(),
+                ordinary_shadow_bounds:None,
                 morph:None,
                 prepared_sdf:None,
                 emitters: Default::default(),
@@ -872,7 +911,7 @@ impl Renderer {
                 bake_geometry,
             },
         ));
-        self.static_model_changed(id);
+        self.static_model_changed(id, None);
         Ok(triangles)
     }
 
@@ -904,8 +943,8 @@ impl Renderer {
         // Its doors go with it: a reload re-parses the GLB, and a clock aimed
         // at a state index of the OLD parse has no meaning against the new
         // one.
-        let slots: Vec<usize> = self
-            .placed_models
+        // Unloading forgets the old animation clocks even for slots the host could restore.
+        let slots: Vec<usize> = self.placed_models()
             .iter()
             .enumerate()
             .filter(|(_, m)| m.model == id)

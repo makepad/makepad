@@ -1200,6 +1200,11 @@ impl StaticModel {
         };
         let mut vert_total = 0usize;
         let mut parts: Vec<(Vec3f, Vec3f)> = Vec::new();
+        // A far stand-in's extent (impostor.rs: a camera-facing picture of the body, square
+        // around its centre, so it reaches past the body). It is not the body: placement,
+        // culling, colliders and occluders take the body's bounds, unless it is all there is.
+        let mut stand_min = Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX };
+        let mut stand_max = Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN };
         // Kept alongside the packed stream purely so AO can be baked once the
         // whole mesh is known — occlusion needs every triangle, and primitives
         // arrive one at a time. Dropped at the end of this function.
@@ -1302,6 +1307,7 @@ impl StaticModel {
                 let prim_image = gltf_prim_image_index(&json, prim);
                 let (detail_image, detail_scale) = gltf_prim_detail(&json, prim);
                 let prim_pbr = gltf_prim_pbr(&json, prim);
+                let stand_in = gltf_prim_is_stand_in(&json, prim);
                 let prim_v0 = vert_total;
                 let prim_i0 = indices.len();
                 // Reflection reverses winding. Authored normals follow the
@@ -1345,12 +1351,13 @@ impl StaticModel {
                         nrm.y /= len;
                         nrm.z /= len;
                     }
-                    min.x = min.x.min(p.x);
-                    min.y = min.y.min(p.y);
-                    min.z = min.z.min(p.z);
-                    max.x = max.x.max(p.x);
-                    max.y = max.y.max(p.y);
-                    max.z = max.z.max(p.z);
+                    let (lo, hi) = if stand_in { (&mut stand_min, &mut stand_max) } else { (&mut min, &mut max) };
+                    lo.x = lo.x.min(p.x);
+                    lo.y = lo.y.min(p.y);
+                    lo.z = lo.z.min(p.z);
+                    hi.x = hi.x.max(p.x);
+                    hi.y = hi.y.max(p.y);
+                    hi.z = hi.z.max(p.z);
                     pmin.x = pmin.x.min(p.x);
                     pmin.y = pmin.y.min(p.y);
                     pmin.z = pmin.z.min(p.z);
@@ -1413,8 +1420,9 @@ impl StaticModel {
                     liquid_spans.push((node_index, prim_i0, indices.len()));
                 }
                 if count > 0 {
-                    parts.push((pmin, pmax));
+                    if !stand_in { parts.push((pmin, pmax)); }
                     prim_spans.push(PrimSpan {
+                        stand_in,
                         material: prim.get("material").and_then(Val::usize),
                         band: band_uv.is_some(),
                         image: prim_image,
@@ -1518,6 +1526,13 @@ impl StaticModel {
             max.y = max.y.max(s.max.y);
             max.z = max.z.max(s.max.z);
         }
+        // Nothing but a stand-in: its own extent is the model's.
+        let body = min.x <= max.x;
+        if !body && stand_min.x <= stand_max.x { (min, max) = (stand_min, stand_max); }
+        // The AO bake takes the whole mesh it bakes, as before.
+        let (bake_min, bake_max) = if body && stand_min.x <= stand_max.x {
+            (vec3f(min.x.min(stand_min.x), min.y.min(stand_min.y), min.z.min(stand_min.z)), vec3f(max.x.max(stand_max.x), max.y.max(stand_max.y), max.z.max(stand_max.z)))
+        } else { (min, max) };
         if vertices.is_empty() && anim_parts.is_empty() && driven_parts.is_empty() && sky.is_none() {
             // A distance variant can intentionally drop every visible owner.
             let empty_lod = node_vals.iter().enumerate().any(|(i,n)| active_nodes[i]
@@ -1559,11 +1574,11 @@ impl StaticModel {
                 let mut raw_authored = raw_nrm.clone();
                 resolve_corner_normals(
                     &mut raw_pos, &mut raw_nrm, &mut raw_authored, &mut raw_uv, &mut raw_tint,
-                    &mut indices, min, max,
+                    &mut indices, bake_min, bake_max,
                 );
                 let baked = crate::ao_atlas::bake_into_authored(
                     atlas, &mut raw_pos, &mut raw_nrm, Some(&raw_authored), &mut indices,
-                    min, max,
+                    bake_min, bake_max,
                 );
                 let mut uv = Vec::with_capacity(raw_pos.len());
                 let mut tint = Vec::with_capacity(raw_pos.len());
@@ -1658,6 +1673,13 @@ impl StaticModel {
         } else {
             Vec::new()
         };
+        // A stand-in draws from its own layer; the merged mesh is the body's (colliders,
+        // occluders, the lightmap raycaster), so a tree's far picture is no wall through it.
+        // A model drawn from the merged mesh (one layer, an AO atlas) or morphed keeps it whole.
+        let mut liquid_ranges = liquid_ranges;
+        if body && !draw_layers.is_empty() && !has_morphs && prim_spans.iter().any(|s| s.stand_in) {
+            strip_stand_ins(&mut vertices, &mut indices, &mut liquid_ranges, &prim_spans);
+        }
         let (detail_png, detail_scale) = first_detail_layer(&draw_layers, &prim_spans, &json, bin_chunk);
         let prelit = materials_have_lightmap(&json);
         let pbr = model_level_pbr(&prim_spans, &json, bin_chunk);
@@ -1695,6 +1717,8 @@ impl StaticModel {
 
 #[derive(Clone)]
 struct PrimSpan {
+    /// A far stand-in's quad (`makepadShading.impostor`): drawn, not part of the body.
+    stand_in: bool,
     material: Option<usize>,
     /// Its vertices carry their band coordinates in the AO lane (a worn
     /// road part on a model whose lane is free): its paint keeps its band.
@@ -1747,6 +1771,29 @@ pub(crate) fn gltf_mag_nearest(json: &Val, index: usize) -> bool {
         let sampler = json.get("textures")?.idx(texture)?.get("sampler")?.usize()?;
         json.get("samplers")?.idx(sampler)?.get("magFilter")?.usize()
     })() == Some(9728)
+}
+
+/// A primitive whose material is a far stand-in (impostor.rs, `makepadShading.impostor`).
+fn gltf_prim_is_stand_in(json: &Val, prim: &Val) -> bool {
+    prim.get("material").and_then(Val::usize)
+        .and_then(|m| json.get("materials")?.idx(m)?.get("extras")?.get("makepadShading")?.get("impostor")?.f64())
+        .is_some_and(|distance| distance > 0.0)
+}
+
+/// Drop the stand-in spans' vertices and triangles from the merged mesh, keeping every
+/// other span in order (a span's triangles index only its own vertices).
+fn strip_stand_ins(vertices: &mut Vec<f32>, indices: &mut Vec<u32>, liquid_ranges: &mut [(usize, usize)], spans: &[PrimSpan]) {
+    let mut kept_vertices = Vec::with_capacity(vertices.len());
+    let mut kept_indices = Vec::with_capacity(indices.len());
+    for span in spans.iter().filter(|span| !span.stand_in) {
+        let v0 = (kept_vertices.len() / MODEL_VERTEX_FLOATS) as u32;
+        kept_vertices.extend_from_slice(&vertices[span.v0 * MODEL_VERTEX_FLOATS..span.v1 * MODEL_VERTEX_FLOATS]);
+        let i0 = kept_indices.len();
+        kept_indices.extend(indices[span.i0..span.i1].iter().map(|&i| i - span.v0 as u32 + v0));
+        for range in liquid_ranges.iter_mut().filter(|range| **range == (span.i0, span.i1)) { *range = (i0, kept_indices.len()); }
+    }
+    *vertices = kept_vertices;
+    *indices = kept_indices;
 }
 
 pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<crate::material_surface::MaterialSurface> {
@@ -2483,6 +2530,7 @@ fn pack_node_stream(
             let (detail_image, detail_scale) = gltf_prim_detail(json, prim);
             let (metallic, roughness, orm_image) = gltf_prim_pbr(json, prim);
             out.spans.push(PrimSpan {
+                stand_in: false,
                 material: prim.get("material").and_then(Val::usize),
                 band: false,
                 image: gltf_prim_image_index(json, prim),
@@ -3674,6 +3722,51 @@ pub(crate) mod tests {
         out.extend_from_slice(b"BIN\0");
         out.extend_from_slice(&bin);
         out
+    }
+
+    /// A bush (wide, short, standing on y = 0) with its far stand-in: the bake's square
+    /// quad around the bush's centre reaches below the ground. A copy is grounded by the
+    /// model's bounds, so the quad must not be in them, nor in the collider mesh (a tree's
+    /// stand-in was a wall through it); it still draws, from its own layer. A model that is
+    /// nothing but a stand-in keeps the stand-in's own bounds.
+    #[test]
+    fn a_far_stand_in_draws_but_is_not_part_of_the_body() {
+        let body: [[f32; 3]; 12] = [
+            [-2.0, 0.0, -2.0], [2.0, 0.0, -2.0], [0.0, 1.0, 0.0], [2.0, 0.0, -2.0], [2.0, 0.0, 2.0], [0.0, 1.0, 0.0],
+            [2.0, 0.0, 2.0], [-2.0, 0.0, 2.0], [0.0, 1.0, 0.0], [-2.0, 0.0, 2.0], [-2.0, 0.0, -2.0], [0.0, 1.0, 0.0],
+        ];
+        let quad: [[f32; 3]; 6] = [[-2.0, -1.5, 0.0], [2.0, -1.5, 0.0], [2.0, 2.5, 0.0], [-2.0, -1.5, 0.0], [2.0, 2.5, 0.0], [-2.0, 2.5, 0.0]];
+        let glb = |parts: &[&[[f32; 3]]], materials: &[&str]| {
+            let mut bin = Vec::new();
+            let (mut views, mut accessors, mut primitives) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, part) in parts.iter().enumerate() {
+                views.push(format!(r#"{{"buffer":0,"byteOffset":{},"byteLength":{}}}"#, bin.len(), part.len() * 12));
+                accessors.push(format!(r#"{{"bufferView":{i},"componentType":5126,"count":{},"type":"VEC3"}}"#, part.len()));
+                primitives.push(format!(r#"{{"attributes":{{"POSITION":{i}}},"material":{i}}}"#));
+                for p in part.iter() { for f in p { bin.extend_from_slice(&f.to_le_bytes()); } }
+            }
+            let json = format!(r#"{{"asset":{{"version":"2.0"}},"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{}]}}],"materials":[{}],"accessors":[{}],"bufferViews":[{}],"buffers":[{{"byteLength":{}}}]}}"#,
+                primitives.join(","), materials.join(","), accessors.join(","), views.join(","), bin.len());
+            glb_from(json, bin)
+        };
+        let leaves = r#"{"name":"leaves"}"#;
+        let stand_in = r#"{"name":"stand-in","alphaMode":"MASK","extras":{"makepadShading":{"impostor":50.0}}}"#;
+        let close = |a: Vec3f, b: [f32; 3]| (a.x - b[0]).abs() < 1e-6 && (a.y - b[1]).abs() < 1e-6 && (a.z - b[2]).abs() < 1e-6;
+
+        let bush = StaticModel::parse_glb(&glb(&[&body, &quad], &[leaves, stand_in])).unwrap();
+        assert!(close(bush.min, [-2.0, 0.0, -2.0]) && close(bush.max, [2.0, 1.0, 2.0]),
+            "bounds are the body's, so a grounded copy stands on its base: {:?}..{:?}", bush.min, bush.max);
+        assert_eq!(bush.parts.len(), 1, "the stand-in is no collider or occluder part");
+        assert_eq!((bush.vertices.len() / MODEL_VERTEX_FLOATS, bush.indices.len()), (12, 12), "the merged (collision) mesh is the body's");
+        assert!(bush.vertices.chunks_exact(MODEL_VERTEX_FLOATS).all(|v| v[1] >= 0.0), "no stand-in corner in the merged mesh");
+        assert_eq!(bush.draw_layers.len(), 2, "the stand-in still draws, from its own layer");
+        assert!(bush.draw_layers.iter().any(|l| l.indices.len() == 6 && l.pbr.surface.as_ref().is_some_and(|s| s.impostor > 0.0)),
+            "the drawn stand-in layer keeps its two triangles");
+
+        let alone = StaticModel::parse_glb(&glb(&[&quad], &[stand_in])).unwrap();
+        assert!(close(alone.min, [-2.0, -1.5, 0.0]) && close(alone.max, [2.0, 2.5, 0.0]),
+            "a model that is only a stand-in keeps its bounds: {:?}..{:?}", alone.min, alone.max);
+        assert_eq!(alone.indices.len(), 6, "and its mesh");
     }
 
     /// Two rooms and a door, the shape the classic-map importer exports:

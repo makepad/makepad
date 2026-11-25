@@ -9,14 +9,13 @@ use crate::b3_validate;
 use crate::constants::{linear_slop, min_capsule_length};
 use crate::core::NULL_INDEX;
 use crate::manifold::{
-    clip_polygon, edge_edge_separation, find_incident_face, flip_pair, make_feature_pair,
-    validate_polygon, ClipVertex, EdgeQuery, FaceQuery, FeatureOwner, FEATURE_PAIR_SINGLE,
-    MAX_CLIP_POINTS,
+    edge_edge_separation, find_incident_face, flip_pair, make_feature_pair,
+    validate_polygon, ClipBuffer, ClipVertex, EdgeQuery, FaceQuery, FeatureOwner, FEATURE_PAIR_SINGLE, MAX_CLIP_POINTS,
 };
 use crate::math_functions::{
     abs_float, add, cross, distance as vec_distance, distance_squared, dot, get_length_and_normalize, inv_mul_quat, invert_transform,
     inv_rotate_vector, inv_transform_point, length_squared, lerp, line_distance,
-    make_matrix_from_quat, max_float, min_float, min_int, mul_add, mul_mv, mul_sub, mul_sv, neg,
+    make_matrix_from_quat, max_float, min_float, mul_add, mul_mv, mul_sub, mul_sv, neg,
     normalize, point_to_segment_distance, rotate_vector, segment_distance, sub, transform_point,
     Plane, Transform, Vec3,
 };
@@ -354,12 +353,12 @@ fn query_edge_directions(hull_a: &HullData, hull_b: &HullData, transform_b_to_a:
 
 // Reduce the manifold points to a maximum of 4 points.
 // Note: this modifies the input point array to improve performance
-fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &mut [LocalManifoldPoint], count: i32, speculative: f32) {
+fn reduce_manifold_points(manifold: &mut LocalManifold, capacity: i32, points: &mut [LocalManifoldPoint], speculative: f32) {
     if capacity < 4 {
         return;
     }
 
-    let mut count = count;
+    let mut count = points.len() as i32;
 
     if count <= 4 {
         manifold.points.clear();
@@ -1069,7 +1068,7 @@ pub fn collide_hull_and_capsule(manifold: &mut LocalManifold, capacity: i32, hul
     }
 }
 
-fn build_polygon(out: &mut [ClipVertex], transform: Transform, hull: &HullData, inc_face: i32, ref_plane: Plane) -> i32 {
+fn build_polygon(out: &mut ClipBuffer<ClipVertex, MAX_CLIP_POINTS>, transform: Transform, hull: &HullData, inc_face: i32, ref_plane: Plane) {
     let faces = &hull.faces;
     let edges = &hull.edges;
     let points = &hull.points;
@@ -1077,8 +1076,6 @@ fn build_polygon(out: &mut [ClipVertex], transform: Transform, hull: &HullData, 
     let face = *hull_at(faces, inc_face as usize);
     let mut edge_index = face.edge as i32;
     b3_assert!(hull_at(edges, edge_index as usize).face as i32 == inc_face);
-
-    let mut out_count: i32 = 0;
 
     let matrix = make_matrix_from_quat(transform.q);
 
@@ -1088,24 +1085,21 @@ fn build_polygon(out: &mut [ClipVertex], transform: Transform, hull: &HullData, 
         let next_edge_index = edge.next as i32;
         let next = *hull_at(edges, next_edge_index as usize);
 
-        let mut vertex = ClipVertex::default();
-        vertex.position = add(mul_mv(matrix, *hull_at(points, next.origin as usize)), transform.p);
-        vertex.separation = plane_separation(ref_plane, vertex.position);
-        vertex.pair = make_feature_pair(FeatureOwner::ShapeB, edge_index, FeatureOwner::ShapeB, next_edge_index);
-
-        out[out_count as usize] = vertex;
-        out_count += 1;
+        let position = add(mul_mv(matrix, *hull_at(points, next.origin as usize)), transform.p);
+        out.push(ClipVertex {
+            position,
+            separation: plane_separation(ref_plane, position),
+            pair: make_feature_pair(FeatureOwner::ShapeB, edge_index, FeatureOwner::ShapeB, next_edge_index),
+        });
 
         edge_index = next_edge_index;
 
-        if !(edge_index != face.edge as i32 && out_count < MAX_CLIP_POINTS as i32) {
+        if edge_index == face.edge as i32 {
             break;
         }
     }
 
-    b3_validate!(validate_polygon(out, out_count));
-
-    out_count
+    b3_validate!(validate_polygon(out.as_slice(), out.as_slice().len() as i32));
 }
 
 fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: FaceQuery, cache: &mut SATCache, speculative: f32) -> bool {
@@ -1123,13 +1117,12 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
     let inc_face = find_incident_face(hull_b, ref_normal_in_b, query.vertex_index);
 
     // Build clip polygon from incident face in frame A
-    let mut buffer1 = [ClipVertex::default(); MAX_CLIP_POINTS];
-    let mut buffer2 = [ClipVertex::default(); MAX_CLIP_POINTS];
-    let mut point_count = build_polygon(&mut buffer1, transform_b_to_a, hull_b, inc_face, ref_plane);
+    let mut buffer1 = ClipBuffer::new();
+    let mut buffer2 = ClipBuffer::new();
+    build_polygon(&mut buffer1, transform_b_to_a, hull_b, inc_face, ref_plane);
 
     // Clip incident face against side planes of reference face
-    let mut input: &mut [ClipVertex] = &mut buffer1;
-    let mut output: &mut [ClipVertex] = &mut buffer2;
+    let (mut input, mut output) = (&mut buffer1, &mut buffer2);
 
     let face = *hull_at(faces_a, ref_face as usize);
     let mut edge_index = face.edge as i32;
@@ -1145,12 +1138,10 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
 
         let clip_plane = make_plane_from_normal_and_point(binormal, vertex1);
 
-        point_count = clip_polygon(output, input, point_count, clip_plane, edge_index, ref_plane);
-        b3_assert!(point_count <= MAX_CLIP_POINTS as i32);
-
+        output.clip_from(input.as_slice(), clip_plane, edge_index, ref_plane);
         std::mem::swap(&mut output, &mut input);
 
-        if point_count < 3 {
+        if input.as_slice().len() < 3 {
             *cache = SATCache::default();
             return false;
         }
@@ -1161,18 +1152,12 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
         }
     }
 
-    let point_count = min_int(point_count, MAX_CLIP_POINTS as i32);
-
-    let mut points = [LocalManifoldPoint::default(); MAX_CLIP_POINTS];
+    let mut points = ClipBuffer::<LocalManifoldPoint, MAX_CLIP_POINTS>::new();
     let mut min_separation = f32::MAX;
 
     manifold.normal = ref_plane.normal;
 
-    for i in 0..point_count {
-        let clip_point = &input[i as usize];
-        let pt = &mut points[i as usize];
-        *pt = LocalManifoldPoint::default();
-
+    for clip_point in input.as_slice() {
         // Using the half-way point keeps the points in the same position when swapping
         // reference face from A to B.
         let point = mul_sub(clip_point.position, 0.5 * clip_point.separation, ref_plane.normal);
@@ -1180,9 +1165,12 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
         // Old way of pushing onto the reference face:
         // point = clip_point.position - clip_point.separation * ref_plane.normal
 
-        pt.point = point;
-        pt.separation = clip_point.separation;
-        pt.pair = clip_point.pair;
+        points.push(LocalManifoldPoint {
+            point,
+            separation: clip_point.separation,
+            pair: clip_point.pair,
+            triangle_index: 0,
+        });
 
         min_separation = min_float(min_separation, clip_point.separation);
     }
@@ -1192,7 +1180,7 @@ fn build_face_a_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
         return false;
     }
 
-    reduce_manifold_points(manifold, capacity, &mut points, point_count, speculative);
+    reduce_manifold_points(manifold, capacity, points.as_mut_slice(), speculative);
 
     // Save cache
     cache.separation = min_separation;
@@ -1231,7 +1219,7 @@ fn build_face_b_contact(manifold: &mut LocalManifold, capacity: i32, hull_a: &Hu
     true
 }
 
-fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: EdgeQuery, cache: &mut SATCache) -> bool {
+fn edge_contact(hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: EdgeQuery, cache: &mut SATCache) -> Option<(Vec3, LocalManifoldPoint)> {
     // Work in shapeA coordinates
     let edges_a = &hull_a.edges;
     let points_a = &hull_a.points;
@@ -1263,7 +1251,7 @@ fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &
 
     if !is_within_segments(&result) {
         *cache = SATCache::default();
-        return false;
+        return None;
     }
 
     // This can slide off the end from caching
@@ -1275,14 +1263,10 @@ fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &
     let point = mul_sv(0.5, add(result.point1, result.point2));
 
     // Result in frame A
-    manifold.normal = normal;
-    manifold.points.clear();
-
     let mut pt = LocalManifoldPoint::default();
     pt.point = point;
     pt.separation = separation;
     pt.pair = make_feature_pair(FeatureOwner::ShapeA, query.index_a, FeatureOwner::ShapeB, query.index_b);
-    manifold.points.push(pt);
 
     // Save cache
     cache.separation = separation;
@@ -1290,7 +1274,17 @@ fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &
     cache.index_a = query.index_a as u8;
     cache.index_b = query.index_b as u8;
 
-    true
+    Some((normal, pt))
+}
+
+fn build_edge_contact(manifold: &mut LocalManifold, hull_a: &HullData, hull_b: &HullData, transform_b_to_a: Transform, query: EdgeQuery, cache: &mut SATCache) -> bool {
+    if let Some((normal, point)) = edge_contact(hull_a, hull_b, transform_b_to_a, query, cache) {
+        manifold.normal = normal;
+        manifold.points.clear();
+        manifold.points.push(point);
+        return true;
+    }
+    false
 }
 
 /// Collide two hulls.
@@ -1544,20 +1538,12 @@ pub fn collide_hulls(manifold: &mut LocalManifold, capacity: i32, hull_a: &HullD
     // Face contact can be empty if it does not realize the axis of minimum penetration.
     // Create edge contact if face contact fails or edge contact is significantly better!
     if manifold.point_count() == 0 || edge_query.separation > K_REL_EDGE_TOLERANCE * clipped_face_separation + k_abs_tolerance {
-        // Edge contact
-        let mut edge_manifold = LocalManifold::default();
-
-        build_edge_contact(&mut edge_manifold, hull_a, hull_b, transform_b_to_a, edge_query, cache);
-
-        // It is possible with speculation to have vertex-vertex collision that is missed by SAT.
-        if edge_manifold.point_count() == 1 {
-            // Copy edge manifold out, being careful to preserve manifold point buffer.
-            let edge_point = edge_manifold.points[0];
-            let mut points = std::mem::take(&mut manifold.points);
-            points.clear();
-            points.push(edge_point);
-            *manifold = edge_manifold;
-            manifold.points = points;
+        // Speculation can miss a vertex-vertex pair. Keep the face unless the
+        // edge produced a point, and reuse the caller's manifold storage.
+        if let Some((normal, point)) = edge_contact(hull_a, hull_b, transform_b_to_a, edge_query, cache) {
+            manifold.points.clear();
+            manifold.points.push(point);
+            *manifold = LocalManifold { normal, points: std::mem::take(&mut manifold.points), ..Default::default() };
         }
     }
 }

@@ -201,6 +201,8 @@ pub(super) struct ArenaPair<'a> {
     /// a face intersection or a classification query
     /// ([`ClassGeometryMut::topology_entity_for_query`]) empties them.
     face_caches: [FaceCaches; 2],
+    /// The solve's tree and state caches for each operand, lent out during a solve.
+    kept_face_caches: ti::KeptFaceCaches<H>,
 }
 
 /// The identity callbacks of each operand's edits that a [`MergeContext`] borrows for as
@@ -285,6 +287,7 @@ impl ArenaPair<'_> {
             cache_kernels,
             caches: [std::cell::OnceCell::new(), std::cell::OnceCell::new()],
             face_caches: [FaceCaches::new(), FaceCaches::new()],
+            kept_face_caches: ti::KeptFaceCaches::default(),
         }
     }
 
@@ -308,6 +311,7 @@ impl ArenaPair<'_> {
     fn clear_face_caches(&mut self, slot: usize) {
         if let Some(caches) = self.face_caches.get_mut(slot) {
             caches.clear();
+            self.kept_face_caches.clear_slot(slot);
         }
     }
 
@@ -1625,7 +1629,10 @@ impl IntersectorBrep<H> for ArenaPair<'_> {
         if brep.kind != K_BREP {
             return Err(invalid("not a B-rep handle"));
         }
-        self.clear_face_caches(slot);
+        // A solve checks the editing flag in its fingerprint when it asks for a cache.
+        if let Some(caches) = self.face_caches.get_mut(slot) {
+            caches.clear();
+        }
         let b = self
             .breps
             .get_mut(slot)
@@ -1637,6 +1644,12 @@ impl IntersectorBrep<H> for ArenaPair<'_> {
     }
     fn topology_objects(&self) -> &dyn TopologyObjects<H> {
         self
+    }
+    fn take_kept_face_caches(&mut self) -> ti::KeptFaceCaches<H> {
+        self.kept_face_caches.take_pair(|face| face.b == 1)
+    }
+    fn put_kept_face_caches(&mut self, kept: ti::KeptFaceCaches<H>) {
+        self.kept_face_caches = kept;
     }
     fn face_cache_target(&mut self, face: H) -> crate::Result<ti::FaceCacheTarget<'_, H>> {
         if face.kind != K_FACE {

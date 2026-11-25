@@ -438,6 +438,8 @@ fn test_hit_events() {
         let events = world_get_contact_events(&world);
         if !events.hit_events.is_empty() && hit_count == 0 {
             let hit = events.hit_events[0];
+            let absent = makepad_box3d::core::NULL_INDEX;
+            assert_eq!((hit.child_index_a, hit.child_index_b), (absent, absent), "ordinary shapes must not report child slots");
             captured_speed = hit.approach_speed;
             captured_normal = hit.normal;
             captured_material_a = hit.user_material_id_a;
@@ -446,6 +448,45 @@ fn test_hit_events() {
 
         hit_count += events.hit_events.len();
     }
+
+    // A second impact away from the ground hull identifies the winning
+    // contact row on both sets, with different nonzero slots on the two sides.
+    use makepad_box3d::contact::contact_point_children;
+    use makepad_box3d::{create_box_set, SetBox, AABB};
+    let child = |x: f32, y: f32| SetBox {
+        bounds: AABB { lower_bound: vec3(x - 0.25, y, -0.25), upper_bound: vec3(x + 0.25, y + 0.2, 0.25) },
+        material: 0, user_data: 0,
+    };
+    let support = create_body(&mut world, &BodyDef { position: pos(20.0, 0.0, 0.0), ..default_body_def() });
+    let base = create_box_set_shape(&mut world, support, &ground_shape_def,
+        &create_box_set(&[child(2.0, -0.2), child(-0.5, -0.2), child(0.5, -0.2)]));
+    let striker = create_body(&mut world, &BodyDef {
+        body_type: BodyType::Dynamic, position: pos(20.0, 0.0, 0.0), linear_velocity: vec3(0.0, -4.0, 0.0),
+        angular_velocity: vec3(0.0, 0.0, 1.5), ..default_body_def()
+    });
+    let top = create_box_set_shape(&mut world, striker, &shape_def,
+        &create_box_set(&[child(0.0, 0.4), child(0.5, 0.0), child(-0.5, 0.0)]));
+    world_step(&mut world, 1.0 / 60.0, 4);
+    let hit = world_get_contact_events(&world).hit_events.iter().find(|h| h.shape_id_a == top || h.shape_id_b == top)
+        .expect("the downward set must produce a hit on the support set");
+    let slots = (hit.child_index_a, hit.child_index_b);
+    // The spin drives the left foot down faster. It is slot 2 on the
+    // striker, on top of slot 1 of the support.
+    let expected = if hit.shape_id_a == base { (1, 2) } else { (2, 1) };
+    assert_eq!(slots, expected, "the event must name the harder-hit foot and its support in shape order");
+    let contact = &world.contacts[(hit.contact_id.index1 - 1) as usize];
+    let mut fastest = world.hit_event_threshold;
+    let mut children = None;
+    for (m, manifold) in contact.manifolds.iter().enumerate() {
+        for p in 0..manifold.point_count {
+            let point = &manifold.points[p as usize];
+            if -point.normal_velocity > fastest && point.total_normal_impulse > 0.0 {
+                fastest = -point.normal_velocity;
+                children = contact_point_children(&world, hit.contact_id, m as i32, p);
+            }
+        }
+    }
+    assert_eq!(children, Some(slots), "event children must agree with the accessor for the fastest loaded point");
 
     destroy_world(world);
 

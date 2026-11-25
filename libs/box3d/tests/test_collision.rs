@@ -4,10 +4,11 @@
 use makepad_box3d::aabb::ray_cast_aabb;
 use makepad_box3d::constants::speculative_distance;
 use makepad_box3d::convex_manifold::collide_hulls;
-use makepad_box3d::hull::make_box_hull;
+use makepad_box3d::hull::{create_hull, find_hull_support_face, make_box_hull};
 use makepad_box3d::math_functions::*;
 use makepad_box3d::shape::{compute_fat_shape_aabb, Shape, ShapeGeometry};
-use makepad_box3d::types::{LocalManifold, SATCache};
+use makepad_box3d::triangle_manifold::collide_hull_and_triangle;
+use makepad_box3d::types::{HullData, LocalManifold, SATCache, SeparatingFeature, TriangleFeature};
 use makepad_box3d::{ensure, ensure_small};
 
 #[test]
@@ -334,4 +335,87 @@ fn large_world_aabb_double_precision_test() {
     ensure!((fat.upper_bound.x as f64) >= d + 0.5 + extra as f64);
     ensure!((fat.upper_bound.y as f64) >= d + 0.5 + extra as f64);
     ensure!((fat.upper_bound.z as f64) >= d + 0.5 + extra as f64);
+}
+
+fn pyramid_with_regular_base(sides: i32, apex_y: f32, phase: f32) -> std::sync::Arc<HullData> {
+    let mut points = Vec::new();
+    for i in 0..sides {
+        let angle = (i as f32 + phase) * (std::f32::consts::TAU / sides as f32);
+        let (s, c) = angle.sin_cos();
+        points.push(vec3(c, 0.0, s));
+    }
+    points.push(vec3(0.0, apex_y, 0.0));
+    let hull = create_hull(&points, sides + 1).expect("the pyramid must be a valid convex hull");
+    let base = find_hull_support_face(&hull, vec3(0.0, -apex_y, 0.0)) as u8;
+    assert_eq!(hull.edges.iter().filter(|e| e.face == base).count(), sides as usize, "the full base must clip");
+    hull
+}
+
+#[test]
+fn many_sided_faces_clip_to_a_valid_manifold() {
+    // Alternating the corners of two regular 40-gons gives an 80-vertex
+    // intersection before reduction, in either choice of reference frame.
+    let lower = pyramid_with_regular_base(40, -1.0, 0.0);
+    let upper = pyramid_with_regular_base(40, 1.0, 0.5);
+    let mut local = LocalManifold::default();
+    collide_hulls(
+        &mut local,
+        4,
+        &lower,
+        &upper,
+        Transform::IDENTITY,
+        &mut SATCache::default(),
+        speculative_distance(),
+    );
+    assert_eq!(local.point_count(), 4, "the clipped base must reduce to four supporting points");
+    assert!(local.normal.y > 0.999, "the normal must point from the lower base to the upper one");
+    for p in &local.points {
+        assert!(
+            p.separation.abs() < 1e-5 && p.point.y.abs() < 1e-5 && (length(p.point) - 1.0).abs() < 0.01,
+            "every reduced point must lie on the contact perimeter"
+        );
+    }
+}
+
+#[test]
+fn triangle_clips_a_many_sided_face_in_both_orders() {
+    const SIDES: i32 = 63;
+    let hull = pyramid_with_regular_base(SIDES, 1.0, 0.0);
+    // Each triangle side cuts one corner of the base, halfway between the
+    // extreme vertex and its two neighbours along that side's normal.
+    let radius = 1.0 + (std::f32::consts::TAU / SIDES as f32).cos();
+    let [a, b, c] = [1.0_f32, -1.0, -3.0].map(|i| {
+        let (s, c) = (i * std::f32::consts::FRAC_PI_3).sin_cos();
+        vec3(radius * c, 0.0, radius * s)
+    });
+    let mut local = LocalManifold::default();
+    for (axis, feature) in [
+        (SeparatingFeature::ManualFaceAxisB, TriangleFeature::HullFace),
+        (SeparatingFeature::ManualFaceAxisA, TriangleFeature::TriangleFace),
+    ] {
+        let mut cache = SATCache { type_: axis as u8, ..Default::default() };
+        collide_hull_and_triangle(&mut local, i32::MAX, &hull, a, b, c, 0, &mut cache);
+        assert_eq!(local.feature, feature, "the requested face must be the reference");
+        assert_eq!(local.point_count(), SIDES + 3, "each cut must replace one corner with two intersections");
+        assert!(local.normal.y > 0.999, "both reference choices must support the pyramid from below");
+        for p in &local.points {
+            assert!(
+                p.separation.abs() < 1e-5 && p.point.y.abs() < 1e-5 && (length(p.point) - 1.0).abs() < 0.01,
+                "all 66 points must be on the shared perimeter"
+            );
+        }
+        // The mesh caller can request a smaller output even when the full
+        // polygon needs more space. Its ordered prefix determines warm starts.
+        let mut limited = LocalManifold::default();
+        let mut cache = SATCache { type_: axis as u8, ..Default::default() };
+        collide_hull_and_triangle(&mut limited, 32, &hull, a, b, c, 0, &mut cache);
+        assert_eq!(limited.point_count(), 32, "the public output capacity must be honoured");
+        for (p, full) in limited.points.iter().zip(&local.points) {
+            assert_eq!(
+                (p.point, p.separation, p.pair),
+                (full.point, full.separation, full.pair),
+                "a bounded output must preserve the full polygon's point and feature order"
+            );
+        }
+    }
 }

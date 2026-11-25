@@ -85,22 +85,38 @@ impl Part {
         let mut all = Part::new(name);
         let mut normals: Vec<[f64; 3]> = Vec::new();
         for p in parts.iter().filter(|p| !p.is_empty()) {
+            mesh::pace();
             let base = all.positions.len() as u32;
             normals.extend(p.corner_normals());
-            all.positions.extend_from_slice(&p.positions); all.weights.extend(p.weights.iter().cloned()); all.colors.extend_from_slice(&p.colors);
-            all.polys.extend(p.polys.iter().map(|q| mesh::Polygon { vertices: q.vertices.iter().map(|v| v + base).collect(), uvs: q.uvs.clone(), material: q.material }));
+            all.positions.extend_from_slice(&p.positions);
+            for weights in p.weights.chunks(512) { mesh::pace(); all.weights.extend(weights.iter().cloned()); }
+            all.colors.extend_from_slice(&p.colors);
+            for polys in p.polys.chunks(256) {
+                mesh::pace();
+                all.polys.extend(polys.iter().map(|q| mesh::Polygon { vertices: q.vertices.iter().map(|v| v + base).collect(), uvs: q.uvs.clone(), material: q.material }));
+            }
         }
         all.export_with(Some(normals), limits)
     }
     /// Area-weighted corner normals, split at the crease angle, in polygon order.
     pub fn corner_normals(&self) -> Vec<[f64; 3]> {
-        let face_n: Vec<[f64; 3]> = self.polys.iter().map(|p| { let q: Vec<[f64; 3]> = p.vertices.iter().map(|&i| self.positions[i as usize]).collect(); let mut n = [0.; 3]; for i in 1..q.len() - 1 { n = add(n, cross(sub(q[i], q[0]), sub(q[i + 1], q[0]))); } n }).collect();
+        let face_n: Vec<[f64; 3]> = self.polys.iter().enumerate().map(|(i, p)| {
+            if i % 256 == 0 { mesh::pace(); }
+            let q: Vec<[f64; 3]> = p.vertices.iter().map(|&i| self.positions[i as usize]).collect();
+            let mut n = [0.; 3];
+            for i in 1..q.len() - 1 { n = add(n, cross(sub(q[i], q[0]), sub(q[i + 1], q[0]))); }
+            n
+        }).collect();
         let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); self.positions.len()];
-        for (f, p) in self.polys.iter().enumerate() { for &v in &p.vertices { adjacent[v as usize].push(f); } }
+        for (f, p) in self.polys.iter().enumerate() {
+            if f % 512 == 0 { mesh::pace(); }
+            for &v in &p.vertices { adjacent[v as usize].push(f); }
+        }
         let cos = self.crease.pcos();
         let smooth = self.crease >= std::f64::consts::PI - 1e-6;
         let mut out = Vec::new();
         for (f, p) in self.polys.iter().enumerate() {
+            if f % 128 == 0 { mesh::pace(); }
             let own = norm(face_n[f]);
             for &v in &p.vertices {
                 let mut n = [0.; 3];
@@ -118,7 +134,8 @@ impl Part {
         assert_eq!(self.polys.len(), selected.len());
         let mut normals = self.corner_normals().into_iter();
         let mut groups = [(Vec::new(), Vec::new()), (Vec::new(), Vec::new())];
-        for (poly, &second) in self.polys.drain(..).zip(selected) {
+        for (i, (poly, &second)) in self.polys.drain(..).zip(selected).enumerate() {
+            if i % 256 == 0 { mesh::pace(); }
             let (faces, corners) = &mut groups[usize::from(second)];
             corners.extend(normals.by_ref().take(poly.vertices.len()));
             faces.push(poly);
@@ -133,15 +150,23 @@ impl Part {
     }
     /// The editable mesh plus the vertex-paint ops that carry `colors`.
     fn export_with(&self, normals: Option<Vec<[f64; 3]>>, limits: &crate::Limits) -> Result<(Operation, Vec<Operation>)> {
+        mesh::pace();
         if self.polys.is_empty() { return Err(Error::Invalid("character part has no faces")); }
         // Only referenced vertices are exported; unreferenced ones would
         // be loose points in the editable mesh.
         let mut used = vec![u32::MAX; self.positions.len()];
         let (mut positions, mut weights, mut colors) = (Vec::new(), Vec::new(), Vec::new());
-        for p in &self.polys { for &v in &p.vertices { if used[v as usize] == u32::MAX { used[v as usize] = positions.len() as u32; positions.push(self.positions[v as usize]); weights.push(self.weights[v as usize].clone()); colors.push(self.colors[v as usize]); } } }
-        let polys: Vec<mesh::Polygon> = self.polys.iter().map(|p| mesh::Polygon { vertices: p.vertices.iter().map(|&v| used[v as usize]).collect(), uvs: p.uvs.clone(), material: p.material }).collect();
+        for (i, p) in self.polys.iter().enumerate() {
+            if i % 256 == 0 { mesh::pace(); }
+            for &v in &p.vertices { if used[v as usize] == u32::MAX { used[v as usize] = positions.len() as u32; positions.push(self.positions[v as usize]); weights.push(self.weights[v as usize].clone()); colors.push(self.colors[v as usize]); } }
+        }
+        let polys: Vec<mesh::Polygon> = self.polys.iter().enumerate().map(|(i, p)| {
+            if i % 256 == 0 { mesh::pace(); }
+            mesh::Polygon { vertices: p.vertices.iter().map(|&v| used[v as usize]).collect(), uvs: p.uvs.clone(), material: p.material }
+        }).collect();
         let corner_normals = normals.unwrap_or_else(|| self.corner_normals());
-        let mut ctx = mesh::Context::new(limits.mesh.clone(), None);
+        // the part's own new mesh: its construction paces (no shared state, no lock)
+        let mut ctx = mesh::Context::new(limits.mesh.clone(), None).pacing();
         let mut m = mesh::Mesh::from_weighted_polygons(&positions, &weights, &polys, &mut ctx)?;
         let values: Vec<_> = m.corners().iter().zip(&corner_normals).map(|(c, n)| (c.id, Some(*n))).collect();
         m.set_corner_normals_bulk(&values, &mut ctx)?;
@@ -153,6 +178,7 @@ impl Part {
         // search at compile (seconds for a character).
         let (mut vids, mut cols) = (Vec::new(), Vec::new());
         for (i, c) in colors.iter().enumerate() {
+            if i % 1024 == 0 { mesh::pace(); }
             vids.push(mesh::VertexId(ids[i]));
             cols.push(c.map(|v| v.clamp(0., 1.)));
         }
@@ -218,6 +244,7 @@ pub(crate) fn tube(part: &mut Part, rings: &[Ring], segments: usize, start: Cap,
     let n = segments.max(3);
     let mut grid = Vec::with_capacity(rings.len());
     for (i, r) in rings.iter().enumerate() {
+        mesh::pace();
         grid.push((0..n).map(|k| { let p = r.point(theta0 + TAU * k as f64 / n as f64); let w = weight_fn.map_or_else(|| r.w.clone(), |f| f(p, i)); part.vertex(p, w) }).collect::<Vec<u32>>());
     }
     // Metre UVs: u around (average perimeter), v along the centre line.
@@ -233,6 +260,7 @@ pub(crate) fn tube(part: &mut Part, rings: &[Ring], segments: usize, start: Cap,
     let flip = score > 0.;
     let uv = |k: usize, i: usize| [perim * k as f64 / n as f64 * uv_scale, vs[i] * uv_scale];
     for i in 0..rings.len() - 1 {
+        mesh::pace();
         for k in 0..n {
             let k1 = k + 1;
             let theta = theta0 + TAU * (k as f64 + 0.5) / n as f64;
@@ -277,6 +305,7 @@ pub(crate) fn blob(part: &mut Part, centre: [f64; 3], axis: [f64; 3], side: [f64
     let south = f(mul(a, -1.)); let north = f(a);
     let s_i = part.vertex(south, wf(south));
     for r in 1..rings {
+        mesh::pace();
         let phi = std::f64::consts::PI * r as f64 / rings as f64;
         grid.push((0..n).map(|k| { let p = f(dir(phi, TAU * k as f64 / n as f64)); part.vertex(p, wf(p)) }).collect());
     }
@@ -301,7 +330,10 @@ pub(crate) fn blob(part: &mut Part, centre: [f64; 3], axis: [f64; 3], side: [f64
     let (p0, p1, p2) = (part.positions[grid[mid][0] as usize], part.positions[grid[mid][1] as usize], part.positions[grid[(mid + 1).min(grid.len() - 1)][0] as usize]);
     let c = mul(add(south, north), 0.5);
     let flip = dot(cross(sub(p1, p0), sub(p2, p0)), sub(p0, c)) < 0.;
-    for (mut v, mut t, m) in faces { if flip { v.reverse(); t.reverse(); } part.poly(v, t, m); }
+    for (i, (mut v, mut t, m)) in faces.into_iter().enumerate() {
+        if i % 256 == 0 { mesh::pace(); }
+        if flip { v.reverse(); t.reverse(); } part.poly(v, t, m);
+    }
     let mut all = vec![vec![s_i]]; all.extend(grid); all.push(vec![n_i]);
     all
 }

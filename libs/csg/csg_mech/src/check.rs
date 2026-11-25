@@ -15,8 +15,9 @@ type Field<'a> = &'a (dyn Sdf3 + Sync);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Gap {
-    /// mm; negative: the parts overlap, by at least -gap (the search stops at the first overlap
-    /// it finds, and the deepest may go deeper).
+    /// The gap in mm; negative: the parts overlap. [`min_gap`] stops at the first overlap it finds
+    /// (they overlap by at least -gap, the deepest may go deeper); [`deepest_overlap`] searches on
+    /// for the deepest.
     pub gap: f64,
     pub at: P3,
     pub evals: u64,
@@ -253,9 +254,20 @@ pub fn min_gap(a: Field, b: Field, lo: P3, hi: P3, tol: f64) -> Gap {
     min_gap_steps(a, b, lo, hi, tol, &mut on).expect("a search that never stops ends")
 }
 
+/// The deepest overlap, or the smallest gap for separated parts. Searches to the same tolerance
+/// as [`min_gap`] and returns twice the smallest `max(dA, dB)` it finds.
+pub fn deepest_overlap(a: Field, b: Field, lo: P3, hi: P3, tol: f64) -> Gap {
+    search_gap(a, b, lo, hi, tol, false, &mut on).expect("a search that never stops ends")
+}
+
 /// [`min_gap`], telling `step` how far it has searched ([`Found::Gap`]) every few cells and at
 /// the end; None when `step` stops it.
 pub fn min_gap_steps(a: Field, b: Field, lo: P3, hi: P3, tol: f64, step: Steps) -> Option<Gap> {
+    search_gap(a, b, lo, hi, tol, true, step)
+}
+
+/// Search for the smallest gap, optionally stopping as soon as a sample proves the parts overlap.
+fn search_gap(a: Field, b: Field, lo: P3, hi: P3, tol: f64, stop_at_overlap: bool, step: Steps) -> Option<Gap> {
     let mut best = f64::INFINITY;
     let mut at = lo;
     let mut evals = 0u64;
@@ -295,9 +307,9 @@ pub fn min_gap_steps(a: Field, b: Field, lo: P3, hi: P3, tol: f64, step: Steps) 
         if g < best {
             best = g;
             at = c;
-            // overlapping parts are fused, however deep: what a deeper sample would say is only
-            // how deep, and the overlap found bounds that
-            if best < 0.0 {
+            // overlapping parts are fused, however deep: for `min_gap` what a deeper sample would
+            // say is only how deep, and the overlap found bounds that
+            if stop_at_overlap && best < 0.0 {
                 break;
             }
         }
@@ -376,6 +388,36 @@ pub fn moved<'a>(f: Field<'a>, pivot: P3, axis: P3, amount: f64, slide: bool) ->
         }
     }
     Posed { field: f, pivot, axis, ang: amount, slide }
+}
+
+/// The as-built field `f` after its centre of mass moves from `rest_com` to `com` and its
+/// body turns by the row-major rotation `rot` from [`crate::sim::pose_bodies`].
+pub fn rigid<'a>(f: Field<'a>, rest_com: P3, com: P3, rot: [[f64; 3]; 3]) -> impl Sdf3 + Sync + 'a {
+    /// The field and the body's pose, used to read distances in the as-built frame.
+    struct Rigid<'a> {
+        field: Field<'a>,
+        rest_com: P3,
+        com: P3,
+        rot: [[f64; 3]; 3],
+    }
+    impl Rigid<'_> {
+        /// Map a point back to the as-built body with `rest_com + rot^T (p - com)`.
+        fn local(&self, p: makepad_csg_math::Vec3d) -> makepad_csg_math::Vec3d {
+            let q = sub(p3(p), self.com);
+            v3(add(self.rest_com, std::array::from_fn(|i| self.rot[0][i] * q[0] + self.rot[1][i] * q[1] + self.rot[2][i] * q[2])))
+        }
+    }
+    impl Sdf3 for Rigid<'_> {
+        /// Read the field at the corresponding as-built point.
+        fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
+            self.field.distance(self.local(p))
+        }
+        /// Keep the field's hints in its own frame across bounded queries.
+        fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
+            self.field.distance_bounded(self.local(p), lower, upper, hints)
+        }
+    }
+    Rigid { field: f, rest_com, com, rot }
 }
 
 #[derive(Clone, Copy)]
@@ -1019,14 +1061,40 @@ mod tests {
         }
     }
 
+    /// The searches agree on clearance, and continuing past first contact finds the overlap depth.
     #[test]
     fn gap_between_spheres() {
         let a = P(Prim::Sphere { c: [0.0, 0.0, 0.0], r: 1.0 });
         let b = P(Prim::Sphere { c: [2.35, 0.0, 0.0], r: 1.0 });
-        let g = min_gap(&a, &b, [-1.5, -1.5, -1.5], [4.0, 1.5, 1.5], 0.005);
+        let (lo, hi) = ([-1.5; 3], [4.0, 1.5, 1.5]);
+        let tol = 0.005;
+        let g = min_gap(&a, &b, lo, hi, tol);
         assert!((g.gap - 0.35).abs() < 0.01, "{g:?}");
-        assert!(closer_than(&a, &b, [-1.5, -1.5, -1.5], [4.0, 1.5, 1.5], 0.4));
-        assert!(!closer_than(&a, &b, [-1.5, -1.5, -1.5], [4.0, 1.5, 1.5], 0.3));
+        assert_eq!(deepest_overlap(&a, &b, lo, hi, tol), g, "both searches find the same clearance");
+        assert!(closer_than(&a, &b, lo, hi, 0.4));
+        assert!(!closer_than(&a, &b, lo, hi, 0.3));
+
+        let b = P(Prim::Sphere { c: [1.4, 0.0, 0.0], r: 1.0 });
+        let first = min_gap(&a, &b, lo, hi, tol);
+        let deepest = deepest_overlap(&a, &b, lo, hi, tol);
+        assert!((deepest.gap + 0.6).abs() < 0.02, "expected 0.6 mm of overlap, got {deepest:?}");
+        assert!(deepest.gap < first.gap && first.gap < 0.0, "first overlap {first:?} should be shallower than {deepest:?}");
+    }
+
+    /// A quarter turn about an offset pivot gives the same distances in either pose description.
+    #[test]
+    fn rigid_matches_posed() {
+        let sphere = P(Prim::Sphere { c: [4.0, 2.0, 0.5], r: 1.0 });
+        let turned = posed(&sphere, [1.0, 2.0, 0.0], [0.0, 0.0, 1.0], std::f64::consts::FRAC_PI_2);
+        let rot = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let body = rigid(&sphere, [3.0, 2.0, 0.5], [1.0, 4.0, 0.5], rot);
+        let mut hints = Hints::default();
+        for p in [[1.0, 5.0, 0.5], [1.0, 4.0, 0.5], [1.5, 5.5, 1.0], [4.0, 2.0, 0.5]] {
+            let expected = turned.distance(v3(p));
+            assert!((body.distance(v3(p)) - expected).abs() < 1e-9, "distance at {p:?}");
+            let bounded = body.distance_bounded(v3(p), -0.5, 0.5, &mut hints);
+            assert!((bounded - expected.clamp(-0.5, 0.5)).abs() < 1e-9, "bounded distance at {p:?}");
+        }
     }
 
     #[test]

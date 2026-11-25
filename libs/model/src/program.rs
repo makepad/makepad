@@ -109,6 +109,7 @@ impl MeshPrimitive {
         }
     }
     fn cached_operations(&self, limits: &Limits, cache: &mut BTreeMap<PrimitiveKey, CachedPrimitive>) -> crate::Result<Vec<Operation>> {
+        crate::mesh::pace();
         let Some((key, object)) = self.cache_key() else { return self.operations(limits) };
         let Some(cached) = cache.get_mut(&key) else { return self.operations(limits) };
         cached.remaining -= 1;
@@ -539,7 +540,9 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                 run.flush(&names)?;
                 let weathering_start = ProgramInstant::now();
                 let (ao, distance, edges, samples) = (ao.clamp(0., 1.), distance.clamp(0.005, 10.), edges.clamp(0., 1.), (*samples).clamp(1, 64) as usize);
-                for op in weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples, &mut weathering_detail) {
+                let operations = weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples, &mut weathering_detail, cancelled)
+                    .map_err(|_| fail(index, "cancelled".into()))?;
+                for op in operations {
                     run.pending.push((index, op));
                 }
                 timings.weathering += weathering_start.elapsed();

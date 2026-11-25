@@ -425,17 +425,6 @@ script_mod! {
             let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
             let field = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
             let sun_vis = self.csm_ground_vis(field, self.csm_vis(self.v_csm.xyz, self.v_csm_n, self.v_csm.w))
-            // A character standing in a lamp pool inside a building's shadow
-            // gets the same fill the ground under its feet does, or it would
-            // read as the one thing in the pool the lamp failed to light —
-            // lightmap::lamp_shadow_fill.
-            var local = self.v_dl
-            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
-            let lit = albedo * (
-                self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * ao
-                    + (self.v_direct * self.sun_filled(sun_vis, local) + local)
-                        * ao_direct
-            )
             if self.surface_on>0.5 {
                 let base=self.color_adjust(srgb_to_linear(tex.xyz)*tint_color,self.tint,self.color_adjust_ctl)
                 var n=normalize(self.v_csm_n)
@@ -507,6 +496,21 @@ script_mod! {
                 if self.msdf_ctl.y > 0.0 && self.alpha_mode < 1.5 { colour_coverage = 1.0 }
                 return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*colour_coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }
+            // The rest is the path for a rig with no materials. Its GI gather
+            // and lamp walk stay below the surface branch: computed above it,
+            // every material pixel paid for a second gather and walk it never
+            // used.
+            // A character standing in a lamp pool inside a building's shadow
+            // gets the same fill the ground under its feet does, or it would
+            // read as the one thing in the pool the lamp failed to light —
+            // lightmap::lamp_shadow_fill.
+            var local = self.v_dl
+            if self.cluster_on > 0.5 { local = self.cluster_sum(self.v_csm.xyz, self.v_csm_n) }
+            let lit = albedo * (
+                self.gi_ambient(self.v_csm.xyz,self.v_csm_n,self.v_ambient) * ao
+                    + (self.v_direct * self.sun_filled(sun_vis, local) + local)
+                        * ao_direct
+            )
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(lit, self.v_fog, self.v_csm.xyz, self.fog_density), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }
 

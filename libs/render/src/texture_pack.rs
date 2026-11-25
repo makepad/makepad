@@ -426,7 +426,9 @@ mod tests {
         let mut timings = Vec::new();
         let ready = embed_load_ready_images_with_timings(&authored, makepad_texcomp::uastc::Quality::Fast,
             &encode, Some(&mut |t| timings.push(t))).unwrap().unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 9, "one encoder dispatch per base-chain level");
+        // Each opaque base-chain level goes through the executor three times: its RGBA rows, its
+        // alpha scan and its encode. The nine retained PNGs are not encoded.
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 27, "three executor dispatches per base-chain level");
         assert_eq!(timings.len(), 9);
         assert_eq!((timings[0].width, timings[0].height, timings[0].mip_levels, timings[0].format), (256, 256, 9, "ktx2"));
         for (level, timing) in timings.iter().enumerate().skip(1) {

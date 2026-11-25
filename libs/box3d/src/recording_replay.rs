@@ -519,6 +519,7 @@ pub enum RegistryGeometry {
     Mesh(Arc<MeshData>),
     HeightField(Arc<HeightFieldData>),
     Compound(Arc<CompoundData>),
+    BoxSet(Arc<crate::box_set::BoxSetData>),
 }
 
 #[derive(Clone, Debug)]
@@ -589,6 +590,9 @@ pub fn load_registry(bytes: &[u8]) -> Option<RecReader> {
                 RegistryGeometry::HeightField(Arc::new(des_height_field_data(&mut gr)?))
             }
             GeometryKind::Compound => RegistryGeometry::Compound(Arc::new(des_compound_data(&mut gr)?)),
+            GeometryKind::BoxSet => {
+                RegistryGeometry::BoxSet(Arc::new(crate::box_set::BoxSetData::read_snapshot(&mut gr)?))
+            }
         };
 
         slots.push(RegistrySlot { kind, geometry });

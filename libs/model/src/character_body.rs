@@ -215,6 +215,7 @@ impl Wardrobe {
 fn front_angle(theta: f64) -> f64 { let mut d = (theta - 1.5 * PI).rem_euclid(TAU); if d > PI { d -= TAU; } d }
 
 pub(crate) fn build(g: &mut Gen) {
+    crate::mesh::pace();
     let wr = gear::wardrobe(g);
     let b = &g.b;
     let u = b.u;
@@ -223,7 +224,9 @@ pub(crate) fn build(g: &mut Gen) {
     neck(&mut part, b, &wr);
     for side in 0..2 {
         arm(&mut part, b, &wr, side);
+        crate::mesh::pace();
         hand(&mut part, b, &wr, side, g.spec.hand_style == "mitten");
+        crate::mesh::pace();
         leg(&mut part, b, &wr, side);
         foot(&mut part, b, &wr, side);
     }

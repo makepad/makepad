@@ -10,6 +10,7 @@
 
 use makepad_draw::*;
 use makepad_scene::VolumeFog;
+use crate::ssr::{DrawSsrFogApply, SsrApply};
 
 script_mod! {
     use mod.pod.*
@@ -72,6 +73,7 @@ script_mod! {
         u_albedo: uniform(vec3(1.0, 1.0, 1.0))
         // g, sun gain, frame index, local count
         u_scatter: uniform(vec4(0.6, 1.0, 0.0, 0.0))
+        march_steps: uniform(24.0)
         frag: fragment_position()
         u_local_pos0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         u_local_color0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -182,13 +184,14 @@ script_mod! {
             let raw = self.depth_tex.sample_nearest(uv).x
             let origin = self.ray_origin(uv)
             let ray = self.ray_dir(uv)
-            let step = self.march_distance(uv, raw) / 24.0
+            let step = self.march_distance(uv, raw) / self.march_steps
             let jitter = fract(52.9829189 * fract(dot(floor(self.frag.xy) + self.u_scatter.z * vec2(5.588238, 5.588238), vec2(0.06711056, 0.00583715))))
             let sun_dir = self.light_dir / max(length(self.light_dir), 0.000001)
             let phase = self.phase(dot(ray, sun_dir))
             var trans = 1.0
             var scatter = vec3(0.0, 0.0, 0.0)
             for i in 0..24 {
+                if float(i) >= self.march_steps {break}
                 let p = origin + ray * ((float(i) + jitter) * step)
                 var extinction = self.u_medium.x
                 // Uniform density needs no height arithmetic: even an
@@ -271,8 +274,7 @@ script_mod! {
             self.world = vec4(self.geom.pos.x, self.geom.pos.y, 0.0, 1.0)
             self.vertex_pos = vec4(self.geom.pos.x * 2.0 - 1.0, 1.0 - self.geom.pos.y * 2.0, 0.0, 1.0)
         }
-        pixel: fn() -> vec4f {
-            let raw = self.depth_tex.sample_nearest(self.pos).x
+        fog_apply: fn(scene: vec4f, raw: float) -> vec4f {
             let p = self.ray_origin(self.pos) + self.ray_dir(self.pos) * self.march_distance(self.pos, raw)
             let depth = self.fog_scene_depth(p, self.u_eye, self.u_axis, self.u_ref)
             let background = self.background(raw)
@@ -299,8 +301,10 @@ script_mod! {
             }
             var fog = closest
             if weight > 0.000001 { fog = sum / weight }
-            let scene = self.scene_tex.sample(self.pos)
             return vec4(scene.xyz * fog.w + fog.xyz, scene.w)
+        }
+        pixel: fn() -> vec4f {
+            return self.fog_apply(self.scene_tex.sample(self.pos), self.depth_tex.sample_nearest(self.pos).x)
         }
         fragment: fn() { self.fb0 = self.pixel() }
     }
@@ -317,7 +321,7 @@ pub struct DrawVolumeFogResolve { #[deref] pub draw_super: DrawQuad }
 pub struct DrawVolumeFogApply { #[deref] pub draw_super: DrawQuad }
 
 /// CPU camera state carried with the history, in absolute world coordinates.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct VolumeFogCamera {
     pub general: crate::SsaoGeneral,
     pub eye: [f32; 4],
@@ -329,6 +333,14 @@ impl VolumeFogCamera {
         let general = crate::SsaoGeneral::from_clip(clip);
         let terms = general.terms();
         Self { general, eye: terms.eye, axis: terms.axis, reference: terms.reference }
+    }
+    pub(crate) fn bind(&self, cx: &Cx, dv: &mut DrawVars) {
+        let depth_map = match cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => [2.0, -1.0], _ => [1.0, 0.0] };
+        dv.set_uniform(cx, live_id!(u_world_from_clip), &self.general.world_from_clip);
+        dv.set_uniform(cx, live_id!(u_eye), &self.eye);
+        dv.set_uniform(cx, live_id!(u_axis), &self.axis);
+        dv.set_uniform(cx, live_id!(u_ref), &self.reference);
+        dv.set_uniform(cx, live_id!(u_depth_map), &depth_map);
     }
 }
 
@@ -342,7 +354,14 @@ pub struct VolumeFogUniforms {
     pub history: bool,
     pub frame: u32,
 }
-impl VolumeFogUniforms { pub fn active(&self) -> bool { self.fog.active() } }
+impl VolumeFogUniforms {
+    pub fn active(&self) -> bool { self.fog.active() }
+    fn bind(&self, cx: &Cx, dv: &mut DrawVars) {
+        self.camera.bind(cx, dv);
+        let f = self.fog;
+        dv.set_uniform(cx, live_id!(u_medium), &[f.density, f.height, f.falloff, f.max_distance]);
+    }
+}
 impl VolumeFogHistory {
     pub fn uniforms(&self, fog: VolumeFog, camera: VolumeFogCamera) -> VolumeFogUniforms {
         VolumeFogUniforms { fog: fog.sanitized(), camera, previous: self.previous.unwrap_or(camera), history: self.previous.is_some(), frame: self.frame }
@@ -387,6 +406,7 @@ struct Resources {
     draw_march: Box<DrawVolumeFogMarch>,
     draw_resolve: Box<DrawVolumeFogResolve>,
     draw_apply: Box<DrawVolumeFogApply>,
+    draw_merged: Box<DrawSsrFogApply>,
 }
 
 /// The self-contained pass chain. `ensure` is called only for enabled HDR frames.
@@ -413,16 +433,17 @@ impl VolumeFogPass {
 
     pub fn ensure(&mut self, cx: &mut Cx) -> bool {
         if self.resources.is_some() { return true; }
-        let Some((march, resolve, apply)) = cx.try_with_vm(|vm| (
+        let Some((march, resolve, apply, merged)) = cx.try_with_vm(|vm| (
             Box::new(DrawVolumeFogMarch::script_new_with_default(vm)),
             Box::new(DrawVolumeFogResolve::script_new_with_default(vm)),
             Box::new(DrawVolumeFogApply::script_new_with_default(vm)),
+            Box::new(DrawSsrFogApply::script_new_with_default(vm)),
         )) else { return false; };
         let target = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
         self.resources = Some(Resources {
             march: Stage::new(cx, "volume fog march", self.scene_time), resolve: Stage::new(cx, "volume fog resolve", self.scene_time), apply: Stage::new(cx, "volume fog apply", self.scene_time),
             raw: target(cx), fog: [target(cx), target(cx)], depth: [target(cx), target(cx)], applied: target(cx),
-            draw_march: march, draw_resolve: resolve, draw_apply: apply,
+            draw_march: march, draw_resolve: resolve, draw_apply: apply, draw_merged: merged,
         });
         true
     }
@@ -484,6 +505,13 @@ impl VolumeFogPass {
     /// Record all three passes; caller parents its scene producer under the
     /// returned march pass. `frame` matrices and lighting describe that scene.
     pub fn run(&mut self, cx: &mut Cx2d, frame: VolumeFogFrame<'_>) -> Option<DrawPassId> {
+        let scene = frame.scene;
+        let apply = self.record(cx, frame)?;
+        self.apply(cx, &apply, scene, None);
+        Some(apply.first)
+    }
+
+    pub(crate) fn record(&mut self, cx: &mut Cx2d, frame: VolumeFogFrame<'_>) -> Option<FogApply> {
         if !frame.fog.active() { self.disable(cx.cx); return None; }
         if !self.ensure(cx.cx) { return None; }
         let pixels = frame.size * cx.current_dpi_factor();
@@ -497,15 +525,8 @@ impl VolumeFogPass {
         r.march.pass.set_pass_parent(cx.cx, r.resolve.pass.draw_pass_id());
         r.resolve.pass.set_pass_parent(cx.cx, r.apply.pass.draw_pass_id());
         r.apply.pass.set_pass_parent(cx.cx, frame.parent);
-        let depth_map = match cx.cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => [2.0, -1.0], _ => [1.0, 0.0] };
-        for dv in [&mut r.draw_march.draw_super.draw_vars, &mut r.draw_resolve.draw_super.draw_vars, &mut r.draw_apply.draw_super.draw_vars] {
-            dv.set_uniform(cx.cx, live_id!(u_world_from_clip), &uniforms.camera.general.world_from_clip);
-            dv.set_uniform(cx.cx, live_id!(u_eye), &uniforms.camera.eye);
-            dv.set_uniform(cx.cx, live_id!(u_axis), &uniforms.camera.axis);
-            dv.set_uniform(cx.cx, live_id!(u_ref), &uniforms.camera.reference);
-            let f = uniforms.fog;
-            dv.set_uniform(cx.cx, live_id!(u_medium), &[f.density, f.height, f.falloff, f.max_distance]);
-            dv.set_uniform(cx.cx, live_id!(u_depth_map), &depth_map);
+        for dv in [&mut r.draw_march.draw_super.draw_vars, &mut r.draw_resolve.draw_super.draw_vars] {
+            uniforms.bind(cx.cx, dv);
         }
         let dv = &mut r.draw_march.draw_super.draw_vars;
         dv.set_texture(0, frame.depth);
@@ -515,6 +536,7 @@ impl VolumeFogPass {
         dv.set_uniform(cx.cx, live_id!(sun_sky), &v3(frame.sun.sky));
         dv.set_uniform(cx.cx, live_id!(u_albedo), &uniforms.fog.color);
         dv.set_uniform(cx.cx, live_id!(u_scatter), &[uniforms.fog.anisotropy, uniforms.fog.shafts, (uniforms.frame % 4096) as f32, self.light_count as f32]);
+        dv.set_uniform(cx.cx, live_id!(march_steps), &[frame.steps.clamp(1.0, 24.0)]);
         for (i, (pos, color, dir)) in [
             (live_id!(u_local_pos0), live_id!(u_local_color0), live_id!(u_local_dir0)),
             (live_id!(u_local_pos1), live_id!(u_local_color1), live_id!(u_local_dir1)),
@@ -542,15 +564,31 @@ impl VolumeFogPass {
         dv.set_uniform(cx.cx, live_id!(u_previous_ref), &uniforms.previous.reference);
         dv.set_uniform(cx.cx, live_id!(u_history), &[if uniforms.history { 1.0 } else { 0.0 }]);
         r.resolve.record(cx, half, &[&r.fog[self.flip], &r.depth[self.flip]], &mut r.draw_resolve.draw_super);
-        let dv = &mut r.draw_apply.draw_super.draw_vars;
-        dv.set_texture(0, frame.scene);
-        dv.set_texture(1, &r.fog[self.flip]);
-        dv.set_texture(2, &r.depth[self.flip]);
-        dv.set_texture(3, frame.depth);
-        r.apply.record(cx, pixels, &[&r.applied], &mut r.draw_apply.draw_super);
-        self.history.commit(&uniforms);
+        Some(FogApply { first: r.march.pass.draw_pass_id(), pixels, depth: frame.depth.clone(), uniforms })
+    }
+
+    pub(crate) fn apply(&mut self, cx: &mut Cx2d, fog: &FogApply, scene: &Texture, ssr: Option<&SsrApply>) {
+        let r = self.resources.as_mut().unwrap();
+        if let Some(ssr) = ssr {
+            let draw = &mut r.draw_merged.draw_super;
+            fog.uniforms.bind(cx.cx, &mut draw.draw_vars);
+            ssr.bind(cx.cx, &mut draw.draw_vars);
+            draw.draw_vars.set_texture(6, &r.fog[self.flip]);
+            draw.draw_vars.set_texture(7, &r.depth[self.flip]);
+            r.apply.record(cx, fog.pixels, &[&r.applied, &ssr.target], draw);
+            // The draw list owns these bindings. Fog can outlive the SSR targets.
+            draw.draw_vars.texture_slots[..6].fill(None);
+        } else {
+            let draw = &mut r.draw_apply.draw_super;
+            fog.uniforms.bind(cx.cx, &mut draw.draw_vars);
+            draw.draw_vars.set_texture(0, scene);
+            draw.draw_vars.set_texture(1, &r.fog[self.flip]);
+            draw.draw_vars.set_texture(2, &r.depth[self.flip]);
+            draw.draw_vars.set_texture(3, &fog.depth);
+            r.apply.record(cx, fog.pixels, &[&r.applied], draw);
+        }
+        self.history.commit(&fog.uniforms);
         self.output_valid = true;
-        Some(r.march.pass.draw_pass_id())
     }
 
     pub fn parent_apply(&self, cx: &mut Cx, parent: DrawPassId) {
@@ -558,8 +596,14 @@ impl VolumeFogPass {
     }
 }
 
+pub(crate) struct FogApply {
+    pub first: DrawPassId, pub pixels: DVec2, pub depth: Texture, pub uniforms: VolumeFogUniforms,
+}
+
 pub struct VolumeFogFrame<'a> {
     pub fog: VolumeFog,
+    /// the march's steps per pixel, 1 to 24
+    pub steps: f32,
     pub camera: VolumeFogCamera,
     pub sun: crate::SunLight,
     pub depth: &'a Texture,

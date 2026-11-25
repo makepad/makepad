@@ -194,6 +194,13 @@ pub struct StepContext {
     pub enable_warm_starting: bool,
 }
 
+#[derive(Default)]
+struct SetCcdScratch {
+    counts: crate::shape::SetSweepCounts,
+    // Retain all set sensor hits until the final solid fraction is known.
+    sensor_hits: Vec<(SensorHit, f32)>,
+}
+
 /// Persistent per-world solver scratch. The C engine allocates the step scratch
 /// from a reusable arena; the port keeps the Vecs on the world so their
 /// capacity survives across steps. world_step moves them into the StepContext
@@ -215,11 +222,23 @@ pub struct SolverScratch {
     pub blocks: Vec<SolverBlock>,
     pub block_sync: Vec<crate::sync::AtomicIndex>,
     pub stage_completion: Vec<crate::sync::AtomicIndex>,
+    set_ccd: Vec<SetCcdScratch>,
 }
 
 impl SolverScratch {
+    /// Box leaves visited and actual TOI calls (including fallback spheres) in
+    /// the last step. Nested set queries count both outer and inner visits.
+    pub fn set_ccd_work(&self) -> (usize, usize) {
+        self.set_ccd.iter().fold((0, 0), |(candidates, calls), worker| {
+            (candidates + worker.counts.candidates, calls + worker.counts.toi_calls)
+        })
+    }
+
     /// Move the scratch buffers into a fresh step context (start of world_step).
     pub fn attach(&mut self, context: &mut StepContext) {
+        for worker in &mut self.set_ccd {
+            worker.counts = Default::default();
+        }
         context.wide_constraints = std::mem::take(&mut self.wide_constraints);
         context.contact_constraints = std::mem::take(&mut self.contact_constraints);
         context.manifold_constraints = std::mem::take(&mut self.manifold_constraints);
@@ -389,7 +408,7 @@ pub struct SolverShared<'a> {
     pub context: &'a StepContext,
     pub states: StateAccess<'a>,
     pub contacts: crate::sync::SyncSlice<'a, crate::contact::Contact>,
-    pub joint_colors: Vec<crate::sync::SyncSlice<'a, crate::joint::JointSim>>,
+    pub joint_colors: [crate::sync::SyncSlice<'a, crate::joint::JointSim>; GRAPH_COLOR_COUNT],
     pub wide_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraintWide>,
     pub manifold_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ManifoldConstraint>,
     pub contact_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraint>,
@@ -431,7 +450,7 @@ use crate::body::{
 use crate::broad_phase::{
     broad_phase_enlarge_proxy, buffer_move, proxy_id, proxy_type, validate_broad_phase, validate_no_enlarged,
 };
-use crate::constants::{GRAPH_COLOR_COUNT, MAX_ROTATION, TIME_TO_SLEEP};
+use crate::constants::{GRAPH_COLOR_COUNT, MAX_ROTATION, MAX_WORKERS, TIME_TO_SLEEP};
 use crate::constraint_graph::OVERFLOW_INDEX;
 use crate::core::NULL_INDEX;
 use crate::ctz::ctz64;
@@ -447,7 +466,7 @@ use crate::math_internal::{integrate_rotation, modified_cross};
 use crate::physics_world::{World, AWAKE_SET};
 use crate::sensor::{SensorHit, Visitor};
 use crate::shape::{
-    compute_fat_shape_aabb, compute_shape_aabb, get_shape_user_material_id, shape_time_of_impact,
+    compute_fat_shape_aabb, compute_shape_aabb, get_shape_user_material_id, shape_time_of_impact_counted,
     should_shapes_collide,
 };
 use crate::timer::{get_milliseconds, get_milliseconds_and_reset, get_ticks};
@@ -740,6 +759,7 @@ struct FinalizeCtx<'a> {
     move_events: crate::sync::SyncSlice<'a, BodyMoveEvent>,
     task_contexts: crate::sync::SyncSlice<'a, crate::physics_world::TaskContext>,
     bullet_bodies: crate::sync::SyncSlice<'a, i32>,
+    set_ccd: crate::sync::SyncSlice<'a, SetCcdScratch>,
     bullet_count: &'a crate::sync::AtomicIndex,
     pre_solve: crate::sync::SyncPtr<Option<Box<crate::types::PreSolveFcn>>>,
     custom_filter: crate::sync::SyncPtr<Option<Box<crate::types::CustomFilterFcn>>>,
@@ -841,6 +861,8 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
 
     // b3ContinuousContext locals
     let mut ctx_fraction = 1.0f32;
+    // Each worker has exclusive use of its counters and transient sensor hits.
+    let set_ccd = unsafe { ctx.set_ccd.get_mut(worker_index as usize) };
     let mut sensor_hits = [SensorHit::default(); MAX_CONTINUOUS_SENSOR_HITS];
     let mut sensor_fractions = [0.0f32; MAX_CONTINUOUS_SENSOR_HITS];
     let mut sensor_count = 0usize;
@@ -867,6 +889,10 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
         // Update the shape AABB first (C mutates fastShape->aabb before the queries).
         let (next_shape_id, box1, box2, fast_shape_type, fast_sensor_index) = {
             let shape = unsafe { ctx.shapes.get_ref(fast_shape_id as usize) };
+            if shape.proxy_key == NULL_INDEX {
+                shape_id = shape.next_shape_id;
+                continue;
+            }
             let box1 = shape.aabb;
             // xf2 is relative to the base, so translate the box back to world space, rounding outward
             let box2 = offset_aabb(compute_shape_aabb(shape, xf2), base);
@@ -880,8 +906,8 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
 
         // Note: C computes context.centroid1/centroid2 here; they are never read.
 
-        // No continuous collision for meshes
-        if fast_shape_type == ShapeType::Mesh || fast_shape_type == ShapeType::Height {
+        // These shapes do not participate as the fast shape in a sweep.
+        if matches!(fast_shape_type, ShapeType::Mesh | ShapeType::Height) {
             continue;
         }
 
@@ -890,7 +916,30 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
             continue;
         }
 
-        let swept_box = aabb_union(box1, box2);
+        let is_set = fast_shape_type == ShapeType::BoxSet;
+        let swept_box = if is_set {
+            let shape = unsafe { ctx.shapes.get_ref(fast_shape_id as usize) };
+            offset_aabb(crate::shape::compute_swept_shape_aabb(shape, &sweep, 1.0), base)
+        } else {
+            aabb_union(box1, box2)
+        };
+
+        let is_convex = matches!(fast_shape_type, ShapeType::Sphere | ShapeType::Capsule | ShapeType::Hull);
+        // A rotating convex child can swing outside both endpoint boxes.
+        // Only static set targets use the extra part of this query.
+        let static_bounds = if is_convex && sweep.q1 != sweep.q2 {
+            let shape = unsafe { ctx.shapes.get_ref(fast_shape_id as usize) };
+            let local = compute_shape_aabb(shape, Transform::IDENTITY);
+            let arc = crate::shape::set_rotation_slack(&sweep, local, 1.0);
+            // Reuse the existing endpoint union and round the expansion
+            // outward in large-world mode.
+            AABB {
+                lower_bound: offset_aabb(swept_box, crate::math_functions::pos(-arc, -arc, -arc)).lower_bound,
+                upper_bound: offset_aabb(swept_box, crate::math_functions::pos(arc, arc, arc)).upper_bound,
+            }
+        } else {
+            swept_box
+        };
 
         // This is called from dynamic_tree_query for continuous collision
         // (C: b3ContinuousQueryCallback)
@@ -910,6 +959,15 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
                 }
 
                 let shape = unsafe { ctx.shapes.get_ref(hit_shape_id as usize) };
+                let target_type = shape.shape_type();
+                let set_target = target_type == ShapeType::BoxSet;
+                if set_target {
+                    if !(is_convex || is_set) || proxy_type(shape.proxy_key) != BodyType::Static {
+                        return true;
+                    }
+                } else if is_set && !matches!(target_type, ShapeType::Mesh | ShapeType::Height | ShapeType::Hull | ShapeType::Sphere | ShapeType::Capsule) {
+                    return true;
+                }
 
                 // Skip same body
                 if shape.body_id == fast_shape.body_id {
@@ -972,10 +1030,16 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
                 let sweep_a = make_relative_sweep(body_sim, base);
 
                 // Time of impact versus shape. Supports all shape types
-                let output = shape_time_of_impact(shape, fast_shape, &sweep_a, &sweep, ctx_fraction, ctx.world.speculative_distance);
+                let output = shape_time_of_impact_counted(
+                    shape, fast_shape, &sweep_a, &sweep, ctx_fraction, ctx.world.speculative_distance, &mut set_ccd.counts,
+                );
                 if is_sensor {
                     // Only accept a sensor hit that is sooner than the current solid hit.
-                    if output.fraction <= ctx_fraction && sensor_count < MAX_CONTINUOUS_SENSOR_HITS {
+                    if is_set || set_target {
+                        if output.state != crate::types::TOIState::Separated && output.fraction <= ctx_fraction {
+                            set_ccd.sensor_hits.push((SensorHit { sensor_id: shape.id, visitor_id: fast_shape.id }, output.fraction));
+                        }
+                    } else if output.fraction <= ctx_fraction && sensor_count < MAX_CONTINUOUS_SENSOR_HITS {
                         // The hit shape is a sensor
                         sensor_hits[sensor_count] = SensorHit {
                             sensor_id: shape.id,
@@ -1017,15 +1081,20 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
                 true
             };
 
-            crate::dynamic_tree::dynamic_tree_query(
-                &ctx.world.broad_phase.trees[BodyType::Static as usize],
-                swept_box,
-                DEFAULT_MASK_BITS,
-                false,
-                &mut callback,
-            );
+            let static_tree = &ctx.world.broad_phase.trees[BodyType::Static as usize];
+            let widened = static_bounds != swept_box;
+            crate::dynamic_tree::dynamic_tree_query(static_tree, static_bounds, DEFAULT_MASK_BITS, false, &mut |id, data| {
+                // Preserve the original candidate sequence (including user
+                // filtering callbacks) for every non-set target.
+                if widened && !crate::math_functions::aabb_overlaps(swept_box, crate::dynamic_tree::dynamic_tree_get_aabb(static_tree, id))
+                    && unsafe { ctx.shapes.get_ref(data as usize) }.shape_type() != ShapeType::BoxSet
+                {
+                    return true;
+                }
+                callback(id, data)
+            });
 
-            if is_bullet {
+            if is_bullet && !is_set {
                 crate::dynamic_tree::dynamic_tree_query(
                     &ctx.world.broad_phase.trees[BodyType::Kinematic as usize],
                     swept_box,
@@ -1070,10 +1139,12 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
         let mut shape_id = unsafe { ctx.bodies.get_ref(fast_body_id as usize) }.head_shape_id;
         while shape_id != NULL_INDEX {
             // Must recompute aabb at the interpolated transform
-            let aabb =
-                compute_fat_shape_aabb(unsafe { ctx.shapes.get_ref(shape_id as usize) }, transform, speculative_scalar);
-
             let shape = unsafe { ctx.shapes.get_mut(shape_id as usize) };
+            if shape.proxy_key == NULL_INDEX {
+                shape_id = shape.next_shape_id;
+                continue;
+            }
+            let aabb = compute_fat_shape_aabb(shape, transform, speculative_scalar);
             shape.aabb = aabb;
 
             if !aabb_contains(shape.fat_aabb, aabb) {
@@ -1104,7 +1175,7 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
 
             // shape.aabb is still valid from above
 
-            if !aabb_contains(shape.fat_aabb, shape.aabb) {
+            if shape.proxy_key != NULL_INDEX && !aabb_contains(shape.fat_aabb, shape.aabb) {
                 let margin_scalar = shape.aabb_margin;
                 let aabb_margin = vec3(margin_scalar, margin_scalar, margin_scalar);
                 shape.fat_aabb = AABB {
@@ -1132,6 +1203,11 @@ fn solve_continuous(ctx: &FinalizeCtx, body_sim_index: i32, worker_index: i32) {
     {
         // SAFETY: worker_index is exclusive per task.
         let task_context = unsafe { ctx.task_contexts.get_mut(worker_index as usize) };
+        for (hit, fraction) in set_ccd.sensor_hits.drain(..) {
+            if fraction < ctx_fraction {
+                task_context.sensor_hits.push(hit);
+            }
+        }
         task_context.distance_iterations = crate::math_functions::max_int(task_context.distance_iterations, distance_iterations);
         task_context.push_back_iterations = crate::math_functions::max_int(task_context.push_back_iterations, push_back_iterations);
         task_context.root_iterations = crate::math_functions::max_int(task_context.root_iterations, root_iterations);
@@ -1304,6 +1380,11 @@ fn finalize_bodies_range(ctx: &FinalizeCtx, start_index: i32, end_index: i32, wo
         let is_fast = (sim.flags & IS_FAST) != 0;
         let mut shape_id = unsafe { ctx.bodies.get_ref(body_id as usize) }.head_shape_id;
         while shape_id != NULL_INDEX {
+            let shape = unsafe { ctx.shapes.get_ref(shape_id as usize) };
+            if shape.proxy_key == NULL_INDEX {
+                shape_id = shape.next_shape_id;
+                continue;
+            }
             if is_fast {
                 // For fast non-bullet bodies the AABB has already been updated in solve_continuous
                 // For fast bullet bodies the AABB will be updated at a later stage
@@ -1825,15 +1906,13 @@ fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
         return;
     }
 
-    let worker_contexts: Vec<SolverWorkerContext> = (0..worker_count)
-        .map(|worker_index| SolverWorkerContext { shared, worker_index })
-        .collect();
+    let worker_contexts: [_; MAX_WORKERS] =
+        std::array::from_fn(|i| SolverWorkerContext { shared, worker_index: i as i32 });
 
     // An external system may run tasks synchronously inside enqueue (or the
     // ring budget may force inline execution) — either way the mainClaimed
     // race below keeps the orchestration correct (C solver.c comment).
-    let mut handles: Vec<crate::scheduler::TaskHandle> =
-        vec![crate::scheduler::TaskHandle::Inline; worker_count as usize];
+    let mut handles = [crate::scheduler::TaskHandle::Inline; MAX_WORKERS];
     for i in 0..worker_count as usize {
         // SAFETY: worker_contexts (and everything shared references) stay
         // alive until the finish loop below returns.
@@ -1955,7 +2034,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             let color_manifold_start = manifold_count;
             for j in 0..color_contact_count {
                 color.contacts[j as usize].manifold_start = manifold_count;
-                manifold_count += color.contacts[j as usize].manifold_count as i32;
+                manifold_count += color.contacts[j as usize].manifold_count;
             }
             color.manifold_constraint_start = color_manifold_start;
             color.manifold_constraint_count = manifold_count - color_manifold_start;
@@ -1988,7 +2067,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             overflow_count = overflow.contacts.len() as i32;
             for i in 0..overflow_count {
                 overflow.contacts[i as usize].manifold_start = manifold_count + overflow_manifold_count;
-                overflow_manifold_count += overflow.contacts[i as usize].manifold_count as i32;
+                overflow_manifold_count += overflow.contacts[i as usize].manifold_count;
             }
 
             overflow.contact_constraint_start = contact_count;
@@ -2336,12 +2415,8 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             let mut contact_constraints = std::mem::take(&mut step_context.contact_constraints);
             let mut contacts = std::mem::take(&mut world.contacts);
             let mut task_contexts = std::mem::take(&mut world.task_contexts);
-            let mut joint_colors: Vec<Vec<crate::joint::JointSim>> = world
-                .constraint_graph
-                .colors
-                .iter_mut()
-                .map(|color| std::mem::take(&mut color.joint_sims))
-                .collect();
+            let mut joint_colors: [_; GRAPH_COLOR_COUNT] =
+                std::array::from_fn(|i| std::mem::take(&mut world.constraint_graph.colors[i].joint_sims));
 
             // The user callbacks are not called during the constraint stages;
             // park them so no thread can reach them through the shared world.
@@ -2357,10 +2432,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                     context: context_ref,
                     states: StateAccess::new(&mut states),
                     contacts: crate::sync::SyncSlice::new(&mut contacts),
-                    joint_colors: joint_colors
-                        .iter_mut()
-                        .map(|joints| crate::sync::SyncSlice::new(joints.as_mut_slice()))
-                        .collect(),
+                    joint_colors: joint_colors.each_mut().map(|joints| crate::sync::SyncSlice::new(joints)),
                     wide_constraints: crate::sync::SyncSlice::new(&mut wide_constraints),
                     manifold_constraints: crate::sync::SyncSlice::new(&mut manifold_constraints),
                     contact_constraints: crate::sync::SyncSlice::new(&mut contact_constraints),
@@ -2429,6 +2501,8 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             let enable_continuous = world.enable_continuous;
             let world_id = world.world_id;
 
+            let mut set_ccd = std::mem::take(&mut world.solver_scratch.set_ccd);
+            set_ccd.resize_with(world.worker_count as usize, SetCcdScratch::default);
             let mut bodies = std::mem::take(&mut world.bodies);
             let mut shapes = std::mem::take(&mut world.shapes);
             let mut move_events = std::mem::take(&mut world.body_move_events);
@@ -2458,6 +2532,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                     move_events: crate::sync::SyncSlice::new(&mut move_events),
                     task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
                     bullet_bodies: crate::sync::SyncSlice::new(&mut bullet_bodies),
+                    set_ccd: crate::sync::SyncSlice::new(&mut set_ccd),
                     bullet_count: &bullet_count,
                     pre_solve: crate::sync::SyncPtr::new(&mut pre_solve),
                     custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
@@ -2488,6 +2563,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
 
             bullet_bodies.truncate(bullet_count.load() as usize);
             step_context.bullet_bodies = bullet_bodies;
+            world.solver_scratch.set_ccd = set_ccd;
             world.bodies = bodies;
             world.shapes = shapes;
             world.body_move_events = move_events;
@@ -2607,6 +2683,8 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                         shape_id_a: ShapeId::default(),
                         shape_id_b: ShapeId::default(),
                         contact_id: ContactId::default(),
+                        child_index_a: NULL_INDEX,
+                        child_index_b: NULL_INDEX,
                         point: crate::math_functions::POS_ZERO,
                         normal: Vec3::ZERO,
                         approach_speed: threshold,
@@ -2616,8 +2694,9 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
 
                     let mut found = false;
                     let mut triangle_index = 0i32;
+                    let mut winning_point = (0usize, 0usize);
                     let contact = &world.contacts[contact_id as usize];
-                    for manifold in &contact.manifolds {
+                    for (m, manifold) in contact.manifolds.iter().enumerate() {
                         let point_count = manifold.point_count;
                         for p in 0..point_count {
                             let mp = &manifold.points[p as usize];
@@ -2629,6 +2708,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                                 event.point = offset_pos(mid_center, lerp(mp.anchor_a, mp.anchor_b, 0.5));
                                 event.normal = manifold.normal;
                                 triangle_index = mp.triangle_index;
+                                winning_point = (m, p as usize);
                                 found = true;
                             }
                         }
@@ -2647,10 +2727,19 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                             generation: contact_generation,
                         };
 
-                        // shapeB is never a compound today (asserted in create_contact), so the
-                        // childIndex argument is irrelevant for it. shapeA carries the compound.
-                        event.user_material_id_a = get_shape_user_material_id(shape_a, child_index, triangle_index);
-                        event.user_material_id_b = get_shape_user_material_id(shape_b, 0, triangle_index);
+                        let (child_a, child_b) = if let Some(set) = &contact.set_contact {
+                            let children = set.point_children(shape_a, shape_b, winning_point.0, winning_point.1)
+                                .expect("live hit point must identify its children");
+                            (event.child_index_a, event.child_index_b) = children;
+                            children
+                        } else {
+                            if shape_a.shape_type() == ShapeType::Compound {
+                                event.child_index_a = child_index;
+                            }
+                            (child_index, 0)
+                        };
+                        event.user_material_id_a = get_shape_user_material_id(shape_a, child_a, triangle_index);
+                        event.user_material_id_b = get_shape_user_material_id(shape_b, child_b, triangle_index);
 
                         world.contact_hit_events.push(event);
                     }
@@ -2708,7 +2797,9 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                             // Shape is fast. Its aabb will be enlarged in continuous collision.
                             // Update the move array here for determinism because bullets are processed
                             // below in non-deterministic order.
-                            buffer_move(&mut world.broad_phase, proxy_key);
+                            if proxy_key != NULL_INDEX {
+                                buffer_move(&mut world.broad_phase, proxy_key);
+                            }
 
                             shape_id = next_shape_id;
                         }
@@ -2757,6 +2848,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             let enable_continuous = world.enable_continuous;
             let world_id = world.world_id;
 
+            let mut set_ccd = std::mem::take(&mut world.solver_scratch.set_ccd);
             let mut bodies = std::mem::take(&mut world.bodies);
             let mut shapes = std::mem::take(&mut world.shapes);
             let mut move_events = std::mem::take(&mut world.body_move_events);
@@ -2781,6 +2873,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                     move_events: crate::sync::SyncSlice::new(&mut move_events),
                     task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
                     bullet_bodies: crate::sync::SyncSlice::new(&mut bullet_bodies),
+                    set_ccd: crate::sync::SyncSlice::new(&mut set_ccd),
                     bullet_count: &bullet_count,
                     pre_solve: crate::sync::SyncPtr::new(&mut pre_solve),
                     custom_filter: crate::sync::SyncPtr::new(&mut custom_filter),
@@ -2808,6 +2901,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             }
 
             step_context.bullet_bodies = bullet_bodies;
+            world.solver_scratch.set_ccd = set_ccd;
             world.bodies = bodies;
             world.shapes = shapes;
             world.body_move_events = move_events;

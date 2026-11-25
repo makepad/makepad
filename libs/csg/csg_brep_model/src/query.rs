@@ -28,8 +28,7 @@ pub struct Measure {
 pub fn measure(k: &Kernel, b: &mut Body) -> Result<Measure, BrepError> {
     let store = AttributeStore::default();
     let attrs = PropertyAttributes { store: &store, key_of: &|_| ObjectKey(0) };
-    let volume = brep_volume(k, b, ACCURACY, &attrs)?;
-    let area = brep_area(k, b, ACCURACY)?;
+    let (volume, area) = volume_area(k, b, ACCURACY)?;
     let mass = brep_mass_properties(k, b, ACCURACY, 1.0, Point3::ZERO, &attrs)?;
     let box3 = brep_bounding_box(k, b, true)?;
     let (lo, hi) = (box3.min(), box3.max());
@@ -43,6 +42,14 @@ pub fn measure(k: &Kernel, b: &mut Body) -> Result<Measure, BrepError> {
         edges: makepad_csg_brep::topology::brep::p1::edges(b, None)?.len(),
         solid: brep_is_manifold_solid(b)?,
     })
+}
+
+/// Volume and area alone (mm³, mm²), integrated to `accuracy` ([`measure`]'s are to 1e-6),
+/// without [`measure`]'s mass properties, bounds and counts.
+pub fn volume_area(k: &Kernel, b: &mut Body, accuracy: f64) -> Result<(f64, f64), BrepError> {
+    let store = AttributeStore::default();
+    let attrs = PropertyAttributes { store: &store, key_of: &|_| ObjectKey(0) };
+    Ok((brep_volume(k, b, accuracy, &attrs)?, brep_area(k, b, accuracy)?))
 }
 
 /// What an edge's curve is.
@@ -171,6 +178,11 @@ pub fn faces(k: &Kernel, b: &mut Body) -> Result<Vec<FaceInfo>, BrepError> {
 /// The triangle of `mesh` nearest `p` (`tri_face`: each triangle's face): that face, and how
 /// far `p` is from it. O(triangles), most rejected by their box.
 pub fn nearest_face(mesh: &makepad_csg_graph::TriMesh, tri_face: &[u32], p: [f64; 3]) -> Option<(u32, f64)> {
+    nearest_where(mesh, tri_face, p, |_| true)
+}
+
+/// [`nearest_face`] among the triangles of the faces `keep` takes.
+pub fn nearest_where(mesh: &makepad_csg_graph::TriMesh, tri_face: &[u32], p: [f64; 3], keep: impl Fn(u32) -> bool) -> Option<(u32, f64)> {
     let v = |i: u32| {
         let q = mesh.vertices[i as usize];
         [q.x, q.y, q.z]
@@ -178,6 +190,10 @@ pub fn nearest_face(mesh: &makepad_csg_graph::TriMesh, tri_face: &[u32], p: [f64
     let mut best: Option<(u32, f64)> = None;
     let mut reach = f64::MAX;
     for (t, tri) in mesh.triangles.iter().enumerate() {
+        let Some(&face) = tri_face.get(t) else { continue };
+        if !keep(face) {
+            continue;
+        }
         let (a, b, c) = (v(tri[0]), v(tri[1]), v(tri[2]));
         if (0..3).any(|i| p[i] < a[i].min(b[i]).min(c[i]) - reach || p[i] > a[i].max(b[i]).max(c[i]) + reach) {
             continue;
@@ -185,10 +201,18 @@ pub fn nearest_face(mesh: &makepad_csg_graph::TriMesh, tri_face: &[u32], p: [f64
         let d = dist(p, on_triangle(p, a, b, c));
         if d < reach {
             reach = d;
-            best = tri_face.get(t).map(|f| (*f, d));
+            best = Some((face, d));
         }
     }
     best
+}
+
+/// The point of segment `ab` nearest `p`.
+pub fn on_segment(p: [f64; 3], a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+    let u = if len2 > 0.0 { (((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    [0, 1, 2].map(|i| a[i] + ab[i] * u)
 }
 
 /// The point of triangle `abc` nearest `p` (by its Voronoi regions).

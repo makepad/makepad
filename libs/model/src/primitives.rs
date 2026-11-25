@@ -8,8 +8,10 @@ pub(crate) fn sphere(radius:f64,segments:u32,rings:u32,smooth:bool,limits:&Limit
     preflight((r-1).saturating_mul(n).saturating_add(2),r.saturating_mul(n),n.saturating_mul(r.saturating_mul(4).saturating_sub(2)),limits)?;
     let mut positions=Vec::with_capacity((r-1)*n+2); positions.push([0.,radius,0.]);
     for row in 1..r {
+        mesh::pace();
         let (theta_cos,theta_sin)=turn(row,2*r);
         for col in 0..n {
+            if col % 1024 == 1023 { mesh::pace(); }
             let (phi_cos,phi_sin)=turn(col,n);
             positions.push([radius*theta_sin*phi_cos,radius*theta_cos,radius*theta_sin*phi_sin]);
         }
@@ -19,8 +21,10 @@ pub(crate) fn sphere(radius:f64,segments:u32,rings:u32,smooth:bool,limits:&Limit
     let uv=|row:usize,col:usize| [col as f64/n as f64,row as f64/r as f64];
     let mut polygons=Vec::with_capacity(r*n);
     for col in 0..n {
+        mesh::pace();
         polygons.push(Polygon {vertices:vec![0,index(1,col+1),index(1,col)],uvs:vec![[(col as f64+0.5)/n as f64,0.],uv(1,col+1),uv(1,col)],material:0});
         for row in 1..r-1 {
+            if row % 512 == 0 { mesh::pace(); }
             // Spherical latitude quads are coplanar; winding points outward.
             polygons.push(Polygon {vertices:vec![index(row,col),index(row,col+1),index(row+1,col+1),index(row+1,col)],
                 uvs:vec![uv(row,col),uv(row,col+1),uv(row+1,col+1),uv(row+1,col)],material:0});
@@ -33,7 +37,8 @@ pub(crate) fn sphere(radius:f64,segments:u32,rings:u32,smooth:bool,limits:&Limit
     if smooth {
         // Per-corner storage preserves UV seams while all corners at the same
         // sphere vertex share its analytic normal, including the two poles.
-        let normals=mesh.corners().iter().map(|corner| {
+        let normals=mesh.corners().iter().enumerate().map(|(i,corner)| {
+            if i % 1024 == 0 { mesh::pace(); }
             let p=mesh.vertex(corner.vertex).unwrap().position;
             (corner.id,Some(p.map(|v|v/radius)))
         }).collect::<Vec<_>>();
@@ -50,6 +55,7 @@ pub(crate) fn cylinder(radius:f64,height:f64,segments:u32,smooth:bool,limits:&Li
     preflight(n.saturating_mul(2),n.saturating_add(2),n.saturating_mul(6),limits)?;
     let mut positions=Vec::with_capacity(n*2);
     for y in [-height*0.5,height*0.5] { for col in 0..n {
+        if col % 1024 == 0 { mesh::pace(); }
         let (cos,sin)=turn(col,n);
         positions.push([radius*cos,y,radius*sin]);
     } }
@@ -57,6 +63,7 @@ pub(crate) fn cylinder(radius:f64,height:f64,segments:u32,smooth:bool,limits:&Li
     polygons.push(Polygon {vertices:(0..n as u32).collect(),uvs:positions[..n].iter().map(|p|[p[0]/(2.*radius)+0.5,p[2]/(2.*radius)+0.5]).collect(),material:0});
     polygons.push(Polygon {vertices:(n as u32..(n*2) as u32).rev().collect(),uvs:positions[n..].iter().rev().map(|p|[p[0]/(2.*radius)+0.5,p[2]/(2.*radius)+0.5]).collect(),material:0});
     for col in 0..n {
+        if col % 512 == 0 { mesh::pace(); }
         let next=(col+1)%n; let u=col as f64/n as f64; let v=(col+1) as f64/n as f64;
         polygons.push(Polygon {vertices:vec![col as u32,(col+n) as u32,(next+n) as u32,next as u32],uvs:vec![[u,1.],[u,0.],[v,0.],[v,1.]],material:0});
     }
@@ -65,7 +72,9 @@ pub(crate) fn cylinder(radius:f64,height:f64,segments:u32,smooth:bool,limits:&Li
     if smooth {
         let mut normals=Vec::with_capacity(mesh.corners().len());
         for (index,face) in mesh.faces().iter().enumerate() {
-            for corner in mesh.face_corners(face.id)? {
+            if index % 512 == 0 { mesh::pace(); }
+            for (i, corner) in mesh.face_corners(face.id)?.iter().enumerate() {
+                if i % 1024 == 1023 { mesh::pace(); }
                 let p=mesh.vertex(corner.vertex).unwrap().position;
                 // The first two polygons are the bottom and top caps. Do not
                 // average their normals into the radial side wall at the rim.

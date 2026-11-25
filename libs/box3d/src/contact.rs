@@ -48,6 +48,13 @@ pub const RELATIVE_TRANSFORM_VALID: u32 = 0x00800000;
 pub const SIM_TUBE_CONTACT: u32 = 0x01000000;
 /// PORT EXTENSION: a sphere against a distance field, whose manifold is swept along the step's motion.
 pub const SIM_FIELD_CONTACT: u32 = 0x02000000;
+pub const SIM_SET_CONTACT: u32 = 0x04000000;
+
+/// These contact types require the scalar solver in every graph color.
+#[inline]
+pub(crate) fn contact_requires_scalar_solver(flags: u32) -> bool {
+    flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT | SIM_SET_CONTACT) != 0
+}
 
 /// A contact edge is used to connect bodies and contacts together
 /// in a contact graph where each body is a node and each contact
@@ -222,6 +229,8 @@ pub struct Contact {
     /// Monotonically advanced when a contact is allocated in this slot.
     pub generation: u32,
 
+    pub set_contact: Option<Box<crate::set_contact::SetContact>>,
+
     /// The C `b3Manifold* manifolds` block allocation, inline when single
     /// (see `Manifolds`). Kept as the last field on purpose — see the
     /// repr(C) note above.
@@ -241,7 +250,7 @@ pub struct ContactSpec {
 
     /// Start of the global manifold constraint array
     pub manifold_start: i32,
-    pub manifold_count: u16,
+    pub manifold_count: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +294,22 @@ pub(crate) fn get_contact_full_id(world: &World, contact_id: ContactId) -> i32 {
     let contact = &world.contacts[id as usize];
     b3_assert!(contact.contact_id == id && contact.generation == contact_id.generation);
     id
+}
+
+/// Box slots for a live contact point. A non-set side has NULL_INDEX.
+/// Removing or replacing a child invalidates its previous row immediately.
+pub fn contact_point_children(world: &World, contact_id: ContactId, manifold: i32, point: i32) -> Option<(i32, i32)> {
+    if contact_id.index1 <= 0 || !crate::physics_world::contact_is_valid(world, contact_id) {
+        return None;
+    }
+    let contact = &world.contacts[(contact_id.index1 - 1) as usize];
+    let manifold = usize::try_from(manifold).ok()?;
+    if !(0..contact.manifolds.get(manifold)?.point_count).contains(&point) {
+        return None;
+    }
+    contact.set_contact.as_ref()?.point_children(
+        &world.shapes[contact.shape_id_a as usize], &world.shapes[contact.shape_id_b as usize], manifold, point as usize,
+    )
 }
 
 pub fn contact_get_data(world: &World, contact_id: ContactId) -> ContactData<'_> {
@@ -336,7 +361,7 @@ pub(crate) fn mix_restitution(
 // b3AddType calls in b3InitializeContactRegisters.
 fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
     use ShapeType::*;
-    const PAIRS: [(ShapeType, ShapeType); 20] = [
+    const PAIRS: [(ShapeType, ShapeType); 26] = [
         (Sphere, Sphere),
         (Capsule, Sphere),
         (Capsule, Capsule),
@@ -357,6 +382,12 @@ fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
         (Tube, Capsule),
         (Tube, Hull),
         (Field, Sphere),
+        (Mesh, BoxSet),
+        (Height, BoxSet),
+        (BoxSet, Sphere),
+        (BoxSet, Capsule),
+        (BoxSet, Hull),
+        (BoxSet, BoxSet),
     ];
 
     for &(t1, t2) in PAIRS.iter() {
@@ -482,7 +513,11 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
         }
     }
 
-    if type_a == ShapeType::Tube {
+    if type_b == ShapeType::BoxSet || type_a == ShapeType::BoxSet {
+        let contact = &mut world.contacts[contact_id as usize];
+        contact.flags |= SIM_SET_CONTACT;
+        contact.set_contact = Some(world.free_set_contacts.pop().unwrap_or_default());
+    } else if type_a == ShapeType::Tube {
         world.contacts[contact_id as usize].flags |= SIM_TUBE_CONTACT;
     } else if type_a == ShapeType::Field {
         world.contacts[contact_id as usize].flags |= SIM_FIELD_CONTACT;
@@ -499,7 +534,7 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
     }
 
     // todo impose these restrictions to make life easier
-    b3_assert!(type_b == ShapeType::Sphere || type_b == ShapeType::Capsule || type_b == ShapeType::Hull || type_b == ShapeType::Tube);
+    b3_assert!(matches!(type_b, ShapeType::Sphere | ShapeType::Capsule | ShapeType::Hull | ShapeType::Tube | ShapeType::BoxSet));
 
     // Is either body static?
     // Note: it is possible to have a dynamic mesh collide with a static convex shape.
@@ -600,7 +635,13 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     let pair_key = crate::table::shape_pair_key(shape_id_a, shape_id_b, child_index);
     crate::table::remove_key(&mut world.broad_phase.pair_set, pair_key);
 
-    world.contacts[contact_id as usize].manifolds = Manifolds::None;
+    let contact = &mut world.contacts[contact_id as usize];
+    if let Some(mut set) = contact.set_contact.take() {
+        set.recycle(&mut contact.manifolds);
+        world.free_set_contacts.push(set);
+    } else {
+        contact.manifolds = Manifolds::None;
+    }
 
     let body_id_a = edge_a.body_id;
     let body_id_b = edge_b.body_id;
@@ -683,7 +724,7 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     if color_index != NULL_INDEX {
         // contact is an active constraint
         b3_assert!(set_index == AWAKE_SET);
-        let multi_manifold = (flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
+        let multi_manifold = contact_requires_scalar_solver(flags);
         crate::constraint_graph::remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, multi_manifold);
     } else {
         // contact is non-touching or is sleeping or is a sensor
@@ -1185,21 +1226,14 @@ pub fn update_contact(
         task_context.child_shape_scratch = child_shape_a;
     } else if shape_a.shape_type() == ShapeType::Tube {
         touching = crate::tube_contact::update_tube_contact(world, task_context, contact, shape_a, xf_a, shape_b, xf_b);
-    } else if shape_a.shape_type() == ShapeType::Mesh || shape_a.shape_type() == ShapeType::Height {
-        // Does this contact touch a mesh or height-field?
-
-        // Compute mesh manifolds
-        touching = crate::mesh_contact::compute_mesh_manifolds(
-            world,
-            task_context,
-            contact,
-            shape_a,
-            None,
-            xf_a,
-            shape_b,
-            xf_b,
-            is_fast,
-        );
+    } else if shape_a.shape_type() == ShapeType::Mesh || shape_a.shape_type() == ShapeType::Height
+        || shape_a.shape_type() == ShapeType::BoxSet
+    {
+        touching = if contact.flags & SIM_SET_CONTACT != 0 {
+            crate::set_contact::compute_set_manifolds(world, task_context, contact, shape_a, xf_a, shape_b, xf_b, is_fast)
+        } else {
+            crate::mesh_contact::compute_mesh_manifolds(world, task_context, contact, shape_a, None, xf_a, shape_b, xf_b, is_fast)
+        };
 
         if touching && (shape_a.enable_hit_events || shape_b.enable_hit_events) {
             contact.flags |= SIM_ENABLE_HIT_EVENT;

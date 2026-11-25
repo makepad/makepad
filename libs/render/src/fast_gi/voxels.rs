@@ -15,12 +15,80 @@
 //! owns a CPU mirror of the three voxel images; the UI thread copies the
 //! changed rows of a finished job into the GPU textures.
 use super::*;
+use crate::texture_restore::TAIL_EDGE;
+use makepad_draw::makepad_platform::CompressedTextureFormat;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Voxels per brick edge: the unit of scrolling and of edit invalidation.
 pub(crate) const BRICK: usize = 8;
 /// z slices laid side by side per texture row of a level.
 pub(crate) const TILE_COLUMNS: usize = 8;
+
+/// The shader tests normalized BGRA8 alpha with `w > 0.5`.
+fn albedo_is_solid(texel: u32) -> bool { texel >> 24 >= 128 }
+
+#[derive(Clone)]
+pub(super) enum ImagePixels {
+    Bgra(Vec<u32>),
+    Blocks { format: CompressedTextureFormat, bytes: Vec<u8>, decoded: OnceLock<Option<Vec<u32>>> },
+}
+
+impl ImagePixels {
+    /// Resident 32-bit words, including decoded texels once the voxel worker has used them.
+    pub(super) fn len(&self) -> usize {
+        match self {
+            Self::Bgra(words) => words.len(),
+            Self::Blocks { bytes, decoded, .. } =>
+                bytes.len() / 4 + decoded.get().and_then(Option::as_ref).map_or(0, Vec::len),
+        }
+    }
+}
+
+/// One albedo level, copied from the texture bound to this draw.
+#[derive(Clone)]
+pub struct MeshImage(usize, usize, pub(super) ImagePixels);
+
+impl MeshImage {
+    pub(crate) fn bgra((w, h, words): (usize, usize, Vec<u32>)) -> Self {
+        Self(w, h, ImagePixels::Bgra(words))
+    }
+
+    pub(crate) fn compressed(w: usize, h: usize, format: CompressedTextureFormat, blocks: &[u8]) -> Self {
+        Self(w, h, ImagePixels::Blocks { format, bytes: blocks.to_vec(), decoded: OnceLock::new() })
+    }
+
+    /// The dimensions and BGRA texels. The first read on the voxel worker decodes a block
+    /// image. A failed block leaves the whole image absent on later reads too.
+    pub fn texels(&self) -> Option<(usize, usize, &[u32])> {
+        let (w, h) = (self.0, self.1);
+        let words = match &self.2 {
+            ImagePixels::Bgra(words) => words.as_slice(),
+            ImagePixels::Blocks { format, bytes, decoded } => decoded.get_or_init(|| {
+                let blocks_wide = w.div_ceil(4);
+                let mut words = vec![0; w * h];
+                for (i, block) in bytes.chunks_exact(16).enumerate() {
+                    let block: &[u8; 16] = block.try_into().ok()?;
+                    let texels = match format {
+                        CompressedTextureFormat::Astc4x4 => makepad_texcomp::astc::decode_block(block)?,
+                        // BC7's reserved mode byte has no endpoints to decode.
+                        CompressedTextureFormat::Bc7 if block[0] != 0 => makepad_texcomp::bc7::decode_block(block),
+                        _ => return None,
+                    };
+                    let (x, y) = (4 * (i % blocks_wide), 4 * (i / blocks_wide));
+                    for dy in 0..4.min(h - y) {
+                        for dx in 0..4.min(w - x) {
+                            let [r, g, b, a] = texels[dy * 4 + dx];
+                            words[(y + dy) * w + x + dx] = u32::from_le_bytes([b, g, r, a]);
+                        }
+                    }
+                }
+                Some(words)
+            }).as_deref()?,
+        };
+        Some((w, h, words))
+    }
+}
 
 /// A render mesh copied once and shared by every instance that draws it.
 #[derive(Clone)]
@@ -30,8 +98,8 @@ pub struct Mesh {
     pub stride: usize,
     /// -1 uniform white; 5 packed model colour (uv pair at 4); 8 unpacked rgb.
     pub color_lane: i32,
-    /// A small copy of the albedo texture (BGRA u32), sampled per vertex.
-    pub image: Option<(usize, usize, Vec<u32>)>,
+    /// A small copy of the albedo texture, sampled per vertex.
+    pub image: Option<MeshImage>,
     pub lo: Vec3f,
     pub hi: Vec3f,
     /// Content hash: a regenerated but identical mesh is not an edit.
@@ -40,6 +108,10 @@ pub struct Mesh {
 
 impl Mesh {
     pub fn new(vertices: Vec<f32>, indices: Vec<u32>, stride: usize, color_lane: i32, image: Option<(usize, usize, Vec<u32>)>) -> Option<Self> {
+        Self::with_image(vertices, indices, stride, color_lane, image.map(MeshImage::bgra))
+    }
+
+    pub(crate) fn with_image(vertices: Vec<f32>, indices: Vec<u32>, stride: usize, color_lane: i32, image: Option<MeshImage>) -> Option<Self> {
         let lane_ok = match color_lane { -1 => true, 5 => stride >= 6, l => l >= 0 && stride >= l as usize + 3 };
         if stride < 3 || !lane_ok { return None; }
         let count = vertices.len() / stride;
@@ -55,22 +127,32 @@ impl Mesh {
         let mut h = 0xcbf2_9ce4_8422_2325u64 ^ ((stride as u64) << 8) ^ (color_lane as u64);
         for v in &vertices { h = (h ^ v.to_bits() as u64).wrapping_mul(0x100_0000_01b3); }
         for i in &indices { h = (h ^ *i as u64).wrapping_mul(0x100_0000_01b3); }
-        if let Some((w, hh, px)) = &image { h ^= (*w as u64) << 32 ^ *hh as u64; for p in px { h = (h ^ *p as u64).wrapping_mul(0x100_0000_01b3); } }
+        if let Some(MeshImage(w, height, pixels)) = &image {
+            h ^= (*w as u64) << 32 ^ *height as u64;
+            let mut mix = |value: u64| { h = (h ^ value).wrapping_mul(0x100_0000_01b3); };
+            match pixels {
+                ImagePixels::Bgra(words) => words.iter().for_each(|&p| mix(u64::from(p))),
+                ImagePixels::Blocks { format, bytes, .. } => {
+                    mix(*format as u64);
+                    bytes.iter().for_each(|&b| mix(u64::from(b)));
+                }
+            }
+        }
         Some(Self { vertices, indices, stride, color_lane, image, lo, hi, hash: h })
     }
 
     /// Authored (sRGB-encoded) vertex albedo; the shader decodes it when the
     /// host lights in linear space.
-    fn vertex_color(&self, v: &[f32]) -> Vec3f {
+    fn vertex_color(&self, v: &[f32], image: Option<(usize, usize, &[u32])>) -> Vec3f {
         match self.color_lane {
             5 => {
                 let bits = v[5].to_bits();
                 let mut c = vec3f((bits & 255) as f32, ((bits >> 8) & 255) as f32, ((bits >> 16) & 255) as f32) * (1.0 / 255.0);
-                if let Some((w, h, pixels)) = &self.image {
-                    if *w > 0 && *h > 0 {
+                if let Some((w, h, pixels)) = image {
+                    if w > 0 && h > 0 {
                         let (u, t) = makepad_draw::vector::unpack_pair_f16(v[4]);
-                        let x = (u.rem_euclid(1.0) * *w as f32) as usize;
-                        let y = (t.rem_euclid(1.0) * *h as f32) as usize;
+                        let x = (u.rem_euclid(1.0) * w as f32) as usize;
+                        let y = (t.rem_euclid(1.0) * h as f32) as usize;
                         if let Some(&px) = pixels.get(y.min(h - 1) * w + x.min(w - 1)) {
                             c = mul(c, vec3f(((px >> 16) & 255) as f32, ((px >> 8) & 255) as f32, (px & 255) as f32) * (1.0 / 255.0));
                         }
@@ -85,11 +167,10 @@ impl Mesh {
 }
 
 /// Downsample a texture for GI albedo: GI reads one colour per vertex, so a
-/// strided copy of at most `MAX_IMAGE`² texels is plenty and bounds memory.
+/// strided copy of at most `TAIL_EDGE`² texels is plenty and bounds memory.
 pub(crate) fn gi_image(width: usize, height: usize, data: &[u32]) -> Option<(usize, usize, Vec<u32>)> {
-    const MAX_IMAGE: usize = 128;
     if width == 0 || height == 0 || data.len() < width * height { return None; }
-    let (w, h) = (width.min(MAX_IMAGE), height.min(MAX_IMAGE));
+    let (w, h) = (width.min(TAIL_EDGE), height.min(TAIL_EDGE));
     let mut out = Vec::with_capacity(w * h);
     for y in 0..h { for x in 0..w { out.push(data[(y * height / h) * width + x * width / w]); } }
     Some((w, h, out))
@@ -166,12 +247,19 @@ impl Instance {
     pub(crate) fn triangles(&self) -> usize {
         match &self.solid { Solid::Mesh(m) => m.indices.len() / 3, Solid::Field(_) => 0 }
     }
+
+    pub(crate) fn overlaps(&self, (lo, hi): (Vec3f, Vec3f)) -> bool {
+        !(self.hi.x < lo.x || self.lo.x > hi.x || self.hi.y < lo.y || self.lo.y > hi.y
+            || self.hi.z < lo.z || self.lo.z > hi.z)
+    }
 }
 
-/// One scene state for the worker, limited to `region` around the camera.
+/// One scene state for the worker.
 pub(crate) struct Snapshot {
     pub instances: Vec<Instance>,
     pub triangles: usize,
+    /// The region used to filter the instances, if the scene was filtered.
+    pub region: Option<(Vec3f, Vec3f)>,
 }
 
 impl Snapshot {
@@ -192,6 +280,7 @@ impl Snapshot {
 
 /// Highest surface over each world XZ cell, including geometry beyond the
 /// resident voxel windows. Uncovered cells hold the padded scene floor.
+#[derive(Clone)]
 pub(crate) struct Skyline {
     pub min: [f32; 2],
     pub cell: f32,
@@ -201,6 +290,14 @@ pub(crate) struct Skyline {
 }
 
 impl Skyline {
+    fn same_map(&self, other: &Self) -> bool {
+        self.min.map(f32::to_bits) == other.min.map(f32::to_bits)
+            && self.cell.to_bits() == other.cell.to_bits()
+            && self.width == other.width
+            && self.height == other.height
+            && self.heights.iter().map(|h| h.to_bits()).eq(other.heights.iter().map(|h| h.to_bits()))
+    }
+
     pub fn build(snapshot: &Snapshot, (lo, hi): (Vec3f, Vec3f), min_cell: f32) -> Self {
         if lo.x > hi.x || lo.y > hi.y || lo.z > hi.z {
             return Self { min: [0.0; 2], cell: 1.0, width: 1, height: 1, heights: vec![lo.y] };
@@ -315,7 +412,7 @@ impl Accum {
 /// invalidate probes with.
 #[derive(Default)]
 pub(crate) struct VoxelUpdate {
-    /// Full-scene heights, rebuilt only for a new snapshot.
+    /// First far-sky map, or a change to its grid or heights.
     pub skyline: Option<Skyline>,
     /// Per level: whether its texture rows changed.
     pub levels: Vec<bool>,
@@ -326,6 +423,10 @@ pub(crate) struct VoxelUpdate {
     pub needed: Vec<Option<Vec<bool>>>,
     /// World boxes of instances that changed (edit invalidation).
     pub dirty: Vec<(Vec3f, Vec3f)>,
+    /// A scene edit touched resident bricks, the far-sky map or the padded ray bounds.
+    pub edited: bool,
+    /// Every changed box entered or left because the snapshot region moved.
+    pub recentred: bool,
     pub bricks: usize,
     pub triangles: usize,
     pub ms: f64,
@@ -336,6 +437,7 @@ pub(crate) struct VoxelWorld {
     /// Per level: the window whose voxels the mirror holds.
     pub windows: Vec<Option<[i32; 3]>>,
     scene: Option<Arc<Snapshot>>,
+    skyline: Option<Skyline>,
     keys: HashMap<u64, u32>,
     pub albedo: Vec<u32>,
     pub normal: Vec<u32>,
@@ -361,7 +463,7 @@ fn key_counts(s: &Snapshot) -> HashMap<u64, u32> {
 impl VoxelWorld {
     pub fn new(layout: VoxelLayout) -> Self {
         let n = layout.width() * layout.height();
-        Self { layout, windows: vec![None; layout.levels], scene: None, keys: HashMap::new(),
+        Self { layout, windows: vec![None; layout.levels], scene: None, skyline: None, keys: HashMap::new(),
             albedo: vec![0; n], normal: vec![0; n], emission: vec![0; n], accum: Vec::new(), track_needed: false }
     }
 
@@ -373,21 +475,39 @@ impl VoxelWorld {
             // Multiset diff: an instance present in both (same key) is
             // untouched, whatever its position in the list.
             let new_keys = key_counts(&new);
+            let mut world_diff = false;
             if let Some(old) = &self.scene {
-                let mut remaining = new_keys.clone();
-                for i in &old.instances {
-                    match remaining.get_mut(&i.key) { Some(n) if *n > 0 => *n -= 1, _ => out.dirty.push((i.lo, i.hi)) }
+                for (from, other, other_keys) in [(old, &new, &new_keys), (&new, old, &self.keys)] {
+                    // With two filtered snapshots, a missing instance is a world
+                    // change only if the other region would have included it.
+                    let other_region = from.region.and(other.region);
+                    let mut remaining = other_keys.clone();
+                    for i in &from.instances {
+                        match remaining.get_mut(&i.key) {
+                            Some(n) if *n > 0 => *n -= 1,
+                            _ => {
+                                out.dirty.push((i.lo, i.hi));
+                                world_diff |= other_region.is_none_or(|r| i.overlaps(r));
+                            }
+                        }
+                    }
                 }
-                let mut remaining = self.keys.clone();
-                for i in &new.instances {
-                    match remaining.get_mut(&i.key) { Some(n) if *n > 0 => *n -= 1, _ => out.dirty.push((i.lo, i.hi)) }
-                }
+                out.recentred = !out.dirty.is_empty() && !world_diff;
             }
-            // The skyline is the snapshot's: rebuilt for the first one and
-            // for an edit, kept when the same instances came back.
+            // Newly exposed probes trace against the current snapshot, including
+            // changes to its far field caused solely by the region moving.
             if self.scene.is_none() || !out.dirty.is_empty() {
                 let coarsest = self.layout.voxel_size(self.layout.levels - 1);
-                out.skyline = Some(Skyline::build(&new, new.padded_bounds(coarsest), coarsest));
+                let bounds = new.padded_bounds(coarsest);
+                let map = Skyline::build(&new, bounds, coarsest);
+                let changed = self.skyline.as_ref().is_none_or(|last| !last.same_map(&map));
+                // The trace also tests the exact bounds, even when the map rounds to the same grid.
+                out.edited = world_diff && (changed
+                    || self.scene.as_ref().is_some_and(|old| old.padded_bounds(coarsest) != bounds));
+                if changed {
+                    out.skyline = Some(map.clone());
+                    self.skyline = Some(map);
+                }
             }
             self.keys = new_keys;
             self.scene = Some(new);
@@ -413,6 +533,7 @@ impl VoxelWorld {
                     (l, h)
                 });
                 for z in range[2].0..=range[2].1 { for y in range[1].0..=range[1].1 { for x in range[0].0..=range[0].1 {
+                    out.edited = true;
                     flags[x as usize + b[0] * (y as usize + b[1] * z as usize)] = true; any = true;
                 }}}
             }
@@ -455,7 +576,7 @@ impl VoxelWorld {
         let mut out = vec![false; g[0] * g[1] * g[2]];
         for z in 0..d[2] as i32 { for y in 0..d[1] as i32 { for x in 0..d[0] as i32 {
             let c = [win[0] + x, win[1] + y, win[2] + z];
-            if self.albedo[self.layout.texel(level, c)] >> 24 == 0 { continue; }
+            if !albedo_is_solid(self.albedo[self.layout.texel(level, c)]) { continue; }
             let r = [0, 1, 2].map(|a| {
                 let l = (c[a] as f32 + 0.5) * 0.25 - self.layout.home[a];
                 let lo = ((l - 0.35).floor() as i32 - org[a]).max(0);
@@ -575,9 +696,10 @@ impl VoxelWorld {
                     Solid::Field(field) => { self.voxelize_field(inst, field, level, win, flags); continue; }
                 };
                 world.clear(); colors.clear();
+                let image = mesh.image.as_ref().and_then(MeshImage::texels);
                 for vtx in mesh.vertices.chunks_exact(mesh.stride) {
                     world.push(point(&inst.transform, vec3f(vtx[0], vtx[1], vtx[2])));
-                    colors.push(mesh.vertex_color(vtx));
+                    colors.push(mesh.vertex_color(vtx, image));
                 }
                 for ids in mesh.indices.chunks_exact(3) {
                     let p = [world[ids[0] as usize], world[ids[1] as usize], world[ids[2] as usize]];
@@ -614,10 +736,12 @@ impl VoxelWorld {
         for bz in 0..b[2] { for by in 0..b[1] { for bx in 0..b[0] {
             if !flags[bx + b[0] * (by + b[1] * bz)] { continue; }
             bricks += 1;
+            let mut occupied = [[[false; 2]; 2]; 2];
             for z in bz * BRICK..(bz + 1) * BRICK { for y in by * BRICK..(by + 1) * BRICK { for x in bx * BRICK..(bx + 1) * BRICK {
                 let a = self.accum[x + d[0] * (y + d[1] * z)];
                 let t = layout.texel(level, [win[0] + x as i32, win[1] + y as i32, win[2] + z as i32]);
                 if a.weight > 0.0 {
+                    occupied[z / 4 % 2][y / 4 % 2][x / 4 % 2] = true;
                     let c = a.color * (1.0 / a.weight);
                     let n = a.normal * (1.0 / a.weight);
                     let e = a.covered_emission();
@@ -630,6 +754,20 @@ impl VoxelWorld {
                     self.albedo[t] = 0; self.normal[t] = 0; self.emission[t] = 0;
                 }
             }}}
+            // Empty cells in an occupied 4-brick keep alpha 0. Stamp the
+            // wholly empty 4-bricks with 32, or 64 if the whole 8-brick is empty.
+            let empty = if occupied == [[[false; 2]; 2]; 2] { 64 << 24 } else { 32 << 24 };
+            for (sz, plane) in occupied.iter().enumerate() { for (sy, row) in plane.iter().enumerate() { for (sx, &solid) in row.iter().enumerate() {
+                if solid { continue; }
+                let x = win[0] + (bx * BRICK + sx * 4) as i32;
+                let y = win[1] + (by * BRICK + sy * 4) as i32;
+                let z = win[2] + (bz * BRICK + sz * 4) as i32;
+                for dz in 0..4 { for dy in 0..4 {
+                    // An aligned 4-cell row is contiguous even in the wrapped texture.
+                    let t = layout.texel(level, [x, y + dy, z + dz]);
+                    self.albedo[t..t + 4].fill(empty);
+                }}
+            }}}
         }}}
         (bricks, triangles)
     }
@@ -639,7 +777,7 @@ impl VoxelWorld {
     pub fn solid(&self, level: usize, c: [i32; 3]) -> Option<bool> {
         let w = self.windows[level]?;
         if (0..3).any(|a| c[a] < w[a] || c[a] >= w[a] + self.layout.dims[a] as i32) { return None; }
-        Some(self.albedo[self.layout.texel(level, c)] >> 24 != 0)
+        Some(albedo_is_solid(self.albedo[self.layout.texel(level, c)]))
     }
 }
 

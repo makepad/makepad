@@ -84,6 +84,7 @@ fn read_accessor(loaded: &LoadedGltf, accessor: usize) -> Result<(Vec<f32>, usiz
     let normalized = a.normalized.unwrap_or(false);
     let mut out = Vec::with_capacity(a.count * comps);
     for i in 0..a.count {
+        if i % 1024 == 0 { mesh::pace(); }
         for c in 0..comps {
             let at = base + i * stride + c * size;
             let b = buffer.get(at..at + size).ok_or(Error::Invalid("import_glb: accessor out of bounds"))?;
@@ -113,6 +114,7 @@ fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worl
     // Bind world of each joint (in mesh space) = inverse(IBM), else its node world.
     let mut bind: HashMap<usize, Matrix4> = HashMap::new();
     for (k, &node) in joints.iter().enumerate() {
+        if k % 128 == 0 { mesh::pace(); }
         let w = match &ibm {
             Some(m) if m.len() >= (k + 1) * 16 => inverse(std::array::from_fn(|r| std::array::from_fn(|c| m[k * 16 + c * 4 + r] as f64))).unwrap_or(worlds[node]),
             _ => worlds[node],
@@ -127,8 +129,12 @@ fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worl
     let mut order: Vec<usize> = Vec::new();
     let mut stack: Vec<usize> = roots.iter().rev().copied().collect();
     while let Some(n) = stack.pop() {
+        mesh::pace();
         order.push(n);
-        let mut kids: Vec<usize> = joints.iter().copied().filter(|&j| joint_parent(j) == Some(n)).collect();
+        let mut kids: Vec<usize> = joints.iter().enumerate().filter_map(|(i, &j)| {
+            if i % 512 == 511 { mesh::pace(); }
+            (joint_parent(j) == Some(n)).then_some(j)
+        }).collect();
         kids.reverse(); stack.extend(kids);
     }
     let offset = synthetic as usize;
@@ -138,7 +144,8 @@ fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worl
     let mut rests = Vec::new(); let mut names: BTreeMap<String, usize> = BTreeMap::new();
     if synthetic { skeleton.joints.push(Joint { name: "root".into(), parent: None, translation: [0.; 3] }); rests.push(IDENTITY_MATRIX); }
     let mut root_parent = HashMap::new();
-    for &n in &order {
+    for (i, &n) in order.iter().enumerate() {
+        if i % 128 == 0 { mesh::pace(); }
         let parent = joint_parent(n);
         let pw = parent.map_or(IDENTITY_MATRIX, |p| bind[&p]);
         let local = matrix_mul(inverse(pw)?, bind[&n]);
@@ -159,6 +166,7 @@ fn read_clips(loaded: &LoadedGltf, rig: &Rig, _limits: &Limits, _warnings: &mut 
         let samplers = array(anim.key("samplers"));
         let mut channels = Vec::new();
         for ch in array(anim.key("channels")) {
+            mesh::pace();
             let Some(target) = ch.key("target") else { continue };
             let Some(node) = index(target.key("node")) else { continue };
             let Some(&joint) = rig.ordinal.get(&node) else { continue };
@@ -173,6 +181,7 @@ fn read_clips(loaded: &LoadedGltf, rig: &Rig, _limits: &Limits, _warnings: &mut 
             let (_, pr, ps) = parent.map(decompose).unwrap_or(([0.; 3], [0., 0., 0., 1.], [1.; 3]));
             let mut keys: Vec<Keyframe> = Vec::new();
             for (k, &time) in times.iter().enumerate() {
+                if k % 1024 == 0 { mesh::pace(); }
                 let at = if cubic { (k * 3 + 1) * lanes } else { k * lanes };
                 let Some(v) = values.get(at..at + lanes) else { break };
                 let v: Vec<f64> = v.iter().map(|x| *x as f64).collect();
@@ -209,13 +218,18 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
     let mut worlds = vec![IDENTITY_MATRIX; nodes.len()];
     let mut done = vec![false; nodes.len()];
     for start in 0..nodes.len() {
+        if start % 256 == 0 { mesh::pace(); }
         let mut chain = Vec::new(); let mut at = Some(start);
         while let Some(i) = at {
             if done[i] { break; }
             if chain.len() == nodes.len() { return Err(Error::Invalid("import_glb: node hierarchy cycle")); }
+            if chain.len() % 512 == 511 { mesh::pace(); }
             chain.push(i); at = parents[i];
         }
-        while let Some(i) = chain.pop() { worlds[i] = matrix_mul(parents[i].map_or(IDENTITY_MATRIX, |p| worlds[p]), node_matrix(&nodes[i])); done[i] = true; }
+        while let Some(i) = chain.pop() {
+            if chain.len() % 512 == 511 { mesh::pace(); }
+            worlds[i] = matrix_mul(parents[i].map_or(IDENTITY_MATRIX, |p| worlds[p]), node_matrix(&nodes[i])); done[i] = true;
+        }
     }
     let rig = build_rig(&loaded, root, &parents, &worlds, limits, &mut warnings)?;
     let skin_joints: Vec<usize> = doc.skins.as_deref().and_then(|s| s.first()).map(|s| array(s.key("joints")).iter().filter_map(num).map(|n| n as usize).collect()).unwrap_or_default();
@@ -225,6 +239,7 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
     let mut names: HashMap<String, usize> = HashMap::new();
     for (node_index, node) in nodes.iter().enumerate() {
         let Some(mesh_index) = node.mesh else { continue };
+        mesh::pace();
         let skinned = node.skin.is_some() && rig.is_some();
         let world = if skinned { root } else { matrix_mul(root, worlds[node_index]) };
         // A static mesh under a joint node rides that joint rigidly.
@@ -236,6 +251,7 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
         let mut weld: HashMap<(Vec<u64>, Vec<(u32, u32)>), u32> = HashMap::new();
         let mut polygons: Vec<mesh::Polygon> = Vec::new(); let mut corner_normals: Vec<Option<[f64; 3]>> = Vec::new();
         for p in 0..primitive_count {
+            mesh::pace();
             let prim = match decode_mesh_primitive(&loaded, mesh_index, p) { Ok(p) => p, Err(_) => { warnings.push(format!("import_glb: skipped a non-triangle primitive of mesh {mesh_index}")); continue; } };
             let attrs = &doc.meshes.as_deref().unwrap()[mesh_index].primitives[p].attributes;
             let skin_data = if skinned {
@@ -245,6 +261,7 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
             let material = *used_materials.entry(prim.material).or_insert(next);
             let mut ids = Vec::with_capacity(prim.positions.len());
             for (i, q) in prim.positions.iter().enumerate() {
+                if i % 256 == 0 { mesh::pace(); }
                 let w = transform_point(world, q.map(|v| v as f64));
                 let weights: Vec<mesh::JointWeight> = match (&skin_data, &rig) {
                     (Some((j, wt)), Some(r)) => {
@@ -263,7 +280,8 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
                 let id = *weld.entry(key).or_insert_with(|| { positions.push(w); vweights.push(weights.clone()); (positions.len() - 1) as u32 });
                 ids.push(id);
             }
-            for t in prim.indices.chunks_exact(3) {
+            for (triangle, t) in prim.indices.chunks_exact(3).enumerate() {
+                if triangle % 256 == 0 { mesh::pace(); }
                 let mut t = [t[0] as usize, t[1] as usize, t[2] as usize];
                 if t.iter().any(|i| *i >= ids.len()) { return Err(Error::Invalid("import_glb: index out of range")); }
                 if mirrored { t.swap(1, 2); }

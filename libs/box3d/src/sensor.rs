@@ -57,15 +57,19 @@ pub struct SensorTaskContext {
 use crate::b3_assert;
 use crate::bitset::{in_place_union, set_bit, set_bit_count_and_clear};
 use crate::body::{get_body_transform, get_body_transform_quick};
+use crate::box_set::{box_vertices, overlap_box_set, BoxSetData};
 use crate::container::array_remove_swap;
 use crate::core::NULL_INDEX;
 use crate::constants::MAX_SHAPE_CAST_POINTS;
 use crate::ctz::ctz64;
 use crate::dynamic_tree::dynamic_tree_query;
 use crate::id::ShapeId;
-use crate::math_functions::{inv_mul_transforms, min_int, to_relative_transform, transform_point, Transform, Vec3, POS_ZERO};
+use crate::math_functions::{
+    aabb_inflate, inv_mul_transforms, inv_mul_world_transforms, min_int, to_relative_transform, transform_point,
+    Transform, Vec3, POS_ZERO,
+};
 use crate::physics_world::{World, DISABLED_SET};
-use crate::shape::{should_shapes_collide, Shape, ShapeGeometry};
+use crate::shape::{compute_shape_aabb, overlap_shape, should_shapes_collide, Shape, ShapeGeometry};
 use crate::types::{CustomFilterFcn, SensorBeginTouchEvent, SensorEndTouchEvent, ShapeProxy, ShapeType};
 
 fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_shape: &Shape, visitor_transform: Transform) -> bool {
@@ -116,6 +120,7 @@ fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_sha
         ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, Transform::IDENTITY, &local_proxy),
 
         ShapeGeometry::Field(field) => crate::field::overlap_field(&**field, Transform::IDENTITY, &local_proxy),
+        ShapeGeometry::BoxSet(_) => unreachable!("set sensors are tested in their relative body frames"),
 
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, Transform::IDENTITY, &local_proxy),
 
@@ -129,6 +134,31 @@ fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_sha
 
         ShapeGeometry::Sphere(sphere) => crate::sphere::overlap_sphere(sphere, Transform::IDENTITY, &local_proxy),
     }
+}
+
+fn overlap_set_sensor(world: &World, set: &BoxSetData, set_shape: &Shape, other: &Shape) -> bool {
+    let set_xf = get_body_transform_quick(world, set_shape.body_id);
+    let other_xf = get_body_transform_quick(world, other.body_id);
+    let other_to_set = inv_mul_world_transforms(set_xf, other_xf);
+    match &other.geom {
+        ShapeGeometry::Field(_) => return false, // Fields do not participate in sensor events.
+        ShapeGeometry::Sphere(_) | ShapeGeometry::Capsule(_) | ShapeGeometry::Hull(_) => {
+            let mut buffer = [Vec3::ZERO; 2];
+            let proxy = crate::shape::make_shape_proxy(other, &mut buffer);
+            return overlap_box_set(set, &proxy, other_to_set);
+        }
+        ShapeGeometry::Tube(_) | ShapeGeometry::Mesh(_) | ShapeGeometry::HeightField(_)
+            | ShapeGeometry::Compound(_) | ShapeGeometry::BoxSet(_) => {}
+    }
+    let bounds = aabb_inflate(compute_shape_aabb(other, other_to_set), crate::constants::overlap_slop());
+    let set_to_other = inv_mul_world_transforms(other_xf, set_xf);
+    let mut hit = false;
+    set.query(bounds, &mut |_, child| {
+        let points = box_vertices(child.bounds).map(|p| transform_point(set_to_other, p));
+        hit = overlap_shape(other, Transform::IDENTITY, &ShapeProxy { points: &points, radius: 0.0 });
+        !hit
+    });
+    hit
 }
 
 /// C: b3SensorQueryCallback. The query context (world/sensor shape/transform)
@@ -195,9 +225,17 @@ fn sensor_query_callback(
         }
     }
 
-    let other_transform = to_relative_transform(get_body_transform(world, other_shape.body_id), POS_ZERO);
-
-    let overlap = overlap_sensor(sensor_shape, transform, other_shape, other_transform);
+    let overlap = match (&sensor_shape.geom, &other_shape.geom) {
+        (ShapeGeometry::BoxSet(a), ShapeGeometry::BoxSet(b)) if b.indexed_box_count() < a.indexed_box_count() => {
+            overlap_set_sensor(world, b, other_shape, sensor_shape)
+        }
+        (ShapeGeometry::BoxSet(set), _) => overlap_set_sensor(world, set, sensor_shape, other_shape),
+        (_, ShapeGeometry::BoxSet(set)) => overlap_set_sensor(world, set, other_shape, sensor_shape),
+        _ => {
+            let other_transform = to_relative_transform(get_body_transform(world, other_shape.body_id), POS_ZERO);
+            overlap_sensor(sensor_shape, transform, other_shape, other_transform)
+        }
+    };
     if !overlap {
         return true;
     }

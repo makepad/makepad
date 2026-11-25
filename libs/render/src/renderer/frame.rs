@@ -32,6 +32,23 @@ pub(super) enum DomeDraw<'a> {
 }
 
 impl Renderer {
+    /// Bounds for the contact blob and the optional baked silhouette.
+    /// A whole-model silhouette contains every layer, so it is usable
+    /// only for a model whose entire geometry participates.
+    pub(super) fn dynamic_contact_shadow_input(
+        &mut self, cx: &mut Cx, inst: &ModelInstance, sun: &SunLight,
+    ) -> Option<((Vec3f, Vec3f), Option<SdfMeta>)> {
+        if !inst.dynamic { return None; }
+        let (_, model) = self.static_models.iter().find(|(id, _)| *id == inst.model)?;
+        if let Some(ordinary) = &model.ordinary_shadow_bounds {
+            return ordinary.contact.map(|bounds| (bounds, None));
+        }
+        let bounds = (model.min, model.max);
+        self.seed_model_sdf(cx, &inst.model, sun);
+        let sdf = self.model_sdf_tex.get(&inst.model).and_then(Option::as_ref).map(|(_, meta)| *meta);
+        Some((bounds, sdf))
+    }
+
     /// HDR lane: the fill comes from the sky that is actually drawn. Under
     /// the analytic dome (and no authored `ambient`) the up-hemisphere fill
     /// is the dome's own cosine-weighted radiance — blue at noon, amber at
@@ -277,6 +294,7 @@ impl Renderer {
         // bound, the scene's. First, after a live edit, what the renderer
         // derived from the shaders' defaults is derived again (variants.rs).
         self.follow_reload(cx.cx);
+        self.apply_pending_sampler_clamp(cx.cx);
         self.restore_textures(cx.cx);
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
         let pass_id = cx.current_pass_id();
@@ -291,7 +309,19 @@ impl Renderer {
         // depth after these maps draw, so a map that bound it would read a texture written after
         // it, and be owed a paint in every repaint after a recording.
         let ssao = if matches!(scope, EnvScope::Aux) { self.ssao.take() } else { None };
+        // An aux map reads no GI screen cache, and keeps the scene's fill and render origin for the
+        // scene's next draw.
+        let aux_view = if matches!(scope, EnvScope::Aux) {
+            Some((self.gi.last_scene_origin, self.gi.take_screen_view()))
+        } else { None };
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
+        if let Some((scene_origin, view)) = aux_view {
+            self.gi.last_scene_origin = scene_origin;
+            self.gi.restore_screen_view(view);
+        } else {
+            // A fill answers just the next scene draw.
+            self.gi.restore_screen_view(None);
+        }
         if let Some(ssao) = ssao {
             self.ssao = Some(ssao);
         }
@@ -470,7 +500,9 @@ impl Renderer {
         lm_movers.clear();
         if tiers.csm || local_shadows {
             self.ensure_entity_caster_geometries(cx.cx);
-            self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()), &mut lm_movers);
+            let mut static_movers = std::mem::take(&mut self.frame_static_movers);
+            self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()), &mut static_movers, &mut lm_movers);
+            self.frame_static_movers = static_movers;
         }
         if tiers.csm && !self.world_atlas_required() {
             self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
@@ -531,6 +563,7 @@ impl Renderer {
         stats.csm_movers = csm_movers as u64;
         stats.csm_encode_us = csm_us;
         stats.csm_draws = self.gpu_baker.csm_draws() as u64;
+        stats.csm_kept = self.gpu_baker.csm_kept;
         stats.csm_gpu_ms = self.gpu_baker.csm_gpu_ms();
         if self.clustered_enabled {
             self.clustered.update(cx.cx, &self.frame_lights, cluster_view);
@@ -583,6 +616,7 @@ impl Renderer {
         // host's `Renderer::set_pass_camera`); CPU-side culling, cascades
         // and clusters above keep working in true world space.
         let origin = self.render_origin_for(camera_pos);
+        self.gi.last_scene_origin = origin;
         let scene_view_transform = if origin == Vec3f::default() { stage_matrix } else {
             let mut shift = Mat4f::identity();
             shift.v[12] = -origin.x;
@@ -1103,7 +1137,8 @@ impl Renderer {
             self.rekey_lm_remaps();
             self.gpu_baker.poll_caster_readiness(cx.cx);
             let day_key = self.lamp_daylight_key(&sun);
-            let models = self.models_rev ^ self.gpu_baker.caster_bindings.key;
+            let models = if self.world_atlas_required() { self.bake_models_revision() } else { self.models_rev }
+                ^ self.gpu_baker.caster_bindings.key;
             let key = (
                 world.render_rev,
                 self.bake.generation().wrapping_add(self.gpu_baker.caster_ready_revision),
@@ -1177,7 +1212,7 @@ impl Renderer {
             }
         }
         let mut dyn_part_shapes = [false; 5];
-        let mut deferred_alpha: [Vec<DeferredAlphaCube>; 5] = Default::default();
+        let mut deferred_alpha = std::mem::take(&mut self.deferred_alpha);
         for (part_index, _) in &dyn_parts {
             dyn_part_shapes[world.parts[*part_index].shape.index()] = true;
         }
@@ -1196,7 +1231,8 @@ impl Renderer {
                 let has_dynamic_entity = dyn_entity_shapes[shape_index];
                 let has_dynamic_part = dyn_part_shapes[shape_index];
                 let has_beams = shape == Shape::Box && !world.beams.is_empty();
-                if !has_static && !has_dynamic_entity && !has_dynamic_part && !has_beams {
+                let has_loose_boxes = shape == Shape::Box && !self.loose_boxes.is_empty();
+                if !has_static && !has_dynamic_entity && !has_dynamic_part && !has_beams && !has_loose_boxes {
                     continue;
                 }
                 let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
@@ -1320,6 +1356,32 @@ impl Renderer {
                     draw_cube.color_adjust_ctl = owner.color_adjust.instance();
                     draw_cube.cube.draw(cx);
                     stats.dyn_instances += 1;
+                }
+                if has_loose_boxes {
+                    for b in &self.loose_boxes {
+                        let center = vec3f(b.transform.v[12], b.transform.v[13], b.transform.v[14]);
+                        if frustum.is_some_and(|f| !f.intersects_sphere(center, b.size.length() * 0.5)) {
+                            stats.dyn_culled += 1;
+                            continue;
+                        }
+                        let color = shade_color(b.color, self.bake.dynamic_shade(center), 0.);
+                        let neutral = vec4(0., 1., 1., 0.);
+                        if color.w < 0.999 {
+                            deferred_alpha[shape_index].push(DeferredAlphaCube {
+                                transform: b.transform, size: b.size, color, glow: 0., color_adjust_ctl: neutral,
+                            });
+                            continue;
+                        }
+                        draw_cube.cube.transform = b.transform;
+                        draw_cube.cube.cube_pos = vec3(0., 0., 0.);
+                        draw_cube.cube.cube_size = b.size;
+                        draw_cube.cube.color = color;
+                        draw_cube.cube.depth_clip = 1.;
+                        draw_cube.glow = 0.;
+                        draw_cube.color_adjust_ctl = neutral;
+                        draw_cube.cube.draw(cx);
+                        stats.dyn_instances += 1;
+                    }
                 }
                 // Immediate-mode beams (box batch): a box stretched between two
                 // points (grapple cables, lasers). Cable axis on local z.
@@ -1580,21 +1642,11 @@ impl Renderer {
         if shadow_mesh_enabled {
             let t0 = Cx::monotonic_now();
             let instances = std::mem::take(&mut self.placed_models);
-            for inst in &instances {
-                if !inst.dynamic {
-                    continue;
-                }
-                let Some((mmin, mmax)) = self
-                    .static_models
-                    .iter()
-                    .find(|(k, _)| *k == inst.model)
-                    .map(|(_, m)| (m.min, m.max))
+            for (_, inst) in instances.live() {
+                let Some(((mmin, mmax), sdf)) = self.dynamic_contact_shadow_input(cx.cx, inst, &sun)
                 else {
                     continue;
                 };
-                // First sight of this model loads its sidecar (one stat +
-                // read); a miss caches a None so the frame never re-tries.
-                self.seed_model_sdf(cx.cx, &inst.model, &sun);
                 let t = &inst.transform;
                 let mid = vec3f(
                     (mmin.x + mmax.x) * 0.5,
@@ -1626,7 +1678,7 @@ impl Renderer {
                 let air = feet.y - receiver.sample(feet.x, feet.z).0;
                 let mut drawn = false;
                 if draws.shadow_sdf.is_some() && car_sprite_allowed(up_y, air) {
-                    if let Some(Some((_, meta))) = self.model_sdf_tex.get(&inst.model) {
+                    if let Some(meta) = sdf {
                         if let Some(a) = character_shadow_anchor(
                             feet,
                             &receiver,
@@ -1710,9 +1762,9 @@ impl Renderer {
             // Ground plane per DYNAMIC instance (cars), for the sun-ray
             // projected baked-shadow sample; statics never read it.
             self.model_ground.clear();
-            for inst in &self.placed_models {
+            self.model_ground.resize(self.placed_models.len(), 0.0);
+            for (slot, inst) in self.placed_models.live() {
                 if !inst.dynamic {
-                    self.model_ground.push(0.0);
                     continue;
                 }
                 let (x, z) = (inst.transform.v[12], inst.transform.v[14]);
@@ -1726,7 +1778,7 @@ impl Renderer {
                     terrain: world.terrain.as_deref(),
                     statics: &self.receiver_boxes,
                 };
-                self.model_ground.push(receiver.sample(x, z).0);
+                self.model_ground[slot] = receiver.sample(x, z).0;
             }
             let instances = std::mem::take(&mut self.placed_models);
             // The view's focal length in pixels: the grass's density (and its
@@ -2029,6 +2081,10 @@ impl Renderer {
                 }
             }
         }
+
+        // Hosts may omit the alpha draw. Release those entries as well.
+        for list in &mut deferred_alpha { list.clear(); }
+        self.deferred_alpha = deferred_alpha;
 
         if !self.blended_models.is_empty() {
             if let Some(draw) = models_draw.as_deref_mut() {

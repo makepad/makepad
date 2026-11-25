@@ -190,10 +190,11 @@ fn segment_vertices<'p>(rig: &RigInfo, parts: &'p [Part], side: usize, chain: &s
     let d0 = norm(sub(rig.rest[j2 as usize], k1));
     let span = if seg == "1" { (0.2 * l1, l1) } else { (l1, f64::MAX) };
     parts.iter().flat_map(|part| part.positions.iter().zip(&part.weights))
-        .filter(|(pos, w)| {
+        .enumerate().filter_map(|(i, (pos, w))| {
+            if i % 512 == 0 { crate::mesh::pace(); }
             let chain_w: f64 = w.iter().filter(|t| t.joint == j1 || t.joint == j2).map(|t| t.weight).sum();
-            let along = dot(sub(**pos, k1), d0);
-            chain_w >= 0.5 && along >= span.0 && along < span.1
+            let along = dot(sub(*pos, k1), d0);
+            (chain_w >= 0.5 && along >= span.0 && along < span.1).then_some((pos, w))
         })
         .collect()
 }
@@ -252,7 +253,8 @@ fn close_fingers(p: &mut Pose, rig: &RigInfo, parts: &[Part], handles: &[Handle]
                 let gap = |p: &mut Pose, deg: f64| -> f64 {
                     p.set(&name, qaxis(curl, deg));
                     let mut best = f64::MAX;
-                    for (pos, w) in &verts {
+                    for (i, (pos, w)) in verts.iter().enumerate() {
+                        if i % 128 == 0 { crate::mesh::pace(); }
                         let mut q = [0.; 3];
                         for jw in w.iter() {
                             let (rq, t) = p.global(jw.joint as usize);
@@ -341,8 +343,10 @@ pub(super) fn posed_arms(spec: &CharacterSpec, arms: &FpsArms) -> PosedArms {
     let mut support_faces = Vec::new();
     let mut part = Part::new("arms");
     for src in &g.parts {
+        crate::mesh::pace();
         let mut map = vec![u32::MAX; src.positions.len()];
-        for poly in &src.polys {
+        for (i, poly) in src.polys.iter().enumerate() {
+            if i % 256 == 0 { crate::mesh::pace(); }
             // Keep a face only if every corner is mostly an arm vertex.
             let ok = poly.vertices.iter().all(|&v| {
                 let w = &src.weights[v as usize];
@@ -388,6 +392,7 @@ pub(super) fn posed_arms(spec: &CharacterSpec, arms: &FpsArms) -> PosedArms {
         let (shoulder, elbow, wrist, knuckles) = (pos("upper_arm_l"), pos("lower_arm_l"), pos("hand_l"), pos("fingers_1_l"));
         support_faces.resize(part.polys.len(), false);
         for i in left_detail {
+            if i % 256 == 0 { crate::mesh::pace(); }
             let face = &part.polys[i].vertices;
             let centre = mul(face.iter().fold([0.; 3], |s, &v| add(s, part.positions[v as usize])), 1. / face.len() as f64);
             let distance_sq = |a, b| {
@@ -421,6 +426,7 @@ fn outer_profile(part: &Part, vmat: &[u32], a: [f64; 3], b: [f64; 3], samples: u
     let mut buckets: Vec<Vec<(f64, u32)>> = vec![Vec::new(); samples + 1];
     // `vmat` covers the cut arms only: detail added since is not measured.
     for (i, &p) in part.positions.iter().enumerate().take(vmat.len()) {
+        if i % 512 == 0 { crate::mesh::pace(); }
         if vmat[i] == u32::MAX { continue; }
         let t = dot(sub(p, a), d) / len;
         if !(-0.02..=1.02).contains(&t) { continue; }
@@ -436,7 +442,10 @@ fn outer_profile(part: &Part, vmat: &[u32], a: [f64; 3], b: [f64; 3], samples: u
         // The material of the outermost vertices.
         let out = &b[b.len() * 3 / 4..];
         let mut best = (0usize, top.1);
-        for &(_, m) in out { let n = out.iter().filter(|x| x.1 == m).count(); if n > best.0 { best = (n, m); } }
+        for (i, &(_, m)) in out.iter().enumerate() {
+            if i % 64 == 0 { crate::mesh::pace(); }
+            let n = out.iter().filter(|x| x.1 == m).count(); if n > best.0 { best = (n, m); }
+        }
         (top.0, best.1)
     }).collect()
 }

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::box_set::{self, BoxSetData, SetBox};
 use crate::math_functions::{Vec3, AABB};
 use crate::types::{
     Capsule, CompoundData, Filter, HeightFieldData, HullData, Mesh, QueryFilter, ShapeType, Sphere,
@@ -21,6 +22,7 @@ pub enum ShapeGeometry {
     Mesh(Mesh),
     HeightField(Arc<HeightFieldData>),
     Compound(Arc<CompoundData>),
+    BoxSet(Arc<BoxSetData>),
 }
 
 impl Default for ShapeGeometry {
@@ -65,6 +67,10 @@ pub struct Shape {
 }
 
 impl Shape {
+    pub(crate) fn is_empty_box_set(&self) -> bool {
+        matches!(&self.geom, ShapeGeometry::BoxSet(set) if set.bounds().is_none())
+    }
+
     /// Copy every field except `geom` from `src`, reusing this shape's
     /// heap buffers (`materials` keeps its capacity via clone_from). Used by
     /// the compound collide path to build the temporary child shape the way C
@@ -103,6 +109,7 @@ impl Shape {
             ShapeGeometry::Capsule(_) => ShapeType::Capsule,
             ShapeGeometry::Tube(_) => ShapeType::Tube,
             ShapeGeometry::Field(_) => ShapeType::Field,
+            ShapeGeometry::BoxSet(_) => ShapeType::BoxSet,
             ShapeGeometry::Sphere(_) => ShapeType::Sphere,
             ShapeGeometry::Hull(_) => ShapeType::Hull,
             ShapeGeometry::Mesh(_) => ShapeType::Mesh,
@@ -165,7 +172,8 @@ use crate::core::{get_length_units_per_meter, NULL_INDEX, SECRET_COOKIE};
 use crate::id::{BodyId, ContactId, ShapeId, WorldId, NULL_SHAPE_ID};
 use crate::id_pool::{alloc_id, free_id};
 use crate::math_functions::{
-    abs, add, clamp_int, cross, dot, get_length_and_normalize, inv_mul_transforms, inv_rotate_vector,
+    aabb_center, aabb_extents, aabb_inflate, aabb_union, abs, add, clamp_int, cross, dot, get_length_and_normalize,
+    inv_mul_transforms, inv_rotate_vector,
     inv_transform_point, invert_transform, is_valid_float, is_valid_position, is_valid_vec3, length, lerp,
     make_matrix_from_quat, max, max_float, min_float, min_int, mul_add, mul_mv, mul_sub, mul_sv, mul_transforms,
     normalize, offset_pos, rotate_vector, safe_scale, sub, to_relative_transform, transform_point, vec3, Matrix3,
@@ -290,6 +298,9 @@ fn compute_shape_margin(shape: &Shape) -> f32 {
             let bounds = field.bounds();
             margin = 0.5 * crate::math_functions::distance(bounds.upper_bound, bounds.lower_bound);
         }
+        ShapeGeometry::BoxSet(set) => {
+            margin = set.bounds().map_or(0.0, |b| 0.5 * crate::math_functions::distance(b.upper_bound, b.lower_bound));
+        }
 
         ShapeGeometry::Hull(hull) => {
             let points = &hull.points;
@@ -349,6 +360,7 @@ pub enum ShapeGeometryInput<'a> {
     Mesh(&'a Arc<crate::types::MeshData>),
     HeightField(&'a Arc<HeightFieldData>),
     Compound(&'a Arc<CompoundData>),
+    BoxSet(&'a Arc<BoxSetData>),
 }
 
 impl ShapeGeometryInput<'_> {
@@ -357,6 +369,7 @@ impl ShapeGeometryInput<'_> {
             ShapeGeometryInput::Capsule(_) => ShapeType::Capsule,
             ShapeGeometryInput::Tube(_) => ShapeType::Tube,
             ShapeGeometryInput::Field(_) => ShapeType::Field,
+            ShapeGeometryInput::BoxSet(_) => ShapeType::BoxSet,
             ShapeGeometryInput::Sphere(_) => ShapeType::Sphere,
             ShapeGeometryInput::Hull(_) => ShapeType::Hull,
             ShapeGeometryInput::Mesh(_) => ShapeType::Mesh,
@@ -394,6 +407,7 @@ fn create_shape_internal(
         ShapeGeometryInput::Capsule(capsule) => ShapeGeometry::Capsule(**capsule),
         ShapeGeometryInput::Tube(tube) => ShapeGeometry::Tube(Arc::new((**tube).clone())),
         ShapeGeometryInput::Field(field) => ShapeGeometry::Field(Arc::clone(field)),
+        ShapeGeometryInput::BoxSet(set) => ShapeGeometry::BoxSet(Arc::clone(set)),
 
         ShapeGeometryInput::Compound(compound) => {
             // Compounds must be a static and not a sensor
@@ -670,6 +684,18 @@ pub fn create_tube_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, tub
 /// snapshot of its world can't hold it: the query is code, with no data to write.
 pub fn create_field_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, field: &Arc<dyn crate::field::DistanceField>) -> ShapeId {
     create_shape(world, body_id, def, &ShapeGeometryInput::Field(field), Transform::IDENTITY, Vec3::ONE, false)
+}
+
+pub fn create_box_set_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, set: &Arc<BoxSetData>) -> ShapeId {
+    b3_validate!(box_set::box_set_validate(set).is_ok());
+    let id = create_shape(world, body_id, def, &ShapeGeometryInput::BoxSet(set), Transform::IDENTITY, Vec3::ONE, false);
+    if id.is_non_null() {
+        crate::recording::with_recording(world, crate::recording::Recording::mark_box_set_unsupported);
+        if !def.update_body_mass {
+            refresh_body_shape_extents(world, body_id.index1 - 1);
+        }
+    }
+    id
 }
 
 pub fn create_hull_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, hull: &Arc<HullData>) -> ShapeId {
@@ -974,6 +1000,8 @@ pub fn compute_shape_aabb(shape: &Shape, transform: Transform) -> AABB {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_capsule_aabb(capsule, transform),
         ShapeGeometry::Tube(tube) => crate::tube::compute_tube_aabb(tube, transform),
         ShapeGeometry::Field(field) => crate::field::compute_field_aabb(&**field, transform),
+        ShapeGeometry::BoxSet(set) => box_set::compute_box_set_aabb(set, transform)
+            .unwrap_or(AABB { lower_bound: transform.p, upper_bound: transform.p }),
         ShapeGeometry::Compound(compound) => crate::compound::compute_compound_aabb(compound, transform),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::compute_height_field_aabb(height_field, transform)
@@ -1007,6 +1035,35 @@ pub fn compute_fat_shape_aabb(shape: &Shape, transform: WorldTransform, extra: f
     crate::math_functions::offset_aabb(local_box, transform.p)
 }
 
+// For normalized linear quaternion interpolation, a rotating point at radius R
+// departs from its time-interpolated endpoint chord by at most R * (1 - |q1.q2|).
+// Use half the squared quaternion chord to retain small rotations in f32.
+pub(crate) fn set_rotation_slack(sweep: &Sweep, bounds: AABB, time: f32) -> f32 {
+    if time == 0.0 {
+        return 0.0;
+    }
+    let end = if time == 1.0 { sweep.q2 } else { crate::math_functions::nlerp(sweep.q1, sweep.q2, time) };
+    let q1 = if crate::math_functions::dot_quat(sweep.q1, end) < 0.0 {
+        crate::math_functions::negate_quat(sweep.q1)
+    } else {
+        sweep.q1
+    };
+    let dv = sub(end.v, q1.v);
+    let ds = end.s - q1.s;
+    let chord_squared = dot(dv, dv) + ds * ds;
+    if chord_squared == 0.0 {
+        return 0.0;
+    }
+    let radius = length(add(abs(sub(aabb_center(bounds), sweep.local_center)), aabb_extents(bounds)));
+    if time == 1.0 {
+        0.5 * chord_squared * radius
+    } else {
+        // A prefix of an nlerp has a different parameterization. Bound the
+        // displacement from the starting orientation throughout that prefix.
+        2.0 * chord_squared.sqrt() * radius
+    }
+}
+
 pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB {
     b3_assert!(0.0 <= time && time <= 1.0);
     let xf1 = Transform {
@@ -1017,6 +1074,10 @@ pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB
 
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_swept_capsule_aabb(capsule, xf1, xf2),
+        ShapeGeometry::BoxSet(set) => {
+            let endpoints = aabb_union(compute_shape_aabb(shape, xf1), compute_shape_aabb(shape, xf2));
+            set.bounds().map_or(endpoints, |bounds| aabb_inflate(endpoints, set_rotation_slack(sweep, bounds, time)))
+        }
         ShapeGeometry::Tube(tube) => crate::tube::compute_swept_tube_aabb(tube, xf1, xf2),
         ShapeGeometry::Field(field) => {
             crate::math_functions::aabb_union(crate::field::compute_field_aabb(&**field, xf1), crate::field::compute_field_aabb(&**field, xf2))
@@ -1035,6 +1096,7 @@ pub fn get_shape_centroid(shape: &Shape) -> Vec3 {
         ShapeGeometry::Capsule(capsule) => lerp(capsule.center1, capsule.center2, 0.5),
         ShapeGeometry::Tube(tube) => crate::tube::compute_tube_mass(tube, 1.0).center,
         ShapeGeometry::Field(field) => crate::math_functions::aabb_center(field.bounds()),
+        ShapeGeometry::BoxSet(set) => box_set::compute_box_set_mass(set, 1.0).center,
         ShapeGeometry::Compound(compound) => {
             let aabb = crate::compound::compute_compound_aabb(compound, Transform::IDENTITY);
             crate::math_functions::aabb_center(aabb)
@@ -1063,6 +1125,7 @@ pub fn get_shape_area(shape: &Shape) -> f32 {
             2.0 * length(sub(capsule.center1, capsule.center2)) + 2.0 * PI * capsule.radius
         }).sum(),
         ShapeGeometry::Hull(hull) => hull.surface_area,
+        ShapeGeometry::BoxSet(_) => 0.0,
         ShapeGeometry::Sphere(sphere) => 2.0 * PI * sphere.radius,
         _ => 0.0,
     }
@@ -1085,6 +1148,7 @@ pub fn get_shape_projected_area(shape: &Shape, plane_normal: Vec3) -> f32 {
                 + 2.0 * tube.radius * length(cross(sub(capsule.center2, capsule.center1), plane_normal))
         }).sum(),
         ShapeGeometry::Hull(hull) => crate::hull::compute_hull_projected_area(hull, plane_normal),
+        ShapeGeometry::BoxSet(_) => 0.0,
         ShapeGeometry::Sphere(sphere) => PI * sphere.radius * sphere.radius,
         _ => 0.0,
     }
@@ -1095,6 +1159,7 @@ pub fn compute_shape_mass(shape: &Shape) -> MassData {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_capsule_mass(capsule, shape.density),
         ShapeGeometry::Tube(tube) => crate::tube::compute_tube_mass(tube, shape.density),
         ShapeGeometry::Hull(hull) => crate::hull::compute_hull_mass(hull, shape.density),
+        ShapeGeometry::BoxSet(set) => box_set::compute_box_set_mass(set, shape.density),
         ShapeGeometry::Sphere(sphere) => crate::sphere::compute_sphere_mass(sphere, shape.density),
         _ => MassData::default(),
     }
@@ -1149,6 +1214,14 @@ pub fn compute_shape_extent(shape: &Shape, local_center: Vec3) -> ShapeExtent {
         ShapeGeometry::Hull(hull) => {
             extent = crate::hull::compute_hull_extent(hull, local_center);
         }
+        ShapeGeometry::BoxSet(set) => {
+            // An empty child contributes neither a CCD threshold nor angular reach to its body.
+            extent = if set.bounds().is_some() {
+                box_set::compute_box_set_extent(set, local_center)
+            } else {
+                ShapeExtent { min_extent: crate::constants::huge(), max_extent: Vec3::ZERO }
+            };
+        }
 
         ShapeGeometry::Mesh(mesh) => {
             // This is needed for kinematic mesh sleeping
@@ -1177,6 +1250,7 @@ pub fn ray_cast_shape(shape: &Shape, transform: Transform, input: &RayCastInput)
         ShapeGeometry::Capsule(capsule) => crate::capsule::ray_cast_capsule(capsule, &local_input),
         ShapeGeometry::Tube(tube) => crate::tube::ray_cast_tube(tube, &local_input),
         ShapeGeometry::Field(field) => crate::field::ray_cast_field(&**field, &local_input),
+        ShapeGeometry::BoxSet(set) => box_set::ray_cast_box_set(set, &local_input),
         ShapeGeometry::Compound(compound) => crate::compound::ray_cast_compound(compound, &local_input),
         ShapeGeometry::Sphere(sphere) => crate::sphere::ray_cast_sphere(sphere, &local_input),
         ShapeGeometry::Hull(hull) => crate::hull::ray_cast_hull(hull, &local_input),
@@ -1192,6 +1266,10 @@ pub fn ray_cast_shape(shape: &Shape, transform: Transform, input: &RayCastInput)
 }
 
 pub fn shape_cast_shape(shape: &Shape, transform: Transform, input: &ShapeCastInput) -> CastOutput {
+    if let ShapeGeometry::BoxSet(set) = &shape.geom {
+        // The set casts the entire proxy in its relative frame.
+        return box_set::cast_box_set(set, transform, input, false);
+    }
     let mut local_points = [Vec3::ZERO; MAX_SHAPE_CAST_POINTS];
 
     let count = min_int(input.proxy.count(), MAX_SHAPE_CAST_POINTS as i32);
@@ -1213,6 +1291,7 @@ pub fn shape_cast_shape(shape: &Shape, transform: Transform, input: &ShapeCastIn
         ShapeGeometry::Capsule(capsule) => crate::capsule::shape_cast_capsule(capsule, &local_input),
         ShapeGeometry::Tube(tube) => crate::tube::shape_cast_tube(tube, &local_input),
         ShapeGeometry::Field(_) => CastOutput::default(),
+        ShapeGeometry::BoxSet(_) => unreachable!("handled before copying local points"),
         ShapeGeometry::Compound(compound) => crate::compound::shape_cast_compound(compound, &local_input),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::shape_cast_height_field(height_field, &local_input)
@@ -1232,6 +1311,7 @@ pub fn overlap_shape(shape: &Shape, transform: Transform, proxy: &ShapeProxy) ->
         ShapeGeometry::Capsule(capsule) => crate::capsule::overlap_capsule(capsule, transform, proxy),
         ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, transform, proxy),
         ShapeGeometry::Field(field) => crate::field::overlap_field(&**field, transform, proxy),
+        ShapeGeometry::BoxSet(set) => box_set::overlap_box_set(set, proxy, invert_transform(transform)),
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, transform, proxy),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::overlap_height_field(height_field, transform, proxy)
@@ -1263,6 +1343,11 @@ pub fn collide_mover(
         ShapeGeometry::Capsule(capsule) => crate::capsule::collide_mover_and_capsule(&mut planes[0], capsule, &local_mover),
         ShapeGeometry::Tube(tube) => crate::tube::collide_mover_and_tube(&mut planes[..plane_capacity as usize], tube, &local_mover),
         ShapeGeometry::Field(_) => 0,
+        ShapeGeometry::BoxSet(set) => return box_set::with_box_set_mover_planes(set, transform, mover, |found| {
+            let count = found.len().min(plane_capacity as usize).min(planes.len());
+            planes[..count].copy_from_slice(&found[..count]);
+            count as i32
+        }),
         ShapeGeometry::Compound(compound) => {
             crate::compound::collide_mover_and_compound(&mut planes[..plane_capacity as usize], compound, &local_mover)
         }
@@ -1297,6 +1382,9 @@ pub fn create_shape_proxy(
 ) {
     b3_assert!(world.shapes[shape_id as usize].proxy_key == NULL_INDEX);
 
+    if world.shapes[shape_id as usize].is_empty_box_set() {
+        return;
+    }
     update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, body_type, world.speculative_distance);
 
     let (fat_aabb, category_bits) = {
@@ -1330,6 +1418,7 @@ pub fn destroy_shape_proxy(world: &mut World, shape_id: i32) {
 fn destroy_shape_allocation_for_shape_change(world: &mut World, shape_id: i32) {
     let hull = match &world.shapes[shape_id as usize].geom {
         ShapeGeometry::Hull(hull) => Some(Arc::clone(hull)),
+        ShapeGeometry::BoxSet(_) => None,
         _ => None,
     };
 
@@ -1339,7 +1428,7 @@ fn destroy_shape_allocation_for_shape_change(world: &mut World, shape_id: i32) {
         remove_hull_from_database(world, &hull);
     }
 
-    if matches!(&world.shapes[shape_id as usize].geom, ShapeGeometry::Tube(_) | ShapeGeometry::Field(_)) {
+    if matches!(&world.shapes[shape_id as usize].geom, ShapeGeometry::Tube(_) | ShapeGeometry::Field(_) | ShapeGeometry::BoxSet(_)) {
         world.shapes[shape_id as usize].geom = ShapeGeometry::default();
     }
 
@@ -1375,6 +1464,7 @@ pub fn make_shape_proxy<'a>(shape: &'a Shape, buffer: &'a mut [Vec3; 2]) -> Shap
         ShapeGeometry::Tube(_) => panic!("a tube requires one convex proxy per segment"),
 
         ShapeGeometry::Field(_) => panic!("a field has no convex proxy"),
+        ShapeGeometry::BoxSet(_) => panic!("a box set requires one convex proxy per child"),
 
         _ => {
             b3_assert!(false);
@@ -1429,6 +1519,11 @@ pub fn get_shape_user_material_id(shape: &Shape, child_index: i32, triangle_inde
 
     let mut material_index: i32 = 0;
     match &shape.geom {
+        ShapeGeometry::BoxSet(set) => {
+            if let Some(child) = box_set::box_set_get(set, child_index) {
+                material_index = i32::try_from(child.material).unwrap_or(0);
+            }
+        }
         ShapeGeometry::Mesh(mesh) => {
             let indices = &mesh.data.materials;
             if !indices.is_empty() {
@@ -1462,6 +1557,12 @@ pub fn get_shape_user_material_id(shape: &Shape, child_index: i32, triangle_inde
 
 /// C: static b3ResetProxy.
 fn reset_proxy(world: &mut World, shape_id: i32, wake_bodies: bool, destroy_proxy: bool) {
+    destroy_shape_contacts(world, shape_id, wake_bodies);
+    refit_shape_proxy(world, shape_id, destroy_proxy);
+    crate::physics_world::validate_solver_sets(world);
+}
+
+fn destroy_shape_contacts(world: &mut World, shape_id: i32, wake_bodies: bool) {
     let body_id = world.shapes[shape_id as usize].body_id;
 
     // destroy all contacts associated with this shape
@@ -1480,7 +1581,20 @@ fn reset_proxy(world: &mut World, shape_id: i32, wake_bodies: bool, destroy_prox
             crate::contact::destroy_contact(world, contact_id, wake_bodies);
         }
     }
+}
 
+// An incremental geometry edit only refits its proxy. A wholesale change
+// destroys the old contacts before using the same proxy maintenance path.
+fn refit_shape_proxy(world: &mut World, shape_id: i32, destroy_proxy: bool) {
+    let body_id = world.shapes[shape_id as usize].body_id;
+    if world.shapes[shape_id as usize].is_empty_box_set() {
+        destroy_shape_proxy(world, shape_id);
+        let shape = &mut world.shapes[shape_id as usize];
+        shape.aabb = AABB::default();
+        shape.fat_aabb = AABB::default();
+        shape.enlarged_aabb = false;
+        return;
+    }
     let transform = crate::body::get_body_transform_quick(world, body_id);
     let proxy_key = world.shapes[shape_id as usize].proxy_key;
     if proxy_key != NULL_INDEX {
@@ -1509,10 +1623,12 @@ fn reset_proxy(world: &mut World, shape_id: i32, wake_bodies: bool, destroy_prox
         }
     } else {
         let proxy_type = world.bodies[body_id as usize].body_type;
-        update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type, world.speculative_distance);
+        if world.bodies[body_id as usize].set_index == DISABLED_SET {
+            update_shape_aabbs(&mut world.shapes[shape_id as usize], transform, proxy_type, world.speculative_distance);
+        } else {
+            create_shape_proxy(world, shape_id, proxy_type, transform, true);
+        }
     }
-
-    crate::physics_world::validate_solver_sets(world);
 }
 
 // ---------------------------------------------------------------------------
@@ -1976,6 +2092,110 @@ pub fn shape_set_mesh(world: &mut World, shape_id: ShapeId, mesh_data: &Arc<crat
     world.locked = false;
 }
 
+pub fn shape_get_box_set(world: &World, shape_id: ShapeId) -> &Arc<BoxSetData> {
+    match &world.shapes[get_shape_full_id(world, shape_id) as usize].geom {
+        ShapeGeometry::BoxSet(set) => set,
+        _ => panic!("shape is not a box set"),
+    }
+}
+
+// Geometry setters leave a body's chosen mass properties in place. CCD and
+// angular reach still need the bounds of all its shapes about that same centre.
+pub(crate) fn refresh_body_shape_extents(world: &mut World, body_id: i32) {
+    let center = crate::body::get_body_sim_from_id(world, body_id).local_center;
+    let mut min_extent = crate::constants::huge();
+    let mut max_extent = Vec3::ZERO;
+    let mut child = world.bodies[body_id as usize].head_shape_id;
+    while child != NULL_INDEX {
+        let shape = &world.shapes[child as usize];
+        let extent = compute_shape_extent(shape, center);
+        min_extent = min_float(min_extent, extent.min_extent);
+        max_extent = max(max_extent, extent.max_extent);
+        child = shape.next_shape_id;
+    }
+    let sim = crate::body::get_body_sim_from_id_mut(world, body_id);
+    sim.min_extent = min_extent;
+    sim.max_extent = max_extent;
+}
+
+pub fn shape_set_box_set(world: &mut World, shape_id: ShapeId, set: &Arc<BoxSetData>) {
+    if world.locked {
+        return;
+    }
+    b3_validate!(box_set::box_set_validate(set).is_ok());
+    let id = get_shape_full_id(world, shape_id);
+    crate::recording::with_recording(world, crate::recording::Recording::mark_box_set_unsupported);
+    world.locked = true;
+    destroy_shape_contacts(world, id, true);
+    destroy_shape_allocation_for_shape_change(world, id);
+    let shape = &mut world.shapes[id as usize];
+    shape.geom = ShapeGeometry::BoxSet(Arc::clone(set));
+    shape.local_centroid = get_shape_centroid(shape);
+    shape.aabb_margin = compute_shape_margin(shape);
+    let body_id = shape.body_id;
+    refit_shape_proxy(world, id, true);
+    refresh_body_shape_extents(world, body_id);
+    crate::physics_world::validate_solver_sets(world);
+    world.locked = false;
+}
+
+/// Remove live slots, then insert new children in input order. The returned
+/// slots replace the contents of `added`. Contacts stay live. As with other
+/// geometry setters, call `body_apply_mass_from_shapes` to update body mass.
+pub fn shape_edit_box_set(world: &mut World, shape_id: ShapeId, remove: &[i32], add: &[SetBox], added: &mut Vec<i32>) {
+    added.clear();
+    if world.locked {
+        return;
+    }
+    let id = get_shape_full_id(world, shape_id);
+    let ShapeGeometry::BoxSet(set) = &mut world.shapes[id as usize].geom else {
+        panic!("shape is not a box set");
+    };
+    let removed = remove.iter().any(|&slot| box_set::box_set_get(set, slot).is_some());
+    if !removed && add.is_empty() {
+        return;
+    }
+    let old_bounds = set.bounds();
+    world.locked = true;
+    Arc::make_mut(set).edit(remove, add, added);
+    let bounds_changed = old_bounds != set.bounds();
+    crate::recording::with_recording(world, crate::recording::Recording::mark_box_set_unsupported);
+    let shape = &mut world.shapes[id as usize];
+    shape.local_centroid = get_shape_centroid(shape);
+    let body_id = shape.body_id;
+    if bounds_changed {
+        shape.aabb_margin = compute_shape_margin(shape);
+        refit_shape_proxy(world, id, false);
+        refresh_body_shape_extents(world, body_id);
+    }
+    if removed {
+        crate::body::wake_body(world, body_id);
+        let mut key = world.bodies[body_id as usize].head_contact_key;
+        while key != NULL_INDEX {
+            let contact = &world.contacts[(key >> 1) as usize];
+            let edge = (key & 1) as usize;
+            key = contact.edges[edge].next_key;
+            if (contact.flags & crate::contact::CONTACT_TOUCHING_FLAG) != 0
+                && (contact.shape_id_a == id || contact.shape_id_b == id)
+            {
+                let other_body = contact.edges[edge ^ 1].body_id;
+                crate::body::wake_body(world, other_body);
+            }
+        }
+    }
+    if world.shapes[id as usize].proxy_key != NULL_INDEX && !add.is_empty() {
+        let transform = crate::body::get_body_transform_quick(world, body_id);
+        let rotation = Transform { p: Vec3::ZERO, q: transform.q };
+        for child in add {
+            let rotated = box_set::transform_box_bounds(child.bounds, rotation);
+            let grown = crate::math_functions::aabb_inflate(rotated, world.speculative_distance);
+            let bounds = crate::math_functions::offset_aabb(grown, transform.p);
+            crate::broad_phase::wake_sleeping_bodies_overlapping_shape(world, id, bounds);
+        }
+    }
+    world.locked = false;
+}
+
 pub fn shape_get_contact_capacity(world: &World, shape_id: ShapeId) -> i32 {
     if world.locked {
         return 0;
@@ -2104,6 +2324,15 @@ pub fn shape_get_closest_point(world: &World, shape_id: ShapeId, target: Vec3) -
     let shape = &world.shapes[shape_idx as usize];
     // Low level closest point query is a documented float carve-out far from the origin
     let transform = to_relative_transform(crate::body::get_body_transform_quick(world, shape.body_id), POS_ZERO);
+
+    if let ShapeGeometry::BoxSet(set) = &shape.geom {
+        let local = inv_transform_point(transform, target);
+        return match box_set::closest_box_set_point(set, local) {
+            Some(point) if point == local => target,
+            Some(point) => transform_point(transform, point),
+            None => transform.p,
+        };
+    }
 
     if let ShapeGeometry::Tube(tube) = &shape.geom {
         let (point, _) = crate::tube::closest_point_on_tube(tube, inv_transform_point(transform, target), true);
@@ -2435,8 +2664,348 @@ fn mesh_time_of_impact_fcn(ctx: &mut MeshImpactContext, a: Vec3, b: Vec3, c: Vec
     true
 }
 
+#[derive(Default)]
+pub(crate) struct SetSweepCounts {
+    pub candidates: usize,
+    pub toi_calls: usize,
+}
+
+// All children share the body's orientations. Compute the projections once
+// per shape pair, after at least one pair of leaves reaches SAT.
+struct SweepAxis {
+    normal: Vec3,
+    fixed: Vec3,
+    start: Vec3,
+    end: Vec3,
+    length: f32,
+}
+
+fn box_sweep_axes(start: Transform, end: Transform) -> [SweepAxis; 15] {
+    let fixed = [Vec3::AXIS_X, Vec3::AXIS_Y, Vec3::AXIS_Z];
+    let basis = make_matrix_from_quat(start.q);
+    let moving = [basis.cx, basis.cy, basis.cz];
+    std::array::from_fn(|i| {
+        let normal = match i {
+            0..=2 => fixed[i],
+            3..=5 => moving[i - 3],
+            _ => cross(moving[(i - 6) / 3], fixed[(i - 6) % 3]),
+        };
+        SweepAxis {
+            normal, fixed: abs(normal), length: length(normal),
+            start: abs(inv_rotate_vector(start.q, normal)), end: abs(inv_rotate_vector(end.q, normal)),
+        }
+    })
+}
+
+// Intersect the time intervals on the fifteen box SAT axes in the target
+// frame. For rotation these are necessary tests only: each moving vertex is
+// within the arc slack of its endpoint chord. On any axis that chord is within
+// the larger endpoint support about the interpolated centre. The result is a
+// lower bound; the full body sweep determines the hit.
+fn hit_fraction(
+    axes: &[SweepAxis; 15], fixed: AABB, moving: AABB, start: Transform, end: Transform, padding: f32, limit: f32,
+) -> Option<f32> {
+    let center = aabb_center(moving);
+    let fixed_center = aabb_center(fixed);
+    // Cover both endpoints even when a thin box's midpoint rounds onto a face.
+    let half = max(sub(center, moving.lower_bound), sub(moving.upper_bound, center));
+    let fixed_half = max(sub(fixed_center, fixed.lower_bound), sub(fixed.upper_bound, fixed_center));
+    let first = transform_point(start, center);
+    let delta = sub(first, fixed_center);
+    let travel = sub(transform_point(end, center), first);
+    let mut enter = 0.0f32;
+    let mut leave = limit;
+    for axis in axes {
+        let support = dot(half, axis.start).max(dot(half, axis.end));
+        let span = dot(fixed_half, axis.fixed) + support + padding * axis.length;
+        let d = dot(delta, axis.normal);
+        let v = dot(travel, axis.normal);
+        if v == 0.0 {
+            if d.abs() > span {
+                return None;
+            }
+        } else {
+            let t1 = (-span - d) / v;
+            let t2 = (span - d) / v;
+            enter = enter.max(t1.min(t2));
+            leave = leave.min(t1.max(t2));
+            if enter > leave {
+                return None;
+            }
+        }
+    }
+    Some(enter)
+}
+
+fn swept_box_bounds(bounds: AABB, start: Transform, end: Transform, padding: f32) -> AABB {
+    aabb_inflate(aabb_union(box_set::transform_box_bounds(bounds, start), box_set::transform_box_bounds(bounds, end)), padding)
+}
+
+// Stop counting as soon as the other side is known to be smaller. Keep one
+// leaf by value so a lone survivor never requires a second walk.
+fn count_sweep_leaves(set: &BoxSetData, query: AABB, limit: usize) -> (usize, AABB) {
+    let mut count = 0;
+    let mut last = AABB::default();
+    set.query(query, &mut |_, child| {
+        count += 1;
+        last = child.bounds;
+        count < limit
+    });
+    (count, last)
+}
+
+// Count emitted leaves, including the walks used to choose the outer tree.
+// The target is probed first so an empty overhang costs no striker visits.
+fn query_swept_box_pairs(
+    fixed: &BoxSetData, moving: &BoxSetData, to_fixed: impl Fn(AABB) -> AABB, to_moving: impl Fn(AABB) -> AABB,
+    mut visit: impl FnMut(AABB, AABB),
+) -> usize {
+    let (Some(fixed_root), Some(moving_root)) = (fixed.bounds(), moving.bounds()) else { return 0 };
+    let moving_total = moving.indexed_box_count() as usize;
+    let fixed_query = to_fixed(moving_root);
+    let (fixed_count, single_fixed) = count_sweep_leaves(fixed, fixed_query, moving_total + 1);
+    if fixed_count == 0 {
+        return 0;
+    }
+    let mut visits = fixed_count;
+    if fixed_count == 1 {
+        moving.query(to_moving(single_fixed), &mut |_, b| {
+            visits += 1;
+            visit(single_fixed, b.bounds);
+            true
+        });
+        return visits;
+    }
+    let moving_query = to_moving(fixed_root);
+    let (moving_count, single_moving) = count_sweep_leaves(moving, moving_query, fixed_count);
+    visits += moving_count;
+    if moving_count == 0 {
+        return visits;
+    }
+    let fixed_outer = fixed_count <= moving_count;
+    let (outer, inner, query) = if fixed_outer { (fixed, moving, fixed_query) } else { (moving, fixed, moving_query) };
+    let mut inner_visits = 0;
+    let mut visit_outer = |bounds| {
+        let query = if fixed_outer { to_moving(bounds) } else { to_fixed(bounds) };
+        inner.query(query, &mut |_, child| {
+            inner_visits += 1;
+            if fixed_outer {
+                visit(bounds, child.bounds);
+            } else {
+                visit(child.bounds, bounds);
+            }
+            true
+        });
+    };
+    if moving_count == 1 {
+        visit_outer(single_moving);
+    } else {
+        outer.query(query, &mut |_, child| {
+            visits += 1;
+            visit_outer(child.bounds);
+            true
+        });
+    }
+    visits + inner_visits
+}
+
+fn sweep_set_proxy(input: TOIInput, fallback: Option<(Vec3, f32)>, best: &mut TOIOutput, counts: &mut SetSweepCounts) {
+    counts.toi_calls += 1;
+    let mut output = crate::distance::time_of_impact(&input);
+    if output.fraction == 0.0 {
+        if let Some((center, radius)) = fallback {
+            counts.toi_calls += 1;
+            output = crate::distance::time_of_impact(&TOIInput {
+                proxy_b: ShapeProxy { points: std::slice::from_ref(&center), radius: radius + crate::constants::linear_slop() },
+                ..input
+            });
+            output.used_fallback = true;
+        }
+    }
+    if output.fraction > 0.0 && output.fraction < best.fraction {
+        *best = output;
+    }
+}
+
+// The target is static. All proxies, including an off-centre child, stay in
+// their body's own frame. The body sweep supplies both translation and rotation.
+fn set_time_of_impact(
+    target: &Shape, set: &BoxSetData, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32, counts: &mut SetSweepCounts,
+) -> TOIOutput {
+    let mut best = TOIOutput { state: crate::types::TOIState::Separated, fraction: max_fraction, ..Default::default() };
+    let Some(root) = set.bounds() else { return best };
+    if sweep_a.c1 != sweep_a.c2 || sweep_a.q1 != sweep_a.q2 {
+        return best;
+    }
+    let xf_a = crate::distance::get_sweep_transform(sweep_a, 0.0);
+    let start = inv_mul_transforms(xf_a, crate::distance::get_sweep_transform(sweep_b, 0.0));
+    let end = inv_mul_transforms(xf_a, crate::distance::get_sweep_transform(sweep_b, 1.0));
+    let inv_start = invert_transform(start);
+    let inv_end = invert_transform(end);
+    let arc = set_rotation_slack(sweep_b, root, 1.0);
+    // In the inverse sweep the translating centre is also viewed from two
+    // different orientations. Its cross term is t*(1-t)*(R1^-1 - R2^-1)*travel.
+    let travel = sub(sweep_b.c2, sweep_b.c1);
+    let travel1 = inv_rotate_vector(sweep_b.q1, travel);
+    let travel2 = inv_rotate_vector(sweep_b.q2, travel);
+    let inverse_slack = arc + 0.25 * length(sub(travel1, travel2));
+
+    if let ShapeGeometry::BoxSet(fixed) = &target.geom {
+        // Zero-radius GJK proxies can report a hit at target + tolerance.
+        let tolerance = 1.25 * crate::constants::linear_slop();
+        let forward = |b| swept_box_bounds(b, start, end, set_rotation_slack(sweep_b, b, 1.0) + tolerance);
+        // A near-contact witness can be 'tolerance' beyond the moving root.
+        // Its inverse-rotation slack grows by at most that much as well.
+        let back = |a| swept_box_bounds(a, inv_start, inv_end, inverse_slack + 2.0 * tolerance);
+        let mut axes = None;
+        let mut entry = |a, b, limit| {
+            let axes = axes.get_or_insert_with(|| box_sweep_axes(start, end));
+            let padding = set_rotation_slack(sweep_b, b, 1.0) + tolerance;
+            hit_fraction(axes, a, b, start, end, padding, limit).filter(|&t| t < limit)
+        };
+        let cast = |a, b, best: &mut TOIOutput, counts: &mut SetSweepCounts| {
+            let vertices_a = box_set::box_vertices(a);
+            let vertices_b = box_set::box_vertices(b);
+            let half = aabb_extents(b);
+            let radius = 0.5 * half.x.min(half.y).min(half.z);
+            let input = TOIInput {
+                proxy_a: ShapeProxy { points: &vertices_a, radius: 0.0 },
+                proxy_b: ShapeProxy { points: &vertices_b, radius: 0.0 },
+                sweep_a: *sweep_a, sweep_b: *sweep_b, max_fraction: best.fraction,
+            };
+            sweep_set_proxy(input, Some((aabb_center(b), radius)), best, counts);
+        };
+        // Tree order is spatial, not temporal. Start at the smallest lower
+        // bound so even a back-to-front box insertion order needs few TOIs.
+        // Revisit the trees only if another pair can still beat this result.
+        let mut first = None;
+        let mut first_entry = max_fraction;
+        let mut next_entry = max_fraction;
+        counts.candidates += query_swept_box_pairs(fixed, set, forward, back, |a, b| {
+            if let Some(t) = entry(a, b, max_fraction) {
+                if t < first_entry {
+                    next_entry = first_entry;
+                    first_entry = t;
+                    first = Some((a, b));
+                } else {
+                    next_entry = next_entry.min(t);
+                }
+            }
+        });
+        if let Some(seed) = first {
+            cast(seed.0, seed.1, &mut best, counts);
+            if next_entry < best.fraction {
+                let visits = query_swept_box_pairs(fixed, set, forward, back, |a, b| {
+                    if (a, b) != seed && entry(a, b, best.fraction).is_some() {
+                        cast(a, b, &mut best, counts);
+                    }
+                });
+                counts.candidates += visits;
+            }
+        }
+        return best;
+    }
+
+    let mut visit = |proxy_a: ShapeProxy, bounds: AABB, face: Option<(Vec3, Vec3)>| {
+        set.query(aabb_inflate(bounds, inverse_slack), &mut |_, child| {
+            counts.candidates += 1;
+            let center = aabb_center(child.bounds);
+            let half = aabb_extents(child.bounds);
+            let radius = 0.5 * half.x.min(half.y).min(half.z);
+            if let Some((a, normal)) = face {
+                let d1 = dot(normal, sub(transform_point(start, center), a));
+                let d2 = dot(normal, sub(transform_point(end, center), a));
+                if d1 < 0.0 {
+                    return true;
+                }
+                if target.sensor_index == NULL_INDEX && d1 - d2 < radius && d2 > radius {
+                    // A shallow crest can pass under the centroid while clipping
+                    // a corner. Accept the front-side shortcut only if the
+                    // entire swept box clears the plane, including its arc.
+                    let near1 = d1 - dot(half, abs(inv_rotate_vector(start.q, normal)));
+                    let near2 = d2 - dot(half, abs(inv_rotate_vector(end.q, normal)));
+                    if near1.min(near2) > arc {
+                        return true;
+                    }
+                }
+            }
+            let vertices = box_set::box_vertices(child.bounds);
+            let input = TOIInput {
+                proxy_a,
+                proxy_b: ShapeProxy { points: &vertices, radius: 0.0 },
+                sweep_a: *sweep_a, sweep_b: *sweep_b, max_fraction: best.fraction,
+            };
+            sweep_set_proxy(input, Some((center, radius)), &mut best, counts);
+            true
+        });
+    };
+
+    match &target.geom {
+        ShapeGeometry::Mesh(_) | ShapeGeometry::HeightField(_) => {
+            let endpoints = aabb_union(box_set::transform_box_bounds(root, start), box_set::transform_box_bounds(root, end));
+            let bounds = aabb_inflate(endpoints, arc);
+            let mut triangle = |a, b, c, _| {
+                let points = [a, b, c];
+                let b1 = crate::math_functions::make_aabb(&points.map(|p| transform_point(inv_start, p)), 0.0);
+                let b2 = crate::math_functions::make_aabb(&points.map(|p| transform_point(inv_end, p)), 0.0);
+                let face = (a, crate::math_internal::make_normal_from_points(a, b, c));
+                visit(ShapeProxy { points: &points, radius: 0.0 }, aabb_union(b1, b2), Some(face));
+                true
+            };
+            match &target.geom {
+                ShapeGeometry::Mesh(mesh) => crate::mesh::query_mesh(mesh, bounds, &mut triangle),
+                ShapeGeometry::HeightField(field) => crate::height_field::query_height_field(field, bounds, &mut triangle),
+                _ => unreachable!(),
+            }
+        }
+        ShapeGeometry::Sphere(_) | ShapeGeometry::Capsule(_) | ShapeGeometry::Hull(_) => {
+            let bounds = aabb_union(compute_shape_aabb(target, inv_start), compute_shape_aabb(target, inv_end));
+            let mut buffer = [Vec3::ZERO; 2];
+            visit(make_shape_proxy(target, &mut buffer), bounds, None);
+        }
+        ShapeGeometry::BoxSet(_) => unreachable!("handled by the set pair sweep above"),
+        ShapeGeometry::Field(_) | ShapeGeometry::Tube(_) | ShapeGeometry::Compound(_) => {}
+    }
+    best
+}
+
 pub fn shape_time_of_impact(shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32, speculative: f32) -> TOIOutput {
-    // A field has no surface to sweep against: its contacts catch what moves, ahead by the speculative distance.
+    shape_time_of_impact_counted(shape_a, shape_b, sweep_a, sweep_b, max_fraction, speculative, &mut SetSweepCounts::default())
+}
+
+pub(crate) fn shape_time_of_impact_counted(
+    shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32, speculative: f32, counts: &mut SetSweepCounts,
+) -> TOIOutput {
+    if let ShapeGeometry::BoxSet(set) = &shape_b.geom {
+        return set_time_of_impact(shape_a, set, sweep_a, sweep_b, max_fraction, counts);
+    }
+    if let ShapeGeometry::BoxSet(set) = &shape_a.geom {
+        let mut best = TOIOutput { state: crate::types::TOIState::Separated, fraction: max_fraction, ..Default::default() };
+        if sweep_a.c1 != sweep_a.c2 || sweep_a.q1 != sweep_a.q2
+            || !matches!(shape_b.geom, ShapeGeometry::Hull(_) | ShapeGeometry::Capsule(_) | ShapeGeometry::Sphere(_))
+        {
+            return best;
+        }
+        let fixed = crate::distance::get_sweep_transform(sweep_a, 0.0);
+        let start = inv_mul_transforms(fixed, crate::distance::get_sweep_transform(sweep_b, 0.0));
+        let end = inv_mul_transforms(fixed, crate::distance::get_sweep_transform(sweep_b, 1.0));
+        let local = compute_shape_aabb(shape_b, Transform::IDENTITY);
+        let padding = set_rotation_slack(sweep_b, local, 1.0) + 1.25 * crate::constants::linear_slop();
+        let bounds = aabb_inflate(aabb_union(compute_shape_aabb(shape_b, start), compute_shape_aabb(shape_b, end)), padding);
+        let mut buffer = [Vec3::ZERO; 2];
+        let proxy_b = make_shape_proxy(shape_b, &mut buffer);
+        set.query(bounds, &mut |_, child| {
+            counts.candidates += 1;
+            let vertices = box_set::box_vertices(child.bounds);
+            let input = TOIInput {
+                proxy_a: ShapeProxy { points: &vertices, radius: 0.0 }, proxy_b,
+                sweep_a: *sweep_a, sweep_b: *sweep_b, max_fraction: best.fraction,
+            };
+            sweep_set_proxy(input, None, &mut best, counts);
+            true
+        });
+        return best;
+    }
     if shape_a.shape_type() == ShapeType::Field || shape_b.shape_type() == ShapeType::Field {
         return TOIOutput { state: crate::types::TOIState::Separated, fraction: max_fraction, ..Default::default() };
     }

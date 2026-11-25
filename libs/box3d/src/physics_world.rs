@@ -116,7 +116,7 @@ pub struct TaskContext {
     /// the port defers them so workers never alias the constraint graph.
     /// Applied serially after the parallel-for in worker order; slot-disjoint,
     /// so the values are order independent.
-    pub mesh_spec_updates: Vec<(i32, i32, u16)>,
+    pub mesh_spec_updates: Vec<(i32, i32, i32)>,
 
     /// Scratch local manifold for the convex collide path. C builds the local
     /// manifold in a caller-provided stack buffer; the port reuses this
@@ -128,6 +128,24 @@ pub struct TaskContext {
     /// b3ComputeMeshManifolds). Capacity-preserving reuse across contacts;
     /// see MeshCollideScratch.
     pub mesh_scratch: crate::mesh_contact::MeshCollideScratch,
+    pub(crate) set_scratch: Option<Box<crate::set_contact::SetCollideScratch>>,
+    /// Set narrow-phase work performed by this worker in the most recent step.
+    pub set_triangle_visits: usize,
+    /// Box tree nodes the set/mesh triangle descent popped this step, rejected ones included.
+    pub set_mesh_node_visits: usize,
+    /// Set/convex: box leaves visited. Set/set: node pairs the joint tree descent
+    /// tested, plus each candidate pair it emitted.
+    pub set_box_visits: usize,
+    pub set_child_pairs: usize,
+    pub set_manifolds: usize,
+    /// Child contact rows whose normal the seam filter changed, before patch reduction.
+    pub set_corrected_rows: usize,
+    /// Child contact rows the seam filter discarded, before embedded recovery.
+    pub set_dropped_rows: usize,
+    /// Contacts that needed an exterior exit after all child points were buried.
+    pub set_recovery_contacts: usize,
+    /// Box faces examined by those six-axis walks, including the exit faces.
+    pub set_walk_steps: usize,
 
     /// Reusable segment-pair manifolds for tube contacts.
     pub tube_scratch: crate::tube_contact::TubeCollideScratch,
@@ -170,6 +188,7 @@ pub struct World {
     /// This is a sparse array that maps contact ids to the contact data stored
     /// in the constraint graph or in the solver sets.
     pub contacts: Vec<Contact>,
+    pub(crate) free_set_contacts: Vec<Box<crate::set_contact::SetContact>>,
 
     /// Used to create stable ids for islands.
     pub island_id_pool: IdPool,
@@ -198,6 +217,7 @@ pub struct World {
     /// Persistent solver step scratch (C: reusable arena). Moved into the
     /// StepContext for the duration of world_step; contents are transient.
     pub solver_scratch: crate::solver::SolverScratch,
+    pub(crate) island_split_scratch: crate::island::IslandSplitScratch,
 
     pub body_move_events: Vec<BodyMoveEvent>,
     pub sensor_begin_events: Vec<SensorBeginTouchEvent>,
@@ -331,8 +351,8 @@ use crate::constants::{
 };
 use crate::constraint_graph::{add_contact_to_graph, remove_contact_from_graph, OVERFLOW_INDEX};
 use crate::contact::{
-    update_contact, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_TOUCHING_FLAG, RELATIVE_TRANSFORM_VALID,
-    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_FIELD_CONTACT, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
+    contact_requires_scalar_solver, update_contact, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_TOUCHING_FLAG, RELATIVE_TRANSFORM_VALID,
+    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_FIELD_CONTACT, SIM_MESH_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
     SIM_TOUCHING_FLAG,
 };
 use crate::core::{get_byte_count, NULL_INDEX, SECRET_COOKIE};
@@ -677,7 +697,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         let is_static_a = type_a == BodyType::Static;
         let is_static_b = type_b == BodyType::Static;
         let was_touching = (contact_flags & SIM_TOUCHING_FLAG) != 0;
-        let multi_manifold = (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
+        let multi_manifold = contact_requires_scalar_solver(contact_flags);
 
         if was_touching {
             b3_assert!(set_index_a == AWAKE_SET || set_index_a == STATIC_SET);
@@ -709,6 +729,8 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
             && recycle_distance > 0.0
             && (contact_flags & RELATIVE_TRANSFORM_VALID) != 0
             && (contact_flags & CONTACT_RECYCLE_FLAG) != 0
+            && ((contact_flags & crate::contact::SIM_SET_CONTACT) == 0 || contact.set_contact.as_ref().unwrap()
+                .revisions_match(&world.shapes[shape_id_a as usize], &world.shapes[shape_id_b as usize]))
             && ((contact_flags & SIM_FIELD_CONTACT) == 0 || field_motion_is_within(world, contact, transform_a, transform_b, recycle_tolerance))
         {
             let angle_a = dot_quat(transform_a.q, contact.cached_rotation_a);
@@ -816,11 +838,11 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         // inline (slot-disjoint per contact); the port defers to keep workers
         // from aliasing the graph.
         let contact_flags = contact.flags;
-        if touching && was_touching && (contact_flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 {
+        if touching && was_touching && contact_requires_scalar_solver(contact_flags) {
             let (color_index, local_index) = (contact.color_index, contact.local_index);
             b3_assert!(color_index != NULL_INDEX);
             b3_assert!(0 <= color_index && color_index < GRAPH_COLOR_COUNT as i32);
-            task_context.mesh_spec_updates.push((color_index, local_index, manifold_count as u16));
+            task_context.mesh_spec_updates.push((color_index, local_index, manifold_count));
         }
 
         // State changes that affect island connectivity. Also affects contact events.
@@ -1076,7 +1098,7 @@ fn collide(world: &mut World, context: &mut StepContext) {
 
                 add_non_touching_contact(world, contact_id);
 
-                let multi_manifold = (world.contacts[contact_id as usize].flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0;
+                let multi_manifold = contact_requires_scalar_solver(world.contacts[contact_id as usize].flags);
                 remove_contact_from_graph(world, body_id_a, body_id_b, color_index, local_index, multi_manifold);
             }
 
@@ -1113,6 +1135,15 @@ pub fn world_step(world: &mut World, time_step: f32, sub_step_count: i32) {
     for i in 0..world.worker_count as usize {
         world.task_contexts[i].points.clear();
         world.task_contexts[i].lines.clear();
+        world.task_contexts[i].set_triangle_visits = 0;
+        world.task_contexts[i].set_mesh_node_visits = 0;
+        world.task_contexts[i].set_box_visits = 0;
+        world.task_contexts[i].set_child_pairs = 0;
+        world.task_contexts[i].set_manifolds = 0;
+        world.task_contexts[i].set_corrected_rows = 0;
+        world.task_contexts[i].set_dropped_rows = 0;
+        world.task_contexts[i].set_recovery_contacts = 0;
+        world.task_contexts[i].set_walk_steps = 0;
     }
 
     // Prepare to capture events
@@ -2020,19 +2051,23 @@ pub fn world_collide_mover(
             let body_transform = get_body_transform_quick(world, shape.body_id);
             let transform = to_relative_transform(body_transform, origin);
 
+            let mut report = |planes: &[PlaneResult]| {
+                if planes.is_empty() {
+                    return true;
+                }
+                let id = ShapeId { index1: shape.id + 1, world0: world.world_id, generation: shape.generation };
+                let ret = fcn(id, planes);
+                if let Some(w) = rec_writer.as_mut() {
+                    w.write_plane_hit(id, planes, ret);
+                }
+                ret
+            };
+            if let crate::shape::ShapeGeometry::BoxSet(set) = &shape.geom {
+                return crate::box_set::with_box_set_mover_planes(set, transform, mover, report);
+            }
             let mut buffer = [PlaneResult::default(); 64];
             let count = crate::shape::collide_mover(&mut buffer, 64, shape, transform, mover);
-
-            if count > 0 {
-                let id = ShapeId { index1: shape.id + 1, world0: world.world_id, generation: shape.generation };
-                let ret = fcn(id, &buffer[..count as usize]);
-                if let Some(w) = rec_writer.as_mut() {
-                    w.write_plane_hit(id, &buffer[..count as usize], ret);
-                }
-                return ret;
-            }
-
-            true
+            report(&buffer[..count as usize])
         };
 
         dynamic_tree_query(&world.broad_phase.trees[i], aabb, filter.mask_bits, false, &mut callback);
@@ -2468,7 +2503,11 @@ pub fn world_cast_mover(
                 // Re-center on the query origin so the per-shape cast stays in float precision far from the origin
                 let transform = to_relative_transform(get_body_transform_quick(world, shape.body_id), origin);
 
-                let output = shape_cast_shape(shape, transform, &local_input);
+                let output = match &shape.geom {
+                    // A child overlapping at the start must not hide a wall farther along the same cast.
+                    crate::shape::ShapeGeometry::BoxSet(set) => crate::box_set::cast_box_set(set, transform, &local_input, true),
+                    _ => shape_cast_shape(shape, transform, &local_input),
+                };
                 if output.fraction == 0.0 {
                     // Ignore overlapping shapes
                     return *fraction;
@@ -2570,6 +2609,7 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
         let local_position = inv_transform_world_point(xf, position);
 
         let (witness_point, distance) = match &shape.geom {
+            crate::shape::ShapeGeometry::BoxSet(_) => continue,
             crate::shape::ShapeGeometry::Tube(tube) => crate::tube::closest_point_on_tube(tube, local_position, true),
             crate::shape::ShapeGeometry::Field(field) => crate::field::closest_point_on_field(&**field, local_position),
             _ => {
@@ -2783,7 +2823,7 @@ pub fn validate_solver_sets(world: &World) {
                         b3_assert!(shape.id == shape_id);
                         b3_assert!(shape.prev_shape_id == prev_shape_id);
 
-                        if set_index == DISABLED_SET {
+                        if set_index == DISABLED_SET || shape.is_empty_box_set() {
                             b3_assert!(shape.proxy_key == NULL_INDEX);
                         } else if set_index == STATIC_SET {
                             b3_assert!(crate::broad_phase::proxy_type(shape.proxy_key) == BodyType::Static);
@@ -3033,7 +3073,7 @@ pub fn validate_contacts(world: &World) {
                     b3_assert!(contact.body_sim_index_b == body_b.local_index);
                 }
 
-                if (contact.flags & (SIM_MESH_CONTACT | SIM_TUBE_CONTACT)) != 0 || contact.color_index == OVERFLOW_INDEX {
+                if contact_requires_scalar_solver(contact.flags) || contact.color_index == OVERFLOW_INDEX {
                     let color = &world.constraint_graph.colors[contact.color_index as usize];
                     let contact_id = color.contacts[contact.local_index as usize].contact_id;
                     b3_assert!(contact_id == contact_index);

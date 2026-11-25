@@ -368,7 +368,7 @@ impl Renderer {
     /// a caller with many doors should reject on `min`/`max` first.
     pub fn anim_part_boxes(&self) -> Vec<AnimPartBox> {
         let mut out = Vec::new();
-        for (slot, inst) in self.placed_models.iter().enumerate() {
+        for (slot, inst) in self.placed_models.live() {
             let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == inst.model)
             else {
                 continue;
@@ -404,7 +404,7 @@ impl Renderer {
         let target = target.into();
         let slot = match &target {
             ModelTarget::Instance(i)|ModelTarget::Attachment(i) => *i,
-            ModelTarget::Model(id) => self.placed_models.iter().position(|m| m.model == *id)?,
+            ModelTarget::Model(id) => self.placed_models.live().find(|(_, m)| m.model == *id)?.0,
         };
         let inst = if matches!(target,ModelTarget::Attachment(_)){self.world_attachments.get(slot)?}else{self.placed_models.get(slot)?};
         let (_, loaded) = self.static_models.iter().find(|(k, _)| *k == inst.model)?;

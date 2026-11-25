@@ -158,7 +158,13 @@ fn commercial(name: &str) -> Fixture {
     f.write("scope/resources/logo.svg", "<svg/>\n");
     f.write("scope/deps/scope_dep/Cargo.toml", &package("scope-dep", ""));
     f.write("scope/deps/scope_dep/src/lib.rs", "");
-    for dep in ["extra", "via", "weak"] {
+    f.write(
+        "scope/deps/extra/Cargo.toml",
+        &package("scope-extra", "[features]\ndefault = [\"fast\"]\nfast = []\n[dependencies]\nlog = { version = \"0.4\", optional = true }\n"),
+    );
+    f.write("scope/deps/extra/src/lib.rs", "pub mod tables;\n");
+    f.write("scope/deps/extra/src/tables.rs", "// the tables\n");
+    for dep in ["via", "weak"] {
         f.write(&format!("scope/deps/{dep}/Cargo.toml"), &package(&format!("scope-{dep}"), ""));
         f.write(&format!("scope/deps/{dep}/src/lib.rs"), "");
     }
@@ -186,9 +192,11 @@ fn closure_follows_normal_build_and_target_dependencies_but_not_dev_or_external_
     // dependency (milkdrop's stage-shared).
     assert_eq!(names, vec!["makepad-amp", "amp-build", "amp-unix-build", "amp-win", "milkdrop", "stage-shared", "visuals"]);
     let scope: Vec<&str> = source.closure(&roots(&["makepad-scope"]), &[]).unwrap().iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(scope, vec!["makepad-scope", "scope-dep"]);
+    // Scope's own features name scope-internal (and so its scope-rows) and
+    // scope-via: they come along without slice features.
+    assert_eq!(scope, vec!["makepad-scope", "scope-internal", "scope-rows", "scope-dep", "scope-via"]);
     let both = source.closure(&roots(&["makepad-scope", "makepad-amp"]), &[]).unwrap();
-    assert_eq!(both.len(), 9, "without features, Scope's optional dependencies stay out");
+    assert_eq!(both.len(), 12, "without features, the optional dependencies Scope's features name come along and the others stay out");
     assert!(source.closure(&roots(&["makepad-nothing"]), &[]).unwrap_err().contains("No package makepad-nothing"));
     assert!(source.closure(&[], &[]).is_err());
     assert!(source.closure(&roots(&["makepad-commercial-members"]), &[]).unwrap_err().contains("root package"));
@@ -254,7 +262,10 @@ fn a_slice_holds_exactly_its_crates_their_includes_and_the_generated_members_pac
             "scope/deps/extra/Cargo.toml",
             "scope/deps/extra/src/lib.rs",
             "scope/deps/internal/Cargo.toml",
+            "scope/deps/internal/src/agents.rs",
             "scope/deps/internal/src/lib.rs",
+            "scope/deps/rows/Cargo.toml",
+            "scope/deps/rows/src/lib.rs",
             "scope/deps/scope_dep/Cargo.toml",
             "scope/deps/scope_dep/src/lib.rs",
             "scope/deps/via/Cargo.toml",
@@ -265,10 +276,10 @@ fn a_slice_holds_exactly_its_crates_their_includes_and_the_generated_members_pac
             "scope/src/main.rs",
             "src/lib.rs"
         ],
-        "Scope's optional dependencies, left off without features, are placeholders; scope-rows is none of Scope's"
+        "the optional dependencies Scope's features name ship (scope-internal with its scope-rows, scope-via); the two only an implicit or a weak feature reaches are placeholders"
     );
-    assert_eq!(scope.placeholders.len(), 4);
-    assert_eq!(scope.files, 16);
+    assert_eq!(scope.placeholders.len(), 2);
+    assert_eq!(scope.files, 19);
 }
 
 #[test]
@@ -420,8 +431,10 @@ fn paths_resolve_lexically_and_never_leave_the_repository() {
     assert!(under("stage/libs/x/y", "stage/libs/x") && under("a", "") && !under("stage/libsx", "stage/libs"));
 }
 
-/// A root's optional dependencies are in the slice only when its features
-/// turn them on, with no default features, as the Runner builds it.
+/// A root's optional dependencies that its own features turn on are always
+/// in the slice: a release may turn any of them on where it builds. One that
+/// only its implicit feature reaches is in it when the slice's features turn
+/// it on, with no default features, as the Runner builds it.
 #[test]
 fn a_roots_optional_dependencies_follow_the_slice_features() {
     let f = commercial("features");
@@ -431,20 +444,22 @@ fn a_roots_optional_dependencies_follow_the_slice_features() {
         let features: Vec<String> = features.iter().map(|s| s.to_string()).collect();
         Ok(source.closure(&roots(&["makepad-scope"]), &features)?.iter().map(|c| c.name.clone()).collect())
     };
-    // `internal` is a default feature: off without features.
-    assert_eq!(closure(&[]).unwrap(), vec!["makepad-scope", "scope-dep"]);
-    // `dep:x` (here a target table's), `x/f`, an implicit feature and a
-    // chain of features turn dependencies on; `x?/f` does not. (Crates come
-    // in directory order.)
-    // (scope-internal's own optional scope-rows comes along: a crate that is
-    // not a root has all its optional dependencies followed.)
-    assert_eq!(closure(&["internal"]).unwrap(), vec!["makepad-scope", "scope-internal", "scope-rows", "scope-dep"]);
-    assert_eq!(closure(&["via"]).unwrap(), vec!["makepad-scope", "scope-dep", "scope-via"]);
-    assert_eq!(closure(&["scope-extra"]).unwrap(), vec!["makepad-scope", "scope-extra", "scope-dep"]);
-    assert_eq!(closure(&["weak"]).unwrap(), vec!["makepad-scope", "scope-dep"]);
+    // Without slice features, what Scope's own features turn on comes along:
+    // `dep:x` (here a target table's, under the default feature `internal`)
+    // and `x/f` (`via`); `x?/f` (`weak`) does not, nor does an implicit
+    // feature no feature names (scope-extra). (Crates come in directory
+    // order; scope-internal's own optional scope-rows comes along: a crate
+    // that is not a root has all its optional dependencies followed.)
+    let named = vec!["makepad-scope", "scope-internal", "scope-rows", "scope-dep", "scope-via"];
+    assert_eq!(closure(&[]).unwrap(), named);
+    assert_eq!(closure(&["internal"]).unwrap(), named);
+    assert_eq!(closure(&["via"]).unwrap(), named);
+    assert_eq!(closure(&["weak"]).unwrap(), named);
+    // An implicit feature among the slice's features turns its dependency on.
+    assert_eq!(closure(&["scope-extra"]).unwrap(), vec!["makepad-scope", "scope-extra", "scope-internal", "scope-rows", "scope-dep", "scope-via"]);
     assert_eq!(closure(&["all", "scope-weak"]).unwrap(), vec!["makepad-scope", "scope-internal", "scope-rows", "scope-dep", "scope-via", "scope-weak"]);
     // An optional dependency from elsewhere is a feature too.
-    assert_eq!(closure(&["serde"]).unwrap(), vec!["makepad-scope", "scope-dep"]);
+    assert_eq!(closure(&["serde"]).unwrap(), named);
     // Named as `dep:` by a feature, a dependency has no implicit feature.
     assert!(closure(&["scope-internal"]).unwrap_err().contains("has the feature scope-internal"));
     assert!(closure(&["nope"]).unwrap_err().contains("No root package (makepad-scope) has the feature nope"));
@@ -452,31 +467,34 @@ fn a_roots_optional_dependencies_follow_the_slice_features() {
     let both = source.closure(&roots(&["makepad-amp", "makepad-scope"]), &["internal".into()]).unwrap();
     assert!(both.iter().any(|c| c.name == "scope-internal") && both.iter().any(|c| c.name == "milkdrop"));
 
-    // The slice follows: the features' crates are shipped; a left-off
-    // optional dependency is a placeholder package in its directory (Cargo
-    // reads every path dependency's manifest), with its name, version and
-    // feature names (implicit ones included), no dependencies and an empty
-    // library, and not a member of the slice.
+    // The slice follows: the crates the root's features name ship as source
+    // (scope-internal, though `internal` is a default feature and the slice
+    // has none) and are members; one left off is a placeholder package in
+    // its directory (Cargo reads every path dependency's manifest), with its
+    // name, version and feature names (implicit ones included), no
+    // dependencies and an empty library, and not a member of the slice.
     let plain = slice(&f.dir, &commit, "scope", &roots(&["makepad-scope"]), &[]).unwrap();
     let files = f.files(&plain.commit);
-    let internal_files: Vec<&String> = files.iter().filter(|file| file.starts_with("scope/deps/internal/")).collect();
-    assert_eq!(internal_files, ["scope/deps/internal/Cargo.toml", "scope/deps/internal/src/lib.rs"]);
-    assert!(!files.iter().any(|file| file.starts_with("scope/deps/rows")), "{files:?}");
-    let placeholder = f.show(&format!("{}:scope/deps/internal/Cargo.toml", plain.commit));
-    assert_eq!(placeholder, placeholder_manifest(&source.crates["scope/deps/internal"]));
-    assert!(placeholder.contains("name = \"scope-internal\"\nversion = \"0.1.0\"") && placeholder.contains("\n[features]\n\"default\" = []\n\"log\" = []\n\"rows\" = []\n"), "{placeholder}");
+    assert!(files.contains(&"scope/deps/internal/src/agents.rs".to_owned()) && files.contains(&"scope/deps/rows/src/lib.rs".to_owned()), "{files:?}");
+    assert_eq!(f.show(&format!("{}:scope/deps/internal/Cargo.toml", plain.commit)), f.show(&format!("{commit}:scope/deps/internal/Cargo.toml")));
+    assert!(f.show(&format!("{}:Cargo.toml", plain.commit)).contains("\"scope-internal\" = { path = \"scope/deps/internal\" }"));
+    let extra_files: Vec<&String> = files.iter().filter(|file| file.starts_with("scope/deps/extra/")).collect();
+    assert_eq!(extra_files, ["scope/deps/extra/Cargo.toml", "scope/deps/extra/src/lib.rs"]);
+    let placeholder = f.show(&format!("{}:scope/deps/extra/Cargo.toml", plain.commit));
+    assert_eq!(placeholder, placeholder_manifest(&source.crates["scope/deps/extra"]));
+    assert!(placeholder.contains("name = \"scope-extra\"\nversion = \"0.1.0\"") && placeholder.contains("\n[features]\n\"default\" = []\n\"fast\" = []\n\"log\" = []\n"), "{placeholder}");
     assert!(!placeholder.contains("[dependencies]"), "{placeholder}");
-    assert_eq!(f.show(&format!("{}:scope/deps/internal/src/lib.rs", plain.commit)), "");
+    assert_eq!(f.show(&format!("{}:scope/deps/extra/src/lib.rs", plain.commit)), "");
     let doc = parse_toml(&placeholder).unwrap();
-    assert_eq!(doc.get_path(&["package", "name"]).and_then(Toml::as_str), Some("scope-internal"));
-    assert_eq!(plain.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["scope-extra", "scope-internal", "scope-via", "scope-weak"]);
-    assert!(!f.show(&format!("{}:Cargo.toml", plain.commit)).contains("scope-internal"));
-    let internal = slice(&f.dir, &commit, "scope", &roots(&["makepad-scope"]), &["internal".into()]).unwrap();
-    let files = f.files(&internal.commit);
-    assert!(files.contains(&"scope/deps/internal/src/agents.rs".to_owned()), "{files:?}");
-    assert_eq!(f.show(&format!("{}:scope/deps/internal/Cargo.toml", internal.commit)), f.show(&format!("{commit}:scope/deps/internal/Cargo.toml")));
-    assert_eq!(internal.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["scope-extra", "scope-via", "scope-weak"]);
-    assert!(f.show(&format!("{}:Cargo.toml", internal.commit)).contains("\"scope-internal\" = { path = \"scope/deps/internal\" }"));
+    assert_eq!(doc.get_path(&["package", "name"]).and_then(Toml::as_str), Some("scope-extra"));
+    assert_eq!(plain.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["scope-extra", "scope-weak"]);
+    assert!(!f.show(&format!("{}:Cargo.toml", plain.commit)).contains("scope-extra"));
+    let extra = slice(&f.dir, &commit, "scope", &roots(&["makepad-scope"]), &["scope-extra".into()]).unwrap();
+    let files = f.files(&extra.commit);
+    assert!(files.contains(&"scope/deps/extra/src/tables.rs".to_owned()), "{files:?}");
+    assert_eq!(f.show(&format!("{}:scope/deps/extra/Cargo.toml", extra.commit)), f.show(&format!("{commit}:scope/deps/extra/Cargo.toml")));
+    assert_eq!(extra.placeholders.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["scope-weak"]);
+    assert!(f.show(&format!("{}:Cargo.toml", extra.commit)).contains("\"scope-extra\" = { path = \"scope/deps/extra\" }"));
 }
 
 /// A repository with a root workspace (Makepad's shape): the archive of a root reaching a

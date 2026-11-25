@@ -4,7 +4,7 @@ use crate::{
     rig::{read_clip, read_skeleton, write_clip, write_skeleton},
     AnimationClip, Material, Operation, OperationResult, Skeleton,
 };
-use makepad_core_util::sha256::sha256;
+use makepad_core_util::sha256::{sha256, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
@@ -280,7 +280,7 @@ impl Workspace {
         }
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         let content = state_hash(&self.state, &self.limits, &mut ctx)?;
-        let (_, checkpoint_source) = checkpoint_load_work(&self.state, &self.limits)?;
+        let (_, checkpoint_source) = checkpoint_load_work(&self.state, &self.limits, cancelled)?;
         ctx.checkpoint(0)?;
         let checkpoint = {
             let _clone = GeometryTimer::new(GeometryPhase::Clone);
@@ -339,7 +339,7 @@ impl Document {
         state.materials.insert(0, Material::default());
         let mut ctx = mesh::Context::new(limits.mesh.clone(), None);
         let hash = state_hash(&state, &limits, &mut ctx)?;
-        let (_,checkpoint_source)=checkpoint_load_work(&state,&limits)?;
+        let (_,checkpoint_source)=checkpoint_load_work(&state,&limits,None)?;
         Ok(Self {
             limits,
             checkpoint: state.clone(),
@@ -676,7 +676,7 @@ impl Document {
             .checked_add(1)
             .ok_or(Error::Budget("generation"))?;
         self.admit(self.state.memory_bytes())?;
-        let (_,source)=checkpoint_load_work(&self.state,&self.limits)?;
+        let (_,source)=checkpoint_load_work(&self.state,&self.limits,None)?;
         self.checkpoint = self.state.clone();
         self.checkpoint_source=source;
         self.log.clear();
@@ -1557,8 +1557,8 @@ fn checkpoint_source_measure(state:&State,limits:&Limits,ctx:&mut mesh::Context)
 }
 // Compute once per checkpoint (and derive directly while decoding). The
 // serialized work counters are deliberately not trusted or persisted.
-fn checkpoint_load_work(state:&State,limits:&Limits)->Result<(u64,SourceMeasure)>{
-    let mut ctx=mesh::Context::new(limits.mesh.clone(),None);
+fn checkpoint_load_work(state:&State,limits:&Limits,cancelled:Option<&dyn Fn()->bool>)->Result<(u64,SourceMeasure)>{
+    let mut ctx=mesh::Context::new(limits.mesh.clone(),cancelled);
     let (bytes,source)=checkpoint_source_measure(state,limits,&mut ctx)?;
     let mut reader=Reader::new(&bytes);
     read_state(&mut reader,limits,&mut ctx,2)?;reader.end()?;
@@ -1568,7 +1568,13 @@ fn state_hash(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result
     let mut w = Writer::new();
     write_state(&mut w, state, limits, ctx, false)?;
     ctx.checkpoint(w.bytes.len() as u64)?;
-    Ok(sha256(&w.bytes))
+    // A large model's state hashed for 0.12 s at a 2-core share: poll between pieces.
+    let mut hash = Sha256::new();
+    for piece in w.bytes.chunks(1 << 20) {
+        hash.update(piece);
+        ctx.checkpoint(0)?;
+    }
+    Ok(hash.finish())
 }
 fn write_material(w: &mut Writer, value: &Material) -> Result<()> {
     for v in value.color {
