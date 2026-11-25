@@ -1,3 +1,4 @@
+// corpus: rustc-arch x86_64
 #[test]
 fn legacy_const_argument() {
     unsafe {

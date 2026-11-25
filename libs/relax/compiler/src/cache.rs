@@ -259,7 +259,7 @@ const LEDGER_KEY: u128 = 0;
 // A vtable's data name carries its principal keys (syms::vtable_name_keys). 40: no notes (39
 // reverted). 41: the notes again, and the real-time set they gate (a 39 set, taken ungated, is
 // never read: the configuration key carries the version).
-const ENTRY_VERSION: u32 = 41;
+const ENTRY_VERSION: u32 = 42;
 /// The real-time set earlier runs recorded (Cache::rt_set_load), by why each slot joined. Nothing
 /// announces a missed slot's code (a handoff through a static met once as a counted miss, what an
 /// audit's hole reached): the next run walks those slots before the tickets, as roots, so the
@@ -288,16 +288,38 @@ const RT_SET_RULE: u32 = 5;
 const TY_BACKREF: u8 = 63;
 /// A back-reference's length (its tag and its u32).
 const TY_BACKREF_LEN: u32 = 5;
-/// A callee relocation's tag (20 slot, 21 thunk, 25 call) plus this: its key is the n-th one the
-/// entry's relocation list wrote (a u32 n follows instead of the key's bytes): 26, 27 and 31.
+/// A callee relocation's tag (20 slot, 21 thunk, 25 call, 32 body word) plus this: its key is the
+/// n-th one the entry's relocation list wrote (a u32 n follows instead of the key's bytes): 26,
+/// 27, 31 and 38.
 const RELOC_KEY_REF: u8 = 6;
+/// The callee tag of a slot's body word (`Reloc::Body`: a hot site of O3 code calls through it)
+pub(crate) const RELOC_BODY: u8 = 32;
 
-/// The callee tag (20, 21, 25) of a callee relocation's tag, written in full or as a reference.
-fn callee_tag(tag: u8) -> u8 {
-    if tag >= 20 + RELOC_KEY_REF { tag - RELOC_KEY_REF } else { tag }
+/// The callee tag (20, 21, 25, 32) of a callee relocation's tag, written in full or as a reference.
+pub(crate) fn callee_tag(tag: u8) -> u8 {
+    match tag {
+        26 | 27 | 31 | 38 => tag - RELOC_KEY_REF,
+        t => t,
+    }
 }
 
-/// Writes a callee relocation (tag 20, 21 or 25) to slot `x`: the bytes of its key (`key`) the
+/// Whether `tag` is a callee relocation's tag, in full or as a reference.
+pub(crate) fn is_callee_tag(tag: u8) -> bool {
+    matches!(callee_tag(tag), 20 | 21 | 25 | RELOC_BODY)
+}
+
+/// The callee relocation tag of `r` (None: it names no slot).
+fn reloc_callee(r: &Reloc) -> Option<(u8, u32)> {
+    match *r {
+        Reloc::Slot(x) => Some((20, x)),
+        Reloc::Thunk(x) => Some((21, x)),
+        Reloc::Call(x) => Some((25, x)),
+        Reloc::Body(x) => Some((RELOC_BODY, x)),
+        _ => None,
+    }
+}
+
+/// Writes a callee relocation (tag 20, 21, 25 or 32) to slot `x`: the bytes of its key (`key`) the
 /// first time the list names `x`, after that the position of that key (RELOC_KEY_REF). False when
 /// the key cannot be encoded.
 fn write_callee(e: &mut E, tag: u8, x: u32, keyed: &mut HashMap<u32, u32>, key: impl FnOnce() -> Option<Vec<u8>>) -> bool {
@@ -318,7 +340,7 @@ fn write_callee(e: &mut E, tag: u8, x: u32, keyed: &mut HashMap<u32, u32>, key: 
 /// `first` runs once per key, the first time the list writes it, and a later reference (a
 /// RELOC_KEY_REF tag) gives that result again from `seen`.
 fn read_callee<'a, T: Copy>(d: &mut D<'a>, tag: u8, seen: &mut Vec<T>, first: impl FnOnce(&'a [u8]) -> Option<T>) -> Option<T> {
-    if tag >= 20 + RELOC_KEY_REF {
+    if callee_tag(tag) != tag {
         return seen.get(d.u32()? as usize).copied();
     }
     let t = first(d.bytes()?)?;
@@ -723,6 +745,7 @@ unsafe impl Sync for CacheCell {}
 impl CacheCell {
     pub fn new(cache: Cache) -> Self { Self(std::cell::UnsafeCell::new(cache)) }
     pub(crate) fn get(&self) -> *mut Cache { self.0.get() }
+    pub(crate) fn into_inner(self) -> Cache { self.0.into_inner() }
 }
 impl std::ops::Deref for CacheCell {
     type Target = Cache;
@@ -990,6 +1013,15 @@ pub struct Cache {
     def_maps: HashMap<u32, HashMap<u128, DefId>>,
     /// every definition by crate (built once, on the first decode)
     crate_defs: Vec<Vec<DefId>>,
+    /// `crate_defs` being made in steps (`map_crate_defs`): the lists so far, and the definition
+    /// the scan goes on from
+    crate_defs_scan: Option<(Vec<Vec<DefId>>, usize)>,
+    /// a crate's definition map being built in steps (`map_crate_defs`): the crate, its
+    /// definitions, how many are keyed, the map so far, and the keys found twice
+    def_map_partial: Option<(u32, Vec<DefId>, usize, HashMap<u128, DefId>, HashSet<u128>)>,
+    /// (test) the crates whose maps an append of definitions made go (`defs_appended`)
+    #[cfg(test)]
+    def_maps_appended: Vec<u32>,
     crate_defs_n: usize,
     /// definitions from `crate_defs_n` to here are run-time modules' (`defs_mapped`); 0: none seen
     module_defs_n: usize,
@@ -1111,6 +1143,13 @@ pub struct Cache {
     /// bytes and slots, `replaced`'s length when it was built, the crates edited live by then and
     /// its slots' bits; the retry takes it while at most 1% of its slots were replaced since
     image_kept: Option<(Vec<u8>, u32, usize, usize, Vec<u64>)>,
+    /// Work and cursor of a startup image build that gave way during record_manifest.
+    image_resume: Option<image::ImageResume>,
+    #[cfg(test)]
+    image_reads: std::sync::atomic::AtomicUsize,
+    /// (test) image builds that gave way and then started over (cache/image.rs refresh_resume)
+    #[cfg(test)]
+    image_starts_over: usize,
     /// the tier of each code entry this run recorded (by key), pending or written: a verified O1
     /// rebuild replaces only an entry below O1
     rec_tier: HashMap<u128, u8>,
@@ -1479,6 +1518,10 @@ impl Cache {
             foreign_canon: None,
             def_maps: HashMap::new(),
             crate_defs: Vec::new(),
+            crate_defs_scan: None,
+            def_map_partial: None,
+            #[cfg(test)]
+            def_maps_appended: Vec::new(),
             crate_defs_n: 0,
             module_defs_n: 0,
             def_keys: HashMap::new(),
@@ -1520,6 +1563,11 @@ impl Cache {
             loaded_bits: std::sync::OnceLock::new(),
             startup_ids: std::sync::OnceLock::new(),
             image_kept: None,
+            image_resume: None,
+            #[cfg(test)]
+            image_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            image_starts_over: 0,
             rec_tier: HashMap::new(),
             manifest_root: None,
             linked_key: HashMap::new(),
@@ -2226,6 +2274,7 @@ impl Cache {
         // the crates before `first` keep their lists: dec_def builds such a map on its first miss
         for v in by.iter_mut().skip(first) { *v = Vec::new(); }
         self.crate_defs = by;
+        self.crate_defs_scan = None;
     }
 
     /// A file version in an entry: its path and source hash (see file_ids).
@@ -2385,14 +2434,7 @@ impl Cache {
         let ci = dd.u128()?;
         let k = dd.u128()?;
         let c = *self.crate_by_ident.get(&ci)?;
-        // definitions added since the maps were built (a live edit): build them again
-        if !self.defs_mapped(u) {
-            self.crate_defs_n = u.prog.defs.len();
-            self.module_defs_n = 0;
-            self.crate_defs.clear();
-            self.def_maps.clear();
-            self.mapped_definitions = None;
-        }
+        if !self.defs_mapped(u) { self.defs_appended(u); }
         if let Some(mapped) = &self.mapped_definitions {
             // (a partial restore's tables hold for its kept crates' definitions before its suffix;
             // the rest -- the other crates, a kept crate's on-demand tail -- go by the maps)
@@ -2402,38 +2444,130 @@ impl Cache {
                 None => {}
             }
         }
-        if !self.def_maps.contains_key(&c) {
-            let t0 = relax_session::clock::cpu_ns();
-            if self.crate_defs.is_empty() {
-                let mut by = vec![Vec::new(); u.prog.crates.len()];
-                for i in 0..u.prog.defs.len() {
-                    let d = DefId(i as u32);
-                    if let Some(v) = by.get_mut(u.prog.def(d).krate as usize) {
-                        v.push(d);
-                    }
-                }
-                self.crate_defs = by;
-            }
-            let defs = std::mem::take(self.crate_defs.get_mut(c as usize)?);
-            let mut m = HashMap::with_capacity(defs.len());
-            let mut dup = HashSet::new();
-            for &d in &defs {
-                let kk = self.def_key(u, d);
-                if m.insert(kk, d).is_some() {
-                    dup.insert(kk);
-                }
-            }
-            // two definitions with one key: neither decodes (a miss, never the wrong one)
-            for kk in dup {
-                m.remove(&kk);
-                self.stats.def_collisions += 1;
-            }
-            if self.verbose && trace_on() {
-                eprintln!("relax cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_session::clock::cpu_ns() - t0) as f64 / 1e6);
-            }
-            self.def_maps.insert(c, m);
-        }
+        if !self.map_crate_defs(u, c, &|| false).ok()? { return None; }
         self.def_maps.get(&c)?.get(&k).copied()
+    }
+
+    /// Definitions were added to crates the cache names since the maps were built (a live edit;
+    /// definitions are only ever appended): the maps of those crates go, with their lists of
+    /// definitions taken anew; every other crate's map, or its list, holds as it was. The
+    /// restored tables go as before (they describe the definitions before the append, and the
+    /// collected record reuses them up to `crate_defs_n`).
+    fn defs_appended(&mut self, u: &Unit) {
+        let n = u.prog.defs.len();
+        // the crates the cache names that have new definitions, a flag per crate (no sort over the
+        // definitions); none while nothing is listed or mapped, as at the first map, whose
+        // definitions are all new (it runs inside the startup image build, with no yield check)
+        let mut touched: Vec<u32> = Vec::new();
+        if !self.crate_defs.is_empty() || !self.def_maps.is_empty() {
+            let mut seen = vec![false; self.crate_ident.len()];
+            for i in self.crate_defs_n.min(n)..n {
+                let k = u.prog.def(DefId(i as u32)).krate as usize;
+                if k < seen.len() && !seen[k] {
+                    seen[k] = true;
+                    touched.push(k as u32);
+                }
+            }
+            touched.sort_unstable();
+        }
+        // a map built in steps: its definitions back to its crate's list (taken anew below if
+        // its crate is one of these)
+        if let Some((pc, defs, ..)) = self.def_map_partial.take() {
+            if let Some(v) = self.crate_defs.get_mut(pc as usize) { *v = defs; }
+        }
+        for c in &touched { self.def_maps.remove(c); }
+        // (the lists cover the crates loaded since they were made: every crate has its list)
+        if !self.crate_defs.is_empty() && self.crate_defs.len() < u.prog.crates.len() {
+            self.crate_defs.resize(u.prog.crates.len(), Vec::new());
+        }
+        if !self.crate_defs.is_empty() && !touched.is_empty() {
+            for &c in &touched { if let Some(v) = self.crate_defs.get_mut(c as usize) { v.clear(); } }
+            for i in 0..n {
+                let d = DefId(i as u32);
+                let k = u.prog.def(d).krate;
+                if touched.binary_search(&k).is_ok() {
+                    if let Some(v) = self.crate_defs.get_mut(k as usize) { v.push(d); }
+                }
+            }
+        }
+        self.crate_defs_n = n;
+        self.module_defs_n = 0;
+        self.mapped_definitions = None;
+        #[cfg(test)]
+        { self.def_maps_appended.extend(touched); }
+    }
+
+    /// Crate `c`'s map from definition key to definition, built when it has none, asking `stop`
+    /// every DEF_MAP_STEP definitions (a large crate's map took 10-35 ms in one step inside the
+    /// startup image build): a stop keeps what is keyed (`def_map_partial`) for the next call, of
+    /// this crate. Each call keys a step before it asks, so a stop that always says yes still
+    /// sees the map built. The first call makes every crate's list of definitions, one scan over
+    /// the program's, in steps of DEF_SCAN_STEP the same way. Ok(true): `c` has its map;
+    /// Ok(false): `stop` said yes; Err: `c` has no list.
+    pub(super) fn map_crate_defs(&mut self, u: &Unit, c: u32, stop: &dyn Fn() -> bool) -> Result<bool, ()> {
+        if !self.defs_mapped(u) { self.defs_appended(u); }
+        if self.def_maps.contains_key(&c) { return Ok(true); }
+        let t0 = relax_session::clock::cpu_ns();
+        if self.crate_defs.is_empty() {
+            // (definitions appended meanwhile are scanned too: the scan runs to the program's end)
+            let (mut by, mut i) = self.crate_defs_scan.take().unwrap_or_else(|| (vec![Vec::new(); u.prog.crates.len()], 0));
+            // (a saved scan is this program's: definitions are only appended, and a settle
+            // rebuild, which replaces the program, opens a new cache that inherits no definition
+            // state, inherit_run_state)
+            debug_assert!(i <= u.prog.defs.len(), "a saved definition scan past the program's end: {} of {}", i, u.prog.defs.len());
+            let start = i;
+            while i < u.prog.defs.len() {
+                if i > start && (i - start) % DEF_SCAN_STEP == 0 && stop() {
+                    self.crate_defs_scan = Some((by, i));
+                    return Ok(false);
+                }
+                let d = DefId(i as u32);
+                let k = u.prog.def(d).krate as usize;
+                if by.len() <= k {
+                    by.resize(k + 1, Vec::new());
+                }
+                by[k].push(d);
+                i += 1;
+            }
+            if by.len() < u.prog.crates.len() {
+                by.resize(u.prog.crates.len(), Vec::new());
+            }
+            self.crate_defs = by;
+        }
+        let (defs, mut i, mut m, mut dup) = match self.def_map_partial.take() {
+            Some((pc, defs, i, m, dup)) if pc == c => (defs, i, m, dup),
+            other => {
+                // another crate's map in steps: its definitions back to its list (it starts again)
+                if let Some((pc, defs, ..)) = other {
+                    if let Some(v) = self.crate_defs.get_mut(pc as usize) { *v = defs; }
+                }
+                let defs = std::mem::take(self.crate_defs.get_mut(c as usize).ok_or(())?);
+                let m = HashMap::with_capacity(defs.len());
+                (defs, 0, m, HashSet::new())
+            }
+        };
+        let start = i;
+        while i < defs.len() {
+            if i > start && (i - start) % DEF_MAP_STEP == 0 && stop() {
+                self.def_map_partial = Some((c, defs, i, m, dup));
+                return Ok(false);
+            }
+            let kk = self.def_key(u, defs[i]);
+            if m.insert(kk, defs[i]).is_some() {
+                dup.insert(kk);
+            }
+            i += 1;
+        }
+        // two definitions with one key: neither decodes (a miss, never the wrong one)
+        for kk in dup {
+            m.remove(&kk);
+            self.stats.def_collisions += 1;
+        }
+        if self.verbose && trace_on() {
+            eprintln!("relax cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_session::clock::cpu_ns() - t0) as f64 / 1e6);
+        }
+        self.def_maps.insert(c, m);
+        Ok(true)
     }
 
     /// A monomorphic type by structure. Inference variables, params, etc. cannot be stored.
@@ -4657,7 +4791,7 @@ impl Cache {
                 for rl in relocs {
                     let t = match &rl.target {
                         Reloc::Sym(s) => format!("{} +{}", crate::syms::describe(u, *s), s.off),
-                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
+                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
                         r => format!("{:?}", r),
                     };
                     eprintln!("relax cache: RELOCS rec {} {} {}", name, rl.at, t);
@@ -4716,8 +4850,8 @@ impl Cache {
                         ok
                     }
                 },
-                Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => {
-                    let tag = match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 };
+                Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => {
+                    let (tag, _) = reloc_callee(r).unwrap();
                     let ok = write_callee(&mut e, tag, *x, &mut keyed, || self.slot_bytes(u, *x));
                     if !ok {
                         self.why("callee key");
@@ -4745,7 +4879,7 @@ impl Cache {
                 self.stats.unencodable += 1;
                 if trace_on() {
                     let w = match r {
-                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot/thunk key {}", crate::syms::stable_fn_name(u, *x)),
+                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => format!("slot/thunk key {}", crate::syms::stable_fn_name(u, *x)),
                         Reloc::Sym(s) => format!("{} ({})", self.last_why, crate::syms::describe(u, *s)),
                         _ => self.last_why.to_string(),
                     };
@@ -5033,6 +5167,7 @@ impl Cache {
         if self.keys_moved != 0 || !self.layout_edited.is_empty() {
             self.manifest_done = true;
             self.manifest_len = order.len();
+            self.discard_image_resume();
             return true;
         }
         let t0 = std::time::Instant::now();
@@ -5050,6 +5185,7 @@ impl Cache {
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
         if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && { let (r, n) = self.image_replaced(); r * 50 <= n }) {
+            self.discard_image_resume();
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -5057,9 +5193,14 @@ impl Cache {
         // next start would prelink a few dozen slots instead of ~20,000). Slots whose entry
         // an O2/O3 build replaced since stay lazy at the next start (image.rs img_live).
         if self.manifest_done && crate::preempt::is_stopped() {
+            self.discard_image_resume();
             return true;
         }
-        let Some(key) = self.manifest_key(root) else { self.manifest_done = true; self.manifest_len = order.len(); return true };
+        let Some(key) = self.manifest_key(root) else {
+            self.manifest_done = true; self.manifest_len = order.len();
+            self.discard_image_resume();
+            return true;
+        };
         // what earlier spills of this run wrote: the image takes those entries too (mid-run, as the
         // cache writer opened their stores before this request: open_written)
         if !self.index_written(crate::preempt::is_stopped()) {
@@ -5118,6 +5259,7 @@ impl Cache {
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
             self.image_kept = None;
+            self.discard_image_resume();
             return true;
         }
         if self.verbose {
@@ -5159,20 +5301,18 @@ impl Cache {
         let kept = self.image_kept.take().filter(|(_, n, at, ed, bits)| *ed == edited && self.replaced_in(bits, *at) * 100 <= *n as usize);
         let (img, built_at) = match kept {
             Some((b, n, at, _, bits)) => {
+                self.discard_image_resume();
                 if self.verbose { eprintln!("relax cache: startup image of {} slots kept from the try that gave way ({} of them replaced since)", n, self.replaced_in(&bits, at)); }
                 (Some((b, n, bits)), at)
             }
+            None if self.mode == Mode::Verify => (None, self.replaced.len()),
             None => {
-                let at = self.replaced.len();
-                let img = if self.mode != Mode::Verify {
-                    let t = std::time::Instant::now();
-                    let built = self.build_image(u, &image_ids, stop);
-                    if self.verbose {
-                        eprintln!("relax cache: startup image of {} slots {} in {:.1} ms", image_ids.len(), if built.is_ok() { "built" } else { "gave way" }, t.elapsed().as_secs_f64() * 1e3);
-                    }
-                    match built { Err(()) => return false, Ok(img) => img }
-                } else { None };
-                (img, at)
+                let t = std::time::Instant::now();
+                let built = self.build_image(u, &image_ids, stop);
+                if self.verbose {
+                    eprintln!("relax cache: startup image of {} slots {} in {:.1} ms", image_ids.len(), if built.is_ok() { "built" } else { "gave way" }, t.elapsed().as_secs_f64() * 1e3);
+                }
+                match built { Err(()) => return false, Ok(image_and_at) => image_and_at }
             }
         };
         // at exit no key can be made any more (slot_key): slots no lookup or record keyed this
@@ -5191,6 +5331,7 @@ impl Cache {
                 eprintln!("relax cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
             self.manifest_done = true; self.manifest_len = order.len();
+            self.discard_image_resume();
             return true;
         }
         // the entry first (the yield checks: nothing is queued before the last of them)
@@ -5263,6 +5404,7 @@ impl Cache {
         f.u128(if crate::reload::edited_crates().is_empty() { self.sources_fp() } else { 0 });
         self.push_pending(root, NewEntry { key: self.manifest_sources_key(key), kind: KIND_MANIFEST, payload: f.0 });
         self.image_rewrite = false;
+        self.discard_image_resume();
         true
     }
 
@@ -6856,6 +6998,13 @@ pub(crate) fn def_kind_code(k: &DefKind) -> u32 {
 /// name, stable name), kept in memory and written at exit (no I/O on the compile path).
 static TRACE: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
 
+/// Definitions a crate's map keys between two asks of `stop` (map_crate_defs); few in tests, so a
+/// small crate's map is built in steps too.
+const DEF_MAP_STEP: usize = if cfg!(test) { 4 } else { 1024 };
+/// Definitions the scan that makes the crates' lists takes between two asks of `stop`
+/// (map_crate_defs: a list push each, where a map's step makes a key each).
+const DEF_SCAN_STEP: usize = if cfg!(test) { 4 } else { 32768 };
+
 pub(crate) fn trace_on() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *T.get_or_init(|| std::env::var_os("RELAX_CACHE_TRACE").is_some())
@@ -7078,13 +7227,13 @@ impl Cache {
                     let mut e = E::default();
                     let ok = match &rl.target {
                         Reloc::Sym(s) => self.enc_sym(u, *s, &mut e, &mut rw).is_some(),
-                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => self.slot_bytes(u, *x).map(|b| e.bytes(&b)).is_some(),
+                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => self.slot_bytes(u, *x).map(|b| e.bytes(&b)).is_some(),
                         _ => false,
                     };
                     if ok && !rest.windows(e.0.len().max(1)).any(|w| w == &e.0[..]) {
                         missing.push(match &rl.target {
                             Reloc::Sym(s) => format!("{} {}", rl.at, crate::syms::describe(u, *s)),
-                            Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("{} slot {}", rl.at, crate::syms::stable_fn_name(u, *x)),
+                            Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => format!("{} slot {}", rl.at, crate::syms::stable_fn_name(u, *x)),
                             _ => String::new(),
                         });
                     }
@@ -7093,7 +7242,7 @@ impl Cache {
                 for rl in relocs {
                     let t = match &rl.target {
                         Reloc::Sym(s) => format!("{} +{}", crate::syms::describe(u, *s), s.off),
-                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
+                        Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
                         r => format!("{:?}", r),
                     };
                     eprintln!("relax cache: RELOCS fresh {} {} {}", name, rl.at, t);
@@ -7117,8 +7266,8 @@ impl Cache {
             let mut e = E::default();
             let ok = match r {
                 Reloc::Sym(s) => self.enc_sym(u, *s, &mut e, &mut rw).is_some(),
-                Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => {
-                    let tag = match r { Reloc::Slot(_) => 20, Reloc::Call(_) => 25, _ => 21 };
+                Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => {
+                    let (tag, _) = reloc_callee(r).unwrap();
                     write_callee(&mut e, tag, *x, &mut keyed, || self.slot_bytes(u, *x))
                 }
                 Reloc::TlsKey => { e.u8(22); true }
@@ -7131,7 +7280,7 @@ impl Cache {
                 // (what differs: the cached offset, kind and target bytes against the fresh ones)
                 let first = cbytes.as_deref().map_or(0, |b| b.iter().zip(&e.0).take_while(|(x, y)| x == y).count());
                 let hex = |b: &[u8]| format!("[{}/{}] {}", first, b.len(), b.iter().skip(first.saturating_sub(4)).take(16).map(|x| format!("{:02x}", x)).collect::<String>());
-                eprintln!("relax cache: VERIFY RELOC differs: {} at {} ({:?} -> {}, {}; cached at {} kind {}, target {} / fresh {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() }, inputs_word, co, if ck == Some(rl.kind) { "same" } else { "differs" }, cbytes.as_deref().map_or(String::from("-"), |b| hex(b)), if ok { hex(&e.0) } else { String::from("unencodable") });
+                eprintln!("relax cache: VERIFY RELOC differs: {} at {} ({:?} -> {}, {}; cached at {} kind {}, target {} / fresh {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) | Reloc::Body(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() }, inputs_word, co, if ck == Some(rl.kind) { "same" } else { "differs" }, cbytes.as_deref().map_or(String::from("-"), |b| hex(b)), if ok { hex(&e.0) } else { String::from("unencodable") });
                 if same_inputs { self.stats.verify_diff_reloc += 1 } else { self.stats.verify_diff_inputs += 1 }
                 return Some(false);
             }
@@ -7319,6 +7468,15 @@ fn file_ident(path: &str, source: u128, owner: u128, numbering: u128) -> u128 {
     h.u128(owner);
     h.u128(numbering);
     h.finish128()
+}
+
+// Native O3 always emits unwind info. A malformed part must miss instead of
+// taking split_unwind_info's fallback for callers that accept trailerless code.
+fn cached_code_len(code: &[u8], tier: u8) -> Option<usize> {
+    if relax_codegen::interp::blob::is_blob(code) { return Some(code.len()); }
+    let split = relax_backend::rir::split_unwind_info(code);
+    if tier == TIER_O3 && (code.len() % 4 != 0 || split.host.is_none()) { return None; }
+    Some(split.code_len)
 }
 
 fn skip_build_inputs(d: &mut D) -> Option<(usize, usize)> {
@@ -7517,19 +7675,75 @@ pub fn start_deferred_front(after: &'static str) {
 /// and ending the process under the writer.
 static FRONT_GRAPH_WRITER: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
+/// The demand plans of the queued graph writes that are neither made nor failed (locks
+/// DEFERRED_FRONT, then FRONT_GRAPH_WRITES: the writer's order).
+fn unready_plans() -> Vec<std::sync::Arc<crate::preload::DemandPlan>> {
+    let deferred = DEFERRED_FRONT.lock().unwrap();
+    let writes = FRONT_GRAPH_WRITES.lock().unwrap();
+    deferred.iter().filter_map(|d| d.graph.as_ref()).chain(writes.iter())
+        .filter_map(|job| job.demand.as_ref())
+        .filter(|p| p.ready().is_none() && !p.failed()).cloned().collect()
+}
+
+/// A queued graph write waits for its demand plan.
+pub fn front_plans_pending() -> bool { !unready_plans().is_empty() }
+
+/// Off the owner thread, settle every queued graph write's demand plan, waiting on its
+/// condvar for completion or failure. Include plans queued during the wait.
+/// With `report`, it is called with the plan and the time waited for it each period the wait goes on.
+pub fn settle_front_plans(mut report: Option<(std::time::Duration, &mut dyn FnMut(&crate::preload::DemandPlan, std::time::Duration))>) {
+    debug_assert!(!crate::owner::is_owner());
+    loop {
+        let plans = unready_plans();
+        if plans.is_empty() { break; }
+        for p in plans {
+            let _ = match report.as_mut() {
+                Some((every, report)) => p.settle_reporting(*every, &mut |waited| report(&*p, waited)),
+                None => p.settle(),
+            };
+        }
+    }
+}
+
+/// What an exit waiting for a queued graph write's demand plan says: the plan's program crate
+/// and how far its selection got.
+pub fn front_plan_wait_line(plan: &crate::preload::DemandPlan, waited: std::time::Duration) -> String {
+    let crates = plan.crates();
+    let name = crates.last().map_or("?", |c| c.name.as_str());
+    format!("the exit is waiting for the demand plan of `{name}` ({} of {} crates selected so far, {:.0} s); the run's front graph is written once it is made",
+        plan.early_prefix().min(crates.len()), crates.len(), waited.as_secs_f64())
+}
+
 fn flush_front_graphs() -> Result<(), String> {
+    // Discovery may need the owner to compile a macro. Writers wait for plans outside
+    // the writer lock, and the owner leaves unfinished plans queued.
+    if !crate::owner::is_owner() { settle_front_plans(None); }
     // Only the cache-writer threads wait here; queueing and pending probes
     // keep their short lock. An empty queue does not mean a mid-run writer
     // has finished the jobs it took. Exit must wait for their demand parts
     // and graph commit before publishing the collected image or terminating.
     let _writer = FRONT_GRAPH_WRITER.lock().unwrap_or_else(|e| e.into_inner());
-    for mut d in std::mem::take(&mut *DEFERRED_FRONT.lock().unwrap()) {
+    let deferred = {
+        let mut pending = DEFERRED_FRONT.lock().unwrap();
+        let mut writes = FRONT_GRAPH_WRITES.lock().unwrap();
+        let mut deferred = std::mem::take(&mut *pending);
+        writes.extend(deferred.iter_mut().filter_map(|d| d.graph.take()));
+        deferred
+    };
+    for mut d in deferred {
         if let Some(w) = d.writers.as_mut() { w.finish(); }
-        if let Some(job) = d.graph.take() { FRONT_GRAPH_WRITES.lock().unwrap().push(job); }
     }
-    let writes = std::mem::take(&mut *FRONT_GRAPH_WRITES.lock().unwrap());
+    let (writes, n) = {
+        let mut pending = FRONT_GRAPH_WRITES.lock().unwrap();
+        let writes: Vec<_> = pending.extract_if(.., |job| job.demand.as_ref().is_none_or(|p| p.ready().is_some() || p.failed())).collect();
+        (writes, pending.len())
+    };
     let mut writes = writes.into_iter();
     while let Some(job) = writes.next() {
+        if job.demand.as_ref().is_some_and(|p| p.failed()) {
+            if crate::preload::trace() { eprintln!("relax front: skipping graph write because its demand plan failed"); }
+            continue;
+        }
         let recorded = write_front_graph(&job).is_some();
         if job.profile { crate::load_profile::flush_current(); }
         if !recorded {
@@ -7540,6 +7754,7 @@ fn flush_front_graphs() -> Result<(), String> {
             return Err("front graph recording deferred: crate stores unavailable".into());
         }
     }
+    if n > 0 { return Err(format!("front graph deferred: {n} demand plan(s) still planning")); }
     Ok(())
 }
 
@@ -7590,7 +7805,10 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let (dir, recipe, fps) = (&job.dir, &job.recipe, &job.fps);
     let mut graph = crate::crate_image::GraphImage {
         identity: recipe.identity, crates: Vec::new(), inputs: Vec::new(), stamps: Vec::new(), probes: Vec::new(),
-        demand_image: job.demand.as_ref().map(|p| p.image.clone()),
+        demand_image: match &job.demand {
+            Some(plan) => Some(plan.ready()?.image.clone()),
+            None => None,
+        },
     };
     let mut inputs = std::collections::BTreeMap::new();
     let mut probes = std::collections::BTreeMap::new();
@@ -7705,7 +7923,9 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
         let parts: Vec<String> = marks.iter().map(|&(n, t)| { let d = t - prev; prev = t; format!("{}={:.0}", n, d) }).collect();
         eprintln!("relax front: graph recorded ({} crates, {} inputs) in {:.0} ms: {}", graph.crates.len(), graph.inputs.len(), prev, parts.join(" "));
     }
-    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.image.recording_written(written.parts.clone()); }
+    if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) {
+        source.ready()?.image.recording_written(written.parts.clone());
+    }
     Some(())
 }
 
@@ -7786,7 +8006,9 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
 }
 
 pub fn front_graph_pending() -> bool {
-    !FRONT_GRAPH_WRITES.lock().unwrap().is_empty() || !DEFERRED_FRONT.lock().unwrap().is_empty()
+    // one lock at a time: the writer and `unready_plans` nest DEFERRED_FRONT, then FRONT_GRAPH_WRITES
+    let writes = !FRONT_GRAPH_WRITES.lock().unwrap().is_empty();
+    writes || !DEFERRED_FRONT.lock().unwrap().is_empty()
 }
 
 #[derive(Default)]
@@ -8826,8 +9048,12 @@ impl ColdFront {
             // A write that cannot record yet stays queued for the post-present or exit writer.
             if deferred {
                 DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: deferred_writers.take(), graph: Some(job) });
+            } else {
+                if let Some(p) = &job.demand {
+                    if !crate::owner::is_owner() { let _ = p.settle(); }
+                }
+                write_front_graph(&job);
             }
-            else { write_front_graph(&job); }
         } else if let Some(w) = deferred_writers.take() {
             DEFERRED_FRONT.lock().unwrap().push(DeferredFront { writers: Some(w), graph: None });
         }
@@ -9094,6 +9320,79 @@ mod cold_tests {
     }
 
 
+
+    #[test]
+    fn owner_never_waits_for_a_plan_that_needs_it() {
+        isolated_test!(owner_never_waits_for_a_plan_that_needs_it);
+        use std::sync::{mpsc, Arc, Mutex};
+        let mut session = crate::Session::default();
+        session.options.rs_lazy = true;
+        let sess = &Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-owner-front-plan-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        let package = dir.join("host");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"test_crate\"\nversion = \"0.1.0\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+        let root = package.join("lib.rs").to_string_lossy().into_owned();
+        std::fs::write(&root, "mod late; pub struct FxIn { pub t: f32, pub kick: f32 } pub fn host_scale(t: f32) -> f32 { t * 2.0 } pub fn main() {}").unwrap();
+        std::fs::write(package.join("late.rs"), "pub struct Later { pub value: u64 } pub fn later() -> u64 { 3 }").unwrap();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let pre = vec![crate::preload::PreCrate { name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
+            deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
+        let store = dir.join("cache");
+        pack::ensure_private_dir(&store).unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.record_front = true;
+        prog.front_sink = Some(FrontSink::for_dir(&store));
+        prog.preload(pre.clone());
+        prog.load_crate(&pre[0].name, &pre[0].root, 2021, cfg, vec![]).unwrap();
+        prog.resolve_imports();
+        assert!(prog.errors.is_empty(), "the fixture must load cleanly: {:?}", prog.errors);
+        let mut cold = ColdFront::default();
+        cold.finish_in(&mut prog, store.clone());
+        let identity = prog.front_graph.as_ref().unwrap().identity;
+        let fps = cold.fps.clone();
+        std::fs::remove_file(front_graph_path(&store, identity)).expect("the fixture must have written its initial graph");
+
+        let contexts = crate::source_context::Context::for_crates(&pre, Arc::default(), sess);
+        let plan = Arc::new(crate::preload::DemandPlan::new(&pre, contexts, None, true));
+        assert!(plan.ready().is_none(), "the queued graph must start with an unmade plan");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let entered_tx = Mutex::new(entered_tx);
+        plan.on_early_publish(move || {
+            let _ = entered_tx.lock().unwrap().send(());
+            crate::owner::call(crate::owner::Class::Program, || ());
+        });
+        let mut job = FrontGraphWrite::capture(&prog, &store, &fps).unwrap();
+        job.demand = Some(plan.clone());
+        FRONT_GRAPH_WRITES.lock().unwrap().push(job);
+
+        let (first, planning, settling, said) = crate::owner::call(crate::owner::Class::Program, || {
+            let p = plan.clone();
+            let planning = std::thread::spawn(move || p.complete());
+            entered_rx.recv().expect("the plan must reach its early publication");
+            let first = flush_front_graphs();
+            // the exit's wait, off the owner: it says what it waits for while the plan waits for the owner
+            let (said_tx, said_rx) = mpsc::channel();
+            let settling = std::thread::spawn(move || settle_front_plans(Some((std::time::Duration::from_millis(5),
+                &mut |p: &crate::preload::DemandPlan, waited: std::time::Duration| { let _ = said_tx.send(front_plan_wait_line(p, waited)); }))));
+            let said = said_rx.recv().expect("a settle that waits for the plan must report each period");
+            assert!(plan.ready().is_none(), "the report must come while the plan still waits for the owner");
+            (first, planning, settling, said)
+        });
+        let error = first.expect_err("the owner must defer a graph whose plan needs the owner");
+        assert!(error.contains("still planning"), "the owner must report the unfinished demand plan: {error}");
+        assert!(said.contains("demand plan of `test_crate`") && said.contains("of 1 crates"), "the wait's line must name the plan it waits for: {said}");
+
+        settling.join().expect("the reporting settle must end once the plan is made");
+        assert!(front_graph_pending(), "the deferred graph must stay queued until it is flushed");
+        assert!(plan.ready().is_some(), "settling off the owner must finish the plan");
+        flush_front_graphs().expect("the graph with its finished plan must be writable");
+        assert!(!front_graph_pending(), "the successful flush must empty the queue");
+        let graph = read_front_graph(&store, identity).expect("the flush must write a readable graph");
+        assert!(graph.demand_image.is_some(), "the stored graph must include its demand image");
+        planning.join().expect("the planning thread must finish normally");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn collected_boot_excludes_runtime_crates_and_later_boot_queries() {
@@ -9830,7 +10129,7 @@ mod data_tests {
 
     static CACHE_UNIT: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
-    std::thread_local! {
+    thread_local! {
         // Run a nested lookup while an outer lookup owns its link guard, without
         // requiring process-global JIT execution of a static initializer.
         pub(super) static BEFORE_LINK: std::cell::RefCell<Option<Box<dyn FnOnce(&mut Unit)>>> = Default::default();
@@ -10251,6 +10550,124 @@ mod data_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    impl Cache {
+        fn pending_manifest_payload(&self, root: u32) -> Option<&[u8]> {
+            let key = self.manifest_key(root)?;
+            let (_, entry) = self.pending.iter().rev().find(|(_, e)| e.kind == KIND_MANIFEST && e.key == key)?;
+            Some(&entry.payload)
+        }
+    }
+
+    #[test]
+    fn an_image_build_that_gave_way_resumes_where_it_stopped() {
+        isolated_test!(an_image_build_that_gave_way_resumes_where_it_stopped);
+        use std::cell::Cell;
+        use std::sync::atomic::Ordering::Relaxed;
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-manifest-resume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut source = String::from("#![no_std]\n");
+        for i in 0..40 { source.push_str(&format!("pub fn f{i}() -> u32 {{ {i} }}\n")); }
+        let path = dir.join("a.rs");
+        std::fs::write(&path, source).unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        let root = prog.load_crate("a", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let u = Unit::new(prog, tcx, 0);
+        let ids: Vec<_> = (0..40).map(|i| {
+            let name = format!("f{i}");
+            let def = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+            u.fn_id(FnKey::Inst(def, vec![]))
+        }).collect();
+        // Each symbol queues two objects and adds a thunk to the symbol table. The eighth
+        // step falls inside a drain and the sixteenth at the start of a symbol.
+        let relocs: Vec<_> = ids.iter().take(6).map(|&id| {
+            let entry = u.entry(id);
+            let thunk = u.syms.intern(SymKind::Thunk(id), entry);
+            let leaf = u.data(&entry.to_le_bytes(), 8, DataKind::Relocs(vec![(0, thunk)]));
+            let object = u.data(&leaf.to_le_bytes(), 8, DataKind::Relocs(vec![(0, u.data_sym(leaf))]));
+            [RelocAt { at: 0, kind: RelocKind::Pool64, target: Reloc::Sym(u.data_sym(object)) }]
+        }).collect();
+        let fresh = |name: &str| {
+            let mut cache = open_test_cache(&u, &dir.join(name));
+            for (i, &id) in ids.iter().enumerate() {
+                if let Some(reloc) = relocs.get(i) {
+                    cache.record(&u, id, &[0, 0, 0, 0, 0, 0, 0, 0, 0xc3], reloc, &[]);
+                } else {
+                    cache.record(&u, id, &[0xc3], &[], &[]);
+                }
+            }
+            cache
+        };
+        let record = |cache: &mut Cache, stop: &dyn Fn() -> bool| {
+            let before = cache.image_reads.load(Relaxed);
+            let done = cache.record_manifest(&u, root, &ids, ids.len(), stop);
+            (done, cache.image_reads.load(Relaxed) - before)
+        };
+        let calls = Cell::new(0usize);
+        let mut reference = fresh("reference");
+        let (done, reads) = record(&mut reference, &|| { calls.set(calls.get() + 1); false });
+        assert!(done && reads > 0, "the reference must build an image");
+        assert_eq!(reference.image_built.as_ref().map(|b| b.1), Some(40), "all slots were placed");
+        let payload = reference.pending_manifest_payload(root).expect("the reference manifest");
+        let mut repeat = fresh("repeat");
+        assert_eq!(record(&mut repeat, &|| false), (true, reads), "one-go reference reads");
+        assert_eq!(repeat.pending_manifest_payload(root), Some(payload), "one-go reference bytes");
+
+        for g in 1..=calls.get() {
+            let mut cache = fresh(&g.to_string());
+            let checked = Cell::new(0usize);
+            let (done, first) = record(&mut cache, &|| {
+                checked.set(checked.get() + 1);
+                checked.get() == g
+            });
+            assert!(!done, "check {g} must interrupt the first try");
+            let (done, second) = record(&mut cache, &|| false);
+            assert!(done, "the retry after check {g} must finish");
+            assert_eq!(cache.pending_manifest_payload(root), Some(payload), "manifest bytes after check {g}");
+            assert_eq!(first + second, reads, "image reads across check {g}");
+        }
+        // A slot replaced between the tries (an O2 build of the last slot, placed last): a build
+        // that has not placed it goes on and chooses its entry again; one that placed it would
+        // hold older code for 1 of its 40 slots (over 1%) and starts over. Either way the manifest
+        // is the one a build in one go makes of the same final state.
+        let last = *ids.last().unwrap();
+        let o2 = [0x90, 0xc3];
+        let mut replaced_ref = fresh("reference-replaced");
+        replaced_ref.record_o2(&u, last, &o2, &[], &[]);
+        assert!(record(&mut replaced_ref, &|| false).0, "the replaced reference builds");
+        let replaced_payload = replaced_ref.pending_manifest_payload(root).expect("the replaced reference manifest").to_vec();
+        assert_ne!(&replaced_payload[..], payload, "the O2 code is in the image");
+        let (mut resumed, mut restarted) = (0, 0);
+        for g in 1..=calls.get() {
+            let mut cache = fresh(&format!("replaced-{g}"));
+            let checked = Cell::new(0usize);
+            let (done, _) = record(&mut cache, &|| {
+                checked.set(checked.get() + 1);
+                checked.get() == g
+            });
+            assert!(!done, "check {g} must interrupt the first try (replaced)");
+            let placed = cache.image_resume_placed(last);
+            cache.record_o2(&u, last, &o2, &[], &[]);
+            assert!(record(&mut cache, &|| false).0, "the retry after check {g} and a replacement must finish");
+            assert_eq!(cache.pending_manifest_payload(root), Some(&replaced_payload[..]), "manifest bytes after check {g} and a replacement");
+            match placed {
+                Some(true) => { assert_eq!(cache.image_starts_over, 1, "check {g}: the replaced slot was placed: the build starts over"); restarted += 1; }
+                Some(false) => { assert_eq!(cache.image_starts_over, 0, "check {g}: the replaced slot was not placed: the build goes on"); resumed += 1; }
+                None => {}
+            }
+        }
+        assert!(resumed > 0 && restarted > 0, "both cases ran: {resumed} went on, {restarted} started over");
+        drop(replaced_ref);
+        drop(repeat);
+        drop(reference);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A proc macro's read of cargo's `[env]` (macro_reg::call_krate_env past the crate's own
     /// variables) is a late input of the invoking crate (sip LATE_CONFIG_ENV), present or absent:
     /// the crate's code store is stale when that configuration's value changes, and not when only
@@ -10577,9 +10994,18 @@ mod data_tests {
         assert_eq!((hit, other.stats.shared_hits), ([false, false, true, true, true, true, true, true], 0), "under another std the sealed slots miss, a's own code hits");
         drop(other);
         // `a` moved to a2, its run dirs with it: the shared code hits; a's own code is keyed by
-        // the checkout and misses; nothing that holds a path was recorded to hit
+        // the checkout and misses; nothing that holds a path was recorded to hit. (Copied, not
+        // renamed: this process holds its build and pass locks in a's store folders until it
+        // exits (store.rs HELD, PASSES), and Windows renames no folder holding an open file.)
+        fn copy(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for e in std::fs::read_dir(from).unwrap() {
+                let (e, to) = { let e = e.unwrap(); let to = to.join(e.file_name()); (e, to) };
+                if e.file_type().unwrap().is_dir() { copy(&e.path(), &to) } else { std::fs::copy(e.path(), to).unwrap(); }
+            }
+        }
         std::fs::remove_dir_all(&a2).unwrap();
-        std::fs::rename(&a, &a2).unwrap();
+        copy(&a, &a2);
         assert_eq!(run(&mut ua2, &a2_ids, a2_path, &a2, fresh, home), (first, [6, 0, 0, 1, 1]), "the moved checkout links only the shared code");
         // short of room on its volume, prune evicts the shared store (used by no running pass, nor
         // by a run of this process now): the next run compiles that code again and shares it, a
@@ -11029,20 +11455,42 @@ mod data_tests {
         pack::ensure_private_dir(&root).unwrap();
         let source = root.join("fixture.rs");
         let module_path = root.join("module.rs");
+        let other_path = root.join("other.rs");
         std::fs::write(&source, "pub fn f() {}\nfn main() {}\n").unwrap();
         std::fs::write(&module_path, "pub fn g() {}\n").unwrap();
+        // (more definitions than a map's step in tests: its map is built in several steps)
+        std::fs::write(&other_path, (0..10).map(|i| format!("pub fn o{i}() {{}}\n")).collect::<String>()).unwrap();
         let mut prog = crate::program::Program::new(sess);
-        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let fixture = prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let other = prog.load_crate("other", other_path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
         let f = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "f").unwrap() as u32);
+        let o3 = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "o3").unwrap() as u32);
         let mut tcx = crate::tcx::Tcx::new();
         tcx.collect(&prog);
         let mut u = Unit::new(prog, tcx, 0);
         let mut c = open_test_cache(&u, &root);
         let mut e = E::default();
         c.enc_def(&u, f, &mut e, &mut Vec::new());
+        let mut other_e = E::default();
+        c.enc_def(&u, o3, &mut other_e, &mut Vec::new());
+        // the crates' lists are made in steps, and a map built in steps keeps its progress over a
+        // stop and gives way to another crate's: under a stop that always says yes each call scans
+        // a step of the lists, and the one that ends them keys a step of the other crate's map
+        let (mut scanned, mut calls) = (0, 0);
+        while c.crate_defs.is_empty() {
+            assert_eq!(c.map_crate_defs(&u, other, &|| true), Ok(false), "a stop leaves the lists or the map in steps");
+            let now = c.crate_defs_scan.as_ref().map_or(u.prog.defs.len(), |s| s.1);
+            assert!(now > scanned, "each call scans a step of the lists before it gives way ({now} after {scanned})");
+            (scanned, calls) = (now, calls + 1);
+        }
+        assert!(calls > 1, "the lists of {} definitions are made in steps", u.prog.defs.len());
+        assert!(c.def_map_partial.as_ref().is_some_and(|p| p.0 == other && p.2 > 0), "the steps so far are kept");
         assert_eq!(c.dec_def(&u, &mut D { b: &e.0, p: 0 }), Some(f), "the program definition must decode before a module loads");
         let maps = (c.crate_defs_n, c.def_maps.len());
         assert_eq!(maps, (u.prog.defs.len(), 1), "the first decode must build the program crate's definition map");
+        assert!(c.def_map_partial.is_none(), "another crate's decode puts the map in steps back");
+        assert_eq!(c.dec_def(&u, &mut D { b: &other_e.0, p: 0 }), Some(o3), "the other crate's map is built whole after a stop");
+        let maps = (c.crate_defs_n, c.def_maps.len());
 
         u.prog.load_crate("module", module_path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
         let g = DefId(u.prog.defs.iter().position(|d| u.prog.syms.str(d.name) == "g").unwrap() as u32);
@@ -11053,12 +11501,44 @@ mod data_tests {
         c.enc_def(&u, g, &mut module_e, &mut Vec::new());
         assert_eq!(c.dec_def(&u, &mut D { b: &module_e.0, p: 0 }), None, "a run-time module's definition must not decode from a cache key");
 
-        // A live edit adds a definition to a crate the cache can name.
-        let added = *u.prog.def(f);
-        u.prog.defs.push(added);
-        let _ = c.dec_def(&u, &mut D { b: &e.0, p: 0 });
+        // the first map found nothing listed to take anew (it scans no definitions for that), and
+        // a run-time module's definitions belong to no crate the cache names
+        assert!(c.def_maps_appended.is_empty(), "the first map and a run-time module's load drop no map: {:?}", c.def_maps_appended);
+        // A live edit adds definitions to a crate the cache can name: one under a new name, and a
+        // copy of f.
+        let mut renamed = *u.prog.def(f);
+        renamed.name = u.prog.syms.intern("h");
+        u.prog.defs.push(renamed);
+        let h = DefId(u.prog.defs.len() as u32 - 1);
+        let twin = *u.prog.def(f);
+        u.prog.defs.push(twin);
+        let twin = DefId(u.prog.defs.len() as u32 - 1);
+        let mut h_e = E::default();
+        c.enc_def(&u, h, &mut h_e, &mut Vec::new());
+        let mut twin_e = E::default();
+        c.enc_def(&u, twin, &mut twin_e, &mut Vec::new());
+        assert_eq!(c.dec_def(&u, &mut D { b: &h_e.0, p: 0 }), Some(h), "the added definition decodes");
         assert_eq!(c.crate_defs_n, u.prog.defs.len(), "adding a program definition must rebuild the definition maps");
         assert_eq!(c.module_defs_n, 0, "rebuilding the definition maps must reset the module definition count");
+        assert_eq!(c.def_maps_appended, vec![fixture], "only the crate the definitions were added to loses its map");
+        assert!(c.def_maps.contains_key(&other), "the other crate's map is kept, not built again");
+        // every lookup as a cache that builds every map from the whole program finds it
+        pack::ensure_private_dir(&root.join("full")).unwrap();
+        let mut full = open_test_cache(&u, &root.join("full"));
+        // each call scans or keys a step before it can give way: under a stop that always says
+        // yes the lists and the other crate's map are still made, a step a call (and the map
+        // decodes as one built whole)
+        let mut at = (0, 0);
+        while full.map_crate_defs(&u, other, &|| true) == Ok(false) {
+            let now = (full.crate_defs_scan.as_ref().map_or(usize::MAX, |s| s.1), full.def_map_partial.as_ref().map_or(0, |p| p.2));
+            assert!(now > at, "a call resumed at a step's end scans or keys before it gives way ({now:?} after {at:?})");
+            at = now;
+        }
+        assert!(full.def_maps.contains_key(&other), "the map in steps is built under a stop that always says yes");
+        for (what, b) in [("f", &e.0), ("o3", &other_e.0), ("h", &h_e.0), ("f's copy", &twin_e.0), ("g", &module_e.0)] {
+            assert_eq!(c.dec_def(&u, &mut D { b, p: 0 }), full.dec_def(&u, &mut D { b, p: 0 }), "{what}: as a full rebuild decodes it");
+        }
+        drop(full);
         drop(c);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -12462,6 +12942,8 @@ impl Linker {
             if let Some(hook) = hook { hook(u); }
         }
         let mut callees = Vec::new();
+        // the slots hot sites call through their body words (Reloc::Body): reached with this code
+        let mut bypassed = Vec::new();
         let mut data = Vec::new();
         let mut d = D { b: payload, p: 0 };
         if d.u32()? != ENTRY_VERSION {
@@ -12487,7 +12969,9 @@ impl Linker {
             }
         }
         skip_nounwind_and_cert(&mut d)?;
-        let code = d.bytes()?.to_vec();
+        let code = d.bytes()?;
+        if is_o3 { cached_code_len(code, tier)?; }
+        let code = code.to_vec();
         let n = d.u32()? as usize;
         let mut relocs = Vec::with_capacity(n);
         let mut rw = Vec::new();
@@ -12500,7 +12984,7 @@ impl Linker {
             // the relocation keeps what it names (a slot, a symbol): the install records the
             // code's references from these (jit CodeRefs), as it does for code built this run
             let target = match tag {
-                20 | 21 | 25 | 26 | 27 | 31 => {
+                t if is_callee_tag(t) => {
                     d.u8()?;
                     let sid = read_callee(&mut d, tag, &mut keyed, |b| self.slot_of_bytes(u, b))?;
                     let sid = {
@@ -12515,6 +12999,11 @@ impl Linker {
                         25 => {
                             callees.push(sid);
                             Reloc::Call(sid)
+                        }
+                        RELOC_BODY => {
+                            callees.push(sid);
+                            bypassed.push(sid);
+                            Reloc::Body(sid)
                         }
                         _ => Reloc::Thunk(sid),
                     }
@@ -12581,7 +13070,7 @@ impl Linker {
                 u.note_vtable_maker(a, id);
             }
         }
-        if !u.aux { crate::harness::reach::note(id, inl.iter().copied()); }
+        if !u.aux { crate::harness::reach::note(id, inl.iter().chain(&bypassed).copied()); }
         if !is_o3 {
             // the slots this code took in run inside it: a replacement that calls one instead
             // (an O3 build missing its body) has it built before its swap (jit prebuild_callees);

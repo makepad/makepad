@@ -8,3 +8,4 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }

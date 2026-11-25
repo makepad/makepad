@@ -3,16 +3,16 @@
 //! that is *invalidated* must never run again: a call, return or jump into it is a stale access
 //! (stale.rs: the thread parks, the app pauses, the user restarts or stops), never silent wrong
 //! results or corrupt memory. Invalidated are:
-//! - the earlier patch versions of the slots a layout-changing patch rebuilt (code built for the
+//! - the earlier versions of the slots a layout-changing patch rebuilt (code built for the
 //!   old field list or variants);
 //! - a rolled-back patch generation: the borrow checker rejected it after it ran (SPEC-V), or it
 //!   panicked or faulted (M7) -- its O3 code and its unverified-mode twins included;
 //! - an unloaded module's code (the twins of its crate's fns, a trusted module's fns).
 //!
-//! Such code is allocated in groups (`Group`): one slot's code from one patch generation, one
+//! Patch and module code is allocated in groups (`Group`): one slot's code from one patch generation, one
 //! module's code from one generation. Every range is registered with `stale::register` before it
-//! is made unrunnable, and addresses are never reused. Code of a run's first generation (every
-//! slot's first code, std's twins, glue) stays bump-shared: it is never invalidated.
+//! is made unrunnable, and addresses are never reused. First-generation bodies share pages
+//! across slots. A layout patch trap-fills just the replaced bodies (`invalidate_first`).
 //! - A module group's code lies in page-aligned chunks that hold nothing else: its unload (or a
 //!   rollback of its generation) is one `mprotect(PROT_NONE)` per chunk (the kernel's TLB
 //!   shootdown makes it immediate on every core).
@@ -32,14 +32,11 @@
 //! O3 tier-up inlined patched bodies (the latest generation over what it took in). A rollback of
 //! the generation (or a later layout patch) invalidates it with the rest.
 //!
-//! First code cannot be made inaccessible (it shares pages). A layout-changing patch therefore
-//! pauses the program, and with a thread in code of a fn it rebuilds (`frame_in`) it does not
-//! install: the edit is a restart, offered, and the running code goes on. Under the same pause it
-//! installs, and a thread found in such code after all (one the pause did not stop entered it) is
-//! held for good (`hold_old_frames`, stale.rs `park_held`): it never returns there, and the app
-//! runs on without it until the restart that is offered.
+//! Before a layout-changing patch installs, `frame_in` checks the paused program's stacks. An
+//! affected frame requires a restart. If a thread entered first code after that check, the patch
+//! reports the frame and offers a restart. The thread parks on its own fault on returning there.
 
-use crate::jit::{FnKey, Unit};
+use crate::jit::{FnKey, SlotWord, Unit};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A group of invalidatable code.
@@ -127,7 +124,7 @@ const MODULE_CHUNK_MAX: u64 = 64 << 10;
 
 /// The group new code of slot `id` goes to (`gen`: the install's patch generation, 0 outside a
 /// patch; `inlined`: the slots an O3 build inlined, beside the slot's body_deps), None:
-/// bump-shared code (never invalidated).
+/// bump-shared code (retired by body on a layout change).
 pub(crate) fn group_of(u: &Unit, id: u32, gen: u32, inlined: &[u32]) -> Option<Group> {
     let f = &u.fns[id as usize];
     // the generation whose source the code is built from: a patch's own, a slot's last patch (its
@@ -419,6 +416,62 @@ pub(crate) fn invalidate(u: &mut Unit, pick: impl Fn(Group) -> bool, by_gen: u32
     (dead.len(), bytes)
 }
 
+#[derive(Default)]
+pub(crate) struct FirstFill {
+    /// (start, length, slot), in code-index address order. Used to name frames after the fill.
+    pub bodies: Vec<(u64, u32, u32)>,
+    pub bytes: u64,
+    pub warnings: Vec<String>,
+}
+
+/// Retire the bump-shared bodies replaced by this layout patch. The index includes earlier
+/// tier installs and gives the whole extent of a body with a joined patched path.
+pub(crate) fn invalidate_first(u: &mut Unit, gen: u32, why: &str) -> FirstFill {
+    if crate::os::mem::no_codegen() {
+        return FirstFill::default();
+    }
+    let affected: crate::fxhash::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
+    let bodies: Vec<_> = {
+        let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+        code.index.iter().copied().filter(|&(start, _, slot)| {
+            affected.contains(&slot) && start != u.fns[slot as usize].code && crate::stale::lookup(start).is_none()
+        }).collect()
+    };
+    // A borrowed SPEC-V word can address its twin's code. Check all the relevant words against
+    // every candidate body, including an address in its interior, before publishing any of them.
+    let mut words = Vec::new();
+    for &id in &affected {
+        let partner = match u.fns[id as usize].key {
+            FnKey::Plain(base) => Some(base).filter(|&b| (b as usize) < u.fns.len()),
+            _ => u.plain_twin_of(id),
+        };
+        for slot in [Some(id), partner].into_iter().flatten() {
+            words.push((SlotWord::of(&u.slots, slot).load(Ordering::SeqCst), slot));
+        }
+    }
+    words.sort_unstable();
+    let mut fill = Vec::new();
+    let mut result = FirstFill::default();
+    for (lo, len, slot) in bodies {
+        let hi = lo + u64::from(len);
+        let k = words.partition_point(|&(at, _)| at < lo);
+        if let Some(&(at, id)) = words.get(k).filter(|&&(at, _)| at < hi) {
+            let line = format!("layout patch gen {gen}: live slot #{id} points to {at:#x} inside slot #{slot}'s replaced code [{lo:#x}, {hi:#x}). Skipped trap fill; restart the app");
+            eprintln!("relax: {line}");
+            result.warnings.push(line);
+            continue;
+        }
+        let group = Group::Patch { slot, gen: 0 };
+        crate::zone_alloc::kept_with(|| WHYS.lock().unwrap_or_else(|e| e.into_inner()).push(Why { lo, hi, group, by_gen: gen, installs: Vec::new() }));
+        crate::stale::register(lo, hi, "invalidated code", u.fns[slot as usize].name.to_string(), 0, why.to_string());
+        fill.push((0, lo, hi));
+        result.bodies.push((lo, len, slot));
+        result.bytes += hi - lo;
+    }
+    trap_fill(&mut fill);
+    result
+}
+
 /// What a dead range is filled with: an instruction that faults (SIGILL) at every offset a fetch
 /// can start at -- x86-64: 0x06, one byte, invalid in 64-bit mode; arm64: UDF #0xdead, a word
 /// (fetches start at words only). Not a breakpoint: debuggers and tracers take those.
@@ -436,6 +489,9 @@ static TRANSIT_HI: AtomicU64 = AtomicU64::new(0);
 static FILLS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static TRANSIT_WAITS: AtomicU64 = AtomicU64::new(0);
 static TRANSIT_WAIT_MAX_NS: AtomicU64 = AtomicU64::new(0);
+/// Layout patches that retired code, and the longest time one spent retiring and filling it (us).
+static LAYOUT_FILLS: AtomicU64 = AtomicU64::new(0);
+static LAYOUT_FILL_MAX_US: AtomicU64 = AtomicU64::new(0);
 /// One fill at a time (the transit pages are one range).
 static FILLING: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 /// A test holds the pages out of reach this long, so a neighbour surely touches them.
@@ -452,7 +508,9 @@ pub(crate) static TRANSIT_HOLD_US: AtomicU64 = AtomicU64::new(0);
 /// instruction again: a live neighbour's runs on, a dead range's traps. No core can fetch the
 /// dead bytes, or read a dead range's literal pool, while they change. Registration and the
 /// slots' stubs come first (`invalidate`); nothing here takes a lock a faulting thread can hold.
-fn trap_fill(ranges: &mut [(u64, u64, u64)]) {
+/// It writes [lo, hi) and not a byte past it: a body's length on x86-64 is any number of bytes,
+/// and the next function's code can start at `hi`.
+pub(crate) fn trap_fill(ranges: &mut [(u64, u64, u64)]) {
     if ranges.is_empty() {
         return;
     }
@@ -479,7 +537,8 @@ fn trap_fill(ranges: &mut [(u64, u64, u64)]) {
             let n = (hi - lo) as usize;
             let w = crate::os::mem::code_alias(lo, n) as *mut u8;
             for q in (0..n).step_by(4) {
-                unsafe { std::ptr::copy_nonoverlapping(TRAP.as_ptr(), w.add(q), 4) };
+                // the last write ends at `hi` (x86-64: TRAP is one byte repeated)
+                unsafe { std::ptr::copy_nonoverlapping(TRAP.as_ptr(), w.add(q), (n - q).min(4)) };
             }
             FILLED_BYTES.fetch_add(hi - lo, Ordering::Relaxed);
         }
@@ -554,6 +613,13 @@ pub fn patch_event(gen: u32, text: String) {
     });
 }
 
+/// A layout patch retired its code in `us` (the old generations' groups and first code: their
+/// index scan, checks and trap fills), for `stats_line`.
+pub(crate) fn layout_fill_took(us: u64) {
+    LAYOUT_FILLS.fetch_add(1, Ordering::Relaxed);
+    LAYOUT_FILL_MAX_US.fetch_max(us, Ordering::Relaxed);
+}
+
 /// The recorded `reload.patch` event of generation `gen`: (wall ns, text).
 pub fn patch_event_of(gen: u32) -> Option<(u64, String)> {
     PATCH_EVENTS.lock().unwrap_or_else(|e| e.into_inner()).iter().rev().find(|e| e.0 == gen).map(|e| (e.1, e.2.clone()))
@@ -564,7 +630,7 @@ pub fn stats_line() -> String {
     let kb = |a: &AtomicU64| a.load(Ordering::Relaxed) as f64 / 1024.0;
     let (c, b) = (CHUNK_BYTES.load(Ordering::Relaxed), GROUP_CODE_BYTES.load(Ordering::Relaxed));
     format!(
-        "invalidatable code: {} groups ({} patch generations' arenas): {:.1} KB of chunks for {:.1} KB of code (+{:.1} KB rounding and arena tails); invalidated (never reused): {} groups, {:.1} KB -- {:.1} KB of chunks inaccessible (PROT_NONE), {:.1} KB trap-filled in {} fills ({} faults waited for a fill, the longest {:.1} us)",
+        "invalidatable code: {} groups ({} patch generations' arenas): {:.1} KB of chunks for {:.1} KB of code (+{:.1} KB rounding and arena tails); invalidated (never reused): {} groups, {:.1} KB -- {:.1} KB of chunks inaccessible (PROT_NONE), {:.1} KB trap-filled in {} fills ({} faults waited for a fill, the longest {:.1} us); {} layout patches retired code, the longest in {} us",
         GROUPS.load(Ordering::Relaxed),
         ARENAS.load(Ordering::Relaxed),
         c as f64 / 1024.0,
@@ -577,31 +643,18 @@ pub fn stats_line() -> String {
         FILLS.load(Ordering::Relaxed),
         TRANSIT_WAITS.load(Ordering::Relaxed),
         TRANSIT_WAIT_MAX_NS.load(Ordering::Relaxed) as f64 / 1000.0,
+        LAYOUT_FILLS.load(Ordering::Relaxed),
+        LAYOUT_FILL_MAX_US.load(Ordering::Relaxed),
     )
 }
 
-/// A layout-changing patch (gen `gen`, `layout`: the types whose fields or variants changed),
-/// with the program threads paused (inspect::instrument::pause_for_patch, before its install;
-/// `paused`: that call paused them) and its code installed: the threads with a frame in the
-/// replaced code of a slot the patch rebuilt are held for good and reported (stale::park_held);
-/// every other thread resumes. Returns how many were held. The patch was asked first whether a
-/// thread is in such code (`frame_in`, under the same pause: it then does not install), so this
-/// finds only a thread the pause did not stop (Linux: one blocked in a read or a poll that came
-/// back and called into it before the install).
-///
-/// Why frames only: the earlier patch versions of those slots are in groups (invalidated by the
-/// patch, trap-filled or PROT_NONE: a return into them parks by its fault). A slot's first code shares its pages
-/// with other code and cannot be made inaccessible; it is reached only through its slot (calls go
-/// through the slot word, fn pointers and vtables hold thunks: the install has swapped the words)
-/// or through a frame that was live at the patch. Those frames are what this finds. A thread
-/// blocked in a system call is not held by the pause; its stack is walked where it blocks and,
-/// with such a frame, it is held now (microseconds after the walk).
-pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) -> usize {
-    let affected: crate::fxhash::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
-    let caps = if affected.is_empty() { Ok(Vec::new()) } else { crate::inspect::capture_all(&crate::inspect::instrument::program_thread) };
-    let mut held = Vec::new();
+/// Report frames in first-generation bodies retired by this patch. A thread may have entered one
+/// after the pre-install stack check. It parks by its own fault when it returns to those bytes.
+pub(crate) fn report_old_frames(u: &Unit, gen: u32, why: &str, bodies: &[(u64, u32, u32)], paused: bool) -> usize {
+    let caps = if bodies.is_empty() { Ok(Vec::new()) } else { crate::inspect::capture_all(&crate::inspect::instrument::program_thread) };
+    let mut reports = Vec::new();
     match caps {
-        Err(e) => eprintln!("relax: layout patch gen {}: the program's stacks could not be read ({}): a thread still in first-version code of a rebuilt fn is not held", gen, e),
+        Err(e) => eprintln!("relax: layout patch gen {gen}: could not read the program's stacks ({e}). A thread in replaced code parks when it returns there"),
         Ok(caps) => {
             for c in caps {
                 // pc, return addresses; a leaf's caller (arm64 lr; x86-64 the word at sp: a
@@ -616,20 +669,15 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
                         at.push((usize::MAX, u64::from_le_bytes(w[..8].try_into().unwrap()).wrapping_sub(1)));
                     }
                 }
-                // (the code tables' lock for the lookup alone: never across the thread's hold)
-                let hit = {
-                    let code = u.code.read().unwrap_or_else(|e| e.into_inner());
-                    at.iter().find_map(|&(k, a)| {
-                        let (start, len, slot) = code.entry_at(a)?;
-                        (affected.contains(&slot) && start != u.fns[slot as usize].code && crate::stale::lookup(a).is_none()).then_some((k, start, len, slot))
-                    })
-                };
-                if let Some((k, start, len, slot)) = hit {
-                    let ok = crate::inspect::instrument::hold_for_good(&c.t);
-                    let pc = at.iter().find(|x| x.0 == k).map_or(start, |x| x.1);
+                let hit = at.iter().find_map(|&(k, pc)| {
+                    let i = bodies.partition_point(|&(lo, _, _)| lo <= pc).checked_sub(1)?;
+                    let (start, len, slot) = bodies[i];
+                    (pc < start + u64::from(len)).then_some((k, pc, start, len, slot))
+                });
+                if let Some((k, pc, start, len, slot)) = hit {
                     let path = if crate::inspect::codever::in_patched_path(u, slot, start, pc) { ", its patched path" } else { "" };
                     let what = format!("slot #{} `{}` first-version code [{:#x}, {:#x}) (+{:#x}{})", slot, u.fns[slot as usize].name, start, start + len as u64, pc - start, path);
-                    held.push((c.t.os_id, c.frames.clone(), k, what, ok));
+                    reports.push((c.t.os_id, c.frames, k, what));
                 }
             }
         }
@@ -637,13 +685,16 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
     if paused {
         crate::inspect::instrument::resume_program();
     }
-    let n = held.len();
-    let reason = format!("layout-changing patch gen {} (fields or variants of {}) replaced it: code built for the old layout never runs again", gen, layout);
-    for (os_id, frames, k, what, ok) in held {
-        crate::stale::park_held(os_id, frames, k, what, reason.clone(), ok);
+    let n = reports.len();
+    for (os_id, frames, k, what) in reports {
+        crate::stale::park_held(os_id, frames, k, what, why.to_string());
     }
     n
 }
+
+/// The named fixture thread stands for a thread that entered the code after the check.
+#[cfg(test)]
+pub(crate) static FRAME_CHECK_MISSES: AtomicU64 = AtomicU64::new(0);
 
 /// A patch that changes a struct's layout in place (reload.rs fresh_layout_struct), about to
 /// install with the program threads paused (inspect::instrument::pause_for_patch): the first frame
@@ -670,6 +721,10 @@ pub(crate) fn frame_in(u: &Unit, slots: &crate::fxhash::HashSet<u32>) -> Result<
     let shown = |slot: u32| crate::reload::slot_shown(u, slot);
     let mut unread = None;
     for c in caps {
+        #[cfg(test)]
+        if c.t.os_id == FRAME_CHECK_MISSES.load(Ordering::Relaxed) {
+            continue;
+        }
         if let Some(e) = c.err {
             unread.get_or_insert_with(|| format!("thread {}: {}", c.t.os_id, e));
             continue;
@@ -790,6 +845,8 @@ pub(crate) unsafe fn reset_statics() {
     reset(&FILLS, AtomicU64::new(0));
     reset(&TRANSIT_WAITS, AtomicU64::new(0));
     reset(&TRANSIT_WAIT_MAX_NS, AtomicU64::new(0));
+    reset(&LAYOUT_FILLS, AtomicU64::new(0));
+    reset(&LAYOUT_FILL_MAX_US, AtomicU64::new(0));
     // (no fill runs at a run's end: they run in a layout patch or a rollback, on the owner)
     reset(&TRANSIT_SEQ, AtomicU64::new(0));
     reset(&TRANSIT_LO, AtomicU64::new(0));

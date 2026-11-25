@@ -766,6 +766,14 @@ impl<'a> Gates<'a> {
                 }
             }
         }
+        if let Some(root) = relax_internal(&names) {
+            // (no module of rustc's library: its resolve error for the path)
+            // (at the segment that does not resolve, rustc's span)
+            if !self.feats.has(RELAX_INTERNALS) {
+                self.errors.push(self.prog.record_error(self.file, segs[1].name.lo, "typeck", format!("E0433: cannot find `intrinsics_mem` in `{root}`")));
+            }
+            return;
+        }
         if let Some((feature, reason)) = table_entry(&names) {
             if self.feats.has(&feature) { return; }
             let msg = match reason { Some(r) => format!("E0658: use of unstable library feature `{}`: {}", feature, r), None => format!("E0658: use of unstable library feature `{}`", feature) };
@@ -893,7 +901,14 @@ impl<'a> Gates<'a> {
         self.binders.clear();
         if self.pf.edition >= 2018 { self.body_binders(owner); }
         match item.kind {
-            ItemKind::Fn(_, body, _) if let Some(b) = body.get() => self.block(b),
+            ItemKind::Fn(_, body, _) => {
+                // a deferred body (a lazy load: `makepad test`, `makepad run`) as typeck takes it, from
+                // the file's part: the check parsed every body of its crates before the gates. Only a
+                // file of this crate is asked, so nothing outside the checked crates is parsed here.
+                let ours = self.prog.file_crate.get(def.file as usize) == Some(&self.krate);
+                let b = body.get().or_else(|| if ours { self.prog.fn_body(def.file, def.item).ok().flatten() } else { None });
+                if let Some(b) = b { self.block(b) }
+            }
             ItemKind::Const(_, e) | ItemKind::Static(_, _, e) => if let Some(e) = e.get() { self.expr(e) },
             _ => {}
         }
@@ -1227,11 +1242,20 @@ pub(crate) fn unstable_of(prog: &Program, d: crate::program::DefId) -> Option<(S
     unstable_in_attrs(prog, d)
 }
 
+/// The feature of Relax's own std items (`core::intrinsics_mem`), which its library crates enable.
+const RELAX_INTERNALS: &str = "relax_internals";
+
+/// A path into Relax's own intrinsics module (`core::intrinsics_mem::..`): its root, `core` or
+/// `std`. rustc's library has no such module, so a crate outside Relax's std gets rustc's resolve
+/// error for it.
+fn relax_internal<'a>(names: &[&'a str]) -> Option<&'a str> {
+    match names { [root, "intrinsics_mem", ..] if matches!(*root, "core" | "std") => Some(*root), _ => None }
+}
+
 /// The library's table entry for a path as written (`std::intrinsics::copy`): a re-export has
 /// its own stability, so the key is the written path, not the defining one.
 fn table_entry(names: &[&str]) -> Option<(String, Option<String>)> {
-    // (Relax's own intrinsics: no path of rustc's library, whose E0432 this rejection stands for)
-    if matches!(names, ["core" | "std", "intrinsics_mem", ..]) { return Some(("relax_internals".to_string(), None)); }
+    if relax_internal(names).is_some() { return Some((RELAX_INTERNALS.to_string(), None)); }
     // a stable re-export of a module or item is the definition it names (rustc checks the
     // stability of the path's final definition): rewrite the longest re-exported prefix
     let mut key: Vec<String> = names.iter().map(|s| s.to_string()).collect();
@@ -1281,6 +1305,13 @@ fn check_imports(prog: &Program, krate: u32, imports: &[usize]) -> Vec<String> {
         if !matches!(pf.expansion_kind(imp.pos), crate::parser::ExpnKind::Root | crate::parser::ExpnKind::LocalRules) { continue; }
         let names: Vec<&str> = imp.segs.iter().map(|sg| prog.syms.str(sg.1)).collect();
         if !imp.global && !matches!(names.first(), Some(&"std" | &"core" | &"alloc")) { continue; }
+        if let Some(root) = relax_internal(&names) {
+            // (no module of rustc's library: rustc's unresolved import)
+            if !feats.has(RELAX_INTERNALS) {
+                out.push(prog.record_error(imp.file, import_segment_pos(prog, imp, "intrinsics_mem"), "typeck", format!("E0432: unresolved import `{root}::intrinsics_mem`")));
+            }
+            continue;
+        }
         if let Some((feature, reason)) = table_entry(&names) {
             if feats.has(&feature) { continue; }
             let msg = match reason { Some(r) => format!("E0658: use of unstable library feature `{}`: {}", feature, r), None => format!("E0658: use of unstable library feature `{}`", feature) };
@@ -1288,6 +1319,19 @@ fn check_imports(prog: &Program, krate: u32, imports: &[usize]) -> Vec<String> {
         }
     }
     out
+}
+
+/// rustc's span for segment `name` of import `imp`, the one that does not resolve: where that word
+/// first stands in the import's text up to its `;` (as resolve places an unresolved import's name;
+/// the import keeps no segment positions), else the import's start.
+fn import_segment_pos(prog: &Program, imp: &crate::program::Import, name: &str) -> u32 {
+    let pf = &*prog.files[imp.file as usize];
+    let src = &pf.src[..(pf.src_len as usize).min(pf.src.len())];
+    let lo = pf.diagnostic_pos(imp.pos) as usize;
+    if lo >= src.len() { return imp.pos; }
+    let text = &src[lo..];
+    let end = text.iter().position(|&c| c == b';').unwrap_or(text.len());
+    text[..end].windows(name.len()).position(|w| w == name.as_bytes()).map_or(imp.pos, |n| (lo + n) as u32)
 }
 
 fn unstable_in_attrs(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {

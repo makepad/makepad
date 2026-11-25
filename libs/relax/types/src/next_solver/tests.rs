@@ -79,8 +79,15 @@ fn round11_rpitit_rejects_e0477_and_accepts_declared_outlives() {
         let source = format!("trait Copy {{}} impl<'x> Copy for &'x u32 {{}} trait Tr {{ fn f<'a, 'b>(_: &'a u32, x: &'b u32) -> impl Copy + 'a{clause}; }} struct S; impl Tr for S {{ fn f<'a, 'b>(_: &'a u32, x: &'b u32) -> &'b u32{clause} {{ x }} }}");
         let (p,t) = program(&source, if positive { "rpitit_yes" } else { "rpitit_no" });
         let method = *p.trait_item_def_id.keys().find(|&&d| p.def(d).kind == crate::program::DefKind::AssocFn).unwrap();
-        let r = t.collect_return_position_impl_trait_in_trait_tys(&p,method);
-        assert_eq!(r.is_ok(),positive,"{r:?}");
+        let r = t.collect_return_position_impl_trait_in_trait_tys(&p,method).expect("the RPITIT collection");
+        // compare_impl_item.rs:704-706: the region error is reported (E0477, the item bound `'a` the
+        // hidden type `&'b u32` does not meet), and the hidden type is an error
+        let (errors, _) = t.dcx.drain_reported();
+        assert_eq!(r.iter().all(|&(_, ty)| !t.tys.has_error(ty)), positive, "{r:?}");
+        if positive { assert!(errors.is_empty(), "{errors:?}"); } else {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, "E0477: the type `&u32` does not fulfill the required lifetime");
+        }
     }
 }
 #[test]

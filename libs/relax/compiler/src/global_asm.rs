@@ -13,6 +13,12 @@
 //! names the crate, the block and why: the other crates' blocks are placed as before, and so is
 //! a crate that uses none of its labels. A call to a symbol a left-out crate defines panics with
 //! that reason (jit.rs missing_foreign_stub), as a call to a fn that does not compile does.
+//!
+//! On Windows a function's `.seh_*` directives give it its own unwind info, placed beside the
+//! crate's text and found through the code area's function table (os/mem.rs add_asm_unwind): the
+//! exception dispatcher and stack walks go through its frame as its prologue says, and its
+//! `.seh_handler` is called (through a jump in the code area: the info names it by a 32-bit
+//! offset from the area's base).
 
 use crate::ast::*;
 use crate::jit::Unit;
@@ -70,6 +76,10 @@ struct Resolved {
     texts: Vec<(usize, Vec<u8>)>,
     data: Vec<(u64, Vec<u8>)>,
     uses: Vec<(usize, String)>,
+    /// the functions' unwind info (handler jumps and UNWIND_INFOs, to write at the crate's
+    /// reserved place) and their entries: (first byte, byte past the last, UNWIND_INFO)
+    unwind: Vec<u8>,
+    entries: Vec<[u64; 3]>,
 }
 
 fn crate_name(prog: &crate::program::Program, krate: u32) -> &str {
@@ -220,6 +230,7 @@ fn place_all(u: &Unit) -> Placed {
     }
     // place: data sections first (their addresses go into the text), then the text
     let mut bases: Vec<Vec<u64>> = vec![Vec::new(); crates.len()];
+    let mut xdata: Vec<u64> = vec![0; crates.len()];
     for (ci, c) in crates.iter().enumerate() {
         let Some(out) = c.out.as_ref().filter(|_| c.failed.is_none()) else { continue };
         for s in &out.sections {
@@ -236,9 +247,14 @@ fn place_all(u: &Unit) -> Placed {
         for (si, s) in out.sections.iter().enumerate() {
             if s.exec {
                 let n_br = out.fixups.iter().filter(|f| f.section == si as u32 && matches!(f.kind, FixKind::X64Branch32 | FixKind::A64Branch26)).count();
-                let len = s.bytes.len() + 16 * n_br;
+                let len = s.bytes.len() + VENEER * n_br;
                 bases[ci][si] = u.reserve_asm_code(len as u64, s.align.max(16) as u64);
             }
+        }
+        // the functions' unwind info (`.seh_proc`): beside the text, in its code area
+        if !out.seh.is_empty() {
+            let len: usize = out.seh.iter().map(|p| p.unwind_info(0).len() + if p.handler.is_some() { VENEER } else { 0 }).sum();
+            xdata[ci] = u.reserve_asm_code(len as u64, 16);
         }
     }
     let mut table: HashMap<String, (u64, usize)> = HashMap::new();
@@ -258,7 +274,7 @@ fn place_all(u: &Unit) -> Placed {
     for ci in 0..crates.len() {
         let c = &crates[ci];
         let Some(out) = c.out.as_ref().filter(|_| c.failed.is_none()) else { continue };
-        match resolve_crate(u, c, out, &bases[ci], &table, &left, &exports) {
+        match resolve_crate(u, c, out, &bases[ci], xdata[ci], &table, &left, &exports) {
             Ok(r) => resolved[ci] = Some(r),
             Err(e) => crates[ci].failed = Some(e),
         }
@@ -298,6 +314,12 @@ fn place_all(u: &Unit) -> Placed {
         for (si, bytes) in r.texts {
             u.write_reserved_code(bases[ci][si], &bytes);
         }
+        if !r.entries.is_empty() {
+            u.write_reserved_code(xdata[ci], &r.unwind);
+            if let Err(e) = add_unwind(&r.entries) {
+                eprintln!("relax run: global_asm! of crate `{}`: its functions' unwind info is not registered: {}", crate_name(prog, c.krate), e);
+            }
+        }
     }
     for (name, (a, ci)) in table {
         if crates[ci].failed.is_none() {
@@ -308,8 +330,10 @@ fn place_all(u: &Unit) -> Placed {
 }
 
 /// A placed crate's fixups, resolved against the program's global asm symbols (`table`; `left`:
-/// the names left-out crates define), its exported fns and the host; nothing is written yet.
-fn resolve_crate(u: &Unit, c: &Crate, out: &rasm::Output, bases: &[u64], table: &HashMap<String, (u64, usize)>, left: &HashMap<String, String>, exports: &HashMap<String, DefId>) -> Result<Resolved, String> {
+/// the names left-out crates define), its exported fns and the host, and its functions' unwind
+/// info for its place `xdata`; nothing is written yet.
+#[allow(clippy::too_many_arguments)]
+fn resolve_crate(u: &Unit, c: &Crate, out: &rasm::Output, bases: &[u64], xdata: u64, table: &HashMap<String, (u64, usize)>, left: &HashMap<String, String>, exports: &HashMap<String, DefId>) -> Result<Resolved, String> {
     let arch = Arch::host();
     let local: HashMap<&str, u64> = out.defs.iter().map(|d| (d.name.as_str(), bases[d.section as usize] + d.offset as u64)).collect();
     let mut uses: Vec<(usize, String)> = Vec::new();
@@ -385,7 +409,51 @@ fn resolve_crate(u: &Unit, c: &Crate, out: &rasm::Output, bases: &[u64], table: 
             data.push((pc, b));
         }
     }
-    Ok(Resolved { texts, data, uses })
+    // unwind info: a handler is named by its offset from the code area's base, so it is called
+    // through a jump beside the info (wherever it is: host code, another area)
+    let mut unwind = Vec::new();
+    let mut entries = Vec::new();
+    if !out.seh.is_empty() {
+        let base = code_base(xdata).ok_or("its unwind info is not in code memory")?;
+        let rva = |a: u64| a.checked_sub(base).and_then(|r| u32::try_from(r).ok()).ok_or_else(|| format!("{:#x} is out of reach of its code area's base {:#x}", a, base));
+        for p in &out.seh {
+            let mut handler = 0;
+            if let Some((name, _)) = &p.handler {
+                let target = resolve(name)?;
+                handler = rva(xdata + unwind.len() as u64)?;
+                veneer(arch, &mut unwind, target);
+            }
+            let (begin, end) = (bases[p.section as usize] + p.start as u64, bases[p.section as usize] + p.end as u64);
+            let info = xdata + unwind.len() as u64;
+            rva(begin)?;
+            rva(end)?;
+            rva(info)?;
+            entries.push([begin, end, info]);
+            unwind.extend(p.unwind_info(handler));
+        }
+    }
+    Ok(Resolved { texts, data, uses, unwind, entries })
+}
+
+/// The base of the code area holding `at` (Windows: what unwind info is relative to).
+#[cfg(windows)]
+fn code_base(at: u64) -> Option<u64> {
+    crate::os::mem::code_base(at)
+}
+#[cfg(not(windows))]
+fn code_base(_at: u64) -> Option<u64> {
+    None
+}
+
+/// Registers asm functions' unwind entries (Windows; elsewhere none are made: `.seh_*` are
+/// COFF's).
+#[cfg(windows)]
+fn add_unwind(entries: &[[u64; 3]]) -> Result<(), String> {
+    crate::os::mem::add_asm_unwind(entries)
+}
+#[cfg(not(windows))]
+fn add_unwind(_entries: &[[u64; 3]]) -> Result<(), String> {
+    Ok(())
 }
 
 /// The C name of an assembly symbol: Mach-O prefixes C names with `_` (dlsym, extern blocks and
@@ -397,6 +465,9 @@ pub(crate) fn c_name(n: &str) -> &str {
         n
     }
 }
+
+/// A veneer's bytes.
+const VENEER: usize = 16;
 
 /// A jump to `target` from anywhere (x64: jmp [rip + 0]; .quad target -- arm64: ldr x16, 8;
 /// br x16; .quad target -- IP0, as AAPCS64 lets veneers use it).

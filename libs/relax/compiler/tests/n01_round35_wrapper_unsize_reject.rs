@@ -1,3 +1,4 @@
+// rejects: E0308
 //~ E0308
 // A generic wrapper of a raw pointer has no CoerceUnsized impl: rustc rejects the coercion.
 use std::fmt::Display;

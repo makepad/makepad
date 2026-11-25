@@ -149,6 +149,6 @@ pub fn c_sig(u: &crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Option<u
     CSig { conv, args, ret, n_fixed: match n_fixed {
         Some(n) => n as u32,
         None => u32::MAX,
-    }, ret_narrow, unwinds: abi.unwinds() }
+    }, ret_narrow, unwinds: abi.unwinds(), math: false }
 }
 

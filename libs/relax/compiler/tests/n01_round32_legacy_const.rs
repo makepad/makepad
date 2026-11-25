@@ -1,3 +1,4 @@
+// corpus: rustc-arch x86_64
 use std::arch::x86_64::{_mm_slli_epi32 as shift, _mm_set1_epi32, _mm_cvtsi128_si32};
 
 #[test]

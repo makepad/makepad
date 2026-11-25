@@ -5,7 +5,7 @@
 # by its own process, with the lines the loader started as RUSTC gives. Prints
 # "script_cargo_is_loader: ok" or "script_cargo_is_loader: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d) || exit 1
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 1
 [ -n "$T" ] || exit 1
 trap 'rm -rf "$T"' EXIT
 printf '#!/bin/sh\necho "a cargo ran: $*" >&2\nexit 1\n' > "$T/cargo"

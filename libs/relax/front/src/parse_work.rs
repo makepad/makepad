@@ -9,10 +9,10 @@ pub struct Reuse {
     expansions: crate::fxhash::HashMap<Vec<u8>, std::sync::Arc<crate::builtins::Expansion>>,
     rules: crate::fxhash::HashMap<Vec<u8>, std::sync::Arc<Rules>>,
 }
-/// transcription text, fragment-token origins, definition-body-token origins, opaque fragment
-/// groups (text offsets of the first token's start and the last token's end)
-/// a macro_rules expansion: its text, the tokens over it, token origins, body positions, token-tree groups
-pub type Rules = (String, Vec<crate::lexer::Tok>, Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>, Vec<(u32, u32)>);
+/// a macro_rules expansion: its text, the tokens over it, fragment-token origins,
+/// definition-body-token origins, opaque fragment groups (text offsets of the first token's start
+/// and the last token's end), and the fragments' `$x` positions (Transcript::metas)
+pub type Rules = (String, Vec<crate::lexer::Tok>, Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32, u32)>);
 struct Reusing {
     previous: std::sync::Arc<Reuse>,
     next: Reuse,
@@ -256,6 +256,7 @@ mod tests {
             assert_eq!(v.pf.tok_origin, full.pf.tok_origin);
             assert_eq!(v.pf.token_origins, full.pf.token_origins);
             assert_eq!(v.pf.body_origin, full.pf.body_origin);
+            assert_eq!(v.pf.meta_origin, full.pf.meta_origin);
             assert_eq!(v.pf.pm_editions, full.pf.pm_editions);
             s.reuse = v.reuse;
         }

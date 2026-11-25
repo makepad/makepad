@@ -10,7 +10,7 @@
 #            and under `makepad run` (O3 forced on with call threshold 1); the state dumps (`ui` after each
 #            checkpoint: display, tape, widget tree with rects and text) must be identical.
 # Usage: tools/run/fixture/diff_full.sh [corpus|replay]      (default both; replay-only on a machine without rustc deps)
-# Env: the JIT runs through `cargo run --profile host`, DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default 8), DIFF_NATIVE_CALC (prebuilt native calculator;
+# Env: the JIT runs through `cargo run --profile host`, DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default the lease's RELAX_JOBS, else 8), DIFF_NATIVE_CALC (prebuilt native calculator;
 #      else cargo build --profile host -p makepad-app-calculator -j4 runs first), DIFF_FULL_ANYWAY=1 (allow a non-Linux host).
 # Output (replay alone: `full: replay equal|DIFFERS`): `full: corpus E/N equal (A allowed, S skipped), replay equal|DIFFERS`; the diffs follow; exit 1 on any difference.
 if [ "$(uname)" != Linux ] && [ -z "$DIFF_FULL_ANYWAY" ]; then echo "full: a pool node (Linux) only; DIFF_FULL_ANYWAY=1 overrides"; exit 2; fi
@@ -53,7 +53,7 @@ fi
 corpus_ok=0; corpus_n=0; corpus_skip=0; corpus_allowed=0; msgs=; replay=skipped; allow_fixed=
 if [ $what = all ] || [ $what = corpus ]; then
     work=$(mktemp -d "${TMPDIR:-/tmp}/diff_full.XXXXXX")
-    ls "$corpus"/*.rs | xargs -P "${DIFF_JOBS:-8}" -n 1 "$0" --corpus-job "$work"
+    ls "$corpus"/*.rs | xargs -P "${DIFF_JOBS:-${RELAX_JOBS:-8}}" -n 1 "$0" --corpus-job "$work"
     for src in "$corpus"/*.rs; do
         n=$(basename "$src" .rs)
         if [ -f "$work/$n.skip" ]; then corpus_skip=$((corpus_skip + 1)); continue; fi

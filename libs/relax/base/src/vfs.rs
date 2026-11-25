@@ -252,15 +252,27 @@ pub fn mount_folder(root: &str, folder: &std::path::Path) {
     ANY.store(true, Ordering::Release);
 }
 
+#[inline(always)]
+#[track_caller]
+fn mount_read<T>(table: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    let guard = table.read().unwrap();
+    #[cfg(test)]
+    tests::pause_after_first_mount_read();
+    guard
+}
+
 /// The folder mount whose root is the innermost mount containing `p` (normalized): (root, disk
 /// folder, `p` relative to the root). A store mount inside it wins for its own folder.
 fn folder_mount(p: &str) -> Option<(String, std::path::PathBuf, String)> {
     if !ANY_FOLDER.load(Ordering::Acquire) {
         return None;
     }
-    let folders = FOLDER_MOUNTS.read().unwrap();
+    // MOUNTS before FOLDER_MOUNTS, the order find nests its reads in: opposite orders deadlock
+    // once a writer queues on each (a_folder_mount_is_its_folder_under_another_name).
+    let mounts = mount_read(&MOUNTS);
+    let folders = mount_read(&FOLDER_MOUNTS);
     let (root, dir, rel) = folders.iter().find_map(|(r, d)| relative(p, r).map(|rel| (r, d, rel)))?;
-    if MOUNTS.read().unwrap().iter().any(|m| m.root.len() > root.len() && relative(p, &m.root).is_some()) {
+    if mounts.iter().any(|m| m.root.len() > root.len() && relative(p, &m.root).is_some()) {
         return None;
     }
     Some((root.clone(), dir.clone(), rel.to_string()))
@@ -475,10 +487,10 @@ fn relative<'a>(path: &'a str, root: &str) -> Option<&'a str> {
 /// A path whose innermost mount is a folder mount has none ([`folder_path`]).
 fn find(path: &str) -> Option<(Arc<Mount>, String)> {
     let p = normalize_path(path);
-    let m = MOUNTS.read().unwrap();
+    let m = mount_read(&MOUNTS);
     for mount in m.iter() {
         if let Some(rest) = relative(&p, &mount.root) {
-            if ANY_FOLDER.load(Ordering::Acquire) && FOLDER_MOUNTS.read().unwrap().iter().any(|(r, _)| r.len() > mount.root.len() && relative(&p, r).is_some()) {
+            if ANY_FOLDER.load(Ordering::Acquire) && mount_read(&FOLDER_MOUNTS).iter().any(|(r, _)| r.len() > mount.root.len() && relative(&p, r).is_some()) {
                 return None;
             }
             return Some((mount.clone(), rest.to_string()));
@@ -539,6 +551,55 @@ fn edited_file(path: &str) -> Option<std::path::PathBuf> {
 
 /// The whiteout list changes on disk during a live run; stat it, parse only when it changes.
 static WHITEOUTS: RwLock<Option<(std::path::PathBuf, Option<FileStat>, Arc<BTreeSet<String>>)>> = RwLock::new(None);
+
+#[cfg(unix)]
+mod fork {
+    use super::*;
+    use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::sync::RwLockWriteGuard as Write;
+
+    // Tuple fields drop in declaration order, the reverse of acquisition.
+    type Guards = (
+        Write<'static, BTreeSet<String>>,
+        Write<'static, Option<(PathBuf, Option<FileStat>, Arc<BTreeSet<String>>)>>,
+        Write<'static, BTreeMap<String, Option<Arc<[u8]>>>>,
+        Write<'static, Vec<String>>,
+        Write<'static, Option<PathBuf>>,
+        Write<'static, Vec<(String, PathBuf)>>,
+        Write<'static, Vec<Arc<Mount>>>,
+    );
+    thread_local! { static HELD: Cell<Option<Guards>> = const { Cell::new(None) }; }
+
+    /// Keep every mount and overlay table writable by the forking thread across a plain fork.
+    pub fn fork_prepare() {
+        let mounts = MOUNTS.write().unwrap_or_else(|e| e.into_inner());
+        let folders = FOLDER_MOUNTS.write().unwrap_or_else(|e| e.into_inner());
+        let edits = EDITS.write().unwrap_or_else(|e| e.into_inner());
+        let frozen = FROZEN.write().unwrap_or_else(|e| e.into_inner());
+        let view = STD_VIEW.write().unwrap_or_else(|e| e.into_inner());
+        let whiteouts = WHITEOUTS.write().unwrap_or_else(|e| e.into_inner());
+        let program = PROGRAM_EDITS.write().unwrap_or_else(|e| e.into_inner());
+        HELD.with(|h| h.set(Some((program, whiteouts, view, frozen, edits, folders, mounts))));
+    }
+
+    /// Release the forking thread's VFS guards in the parent.
+    pub fn fork_parent() { drop(HELD.with(Cell::take)); }
+    /// Release the surviving thread's VFS guards in the child.
+    pub fn fork_child() { drop(HELD.with(Cell::take)); }
+
+    // The compiler's integration test links this crate as an ordinary dependency.
+    #[doc(hidden)]
+    pub fn fork_locks_available(exclusive: bool) -> [bool; 7] {
+        macro_rules! probe { ($lock:ident) => {
+            if exclusive { $lock.try_write().is_ok() } else { $lock.try_read().is_ok() }
+        }; }
+        [probe!(MOUNTS), probe!(FOLDER_MOUNTS), probe!(EDITS), probe!(FROZEN),
+         probe!(STD_VIEW), probe!(WHITEOUTS), probe!(PROGRAM_EDITS)]
+    }
+}
+#[cfg(unix)]
+pub use fork::{fork_prepare, fork_parent, fork_child, fork_locks_available};
 
 /// The edits folder's whiteouts (`.makepad-run-deleted`): each deleted file's place there, as
 /// [`edit_rel`] gives it; none without an edits folder. One read of the list.
@@ -1229,21 +1290,81 @@ pub fn modified(path: impl AsRef<std::path::Path>) -> Option<std::time::SystemTi
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// What a virtual path's content is fixed by: its mount's store and commit (None on disk, and under
-/// a folder mount: its content names it). Caches that would compare file times compare this
-/// instead.
+/// What a virtual path's content is fixed by: its mount's store and commit, and the edits of it
+/// and below it ([`edits_below`]; None on disk, and under a folder mount: its content names it).
+/// Caches that would compare file times compare this instead: a build script's rerun key (a file
+/// it names), the std a script tool is keyed by. The commit alone kept a script's output across
+/// every overlay edit of what it read.
 pub fn identity(path: &str) -> Option<String> {
+    identity_in(path, false)
+}
+
+/// [`identity`] of a package's folder by cargo's rule for its files: its target folders and
+/// hidden entries at its top are not its files (unitgraph.rs `newest_mtime_pkg`). The rerun key of
+/// a build script that names no input.
+pub fn package_identity(dir: &str) -> Option<String> {
+    identity_in(dir, true)
+}
+
+fn identity_in(path: &str, package: bool) -> Option<String> {
     if !ANY.load(Ordering::Acquire) {
         return None;
     }
     let (m, _) = find(path)?;
-    if whiteout(path) || edited_file(path).is_some() || std_view(path).is_some() {
+    if std_view(path).is_some() {
         return None;
     }
-    Some(match m.store.range {
+    let mount = match m.store.range {
         Some((offset, len)) => format!("{}@{offset}+{len}@{}", m.store.path.display(), store::hex(&m.commit)),
         None => format!("{}@{}", m.store.path.display(), store::hex(&m.commit)),
+    };
+    Some(match edits_below(path, package) {
+        Some(edits) => format!("{mount}+edits {edits}"),
+        None => mount,
     })
+}
+
+/// The edits of virtual `path` and below it as a key, None when it has none: each file the edits
+/// folder holds there with its length and modification time (cargo's key of a package's files),
+/// and each whiteout there. One walk of the edits folder at that place: the few files edited
+/// there, never the store's files, and none read. `package`: not its top's target folders and
+/// hidden entries ([`package_identity`]).
+fn edits_below(path: &str, package: bool) -> Option<String> {
+    let (at, rel) = edit_path(path)?;
+    let dir = EDITS.read().unwrap().clone()?;
+    // (a name below `rel`, by its part below it; None: not below it)
+    fn below<'a>(rel: &str, d: &'a str) -> Option<&'a str> {
+        if rel.is_empty() { Some(d) } else if d == rel { Some("") } else { d.strip_prefix(rel).and_then(|x| x.strip_prefix('/')) }
+    }
+    let kept = |d: &str| below(&rel, d).is_some_and(|x| !package || !(x.starts_with("target") || x.starts_with('.')));
+    let mut lines = Vec::new();
+    let mut todo = vec![(at, rel.clone())];
+    while let Some((p, r)) = todo.pop() {
+        let Ok(m) = std::fs::metadata(&p) else { continue };
+        if m.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&p) else { continue };
+            for e in entries.flatten() {
+                let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+                // (the run's own records, at the folder's top)
+                if r.is_empty() && name.starts_with(".makepad-run-") {
+                    continue;
+                }
+                let r = if r.is_empty() { name } else { format!("{r}/{name}") };
+                if kept(&r) {
+                    todo.push((e.path(), r));
+                }
+            }
+        } else {
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+            lines.push(format!("e {r} {} {t}", m.len()));
+        }
+    }
+    lines.extend(deleted_paths(&dir).iter().filter(|d| kept(d)).map(|d| format!("d {d}")));
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort_unstable();
+    Some(crate::sha256::sha256_hex(lines.join("\n").as_bytes())[..32].to_string())
 }
 
 // ---- the mount table as text (a child process started in a virtual folder mounts the same)
@@ -1630,13 +1751,16 @@ pub fn edits_ledger_stamp() -> Option<(std::time::SystemTime, u64)> {
 }
 
 /// The disk path of `path` in the edits folder when it is an edited file or folder there
-/// (removing or renaming an edited file).
+/// (removing or renaming an edited file). A symlink the run made there is one whether its target
+/// exists or not: removing a dangling one removes the link, as on the disk (it was NotFound, so a
+/// folder holding one could not be removed, 11-25).
 pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
+    let present = |p: &std::path::Path| p.symlink_metadata().is_ok();
     if let Some(disk) = folder_path(path) {
-        return disk.exists().then_some(disk);
+        return present(&disk).then_some(disk);
     }
     let (p, rel) = edit_path(path)?;
-    (!rel.starts_with(".makepad-run-") && p.exists()).then_some(p)
+    (!rel.starts_with(".makepad-run-") && present(&p)).then_some(p)
 }
 
 /// The disk file a read-only open of the virtual `path` reads, so that it sees later writes as it
@@ -1910,10 +2034,31 @@ mod test_store;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, sync::mpsc, thread, time::{Duration, Instant}};
 
     /// The mounts' outermost root and the edits folder are process state: the tests that set
     /// them run one at a time.
     static EDITS_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    thread_local! {
+        static FIRST_MOUNT_READ: Cell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn pause_after_first_mount_read() {
+        if let Some((held, release)) = FIRST_MOUNT_READ.with(Cell::take) {
+            held.send(()).unwrap();
+            release.recv().unwrap();
+        }
+    }
+
+    fn paused_mount_lookup(held: mpsc::Sender<()>, lookup: impl FnOnce() + Send + 'static) -> (mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let (release, wait) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            FIRST_MOUNT_READ.with(|p| p.set(Some((held, wait))));
+            lookup();
+        });
+        (release, reader)
+    }
 
     /// A held landing's files read as they were before it: changed, removed (still there) and
     /// added (not there yet) alike, through every read; the live watch reads them as they are; a
@@ -2150,6 +2295,17 @@ mod tests {
     /// dependency's `src/lib.rs` from the checkout's).
     #[test]
     fn a_folder_mount_is_its_folder_under_another_name() {
+        // If the readers deadlock, leave their threads in this test's process so the
+        // remaining VFS tests can still use both mount tables.
+        const CHILD: &str = "RELAX_VFS_MOUNT_ORDER_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "vfs::tests::a_folder_mount_is_its_folder_under_another_name", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains("test result: ok. 1 passed"),
+                "folder mount test failed: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            return;
+        }
         let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("relax-vfs-folder-{}", std::process::id()));
         let checkout = base.join("checkout");
@@ -2207,9 +2363,62 @@ mod tests {
         mount_text(&format!("{other}\t{}\tdir\n", checkout.display())).unwrap();
         assert_eq!(read_to_string(format!("{other}/Cargo.toml")).unwrap(), "[package]", "the table's text mounts it again");
 
+        let writer_root = format!("{other}/extra");
+        {
+            const DEADLOCK: &str = "deadlock: folder_mount and find took MOUNTS and FOLDER_MOUNTS in opposite orders";
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let remaining = || deadline.saturating_duration_since(Instant::now());
+            let wait_tick = || {
+                let left = remaining();
+                assert!(!left.is_zero(), "{DEADLOCK}");
+                thread::sleep(Duration::from_millis(2).min(left));
+            };
+            let (ready, reached) = mpsc::channel();
+            let wait_ready = || reached.recv_timeout(remaining()).expect(DEADLOCK);
+
+            let (release_a, a) = paused_mount_lookup(ready.clone(), move || {
+                assert_eq!(folder_mount(&lib).unwrap().2, "src/lib.rs");
+            });
+            wait_ready();
+            let nested_file = format!("{inner_root}/src/lib.rs");
+            let (release_b, b) = paused_mount_lookup(ready.clone(), move || {
+                assert_eq!(find(&nested_file).unwrap().1, "src/lib.rs");
+            });
+            wait_ready();
+            // Both readers should hold MOUNTS. Keep the folder writer queued even in
+            // that case. With the old order A itself holds FOLDER_MOUNTS for read.
+            let mounts_first = FOLDER_MOUNTS.try_write().is_ok();
+            let folders = FOLDER_MOUNTS.read().unwrap();
+            let (store_root, store, commit) = (dep_root.clone(), dep.store.clone(), dep.commit);
+            let mounting = ready.clone();
+            let c = thread::spawn(move || {
+                mounting.send(()).unwrap();
+                mount(&store_root, store, &commit).unwrap();
+            });
+            let folder_root = writer_root.clone();
+            let d = thread::spawn(move || {
+                ready.send(()).unwrap();
+                mount_folder(&folder_root, &checkout);
+            });
+            wait_ready();
+            wait_ready();
+            thread::sleep(Duration::from_millis(50).min(remaining()));
+            // Each table still has a reader, so a refused read here observes a queued
+            // writer. A descheduled writer cannot let the old order slip through.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            while MOUNTS.try_read().is_ok() || FOLDER_MOUNTS.try_read().is_ok() { wait_tick(); }
+            drop(folders);
+            release_a.send(()).unwrap();
+            release_b.send(()).unwrap();
+
+            let workers = [a, b, c, d];
+            while !workers.iter().all(thread::JoinHandle::is_finished) { wait_tick(); }
+            for worker in workers { worker.join().unwrap(); }
+            assert!(mounts_first, "both readers must take MOUNTS first even if the backend admits a reader past a queued writer");
+        }
         MOUNTS.write().unwrap().retain(|m| m.root != dep_root && m.root != inner_root);
         let mut folders = FOLDER_MOUNTS.write().unwrap();
-        folders.retain(|(r, _)| *r != root && *r != other);
+        folders.retain(|(r, _)| *r != root && *r != other && *r != writer_root);
         if folders.is_empty() {
             ANY_FOLDER.store(false, Ordering::Release);
         }
@@ -2342,12 +2551,14 @@ mod tests {
         let disk = prepare_edit(&path, true).unwrap();
         assert_eq!(std::fs::read(&disk).unwrap(), bytes);
         std::fs::write(&disk, b"edited").unwrap();
+        let edited_identity = super::identity(&path).unwrap();
+        assert_ne!(edited_identity, identity, "an edit moves the file's identity (a script's rerun key)");
         for root in roots {
             let path = format!("{root}/{file}");
             assert_eq!(read(&path).unwrap(), b"edited");
             assert_eq!(metadata(&path).unwrap().len, 6);
             assert_eq!(edited_disk_path(&path), Some(disk.clone()));
-            assert!(super::identity(&path).is_none());
+            assert_eq!(super::identity(&path).as_ref(), Some(&edited_identity), "{path}: every spelling, one identity");
             assert!(modified(&path).is_some());
             assert_eq!(prepare_edit_dir(&format!("{root}/new-dir")).unwrap(), edits.join("new-dir"));
         }

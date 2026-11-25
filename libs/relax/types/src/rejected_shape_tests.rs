@@ -9,8 +9,19 @@ use crate::tcx::{EvalCx, EvalState, TypingEnv};
 /// rules, well-formedness of every item, the type check of every body, and the borrow check of each body
 /// whose type check passed. Each is "<item path>: <code> <message>".
 fn errors(source: &str) -> Vec<String> {
+    let (prog, tcx, user) = load(source);
+    errors_of(&prog, &tcx, user)
+}
+
+/// The crate `source`, loaded and validated as a checked crate is; `user` is its crate.
+fn load(source: &str) -> (crate::program::Program, crate::tcx::Tcx, u32) {
     let (mut prog, tcx, user) = load_source(source, 2021, "repro");
     prog.crates[user as usize].validate = true;
+    (prog, tcx, user)
+}
+
+/// `errors` of a crate `load` gave.
+fn errors_of(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, user: u32) -> Vec<String> {
     let mut out = Vec::new();
     for (d, _, e) in tcx.orphan_errors(&prog) {
         if prog.def(d).krate == user { out.push(format!("{}: {e}", prog.def_path(d))); }
@@ -528,4 +539,46 @@ fn a_callable_whose_signature_may_not_outlive_a_region_warns() {
         assert!(!warnings.iter().any(|w| warning_line(w) == line(item)), "{item}: a satisfied signature lifetime requirement warned: {warnings:?}");
     }
     assert!(warnings.iter().all(|w| [line("early_fn"), line("resolve<")].contains(&warning_line(w))), "unexpected callable warning outside the two unproven requirements: {warnings:?}");
+}
+
+/// Comparing an impl item's signature with its trait's assumes the impl header types the trait signature names
+/// (every item of the impl assumes its header), and no more. A where-clause or an impl signature that needs a
+/// header bound the trait signature does not name is refused, as rustc refuses them (E0276, E0310). Two shapes
+/// rustc accepts stay refused: a bound only a non-header alias argument carries (a generic associated type's
+/// where-clause, the alias normalizing away in the impl) proves no where-clause of the impl method, and a header
+/// that is itself an alias normalizing away (`<&'b &'a () as Trait>::Type`) implies nothing. The declarations
+/// and a generic caller are fine.
+#[test]
+fn an_impl_item_assumes_the_header_types_its_trait_signature_names_and_no_more() {
+    let (prog, tcx, user) = load("
+        use std::marker::PhantomData;
+        pub mod decl {
+            pub trait Plain { fn f(x: &u32) -> u32; }
+            pub trait Named { type A; fn g(x: &u32) -> u32; }
+            pub trait Gat { type W<'a, 'b> where 'b: 'a; fn w<'a, 'b, T>(_: Self::W<'a, 'b>, v: &'b T) -> &'a T where 'a: 'a, 'b: 'b; }
+            pub trait Trait { type Type; }
+            impl<T> Trait for T { type Type = (); }
+            pub trait Ext<'a, 'b> { fn extend(self, s: &'a str) -> &'b str; }
+        }
+        use decl::*;
+        pub struct G<T: 'static>(PhantomData<T>);
+        impl<T> Plain for G<T> { fn f(x: &u32) -> u32 where T: 'static { *x } }
+        impl<T> Named for G<T> { type A = u32; fn g(x: &<G<T> as Named>::A) -> u32 { *x } }
+        pub struct S;
+        impl Gat for S { type W<'a, 'b> = () where 'b: 'a; fn w<'a, 'b, T>(_: Self::W<'a, 'b>, v: &'b T) -> &'a T where 'a: 'a, 'b: 'a { v } }
+        pub fn call<'a, 'b, X: Gat, T>(w: X::W<'a, 'b>, v: &'b T) -> &'a T { X::w(w, v) }
+        impl<'a, 'b> Ext<'a, 'b> for <&'b &'a () as Trait>::Type { fn extend(self, s: &'a str) -> &'b str { s } }");
+    // the impl items whose signature comparison with their trait's fails (E0053 in a checked crate)
+    let mismatched: Vec<String> = (0..prog.defs.len() as u32).map(DefId)
+        .filter(|&d| prog.def(d).krate == user && prog.trait_item_def_id.contains_key(&d) && tcx.compare_impl_item(&prog, d).is_err())
+        .map(|d| prog.name(d).to_string()).collect();
+    assert!(mismatched.iter().any(|n| n == "f"), "a where-clause only the header implies, the trait signature not naming it: {mismatched:?}");
+    assert!(mismatched.iter().any(|n| n == "g"), "an impl signature naming the header, the trait signature not: {mismatched:?}");
+    assert!(mismatched.iter().any(|n| n == "w"), "a bound only a non-header alias argument carries: {mismatched:?}");
+    assert!(mismatched.iter().any(|n| n == "extend"), "a header that normalizes away implies nothing: {mismatched:?}");
+    assert_eq!(mismatched.len(), 4, "only those four: {mismatched:?}");
+    let e = errors_of(&prog, &tcx, user);
+    for item in ["decl::Plain::f", "decl::Named::g", "decl::Gat::w", "decl::Gat::W", "decl::Ext::extend", "call"] {
+        assert!(!has(&e, item, ""), "{item} is fine: {e:?}");
+    }
 }

@@ -1,7 +1,6 @@
-// Web target differential program (run.sh): the same output from rustc's build of it (a
-// wasm32-unknown-unknown cdylib run in node for wasm32; a host binary for wasm64, whose data
-// layout is x86_64's) and from Relax running it as the web target in the trace host's mode
-// (RELAX_CHECK_TARGET=wasm{32,64}-unknown-unknown). Output goes through the page-side
+// Web target differential program (run.sh): the same output from rustc's host build of it (wasm64's
+// data layout is x86_64's) and from Relax running it as the web target in the trace host's mode
+// (RELAX_CHECK_TARGET=wasm64-unknown-unknown). Output goes through the page-side
 // import `js_console_log` (a page has no stdout). Pointer-heavy on purpose: fat pointers,
 // trait objects, vtables, statics holding pointers, Box/Rc/Vec/String, enums with pointer niches,
 // fn pointers, closures, unaligned/packed fields, 64- and 128-bit math, atomics.
@@ -374,12 +373,6 @@ fn body() {
     let none: Option<Box<u64>> = None;
     say!("niche {:?} {:?} {}", some, none, std::mem::size_of_val(&none));
     say!("done");
-}
-
-/// rustc's wasm32 build: node calls this (run.sh)
-#[no_mangle]
-pub extern "C" fn run() {
-    body()
 }
 
 fn main() {

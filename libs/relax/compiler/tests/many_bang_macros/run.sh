@@ -3,7 +3,7 @@
 # (Robrix: futures-util's try_join! calls $crate::try_join_internal!, the 57th); prints
 # "many_bang_macros: ok" or "many_bang_macros: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet many-bang-app 2>>"$ERR")

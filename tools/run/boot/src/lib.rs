@@ -37,7 +37,7 @@ mod layout;
 mod ring;
 mod text;
 
-use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
+use document::{Program, BAKE, ERROR_BAND, FIELD, GLYPH, ICON, LATTICE, PIPE_BANK_SIZE, STARS};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
 pub use ring::{summary as ring_summary, Alert as RingAlert, Want as RingWant};
@@ -246,6 +246,8 @@ pub struct Boot {
     offscreen: bool,
     /// `RELAX_BOOT_STATS=1`: the HAL's GPU time of the boot session's frames, printed as it goes
     gpu: bool,
+    /// (frames, ns) of the boot session's GPU time at the last print
+    gpu_last: (u64, u64),
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
     /// the window system composites badges over the window (`info_flags::WINDOW_BADGES`)
@@ -293,6 +295,9 @@ pub struct Boot {
     device_lost: bool,
     /// the window's icon (`icon`), uploaded again on a new device
     icon: Option<Icon>,
+    /// the program whose `ignition_lattice` filled the noise lattice (`LATTICE_TEXTURE`) on this
+    /// device (its pipe's id): none, it is filled before the next frame's draws
+    lattice: Option<Id>,
 }
 
 impl Boot {
@@ -329,6 +334,7 @@ impl Boot {
             dump: dump::Dump::from_env(),
             offscreen: false,
             gpu: std::env::var_os("RELAX_BOOT_STATS").is_some(),
+            gpu_last: (0, 0),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
             badges: info.flags & info_flags::WINDOW_BADGES != 0,
             display_clock: info.flags & info_flags::DISPLAY_CLOCK != 0,
@@ -359,6 +365,7 @@ impl Boot {
             recovers: info.flags & info_flags::DEVICE_RESET != 0,
             device_lost: false,
             icon: None,
+            lattice: None,
         };
         if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
             boot.chrome = chrome;
@@ -409,6 +416,15 @@ impl Boot {
             Attr::default(),
         );
         upload_quad(&mut writer);
+        writer.texture_create(
+            LATTICE_TEXTURE,
+            usage::RENDER_TARGET | usage::SAMPLED,
+            format::R16F,
+            LATTICE_SIZE,
+            LATTICE_SIZE,
+            [1, 1],
+            Attr::default(),
+        );
         let text = text::Text::new(&mut writer)?;
         program.create(&mut writer, info.dialect);
         hal.submit(&writer.buf());
@@ -454,6 +470,9 @@ impl Boot {
         self.layer(None, 0, false);
         let Some(window) = self.window.take() else { return true };
         let mut writer = CmdWriter::new(HOST);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.field.release(&mut writer);
+        }
         if let Some(badge) = self.ring.window.take() {
             writer.window_close(badge);
             self.ring.hovered = None;
@@ -471,6 +490,9 @@ impl Boot {
         }
         let Some(window) = self.window else { return };
         let mut writer = CmdWriter::new(HOST);
+        if let (true, Some(renderer)) = (hidden, &mut self.renderer) {
+            renderer.field.release(&mut writer);
+        }
         writer.window_state(window, if hidden { window_state::HIDE } else { window_state::SHOW });
         Hal::global().submit(&writer.buf());
     }
@@ -514,8 +536,10 @@ impl Boot {
         if let Some(icon) = &self.icon {
             icon.fill(&mut writer);
         }
-        // the field's instances are written again from nothing by its next frame
+        // the field's instances are written again from nothing by its next frame, the lattice
+        // filled again before it
         renderer.field.device_reset();
+        self.lattice = None;
         renderer.layer.blurred = None;
         renderer.dirty = true;
         renderer.redraw = true;
@@ -1245,13 +1269,14 @@ impl Boot {
         let field = renderer.field.frame(
             &mut writer,
             &program.pipes[FIELD],
+            &program.pipes[STARS],
             &self.state,
             time,
             renderer.layout.galaxy,
             self.environment.reduce_motion,
             true,
             -1.0,
-            false,
+            dpi,
         );
         let max_scroll = (renderer.layout.content_height - renderer.layout.clip[3]).max(0.0);
         renderer.scroll = renderer.scroll.min(max_scroll);
@@ -1350,6 +1375,7 @@ impl Boot {
                     (id!(view), &field.view),
                     (id!(field_params), &field.params),
                     (id!(field_fall), &field.fall),
+                    (id!(field_stars), &field.stars),
                     (id!(field_frame), &field_frame),
                     (id!(field_fault), &fault),
                     (id!(radius), &[sdf.radius]),
@@ -1366,6 +1392,7 @@ impl Boot {
                 ..Default::default()
             },
         );
+        fill_lattice(&mut writer, program, &mut self.lattice);
         writer.pass(Pass {
             load: [pass_load::CLEAR; 5],
             clear: [[0.0; 4]; 4],
@@ -1390,7 +1417,7 @@ impl Boot {
                 ],
                 &mut app_data,
             );
-            pipe.draw(&mut writer, &app_data, &app_uniforms, renderer.layer.texture(layer::APP), scissor);
+            pipe.draw(&mut writer, &app_data, &app_uniforms, &[renderer.layer.texture(layer::APP)], scissor);
             kept.push(app_data);
             kept.push(app_uniforms);
         } else {
@@ -1399,8 +1426,12 @@ impl Boot {
                 field.instances,
                 field.count,
                 &uniforms[FIELD],
+                &[LATTICE_TEXTURE; 3],
                 scissor,
             );
+            for (buffer, first, count) in field.live {
+                program.pipes[STARS].draw_range(&mut writer, buffer, first, count, &uniforms[STARS], &[], scissor);
+            }
         }
         for i in [ERROR_BAND, ICON, GLYPH] {
             if i == ICON && !program.icon {
@@ -1410,11 +1441,11 @@ impl Boot {
                 &mut writer,
                 &data[i],
                 &uniforms[i],
-                if i == ICON {
+                &[if i == ICON {
                     icon::TEXTURE
                 } else {
                     renderer.text.atlas()
-                },
+                }],
                 scissor,
             );
         }
@@ -1552,6 +1583,8 @@ impl Boot {
             None if renderer.layer.on => {
                 writer.window_overlay(window, false, [0.0; 4], Id::NONE, false);
                 layer_textures(&mut writer, &renderer.layer, None);
+                // the field is put away with the layer
+                renderer.field.release(&mut writer);
                 renderer.layer.on = false;
                 renderer.layer.size = [0; 2];
                 renderer.dirty = true;
@@ -1959,10 +1992,10 @@ impl Boot {
         let glyph = &program.pipes[GLYPH];
         let mut writer = CmdWriter::new(HOST);
         badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, dpi, viewport, |writer| {
-            band.draw(writer, &ring_data, &ring_uniforms, atlas, px(ring_rect));
+            band.draw(writer, &ring_data, &ring_uniforms, &[atlas], px(ring_rect));
             if let Some((uniforms, data, glyph_uniforms)) = &tip_draws {
-                band.draw(writer, data, uniforms, atlas, px(tip_rect));
-                glyph.draw(writer, &glyphs, glyph_uniforms, atlas, px(tip_rect));
+                band.draw(writer, data, uniforms, &[atlas], px(tip_rect));
+                glyph.draw(writer, &glyphs, glyph_uniforms, &[atlas], px(tip_rect));
             }
         });
         Hal::global().submit(&writer.buf());
@@ -2015,13 +2048,14 @@ impl Boot {
         let frame = renderer.field.frame(
             &mut writer,
             &program.pipes[FIELD],
+            &program.pipes[STARS],
             &self.state,
             time,
             region,
             reduce_motion,
             false,
             look.map_or(-1.0, |l| l.resolve),
-            veil.is_some() || renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
+            dpi,
         );
         let hint = program.label(layout::phase_key(self.state.phase));
         let app = caption.title.as_deref().unwrap_or(&self.state.app);
@@ -2078,7 +2112,7 @@ impl Boot {
         let sdf = makepad_font_core::raster::Settings::default().sdfer;
         let field_layer = look.map_or([0.0; 4], |l| [1.0, l.galaxy, l.backdrop, l.progress]);
         let field_fault = [0.0, 0.0, caption.height, 0.0];
-        let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| {
+        let common_stars = |pipe: &gpu::Pipeline, stars: &[f32; 4], out: &mut Vec<f32>| {
             pipe.uniforms.write(
                 &[
                     (id!(viewport), &viewport),
@@ -2089,6 +2123,7 @@ impl Boot {
                     (id!(view), &frame.view),
                     (id!(field_params), &frame.params),
                     (id!(field_fall), &frame.fall),
+                    (id!(field_stars), stars),
                     (id!(field_layer), &field_layer),
                     (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
@@ -2097,8 +2132,30 @@ impl Boot {
                 out,
             );
         };
+        let common = |pipe: &gpu::Pipeline, out: &mut Vec<f32>| common_stars(pipe, &frame.stars, out);
         let mut field_uniforms = Vec::new();
         common(&program.pipes[FIELD], &mut field_uniforms);
+        // the stars past the frontier draw whole; the baked ones' records (the sparks) only what
+        // the bake lacks
+        let mut star_uniforms = Vec::new();
+        common_stars(&program.pipes[STARS], &[frame.stars[0], 0.0, 0.0, 0.0], &mut star_uniforms);
+        let mut spark_uniforms = Vec::new();
+        common_stars(&program.pipes[STARS], &[frame.stars[0], 1.0, 0.0, 0.0], &mut spark_uniforms);
+        let mut bake_uniforms = [Vec::new(), Vec::new()];
+        let bake = renderer.field.take_bake();
+        if let Some(bake) = &bake {
+            for (out, weight) in bake_uniforms.iter_mut().zip([1.0, -1.0]) {
+                program.pipes[BAKE].uniforms.write(
+                    &[
+                        (id!(viewport), &[bake.side as f32; 2]),
+                        (id!(dpi), &[dpi]),
+                        (id!(field_params), &frame.params),
+                        (id!(bake), &[bake.scale[0], bake.scale[1], weight, 0.0]),
+                    ],
+                    out,
+                );
+            }
+        }
         let mut glyph_uniforms = Vec::new();
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         // the caption's window buttons (the field's only cards)
@@ -2140,6 +2197,29 @@ impl Boot {
                 ..Default::default()
             },
         );
+        fill_lattice(&mut writer, program, &mut self.lattice);
+        // the stars past the bake's frontier, into its layers (on the stars' own records), before
+        // the frame shows them
+        if let Some(bake) = &bake {
+            let side = bake.side as f32;
+            let mut color = [Id::NONE; 4];
+            color[..2].copy_from_slice(&bake.layers);
+            writer.pass(Pass {
+                color,
+                load: [if bake.clear { pass_load::CLEAR } else { pass_load::LOAD }; 5],
+                clear: [[0.0; 4]; 4],
+                viewport: [0.0, 0.0, side, side],
+                dpi: 1.0,
+                ..Default::default()
+            });
+            let pipe = &program.pipes[BAKE];
+            let scissor = [0.0, 0.0, side, side];
+            for &(buffer, first, count) in &bake.runs {
+                pipe.draw_range(&mut writer, buffer, first, count, &bake_uniforms[0], &[], scissor);
+            }
+            pipe.draw(&mut writer, &bake.put_in, &bake_uniforms[0], &[], scissor);
+            pipe.draw(&mut writer, &bake.take_out, &bake_uniforms[1], &[], scissor);
+        }
         // the blurred app: made again from a new app frame (the HAL copied the app's image into
         // APP at this frame's start): full -> half (a box), half -> quarter across, then down
         let layer_pipe = program.layer.map(|i| &program.pipes[i]);
@@ -2181,7 +2261,7 @@ impl Boot {
                         ],
                         &mut data,
                     );
-                    pipe.draw(&mut writer, &data, &uniforms, layer.texture(source), [0.0, 0.0, size[0], size[1]]);
+                    pipe.draw(&mut writer, &data, &uniforms, &[layer.texture(source)], [0.0, 0.0, size[0], size[1]]);
                     kept.push(data);
                     kept.push(uniforms);
                 }
@@ -2215,7 +2295,7 @@ impl Boot {
                     ],
                     &mut data,
                 );
-                pipe.draw(writer, &data, &uniforms, renderer.layer.texture(texture), scissor);
+                pipe.draw(writer, &data, &uniforms, &[renderer.layer.texture(texture)], scissor);
                 kept.push(data);
                 kept.push(uniforms);
             }
@@ -2229,15 +2309,23 @@ impl Boot {
                 frame.instances,
                 frame.count,
                 &field_uniforms,
+                &match frame.shown {
+                    Some([a, b]) => [LATTICE_TEXTURE, a, b],
+                    None => [LATTICE_TEXTURE; 3],
+                },
                 scissor,
             );
+            for (buffer, first, count) in frame.live {
+                program.pipes[STARS].draw_range(&mut writer, buffer, first, count, &star_uniforms, &[], scissor);
+            }
+            program.pipes[STARS].draw_buffer(&mut writer, frame.sparks.0, frame.sparks.1, &spark_uniforms, &[], scissor);
         }
         if !buttons.is_empty() {
             program.pipes[ERROR_BAND].draw(
                 &mut writer,
                 &buttons,
                 &band_uniforms,
-                renderer.text.atlas(),
+                &[renderer.text.atlas()],
                 scissor,
             );
         }
@@ -2245,7 +2333,7 @@ impl Boot {
             &mut writer,
             &glyphs,
             &glyph_uniforms,
-            renderer.text.atlas(),
+            &[renderer.text.atlas()],
             scissor,
         );
         if let Some(strip) = app_strip {
@@ -2290,11 +2378,19 @@ impl Boot {
                     .map(|s| (s.stats.gpu_frames, s.stats.gpu_ns_total, s.stats.gpu_ns_max))
             });
             if let Some((frames, total, max)) = stats.filter(|s| s.0 > 0) {
+                let (last_frames, last_total) = std::mem::replace(&mut self.gpu_last, (frames, total));
+                let recent = total.saturating_sub(last_total) as f64 / frames.saturating_sub(last_frames).max(1) as f64 / 1e3;
+                let (stars, cpu_mean, cpu_max) = renderer.field.take_cpu();
                 eprintln!(
-                    "relax: boot window gpu: {} frames, mean {:.0} us, max {:.0} us",
+                    "relax: boot window gpu: {} frames, mean {:.0} us (the last {}: {:.0} us), max {:.0} us; {} stars, the field's cpu per frame {:.0} us (max {:.0} us)",
                     frames,
                     total as f64 / frames as f64 / 1e3,
-                    max as f64 / 1e3
+                    frames.saturating_sub(last_frames),
+                    recent,
+                    max as f64 / 1e3,
+                    stars,
+                    cpu_mean,
+                    cpu_max
                 );
             }
         }
@@ -2303,6 +2399,38 @@ impl Boot {
         renderer.presented_revision = renderer.layout_revision;
         renderer.presented_scroll = renderer.scroll;
     }
+}
+
+/// The value noise's lattice (`lattice_uv` in boot.splash, which derives its size from where the
+/// noise is read): `hash21` of each integer point from -32 to 31, so a shader's value noise is one
+/// bilinear tap.
+const LATTICE_TEXTURE: Id = Id::new(24, 1);
+const LATTICE_SIZE: u32 = 64;
+
+/// Fill the noise lattice with `program`'s `ignition_lattice` (on the GPU that samples it, with
+/// its own `hash21`), when no frame of this program on this device has.
+fn fill_lattice(writer: &mut CmdWriter, program: &Program, filled: &mut Option<Id>) {
+    let pipe = &program.pipes[LATTICE];
+    if *filled == Some(pipe.id) {
+        return;
+    }
+    *filled = Some(pipe.id);
+    let side = LATTICE_SIZE as f32;
+    let mut color = [Id::NONE; 4];
+    color[0] = LATTICE_TEXTURE;
+    writer.pass(Pass {
+        color,
+        load: [pass_load::CLEAR; 5],
+        clear: [[0.0; 4]; 4],
+        viewport: [0.0, 0.0, side, side],
+        dpi: 1.0,
+        ..Default::default()
+    });
+    let mut uniforms = Vec::new();
+    pipe.uniforms.write(&[(id!(viewport), &[side, side])], &mut uniforms);
+    let mut data = Vec::new();
+    pipe.instances.write(&[(id!(rect), &[0.0, 0.0, side, side])], &mut data);
+    pipe.draw(writer, &data, &uniforms, &[], [0.0, 0.0, side, side]);
 }
 
 /// The unit quad every pipeline draws its instances on: its vertices and indices.

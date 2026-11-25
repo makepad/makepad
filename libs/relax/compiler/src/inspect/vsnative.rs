@@ -247,12 +247,20 @@ mod imp {
         let map = Map::of(pid, &native);
         let _ = child.kill();
         let _ = child.wait();
+        // both sides in one unit: our CPU-time samples weigh 1 each (prof), the native records carry
+        // their period (ns of CPU time for cpu), so a native CPU sample weighs 1 too; hardware
+        // events weigh their period on both sides
+        if run.ev != ev {
+            return out.err(&format!("this process could not be sampled for {} ({} instead) while the native build was: the two sides are in different units", ev.name(), run.ev.name()));
+        }
+        let cpu = ev == crate::inspect::prof::Ev::Cpu;
         // native: per fn
         let mut nat_fn: HashMap<String, u64> = HashMap::new();
         let mut nat_total = 0u64;
         let mut unnamed = 0u64;
         let named = crate::inspect::asm::with_native_bin(&native, |nb| {
             for &(pc, w) in &nat {
+                let w = if cpu { 1 } else { w };
                 nat_total += w;
                 match map.vaddr(pc).and_then(|va| nb.fn_at(va)) {
                     Some(f) => *nat_fn.entry(crate::inspect::asm_plain(&f.name)).or_default() += w,

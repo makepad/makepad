@@ -7,7 +7,7 @@
 # tree. Prints "inline_target_tables: ok" or "inline_target_tables: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 relax=${1:?usage: run.sh <relax binary>}
-W=$(mktemp -d) || exit 1
+W=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 1
 trap '[ -n "$W" ] && rm -rf -- "$W"' EXIT
 mkdir "$W/pkg" && cp -R "$H/Cargo.toml" "$H/src" "$H/progs" "$W/pkg/" || exit 1
 export CARGO_NET_OFFLINE=true RELAX_CACHE=off RELAX_STD=$H/../../std CARGO_TARGET_DIR=$W/target

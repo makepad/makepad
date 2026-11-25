@@ -1,3 +1,5 @@
+// rejects: E0407
+// rejects: E0046
 // front-bck audit 1.14 / 1.16: rustc_resolve check_trait_item (E0407, E0437, E0438, E0323,
 // E0324, E0325, E0201) and the `default` diagnostics. Checked as a package with `makepad check`.
 #![allow(dead_code)]

@@ -13,5 +13,5 @@ mod b;
 mod c;
 #[test] fn latest_textual_definition() { assert_eq!(c::which(), 2); }
 #[test] fn own_definitions() { assert_eq!(c::own(), 3); assert_eq!(a::which_a(), 1); }
-#[test] fn module_path_of_files() { assert_eq!(c::path(), "test_crate::c"); }
+#[test] fn module_path_of_files() { assert_eq!(c::path(), format!("{}::c", module_path!())); }
 

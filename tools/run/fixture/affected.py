@@ -25,7 +25,11 @@ the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packa
 diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
 whatever the diff. A package's test variants ([`variants`]) run beside it, a `tests` line each.
 `--runs` with GATE_MACOS=1 prints the mac bucket's instead (mac_tests.sh): a `tests <package> <dir> --test <target>`
-line for each test target only a Mac can fail ([`macos_tests`]) whose package's tests the diff reaches.
+line for each test target only a Mac can fail ([`macos_tests`]) whose package's tests the diff reaches, and a
+`boundary <app> <dir>` line for each app of BOUNDARY_APPS the diff reaches, as the fast bucket's: on the Mac its
+provided crates build the Apple-only code no Linux audit lowers (26 violations only a Mac's audit showed, 11-24).
+A `boundary <app> <dir>` line: an app of BOUNDARY_APPS the diff reaches (its own crates, or any crate it builds
+from, a provided one too), whose boundary audit runs after the landing (land_gate.sh qboundary_one).
 """
 import json
 import os
@@ -67,6 +71,12 @@ def guard_unit(name, target):
     """A GPU guard's unit, as land_gate.sh step_guards names it: `guard <pkg>` for a library's guard,
     `guard <pkg> --test <target>` for a test target's, so two guards of one package are two units."""
     return ["guard", name] if target == "lib" else ["guard", name, "--test", target.removeprefix("test:")]
+# the apps whose boundary audit (`makepad check --boundary all <app>`: every body a run of the app compiles, from its
+# main, against the provided crates' ops; provided_sweep.sh's list) runs after a landing that reaches them: a call from
+# game code into a provided crate's fn that reads a field whose bytes are rustc's failed at the app's first use and
+# stayed on main 36 min, the audit ran only in the jitlegs, which no app landing starts (11-23). An app this tree
+# lacks has none (the gate fixtures' workspaces)
+BOUNDARY_APPS = SMOKE + ("makepad-app-wm",)
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
 DEVHUB_PACKAGE = "makepad-devhub"
@@ -113,6 +123,17 @@ def old_dep_features(repo, ref, rel, directory):
                 crate = (directory / dep["path"]).resolve()
                 out[crate] = out.get(crate, frozenset()) | frozenset(dep.get("features", ()))
     return out
+
+
+def reverse_deps(packages):
+    """Each package directory's dependents, by the declared path dependencies, optional and
+    target-specific edges too (cargo's host/default resolve graph can hide affected consumers)."""
+    reverse = {}
+    for directory, pkg in packages.items():
+        for dep in pkg["dependencies"]:
+            if dep.get("path") and dep["kind"] != "dev":
+                reverse.setdefault(Path(dep["path"]).resolve(), set()).add(directory)
+    return reverse
 
 
 def closure(start, edges):
@@ -260,13 +281,8 @@ def run_units(packages, members, touched, workspace, jit, retry):
     bucket held most of the pool's boxes for 78-106 min a run, a new run queued as one ended
     (11-08). The full bucket runs every package's daily; the fast bucket type-checks every reached test
     target ([`tested`]). Sorted (name, dir) pairs."""
-    reverse = {}
-    for directory, pkg in packages.items():
-        for dep in pkg["dependencies"]:
-            if dep.get("path") and dep["kind"] != "dev":
-                reverse.setdefault(Path(dep["path"]).resolve(), set()).add(directory)
     by_name = {p["name"]: d for d, p in packages.items()}
-    reached = set(packages) if workspace else closure(touched, reverse)
+    reached = set(packages) if workspace else closure(touched, reverse_deps(packages))
     gate = {by_name[name] for name in GATE_PACKAGES if by_name.get(name) in reached}
     if workspace or jit:
         gate |= {by_name[name] for name in SMOKE + JIT_CHECKS if name in by_name}
@@ -303,6 +319,10 @@ def tests_only(root, base, cbase, runs):
         for name, directory in tested(packages, members, set(members) if every else touched, retried()):
             for args in macos_tests(packages[directory]):
                 print(f"tests {name} {directory.relative_to(root)} {' '.join(args)}")
+        affected, by_name = closure(touched, reverse_deps(packages)), {p["name"]: d for d, p in packages.items()}
+        for name in BOUNDARY_APPS:
+            if name in by_name and (by_name[name] in affected or ["boundary", name] in retried()):
+                print(f"boundary {name} {by_name[name].relative_to(root)}")
         return
     if os.environ.get("GATE_FULL") == "1":
         units = tested(packages, members, set(members), retried())
@@ -357,14 +377,7 @@ def main():
     if sandbox.exists() and not any(p["name"] == "makepad-sandbox" for p in packages.values()):
         local(root, metadata(sandbox), packages)
 
-    reverse = {}
-    for directory, pkg in packages.items():
-        # Use declared path dependencies, including optional and target-specific
-        # edges; cargo's host/default resolve graph can hide affected consumers.
-        for dep in pkg["dependencies"]:
-            if dep.get("path") and dep["kind"] != "dev":
-                reverse.setdefault(Path(dep["path"]).resolve(), set()).add(directory)
-
+    reverse = reverse_deps(packages)
     compiled, touched = owners(root, packages, files)
     affected = closure(touched, reverse)
     by_name = {p["name"]: d for d, p in packages.items()}
@@ -382,7 +395,7 @@ def main():
     # a guard unit no GUARDS entry names any more (renamed, or the guard removed) is gone too
     guard_units = [guard_unit(name, target) for name, target, _ in GUARDS]
     gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)
-            or (words[0] == "guard" and words not in guard_units)]
+            or (words[0] == "guard" and words not in guard_units) or (words[0] == "boundary" and words[1] not in BOUNDARY_APPS)]
     live = [words for words in retry if words not in gone]
     retry_presents = {words[1] for words in live if words[0] == "present"}
     retry_devhub = any(words[0] == "devhub" for words in live)
@@ -560,6 +573,10 @@ def main():
     for name in SMOKE:
         if name in PRESENT_ARGS and (name in selected or name in retry_presents):
             print(" ".join(["present", name, where(name), *PRESENT_ARGS[name]]))
+    # (a JIT change alone audits none: the jitlegs' full-b leg audits every app on it, step_boundary)
+    for name in BOUNDARY_APPS:
+        if name in by_name and (by_name[name] in affected or ["boundary", name] in live):
+            print(f"boundary {name} {where(name)}")
 
 
 if __name__ == "__main__":

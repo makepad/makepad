@@ -285,6 +285,8 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
         ev::ARM => format!("count stub armed on {} ({})", code(e.b), ARM_WHY.get(e.why as usize).unwrap_or(&"?")),
         ev::CHECK => format!("cost check on {}: decayed cost {} under the threshold", code(e.b), e.a),
         ev::QUEUE => format!("queued for O3 by {}{}{}", Q_WHY.get(e.why as usize).unwrap_or(&"?"), if e.a > 0 { format!(" at {} cost/s", e.a) } else { String::new() }, if e.b != 0 { format!(" on {}", code(e.b)) } else { String::new() }),
+        // (a profiled entry's pick reads its counts: jit.rs profiled_pick_cold)
+        ev::LEFT if e.why == 4 => format!("left the O3 queue at its pick (profiled) after {}: {} instructions a second of its own work since it was queued, under {}", ms(e.a), e.b, crate::jit::PGO_MIN_WORK),
         ev::LEFT => format!("left the O3 queue at its pick ({}) after {}: cost {} under the threshold", Q_WHY.get(e.why as usize).unwrap_or(&"?"), ms(e.a), e.b),
         ev::KEPT => "O3 queue entry stays queued (other code was installed meanwhile)".into(),
         ev::POP => format!("taken by an O3 worker ({}) after {} in the queue", Q_WHY.get(e.why as usize).unwrap_or(&"?"), ms(e.a)),
@@ -381,6 +383,70 @@ fn cmd_uncounted(req: &super::Req, out: &mut super::Out) {
 }
 
 
+/// `why-tier parked`: the slots PGO parked in their counted code (a window of less than
+/// PGO_MIN_WORK instructions a second of their own work: no O3 build while that holds), ranked by
+/// the work of their last window, with the running share of all of it, their code now and whether
+/// an O2 body was built (the code a parked slot gave up for its counted code).
+fn cmd_parked(req: &super::Req, out: &mut super::Out) {
+    let n = req.num("n", 20) as usize;
+    let up = crate::jit::current_unit();
+    if up.is_null() {
+        return out.err("no running unit");
+    }
+    let mut v = crate::jit::tier_parked(crate::jit::wall_ns());
+    v.sort_by_key(|p| (std::cmp::Reverse(p.1), p.0));
+    let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
+        let u = unsafe { &*up };
+        let v: Vec<_> = v.into_iter().filter(|p| (p.0 as usize) < u.fns.len()).collect();
+        let o2 = |id: u32| super::codever::bodies(u, id).iter().map(|b| b.start).collect::<Vec<u64>>().into_iter().any(|s| super::codever::kind_at(u, s).tier == crate::jit::tier::O2);
+        let with_o2: Vec<bool> = v.iter().map(|p| o2(p.0)).collect();
+        let total: u128 = v.iter().map(|p| p.1 as u128).sum();
+        let share = |k: usize| if total == 0 { 0.0 } else { v.iter().take(k).map(|p| p.1 as u128).sum::<u128>() as f64 * 100.0 / total as f64 };
+        let mut rows = vec![format!(
+            "{} slots are parked in their counted code (a window of less than {} instructions a second of their own work: no O3 build while that holds); their last windows: {:.1}M instructions a second, the top 100 {:.1}% of it, the top 1000 {:.1}%; {} have an O2 body",
+            v.len(),
+            crate::jit::PGO_MIN_WORK,
+            total as f64 / 1e6,
+            share(100),
+            share(1000),
+            with_o2.iter().filter(|&&b| b).count()
+        )];
+        if !v.is_empty() {
+            rows.push("| slot | fn | insts/s last window | insts/s this window | this window s | cum % | code | O2 body |".into());
+            rows.push("|---|---|---:|---:|---:|---:|---|---|".into());
+            let mut cum = 0u128;
+            for (k, &(id, last, so_far, win)) in v.iter().take(n).enumerate() {
+                cum += last as u128;
+                let f = &u.fns[id as usize];
+                rows.push(format!(
+                    "| S{} | `{}` | {} | {} | {:.1} | {:.1} | {} | {} |",
+                    id,
+                    super::short(&super::display_name(u, id, 0), 80),
+                    last,
+                    so_far,
+                    win as f64 / 1e9,
+                    if total == 0 { 0.0 } else { cum as f64 * 100.0 / total as f64 },
+                    super::codever::label(super::codever::kind_at(u, f.code)),
+                    if with_o2[k] { "yes" } else { "no" }
+                ));
+            }
+            if v.len() > n {
+                rows.push(format!("+{} more (n=)", v.len() - n));
+            }
+        }
+        rows
+    });
+    match r {
+        Some(rows) => {
+            for l in rows {
+                out.line(&l);
+            }
+            out.line("more: why-tier @<slot>  tier @<slot> o3");
+        }
+        None => out.err("the owner did not answer in 10 s"),
+    }
+}
+
 /// ms of the run, for tables.
 pub fn at_s(t_ns: u64) -> String {
     format!("{:.2}", t_ns as f64 / 1e9)
@@ -390,10 +456,13 @@ pub fn at_s(t_ns: u64) -> String {
 /// tier-up state now and its decision history (counts by kind, the last events).
 pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
     let Some(q) = req.pos.first().cloned() else {
-        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier stuck [n=20] | why-tier uncounted [n=20]");
+        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier stuck [n=20] | why-tier uncounted [n=20] | why-tier parked [n=20]");
     };
     if q == "uncounted" {
         return cmd_uncounted(req, out);
+    }
+    if q == "parked" {
+        return cmd_parked(req, out);
     }
     if q == "stuck" {
         return cmd_stuck(req, out);

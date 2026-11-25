@@ -20,7 +20,7 @@ KNOWN="asm::tests_arm64::oracle_mem"
 T=${CARGO_TARGET_DIR:-$PWD/target}
 log=$(mktemp -d "${TMPDIR:-/tmp}/arm64leg.XXXXXX") || exit 2
 echo "toolchain: $(rustc -V)"
-cargo test --release -j 8 -p relax-codegen -p relax-backend --no-fail-fast > "$log/test" 2>&1
+cargo test --release -j${CARGO_BUILD_JOBS:-8} -p relax-codegen -p relax-backend --no-fail-fast > "$log/test" 2>&1
 rc=$?
 bad=$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log/test" | sort -u)
 for k in $KNOWN; do bad=$(printf '%s\n' "$bad" | grep -vx "$k"); done
@@ -36,11 +36,19 @@ fail=""
 [ "$ran" = 0 ] && [ -z "$fail" ] && fail="$fail no-test-binaries-ran"
 [ "$rc" != 0 ] && [ -z "$fail" ] && [ -z "$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log/test")" ] && fail="$fail cargo-rc-$rc"
 grep -E '^test .* FAILED$' "$log/test" | head -20
+# the JIT binary's identity around its build (diff_fast says it at its own phases): an arm64 leg's
+# package runs could not start it (ENOENT, 11-22), and nothing said what had replaced it
+binid() {
+  stat -c 'inode %i links %h size %s mtime %Y ctime %Z' "$1" 2>/dev/null || stat -f 'inode %i links %l size %z mtime %m ctime %c' "$1" 2>/dev/null || echo missing
+}
 if [ "${1:-}" = --diff-fast ]; then
-  if cargo build --profile host -j 8 -p makepad-run --bin makepad --bin makepad-launcher > "$log/build" 2>&1; then
+  echo "BIN before the build: at $(date -u +%s) $(binid "$T/host/makepad")"
+  if cargo build --profile host -j${CARGO_BUILD_JOBS:-8} -p makepad-run --bin makepad --bin makepad-launcher > "$log/build" 2>&1; then
+    echo "BIN after the build: at $(date -u +%s) $(binid "$T/host/makepad")"
     DIFF_PKG_TARGET=$T DIFF_CACHE=${ARM64_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} DIFF_TIERS="o1 base o3 counted" \
       tools/run/fixture/diff_fast.sh > "$log/diff" 2>&1
-    tail -20 "$log/diff"
+    grep -a '^diff bin \|^diff enoent' "$log/diff" | cut -c1-240 | head -120
+    grep -av '^diff bin \|^diff enoent' "$log/diff" | tail -20
     d=$(grep '^diff: ' "$log/diff" | tail -1)
     echo "DIFF: $d |$(grep '^diff tiers:' "$log/diff" | tail -1 | sed 's/^diff tiers://')"
     echo "$d" | grep -qE '^diff: ([0-9]+)/\1 equal' || fail="$fail diff_fast"

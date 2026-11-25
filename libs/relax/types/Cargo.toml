@@ -14,6 +14,7 @@ include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 windows = { "lib" = "6 of 838 fail there: pattern_analysis" }
 
 [dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }
 relax-codegen = { workspace = true }
 relax-backend = { workspace = true }
 relax-front = { workspace = true }

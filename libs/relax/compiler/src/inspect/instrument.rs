@@ -1151,7 +1151,7 @@ pub fn pause_program() -> usize {
     n
 }
 
-/// A layout-changing patch's pause (reload.rs step 6, invalid.rs `hold_old_frames`): the program
+/// A layout-changing patch's pause (reload.rs step 6, invalid.rs `report_old_frames`): the program
 /// threads are held while the patch installs and their stacks are read. True: this call paused
 /// them (`resume_program` ends it); false: they were paused already (by `pause` or a stale
 /// access), and stay so.
@@ -1174,9 +1174,9 @@ static PATCH_PAUSE: AtomicBool = AtomicBool::new(false);
 /// Such a thread runs on and is held once it has left the front end (the pause's sweep). A
 /// patch's pause holds every thread, as it reads their stacks before its install. Async-signal-
 /// safe (the Linux hold handler asks): two atomic loads. Where a pause holds threads: the Apple
-/// pause, the Linux and Android aarch64 hold handler (inspect/threads.rs); elsewhere a pause
-/// holds no thread.
-#[cfg(any(target_vendor = "apple", target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
+/// and Windows x64 pause, the Linux and Android aarch64 hold handler (inspect/threads.rs);
+/// elsewhere a pause holds no thread.
+#[cfg(any(target_vendor = "apple", all(windows, target_arch = "x86_64"), target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
 pub(crate) fn pause_lets_front_readers_go() -> bool {
     PAUSED.load(Relaxed) && !PATCH_PAUSE.load(Relaxed)
 }
@@ -1193,22 +1193,6 @@ pub(crate) fn quit_resumes() {
         eprintln!("relax: a quit: the paused program goes on so that it can quit");
         resume_program();
     }
-}
-
-/// Thread `t` (a program thread) stays held for good, past any `resume`, until the run's end
-/// (`release_held_for_good`): it has a frame in code that never runs again (stale.rs `park_held`).
-/// A thread the pause did not hold (blocked in a system call) is held now. False: it could not be
-/// held (it ended, or this platform cannot).
-pub fn hold_for_good(t: &super::threads::Thread) -> bool {
-    pause_imp::keep(t)
-}
-
-/// A run's end, once its code is gone (domain::end_run): the threads held for good go on. Their
-/// frames in code that never runs again are as gone as every other frame of the run's code, so they
-/// leave as every thread of the run does (kicked out of a wait, ended at their next instruction of
-/// that code), and the run's memory goes with them. Returns how many went on.
-pub(crate) fn release_held_for_good() -> usize {
-    pause_imp::release_kept()
 }
 
 /// A run's end began: the program's threads go on so they can be ended, and a parked hit stops
@@ -1374,28 +1358,28 @@ fn host_ui_thread(t: &super::threads::Thread) -> bool {
 /// the host's own main loop, not the program's code, and held it is a window that stops drawing and
 /// taking input: macOS suspended it (AppKit's main thread) for a stale access's report, and the
 /// app's window froze with its decision nowhere on screen (11-08); Linux held it only when a sweep
-/// found it running or in a futex. A stack read (`frame_in`, `hold_old_frames`) still reads it.
+/// found it running or in a futex. A stack read (`frame_in`, `report_old_frames`) still reads it.
 fn pause_holds(t: &super::threads::Thread) -> bool {
     program_thread(t) && !host_ui_thread(t)
 }
 
-/// Whether the pause holds thread `os_id` now (held for good included): `makepad inspect threads`.
+/// Whether the pause holds thread `os_id` now: `makepad inspect threads`.
 pub(crate) fn held_now(os_id: u64) -> bool {
     pause_imp::holds(os_id)
 }
 
-#[cfg(target_vendor = "apple")]
+/// The pause by suspension (macOS: Mach; Windows x64: SuspendThread), in a window in which the
+/// allocator's locks are this thread's (`lock_allocator`).
+#[cfg(any(target_vendor = "apple", all(windows, target_arch = "x86_64")))]
 mod pause_imp {
     static HELD: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
-    /// The threads held for good (`keep`): suspended until the run's end lets them go (`release_kept`).
-    static KEPT: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
 
     /// What this module holds of a run, as a fresh process has it (`run_end`).
     pub(crate) unsafe fn reset_statics() {
         relax_session::reset_static(&HELD, relax_session::sync::Mutex::new(Vec::new()));
-        relax_session::reset_static(&KEPT, relax_session::sync::Mutex::new(Vec::new()));
         relax_session::reset_static(&DECLINED, relax_session::sync::Mutex::new(Vec::new()));
     }
+    #[cfg(target_vendor = "apple")]
     extern "C" {
         static mach_task_self_: u32;
         fn malloc_get_all_zones(task: u32, reader: *const u8, out: *mut *const usize, count: *mut u32) -> i32;
@@ -1404,7 +1388,8 @@ mod pause_imp {
     /// Every malloc zone's lock taken (zone->introspect->force_lock, as fork() does) while the
     /// threads are suspended: no thread stops holding an allocator lock, so inspect's commands
     /// (which allocate) keep working while the program is paused. Nothing may allocate between
-    /// `lock_zones` and `unlock_zones` (this thread would wait for itself).
+    /// `lock_allocator` and `unlock_allocator` (this thread would wait for itself).
+    #[cfg(target_vendor = "apple")]
     unsafe fn zones() -> &'static [usize] {
         let mut addrs: *const usize = std::ptr::null();
         let mut n = 0u32;
@@ -1415,6 +1400,7 @@ mod pause_imp {
     }
     /// malloc_zone_t: introspect is its 13th word; malloc_introspection_t: force_lock, force_unlock
     /// are its 6th and 7th
+    #[cfg(target_vendor = "apple")]
     unsafe fn zone_fn(zone: usize, k: usize) -> Option<unsafe extern "C" fn(usize)> {
         let intro = *((zone as *const usize).add(12));
         if intro == 0 {
@@ -1465,17 +1451,17 @@ mod pause_imp {
     }
     /// The threads the pause let go inside the compiler's front end (pause), until it holds them.
     static DECLINED: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
-    /// The pthread handles of the threads with a front read now (jit::front_holders: a thread
-    /// stopped between taking its read and listing it, a few instructions, is not seen).
+    /// The pthread handles of the threads with a front read now (jit::front_holders: listed from
+    /// before a thread takes its read until after it gave it back).
     fn front_readers() -> Vec<u64> {
-        crate::jit::front_holders::snapshot().iter().map(|r| r.0).collect()
+        crate::jit::front_holders::threads()
     }
     /// The pause's windows (the zones locked, the threads suspended): the picked threads of `list`
     /// (all moved out) suspended into `held`, the others into `rest`. No allocation or free in
     /// there: `held` and `rest` have room, the threads move out of `list` by drain (its buffer is
     /// freed after the unlock, as a thread's name is when it drops).
     unsafe fn hold_picked(list: &mut Vec<crate::inspect::threads::Thread>, picked: &[bool], held: &mut Vec<crate::inspect::threads::Thread>, rest: &mut Vec<crate::inspect::threads::Thread>) {
-        lock_zones();
+        lock_allocator();
         for (k, t) in list.drain(..).enumerate() {
             if picked[k] && crate::inspect::threads::suspend(&t) {
                 held.push(t);
@@ -1483,55 +1469,82 @@ mod pause_imp {
                 rest.push(t);
             }
         }
-        unlock_zones();
+        unlock_allocator();
     }
     /// `declined`'s threads suspended, whether each was into `stopped` (it has room).
     unsafe fn hold_declined(declined: &[crate::inspect::threads::Thread], stopped: &mut Vec<bool>) {
-        lock_zones();
+        lock_allocator();
         for t in declined {
             stopped.push(crate::inspect::threads::suspend(t));
         }
-        unlock_zones();
-    }
-    /// Thread `t` suspended, as the pause suspends one (`keep`, of a thread it did not hold).
-    unsafe fn hold_one(t: &crate::inspect::threads::Thread) -> bool {
-        lock_zones();
-        let ok = crate::inspect::threads::suspend(t);
-        unlock_zones();
-        ok
+        unlock_allocator();
     }
     /// Under a JIT (this runtime run by another Relax, as its own tests are under `--live`) the
-    /// windows' code is built before a zone is locked: a lazy compile in there asks that JIT's
-    /// compiler, whose allocations wait for the zone locks this thread holds, and the process
-    /// hangs (macOS hangs of the reload tests under the JIT, 11-17). The JIT builds them with all
+    /// windows' code is built before an allocator lock is taken: a lazy compile in there asks that
+    /// JIT's compiler, whose allocations wait for the locks this thread holds (on Windows, those of
+    /// its other threads), and the process hangs (macOS hangs of the reload tests under the JIT,
+    /// 11-17). The JIT builds them with all
     /// they reach through `__relax_precompile`, as Relax std's fork_exec asks before its fork
     /// (which locks the zones too). Each pause asks: an edit of this code sends it back to its lazy
     /// stubs, and an ask with nothing left to build is one walk. Native: no such symbol.
     fn build_windows() {
+        let at = precompile_symbol();
+        if at != 0 {
+            let precompile = unsafe { std::mem::transmute::<usize, unsafe extern "C" fn(*const usize, usize, bool) -> u64>(at) };
+            let roots = [hold_picked as *const () as usize, hold_declined as *const () as usize];
+            unsafe { precompile(roots.as_ptr(), roots.len(), false) };
+        }
+    }
+    /// The JIT's `__relax_precompile` (its loader's symbol, found through dlsym); 0 natively.
+    #[cfg(target_vendor = "apple")]
+    fn precompile_symbol() -> usize {
         extern "C" {
             fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
         }
         const RTLD_DEFAULT: *mut u8 = -2isize as *mut u8;
-        let at = unsafe { dlsym(RTLD_DEFAULT, b"__relax_precompile\0".as_ptr()) } as usize;
-        if at != 0 {
-            let precompile = unsafe { std::mem::transmute::<usize, unsafe extern "C" fn(*const usize, usize, bool) -> u64>(at) };
-            let roots = [hold_picked as *const () as usize, hold_declined as *const () as usize, hold_one as *const () as usize];
-            unsafe { precompile(roots.as_ptr(), roots.len(), false) };
+        unsafe { dlsym(RTLD_DEFAULT, b"__relax_precompile\0".as_ptr()) as usize }
+    }
+    /// The JIT's `__relax_precompile` (its loader answers GetProcAddress for it, whatever the
+    /// module); 0 natively.
+    #[cfg(windows)]
+    fn precompile_symbol() -> usize {
+        use relax_session::win32::{GetModuleHandleExW, GetProcAddress};
+        // (GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: the executable's handle, nothing taken)
+        let mut exe = 0;
+        unsafe {
+            GetModuleHandleExW(2, std::ptr::null(), &mut exe);
+            GetProcAddress(exe, b"__relax_precompile\0".as_ptr()) as usize
         }
     }
-    unsafe fn lock_zones() {
+    #[cfg(target_vendor = "apple")]
+    unsafe fn lock_allocator() {
         for &z in zones() {
             if let Some(f) = zone_fn(z, 5) {
                 f(z);
             }
         }
     }
-    unsafe fn unlock_zones() {
+    #[cfg(target_vendor = "apple")]
+    unsafe fn unlock_allocator() {
         for &z in zones().iter().rev() {
             if let Some(f) = zone_fn(z, 6) {
                 f(z);
             }
         }
+    }
+    /// The process heap's lock taken (HeapLock) while the threads are suspended: the heap the
+    /// system allocator, the C runtime and the system's own calls allocate from, so no thread
+    /// stops holding it and inspect's commands keep working while the program is paused. (Only
+    /// that heap: a private heap made without serialization has no lock to take, HeapLock on it
+    /// is undefined, and inspect allocates from none.) A thread waiting for the lock stops there:
+    /// `threads::suspend` returns once its thread has stopped, so none takes it after the unlock.
+    #[cfg(windows)]
+    unsafe fn lock_allocator() {
+        relax_session::win32::HeapLock(relax_session::win32::GetProcessHeap());
+    }
+    #[cfg(windows)]
+    unsafe fn unlock_allocator() {
+        relax_session::win32::HeapUnlock(relax_session::win32::GetProcessHeap());
     }
     /// One sweep of the threads the pause let go: each is stopped, and held when it has left the
     /// front end (let go again when not). False: none is left to hold, or the pause ended.
@@ -1572,35 +1585,8 @@ mod pause_imp {
         DECLINED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         n
     }
-    /// Out of the pause's set: no resume reaches it (its Mach suspension stays until the run's end,
-    /// `release_kept`); suspended now when the pause did not hold it.
-    pub fn keep(t: &crate::inspect::threads::Thread) -> bool {
-        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-        let kept = match held.iter().position(|h| h.os_id == t.os_id) {
-            Some(k) => Some(held.remove(k)),
-            None => {
-                drop(held);
-                let found = crate::inspect::threads::list().into_iter().find(|x| x.os_id == t.os_id);
-                build_windows();
-                found.filter(|x| unsafe { hold_one(x) })
-            }
-        };
-        let ok = kept.is_some();
-        if let Some(x) = kept {
-            crate::zone_alloc::kept_with(|| KEPT.lock().unwrap_or_else(|e| e.into_inner()).push(x));
-        }
-        ok
-    }
     pub fn holds(os_id: u64) -> bool {
-        HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().chain(KEPT.lock().unwrap_or_else(|e| e.into_inner()).iter()).any(|t| t.os_id == os_id)
-    }
-    pub fn release_kept() -> usize {
-        let kept = std::mem::take(&mut *KEPT.lock().unwrap_or_else(|e| e.into_inner()));
-        let n = kept.len();
-        for t in kept {
-            crate::inspect::threads::resume(&t);
-        }
-        n
+        HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|t| t.os_id == os_id)
     }
 }
 
@@ -1665,26 +1651,12 @@ mod pause_imp {
         }
         n
     }
-    /// Out of the pause's set, held for good (signalled now when the pause did not hold it).
-    pub fn keep(t: &crate::inspect::threads::Thread) -> bool {
-        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(k) = held.iter().position(|h| h.0 == t.os_id) {
-            let (_, s) = held.remove(k);
-            crate::inspect::threads::keep_held(s);
-            return true;
-        }
-        drop(held);
-        crate::inspect::threads::hold_for_good(t.os_id).is_ok()
-    }
     pub fn holds(os_id: u64) -> bool {
         crate::inspect::threads::is_held(os_id)
     }
-    pub fn release_kept() -> usize {
-        crate::inspect::threads::release_held_for_good()
-    }
 }
 
-#[cfg(any(windows, target_os = "android"))]
+#[cfg(any(all(windows, not(target_arch = "x86_64")), target_os = "android"))]
 mod pause_imp {
     pub fn pause(_want: &'static (dyn Fn(&crate::inspect::threads::Thread) -> bool + Sync)) -> usize {
         0
@@ -1692,14 +1664,8 @@ mod pause_imp {
     pub fn resume() -> usize {
         0
     }
-    pub fn keep(_t: &crate::inspect::threads::Thread) -> bool {
-        false
-    }
     pub fn holds(_os_id: u64) -> bool {
         false
-    }
-    pub fn release_kept() -> usize {
-        0
     }
 
     pub(crate) unsafe fn reset_statics() {}
@@ -1865,7 +1831,7 @@ mod name_tests {
     }
 }
 
-#[cfg(all(test, any(target_vendor = "apple", all(target_os = "linux", target_arch = "x86_64"))))]
+#[cfg(all(test, any(target_vendor = "apple", all(any(target_os = "linux", windows), target_arch = "x86_64"))))]
 mod pause_tests {
     use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 
@@ -1873,52 +1839,104 @@ mod pause_tests {
     /// runs on while it reads, is held once it has left, and a front writer gets in while the
     /// program stays paused. (Held while it read, the main thread kept the front end for as long
     /// as a stale access stayed parked: the module fixtures' `inspect eval` failed after 30 s,
-    /// "the compiler's front end stayed busy (read by makepad at typeck_ahead)", 11-12.) The first
-    /// pause of its process: a hang ends at the deadline (the next test's).
+    /// "the compiler's front end stayed busy (read by makepad at typeck_ahead)", 11-12.) The
+    /// reader stands still between the two steps of taking its read and of giving it back
+    /// (jit::FRONT_READ_BETWEEN), where it still counted as no reader while the lock was its own:
+    /// held there, it kept every front writer out (a test run under the JIT, once, 11-24). The
+    /// first pause of its process: a hang ends at the deadline (the next test's).
     #[test]
     fn a_pause_holds_no_thread_inside_the_compilers_front_end() {
         if !crate::test_child::run_alone_within(module_path!(), "a_pause_holds_no_thread_inside_the_compilers_front_end", 120) {
             return;
         }
-        static STEP: AtomicU32 = AtomicU32::new(0);
+        use crate::jit::FRONT_RW;
+        // where the reader stands: 1 between taking its read's two steps, 2 holding the read, 3
+        // between giving it back's two steps, 4 out of the front end (its last stand: held there
+        // or on its way, it is seen held, not at 4)
+        static AT: AtomicU32 = AtomicU32::new(0);
+        // how far it may go: past position p once GO is p or more
+        static GO: AtomicU32 = AtomicU32::new(0);
+        fn stand(at: u32) {
+            AT.store(at, SeqCst);
+            while GO.load(SeqCst) < at {
+                std::hint::spin_loop();
+            }
+        }
+        fn between(step: u32) {
+            stand(if step == 1 { 1 } else { 3 });
+        }
+        fn reached(at: u32) {
+            while AT.load(SeqCst) != at {
+                std::thread::yield_now();
+            }
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let reader = std::thread::Builder::new().name("pause-reader".into()).spawn(move || {
+            // a read taken and given back once first: under a JIT its code is built before the
+            // pause (a lazy compile while the pause holds the program's threads can wait for
+            // what one of them holds in the JIT running these tests, which this pause knows
+            // nothing of)
+            drop(crate::jit::front_read("pause test"));
+            crate::jit::FRONT_READ_BETWEEN.with(|h| h.set(Some(between)));
             tx.send(crate::inspect::threads::self_os_id()).unwrap();
             let read = crate::jit::front_read("pause test");
-            STEP.store(1, SeqCst);
-            while STEP.load(SeqCst) < 2 { std::hint::spin_loop(); }
+            stand(2);
             drop(read);
-            while STEP.load(SeqCst) < 3 { std::hint::spin_loop(); }
+            stand(4);
         }).unwrap();
         let os_id = rx.recv().unwrap();
-        while STEP.load(SeqCst) < 1 { std::thread::yield_now(); }
+        reached(1);
         // The pause is asked for, and its effect read, from a thread of the runtime's inspector
         // (as `inspect pause` and a stale access's report are): the pause holds every program
         // thread, this test's own among them (on Linux, held asleep, it waited out the hold's 10
-        // minutes).
+        // minutes). A reader held where it should run on cannot go on: the steps end there.
         let inspector = std::thread::Builder::new().name("run-inspect-t".into()).spawn(move || {
+            let mut seen: Vec<(&'static str, bool)> = Vec::new();
             super::pause_program();
-            // (several of the pause's sweeps, 5 ms apart)
-            std::thread::sleep(std::time::Duration::from_millis(40));
-            let reading_held = super::held_now(os_id);
-            let writer_while_read = crate::jit::FRONT_RW.try_write().is_ok();
-            STEP.store(2, SeqCst);
-            let t0 = std::time::Instant::now();
-            while !super::held_now(os_id) && t0.elapsed().as_secs() < 5 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+            'steps: {
+                let held = super::held_now(os_id);
+                seen.push(("a thread about to take its front read is not held by the pause", !held));
+                seen.push(("a front writer gets in before the reader has taken its lock", FRONT_RW.try_write().is_ok()));
+                if held {
+                    break 'steps;
+                }
+                GO.store(1, SeqCst);
+                reached(2);
+                let held = super::held_now(os_id);
+                seen.push(("a thread holding a front read is not held by the pause", !held));
+                seen.push(("(the reader still read: no writer got in)", FRONT_RW.try_write().is_err()));
+                if held {
+                    break 'steps;
+                }
+                GO.store(2, SeqCst);
+                reached(3);
+                let held = super::held_now(os_id);
+                seen.push(("a thread giving its front read back is not held by the pause before it has left", !held));
+                seen.push(("a front writer gets in once the reader has given its lock back", FRONT_RW.try_write().is_ok()));
+                if held {
+                    break 'steps;
+                }
+                GO.store(3, SeqCst);
+                // Once it has left, the pause's sweep (every 5 ms) holds it, wherever it is then:
+                // at 4, or on its way there (a JIT's lazy compile on that way is a wait the sweep
+                // holds it in), so this waits for the hold, not for 4.
+                let t0 = std::time::Instant::now();
+                while !super::held_now(os_id) && t0.elapsed().as_secs() < 5 {
+                    std::thread::yield_now();
+                }
+                seen.push(("the thread is held once it has left the front end", super::held_now(os_id)));
+                seen.push(("a front writer gets in while the program stays paused", FRONT_RW.try_write().is_ok()));
             }
-            let held_after = super::held_now(os_id);
-            let writer_while_paused = crate::jit::FRONT_RW.try_write().is_ok();
             super::resume_program();
-            STEP.store(3, SeqCst);
-            (reading_held, writer_while_read, held_after, writer_while_paused)
+            GO.store(4, SeqCst);
+            seen
         }).unwrap();
-        let (reading_held, writer_while_read, held_after, writer_while_paused) = inspector.join().unwrap();
+        let seen = inspector.join().unwrap();
         reader.join().unwrap();
-        assert!(!reading_held, "a thread holding a front read is not held by the pause");
-        assert!(!writer_while_read, "(the reader still read: no writer got in)");
-        assert!(held_after, "the thread is held once it has left the front end");
-        assert!(writer_while_paused, "a front writer gets in while the program stays paused");
+        for (what, ok) in &seen {
+            assert!(ok, "{what}");
+        }
+        assert_eq!(seen.len(), 8, "every step of the reader was seen: {seen:?}");
     }
 
     /// A patch's pause is the first a fresh process takes, a program thread running: it holds the

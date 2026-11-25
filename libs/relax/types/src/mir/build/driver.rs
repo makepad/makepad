@@ -51,7 +51,7 @@ pub struct BuildProvider<'a> {
 }
 impl crate::mir::transform::qualifs::ConstQualifsProvider for BuildProvider<'_> {
     fn mir_const_qualif(&self, def: crate::program::DefId) -> Result<crate::mir::transform::qualifs::ConstQualifs, crate::mir::transform::qualifs::Blocked> {
-        use crate::mir::transform::qualifs::Blocked;
+        use crate::mir::transform::qualifs::{in_any_value_of_ty_in_env, Blocked, ConstQualifs};
         if let Some(r) = self.memo.borrow().get(&def) {
             return r.clone();
         }
@@ -84,14 +84,26 @@ impl crate::mir::transform::qualifs::ConstQualifsProvider for BuildProvider<'_> 
                 }
                 Err(_) => return Err(Blocked("typeck panicked")),
             };
-            if !typeck_body.errors.is_empty() {
-                return Err(Blocked("typeck errors"));
-            }
             let env = TypingEnv {
                 limit: RecursionLimit::for_item(self.prog, typeck_body.def),
                 param_env: typeck_body.param_env.unwrap_or_default(),
                 mode: TypingMode::borrowck(self.tcx, self.prog, typeck_body.def),
             };
+            if !typeck_body.errors.is_empty() {
+                // rustc's construct_error makes a divergent body. mir_const_qualif then uses the
+                // declared type's worst-case qualifs. Fixing the initializer can only allow more
+                // promotions, so a reader already checked Clean stays valid for that type.
+                let ty = match owner.kind {
+                    BodyKind::InlineConst(e) => typeck_body.inline_const_types.get(&e.0).copied(),
+                    _ => self.tcx.const_ty(self.prog, def),
+                }.ok_or(Blocked("typeck errors"))?;
+                if self.tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_ERROR) {
+                    return Ok(ConstQualifs { tainted_by_errors: true, ..Default::default() });
+                }
+                let features = self.prog.crates[self.prog.def(def).krate as usize].features(self.prog);
+                let const_drops = features.has("const_destruct") || features.has("const_precise_live_drops");
+                return Ok(in_any_value_of_ty_in_env(self.prog, self.tcx, env, ty, const_drops, true));
+            }
             let state = EvalState::new();
             let eval = EvalCx::new(self.prog, self.tcx, env, &state);
             let root = BuildRoot::new(BuildCx { prog: self.prog, tcx: self.tcx, env, eval: &eval }, &typeck_body).map_err(|_| Blocked("no scope tree"))?;

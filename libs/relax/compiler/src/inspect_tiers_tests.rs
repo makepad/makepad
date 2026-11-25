@@ -377,12 +377,18 @@ fn a_split_keeps_a_branch_whose_body_ends_in_an_empty_guarded_copy() {
     assert!(unsafe { compile_tier1(up, ids[3]) }, "O3 build of lane_read");
     assert!(unsafe { compile_tier1(up, caller) }, "O3 build of caller");
     crate::owner::call(crate::owner::Class::Program, || {
-        let mut pat = false;
-        u.fns[caller as usize].pc_map.each(|o, p| {
-            pat |= o != u32::MAX && relax_backend::rir::pos_patched(p);
+        let f = &u.fns[caller as usize];
+        let mut pat = None;
+        f.pc_map.each(|o, p| {
+            if o < f.code_len && relax_backend::rir::pos_patched(p) {
+                pat = Some(f.code + u64::from(o));
+                return false;
+            }
             true
         });
-        assert!(pat, "caller's O3 code has a patched path: {}", u.fns[caller as usize].rir.as_ref().map(|r| r.dump()).unwrap_or_default());
+        let pc = pat.unwrap_or_else(|| panic!("caller's O3 code has a patched path: {}", f.rir.as_ref().map(|r| r.dump()).unwrap_or_default()));
+        assert!(codever::describe_pc(&u, &mut codever::Resolver::new(), pc).unwrap().patched);
+        assert!(codever::in_patched_path(&u, caller, f.code, pc));
     });
     assert_eq!(unsafe { run(up, caller) }, 1980309814, "the split O3 build's fast half keeps the branch and both stores");
     unsafe { UNIT = std::ptr::null_mut() };
@@ -392,11 +398,8 @@ fn a_split_keeps_a_branch_whose_body_ends_in_an_empty_guarded_copy() {
 #[test]
 fn a_frame_in_a_patched_path_is_named() {
     isolated_test!(a_frame_in_a_patched_path_is_named);
-    // A live session's O3 build of `caller` splits (relax_codegen::patched): its loop runs leaf's
-    // copy unguarded behind an exit, the patched path keeps the guard. A pc in the patched path is
-    // named so (its pc-map positions carry POS_PATCHED), a fast one is not; a patch flag of leaf
-    // moves caller's copy version, and the loop then leaves for its patched path and computes the
-    // same.
+    // Both machine functions belong to one install. An old frame keeps that install's
+    // source and inline context when the slot moves to another patch generation.
     crate::borrowck::lazy::disable_gandalf();
     if std::env::var_os("RELAX_STD").is_none() {
         std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
@@ -407,12 +410,15 @@ fn a_frame_in_a_patched_path_is_named() {
     std::fs::write(&path, SOURCE).unwrap();
     let mut session = crate::Session::default();
     session.options.live = true;
+    session.options.opt = vec!["+outline".into()];
+    std::env::remove_var("RELAX_OUTLINE_WHOLE");
     let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "patched_path", false).unwrap();
     let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = DefId(i as u32);
         (d.krate == krate && prog.name(id) == n).then_some(id)
     }).unwrap();
     let (leaf_d, caller_d) = (def(&prog, "leaf"), def(&prog, "caller"));
+    let file = prog.def(leaf_d).file;
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
@@ -428,31 +434,450 @@ fn a_frame_in_a_patched_path_is_named() {
         }
         (ids[0], ids[1])
     });
+    // A slot compiled from an edited file tiers into that generation's code group.
+    crate::owner::call(crate::owner::Class::Program, || {
+        u.file_gen.insert(file, 1);
+        assert!(crate::invalid::group_of(&u, caller, 0, &[]).is_some());
+    });
     assert!(unsafe { compile_tier1(up, caller) }, "O3 build of caller");
     let ver = |u: &Unit| unsafe { (*tier_rec(&u.slots, caller).add((TIER_COPY / 8) as usize)).load(Ordering::Acquire) };
-    crate::owner::call(crate::owner::Class::Program, || {
-        let code = u.fns[caller as usize].code;
-        let (mut fast, mut pat) = (None, None);
+    let code = u.fns[caller as usize].code;
+    let part = joined_install(&u, caller, 2, origin::FRESH);
+    let (pc, location) = crate::owner::call(crate::owner::Class::Program, || {
+        let mut pc = None;
+        let lines = codever::target_lines(&u, &[(leaf, None)]);
         u.fns[caller as usize].pc_map.each(|o, p| {
-            if o != u32::MAX {
-                if relax_backend::rir::pos_patched(p) { pat.get_or_insert(o); } else { fast.get_or_insert(o); }
+            let at = code + u64::from(o);
+            if (part..code + u64::from(u.fns[caller as usize].code_len)).contains(&at)
+                && relax_backend::rir::pos_ctx(p) != 0 && lines.iter().any(|l| l.holds(&u, p)) {
+                pc = Some((at, u.pos_str(relax_backend::rir::pos_file(p), p as u32)));
+                return false;
             }
             true
         });
-        let pat = pat.unwrap_or_else(|| panic!("caller's O3 code has a patched path: {}", u.fns[caller as usize].rir.as_ref().map(|r| r.dump()).unwrap_or_default()));
+        pc.expect("an inlined instruction of leaf in P")
+    });
+    let check = |u: &Unit, state: &str| {
         let mut r = codever::Resolver::new();
-        let d = codever::describe_pc(&u, &mut r, code + pat as u64).unwrap();
-        let (_, _, module, json) = codever::frame_fields(&u, &d);
-        assert!(d.patched && module.contains("patched path of") && json.contains("\"patched_path\""), "a pc in the patched path is named so: {} {}", module, json);
-        assert!(codever::in_patched_path(&u, caller, code, code + pat as u64), "the held-frame report sees it too");
-        let d = codever::describe_pc(&u, &mut r, code + fast.unwrap() as u64).unwrap();
-        assert!(!d.patched && !codever::frame_fields(&u, &d).2.contains("patched path"), "a fast pc is not");
+        let d = codever::describe_pc(u, &mut r, pc).unwrap();
+        assert_eq!((d.slot, d.start, d.state), (caller, code, state));
+        let (name, at, module, json) = codever::frame_fields(u, &d);
+        assert_eq!(name, "patched_path::leaf");
+        assert_eq!(at, location, "the saved instruction's file, line and column");
+        assert!(module.contains("patched path of patched_path::caller") && module.contains("inlined at"), "{module}");
+        assert!(json.contains("\"patched_path\"") && json.contains("\"inlined_into\":\"patched_path::caller\"")
+            && json.contains("\"inline_stack\":[{\"fn\":\"patched_path::leaf\""), "{json}");
+        assert!(d.patched && codever::in_patched_path(u, caller, code, pc));
+        assert!(codever::describe_pc(u, &mut r, part).unwrap().patched, "P's entry before its first source line");
+        assert!(codever::in_patched_path(u, caller, code, part));
+        let fast = codever::describe_pc(u, &mut r, code).unwrap();
+        assert!(!fast.patched && !codever::frame_fields(u, &fast).2.contains("patched path"));
+        assert!(!codever::in_patched_path(u, caller, code, code + u64::from(d.len)), "past this install");
+    };
+    crate::owner::call(crate::owner::Class::Program, || {
+        check(&u, "installed");
         assert_eq!(ver(&u), 0);
     });
-    assert_eq!(unsafe { run(up, caller) }, 9984);
-    crate::owner::call(crate::owner::Class::Program, || set_patched(&u, leaf));
-    assert_ne!(ver(&u), 0, "a patch flag of leaf moves the copy version caller's exits read");
-    assert_eq!(unsafe { run(up, caller) }, 9984, "the patched path computes what the fast half did");
+    let run_saved = || {
+        let mut result = 0u32;
+        unsafe { call_jit(up, code, &mut result as *mut u32 as u64) }.map_err(|p| p.message).unwrap();
+        result
+    };
+    assert_eq!(run_saved(), 9984);
+    let change = unsafe { crate::reload::apply(up, vec![crate::reload::Edit {
+        file, path: path.to_string_lossy().into_owned(), src: SOURCE.replace("z ^ 7", "(z ^ 7) + 1").replacen("*out = s;", "*out = s + 2;", 1).into_bytes(),
+    }]) };
+    assert_eq!(change.rung, crate::reload::Rung::Patch, "{:?}", change.lines);
+    assert_ne!(ver(&u), 0, "the changed leaf moves the copy version the saved host reads");
+    assert_eq!(run_saved(), 10084, "the original entry runs the changed leaf through P");
+    assert_eq!(unsafe { run(up, caller) }, 10086, "the replacement also adds two");
+    crate::owner::call(crate::owner::Class::Program, || {
+        check(&u, "replaced");
+        u.restore_before(caller, change.group);
+        check(&u, "installed");
+    });
     unsafe { UNIT = std::ptr::null_mut() };
     std::fs::remove_dir_all(&dir).ok();
+}
+
+fn joined_install(u: &Unit, slot: u32, version: u32, origin: u8) -> u64 {
+    let f = &u.fns[slot as usize];
+    let start = f.code;
+    let t = u.code.read().unwrap();
+    assert_eq!(t.version_of(start).map(|(v, n, _)| (v, n)), Some((version, version)), "one version per install");
+    assert_eq!(t.kind_of(start), CodeKind::new(tier::O3, origin), "O3 install origin");
+    let part = t.function_base(start, start + u64::from(f.code_len) - 1);
+    assert!(part > start, "P has its own function base");
+    assert_eq!(t.function_base(start, part - 1), start, "last byte of the host");
+    assert_eq!(t.function_base(start, part), part, "first byte of P");
+    assert_eq!(t.entry_at(part), Some((start, f.code_len, slot)), "P belongs to the host slot");
+    assert_eq!(unwind_starts(&t, start, start + u64::from(f.code_len)), [start, part], "both unwind trailers");
+    part
+}
+
+#[test]
+fn joined_body_unwind_uses_each_functions_frame() {
+    use relax_backend::rir::{part_trailer_words, split_unwind_info, unwind_info_words};
+    const LEN: u32 = 48;
+    const P_OFF: u32 = 24;
+    // The image keeps these bytes mapped for the lifetime of the code tables.
+    static BODY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let body = BODY.get_or_init(|| {
+        let mut words = vec![0; LEN as usize / 4];
+        words.extend(unwind_info_words(&[3], &[], &[(P_OFF, 16)], 48));
+        let p = unwind_info_words(&[12, 0x108], &[], &[(8, 32)], 80);
+        let footer = part_trailer_words(P_OFF, p.len());
+        words.extend(p);
+        words.extend(footer);
+        words.into_iter().flat_map(u32::to_le_bytes).collect()
+    });
+
+    let mut tables = CodeTables::default();
+    let split = split_unwind_info(body);
+    tables.add(0x2000, split.code_len as u32, 7, split.host, split.part, CodeKind::default(), false);
+    assert_eq!(tables.index.len(), 1, "one code range for both functions");
+
+    // Image order can differ from address order. The second install uses its mapped trailers.
+    tables.add_image_trailers(0x1000, LEN, &body[LEN as usize..], &PcMap::default());
+    tables.add(0x1000, LEN, 8, None, None, CodeKind::default(), false);
+    assert_eq!(tables.index.len(), 2, "one more code range for the mapped body");
+    for (start, slot) in [(0x2000, 7), (0x1000, 8)] {
+        let p = start + P_OFF as u64;
+        assert_eq!(tables.entry_at(p + 7), Some((start, LEN, slot)), "P belongs to its owner's slot");
+        assert_eq!(tables.version_of(start).map(|(v, n, _)| (v, n)), Some((1, 1)), "one version per install");
+        assert_eq!(tables.function_base(start, p - 1), start, "last byte of host");
+        assert_eq!(tables.function_base(start, p), p, "first byte of P");
+        assert_eq!(tables.frame_pointer_at(start + 8, 1000), Ok(1048), "host frame");
+        assert_eq!(tables.frame_pointer_at(p, 1000), Ok(1064), "call ending at P belongs to host");
+        assert_eq!(tables.frame_pointer_at(p + 8, 1000), Ok(1112), "P's staged bytes at its relative return offset");
+        assert_eq!(tables.frame_pointer_at(start + LEN as u64, 1000), Ok(1080), "last call in P");
+        assert_eq!(tables.saved_regs_at(p - 1), Some((start, vec![3])), "host register saves");
+        assert_eq!(tables.saved_regs_at(p), Some((p, vec![12, 0x108])), "P's register saves and base");
+    }
+}
+
+fn unwind_starts(tables: &CodeTables, start: u64, end: u64) -> Vec<u64> {
+    let mut frames: Vec<_> = tables.unwind.keys().copied().chain(tables.image_unwind.iter().map(|t| t.0))
+        .filter(|a| (start..end).contains(a)).collect();
+    frames.sort_unstable();
+    frames
+}
+
+fn joined_body_phases(test: &str, program: &str, whole: &str, phases: &[&str]) -> Option<(String, std::path::PathBuf)> {
+    const PHASE: &str = "RELAX_JOINED_BODY_PHASE";
+    const DIR: &str = "RELAX_JOINED_BODY_DIR";
+    if let Ok(phase) = std::env::var(PHASE) {
+        let path = std::path::PathBuf::from(std::env::var_os(DIR).unwrap()).join("lib.rs");
+        return Some((phase, path));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-{test}-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("lib.rs"), program).unwrap();
+    for &phase in phases {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", &format!("jit::inspect_tiers_tests::{test}"), "--nocapture", "--test-threads=1"])
+            .env(PHASE, phase).env(DIR, &dir).env("RELAX_CACHE_DIR", dir.join("cache"))
+            .env("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"))
+            .env("RELAX_OUTLINE_WHOLE", whole).env_remove("RELAX_INSPECT")
+            .env("RELAX_FLIGHTREC", "0").env("RELAX_PANIC_PARK", "600").env("RELAX_EXPECTED_CRASH", "the joined body test inspects and releases its park");
+        let start = std::time::Instant::now();
+        let out = crate::test_child::output(&mut child);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        eprintln!("joined bodies {phase}: {:.2?}", start.elapsed());
+        assert!(out.status.success() && stdout.contains("1 passed"), "{phase} ({}): {stdout}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    None
+}
+
+#[test]
+fn joined_bodies_unwind_once_and_show_the_parts_locals() {
+    const PROGRAM: &str = r#"
+use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+static DROPS: AtomicU32 = AtomicU32::new(0);
+struct D<F: Fn()>(u32, F);
+impl<F: Fn()> Drop for D<F> { fn drop(&mut self) { (self.1)(); DROPS.fetch_add(self.0, SeqCst); } }
+#[inline(never)]
+pub fn outlined_leaf(n: u32) -> u32 {
+    let seen = n * 3 + 1;
+    // Both locals are still needed when the panic unwinds this frame.
+    let _d = D(10, || { std::hint::black_box((&n, &seen)); });
+    if n > 2 { panic!("outlined_leaf panics") }
+    seen
+}
+#[inline(never)]
+pub fn outlined_host(n: u32) -> u32 { let _d = D(1, || {}); outlined_leaf(n) + 1 }
+pub fn normal(out: &mut [u32; 2]) {
+    out[0] = outlined_host(1);
+    out[1] = DROPS.load(SeqCst);
+}
+pub fn panicking(out: &mut [u32; 2]) {
+    out[0] = std::thread::spawn(|| outlined_host(7)).join().is_err() as u32;
+    out[1] = DROPS.load(SeqCst);
+}
+"#;
+    let Some((phase, path)) = joined_body_phases("joined_bodies_unwind_once_and_show_the_parts_locals",
+        PROGRAM, "outlined_leaf,outlined_host", &["cold", "warm", "image"]) else { return };
+    crate::borrowck::lazy::disable_gandalf();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "joined_body", false).unwrap();
+    let def = |name| (0..prog.defs.len() as u32).map(DefId).find(|&d| prog.def(d).krate == krate && prog.name(d) == name).unwrap();
+    let [leaf, host, normal, panicking] = ["outlined_leaf", "outlined_host", "normal", "panicking"].map(def);
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let (ids, plain, [normal, panicking]) = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        if phase == "image" {
+            cache.load_manifest(krate);
+            assert!(cache.has_startup_image(), "the cold run wrote a startup image");
+        }
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let ids = [leaf, host].map(|d| u.fn_id(FnKey::Inst(d, vec![])));
+        let plain = u.fn_id(FnKey::Inst(normal, vec![]));
+        (ids, plain, [normal, panicking].map(|d| u.entry(u.fn_id(FnKey::Inst(d, vec![])))))
+    });
+    if phase == "image" {
+        assert!(unsafe { prelink_startup(up) } >= ids.len(), "startup image placed before the first call");
+    }
+    let mut out = [0u32; 2];
+    unsafe { call_jit(up, normal, out.as_mut_ptr() as u64) }.map_err(|p| p.message).unwrap();
+    assert_eq!(out, [5, 11], "{phase}: return and normal drops");
+    // Releasing a watched panic can instrument its leaf for the next restart. Inspect the
+    // installs that will run, and identify that same leaf by its body start at the park.
+    let starts = crate::owner::call(crate::owner::Class::Program, || ids.map(|id| u.fns[id as usize].code));
+    let origin = match phase.as_str() { "warm" => "warm-cache", "image" => "warm-image", _ => "fresh" };
+    for ((id, start), name) in ids.into_iter().zip(starts).zip(["outlined_leaf", "outlined_host"]) {
+        assert_eq!(codever::kind_at(&u, start).origin_name(), origin, "{phase}: {}", name);
+        let tables = u.code.read().unwrap();
+        let (_, len, slot) = tables.entry_at(start).expect("installed code");
+        assert_eq!(slot, id);
+        assert_eq!(tables.version_of(start).map(|(v, n, _)| (v, n)), Some((1, 1)), "{phase}: {}", name);
+        let end = start + u64::from(len);
+        let base = tables.function_base(start, end - 1);
+        assert_ne!(base, start, "{phase}: {} part in code tables", name);
+        assert_eq!(unwind_starts(&tables, start, end), [start, base], "{} has both unwind trailers", name);
+        assert_eq!(tables.function_base(start, base - 1), start);
+        assert_eq!(tables.function_base(start, base), base);
+        assert_eq!(tables.entry_at(base), Some((start, len, id)));
+    }
+    // A function the option does not name takes the path an unset option takes: unchanged
+    if phase == "cold" {
+        let start = crate::owner::call(crate::owner::Class::Program, || u.fns[plain as usize].code);
+        let tables = u.code.read().unwrap();
+        let (_, len, _) = tables.entry_at(start).expect("installed code");
+        let end = start + u64::from(len);
+        assert_eq!(tables.function_base(start, end - 1), start, "an unnamed function has no part");
+        assert_eq!(unwind_starts(&tables, start, end), [start], "an unnamed function has only its own unwind trailer");
+    }
+    // Snapshot those same installs for disk and image before the inspector can replace one.
+    if phase == "cold" {
+        crate::owner::call(crate::owner::Class::Program, || {
+            u.flush_cache_records();
+            let mut cache = u.cache.take().unwrap();
+            assert!(cache.record_manifest(&u, krate, &ids, ids.len(), &|| false), "record the two functions in the startup image");
+            u.cache = Some(cache);
+        });
+    }
+    crate::inspect::start("joined_body");
+    let (ran, seen) = watch_part(up, starts[0], "outlined_leaf", ["seen", "n"], || {}, || {
+        unsafe { call_jit(up, panicking, out.as_mut_ptr() as u64) }
+    });
+    assert_eq!(seen.len(), 1, "{phase}: one park: {seen:?}");
+    assert!(seen[0].1.contains("outlined_leaf panics"), "{phase}: {seen:?}");
+    assert_eq!(seen[0].2, Ok([22, 7]), "{phase}: seen and n in the leaf's part");
+    ran.map_err(|p| p.message).unwrap();
+    assert_eq!(out, [1, 22], "{phase}: join returned the panic and unwinding added exactly 11 drops");
+    if phase == "cold" {
+        crate::owner::call(crate::owner::Class::Program, || u.cache.as_mut().unwrap().flush().unwrap());
+    }
+    std::mem::forget(u);
+}
+
+fn watch_part<T>(up: *mut Unit, start: u64, host: &str, locals: [&str; 2], mut on_wait: impl FnMut() + Send, run: impl FnOnce() -> T)
+    -> (T, Vec<(u64, String, Result<[u32; 2], String>)>) {
+    fn parked_locals(u: &Unit, start: u64, regs: &[u64], host: &str, locals: [&str; 2]) -> Result<[u32; 2], String> {
+        use crate::inspect::vars;
+        let stop = vars::Stop::from_block(u, regs).ok_or("short parked register block")?;
+        let frame = {
+            let tables = u.code.read().unwrap();
+            stop.frames.iter().position(|&(pc, _)| tables.entry_at(pc).is_some_and(|(owner, _, _)| owner == start && tables.function_base(owner, pc) != owner))
+        }.ok_or_else(|| format!("parked stack has no frame in {host}'s part"))?;
+        let levels = vars::levels(u, &stop, Some(frame));
+        let level = levels.iter().flat_map(|(_, levels)| levels).find(|l| l.inlined_into.is_none() && l.name.ends_with(host))
+            .ok_or_else(|| format!("no root level for {host}'s part"))?;
+        let read = |name| {
+            let local = level.locals.iter().find(|l| l.name == name).ok_or_else(|| format!("missing {name}"))?;
+            match &local.got {
+                vars::Got::Bytes(b, _) => b.as_slice().try_into().map(u32::from_le_bytes).map_err(|_| format!("{name}: expected u32")),
+                vars::Got::No(why) => Err(format!("{name}: {why}")),
+            }
+        };
+        Ok([read(locals[0])?, read(locals[1])?])
+    }
+    let addr = up as usize;
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let watcher = scope.spawn(move || {
+            use crate::inspect::events;
+            let mut seen = Vec::new();
+            loop {
+                on_wait();
+                for (id, _, _, message, _) in events::parked_now() {
+                    if seen.iter().any(|(k, _, _)| *k == id) { continue; }
+                    let values = events::parked_regs(Some(id)).ok_or("missing parked registers".to_string()).and_then(|(_, regs)| {
+                        crate::owner::call(crate::owner::Class::Program, || parked_locals(unsafe { &*(addr as *const Unit) }, start, &regs, host, locals))
+                    });
+                    seen.push((id, message, values));
+                    events::quit_releases();
+                }
+                if finished.recv_timeout(std::time::Duration::from_millis(2)) != Err(std::sync::mpsc::RecvTimeoutError::Timeout) { break; }
+            }
+            seen
+        });
+        let ran = run();
+        drop(done);
+        (ran, watcher.join().unwrap())
+    })
+}
+
+#[test]
+fn a_live_exit_unwinds_and_shows_the_hosts_locals_in_the_part() {
+    const PROGRAM: &str = r#"
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering::SeqCst};
+static ADDRESS: AtomicUsize = AtomicUsize::new(0);
+struct D<F: Fn()>(F);
+impl<F: Fn()> Drop for D<F> { fn drop(&mut self) { (self.0)(); } }
+#[inline]
+fn leaf(n: u32) -> u32 { n + 1 }
+#[inline(never)]
+fn escape(shared: *mut u32, gate: &AtomicU32) {
+    ADDRESS.store(shared as usize, SeqCst);
+    if gate.load(SeqCst) == 4 { return; }
+    gate.store(1, SeqCst);
+    while gate.load(SeqCst) == 1 { std::thread::yield_now(); }
+}
+#[inline(never)]
+pub fn host(state: &[AtomicU32; 4]) {
+    let mut shared = 7u32;
+    let _before = D(|| { state[1].fetch_add(1, SeqCst); });
+    escape(&raw mut shared, &state[0]);
+    let seen = leaf(shared);
+    shared = seen + 1;
+    let _after = D(|| {
+        state[3].store(shared * 100 + seen, SeqCst);
+        state[2].fetch_add(1, SeqCst);
+    });
+    let alias = ADDRESS.load(SeqCst) as *const u32;
+    if unsafe { *alias } == 11 && shared == 11 && state[0].load(SeqCst) != 4 { panic!("patched host panics") }
+}
+pub fn drive(addr: usize) {
+    let result = std::thread::spawn(move || host(unsafe { &*(addr as *const [AtomicU32; 4]) })).join();
+    let state = unsafe { &*(addr as *const [AtomicU32; 4]) };
+    if result.is_err() { state[0].store(3, SeqCst); }
+}
+"#;
+    let Some((phase, path)) = joined_body_phases("a_live_exit_unwinds_and_shows_the_hosts_locals_in_the_part",
+        PROGRAM, "", &["cold", "warm", "image", "corrupt"]) else { return };
+    crate::borrowck::lazy::disable_gandalf();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    session.options.opt = vec!["+outline".into()];
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "live_part", false).unwrap();
+    let [leaf, host, driver] = ["leaf", "host", "drive"].map(|name|
+        (0..prog.defs.len() as u32).map(DefId).find(|&d| prog.def(d).krate == krate && prog.name(d) == name).unwrap());
+    let file = prog.def(leaf).file;
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    let (leaf, host, drive) = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        if phase == "cold" { cache.mode = crate::cache::Mode::On; }
+        if matches!(phase.as_str(), "image" | "corrupt") {
+            cache.load_manifest(krate);
+            assert!(cache.has_startup_image(), "the zero-version host has a startup image");
+        }
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let [leaf, host, driver] = [leaf, host, driver].map(|d| u.fn_id(FnKey::Inst(d, vec![])));
+        if phase == "cold" {
+            let (body, map, relocs) = unsafe { compile_fn(up, leaf) }.unwrap();
+            u.install(leaf, &body, &relocs, map, 0).unwrap();
+            unsafe { compile_o3_always(up, host) }.expect("the producer builds the host's first O3 install");
+        }
+        (leaf, host, u.entry(driver))
+    });
+    if phase == "image" {
+        assert!(unsafe { prelink_startup(up) } > 0, "the image placed code before the first call");
+    } else if phase == "corrupt" {
+        unsafe { prelink_startup(up) };
+        assert!(!u.fns[host as usize].compiled, "prelink left the malformed host uninstalled");
+        assert!(u.cache.as_ref().unwrap().stats.prelink_failed > 0, "prelink rejected the malformed image slot");
+    }
+    // The same call links the disk entry, or compiles the host on a miss.
+    let normal = [const { std::sync::atomic::AtomicU32::new(0) }; 4];
+    normal[0].store(4, Ordering::Release);
+    let call = |at| unsafe { call_jit(up, at, normal.as_ptr() as u64) }.map_err(|p| p.message).unwrap();
+    call(u.entry(host));
+    assert_eq!(normal[3].load(Ordering::Acquire), 908, "{phase}: the unpatched call returns shared=9 and seen=8");
+    if phase == "corrupt" {
+        let t = u.code.read().unwrap();
+        let bodies = t.bodies_of(host);
+        assert_eq!(bodies.len(), 1, "the corrupt entry never installed");
+        assert_eq!(bodies[0].2.origin, origin::FRESH, "a malformed part compiles fresh on demand");
+        assert!(u.cache.as_ref().unwrap().stats.link_fail > 0, "the recorded entry failed to link");
+        unsafe { UNIT = std::ptr::null_mut() };
+        return;
+    }
+    let start = u.fns[host as usize].code;
+    crate::owner::call(crate::owner::Class::Program, || {
+        let origin = match phase.as_str() { "cold" => origin::FRESH, "warm" => origin::CACHE, "image" => origin::IMAGE, _ => unreachable!() };
+        joined_install(&u, host, 1, origin);
+        assert_eq!(copy_ver(&u, host).unwrap().1, 0, "{phase}: exits start at the recorded copy version");
+        assert!(u.fns[leaf as usize].history().copy_hosts.contains(&host), "{phase}: P's leaf flag guards the host");
+        if phase == "cold" {
+            u.flush_cache_records();
+            let mut cache = u.cache.take().unwrap();
+            assert!(cache.record_manifest(&u, krate, &[host], 1, &|| false), "snapshot the real O3 install before the edit");
+            cache.flush().unwrap();
+            cache.mode = crate::cache::Mode::ReadOnly;
+            u.cache = Some(cache);
+        } else if phase == "image" {
+            // The final process tries prelink and demand-link on this same host.
+            let mut cache = u.cache.take().unwrap();
+            cache.corrupt_recorded_part(&u, host);
+            u.cache = Some(cache);
+        }
+    });
+    let state = [const { std::sync::atomic::AtomicU32::new(0) }; 4];
+    let mut change = None;
+    let addr = up as usize;
+    crate::inspect::start("live_part");
+    let (ran, seen) = watch_part(up, start, "live_part::host", ["shared", "seen"], || {
+        if state[0].load(Ordering::Acquire) == 1 {
+            let outcome = unsafe { crate::reload::apply(addr as *mut Unit, vec![crate::reload::Edit {
+                file, path: path.to_string_lossy().into_owned(), src: PROGRAM.replace("{ n + 1 }", "{ n + 3 }").into_bytes(),
+            }]) };
+            change = Some((outcome.rung, outcome.lines));
+            state[0].store(2, Ordering::Release);
+        }
+    }, || unsafe { call_jit(up, drive, state.as_ptr() as u64) });
+    let (rung, lines) = change.expect("the fast half escaped its slot before the edit");
+    assert_eq!(rung, crate::reload::Rung::Patch, "{lines:?}");
+    assert_eq!(seen.len(), 1, "one panic park: {seen:?}");
+    assert!(seen[0].1.contains("patched host panics"), "{seen:?}");
+    assert_eq!(seen[0].2, Ok([11, 10]), "the shared slot and the patched leaf's result at the park");
+    ran.map_err(|p| p.message).unwrap();
+    assert_eq!(state[0].load(Ordering::Acquire), 3, "the JIT thread unwound to its join");
+    assert_eq!(state[1].load(Ordering::Acquire), 1, "the guard created before the exit dropped once");
+    assert_eq!(state[2].load(Ordering::Acquire), 1, "the guard created in P dropped once");
+    assert_eq!(state[3].load(Ordering::Acquire), 1110, "the cleanup read both locals from their live homes");
+    assert!(u.fns[leaf as usize].patched.load(Ordering::Acquire), "{phase}: the edit set P's leaf flag");
+    assert_ne!(copy_ver(&u, host).unwrap().1, 0, "{phase}: patching the leaf moved the host's copy version");
+    call(start);
+    assert_eq!(normal[3].load(Ordering::Acquire), 1110, "{phase}: the saved exit returns the slow leaf's values");
+    unsafe { UNIT = std::ptr::null_mut() };
 }

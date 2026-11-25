@@ -11,9 +11,8 @@ import os, re, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STD = os.path.normpath(os.path.join(HERE, "..", "..", "std"))
-# `makepad run` of a working tree is a live session: the app crate's structs carry the live extension
-# block (size_of::<Pad>() is 16, not 4); the dependency crate's do not
-BASE = [101, 8, 6, 10, 1, 42, 8, 9, 6, 2, 16, 7, 71, 21]
+# `makepad run` of a working tree is a live session; its structs keep rustc's layout (size_of::<Pad>() is 4)
+BASE = [101, 8, 6, 10, 1, 42, 8, 9, 6, 2, 4, 7, 71, 21]
 # result fields: use_leaf, use_shape, use_const, use_dyn, use_loud, unrelated, untouched_user, stable_after, use_static, local_size, use_pad, from_mac, mac_static, mac_body
 SCENARIOS = {
     # a fn body: the fn recompiles; nothing else in its file or above it does
@@ -42,7 +41,7 @@ SCENARIOS = {
     # a struct layout in the app (the top crate): the app's code recompiles, the dependency
     # crate below it does not
     "applayout": ("struct Pad { a: u32 } // EDIT applayout", "struct Pad { a: u128 } // EDIT applayout",
-                  {10: 32}, ["use_pad"], ["stable_before", "untouched_user", "stable_after", "local_size", "speak"]),
+                  {10: 16}, ["use_pad"], ["stable_before", "untouched_user", "stable_after", "local_size", "speak"]),
     # content inside a macro invocation that expands to an item fn / a static / a fn body: the code it
     # feeds follows the invocation's tokens, the rest of the file stays linked
     "macro_item": ("mk_fn!(from_mac = 7); // EDIT macro_item", "mk_fn!(from_mac = 8); // EDIT macro_item",

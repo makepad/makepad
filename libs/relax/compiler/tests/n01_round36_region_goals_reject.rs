@@ -1,3 +1,4 @@
+// rejects: lifetime may not live long enough
 // A goal on two invariant references keeps its lifetime equality through the borrowck type-op
 // boundary (rustc_trait_selection/traits/query/type_op/custom.rs): rustc rejects the unrelated 'a/'b.
 use std::cell::Cell;

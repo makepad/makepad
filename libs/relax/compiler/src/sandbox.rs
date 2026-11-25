@@ -272,7 +272,7 @@ pub struct Domain {
 /// What third-party packages' compile-time code may do (proc macros, pmhost.rs; build scripts,
 /// unitgraph.rs): the entry point's choice, one per process (runner Host `compile_time_code`).
 /// Kept in relax-base, where the build-script runs read it too.
-pub use relax_base::compile_time::{policy, set_policy, Policy};
+pub use relax_base::compile_time::{policy, replace_policy_in_test, set_policy, Policy};
 
 /// The run-time modules' domain: what every domain may call, nothing more; metered (a module's
 /// arena may set a per-call budget).
@@ -2497,6 +2497,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                         // (black_box's block runs no instruction)
                         Callee::Asm(b) if b.is_empty() => Callee::Asm(b),
                         Callee::Asm(_) => return Err(format!("{}: inline assembly, which sandboxed code cannot run", f.name)),
+                        Callee::Part(_) => return Err(format!("{}: sandbox transform needs the body before outlining", f.name)),
                         Callee::Fn(id) => Callee::Fn(call_target(up, id, &sandboxed, allow)?),
                         Callee::CFn(id, sig) => Callee::CFn(call_target(up, id, &sandboxed, allow)?, sig),
                         Callee::Indirect(v) => Callee::Indirect(mask_fn(&*up, f, &mut insts, &mut pos, p, v)),

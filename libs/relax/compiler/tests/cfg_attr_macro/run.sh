@@ -3,7 +3,7 @@
 # The expected line is derived from the assertions in app/src/main.rs.
 set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 EXPECTED='cfg attr macros ok'

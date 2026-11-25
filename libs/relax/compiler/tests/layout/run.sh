@@ -3,7 +3,7 @@
 # run and in a live session (a live session lays out the program's own types as well); diffs each
 set -u
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d) || exit 2
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 2
 : "${T:?}"
 trap 'rm -rf "$T"' EXIT
 rustc --edition 2021 -O "$H/layout_diff.rs" -o "$T/real" 2>"$T/rustc.err" || { cat "$T/rustc.err"; exit 2; }

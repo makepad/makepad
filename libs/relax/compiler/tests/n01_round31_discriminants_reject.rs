@@ -1,3 +1,4 @@
+// rejects: E0370
 #![allow(dead_code)]
 #[repr(u8)] enum Eval { A = 255u8 + 1u8 }
 #[repr(u8)] enum Overflow { A = 255, B }

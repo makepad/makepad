@@ -3,7 +3,7 @@
 # macros as `#[doc]` attributes (as rustc 1.93 prints them); prints "derive_doc_input: ok" or
 # "derive_doc_input: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet derive-doc-app 2>>"$ERR")

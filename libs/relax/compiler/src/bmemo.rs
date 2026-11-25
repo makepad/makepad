@@ -329,7 +329,7 @@ pub(crate) fn lookup(k: &Key, p: &Prep, counter: Option<relax_backend::rir::Sym>
     let relocs = e.relocs.iter().map(|r| {
         let mut r = *r;
         match &mut r.target {
-            Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) => back(s),
+            Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) | Reloc::Body(s) => back(s),
             Reloc::Sym(s) => {
                 if let Some(w) = words.iter().find(|w| w.0 == *s) {
                     *s = w.1;
@@ -387,7 +387,7 @@ pub(crate) fn store(k: Key, prep: SPrep, opt: &Option<(Arc<Func>, Vec<(u32, usiz
     }).collect();
     let relocs: Vec<RelocAt> = relocs.iter().map(|r| {
         let mut r = *r;
-        if let Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) = &mut r.target {
+        if let Reloc::Slot(s) | Reloc::Thunk(s) | Reloc::Call(s) | Reloc::Body(s) = &mut r.target {
             to(s);
         }
         r

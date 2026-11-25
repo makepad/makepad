@@ -61,6 +61,7 @@ impl Tcx {
         }
         if prog.def(method).kind == DefKind::AssocTy && self.own_clauses_of(prog, method).is_empty() { return self.check_type_bounds(prog, method, trait_method); }
         let mut trait_args = self.impl_trait_ref(prog, imp, &parent.identity_args(&self.tys)).args;
+        let header = trait_args.clone();
         trait_args.extend_from_slice(a);
         let mut clauses = self.clauses_of(prog, imp);
         for p in self.own_clauses_of(prog, trait_method) { clauses.push(self.instantiate_predicate(prog, trait_method, &trait_args, &p)); }
@@ -102,6 +103,7 @@ impl Tcx {
                     for &ty in self.tys.list(*inputs) { if !wf_tys.contains(&ty) { wf_tys.push(ty); } }
                     if !wf_tys.contains(output) { wf_tys.push(*output); }
                 }
+                for ty in self.header_tys_named_in(&header, raw_trait) { if !wf_tys.contains(&ty) { wf_tys.push(ty); } }
                 let goals = infcx.at(prog, env.clone()).sub(impl_fn, trait_fn).map_err(|_| NoSolution)?;
                 ocx.register_obligations(goals);
                 if !self.tys.has_error(impl_fn) && !self.tys.has_error(trait_fn) {
@@ -129,6 +131,28 @@ impl Tcx {
 }
 
 impl Tcx {
+    /// The impl header types (the type arguments of the impl's trait reference, its self type first) that
+    /// occur anywhere in `ty`, the unnormalized trait signature instantiated with that reference. Every item of
+    /// the impl assumes its header WF (wfcheck's assumed_wf_types), so comparing an impl item's signature
+    /// with its trait's may assume those the trait signature names. rustc gets their bounds by walking the
+    /// unnormalized signature; here implied bounds come from the normalized type only, so an alias argument
+    /// implies nothing unless it holds a header type, and a header type the trait signature does not name is
+    /// not assumed (rustc refuses those impls: E0276, E0310). The walk normalizes each type it is given.
+    pub(super) fn header_tys_named_in(&self, header: &[GenericArg], ty: crate::types::TyId) -> Vec<crate::types::TyId> {
+        use crate::types::{fold::TypeFolder, TyId};
+        struct Named { header: Vec<TyId>, found: Vec<TyId> }
+        impl TypeFolder for Named {
+            fn fold_ty(&mut self, tys: &crate::types::Types, t: TyId, depth: crate::types::DebruijnIndex) -> TyId {
+                if self.header.contains(&t) && !self.found.contains(&t) { self.found.push(t); }
+                crate::types::fold::super_fold_ty(tys, t, self, depth)
+            }
+        }
+        let header = header.iter().filter_map(|a| match a { GenericArg::Type(t) => Some(*t), _ => None }).collect();
+        let mut named = Named { header, found: Vec::new() };
+        named.fold_ty(&self.tys, ty, 0);
+        named.found
+    }
+
     /// compare_impl_item.rs:2485-2597. Specialization/default associated types
     /// and const-trait conditions are cut; the associated value is a final leaf.
     fn check_type_bounds(&self, prog: &Program, item: DefId, trait_item: DefId) -> Result<(), NoSolution> {

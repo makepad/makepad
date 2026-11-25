@@ -737,6 +737,12 @@ pub fn bin_start(args: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
 /// RELAX_SELF_EXEC, tell: a C library's exec passes this process's own environment, which names
 /// it, with the program's arguments alone.)
 pub fn relaunched(args: &[Vec<u8>]) -> Option<Vec<Vec<u8>>> {
+    // the runner as a program Relax runs (Relax running itself): its executable is its run's link
+    // by design (os::proc), and this start is that run's program starting, never a launch of the
+    // link; taken for one, it ran the run's program, itself, again, one runtime inside the next
+    if cfg!(relax) {
+        return None;
+    }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     if dir.file_name().is_some_and(|n| n == LAUNCH) {
@@ -933,6 +939,19 @@ pub fn parent_of(_pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program Relax runs that is a loader itself (Relax running its own runner): its executable
+    /// is its run's link by design, with the run's entry beside it, and this start is that run's
+    /// own, never a launch of the link (taken for one, the runner ran its run's program, itself,
+    /// again, one runtime inside the next). Natively the test binary is no run's link.
+    #[test]
+    fn a_run_s_own_program_is_no_launch_of_its_link() {
+        if cfg!(relax) {
+            let exe = std::env::current_exe().unwrap();
+            assert!(runs_in(exe.parent().unwrap()).is_some_and(|r| !r.is_empty()), "under Relax the test's run is recorded beside its link");
+        }
+        assert!(relaunched(&[b"program".to_vec(), b"--help".to_vec()]).is_none(), "the run's own program was taken for a launch of its link");
+    }
 
     /// What the links of a loader are told by: a hard link and its file are one file, with one
     /// key; a copy is another file; the file a new build put at the loader's path has another key

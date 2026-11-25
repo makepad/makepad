@@ -9,7 +9,7 @@ H=$(cd "$(dirname "$0")" && pwd)
 export RELAX_CACHE=off
 run() { (cd "$H" && env "$@" RELAX_STD=$H/../../std "$MAKEPAD" run --quiet cce-app 2>>"$ERR"); }
 MAKEPAD=$1
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 A=$(run -u CCE_FORCED -u CCE_PLAIN)
 B=$(run CCE_FORCED="forced by process" CCE_PLAIN="plain from process")
 echo "$A"; echo "$B"

@@ -43,6 +43,14 @@ static REFRESH: Mutex<()> = Mutex::new(());
 /// Rebuilds the module index. Allocates and takes the loader lock: only while no thread is held.
 pub fn refresh() {
     let _g = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
+    refresh_index();
+}
+
+pub(super) fn refresh_nowait() {
+    if let Ok(_g) = REFRESH.try_lock() { refresh_index(); }
+}
+
+fn refresh_index() {
     use super::symbols::{dl_iterate_phdr, PhdrInfo};
     extern "C" fn cb(info: *const PhdrInfo, _size: usize, data: *mut u8) -> i32 {
         unsafe {
@@ -387,11 +395,13 @@ fn run(row: &mut Row, init: &Row, cie: &Cie, from: u64, to: u64, mut loc: u64, t
                     return None;
                 }
                 depth -= 1;
-                // the CFA stays as it is (DWARF: restore_state restores register rules)
-                let (cr, co) = (row.cfa_reg, row.cfa_off);
+                // the whole row, the CFA with the register rules, as libgcc, LLVM's libunwind and
+                // gimli restore it: gcc ends a mid-function epilogue with it (remember_state,
+                // `leave` or pops moving the CFA to rsp + 8, ret, restore_state), and the code
+                // after that `ret` has the body's CFA again (glibc's pthread_cond_wait, built with
+                // frame pointers: rbp + 16; keeping rsp + 8 read a heap pointer as its return
+                // address and a layout patch was refused, 11-24)
                 *row = stack[depth];
-                row.cfa_reg = cr;
-                row.cfa_off = co;
             }
             0x0c => {
                 row.cfa_reg = c.uleb() as u16;
@@ -509,17 +519,34 @@ pub fn step(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> St
 /// a syscall gives its sp and pc only, and a libc built with frame pointers bases its CFA on it): the
 /// slot above `rsp` holding a return address whose call calls this very function. Earlier calls
 /// leave frame records on the stack, so the shape of one proves nothing; the call does. `ra_off`:
-/// where the return address is from the frame pointer.
-fn rbp_of_its_call(lo: u64, hi: u64, rsp: u64, ra_off: i64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+/// where the return address is from the frame pointer. Ok(None): no call proves one; an error: a
+/// call's stub chain ran past `STUB_HOPS` with nothing else proven.
+pub(super) fn rbp_of_its_call(lo: u64, hi: u64, rsp: u64, ra_off: i64, read: &dyn Fn(u64) -> Option<u64>) -> Result<Option<u64>, &'static str> {
     // past a frame's locals: what a libc function blocking in a syscall keeps
     const REACH: u64 = 512;
-    (0..REACH).map(|k| rsp.wrapping_add(k * 8)).find(|p| read(p.wrapping_add(ra_off as u64)).is_some_and(|ret| call_reaches(ret, lo, hi, read)))
+    let mut why = Ok(None);
+    for p in (0..REACH).map(|k| rsp.wrapping_add(k * 8)) {
+        let Some(ret) = read(p.wrapping_add(ra_off as u64)) else { continue };
+        match call_reaches(ret, lo, hi, read) {
+            Ok(true) => return Ok(Some(p)),
+            Ok(false) => {}
+            Err(e) => why = Err(e),
+        }
+    }
+    why
 }
 
+/// Jump stubs a call may go through before the code: the JIT's longest chain is three (a thunk's
+/// head, its table path, a count stub). Past this the chain is a cycle or something unknown, and
+/// the walk says so (`STUB_CHAIN_TOO_LONG`) rather than that no call was found.
+const STUB_HOPS: usize = 5;
+pub const STUB_CHAIN_TOO_LONG: &str = "a call above its sp goes through more jump stubs than any known chain (a cycle?), so its frame is not proven";
+
 /// Whether the call before return address `ret` goes to [lo, hi), directly or through jump stubs
-/// (a PLT entry, a JIT veneer).
-fn call_reaches(ret: u64, lo: u64, hi: u64, read: &dyn Fn(u64) -> Option<u64>) -> bool {
-    let Some(before) = read(ret.wrapping_sub(8)) else { return false };
+/// (a PLT entry, a JIT veneer, a JIT slot's thunk and count stub: `jump_stub_target`); an error
+/// past `STUB_HOPS` stubs.
+fn call_reaches(ret: u64, lo: u64, hi: u64, read: &dyn Fn(u64) -> Option<u64>) -> Result<bool, &'static str> {
+    let Some(before) = read(ret.wrapping_sub(8)) else { return Ok(false) };
     let b = before.to_le_bytes();
     let disp = |at: usize| i32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as i64 as u64;
     let mut target = if b[3] == 0xe8 {
@@ -528,36 +555,99 @@ fn call_reaches(ret: u64, lo: u64, hi: u64, read: &dyn Fn(u64) -> Option<u64>) -
         // call [rip + disp]
         match read(ret.wrapping_add(disp(4))) {
             Some(t) => t,
-            None => return false,
+            None => return Ok(false),
+        }
+    } else if b[6] == 0xff && (0xd0..=0xd7).contains(&b[7]) {
+        let extended = b[5] == 0x41;
+        let call = ret.wrapping_sub(if extended { 3 } else { 2 });
+        let rex = if extended { 0x4c } else { 0x48 };
+        let modrm = ((b[7] & 7) << 3) | 5;
+        // 32 bytes leaves room around the observed 13-byte sequence for argument setup.
+        // A pattern inside another instruction is accepted only if its target names this very function.
+        let load = (7..=32).find_map(|back| {
+            let at = call.wrapping_sub(back);
+            let w = read(at)?.to_le_bytes();
+            if w[0] != rex || !matches!(w[1], 0x8b | 0x8d) || w[2] != modrm {
+                return None;
+            }
+            let disp = i32::from_le_bytes([w[3], w[4], w[5], w[6]]);
+            Some((w[1], at.wrapping_add(7).wrapping_add_signed(i64::from(disp))))
+        });
+        match load {
+            Some((0x8b, slot)) => match read(slot) { Some(t) => t, None => return Ok(false) },
+            Some((_, addr)) => addr,
+            None => return Ok(false),
         }
     } else {
-        return false;
+        return Ok(false);
     };
-    for _ in 0..3 {
+    for _ in 0..=STUB_HOPS {
         if (lo..hi).contains(&target) {
-            return true;
+            return Ok(true);
         }
         match jump_stub_target(target, read) {
             Some(t) => target = t,
-            None => return false,
+            None => return Ok(false),
         }
     }
-    false
+    Err(STUB_CHAIN_TOO_LONG)
 }
 
-/// Where a stub at `t` jumps: `[endbr64] [bnd] jmp [rip + disp]`.
+/// Where a stub at `t` jumps:
+/// - `[endbr64] [bnd] jmp [rip + disp]` (a PLT entry, a veneer);
+/// - `jmp rel32` (a JIT slot's thunk head: to the code, or to its table path);
+/// - `mov rax, slot; jmp [rax]` (that table path: the slot's word);
+/// - `mov rax, counter; sub qword [rax], imm32; jle hot; jmp rel32` or `...; mov r11, code;
+///   jmp r11` (a tier-up count stub, relax_backend x64::count_stub: on to the code).
+/// (`mov reg, imm` in each form the backend's mov_ri gives a nonzero value: `mov_imm`)
 fn jump_stub_target(t: u64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    let rel32 = |at: u64, b: &[u8]| at.wrapping_add(i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64 as u64);
     let mut at = t;
     if read(at)? as u32 == 0xfa1e_0ff3 {
         at = at.wrapping_add(4);
     }
     let w = read(at)?.to_le_bytes();
+    if w[0] == 0xe9 {
+        return Some(rel32(at.wrapping_add(5), &w[1..5]));
+    }
+    if let Some((0, imm, len)) = mov_imm(at, read) {
+        let at = at.wrapping_add(len);
+        let next = read(at)?.to_le_bytes();
+        if next[0] == 0xff && next[1] == 0x20 {
+            return read(imm);
+        }
+        if next[..3] != [0x48, 0x81, 0x28] || next[7] != 0x7e {
+            return None;
+        }
+        let jmp = read(at.wrapping_add(9))?.to_le_bytes();
+        if jmp[0] == 0xe9 {
+            return Some(rel32(at.wrapping_add(14), &jmp[1..5]));
+        }
+        let (11, code, len) = mov_imm(at.wrapping_add(9), read)? else { return None };
+        let far = read(at.wrapping_add(9 + len))?.to_le_bytes();
+        return (far[..3] == [0x41, 0xff, 0xe3]).then_some(code);
+    }
     let skip = (w[0] == 0xf2) as usize;
     if w[skip] != 0xff || w[skip + 1] != 0x25 {
         return None;
     }
     let disp = i32::from_le_bytes([w[skip + 2], w[skip + 3], w[skip + 4], w[skip + 5]]) as i64 as u64;
     read(at.wrapping_add(skip as u64 + 6).wrapping_add(disp))
+}
+
+/// `mov reg, imm` at `at` as relax_backend's x64 mov_ri encodes a nonzero value: `mov r32, imm32`,
+/// `mov r64, simm32`, `movabs r64, imm64`. The register, the value and the instruction's length.
+fn mov_imm(at: u64, read: &dyn Fn(u64) -> Option<u64>) -> Option<(u8, u64, u64)> {
+    let w = read(at)?.to_le_bytes();
+    let (rex, op) = if w[0] & 0xf0 == 0x40 { (w[0], 1) } else { (0, 0) };
+    let ext = if rex & 1 != 0 { 8 } else { 0 };
+    let imm32 = |k: usize| u32::from_le_bytes([w[k], w[k + 1], w[k + 2], w[k + 3]]);
+    match (rex & 0x08 != 0, w[op]) {
+        (false, 0xb8..=0xbf) => Some((ext + (w[op] & 7), imm32(op + 1) as u64, op as u64 + 5)),
+        (true, 0xb8..=0xbf) => Some((ext + (w[op] & 7), read(at.wrapping_add(2))?, 10)),
+        (true, 0xc7) if w[2] & 0xf8 == 0xc0 => Some((ext + (w[2] & 7), imm32(3) as i32 as i64 as u64, 7)),
+        _ => None,
+    }
 }
 
 /// One step of the frame at `pc` (the lookup pc: rip, or rip - 1 for a return address) in module `m`.
@@ -598,8 +688,9 @@ fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>)
         6 if r.rbp == 0 => {
             let Rule::Offset(o) = row.rules[cie.ra as usize % NREG] else { return Step::NeedRbp };
             match rbp_of_its_call(start.wrapping_add(m.delta), start.wrapping_add(m.delta).wrapping_add(range), r.rsp, row.cfa_off as i64 + o as i64, read) {
-                Some(rbp) => rbp,
-                None => return Step::NeedRbp,
+                Ok(Some(rbp)) => rbp,
+                Ok(None) => return Step::NeedRbp,
+                Err(why) => return Step::Fail(why),
             }
         }
         6 => r.rbp,
@@ -710,6 +801,37 @@ impl Foreign {
 }
 
 #[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    /// glibc's pthread_cond_wait (2.44, frame pointers): the body's CFA is rbp + 16; an early
+    /// return's epilogue remembers the state, moves the CFA to rsp + 8 for its `ret`, and the code
+    /// after the `ret` restores the state, the CFA with it. A step anywhere in the rest of the
+    /// body needs rbp + 16.
+    #[test]
+    fn restore_state_brings_back_the_cfa_with_the_rules() {
+        let cie = Cie { code_align: 1, data_align: -8, ra: 16, fde_enc: 0, has_aug: false, init: (0, 0) };
+        let mut init = Row { cfa_reg: 7, cfa_off: 8, rules: [Rule::Same; NREG] };
+        init.rules[16] = Rule::Offset(-8);
+        let program: &[u8] = &[
+            0x40 | 5, 0x0e, 16, 0x80 | 6, 2, // +5 push rbp: CFA rsp + 16, rbp at CFA - 16
+            0x40 | 3, 0x0d, 6, //               +8 mov rbp, rsp: CFA rbp + 16
+            0x40 | 9, 0x80 | 3, 7, //            +17 pushes: rbx at CFA - 56
+            0x02, 0xcf, 0x0a, 0x0c, 7, 8, //   +224 an early return: remember, CFA rsp + 8
+            0x40 | 8, 0x0b, //                  +232 after its ret: restore
+        ];
+        let at = |target: u64| {
+            let mut row = init;
+            run(&mut row, &init, &cie, program.as_ptr() as u64, program.as_ptr() as u64 + program.len() as u64, 0, target).unwrap();
+            (row.cfa_reg, row.cfa_off, row.rules[3] == Rule::Offset(-56), row.rules[6] == Rule::Offset(-16))
+        };
+        assert_eq!(at(0x20), (6, 16, true, true), "the body: rbp + 16, rbx and rbp saved");
+        assert_eq!(at(0xe4), (7, 8, true, true), "the early return's ret: rsp + 8");
+        assert_eq!(at(0x13b), (6, 16, true, true), "after that ret: the body's CFA and rules again");
+    }
+}
+
+#[cfg(test)]
 mod frame_of_its_call_tests {
     use super::*;
     use std::collections::HashMap;
@@ -749,7 +871,7 @@ mod frame_of_its_call_tests {
         // locals, then a stale record of a call to something else, then the function's own
         let (stale, own) = (0x7000u64, 0x7100u64);
         let read = memory(&[stack(&[1, 2, 0xa000, stale, 0xa010, own, 3]), call_to(stale, 0x6000), call_to(own, 0x5010)]);
-        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP + 4 * 8));
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(Some(SP + 4 * 8)));
     }
 
     #[test]
@@ -760,25 +882,71 @@ mod frame_of_its_call_tests {
         stub.extend_from_slice(&0x5008u64.to_le_bytes());
         stub.extend_from_slice(&[0; 8]);
         let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, veneer), (veneer, stub)]);
-        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(Some(SP)));
         // a PLT entry with its endbr64 and bnd prefix
         let mut plt = vec![0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25];
         plt.extend_from_slice(&0x100i32.to_le_bytes());
         plt.extend_from_slice(&[0; 16]);
         let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, veneer), (veneer, plt), (veneer + 11 + 0x100, 0x5020u64.to_le_bytes().to_vec())]);
-        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(Some(SP)));
         // call [rip + disp]
         let mut code = vec![0x90, 0x90, 0xff, 0x15];
         code.extend_from_slice(&0x40i32.to_le_bytes());
         let read = memory(&[stack(&[0xa000, ret, 0]), (ret - 8, code), (ret + 0x40, 0x5030u64.to_le_bytes().to_vec())]);
-        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(Some(SP)));
+
+        let mut code = vec![0x48, 0x8b, 0x05, 0x39, 0, 0, 0]; // mov rax, [rip + 0x39] (slot at +0x40)
+        code.extend_from_slice(&[0x89, 0xdf, 0x89, 0xde, 0xff, 0xd0]); // mov edi, ebx; mov esi, ebx; call rax
+        let rax_ret = ret + code.len() as u64;
+        code.extend_from_slice(&[0x4c, 0x8d, 0x1d]); // lea r11, [rip + disp]
+        let lea_end = ret + code.len() as u64 + 4;
+        code.extend_from_slice(&(FUNC.0.wrapping_sub(lea_end) as u32).to_le_bytes());
+        code.extend_from_slice(&[0x41, 0xff, 0xd3]);
+        let r11_ret = ret + code.len() as u64;
+        code.extend_from_slice(&[0x48, 0x8d, 0x05, 0, 0, 0, 0, 0xff, 0xd0]); // lea rax, [rip]; call rax
+        let other_ret = ret + code.len() as u64;
+        let read = memory(&[(ret, code), (ret + 0x40, FUNC.0.to_le_bytes().to_vec())]);
+        assert_eq!(call_reaches(rax_ret, FUNC.0, FUNC.1, &read), Ok(true), "mov from slot into rax across two instructions");
+        assert_eq!(call_reaches(r11_ret, FUNC.0, FUNC.1, &read), Ok(true), "lea into r11 with a backward displacement");
+        assert_eq!(call_reaches(other_ret, FUNC.0, FUNC.1, &read), Ok(false), "the nearer load into rax names another function");
+
+        // a JIT call: the slot's thunk (relax_backend's own encodings), its head straight to the
+        // code, or to its table path, whose word names a count stub that goes on to the code
+        use relax_backend::x64::{count_stub, thunk, thunk_head};
+        let thunk_at = 0x6000u64;
+        let mut direct = thunk(0x6800);
+        direct[..8].copy_from_slice(&thunk_head(thunk_at, FUNC.0).to_le_bytes());
+        let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, thunk_at), (thunk_at, direct)]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(Some(SP)), "a thunk's head jumps to the code");
+        // a count stub in reach of the code jumps by rel32, one far from it through r11; a low
+        // table word or counter takes mov_ri's short form, a high one its imm64 form
+        let high = (0x6100_0000_0000u64, 0x6100_0000_0100u64);
+        let cases = [
+            (0x6800u64, 0x5800u64, 0x7100u64, FUNC, [0xe9u8, 0], "a low word and counter, the stub's jmp rel32"),
+            (0x5f00_0000_6800, 0x5f00_0000_0000, 0x7100_0000_0000, FUNC, [0x41, 0xbb], "a high word and counter, the stub's mov r11, imm32; jmp r11"),
+            (0x5f00_0000_6800, 0x5f00_0000_0000, 0x7100_0000_0000, high, [0x49, 0xbb], "high code, the stub's movabs r11; jmp r11"),
+        ];
+        for (word, stub_at, counter, code, form, what) in cases {
+            let mut table = thunk(word);
+            table[..8].copy_from_slice(&thunk_head(thunk_at, 0).to_le_bytes());
+            let stub = count_stub(stub_at, counter, 3, code.0, 0x7200_0000_0000, 9);
+            let jmp_at = if counter >> 32 == 0 { 14 } else { 19 };
+            assert!(stub[jmp_at] == form[0] && (form[1] == 0 || stub[jmp_at + 1] == form[1]), "{what}: the encoding this case is about");
+            let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, thunk_at), (thunk_at, table), (word, stub_at.to_le_bytes().to_vec()), (stub_at, stub)]);
+            assert_eq!(rbp_of_its_call(code.0, code.1, SP, 8, &read), Ok(Some(SP)), "the thunk's table path and {what} reach the code");
+        }
+        // a thunk whose head jumps to itself: a cycle is reported as one, not as no call found
+        let mut cycle = thunk(0x6800);
+        cycle[..8].copy_from_slice(&thunk_head(thunk_at, thunk_at).to_le_bytes());
+        let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, thunk_at), (thunk_at, cycle)]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Err(STUB_CHAIN_TOO_LONG), "a stub cycle names itself");
     }
 
     #[test]
     fn nothing_proven_is_not_a_frame_pointer() {
-        // a call through a register says nothing of where it went, and words that are no code
+        // a call through a register with no known target, and words that are no code
         let ret = 0x7000u64;
         let read = memory(&[stack(&[0xa000, ret, 5, 6]), (ret - 8, vec![0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xff, 0xd0])]);
-        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), None);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Ok(None));
     }
 }

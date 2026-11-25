@@ -73,11 +73,14 @@ pub struct Raw {
     /// why the walk ended at the last frame when that frame is not the stack's outermost: the
     /// step to its caller could not be proven (a walk never guesses a caller)
     pub stop: Option<&'static str>,
+    /// the return address the walk could not step into (`NOT_CODE`), else 0: the report names
+    /// what maps it
+    pub stop_at: u64,
 }
 
 impl Raw {
     pub fn new() -> Raw {
-        Raw { pcs: [0; MAX_FRAMES], n: 0, lr: 0, sp: 0, handle: 0, stop: None }
+        Raw { pcs: [0; MAX_FRAMES], n: 0, lr: 0, sp: 0, handle: 0, stop: None, stop_at: 0 }
     }
     pub fn frames(&self) -> &[u64] {
         &self.pcs[..self.n]
@@ -158,6 +161,7 @@ pub fn waited_ns(id: u64) -> u64 {
 pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
     raw.n = 0;
     raw.stop = None;
+    raw.stop_at = 0;
     if t.os_id == self_os_id() {
         return Err("the calling thread (not captured)");
     }
@@ -176,8 +180,13 @@ pub use imp::{stack_hi_of_self, walk_regs_with, Slot as HoldSlot};
 /// Windows JIT frames by their records, host frames by their unwind tables (x64_walk). Reads stay
 /// inside the thread's stack (the program stack while it runs on one: the walk ends at its
 /// switch). Nothing where no walk exists.
-#[inline(never)]
+#[inline(always)]
 pub fn capture_self(out: &mut Vec<u64>) {
+    capture_self_with(out, false);
+}
+
+#[inline(never)]
+pub(super) fn capture_self_with(out: &mut Vec<u64>, _nowait: bool) -> Option<&'static str> {
     let (lo, hi) = crate::os::fault::stack_bounds_of_self();
     #[cfg(any(target_arch = "aarch64", target_vendor = "apple"))]
     {
@@ -206,6 +215,7 @@ pub fn capture_self(out: &mut Vec<u64>) {
             }
             fp = next;
         }
+        None
     }
     #[cfg(all(target_arch = "x86_64", any(target_os = "linux", windows)))]
     {
@@ -217,7 +227,7 @@ pub fn capture_self(out: &mut Vec<u64>) {
         }
         // the module index, built once (a refresh leaks the index it replaces: walks may still read it)
         if !super::cfi::covers(rip) {
-            super::cfi::refresh();
+            if _nowait { super::cfi::refresh_nowait(); } else { super::cfi::refresh(); }
         }
         #[allow(unused_mut)]
         let mut regs = super::cfi::Regs { rip, rsp, rbp: rbp.max(1), rbx, r12, r13, r14, r15, ..Default::default() };
@@ -230,17 +240,18 @@ pub fn capture_self(out: &mut Vec<u64>) {
         let read = |a: u64| -> Option<u64> { (a >= rsp && a % 8 == 0 && a.saturating_add(8) <= hi).then(|| unsafe { *(a as *const u64) }) };
         // (the first pc is this fn's own)
         let mut first = true;
-        x64_walk::walk_each(&mut regs, &read, &mut |pc| {
+        x64_walk::walk_each(&mut regs, &read, _nowait, &mut |pc| {
             if !first {
                 out.push(pc);
             }
             first = false;
             true
-        });
+        })
     }
     #[cfg(not(any(target_arch = "aarch64", target_vendor = "apple", all(target_arch = "x86_64", any(target_os = "linux", windows)))))]
     {
         let _ = (out, lo, hi);
+        Some("no stack walk on this target")
     }
 }
 
@@ -250,28 +261,7 @@ pub fn hold_paused(tid: u64) -> Result<&'static HoldSlot, &'static str> {
     imp::hold(tid, imp::HOLD_PAUSE)
 }
 
-/// Holds thread `tid` in its handler for good (a thread with a frame in code that never runs
-/// again: stale.rs `park_held`); a blocked thread is signalled too (it leaves the handler only at
-/// the run's end, `release_held_for_good`, when no code of the run runs any more). Linux.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn hold_for_good(tid: u64) -> Result<&'static HoldSlot, &'static str> {
-    imp::hold(tid, imp::HOLD_FOREVER)
-}
-
-/// A pause's hold of a thread becomes a hold for good (no resume releases it: the run's end does).
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn keep_held(s: &HoldSlot) {
-    imp::keep(s)
-}
-
-/// The run's end, once its code is gone: every thread held for good leaves its handler (it faults
-/// out of that code at its next instruction there). Returns how many. Linux.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn release_held_for_good() -> usize {
-    imp::release_forever()
-}
-
-/// Whether thread `tid` stands still in its handler now (held by a pause or for good). Linux.
+/// Whether thread `tid` stands still in its handler now. Linux.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn is_held(tid: u64) -> bool {
     imp::held(tid).is_some()
@@ -327,9 +317,12 @@ pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
     }
 }
 
-/// Pause: Mach suspend / resume of one thread (macOS; suspends nest); its run state.
+/// Pause: suspend / resume of one thread (macOS: Mach; Windows x64: SuspendThread; suspends
+/// nest); its run state (macOS).
 #[cfg(target_vendor = "apple")]
 pub use imp::{resume, running, suspend};
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub use imp::{resume, suspend};
 
 /// Walks frame records from `fp` (fp rule: [fp] = caller's fp, [fp+8] = return address), appending
 /// to `raw` until the chain ends, leaves the stack upwards order or `raw` is full.
@@ -786,16 +779,12 @@ mod imp {
         /// x86_64: rip, rsp, rbp, rbx, r12, r13, r14, r15; arm64: pc, sp, fp, lr, -, -, -, -;
         /// then the pthread handle
         regs: [AtomicU64; 9],
-        /// HOLD_CAPTURE (one walk, at most 5 s), HOLD_PAUSE (until `resume`, at most 10 minutes),
-        /// HOLD_FOREVER (a thread that must not run on while its run does: stale.rs `park_held`)
+        /// HOLD_CAPTURE (one walk, at most 5 s), HOLD_PAUSE (until `resume`, at most 10 minutes).
         mode: AtomicU32,
     }
     static HOLDS: [Slot; SLOTS] = [const { Slot { state: AtomicU32::new(0), tid: AtomicI32::new(0), regs: [const { AtomicU64::new(0) }; 9], mode: AtomicU32::new(0) } }; SLOTS];
     pub const HOLD_CAPTURE: u32 = 0;
     pub const HOLD_PAUSE: u32 = 1;
-    // a hold for good: Linux x86_64 only (`hold_for_good`, `keep_held`)
-    #[cfg(target_arch = "x86_64")]
-    pub const HOLD_FOREVER: u32 = 2;
     static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
     fn futex_wait(w: &AtomicU32, val: u32, ms: u64) {
@@ -845,16 +834,12 @@ mod imp {
             futex_wake(&slot.state);
             // a capture's hold is bounded (an inspector that died mid-walk must not stop this
             // thread forever); a pause's lasts until resume, or 10 minutes
+            let limit = if slot.mode.load(Relaxed) == HOLD_PAUSE { 600 } else { 5 };
             let t0 = std::time::Instant::now();
             loop {
                 if slot.state.load(Acquire) != 2 {
                     break;
                 }
-                let limit = match slot.mode.load(Relaxed) {
-                    HOLD_CAPTURE => 5,
-                    HOLD_PAUSE => 600,
-                    _ => u64::MAX,
-                };
                 if t0.elapsed().as_secs() >= limit {
                     break;
                 }
@@ -920,23 +905,6 @@ mod imp {
             r.store(0, Relaxed);
         }
         slot.state.store(0, Release);
-    }
-
-    /// A held thread stays held for good.
-    #[cfg(target_arch = "x86_64")]
-    pub fn keep(slot: &Slot) {
-        slot.mode.store(HOLD_FOREVER, Relaxed);
-    }
-
-    /// Lets every thread held for good go (`release_held_for_good`).
-    #[cfg(target_arch = "x86_64")]
-    pub fn release_forever() -> usize {
-        let mut n = 0;
-        for slot in HOLDS.iter().filter(|h| h.mode.load(Relaxed) == HOLD_FOREVER && h.state.load(Acquire) == 2) {
-            release(slot);
-            n += 1;
-        }
-        n
     }
 
     /// The slot holding `tid` now (a paused thread), if any.
@@ -1035,6 +1003,7 @@ mod imp {
                 }
                 raw.n = 0;
                 raw.stop = None;
+                raw.stop_at = 0;
             }
         }
         let slot = hold(t.os_id, HOLD_CAPTURE)?;
@@ -1140,6 +1109,7 @@ mod x64_walk {
         extern "C" {
             fn __relax_host_jit_code(pc: u64) -> u32;
             fn __relax_host_switch_return_pc() -> u64;
+            fn __relax_host_code_bounds(pc: u64, out: *mut u64) -> u32;
         }
 
         /// Whether `pc` is JIT code of the runtime that runs this compiler.
@@ -1152,6 +1122,22 @@ mod x64_walk {
             {
                 let _ = pc;
                 false
+            }
+        }
+
+        /// The bounds [lo, hi) of that runtime's JIT function or glue holding `pc` (None: none, or
+        /// no such runtime).
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub fn code_bounds(pc: u64) -> Option<(u64, u64)> {
+            #[cfg(relax)]
+            {
+                let mut out = [0u64; 2];
+                (unsafe { __relax_host_code_bounds(pc, out.as_mut_ptr()) } != 0).then_some((out[0], out[1]))
+            }
+            #[cfg(not(relax))]
+            {
+                let _ = pc;
+                None
             }
         }
 
@@ -1174,8 +1160,8 @@ mod x64_walk {
 
     /// Why a walk ends at a frame of the runtime that runs this compiler when the frame pointer is
     /// not known (a thread blocked in a syscall, walked from its sp and pc): that runtime's frame
-    /// sizes are its own, and no frame is taken from stack contents.
-    pub const HOST_NO_FP: &str = "it is JIT code of the runtime that runs this compiler, and its frame pointer is not known (a thread blocked in a syscall is walked from its sp and pc only)";
+    /// sizes are its own, and its frame record counts only where a call into its code proves it.
+    pub const HOST_NO_FP: &str = "it is JIT code of the runtime that runs this compiler, and its frame pointer is not known (a thread blocked in a syscall is walked from its sp and pc only, and no call into this code left its return address above that sp)";
 
     /// Each step is proven or the walk ends there, saying why (`raw.stop`): a JIT frame by its
     /// frame record (JIT code keeps one in rbp; where rbp is not known, at its unwind info's
@@ -1190,16 +1176,18 @@ mod x64_walk {
             return;
         }
         let (pcs, n) = (&mut raw.pcs, &mut raw.n);
-        raw.stop = walk_each(r, read, &mut |pc| {
+        raw.stop = walk_each(r, read, false, &mut |pc| {
             pcs[*n] = pc;
             *n += 1;
             *n < MAX_FRAMES
         });
+        // (a walk ends at NOT_CODE with that return address as its next pc)
+        raw.stop_at = if raw.stop == Some(NOT_CODE) { r.rip } else { 0 };
     }
 
     /// `walk_with`'s walk, each pc handed to `push` (innermost first; false: the walk ends after
     /// that frame's step); why it ended at its last frame, when that is not the stack's outermost.
-    pub fn walk_each(r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>, push: &mut dyn FnMut(u64) -> bool) -> Option<&'static str> {
+    pub fn walk_each(r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>, nowait: bool, push: &mut dyn FnMut(u64) -> bool) -> Option<&'static str> {
         use super::super::cfi;
         let mut top = true;
         while r.rip != 0 {
@@ -1231,14 +1219,25 @@ mod x64_walk {
                     if top {
                         return Some("it is JIT code at no call (it makes the syscall itself) and its frame pointer is not known");
                     }
-                    if !own {
-                        return Some(HOST_NO_FP);
-                    }
-                    match crate::jit::frame_pointer_at(r.rip, sp0) {
-                        Ok(fp) => r.rbp = fp,
-                        Err(why) => {
-                            return Some(why);
+                    if own {
+                        match crate::jit::frame_pointer_at_with(r.rip, sp0, nowait) {
+                            Ok(fp) => r.rbp = fp,
+                            Err(why) => {
+                                return Some(why);
+                            }
                         }
+                    } else {
+                        // the runtime that runs this compiler: its frame record is the slot above
+                        // sp holding a return address whose call calls this code (stack contents
+                        // alone prove nothing: earlier calls leave records there)
+                        #[cfg(target_os = "linux")]
+                        match host::code_bounds(look).map(|(lo, hi)| cfi::rbp_of_its_call(lo, hi, sp0, 8, read)) {
+                            Some(Ok(Some(fp))) => r.rbp = fp,
+                            Some(Err(why)) => return Some(why),
+                            _ => return Some(HOST_NO_FP),
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        return Some(HOST_NO_FP);
                     }
                 }
                 if r.rbp < sp0 || r.rbp - sp0 > 1 << 20 {
@@ -1348,9 +1347,58 @@ mod imp {
     use makepad_windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
     use makepad_windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetThreadDescription, GetThreadTimes, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME};
 
-    /// (no pause on Windows: nothing holds a thread whose registers this could give)
-    pub fn regs_now(_t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
-        None
+    /// A held thread's pc, frame pointer and callee-saved registers (rbx, r12..r15 at their
+    /// jit.rs `reg_slot` indices), read while one more suspension stops it (suspends nest).
+    pub fn regs_now(t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
+        let h = open(t, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT)?;
+        let mut ctx = Aligned(CONTEXT::default());
+        ctx.0.ContextFlags = CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
+        let got = unsafe {
+            let got = SuspendThread(h) != u32::MAX && GetThreadContext(h, &mut ctx.0).is_ok();
+            ResumeThread(h);
+            let _ = CloseHandle(h);
+            got
+        };
+        let c = &ctx.0;
+        got.then(|| (c.Rip, c.Rbp, vec![(2, c.Rbx), (3, c.R12), (4, c.R13), (5, c.R14), (6, c.R15)]))
+    }
+
+    /// The thread's handle with `access`; None once it ended.
+    fn open(t: &Thread, access: makepad_windows_sys::Win32::System::Threading::THREAD_ACCESS_RIGHTS) -> Option<HANDLE> {
+        unsafe { OpenThread(access, false, t.os_id as u32) }.ok()
+    }
+
+    /// Thread `t` suspended (the pause's hold; suspends nest, as Mach's do), and stopped once this
+    /// returns true: a suspension takes effect asynchronously, and GetThreadContext returns once it
+    /// has. Never this thread. System calls only, no allocation (the pause calls it with the
+    /// process heap locked).
+    pub fn suspend(t: &Thread) -> bool {
+        if t.os_id == self_os_id() {
+            return false;
+        }
+        let Some(h) = open(t, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT) else { return false };
+        let mut ctx = Aligned(CONTEXT::default());
+        ctx.0.ContextFlags = CONTEXT_CONTROL_AMD64;
+        unsafe {
+            let mut ok = SuspendThread(h) != u32::MAX;
+            // (a suspension that cannot be seen to stop it is taken back: not held)
+            if ok && GetThreadContext(h, &mut ctx.0).is_err() {
+                ResumeThread(h);
+                ok = false;
+            }
+            let _ = CloseHandle(h);
+            ok
+        }
+    }
+
+    /// One suspension of `t` taken back.
+    pub fn resume(t: &Thread) {
+        if let Some(h) = open(t, THREAD_SUSPEND_RESUME) {
+            unsafe {
+                ResumeThread(h);
+                let _ = CloseHandle(h);
+            }
+        }
     }
 
     pub fn self_os_id() -> u64 {
@@ -1590,20 +1638,162 @@ mod tests {
         assert!(!raw.frames().contains(&planted), "a caller guessed from stack contents: {names:?}");
         if cfg!(relax) {
             // under the JIT, `park_in_poll` is JIT code of the runtime that runs this test, which
-            // the walk asks about: it steps libc's frames by their CFI, reaches `park_in_poll`, and
-            // ends there, saying why: the garbage rbp, when poll's unwind tables restore it (a poll
-            // that saves rbp), or no frame pointer at all (one that leaves it alone: a thread
-            // blocked in a syscall gives none)
+            // the walk asks about: it steps libc's frames by their CFI and reaches `park_in_poll`.
+            // A poll that saves rbp restores the garbage one, and the walk ends there, saying so;
+            // one that leaves rbp alone leaves no frame pointer (a thread blocked in a syscall
+            // gives none), and the walk finds park_in_poll's frame record by the call into it
+            // (that runtime's code bounds) and goes on to its caller
             let pcs = raw.frames();
-            assert!(raw.stop == Some(FP_NOT_IN_STACK) || raw.stop == Some(HOST_NO_FP), "{names:?} {:?}", raw.stop);
-            assert!(pcs.len() >= 2 && names[pcs.len() - 2].contains("poll"), "poll's frame comes before the last: {names:?}");
-            let last = pcs[pcs.len() - 1];
-            assert!(host::jit_code(last - 1) && last > park_in_poll as fn(i32, u64, &AtomicU64) as usize as u64, "the last frame is park_in_poll's, the runtime's JIT code: {names:?}");
+            let poll_at = names.iter().position(|n| n.contains("poll")).expect("poll's frame");
+            let park = pcs.get(poll_at + 1).copied().unwrap_or(0);
+            assert!(host::jit_code(park.wrapping_sub(1)) && park > park_in_poll as fn(i32, u64, &AtomicU64) as usize as u64, "the frame after poll's is park_in_poll's, the runtime's JIT code: {names:?}");
+            assert_ne!(raw.stop, Some(HOST_NO_FP), "park_in_poll's frame pointer comes from the call into it: {names:?}");
+            if pcs.len() == poll_at + 2 {
+                assert_eq!(raw.stop, Some(FP_NOT_IN_STACK), "a walk that ends at park_in_poll ends at its garbage rbp: {names:?}");
+            }
         } else {
             let reached = names.iter().any(|n| n.contains("park_in_poll"));
             assert!(reached || raw.stop == Some(BLOCKED_NO_FP), "the walk neither reached park_in_poll nor said why it stopped: {names:?} {:?}", raw.stop);
             assert!(raw.n >= 1);
         }
+    }
+}
+
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
+mod lazy_compile_tests {
+    use super::{capture, capture_self, list, self_os_id, Raw};
+    use crate::jit::{call_jit, FnKey, Unit, LAZY_COMPILE_HOOK};
+    use crate::owner::{self, Class};
+    use crate::program::{DefId, Program};
+    use std::sync::{Arc, OnceLock};
+
+    static OWN: OnceLock<Vec<u64>> = OnceLock::new();
+    static REPORT: OnceLock<String> = OnceLock::new();
+    static WAITING: OnceLock<Result<Raw, &'static str>> = OnceLock::new();
+
+    // When the test harness itself runs under Relax, its rt_compile belongs to the outer JIT.
+    #[cfg(relax)]
+    fn name_hosted_frames(frames: &mut [crate::inspect::Frame]) {
+        extern "C" {
+            fn relax_backtrace_resolve(pcs: *const u64, n: usize, out: *mut u8, cap: usize) -> usize;
+        }
+        let pcs: Vec<_> = frames.iter().map(|f| f.pc).collect();
+        let resolve = |buf: &mut [u8]| unsafe { relax_backtrace_resolve(pcs.as_ptr(), pcs.len(), buf.as_mut_ptr(), buf.len()) };
+        let mut buf = vec![0; pcs.len() * 128];
+        let symbols = loop {
+            let n = resolve(&mut buf);
+            if n <= buf.len() { break std::str::from_utf8(&buf[..n]).unwrap(); }
+            buf.resize(n, 0);
+        };
+        for line in symbols.lines() {
+            let mut fields = line.split('\t');
+            let frame = &mut frames[fields.next().unwrap().parse::<usize>().unwrap()];
+            if frame.module == "?" { frame.name = fields.next().unwrap().to_owned(); }
+        }
+    }
+
+    #[cfg(relax)]
+    fn hosted_name(pc: u64) -> String {
+        let mut frame = [crate::inspect::Frame { pc, name: String::new(), at: String::new(), module: "?".into(), code: String::new(), slot: None, levels: Vec::new() }];
+        name_hosted_frames(&mut frame);
+        std::mem::take(&mut frame[0].name)
+    }
+
+    fn inside_lazy_compile() {
+        let mut pcs = Vec::new();
+        capture_self(&mut pcs);
+        OWN.set(pcs).unwrap();
+        REPORT.set(crate::inspect::report_stack()).unwrap();
+        let (tid, handle) = (self_os_id(), crate::waits::me());
+        // Queue the capture ahead of the compile's next Program request. The owner keeps
+        // that request pending until it has captured the parked caller.
+        owner::post(Class::Program, move || {
+            let start = std::time::Instant::now();
+            let result = loop {
+                if crate::waits::of(handle).is_some_and(|w| w.kind == crate::waits::Kind::Owner && w.object == Class::Program as u64) {
+                    if let Some(thread) = list().into_iter().find(|t| t.os_id == tid && t.state == "waiting") {
+                        let mut raw = Raw::new();
+                        break capture(&thread, &mut raw).map(|()| raw);
+                    }
+                }
+                if start.elapsed().as_secs() >= 5 {
+                    break Err("the lazy compile did not park on its owner request");
+                }
+                std::thread::yield_now();
+            };
+            let _ = WAITING.set(result);
+        });
+    }
+
+    #[test]
+    fn lazy_compile_stack_reaches_app_caller() {
+        isolated_test!(lazy_compile_stack_reaches_app_caller);
+        crate::borrowck::lazy::disable_gandalf();
+        let path = std::env::temp_dir().join(format!("relax-lazy-stack-{}.rs", std::process::id()));
+        std::fs::write(&path, "#![no_std]\n#[inline(never)] fn cold(x: u64) -> u64 { x ^ 7 }\npub fn app_caller(out: &mut u64) { *out = cold(*out) ^ 1; }").unwrap();
+        let session = Arc::new(crate::Session::default());
+        let mut prog = Program::new(&session);
+        prog.load_crate("stack_test", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let (entry, cold) = owner::call(Class::Program, || {
+            let slot = |name| {
+                let def = (0..u.prog.defs.len()).map(|i| DefId(i as u32)).find(|&d| u.prog.name(d) == name).unwrap();
+                u.fn_id(FnKey::Inst(def, vec![]))
+            };
+            (u.entry(slot("app_caller")), slot("cold"))
+        });
+        LAZY_COMPILE_HOOK.set(Some((cold, inside_lazy_compile)));
+        let mut value = 11u64;
+        let result = unsafe { call_jit(&mut *u, entry, &mut value as *mut u64 as u64) }.map_err(|p| p.message);
+        std::fs::remove_file(path).unwrap();
+        result.unwrap();
+        assert_eq!(value, 13);
+
+        let report = REPORT.get().expect("the first call produced a Relax stack report");
+        eprintln!("{report}");
+        // each frame's name; hosted (this harness under Relax), the outer JIT's frames print as
+        // raw pcs (their names need its owner, which a report never waits for): named here
+        let names: Vec<String> = report.lines().skip(1).map(|line| {
+            let mut words = line.split_whitespace();
+            let _pc = words.next().and_then(|pc| u64::from_str_radix(pc.trim_start_matches("0x"), 16).ok());
+            match words.next() {
+                Some(name) => name.to_string(),
+                #[cfg(relax)]
+                None => _pc.map(hosted_name).unwrap_or_default(),
+                #[cfg(not(relax))]
+                None => String::new(),
+            }
+        }).collect();
+        let compile = names.iter().position(|n| n.ends_with("::rt_compile"));
+        let glue = names.iter().position(|n| n == "relax::lazy_entry");
+        let app = names.iter().position(|n| n == "stack_test::app_caller");
+        assert!(compile.is_some(), "the report names rt_compile: {report}");
+        assert!(compile < glue, "the report names lazy_entry below rt_compile: {report}");
+        assert!(glue < app, "the report names app_caller below lazy_entry: {report}");
+
+        let own = OWN.get().expect("the first call of cold entered rt_compile");
+        let waiting = WAITING.get().expect("the owner sampled the requester").as_ref().unwrap();
+        let mut partial = Vec::new();
+        let mut stacks = crate::inspect::symbolise(&[own.clone(), waiting.frames().to_vec()], &mut partial);
+        let mut reached = Vec::new();
+        for (label, frames) in ["self", "owner wait"].into_iter().zip(&mut stacks) {
+            #[cfg(relax)]
+            name_hosted_frames(frames);
+            eprintln!("{label} stack:");
+            for f in frames.iter() {
+                eprintln!("  {:#x} {}", f.pc, f.name);
+            }
+            let compile = frames.iter().position(|f| f.name.ends_with("::rt_compile"));
+            let app = frames.iter().position(|f| f.name == "stack_test::app_caller");
+            reached.push(compile.is_some() && app > compile);
+            if label == "owner wait" {
+                let glue = frames.iter().position(|f| f.name == "relax::lazy_entry");
+                assert!(compile.is_some() && compile < glue && glue < app, "owner wait did not name lazy_entry between rt_compile and app_caller: {glue:?}, {partial:?}");
+            }
+        }
+        assert_eq!(reached, [true, true], "app_caller below rt_compile (self, owner wait); wait stop {:?}, {partial:?}", waiting.stop);
     }
 }
 

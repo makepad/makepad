@@ -7,7 +7,7 @@
 # up to 2 s for the unit lock while the threads kept compiling.)
 R=$1
 H=$(cd "$(dirname "$0")" && pwd)
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 mkdir "$C/p" "$C/p/src"
 printf '[package]\nname = "relax-exit-compiling"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n\n[workspace]\n' > "$C/p/Cargo.toml"
@@ -64,4 +64,6 @@ if bad:
 # the temp dir this script made (mktemp -d), nothing else
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
+# (the verdict is the exit status too: a check reads that)
+sys.exit(1 if bad else 0)
 PY

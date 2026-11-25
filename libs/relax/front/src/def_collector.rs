@@ -22,7 +22,7 @@ pub fn collect_definitions(prog: &mut Program, owner: DefId) -> Result<(), Strin
     let file = prog.def(owner).file;
     let pf = prog.files[file as usize].clone();
     let scope = prog.def(owner).scope;
-    let mut visitor = DefCollector { prog, ast: &pf.ast, file, parent_def: owner, scope, legacy: false, legacy_attrs: None, legacy_names: &NO_NAMES, call_names: Some(Vec::new()), const_ribs: false, bindings: Vec::new(), checking_defs: false, creates_defs: false, legacy_calls: Default::default(), legacy_children: Vec::new() };
+    let mut visitor = DefCollector { prog, ast: &pf.ast, file, parent_def: owner, scope, legacy: false, legacy_attrs: None, legacy_names: &NO_NAMES, call_names: Some(Vec::new()), const_ribs: false, bindings: Vec::new(), checking_defs: false, creates_defs: false, creates_defs_at: 0, legacy_calls: Default::default(), legacy_children: Vec::new(), restricted: Vec::new(), owner_lo: 0 };
     visitor.visit_item(owner)?;
     // an owner with a constant or generic-default rib is walked by the legacy pass (its
     // late.rs const-rib checks report there): no entry
@@ -53,6 +53,10 @@ pub struct LegacyOwner {
     pub ranges: Vec<(u32, u32)>,
     pub calls: crate::fxhash::HashMap<ExprId, LegacyConstArgs>,
     pub children: Vec<(ExprId, DefId)>,
+    /// the paths check_generic_path reported (a generic parameter a constant may not name, a
+    /// forward default, a const parameter's type), as offsets from the owner item's start: rustc
+    /// resolves each to an error (Res::Err), which reports nothing more (Program::const_param_restricted)
+    pub restricted: Vec<u32>,
 }
 
 pub fn lower_legacy_const_generics(prog: &mut Program) -> usize {
@@ -153,18 +157,19 @@ pub fn lower_legacy_const_owners(prog: &mut Program, owners: &[DefId]) -> usize 
         // definition collection over the same syntax): every lower_legacy_call returns before
         // resolving, the walk splits nothing and creates nothing -- its result is empty
         if prog.legacy_call_names.get(&owner).is_some_and(|c| !c.iter().any(|s| names.contains(s))) {
-            results.push((owner, std::sync::Arc::new(LegacyOwner { file, ranges: Vec::new(), calls: Default::default(), children: Vec::new() })));
+            results.push((owner, std::sync::Arc::new(LegacyOwner { file, ranges: Vec::new(), calls: Default::default(), children: Vec::new(), restricted: Vec::new() })));
             continue;
         }
         let pf = prog.files[file as usize].clone();
         let mut visitor = DefCollector { prog, ast: &pf.ast, file, parent_def: owner, scope,
-            legacy: true, legacy_attrs: Some(&attrs), legacy_names: &names, call_names: None, const_ribs: false, bindings: Vec::new(), checking_defs: false, creates_defs: false,
-            legacy_calls: Default::default(), legacy_children: Vec::new() };
+            legacy: true, legacy_attrs: Some(&attrs), legacy_names: &names, call_names: None, const_ribs: false, bindings: Vec::new(), checking_defs: false, creates_defs: false, creates_defs_at: 0,
+            legacy_calls: Default::default(), legacy_children: Vec::new(), restricted: Vec::new(), owner_lo: pf.ast.item(item).lo };
         if let Err(error) = visitor.visit_item(owner) { visitor.prog.errors.push(error); }
         let calls = visitor.legacy_calls;
         let children = visitor.legacy_children;
+        let restricted = visitor.restricted;
         let ranges = if calls.is_empty() { Vec::new() } else { prog.item_expr_ranges(file, item) };
-        let result = LegacyOwner { file, ranges, calls, children };
+        let result = LegacyOwner { file, ranges, calls, children, restricted };
         results.push((owner, std::sync::Arc::new(result)));
     }
     // No preemption point exists in declaration collection. The front writer
@@ -330,13 +335,21 @@ struct DefCollector<'a> {
     bindings: Vec<ValueRib>,
     checking_defs: bool,
     creates_defs: bool,
+    /// where the checked argument first creates a definition (rustc's error span)
+    creates_defs_at: u32,
     legacy_calls: crate::fxhash::HashMap<ExprId, LegacyConstArgs>,
     legacy_children: Vec<(ExprId, DefId)>,
+    /// the legacy pass: LegacyOwner::restricted, and the owner item's start they are offsets from
+    restricted: Vec<u32>,
+    owner_lo: u32,
 }
 
 impl DefCollector<'_> {
     fn create_def(&mut self, node: NodeId, name: Option<crate::program::Sym>, kind: DefKind) -> DefId {
-        if self.checking_defs { self.creates_defs = true; return self.parent_def; }
+        if self.checking_defs {
+            if let (false, NodeId::AnonConst(e) | NodeId::InlineConst(e) | NodeId::Closure(e)) = (self.creates_defs, node) { self.creates_defs_at = self.ast.expr(e).lo; }
+            self.creates_defs = true; return self.parent_def;
+        }
         let key = (self.file, node);
         if let Some(&def) = self.prog.node_id_to_def_id.get(&key) { return def; }
         let next = self.prog.def_disambiguators.entry((self.parent_def, kind, name)).or_default();
@@ -433,16 +446,20 @@ impl DefCollector<'_> {
             }
         }
         if !found { return; }
+        // rustc_resolve late.rs / diagnostics.rs ResolutionError: ParamInNonTrivialAnonConst and
+        // ParamInEnumDiscriminant carry no code; the path then resolves to an error
         let message = if forward {
-            Some("E0128: generic parameter defaults cannot reference parameters before they are declared".to_string())
+            Some("E0128: generic parameter defaults cannot reference parameters before they are declared")
         } else { restriction.map(|r| match r {
-            ConstRestriction::NonTrivial => format!("generic parameters may not be used in const operations: `{name}`"),
-            ConstRestriction::Discriminant => format!("generic parameters may not be used in enum discriminant values: `{name}`"),
-            ConstRestriction::ParamTy => format!("E0770: the type of const parameters must not depend on other generic parameters: `{name}`"),
+            ConstRestriction::NonTrivial => "generic parameters may not be used in const operations",
+            ConstRestriction::Discriminant => "generic parameters may not be used in enum discriminant values",
+            ConstRestriction::ParamTy => "E0770: the type of const parameters must not depend on other generic parameters",
         }) };
         if let Some(message) = message {
-            let error = self.prog.record_error(self.file, p.lo, "resolve", message);
+            let error = if message.starts_with('E') { self.prog.record_error(self.file, p.lo, "resolve", message.into()) }
+                else { self.prog.record_uncoded_error(self.file, p.lo, "resolve", message.into()) };
             if !self.prog.errors.contains(&error) { self.prog.errors.push(error); }
+            if p.lo >= self.owner_lo && !self.restricted.contains(&(p.lo - self.owner_lo)) { self.restricted.push(p.lo - self.owner_lo); }
         }
     }
 
@@ -705,7 +722,10 @@ impl DefCollector<'_> {
                 Stmt::Expr(_, e) => self.visit_expr(e),
                 Stmt::Attrs(r) => self.visit_expr(self.ast.row(r).expr),
                 Stmt::Item(i) => {
-                    if self.checking_defs { self.creates_defs = true; continue; }
+                    if self.checking_defs {
+                        if !self.creates_defs { self.creates_defs_at = self.ast.item(i).lo; }
+                        self.creates_defs = true; continue;
+                    }
                     if !self.legacy {
                         if let Some(&d) = self.prog.item_defs.get(&(self.file, i.0)) {
                             self.prog.defs[d.0 as usize].parent = self.parent_def;
@@ -889,12 +909,13 @@ impl DefCollector<'_> {
                 self.legacy_children.push((arg, child));
                 // WillCreateDefIdsVisitor (expr.rs:90-109) uses the same AST walk;
                 // the checking mode records definition-producing nodes without installing them.
-                self.checking_defs = true; self.creates_defs = false;
+                self.checking_defs = true; self.creates_defs = false; self.creates_defs_at = self.ast.expr(arg).lo;
                 self.visit_expr(arg);
                 self.checking_defs = false;
+                // (once per call, at the node that creates the definition: InvalidLegacyConstGenericArg)
                 if self.creates_defs && !split.invalid {
-                    let error = self.prog.record_error(self.file, self.ast.expr(arg).lo, "legacy_const_generics",
-                        "invalid legacy const generic argument; use a const generic argument in the path instead".into());
+                    let error = self.prog.record_uncoded_error(self.file, self.creates_defs_at, "resolve",
+                        "invalid argument to a legacy const generic: cannot have const blocks, closures, async blocks or items".into());
                     if !self.prog.errors.contains(&error) { self.prog.errors.push(error); }
                     split.invalid = true;
                 }
@@ -1118,7 +1139,7 @@ mod legacy_attribute_tests {
 crate::collected_enum!(NodeId; 0 => AnonConst(e), 1 => InlineConst(e), 2 => OpaqueTy(t), 3 => AsyncReturn(i), 4 => AsyncBody(i), 5 => Closure(e), 6 => Field(n));
 crate::collected_fields!(LegacyConstArgs, callee, positions, const_args, value_args, invalid);
 
-crate::collected_fields!(LegacyOwner, file, ranges, calls, children);
+crate::collected_fields!(LegacyOwner, file, ranges, calls, children, restricted);
 
 #[cfg(test)]
 mod round45_tests {

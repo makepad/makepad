@@ -1,3 +1,4 @@
+// rejects: E0080
 // compile-fail: each initializer must report E0080, with overflow checks off too.
 const U8_ADD: u8 = { let x = 255u8; x + 1 };
 const U8_SUB: u8 = { let x = 0u8; x - 1 };

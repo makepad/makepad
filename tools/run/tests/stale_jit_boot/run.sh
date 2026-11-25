@@ -31,6 +31,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relax-api = { path = "$R/libs/relax_api" }
+makepad-thread-local = { path = "$R/libs/thread_local" }
 EOF
 printf '\npub fn stale_jit_boot_marker() {}\n' >> "$T/ws/fixture/src/lib.rs"
 fails=""

@@ -5,7 +5,7 @@
 //! value until it ends (then it is dropped as usual).
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::{AccessError, LocalKey};
+use makepad_thread_local::{AccessError, LocalKey};
 
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 
@@ -70,7 +70,7 @@ macro_rules! memo_local {
         $(
             $(#[$attr])*
             $vis const $name: $crate::memo_local::MemoLocal<$ty> = {
-                std::thread_local! {
+                $crate::__thread_local::thread_local! {
                     static CELL: $crate::memo_local::MemoCell<$ty> = Default::default();
                 }
                 $crate::memo_local::MemoLocal::new(&CELL)

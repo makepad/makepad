@@ -8,7 +8,7 @@
 # "cache_warm_statics: FAILED ..."; exit 0 / 1.
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 rc=()
 for k in 1 2 3; do

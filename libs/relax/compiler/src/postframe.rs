@@ -520,6 +520,7 @@ pub(crate) fn before_present_line(main_ns: u64) -> String {
             crate::jit::MAIN_LOWER_WHY.iter().enumerate().filter(|(_, n)| n.load(Relaxed) > 0).map(|(i, n)| format!("af{} {}", i, n.load(Relaxed))).collect::<Vec<_>>().join(", "))
     } + &format!("; bodies type-checked {} ({} of them by the app check, before main or beside it: {} crates, {:.0} ms)",
         crate::type_queries::BODIES_CHECKED.load(Relaxed), crate::check::RUN_CHECK[1].load(Relaxed), crate::check::RUN_CHECK[0].load(Relaxed), crate::check::RUN_CHECK[2].load(Relaxed) as f64 / 1e6)
+        + &format!("; process cpu {:.0} ms since its start", crate::first_frame::process_cpu_ns() as f64 / 1e6)
 }
 
 pub(crate) fn main_owner_wait(t0: u64, w: u64) {

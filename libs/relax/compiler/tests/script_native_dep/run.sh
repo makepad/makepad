@@ -6,9 +6,11 @@
 # and the program prints what cargo's does (relax issue 174). Then what hands a build script's run
 # its native build grants nothing: a run without `--allow-c` that names the build's receipt as a
 # script's run would (RELAX_SCRIPT_DEPTH, RELAX_NATIVE_RECEIPT) loads no native library, and says
-# so. One line per case; the last is "script_native_dep: ok" or "script_native_dep: FAILED" (exit 1).
+# so. A build-dependency of a native script that the program uses too compiles for real only as
+# the host unit the script needs: the run keeps the target's std out of reach to show it. One line
+# per case; the last is "script_native_dep: ok" or "script_native_dep: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 [ -n "$T" ] && [ -d "$T" ] || exit 2
 trap 'rm -rf "$T"' EXIT
 export RELAX_CACHE=off CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=$T/target RELAX_PANIC_PARK=0
@@ -17,12 +19,17 @@ FAILS=0
 case_is() { # name ok?
     if [ "$2" = 1 ]; then echo "script_native_dep: $1: ok"; else echo "script_native_dep: $1: FAILED"; FAILS=$((FAILS + 1)); fi
 }
-OUT=$(cd "$H" && "$1" run --quiet --allow-c snd-app 2>&1)
+# The native build compiles only host units for real: snd-callback's script build-depends on
+# snd-shared, which the program uses too, and that program-side unit is a stub. The run's target
+# std is out of reach (RUSTFLAGS reach only target units under the build's --target): a real
+# compile of a target unit fails there, as on a toolchain without the target's std (E0463)
+mkdir -p "$T/no-target-std"
+OUT=$(cd "$H" && RUSTFLAGS="--sysroot=$T/no-target-std" "$1" run --quiet --allow-c snd-app 2>&1)
 rc=$?
 echo "$OUT" | tail -5
 ok=0
 [ $rc = 0 ] && echo "$OUT" | grep -qx "script 42 program 41" && ok=1
-case_is "a build script with a native build-dependency" $ok
+case_is "a build script with a native build-dependency, the target std out of reach" $ok
 RECEIPT=$(ls "$T"/target/relax/native-scripts-*.json 2>/dev/null | head -1)
 OUT=$(cd "$H" && RELAX_SCRIPT_DEPTH=1 RELAX_NATIVE_RECEIPT=$RECEIPT "$1" run --quiet snd-app 2>&1)
 rc=$?

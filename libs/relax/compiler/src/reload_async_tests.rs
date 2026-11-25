@@ -71,8 +71,11 @@ pub(crate) fn live_app(tag: &str, files: &[(&str, &str)], names: &[&str], run: i
             assert!(text.contains(from), "{file}: {from}");
             *text = text.replace(from, to);
         }
-        let p = path(file);
-        let index = unsafe { (*up).prog.current_source_files(|q| q == p)[&p] };
+        // (found as a path, not a string: on Windows the program spells a `mod` file's path
+        // otherwise than this join does -- `#[path]` files and the root as given)
+        let p = crate::vfs::normalize_path(&path(file));
+        let found = unsafe { (*up).prog.current_source_files(|q| crate::vfs::normalize_path(q) == p) };
+        let (p, index) = found.into_iter().next().unwrap_or_else(|| panic!("{file}: no source file of the program is {p}"));
         unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file: index, path: p, src: text.clone().into_bytes() }]) }
     };
     run(&call, &mut edit);

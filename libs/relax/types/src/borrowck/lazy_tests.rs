@@ -44,8 +44,9 @@ struct TestFront {
     lock: std::sync::RwLock<()>,
 }
 impl TestFront {
-    fn new(block_call: u64) -> Arc<Self> {
-        let (prog, tcx) = fixture("app", SOURCE);
+    fn new(block_call: u64) -> Arc<Self> { Self::of(SOURCE, block_call) }
+    fn of(source: &str, block_call: u64) -> Arc<Self> {
+        let (prog, tcx) = fixture("app", source);
         Arc::new(Self { prog, tcx, quiet: AtomicU64::new(0), calls: AtomicU64::new(0), block_call,
             entered: Barrier::new(2), release: Barrier::new(2), panic_stored: AtomicBool::new(false), lock: std::sync::RwLock::new(()) })
     }
@@ -229,11 +230,16 @@ fn guard_filters_non_app() {
     assert!(app_crate(&prog, 0));
     set_app_scope(Vec::new());
     assert!(!app_crate(&prog, 0));
-    // The one all-crates switch applies on top of the compiled default.
+    // The one all-crates switch applies on top of the compiled default. It is read once a run: a
+    // change of the environment is seen after the run's end (reset_statics), as a fresh process
+    // sees it.
     assert!(!admit(&prog, 0));
     std::env::set_var("RELAX_GANDALF_ALL", "1");
+    assert!(!admit(&prog, 0), "the switch is read once a run");
+    unsafe { super::super::event::reset_statics() };
     assert!(admit(&prog, 0));
     std::env::set_var("RELAX_GANDALF_ALL", "0");
+    unsafe { super::super::event::reset_statics() };
     assert!(!admit(&prog, 0));
     std::env::remove_var("RELAX_GANDALF_ALL");
     unsubscribe(id);
@@ -424,6 +430,30 @@ fn live_epoch_carries_verdicts_of_unreached_owners() {
     assert!(matches!(wait_verdict(&front, edited), FnVerdict::Errors(_)));
     assert!(matches!(wait_verdict(&front, queued), FnVerdict::Errors(_)));
     assert_eq!(wait_checked(checked0 + 2) - checked0, 2, "the carried clean owner was checked again");
+    stop();
+}
+
+#[test]
+fn a_live_patch_only_asks_about_its_own_owners() {
+    if child("a_live_patch_only_asks_about_its_own_owners") { return; }
+    let front = TestFront::new(0);
+    let world = TestFront::of(&[SOURCE, "fn helper() {} fn world_clean() {}"].concat(), 0);
+    let clean = front.enqueue("clean", false);
+    let world_clean = world.enqueue("world_clean", false);
+    assert!(world_clean.0 as usize >= front.prog.defs.len(), "the world's owner must be outside the patched program's defs");
+    front.ungate();
+    world.ungate();
+    assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
+    assert_eq!(wait_verdict(&world, world_clean), FnVerdict::Clean);
+
+    let asked = std::cell::RefCell::new(Vec::new());
+    front.patch(&|d| {
+        asked.borrow_mut().push(d);
+        Carry::Drop
+    });
+    assert_eq!(asked.into_inner(), [clean]);
+    assert_eq!(verdict(front.identity(), clean, &[], front.epoch()), FnVerdict::Unchecked("not queued".into()));
+    assert_eq!(verdict(world.identity(), world_clean, &[], world.epoch()), FnVerdict::Clean);
     stop();
 }
 

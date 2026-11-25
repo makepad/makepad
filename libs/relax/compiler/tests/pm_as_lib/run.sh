@@ -4,7 +4,7 @@
 # program; outside a macro call proc_macro::is_available() is false. Prints "pm_as_lib: ok" or
 # "pm_as_lib: FAILED" (exit 1). The expected line is what `cargo run -p pm-as-lib-app` prints.
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off CARGO_NET_OFFLINE=true
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet pm-as-lib-app 2>>"$ERR")

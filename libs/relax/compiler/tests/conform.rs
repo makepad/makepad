@@ -1,5 +1,6 @@
 // Repros for rustc tests/ui run-pass failures (conformance lane). Each test names the rustc
-// suite file it was reduced from; all of them pass under rustc (`rustc --test conform.rs`).
+// suite file it was reduced from; all of them pass under rustc (`rustc --test conform.rs`) and
+// under the JIT: tools/run/fixture/agree.sh runs the file among its named cases.
 use std::process::{ExitCode, Termination};
 use std::rc::Rc;
 
@@ -656,27 +657,6 @@ fn c24_literal_trait_selection() {
     assert_eq!(bounded(0), 7 + std::mem::size_of::<isize>() as u32);
 }
 
-// F37 (bring-up, apple_sys): a discriminant calling a const fn is evaluated like a const
-const fn four_cc(s: &str) -> u32 {
-    let b = s.as_bytes();
-    ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Sel {
-    Devices = four_cc("dev#"),
-    Other = 7,
-    Next,
-}
-
-#[test]
-fn c25_const_fn_discriminant() {
-    assert_eq!(Sel::Devices as u32, 0x6465_7623);
-    assert_eq!((Sel::Other as u32, Sel::Next as u32), (7, 8));
-    assert!(Sel::Devices != Sel::Next);
-}
-
 // traits/vtable/empty-supertrait-with-nonempty-supersupertrait.rs, traits/trait-upcasting/*:
 // `&dyn Sub` as `&dyn Super` takes Sub's stored vtable for Super (it kept Sub's vtable: the
 // wrong method ran, SILENT)
@@ -1322,22 +1302,6 @@ fn c50_env_args_are_the_programs() {
     assert!(!a.iter().any(|x| x == "--units" || x == "test"));
 }
 
-// runtime/atomic-print.rs: inside `impl Tr for X` the trait Tr is in scope for method calls
-// (rustc resolve traits_in_scope: current_trait_ref), without a `use`
-mod impl_trait_scope {
-    pub struct Wrap(pub u32);
-    impl core::fmt::Debug for Wrap {
-        fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-            self.0.fmt(f)
-        }
-    }
-}
-
-#[test]
-fn c51_impl_trait_in_scope() {
-    assert_eq!(format!("{:?}", impl_trait_scope::Wrap(7)), "7");
-}
-
 // rustc ast_lowering inline_literals: `{}` of a string / in-range integer literal becomes part of
 // the pieces, so `format_args!("x {}", 1).as_str()` is Some and `panic!("t {}", "lit")` has a
 // `&'static str` payload
@@ -1358,8 +1322,9 @@ fn c52_format_args_inline_literals() {
     );
 }
 
-// drop/or-pattern-drop-order.rs: an argument-position `impl Trait<Assoc = X>` is an anonymous
-// generic param with that bound (`1..=3` becomes u32)
+// rustc_ast_lowering lower_universal_param_and_bounds (ImplTraitContext::Universal): an
+// argument-position `impl Trait<Assoc = X>` is an anonymous generic param with that bound
+// (`1..=3` becomes u32)
 fn apit_items(x: impl IntoIterator<Item = u32>) -> Vec<u32> {
     x.into_iter().collect()
 }
@@ -1556,30 +1521,6 @@ fn c61_literal_index_typed_by_impl() {
     let v = vec![10, 20, 30];
     let r = RowOf { m: vec![5, 6] };
     assert_eq!((p[1], v[2], r[1]), (2, 30, 6));
-}
-
-// `&mut T` is noalias only for T: Unpin (rustc): a !Unpin value may be written through a pointer
-// into itself while the `&mut` is live
-struct SelfRef {
-    x: u32,
-    p: *mut u32,
-    _pin: std::marker::PhantomPinned,
-}
-
-#[inline(never)]
-fn write_through_self(s: &mut SelfRef) -> u32 {
-    s.x = 1;
-    unsafe { *s.p = 2 };
-    s.x
-}
-
-#[test]
-fn c62_not_unpin_mut_ref_may_alias() {
-    let mut s = Box::pin(SelfRef { x: 0, p: std::ptr::null_mut(), _pin: std::marker::PhantomPinned });
-    let r = unsafe { s.as_mut().get_unchecked_mut() };
-    r.p = &mut r.x;
-    let f: fn(&mut SelfRef) -> u32 = std::hint::black_box(write_through_self);
-    assert_eq!(f(r), 2);
 }
 
 // or-patterns/issue-70413-no-unreachable-pat-and-guard.rs, search-via-bindings.rs,

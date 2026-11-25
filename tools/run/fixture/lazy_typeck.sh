@@ -1,10 +1,12 @@
 #!/bin/bash
 # Regression test: `makepad run`'s lazy type check never runs unchecked code and never ends the
-# program over a type error (the user's rule, 2026-11-02). tools/run/fixture/lazy_typeck: an app
+# program over a type error a live edit can fix (the user's rule, 2026-11-02). tools/run/fixture/lazy_typeck: an app
 # crate and two dependencies under libs/ (outside the app scope) with a broken body and impls.
 #   app-error  : an error in the app's own crate refuses the run before main, as cargo's build would
 #   background : while main runs, the unused broken body (E0308), missing method (E0046), short
-#                parameter list (E0050) and extra method (E0407) are all reported
+#                parameter list (E0050) and extra method (E0407) are all reported; the memory report
+#                (RELAX_MEM_REPORT, asked for through RELAX_MEM_SNAPSHOT once they are) has the item
+#                pass's own tag, and RELAX_BG_TRACE names the dependency whose items it checks
 #   app-items  : an unused, incomplete app impl refuses the run before main with E0046
 #   items-nested: a body edit that introduces an ill-formed nested type invalidates a clean item verdict
 #   park       : a run that calls `broken` parks at the call with the compile error and stays up, its
@@ -16,6 +18,8 @@
 #                same run keeps calling the previous code
 #   unattended : calling `broken` under `run --unattended` (an app a test starts) parks nothing: the run
 #                ends at once, non-zero, with the compile error's text
+#   unwatched-dep: calling `broken` where the live watcher does not look (the dependency moved to a
+#                registry-shaped folder) parks nothing: the run stops at once, saying why
 #   trait-unattended: a call through the incomplete impl under --unattended ends with its E0046
 #   unwatched  : a hidden run with no observer or terminal parks a panic briefly, even under
 #                --quiet; it ends by itself within 60 s and explains how --unattended avoids the park
@@ -65,17 +69,26 @@ extra='E0407: method `extra` is not a member of trait'
 
 # background: main's first line and the diagnostics can arrive in either order
 # shellcheck disable=SC2086
-TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-bg" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app > "$dir/bg.log" 2>&1 &
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-bg" RELAX_MEM_REPORT=1 RELAX_MEM_SNAPSHOT="$dir/bg.snap" RELAX_BG_TRACE=1 MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app > "$dir/bg.log" 2>&1 &
 pid=$!
 if wait_for "$dir/bg.log" $pid "E0308" && wait_for "$dir/bg.log" $pid "$missing_at" &&
    wait_for "$dir/bg.log" $pid "$short_at" && wait_for "$dir/bg.log" $pid "$extra"; then
   wait_for "$dir/bg.log" $pid "main runs" || fail="$fail background-main-never-ran"
   [ "$(grep -Fc "$extra" "$dir/bg.log")" = 1 ] || fail="$fail background-extra-reported-twice"
   kill -0 $pid 2>/dev/null || fail="$fail background-run-ended"
+  # the memory report the run writes when the snapshot file appears: the item pass's own row
+  touch "$dir/bg.snap"
+  if wait_for "$dir/bg.report" $pid "harness snapshot"; then
+    grep -q ':   item-pass ' "$dir/bg.report" || { fail="$fail background-item-pass-untagged"; grep -E ':   [a-z-]+ +[0-9]' "$dir/bg.report" | head -12; }
+  else
+    fail="$fail background-no-memory-report"
+  fi
 else
   fail="$fail background-not-reported"; tail -8 "$dir/bg.log"
 fi
 kill $pid 2>/dev/null; wait $pid 2>/dev/null
+# the trace named the items of the dependency with the incomplete impl
+grep -Fq 'relax bg trace: the items of `lazy_typeck_store`' "$dir/bg.log" || fail="$fail background-trace-silent"
 
 # app-items: nothing calls this app impl; its E0046 refuses the run before main
 cp -R "$dir/fx" "$dir/fx-items"
@@ -115,6 +128,21 @@ TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-nested" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN
 # shellcheck disable=SC2086
 out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-unattended" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run --unattended lazy-typeck-app -- call 2>&1); rc=$?
 { [ $rc != 0 ] && echo "$out" | grep -q "compile error in lazy_typeck_dep::broken" && ! echo "$out" | grep -q "parked"; } || { fail="$fail unattended-parked:$rc"; echo "$out" | tail -8; }
+
+# unwatched-dep: keep the local path dependency, but put its code where the live watcher skips it
+# (still under libs/: outside the app scope, as the run checks the app's own crates whole first)
+fx_unwatched="$dir/fx-unwatched"
+registry_dep="libs/cache/.cargo/registry/src/index-0/lazy-typeck-dep-0.1.0"
+cp -R "$dir/fx" "$fx_unwatched" || exit 1
+mkdir -p "$fx_unwatched/${registry_dep%/*}" || exit 1
+mv "$fx_unwatched/libs/dep" "$fx_unwatched/$registry_dep" || exit 1
+perl -pi -e "s|libs/dep|$registry_dep|" "$fx_unwatched/Cargo.toml" "$fx_unwatched/app/Cargo.toml" || exit 1
+perl -pi -e "s|[.][.]/dep|../../$registry_dep|" "$fx_unwatched/libs/store/Cargo.toml" || exit 1
+log="$dir/unwatched-dep.log"
+# shellcheck disable=SC2086
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-unwatched-dep" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$fx_unwatched" $J run lazy-typeck-app -- call > "$log" 2>&1; rc=$?
+{ [ "$rc" != 0 ] && grep -Eq '^relax: compile error in lazy_typeck_dep::broken: .* at .*/\.cargo/registry/.*:[0-9]+:[0-9]+\. This run does not watch that source .*no live edit can fix it' "$log" &&
+  ! grep -Fq 'compile error parked' "$log"; } || { fail="$fail unwatched-dep:$rc"; tail -8 "$log"; }
 
 # trait-unattended: building dep's first::<store::Store> finds the incomplete impl in store. The
 # compiler's own panic there becomes the build's error and is never printed as a panic (trait-park too)

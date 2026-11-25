@@ -1,3 +1,4 @@
+// rejects: literal out of range for `u8`
 // overflowing_literals (deny by default): consts, a negated literal, a const argument and a
 // `#[deny]` statement inside an `#[allow]` fn. rustc rejects all six literals.
 pub const A: u8 = 256;

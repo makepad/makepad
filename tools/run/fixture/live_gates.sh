@@ -16,9 +16,12 @@
 #   restart: an edit of the provided crate needs a JIT rebuild the session cannot make; the next
 #            save says "restart pending" in the output (it was an event alone);
 #   term:    a SIGTERM to `makepad test --live` (a driver's terminate) ends the run it started
-#            and that run's process group too (the run kept watching and testing, relax#88).
+#            and that run's process group too while a failed compile waits for a save (relax#88).
+#            A bad array-length const must hold once, then a repair must pass on a restarted run.
 #            Before that, its package's derive of its own runs in the macro world: an edit of the
 #            file with the derive builds no second world (the load's is kept; relax#144).
+#   overlay: a held test whose package exists only in a mounted store restarts when the repair's
+#            edits ledger is renamed into place.
 # Each step waits on the line it expects. Run from the workspace root; works on copies under the
 # tree's target folder. Prints "live_gates: ok" or "live_gates: FAILED <step>"; exit 0 / 1.
 ROOT=$(pwd)
@@ -30,11 +33,13 @@ S=$(mktemp -d "$ROOT/target/live_gates.XXXXXX") || exit 1
 pid=""
 tp=""
 child=""
+pack=""
 finish() {
     [ -n "$pid" ] && kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null
     [ -n "$tp" ] && kill "$tp" 2>/dev/null && wait "$tp" 2>/dev/null
     # the term step's run, by its recorded pid (and its group, which it leads with the fix)
     [ -n "$child" ] && { kill -- "-$child" || kill "$child"; } 2>/dev/null
+    [ -n "$pack" ] && rm -rf -- "$pack"
     rm -rf -- "$S"
 }
 trap finish EXIT
@@ -61,6 +66,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relax-api = { path = "$ROOT/libs/relax_api" }
+makepad-thread-local = { path = "$ROOT/libs/thread_local" }
 EOF
 cat > "$S/ws/app/Cargo.toml" <<'EOF'
 [package]
@@ -90,9 +96,13 @@ cat > "$S/ws/libs/term/src/lib.rs" <<'EOF'
 #[derive(relax_live_derive::Describe)]
 pub struct Record;
 
+pub const LIMIT: usize = 3;
+
 #[test]
 fn adds() {
     assert_eq!(1 + 1, 2);
+    let bytes: [u8; LIMIT] = [0; LIMIT];
+    assert_eq!(bytes.len(), LIMIT);
 }
 
 #[test]
@@ -186,6 +196,41 @@ perl -pi -e 's/1 \+ 1, 2/2 + 0, 2/' "$S/ws/libs/term/src/lib.rs"
 [ "$(grep -cE -m2 '^testverdict .*failed=0' < <(timeout 60 tail --pid="$tp" -n +1 -f "$S/tlog" 2>/dev/null))" = 2 ] || { tail -20 "$S/tlog"; fail world-edit-verdict; }
 [ "$(grep -c 'boot-trace: macro world: std' "$S/tlog")" = 1 ] || { grep 'macro world' "$S/tlog"; fail world-built-again; }
 times="$times world $(date +%s.%N | awk -v t0="$t0" '{printf "%.1f", $1 - t0}')s"
+# Each edit must produce its own evidence, even when both broken runs name the same file.
+source_file="$S/ws/libs/term/src/lib.rs"
+hold='relax test: held: the tests did not compile; the next save starts the next run'
+test_fail() {
+    tail -n +"$first" "$S/tlog" | grep -E '^relax live: restarting |E0308|^relax test: held:|^testverdict '
+    tail -n +"$first" "$S/tlog" | tail -20
+    fail "$1"
+}
+test_said() {
+    grep -qE -m1 "$1" < <(timeout 60 tail --pid="$tp" -n +"$first" -f "$S/tlog") || test_fail "$2"
+}
+break_and_hold() {
+    first=$(( $(wc -l < "$S/tlog") + 1 ))
+    perl -pi -e 's/^pub const LIMIT: usize = [0-9]+;/pub const LIMIT: usize = "bad";/' "$source_file"
+    test_said "^$hold$" compile-hold
+    tail -n +"$first" "$S/tlog" > "$S/broken"
+    grep -q '^relax live: restarting (' "$S/broken" || test_fail compile-restart
+    grep -q 'E0308' "$S/broken" || test_fail compile-diagnostic
+    [ "$(grep -Fxc "$hold" "$S/broken")" = 1 ] || test_fail compile-hold-count
+    grep -Ei 'internal compiler error|^running [0-9]+ tests?|^test (adds|describes) \.\.\.|^test result:|^testverdict ' "$S/broken" && test_fail compile-ran
+    kill -0 "$tp" || test_fail compile-exited
+    local harness
+    harness=$(ps -o pid= --ppid "$tp" | tr -d ' ')
+    case "$harness" in ''|*[!0-9]*) test_fail compile-child;; esac
+    TMPDIR="$S/tmp" timeout 5 "$S/makepad" inspect "$harness" live as=json | grep -q '"held":1' || test_fail compile-live
+    TMPDIR="$S/tmp" timeout 5 "$S/makepad" inspect "$harness" inputs as=json | grep -q '"err":"held: no run:' || test_fail compile-inputs
+    grep -E '^relax live: restarting |E0308|^relax test: held:' "$S/broken"
+}
+break_and_hold
+first=$(( $(wc -l < "$S/tlog") + 1 ))
+perl -pi -e 's/^pub const LIMIT: usize = "bad";/pub const LIMIT: usize = 4;/' "$source_file"
+test_said '^testverdict .*ran=2 passed=2 failed=0 .*restarted=true( |$)' compile-repair
+tail -n +"$first" "$S/tlog" | grep -m1 '^testverdict '
+[ "$(grep -Fxc "$hold" "$S/tlog")" = 1 ] || test_fail compile-hold-count
+break_and_hold
 child=$(ps -o pid= --ppid "$tp" | tr -d ' ')
 case "$child" in ''|*[!0-9]*) fail term-child-pid;; esac
 kill -TERM "$tp"
@@ -198,4 +243,45 @@ done
 { kill -0 "$child" || kill -0 -- "-$child"; } 2>/dev/null && fail term-child-left
 child=""
 times="$times term $(date +%s.%N | awk -v t0="$t0" '{printf "%.1f", $1 - t0}')s"
+
+# pack-src must read only its own workspace, including Cargo configuration from ancestor folders.
+pack=$(mktemp -d /tmp/live_gates_pack.XXXXXX) || fail overlay-setup
+edits="$S/edits"
+mkdir -p "$pack/src" "$pack/libs/relax/compiler" "$edits/src" || fail overlay-setup
+cp -R "$ROOT/libs/relax/compiler/std" "$pack/libs/relax/compiler/" || fail overlay-setup
+printf '[package]\nname = "held-overlay"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n' > "$pack/Cargo.toml"
+cat > "$pack/src/lib.rs" <<'EOF'
+pub const LIMIT: usize = 3;
+#[test]
+fn array() {
+    let bytes: [u8; LIMIT] = [0; LIMIT];
+    assert_eq!(bytes.len(), 3);
+}
+EOF
+(cd "$pack" && RELAX_HOME="$S/thome" "$S/makepad" pack-src "$S/src.store" held-overlay) > "$S/pack.log" 2>&1 || { tail -20 "$S/pack.log"; fail overlay-pack; }
+commit=$(sed -n 's/^pack-src: .* commit \([[:xdigit:]]\{40\}\)$/\1/p' "$S/pack.log")
+[ -n "$commit" ] || fail overlay-commit
+base=$(git hash-object --no-filters "$pack/src/lib.rs") || fail overlay-base
+sed 's/usize = 3/usize = "bad"/' "$pack/src/lib.rs" > "$edits/src/lib.rs"
+printf 'src/lib.rs\t%s\n' "$base" > "$edits/.makepad-run-edits"
+# Both publications have the same records. The repair's temporary ledger can predate the boot.
+cp -p "$edits/.makepad-run-edits" "$edits/.makepad-run-edits.tmp" || fail overlay-stage
+mounts=$(printf '%s\t%s\t%s' "$S/virtual" "$S/src.store" "$commit")
+(cd "$S" && RELAX_VFS="$mounts" RELAX_WORKSPACE="$S/virtual" RELAX_EDITS="$edits" \
+    RELAX_HOME="$S/thome" RELAX_CACHE=off TMPDIR="$S/tmp" exec "$S/makepad" test --live held-overlay --lib) > "$S/tlog" 2>&1 &
+tp=$!
+first=1
+test_said "^$hold$" overlay-hold
+grep -q 'E0308' "$S/tlog" || test_fail overlay-diagnostic
+first=$(( $(wc -l < "$S/tlog") + 1 ))
+cp "$pack/src/lib.rs" "$edits/src/lib.rs.part" && mv "$edits/src/lib.rs.part" "$edits/src/lib.rs" || fail overlay-source
+child=$(ps -o pid= --ppid "$tp" | tr -d ' ')
+case "$child" in ''|*[!0-9]*) test_fail overlay-child;; esac
+TMPDIR="$S/tmp" timeout 5 "$S/makepad" inspect "$child" live as=json | grep -q '"held":1' || test_fail overlay-uncommitted
+mv "$edits/.makepad-run-edits.tmp" "$edits/.makepad-run-edits" || fail overlay-publish
+test_said '^testverdict .*ran=1 passed=1 failed=0 .*restarted=true( |$)' overlay-repair
+[ "$(grep -Fxc "$hold" "$S/tlog")" = 1 ] || test_fail overlay-hold-count
+[ ! -e "$S/virtual" ] || test_fail overlay-checkout
+tail -n +"$first" "$S/tlog" | grep -m1 '^testverdict '
+times="$times overlay $(date +%s.%N | awk -v t0="$t0" '{printf "%.1f", $1 - t0}')s"
 echo "live_gates: ok (since the session started:$times)"

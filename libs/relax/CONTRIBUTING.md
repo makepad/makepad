@@ -78,6 +78,9 @@ with `RELAX_CACHE_DIR=<dir>` so neither reuses the other's compiled code.
 - `RELAX_TRACE=typeck:<fn substring>,lower:<fn substring>`: phase starts for matching fns.
 - `RELAX_TRACE=bt`: backtraces of internal errors.
 - `--verbose` (or `RELAX_VERBOSE=1`): phase timings.
+- `RELAX_OUTLINE_WHOLE=<suffix>[,<suffix>...]`: functions whose names end with a suffix build
+  as joined bodies, a stub that privately calls the whole body as an outlined part. A stress
+  mode for the joined install, unwind and locals paths; unset, nothing changes.
 - A running program: `relax inspect <pid> help` (panics, why-hung, probes).
 
 ## Read live test results from an agent

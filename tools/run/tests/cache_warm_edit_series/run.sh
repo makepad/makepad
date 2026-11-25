@@ -18,7 +18,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 W=$(cd "$H/../../../.." && pwd)
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 S=$C/src
 mkdir -p "$S" "$C/home/tmp"

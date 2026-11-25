@@ -43,6 +43,14 @@ path = "src/main.rs"
 name = "modules"
 path = "fixture/modules_harness.rs"
 
+[[test]]
+name = "host_linked"
+path = "tests/host_linked.rs"
+
+[[test]]
+name = "two_hosts"
+path = "tests/two_hosts.rs"
+
 # third-party proc macros under Open and Sandboxed: it re-executes itself as the runner
 [[test]]
 name = "confined_macros"
@@ -89,3 +97,6 @@ makepad-network = { path = "../../platform/network" }
 # `makepad change-report`: checks a change report exactly as makepad.nl does (docs/agents/change-report.md)
 makepad-change-report = { path = "../../libs/change_report" }
 relax-light-http = { workspace = true }
+
+[dev-dependencies]
+relax-base = { workspace = true }

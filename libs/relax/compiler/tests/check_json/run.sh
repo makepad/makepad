@@ -2,7 +2,7 @@
 set -eu
 H=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 export RELAX_CACHE=off
 export RELAX_STD="$H/../../std"
 export RELAX_CACHE_DIR="$T/target"
@@ -32,6 +32,8 @@ assert rows[-1]['errors']==len(rows)-1
 rows[-1]['ms']=0
 for d in rows[:-1]:
     d['file']=d['file'].removeprefix(h+'/')
+    # a note names its place with the file's path too ("in this macro invocation: <path>:6:1")
+    d['notes']=[n.replace(h+'/','') for n in d['notes']]
     if d['suggestion'] and d['suggestion']['replacement']:
         d['suggestion']['replacement'][0]=d['suggestion']['replacement'][0].removeprefix(h+'/')
 with open(out,'a') as f:
@@ -42,7 +44,7 @@ cat > "$T/expected" <<'EXPECTED'
 {"severity":"error","code":"E0432","message":"unresolved import `crate::Widgte`","file":"main.rs","line":3,"col":12,"end_line":3,"end_col":18,"phase":"resolve","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",3,12,3,18,"Widget"]}}
 {"severity":"error","code":"RM0001","message":"cannot find macro `greetign` in this scope","file":"main.rs","line":9,"col":1,"end_line":9,"end_col":9,"phase":"macro","notes":[],"suggestion":null}
 {"severity":"error","code":"E0425","message":"cannot find type `Widgte` in this scope","file":"main.rs","line":4,"col":11,"end_line":4,"end_col":17,"phase":"typeck","notes":[],"suggestion":{"message":"did you mean `Widget`?","replacement":["main.rs",4,11,4,17,"Widget"]}}
-{"severity":"error","code":"E0425","message":"cannot find type `Missing` in this scope","file":"main.rs","line":6,"col":1,"end_line":6,"end_col":7,"phase":"typeck","notes":[],"suggestion":null}
+{"severity":"error","code":"E0425","message":"cannot find type `Missing` in this scope","file":"main.rs","line":5,"col":44,"end_line":5,"end_col":51,"phase":"typeck","notes":["in this macro invocation: main.rs:6:1"],"suggestion":null}
 {"type":"summary","errors":4,"warnings":0,"ms":0}
 {"type":"summary","errors":0,"warnings":0,"ms":0}
 EXPECTED

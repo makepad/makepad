@@ -17,7 +17,7 @@
 # with one string over 128 KiB (E2BIG), and a spawn that handed the build environment in one
 # variable could not start the binary; a descriptor hands it now (relax-base progenv.rs BUILD_FD).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 [ -n "$T" ] && [ -d "$T" ] || exit 2
 trap 'rm -rf "$T"' EXIT
 # (a failing start ends its run: no panic parked for a decision)

@@ -1,3 +1,6 @@
+// rejects: E0790
+// (an associated function called on the trait without its impl type: rustc_trait_selection
+// error_reporting/traits/ambiguity.rs maybe_report_ambiguity)
 // rustc_hir_typeck/src/method/probe.rs:640-794,895-907: later autoderef
 // inference must not constrain the original receiver of an inherent method.
 use std::ops::Deref;

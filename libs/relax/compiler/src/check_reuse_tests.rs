@@ -173,7 +173,10 @@ fn a_copy_in_another_worktree_reuses_its_verdicts_with_its_own_paths() {
     std::fs::write(b.join("data.txt"), "two!").unwrap();
     let reused = check_in_child_store(&b, true, &store, &in_b);
     assert_eq!((reused.hits, &reused.diags), (1, &cold.diags), "the copy's included file edited: the library checked again: {reused:?}");
-    let note = format!("#[deprecated(note = \"see {a_path}/notes\")]\npub fn old() {{}}\n");
+    // the note names the folder as printed, and its literal escapes it (its `"`, and on Windows
+    // its `\`): the warning prints the note's value, as rustc does
+    let noted = format!("see {a_path}/notes, \"as written\"");
+    let note = format!("#[deprecated(note = {noted:?})]\npub fn old() {{}}\n");
     let bin = BIN.replace("let x = pkg::f();", "let x = pkg::f(); pkg::old();");
     for d in [&a, &b] {
         std::fs::write(d.join("data.txt"), "two!").unwrap();
@@ -183,7 +186,7 @@ fn a_copy_in_another_worktree_reuses_its_verdicts_with_its_own_paths() {
     let first = check_in_child_store(&a, true, &store, &in_a);
     let reused = check_in_child_store(&b, true, &store, &in_b);
     let cold = check_in_child_store(&b, true, &store, &verify);
-    assert!(first.code == 0 && cold.diags.iter().any(|d| d.contains(&format!("see {a_path}/notes"))), "the note as written: {first:?}, {cold:?}");
+    assert!(first.code == 0 && cold.diags.iter().any(|d| d.contains(&noted)), "the note as written: {first:?}, {cold:?}");
     assert_eq!((reused.hits, &reused.diags), (1, &cold.diags), "a diagnostic naming the first worktree's folder: the binary checked again in the copy: {reused:?}, {cold:?}");
     std::fs::remove_dir_all(&a).unwrap();
     std::fs::remove_dir_all(&b).unwrap();
@@ -674,6 +677,54 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Generic parameters a constant may not name (rustc 1.100, the round-34 corpus case without its
+/// type error): `makepad check` prints rustc's errors, each once -- uncoded where rustc's are, no
+/// load summary repeating the checked crate's own, and nothing more where rustc resolves the path
+/// to an error (no E0425 for the name, no E0277 for `Self`, no E0080 for the discriminant).
+#[test]
+fn generic_parameters_in_constants_are_rustcs_errors_once() {
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() { return; }
+    let lib = "#![allow(dead_code)]\nstruct A<const N: usize>;\n\
+        fn arithmetic<const N: usize>() -> [u8; N + 1] { loop {} }\n\
+        fn type_param<T>() -> [u8; std::mem::size_of::<T>()] { loop {} }\n\
+        fn nested_braces<const N: usize>() -> A<{ { N } }> { loop {} }\n\
+        fn repeat_const<const N: usize>() { let _ = [0; N + 1]; }\n\
+        struct DefaultOp<const N: usize, const M: usize = { N + 1 }>;\n\
+        struct Forward<const N: usize = M, const M: usize = 2>;\n\
+        struct ParamType<T, const N: T>(T);\n\
+        trait Tr { fn f() -> [u8; std::mem::size_of::<Self>()]; }\n\
+        enum E<const N: usize> { A = N as isize }\n\
+        const fn id<const N: usize>() -> usize { N }\n\
+        fn nested_arg<const N: usize>() -> [u8; id::<N>()] { loop {} }\n";
+    let dir = package("constparams", &[("Cargo.toml", "[package]\nname = \"early_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n"), ("lib.rs", lib)]);
+    let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "check_reuse_tests::early_child", "--nocapture", "--test-threads=1", "--format=terse"])
+        .env(EARLY_CHILD, &dir).env("RELAX_CACHE_DIR", dir.join("cache"))
+        .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE"));
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+    let code = stderr.lines().find_map(|l| l.strip_prefix("early child exit ")).map(|c| c.parse::<i32>().unwrap());
+    assert!(code.is_some_and(|c| c != 0), "the check fails: {stderr}");
+    // every error line, as (line, column, message): `lib.rs:L:C: message`
+    let mut errors: Vec<(u32, u32, String)> = stderr.lines().filter(|l| !l.contains(": warning: ")).filter_map(|l| {
+        let (_, rest) = l.split_once("lib.rs:")?;
+        let mut it = rest.splitn(3, ':');
+        Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.trim_start().to_string()))
+    }).collect();
+    errors.sort();
+    // rustc's, at rustc's positions
+    let op = "error: generic parameters may not be used in const operations";
+    let expected: Vec<(u32, u32, String)> = [
+        (3, 41, op), (4, 48, op), (5, 45, op), (6, 49, op), (7, 53, op),
+        (8, 33, "E0128: generic parameter defaults cannot reference parameters before they are declared"),
+        (9, 30, "E0770: the type of const parameters must not depend on other generic parameters"),
+        (10, 47, op), (11, 30, "error: generic parameters may not be used in enum discriminant values"),
+        (13, 46, "E0747: unresolved item provided when a constant was expected"), (13, 46, op),
+    ].iter().map(|&(l, c, m)| (l, c, m.to_string())).collect();
+    assert_eq!(errors, expected, "{stderr}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 const APP_CHILD: &str = "RELAX_CHECK_APP_CHILD";
 
 /// In a child (APP_CHILD names the workspace folder): `makepad check app_pkg` there, as the command
@@ -772,9 +823,15 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
 /// of that load hides it) and after an edit of the checked crate; with the dependency fixed the
 /// check passes. A published crate's error (its source under the cargo home's registry) also says
 /// it is most likely a makepad run divergence and asks for a report; a path dependency's does not.
+/// std, unchanged, is checked by the cold check alone: the next checks look its clean verdicts up.
 #[test]
 fn a_dependency_error_fails_the_check() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    // a Windows path's drive colon is the path's: the error stays the dependency's on every host
+    let windows = "C:\\ws\\dep\\lib.rs:1:19: E0425: cannot find type `NoSuchType` in this scope";
+    assert_eq!(crate::check::place_of(windows), Some(("C:\\ws\\dep\\lib.rs", "1", "19", Some(" E0425: cannot find type `NoSuchType` in this scope"))));
+    assert_eq!(crate::check::label_internal("C:\\ws\\lib.rs:2:3: oops\nmore"), "C:\\ws\\lib.rs:2:3: internal: oops\nmore");
+    assert_eq!((crate::check::place_of("/ws/lib.rs:2:3"), crate::check::place_of("no place: here")), (Some(("/ws/lib.rs", "2", "3", None)), None));
     let dir = package("deperror", &[]);
     let write = |f: &str, src: &str| {
         let path = dir.join(f);
@@ -804,7 +861,11 @@ fn a_dependency_error_fails_the_check() {
         assert!(r.0.is_some_and(|c| c != 0) && r.1.contains(code) && (!named || r.1.contains("could not compile `dep`")), "{what}: {}", r.1);
         assert!(!r.1.contains(": internal:"), "{what}: a dependency's error is its own, not internal: {}", r.1);
         assert_eq!(r.1.contains("`dep` is a published crate"), published, "{what}: only a published crate's error asks for a report: {}", r.1);
+        r.1
     };
+    // the std bodies a check type-checked (its verbose line "std for the target: N crates, M body owners checked")
+    let std_checked = |stderr: &str| stderr.lines().find_map(|l| l.split_once("std for the target: "))
+        .and_then(|(_, r)| r.split(", ").nth(1)?.split(' ').next()?.parse::<usize>().ok());
     write("ws/app/lib.rs", &app(1));
     for (what, dep, code, named) in [
         ("an unresolved import", "use std::collections::NoSuchMap;\npub fn value() -> u32 { 7 }\n", "E0432", true),
@@ -813,8 +874,12 @@ fn a_dependency_error_fails_the_check() {
         ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0425", true),
     ] {
         write("dep/lib.rs", dep);
-        fails(&format!("{what}, cold"), code, named, false);
-        fails(&format!("{what}, again"), code, named, false);
+        let cold = fails(&format!("{what}, cold"), code, named, false);
+        let again = fails(&format!("{what}, again"), code, named, false);
+        // (the first case's cold check is the test's first: its cache folder is new)
+        if code == "E0432" {
+            assert!(std_checked(&cold).is_some_and(|n| n > 0) && std_checked(&again) == Some(0), "std checked by the cold check alone: {:?} then {:?}", std_checked(&cold), std_checked(&again));
+        }
         write("ws/app/lib.rs", &app(2));
         fails(&format!("{what}, after an app edit"), code, named, false);
         write("ws/app/lib.rs", &app(1));

@@ -1,7 +1,7 @@
 //! Reflection and packets, using the same shader compiler and HAL ABI as the app.
 use makepad_hal::{
-    dialect, format, pipeline_binding as binding, Attr, CmdWriter, Draw, Id, Inst, PipelineDesc,
-    Slice,
+    dialect, format, pipeline_binding as binding, pipeline_blend, Attr, CmdWriter, Draw, Id, Inst,
+    PipelineDesc, Slice,
 };
 use makepad_script::{
     id,
@@ -19,6 +19,7 @@ use makepad_shader::{
 pub const VERTICES: Id = Id::new(0, 1);
 pub const INDICES: Id = Id::new(1, 1);
 
+#[derive(PartialEq)]
 pub struct Field {
     name: LiveId,
     offset: usize,
@@ -42,6 +43,12 @@ impl Record {
             offset,
             slots,
         });
+    }
+
+    /// Whether a record of `other` reads the same as one of this (the same fields at the same
+    /// places): one buffer of records feeds both pipelines.
+    pub fn same_layout(&self, other: &Record) -> bool {
+        self.fields == other.fields && self.defaults.len() == other.defaults.len()
     }
 
     fn align(&mut self) {
@@ -68,7 +75,9 @@ pub struct Pipeline {
     pub instances: Record,
     pub uniforms: Record,
     scope: Vec<f32>,
-    textures: usize,
+    /// the 2D textures the shader samples, in the order it declares them (a draw binds its
+    /// texture ids in this order)
+    pub textures: Vec<LiveId>,
     blob: Vec<u8>,
 }
 
@@ -136,12 +145,13 @@ impl Pipeline {
         let mut instances = Record::default();
         let mut uniforms = Record::default();
         let mut scope = Record::default();
-        let mut textures = 0;
-        // the one texture's name and sampler (GLES binds a texture by name, with its sampler)
-        let mut texture = None;
+        // each texture's name and sampler, as declared (GLES binds a texture by name, with its
+        // sampler)
+        let mut textures = Vec::new();
         let mut geometry = false;
         let mut vertex = false;
-        let mut fragment = false;
+        // the colour outputs the fragment writes (bit i: `fragment_output(i, ..)`)
+        let mut outputs = 0u32;
         for io in desc.io() {
             let slots = io.ty().slots();
             if matches!(
@@ -247,27 +257,16 @@ impl Pipeline {
                     }
                     geometry = true;
                 }
-                ShaderIoKind::Texture(TextureType::Texture2d) => {
-                    if ![id!(grayscale_texture), id!(image_texture)].contains(&io.name())
-                        || textures != 0
-                    {
-                        return Err(format!(
-                            "Boot shader texture {} must be the single glyph atlas or app image",
-                            io.name()
-                        ));
-                    }
-                    textures += 1;
-                    texture = Some((io.name(), io.sampler()));
-                }
+                ShaderIoKind::Texture(TextureType::Texture2d) => textures.push((io.name(), io.sampler())),
                 ShaderIoKind::VertexPosition => vertex = true,
-                ShaderIoKind::FragmentOutput(0) => fragment = true,
+                ShaderIoKind::FragmentOutput(i) if *i < 4 => outputs |= 1 << *i,
                 ShaderIoKind::Varying | ShaderIoKind::ScopeUniform => {}
                 _ => return Err(format!("Unsupported boot shader IO {}", io.name())),
             }
         }
         if !geometry
             || !vertex
-            || !fragment
+            || outputs & 1 == 0
             || !instances
                 .fields
                 .iter()
@@ -305,7 +304,7 @@ impl Pipeline {
             .uniform_buffer_bindings()
             .scope_uniform_buffer_index()
             .map_or(binding::NONE, |i| i as u32);
-        bindings[binding::TEXTURES] = textures as u32;
+        bindings[binding::TEXTURES] = textures.len() as u32;
         let code = if dialect == dialect::SPIRV {
             let result = output.spirv().ok_or("Shader compiler returned no SPIR-V")?;
             if let Some(error) = result.error() {
@@ -330,8 +329,8 @@ impl Pipeline {
                 // the boot screen never draws into a multiview pass
                 xr_vertex: Vec::new(),
                 xr_fragment: Vec::new(),
-                // the boot document samples at most one 2D texture (checked above)
-                textures: vec![0; textures],
+                // 2D textures only (checked above)
+                textures: vec![0; textures.len()],
                 samplers: desc
                     .samplers()
                     .iter()
@@ -358,7 +357,7 @@ impl Pipeline {
             // it: the one source plus the texture shapes and sampler states D3D11 binds.
             makepad_hal::hlsl::HlslPipeline {
                 source: output.combined().to_owned(),
-                textures: vec![0; textures],
+                textures: vec![0; textures.len()],
                 samplers: desc
                     .samplers()
                     .iter()
@@ -415,8 +414,9 @@ impl Pipeline {
                     });
                 }
             }
-            let textures = texture
-                .map(|(name, sampler)| makepad_hal::glsl::Texture {
+            let textures = textures
+                .iter()
+                .map(|&(name, sampler)| makepad_hal::glsl::Texture {
                     name: format!("tex_{name}"),
                     shape: 0,
                     sampler: desc.samplers().get(sampler).map_or(
@@ -469,10 +469,31 @@ impl Pipeline {
         } else {
             output.combined().as_bytes().to_vec()
         };
+        // the target's format and blend as the shader declares them, as the platform's draw shaders
+        // do (`DrawShaderColorFormat`): `color_format: @Rgba16F` and the like (the default is the
+        // window's BGRA8), `blend_op: @Add` (src + dst; any other format writes raw without it)
+        let declared = |key: LiveId| heap.value(shader, key.into(), NoTrap).as_id();
+        let color_format = match declared(id!(color_format)) {
+            None => format::BGRA8,
+            Some(f) if f == id!(Bgra8NoBlend) => format::BGRA8,
+            Some(f) if f == id!(Rgba16F) => format::RGBA16F,
+            Some(f) if f == id!(Rgba32F) => format::RGBA32F,
+            Some(f) if f == id!(Rf32) => format::R32F,
+            Some(f) if f == id!(Rf16) => format::R16F,
+            Some(f) if f == id!(Ru8) => format::R8,
+            Some(f) => return Err(format!("Boot shader color_format {f} is not a target format")),
+        };
+        let raw = declared(id!(color_format)).is_some();
+        let blend = match declared(id!(blend_op)) {
+            None => 0,
+            Some(b) if b == id!(Add) => pipeline_blend::ADD,
+            Some(b) => return Err(format!("Boot shader blend_op {b} is not supported (over or @Add)")),
+        } | if !raw || declared(id!(blend_op)).is_some() { 0 } else { pipeline_blend::RAW };
         let blob = CmdWriter::pipeline_blob(
             PipelineDesc {
-                color_formats: [format::BGRA8, 0, 0, 0],
-                outputs: 1,
+                color_formats: std::array::from_fn(|i| if outputs & (1 << i) != 0 { color_format } else { 0 }),
+                blend,
+                outputs,
                 shader: id.index,
                 instance_stride: instances.defaults.len() as u32,
                 ..Default::default()
@@ -487,7 +508,7 @@ impl Pipeline {
             instances,
             uniforms,
             scope: scope.defaults,
-            textures,
+            textures: textures.into_iter().map(|(name, _)| name).collect(),
             blob,
         })
     }
@@ -497,19 +518,26 @@ impl Pipeline {
     }
 
     /// One draw of `count` instances of the retained instance buffer `buffer`.
-    pub fn draw_buffer(&self, writer: &mut CmdWriter, buffer: Id, count: u32, uniforms: &[f32], scissor: [f32; 4]) {
+    pub fn draw_buffer(&self, writer: &mut CmdWriter, buffer: Id, count: u32, uniforms: &[f32], textures: &[Id], scissor: [f32; 4]) {
+        self.draw_range(writer, buffer, 0, count, uniforms, textures, scissor);
+    }
+
+    /// One draw of the `count` instances of the retained instance buffer `buffer` from its
+    /// `first`.
+    pub fn draw_range(&self, writer: &mut CmdWriter, buffer: Id, first: u32, count: u32, uniforms: &[f32], textures: &[Id], scissor: [f32; 4]) {
         if count == 0 {
             return;
         }
+        let tex = self.bind(writer, textures);
         let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
         writer.draw(Draw {
             pipeline: self.id,
             vb: VERTICES,
             ib: INDICES,
             index: [0, 6],
-            inst: Inst::buffer(buffer, 0, count),
+            inst: Inst::buffer(buffer, first, count),
             uniforms,
-            tex: Default::default(),
+            tex,
             scissor,
             bounds: [f32::NAN; 4],
             flags: Draw::BLEND | Draw::INDEX_U32,
@@ -522,13 +550,13 @@ impl Pipeline {
         writer: &mut CmdWriter,
         data: &[f32],
         uniforms: &[f32],
-        atlas: Id,
+        textures: &[Id],
         scissor: [f32; 4],
     ) {
         if data.is_empty() {
             return;
         }
-        let textures = if self.textures != 0 { writer.put_ids(&[atlas]) } else { Default::default() };
+        let textures = self.bind(writer, textures);
         let inst = Inst::inline(writer.keep(data), (data.len() / self.instances.defaults.len()) as u32);
         let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
         writer.draw(Draw {
@@ -544,5 +572,15 @@ impl Pipeline {
             flags: Draw::BLEND | Draw::INDEX_U32,
             ..Default::default()
         });
+    }
+
+    /// The draw's texture ids, one for each texture the shader declares, in its order.
+    fn bind(&self, writer: &mut CmdWriter, textures: &[Id]) -> makepad_hal::Range {
+        debug_assert_eq!(textures.len(), self.textures.len(), "a boot draw binds one id per declared texture");
+        if self.textures.is_empty() {
+            Default::default()
+        } else {
+            writer.put_ids(&textures[..self.textures.len()])
+        }
     }
 }

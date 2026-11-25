@@ -1,3 +1,4 @@
+// rejects: E0053
 // L7: rustc rejects each item below (x86_64 target). Checked as a package with `makepad check`.
 #![allow(dead_code)]
 #[target_feature(enable = "avx2")] fn avx2_fn() {}

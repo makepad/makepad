@@ -25,13 +25,72 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// The cargo package of the running loader and its manifest (tools/run for `makepad`,
-/// tools/run/runner for `relax`): set by the runner at startup.
+/// tools/run/runner for `relax`), supplied by the linked host.
 static PACKAGE: Mutex<Option<(&'static str, &'static str)>> = Mutex::new(None);
 
 pub fn set_loader_package(package: &'static str, manifest: &'static str) {
     *PACKAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some((package, manifest));
-    // the loader file this process starts from, taken now: a first look after a build replaced
-    // it would take the new file for the one this process runs ([`loader_replaced`])
+}
+
+fn loader_package() -> Option<(&'static str, &'static str)> {
+    relax_base::host::init();
+    *PACKAGE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+type SaveWait = fn(Vec<PathBuf>, std::time::SystemTime) -> Result<(), String>;
+static SAVE_WAIT: std::sync::OnceLock<SaveWait> = std::sync::OnceLock::new();
+
+pub fn set_save_wait(wait: SaveWait) {
+    SAVE_WAIT.set(wait).expect("the runner's save wait was already registered");
+}
+
+pub fn wait_for_save(dirs: Vec<PathBuf>, since: std::time::SystemTime) -> Result<(), String> {
+    relax_base::host::init();
+    SAVE_WAIT.get().ok_or("no runner registered to wait for a save")?(dirs, since)
+}
+
+pub(crate) enum TestSave {
+    Tree(std::time::SystemTime),
+    Overlay { ledger: PathBuf, before: Option<crate::vfs::FileStat> },
+}
+
+impl TestSave {
+    pub(crate) fn at_boot(since: std::time::SystemTime) -> Self {
+        if let Some(ledger) = crate::vfs::edits_record().filter(|_| crate::vfs::in_store(&crate::run::workspace_dir())) {
+            // The ledger's identity changes at rename, even if the staged file predates this boot.
+            let before = crate::vfs::file_stat(&ledger.to_string_lossy());
+            Self::Overlay { ledger, before }
+        } else {
+            Self::Tree(since)
+        }
+    }
+
+    pub(crate) fn wait(&self, dirs: Vec<PathBuf>) -> Result<(), String> {
+        let (ledger, before) = match self {
+            Self::Tree(since) => return wait_for_save(dirs, *since),
+            Self::Overlay { ledger, before } => (ledger, before),
+        };
+        let path = ledger.to_string_lossy();
+        let arm = || super::watch_events::Watch::new(std::iter::once(path.as_ref()));
+        let mut watch = arm();
+        // Arm before checking for a publication made during the failed compile. A staged source,
+        // a whiteout or a watcher kick leaves the published ledger in place.
+        while !crate::vfs::file_stat(&path).is_some_and(|now| Some(now) != *before) {
+            if let Some(w) = &mut watch {
+                w.wait(None);
+                if w.changed().is_none() { watch = arm(); }
+            } else {
+                // The live watcher's fallback on hosts without native events.
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot the loader file at runtime startup, after the launcher has set its path and
+/// before a later build can replace the file this process runs ([`loader_replaced`]).
+pub fn snapshot_loader() {
     let _ = loader();
 }
 
@@ -68,9 +127,9 @@ pub fn loader_replaced() -> bool {
 fn loader_buildable() -> bool {
     static BUILDABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if let Some(buildable) = BUILDABLE.get() { return *buildable; }
-    // (with no package named yet nothing is known, and off unix no restart goes into another file:
+    // (with no linked package nothing is known, and off unix no restart goes into another file:
     // the route stays build-first, as it was)
-    if !cfg!(unix) || PACKAGE.lock().unwrap_or_else(|e| e.into_inner()).is_none() { return true; }
+    if !cfg!(unix) || loader_package().is_none() { return true; }
     *BUILDABLE.get_or_init(|| command(Priority::Background).is_ok())
 }
 
@@ -153,7 +212,7 @@ fn command(priority: Priority) -> Result<(std::process::Command, String), String
     if picked(&exe) {
         return Err(format!("{} was picked for this tree by its inputs' content: cargo never writes it, and its run picks the JIT again", exe.display()));
     }
-    let (package, manifest) = PACKAGE.lock().unwrap_or_else(|e| e.into_inner()).ok_or("no loader package")?;
+    let (package, manifest) = loader_package().ok_or("no loader package")?;
     let (target, profile, triple) = layout(&exe).ok_or_else(|| format!("{} is not in a cargo target directory", exe.display()))?;
     if !Path::new(manifest).is_file() {
         return Err(format!("{manifest} is missing"));

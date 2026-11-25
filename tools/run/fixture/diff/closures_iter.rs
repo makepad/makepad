@@ -57,4 +57,12 @@ fn work() {
     d!("{}", counter);
     let o: Option<u32> = v.iter().copied().find(|x| x * x > 5000); d!("{:?} {:?}", o, "a,b,,c".split(',').collect::<Vec<_>>());
     let r: Result<Vec<i32>, _> = "1 2 x 4".split(' ').map(|s| s.parse::<i32>()).collect(); d!("{:?}", r.is_err());
+    // `let _ = s[i]` as a closure's only use of s still reads s (the bounds check): the closure captures
+    // `*s` by reference (rustc's capture analysis sees the index's autoref; writeback makes it builtin later)
+    let data: Vec<f32> = (0..32).map(|x| x as f32 * 0.5).collect();
+    let (take, points) = (16usize, 9usize);
+    let s = &data[data.len() - take..];
+    let at = |p: usize| { let _ = s[p * (take - 1) / (points - 1)]; p * 3 };
+    let past = |i: usize| { let _ = s[i]; i };
+    d!("{:?} {:?}", (0..points).map(at).collect::<Vec<_>>(), std::panic::catch_unwind(|| past(take + 1)).map_err(|e| e.downcast_ref::<String>().cloned()));
 }

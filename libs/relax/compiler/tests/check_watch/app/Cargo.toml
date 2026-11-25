@@ -3,6 +3,10 @@ name = "check-watch"
 version = "0.1.0"
 edition = "2021"
 [workspace]
+# a registry crate the Makepad workspace carries in-tree (its root [patch.crates-io]): the copy outside
+# the tree resolves it offline only through that table (run.py)
+[dependencies]
+cfg-if = "1"
 [[bin]]
 name = "check-watch"
 path = "main.rs"

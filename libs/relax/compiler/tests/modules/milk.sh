@@ -4,8 +4,8 @@ set -eu
 D=$(cd "$(dirname "$0")" && pwd)
 for CONFIG in '1 1 1' '0 1 1' '0 0 1' '0 1 0' '0 0 0'; do
     read -r TRUSTED FUEL TIER <<< "$CONFIG"
-    LOG=$(mktemp)
-    TRACE=$(mktemp)
+    LOG=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
+    TRACE=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
     # the grants are words of the command line; the program reads its mode from MILK_TRUSTED
     GRANTS=""; [ "$TRUSTED" = 1 ] && GRANTS="--allow-host-modules"; [ "$FUEL" = 0 ] && GRANTS="$GRANTS --allow-unmetered-modules"
     if RELAX_WATCHDOG_MS=180000 MILK_TRUSTED=$TRUSTED RELAX_O3=$TIER RELAX_O3_CALLS=2000 RELAX_O3_TRACE=1 "$1" test $GRANTS "$D/milk.rs" >"$LOG" 2>"$TRACE"; then

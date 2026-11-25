@@ -10,8 +10,9 @@ use crate::{
 };
 use std::sync::Arc;
 
-// A file's metadata records how its parse numbered it (FileMeta::numbering).
-pub const VERSION: u32 = 27;
+// A macro_rules transcriber's `$x` keeps its position (TNode::Var), and a parsed file its
+// meta_origin table.
+pub const VERSION: u32 = 28;
 
 pub(crate) mod strings;
 
@@ -316,9 +317,10 @@ impl Codec for TNode {
                 0u8.put(w);
                 t.put(w)
             }
-            Self::Var(n) => {
+            Self::Var(n, pos) => {
                 1u8.put(w);
-                n.put(w)
+                n.put(w);
+                pos.put(w)
             }
             Self::Rep(v, s, o) => {
                 2u8.put(w);
@@ -338,7 +340,7 @@ impl Codec for TNode {
     fn get(r: &mut Decode<'_>) -> Option<Self> {
         Some(match u8::get(r)? {
             0 => Self::Tok(Codec::get(r)?),
-            1 => Self::Var(Codec::get(r)?),
+            1 => Self::Var(Codec::get(r)?, Codec::get(r)?),
             2 => Self::Rep(Codec::get(r)?, Codec::get(r)?, Codec::get(r)?),
             3 => Self::Group(Codec::get(r)?, Codec::get(r)?, Codec::get(r)?),
             4 => Self::Crate,

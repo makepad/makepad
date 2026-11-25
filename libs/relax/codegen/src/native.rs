@@ -69,9 +69,26 @@ pub fn compile(options: &relax_session::Options, f: &Func, env: &target::Env) ->
     compile_freq(options, f, env, None)
 }
 
+/// RELAX_OUTLINE_WHOLE: comma-separated function name suffixes whose entire native body runs
+/// as a private part. Exercises the joined install, unwind and inspection paths.
+#[inline]
+pub fn outline_whole(name: &str) -> bool {
+    static SUFFIXES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    relax_session::phase::env_once(&SUFFIXES, "RELAX_OUTLINE_WHOLE").is_some_and(|s| s.split(',').any(|p| !p.is_empty() && name.ends_with(p)))
+}
+
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
+    if outline_whole(&f.name) {
+        match compile_whole(options, f, env, freq) {
+            Ok(mut joined) => {
+                joined.relocs.extend(f.notes.iter().map(|&s| RelocAt { at: 0, kind: RelocKind::Note, target: Reloc::Sym(s) }));
+                return Ok(joined);
+            }
+            Err(why) => eprintln!("RELAX_OUTLINE_WHOLE: {}: {}", f.name, why),
+        }
+    }
     let mut c = compile_freq_inner(options, f, env, freq)?;
     c.relocs.extend(f.notes.iter().map(|&s| RelocAt { at: 0, kind: RelocKind::Note, target: Reloc::Sym(s) }));
     // the inline stack goes with the code, in its pc map (rir::inline_pc_entries)
@@ -79,6 +96,30 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::En
         c.pc_map.extend(relax_backend::rir::inline_pc_entries(f));
     }
     Ok(c)
+}
+
+fn compile_whole(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
+    use relax_backend::rir::{Callee, Inst, Term};
+    if f.cabi.is_some() { return Err("C ABI".into()); }
+    if f.naked { return Err("naked function".into()); }
+    if f.sret.is_some() { return Err("indirect result".into()); }
+    if crate::web32::applies(env.syms).is_some() { return Err("web32".into()); }
+    let mut part = compile_freq_inner(options, f, env, freq)?;
+    if crate::interp::blob::is_blob(&part.code) { return Err("interpreter body".into()); }
+    if !f.inl.is_empty() && !part.pc_map.is_empty() {
+        part.pc_map.extend(relax_backend::rir::inline_pc_entries(f));
+    }
+    let mut h = Func::new(f.name.clone(), f.file);
+    h.params = f.params.iter().map(|v| h.vreg(f.vregs[v.0 as usize])).collect();
+    h.rets = f.rets.clone();
+    let results: Vec<_> = f.rets.iter().map(|&c| h.vreg(c)).collect();
+    let pos = f.blocks[0].pos.first().copied().unwrap_or(f.blocks[0].term_pos);
+    h.block();
+    h.blocks[0].insts.push(Inst::Call(Callee::Part(None), h.params.clone(), results.clone()));
+    h.blocks[0].pos.push(pos);
+    h.blocks[0].term = Term::Ret(results);
+    h.blocks[0].term_pos = pos;
+    target::join_part(target::compile_freq(options, &h, env, None)?, part)
 }
 
 fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
@@ -106,7 +147,7 @@ fn compile_native(options: &relax_session::Options, f: &Func, env: &target::Env,
         // RELAX_NO_CODEGEN): its "code" is the interpreter's relocatable form (interp/blob.rs)
         if let Some((code, relocs)) = crate::interp::maybe_compile(options, f, env.slots, env.syms, env.sym_class, env.tls_slow, env.resume) {
             let n = code.len() as u32;
-            return Ok(target::Compiled { code, pc_map: Vec::new(), frame_size: 0, text_len: n, alloc_sig: 0, relocs, rir_map: Vec::new(), rir_emitted: String::new() });
+            return Ok(target::Compiled { code, pc_map: Vec::new(), frame_size: 0, text_len: n, alloc_sig: 0, relocs, part_calls: Vec::new(), rir_map: Vec::new(), rir_emitted: String::new() });
         }
         // research (ios-interp): RELAX_INTERP_STATS=1 also sums the machine-code backend's
         // time and output for functions compiled natively, to compare with the interpreter's lowering

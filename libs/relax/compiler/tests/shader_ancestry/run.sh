@@ -8,7 +8,7 @@
 # defines the derived type's macro with an expansion-made `#[macro_export] macro_rules!`.
 # Prints "shader_ancestry: ok" or "shader_ancestry: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet anc-app 2>>"$ERR")

@@ -11,6 +11,7 @@ publish = false
 include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 
 [dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }
 makepad-core-util = { path = "../../core_util", version = "0.1.0" }
 relax-session = { workspace = true }
 relax-backend = { workspace = true }

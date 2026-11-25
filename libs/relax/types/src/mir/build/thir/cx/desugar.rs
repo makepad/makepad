@@ -336,6 +336,11 @@ impl Cx<'_> {
         let span = self.espan(a);
         let node = |kind| Pat { ty, span, extra: None, kind };
         match ast.expr(a).kind {
+            // `(..)`: the empty tuple pattern with a rest, not an assignment to `..`
+            A::Paren(x) if self.is_rest_assignee(x) => match *tcx.tys.kind(ty) {
+                TyKind::Tuple(_) => Ok(node(PatKind::Leaf { subpatterns: Vec::new() })),
+                _ => self.unresolved(span, "tuple assignee of a non-tuple type"),
+            },
             A::Paren(x) => self.assignee_pat(x, ty, scope, leaves),
             A::Underscore => Ok(node(PatKind::Wild)),
             A::Tuple(elems) => {

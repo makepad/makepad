@@ -907,3 +907,64 @@ fn a_value_read_after_the_call_owning_its_copy_stays_apart() {
     assert!(!opt::coalesce_slot_copies(&mut f, true));
     assert_eq!(copies(&f), 1, "the callee may write its copy: the value read after it is another one");
 }
+
+/// B = rd(); A = B; g(A) -- `rd` returns in memory (B: its result buffer, `Slot::ret`) and A is
+/// `g`'s by-value argument copy (the `?` operator's `Try::branch(rd(..))`). `prefix`: C = h()
+/// first (a 16-byte result buffer), then the 8-byte B moves into C's start and C is read whole.
+fn ret_build(prefix: bool) -> Func {
+    let mut f = Func::new("slot_coalesce_ret".into(), 0);
+    let n = f.vreg(Cls::I);
+    f.params.push(n);
+    f.rets.push(Cls::I);
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pb, pd, a, b, s) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    f.sret_callees = vec![7, 8];
+    if prefix {
+        let (sd, sb) = (f.slot(16, 8), f.slot(8, 8));
+        f.slots[sd as usize].ret = true;
+        f.slots[sb as usize].ret = true;
+        push(&mut f, 0, Inst::SlotAddr(pd, sd));
+        push(&mut f, 0, Inst::Call(Callee::Fn(8), vec![pd], vec![]));
+        push(&mut f, 0, Inst::SlotAddr(pb, sb));
+        push(&mut f, 0, Inst::Call(Callee::Fn(7), vec![pb], vec![]));
+        push(&mut f, 0, Inst::Copy(pd, pb, 8));
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), a, pd, 0));
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), b, pd, 8));
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, s, a, b));
+    } else {
+        let (sb, sd) = (f.slot(16, 8), f.slot(16, 8));
+        f.slots[sb as usize].ret = true;
+        f.slots[sd as usize].arg = true;
+        push(&mut f, 0, Inst::SlotAddr(pb, sb));
+        push(&mut f, 0, Inst::Call(Callee::Fn(7), vec![pb], vec![]));
+        push(&mut f, 0, Inst::SlotAddr(pd, sd));
+        push(&mut f, 0, Inst::Copy(pd, pb, 16));
+        push(&mut f, 0, Inst::Call(Callee::Fn(5), vec![pd], vec![]));
+        push(&mut f, 0, Inst::Mov(s, n));
+    }
+    f.blocks[0].term = Term::Ret(vec![s]);
+    f
+}
+
+/// The slot `rd` (Fn(7)) is handed as its result buffer.
+fn rd_slot(f: &Func) -> u32 {
+    let insts: Vec<&Inst> = f.blocks.iter().flat_map(|b| b.insts.iter()).collect();
+    let arg = insts.iter().find_map(|i| match i { Inst::Call(Callee::Fn(7), args, _) => Some(args[0]), _ => None }).expect("the call");
+    insts.iter().find_map(|i| match i { Inst::SlotAddr(d, s) if *d == arg => Some(*s), _ => None }).expect("its slot")
+}
+
+/// The joined slot is a call's whole result buffer (`Slot::ret`) only when every call handing it
+/// as one writes all of it: sroa then spares a guarded copy's slow call the flush of that buffer
+/// (find_span's ten `rd(..)?` results kept 80 cells live from the entry, zero-filled each call).
+#[test]
+fn a_result_buffer_joined_whole_stays_one_and_as_a_prefix_does_not() {
+    let mut f = ret_build(false);
+    assert!(opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 0, "the call's result is built in the argument copy:\n{}", f.dump());
+    assert!(f.slots[rd_slot(&f) as usize].ret, "moved on whole, the result buffer is still the call's whole result:\n{}", f.dump());
+    let mut f = ret_build(true);
+    assert!(opt::coalesce_slot_copies(&mut f, true));
+    assert_eq!(copies(&f), 0, "the smaller result is built in the larger one's start:\n{}", f.dump());
+    assert!(!f.slots[rd_slot(&f) as usize].ret, "a call writing only the start of a slot does not write all of it:\n{}", f.dump());
+}

@@ -8,6 +8,81 @@ use std::sync as backend;
 use macos as backend;
 pub use backend::WaitTimeoutResult;
 
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed}};
+
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(0);
+static FORKER: AtomicU64 = AtomicU64::new(0);
+static FORK_MARK: AtomicU64 = AtomicU64::new(0);
+static IN_FORK_CHILD: AtomicBool = AtomicBool::new(false);
+
+thread_local! { static THREAD_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+#[inline]
+fn thread_token() -> u64 {
+    THREAD_TOKEN.with(|slot| {
+        let token = slot.get();
+        if token != 0 { return token; }
+        let token = NEXT_TOKEN.fetch_add(1, Relaxed) + 1;
+        slot.set(token);
+        token
+    })
+}
+
+/// Marks the sole surviving thread immediately after a plain fork, including a nested fork.
+pub fn fork_child() {
+    FORKER.store(thread_token(), Relaxed);
+    FORK_MARK.store(NEXT_TOKEN.load(Relaxed), Relaxed);
+    IN_FORK_CHILD.store(true, Relaxed);
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn write(fd: std::ffi::c_int, buf: *const std::ffi::c_void, count: usize) -> isize;
+    fn _exit(status: std::ffi::c_int) -> !;
+}
+
+#[cold]
+#[track_caller]
+fn inherited_lock() -> ! {
+    #[cfg(unix)]
+    {
+        let site = std::panic::Location::caller();
+        let mut line = site.line();
+        let mut digits = [0; 10];
+        let mut pos = digits.len();
+        loop {
+            pos -= 1;
+            digits[pos] = b'0' + (line % 10) as u8;
+            line /= 10;
+            if line == 0 { break; }
+        }
+        // Usually one write. Flush a full buffer so even a long source path is reported intact.
+        let mut buf = [0u8; 512];
+        let mut used = 0;
+        let flush = |mut bytes: &[u8]| {
+            while !bytes.is_empty() {
+                let n = unsafe { write(2, bytes.as_ptr().cast(), bytes.len()) };
+                if n <= 0 { break; }
+                bytes = &bytes[n as usize..];
+            }
+        };
+        for mut bytes in [b"relax: forked child: the lock taken at ".as_slice(), site.file().as_bytes(), b":",
+            &digits[pos..], b" was held at the fork by a thread of the parent, which a forked child does not have; exiting\n"] {
+            while !bytes.is_empty() {
+                let n = bytes.len().min(buf.len() - used);
+                buf[used..used + n].copy_from_slice(&bytes[..n]);
+                used += n;
+                bytes = &bytes[n..];
+                if used == buf.len() { flush(&buf); used = 0; }
+            }
+        }
+        flush(&buf[..used]);
+        unsafe { _exit(134) }
+    }
+    #[cfg(not(unix))]
+    unreachable!("fork child on a platform without fork")
+}
+
 mod held {
     use core::cell::Cell;
     use core::panic::Location;
@@ -95,36 +170,59 @@ use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 /// A mutex that records each held guard for cooperative pool checkpoints.
-pub struct Mutex<T: ?Sized>(backend::Mutex<T>);
+pub struct Mutex<T: ?Sized> {
+    holder: AtomicU64,
+    inner: backend::Mutex<T>,
+}
 
 impl<T> Mutex<T> {
-    pub const fn new(value: T) -> Self { Self(backend::Mutex::new(value)) }
-    pub fn into_inner(self) -> LockResult<T> { self.0.into_inner() }
+    pub const fn new(value: T) -> Self { Self { holder: AtomicU64::new(0), inner: backend::Mutex::new(value) } }
+    pub fn into_inner(self) -> LockResult<T> { self.inner.into_inner() }
 }
 
 impl<T: ?Sized> Mutex<T> {
     #[inline]
     #[track_caller]
     pub fn lock(&self) -> LockResult<MutexGuard<'_, T>> {
-        let result = self.0.lock();
-        wrap_guard(result, held::HeldLock::new())
+        // An uncontended lock is the one acquire std's own `lock` starts with: only a lock found
+        // taken asks whether this is a fork child that inherited it held (`lock_contended`). A
+        // check of the child flag at every lock cost a cold JIT compile 1% with the arenas' (11-23).
+        match self.try_lock() {
+            Ok(g) => Ok(g),
+            Err(TryLockError::Poisoned(e)) => Err(e),
+            Err(TryLockError::WouldBlock) => self.lock_contended(),
+        }
+    }
+
+    #[cold]
+    #[track_caller]
+    fn lock_contended(&self) -> LockResult<MutexGuard<'_, T>> {
+        if IN_FORK_CHILD.load(Relaxed) {
+            // Order the holder read after the failed try_lock observed the backend lock word.
+            fence(Acquire);
+            let holder = self.holder.load(Relaxed);
+            if holder != 0 && holder <= FORK_MARK.load(Relaxed) && holder != FORKER.load(Relaxed) {
+                inherited_lock();
+            }
+        }
+        let result = self.inner.lock();
+        wrap_guard(result, held::HeldLock::new(), &self.holder)
     }
 
     #[inline]
     #[track_caller]
     pub fn try_lock(&self) -> TryLockResult<MutexGuard<'_, T>> {
-        match self.0.try_lock() {
-            Ok(guard) => Ok(MutexGuard { inner: ManuallyDrop::new(guard), held: held::HeldLock::new() }),
-            Err(TryLockError::Poisoned(err)) => Err(TryLockError::Poisoned(PoisonError::new(MutexGuard {
-                inner: ManuallyDrop::new(err.into_inner()), held: held::HeldLock::new(),
-            }))),
-            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
-        }
+        let result = match self.inner.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::Poisoned(err)) => Err(err),
+            Err(TryLockError::WouldBlock) => return Err(TryLockError::WouldBlock),
+        };
+        wrap_guard(result, held::HeldLock::new(), &self.holder).map_err(TryLockError::Poisoned)
     }
 
-    pub fn get_mut(&mut self) -> LockResult<&mut T> { self.0.get_mut() }
-    pub fn is_poisoned(&self) -> bool { self.0.is_poisoned() }
-    pub fn clear_poison(&self) { self.0.clear_poison(); }
+    pub fn get_mut(&mut self) -> LockResult<&mut T> { self.inner.get_mut() }
+    pub fn is_poisoned(&self) -> bool { self.inner.is_poisoned() }
+    pub fn clear_poison(&self) { self.inner.clear_poison(); }
 }
 impl<T: Default> Default for Mutex<T> {
     fn default() -> Self { Self::new(T::default()) }
@@ -148,35 +246,39 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Mutex<T> {
 pub struct MutexGuard<'a, T: ?Sized> {
     inner: ManuallyDrop<backend::MutexGuard<'a, T>>,
     held: held::HeldLock,
+    holder: &'a AtomicU64,
 }
 
-fn wrap_guard<T: ?Sized>(result: LockResult<backend::MutexGuard<'_, T>>, held: held::HeldLock) -> LockResult<MutexGuard<'_, T>> {
+fn wrap_guard<'a, T: ?Sized>(result: LockResult<backend::MutexGuard<'a, T>>, held: held::HeldLock, holder: &'a AtomicU64) -> LockResult<MutexGuard<'a, T>> {
+    holder.store(thread_token(), Relaxed);
     match result {
-        Ok(guard) => Ok(MutexGuard { inner: ManuallyDrop::new(guard), held }),
-        Err(err) => Err(PoisonError::new(MutexGuard { inner: ManuallyDrop::new(err.into_inner()), held })),
+        Ok(guard) => Ok(MutexGuard { inner: ManuallyDrop::new(guard), held, holder }),
+        Err(err) => Err(PoisonError::new(MutexGuard { inner: ManuallyDrop::new(err.into_inner()), held, holder })),
     }
 }
 
 impl<'a, T: ?Sized> MutexGuard<'a, T> {
-    fn into_parts(self) -> (backend::MutexGuard<'a, T>, held::HeldLock) {
+    fn into_parts(self) -> (backend::MutexGuard<'a, T>, held::HeldLock, &'a AtomicU64) {
         let mut this = ManuallyDrop::new(self);
-        // Transfer both fields without running either guard's destructor.
-        unsafe { (ManuallyDrop::take(&mut this.inner), std::ptr::read(&this.held)) }
+        this.holder.store(0, Relaxed);
+        // Transfer the guard and its diagnostic token across the backend wait.
+        unsafe { (ManuallyDrop::take(&mut this.inner), std::ptr::read(&this.held), this.holder) }
     }
 }
-fn wrap_timeout<T>(result: LockResult<(backend::MutexGuard<'_, T>, WaitTimeoutResult)>, held: held::HeldLock) -> LockResult<(MutexGuard<'_, T>, WaitTimeoutResult)> {
+fn wrap_timeout<'a, T>(result: LockResult<(backend::MutexGuard<'a, T>, WaitTimeoutResult)>, held: held::HeldLock, holder: &'a AtomicU64) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
+    holder.store(thread_token(), Relaxed);
     match result {
-        Ok((inner, result)) => Ok((MutexGuard { inner: ManuallyDrop::new(inner), held }, result)),
+        Ok((inner, result)) => Ok((MutexGuard { inner: ManuallyDrop::new(inner), held, holder }, result)),
         Err(err) => {
             let (inner, result) = err.into_inner();
-            Err(PoisonError::new((MutexGuard { inner: ManuallyDrop::new(inner), held }, result)))
+            Err(PoisonError::new((MutexGuard { inner: ManuallyDrop::new(inner), held, holder }, result)))
         }
     }
 }
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        // Unlock before the held-lock token is dropped.
+        self.holder.store(0, Relaxed);
         unsafe { ManuallyDrop::drop(&mut self.inner); }
     }
 }
@@ -204,20 +306,31 @@ impl Condvar {
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> LockResult<MutexGuard<'a, T>> {
         // Retain the acquisition token across waits: this thread cannot checkpoint
         // inside the backend wait, and owns the mutex again before user code resumes.
-        let (inner, held) = guard.into_parts();
-        wrap_guard(self.0.wait(inner), held)
+        let (inner, held, holder) = guard.into_parts();
+        wrap_guard(self.0.wait(inner), held, holder)
     }
-    pub fn wait_while<'a, T, F: FnMut(&mut T) -> bool>(&self, guard: MutexGuard<'a, T>, condition: F) -> LockResult<MutexGuard<'a, T>> {
-        let (inner, held) = guard.into_parts();
-        wrap_guard(self.0.wait_while(inner, condition), held)
+    pub fn wait_while<'a, T, F: FnMut(&mut T) -> bool>(&self, mut guard: MutexGuard<'a, T>, mut condition: F) -> LockResult<MutexGuard<'a, T>> {
+        while condition(&mut *guard) { guard = self.wait(guard)?; }
+        Ok(guard)
     }
     pub fn wait_timeout<'a, T>(&self, guard: MutexGuard<'a, T>, dur: Duration) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
-        let (inner, held) = guard.into_parts();
-        wrap_timeout(self.0.wait_timeout(inner, dur), held)
+        let (inner, held, holder) = guard.into_parts();
+        wrap_timeout(self.0.wait_timeout(inner, dur), held, holder)
     }
-    pub fn wait_timeout_while<'a, T, F: FnMut(&mut T) -> bool>(&self, guard: MutexGuard<'a, T>, dur: Duration, condition: F) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
-        let (inner, held) = guard.into_parts();
-        wrap_timeout(self.0.wait_timeout_while(inner, dur, condition), held)
+    pub fn wait_timeout_while<'a, T, F: FnMut(&mut T) -> bool>(&self, guard: MutexGuard<'a, T>, dur: Duration, mut condition: F) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
+        // The backend owns the timeout result and the deadline across spurious wakes. Its
+        // predicate runs under the reacquired lock; clear the stamp even if it unwinds.
+        struct PredicateGuard<'a>(&'a AtomicU64);
+        impl Drop for PredicateGuard<'_> {
+            fn drop(&mut self) { self.0.store(0, Relaxed); }
+        }
+        let (inner, held, holder) = guard.into_parts();
+        let result = self.0.wait_timeout_while(inner, dur, |value| {
+            holder.store(thread_token(), Relaxed);
+            let _stamp = PredicateGuard(holder);
+            condition(value)
+        });
+        wrap_timeout(result, held, holder)
     }
 }
 impl Default for Condvar {
@@ -566,12 +679,6 @@ mod macos {
             if guard.lock.is_poisoned() { Err(PoisonError::new(guard)) } else { Ok(guard) }
         }
 
-        pub fn wait_while<'a, T, F>(&self, mut guard: MutexGuard<'a, T>, mut condition: F) -> LockResult<MutexGuard<'a, T>>
-        where F: FnMut(&mut T) -> bool {
-            while condition(&mut *guard) { guard = self.wait(guard)?; }
-            Ok(guard)
-        }
-
         pub fn wait_timeout<'a, T>(&self, guard: MutexGuard<'a, T>, dur: Duration) -> LockResult<(MutexGuard<'a, T>, WaitTimeoutResult)> {
             let success = unsafe { self.wait_optional_timeout(&guard.lock.inner, Some(dur)) };
             let poisoned = guard.lock.is_poisoned();
@@ -642,6 +749,106 @@ mod tests {
         assert_eq!(held_lock(), (1, second_site));
         drop(second);
         assert_eq!(held_lock(), (0, None));
+
+        #[cfg(unix)]
+        {
+            use std::ffi::{c_int, c_void};
+            use std::sync::atomic::{AtomicBool, Ordering::{Acquire, Release}};
+            use std::time::Instant;
+            unsafe extern "C" {
+                fn fork() -> c_int;
+                fn pipe(fds: *mut c_int) -> c_int;
+                fn dup2(fd: c_int, to: c_int) -> c_int;
+                fn close(fd: c_int) -> c_int;
+                fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+                fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+                fn kill(pid: c_int, signal: c_int) -> c_int;
+            }
+            let wait = |pid| {
+                assert!(pid > 0, "fork failed");
+                let start = Instant::now();
+                let mut status = 0;
+                loop {
+                    let got = unsafe { waitpid(pid, &mut status, 1) }; // WNOHANG
+                    if got == pid { return status; }
+                    if got < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+                    assert_eq!(got, 0, "waitpid failed");
+                    if start.elapsed() >= Duration::from_secs(10) {
+                        unsafe { kill(pid, 9); waitpid(pid, &mut status, 0); }
+                        panic!("child hung");
+                    }
+                    thread::sleep(Duration::from_millis(3));
+                }
+            };
+            static M1: Mutex<()> = Mutex::new(());
+            static M2: Mutex<()> = Mutex::new(());
+            static M3: Mutex<()> = Mutex::new(());
+            static CHILD_HOLDS: AtomicBool = AtomicBool::new(false);
+            static CHILD_WAITS: AtomicBool = AtomicBool::new(false);
+            thread::spawn(|| drop(M1.lock().unwrap())).join().unwrap();
+            let forker_guard = M2.lock().unwrap();
+            let pid = unsafe { fork() };
+            if pid == 0 {
+                super::fork_child();
+                let one = thread::spawn(|| {
+                    let _guard = M1.lock().unwrap();
+                    CHILD_HOLDS.store(true, Release);
+                    thread::sleep(Duration::from_millis(50));
+                });
+                while !CHILD_HOLDS.load(Acquire) { thread::yield_now(); }
+                drop(M1.lock().unwrap());
+                one.join().unwrap();
+                let two = thread::spawn(|| {
+                    CHILD_WAITS.store(true, Release);
+                    drop(M2.lock().unwrap());
+                });
+                while !CHILD_WAITS.load(Acquire) { thread::yield_now(); }
+                thread::sleep(Duration::from_millis(20));
+                drop(forker_guard);
+                two.join().unwrap();
+                unsafe { super::_exit(0) }
+            }
+            drop(forker_guard);
+            assert_eq!(wait(pid), 0, "child could not wait for its own threads");
+
+            let mut fds = [-1; 2];
+            assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+            let ready = AtomicBool::new(false);
+            let release = AtomicBool::new(false);
+            let status = thread::scope(|scope| {
+                let parent = scope.spawn(|| {
+                    let _guard = M3.lock().unwrap();
+                    ready.store(true, Release);
+                    while !release.load(Acquire) { thread::park(); }
+                });
+                while !ready.load(Acquire) { thread::yield_now(); }
+                let pid = unsafe { fork() };
+                if pid == 0 {
+                    unsafe {
+                        close(fds[0]);
+                        if dup2(fds[1], 2) != 2 { super::_exit(1); }
+                        if fds[1] != 2 { close(fds[1]); }
+                    }
+                    super::fork_child();
+                    take_inherited();
+                    unsafe { super::_exit(1) }
+                }
+                unsafe { close(fds[1]); }
+                release.store(true, Release);
+                parent.thread().unpark();
+                parent.join().unwrap();
+                wait(pid)
+            });
+            assert_eq!(status, 134 << 8, "child did not exit with status 134");
+            const LOCK_LINE: u32 = line!() + 1;
+            fn take_inherited() { drop(M3.lock().unwrap()); }
+            let mut message = [0u8; 2048];
+            let n = unsafe { read(fds[0], message.as_mut_ptr().cast(), message.len()) };
+            unsafe { close(fds[0]); }
+            assert!(n > 0, "child did not name the inherited lock");
+            let message = String::from_utf8_lossy(&message[..n as usize]);
+            assert!(message.contains(&format!("the lock taken at {}:{} was held at the fork", file!(), LOCK_LINE)), "{message}");
+        }
     }
 
     #[test]

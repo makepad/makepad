@@ -330,7 +330,8 @@ mod tests {
         std::fs::write(&helper, b"// changed helper").unwrap();
         let mismatch = checked(&reg).unwrap_err();
         assert_eq!(mismatch.package, "makepad_micro_proc_macro");
-        assert_eq!(mismatch.file, helper.to_string_lossy());
+        // (the same file: the mismatch joins the package root and the listed `src/macro_lib.rs`)
+        assert_eq!(std::path::Path::new(&mismatch.file), helper.as_path());
         assert_eq!(mismatch.reason, "source bytes differ");
         // Only a reload transaction changes certification; use-time lookup reads no files.
         assert!(graph.find(&entry).unwrap().is_some());

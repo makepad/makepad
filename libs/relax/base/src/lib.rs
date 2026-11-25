@@ -6,6 +6,10 @@
 
 #![recursion_limit = "1024"]
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
 // log in a full tmpfs /tmp aborted a fleet run inside a lazy compile, 2026-10-23), so in this
@@ -62,6 +66,7 @@ pub mod boot_stats;
 pub mod dirs;
 pub use relax_lex::tokens as pm_tokens;
 pub mod pm;
+pub mod host;
 pub mod progenv;
 pub mod compile_time;
 pub mod zone_alloc;
@@ -85,13 +90,14 @@ pub mod scc;
 pub mod solver_work;
 
 /// The command this process runs as, for the lines that tell the user what to type next
-/// (`relax inspect <pid> help`): `relax` unless the runner set another at start (the Makepad
-/// host sets `makepad`). A property of the process, so reset_statics leaves it.
+/// (`relax inspect <pid> help`): the linked host's name, or `relax` if none is linked.
+/// A property of the process, so reset_statics leaves it.
 static TOOL_NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 pub fn set_tool_name(name: &'static str) {
     let _ = TOOL_NAME.set(name);
 }
 pub fn tool_name() -> &'static str {
+    host::init();
     TOOL_NAME.get().copied().unwrap_or("relax")
 }
 

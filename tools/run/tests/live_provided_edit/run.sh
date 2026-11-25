@@ -39,6 +39,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relax-api = { path = "$R/libs/relax_api" }
+makepad-thread-local = { path = "$R/libs/thread_local" }
 EOF
     (cd "$S/ws" && RELAX_CACHE=off RELAX_HOME="$S/home" TMPDIR="$S/tmp" exec "$S/$2" test --live relax-provided-fixture --test relax_api_entries) > "$S/log" 2>&1 &
     pid=$!

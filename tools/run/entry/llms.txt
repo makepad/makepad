@@ -1,0 +1,45 @@
+# Makepad
+
+Makepad apps (Fab, for CAD and 3D printing, and more) are compiled from source on this computer
+by the Makepad Runner. Your coding agent can install one, start it and use its tools from the
+shell. No plugin or MCP server is needed.
+
+## Install and start an app
+
+macOS (Apple silicon) and Linux (x86_64, glibc):
+
+    curl -fsSL https://makepad.nl/runner/unix | sh -s -- open fab
+
+Windows (from cmd, PowerShell or a POSIX shell):
+
+    powershell -NoProfile -c "& ([scriptblock]::Create((irm https://makepad.nl/runner/windows.ps1))) open fab"
+
+The first start downloads Rust, builds the loader and compiles the app for this computer: many
+minutes. A window on the screen shows how far it is. Run the line with a long timeout, or in the
+background, and read its output. If your shell stops waiting, run the same line again: it
+continues where it is. Later starts reuse what was built.
+
+It ends with a block like this one:
+
+    Ready: fab pid=48213 makepad=/home/you/makepad-runner/makepad
+    Fab is running. Talk to it from your shell:
+      /home/you/makepad-runner/makepad inspect 48213 tools                       (its AI tools)
+      /home/you/makepad-runner/makepad inspect 48213 call <service>.<tool> {..}  (one tool call; pictures are saved as files)
+      /home/you/makepad-runner/makepad inspect 48213 grab                        (a picture of its window)
+      /home/you/makepad-runner/makepad inspect 48213 help                        (every remote command)
+
+On Windows the makepad path ends in makepad.cmd. When the app cannot be found by its pid, the
+block names its socket path instead; use whatever the block prints.
+
+## Talk to the running app
+
+Use the makepad path and the target (pid or socket) from the ready block:
+
+    <makepad> inspect <target> tools               the app's AI tools, with their arguments
+    <makepad> inspect <target> call fab.render {}  call one tool; pictures are written to files, their paths printed
+    <makepad> inspect <target> grab                a picture of the app's window
+    <makepad> inspect <target> help                every remote command
+
+To start the app again later, or to find it when it already runs:
+
+    <makepad> open fab

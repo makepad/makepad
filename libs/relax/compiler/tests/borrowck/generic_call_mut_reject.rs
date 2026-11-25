@@ -1,3 +1,4 @@
+// rejects: E0596
 fn bad<F: FnMut()>(f: F) {
     let mut o = Some(f);
     (|| if let Some(f) = o.take() { f() })(); // E0596 even for an Fn instance

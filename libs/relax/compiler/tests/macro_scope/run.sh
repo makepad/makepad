@@ -8,7 +8,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 # no disk cache: its "relax cache:" lines and stored code are not part of what is tested
 export RELAX_CACHE=off
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 {
 for v in with without; do
   if [ $v = with ]; then DEPS='[{"index":0,"extern_crate_name":"dep_a"},{"index":2,"extern_crate_name":"user"}]'; else DEPS='[{"index":2,"extern_crate_name":"user"}]'; fi

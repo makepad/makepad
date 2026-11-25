@@ -19,7 +19,9 @@ rem    source marker reuses the source; matching SHA-256 and Rust stamps reuse t
 rem    A changed ZIP replaces only changed files, so only their crates
 rem    compile again. Then `makepad` with no arguments: the runner,
 rem    from its launch record (apps\runner.launch, the release service's latest `runner` release),
-rem    which downloads the rest. With arguments, the loader runs with them instead.
+rem    which downloads the rest. With open <id> (for example, makepad.bat open fab), it prepares
+rem    the same Runner launch record, then hands over to makepad open <id> for progress and the
+rem    app's ready line. Other arguments go straight to the loader.
 rem
 rem In a console it draws one screen, redrawn in place about every second: a row for each step
 rem (Rust, the loader's source, its build, the Runner) with a bar, sizes, speed or crates, the time
@@ -35,7 +37,24 @@ rem Under cache\loader, current selects src or a commit folder; pending rolls ba
 rem unless the new runner confirmed its first start. Each folder keeps its own source and binary.
 rem Run it again at any time: nothing is downloaded or compiled twice. It uses only Windows' own
 rem curl.exe, tar.exe, certutil.exe and PowerShell (for the console, release JSON, source updates).
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
+set "OPEN_ID="
+set "PREPARE_RUNNER="
+if "%~1"=="" set "PREPARE_RUNNER=1"
+if not "%~1"=="open" goto :arguments_ready
+rem Bare open goes to the loader. A second argument of "" is an invalid id.
+if not "%~2"=="" goto :open_argument
+if "%2"=="" goto :arguments_ready
+:open_argument
+rem The caller supplies the shell arguments; keep ! literal so PowerShell can reject a mistyped id before setup.
+set "OPEN_ID=%~2"
+powershell -NoProfile -Command "if ($env:OPEN_ID -cmatch '\A[A-Za-z0-9_-]{1,64}\z') { exit 0 }; exit 1" || (
+    echo   Invalid app id: use 1 to 64 letters, digits, hyphens or underscores.
+    exit /b 1
+)
+set "PREPARE_RUNNER=1"
+:arguments_ready
+setlocal EnableDelayedExpansion
 
 rem A release service of its own (a test's) installs only into a folder named for it: a run that sets
 rem MAKEPAD_LOADER_SERVICE without MAKEPAD_LOADER_ROOT stops before it makes or changes anything.
@@ -134,6 +153,7 @@ for %%I in (1 2 3 4) do (set "K=wait" & set "S=next" & set "INFO=" & call :put %
 set "HOLD="
 call :now
 set "T0=!NOW!"
+set "LOADER=!CACHE!\loader"
 call :frame
 
 set "CURL_VERSION=" & set "CURL_AGE=0"
@@ -152,7 +172,6 @@ for %%D in ("%DOWNLOADS%" "%LOGS%" "%CACHE%\loader" "%CACHE%\runner" "%ROOT%\app
 set "RELAX_HOME=%ROOT%"
 
 rem Restore an unconfirmed switch before choosing the source folder or checking its build stamp.
-set "LOADER=!CACHE!\loader"
 if exist "!LOADER!\pending" (
     call :loader_folder previous
     if "!LOADER_NAME!"=="src" (
@@ -277,16 +296,15 @@ call :put 1
 if not defined NEED_RUST (set "K=ok" & set "S=ready" & set "INFO=%D%in rust\%N%" & call :put 1)
 
 rem --- 2. The runner release and its loader's source, cut from the same Makepad commit (so the two
-rem always fit). With arguments a loader compiled before stays as it is (the runner and the apps it
-rem recorded were made for it); offline, the one built before.
+rem always fit). With other loader arguments a loader compiled before stays as it is (the runner and
+rem the apps it recorded were made for it); offline, the one built before.
 rem The loader ZIP's SHA-256 names its version, independent of the runner's commit.
 rem One source folder for every version (target\ inside it: makepad finds its std two levels up).
 set "CURROW=2"
 if not exist "%CACHE%\runner" mkdir "%CACHE%\runner"
 set "RUNNER=%CACHE%\runner\latest.json"
 del "%RUNNER%" 2>nul
-set "ASK="
-if "%~1"=="" set "ASK=1"
+set "ASK=!PREPARE_RUNNER!"
 if not exist "%SRC%\.built" set "ASK=1"
 if defined ASK (
     set "K=doing" & set "S=asking" & set "INFO=%D%!SVCHOST! for the latest Runner release%N%"
@@ -463,17 +481,19 @@ set "T2=The end of the build log is below."
 set "LOGFILE=!LOG!" & set "TAIL=1"
 goto :fail
 :have_loader
-set "PATH=%RUST%\bin;%PATH%"
-set "MAKEPAD_LOADER_ROOT=%ROOT%"
-set "MAKEPAD_LOADER_SERVICE=%SERVICE%"
+set "PATH=!RUST!\bin;!PATH!"
+set "MAKEPAD_LOADER_ROOT=!ROOT!"
+set "MAKEPAD_LOADER_SERVICE=!SERVICE!"
 set "CURROW=4"
-if not "%~1"=="" (
-    set "K=wait" & set "S=not started" & set "INFO=%D%the loader runs with your arguments%N%"
-    call :put 4
-    call :ready "Running the loader with your arguments."
-    "%MAKEPAD%" %*
-    exit /b !errorlevel!
-)
+if defined PREPARE_RUNNER goto :prepare_runner
+set "K=wait" & set "S=not started" & set "INFO=%D%the loader runs with your arguments%N%"
+call :put 4
+call :ready "Running the loader with your arguments."
+"%MAKEPAD%" %*
+exit /b
+
+:prepare_runner
+call :write_entry || (set "T=Cannot write !ROOT!\makepad.cmd." & goto :fail)
 
 rem --- 4. The runner's launch record, then `makepad` alone runs it (makepad launch.rs) ------------
 rem The service's latest licence-free `runner` release: its repositories on the service's read-only
@@ -496,6 +516,11 @@ if not exist "%ROOT%\apps\runner.launch" (
 )
 set "K=doing" & set "S=starting" & set "INFO=%D%Makepad's loader opens its window%N%"
 call :put 4
+if defined OPEN_ID (
+    call :ready "Handing over to makepad open !OPEN_ID!."
+    "%MAKEPAD%" open !OPEN_ID!
+    exit /b
+)
 call :ready "The Runner opens in a moment."
 "%MAKEPAD%"
 exit /b %errorlevel%
@@ -506,13 +531,21 @@ rem name, so a short 8.3 one (JOHNSM~1) matches too; PowerShell reads them, cmd 
 for /f %%T in ('powershell -NoProfile -Command "$h = [IO.Path]::GetFullPath($env:ROOT + '\'); foreach ($t in $env:TEMP, $env:TMP) { if ($t -and $h.StartsWith([IO.Path]::GetFullPath($t.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { 'temporary'; break } }"') do set "NOT_HOME=%%T"
 exit /b 0
 
-rem :loader_folder POINTER returns only a valid folder with a binary, otherwise src.
-rem Read untrusted pointer text in PowerShell so cmd never expands it as commands or paths.
-:loader_folder
-set "LOADER_NAME=src"
-set "LOADER_POINTER=%~1"
-if not exist "!LOADER!\!LOADER_POINTER!" exit /b 0
-for /f "delims=" %%N in ('powershell -NoProfile -Command "try { $n = [IO.File]::ReadAllText((Join-Path $env:LOADER $env:LOADER_POINTER)).Trim(); if ($n -cmatch '\A(src|[0-9a-f]{40})\z' -and [IO.File]::Exists((Join-Path $env:LOADER ($n + '\target\host\makepad.exe')))) { $n } } catch {}"') do set "LOADER_NAME=%%N"
+:write_entry
+setlocal DisableDelayedExpansion
+if exist "%ROOT%\makepad.cmd\" exit /b 1
+rem What this script gives the loader when it runs it; Rust's bin goes before the caller's PATH then.
+set "RUST_BIN=%RUST%\bin"
+rem Copy the entry and its shared pointer check from the end of this file, filling in the settings we applied.
+rem Double percent signs in batch literals. An embedded quote (as in PATH) also needs cmd's metacharacters escaped.
+powershell -NoProfile -Command ^
+    "$ErrorActionPreference = 'Stop'; $src = [IO.File]::ReadAllLines($env:SELF); $start = [Array]::IndexOf($src, ':makepad_cmd'); if ($start -lt 0) { exit 1 };" ^
+    "$keys = @('RELAX_HOME', 'MAKEPAD_LOADER_ROOT', 'MAKEPAD_LOADER_SERVICE', 'RUST_BIN');" ^
+    "$lines = foreach ($line in $src[($start + 1)..($src.Length - 1)]) { if ($line -cne 'rem Installed environment') { $line; continue }; foreach ($k in $keys) {" ^
+    "  $v = [Environment]::GetEnvironmentVariable($k); if ($v -match '[\r\n\x1a]') { throw ('Cannot write setting ' + $k) };" ^
+    "  $s = ('set {0}{1}={2}{0}' -f [char]34,$k,$v).Replace('%%','%%%%'); if ($v -match '\x22') { $s -replace '[\x22&|<>()^]','^$0' } else { $s } } };" ^
+    "[IO.File]::WriteAllLines((Join-Path $env:ROOT 'makepad.cmd.part'), [string[]]$lines)" || exit /b 1
+move /y "%ROOT%\makepad.cmd.part" "%ROOT%\makepad.cmd" >nul || exit /b 1
 exit /b 0
 
 rem :build_progress counts Cargo's own Compiling lines and keeps the last crate's name, no version:
@@ -591,6 +624,10 @@ if defined SCREEN (
     goto :draw
 )
 echo   !WHERE!
+if not defined CONSOLE if defined OPEN_ID (
+    if exist "!LOADER!\pending" (call :loader_folder previous) else call :loader_folder current
+    if not exist "!LOADER!\!LOADER_NAME!\target\host\makepad.exe" echo   First start: Rust, the loader, then !OPEN_ID! compiles for this computer: many minutes. If your shell stops waiting, run the same line again: it continues where it is.
+)
 if defined NOTE echo   !NOTE!
 if defined NOTE2 echo   !NOTE2!
 exit /b 0
@@ -824,4 +861,30 @@ rem One part of Rust unpacked into its own folder; its .done file says ok or fai
 tar.exe -xzf "%DOWNLOADS%\%~2-%RUST_VERSION%-%TRIPLE%.tar.gz" --strip-components=2 -C "%STAGE%\%~2" 2>"%STAGE%\%~2.log" && (set "RESULT=ok") || (set "RESULT=failed")
 >"%STAGE%\%~2.part" echo %RESULT%
 move /y "%STAGE%\%~2.part" "%STAGE%\%~2.done" >nul
+exit /b 0
+
+rem The remainder of this file is also the standalone makepad.cmd.
+:makepad_cmd
+@echo off
+setlocal EnableExtensions DisableDelayedExpansion
+set "ENTRY_CODEPAGE="
+for /f "tokens=2 delims=:" %%C in ('chcp 2^>nul') do set "ENTRY_CODEPAGE=%%C"
+if defined ENTRY_CODEPAGE chcp 65001 >nul
+rem Installed environment
+if defined ENTRY_CODEPAGE chcp %ENTRY_CODEPAGE% >nul
+set "PATH=%RUST_BIN%;%PATH%"
+set "LOADER=%MAKEPAD_LOADER_ROOT%\cache\loader"
+call :loader_folder current
+"%LOADER%\%LOADER_NAME%\target\host\makepad.exe" %*
+exit /b
+
+rem :loader_folder POINTER returns only a valid folder with a binary, otherwise src.
+rem Read untrusted pointer text in PowerShell so cmd never expands it as commands or paths.
+:loader_folder
+set "LOADER_NAME=src"
+set "LOADER_POINTER=%~1"
+setlocal DisableDelayedExpansion
+if not exist "%LOADER%\%LOADER_POINTER%" exit /b 0
+for /f "delims=" %%N in ('powershell -NoProfile -Command "try { $n = [IO.File]::ReadAllText((Join-Path $env:LOADER $env:LOADER_POINTER)).Trim(); if ($n -cmatch '\A(src|[0-9a-f]{40})\z' -and [IO.File]::Exists((Join-Path $env:LOADER ($n + '\target\host\makepad.exe')))) { $n } } catch {}"') do set "LOADER_NAME=%%N"
+endlocal & set "LOADER_NAME=%LOADER_NAME%"
 exit /b 0

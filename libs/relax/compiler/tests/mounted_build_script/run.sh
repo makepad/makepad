@@ -6,7 +6,7 @@
 # on the mount's std. Prints "mounted_build_script: ok" or "mounted_build_script: FAILED ..."
 # (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d) || exit 1
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 1
 [ -n "$T" ] || exit 1
 trap 'rm -rf "$T"' EXIT
 W=$T/ws

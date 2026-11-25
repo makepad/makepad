@@ -18,8 +18,18 @@ include = ["../build_stamp.rs", "../self_stamp.rs", "std"]
 [package.metadata.makepad]
 test-tree = "its build script runs cargo metadata on the checkout"
 
-[package.metadata.makepad.platform-gaps]
-windows = { "lib" = "16 of 468 fail there: cache and check reuse (4); platform gaps (6): native binaries (3), a 32-bit lab, WSABUF, a directory read as a file; untriaged (6)" }
+# a Windows box runs all its unit tests after the landings that reach it (devhub's windows-tests
+# bucket): its Windows code (SEH, its memory, sockets, handles) is tested nowhere else. And these
+# corpus files under the JIT there (`makepad test <file>`), what Relax's std and runtime do with
+# the OS: no other run tests them on Windows
+[package.metadata.makepad.windows-tests]
+"corpus:tests/thread_name_cut.rs" = "a thread's name as Windows keeps it (its thread description)"
+"corpus:tests/thread_local_keys.rs" = "thread-local keys and their destructors as Windows threads end"
+"corpus:tests/deep_clone_stack.rs" = "a deep recursion on an 8 MB thread: Windows' stack reserve and its probes"
+"corpus:tests/fp_env.rs" = "the floating-point control register across Windows' calling convention"
+"corpus:tests/os_str_path_cow_cmp.rs" = "OsStr and Path forms compared as Windows paths"
+"corpus:tests/import_library_dlls.rs" = "an import library's imports bound to the DLLs it names (mincore: API sets)"
+"lib" = "its Windows code: SEH, its memory, sockets and handles"
 
 [lib]
 name = "relax_compiler"
@@ -30,6 +40,7 @@ name = "enum_tag16"
 path = "tests/enum_tag16.rs"
 
 [dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }
 makepad-cpu-budget = { workspace = true }
 makepad-core-util = { path = "../../core_util", version = "0.1.0" }
 # the git store's deflate/inflate (src/inflate), the manifests' TOML (src/toml) and the

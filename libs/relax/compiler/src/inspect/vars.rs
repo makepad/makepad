@@ -149,14 +149,15 @@ pub(crate) struct Level {
     pub locals: Vec<Local>,
 }
 
-/// The variable table of the code body holding `pc` and the body's start and pc map entries.
-fn table_at(u: &Unit, pc: u64) -> Option<(u64, Vec<(u32, u64)>, dbgloc::Table)> {
+/// The owning body's start and map, the function-relative lookup PC and that frame's locals.
+fn table_at(u: &Unit, pc: u64) -> Option<(u64, Vec<(u32, u64)>, u32, dbgloc::Table)> {
     let id = u.find_fn(pc)?;
     let b = super::codever::bodies(u, id).into_iter().find(|b| pc >= b.start && pc < b.start + b.len as u64)?;
     let entries = b.map.entries();
     let bytes = dbgloc::from_pc_entries(entries.iter().copied());
-    let t = if bytes.is_empty() { dbgloc::Table::default() } else { dbgloc::decode(&bytes)? };
-    Some((b.start, entries, t))
+    let (bytes, func_off) = relax_backend::rir::part_local_table(&bytes, (pc - b.start) as u32)?;
+    let t = if bytes.is_empty() { dbgloc::Table::default() } else { dbgloc::decode(bytes)? };
+    Some((b.start, entries, func_off, t))
 }
 
 fn reg_word(regs: &[Option<u64>], h: Home) -> Option<u64> {
@@ -264,9 +265,9 @@ pub(crate) fn levels(u: &Unit, stop: &Stop, only: Option<usize>) -> Vec<(usize, 
         }
         let at_call = k > 0 || stop.top_at_call;
         let Some(id) = u.find_fn(pc) else { continue };
-        let Some((start, entries, table)) = table_at(u, pc) else { continue };
+        let Some((start, entries, func_off, table)) = table_at(u, pc) else { continue };
         let off = (pc - start) as u32;
-        let ret_off = off + 1;
+        let ret_off = func_off + 1;
         // the pc's position and its inline contexts, innermost first (ctx 0: the slot's fn)
         let mut pos = None;
         for &(o, p) in &entries {

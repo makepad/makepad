@@ -545,21 +545,22 @@ fn selection() -> Option<&'static Sel> {
     .as_ref()
 }
 
+/// Whether native code generation would select the interpreter for this name.
+pub fn selected(name: &str) -> bool {
+    if !cfg!(target_arch = "aarch64") { return false; }
+    let Some(sel) = selection() else { return false };
+    // a pattern matches a name containing it; `=name` matches that name only
+    let m = |p: &String| match p.strip_prefix('=') {
+        Some(x) => name == x,
+        None => name.contains(p.as_str()),
+    };
+    (sel.all || sel.pats.iter().any(m)) && !sel.skip.iter().any(m)
+}
+
 /// The backends' hook: `Some(code)` when `f` runs in the interpreter -- the slot's code is then
 /// a jump to the function's entry thunk.
 pub fn maybe_compile(options: &relax_session::Options, f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_slow: u64, resume: u64) -> Option<(Vec<u8>, Vec<RelocAt>)> {
-    let sel = selection()?;
-    // a pattern matches a name containing it; `=name` matches that name only
-    let m = |p: &String| match p.strip_prefix('=') {
-        Some(x) => f.name == x,
-        None => f.name.contains(p.as_str()),
-    };
-    if !(sel.all || sel.pats.iter().any(m)) || sel.skip.iter().any(m) {
-        return None;
-    }
-    if !cfg!(target_arch = "aarch64") {
-        return None;
-    }
+    if !selected(&f.name) { return None; }
     let t0 = std::time::Instant::now();
     let lowered = lower(options, f, slots, syms, sym_class);
     LOWER_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3508,6 +3509,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let target = match callee {
                 // an asm! block runs only as machine code: its function stays native
                 Callee::Asm(_) => return Err("inline assembly"),
+                Callee::Part(_) => return Err("outlined calls are native only"),
                 Callee::Fn(id) | Callee::CFn(id, _) => Target::Table(slots.table(*id)),
                 Callee::Indirect(v) | Callee::CIndirect(v, _) => Target::Cell(l.cell[v.0 as usize]),
                 Callee::Host(s) | Callee::CHost(s, _) => Target::Addr(sym_val(*s)),

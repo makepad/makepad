@@ -17,24 +17,41 @@ let dither = fn(px: vec2) -> float {
     let b = fract(52.9829189 * fract(dot(px.yx + vec2(47.0, 19.0), k)))
     return (a + b - 1.0) / 255.0
 }
-// ---- the Ignition Field: every star, dust grain and flare is one instance of one pipeline.
-// Instance: rect = (angle, radius, size, born), info = (kind, 0, glint + 1, seed); a dust grain:
-// rect = (angle, radius, size, the radius it warps to), info = (kind, its warp's start, the turn
-// to its place on an arm, seed).
-// kinds: 0 star, 1 dust, 2 O3 star, 3 the disk (core, arm glow, dust lanes, the source ring's
+// ---- the Ignition Field: every star (one function installed) and dust grain is one instance:
+// the stars of their own pipeline (`ignition_stars`), the rest of `ignition`. A star: rect =
+// (angle, radius, size, born), info = (kind, O3 + 1, glint + 1, seed) (a moment + 1, 0: never);
+// its size is its function's weight (field.rs `size_of`: 0.45 for the lightest code to 2.85 for
+// the heaviest). A dust grain: rect = (angle, radius, size, the radius it
+// warps to), info = (kind, its warp's start, the turn to its place on an arm, seed).
+// kinds: 0 star (ignition_stars), 1 dust, 3 the disk (core, arm glow, dust lanes, the source ring's
 // haze), 4 swap ring, 5 corner brackets (halted only), 6 backdrop, 7 warm-up arc. Angles are
 // before the turn, radii in disk radii; view = (centre x, centre y, radius in points, the disk's
 // reach). One radius for both axes: the galaxy is round at any window size and dpi. The spiral
 // is field.rs's: an arm at base angle b runs along a = b - 2.3 ln(r / 0.08). Light is added
 // (alpha 0 over the premultiplied target). The field opens on scattered dust that warps in place
 // into the spiral over about 1.5 s (each grain eases along a short curve to its arm while the disk
-// starts turning). A star arrives with a brief brighter twinkle; a compile glints its star (info.z:
-// that moment + 1, 0: never); `glitter` (field_fall.z, 0..1: the install rate) adds a capped
-// shimmer while the compile is busy. Colours: a warm core, white to blue arms on the deep field bg #08060f; O3 gold
-// #ffcf6a; failure ember #ff7a5c. A halted field (`fault` 1: compile errors, a parked panic)
-// stops turning, its stars cool to dim and the core glows ember.
+// starts turning). A star arrives with a brief brighter twinkle when its function is installed;
+// installed again it glints, its O3 code turns it gold with a gold flare, and nothing else
+// sparks: every flash is a function installed. `glitter` (field_fall.z, 0..1: the install rate)
+// only softens arrivals in a burst. Colours: a warm core, white to blue arms on the deep field bg
+// #08060f; O3 gold #ffcf6a; failure ember #ff7a5c. A halted field (`fault` 1: compile errors, a
+// parked panic) stops turning, its stars cool to dim and the core glows ember.
 let hash21 = fn(p: vec2) -> float {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453)
+}
+// the value noise's lattice: a 64 x 64 texture holding `hash21` of the integer points from -32 to
+// 31 (`ignition_lattice` fills it on the GPU, once per document and device). Its bilinear tap at
+// `lattice_uv(p)` is `vnoise(p)`: the smoothstep of each corner's weight is moved into the
+// coordinate, so the filter's linear weights are vnoise's. That holds for p within -32..31 (past
+// it the tap clamps to the edge: it neither repeats nor matches), which covers every place the
+// noise shows: the disk's (`disk_px`, read out to 1.38 radii, but only inside its reach does it
+// show: r < 1.05, the reach stays under 1 and nothing is lit past reach + 0.05), at q * 7 (|p| <
+// 7.4) and q * 19 + (5.2, 1.3) (x -14.8..25.2, y -18.7..21.3); the baked stars' twinkle rate at q * 20 over their layers, which span 1.4 radii a
+// side on each axis (|p| <= 28). A reader that goes wider grows the lattice (LATTICE_SIZE)
+let lattice_uv = fn(p: vec2) -> vec2 {
+    let i = floor(p)
+    let f = fract(p)
+    return (i + f * f * (vec2(3.0) - 2.0 * f) + vec2(32.5)) / 64.0
 }
 let vnoise = fn(p: vec2) -> float {
     let i = floor(p)
@@ -46,18 +63,24 @@ let vnoise = fn(p: vec2) -> float {
     let e = hash21(i + vec2(1.0, 1.0))
     return mix(mix(a, b, u.x), mix(c, e, u.x), u.y)
 }
-// the turn at radius r: the inner disk turns faster (2.3x at the core), the arms nearly as one
+// the turn at radius r: the disk turns as one, so the spiral keeps its shape however long the
+// window has been open (a faster core wound the arms tighter with every minute of the clock)
 let turn = fn(r: float, spin: float) -> float {
-    return spin * (1.0 + 1.3 * exp(-5.0 * r))
+    return spin
 }
 // where (a, r) (before the turn) lies across the arms: 0 and pi on the main arms' ridges
 let arm_phase = fn(a: float, r: float) -> float {
     return a + 2.3 * log(max(r, 0.02) / 0.08)
 }
-// a dust lane along the inner edge of each main arm, in the disk's middle
+// a dust lane along the inner edge of each main arm, in the disk's middle, from
+// c = cos(2 (psi + 0.38))
+let lane_at = fn(c: float, r: float) -> float {
+    let b = 0.5 + 0.5 * c
+    let b3 = b * b * b
+    return b3 * b3 * b * smoothstep(0.06, 0.2, r) * (1.0 - smoothstep(0.5, 0.95, r))
+}
 let lane = fn(psi: float, r: float) -> float {
-    let l = pow(0.5 + 0.5 * cos(2.0 * (psi + 0.38)), 7.0)
-    return l * smoothstep(0.06, 0.2, r) * (1.0 - smoothstep(0.5, 0.95, r))
+    return lane_at(cos(2.0 * (psi + 0.38)), r)
 }
 let project = fn(a: float, r: float, view: vec4, spin: float) -> vec2 {
     let t = a + turn(r, spin)
@@ -77,36 +100,23 @@ let rays = fn(d: vec2, l: float, dp: float) -> float {
     let y = exp(-abs(d.x) * dp * 1.5) * max(0.0, 1.0 - abs(d.y) / max(l, 0.01))
     return x + y
 }
-let star_px = fn(d: vec2, size: float, r: float, seed: float, age: float, twinkle: float, time: float, calm: float, shade: float, scale: float, dp: float, fault: float, glitter: float) -> vec4 {
+// a star at rest (no arrival, glint, gold or fault), from its record: its colour (warm in the bulge,
+// white to blue outward, a few young blue giants and pink knots on the arms) and its light by
+// weight before the exposure, with a little of each star's own and what the dust lanes leave it
+// (rgb, light). `ignition_stars` draws it live, `ignition_bake` into the bake: the same maths, so a
+// star taken out of the bake cancels
+let star_rest = fn(a: float, r: float, size: float, seed: float) -> vec4 {
     let h1 = fract(seed * 7.31 + 0.13)
     let h2 = fract(seed * 13.7 + 0.41)
     let h3 = fract(seed * 29.3 + 0.77)
-    let s = size * scale * 0.42
-    // the few large stars: a faint halo and four short rays
-    let big = smoothstep(1.5, 2.6, size)
-    // a gentle twinkle, each star at its own pace, a little deeper while the compile is busy
-    let tw = 1.0 - calm * (0.22 + 0.14 * glitter) * (0.5 + 0.5 * sin(time * (0.9 + 1.8 * h2) + h3 * 6.2831853))
-    // the busy shimmer: now and then a star sparks for a tenth of a second, each at its own slow
-    // pace (under one a second), so the galaxy glitters without ever flashing as one
-    let spark = pow(0.5 + 0.5 * sin(time * (2.2 + 3.0 * h1) + h2 * 40.0), 24.0) * glitter * calm * 0.8
-    // arrival: fades in over 0.3 s into a brief brighter twinkle that settles over about a
-    // second; softer when thousands arrive at once, so a burst never flashes the disk
-    let x = max(age, 0.0) / 0.3
-    let arrive = x * exp(1.0 - x) * (0.85 - 0.4 * glitter) * (1.0 - fault)
-    let birth = smoothstep(0.0, 0.3, age) + arrive
-    let light = dot_px(d, s, dp) + big * (rays(d, s * 9.0, dp) * 0.14 + exp(-length(d) / max(s * 3.5, 0.5)) * 0.08) + rays(d, s * 6.0, dp) * 0.1 * (arrive + spark)
-    // a compile's glint: a brief brightening towards white
-    let g = clamp(1.0 - twinkle / 0.5, 0.0, 1.0) * step(0.0, twinkle) * (1.0 - fault)
-    let lum = (0.3 + 0.7 * h1 * h1) * tw * birth * shade * (1.0 + 2.2 * g * g) * (1.0 + spark)
-    // warm in the bulge, white to blue outward, a few young blue giants and pink knots on the arms
+    let heavy = clamp((size - 0.45) / 2.4, 0.0, 1.0)
+    let shade = 1.0 - 0.8 * lane(arm_phase(a, r), r)
     let warm = mix(#ffd2a1, #fff2e3, smoothstep(0.04, 0.3, r))
     let cool = mix(#fff2e3, #9db8ff, smoothstep(0.12, 0.6, r) * (0.6 + 0.4 * h2))
     var c = mix(warm, cool, smoothstep(0.12, 0.4, r)).rgb
     c = mix(c, #8fb0ff.rgb, step(0.9, h3) * smoothstep(0.25, 0.5, r))
     c = mix(c, #ff9ccf.rgb, step(0.975, h2) * smoothstep(0.3, 0.5, r))
-    c = mix(c, #ffffff.rgb, max(g, 0.4 * max(arrive, spark)))
-    c = mix(c, #8a7fb8.rgb * 0.6, fault)
-    return vec4(c * light * lum, 0.0)
+    return vec4(c, (0.35 + 0.65 * sqrt(heavy)) * (0.8 + 0.4 * h1 * h1) * shade)
 }
 // a grain of source dust: faint and cool where it starts, taking the disk's colours as it warps
 // onto its arm (u: 0 scattered, 1 in place) at the same light, the dust lanes dimming it there
@@ -117,30 +127,35 @@ let dust_px = fn(d: vec2, size: float, u: float, r: float, seed: float, time: fl
     let c = mix(#9890e0, place, u)
     return vec4(c.rgb * light * a, 0.0)
 }
-let o3_px = fn(d: vec2, age: float, scale: float, dp: float, fault: float) -> vec4 {
-    let f = clamp(1.0 - age / 0.8, 0.0, 1.0) * (1.0 - fault)
-    let core = dot_px(d, 0.55 * scale, dp)
-    let ray = rays(d, (5.0 * f + 2.0) * scale, dp) * (0.15 + 0.45 * f)
-    let halo = exp(-length(d) / (2.5 * scale)) * 0.25 * f
-    let c = #ffcf6a * (core * 0.9 + ray + halo) * (1.0 - 0.6 * fault)
-    return vec4(c.rgb, 0.0)
+// the disk's square: its half side (points), 1.4 radii, less while the field falls
+let disk_extent = fn(view: vec4, fall: float) -> float {
+    return view.z * mix(1.4, min(1.4, view.w + 0.3), step(1.0, fall))
 }
-// the disk: the core's glow (lit by the dust the parse brings in, swelling when main() starts),
-// the arms' diffuse light out to the reach with dust lanes along them; a halted field glows ember
-// at its core
-let disk_px = fn(d: vec2, view: vec4, spin: float, parsed: float, main_age: float, fault: float, px: vec2) -> vec4 {
-    let p = d / max(view.z, 1.0)
-    let r = length(p)
-    let a = atan2(p.y, p.x) - turn(r, spin)
-    let psi = arm_phase(a, r)
-    let arms = max(pow(0.5 + 0.5 * cos(2.0 * psi), 3.0), pow(0.5 + 0.5 * cos(2.0 * psi - 3.1415927), 6.0) * 0.45)
-    // turbulence that turns with the disk
-    let q = vec2(cos(a), sin(a)) * r
-    let n = vnoise(q * 7.0) * 0.6 + vnoise(q * 19.0 + vec2(5.2, 1.3)) * 0.4
-    let reach = view.w
+// the disk at q, its place before the turn (radii), with n its turbulence there (value noise that
+// turns with the disk): the core's glow (lit by the dust the parse brings in, swelling when main()
+// starts), the arms' diffuse light out to the reach with dust lanes along them; a halted field
+// glows ember at its core
+let disk_px = fn(q: vec2, n: float, reach: float, parsed: float, main_age: float, fault: float, px: vec2) -> vec4 {
+    let r = length(q)
+    // across the arms without an angle: 2 psi (`arm_phase`) is q's double angle turned by the
+    // spiral's winding at r, so its cosine and sine come from q itself and one turn
+    let r2 = max(r * r, 0.0000000001)
+    let c2a = (q.x * q.x - q.y * q.y) / r2
+    let s2a = 2.0 * q.x * q.y / r2
+    let wind = 4.6 * log(max(r, 0.02) / 0.08)
+    let cw = cos(wind)
+    let sw = sin(wind)
+    let c2 = c2a * cw - s2a * sw
+    let s2 = s2a * cw + c2a * sw
+    // the main arms at cos(2 psi), the faint pair between them at cos(2 psi - pi)
+    let b = 0.5 + 0.5 * c2
+    let o = 1.0 - b
+    let o3 = o * o * o
+    let arms = max(b * b * b, o3 * o3 * 0.45)
     let inside = 1.0 - smoothstep(reach - 0.25, reach + 0.05, r)
     let grown = clamp((reach - 0.18) / 0.8, 0.0, 1.0)
-    let dust = lane(psi, r) * (0.55 + 0.45 * n) * inside
+    // the lane at cos(2 psi + 0.76)
+    let dust = lane_at(c2 * 0.7248360 - s2 * 0.6889214, r) * (0.55 + 0.45 * n) * inside
     let glow = exp(-r / 0.45) * (0.18 + 0.82 * arms) * (0.45 + 0.55 * n) * inside * (0.25 + 0.75 * grown)
     let disk_c = mix(#ffc890, #5f7fff, smoothstep(0.05, 0.55, r)) * glow * 0.6
     let parse = clamp(parsed, 0.0, 1.0)
@@ -149,8 +164,10 @@ let disk_px = fn(d: vec2, view: vec4, spin: float, parsed: float, main_age: floa
     let core = (exp(-rc * rc) + 0.25 * exp(-r / 0.09)) * (0.12 + 0.88 * parse + swell)
     let core_c = mix(#fff4e2, #ffbe78, smoothstep(0.0, 0.16, r)) * core
     var c = (disk_c.rgb + core_c.rgb) * (1.0 - 0.75 * dust)
-    let e = exp(-r / 0.25)
-    c = mix(c, c * 0.35 + mix(#ff7a5c, #ffd2c4, e * e).rgb * e * 0.6, fault)
+    if fault > 0.0 {
+        let e = exp(-r / 0.25)
+        c = mix(c, c * 0.35 + mix(#ff7a5c, #ffd2c4, e * e).rgb * e * 0.6, fault)
+    }
     // nothing at the quad's edge
     c = c * (1.0 - smoothstep(1.15, 1.38, r))
     return vec4(c + vec3(dither(px) * step(0.0005, c.r + c.g + c.b)), 0.0)
@@ -483,6 +500,8 @@ let Quad = {
         view: uniform(vec4(0.0))
         field_params: uniform(vec4(0.0))
         field_fall: uniform(vec4(0.0))
+        // (the faint stars' exposure, 1 when the bake holds stars, 0, 0)
+        field_stars: uniform(vec4(0.0))
         // the frame the backdrop and brackets fill (points; zero: the window) and
         // (fault, corner radius, caption strip height, 0)
         field_frame: uniform(vec4(0.0))
@@ -490,6 +509,13 @@ let Quad = {
         // over a running app (the window layer): (on: 1, galaxy opacity, backdrop opacity, arc
         // progress or -1); zero: the boot window
         field_layer: uniform(vec4(0.0))
+        // the value noise's lattice (`lattice_uv`)
+        lattice: texture_2d(float)
+        // the bake (`ignition_bake`): the stars older than its frontier, in disk space before
+        // the turn, 1.4 radii each way. A: the light that takes the exposure (rgb), the twinkle's
+        // phasor's cosine part; B: the light that does not, its sine part
+        bake_a: texture_2d(float)
+        bake_b: texture_2d(float)
         d: varying(vec2f)
         px: varying(vec2f)
         // (dust warp, radius, a star's light left by the dust lanes, 0)
@@ -514,10 +540,25 @@ let Quad = {
             // a layer's backdrop it does not draw is empty, the brackets only frame a halted view
             let gone = step(0.5, self.field_layer.x) * (1.0 - step(0.001, self.field_layer.z))
             let arc = vec2(self.view.z * 1.45 + 10.0) * step(-0.5, self.field_layer.w) * step(0.5, self.field_layer.x)
-            let big = smoothstep(1.5, 2.6, self.rect.z)
-            let s = self.rect.z * scale * 0.42
-            let extent = if k < 0.5 { vec2(s * (6.2 + 3.2 * big) + 1.0) } else if k < 1.5 { vec2(self.rect.z * scale * 2.1 + 1.0) } else if k < 2.5 { vec2(8.0 * scale + 2.0) } else if k < 3.5 { vec2(self.view.z * mix(1.4, min(1.4, self.view.w + 0.3), step(1.0, self.field_fall.x))) } else if k < 4.5 { vec2(self.view.z * 1.7 + 6.0) } else if k < 5.5 { frame.zw * 0.5 * step(0.5, self.field_fault.x) } else if k < 6.5 { frame.zw * 0.5 * (1.0 - gone) } else { arc }
-            let p = center + (self.geom * 2.0 - vec2(1.0)) * extent
+            let square = disk_extent(self.view, self.field_fall.x)
+            // the swap ring only while it shows (its first second)
+            let ring = step(0.0, self.field_params.w) * step(self.field_params.w, 1.0)
+            let extent = if k < 1.5 { vec2(self.rect.z * scale * 2.1 + 1.0) } else if k < 3.5 { vec2(square) } else if k < 4.5 { vec2(self.view.z * 1.7 + 6.0) * ring } else if k < 5.5 { frame.zw * 0.5 * step(0.5, self.field_fault.x) } else { arc }
+            var p = center + (self.geom * 2.0 - vec2(1.0)) * extent
+            if k > 5.5 && k < 6.5 {
+                // the backdrop: band info.y (0 above the disk's square, 1 below, 2 left, 3 right of
+                // it) of the frame; the disk draws it under its square, so each pixel is drawn
+                // once. The bands' inner edges are the square's own corners, so they meet exactly
+                let f0 = frame.xy
+                let f1 = frame.xy + frame.zw
+                let s0 = clamp(self.view.xy - vec2(square), f0, f1)
+                let s1 = clamp(self.view.xy + vec2(square), f0, f1)
+                let band = self.info.y
+                let lo = if band < 0.5 { f0 } else if band < 1.5 { vec2(f0.x, s1.y) } else if band < 2.5 { vec2(f0.x, s0.y) } else { vec2(s1.x, s0.y) }
+                let hi = if band < 0.5 { vec2(f1.x, s0.y) } else if band < 1.5 { f1 } else if band < 2.5 { vec2(s0.x, s1.y) } else { vec2(f1.x, s1.y) }
+                let corner = vec2(if self.geom.x > 0.5 { hi.x } else { lo.x }, if self.geom.y > 0.5 { hi.y } else { lo.y })
+                p = if gone > 0.5 { center } else { corner }
+            }
             self.d = p - center
             self.px = p * self.dpi
             self.aux = vec4(u, r, 1.0 - 0.8 * lane(arm_phase(a, r), r), 0.0)
@@ -526,26 +567,50 @@ let Quad = {
         fragment: fn() {
             let k = self.info.x
             let dp = max(self.dpi, 1.0)
-            let age = self.time - self.rect.w
             let scale = self.field_params.y
             let fault = self.field_fault.x
-            let calm = (1.0 - self.reduce_motion) * (1.0 - fault)
             let vp = self.viewport
             let frame = if self.field_frame.z > 0.0 { self.field_frame } else { vec4(0.0, 0.0, vp.x, vp.y) }
             let half = frame.zw * 0.5
-            let twinkle = if self.info.z > 0.5 { self.time - self.info.z + 1.0 } else { -1.0 }
             let layer = self.field_layer
             let on = step(0.5, layer.x)
-            // over the app: the galaxy at its opacity, the backdrop at its own
-            let opacity = if k > 5.5 && k < 6.5 { mix(1.0, layer.z, on) } else { mix(1.0, layer.y, on) }
-            self.fb0 = opacity * if k < 0.5 {
-                star_px(self.d, self.rect.z, self.aux.y, self.info.w, age, twinkle, self.time, calm, self.aux.z, scale, dp, fault, self.field_fall.z)
-            } else if k < 1.5 {
+            // over the app: the galaxy at its opacity, the backdrop at its own (none: not drawn)
+            let backdrop = mix(1.0, layer.z, on) * (1.0 - on * (1.0 - step(0.001, layer.z)))
+            let opacity = if k > 5.5 && k < 6.5 { backdrop } else { mix(1.0, layer.y, on) }
+            self.fb0 = if k > 1.5 && k < 3.5 {
+                // the disk and the stars the bake holds, at their place before the turn (radii);
+                // past 1.38 radii both are dark (the disk's edge; no star lies that far out)
+                let pd = self.d / max(self.view.z, 1.0)
+                var light = vec4(0.0)
+                if dot(pd, pd) < 1.9044 {
+                    let cs = cos(self.field_params.x)
+                    let sn = sin(self.field_params.x)
+                    let q = vec2(pd.x * cs + pd.y * sn, pd.y * cs - pd.x * sn)
+                    let n = self.lattice.sample(lattice_uv(q * 7.0)).x * 0.6 + self.lattice.sample(lattice_uv(q * 19.0 + vec2(5.2, 1.3))).x * 0.4
+                    light = disk_px(q, n, self.view.w, self.field_fall.x, self.field_params.z, fault, self.px)
+                    if self.field_stars.y > 0.5 {
+                        // the baked stars, under the disk's light: their place in the layers (one
+                        // bilinear tap each). Each star twinkles at its own phase (the phasor's
+                        // weights) and its place's pace (the lattice's noise: 0.9..2.7), so a lone
+                        // star's twinkle is its own, overlapping ones average out as on screen
+                        let uv = vec2(0.5) + q / 2.8
+                        let la = self.bake_a.sample(uv)
+                        let lb = self.bake_b.sample(uv)
+                        let rate = 0.9 + 1.8 * self.lattice.sample(lattice_uv(q * 20.0)).x
+                        let w = max(dot(la.rgb + lb.rgb, vec3(0.2126, 0.7152, 0.0722)), 0.000001)
+                        let phasor = (la.w * sin(self.time * rate) + lb.w * cos(self.time * rate)) / w
+                        let tw = 1.0 - (1.0 - self.reduce_motion) * (1.0 - fault) * 0.11 * (1.0 + phasor)
+                        light = light + vec4((la.rgb * self.field_stars.x + lb.rgb) * tw, 0.0)
+                    }
+                }
+                // the backdrop under the square (the frame's own place: d from its centre)
+                var under = vec4(0.0)
+                if backdrop > 0.0 {
+                    under = backdrop * backdrop_px(self.d + self.view.xy - frame.xy - half, half, self.d, self.view, fault, self.field_fault.y, dp, self.px)
+                }
+                mix(1.0, layer.y, on) * light + under
+            } else { opacity * if k < 1.5 {
                 dust_px(self.d, self.rect.z, self.aux.x, self.aux.y, self.info.w, self.time, self.field_fall.y, self.aux.z, scale, dp)
-            } else if k < 2.5 {
-                o3_px(self.d, age, scale, dp, fault)
-            } else if k < 3.5 {
-                disk_px(self.d, self.view, self.field_params.x, self.field_fall.x, self.field_params.z, fault, self.px)
             } else if k < 4.5 {
                 ring_px(self.d, self.field_params.w, self.view, self.px)
             } else if k < 5.5 {
@@ -556,7 +621,266 @@ let Quad = {
                 backdrop_px(self.d, half, frame.xy + half + self.d - self.view.xy, self.view, fault, self.field_fault.y, dp, self.px)
             } else {
                 arc_px(self.d, self.view, layer.w, self.field_fall.w, dp, self.px)
+            } }
+        }
+    }
+    // the value noise's lattice (`lattice_uv`): each texel `hash21` of its integer point, from -32
+    ignition_lattice: {
+        color_format: @Rf16
+        geom: vertex_buffer(vec2f)
+        rect: instance(vec4(0.0))
+        viewport: uniform(vec2(1.0))
+        px: varying(vec2f)
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        vertex: fn() {
+            let p = self.rect.xy + self.geom * self.rect.zw
+            self.px = p
+            self.vertex_pos = vec4(p.x / self.viewport.x * 2.0 - 1.0, 1.0 - p.y / self.viewport.y * 2.0, 0.0, 1.0)
+        }
+        fragment: fn() {
+            self.fb0 = vec4(hash21(floor(self.px) - vec2(32.0)), 0.0, 0.0, 1.0)
+        }
+    }
+    // the bake: stars' dots at rest into the two layers `ignition`'s disk shows (disk space before
+    // the turn, `bake.x` texels a radius, the centre in the middle), added (`bake.z` 1) or taken
+    // out (-1) on the stars' own records. Each dot as it shows: sigma sp points (at least 0.7
+    // pixels) at k^2 of its light (`ignition_stars`); baked with sigma^2 less the 1/6 texel^2 the
+    // show's bilinear tap blurs by, at the light that keeps its sum, and only as far as it changes
+    // a pixel at full exposure (static, so a star taken out cancels to half-float rounding). A big
+    // star's halo with it: round, so it turns with the disk as it is, with the light its live
+    // square held. Gold stars are never baked (they draw live). A: the light that takes the exposure, B: the light
+    // that does not; their alphas the twinkle's phasor (cos, sin of its phase) by its luminance
+    ignition_bake: {
+        color_format: @Rgba16F
+        blend_op: @Add
+        geom: vertex_buffer(vec2f)
+        rect: instance(vec4(0.0))
+        info: instance(vec4(0.0))
+        viewport: uniform(vec2(1.0))
+        dpi: uniform(1.0)
+        field_params: uniform(vec4(0.0))
+        // (texels a radius, texels a point, the weight: 1 in, -1 out, 0)
+        bake: uniform(vec4(0.0))
+        // the offset from the star (texels)
+        d: varying(vec2f)
+        // (A's light rgb, the luminance the phasor weighs by)
+        light_a: varying(vec4f)
+        // (B's light rgb, the dot's sigma as baked, texels)
+        light_b: varying(vec4f)
+        // (cos, sin of the twinkle's phase, the cut radius (texels), the dot's peak by the weight)
+        phase: varying(vec4f)
+        // a big star's halo: (its weight by the bake's, its length, its radius (texels), 0)
+        halo: varying(vec4f)
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        fb1: fragment_output(1, vec4f)
+        vertex: fn() {
+            let a = self.rect.x
+            let r = self.rect.y
+            let size = self.rect.z
+            let seed = self.info.w
+            let rest = star_rest(a, r, size, seed)
+            let heavy = clamp((size - 0.45) / 2.4, 0.0, 1.0)
+            let light = rest.rgb * rest.w
+            let w = dot(light, vec3(0.2126, 0.7152, 0.0722))
+            // the twinkle's phase (`ignition_stars`' h3)
+            let phi = fract(seed * 29.3 + 0.77) * 6.2831853
+            let s = size * self.field_params.y * 0.42
+            let sp = max(s, 0.7 / max(self.dpi, 1.0))
+            let k = s / sp
+            let st = sp * self.bake.y
+            let sb2 = max(st * st - 1.0 / 6.0, 0.01)
+            let peak = max(light.r, max(light.g, light.b)) * k * k
+            let cut = min(sqrt(max(2.0 * log(max(510.0 * peak, 1.0)), 0.0)), 3.5) * st
+            // the halo (`ignition_stars`: exp(-d / max(3.5 s, 0.5)) by 0.08 big, on a square of
+            // half side s (6.2 + 3.2 big) + 1 points), here on the circle that holds as much of its
+            // light as that square: 1.11 times the half side (the square's corners hold 5-9% of
+            // it, its inscribed circle would dim a dense bulge)
+            let big = smoothstep(2.0, 2.8, size)
+            let reach = 1.11 * (s * (6.2 + 3.2 * big) + 1.0) * self.bake.y * step(0.0001, big)
+            let extent = max(cut, reach)
+            let on = step(self.info.y, 0.5) * step(0.0001, extent)
+            let at = self.viewport * 0.5 + vec2(cos(a), sin(a)) * r * self.bake.x
+            let p = at + (self.geom * 2.0 - vec2(1.0)) * ((extent + 1.0) * on)
+            self.d = p - at
+            self.light_a = vec4(light * (1.0 - heavy), w)
+            self.light_b = vec4(light * heavy, sqrt(sb2))
+            self.phase = vec4(cos(phi), sin(phi), cut, k * k * st * st / sb2 * self.bake.z)
+            self.halo = vec4(0.08 * big * self.bake.z, max(s * 3.5, 0.5) * self.bake.y, reach, 0.0)
+            self.vertex_pos = vec4(p.x / self.viewport.x * 2.0 - 1.0, 1.0 - p.y / self.viewport.y * 2.0, 0.0, 1.0)
+        }
+        fragment: fn() {
+            let q2 = dot(self.d, self.d)
+            let sb = self.light_b.w
+            var v = self.phase.w * exp(-0.5 * q2 / (sb * sb)) * step(q2, self.phase.z * self.phase.z)
+            if abs(self.halo.x) > 0.0 {
+                v = v + self.halo.x * exp(-sqrt(q2) / self.halo.y) * step(q2, self.halo.z * self.halo.z)
             }
+            self.fb0 = vec4(self.light_a.rgb, self.light_a.w * self.phase.x) * v
+            self.fb1 = vec4(self.light_b.rgb, self.light_a.w * self.phase.y) * v
+        }
+    }
+    // the stars: one instance each, rect = (angle, radius, size, born), info = (0, O3 + 1,
+    // glint + 1, seed), in a pipeline of their own so a star's pixels run a small shader. The
+    // ones the bake holds draw only what it lacks (field_stars.y 1: the sparks' records, two a
+    // star, info.x 1 and 2): at rest a big star's rays, across and down, one band each (its dot
+    // and halo are in the bake); arriving, glinting or gold, the first record draws the star whole
+    // less what the bake holds (gold: all of it, taken out of the bake), the second nothing. A star's
+    // size (a weight, 0.45 the lightest code to 2.85 the heaviest) sets its glow and its light;
+    // the light stars take the exposure (field_stars.x: 1 while the disk is sparse, lower as it
+    // fills), the heaviest keep all their light. All that is the same over a star (its colour,
+    // twinkle, arrival, glint, light, gold) is worked out per vertex; a pixel only adds up its
+    // dot, its two sets of rays and its halo, each by the weight the vertex gave it
+    ignition_stars: {
+        geom: vertex_buffer(vec2f)
+        rect: instance(vec4(0.0))
+        info: instance(vec4(0.0))
+        viewport: uniform(vec2(1.0))
+        dpi: uniform(1.0)
+        reduce_motion: uniform(0.0)
+        time: uniform(0.0)
+        view: uniform(vec4(0.0))
+        field_params: uniform(vec4(0.0))
+        field_fall: uniform(vec4(0.0))
+        field_stars: uniform(vec4(0.0))
+        field_fault: uniform(vec4(0.0))
+        field_layer: uniform(vec4(0.0))
+        d: varying(vec2f)
+        // the star's colour times its light (rgb): its rays' and its halo's
+        tint: varying(vec4f)
+        // its dot's (rgb): the tint by the dot's weight, less what the bake holds of it
+        dot_tint: varying(vec4f)
+        // (the dot's sigma, 0 or a ray band (1 across, 2 down), the first rays' length, their
+        // weight)
+        core: varying(vec4f)
+        // (the second rays' length, their weight, the halo's length, its weight)
+        glow: varying(vec4f)
+        vertex_pos: vertex_position(vec4f)
+        fb0: fragment_output(0, vec4f)
+        vertex: fn() {
+            let a = self.rect.x
+            let r = self.rect.y
+            let size = self.rect.z
+            let scale = self.field_params.y
+            let dpi = max(self.dpi, 1.0)
+            let at = project(a, r, self.view, self.field_params.x)
+            let vp = self.viewport
+            let fault = self.field_fault.x
+            let calm = (1.0 - self.reduce_motion) * (1.0 - fault)
+            let rest = star_rest(a, r, size, self.info.w)
+            let age = self.time - self.rect.w
+            let twinkle = if self.info.z > 0.5 { self.time - self.info.z + 1.0 } else { -1.0 }
+            let gold = if self.info.y > 0.5 { self.time - self.info.y + 1.0 } else { -1.0 }
+            let seed = self.info.w
+            let h3 = fract(seed * 29.3 + 0.77)
+            let s = size * scale * 0.42
+            // the heaviest stars: a faint halo and four short rays
+            let big = smoothstep(2.0, 2.8, size)
+            let heavy = clamp((size - 0.45) / 2.4, 0.0, 1.0)
+            // a gentle twinkle, each star at its own phase and its place's pace (0.9..2.7, value noise
+            // over the disk before the turn: the bake's, so a star baked twinkles on as it did); it
+            // only ever dims a star, never flashes one
+            let pace = 0.9 + 1.8 * vnoise(vec2(cos(a), sin(a)) * r * 20.0)
+            let tw = 1.0 - calm * 0.22 * (0.5 + 0.5 * sin(self.time * pace + h3 * 6.2831853))
+            // arrival: fades in over 0.3 s into a brief brighter twinkle that settles over about a
+            // second; softer when thousands arrive at once, so a burst never flashes the disk
+            let x = max(age, 0.0) / 0.3
+            let arrive = x * exp(1.0 - x) * (0.85 - 0.4 * self.field_fall.z) * (1.0 - fault)
+            let fade_in = smoothstep(0.0, 0.3, age)
+            let birth = fade_in + arrive
+            // a compile's glint: a brief brightening towards white, with the short rays of a spark
+            let g = clamp(1.0 - twinkle / 0.5, 0.0, 1.0) * step(0.0, twinkle) * (1.0 - fault)
+            // light by weight (the light ones take the exposure), brighter as it glints
+            let lit_rest = rest.w * mix(self.field_stars.x, 1.0, heavy) * tw
+            let lum = lit_rest * birth * (1.0 + 2.2 * g * g)
+            var c = mix(rest.rgb, #ffffff.rgb, max(g, 0.4 * arrive))
+            c = mix(c, #8a7fb8.rgb * 0.6, fault)
+            // over the app: the galaxy at its opacity
+            let opacity = mix(1.0, self.field_layer.y, step(0.5, self.field_layer.x))
+            // the rays and the halo only where they show: most stars, at rest, are their dot alone
+            let sparks = step(0.002, big + arrive + g)
+            var tint = c * lum * opacity
+            // what the bake holds of a baked star's dot and halo (it shows them at rest, the
+            // twinkle its own)
+            let held = rest.rgb * lit_rest * opacity * self.field_stars.y
+            var dot_tint = tint - held
+            var core = vec4(s, 0.0, s * 9.0, big * 0.14 * sparks)
+            var glow = vec4(s * 6.0, 0.1 * (arrive + g * g) * sparks, max(s * 3.5, 0.5), big * 0.08 * sparks)
+            if gold >= 0.0 {
+                // O3 code (gold: s since it came): a gold star, at least the size the O3 mark
+                // always had, a flare as it turns gold
+                let f = clamp(1.0 - gold / 0.8, 0.0, 1.0) * (1.0 - fault)
+                tint = #ffcf6a.rgb * (1.0 - 0.6 * fault) * fade_in * opacity
+                // (never in the bake: a star the bake held is taken out as it turns gold); its
+                // flare's halo by the dot's tint, so by the tint's 0.25 f
+                dot_tint = tint * 0.9
+                core = vec4(max(s, 0.55 * scale), 0.0, (5.0 * f + 2.0) * scale, 0.15 + 0.45 * f)
+                glow = vec4(0.0, 0.0, 2.5 * scale, 0.25 * f / 0.9)
+            }
+            // arriving, glinting or big, a star draws its rays and halo with its dot on a square
+            // of half side `extent` (3.5 sigma as drawn, at least 0.7 px, plus half a pixel at
+            // rest); gold, its flare
+            let lit = max(max(step(age, 1.6), step(0.0, twinkle) * step(twinkle, 0.5)), step(0.001, big))
+            let sp = max(s, 0.7 / dpi)
+            let rest = 3.5 * sp + 0.5 / dpi
+            let extent = max(mix(rest, s * (6.2 + 3.2 * big) + 1.0, lit), step(0.5, self.info.y) * (8.0 * scale + 2.0))
+            // a star with no rays, halo or flare (most, at rest) is its dot alone, drawn only as
+            // far as it changes a pixel: the window keeps 8 bits a channel and rounds every star's
+            // light added, so light under half a step adds nothing. Its brightest channel at the
+            // centre, `peak`, falls to half a step at sqrt(2 ln(510 peak)) sigma (none: it adds
+            // nothing anywhere). It is one triangle, its inscribed circle of that radius: the unit
+            // quad's first triangle (its incentre (0.7071, 0.2929), its inradius 0.2929), the
+            // quad's fourth corner folded onto its first so the second triangle has no area (as
+            // measured, a draw of 3 indices an instance costs more than one of 6 with an empty
+            // triangle)
+            let k = s / sp
+            let peak = max(dot_tint.r, max(dot_tint.g, dot_tint.b)) * k * k
+            let reach = sqrt(max(2.0 * log(max(510.0 * peak, 1.0)), 0.0)) * sp
+            let dot = min(rest, reach + step(0.0001, reach) * 0.5 / dpi)
+            let corner = vec2(self.geom.x, self.geom.x * self.geom.y)
+            var p = if sparks + step(0.0, gold) > 0.5 {
+                at + (self.geom * 2.0 - vec2(1.0)) * vec2(extent)
+            } else {
+                at + (corner - vec2(0.70710678, 0.29289322)) * (dot * 3.41421356)
+            }
+            let band = self.info.x
+            if band > 0.5 {
+                if step(0.002, arrive + g) + step(0.0, gold) > 0.5 {
+                    // whole: the first record (the square, as above), the second nothing
+                    p = if band < 1.5 { p } else { at }
+                } else {
+                    // at rest: a ray band, as long as the rays and as wide as they change a pixel
+                    // (half a step of the window's 8 bits, plus half a pixel)
+                    let ray = max(tint.r, max(tint.g, tint.b)) * core.w
+                    let wide = log(max(510.0 * ray, 1.0)) / (1.5 * dpi) + 0.5 / dpi
+                    let span = if band < 1.5 { vec2(core.z, wide) } else { vec2(wide, core.z) }
+                    p = at + (self.geom * 2.0 - vec2(1.0)) * span * step(0.0001, ray)
+                    core = vec4(core.x, band, core.z, core.w)
+                }
+            }
+            self.d = p - at
+            self.tint = vec4(tint, 0.0)
+            self.dot_tint = vec4(dot_tint, 0.0)
+            self.core = core
+            self.glow = glow
+            self.vertex_pos = vec4(p.x / vp.x * 2.0 - 1.0, 1.0 - p.y / vp.y * 2.0, 0.0, 1.0)
+        }
+        fragment: fn() {
+            let dp = max(self.dpi, 1.0)
+            var light = vec3(0.0)
+            if self.core.y > 0.5 {
+                // a ray band: the rays across (1) or down (2) alone
+                let q = if self.core.y > 1.5 { vec2(self.d.y, self.d.x) } else { self.d }
+                light = self.tint.rgb * (exp(-abs(q.y) * dp * 1.5) * max(0.0, 1.0 - abs(q.x) / max(self.core.z, 0.01)) * self.core.w)
+            } else {
+                light = self.dot_tint.rgb * dot_px(self.d, self.core.x, dp)
+                if self.core.w + self.glow.y + self.glow.w > 0.0 {
+                    // the halo by the dot's tint: less what the bake holds of it
+                    light = light + self.tint.rgb * (rays(self.d, self.core.z, dp) * self.core.w + rays(self.d, self.glow.x, dp) * self.glow.y) + self.dot_tint.rgb * (exp(-length(self.d) / self.glow.z) * self.glow.w)
+                }
+            }
+            self.fb0 = vec4(light, 0.0)
         }
     }
     // the running app's frame under the window layer (`image_texture`: the app image, or a blur

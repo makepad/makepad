@@ -4,7 +4,7 @@
 # every compiler thread has the same stack (COMPILER_STACK), so the nesting fits whichever thread takes a
 # module. Runs the program twice; prints "compiler_thread_stack: ok" or "compiler_thread_stack: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 N=2000
 mkdir -p "$T/x/src"
 printf '[package]\nname = "cts-app"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n\n[workspace]\n' > "$T/x/Cargo.toml"

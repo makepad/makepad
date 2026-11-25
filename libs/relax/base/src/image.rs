@@ -76,7 +76,7 @@ unsafe impl Pod for crate::ast::Path {}
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"RFI1");
 /// bump when a section's meaning changes (layouts are covered by the codegen identity: relax-base is in it)
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 const HEAD: usize = 16;
 const ENTRY: usize = 24;

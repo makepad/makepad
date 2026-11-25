@@ -1,3 +1,4 @@
+// rejects: E0212
 //~ E0212
 // rustc_hir_analysis/src/collect.rs:627: an associated item path in an
 // item type cannot discard the trait bound's uninferred lifetime binder.

@@ -164,9 +164,12 @@ pub fn carry_epoch(src: usize, from: u64, to: u64, owner: &dyn Fn(DefId) -> Carr
     q.alias.insert((src, to), base);
     // every queued, seen or checked key of an owner has a verdict entry (Pending at least), so
     // the dropped keys are found from the verdicts of the dropped owners: no pass over the
-    // queue or the seen set (they hold the whole program)
+    // queue or the seen set (they hold the whole program). The map is the process's: another
+    // checker's entries (the macro world's front) carry DefIds of its own program, which may
+    // lie past this program's defs, so `owner` is asked only about owners with a key of `src`.
     let mut verdicts = VERDICTS.lock().unwrap_or_else(|e| e.into_inner());
-    let moved: Vec<(DefId, Carry)> = verdicts.keys().copied().filter_map(|d| {
+    let moved: Vec<(DefId, Carry)> = verdicts.iter().filter_map(|(&d, instances)| {
+        if !instances.keys().any(|k| k.0 == src) { return None; }
         let how = if d == crate::program::NO_DEF { Carry::Drop } else { owner(d) };
         (how != Carry::Keep).then_some((d, how))
     }).collect();
@@ -696,7 +699,7 @@ pub fn print_summary(options: &crate::options::Options) {
     }
     let preempted = PREEMPTED.load(Ordering::Relaxed);
     if preempted > 0 {
-        s.push_str(&format!(", {} preempted by live patches (queued again)", preempted));
+        s.push_str(&format!(", {} preempted by live patches or a waiting UI (queued again)", preempted));
     }
     if stale > 0 {
         s.push_str(&format!(", {} dropped (queued before the program was collected again, or by a retired unit)", stale));
@@ -805,6 +808,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
     src.lower_priority();
     let mut started = false;
+    let edit_first = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == RANK_EDIT);
     loop {
         if stopping() { return; }
         // The startup's checks wait for the runner; a live edit's do not: the person waits for its
@@ -812,11 +816,15 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
         // in that time waited for the release, 11-04).
         if !started {
             started = src.started();
-            let edit_first = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == RANK_EDIT);
             if !started && !edit_first() {
                 pace(20, RANK_EDIT);
                 continue;
             }
+        }
+        // Leave the worker's CPU to the waiting frame's app check unless a live edit needs a verdict.
+        if crate::preempt::ui_waits() && !edit_first() {
+            pace(20, RANK_EDIT);
+            continue;
         }
         // (the source the worker started with must not keep a replaced front state alive)
         if !src.alive() {

@@ -492,7 +492,7 @@ pub(super) fn tier_code(t: &str) -> u8 {
     match t {
         "native" => ps::tier::NATIVE,
         "baseline" => ps::tier::BASELINE,
-        "O1" => ps::tier::O1,
+        "O1" | "counted" => ps::tier::O1,
         "O2" => ps::tier::O2,
         "inl" => ps::tier::INLINED,
         t if t.starts_with("O3") => ps::tier::O3,

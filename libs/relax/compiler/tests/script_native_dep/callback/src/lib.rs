@@ -1,7 +1,7 @@
 // C that calls back into this crate's Rust, as a -sys crate's C calls its crate's `#[no_mangle]` fn.
 #[no_mangle]
 pub extern "C" fn snd_rust_side(x: i32) -> i32 {
-    x * 10
+    x * snd_shared::scale()
 }
 extern "C" {
     fn snd_c_entry(x: i32) -> i32;

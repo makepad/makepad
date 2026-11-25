@@ -1,3 +1,4 @@
+// rejects: E0600
 pub fn unsigned(x: u32) -> u32 { -x }
 pub fn inferred() -> u8 { let x = -1; x }
 pub fn boolean() -> bool { -true }

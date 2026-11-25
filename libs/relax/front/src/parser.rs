@@ -128,6 +128,10 @@ pub struct Parser<'a> {
     /// macro_rules body tokens -> their position in the definition: (expansion position,
     /// definition position, length), ascending
     pub body_origin: OSeg<'a, Maps>,
+    /// fragments other than a `tt` a macro_rules transcription substituted (same file only) ->
+    /// the position of their `$x` in the definition, where rustc reports a parse or match error
+    /// on them: (expansion position, `$` position, length), ascending
+    pub meta_origin: OSeg<'a, Maps>,
     /// proc-macro output tokens the macro made (spanned at its call site): (text lo, text hi,
     /// the macro crate's edition), ascending; every such range (edition_of reads the edition,
     /// ParsedFile::made_by_proc_macro that the macro made them)
@@ -263,6 +267,7 @@ impl<'a> Parser<'a> {
             import_summary: Default::default(),
             rules_exp: Default::default(),
             body_origin: Default::default(),
+            meta_origin: Default::default(),
             pm_editions: Default::default(),
             foreign_rules: Vec::new(),
             tok_undo: Vec::new(),
@@ -450,7 +455,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ident_tok(&mut self) -> PResult<Ident> {
-        if self.at_stmt_frag() { return self.err("expected identifier, found statement metavariable"); }
+        if self.at_stmt_frag() { return self.stmt_frag_err("identifier"); }
         match self.kind() {
             T::Ident | T::RawIdent => {
                 let t = self.tok();
@@ -780,14 +785,12 @@ impl<'a> Parser<'a> {
             Some(s) => self.bytes(s.name.lo, s.name.hi).to_vec(),
             None => return NO_MAC_ARGS,
         };
-        let known = matches!(
-            name.as_slice(),
-            b"format" | b"print" | b"println" | b"eprint" | b"eprintln" | b"write" | b"writeln" | b"panic" | b"format_args"
-                | b"vec" | b"assert" | b"assert_eq" | b"assert_ne" | b"debug_assert" | b"debug_assert_eq" | b"debug_assert_ne"
-                | b"matches" | b"assert_matches" | b"debug_assert_matches" | b"unreachable" | b"todo" | b"unimplemented" | b"dbg" | b"asm"
-                | b"global_asm" | b"naked_asm"
-        );
-        if !known {
+        if !args_in_place(&name) {
+            return NO_MAC_ARGS;
+        }
+        // a qualified call is the built-in only where its path reaches it: `not_a_crate::vec!` is
+        // rustc's E0433, never `vec!`
+        if (path.segs.len() > 1 || path.global()) && !self.path_reaches_builtin(path) {
             return NO_MAC_ARGS;
         }
         let is_matches = matches!(name.as_slice(), b"matches" | b"assert_matches" | b"debug_assert_matches");
@@ -1472,6 +1475,20 @@ impl<'a> Parser<'a> {
             prefix.push(String::new());
         }
         self.record_use_tree(m, &module, &mut prefix, tree);
+    }
+
+    /// Whether the qualified macro path `path` reaches a built-in (MacroScope::reaches_builtin); with
+    /// no macro table, as the name says.
+    fn path_reaches_builtin(&self, path: &Path) -> bool {
+        let Some(m) = self.macros.as_ref() else { return true };
+        let mut full: Vec<String> = Vec::new();
+        if path.global() { full.push(String::new()); }
+        full.extend(self.ast.segs(path.segs).iter().map(|s| self.seg_text(s)));
+        // `::__relax_crate_x::m!` is `$crate::m!` of crate x
+        if full.len() >= 2 && full[0].is_empty() && full[1].starts_with("__relax_crate_") {
+            full.remove(0);
+        }
+        m.reaches_builtin(&self.krate, &self.cur_module(), &full)
     }
 
     fn seg_text(&self, sg: &PathSeg) -> String {
@@ -2174,14 +2191,15 @@ impl<'a> Parser<'a> {
         }
         let _profile = crate::load_profile::span(self.session.runtime.profile, "macro-rules-output", &def.name);
         let key = crate::parse_work::rules_key(self, def, call_lo, self.toks.at(toks.hi as usize).hi);
-        let (text, rtoks, origins, bodies, groups) = if let Some(x) = crate::parse_work::get_rules(&key).filter(|_| !crate::macros::uses::recording()) { x } else {
+        let (text, rtoks, origins, bodies, groups, metas) = if let Some(x) = crate::parse_work::get_rules(&key).filter(|_| !crate::macros::uses::recording()) { x } else {
             if crate::macros::uses::recording() { crate::macros::uses::synth_clear(); }
-            let x = crate::preload::timed_named(2, &def.name, || self.expand_rules(def, toks.lo as usize, toks.hi as usize)).map_err(|m| {
+            let x = crate::preload::timed_named(2, &def.name, || self.expand_rules(def, toks.lo as usize, toks.hi as usize)).map_err(|e| {
                 if trace {
-                    eprintln!("expand {}! failed in {} using {}:{} module {}: {}", def.name, self.cur_module(), def.def_file, def.def_pos, def.def_mod, m);
+                    eprintln!("expand {}! failed in {} using {}:{} module {}: {}", def.name, self.cur_module(), def.def_file, def.def_pos, def.def_mod, e.msg);
                     eprintln!("expand input: {}", self.toks.range(toks.lo as usize, toks.hi as usize).iter().map(|t| String::from_utf8_lossy(self.tok_text(*t)).into_owned()).collect::<Vec<_>>().join(" "));
                 }
-                PErr { pos: call_lo, msg: m }
+                // at the input token no arm matched (rustc failed_to_match_macro), else the call
+                PErr { pos: e.at.unwrap_or(call_lo), msg: e.msg }
             })?;
             crate::parse_work::put_rules(key, &x);
             x
@@ -2256,6 +2274,9 @@ impl<'a> Parser<'a> {
         if same_file {
             for (off, bp, n) in bodies {
                 self.body_origin.push((base + off, bp, n));
+            }
+            for (off, var, n) in metas {
+                self.meta_origin.push((base + off, var, n));
             }
         }
         if verify_tokens() {
@@ -2432,7 +2453,7 @@ impl<'a> Parser<'a> {
             // of the file's imports
             rec_limit: _, import_summary: _,
             toks, pos, edition, ast, item_start, lazy_bodies, lazy_auto, lazy_part, hole_body, item_macro, lazy_mods, macros, krate,
-            ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin,
+            ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin, meta_origin,
             pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, stmt_frags, synth_parens, fwd_starts,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, foreign_rules, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
@@ -2444,7 +2465,7 @@ impl<'a> Parser<'a> {
         let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
             sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(stmt_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(fwd_starts.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
         let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
-        let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len(), foreign_rules.len());
+        let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), meta_origin.len(), pm_editions.len(), foreign_rules.len());
         let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();
         format!("toks {toks:?}\npos {pos} edition {edition} lazy {lazy_bodies} {lazy_auto} {lazy_part} {lazy_mods:?} hole {hole_body} {item_macro} macros {} krate {krate}\n\
             tables {tables:?} token_input {token_input} exp_depth {exp_depth} builtin_exp {builtin_exp} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
@@ -2777,6 +2798,11 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
+            // an expansion's items end at a `stmt` fragment, which is no item (rustc
+            // parse_ast_fragment: parse_item gives None, then ensure_complete_parse)
+            if end == T::Eof && self.exp_depth > 0 && attrs.is_empty() && self.at_stmt_frag() {
+                return Err(PErr { pos: self.lo(), msg: "macro expansion ignores `stmt` metavariable and any tokens following".into() });
+            }
             let mut attrs = attrs;
             self.normalize_builtin_test_attrs(&mut attrs);
             let dattrs = if attrs.is_empty() || self.macros.is_none() { Vec::new() } else { attrs.clone() };
@@ -3050,7 +3076,7 @@ impl<'a> Parser<'a> {
     /// An item, also one inside a fn body: its own text is not the body's (an impl or a const in
     /// a hole body is seen by other crates), so it is no hole until a fn of its own says so.
     fn item(&mut self, attrs: Vec<Attr>) -> PResult<Option<ItemId>> {
-        if self.at_stmt_frag() { return self.err("expected item, found statement metavariable"); }
+        if self.at_stmt_frag() { return self.stmt_frag_err("item"); }
         let outer = std::mem::replace(&mut self.hole_body, false);
         let r = self.item_here(attrs);
         self.hole_body = outer;
@@ -4456,6 +4482,12 @@ impl<'a> Parser<'a> {
         !self.stmt_frags.is_empty() && self.stmt_frags.contains(&self.lo())
     }
 
+    /// rustc's error for a `stmt` fragment where `what` is expected (token_descr names the
+    /// fragment: "expected item, found `stmt` metavariable").
+    fn stmt_frag_err<X>(&self, what: &str) -> PResult<X> {
+        Err(PErr { pos: self.lo(), msg: format!("expected {what}, found `stmt` metavariable") })
+    }
+
     pub(super) fn ty_fragment_end(&self, lo: u32) -> Option<u32> {
         if self.ty_frags.contains(&lo) { self.frag_groups.get(&lo).copied() } else { None }
     }
@@ -4480,7 +4512,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ty_inner(&mut self, plus: bool) -> PResult<TyId> {
-        if self.at_stmt_frag() { return self.err("expected type, found statement metavariable"); }
+        if self.at_stmt_frag() { return self.stmt_frag_err("type"); }
         // rustc_parse parser/ty.rs: parse_ty_common; parser/mod.rs: eat_metavar_seq.
         // Reparse a captured type inside invisible delimiters (`as $t << n`).
         if let Some(hi) = self.ty_fragment_end(self.tok().lo) {
@@ -4772,7 +4804,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn pat_no_or(&mut self) -> PResult<PatId> {
-        if self.at_stmt_frag() { return self.err("expected pattern, found statement metavariable"); }
+        if self.at_stmt_frag() { return self.stmt_frag_err("pattern"); }
         if self.exp_depth > 0 && (!self.meta_frags.is_empty() || self.kind() == T::OpenParen) {
             self.expr_fragment_pat()?;
         }
@@ -5717,7 +5749,7 @@ impl<'a> Parser<'a> {
     }
 
     fn primary(&mut self, r: u8) -> PResult<ExprId> {
-        if self.at_stmt_frag() { return self.err("expected expression, found statement metavariable"); }
+        if self.at_stmt_frag() { return self.stmt_frag_err("expression"); }
         let lo = self.lo();
         // rustc_parse parser/expr.rs: parse_expr_bottom returns a Path expression
         // for MetaVarKind::Path; calls follow, but `{ .. }` and `::` do not extend it.
@@ -6257,6 +6289,55 @@ fn region_of<'t>(exp_map: impl Into<OSegRef<'t, Regions>>, pos: u32) -> Option<u
     }
 }
 
+/// The expansion tables `authored_pos` reads at a position: fragment origins (tok_origin), call
+/// sites (exp_map), macro_rules regions (rules_exp), body tokens' definition positions
+/// (body_origin), and, while the file parses, fragments' `$x` positions (meta_origin).
+struct AuthoredTables<'t> {
+    tok_origin: OSegRef<'t, Maps>,
+    exp_map: OSegRef<'t, Regions>,
+    rules_exp: OSegRef<'t, Rules>,
+    body_origin: OSegRef<'t, Maps>,
+    meta_origin: Option<OSegRef<'t, Maps>>,
+}
+
+/// Where rustc reports a diagnostic about the token at `pos`: its emitter keeps the spans a
+/// `macro_rules!` of this crate wrote and walks the others back to their call sites. In order:
+/// the file's own text is itself; with `meta_origin` (a parse or match error), a fragment other
+/// than a `tt` substituted for `$x` is at that `$x` (rustc transcribe_pnr: an invisible group
+/// spanned there); a substituted fragment token is at its argument; a token a macro_rules of
+/// this file wrote is at its place in the definition; anything else is at its expansion's call
+/// site. Each step continues from where it lands (a fragment forwarded through two macros, a
+/// macro defined by a macro).
+fn authored_pos<'t>(mut pos: u32, src_len: u32, tables: impl Fn(u32) -> AuthoredTables<'t>) -> u32 {
+    for _ in 0..4096 {
+        if pos < src_len { return pos; }
+        let t = tables(pos);
+        if let Some((_, (at, var, n))) = t.meta_origin.and_then(|m| m.floor_exact(pos)) {
+            if pos < at + n && var != pos {
+                pos = var;
+                continue;
+            }
+        }
+        if let Some(o) = origin_of(t.tok_origin, pos) {
+            pos = o;
+            continue;
+        }
+        if let Some((_, r)) = t.rules_exp.floor(pos) {
+            if pos < r.1 {
+                if let Some(d) = origin_of(t.body_origin, pos) {
+                    pos = d;
+                    continue;
+                }
+            }
+        }
+        match region_of(t.exp_map, pos) {
+            Some(c) if c != pos => pos = c,
+            _ => break,
+        }
+    }
+    pos.min(src_len)
+}
+
 /// Resolve macro positions before interpreting a source span. A full origin is terminal:
 /// its offsets belong to authored bytes, never to another expansion's spelling buffer.
 fn source_origin<'a>(mut pos: u32, exact: bool, src_len: u32,
@@ -6278,6 +6359,15 @@ fn source_origin<'a>(mut pos: u32, exact: bool, src_len: u32,
 }
 
 impl Parser<'_> {
+    /// Where rustc reports a parse or match error at `pos` (authored_pos with the fragments'
+    /// `$x` positions; the tables hold a lazily parsed part's rows over its file's).
+    fn parse_error_pos(&self, pos: u32) -> u32 {
+        authored_pos(pos, self.src.len() as u32, |_| AuthoredTables {
+            tok_origin: self.tok_origin.view(), exp_map: self.exp_map.view(), rules_exp: self.rules_exp.view(),
+            body_origin: self.body_origin.view(), meta_origin: Some(self.meta_origin.view()),
+        })
+    }
+
     pub fn source_span(&self, pos: u32) -> SourceSpan {
         match source_origin(pos, true, self.src.len() as u32, |_| (self.tok_origin.view(), self.exp_map.view(), self.token_origins.view())) {
             Ok(span) => span,
@@ -6377,6 +6467,9 @@ pub struct ParsedFile {
     pub rules_exp: Table<Rules>,
     /// macro_rules body tokens -> definition positions (Parser::body_origin)
     pub body_origin: Table<Maps>,
+    /// substituted fragments -> their `$x` (Parser::meta_origin; a lazily parsed body's parse
+    /// errors read it, and the part keeps none: its parse is the only reader)
+    pub meta_origin: Table<Maps>,
     /// tokens a proc macro made, with its crate's edition (Parser::pm_editions)
     pub pm_editions: Table<Regions>,
     /// the fn bodies this parse skipped (FnSig::lazy_body) and what parsing them later needs
@@ -6928,30 +7021,19 @@ impl ParsedFile {
     /// `macro_rules!` defined in this file stays at its place in the definition, a substituted
     /// fragment is at the call's argument, anything else maps to the call site as in
     /// `diagnostic_pos`.
-    pub fn lint_pos(&self, mut pos: u32) -> u32 {
-        for _ in 0..4096 {
-            if pos < self.src_len { return pos; }
+    pub fn lint_pos(&self, pos: u32) -> u32 {
+        authored_pos(pos, self.src_len, |pos| {
             let (to, em) = self.tables(pos);
-            if let Some(o) = origin_of(to, pos) {
-                pos = o;
-                continue;
-            }
-            let part = self.part_at(pos);
-            let (rules, bodies) = part.map_or((&self.rules_exp, &self.body_origin), |p| (&p.rules_exp, &p.body_origin));
-            if let Some((_, r)) = OSegRef::from(rules).floor(pos) {
-                if pos < r.1 {
-                    if let Some(d) = origin_of(bodies, pos) {
-                        pos = d;
-                        continue;
-                    }
-                }
-            }
-            match region_of(em, pos) {
-                Some(c) if c != pos => pos = c,
-                _ => break,
-            }
-        }
-        pos.min(self.src_len)
+            let (rules, bodies) = self.part_at(pos).map_or((&self.rules_exp, &self.body_origin), |p| (&p.rules_exp, &p.body_origin));
+            AuthoredTables { tok_origin: to.into(), exp_map: em.into(), rules_exp: rules.into(), body_origin: bodies.into(), meta_origin: None }
+        })
+    }
+
+    /// The line and column where rustc reports a diagnostic at `pos` (lint_pos; a whole-file
+    /// token input's own origins name its authored text): for the printers that make their own
+    /// `path:L:C` line.
+    pub fn error_line_col(&self, pos: u32) -> (usize, usize) {
+        self.line_col(if self.token_input { pos } else { self.lint_pos(pos) })
     }
 
     /// The definition position of mark `m`'s macro (u32::MAX: another file).
@@ -7034,7 +7116,8 @@ impl ParsedFile {
         }
     }
 
-    /// Line and column of a position; positions inside macro expansions map to the call site.
+    /// Line and column of a position; positions inside macro expansions map to the call site
+    /// (line!() and locations; a diagnostic maps its position first: lint_pos).
     pub fn line_col(&self, pos: u32) -> (usize, usize) {
         if self.token_input {
             let span = self.source_span(pos);
@@ -7145,7 +7228,7 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
     let src_len = src.len() as u32;
     let token_input = input.is_some();
     let line_origins = bctx.as_ref().map(|c| c.line_origins.clone()).unwrap_or_default();
-    let (toks, ast, ext, exp_map, tok_origin, token_origins, rules_exp, body_origin, pm_editions, used, lazy) = {
+    let (toks, ast, ext, exp_map, tok_origin, token_origins, rules_exp, body_origin, meta_origin, pm_editions, used, lazy) = {
         let toks = if token_input { Vec::new() } else { match pre {
             Some(t) => t,
             None => {
@@ -7185,15 +7268,10 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
             if let Some((pos, msg)) = crate::delims::delimiter_error(&src, (0..p.toks.len()).map(|i| p.toks.at(i))) {
                 return Err((SourceSpan { file: 0, lo: pos, hi: pos }, msg));
             }
-            // an error inside an expansion is reported at its call site, and the file's own end is
-            // none, though the first expansion's text starts at that same position
-            let mut pos = e.pos;
-            let at_end = pos == src_len && p.toks.at(p.pos).kind == T::Eof && p.toks.at(p.pos).lo == src_len;
-            for _ in 0..4096 {
-                if pos < src_len || at_end { break; }
-                let next = region_of(p.exp_map.view(),pos);
-                match next { Some(at) if at != pos => pos = at, _ => break }
-            }
+            // an error inside an expansion is reported where rustc does (authored_pos), and the
+            // file's own end is none, though the first expansion's text starts at that same position
+            let at_end = e.pos == src_len && p.toks.at(p.pos).kind == T::Eof && p.toks.at(p.pos).lo == src_len;
+            let pos = if at_end { e.pos } else { p.parse_error_pos(e.pos) };
             return Err((SourceSpan { file: 0, lo: pos, hi: pos }, e.msg));
         }
         if let Some(&(pos, ref msg)) = p.lit_errs.first() {
@@ -7205,11 +7283,11 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
             Some((krate, path, module_path)) if (p.lazy_auto && skipped) => Some(Box::new(LazyCtx { krate, path, module_path, mods: std::mem::take(&mut p.lazy_mods), s2_fmt })),
             _ => None,
         };
-        (p.toks.into_own(), p.ast, p.ext.into_own(), p.exp_map.into_own(), p.tok_origin.into_own(), p.token_origins.into_own(), p.rules_exp.into_own(), p.body_origin.into_own(), p.pm_editions.into_own(), p.macros.map(|m| m.finish()), lazy)
+        (p.toks.into_own(), p.ast, p.ext.into_own(), p.exp_map.into_own(), p.tok_origin.into_own(), p.token_origins.into_own(), p.rules_exp.into_own(), p.body_origin.into_own(), p.meta_origin.into_own(), p.pm_editions.into_own(), p.macros.map(|m| m.finish()), lazy)
     };
     src.reserve_exact(ext.len());
     src.extend_from_slice(&ext);
-    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), numbering: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None, line_origins };
+    let mut pf = ParsedFile { src: src.into(), toks: toks.into(), ast, edition, exp_map: Table::from_rows(&exp_map), line_starts: std::sync::OnceLock::new(), src_len, source_hash: Default::default(), numbering: Default::default(), tok_origin: Table::from_rows(&tok_origin), token_origins: Table::from_rows(&token_origins), token_input, sources, rules_exp: Table::from_rows(&rules_exp), body_origin: Table::from_rows(&body_origin), meta_origin: Table::from_rows(&meta_origin), pm_editions: Table::from_rows(&pm_editions), lazy: lazy.into(), part: std::sync::OnceLock::new(), impl_heads: std::sync::OnceLock::new(), image: None, sink: None, line_origins };
     pf.shrink();
     Ok((pf, used))
 }
@@ -7261,6 +7339,7 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
     p.token_origins = OSeg::on(&pf.token_origins);
     p.rules_exp = OSeg::on(&pf.rules_exp);
     p.body_origin = OSeg::on(&pf.body_origin);
+    p.meta_origin = OSeg::on(&pf.meta_origin);
     p.pm_editions = OSeg::on(&pf.pm_editions);
     let mut table = crate::macros::MacroTable::default();
     table.s2_fmt = ctx.s2_fmt;
@@ -7310,7 +7389,8 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
                     let (l, c) = source.line_col(span.lo);
                     Err(format!("{}:{}:{}: {}", source.path, l, c, e.msg))
                 } else {
-                    let (l, c) = pf.line_col(e.pos.min(pf.src_len.saturating_sub(1)));
+                    // through the part's own expansions too (pf's tables do not hold them yet)
+                    let (l, c) = pf.line_col(p.parse_error_pos(e.pos).min(pf.src_len.saturating_sub(1)));
                     Err(format!("{}:{}:{}: {}", ctx.path, l, c, e.msg))
                 }
             }
@@ -7458,6 +7538,49 @@ mod diagnostic_tests {
         assert_eq!(l, 3, "{msg}");
     }
 
+    /// Parse and match errors about a `macro_rules!` of the file are where rustc reports them (its
+    /// emitter keeps a local macro's spans): a token the body wrote at its place in the
+    /// definition, a substituted fragment at its `$x`, a failed match at the input token no arm
+    /// took, an unexpected end just after the input's last token. (The macros above have no file: another
+    /// file's, at the call.) A lazily parsed body in an expansion reports its error the same way,
+    /// not at the file's last byte.
+    #[test]
+    fn macro_parse_errors_are_where_rustc_reports_them() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", "/fake/macro_errors.rs", "test", &cfg));
+        let parse = |src: &str, lazy: bool| {
+            let scope = crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()));
+            parse_owned_ctx(sess, src.as_bytes().to_vec(), None, 2021, Some(scope), "test", Some(ctx.clone()), lazy)
+        };
+        // (each with rustc's line and column)
+        for (src, want) in [
+            // a token the body wrote, and the first expansion's first token
+            ("macro_rules! m { () => { fn f() { let x = ; } } }\nm!();\n", (1, 43)),
+            ("macro_rules! m { () => { = } }\nstruct A;\nm!();\n", (1, 26)),
+            ("macro_rules! m { ($i:ident) => { fn f() { let $i = ; } } }\nm!(x);\n", (1, 52)),
+            // a fragment where its kind cannot go: its `$x`
+            ("macro_rules! m { ($t:ty) => { fn f() { let v = $t; } } }\nm!(u32);\n", (1, 48)),
+            ("macro_rules! as_item { ($s:stmt) => { $s }; }\nas_item!(const VALUE: u32 = 7;);\n", (1, 39)),
+            // the input token no arm took; the end of the input: just after its last token, an
+            // empty input at the call
+            ("macro_rules! m { ($a:literal) => {} }\nfn f() { m!(1 2); }\n", (2, 15)),
+            ("macro_rules! m { ($a:expr, $b:expr) => {} }\nfn f() { m!(1,  ); }\n", (2, 15)),
+            ("macro_rules! m { ($a:expr, $b:expr) => {} }\nfn f() { m!(  ); }\n", (2, 10)),
+            // a fragment forwarded through two macros, refused by the innermost: the last `$e`
+            ("macro_rules! inner { ($i:ident) => { 0 } }\nmacro_rules! mid { ($e:expr) => { inner!($e) } }\nmacro_rules! outer { ($e:expr) => { mid!($e) } }\nfn f() -> i32 { outer!(x) }\n", (2, 42)),
+        ] {
+            let (pos, msg) = match parse(src, false) { Err(e) => e, Ok(_) => panic!("expected a parse error: {src}") };
+            let (l, c) = crate::source::line_col(src.as_bytes(), &crate::source::line_starts(src.as_bytes()), pos);
+            assert_eq!((l, c), want, "{msg}: {src}");
+        }
+        let src = "macro_rules! m { () => { fn f() { let x = ; } } }\nm!();\n";
+        let (pf, _) = parse(src, true).unwrap_or_else(|(_, msg)| panic!("the load skips the body: {msg}"));
+        let body = (0..pf.ast.items.len() as u32).find_map(|i| pf.lazy_body(ItemId(i), &cfg)).expect("a lazily parsed body");
+        let err = body.expect_err("the body does not parse");
+        assert!(err.starts_with("/fake/macro_errors.rs:1:43: "), "{err}");
+    }
+
     #[test]
     fn a_load_that_records_lints_numbers_a_file_as_a_run_does() {
         // std's io/error/repr_bitpacked.rs kind_from_prim: a block ending in a call of a body-local
@@ -7504,4 +7627,16 @@ pub(crate) unsafe fn reset_statics() {
     reset(&LAZY_WHY_PARSED, relax_session::sync::Mutex::new(std::collections::BTreeMap::new()));
     reset(&LAZY_AUTO, std::sync::atomic::AtomicBool::new(false));
     reset(&LAZY_PARSED, [const { std::sync::atomic::AtomicU64::new(0) }; 2]);
+}
+
+/// The built-in macros whose arguments the parser reads in place (MacArgs): a call of another name
+/// that no macro resolved keeps no arguments, and is no macro of its scope.
+pub fn args_in_place(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"format" | b"print" | b"println" | b"eprint" | b"eprintln" | b"write" | b"writeln" | b"panic" | b"format_args"
+            | b"vec" | b"assert" | b"assert_eq" | b"assert_ne" | b"debug_assert" | b"debug_assert_eq" | b"debug_assert_ne"
+            | b"matches" | b"assert_matches" | b"debug_assert_matches" | b"unreachable" | b"todo" | b"unimplemented" | b"dbg" | b"asm"
+            | b"global_asm" | b"naked_asm"
+    )
 }

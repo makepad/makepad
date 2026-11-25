@@ -19,6 +19,10 @@ pub struct Session {
     deep: bool,
     lazy: bool,
     deep_errors: Vec<Diagnostic>,
+    /// per own crate, the errors of its item checks (`check_signature_errors`: an impl's items
+    /// against its trait's, E0053/E0046, ..) as of the crate's last check; the front holds them
+    /// beside the collection's errors, as the startup check does
+    item_checks: HashMap<u32, Vec<String>>,
     /// per path, its modules' current versions in module order (one file declared as two
     /// modules is two); the last is the path's file for lookups
     files: HashMap<String, Vec<u32>>,
@@ -75,8 +79,11 @@ impl Session {
         // the root crate's own errors are reported even when the rule leaves it out
         let own_crates: Vec<_> = (0..unit.prog.crates.len() as u32)
             .filter(|k| *k == root || crate::borrowck::event::app_crate(&unit.prog, *k)).collect();
+        let mut item_checks = HashMap::new();
         for &k in &own_crates {
-            errors.extend(unit.tcx.check_signature_errors(&unit.prog, k));
+            let checks = unit.tcx.check_signature_errors(&unit.prog, k);
+            errors.extend(checks.iter().cloned());
+            item_checks.insert(k, checks);
             if k != root {
                 errors.extend(crate::check::own_errors(&unit.prog, k, &unit.prog.errors, "resolve"));
                 errors.extend(crate::check::own_errors(&unit.prog, k, &unit.tcx.errors, "typeck"));
@@ -124,7 +131,7 @@ impl Session {
             unit.tcx.publish_file_bodies(&primed);
         }
         let lazy = !unit.prog.session.options.source_eager;
-        let mut session = Self { unit, root, own_crates, sources, deep: false, lazy, deep_errors: Vec::new(), items: HashMap::new(), front, dependents: Vec::new(), edges: HashMap::new(), files,
+        let mut session = Self { unit, root, own_crates, sources, deep: false, lazy, deep_errors: Vec::new(), item_checks, items: HashMap::new(), front, dependents: Vec::new(), edges: HashMap::new(), files,
             parse_errors, failed_probes: Vec::new(), rechecked: 0, rss_before_trim_mb: 0.0, rss_mb: 0.0, ms: 0.0 };
         // Late-resolved item macros initially live in separate expansion files. Normalize
         // those crates once, before readiness, so the first body edit pairs the same items.
@@ -252,6 +259,23 @@ impl Session {
         }
         for e in crate::macro_reg::derive_failures() {
             let d = crate::diag::from_legacy(&e, "macro");
+            self.front.entry(d.file.clone()).or_default().push(d);
+        }
+        self.front_item_checks();
+    }
+
+    /// The item checks of `crates` (the own ones) run again, after the crates are collected again.
+    fn check_items(&mut self, crates: &[u32]) {
+        for &k in crates {
+            if !self.own_crates.contains(&k) { continue; }
+            let errors = self.unit.tcx.check_signature_errors(&self.unit.prog, k);
+            self.item_checks.insert(k, errors);
+        }
+    }
+
+    fn front_item_checks(&mut self) {
+        for e in self.item_checks.values().flatten() {
+            let d = crate::diag::from_legacy(e, "typeck");
             self.front.entry(d.file.clone()).or_default().push(d);
         }
     }
@@ -392,6 +416,7 @@ impl Session {
             }
         }
         let parsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut items_ms = 0.0;
         if rebuild.is_empty() {
             self.unit.prog.lower_body_declarations(&legacy_owners, &body_files);
             // The edited versions' body inputs, as reload.rs publish_reload.
@@ -405,6 +430,7 @@ impl Session {
                 // (its errors stay in tcx.errors, where collect_added put them)
                 let _ = self.unit.tcx.collect_added(&self.unit.prog, &body_added, false);
             }
+            // (the item checks stand: a file with front errors is collected again when edited)
             self.refresh_front();
             // Include callers before invalidating hidden opaque types: an unchanged
             // caller's inferred return can change when its callee's body changes.
@@ -494,6 +520,7 @@ impl Session {
             }
             // Dependent crates keep their files and DefIds, but signatures may name the
             // replaced definitions and must be collected again.
+            let collected = affected.clone();
             for krate in affected.into_iter().filter(|k| !crates.contains(k)) {
                 let defs: Vec<_> = self.unit.prog.defs.iter().enumerate().filter(|(_, d)| d.krate == krate).map(|(i, _)| DefId(i as u32)).collect();
                 let impls: Vec<_> = defs.iter().copied().filter(|d| self.unit.prog.def(*d).kind == DefKind::Impl).collect();
@@ -509,6 +536,9 @@ impl Session {
             }
             self.items.clear(); self.edges.clear(); self.dependents.clear();
             dirty = self.functions().into_iter().collect();
+            let t = Instant::now();
+            self.check_items(&collected);
+            items_ms = t.elapsed().as_secs_f64() * 1000.0;
             self.refresh_front();
         }
         let mut dirty: Vec<_> = dirty.into_iter().filter(|d| self.own_crates.contains(&self.unit.prog.def(*d).krate) && matches!(self.unit.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn)).collect();
@@ -525,8 +555,8 @@ impl Session {
         self.ms = start.elapsed().as_secs_f64() * 1000.0;
         if trace {
             crate::parse_work::finish().print("check");
-            eprintln!("relax check timing: parse/classify/commit {:.3}, invalidate/front {:.3}, check {:.3}, trim {:.3} ms",
-                parsed_ms, invalidated_ms - parsed_ms, checked_ms - invalidated_ms, self.ms - checked_ms);
+            eprintln!("relax check timing: parse/classify/commit {:.3}, invalidate/front {:.3} (item checks {:.3}), check {:.3}, trim {:.3} ms",
+                parsed_ms, invalidated_ms - parsed_ms, items_ms, checked_ms - invalidated_ms, self.ms - checked_ms);
         }
     }
 
@@ -616,6 +646,12 @@ impl Session {
         }
         self.items.clear(); self.edges.clear(); self.dependents.clear();
         self.parse_errors.clear(); self.failed_probes.clear(); self.deep_errors.clear(); self.front = front;
+        self.item_checks.clear();
+        let own = self.own_crates.clone();
+        let t = Instant::now();
+        self.check_items(&own);
+        if crate::reload::reload_trace() { eprintln!("relax check timing: rebuilt sources, item checks {:.3} ms", t.elapsed().as_secs_f64() * 1000.0); }
+        self.front_item_checks();
         if check_bodies { self.check(); }
         self.ms = start.elapsed().as_secs_f64() * 1000.0;
     }
@@ -933,6 +969,85 @@ mod round45_tests {
         assert!(said.is_empty(), "the caller of both opaques borrow-checks: {said:?}");
         drop(warm);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The item checks (an impl's items against its trait's) are the front's: an impl method's
+    /// signature edit reports E0053 (its crate collected again), and a body edit above the impl
+    /// moves the error with its item, where a one-shot check of the new text places it. Both ways
+    /// an edit is taken: the sources rebuilt (a lazy session's) and the crate collected again.
+    #[test]
+    fn an_impl_signature_edit_reports_e0053_at_its_line_after_a_body_edit() {
+        isolated_test!(an_impl_signature_edit_reports_e0053_at_its_line_after_a_body_edit);
+        let dir = std::env::temp_dir().join(format!("relax-check-items-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("lib.rs").to_string_lossy().into_owned();
+        let source = "#![no_std]\npub fn above() {}\npub trait Shape { fn area(&self, scale: u32) -> u32; }\n\
+            pub struct Square;\nimpl Shape for Square { fn area(&self, scale: u32) -> u32 { scale } }\n";
+        let signature = source.replace("fn area(&self, scale: u32) -> u32 { scale }", "fn area(&self, _: bool) -> u32 { 0 }");
+        let shifted = signature.replace("pub fn above() {}", "pub fn above() {\n    let _ = 1;\n}");
+        let e0053 = |warm: &Session| warm.diagnostics().iter().filter(|d| d.code == "E0053").map(|d| d.line).collect::<Vec<_>>();
+        for lazy in [true, false] {
+            std::fs::write(&root, source).unwrap();
+            let session = std::sync::Arc::new(crate::Session::default());
+            let mut prog = crate::program::Program::new(&session);
+            let cfg = crate::cfg::CfgSet::host(&session, &[]);
+            let krate = prog.load_crate("items", &root, 2021, cfg, vec![]).unwrap();
+            prog.resolve_imports();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            let mut warm = Session::new(Unit::new(prog, tcx, 0), krate, Vec::new());
+            warm.lazy = lazy;
+            warm.check();
+            assert!(warm.diagnostics().is_empty(), "lazy {lazy}: {:?}", warm.diagnostics());
+            warm.did_change(root.clone(), signature.clone());
+            assert_eq!(e0053(&warm), vec![5], "lazy {lazy}, the signature edit: {:?}", warm.diagnostics());
+            warm.did_change(root.clone(), shifted.clone());
+            assert_eq!(e0053(&warm), vec![7], "lazy {lazy}, a body edit above the impl: {:?}", warm.diagnostics());
+            warm.did_change(root.clone(), source.into());
+            assert!(warm.diagnostics().is_empty(), "lazy {lazy}, the edits undone: {:?}", warm.diagnostics());
+            drop(warm);
+        }
+        std::fs::remove_file(root).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn an_invalid_legacy_const_generic_argument_is_its_one_error() {
+        // rustc 1.100: one error per call, at the node that creates a definition, worded as
+        // rustc_ast_lowering's InvalidLegacyConstGenericArg; the call lowers to an error expression,
+        // so the callee's generic arguments give no "type annotations needed" of their own. (rustc
+        // rewrites calls of another crate's fn only: the callee is a dependency's.)
+        isolated_test!(an_invalid_legacy_const_generic_argument_is_its_one_error);
+        let dir = std::env::temp_dir().join(format!("relax-check-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dep_root = dir.join("dep.rs").to_string_lossy().into_owned();
+        let root = dir.join("lib.rs").to_string_lossy().into_owned();
+        std::fs::write(&dep_root, "#![no_std]\n#![feature(rustc_attrs)]\n#[rustc_legacy_const_generics(1)]\n\
+            pub fn shift<const N: i32>(a: i32) -> i32 { a }\n").unwrap();
+        std::fs::write(&root, "#![no_std]\npub fn calls(a: i32) {\n    let _ = dep::shift(a, (|| 2)());\n\
+            \x20   let _ = dep::shift(a, const { 2 });\n}\n").unwrap();
+        let session = std::sync::Arc::new(crate::Session::default());
+        let mut prog = crate::program::Program::new(&session);
+        let dep = prog.load_crate("dep", &dep_root, 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let dep_name = prog.syms.intern("dep");
+        let krate = prog.load_crate("legacy", &root, 2021, crate::cfg::CfgSet::host(&session, &[]), vec![(dep_name, dep)]).unwrap();
+        prog.resolve_imports();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        // (the root's own errors, as run.rs gives the watch its load's)
+        let mut pre = crate::check::own_errors(&prog, krate, &prog.errors, "resolve");
+        pre.extend(crate::check::own_errors(&prog, krate, &tcx.errors, "typeck"));
+        let mut warm = Session::new(Unit::new(prog, tcx, 0), krate, pre);
+        warm.check();
+        let found: Vec<(u32, u32, String)> = warm.diagnostics().iter().map(|d| (d.line, d.col, d.message.clone())).collect();
+        let message = "invalid argument to a legacy const generic: cannot have const blocks, closures, async blocks or items";
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|(_, _, m)| m.ends_with(message)), "{found:?}");
+        assert_eq!(found.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(), [(3, 28), (4, 27)], "at the closure and the const block: {found:?}");
+        drop(warm);
+        std::fs::remove_file(root).unwrap();
+        std::fs::remove_file(dep_root).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

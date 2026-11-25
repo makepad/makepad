@@ -9,9 +9,11 @@ ok=1
 for sig in TERM INT; do
   LOG=$H/target/run-$sig.log
   mkdir -p "$H/target"
-  # (a shell starts `&` jobs with SIGINT ignored; set -m gives the job its own process group with default dispositions)
+  # (a shell starts `&` jobs with SIGINT ignored; set -m gives the job its own process group. A signal ignored
+  # when the shell started stays ignored in its jobs, as under a job runner that ignores SIGINT: the program
+  # starts with SIGINT's default disposition, as a terminal's program does)
   set -m
-  (cd "$H/app" && RELAX_STD=$H/../../std exec "$1" run --quiet signal-exit-app > "$LOG" 2>&1) &
+  (cd "$H/app" && RELAX_STD=$H/../../std exec python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' "$1" run --quiet signal-exit-app > "$LOG" 2>&1) &
   pid=$!
   set +m
   for i in $(seq 1 600); do grep -q started "$LOG" 2>/dev/null && break; sleep 0.1; done

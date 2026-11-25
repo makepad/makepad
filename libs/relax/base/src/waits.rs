@@ -32,9 +32,12 @@ pub enum Kind {
     /// a CPU token of the budget (object and label: the class). No one thread holds it up:
     /// makepad_cpu_budget::tokens names who has them.
     Token,
+    /// the app's check beside the program, which the first frame waits for (holder: the check's
+    /// thread; label: what waits)
+    Check,
 }
 
-pub const KIND_NAMES: [&str; 8] = ["none", "owner", "pump", "query", "build", "futex", "join", "token"];
+pub const KIND_NAMES: [&str; 9] = ["none", "owner", "pump", "query", "build", "futex", "join", "token", "check"];
 
 const ROWS: usize = 1024;
 
@@ -263,6 +266,7 @@ fn read(r: &Row) -> Option<Wait> {
             5 => Kind::Futex,
             6 => Kind::Join,
             7 => Kind::Token,
+            8 => Kind::Check,
             _ => return None,
         };
         // labels are 'static strs written whole before the state word

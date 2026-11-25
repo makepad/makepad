@@ -36,13 +36,38 @@ fn inference_diagnostics_do_not_mask_body_error() {
     assert!(body.errors.iter().any(|e| e.contains("E0283")), "{:?}", body.errors);
 }
 
+#[test]
+fn a_failing_operator_trait_hides_its_projection() {
+    // rustc report_fulfillment_errors (covered_by_trait_error): `u8: Neg` fails, and the
+    // `<u8 as Neg>::Output` projection resting on it is no second error (E0271)
+    // (typeck finds the operator traits at `core::ops`: the program is that crate; two impls
+    // leave the literal's type open until the return type makes it `u8`, as core's many do)
+    let (prog, tcx) = program_as("core", br#"#![no_std]
+        pub mod ops {
+            pub trait Neg { type Output; fn neg(self) -> Self::Output; }
+            impl Neg for i32 { type Output = i32; fn neg(self) -> i32 { self } }
+            impl Neg for i64 { type Output = i64; fn neg(self) -> i64 { self } }
+        }
+        fn inferred() -> u8 { let x = -1; x }
+    "#);
+    let state = EvalState::new();
+    let cx = EvalCx::new(&prog, &tcx, TypingEnv::fully_monomorphized(&prog), &state);
+    let body = crate::typeck::instantiate_body(&cx, &prog, &tcx, named(&prog, "inferred"), &[]);
+    assert!(body.errors.iter().any(|e| e.contains("E0277") && e.contains("Neg")), "{:?}", body.errors);
+    assert!(!body.errors.iter().any(|e| e.contains("E0271")), "{:?}", body.errors);
+}
+
 fn program(source: &[u8]) -> (Program, Tcx) {
+    program_as("typing", source)
+}
+
+fn program_as(crate_name: &str, source: &[u8]) -> (Program, Tcx) {
     let dir = std::env::temp_dir().join(format!("relax-typing-env-{}-{}", std::process::id(), crate::unique_test_suffix()));
     std::fs::create_dir(&dir).unwrap();
     let path = dir.join("lib.rs");
     std::fs::write(&path, source).unwrap();
     let mut prog = Program::new(&std::sync::Arc::new(crate::Session::default()));
-    prog.load_crate("typing", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&prog.session, &[]), Vec::new()).unwrap();
+    prog.load_crate(crate_name, path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&prog.session, &[]), Vec::new()).unwrap();
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
 

@@ -5,8 +5,12 @@
 //!   Linux and macOS a miss asks a native bundle's address accessor for a symbol its link keeps
 //!   hidden);
 //!   `find_system(name)`: the C/math libraries the host may not have loaded (Linux libm/libc).
-//! - `load_library(name, framework)`: a program's `#[link(name = ..)]` library (false: not found);
+//! - `load_library(name, framework)`: a program's `#[link(name = ..)]` library (false on a miss). On Windows, if
+//!   the DLL does not load, finding the import library `<name>.lib` also succeeds.
 //!   `load_library_versioned(name)`: Linux's lib<name>.so.N where lib<name>.so is a linker script.
+//! - `find_imported(name)`: on Windows, a symbol from the DLL its import library names. Each
+//!   library found by `load_library` is read on its first miss (implib.rs). Null elsewhere or
+//!   when none resolves the symbol. `add_link_search(dirs)`: build scripts' search folders on Windows.
 //! - `lookup(handle, name)`: the system's own lookup in a library handle (the program's dlsym).
 //! - `exit(code)`: ends the process once Relax is done with the program (see the Windows half).
 //! - `on_battery()`.
@@ -18,6 +22,14 @@
 //!   its error for another user's ends in `OTHER_USERS`.
 
 pub use imp::*;
+
+/// Only Windows looks for import libraries in the build scripts' folders.
+#[cfg(not(windows))]
+pub fn add_link_search(_dirs: &[String]) {}
+
+/// Only Windows resolves a symbol through an import library.
+#[cfg(not(windows))]
+pub unsafe fn find_imported(_name: *const u8) -> *mut u8 { std::ptr::null_mut() }
 
 /// How `ensure_private_dir`'s error for a directory another user owns ends.
 pub const OTHER_USERS: &str = "belongs to another user";
@@ -895,8 +907,168 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
+    use super::super::implib;
     use crate::os::win32::*;
-    use std::path::Path;
+    use std::collections::HashMap;
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    type Imports = HashMap<String, (String, implib::Export)>;
+
+    #[derive(Default)]
+    struct ImportLibs {
+        /// The build scripts' search folders, first named first.
+        search: Vec<PathBuf>,
+        /// The `#[link]` name, the import library's file and its symbol map once read.
+        libs: Vec<(String, PathBuf, Option<Imports>)>,
+        /// Each imported DLL's lowercased name and handle (0 when it did not load).
+        dlls: Vec<(String, HANDLE)>,
+    }
+
+    /// The run's import libraries and DLL handles, shared by units resolving foreign symbols.
+    static IMPORT_LIBS: Mutex<ImportLibs> = Mutex::new(ImportLibs {
+        search: Vec::new(), libs: Vec::new(), dlls: Vec::new(),
+    });
+
+    /// What this module holds of a run, as a fresh process has it (the parent's `reset_statics`).
+    pub(super) unsafe fn reset_statics() {
+        relax_session::reset_static(&IMPORT_LIBS, Mutex::new(ImportLibs::default()));
+    }
+
+    /// The build scripts' folders precede the system import libraries, as with link.exe's /LIBPATH.
+    pub fn add_link_search(dirs: &[String]) {
+        let mut state = IMPORT_LIBS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::zone_alloc::kept_with(|| {
+            for dir in dirs {
+                let path = Path::new(dir);
+                if !state.search.iter().any(|p| p == path) {
+                    state.search.push(path.to_owned());
+                }
+            }
+        });
+    }
+
+    /// LIB in its given order, then the newest installed SDK with import libraries for this arch.
+    fn system_lib_dirs() -> &'static [PathBuf] {
+        static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+        DIRS.get_or_init(|| crate::zone_alloc::kept_with(|| {
+            let mut dirs = Vec::new();
+            if let Some(lib) = std::env::var_os("LIB") {
+                dirs.extend(std::env::split_paths(&lib).filter(|p| !p.as_os_str().is_empty()));
+            }
+            let arch = match std::env::consts::ARCH {
+                "x86_64" => "x64",
+                "aarch64" => "arm64",
+                _ => return dirs,
+            };
+            let Some(root) = std::env::var_os("ProgramFiles(x86)").filter(|p| !p.is_empty()) else { return dirs };
+            let Ok(versions) = std::fs::read_dir(PathBuf::from(root).join(r"Windows Kits\10\Lib")) else { return dirs };
+            let newest = versions.flatten().filter_map(|entry| {
+                let version = entry.file_name().to_str()?.split('.').map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>().ok()?;
+                let path = entry.path();
+                path.join("um").join(arch).is_dir().then_some((version, path))
+            }).max_by(|(a, _), (b, _)| a.cmp(b));
+            if let Some((_, path)) = newest {
+                dirs.push(path.join("um").join(arch));
+                let ucrt = path.join("ucrt").join(arch);
+                if ucrt.is_dir() {
+                    dirs.push(ucrt);
+                }
+            }
+            dirs
+        }))
+    }
+
+    fn find_import_library(name: &str) -> Option<PathBuf> {
+        let file = if name.to_ascii_lowercase().ends_with(".lib") { name.to_owned() } else { format!("{name}.lib") };
+        // A drive-prefixed or rooted path would replace the search folder when joined.
+        if matches!(Path::new(&file).components().next(), Some(Component::Prefix(_) | Component::RootDir)) {
+            return None;
+        }
+        let in_dir = |dir: &PathBuf| {
+            let path = dir.join(&file);
+            path.is_file().then_some(path)
+        };
+        let found = IMPORT_LIBS.lock().unwrap_or_else(|e| e.into_inner()).search.iter().find_map(&in_dir);
+        found.or_else(|| system_lib_dirs().iter().find_map(in_dir))
+    }
+
+    fn read_imports(path: &Path) -> Imports {
+        let mut imports = HashMap::new();
+        match std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| implib::parse(&bytes)) {
+            Ok((entries, _)) => {
+                for entry in entries {
+                    imports.entry(entry.symbol).or_insert((entry.dll, entry.export));
+                }
+            }
+            Err(error) => eprintln!("relax: the import library {} cannot be read: {error}", path.display()),
+        }
+        imports
+    }
+
+    /// For a symbol no loaded module exports, bind it to the DLL its import library names, as the
+    /// linker does for umbrella libraries like mincore or a DLL with a different name. Each library
+    /// is read on the first miss that reaches it (a few ms for the largest SDK library); later
+    /// misses reuse its map. The lock covers the tables only: a library is read, and a DLL loaded,
+    /// outside it (LoadLibraryA takes the loader lock and runs the DLL's initializers, and a thread
+    /// already holding the loader lock can miss a symbol here too).
+    pub unsafe fn find_imported(name: *const u8) -> *mut u8 {
+        let Ok(name) = std::ffi::CStr::from_ptr(name.cast()).to_str() else { return std::ptr::null_mut() };
+        let lock = || IMPORT_LIBS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut at = 0;
+        loop {
+            // the next library from `at` on: its file when not read yet, else whether it names `name`
+            let next = {
+                let state = lock();
+                let Some((_, path, imports)) = state.libs.get(at) else { return std::ptr::null_mut() };
+                match imports {
+                    None => Err(path.clone()),
+                    Some(imports) => Ok(imports.get(name).map(|(dll, export)| {
+                        let handle = state.dlls.iter().find(|(key, _)| key.eq_ignore_ascii_case(dll)).map(|(_, h)| *h);
+                        (dll.clone(), export.clone(), handle)
+                    })),
+                }
+            };
+            let (dll, export, handle) = match next {
+                Err(path) => {
+                    let read = crate::zone_alloc::kept_with(|| read_imports(&path));
+                    let mut state = lock();
+                    if let Some((_, _, imports @ None)) = state.libs.get_mut(at) {
+                        *imports = Some(read);
+                    }
+                    continue;
+                }
+                Ok(None) => {
+                    at += 1;
+                    continue;
+                }
+                Ok(Some(hit)) => hit,
+            };
+            at += 1;
+            let handle = match handle {
+                Some(handle) => handle,
+                None => {
+                    let handle = LoadLibraryA(format!("{dll}\0").as_ptr());
+                    let mut state = lock();
+                    if !state.dlls.iter().any(|(key, _)| key.eq_ignore_ascii_case(&dll)) {
+                        crate::zone_alloc::kept_with(|| state.dlls.push((dll.to_ascii_lowercase(), handle)));
+                    }
+                    handle
+                }
+            };
+            if handle == 0 {
+                continue;
+            }
+            let address = match export {
+                implib::Export::Name(n) => GetProcAddress(handle, format!("{n}\0").as_ptr()),
+                implib::Export::Ordinal(o) => GetProcAddress(handle, o as usize as *const u8),
+            };
+            if !address.is_null() {
+                return address;
+            }
+        }
+    }
 
     /// A symbol in the Universal C Runtime first (the C library a rustc build of the program uses
     /// on Windows: math results match it bit for bit), then in any module loaded into the process:
@@ -990,10 +1162,25 @@ mod imp {
         (n > 0 && n < name.len()).then(|| (module as usize, std::path::PathBuf::from(std::ffi::OsString::from_wide(&name[..n]))))
     }
 
-    /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.
+    /// Load the named DLL, or record the import library that names a DLL for each symbol.
+    /// An explicit `.dll` names only that DLL.
     pub fn load_library(name: &str, _framework: bool) -> bool {
-        let file = if name.to_ascii_lowercase().ends_with(".dll") { format!("{}\0", name) } else { format!("{}.dll\0", name) };
-        unsafe { LoadLibraryA(file.as_ptr()) != 0 }
+        let explicit_dll = name.to_ascii_lowercase().ends_with(".dll");
+        let file = if explicit_dll { format!("{name}\0") } else { format!("{name}.dll\0") };
+        if unsafe { LoadLibraryA(file.as_ptr()) } != 0 {
+            return true;
+        }
+        if explicit_dll {
+            return false;
+        }
+        crate::zone_alloc::kept_with(|| {
+            let Some(path) = find_import_library(name) else { return false };
+            let mut state = IMPORT_LIBS.lock().unwrap_or_else(|e| e.into_inner());
+            if !state.libs.iter().any(|(lib, _, _)| lib == name) {
+                state.libs.push((name.to_owned(), path, None));
+            }
+            true
+        })
     }
 
     pub fn load_library_versioned(_name: &str) -> bool {
@@ -1290,6 +1477,8 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&EMBEDDED_FAILURE, std::sync::atomic::AtomicI32::new(0));
     reset(&PROGRAM_ATEXIT, std::sync::Mutex::new(Vec::new()));
+    #[cfg(windows)]
+    imp::reset_statics();
 }
 
 #[cfg(all(test, windows))]

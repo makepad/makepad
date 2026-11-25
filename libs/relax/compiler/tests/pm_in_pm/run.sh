@@ -3,7 +3,7 @@
 # (pmpm-inner) in its own source: the macro world has to expand it while it builds (pmhost BOOT_WORLD).
 # Prints "pm_in_pm: ok" or "pm_in_pm: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet pmpm-app 2>>"$ERR")

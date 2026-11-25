@@ -204,6 +204,11 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                     } else { self.delegate.borrow(p, if mutable { BorrowKind::Mut } else { BorrowKind::Imm }); }
                     return None;
                 }
+                // a builtin index borrows its base as well, even where nothing reads the element
+                // (`let _ = s[i]`: the bounds check reads s): rustc's closure analysis runs before
+                // writeback makes the index builtin (writeback.rs fix_index_builtin_expr), so it walks
+                // the overloaded form's autoref of the base (expr_use_visitor.rs walk_adjustment)
+                self.delegate.borrow(p.clone(), if mutable { BorrowKind::Mut } else { BorrowKind::Imm });
                 p.expr = e.0; p.span = self.span(e);
                 return Some(p.project(Projection::Index, self.body.ty(e)));
             }

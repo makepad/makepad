@@ -258,6 +258,9 @@ impl ImpliedBounds {
                 if tcx.adts.get(&d).is_some() && !self.inferred.contains_key(&d) && tcx.inferred_outlives.get(&d).is_none() && !out.contains(&d) { out.push(d); }
                 for t in tys.list(args).to_vec() { self.adt_refs(tcx, t, out); }
             }
+            TyKind::Alias(_, alias) => {
+                for &t in tys.list(alias.args) { self.adt_refs(tcx, t, out); }
+            }
             TyKind::Ref(_, inner, r) => {
                 if matches!(tys.region_kind(r), RegionKind::ReBound(..)) || tys.has_vars_bound_at_or_above(inner, 0) { return; }
                 self.adt_refs(tcx, inner, out);
@@ -392,6 +395,29 @@ impl ImpliedBounds {
                     }
                 }
                 for t in tys.list(args).to_vec() { self.required_to_be_wf(tcx, prog, t, visiting, out); }
+            }
+            // rustc's implicit_infer.rs walks alias arguments and checks the parent trait's explicit predicates for projections.
+            TyKind::Alias(_, alias) => {
+                use crate::next_solver::{ClauseKind, PredicateKind};
+                if let AliasTyKind::Projection { def_id } = alias.kind {
+                    let trait_def = prog.def(def_id).parent;
+                    let args = tcx.complete_args(prog, def_id, tys.list(alias.args), alias.regions);
+                    for p in tcx.own_clauses_of(prog, trait_def) {
+                        if !p.bound_vars.is_empty() || !matches!(p.kind, PredicateKind::Clause(ClauseKind::TypeOutlives(..) | ClauseKind::RegionOutlives(..))) { continue; }
+                        match tcx.instantiate_predicate(prog, def_id, &args, p).kind {
+                            PredicateKind::Clause(ClauseKind::TypeOutlives(t, r)) => {
+                                if tys.has_vars_bound_at_or_above(t, 0) { continue; }
+                                let mut components = ImpliedBounds::default();
+                                components.components(tcx, t, r);
+                                for (a, b) in components.outlives { push(OutlivesPredicate::Region(a, b), out); }
+                                for (t, r) in components.type_outlives { push(OutlivesPredicate::Type(t, r), out); }
+                            }
+                            PredicateKind::Clause(ClauseKind::RegionOutlives(a, b)) => push(OutlivesPredicate::Region(a, b), out),
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                for &t in tys.list(alias.args) { self.required_to_be_wf(tcx, prog, t, visiting, out); }
             }
             TyKind::Ref(_, inner, r) => {
                 // `&'r T` requires `T: 'r`: the components of T each outlive 'r.

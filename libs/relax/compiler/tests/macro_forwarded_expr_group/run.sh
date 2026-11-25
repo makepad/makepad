@@ -4,7 +4,7 @@
 # prints "macro_forwarded_expr_group: ok" or "macro_forwarded_expr_group: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 export RELAX_CACHE=off
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet fwd-app 2>"$ERR")
 echo "$OUT"
 SHAPES='shapes: None["b"] | None[- 1] | None["b"] | None[u8] | None[Brace[1]] | x | "b" | Paren[None["a{0}"]] , None["b"] , | , None["b"] ,'

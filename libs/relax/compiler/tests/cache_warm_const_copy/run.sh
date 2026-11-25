@@ -4,7 +4,7 @@
 # or "cache_warm_const_copy: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 rc=()
 for k in 1 2 3; do
@@ -29,4 +29,6 @@ print("cache_warm_const_copy: " + ("ok" if not bad else "FAILED " + "; ".join(ba
 # the temp dir this script made (mktemp -d), nothing else
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
+# (the verdict is the exit status too: a check reads that)
+sys.exit(1 if bad else 0)
 PY

@@ -871,3 +871,40 @@ fn att_syntax_basics() {
     let o = asm_att("movl $5, (%rax)\nmovq %fs:0, %rax").unwrap();
     assert_eq!(text(&o), bytes("mov dword ptr [rax], 5\nmov rax, qword ptr fs:[0]"));
 }
+
+/// `.seh_*` directives (Windows x64 unwind info): the function each describes, the UNWIND_INFO
+/// it gives (the bytes LLVM writes for these prologues), and what they refuse.
+#[test]
+fn seh_directives_describe_functions_and_their_unwind_info() {
+    let coff = |src: &str| assemble(Arch::X64, Format::Coff, Kind::Global, &[Piece::Text(src.to_string())], &[], false);
+    let coff_att = |src: &str| assemble(Arch::X64, Format::Coff, Kind::Global, &[Piece::Text(src.to_string())], &[], true);
+    // a frame record and a handler (relax_base's stack.rs last frame), one byte into the block
+    let o = coff("nop\n.globl f\nf:\n.seh_proc f\n.seh_handler h, @except\npush rbp\n.seh_pushreg rbp\nsub rsp, 32\n.seh_stackalloc 32\nlea rbp, [rsp + 32]\n.seh_setframe rbp, 32\n.seh_endprologue\ncall rdx\nnop\nadd rsp, 32\npop rbp\nret\n.seh_endproc\n").unwrap();
+    let f = SehProc { section: 0, start: 1, end: 20, prologue: 10, frame: Some((5, 2)), ops: vec![(1, SehOp::PushReg(5)), (5, SehOp::Alloc(32)), (10, SehOp::SetFrame)], handler: Some(("h".to_string(), 1)) };
+    assert_eq!(o.seh, vec![f.clone()], "the function's description");
+    assert_eq!(hex(&f.unwind_info(0x1234)), "09 0a 03 25 0a 03 05 32 01 50 00 00 34 12 00 00", "codes latest first, padded to an even count, then the handler");
+    // no frame register, no handler; a large allocation and saves by offset
+    let o = coff("g:\n.seh_proc g\npush rbx\n.seh_pushreg rbx\nsub rsp, 0x1000\n.seh_stackalloc 0x1000\nmov [rsp + 0x20], rsi\n.seh_savereg rsi, 0x20\nmovaps [rsp + 0x30], xmm6\n.seh_savexmm xmm6, 0x30\n.seh_endprologue\nret\n.seh_endproc\n").unwrap();
+    assert_eq!(o.seh.len(), 1);
+    assert_eq!((o.seh[0].prologue, &o.seh[0].ops[..]), (18, &[(1, SehOp::PushReg(3)), (8, SehOp::Alloc(0x1000)), (13, SehOp::SaveReg(6, 0x20)), (18, SehOp::SaveXmm(6, 0x30))][..]));
+    assert_eq!(hex(&o.seh[0].unwind_info(0)), "01 12 07 00 12 68 03 00 0d 64 04 00 08 01 00 02 01 30 00 00", "UWOP_ALLOC_LARGE in eights, the saves scaled");
+    // AT&T registers, both handler kinds
+    let o = coff_att(".seh_proc g\npushq %rbx\n.seh_pushreg %rbx\n.seh_handler h, @except, @unwind\n.seh_endprologue\nret\n.seh_endproc\n").unwrap();
+    assert_eq!((&o.seh[0].ops[..], o.seh[0].handler.as_ref().map(|h| h.1)), (&[(1, SehOp::PushReg(3))][..], Some(3)));
+    for (src, why) in [
+        ("push rbx\n.seh_pushreg rbx\n", "outside a function"),
+        (".seh_proc f\npush rbx\n.seh_pushreg rbx\n.seh_endprologue\nret\n", "without its .seh_endproc"),
+        (".seh_proc f\nsub rsp, 12\n.seh_stackalloc 12\n.seh_endprologue\n.seh_endproc\n", "multiple of 8"),
+        (".seh_proc f\n.seh_endprologue\npush rbx\n.seh_pushreg rbx\n.seh_endproc\n", "after .seh_endprologue"),
+        (".seh_proc f\npush rbx\n.seh_pushreg rbx\n.seh_endproc\n", "no .seh_endprologue"),
+        (".seh_proc f\n.seh_handler h\n.seh_endprologue\n.seh_endproc\n", "neither @except nor @unwind"),
+        (".seh_proc f\n.seh_pushreg xmm6\n.seh_endprologue\n.seh_endproc\n", "64-bit integer register"),
+    ] {
+        let e = coff(src).err().unwrap_or_else(|| panic!("`{}` assembles", src));
+        assert!(e.msg.contains(why), "`{}`: {}", src, e.msg);
+    }
+    let e = assemble(Arch::X64, Format::Coff, Kind::Inline, &[Piece::Text(".seh_pushreg rbx".to_string())], &[], false).err().expect("inline .seh_ assembles");
+    assert!(e.msg.contains("inline assembly"), "{}", e.msg);
+    let e = asm_intel(".seh_proc f\n.seh_endprologue\n.seh_endproc\n").err().expect(".seh_ assembles for ELF");
+    assert!(e.msg.contains("COFF only"), "{}", e.msg);
+}

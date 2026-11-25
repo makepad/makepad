@@ -46,8 +46,9 @@
 //!   folders, a package's `target` folder or a nested repository), the root first, the first
 //!   `[package]` of that name; `workspace = true` fields inherit from the repository's own
 //!   workspace; a path dependency inside the repository is part of the same git source. Package
-//!   ids are cargo's `git+<url>[?<ref>]#<name>@<version>`.
-//! Unsupported (an error naming it): ssh and file git URLs, registry packages missing from the vendored
+//!   ids are cargo's `git+<url>[?<ref>]#<name>@<version>`. An `ssh://` source is read from
+//!   Cargo's checkout or bare db, or reused from the Relax store. Relax never connects over ssh.
+//! Unsupported (an error naming it): scp-style ssh and file git URLs, registry packages missing from the vendored
 //! directory (never looked up anywhere else, never fetched, then), registry packages that compile C
 //! (a cc/cmake build-dependency), unknown command-line flags.
 
@@ -209,9 +210,7 @@ fn git_src(st: &TomlTable, at: &str, key: &str) -> Result<Option<GitSrc>, String
     if refs.len() > 1 {
         return Err(format!("{}: dependency ({}) specification is ambiguous. Only one of `branch`, `tag` or `rev` is allowed.", at, key));
     }
-    if crate::git::fetch::check_url(&url).is_err() {
-        return Err(format!("{}: `{}` is a git dependency on {}: Relax fetches git repositories over https only", at, key, url));
-    }
+    crate::git::fetch::check_source_url(&url).map_err(|e| format!("{at}: `{key}` is a git dependency on {e}"))?;
     Ok(Some(GitSrc { url, reference: refs.pop().unwrap_or(GitRef::DefaultBranch) }))
 }
 
@@ -602,15 +601,16 @@ impl Resolver {
             allow_c: sess.options.allow_c || sess.options.const_fuel, metadata: false })
     }
 
-    /// The registry version the requesting package's Cargo.lock edge names, if unambiguous and
-    /// accepted by the requirement. Missing or ambiguous edges leave requirement-based resolution.
-    fn locked_edge(&self, from: (&str, &str), dep: &str, req: &str) -> Option<String> {
-        let mut parents = self.ws.lock_by_name.get(from.0)?.iter().map(|&i| &self.ws.lock_pkgs[i]).filter(|p| p.version == from.1);
-        let parent = parents.next()?;
+    /// Return the sole registry version selected by the requesting package's lock edges and the
+    /// requirement. Ignore explicit non-registry sources. Every other versioned edge for this
+    /// dependency must name a package present in Cargo.lock.
+    fn locked_edge(&self, from: (&str, &str), dep: &str, req: &str) -> Result<Option<String>, String> {
+        let mut parents = self.ws.lock_by_name.get(from.0).into_iter().flatten().map(|&i| &self.ws.lock_pkgs[i]).filter(|p| p.version == from.1);
+        let Some(parent) = parents.next() else { return Ok(None) };
         if parents.next().is_some() {
-            return None;
+            return Ok(None);
         }
-        let targets = self.ws.lock_by_name.get(dep)?;
+        let targets = self.ws.lock_by_name.get(dep).map(Vec::as_slice).unwrap_or_default();
         let mut versions = BTreeSet::new();
         for edge in &parent.deps {
             let (id, source) = match edge.split_once(" (") {
@@ -621,7 +621,7 @@ impl Resolver {
                 None => (edge.as_str(), None),
             };
             let mut parts = id.split_whitespace();
-            if parts.next() != Some(dep) {
+            if parts.next() != Some(dep) || source.is_some_and(|s| !s.starts_with("registry+")) {
                 continue;
             }
             let version = parts.next();
@@ -629,23 +629,28 @@ impl Resolver {
                 continue;
             }
             let mut named = targets.iter().map(|&i| &self.ws.lock_pkgs[i]).filter(|p| {
-                p.source.as_deref().is_some_and(|s| s.starts_with("registry+"))
-                    && (version.is_none() || version == Some(p.version.as_str()))
-                    && (source.is_none() || source == p.source.as_deref())
-            });
-            let Some(pkg) = named.next() else { continue };
-            if named.next().is_some() {
+                (version.is_none() || version == Some(p.version.as_str())) && (source.is_none() || source == p.source.as_deref())
+            }).peekable();
+            if version.is_some() && named.peek().is_none() {
+                return Err(format!(
+                    "Cargo.lock has no package matching `{edge}` for dependency `{dep}` of `{} {}`. Regenerate the lock entry with `cargo update -p {dep}`.",
+                    parent.name, parent.version
+                ));
+            }
+            let mut registry = named.filter(|p| p.source.as_deref().is_some_and(|s| s.starts_with("registry+")));
+            let Some(pkg) = registry.next() else { continue };
+            if registry.next().is_some() {
                 continue;
             }
             if crate::registry::Version::parse(&pkg.version).is_some_and(|ver| crate::registry::matches(req, &ver)) {
                 versions.insert(pkg.version.as_str());
             }
         }
-        if versions.len() == 1 { versions.into_iter().next().map(str::to_string) } else { None }
+        Ok(if versions.len() == 1 { versions.into_iter().next().map(str::to_string) } else { None })
     }
 
     fn registry_dir(&self, name: &str, req: &str, from: Option<(&str, &str)>) -> Result<String, String> {
-        let exact = from.and_then(|from| self.locked_edge(from, name, req));
+        let exact = from.map(|f| self.locked_edge(f, name, req)).transpose()?.flatten();
         match &self.vendor {
             Some((Vendor::Dir(vdir), config)) => return self.vendored_dir(vdir, config, name, req, exact.as_deref()),
             // the repository's package of that name (cargo's discovery, as for a git dependency)
@@ -2567,6 +2572,9 @@ pub struct GraphUnit {
 pub struct Units {
     pub units: Vec<GraphUnit>,
     pub roots: Vec<usize>,
+    /// The workspace root cargo runs rustc in for path targets under it (unitgraph.rs rustc_dir).
+    /// Empty when unknown.
+    pub workspace_root: String,
     /// binary target names of the root package when building integration tests (`CARGO_BIN_EXE_<name>`)
     pub bins: Vec<String>,
     /// a build script's units: its parent confined its run, with these folders (`relax_script`)
@@ -2658,7 +2666,7 @@ impl Units {
         }
         let roots = j.get("roots").map(|r| r.arr().iter().map(|x| x.num() as usize).collect()).unwrap_or_default();
         let script = j.get("relax_script").map(|r| ScriptFolders { read: list(r.get("read")), excluded: list(r.get("excluded")), cwd: s(r.get("cwd")) });
-        Ok(Units { units, roots, bins: Vec::new(), script, unified: Vec::new() })
+        Ok(Units { units, roots, workspace_root: s(j.get("workspace_root")), bins: Vec::new(), script, unified: Vec::new() })
     }
 }
 
@@ -3286,7 +3294,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 if u.host { "host" } else { "target" }, u.name, u.mode, u.features.join(","), deps.join(","));
         }
     }
-    Ok(Units { units: out, roots, bins, script: None, unified: Vec::new() })
+    Ok(Units { units: out, roots, workspace_root: r.ws.root.clone(), bins, script: None, unified: Vec::new() })
 }
 
 #[cfg(test)]
@@ -3717,10 +3725,18 @@ extra = []
         let sess = &std::sync::Arc::new(crate::Session::default());
         let one = "[package]\nname = \"dep\"\nversion = \"1.0.0\"\nedition = \"2021\"\n";
         let two = "[package]\nname = \"dep\"\nversion = \"2.0.0\"\nedition = \"2021\"\n";
+        let registry = "registry+https://github.com/rust-lang/crates.io-index";
+        let registry_pkg = |version: &str| format!("[[package]]\nname = \"dep\"\nversion = \"{version}\"\nsource = \"{registry}\"\n");
+        let lock = |edge: Option<&str>, packages: &str| {
+            let deps = edge.map(|e| format!("dependencies = [\"{e}\"]\n")).unwrap_or_default();
+            format!("version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n{deps}\n{packages}")
+        };
+        let locked_one = registry_pkg("1.0.0");
+        let locked_both = format!("{locked_one}\n{}", registry_pkg("2.0.0"));
         let root = tree("lock-edge", &[
             ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
             (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n"),
-            ("Cargo.lock", "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"dep 2.0.0\"]\n\n[[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"dep\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"),
+            ("Cargo.lock", &lock(Some("dep 2.0.0"), &locked_both)),
             ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\ndep = \">=1, <3\"\n"),
             ("app/src/lib.rs", ""),
             ("vendor/dep-1.0.0/Cargo.toml", one),
@@ -3736,16 +3752,55 @@ extra = []
         let paths: Vec<_> = g.units.iter().filter(|u| u.name == "dep").map(|u| u.src_path.clone()).collect();
         assert_eq!(paths, vec![normalize(&format!("{root}/vendor/dep-2.0.0/src/lib.rs"))], "the vendored dependency must use the version named by the requesting package's lock edge");
 
-        std::fs::remove_file(format!("{root}/.cargo/config.toml")).unwrap();
         let mut r = Resolver::new(sess, &root).unwrap();
+        r.vendor = None;
         r.registry_src = format!("{root}/cache");
         assert_eq!(r.registry_dir("dep", ">=1, <3", Some(("app", "0.1.0"))).unwrap(), format!("{root}/cache/index.test-0/dep-2.0.0"), "the cached dependency must use the version named by the requesting package's lock edge");
         assert_eq!(r.registry_dir("dep", ">=1, <3", None).unwrap(), format!("{root}/cache/index.test-0/dep-1.0.0"), "without a requesting package the first matching locked version must still win");
 
-        std::fs::write(format!("{root}/Cargo.lock"), "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"dep\"]\n\n[[package]]\nname = \"dep\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n").unwrap();
-        let mut r = Resolver::new(sess, &root).unwrap();
-        r.registry_src = format!("{root}/cache");
-        assert_eq!(r.registry_dir("dep", ">=1, <3", Some(("app", "0.1.0"))).unwrap(), format!("{root}/cache/index.test-0/dep-1.0.0"), "a bare dependency name must resolve to its only locked registry package");
+        let resolve = |edge: Option<&str>, packages: &str, req: &str| {
+            std::fs::write(format!("{root}/Cargo.lock"), lock(edge, packages)).unwrap();
+            let mut r = Resolver::new(sess, &root).unwrap();
+            r.offline = true;
+            r.registry_src = format!("{root}/cache");
+            let from = Some(("app", "0.1.0"));
+            let vendored = r.registry_dir("dep", req, from);
+            r.vendor = None;
+            [vendored, r.registry_dir("dep", req, from)]
+        };
+        let plain = "dep 2.0.0";
+        let qualified = format!("{plain} ({registry})");
+        let other_versions = format!("{locked_one}\n{}", registry_pkg("1.1.0"));
+        let with_path = format!("{locked_one}\n[[package]]\nname = \"dep\"\nversion = \"2.0.0\"\n");
+        let missing: &[(&str, &str)] = &[
+            (plain, &locked_one),
+            (&qualified, &locked_one),
+            (plain, &other_versions),
+            (&qualified, &other_versions),
+            (plain, ""),
+            (&qualified, &with_path),
+        ];
+        for &(edge, packages) in missing {
+            for result in resolve(Some(edge), packages, ">=1, <3") {
+                let err = result.expect_err("a missing locked target must stop registry resolution");
+                assert!(err.contains(edge) && err.contains("Cargo.lock has no package") && err.contains("app 0.1.0") && err.contains("cargo update -p dep"), "{err}");
+            }
+        }
+
+        let git = "git+https://example.org/dep";
+        let git_edge = format!("{plain} ({git})");
+        let with_git = format!("{with_path}source = \"{git}#0123456789abcdef0123456789abcdef01234567\"\n");
+        let resolving: &[(Option<&str>, &str, &str)] = &[
+            (None, &locked_one, ">=1, <3"),
+            (Some("dep"), &locked_one, ">=1, <3"),
+            (Some(plain), &with_path, "1"),
+            (Some(&git_edge), &with_git, "1"),
+        ];
+        for &(edge, packages, req) in resolving {
+            let [vendored, cached] = resolve(edge, packages, req);
+            assert_eq!(vendored.unwrap(), normalize(&format!("{root}/vendor/dep-1.0.0")), "vendor lookup for {edge:?}");
+            assert_eq!(cached.unwrap(), format!("{root}/cache/index.test-0/dep-1.0.0"), "cache lookup for {edge:?}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3900,7 +3955,12 @@ fn git_sources_as_cargo_spells_them() {
     let t = |text: &str| parse_toml(text).unwrap().root;
     assert!(git_src(&t("git = \"https://h/r\"\nbranch = \"a\"\ntag = \"b\"\n"), "x", "d").is_err());
     assert!(git_src(&t("git = \"https://h/r\"\npath = \"p\"\n"), "x", "d").is_err());
-    assert!(git_src(&t("git = \"git@github.com:a/b\"\n"), "x", "d").unwrap_err().contains("https only"));
+    let err = git_src(&t("git = \"git@github.com:a/b\"\n"), "x", "d").expect_err("scp-style dependency should be refused");
+    assert!(err.contains("git@github.com:a/b"), "scp-style refusal should name the URL: {err}");
+    let ssh = "ssh://git@relax.invalid/team/project.git";
+    let source = git_src(&t(&format!("git = \"{ssh}\"\n")), "x", "d").unwrap().unwrap();
+    assert_eq!(source.url, ssh, "ssh dependency should keep its URL as written");
+    assert!(git_src(&t("git = \"file:///a/b\"\n"), "x", "d").is_err(), "file dependency should be refused");
     assert_eq!(git_src(&t("git = \"https://h/r\"\ntag = \"v1\"\n"), "x", "d").unwrap().unwrap().reference, GitRef::Tag("v1".into()));
     // cargo's package discovery: root first, depth-first by name; hidden folders, target folders
     // beside a manifest and nested repositories skipped

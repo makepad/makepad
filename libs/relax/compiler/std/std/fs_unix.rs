@@ -1065,11 +1065,25 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
 }
 
 pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
-    if vfs::kind(path.as_ref()).is_some() {
+    if let Some((abs, _)) = vfs::kind(path.as_ref()) {
+        // a symlink the run made in a virtual folder (its edits folder's entry) is a symlink, its
+        // target there or not; every other virtual path has none (metadata follows nothing)
+        if let Some(Ok(disk)) = vfs::edit_target(&abs, vfs::Edit::Read) {
+            if let Ok(meta) = lstat(&disk) {
+                if meta.is_symlink() {
+                    vfs::note(&abs, b'p');
+                    return Ok(meta);
+                }
+            }
+        }
         return metadata(path);
     }
     vfs::note(path.as_ref(), b'p');
-    run_path_with_cstr(path.as_ref(), &|c| {
+    lstat(path.as_ref())
+}
+
+fn lstat(path: &Path) -> io::Result<Metadata> {
+    run_path_with_cstr(path, &|c| {
         let mut st = stat_t::zeroed();
         cvt(unsafe { sys::os::lstat(c.as_ptr(), &mut st as *mut stat_t) })?;
         Ok(Metadata { st })
@@ -1166,6 +1180,15 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 }
 
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    // in a virtual folder: a folder the run made there (in its edits folder; NotFound without
+    // one). It went to rmdir(2) on the virtual path, which is on no disk: NotFound for a folder
+    // create_dir had just made (11-25).
+    if let Some(disk) = vfs::edit_target(path.as_ref(), vfs::Edit::Existing) {
+        return run_path_with_cstr(&disk?, &|c| {
+            cvt(unsafe { sys::rmdir(c.as_ptr()) })?;
+            Ok(())
+        });
+    }
     run_path_with_cstr(path.as_ref(), &|c| {
         cvt(unsafe { sys::rmdir(c.as_ptr()) })?;
         Ok(())
@@ -1266,7 +1289,20 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 }
 
 pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
-    run_path_with_cstr(path.as_ref(), &|c| {
+    // in a virtual folder: a symlink the run made there is its edits folder's entry; a store file
+    // or folder is no link (EINVAL, readlink(2)'s answer for one: 22 on Linux and the Apple OSes)
+    if let Some((abs, k)) = vfs::kind(path.as_ref()) {
+        return match vfs::edit_target(&abs, vfs::Edit::Read) {
+            Some(Ok(disk)) => read_link_disk(&disk),
+            _ if matches!(k, vfs::Kind::Missing) => Err(io::Error::from(io::ErrorKind::NotFound)),
+            _ => Err(io::Error::from_raw_os_error(22)),
+        };
+    }
+    read_link_disk(path.as_ref())
+}
+
+fn read_link_disk(path: &Path) -> io::Result<PathBuf> {
+    run_path_with_cstr(path, &|c| {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
         loop {
             let cap = buf.capacity();
@@ -1350,8 +1386,17 @@ pub fn soft_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Re
 }
 
 pub(crate) fn symlink_raw(original: &Path, link: &Path) -> io::Result<()> {
+    // a link made in a virtual folder: in the run's edits folder (read-only without one), as a
+    // file it creates there; `original` is kept as written (the link's text, resolved by whoever
+    // follows it). Over a file or folder the virtual folder has: EEXIST (17 on Linux and the
+    // Apple OSes), as symlink(2) answers.
+    let link = match vfs::kind(link) {
+        Some((_, k)) if !matches!(k, vfs::Kind::Missing) => return Err(io::Error::from_raw_os_error(17)),
+        Some((abs, _)) => vfs::edit_target(&abs, vfs::Edit::Replace).unwrap_or_else(|| Err(vfs::read_only()))?,
+        None => link.to_path_buf(),
+    };
     run_path_with_cstr(original, &|a| {
-        run_path_with_cstr(link, &|b| {
+        run_path_with_cstr(&link, &|b| {
             cvt(unsafe { sys::symlink(a.as_ptr(), b.as_ptr()) })?;
             Ok(())
         })

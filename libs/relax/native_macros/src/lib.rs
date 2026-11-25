@@ -85,6 +85,7 @@ pub fn register(set: &'static Set) {
 
 /// The base set and every registered one, by name. The first read fixes them for the process.
 pub fn sets() -> &'static [&'static Set] {
+    relax_base::host::init();
     SETS.get_or_init(|| {
         let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         registered.0 = true;

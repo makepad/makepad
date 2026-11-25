@@ -1,11 +1,11 @@
-// makepad_git's own SHA-1 (libs/git/src/sha1.rs, the hashing an app's indexing runs) under Relax: its
+// makepad_git_oid's SHA-1 (libs/git_oid/src/sha1.rs, the hashing an app's indexing runs) under Relax: its
 // dispatch picks the hardware path (SHA-NI on x86_64 when the CPU has it, Arm SHA1 always on aarch64);
 // every input length 0..=300 and a few large inputs must hash as a scalar reference SHA-1 does. Also runs
 // that file's own unit tests (cfg(test)).
 // `makepad test libs/relax/compiler/tests/git_sha1_path.rs`; also runnable with rustc -O --test.
 #![allow(dead_code)]
 
-#[path = "../../../../libs/git/src/sha1.rs"]
+#[path = "../../../../libs/git_oid/src/sha1.rs"]
 mod git_sha1;
 
 fn reference(data: &[u8]) -> [u8; 20] {

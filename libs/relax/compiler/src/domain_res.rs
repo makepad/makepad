@@ -13,7 +13,13 @@
 //! as the child's process group (unix) or job (Windows): a grandchild in neither stays.
 //!
 //! The process's own domain (0) is not recorded: it has no end before the process's.
+//!
+//! The table is keyed by what each record is (its kind and its number: an fd, a handle, a
+//! mapping's address, a TLS key), so an interposed create costs one insert and a close one
+//! remove, never a walk; a run's end walks it once. Each record carries the order it was made in,
+//! and a run's end gives back in the reverse of that.
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// What a run's end gave back (`domain::RunEnd`). The same fields on every platform; a pipe, a
 /// directory and any other kernel object count as files.
@@ -65,10 +71,45 @@ fn pages(len: usize) -> usize {
     (len + p - 1) & !(p - 1)
 }
 
-/// The domain the calling thread's resources belong to.
+/// The domain the calling thread's resources belong to: a run's, or the main program's once it
+/// asked for that (`relax_track_handles`).
 fn owner() -> Option<u64> {
     let base = crate::domain::current();
-    (base != 0 && base != crate::domain::default_base()).then_some(base)
+    (base != 0 && (base != crate::domain::default_base() || RECORD_MAIN.load(std::sync::atomic::Ordering::Relaxed))).then_some(base)
+}
+
+/// The main program's resources are recorded too (a run's always are): from its
+/// `relax_track_handles` on. No run's end gives them back; its own closes forget them.
+static RECORD_MAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Runtime introspection, for a program to look up through its loader (dlsym; GetProcAddress on
+/// its own module): from now on the runtime records what the main program holds as it does a
+/// run's. Each of its interposed creates and closes then keeps the table as a run's do (an insert
+/// at a create, a remove at a close); before this, the main program pays one atomic load.
+pub(crate) extern "C" fn relax_track_handles() {
+    make_room();
+    RECORD_MAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Runtime introspection, looked up as `relax_track_handles` is: the handles (Windows) or
+/// descriptors (unix) the runtime records the program holding, its own handles to the program's
+/// children among them. Writes up to `cap` of them to `buf` and returns how many there are; with
+/// the main program not tracked (no `relax_track_handles` yet), `usize::MAX`: the list would leave
+/// out all it holds. Only what goes through a creator the runtime interposes is recorded: what
+/// the program makes otherwise, a run's end cannot give back either. In the order they were made.
+pub(crate) extern "C" fn relax_held_handles(buf: *mut u64, cap: usize) -> usize {
+    if !RECORD_MAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        return usize::MAX;
+    }
+    let mut held: Vec<(u64, u64)> = with_table(|t| t.all().filter_map(|o| held_handle(&o.res).map(|h| (o.seq, h))).collect());
+    held.sort_unstable();
+    for (i, &(_, h)) in held.iter().take(cap).enumerate() {
+        if !buf.is_null() {
+            // SAFETY: the program passes room for `cap` values
+            unsafe { *buf.add(i) = h };
+        }
+    }
+    held.len()
 }
 
 /// An atfork child: the table's lock may be held for good by a thread that did not come along.
@@ -81,8 +122,9 @@ thread_local! {
 }
 
 /// Runs `f` on the table, unless this is a place that may not wait for it (nothing is recorded
-/// then: a stale entry is dropped at the end, a missing one is the one thing lost).
-fn with_table<R: Default>(f: impl FnOnce(&mut Vec<Owned>) -> R) -> R {
+/// then: a stale entry is dropped at the end, a missing one is the one thing lost). `f` is an
+/// insert, a remove or a look: no system call is made under the table's lock.
+fn with_table<R: Default>(f: impl FnOnce(&mut Table) -> R) -> R {
     if FORKED.load(std::sync::atomic::Ordering::Relaxed) || IN_TABLE.with(|t| t.replace(true)) {
         return R::default();
     }
@@ -96,16 +138,258 @@ fn with_table<R: Default>(f: impl FnOnce(&mut Vec<Owned>) -> R) -> R {
 
 fn note(res: Res) {
     if let Some(domain) = owner() {
-        with_table(|t| t.push(Owned { domain, res }));
+        // A program's signal handler may call an interposed create (open, socket, dup, pipe,
+        // accept, fork are async-signal-safe). One that interrupted this thread in the table finds
+        // IN_TABLE set and records nothing, so it never inserts under the lock it interrupted. One
+        // that interrupted the allocator would wait in it if its insert grew a map: inside a
+        // handler an insert only takes the map's spare room, which the inserts outside handlers
+        // keep topped up (`SPARE`), and a record that finds none is left out and counted.
+        #[cfg(unix)]
+        let in_handler = crate::os::progsig::in_program_handler();
+        #[cfg(not(unix))]
+        let in_handler = false;
+        if in_handler {
+            HANDLER_RECORDS.fetch_add(1, Ordering::Relaxed);
+        }
+        match with_table(|t| t.insert(domain, res, in_handler)) {
+            Inserted::New => {}
+            Inserted::Replaced(kind) => replaced(kind),
+            Inserted::LeftOut(kind) => left_out(kind),
+            // a handler that interrupted its thread inside the table (a fork's child records
+            // nothing, by design)
+            Inserted::NotReached => {
+                if in_handler && !FORKED.load(Ordering::Relaxed) {
+                    left_out(kind_of(&res));
+                }
+            }
+        }
     }
 }
 
+/// What an insert did.
+#[derive(Default)]
+enum Inserted {
+    /// (`with_table` did not reach the table)
+    #[default]
+    NotReached,
+    New,
+    /// it replaced a record under the same key (`replaced`)
+    Replaced(Kind),
+    /// a program's signal handler made it, and the map had no spare room for it (`left_out`)
+    LeftOut(Kind),
+}
+
+/// The room the inserts outside handlers keep free in each HashMap for the inserts a program's
+/// signal handler makes, which never grow a map: when an insert leaves less than this, it
+/// reserves twice this more (one rehash per this many inserts at the least, amortized as growth
+/// is). A handler that finds none leaves its record out (`left_out`): the open still succeeds.
+const SPARE: usize = 64;
+
+fn kind_of(res: &Res) -> Kind {
+    match place(res) {
+        Place::Key(kind, _) => kind,
+        Place::Child(_) => Kind::Child,
+        #[cfg(unix)]
+        Place::Map(_) => Kind::Map,
+    }
+}
+
+/// May `map` take `key` without growing (an insert of a new key with no room left grows it)?
+fn has_room<K: std::hash::Hash + Eq, V>(map: &std::collections::HashMap<K, V, Fixed>, key: &K) -> bool {
+    map.len() < map.capacity() || map.contains_key(key)
+}
+
+/// Outside handlers: keeps `SPARE` free in `map`.
+fn top_up<K: std::hash::Hash + Eq, V>(map: &mut std::collections::HashMap<K, V, Fixed>) {
+    if map.capacity() - map.len() < SPARE {
+        map.reserve(2 * SPARE);
+    }
+}
+
+/// Before a run's code starts (`domain::create`; the main program's, at `relax_track_handles`):
+/// the maps get their spare room, so a create in a handler before any create outside one finds it.
+pub(crate) fn make_room() {
+    with_table(|t| {
+        top_up(&mut t.held);
+        top_up(&mut t.children);
+    });
+}
+
+#[derive(Clone, Copy)]
 struct Owned {
     domain: u64,
+    /// the order it was made in (`Table::seq`)
+    seq: u64,
     res: Res,
 }
 
-static OWNED: Mutex<Vec<Owned>> = Mutex::new(Vec::new());
+/// A fixed hasher: the map is a static (no random keys to make), and its keys are the system's
+/// numbers, not anything a program picks to collide.
+type Fixed = std::hash::BuildHasherDefault<std::hash::DefaultHasher>;
+
+/// What the runs hold. A remove from a HashMap frees nothing (it never shrinks), so a close in a
+/// signal handler (close and waitpid are async-signal-safe) does no allocator call.
+struct Table {
+    /// the last record's `Owned::seq`
+    seq: u64,
+    /// by kind and number
+    held: std::collections::HashMap<(Kind, u64), Owned, Fixed>,
+    /// the processes the runs started, by pid
+    children: std::collections::HashMap<u64, Owned, Fixed>,
+    /// unix: the mappings, by start address (an unmap takes a range, a part of one or several)
+    #[cfg(unix)]
+    maps: std::collections::BTreeMap<usize, Owned>,
+}
+
+/// Where a record goes in the table.
+enum Place {
+    Key(Kind, u64),
+    Child(u64),
+    #[cfg(unix)]
+    Map(usize),
+}
+
+impl Table {
+    const fn new() -> Table {
+        Table {
+            seq: 0,
+            held: std::collections::HashMap::with_hasher(Fixed::new()),
+            children: std::collections::HashMap::with_hasher(Fixed::new()),
+            #[cfg(unix)]
+            maps: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Records `res` for `domain`. Replaced: a record was there under the same key, so the system
+    /// gave that number out again and the earlier one was closed by a path the runtime does not
+    /// see. `in_handler` (a program's signal handler made it): the insert allocates nothing, it
+    /// takes the map's spare room or is left out; a mapping always is (a BTreeMap insert may
+    /// allocate a node; mmap is not async-signal-safe).
+    fn insert(&mut self, domain: u64, res: Res, in_handler: bool) -> Inserted {
+        let o = Owned { domain, seq: self.seq + 1, res };
+        let replaced = match place(&res) {
+            Place::Key(kind, n) => {
+                if in_handler && !has_room(&self.held, &(kind, n)) {
+                    return Inserted::LeftOut(kind);
+                }
+                let old = self.held.insert((kind, n), o).map(|_| kind);
+                if !in_handler {
+                    top_up(&mut self.held);
+                }
+                old
+            }
+            Place::Child(pid) => {
+                if in_handler && !has_room(&self.children, &pid) {
+                    return Inserted::LeftOut(Kind::Child);
+                }
+                let old = self.children.insert(pid, o).map(|_| Kind::Child);
+                if !in_handler {
+                    top_up(&mut self.children);
+                }
+                old
+            }
+            #[cfg(unix)]
+            Place::Map(addr) => {
+                if in_handler {
+                    return Inserted::LeftOut(Kind::Map);
+                }
+                self.maps.insert(addr, o);
+                None
+            }
+        };
+        self.seq += 1;
+        replaced.map_or(Inserted::New, Inserted::Replaced)
+    }
+
+    fn remove(&mut self, kind: Kind, n: u64) -> Option<Owned> {
+        self.held.remove(&(kind, n))
+    }
+
+    fn all(&self) -> impl Iterator<Item = &Owned> {
+        let held = self.held.values().chain(self.children.values());
+        #[cfg(unix)]
+        let held = held.chain(self.maps.values());
+        held
+    }
+
+    /// Takes out every record `of` says, in no order.
+    fn take(&mut self, of: impl Fn(&Owned) -> bool) -> Vec<Owned> {
+        let mut out = Vec::new();
+        let mut keep = |o: &mut Owned| {
+            if of(o) {
+                out.push(*o);
+                false
+            } else {
+                true
+            }
+        };
+        self.held.retain(|_, o| keep(o));
+        self.children.retain(|_, o| keep(o));
+        #[cfg(unix)]
+        self.maps.retain(|_, o| keep(o));
+        out
+    }
+}
+
+static OWNED: Mutex<Table> = Mutex::new(Table::new());
+
+/// Records replaced under their key, by kind (`Kind as usize`).
+static REPLACED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+/// The kinds whose replacement was said (a bit each).
+static REPLACED_SAID: AtomicU32 = AtomicU32::new(0);
+
+/// A record replaced: counted, and said once per kind. It names a close the runtime does not
+/// interpose (native code's own close, a call it does not bind): what to interpose next.
+fn replaced(kind: Kind) {
+    let i = kind as usize;
+    REPLACED[i].fetch_add(1, Ordering::Relaxed);
+    if REPLACED_SAID.fetch_or(1 << i, Ordering::Relaxed) & (1 << i) == 0 {
+        say(&["relax: a run's ", kind.name(), " was given out again while the runtime still recorded it: it was closed by a path the runtime does not see (counted; said once per kind)\n"]);
+    }
+}
+
+/// Records a program's signal handlers made that found no spare room (`SPARE`), all kinds.
+static LEFT_OUT: AtomicU64 = AtomicU64::new(0);
+static LEFT_OUT_SAID: AtomicU32 = AtomicU32::new(0);
+/// Records a program's signal handlers made, left out or not.
+static HANDLER_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+/// A record a program's signal handler made, left out: counted, and said once. The run's end does
+/// not give that resource back; the create itself succeeded.
+fn left_out(kind: Kind) {
+    LEFT_OUT.fetch_add(1, Ordering::Relaxed);
+    if LEFT_OUT_SAID.swap(1, Ordering::Relaxed) == 0 {
+        say(&["relax: a program's signal handler made a ", kind.name(), " while the runs' resource table had no spare room, so it is not recorded: the run's end does not give it back (counted; said once)\n"]);
+    }
+}
+
+/// How many records a program's signal handlers made, and how many of them were left out.
+#[cfg(all(test, unix))]
+pub(crate) fn handler_records() -> (u64, u64) {
+    (HANDLER_RECORDS.load(Ordering::Relaxed), LEFT_OUT.load(Ordering::Relaxed))
+}
+
+/// A line to stderr from anywhere, a program's signal handler included: on unix written straight
+/// to fd 2 (std's stderr takes a lock and a RefCell a handler may have interrupted).
+fn say(parts: &[&str]) {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+        }
+        for p in parts {
+            unsafe { write(2, p.as_ptr().cast(), p.len()) };
+        }
+    }
+    #[cfg(not(unix))]
+    eprint!("{}", parts.concat());
+}
+
+/// How many records were replaced under their key so far, all kinds.
+#[cfg(test)]
+pub(crate) fn replaced_records() -> u64 {
+    REPLACED.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+}
 
 /// The handlers a run registered with `pthread_atfork`: only its own `fork` runs them (nothing
 /// is left with libc to call its code after its end).
@@ -127,7 +411,7 @@ pub(crate) fn atfork_may_have_handlers() -> bool {
 }
 
 #[cfg(unix)]
-use unix::Res;
+use unix::{Kind, Res};
 #[cfg(unix)]
 pub(crate) use unix::*;
 #[cfg(unix)]
@@ -143,6 +427,56 @@ mod unix {
         Map { addr: usize, len: usize },
         Key(KeyT),
         Child { pid: i32, told: bool, detached: bool },
+    }
+
+    /// What a record's number is a number of (`Table::held`'s key with it).
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub(super) enum Kind {
+        Fd,
+        Dir,
+        Key,
+        Child,
+        /// (`Table::maps`, keyed by address: named here only, for what a record was)
+        Map,
+    }
+
+    impl Kind {
+        pub(super) fn name(self) -> &'static str {
+            match self {
+                Kind::Fd => "file descriptor",
+                Kind::Dir => "directory stream",
+                Kind::Key => "thread-local key",
+                Kind::Child => "child process",
+                Kind::Map => "mapping",
+            }
+        }
+    }
+
+    pub(super) fn place(res: &Res) -> Place {
+        match *res {
+            Res::Fd { fd, .. } => Place::Key(Kind::Fd, fd as u64),
+            Res::Dir(dir) => Place::Key(Kind::Dir, dir as u64),
+            Res::Key(k) => Place::Key(Kind::Key, k as u64),
+            Res::Map { addr, .. } => Place::Map(addr),
+            Res::Child { pid, .. } => Place::Child(pid as u64),
+        }
+    }
+
+    /// What would call the run's code from threads not its own (`take_back_callbacks`).
+    pub(super) fn is_callback(res: &Res) -> bool {
+        matches!(res, Res::Key(_))
+    }
+
+    /// The descriptor a record holds open, for `relax_held_handles`.
+    pub(super) fn held_handle(res: &Res) -> Option<u64> {
+        match *res {
+            Res::Fd { fd, .. } => Some(fd as u64),
+            Res::Dir(dir) => {
+                let fd = unsafe { sys::dirfd(dir as *mut c_void) };
+                (fd >= 0).then_some(fd as u64)
+            }
+            Res::Map { .. } | Res::Key(_) | Res::Child { .. } => None,
+        }
     }
 
     /// pthread_key_t
@@ -171,33 +505,28 @@ mod unix {
 
     fn forget_fd(fd: c_int) {
         with_table(|t| {
-            if let Some(i) = t.iter().rposition(|o| matches!(o.res, Res::Fd { fd: f, .. } if f == fd)) {
-                t.swap_remove(i);
-            }
+            t.remove(Kind::Fd, fd as u64);
         });
     }
 
-    /// The range is no longer the run's: what is left of a mapping around it stays.
+    /// The range is no longer the run's: what is left of a mapping around it stays. The run's
+    /// mappings do not overlap (a mapping over one forgets it first), so only the one that starts
+    /// below the range can reach into it; the others start in it.
     fn forget_range(addr: usize, len: usize) {
         let end = addr + len;
         with_table(|t| {
-            let mut i = 0;
-            while i < t.len() {
-                let domain = t[i].domain;
-                if let Res::Map { addr: a, len: l } = t[i].res {
-                    let e = a + l;
-                    if a < end && addr < e {
-                        t.swap_remove(i);
-                        if a < addr {
-                            t.push(Owned { domain, res: Res::Map { addr: a, len: addr - a } });
-                        }
-                        if end < e {
-                            t.push(Owned { domain, res: Res::Map { addr: end, len: e - end } });
-                        }
-                        continue;
-                    }
+            let below = t.maps.range(..addr).next_back().filter(|&(&a, o)| matches!(o.res, Res::Map { len: l, .. } if a + l > addr)).map(|(&a, _)| a);
+            let hit: Vec<usize> = below.into_iter().chain(t.maps.range(addr..end).map(|(&a, _)| a)).collect();
+            for a in hit {
+                let Some(o) = t.maps.remove(&a) else { continue };
+                let Res::Map { len: l, .. } = o.res else { continue };
+                let e = a + l;
+                if a < addr {
+                    t.maps.insert(a, Owned { res: Res::Map { addr: a, len: addr - a }, ..o });
                 }
-                i += 1;
+                if end < e {
+                    t.maps.insert(end, Owned { res: Res::Map { addr: end, len: e - end }, ..o });
+                }
             }
         });
     }
@@ -220,6 +549,7 @@ mod unix {
             pub fn opendir(path: *const c_char) -> *mut c_void;
             pub fn fdopendir(fd: c_int) -> *mut c_void;
             pub fn closedir(dir: *mut c_void) -> c_int;
+            pub fn dirfd(dir: *mut c_void) -> c_int;
             pub fn mmap(addr: *mut u8, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut u8;
             pub fn munmap(addr: *mut u8, len: usize) -> c_int;
             pub fn pthread_key_create(key: *mut usize, dtor: Option<extern "C" fn(*mut u8)>) -> c_int;
@@ -347,9 +677,7 @@ mod unix {
     }
     pub extern "C" fn closedir(d: *mut c_void) -> c_int {
         with_table(|t| {
-            if let Some(i) = t.iter().rposition(|o| matches!(o.res, Res::Dir(x) if x == d as usize)) {
-                t.swap_remove(i);
-            }
+            t.remove(Kind::Dir, d as u64);
         });
         unsafe { sys::closedir(d) }
     }
@@ -386,9 +714,7 @@ mod unix {
     }
     pub extern "C" fn pthread_key_delete(key: KeyT) -> c_int {
         with_table(|t| {
-            if let Some(i) = t.iter().rposition(|o| matches!(o.res, Res::Key(k) if k == key)) {
-                t.swap_remove(i);
-            }
+            t.remove(Kind::Key, key as u64);
         });
         unsafe { sys::pthread_key_delete(key) }
     }
@@ -416,9 +742,7 @@ mod unix {
         let r = unsafe { sys::waitpid(pid, status, options) };
         if r > 0 {
             with_table(|t| {
-                if let Some(i) = t.iter().rposition(|o| matches!(o.res, Res::Child { pid: c, .. } if c == r)) {
-                    t.swap_remove(i);
-                }
+                t.children.remove(&(r as u64));
             });
         }
         r
@@ -686,7 +1010,7 @@ mod unix {
 }
 
 #[cfg(windows)]
-use windows::Res;
+use windows::{Kind, Res};
 #[cfg(windows)]
 pub(crate) use windows::*;
 #[cfg(windows)]
@@ -697,6 +1021,7 @@ mod windows {
 
     const INVALID: HANDLE = -1;
     const WAIT_OBJECT_0: u32 = 0;
+    const DUPLICATE_CLOSE_SOURCE: u32 = 1;
     const DUPLICATE_SAME_ACCESS: u32 = 2;
     const DETACHED_PROCESS: u32 = 0x8;
     const MEM_RESERVE: u32 = 0x2000;
@@ -705,11 +1030,65 @@ mod windows {
     #[derive(Clone, Copy)]
     pub(super) enum Res {
         Handle(HANDLE),
+        /// The program's handle to a child this table records (`Child`): when it closes on a
+        /// child that ended, that record goes too.
+        ChildHandle { h: HANDLE, pid: u32 },
         Find(HANDLE),
         Socket(usize),
         Memory { addr: usize, len: usize },
         View { addr: usize, len: usize },
-        Child { process: HANDLE, detached: bool },
+        /// The runtime's own handle to a child the run started, to end it with the run.
+        Child { process: HANDLE, pid: u32, detached: bool },
+    }
+
+    /// The handle a record holds open, for `relax_held_handles` (a socket is one; a find handle
+    /// is the system's context for the search, not the directory's handle).
+    pub(super) fn held_handle(res: &Res) -> Option<u64> {
+        match *res {
+            Res::Handle(h) | Res::ChildHandle { h, .. } | Res::Child { process: h, .. } => Some(h as u64),
+            Res::Socket(s) => Some(s as u64),
+            Res::Find(_) | Res::Memory { .. } | Res::View { .. } => None,
+        }
+    }
+
+    /// What a record's number is a number of (`Table::held`'s key with it). A socket is a kernel
+    /// handle: it shares their numbers, so it shares their kind.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub(super) enum Kind {
+        Handle,
+        Find,
+        Memory,
+        View,
+        Child,
+    }
+
+    impl Kind {
+        pub(super) fn name(self) -> &'static str {
+            match self {
+                Kind::Handle => "handle",
+                Kind::Find => "find handle",
+                Kind::Memory => "reservation",
+                Kind::View => "view",
+                Kind::Child => "child process",
+            }
+        }
+    }
+
+    pub(super) fn place(res: &Res) -> Place {
+        match *res {
+            Res::Handle(h) | Res::ChildHandle { h, .. } => Place::Key(Kind::Handle, h as u64),
+            Res::Socket(s) => Place::Key(Kind::Handle, s as u64),
+            Res::Find(h) => Place::Key(Kind::Find, h as u64),
+            Res::Memory { addr, .. } => Place::Key(Kind::Memory, addr as u64),
+            Res::View { addr, .. } => Place::Key(Kind::View, addr as u64),
+            Res::Child { pid, .. } => Place::Child(pid as u64),
+        }
+    }
+
+    /// What would call the run's code from threads not its own (`take_back_callbacks`): nothing
+    /// in this table on Windows.
+    pub(super) fn is_callback(_res: &Res) -> bool {
+        false
     }
 
     /// A handle: NULL means it failed.
@@ -725,16 +1104,40 @@ mod windows {
         }
         s
     }
-    fn forget(matches: impl Fn(&Res) -> bool) {
+    fn forget(kind: Kind, n: u64) {
         with_table(|t| {
-            if let Some(i) = t.iter().rposition(|o| matches(&o.res)) {
-                t.swap_remove(i);
-            }
+            t.remove(kind, n);
         });
     }
 
     extern "system" fn create_file(name: *const u16, access: u32, share: u32, sa: *mut u8, disposition: u32, flags: u32, template: HANDLE) -> HANDLE {
         note_handle(unsafe { os::CreateFileW(name, access, share, sa, disposition, flags, template) })
+    }
+    extern "system" fn create_file2(name: *const u16, access: u32, share: u32, disposition: u32, params: *const u8) -> HANDLE {
+        note_handle(unsafe { os::CreateFile2(name, access, share, disposition, params) })
+    }
+    extern "system" fn reopen_file(h: HANDLE, access: u32, share: u32, flags: u32) -> HANDLE {
+        note_handle(unsafe { os::ReOpenFile(h, access, share, flags) })
+    }
+    extern "system" fn open_file_by_id(volume: HANDLE, id: *const u8, access: u32, share: u32, security: *const u8, flags: u32) -> HANDLE {
+        note_handle(unsafe { os::OpenFileById(volume, id, access, share, security, flags) })
+    }
+    // The native API's creates (crates that skip kernel32 for them: a poller's \Device\Afd, a
+    // pipe made the way real std makes its child pipes): an NTSTATUS, the handle through `h`.
+    fn note_nt(status: i32, h: *mut HANDLE) -> i32 {
+        if status >= 0 {
+            note_handle(unsafe { *h });
+        }
+        status
+    }
+    extern "system" fn nt_create_file(h: *mut HANDLE, access: u32, attrs: *const u8, io_status: *mut u8, size: *const i64, file_attrs: u32, share: u32, disposition: u32, options: u32, ea: *const u8, ea_len: u32) -> i32 {
+        note_nt(unsafe { os::NtCreateFile(h, access, attrs, io_status, size, file_attrs, share, disposition, options, ea, ea_len) }, h)
+    }
+    extern "system" fn nt_open_file(h: *mut HANDLE, access: u32, attrs: *const u8, io_status: *mut u8, share: u32, options: u32) -> i32 {
+        note_nt(unsafe { os::NtOpenFile(h, access, attrs, io_status, share, options) }, h)
+    }
+    extern "system" fn nt_create_named_pipe_file(h: *mut HANDLE, access: u32, attrs: *const u8, io_status: *mut u8, share: u32, disposition: u32, options: u32, pipe_type: u32, read_mode: u32, completion: u32, instances: u32, inbound: u32, outbound: u32, timeout: *const i64) -> i32 {
+        note_nt(unsafe { os::NtCreateNamedPipeFile(h, access, attrs, io_status, share, disposition, options, pipe_type, read_mode, completion, instances, inbound, outbound, timeout) }, h)
     }
     extern "system" fn create_file_mapping(file: HANDLE, sa: *const SecurityAttributes, protect: u32, hi: u32, lo: u32, name: *const u16) -> HANDLE {
         note_handle(unsafe { os::CreateFileMappingW(file, sa, protect, hi, lo, name) })
@@ -776,50 +1179,134 @@ mod windows {
         note_handle(unsafe { os::CreateJobObjectW(sa, name) })
     }
     extern "system" fn open_process(access: u32, inherit: i32, pid: u32) -> HANDLE {
-        note_handle(unsafe { os::OpenProcess(access, inherit, pid) })
+        let h = unsafe { os::OpenProcess(access, inherit, pid) };
+        if h != 0 && with_table(|t| t.children.contains_key(&(pid as u64))) {
+            note(Res::ChildHandle { h, pid });
+            return h;
+        }
+        note_handle(h)
     }
     extern "system" fn open_thread(access: u32, inherit: i32, id: u32) -> HANDLE {
         note_handle(unsafe { os::OpenThread(access, inherit, id) })
     }
     extern "system" fn duplicate_handle(sp: HANDLE, s: HANDLE, tp: HANDLE, t: *mut HANDLE, access: u32, inherit: i32, options: u32) -> i32 {
+        let me = unsafe { os::GetCurrentProcess() };
+        // DUPLICATE_CLOSE_SOURCE closes the source, whether or not the copy is made: its record
+        // goes first, as in close_handle (once it is closed, another thread can get its number,
+        // and the run's end would close whatever has that number then).
+        let close = sp == me && options & DUPLICATE_CLOSE_SOURCE != 0;
+        // (a copy of a handle to a recorded child is one too)
+        let child = if sp != me {
+            None
+        } else {
+            with_table(|table| {
+                let child = match table.held.get(&(Kind::Handle, s as u64))?.res {
+                    Res::ChildHandle { pid, .. } => Some(pid),
+                    _ => None,
+                };
+                if close {
+                    table.remove(Kind::Handle, s as u64);
+                }
+                child
+            })
+        };
         let ok = unsafe { os::DuplicateHandle(sp, s, tp, t, access, inherit, options) };
-        if ok != 0 && !t.is_null() && tp == unsafe { os::GetCurrentProcess() } {
-            note_handle(unsafe { *t });
+        let mut copied = false;
+        if ok != 0 && !t.is_null() && tp == me {
+            let h = unsafe { *t };
+            match child {
+                Some(pid) if h != 0 => {
+                    note(Res::ChildHandle { h, pid });
+                    copied = true;
+                }
+                _ => {
+                    note_handle(h);
+                }
+            }
+        }
+        // (the program's handle to a child closed and no copy of it here: as in close_handle)
+        if let (true, Some(pid), false) = (close, child, copied) {
+            forget_ended_children(Some(pid));
         }
         ok
     }
+    /// A handle the program closes: its record goes first (once it is closed, another thread can
+    /// get its number). The pid when it is a handle to a recorded child.
+    fn closing(h: HANDLE) -> Option<u32> {
+        with_table(|t| match t.remove(Kind::Handle, h as u64)?.res {
+            Res::ChildHandle { pid, .. } => Some(pid),
+            _ => None,
+        })
+    }
+    /// A child that ended needs its record no longer: the program closing a handle to it is when
+    /// to look (one wait, and only for such a handle), not its next spawn.
+    fn closed(child: Option<u32>) {
+        if let Some(pid) = child {
+            forget_ended_children(Some(pid));
+        }
+    }
     extern "system" fn close_handle(h: HANDLE) -> i32 {
-        // (first: once it is closed, another thread can get this number)
-        forget(|r| matches!(r, Res::Handle(x) if *x == h));
-        unsafe { os::CloseHandle(h) }
+        let child = closing(h);
+        let ok = unsafe { os::CloseHandle(h) };
+        closed(child);
+        ok
+    }
+    // (CloseHandle's own NtClose, inside the system's DLLs, is not the program's: only the
+    // program's imports bind to these, so a close prunes its record once)
+    extern "system" fn nt_close(h: HANDLE) -> i32 {
+        let child = closing(h);
+        let status = unsafe { os::NtClose(h) };
+        closed(child);
+        status
     }
     extern "system" fn create_process(app: *const u16, cmd: *mut u16, pa: *const u8, ta: *const u8, inherit: i32, flags: u32, env: *mut u8, cwd: *const u16, si: *mut u8, pi: *mut ProcessInformation) -> i32 {
         let ok = unsafe { os::CreateProcessW(app, cmd, pa, ta, inherit, flags, env, cwd, si, pi) };
         if ok != 0 {
             let pi = unsafe { &*pi };
-            note_handle(pi.process);
-            note_handle(pi.thread);
-            // (the run's own handle may be closed long before the process ends)
+            // (the run's own handle may be closed long before the process ends; with no run to
+            // record the child, no copy: nothing would ever close it)
             let me = unsafe { os::GetCurrentProcess() };
             let mut process = 0;
-            if unsafe { os::DuplicateHandle(me, pi.process, me, &mut process, 0, 0, DUPLICATE_SAME_ACCESS) } != 0 {
-                forget_ended_children();
-                note(Res::Child { process, detached: flags & DETACHED_PROCESS != 0 });
+            if owner().is_some() && unsafe { os::DuplicateHandle(me, pi.process, me, &mut process, 0, 0, DUPLICATE_SAME_ACCESS) } != 0 {
+                forget_ended_children(None);
+                note(Res::Child { process, pid: pi.pid, detached: flags & DETACHED_PROCESS != 0 });
+                note(Res::ChildHandle { h: pi.process, pid: pi.pid });
+            } else {
+                note_handle(pi.process);
             }
+            note_handle(pi.thread);
         }
         ok
     }
-    /// Those that are over stop holding their process's record.
-    fn forget_ended_children() {
-        with_table(|t| {
-            t.retain(|o| match o.res {
-                Res::Child { process, .. } if unsafe { os::WaitForSingleObject(process, 0) } == WAIT_OBJECT_0 => {
-                    unsafe { os::CloseHandle(process) };
-                    false
-                }
-                _ => true,
-            })
+    /// Those that are over stop holding their process's record: every child, or the one `only`.
+    /// (The looks at the processes are made outside the table's lock, and a record goes only if it
+    /// is still the one looked at: a run's end may have taken it meanwhile, and closes it then.)
+    fn forget_ended_children(only: Option<u32>) {
+        let process_of = |o: &Owned| match o.res {
+            Res::Child { process, pid, .. } => Some((pid, process)),
+            _ => None,
+        };
+        let look: Vec<(u32, HANDLE)> = with_table(|t| match only {
+            Some(pid) => t.children.get(&(pid as u64)).and_then(process_of).into_iter().collect(),
+            None => t.children.values().filter_map(process_of).collect(),
         });
+        let ended: Vec<(u32, HANDLE)> = look.into_iter().filter(|&(_, process)| unsafe { os::WaitForSingleObject(process, 0) } == WAIT_OBJECT_0).collect();
+        if ended.is_empty() {
+            return;
+        }
+        let gone: Vec<HANDLE> = with_table(|t| {
+            let mut gone = Vec::new();
+            for &(pid, process) in &ended {
+                if t.children.get(&(pid as u64)).is_some_and(|o| matches!(o.res, Res::Child { process: p, .. } if p == process)) {
+                    t.children.remove(&(pid as u64));
+                    gone.push(process);
+                }
+            }
+            gone
+        });
+        for process in gone {
+            unsafe { os::CloseHandle(process) };
+        }
     }
     extern "system" fn find_first_ex(name: *const u16, level: i32, data: *mut u8, op: i32, filter: *const u8, flags: u32) -> HANDLE {
         let h = unsafe { os::FindFirstFileExW(name, level, data, op, filter, flags) };
@@ -836,7 +1323,7 @@ mod windows {
         h
     }
     extern "system" fn find_close(h: HANDLE) -> i32 {
-        forget(|r| matches!(r, Res::Find(x) if *x == h));
+        forget(Kind::Find, h as u64);
         unsafe { os::FindClose(h) }
     }
     extern "system" fn socket(af: i32, ty: i32, protocol: i32) -> usize {
@@ -849,7 +1336,7 @@ mod windows {
         note_socket(unsafe { os::accept(s, addr, len) })
     }
     extern "system" fn closesocket(s: usize) -> i32 {
-        forget(|r| matches!(r, Res::Socket(x) if *x == s));
+        forget(Kind::Handle, s as u64);
         unsafe { os::closesocket(s) }
     }
     extern "system" fn virtual_alloc(addr: *mut u8, len: usize, kind: u32, protect: u32) -> *mut u8 {
@@ -862,7 +1349,7 @@ mod windows {
     }
     extern "system" fn virtual_free(addr: *mut u8, len: usize, kind: u32) -> i32 {
         if kind & MEM_RELEASE != 0 {
-            forget(|r| matches!(r, Res::Memory { addr: a, .. } if *a == addr as usize));
+            forget(Kind::Memory, addr as u64);
         }
         unsafe { os::VirtualFree(addr, len, kind) }
     }
@@ -879,7 +1366,7 @@ mod windows {
         note_view(unsafe { os::MapViewOfFileEx(h, access, hi, lo, size, base) }, size)
     }
     extern "system" fn unmap_view(addr: *mut u8) -> i32 {
-        forget(|r| matches!(r, Res::View { addr: a, .. } if *a == addr as usize));
+        forget(Kind::View, addr as u64);
         unsafe { os::UnmapViewOfFile(addr) }
     }
 
@@ -890,6 +1377,13 @@ mod windows {
         }
         match link {
             "CreateFileW" => at!(create_file),
+            "CreateFile2" => at!(create_file2),
+            "ReOpenFile" => at!(reopen_file),
+            "OpenFileById" => at!(open_file_by_id),
+            "NtCreateFile" => at!(nt_create_file),
+            "NtOpenFile" => at!(nt_open_file),
+            "NtCreateNamedPipeFile" => at!(nt_create_named_pipe_file),
+            "NtClose" => at!(nt_close),
             "CreateFileMappingW" => at!(create_file_mapping),
             "CreateEventW" => at!(create_event),
             "CreateEventExW" => at!(create_event_ex),
@@ -933,7 +1427,7 @@ mod windows {
     pub(super) fn give_back(res: Res, out: &mut Released) {
         unsafe {
             match res {
-                Res::Handle(h) => {
+                Res::Handle(h) | Res::ChildHandle { h, .. } => {
                     os::CloseHandle(h);
                     out.files += 1;
                 }
@@ -966,7 +1460,7 @@ mod windows {
     pub(super) fn end_children(list: Vec<Res>, out: &mut Released) -> Vec<Res> {
         let mut ending = Vec::new();
         for res in list {
-            let Res::Child { process, detached } = res else { continue };
+            let Res::Child { process, pid, detached } = res else { continue };
             if detached {
                 unsafe { os::CloseHandle(process) };
                 out.children_detached += 1;
@@ -974,15 +1468,15 @@ mod windows {
                 unsafe { os::CloseHandle(process) };
             } else {
                 unsafe { os::TerminateProcess(process, 1) };
-                ending.push(process);
+                ending.push((process, pid));
             }
         }
         let start = std::time::Instant::now();
         while !ending.is_empty() && start.elapsed() < CHILD_GRACE + CHILD_KILL_GRACE {
-            ending.retain(|h| {
-                let gone = unsafe { os::WaitForSingleObject(*h, 0) } == WAIT_OBJECT_0;
+            ending.retain(|&(h, _)| {
+                let gone = unsafe { os::WaitForSingleObject(h, 0) } == WAIT_OBJECT_0;
                 if gone {
-                    unsafe { os::CloseHandle(*h) };
+                    unsafe { os::CloseHandle(h) };
                     out.children_ended += 1;
                 }
                 !gone
@@ -992,7 +1486,7 @@ mod windows {
             }
         }
         out.children_left += ending.len() as u32;
-        ending.into_iter().map(|process| Res::Child { process, detached: false }).collect()
+        ending.into_iter().map(|(process, pid)| Res::Child { process, pid, detached: false }).collect()
     }
 
     pub(super) fn is_child(res: &Res) -> bool {
@@ -1017,47 +1511,54 @@ pub(crate) fn take_back_callbacks(bases: &[u64]) -> u32 {
         n += crate::os::progsig::give_back(bases);
     }
     crate::os::proc::forget_program_atexit(bases);
-    with_table(|t| {
-        // (last taken first)
-        for i in (0..t.len()).rev() {
-            if bases.contains(&t[i].domain) && give_back_callback(t[i].res) {
-                t.remove(i);
-                n += 1;
-            }
-        }
-    });
+    let mut taken = with_table(|t| t.take(|o| bases.contains(&o.domain) && is_callback(&o.res)));
+    // (last taken first)
+    taken.sort_unstable_by(|a, b| b.seq.cmp(&a.seq));
+    for o in taken {
+        give_back_callback(o.res);
+        n += 1;
+    }
     n
 }
 
 /// After a run's threads have left: everything of its still open. Its children may take a moment
 /// (`CHILD_GRACE`): nothing waits for this table meanwhile.
+///
+/// The order is the reverse of the order the run made them in, by design: nothing given back here
+/// depends on another record still being there (a view keeps its section alive without the
+/// section's handle; a child is ended through the runtime's own handle to it, `end_children`,
+/// not the program's; on unix a descriptor, a directory and a mapping are each on their own).
 pub(crate) fn give_back_run(bases: &[u64]) -> Released {
     let mut out = Released::default();
+    let mut taken = with_table(|t| t.take(|o| bases.contains(&o.domain) || o.domain == OUTLIVED));
+    taken.sort_unstable_by(|a, b| b.seq.cmp(&a.seq));
     let mut children = Vec::new();
+    for o in taken {
+        if is_child(&o.res) {
+            children.push(o.res);
+        } else {
+            give_back(o.res, &mut out);
+        }
+    }
+    let left = end_children(children, &mut out);
     with_table(|t| {
-        let mut i = 0;
-        while i < t.len() {
-            if bases.contains(&t[i].domain) || t[i].domain == OUTLIVED {
-                let o = t.swap_remove(i);
-                if is_child(&o.res) {
-                    children.push(o.res);
-                } else {
-                    give_back(o.res, &mut out);
-                }
-            } else {
-                i += 1;
-            }
+        for res in left {
+            t.insert(OUTLIVED, res, false);
         }
     });
-    let left = end_children(children, &mut out);
-    with_table(|t| t.extend(left.into_iter().map(|res| Owned { domain: OUTLIVED, res })));
     out
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
-    reset(&OWNED, Mutex::new(Vec::new()));
+    reset(&OWNED, Mutex::new(Table::new()));
+    reset(&REPLACED, [const { AtomicU64::new(0) }; 8]);
+    reset(&REPLACED_SAID, AtomicU32::new(0));
+    reset(&LEFT_OUT, AtomicU64::new(0));
+    reset(&LEFT_OUT_SAID, AtomicU32::new(0));
+    reset(&HANDLER_RECORDS, AtomicU64::new(0));
+    reset(&RECORD_MAIN, std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
     reset(&ATFORK, Mutex::new(Vec::new()));
     #[cfg(unix)]

@@ -2,9 +2,9 @@
 // disk cache. Every run must print the same result.
 //
 // Like an app, the program tells the loader its first frame is up (`relax_first_present`, the
-// hook makepad-platform calls) and keeps running past the startup window, so each run's
-// mid-run write records the startup manifest and its image -- with the O2 code the hot host fns
-// got after the present -- as an app's does.
+// hook makepad-platform calls), runs hot code after it, and quits: the quit's write records the
+// startup manifest and its image (quit_mark closes the manifest's window), which the next run
+// prelinks. (The mid-run write of a run past the window, killed before its exit, is exit_persist's.)
 use std::ffi::{c_char, c_void};
 
 extern "C" {
@@ -36,14 +36,10 @@ fn round() -> u64 {
 fn main() {
     let r = round();
     first_present();
-    // hot after the present (O2 code), past the startup window (the mid-run manifest write)
-    let t = std::time::Instant::now();
-    while t.elapsed() < std::time::Duration::from_millis(7500) {
-        for _ in 0..2000 {
-            std::hint::black_box(wf_host::bump(1));
-            assert_eq!(round(), r);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    // hot after the present: a fixed amount of work, no clock
+    for _ in 0..20_000 {
+        std::hint::black_box(wf_host::bump(1));
+        assert_eq!(round(), r);
     }
     println!("cache_warm_edit_ids result {}", r);
 }

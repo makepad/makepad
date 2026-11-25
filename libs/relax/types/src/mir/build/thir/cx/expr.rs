@@ -966,9 +966,12 @@ impl Cx<'_> {
         let kind = if !ptr_to_ptr && (adjusted == expr_ty || tcx.tys.erase_regions(adjusted) == tcx.tys.erase_regions(expr_ty)) {
             // a coercion cast (or a no-op): the value converted by the coercion
             ExprKind::Use { source: mirrored }
-        } else if matches!(tcx.tys.kind(source_ty), TyKind::Ref(..)) {
+        } else if matches!(tcx.tys.kind(source_ty), TyKind::Ref(..)) && matches!(tcx.tys.kind(expr_ty), TyKind::Ptr(..)) {
             // `&[T; N] as *const T`: the element type of the source matches the pointee of the destination
             ExprKind::PointerCoercion { source: mirrored, cast: PointerCoercion::ArrayToPointer, is_from_as_cast: true }
+        } else if matches!(tcx.tys.kind(source_ty), TyKind::Ref(..)) {
+            // a cast to a reference is always a coercion, which typeck records on the operand
+            return self.unresolved(span, "a cast to a reference without its coercion");
         } else {
             // casting an enum variant's discriminant
             let src = super::strip_paren(ast, source);

@@ -28,6 +28,6 @@ pub extern "C" fn makepad_cli_main(argc: std::ffi::c_int, argv: *const *const st
         .collect();
     #[cfg(target_os = "android")]
     jni::name_host_library();
-    relax_runner::set_host(&makepad_run::HOST);
+    relax_runner::start_host(&makepad_run::HOST);
     relax_runner::run_with_args(args);
 }

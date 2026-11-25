@@ -139,7 +139,7 @@ fn work() -> Work {
 
 /// The process's CPU time, every thread's (ns).
 #[cfg(unix)]
-fn process_cpu_ns() -> u64 {
+pub(crate) fn process_cpu_ns() -> u64 {
     #[repr(C)]
     struct Timespec {
         sec: i64,
@@ -158,7 +158,7 @@ fn process_cpu_ns() -> u64 {
 }
 
 #[cfg(windows)]
-fn process_cpu_ns() -> u64 {
+pub(crate) fn process_cpu_ns() -> u64 {
     use makepad_windows_sys::Win32::{Foundation::FILETIME, System::Threading::{GetCurrentProcess, GetProcessTimes}};
     let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     if unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.is_err() { return 0; }

@@ -2,6 +2,7 @@
 // process ("panic in a destructor during cleanup"), as rustc does. Run by
 // bench_rt/interp/unwind_cmp.py, which expects the process to abort under rustc, the JIT and the
 // interpreter alike.
+// corpus: aborts
 struct Bomb;
 impl Drop for Bomb {
     fn drop(&mut self) {

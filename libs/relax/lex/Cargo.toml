@@ -13,3 +13,6 @@ include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 [lib]
 name = "relax_lex"
 path = "src/lib.rs"
+
+[dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }

@@ -15,7 +15,7 @@ else
   cargo build --profile host -q --manifest-path "$ROOT/Cargo.toml" -p makepad-run --bin makepad
   BIN=${CARGO_TARGET_DIR:-$ROOT/target}/host/makepad
 fi
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 export RELAX_CACHE=off
 export RELAX_STD="$H/../../std"
 export RELAX_CACHE_DIR="$T/target"

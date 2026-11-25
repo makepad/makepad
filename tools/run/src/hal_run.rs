@@ -2,6 +2,7 @@
 //! any native HAL backend; compilation and app domains are guests.
 //! Only ending the run closes the physical window, or a program that turns out to draw nothing.
 use crate::boot_progress::{History, Progress};
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
 use relax_boot::{
@@ -13,14 +14,15 @@ use relax_compiler::{
     postframe::Activity,
     run_state::{self, Mode, ParkedPanic, Phase, State},
 };
+use relax_runner::changed_since;
 use relax_session::sync::{Condvar, Mutex, MutexGuard};
 use std::{
     collections::{HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicI32, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 struct Run {
@@ -44,10 +46,18 @@ enum Update {
     NextRun { start_screen: bool },
     /// a build that failed before the app started compiles again (retry)
     Begin,
-    Failure(String),
+    /// A failed build or a crash. `true`: the compile thread holds this failure for a fix (a build
+    /// that failed before the app started, in a run that follows a relaunch or a restart), so the
+    /// pump never ends the run over it, hidden window or not.
+    Failure(String, bool),
     /// a run ended in place on its app check's errors (`next_run`): the next waits for a save or
     /// the Restart, whatever the window (a live session never ends for a compile error)
-    CheckFailed(String),
+    /// (the folders a fix can be saved in, and when the build that failed began: a save since then is
+    /// not lost to the watcher's restart, `changed_since`)
+    CheckFailed(String, Vec<PathBuf>, Option<SystemTime>),
+    /// A build failed before the app started: the app crates' folders a fix can be saved in, and when
+    /// that build began.
+    WatchAppDirs(Vec<PathBuf>, Option<SystemTime>),
     Message(String),
     /// The program turned out to draw nothing: its load screen closes, the run goes on.
     Batch,
@@ -61,6 +71,7 @@ enum Update {
 }
 
 enum Work {
+    WatchAppDirs(Vec<PathBuf>, Option<SystemTime>),
     Save(PathBuf, String),
     OpenFile {
         file: String,
@@ -534,6 +545,7 @@ pub fn next_run() -> bool {
     NEXT_RUN.store(false, Ordering::Release);
     // the run before failed its app check: this one waits for the next save or the Restart (taken
     // under the run's lock: `held` sees the failure or the wait, never neither)
+    let since = *BUILD_START.lock().unwrap_or_else(|e| e.into_inner());
     let check_failed = {
         let mut guard = state();
         let check_failed = relax_compiler::run_end::take_check_failure();
@@ -554,7 +566,7 @@ pub fn next_run() -> bool {
     post(Update::NextRun { start_screen });
     HELD.store(check_failed.is_some(), Ordering::Release);
     match check_failed {
-        Some(why) => post(Update::CheckFailed(format!("The app did not compile: {why}. A save or Restart starts it again"))),
+        Some((why, dirs)) => post(Update::CheckFailed(format!("The app did not compile: {why}. A save or Restart starts it again"), dirs, since)),
         None => post(Update::Begin),
     }
     start_compile_thread();
@@ -589,6 +601,9 @@ fn end_retry_wait() {
 
 /// `run`: the run this thread compiles (`run_end::run_gen`).
 fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
+    // a run that follows a relaunch or a restart (in this process, or in the process it replaced):
+    // a client is there to fix its build, and a live session never ends for a compile error
+    let later = run != 0 || relax_compiler::run_end::run_input("RELAX_RESTART_T0").is_some();
     if HELD.swap(false, Ordering::AcqRel) {
         if !wait_for_retry(state()) {
             return;
@@ -597,6 +612,8 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
     }
     loop {
         relax_compiler::lifeline::clear_panic_at();
+        // (when this build began: a save since then is no save the build read, `changed_since`)
+        *BUILD_START.lock().unwrap_or_else(|e| e.into_inner()) = Some(SystemTime::now());
         // a panic in the compiler (exit 101): its message and position go on the load
         // screen, not only into a log nobody on the box sees
         let (code, panicked) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile())) {
@@ -626,7 +643,7 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
         EXIT.store(code, Ordering::Release);
         // an app's start that could not get its source shows why and waits for the Restart
         let source = relax_compiler::run::source_failure();
-        if run.window.is_none() || !(relax_compiler::run::live_session() || source.is_some()) || (unseen() && !relax_compiler::run::edits_pushed()) {
+        if run.window.is_none() || !(relax_compiler::run::live_session() || source.is_some()) || (unseen() && !later && !relax_compiler::run::edits_pushed()) {
             // No native window backend: there is no run UI to retry from. A run that is
             // no live session takes no edit that could fix the build: it ends with the
             // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
@@ -636,7 +653,9 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
             // A hidden live session whose edits a client pushes (`edits_pushed`) waits as a
             // window's does: that client sends the fix and asks for the next run, as for a run
             // that failed its app check (a hidden session started on a tree that did not load
-            // ended at its start, 11-21).
+            // ended at its start, 11-21). So does a hidden run that follows a relaunch or a
+            // restart (`later`): a client is there to fix it and a live session never ends for a
+            // compile error. Only a hidden first boot, which nobody is waiting on, ends.
             end_run(&format!("the program's run ended with {code}{cause} and no window can retry it"));
             Hal::global().wake_session(HOST);
             if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
@@ -656,12 +675,13 @@ fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>, run: u64) {
                     (Some(line), _) => format!("Compilation failed: the compiler panicked: {line}"),
                     (None, Some(source)) => format!("The app's source could not be had: {source}"),
                     (None, None) => format!("Compilation failed (exit {code})"),
-                }));
+                }, held));
             }
             if run.spec.is_some() {
                 return;
             }
             if held {
+                post(Update::WatchAppDirs(relax_compiler::run::app_dirs(), *BUILD_START.lock().unwrap_or_else(|e| e.into_inner())));
                 // (outside the run's lock: an `inputs` request asks `held` under the watcher's)
                 drop(guard);
                 relax_compiler::reload::inputs_wake();
@@ -886,8 +906,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // Inside a makepad window manager the run is one of its windows: it is named by the app.
     #[cfg(target_os = "linux")]
     makepad_hal::wm_socket::set_client_name(package);
-    // RELAX_DPI: the scale of a hidden window (tests of how the boot window looks on a HiDPI screen)
-    let dpi_hint = std::env::var("RELAX_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    // MAKEPAD_HAL_DPI: the scale of a hidden window, as for every app's (a hidden run's pixel
+    // proof at a HiDPI screen's scale)
+    let dpi_hint = std::env::var("MAKEPAD_HAL_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let info = hal.open_host(&OpenReq::from_env(0, flags, dpi_hint));
     if info.backend == makepad_hal::backend_id::NONE {
         return Err("could not open the host HAL session".into());
@@ -1189,31 +1210,51 @@ fn sources_changed_after_failure() -> Result<AfterFailure, String> {
     Ok(AfterFailure::Offered)
 }
 
-fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
-    let _kept = relax_compiler::zone_alloc::kept();
-    // only a package's own document is watched (the bundled one is the binary's)
-    let document_path = if document.live { document.path.clone() } else { PathBuf::new() };
+/// When the build of the run going now began (`compile_runs`), and of the run that ended in place
+/// until the next one's begins: a failure holds the host with it, and a save after it is one that
+/// build did not read.
+static BUILD_START: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+/// The source watcher's roots: the package, the live document's folder outside it, and after a
+/// failed app check the folders of the app's other crates (`run_end::take_check_failure`), so a fix
+/// saved in any of them starts the next run. A folder inside another root is that root's.
+fn watch_roots(package_dir: &Path, document_path: &Path, app_dirs: Vec<PathBuf>) -> Vec<WatchRoot> {
     let mut roots = Vec::new();
     if package_dir.is_dir() {
-        roots.push(makepad_filesystem_watcher::WatchRoot {
+        roots.push(WatchRoot {
             mount: "run".into(),
-            path: package_dir.clone(),
+            path: package_dir.into(),
         });
     }
     if let Some(parent) = document_path
         .parent()
-        .filter(|p| p.is_dir() && !document_path.starts_with(&package_dir))
+        .filter(|p| p.is_dir() && !document_path.starts_with(package_dir))
     {
-        roots.push(makepad_filesystem_watcher::WatchRoot {
+        roots.push(WatchRoot {
             mount: "boot".into(),
             path: parent.into(),
         });
     }
+    for (i, path) in app_dirs.into_iter().enumerate() {
+        if roots.iter().any(|r| path.starts_with(&r.path)) || !path.is_dir() {
+            continue;
+        }
+        roots.retain(|r| !r.path.starts_with(&path));
+        roots.push(WatchRoot { mount: format!("app-{i}"), path });
+    }
+    roots
+}
+
+fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
+    let _kept = relax_compiler::zone_alloc::kept();
+    // only a package's own document is watched (the bundled one is the binary's)
+    let document_path = if document.live { document.path } else { PathBuf::new() };
     let contents = std::sync::Arc::new(Mutex::new(document.source));
-    let _watcher = if roots.is_empty() {
-        None
-    } else {
-        use makepad_filesystem_watcher::FileSystemWatcher;
+    let start_watcher = |dirs| {
+        let roots = watch_roots(&package_dir, &document_path, dirs);
+        if roots.is_empty() { return None; }
+        let document_path = document_path.clone();
+        let contents = contents.clone();
         FileSystemWatcher::start(roots, move |event| {
             // Watch roots catch atomic saves and backend rescan notifications too.
             if !document_path.as_os_str().is_empty() && (event.path == document_path || event.path.is_dir()) {
@@ -1249,6 +1290,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
         .map_err(|e| eprintln!("makepad: run source watcher: {e}"))
         .ok()
     };
+    let mut _watcher = start_watcher(Vec::new());
     let mut editor = crate::boot_editor::Editor::new();
     loop {
         for error in editor.poll() {
@@ -1269,6 +1311,22 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
             }
         };
         match work {
+            Work::WatchAppDirs(dirs, since) => {
+                // set_roots emits a rescan for each directory, which would retry without a save.
+                let roots = watch_roots(&package_dir, &document_path, dirs.clone());
+                if let Some(next) = start_watcher(dirs) {
+                    _watcher = Some(next);
+                    // a save between the failed build's read of its sources and this watcher is
+                    // nobody's: the old watcher never covered the app's other crates. One walk
+                    // of the roots (this thread's, never the UI's) finds it, and the retry path
+                    // takes it from there. The save the build did read may be found too: that
+                    // costs one retry, which fails the same way, holds again with a newer
+                    // `since` and finds nothing newer.
+                    if since.is_some_and(|since| changed_since(&roots, since)) {
+                        post(Update::SourcesChanged);
+                    }
+                }
+            }
             Work::Save(path, text) => {
                 if let Err(e) = crate::boot_progress::save(&path, &text) {
                     eprintln!("makepad: cannot remember {}: {e}", path.display());
@@ -1369,6 +1427,7 @@ impl Work {
     /// What the work is, for the log.
     fn kind(&self) -> String {
         match self {
+            Work::WatchAppDirs(..) => "a source watcher update".into(),
             Work::Save(path, _) => format!("a save of {}", path.display()),
             Work::OpenFile { .. } => "an open-file request".into(),
             Work::Resume { .. } => "a resume".into(),
@@ -1392,7 +1451,7 @@ fn enqueue(queue: &mut VecDeque<Work>, work: Work) {
                 }
             }
         }
-        Work::Resume { .. } | Work::OpenFile { .. } | Work::Relaunch(_) => {}
+        Work::Resume { .. } | Work::OpenFile { .. } | Work::Relaunch(_) | Work::WatchAppDirs(..) => {}
     }
     queue.push_back(work);
 }
@@ -1577,7 +1636,7 @@ fn pump(
                     overlay_dismissed = false;
                     active = true;
                 }
-                Update::Failure(message) if !has_window || (unseen && !relax_compiler::run::edits_pushed()) => {
+                Update::Failure(message, holds) if !has_window || (unseen && !holds && !relax_compiler::run::edits_pushed()) => {
                     if relax_compiler::hot_failure::recovering() {
                         relax_compiler::hot_failure::restart_failed(&message);
                         continue;
@@ -1585,14 +1644,16 @@ fn pump(
                     // No window shows this failure and nobody can retry from it (a backend without
                     // a shader dialect: headless, a plain program; or a hidden window, which nobody
                     // sees (MAKEPAD_HIDE_WINDOWS)): the run ends with it. A program that panicked
-                    // in main used to leave the process running until it was killed.
+                    // in main used to leave the process running until it was killed. A build the
+                    // compile thread holds for a fix (`holds`: a hidden run after a relaunch or a
+                    // restart, whose client sends the fix) is not ended here; a crash still is.
                     eprintln!("makepad: {message}");
                     let code = relax_compiler::hot_failure::verdict(101).code();
                     let _ = EXIT.compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
                     end_run("its failure (above) has no window to show it");
                 }
-                Update::Failure(message) => {
-                    // a hidden live session whose edits a client pushes holds here as a window does,
+                Update::Failure(message, _) => {
+                    // a hidden live session whose edits a client pushes, or that a relaunch started, holds here as a window does,
                     // for that client's fix and its `session relaunch`; the client reads the log
                     if unseen {
                         eprintln!("makepad: {message}");
@@ -1604,13 +1665,19 @@ fn pump(
                     data.domain = "Boot failed".into();
                 }
                 // the errors themselves came as the check's diagnostics; no previous code runs
-                Update::CheckFailed(message) => {
+                Update::CheckFailed(message, dirs, since) => {
+                    enqueue(&mut work_pending, Work::WatchAppDirs(dirs, since));
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
                     diagnostics_dirty = true;
                     failed = true;
                     active = false;
                     patch_notice = None;
                     data.domain = "Boot failed".into();
+                }
+                Update::WatchAppDirs(dirs, since) => {
+                    if !dirs.is_empty() {
+                        enqueue(&mut work_pending, Work::WatchAppDirs(dirs, since));
+                    }
                 }
                 Update::Relaunched => ring_clicked = false,
                 Update::Message(message) => {
@@ -1679,7 +1746,7 @@ fn pump(
                         EXIT.store(relax_compiler::hot_failure::verdict(101).code(), Ordering::Release);
                         end_run("the app crashed (above), and no live session restarts it");
                     }
-                    DomainState::Crashed(message) => post(Update::Failure(message)),
+                    DomainState::Crashed(message) => post(Update::Failure(message, false)),
                     DomainState::Stopped => {}
                 },
                 Update::Compiler(event) => match event {
@@ -2629,6 +2696,20 @@ mod crash_offer_tests {
         let offers = std::fs::read_to_string(&log).unwrap_or_default().matches("\"event\":\"restart_offered\"").count();
         assert_eq!(offers, 1, "offered once (the WM's toast): every save after it says it again");
         *state() = run(0, true);
+        let app = home.join("app");
+        let dep = home.join("dep");
+        let other_dep = home.join("dep-extra");
+        let boot = home.join("boot");
+        let dirs = vec![app.join("inner"), dep.join("nested"), other_dep.clone(), dep.clone(), dep.clone(), boot.join("inner")];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let roots = super::watch_roots(&app, &boot.join("document"), dirs);
+        let paths: std::collections::HashSet<_> = roots.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(paths, [app, boot, dep, other_dep].into_iter().collect(), "one recursive root per uncovered folder");
+        let mounts: std::collections::HashSet<_> = roots.iter().map(|r| &r.mount).collect();
+        assert_eq!(mounts.len(), paths.len(), "each root has its own mount");
+        assert_eq!(roots.len(), paths.len(), "no folder watched twice");
         assert_eq!(sources_changed_after_failure(), Ok(AfterFailure::Rebuild));
         assert!(state().as_ref().unwrap().retry, "the failed build compiles again");
         *state() = run(0, false);

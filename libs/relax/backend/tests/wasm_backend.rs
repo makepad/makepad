@@ -931,7 +931,7 @@ fn web_c_boundary_numbers_and_bigints() {
             conv: CConv::Host,
             args: vec![CArg::Scalar(Mem::Int(4, false)), CArg::Scalar(Mem::Int(pointer_bytes, false)),
                 CArg::Scalar(Mem::Int(pointer_bytes, false)), CArg::Scalar(Mem::Int(8, false)), CArg::Scalar(Mem::F64)],
-            ret: None, n_fixed: u32::MAX, ret_narrow: Some(U32), unwinds: false,
+            ret: None, n_fixed: u32::MAX, ret_narrow: Some(U32), unwinds: false, math: false,
         };
         let mut f = B::new(&[Cls::I, Cls::I, Cls::I, Cls::I, Cls::F64], &[Cls::I]);
         f.f.cabi = Some(Box::new(signature.clone()));
@@ -979,7 +979,7 @@ fn web_c_boundary_aggregate_indirect() {
     for memory64 in [false, true] {
         let aggregate = CAgg { size: 16, align: 8, fields: vec![(0, Mem::Int(8, false)), (8, Mem::Int(8, false))] };
         let signature = CSig { conv: CConv::Host, args: vec![CArg::Agg(aggregate.clone())], ret: Some(aggregate),
-            n_fixed: u32::MAX, ret_narrow: None, unwinds: false };
+            n_fixed: u32::MAX, ret_narrow: None, unwinds: false, math: false };
         let mut f = B::new(&[Cls::I, Cls::I], &[]);
         f.f.cabi = Some(Box::new(signature.clone()));
         f.i(Inst::Call(Callee::CHost(Sym::new(1), Box::new(signature)), f.f.params.clone(), vec![]));

@@ -415,9 +415,11 @@ pub fn executable_path(buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// Cut to 15 bytes, TASK_COMM_LEN less its NUL (real std's cut; Android's prctl cuts the same).
 pub fn set_thread_name(name: *const c_char) {
+    let cut = super::cut_thread_name::<16>(name);
     unsafe {
-        pthread_setname_np(pthread_self(), name);
+        pthread_setname_np(pthread_self(), cut.as_ptr());
     }
 }
 

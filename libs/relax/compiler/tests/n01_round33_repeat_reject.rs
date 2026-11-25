@@ -1,3 +1,4 @@
+// rejects: E0282
 // typeck-audit 1.14: rustc rejects each (E0277 Copy for a count > 1 or a parameter count,
 // E0282 for an inferred count). Checked as a package with `makepad check`.
 #![allow(dead_code)]

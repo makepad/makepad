@@ -5,6 +5,11 @@
 //! `provided_static.sh` covers marked shared statics (public, private, function-local, mutable,
 //! Cell-backed and arrays), per-side memo storage and thread-locals. Unmarked PLAIN_COUNT and
 //! layout-incompatible SHARED_LOG must be refused when reached from JIT code.
+
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

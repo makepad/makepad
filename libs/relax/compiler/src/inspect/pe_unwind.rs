@@ -162,6 +162,14 @@ pub(crate) fn image_layout(base: u64) -> Option<(u64, u64, u32)> {
 /// suspended.
 pub fn refresh() {
     let _g = REFRESH.lock().unwrap_or_else(|e| e.into_inner());
+    refresh_index();
+}
+
+pub(super) fn refresh_nowait() {
+    if let Ok(_g) = REFRESH.try_lock() { refresh_index(); }
+}
+
+fn refresh_index() {
     let mut mods: Vec<Module> = module_bases()
         .into_iter()
         .filter_map(|lo| {

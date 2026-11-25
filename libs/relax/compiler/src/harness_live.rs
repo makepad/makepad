@@ -52,6 +52,28 @@ static LIVE: OnceLock<(Mutex<State>, Condvar)> = OnceLock::new();
 
 pub(crate) fn enabled() -> bool { LIVE.get().is_some() }
 
+// Only the boot thread starts the replacement while the harness waits for a repair.
+static HELD_BY: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+pub(crate) fn held() -> bool { HELD_BY.get().is_some() }
+
+pub(crate) fn another_waits() -> bool {
+    HELD_BY.get().is_some_and(|owner| *owner != std::thread::current().id())
+}
+
+pub(crate) fn hold(dirs: Vec<std::path::PathBuf>, save: &crate::reload::host::TestSave, errors: &[String]) {
+    HELD_BY.set(std::thread::current().id()).expect("one held boot per harness process");
+    crate::reload::inputs_wake();
+    crate::hot_failure::check_refused("the tests did not compile", errors);
+    eprintln!("relax test: held: the tests did not compile; the next save starts the next run");
+    if let Err(e) = save.wait(dirs) {
+        eprintln!("relax test: watching for a save: {e}");
+        return;
+    }
+    let edit = LIVE.get().unwrap().0.lock().unwrap().edit.clone();
+    restart(edit, "source saved after the tests did not compile");
+}
+
 /// Exec carries the triggering edit in argv; no switch or scratch file is inherited by tests.
 pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
     let _k = crate::zone_alloc::kept();
@@ -60,6 +82,8 @@ pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
         Some(s) => {
             use crate::json::Json;
             let j = crate::json::parse(s.as_bytes())?;
+            // The replacement may fail resolution before the new graph can name its package.
+            if let Some(Json::Str(dir)) = j.get("package_dir") { crate::run::watch_test_package(dir); }
             let group = match j.get("group") {
                 Some(Json::Num(n)) if *n >= 0.0 && *n <= u32::MAX as f64 && n.fract() == 0.0 => *n as u32,
                 _ => return Err("invalid harness restart group".into()),
@@ -197,6 +221,7 @@ pub(super) fn complete(v: Verdict, ms: f64) -> Edit {
     if !s.edit.reverted.is_empty() {
         note += &format!(" reverted={:?} (these tests ran the code from before the edit, not the saved source)", s.edit.reverted);
     }
+    if s.edit.restarted { note += " restarted=true"; }
     note += &statics_note;
     note += &match &borrow_first {
         None => " borrowck=clean".to_string(),
@@ -315,7 +340,8 @@ pub(crate) fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsStr
     let mut words = args.into_iter();
     if let Some(command) = words.next() { out.push(command); }
     out.push("--harness-restart".into());
-    out.push(format!("{{{}}}", state.lock().unwrap().edit.fields()).into());
+    let package = crate::run::app_dirs().first().map(|d| format!(",\"package_dir\":{}", json_str(&d.to_string_lossy()))).unwrap_or_default();
+    out.push(format!("{{{}{package}}}", state.lock().unwrap().edit.fields()).into());
     while let Some(w) = words.next() {
         if w == "--" { out.push(w); out.extend(words); break; }
         if w == "--harness-restart" { words.next(); } else { out.push(w); }
@@ -326,5 +352,6 @@ pub(crate) fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsStr
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
+    reset(&HELD_BY, OnceLock::new());
     reset(&LIVE, OnceLock::new());
 }

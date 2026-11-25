@@ -446,7 +446,7 @@ pub fn emit(prog: &Program, def: DefId, lint: &Lint, file: u32, pos: u32, msg: &
 /// level applies to it.
 pub fn hard_error(prog: &Program, file: u32, pos: u32, msg: &str) {
     if !enabled() { return; }
-    let (l, c) = prog.files[file as usize].line_col(pos);
+    let (l, c) = prog.files[file as usize].error_line_col(pos);
     let line = format!("{}:{}:{}: error: {}", prog.file_paths[file as usize], l, c, msg);
     let _k = crate::zone_alloc::kept();
     let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -489,7 +489,7 @@ pub fn emit_scoped(prog: &Program, scope: (DefId, u32, u32), lint: &Lint, file: 
 /// ordered as `lint`'s reports are. The check prints identical lines once (rustc prints each).
 pub fn progress_warning(prog: &Program, def: DefId, lint: &Lint, file: u32, pos: u32, msg: &str) {
     if !enabled() { return; }
-    let (l, c) = prog.files[file as usize].line_col(pos);
+    let (l, c) = prog.files[file as usize].error_line_col(pos);
     let line = format!("{}:{}:{}: warning: {}", prog.file_paths[file as usize], l, c, msg);
     let _k = crate::zone_alloc::kept();
     let seq = REPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -505,7 +505,7 @@ fn report(prog: &Program, def: DefId, lint: &Lint, spec: Resolved, file: u32, po
         }
         return;
     }
-    let (l, c) = prog.files[file as usize].line_col(pos);
+    let (l, c) = prog.files[file as usize].error_line_col(pos);
     let kind = if level >= Level::Deny { "error" } else { "warning" };
     let line = format!("{}:{}:{}: {}: {} [{}]", prog.file_paths[file as usize], l, c, kind, msg, lint.name);
     let _k = crate::zone_alloc::kept();

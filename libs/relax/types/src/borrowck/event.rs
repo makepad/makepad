@@ -139,9 +139,25 @@ pub fn app_crate(prog: &Program, krate: u32) -> bool {
     APP_SCOPE.lock().unwrap_or_else(|e| e.into_inner()).contains(&root)
 }
 
-/// The one all-crates switch: the compiled APP_CRATES_ONLY, with RELAX_GANDALF_ALL=1 on top.
+/// RELAX_GANDALF_ALL as read once this run (all_crates): 0 not read yet, 1 off, 2 on
+static ALL_CRATES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The one all-crates switch: the compiled APP_CRATES_ONLY, with RELAX_GANDALF_ALL=1 on top. The
+/// variable is read once a run: every body's verdict asks (a preparation's `verdict_state`), and
+/// the environment lookup was a lock and a scan of the environment each time.
 pub fn all_crates() -> bool {
-    !APP_CRATES_ONLY || std::env::var("RELAX_GANDALF_ALL").as_deref() == Ok("1")
+    use std::sync::atomic::Ordering::Relaxed;
+    if !APP_CRATES_ONLY {
+        return true;
+    }
+    match ALL_CRATES.load(Relaxed) {
+        0 => {
+            let on = std::env::var("RELAX_GANDALF_ALL").as_deref() == Ok("1");
+            ALL_CRATES.store(if on { 2 } else { 1 }, Relaxed);
+            on
+        }
+        v => v == 2,
+    }
 }
 
 /// Whether a crate's borrow errors are reported (and refuse live edits).
@@ -153,4 +169,5 @@ pub(crate) unsafe fn reset_statics() {
     reset(&APP_SCOPE, Mutex::new(Vec::new()));
     reset(&USER_TYPES, Mutex::new(None));
     reset(&USER_TYPES_STALE, std::sync::atomic::AtomicBool::new(false));
+    reset(&ALL_CRATES, std::sync::atomic::AtomicU8::new(0));
 }

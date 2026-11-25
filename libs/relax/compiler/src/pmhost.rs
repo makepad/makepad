@@ -38,9 +38,50 @@ use crate::program::*;
 
 thread_local! {
     /// the last `relax_pm_parse` result of this thread (the macro copies it right away)
-    static PARSE_OUT: std::cell::RefCell<Vec<u8>> = Default::default();
-    /// the last `relax_pm_getenv` result of this thread (the macro copies it right away)
-    static ENV_OUT: std::cell::RefCell<Vec<u8>> = Default::default();
+    static PARSE_OUT: Reply = const { Reply::new() };
+    /// the last `relax_pm_getenv` result of this thread (the caller copies it right away)
+    static ENV_OUT: Reply = const { Reply::new() };
+    /// frees this thread's replies when it ends (`reply`)
+    static FREE_REPLIES: FreeReplies = const { FreeReplies };
+}
+
+/// A reply buffer of this thread for a JIT call that copies the bytes right away: a Vec's raw
+/// parts in a Cell, nothing to destroy, so it answers inside any other thread-local's destructor
+/// too (a program's `std::env::var` at its thread's end).
+struct Reply(std::cell::Cell<(*mut u8, usize)>);
+
+impl Reply {
+    const fn new() -> Self {
+        Reply(std::cell::Cell::new((std::ptr::null_mut(), 0)))
+    }
+    fn take(&self) -> Vec<u8> {
+        match self.0.replace((std::ptr::null_mut(), 0)) {
+            (_, 0) => Vec::new(),
+            (p, cap) => unsafe { Vec::from_raw_parts(p, 0, cap) },
+        }
+    }
+}
+
+struct FreeReplies;
+
+impl Drop for FreeReplies {
+    fn drop(&mut self) {
+        drop(PARSE_OUT.with(Reply::take));
+        drop(ENV_OUT.with(Reply::take));
+    }
+}
+
+/// `bytes` become this thread's reply `slot` (valid until its next reply): (start, length). The
+/// reply is freed at the thread's end; one made after that (by a destructor that runs later) is
+/// left to the process.
+fn reply(slot: &'static std::thread::LocalKey<Reply>, bytes: Vec<u8>) -> (*const u8, usize) {
+    let _ = FREE_REPLIES.try_with(|_| ());
+    slot.with(|r| {
+        drop(r.take());
+        let mut b = std::mem::ManuallyDrop::new(bytes);
+        r.0.set((b.as_mut_ptr(), b.capacity()));
+        (b.as_ptr(), b.len())
+    })
 }
 
 /// `"..".parse::<TokenStream>()` inside JIT-run macro code (Relax's std proc_macro FromStr):
@@ -50,14 +91,11 @@ pub extern "C" fn relax_pm_parse(src: *const u8, len: usize, out: *mut *const u8
     let s = unsafe { std::slice::from_raw_parts(src, len) };
     let Ok(s) = std::str::from_utf8(s) else { return 1 };
     let Some(ts) = crate::builtins::lex_stream(s) else { return 1 };
-    PARSE_OUT.with(|b| {
-        let mut b = b.borrow_mut();
-        *b = crate::pm::encode(Span::DUMMY, &ts);
-        unsafe {
-            *out = b.as_ptr();
-            *out_len = b.len();
-        }
-    });
+    let (p, n) = reply(&PARSE_OUT, crate::pm::encode(Span::DUMMY, &ts));
+    unsafe {
+        *out = p;
+        *out_len = n;
+    }
     0
 }
 
@@ -68,15 +106,11 @@ pub extern "C" fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u
     let s = unsafe { std::slice::from_raw_parts(key, len) };
     let Ok(s) = std::str::from_utf8(s) else { return 1 };
     let Some(val) = crate::macro_reg::call_krate_env(s) else { return 1 };
-    ENV_OUT.with(|b| {
-        let mut b = b.borrow_mut();
-        b.clear();
-        b.extend_from_slice(val.as_bytes());
-        unsafe {
-            *out = b.as_ptr();
-            *out_len = b.len();
-        }
-    });
+    let (p, n) = reply(&ENV_OUT, val.into_bytes());
+    unsafe {
+        *out = p;
+        *out_len = n;
+    }
     0
 }
 

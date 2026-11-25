@@ -9,7 +9,8 @@
 # Prints `diff: N/N equal`, or per failing program a minimal diff, and exits 1.
 # Usage (workspace root, (the JIT runs through `cargo run --profile host`)): tools/run/fixture/diff_fast.sh
 # Env: the JIT runs through `cargo run --profile host`, DIFF_CACHE (native binaries; default $TMPDIR/diff_fast_cache),
-# DIFF_PROGRAMS ("floats tls": only those), DIFF_SLEEP_MS (O3 round gap, default 250), DIFF_JOBS (default 4).
+# DIFF_PROGRAMS ("floats tls": only those), DIFF_SLEEP_MS (O3 round gap, default 250), DIFF_JOBS (default the
+# lease's RELAX_JOBS, else 4), DIFF_CARGO_JOBS (default the lease's CARGO_BUILD_JOBS, else 6).
 # Each makepad run gets a fresh home/cache dir, hidden and muted, and deleted afterwards.
 # Package programs (library-backed, e.g. box3d): every package dir in DIFF_PKG_DIRS (default
 # tools/run/fixture/diffpkg, plus apps/commercial/relax_tests when the commercial checkout is there) is
@@ -26,7 +27,7 @@ M=$J
 # looks for <target>/../src/libs/relax/compiler/std and every run exits 1 with no output
 export RELAX_STD=${RELAX_STD:-$root/libs/relax/compiler/std}
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_fast_cache}
-jobs=${DIFF_JOBS:-4}
+jobs=${DIFF_JOBS:-${RELAX_JOBS:-4}}
 # DIFF_TIERS: the JIT tiers (default "o1 base o3"; `counted`: O3 on at call threshold 1 with every counted
 # build kept installed, RELAX_PGO_HOLD=1 -- the PGO counted code itself; `nocodegen`: RELAX_NO_CODEGEN=1,
 # no machine code, every function in the threaded interpreter, arm64 Macs only: nocodegen_leg.sh)
@@ -42,7 +43,41 @@ mkdir -p "$cache"
 progs=${DIFF_PROGRAMS:-$(cd "$here/diff" && ls *.rs | sed 's/\.rs$//')}
 known=${DIFF_KNOWN:-$(ls "$here/known" 2>/dev/null | sed -n 's/\.rs$//p')}
 rv=$(rustc -V)
-export M here root cache work sleepms rv verify
+# the JIT binary `cargo run` starts, where the runs' evidence looks: an arm64 leg's two package runs
+# could not start it, their restart parent's spawn of its path said ENOENT (11-22), and nothing said
+# what had removed or replaced it. `diff bin <phase>:` lines give its identity at each phase: a
+# remove and re-link, or another file in its place, changes its folder's mtime (a package run's own
+# hard link of it in its run dir changes only its ctime), and a run that could not start it keeps
+# what held its target dir right then (`diff enoent`)
+jitbin=${CARGO_TARGET_DIR:-$root/target}
+case $jitbin in /*) ;; *) jitbin=$root/$jitbin ;; esac
+jitbin=$jitbin/host/makepad
+[ -e "$jitbin" ] || [ ! -e "$jitbin.exe" ] || jitbin=$jitbin.exe
+# a file's inode, links, size, mtime and ctime (GNU stat, else BSD's)
+binid() {
+    stat -c 'inode %i links %h size %s mtime %Y ctime %Z' "$1" 2>/dev/null \
+        || stat -f 'inode %i links %l size %z mtime %m ctime %c' "$1" 2>/dev/null || echo missing
+}
+binline() {
+    echo "diff bin $1: at $(date -u +%s) $(binid "$jitbin"), folder mtime $(stat -c %Y "${jitbin%/*}" 2>/dev/null || stat -f %m "${jitbin%/*}" 2>/dev/null)"
+}
+# after a run ($1: its output's path) that could not start the JIT binary (cargo's exec or a restart
+# parent's spawn: no such file): the binary, its folder, the processes of cargo, rustc and a linker
+# and those naming the target dir, the folder's open files, and the disk (a box's reclaim runs when
+# it is low: the master's disk records say when), in $1.held
+enoent() {
+    grep -aq 'cannot start\|could not execute process' "$1.err" 2>/dev/null && grep -aq 'No such file or directory' "$1.err" || return 0
+    t=${jitbin%/host/*}
+    {
+        echo "at $(date -u +%s) the binary: $(binid "$jitbin")"
+        ls -lia "${jitbin%/*}" 2>&1 | head -24
+        echo "processes of cargo, rustc and a linker, and those naming $t:"
+        ps axww -o pid,ppid,etime,command 2>/dev/null | grep -E "cargo|rustc|/ld |ld64|$t" | grep -v ' grep ' | cut -c1-240 | head -40
+        if command -v lsof > /dev/null; then echo "open in ${jitbin%/*}:"; lsof -n +d "${jitbin%/*}" 2>/dev/null | cut -c1-200 | head -20; fi
+        echo "disk: $(df -k "$t" 2>/dev/null | tail -1)"
+    } > "$1.held" 2>&1
+}
+export M here root cache work sleepms rv verify jitbin
 # one job: native build (cached) + native run, or a tier run. $1 = program, $2 = native|base|o3
 job() {
     p=$1; k=$2; src=$here/diff/$p.rs; [ -f "$src" ] || src=$here/known/$p.rs; out=$work/$p.$k
@@ -74,6 +109,7 @@ job() {
             RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" \
             nice -n 10 $M test "$src" > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
+        enoent "$out"
         rm -r "$d" ;;
     esac
 }
@@ -98,6 +134,7 @@ pkgjob() {
             RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" \
             nice -n 10 $M run --quiet --unattended "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
+        enoent "$out"
         rm -r "$d" ;;
     esac
 }
@@ -108,11 +145,12 @@ if [ "$1" = "--job" ]; then work=$2; job "$3" "$4"; exit 0; fi
 # package programs: build each package (one cargo run per package, the workspace target dir), list its programs
 pkgdirs=${DIFF_PKG_DIRS:-$here/diffpkg $root/apps/commercial/relax_tests}
 [ "$pkgdirs" = none ] && pkgdirs=
+binline start
 pkgprogs=; pkgfail=
 for dir in $pkgdirs; do
     [ -f "$dir/Cargo.toml" ] || continue
     pkg=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$dir/Cargo.toml" | head -1)
-    if ! (cd "$root" && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$pkgtarget nice -n 10 cargo build --release -q -p "$pkg" --bin "$pkg" -j "${DIFF_CARGO_JOBS:-6}") > "$work/$pkg.build" 2>&1; then
+    if ! (cd "$root" && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$pkgtarget nice -n 10 cargo build --release -q -p "$pkg" --bin "$pkg" -j "${DIFF_CARGO_JOBS:-${CARGO_BUILD_JOBS:-6}}") > "$work/$pkg.build" 2>&1; then
         # loud, never a smaller count: a package that does not build drops all its programs (the 10-30 "48/51" gates
         # on a node were relax-commercial-tests failing to build against a skewed makepad/commercial pair, its 3 error
         # lines counted as programs and the reason cut off by the gate's tail -1)
@@ -122,7 +160,20 @@ $(grep -E -m8 -A3 '^error' "$work/$pkg.build" | cut -c1-240)
     fi
     for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
 done
-for p in $progs $known $pkgprogs; do for k in native $difftiers; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+binline "after the package build"
+# the programs $2 of phase $1, each natively and at each tier, then the binary: the file programs,
+# then the package programs, whose `makepad run` starts the binary again by its path from its
+# restart parent (GNU xargs runs its command once on no input: an empty list starts nothing)
+phase() {
+    [ -z "$(echo $2)" ] || for p in $2; do for k in native $difftiers; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+    binline "after the $1"
+}
+phase "file programs" "$progs $known"
+phase "package programs" "$pkgprogs"
+for f in "$work"/*.held; do
+    [ -f "$f" ] || continue
+    r=${f##*/}; echo "diff enoent ${r%.held}:"; sed 's/^/diff enoent   /' "$f"
+done
 # how a run ended: its exit status, or the signal that killed it (the JIT runs through cargo run,
 # which execs it: a signal N shows as 128+N, N at most 64)
 how() {

@@ -5,7 +5,7 @@
 # registry package with a C build-dependency (cc) is refused.
 # Prints "vendored: ok" or "vendored: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 # an empty CARGO_HOME (no registry cache, no config) under the ignored target/

@@ -28,6 +28,8 @@ const S_PM_EDITIONS: u32 = 10;
 /// `ParsedFile::numbering` of the parse the image holds (two u64 halves), after the editions: a
 /// record made over a parse (its file metadata) is restored over that parse's image only
 const S_NUMBERING: u32 = 11;
+/// `ParsedFile::meta_origin` (substituted fragments' `$x` positions), after the numbering
+const S_META_ORIGIN: u32 = 12;
 /// tree arrays: 100 + index in AST_ARRAYS order
 const S_AST: u32 = 100;
 
@@ -85,21 +87,18 @@ pub fn image(pf: &ParsedFile) -> Writer<'_> {
     }
     ast_arrays!(put);
     let _ = k;
-    let gated: Vec<u32> = a.gated_syntax.iter().flat_map(|&(f, pos)| {
-        let i = crate::ast::GATED_SYNTAX.iter().position(|g| *g == f).expect("a gated syntax feature of GATED_SYNTAX");
-        [i as u32, pos]
-    }).collect();
-    w.add_owned(S_GATED, &gated);
+    w.add_owned(S_GATED, &gated_words(a));
     w.add(S_PM_EDITIONS, pf.pm_editions.bytes());
     let n = pf.numbering();
     w.add_owned(S_NUMBERING, &[n as u64, (n >> 64) as u64]);
+    w.add(S_META_ORIGIN, pf.meta_origin.bytes());
     w
 }
 
 /// Heap capacity retired by the main image (parts are accounted separately).
 pub fn heap_bytes(pf: &ParsedFile) -> usize {
     let mut n = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes()
-        + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.pm_editions.heap_bytes();
+        + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.meta_origin.heap_bytes() + pf.pm_editions.heap_bytes();
     macro_rules! count { ($($f:ident: $t:ident),*) => { $( n += pf.ast.$f.heap_bytes(); )* }; }
     ast_arrays!(count);
     n
@@ -160,13 +159,16 @@ pub fn apply(path: &str, pf: &mut ParsedFile, img: &'static [u8]) -> bool {
     let got = ast_arrays!(get);
     let Some(pe) = r.slice::<u8>(9 + k, S_PM_EDITIONS).and_then(Table::<Regions>::mapped) else { return mismatch(path, "pm_editions") };
     check!(pe, pf.pm_editions, pe == pf.pm_editions, "pm_editions");
-    let mut before = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes() + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.pm_editions.heap_bytes();
+    let Some(mo) = r.slice::<u8>(11 + k, S_META_ORIGIN).and_then(Table::<Maps>::mapped) else { return mismatch(path, "meta_origin") };
+    check!(mo, pf.meta_origin, mo == pf.meta_origin, "meta_origin");
+    let mut before = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes() + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.meta_origin.heap_bytes() + pf.pm_editions.heap_bytes();
     pf.src = Arena::Mapped(src);
     pf.toks = toks;
     pf.exp_map = em;
     pf.tok_origin = to;
     pf.rules_exp = re;
     pf.body_origin = bo;
+    pf.meta_origin = mo;
     pf.pm_editions = pe;
     // (a table the image renumbered is the run's own again: heap, not mapped)
     before = before.saturating_sub(origins.heap_bytes());
@@ -197,6 +199,8 @@ const P_SOURCES: u32 = 207;
 const P_RULES_EXP: u32 = 208;
 const P_BODY_ORIGIN: u32 = 209;
 const P_PM_EDITIONS: u32 = 210;
+/// `Ast::gated_syntax` of the part's bodies (S_GATED's pairs), after the editions
+const P_GATED: u32 = 211;
 const P_AST: u32 = 300;
 
 pub static PARTS_MAPPED: AtomicU64 = AtomicU64::new(0);
@@ -246,7 +250,22 @@ pub fn part_image<'a>(pf: &'a ParsedFile, fp: &'a crate::parser::FilePart, a: &'
     w.add(P_RULES_EXP, fp.rules_exp.bytes());
     w.add(P_BODY_ORIGIN, fp.body_origin.bytes());
     w.add(P_PM_EDITIONS, fp.pm_editions.bytes());
+    // the gated syntax in its bodies, which a check and a run's app check report (E0658)
+    w.add_owned(P_GATED, &gated_words(a));
     Some(w)
+}
+
+/// `Ast::gated_syntax` as (index in `GATED_SYNTAX`, position) pairs (S_GATED, P_GATED).
+fn gated_words(a: &crate::ast::Ast) -> Vec<u32> {
+    a.gated_syntax.iter().flat_map(|&(f, pos)| {
+        let i = crate::ast::GATED_SYNTAX.iter().position(|g| *g == f).expect("a gated syntax feature of GATED_SYNTAX");
+        [i as u32, pos]
+    }).collect()
+}
+
+/// The gated syntax `gated_words` wrote.
+fn gated_syntax(words: &[u32]) -> Option<Vec<(&'static str, u32)>> {
+    words.chunks_exact(2).map(|p| Some((*crate::ast::GATED_SYNTAX.get(p[0] as usize)?, p[1]))).collect()
 }
 
 /// A part read from its image, continuing a file whose arrays end at `ends` (AST ids) and
@@ -285,6 +304,8 @@ fn part_from_image(path: &str, ends: [u32; crate::ast::ARENAS], (src, toks, rule
         mismatch(path, "part.rules");
         return None;
     };
+    let Some(gated) = r.slice::<u32>(11 + k, P_GATED).and_then(gated_syntax) else { mismatch(path, "part.gated"); return None; };
+    a.gated_syntax = gated;
     let fp = crate::parser::FilePart {
         src_base: src as u32, tok_base: toks as u32, rules_base: rules as u32,
         rules_exp, body_origin, pm_editions, next: Default::default(),
@@ -303,7 +324,7 @@ fn part_from_image(path: &str, ends: [u32; crate::ast::ARENAS], (src, toks, rule
 /// length, and verifying, every array's contents.
 fn same_part(a: &crate::parser::FilePart, aa: &crate::ast::Ast, b: &crate::parser::FilePart, ba: &crate::ast::Ast) -> bool {
     let v = verify();
-    let mut s = aa.base == ba.base && a.bodies.iter().eq(b.bodies.iter()) && a.ext.len() == b.ext.len() && a.toks.len() == b.toks.len()
+    let mut s = aa.base == ba.base && aa.gated_syntax == ba.gated_syntax && a.bodies.iter().eq(b.bodies.iter()) && a.ext.len() == b.ext.len() && a.toks.len() == b.toks.len()
         && a.exp_map.len() == b.exp_map.len() && a.tok_origin.len() == b.tok_origin.len() && a.token_origins.len() == b.token_origins.len()
         && a.rules_exp.len() == b.rules_exp.len() && a.body_origin.len() == b.body_origin.len() && a.pm_editions.len() == b.pm_editions.len();
     if v {
@@ -534,8 +555,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
     macro_rules! get { ($($f:ident: $t:ident),*) => { $(ast.$f=Arena::Mapped(r.slice::<$t>(8+k,S_AST+k as u32)?);k+=1;)* }; }
     ast_arrays!(get);
     // the gated syntax, which `makepad check` reports (E0658) from the restored tree too
-    let gated = r.slice::<u32>(8 + k, S_GATED)?;
-    ast.gated_syntax = gated.chunks_exact(2).map(|p| Some((*crate::ast::GATED_SYNTAX.get(p[0] as usize)?, p[1]))).collect::<Option<_>>()?;
+    ast.gated_syntax = gated_syntax(r.slice::<u32>(8 + k, S_GATED)?)?;
     let mut sources = None;
     let origins = restore_origins(r.slice(6, S_TOKEN_ORIGINS)?, r.slice(7, S_SOURCES)?, &mut sources, certified)?;
     if meta.token_input {
@@ -567,6 +587,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
         tok_origin: Table::mapped(r.slice(3, S_TOK_ORIGIN)?)?,
         rules_exp: Table::mapped(r.slice(4, S_RULES_EXP)?)?,
         body_origin: Table::mapped(r.slice(5, S_BODY_ORIGIN)?)?,
+        meta_origin: Table::mapped(r.slice(11 + k, S_META_ORIGIN)?)?,
         pm_editions: Table::mapped(r.slice(9 + k, S_PM_EDITIONS)?)?,
         line_starts: Default::default(),
         part: Default::default(),
@@ -593,6 +614,7 @@ pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
     assert!(same_origins(image, &image.token_origins, fresh, &fresh.token_origins), "front token origins");
     assert_eq!(image.rules_exp, fresh.rules_exp);
     assert_eq!(image.body_origin, fresh.body_origin);
+    assert_eq!(image.meta_origin, fresh.meta_origin);
     assert_eq!(image.pm_editions, fresh.pm_editions);
     assert_eq!((image.edition, image.src_len, image.token_input), (fresh.edition, fresh.src_len, fresh.token_input));
     assert_eq!(crate::crate_image::encode(&image.lazy), crate::crate_image::encode(&fresh.lazy));
@@ -698,6 +720,33 @@ mod tests {
         verify_file(&restored, &f);
     }
 
+    /// A lazily parsed body in a local macro's output reports a parse error on a substituted
+    /// fragment at its `$i` (rustc's 1:53), warm as cold: the fragments' `$x` positions
+    /// (meta_origin) are in the file's image.
+    #[test]
+    fn a_restored_file_places_a_lazy_bodys_macro_error_as_its_parse_does() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let path = "macro_body.rs";
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", path, "test", &cfg));
+        let table = std::sync::Arc::new(crate::macros::MacroTable::default());
+        let (mut cold, used) = crate::parser::parse_owned_ctx(sess,
+            b"macro_rules! m { ($i:ident) => { fn f() { let x = 1 $i; } } }\nm!(y);\n".to_vec(), None, 2021,
+            Some(crate::macros::MacroScope::new(table)), "test", Some(ctx), true,
+        ).unwrap();
+        assert!(!cold.meta_origin.is_empty());
+        let prep = crate::program::prepare_file(&mut cold, &cfg);
+        let metadata = crate::crate_image::file_meta(path, "test", &cold, &used.unwrap(), &prep, false);
+        let mut meta = crate::crate_image::decode(&metadata).unwrap();
+        let warm = restore(&mut meta, image(encode(&cold))).unwrap();
+        verify_file(&warm, &cold);
+        let error = |f: &ParsedFile| (0..f.ast.items.len() as u32).find_map(|i| f.lazy_body(crate::ast::ItemId(i), &cfg))
+            .expect("a lazily parsed body").expect_err("the body does not parse");
+        let cold_error = error(&cold);
+        assert!(cold_error.starts_with("macro_body.rs:1:53: "), "{cold_error}");
+        assert_eq!(error(&warm), cold_error);
+    }
+
     /// A file's record (its metadata: skipped bodies, prepared blocks, and the ids a collected
     /// program keeps) holds one parse's numbering; an image of the same text that numbers it
     /// another way (one load skipped a body another parsed in its tree) is refused, not restored
@@ -736,7 +785,7 @@ mod tests {
         let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", "test.rs", "test", &cfg));
         let table = std::sync::Arc::new(crate::macros::MacroTable::default());
         let (mut f, _) = crate::parser::parse_owned_ctx(sess,
-            b"pub fn f(x: u32) -> u32 { let y = x + 3; y * 2 }".to_vec(), None, 2021,
+            b"pub fn f(x: u32) -> u32 { let y = #[allow(unused)] 3; (x + y) * 2 }".to_vec(), None, 2021,
             Some(crate::macros::MacroScope::new(table)), "test", Some(ctx), true,
         ).unwrap();
         crate::program::prepare_file(&mut f, &cfg);
@@ -771,15 +820,20 @@ mod tests {
         let (mut fp, mut a) = crate::parser::parse_part(&f, &cfg);
         let part = part_bytes(&f, &fp, &a);
         assert!(a.exprs.heap_bytes() > 0);
+        let gated = a.gated_syntax.clone();
+        assert_eq!(gated.iter().map(|g| g.0).collect::<Vec<_>>(), ["stmt_expr_attributes"]);
         assert!(map_part("test.rs", &f, &mut fp, &mut a, part));
         assert_eq!(a.exprs.heap_bytes(), 0);
         assert_eq!(fp.toks.heap_bytes(), 0);
+        // the gated syntax in the bodies (a run's app check reports it, E0658) is the parse's
+        assert_eq!(a.gated_syntax, gated, "the mapped part's gated syntax");
         // The warm path reads the same image to exactly the same ids and body ranges.
         let (mut warm, _) = lazy_file(sess);
         assert!(apply("test.rs", &mut warm, main));
         assert!(apply_part("test.rs", &mut warm, part, &cfg, false));
         assert_eq!(format!("{:?}", fp.bodies), format!("{:?}", warm.part.get().unwrap().bodies));
         assert_eq!(format!("{:?}", a.exprs), format!("{:?}", warm.ast.part.get().unwrap().exprs));
+        assert_eq!(warm.ast.part.get().unwrap().gated_syntax, gated, "the restored part's gated syntax");
     }
 
     #[test]

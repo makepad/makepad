@@ -1,3 +1,4 @@
+// rejects: E0277
 #![feature(try_trait_v2)]
 // rustc library/core/src/ops/try_trait.rs:160 @8d1a764:
 // Try's residual must recover a TryType with the same output and residual.

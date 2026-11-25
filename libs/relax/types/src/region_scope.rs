@@ -475,16 +475,21 @@ impl Resolve<'_> {
         match self.file.ast.expr(e).kind {
             ExprKind::Tuple(_) | ExprKind::Array(_) | ExprKind::Struct(..) | ExprKind::Underscore => true,
             ExprKind::Call(f, _) => self.constructor(f),
+            // `(..) = e`: the empty tuple pattern with a rest (rustc_ast_lowering's special case in
+            // destructure_assign), as lit::is_assignee_pattern
+            ExprKind::Paren(x) if matches!(self.file.ast.expr(x).kind, ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false)) => true,
             ExprKind::Paren(x) => self.destructuring(x),
             ExprKind::Path(_) => self.constructor(e),
             _ => false,
         }
     }
     fn assignee(&mut self, e: ExprId) {
+        // (with its parentheses: `(..)` is a pattern, its `..` no expression)
+        let pattern = self.destructuring(e);
         let e = self.unparen(e);
         let saved = self.cx;
         let ast = &self.file.ast;
-        if self.destructuring(e) {
+        if pattern {
             self.node(Node::Expr(e.0), false);
             match ast.expr(e).kind {
                 ExprKind::Tuple(xs) | ExprKind::Array(xs) => for x in ast.list(xs) { self.assignee(*x); },

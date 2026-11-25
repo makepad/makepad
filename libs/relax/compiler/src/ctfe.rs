@@ -145,9 +145,13 @@ pub fn same_value(u: &mut Unit, t: TyId, a: u64, b: u64, depth: u32) -> bool {
     let bytes = |p: u64, n: usize| unsafe { std::slice::from_raw_parts(p as *const u8, n) };
     let rd = |p: u64| unsafe { (p as *const u64).read_unaligned() };
     match u.tcx.tys.kind(t).clone() {
-        // A raw pointer can be dangling (MAP_FAILED, null, a function address). Never
-        // dereference it just to compare constants.
-        TyKind::Ptr(..) => bytes(a, l.size as usize) == bytes(b, l.size as usize),
+        TyKind::Ptr(..) => {
+            let size = l.size as usize;
+            bytes(a, size) == bytes(b, size)
+                || (matches!(size, 8 | 16)
+                    && (size == 8 || rd(a + 8) == rd(b + 8))
+                    && same_target(u, rd(a), rd(b), depth))
+        }
         TyKind::Ref(_, inner, _) => {
             let (pa, pb) = (rd(a), rd(b));
             match u.tcx.tys.kind(inner).clone() {
@@ -227,6 +231,38 @@ pub fn same_value(u: &mut Unit, t: TyId, a: u64, b: u64, depth: u32) -> bool {
         }
         _ => bytes(a, l.size as usize) == bytes(b, l.size as usize),
     }
+}
+
+/// Two raw pointers to the same value in different data objects (check_mode): CTFE and the code
+/// give io::Error's bit-packed Repr separate copies of the same SimpleMessage. The same offset in
+/// objects of one length keeps the pointer's tag bits; the objects' contents then compare as values.
+/// A raw pointer can dangle (MAP_FAILED, null, a function address): only data objects are read.
+fn same_target(u: &mut Unit, pa: u64, pb: u64, depth: u32) -> bool {
+    use crate::syms::DataKind::Typed;
+    let Some((sa, la, _, _)) = u.syms.object_of(pa) else { return false };
+    let Some((sb, lb, _, _)) = u.syms.object_of(pb) else { return false };
+    if pa - sa != pb - sb || la != lb {
+        return false;
+    }
+    if depth > 16 {
+        return true;
+    }
+    if let (Typed(ta), Typed(tb)) = (u.syms.kind_at(sa), u.syms.kind_at(sb)) {
+        if ta == tb {
+            return u.layout_of(ta).size as u64 <= la && same_value(u, ta, sa, sb, depth + 1);
+        }
+    }
+    let bytes = |start: u64| unsafe { std::slice::from_raw_parts(start as *const u8, la as usize) };
+    let (a, b) = (bytes(sa), bytes(sb));
+    if sa % 8 != sb % 8 {
+        return a == b;
+    }
+    let prefix = a.as_ptr().align_offset(8).min(a.len());
+    let (words_a, tail_a) = a[prefix..].as_chunks::<8>();
+    let (words_b, tail_b) = b[prefix..].as_chunks::<8>();
+    a[..prefix] == b[..prefix] && tail_a == tail_b && words_a.iter().zip(words_b).all(|(wa, wb)| {
+        wa == wb || same_target(u, u64::from_ne_bytes(*wa), u64::from_ne_bytes(*wb), depth + 1)
+    })
 }
 
 /// Marks the bytes a value of type `t` at `a` defines (mask[off..] = 1): scalars and pointers

@@ -89,6 +89,12 @@ pub struct Graph {
     /// libraries the build scripts link: (name, framework, named by a confined script: the run
     /// never finds it in the working folder, relax-compiler os/proc.rs `load_library_outside_cwd`)
     pub link_libs: Vec<(String, bool, bool)>,
+    /// Absolute folders from build scripts' `rustc-link-search` and `-L` in `rustc-flags`, in
+    /// declaration order. On Windows, os/proc.rs `load_library` searches them before LIB and the SDK, as
+    /// link.exe searches its /LIBPATH folders first.
+    pub link_search: Vec<String>,
+    /// Units::workspace_root
+    pub workspace_root: String,
     /// `--allow-c`: the shared library the native dependencies were linked into (native.rs)
     pub native: Option<crate::native::NativeLib>,
     pub raw: Vec<RawUnit>,
@@ -460,7 +466,7 @@ pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, Str
     if bins.is_empty() && test_crates.contains(&root) && crates[root].bin {
         bins.push(root);
     }
-    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), native: None, raw, bins })
+    Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), link_search: Vec::new(), workspace_root: g.workspace_root.clone(), native: None, raw, bins })
 }
 
 /// cargo's per-package environment (CARGO_MANIFEST_DIR, CARGO_MANIFEST_PATH, CARGO_PKG_*): its
@@ -645,6 +651,7 @@ pub fn register_script_answer(a: &'static ScriptAnswer) {
 
 /// The host's answer to `pkg`'s script `bs`, when the script's files read as the answer's sources.
 fn script_answer(pkg: &str, bs: &BuildScript) -> Option<&'static ScriptAnswer> {
+    relax_base::host::init();
     let a = SCRIPT_ANSWERS.lock().unwrap().iter().copied().find(|a| a.package == pkg)?;
     let folder = std::path::Path::new(&bs.src_path).parent()?;
     a.sources.iter().all(|(path, text)| crate::vfs::read_to_string(folder.join(path)).is_ok_and(|t| t == *text)).then_some(a)
@@ -863,13 +870,14 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         if let (Some(job), Some(done)) = (&native_job, scripts_done) {
             if !job.is_finished() {
                 let (mut cfgs, mut env, mut libs) = (gr.cfgs.clone(), gr.env.clone(), gr.link_libs.clone());
+                let mut search = gr.link_search.clone();
                 let mut ok = true;
                 for (krates, r, out_dir, confined, host) in &results {
                     // a host side's run: its output is the macro world's own (apply_host_output),
                     // which these tables do not carry; the world starts once the scripts are done
                     let (Ok(stdout), false) = (r, *host) else { ok = false; break };
                     for &k in krates {
-                        if script_output_into(&mut cfgs, &mut env, &mut libs, &gr.pkg, k, stdout, out_dir.clone(), check_only, *confined).is_err() { ok = false; }
+                        if script_output_into(&mut cfgs, &mut env, &mut libs, &mut search, rustc_dir(gr, k), &gr.pkg, k, stdout, out_dir.clone(), check_only, *confined).is_err() { ok = false; }
                     }
                 }
                 if ok { _kept = done(gr, &native_krates, &cfgs, &env); }
@@ -1149,12 +1157,21 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                     }
                 }
                 let (dir, pname, ver) = g.pkg[bs.krate].clone();
+                // the output applies to each of the script's crates, each compiled from its own folder
+                let mut link_bases: Vec<String> = Vec::new();
+                for k in bs.krates() {
+                    let base = rustc_dir(g, k);
+                    if !link_bases.iter().any(|b| b == base) {
+                        link_bases.push(base.to_string());
+                    }
+                }
                 let name = script_name(g, bs);
                 let raw = &g.raw;
+                let workspace_root = g.workspace_root.as_str();
                 let done = &done;
                 let receipt = receipts[i];
                 s.spawn(move || {
-                    let r = run_one(sess, bs, raw, &cenv, &dir, &pname, &ver, &name, target_dir, root, receipt);
+                    let r = run_one(sess, bs, raw, &cenv, &dir, &link_bases, workspace_root, &pname, &ver, &name, target_dir, root, receipt);
                     done(i, r.0, r.1, r.2);
                 });
             }
@@ -1243,7 +1260,8 @@ fn apply_host_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, che
     let mut env = pkg_env(dir, name, ver);
     env.push(("CARGO_CRATE_NAME".to_string(), g.crates[k].name.clone()));
     let (mut cfgs, mut env) = (vec![Vec::new()], vec![env]);
-    script_output_into(&mut cfgs, &mut env, &mut g.link_libs, std::slice::from_ref(&g.pkg[k]), 0, stdout, out_dir, check_only, confined)?;
+    let link_base = rustc_dir(g, k).to_string();
+    script_output_into(&mut cfgs, &mut env, &mut g.link_libs, &mut g.link_search, &link_base, std::slice::from_ref(&g.pkg[k]), 0, stdout, out_dir, check_only, confined)?;
     if let (Some(h), Some(cfgs), Some(env)) = (g.crates[k].host.as_mut(), cfgs.pop(), env.pop()) {
         h.build_outputs = Some((cfgs, env));
     }
@@ -1260,18 +1278,47 @@ fn script_name(g: &Graph, bs: &BuildScript) -> String {
 /// One crate's share of a script's output (`stdout`, its OUT_DIR; `confined`: the script ran
 /// confined, its output checked: `confined_output_refusals`).
 fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, check_only: bool, confined: bool) -> Result<(), String> {
-    script_output_into(&mut g.cfgs, &mut g.env, &mut g.link_libs, &g.pkg, k, stdout, out_dir, check_only, confined)
+    let link_base = rustc_dir(g, k).to_string();
+    script_output_into(&mut g.cfgs, &mut g.env, &mut g.link_libs, &mut g.link_search, &link_base, &g.pkg, k, stdout, out_dir, check_only, confined)
 }
 
 /// A script's share of the graph: (its crates, its stdout or why it failed, its OUT_DIR, whether
 /// it ran confined, whether it is a host side's run: `BuildScript::host`).
 type ScriptRun = (Vec<usize>, Result<String, String>, String, bool, bool);
 
+/// Where cargo runs rustc and relative `-L` paths start (`path_args`). A path package whose
+/// target source is under the workspace uses the workspace root. Other targets use the package folder.
+fn rustc_dir(g: &Graph, k: usize) -> &str {
+    let krate = &g.crates[k];
+    rustc_dir_of(&krate.src_path, krate.registry, &g.pkg[k].0, &g.workspace_root)
+}
+
+fn rustc_dir_of<'a>(src_path: &str, registry: bool, pkg_dir: &'a str, workspace_root: &'a str) -> &'a str {
+    if !registry && !workspace_root.is_empty() && std::path::Path::new(src_path).starts_with(workspace_root) {
+        workspace_root
+    } else {
+        pkg_dir
+    }
+}
+
 /// apply_script_output into these tables (the graph's, or copies of them).
 #[allow(clippy::too_many_arguments)]
-fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>], link_libs: &mut Vec<(String, bool, bool)>, pkg: &[(String, String, String)],
-    k: usize, stdout: &str, out_dir: String, check_only: bool, confined: bool) -> Result<(), String> {
+fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>], link_libs: &mut Vec<(String, bool, bool)>, link_search: &mut Vec<String>,
+    link_base: &str, pkg: &[(String, String, String)], k: usize, stdout: &str, out_dir: String, check_only: bool, confined: bool) -> Result<(), String> {
     env[k].push(("OUT_DIR".to_string(), out_dir));
+    // Cargo passes -L through to rustc, so relative folders start in rustc's working directory.
+    let mut add_search = |value: &str| {
+        let path = match value.split_once('=') {
+            Some(("dependency" | "crate" | "native" | "framework" | "all", path)) => path,
+            _ => value,
+        };
+        if !path.is_empty() {
+            let path = std::path::Path::new(link_base).join(path).to_string_lossy().into_owned();
+            if !link_search.contains(&path) {
+                link_search.push(path);
+            }
+        }
+    };
     for line in stdout.lines() {
         let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
             Some(r) => r,
@@ -1298,6 +1345,17 @@ fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>
             if !link_libs.contains(&l) {
                 link_libs.push(l);
             }
+        } else if let Some(path) = rest.strip_prefix("rustc-link-search=") {
+            add_search(path);
+        } else if let Some(flags) = rest.strip_prefix("rustc-flags=") {
+            let mut words = flags.split_whitespace();
+            while let Some(word) = words.next() {
+                if let Some(path) = word.strip_prefix("-L") {
+                    add_search(if path.is_empty() { words.next().unwrap_or("") } else { path });
+                } else if word == "-l" {
+                    let _ = words.next();
+                }
+            }
         } else if let Some(e) = rest.strip_prefix("rustc-env=") {
             if let Some(i) = e.find('=') {
                 env[k].push((e[..i].to_string(), e[i + 1..].to_string()));
@@ -1321,7 +1379,7 @@ pub fn script_confined<'a>(units: impl IntoIterator<Item = &'a RawUnit>) -> bool
 /// JSON (unitgraph::load reads it back in the child); and, when its run is confined
 /// (`script_confined`), its folders (what it reads, what it never reaches), which the graph
 /// names too (`relax_script`, `script_folders`).
-fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrite>, target_dir: &str) -> (String, u64, Option<(Vec<String>, Vec<String>)>) {
+fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrite>, target_dir: &str, workspace_root: &str) -> (String, u64, Option<(Vec<String>, Vec<String>)>) {
     let _why = crate::why::enabled().then(|| crate::why::enter(crate::why::Cause::new(&bs.src_path, 1, "build-script-dependency-hash", "script_units")));
     let build_deps: Vec<_> = bs.build_deps.iter().filter(|(_, name)|
         !rewrite.is_some_and(|r| r.calls.iter().any(|(dep, _)| dep == name))).cloned().collect();
@@ -1455,7 +1513,12 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
         }
         None => String::new(),
     };
-    let encode = |units: &[String]| format!("{{\"version\":1,\"units\":[{}],\"roots\":[{}]{}}}", units.join(","), root, record);
+    // the workspace root its path units under it compile from (rustc_dir), written only when one
+    // is: its path already names the root, so any other graph keeps its text and its key
+    let under_root = !workspace_root.is_empty()
+        && seen.iter().any(|&i| raw[i].path_source && std::path::Path::new(&raw[i].src_path).starts_with(workspace_root));
+    let ws_record = if under_root { format!(",\"workspace_root\":{}", q(workspace_root)) } else { String::new() };
+    let encode = |units: &[String]| format!("{{\"version\":1,\"units\":[{}],\"roots\":[{}]{}{}}}", units.join(","), root, record, ws_record);
     let mut json = encode(&units);
     // Hash the logical graph and the source the child actually compiles before
     // substituting the hash-derived path. Edges/aliases affect the rerun key too.
@@ -1498,18 +1561,19 @@ const LINK_ARGS: [&str; 8] = ["rustc-link-arg", "rustc-link-arg-bins", "rustc-li
 /// such line once, with why. Its lines act here with the person's rights (the run loads the
 /// libraries they name, sets their variables in this process, walks their paths), so each is held
 /// to what the script itself reaches (`read`: its package's source, `excluded`: the folders inside
-/// it never reaches, `out_dir`, which it writes; `pkg_dir`, its package's folder, is where a
-/// relative path starts):
-/// - `rustc-link-search` (and `rustc-flags`' `-L`): a folder inside its folders;
+/// it never reaches, `out_dir`, which it writes):
+/// - `rustc-link-search` (and `rustc-flags`' `-L`): a folder inside its folders. Relative paths
+///   start in rustc's working directory (`link_base`).
 /// - `rustc-link-lib` (and `-l`): a plain name of a kind the run loads (none, dylib, framework,
 ///   static); the run never finds it in the working folder (`Graph::link_libs`);
 /// - no `rustc-link-arg`, in any of its forms;
 /// - `rustc-env`: no name that steers this process or its tools (relax-base resolve.rs
 ///   `script_env_refused`);
-/// - `rerun-if-changed`: a path inside its folders (the rerun key's walk follows no links for it);
+/// - `rerun-if-changed`: a path inside its folders. Relative paths start in the package folder
+///   (`pkg_dir`), and the rerun key's walk follows no links for them.
 /// - `cargo::` lines cargo knows; the old syntax's other keys are metadata, as cargo reads them.
 /// Its parent keeps none of an output that has any (run_one).
-fn confined_output_refusals(stdout: &str, read: &[String], excluded: &[String], out_dir: &str, pkg_dir: &str) -> Vec<String> {
+fn confined_output_refusals(stdout: &str, read: &[String], excluded: &[String], out_dir: &str, pkg_dir: &str, link_base: &str) -> Vec<String> {
     let folders = ScriptReach::new(read, excluded, out_dir);
     let mut refused: Vec<String> = Vec::new();
     for line in stdout.lines() {
@@ -1523,15 +1587,18 @@ fn confined_output_refusals(stdout: &str, read: &[String], excluded: &[String], 
         };
         let (key, value) = rest.split_once('=').unwrap_or((rest, ""));
         let why = match key {
-            "rustc-link-search" => folders.link_search(value, pkg_dir),
+            "rustc-link-search" => folders.link_search(value, link_base),
             "rustc-link-lib" => link_lib_refusal(value),
-            "rustc-flags" => folders.rustc_flags(value, pkg_dir),
+            "rustc-flags" => folders.rustc_flags(value, link_base),
             k if LINK_ARGS.contains(&k) => Some("a confined build script passes no link arguments".to_string()),
             "rustc-env" => match value.split_once('=') {
                 Some((name, _)) if !name.is_empty() => crate::resolve::script_env_refused(name).then(|| format!("`{name}`: {}", crate::resolve::SCRIPT_ENV_PRINCIPLE)),
                 _ => Some("it names no variable".to_string()),
             },
-            "rerun-if-changed" => folders.path(value, pkg_dir),
+            "rerun-if-changed" => {
+                let path = if std::path::Path::new(value).is_absolute() { value.to_string() } else { format!("{pkg_dir}/{value}") };
+                folders.path(&path)
+            }
             "rustc-cfg" | "rustc-check-cfg" | "rerun-if-env-changed" | "warning" | "error" | "metadata" => None,
             _ if new => Some("it is no instruction cargo knows".to_string()),
             _ => None,
@@ -1589,11 +1656,10 @@ impl ScriptReach {
         ScriptReach { read: all(read), excluded: all(excluded), out_dir: all(&[out_dir.to_string()]) }
     }
 
-    /// Some(why) when `path` (from `pkg_dir` when relative) lies outside the script's folders, or
+    /// Some(why) when the resolved `path` lies outside the script's folders, or
     /// inside one it never reaches; a path on disk is judged again as its links resolve.
-    fn path(&self, path: &str, pkg_dir: &str) -> Option<String> {
-        let joined = if std::path::Path::new(path).is_absolute() { path.to_string() } else { format!("{pkg_dir}/{path}") };
-        let p = crate::vfs::normalize_path(&joined);
+    fn path(&self, path: &str) -> Option<String> {
+        let p = crate::vfs::normalize_path(path);
         let mut spellings = vec![p.clone()];
         for s in [crate::vfs::on_disk(&p).into_owned(), crate::vfs::virtual_of(&p).into_owned()] {
             let s = crate::vfs::normalize_path(&s);
@@ -1625,16 +1691,16 @@ impl ScriptReach {
     }
 
     /// `rustc-link-search=[KIND=]PATH` (rustc's `-L`: a known kind before `=`, else the path).
-    fn link_search(&self, value: &str, pkg_dir: &str) -> Option<String> {
+    fn link_search(&self, value: &str, link_base: &str) -> Option<String> {
         let path = match value.split_once('=') {
             Some((kind, p)) if ["dependency", "crate", "native", "framework", "all"].contains(&kind) => p,
             _ => value,
         };
-        self.path(path, pkg_dir)
+        self.path(&std::path::Path::new(link_base).join(path).to_string_lossy())
     }
 
     /// `rustc-flags`: `-l` and `-L` alone, as cargo takes them (a value joined or the next word).
-    fn rustc_flags(&self, value: &str, pkg_dir: &str) -> Option<String> {
+    fn rustc_flags(&self, value: &str, link_base: &str) -> Option<String> {
         let mut words = value.split_whitespace();
         while let Some(w) = words.next() {
             let (flag, joined) = if w.starts_with("-l") || w.starts_with("-L") { w.split_at(2) } else { return Some(format!("`{w}`: only `-l` and `-L` are flags a build script gives")) };
@@ -1642,7 +1708,7 @@ impl ScriptReach {
             let why = match (flag, v) {
                 (_, "") => Some(format!("`{flag}` names nothing")),
                 ("-l", v) => link_lib_refusal(v),
-                (_, v) => self.link_search(v, pkg_dir),
+                (_, v) => self.link_search(v, link_base),
             };
             if why.is_some() {
                 return why;
@@ -1697,7 +1763,7 @@ fn self_exe() -> std::io::Result<std::path::PathBuf> {
 /// itself is the only process it starts. A script of a git run reads its package through the
 /// VFS (RELAX_VFS / RELAX_WORKSPACE for the child), and writes only OUT_DIR (on disk).
 #[allow(clippy::too_many_arguments)]
-fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUnit], cenv: &[(String, String)], dir: &str, pname: &str, ver: &str, name: &str, target_dir: &str, root: &BuildRoot, receipt: Option<&str>) -> (Result<String, String>, String, bool) {
+fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUnit], cenv: &[(String, String)], dir: &str, link_bases: &[String], workspace_root: &str, pname: &str, ver: &str, name: &str, target_dir: &str, root: &BuildRoot, receipt: Option<&str>) -> (Result<String, String>, String, bool) {
     if let Err(e) = crate::vfs::read(&bs.src_path) {
         return (Err(format!("{}: {}", bs.src_path, e)), String::new(), false);
     }
@@ -1709,11 +1775,22 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
             }
         }
     }
-    let (units, h, folders) = script_units(bs, raw, rewrite.as_ref(), target_dir);
+    let (units, h, folders) = script_units(bs, raw, rewrite.as_ref(), target_dir, workspace_root);
     let confined = folders.is_some();
-    // a confined script's output acts here with the person's rights: held to its folders first
+    // a confined script's output acts here with the person's rights: held to its folders first,
+    // from every folder a relative `-L` of it starts in (one per crate it configures)
     let refusals = |output: &str, out_dir: &str| match &folders {
-        Some((read, excluded)) => confined_output_refusals(output, read, excluded, out_dir, dir),
+        Some((read, excluded)) => {
+            let mut refused: Vec<String> = Vec::new();
+            for base in link_bases {
+                for why in confined_output_refusals(output, read, excluded, out_dir, dir, base) {
+                    if !refused.contains(&why) {
+                        refused.push(why);
+                    }
+                }
+            }
+            refused
+        }
         None => Vec::new(),
     };
     let mut fh = h;
@@ -1808,6 +1885,10 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     // after the crate's environment, whose CARGO is the build's cargo (pkg_env). The runner
     // consumes `build-script` on entry, then marks tool calls.
     cmd.env("RUSTC", &exe).env("CARGO", &exe);
+    // and no compiler wrapper: a person's RUSTC_WRAPPER wraps their rustc for cargo, while a
+    // script's RUSTC here is Relax, which answers its probes itself (a caching wrapper refuses
+    // Relax as a compiler, and the script's probe failed through it)
+    cmd.env_remove("RUSTC_WRAPPER").env_remove("RUSTC_WORKSPACE_WRAPPER");
     cmd.env("CARGO_ENCODED_RUSTFLAGS", "");
     for f in &bs.features {
         cmd.env(format!("CARGO_FEATURE_{}", f.to_uppercase().replace('-', "_")), "1");
@@ -2192,7 +2273,7 @@ fn rerun_key(output: &str, pkg_dir: &str, env_key: &str, shared: Option<&SharedC
     }
     if !any {
         // cargo: a script that names no inputs reruns when any file of its package changes
-        match (shared_content(shared, pkg_dir, true, follow), crate::vfs::identity(pkg_dir)) {
+        match (shared_content(shared, pkg_dir, true, follow), crate::vfs::package_identity(pkg_dir)) {
             (Some(c), _) => key.push_str(&format!("p c{:032x} {}\n", c, pkg_dir)),
             (None, Some(id)) => key.push_str(&format!("p {} {}\n", id, pkg_dir)),
             (None, None) => key.push_str(&format!("p {} {}\n", newest_mtime_pkg(std::path::Path::new(pkg_dir), follow), pkg_dir)),
@@ -2849,6 +2930,39 @@ fn claim_holder(path: &str) -> String {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::{confined_output_refusals, rustc_dir_of, script_output_into};
+    use std::path::Path;
+
+    #[test]
+    fn a_relative_link_search_path_starts_where_rustc_runs() {
+        assert_eq!(rustc_dir_of("/w/app/src/main.rs", false, "/w/app", "/w"), "/w", "a workspace member compiles from the root");
+        assert_eq!(rustc_dir_of("/w/inner/src/lib.rs", false, "/w/inner", "/w"), "/w", "a path dependency inside the workspace compiles from the root");
+        assert_eq!(rustc_dir_of("/out/dep/src/lib.rs", false, "/out/dep", "/w"), "/out/dep", "an external path dependency compiles from its package");
+        assert_eq!(rustc_dir_of("/reg/dep/src/lib.rs", true, "/reg/dep", "/w"), "/reg/dep", "a registry dependency compiles from its package");
+        assert_eq!(rustc_dir_of("/w/inner/src/lib.rs", true, "/w/inner", "/w"), "/w/inner", "a registry source under the workspace still uses its package");
+        assert_eq!(rustc_dir_of("/wx/src/lib.rs", false, "/wx", "/w"), "/wx", "workspace containment compares whole path components");
+        assert_eq!(rustc_dir_of("/w/app/src/main.rs", false, "/w/app", ""), "/w/app", "an unknown workspace root falls back to the package");
+
+        let mut link_search = Vec::new();
+        let pkg = [("/w/app".to_string(), "app".to_string(), "0.1.0".to_string())];
+        let output = "cargo:rustc-link-search=native=rel\ncargo::rustc-link-search=/abs\ncargo:rustc-flags=-L flagrel -l foo";
+        script_output_into(&mut [Vec::new()], &mut [Vec::new()], &mut Vec::new(), &mut link_search,
+            "/w", &pkg, 0, output, "/out".into(), false, false).unwrap();
+        let paths: Vec<_> = link_search.iter().map(Path::new).collect();
+        assert_eq!(paths, ["/w/rel", "/abs", "/w/flagrel"].map(Path::new), "both forms of -L preserve search order and resolve relative to rustc");
+
+        let read = ["/reg/dep".to_string()];
+        let refusals = |line: &str, base: &str| confined_output_refusals(line, &read, &[], "/out", "/reg/dep", base);
+        let search = "cargo:rustc-link-search=native=lib";
+        assert!(refusals(search, "/reg/dep").is_empty(), "the package-relative library folder is readable");
+        assert_eq!(refusals(search, "/w").len(), 1, "the same library folder under the workspace is outside the script's reach");
+        assert_eq!(refusals("cargo:rustc-flags=-L lib", "/w").len(), 1, "the -L flag uses the same confinement base");
+        assert!(refusals("cargo:rerun-if-changed=build.rs", "/w").is_empty(), "a rerun input stays relative to the package");
+    }
+}
+
+#[cfg(test)]
 mod script_error_tests {
     /// The cause a failing build script names, by what its stderr holds (relax PR 59).
     #[test]
@@ -3136,6 +3250,62 @@ mod shared_script_tests {
         let use_file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(held.join("relax-use")).unwrap();
         assert!(use_file.try_lock().is_err(), "a build dir made again is use-locked again");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../base/tests/support/vfs_store.rs"]
+mod vfs_store;
+
+#[cfg(test)]
+mod overlay_rerun_tests {
+    use super::*;
+
+    /// An overlay edit reruns a build script: one that names no input at each edit, whiteout or
+    /// take-back of a file of its package (cargo's rule), one that names a file at each edit of
+    /// that file. A mounted store's package folder was keyed by its commit alone, which no edit
+    /// moves, so the script kept its output from before the edit; a named file's edits were keyed
+    /// by a disk time the store's paths have none of, the same at every edit after the first.
+    #[test]
+    fn an_overlay_edit_reruns_a_build_script() {
+        let fixture = super::vfs_store::Fixture::new(&[("pkg/build.rs", b"fn main() {}"), ("pkg/src/lib.rs", b"pub fn f() {}"), ("pkg/proto/a.proto", b"a")]);
+        let root = "/relax-unitgraph-overlay/m";
+        crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let edits = std::env::temp_dir().join(format!("relax-unitgraph-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&edits);
+        std::fs::create_dir_all(&edits).unwrap();
+        crate::vfs::set_edits(Some(edits.clone()));
+        let put = |rel: &str, text: &str| {
+            let p = edits.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        let pkg = format!("{root}/pkg");
+        let unnamed = || rerun_key("cargo:rustc-cfg=x\n", &pkg, "env", None, None).unwrap();
+        let named = || rerun_key("cargo:rerun-if-changed=proto/a.proto\ncargo:rustc-cfg=x\n", &pkg, "env", None, None).unwrap();
+        let (unnamed0, named0) = (unnamed(), named());
+        assert_eq!((unnamed(), named()), (unnamed0.clone(), named0.clone()), "the store's own files: one key");
+        put("pkg/src/lib.rs", "pub fn f() -> u8 { 1 }");
+        let unnamed1 = unnamed();
+        assert_ne!(unnamed1, unnamed0, "an edit of a file of its package reruns a script that names nothing");
+        assert_eq!(named(), named0, "one that names another file keeps its output");
+        put("pkg/proto/a.proto", "bb");
+        let named1 = named();
+        assert_ne!(named1, named0, "an edit of the file it names reruns it");
+        put("pkg/proto/a.proto", "ccc");
+        assert_ne!(named(), named1, "and so does each edit after it");
+        let unnamed2 = unnamed();
+        assert_ne!(unnamed2, unnamed1, "an edit of another file of the package reruns the one that names nothing again");
+        put("pkg/target/debug/out", "x");
+        put("pkg/.hidden", "x");
+        assert_eq!(unnamed(), unnamed2, "its target folder and hidden entries are not its files (cargo's rule)");
+        std::fs::write(edits.join(".makepad-run-deleted"), "pkg/build.rs\n").unwrap();
+        assert_ne!(unnamed(), unnamed2, "a file of the package taken away reruns it");
+        std::fs::remove_file(edits.join(".makepad-run-deleted")).unwrap();
+        std::fs::remove_dir_all(edits.join("pkg")).unwrap();
+        assert_eq!((unnamed(), named()), (unnamed0, named0), "every edit taken back: the store's own files again");
+        crate::vfs::set_edits(None);
+        let _ = std::fs::remove_dir_all(&edits);
     }
 }
 

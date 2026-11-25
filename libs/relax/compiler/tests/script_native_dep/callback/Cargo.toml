@@ -5,3 +5,9 @@ edition = "2021"
 publish = false
 links = "snd_callback"
 build = "build.rs"
+
+[dependencies]
+snd-shared = { path = "../shared" }
+
+[build-dependencies]
+snd-shared = { path = "../shared" }

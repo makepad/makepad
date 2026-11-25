@@ -207,13 +207,14 @@ pub fn capture(prog: &Program, owner: DefId, d: &Diag) -> BorrowError {
 fn snapshot(prog: &Program, span: Span, text: String, primary: bool) -> Label {
     let file = &prog.files[span.file as usize];
     let src = &file.src[..file.src_len as usize];
-    // a position in a macro's expansion is blamed on the macro call that wrote it (rustc keeps
-    // the call site's span): clamped to the end of the text, it named the file's first call
-    // and its last line
+    // a position in a macro's expansion is where rustc's emitter puts it (lint_pos: a token a
+    // macro_rules of the file wrote at its place in the definition, a substituted fragment at
+    // its argument, else the call that wrote it); clamped to the end of the text, it named the
+    // file's first call and its last line
     let (lo, hi) = if file.token_input {
         (span.lo, span.hi)
     } else if span.lo >= file.src_len {
-        file.diagnostic_span(span.lo)
+        file.diagnostic_span(file.lint_pos(span.lo))
     } else if span.hi > file.src_len {
         (span.lo, file.diagnostic_pos(span.hi).max(span.lo))
     } else {

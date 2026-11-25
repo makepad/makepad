@@ -472,6 +472,12 @@ pub(crate) struct SigState {
     since: AtomicU64,
     /// the last signal the trampoline took on this thread (the re-entry report)
     last: AtomicI32,
+    /// while one of the program's handlers runs on this thread (the innermost): a frame of `run`
+    /// below which it runs, else 0; and the thread's alternate stack, [lo, hi), when it runs on
+    /// that one (SA_ONSTACK), else (0, 0) (`in_program_handler`)
+    handler_frame: AtomicUsize,
+    handler_lo: AtomicU64,
+    handler_hi: AtomicU64,
 }
 
 static KEY: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -502,6 +508,44 @@ pub(crate) fn on_program_thread() -> bool {
     !state().is_null()
 }
 
+/// Is a program's signal handler running on the calling thread, this call inside it?
+/// Async-signal-safe: loads of the thread's state (`run` marks it). A handler runs all on the
+/// stack it was delivered on, below the frame of `run` that called it (stacks grow down on every
+/// target Relax runs on): on the thread's alternate stack (SA_ONSTACK), whose range `run` took,
+/// or on the thread's own. A mark the calling frame is not under is one a handler left by
+/// `siglongjmp` (or `siglongjmp`'s kin): it is cleared, and the thread is outside handlers again.
+/// - left from the alternate stack: any frame off that stack is outside, at once (the stack may
+///   lie above the thread's own or below it);
+/// - left from the thread's own stack: a frame above the mark is outside; one below it, before
+///   the thread is above the mark again, counts as inside for that while. Its records then fit the
+///   table's spare room or are left out and counted (`domain_res::note`), never an allocation in
+///   a handler; the mark clears at the thread's first look from above it.
+/// One case is left: a nested handler left by siglongjmp into the handler it interrupted clears
+/// the marks, so that outer handler's later records count as outside handlers (`run` keeps the
+/// outer mark in its own frame, which the jump skips).
+pub(crate) fn in_program_handler() -> bool {
+    let s = state();
+    if s.is_null() {
+        return false;
+    }
+    let s = unsafe { &*s };
+    let frame = s.handler_frame.load(Relaxed);
+    if frame == 0 {
+        return false;
+    }
+    let mark = 0u8;
+    let here = std::hint::black_box(&mark) as *const u8 as usize;
+    let (lo, hi) = (s.handler_lo.load(Relaxed), s.handler_hi.load(Relaxed));
+    let on_alt = |p: usize| (lo..hi).contains(&(p as u64));
+    if here < frame && (hi == 0 || on_alt(here)) {
+        return true;
+    }
+    s.handler_frame.store(0, Relaxed);
+    s.handler_lo.store(0, Relaxed);
+    s.handler_hi.store(0, Relaxed);
+    false
+}
+
 /// The last signal the trampoline took on this thread (0: none, or not a program thread).
 pub(crate) fn last_signal() -> i32 {
     let s = state();
@@ -521,7 +565,7 @@ pub(crate) fn program_thread() -> ProgramThread {
     }
     let s = {
         let _kept = crate::zone_alloc::kept();
-        Box::into_raw(Box::new(SigState { depth: AtomicU32::new(0), slot: AtomicU32::new(0), deferred: AtomicU64::new(0), since: AtomicU64::new(0), last: AtomicI32::new(0) }))
+        Box::into_raw(Box::new(SigState { depth: AtomicU32::new(0), slot: AtomicU32::new(0), deferred: AtomicU64::new(0), since: AtomicU64::new(0), last: AtomicI32::new(0), handler_frame: AtomicUsize::new(0), handler_lo: AtomicU64::new(0), handler_hi: AtomicU64::new(0) }))
     };
     unsafe { sys::pthread_setspecific(k, s as *mut u8) };
     ProgramThread(s)
@@ -812,13 +856,29 @@ pub(crate) fn runs_handler(state: bool, depth: u32, host_pc: impl FnOnce() -> bo
 }
 
 unsafe fn run(sig: i32, h: usize, info: *mut u8, uc: *mut u8, st: *const SigState) {
+    // the thread is inside the program's handler until it returns (`in_program_handler`): this
+    // frame, and the alternate stack's range when the handler runs on it (one sigaltstack call);
+    // a nested one marks its own and puts the outer one's back
+    let mark = 0u8;
+    let here = std::hint::black_box(&mark) as *const u8 as usize;
+    let mut outer = (0, 0, 0);
     if !st.is_null() {
         (*st).last.store(sig, Relaxed);
+        let (lo, hi) = crate::os::fault::altstack();
+        let (lo, hi) = if (lo..hi).contains(&(here as u64)) { (lo, hi) } else { (0, 0) };
+        outer = ((*st).handler_frame.swap(0, Relaxed), (*st).handler_lo.swap(lo, Relaxed), (*st).handler_hi.swap(hi, Relaxed));
+        (*st).handler_frame.store(here, Relaxed);
     }
     COUNTS[sig as usize][RAN].fetch_add(1, Relaxed);
     // three arguments always (a one-argument handler ignores the others)
     let h: extern "C" fn(i32, *mut u8, *mut u8) = std::mem::transmute(h);
     h(sig, info, uc);
+    if !st.is_null() {
+        (*st).handler_frame.store(0, Relaxed);
+        (*st).handler_lo.store(outer.1, Relaxed);
+        (*st).handler_hi.store(outer.2, Relaxed);
+        (*st).handler_frame.store(outer.0, Relaxed);
+    }
 }
 
 /// SA_RESETHAND, applied by the delivery that runs the handler: the entry empties and the kernel's
@@ -872,6 +932,7 @@ const SIGABRT: i32 = 6;
 
 /// A SIGABRT the host's handler chained here was sent on (true, counted off): not reported now,
 /// its next delivery is.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub(crate) fn take_sent_on_abort() -> bool {
     ABRT_SENT_ON.try_update(Relaxed, Relaxed, |n| n.checked_sub(1)).is_ok()
 }
@@ -978,8 +1039,8 @@ pub(crate) fn futex_wake(w: &AtomicU32) {
     };
 }
 
-/// The signal thread's mask once it satisfies `want` (it resyncs after each change).
-#[cfg(test)]
+/// The signal thread's mask once it satisfies `want` (it resyncs after each change; progsig_tests).
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 pub(crate) fn applied_mask(want: impl Fn(u64) -> bool) -> u64 {
     loop {
         let g = APPLIED_GEN.load(Acquire);

@@ -181,7 +181,54 @@ fn a_closure_of_a_replaced_version_without_its_body_is_an_internal_error() {
 
 #[test]
 fn edits_of_items_apply_live() {
-    in_child("reload_items_tests::edits_of_items_apply_live", &["patch", "dyn_maker", "dyn_const"], |case| {
+    in_child("reload_items_tests::edits_of_items_apply_live", &["patch", "dyn_maker", "dyn_const", "const_reader"], |case| {
+        if case == "const_reader" {
+            let lib = "use std::cell::Cell;\npub use self::C as CELL_VALUE;\nmacro_rules! borrow_c { () => { &crate::CELL_VALUE } }\npub mod reader;\npub const C: Option<Cell<u32>> = None;\n";
+            let reader = "use crate::C;\nuse std::cell::Cell;\npub fn r() -> &'static Option<Cell<u32>> { &C }\n";
+            live_app("const-reader", &[("lib.rs", lib), ("reader.rs", reader)], &[], |_, edit| {
+                let check_reader = || crate::owner::call(crate::owner::Class::Program, || {
+                    let u = unsafe { &*(LIVE_UNIT.load(std::sync::atomic::Ordering::Relaxed) as *const crate::jit::Unit) };
+                    let r = u.prog.defs.iter().enumerate().map(|(i, _)| crate::program::DefId(i as u32))
+                        .find(|&d| u.prog.name(d) == "r" && u.prog.file_paths[u.prog.def(d).file as usize].ends_with("reader.rs")).unwrap();
+                    let check = crate::check::live_lints(&u.prog, &u.tcx, &[r]);
+                    assert!(check.borrows.is_empty(), "the reference to None is promotable: {:?}", check.borrows);
+                });
+                check_reader();
+                let bad = edit("lib.rs", &[("= None;", "= Some(Cell::new(1));")]);
+                assert_eq!(bad.rung, Rung::Refuse, "the const edit invalidates r's promotion: {:?}", bad.lines);
+                assert!(bad.lines.iter().any(|l| l.contains("E0515") && l.contains("reader.rs:3:")), "{:?}", bad.lines);
+                let fixed = edit("lib.rs", &[("= Some(Cell::new(1));", "= None;")]);
+                assert_eq!(fixed.rung, Rung::Patch, "{:?}", fixed.lines);
+                check_reader();
+                let via_macro = edit("reader.rs", &[("&C }", "borrow_c!() }")]);
+                assert_eq!(via_macro.rung, Rung::Patch, "{:?}", via_macro.lines);
+                check_reader();
+                let bad = edit("lib.rs", &[("= None;", "= Some(Cell::new(1));")]);
+                assert_eq!(bad.rung, Rung::Refuse, "the macro reads the changed const: {:?}", bad.lines);
+                assert!(bad.lines.iter().any(|l| l.contains("E0515")), "{:?}", bad.lines);
+                // One save changes both files: r goes back to reading C directly.
+                let up = LIVE_UNIT.load(std::sync::atomic::Ordering::Relaxed) as *mut crate::jit::Unit;
+                let files = crate::owner::call(crate::owner::Class::Program, || {
+                    let prog = unsafe { &(*up).prog };
+                    prog.current_source_files(|p| {
+                        let p = std::path::Path::new(p);
+                        p.ends_with("app/src/lib.rs") || p.ends_with("app/src/reader.rs")
+                    })
+                });
+                assert_eq!(files.len(), 2);
+                for check_first in [false, true] {
+                    crate::jit::CHECK_FIRST.store(check_first, std::sync::atomic::Ordering::Relaxed);
+                    let edits = files.iter().map(|(path, &file)| {
+                        let text = if path.ends_with("reader.rs") { reader.to_owned() } else { lib.replace("= None;", "= Some(Cell::new(1));") };
+                        crate::reload::Edit { file, path: path.clone(), src: text.into_bytes() }
+                    }).collect();
+                    let both = unsafe { crate::reload::apply_update(up, edits) };
+                    assert_eq!(both.rung, Rung::Refuse, "combined save (check_first={check_first}): {:?}", both.lines);
+                    assert_eq!(both.lines.join("\n").matches("E0515").count(), 1, "check_first={check_first}: {:?}", both.lines);
+                }
+            });
+            return;
+        }
         if case == "dyn_maker" {
             let lib = format!("{LIB}{SPEAK}");
             live_app("items-dyn-maker", &[("lib.rs", &lib), ("other.rs", OTHER)], &["talk"], |call, edit| {

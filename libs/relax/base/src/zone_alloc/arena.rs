@@ -1,3 +1,4 @@
+use super::arenas_closed;
 use std::alloc::Layout;
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
@@ -270,6 +271,7 @@ fn tsd_slot(key: usize) -> usize {
 }
 /// Called before the program allocator's entries are handed out (domain.rs `symbol`).
 pub fn bind_program_tls() {
+    if arenas_closed() { return; } // the closed allocator never uses the fast TLS slot
     #[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
     DOMAIN_OFFSET.store((domain_tls() as *const DomainTls as usize).wrapping_sub(thread_pointer()), Ordering::Relaxed);
     #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
@@ -950,6 +952,69 @@ pub struct Arena {
 // sets what is not zero at the first use (`init_zeroed`), as `create` does for a domain arena.
 // SAFETY: every field has a valid all-zero representation (create relies on it too).
 static DEFAULT: Arena = unsafe { std::mem::zeroed() };
+/// The heaps' true bounds in the child of a plain fork, which opened HEAPS_LOW/HIGH to every
+/// address (`close_for_fork_child`): the parent's, and those of regions reserved since.
+static PARENT_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PARENT_HIGH: AtomicUsize = AtomicUsize::new(0);
+/// In the child of a plain fork: whether `p` may be a block of a domain heap (the true bounds).
+#[inline]
+pub fn in_parent_heaps(p: *mut u8) -> bool {
+    let a = p as usize;
+    a >= PARENT_LOW.load(Ordering::Acquire) && a < PARENT_HIGH.load(Ordering::Acquire)
+}
+/// Close every arena before releasing any inherited guards in the child of a plain fork. The
+/// paths a parent takes read nothing new for it: the closing changes what they read already.
+/// The calling thread, the child's only one, forgets its chunks ([`forget_thread_chunks`]), so
+/// its allocations and frees miss the fast paths and reach the slow ones, where the closed flag
+/// is read, before any arena lock (`alloc_slow`, `dealloc_slow`). The heaps' bounds open to
+/// every address, so every free that is not an arena's reaches `dealloc_other` (domain.rs),
+/// which finds the child's own system blocks first and leaves the rest to the true bounds
+/// (`in_parent_heaps`). A check at the head of every allocation and free cost a burst arena's
+/// frees 7% and a cold JIT compile 1% (11-23).
+pub fn close_for_fork_child() {
+    // (a nested fork's child: the bounds were opened by its parent, the true ones kept)
+    if !super::ARENAS_CLOSED.swap(true, Ordering::AcqRel) {
+        PARENT_LOW.fetch_min(HEAPS_LOW.swap(0, Ordering::AcqRel), Ordering::AcqRel);
+        PARENT_HIGH.fetch_max(HEAPS_HIGH.swap(usize::MAX, Ordering::AcqRel), Ordering::AcqRel);
+    }
+    forget_thread_chunks();
+}
+
+/// The calling thread's chunk caches, forgotten in the child of a plain fork: nothing is handed
+/// back (that takes the locks), the chunks stay as they are for good.
+pub fn forget_thread_chunks() {
+    let mine = CURRENT.try_with(|c| c.replace([NO_CURRENT; CLASSES]));
+    let domain = DOMAIN.try_with(|t| t.current.replace([NO_CURRENT; CLASSES]));
+    // (a test's simulated child: its thread takes them back as it reopens)
+    #[cfg(test)]
+    let _ = FORGOTTEN.try_with(|f| f.set(Some((mine.unwrap_or([NO_CURRENT; CLASSES]), domain.unwrap_or([NO_CURRENT; CLASSES])))));
+    #[cfg(not(test))]
+    let _ = (mine, domain);
+}
+
+#[cfg(test)]
+thread_local! { static FORGOTTEN: Cell<Option<([Current; CLASSES], [Current; CLASSES])>> = const { Cell::new(None) }; }
+
+/// The chunks `forget_thread_chunks` made this thread forget, its own again (a test's reopen).
+#[cfg(test)]
+pub(super) fn remember_thread_chunks() {
+    if let Some((mine, domain)) = FORGOTTEN.try_with(|f| f.take()).ok().flatten() {
+        let _ = CURRENT.try_with(|c| c.set(mine));
+        let _ = DOMAIN.try_with(|t| t.current.set(domain));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn reopen_after_test() {
+    super::ARENAS_CLOSED.store(false, Ordering::Relaxed);
+    HEAPS_LOW.store(PARENT_LOW.swap(usize::MAX, Ordering::AcqRel), Ordering::Release);
+    HEAPS_HIGH.store(PARENT_HIGH.swap(0, Ordering::AcqRel), Ordering::Release);
+    remember_thread_chunks();
+}
+
+#[cfg(test)]
+pub(super) fn hold_partial() -> impl Drop { lock(&DEFAULT.partial) }
+
 impl Arena {
     /// The fields of an all-zero arena that are not zero: free-list and pool links (NONE), the
     /// chunks released, the pool's one whole-reservation run, the locks' event labels.
@@ -987,7 +1052,10 @@ impl Arena {
                 a.live_bits.store(os_bits_map(), Ordering::Relaxed);
             }
             let a = Box::from_raw(p);
-            if a.init() {
+            // Private until DomainHeap publishes it. A child may create a domain,
+            // but takes no arena lock and serves its allocations from the system heap.
+            a.reserve_region();
+            if a.base.load(Ordering::Relaxed) != 0 {
                 Some(a)
             } else {
                 None
@@ -1157,7 +1225,7 @@ impl Arena {
             Err(_) => std::process::abort(),
         }
     }
-    fn try_current<R>(&self, f: impl FnOnce(&Cell<[Current; CLASSES]>) -> R) -> Result<R, std::thread::AccessError> {
+    fn try_current<R>(&self, f: impl FnOnce(&Cell<[Current; CLASSES]>) -> R) -> Result<R, makepad_thread_local::AccessError> {
         if self.dynamic {
             Ok(f(&domain_tls().current))
         } else {
@@ -1514,36 +1582,45 @@ impl Arena {
     /// Reserves the address range on first use. False when the OS refused (callers then fall back
     /// to the system heap).
     pub fn init(&self) -> bool {
+        if arenas_closed() { return false; }
         if self.base.load(Ordering::Acquire) == 0 {
             let mut tried = lock(&self.init);
             if !*tried {
                 *tried = true;
-                // the static arena's non-zero state (a domain arena's was set by `create`)
-                if !self.dynamic {
-                    unsafe { self.init_zeroed() };
-                }
-                let base = unsafe {
-                    if WEB_AT != 0 {
-                        os::reserve_at(WEB_AT, RESERVE, LABEL)
-                    } else {
-                        os::reserve(self.reach(), CHUNK, if self.dynamic { c"relax-domain" } else { LABEL })
-                    }
-                };
-                // every arena. A domain heap (the program's heap, as its malloc would be) gets
-                // them back per chunk once a chunk is dense (`densify`): huge pages everywhere cost
-                // a large app 2-2.4 GB resident for 100 MB in use, none at all cost a game's warm
-                // frames +4% UI-thread CPU and cold start +5 s on a node (JITMEM.REPORT.md)
-                if base != 0 {
-                    unsafe { os::no_huge_pages(base, self.reach()) };
-                }
-                if base != 0 && self.dynamic {
-                    HEAPS_LOW.fetch_min(base, Ordering::Release);
-                    HEAPS_HIGH.fetch_max(base + self.reach(), Ordering::Release);
-                }
-                self.base.store(base, Ordering::Release);
+                self.reserve_region();
             }
         }
         self.base.load(Ordering::Relaxed) != 0
+    }
+    // Called under init, or on a freshly created domain arena before publication.
+    fn reserve_region(&self) {
+        // the static arena's non-zero state (a domain arena's was set by `create`)
+        if !self.dynamic {
+            unsafe { self.init_zeroed() };
+        }
+        let base = unsafe {
+            if WEB_AT != 0 {
+                os::reserve_at(WEB_AT, RESERVE, LABEL)
+            } else {
+                os::reserve(self.reach(), CHUNK, if self.dynamic { c"relax-domain" } else { LABEL })
+            }
+        };
+        // every arena. A domain heap (the program's heap, as its malloc would be) gets
+        // them back per chunk once a chunk is dense (`densify`): huge pages everywhere cost
+        // a large app 2-2.4 GB resident for 100 MB in use, none at all cost a game's warm
+        // frames +4% UI-thread CPU and cold start +5 s on a node (JITMEM.REPORT.md)
+        if base != 0 {
+            unsafe { os::no_huge_pages(base, self.reach()) };
+        }
+        if base != 0 && self.dynamic {
+            HEAPS_LOW.fetch_min(base, Ordering::Release);
+            HEAPS_HIGH.fetch_max(base + self.reach(), Ordering::Release);
+            if arenas_closed() {
+                PARENT_LOW.fetch_min(base, Ordering::AcqRel);
+                PARENT_HIGH.fetch_max(base + self.reach(), Ordering::AcqRel);
+            }
+        }
+        self.base.store(base, Ordering::Release);
     }
     #[inline(always)]
     /// Whether `p` lies in this region's first RESERVE bytes (all of it but for a region for one
@@ -1555,6 +1632,7 @@ impl Arena {
     /// (committed payload bytes, requested live bytes, committed 2 MB chunk equivalents).
     /// Counters are independent snapshots. Headers/pool metadata are fixed static storage.
     pub fn stats(&self) -> (usize, usize, usize) {
+        if arenas_closed() { return (0, 0, 0); }
         (
             self.committed.load(Ordering::Relaxed),
             // live bytes are kept per chunk: a process-wide counter was one contended cache line
@@ -1566,6 +1644,7 @@ impl Arena {
     /// (bytes touched, bytes in live slots, bytes in large blocks, chunks in the partial list):
     /// touched - live slots = what small chunks hold free; slots - requested = rounding up to the class.
     pub fn detail(&self) -> (usize, usize, usize, usize) {
+        if arenas_closed() { return (0, 0, 0, 0); }
         let (mut touched, mut slots, mut large, mut listed) = (0, 0, 0, 0);
         for h in self.headers.iter() {
             let s = lock(&h.state);
@@ -1595,6 +1674,7 @@ impl Arena {
     /// their live blocks, their live slot bytes, touched bytes of small chunks with <= 4 live
     /// blocks (pinned by a few survivors), large runs, large committed bytes, the 4 largest runs].
     pub fn census(&self) -> [usize; 11] {
+        if arenas_closed() { return [0; 11]; }
         let mut c = [0usize; 11];
         for h in self.headers.iter() {
             let s = lock(&h.state);
@@ -1649,6 +1729,7 @@ impl Arena {
     /// allocates in that fell under 1/8 live loses its mark (the trim's page release then shrinks
     /// it). At most `budget` collapses per pass. Returns the collapses done.
     pub fn densify(&self, budget: usize) -> usize {
+        if arenas_closed() { return 0; }
         let base = self.base.load(Ordering::Relaxed);
         if !self.dynamic || base == 0 {
             return 0;
@@ -1726,6 +1807,7 @@ impl Arena {
     /// live held 841 MB on 16 KB pages.) The threads hand their current chunks back at their next
     /// slow path, so those drain too.
     pub fn mark_old(&self) {
+        if arenas_closed() { return; }
         for (index, h) in self.headers.iter().enumerate() {
             let s = lock(&h.state);
             h.old.store(s.committed != 0, Ordering::Relaxed);
@@ -1738,6 +1820,7 @@ impl Arena {
         }
     }
     pub fn states(&self) -> [usize; 29] {
+        if arenas_closed() { return [0; 29]; }
         let mut c = [0usize; 29];
         let base = self.base.load(Ordering::Relaxed);
         if base == 0 {
@@ -1812,6 +1895,7 @@ impl Arena {
     /// chunk's free list and its granule is resident (a granule given back holds no live block), so
     /// the count is exact, where `heap top` samples one block per 64 KB.
     pub fn old_census(&self, key: &dyn Fn(usize) -> usize, per_key: &mut [[usize; 3]; 64]) -> [usize; 4] {
+        if arenas_closed() { return [0; 4]; }
         let mut total = [0usize; 4];
         let base = self.base.load(Ordering::Relaxed);
         if base == 0 {
@@ -2310,6 +2394,12 @@ impl Arena {
     #[cold]
     /// `may_grow`: a domain heap that has no room here tries its other regions (`grow`).
     unsafe fn alloc_slow(&self, l: Layout, small: bool, class: usize, requested: usize, may_grow: bool) -> *mut u8 {
+        // the child of a plain fork comes here for every allocation (its thread forgot its
+        // chunks) and takes no arena lock: a program heap's block comes from the system heap,
+        // any other arena refuses (its caller falls back to the system heap)
+        if arenas_closed() {
+            return if self.dynamic { super::domain::child_alloc(l, false) } else { null_mut() };
+        }
         if self.hand_back_due() {
             let _ = HAND_SEEN.try_with(|e| e.set(HAND_BACK.load(Ordering::Relaxed)));
             self.detach_thread();
@@ -2444,6 +2534,7 @@ impl Arena {
     /// A thread is ending: its current chunks go back to the shared state (the partial list, or the
     /// pool when empty), so what it left free in them is reused (compiler arena).
     pub fn detach_thread(&self) {
+        if arenas_closed() { return; }
         if !COMPILER || !self.cache_fast() {
             return;
         }
@@ -2478,6 +2569,11 @@ impl Arena {
         if !(COMPILER && l.size().max(l.align()).max(16) > 1 << MAX_SHIFT) {
             std::ptr::write_bytes(p, 0, l.size());
         } else if self.dynamic {
+            // (a fork child's block is the system heap's, `alloc_slow`: no region's)
+            if arenas_closed() {
+                std::ptr::write_bytes(p, 0, l.size());
+                return p;
+            }
             // a large block from the warm large list holds old bytes (the region that gave it: a
             // full heap's block may come from another, `grow`)
             let r = self.region_of(p).unwrap_or(self);
@@ -2494,6 +2590,7 @@ impl Arena {
     /// Changes a block's size without moving it when the new size needs the same slot size (small
     /// blocks) or the same mapping size (large ones). `old` is the layout it was allocated with.
     pub unsafe fn resize_in_place(&self, p: *mut u8, old: Layout, new_size: usize) -> bool {
+        if arenas_closed() { return false; }
         let address = (p as usize) & !(CHUNK - 1);
         let index = (address - self.base.load(Ordering::Relaxed)) / CHUNK;
         let h = &self.headers[index];
@@ -2580,6 +2677,9 @@ impl Arena {
     }
     #[cold]
     unsafe fn dealloc_slow(&self, p: *mut u8, l: Layout, requested: usize, index: usize) {
+        // the child of a plain fork comes here for every free of an arena block (its thread forgot
+        // its chunks): the block stays where it is, no arena lock taken
+        if arenas_closed() { return; }
         let address = self.base.load(Ordering::Relaxed) + index * CHUNK;
         let h = &self.headers[index];
         if !self.mark(p as usize, false) {
@@ -2710,6 +2810,7 @@ impl Arena {
     /// are in use). Only the lists were trimmed before: a large app's trims at its quiet points gave back
     /// 13-49 MB each while its waiting pool workers' chunks held 894 MB resident for 310 MB live.
     pub fn trim(&self) {
+        if arenas_closed() { return; }
         // the calling thread's own current chunks go back first (the lists are what the trim walks)
         if COMPILER && !self.dynamic {
             self.detach_thread();
@@ -3056,6 +3157,7 @@ pub fn current_domain() -> *const Arena {
 /// registered in its domain); the next arena starts with an empty cache. A thread already in a
 /// region of `a`'s heap stays in it.
 pub unsafe fn enter_domain(a: *const Arena) {
+    if arenas_closed() { domain_tls().arena.set(a); return; }
     let old = domain_tls().arena.get();
     if old == a {
         return;
@@ -3086,7 +3188,8 @@ pub unsafe fn domain_wait() {
     let _ = DOMAIN.try_with(|t| {
         if let Some(a) = t.arena.get().as_ref() {
             let epoch = a.trim_epoch.load(Ordering::Relaxed);
-            if t.pass.get() != epoch {
+            // (a fork child's thread forgot its chunks: nothing to pass over, no lock taken)
+            if t.pass.get() != epoch && !arenas_closed() {
                 t.pass.set(epoch);
                 a.owner_pass(t);
             }

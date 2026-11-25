@@ -1,4 +1,5 @@
 // rejects: E0308
+// rejects-at: 12:11 E0308
 // A `$s:stmt` fragment of one token is a statement of its own too (rustc_parse parser/stmt.rs
 // parse_full_stmt): `$a $b` with `v` and `-1` is the statement `v`, an `i32` that is not the
 // block's value and not discarded (rustc: E0308, expected `()`, found `i32`), then the value

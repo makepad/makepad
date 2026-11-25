@@ -66,7 +66,7 @@ t0=$(date +%s)
 rc=0
 # -j: the mini has 10 cores and is also the arm64 bench box; the lease budget holds it to one build job
 for i in "${!keys[@]}"; do
-  cargo check --release -j 8 ${tg[$i]} ${keys[$i]} --message-format short >> "$log/check" 2>&1 || rc=$?
+  cargo check --release -j${CARGO_BUILD_JOBS:-8} ${tg[$i]} ${keys[$i]} --message-format short >> "$log/check" 2>&1 || rc=$?
 done
 secs=$(( $(date +%s) - t0 ))
 fail=""
@@ -80,7 +80,7 @@ if [ $rc != 0 ] || [ -n "$warn" ]; then
   for t in $targets; do
     k=$(pkgs_for "$t" 2>/dev/null)
     [ -n "$k" ] || continue
-    cargo check --release -j 8 --target $t $k --message-format short > "$log/one" 2>&1; one=$?
+    cargo check --release -j${CARGO_BUILD_JOBS:-8} --target $t $k --message-format short > "$log/one" 2>&1; one=$?
     w=$(grep -cE '^[^ ]+:[0-9]+:[0-9]+: warning' "$log/one")
     [ $one = 0 ] && [ "$w" = 0 ] && continue
     if [ $one != 0 ]; then

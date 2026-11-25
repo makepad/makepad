@@ -1,16 +1,17 @@
 #!/bin/bash
 # usage: run.sh <relax or makepad binary>: this program on one fresh disk cache, every run a fresh
-# process with the startup prelink on, running like an app (a first present, then hot code past the
-# startup window, so the mid-run write records the manifest and its image): cold, warm twice, then edits of wf-edit (line insertions, a literal
+# process with the startup prelink on, running like an app (a first present, then hot code, then its
+# quit, whose write records the manifest and its image): cold, warm twice, then edits of wf-edit (line insertions, a literal
 # change, a closure added before the existing ones and removed again, an item moved) interleaved
 # with edits of wf-host (a crate wf-edit does not depend on, so its prelinked slots stay while
 # wf-edit changes), each followed by a run, and two warm reruns at the end. Every run must exit 0
-# and print the cold run's result; no run may report a slot without an identity or drop the
-# startup image (the guard of a broken image).
+# and print the cold run's result, and each after the cold one prelink the image the run before it
+# recorded; no run may report a slot without an identity or drop the startup image (the guard of a
+# broken image).
 # Prints "cache_warm_edit_ids: ok" or "cache_warm_edit_ids: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 mkdir "$C/pkg"
 cp -R "$H/Cargo.toml" "$H/src" "$H/edit" "$H/host" "$C/pkg/"
@@ -28,6 +29,8 @@ for step in "" "" "" "line 1" "host 1" "line 2" "closure+" "host 2" "line 3" "mo
   if [ $rc != 0 ] || [ -z "$got" ] || [ "$got" != "$want" ] || grep -qE "has no identity|startup image dropped" "$C/run$k.log"; then
     bad="$bad run$k(${step:-warm}) exit $rc: $(grep -m1 -E "has no identity|startup image dropped|segfault|panicked|error|result" "$C/run$k.log" "$C/run$k.out" | cut -c1-200);"
   fi
+  # (every run after the cold one starts from the image the run before it recorded)
+  if [ $k -gt 1 ] && ! grep -qE "prelinked [1-9][0-9]* startup slots" "$C/run$k.log"; then bad="$bad run$k(${step:-warm}) prelinked no startup slots;"; fi
   [ -n "$WF_LOG" ] && grep -E "prelinked|identities decoded|startup image of|startup manifest" "$C/run$k.log" | sed "s/^/run$k(${step:-warm}): /"
 done
 if [ -z "$bad" ]; then echo "cache_warm_edit_ids: ok"; else echo "cache_warm_edit_ids: FAILED$bad"; fi
@@ -38,3 +41,5 @@ c = sys.argv[1]
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
 PY
+# the verdict is the exit status too (the corpus reads that)
+[ -z "$bad" ]

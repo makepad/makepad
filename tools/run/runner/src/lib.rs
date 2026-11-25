@@ -34,6 +34,10 @@ macro_rules! print {
     ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
 }
 
+use makepad_filesystem_watcher::{FileSystemEventKind, FileSystemWatcher, WatchRoot};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
 mod lexer {
     pub use relax_compiler::lexer::*;
 }
@@ -45,8 +49,8 @@ mod macros;
 pub mod remote;
 
 /// What a runner binary adds to the bare runner. The `makepad` binary (tools/run) provides crates
-/// built into it and hosts HAL programs on the main thread; the `relax` binary adds nothing (no
-/// host), so every crate of a program, the HAL and Splash included, is JIT-compiled from source.
+/// built into it and hosts HAL programs on the main thread; the `relax` binary links the bare
+/// host, so every crate of a program, the HAL and Splash included, is JIT-compiled from source.
 pub struct Host {
     /// what the `makepad` loader was built from (tools/run/build.rs), for its `--version`; None:
     /// the bare runner, whose `--version` names its binary by the linker's id (binary_id)
@@ -123,35 +127,171 @@ pub enum HelpLine {
 
 /// The bare runner (bin `relax`): provides nothing; tests, checks and agents' boots compile only
 /// what runs.
-pub const BARE: Host = Host { provenance: None, init: || {}, provide: || {}, run_host: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, compile_time_code: relax_compiler::sandbox::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), commands: &[], native_sets: &[], raw_body_macros: &[], script_answers: &[], pure_macro_crates: &[], env: relax_compiler::progenv::HostEnv { unseen: &[], offline: &[], detached_remove: &[], recorded: &[] }, tool: "relax" };
+pub static BARE: Host = Host { provenance: None, init: || {}, provide: || {}, run_host: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, compile_time_code: relax_compiler::sandbox::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), commands: &[], native_sets: &[], raw_body_macros: &[], script_answers: &[], pure_macro_crates: &[], env: relax_compiler::progenv::HostEnv { unseen: &[], offline: &[], detached_remove: &[], recorded: &[] }, tool: "relax" };
+
+#[doc(hidden)]
+pub use relax_base as __relax_base;
+#[doc(hidden)]
+pub use relax_native_macros;
+
+/// Declare the host whose facts the first reader in this binary will apply.
+#[macro_export]
+macro_rules! linked_host {
+    ($host:path) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = {
+            fn apply() { $crate::apply_host(&$host); }
+
+            #[used]
+            #[cfg_attr(target_vendor = "apple", link_section = "__DATA,__relax_host")]
+            #[cfg_attr(all(not(target_vendor = "apple"), not(windows)), link_section = "relax_host")]
+            #[cfg_attr(windows, link_section = ".relaxhost$m")]
+            static ENTRY: $crate::__relax_base::host::Entry = $crate::__relax_base::host::Entry {
+                name: $host.tool,
+                apply: Some(apply),
+            };
+        };
+    };
+}
 
 static HOST: std::sync::OnceLock<&'static Host> = std::sync::OnceLock::new();
 
 fn host() -> &'static Host {
+    relax_base::host::init();
     HOST.get().copied().unwrap_or(&BARE)
 }
 
-/// The runner's host, once, before `main`/`init_embedded`/`run_checkout`.
-pub fn set_host(host: &'static Host) {
-    if HOST.set(host).is_ok() {
-        for &set in host.native_sets {
-            relax_native_macros::register(set);
+/// Register the linked host's compile-time facts on their first read.
+#[doc(hidden)]
+pub fn apply_host(host: &'static Host) {
+    assert!(HOST.set(host).is_ok(), "the runner's host was already registered");
+    for &set in host.native_sets {
+        relax_native_macros::register(set);
+    }
+    for &a in host.script_answers {
+        relax_compiler::unitgraph::register_script_answer(a);
+    }
+    relax_compiler::sandbox::set_policy(host.compile_time_code);
+    relax_compiler::macro_reg::set_pure_crates(host.pure_macro_crates);
+    relax_compiler::progenv::set_host_env(host.env);
+    relax_compiler::set_tool_name(host.tool);
+    relax_compiler::reload::set_loader_package(host.package, host.manifest);
+    relax_compiler::reload::host::set_save_wait(wait_for_save);
+}
+
+/// Whether a source file under `roots` (`.rs` or `.toml`, the watcher's own filter; no `target` or
+/// hidden folder) was modified after `since`: a save the watcher that starts now would not tell.
+pub fn changed_since(roots: &[WatchRoot], since: SystemTime) -> bool {
+    fn walk(dir: &Path, since: SystemTime) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else { return false };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            let path = entry.path();
+            if kind.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name == "target" || name.starts_with('.') {
+                    continue;
+                }
+                if walk(&path, since) {
+                    return true;
+                }
+            } else if kind.is_file()
+                && matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "toml"))
+                && entry.metadata().and_then(|m| m.modified()).is_ok_and(|m| m > since)
+            {
+                return true;
+            }
         }
-        for &a in host.script_answers {
-            relax_compiler::unitgraph::register_script_answer(a);
+        false
+    }
+    roots.iter().any(|root| walk(&root.path, since))
+}
+
+/// Arm the recursive watcher before looking for a save made during the failed boot.
+fn wait_for_save(mut dirs: Vec<PathBuf>, since: SystemTime) -> Result<(), String> {
+    dirs.sort();
+    let mut roots = Vec::<WatchRoot>::new();
+    for dir in dirs {
+        if !roots.iter().any(|r| dir.starts_with(&r.path)) {
+            roots.push(WatchRoot { mount: roots.len().to_string(), path: dir });
         }
-        relax_compiler::sandbox::set_policy(host.compile_time_code);
-        relax_compiler::macro_reg::set_pure_crates(host.pure_macro_crates);
-        relax_compiler::progenv::set_host_env(host.env);
-        relax_compiler::set_tool_name(host.tool);
-        relax_compiler::reload::set_loader_package(host.package, host.manifest);
+    }
+    let source = |p: &Path| matches!(p.extension().and_then(|e| e.to_str()), Some("rs" | "toml"));
+    // One notification suffices even if a save produces several events.
+    let (saved, rx) = std::sync::mpsc::sync_channel(1);
+    let watched = roots.clone();
+    let _watcher = FileSystemWatcher::start(roots.clone(), move |event| {
+        let changed = match event.kind {
+            // lost events: re-inventory the roots, as the watcher asks (no save, no restart)
+            FileSystemEventKind::RescanRequired { .. } => changed_since(&watched, since),
+            FileSystemEventKind::Renamed { from } => source(&from) || source(&event.path),
+            // The macOS fallback reports changes at the root, including periodic hints.
+            FileSystemEventKind::Changed if watched.iter().any(|r| r.path == event.path) => changed_since(&watched, since),
+            _ => source(&event.path),
+        };
+        if changed { let _ = saved.try_send(()); }
+    })?;
+    if !changed_since(&roots, since) {
+        rx.recv().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::{changed_since, WatchRoot};
+
+    /// A save made after a failed build began, before the watcher that covers its folder was up,
+    /// is found by one walk of the roots: a source file after `since`, in no `target` or hidden
+    /// folder. A file before it, or a file that is no source, is not.
+    #[test]
+    fn a_save_since_the_build_began_is_found_in_the_roots() {
+        use std::time::Duration;
+        let dir = std::env::temp_dir().join(format!("relax-changed-since-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("dep");
+        for sub in ["src", "target/debug", ".git"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        // since is the file system's own clock: the marker's mtime; every file's time is set from it
+        let marker = dir.join("marker");
+        std::fs::write(&marker, "").unwrap();
+        let since = std::fs::metadata(&marker).unwrap().modified().unwrap();
+        let write = |rel: &str, after: bool| {
+            let path = root.join(rel);
+            std::fs::write(&path, "x").unwrap();
+            let time = if after { since + Duration::from_secs(60) } else { since - Duration::from_secs(60) };
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
+        };
+        let roots = [WatchRoot { mount: "app-0".into(), path: root.clone() }];
+        write("src/lib.rs", false);
+        assert!(!changed_since(&roots, since), "a source file written before the build began is not a save");
+        write("README.md", true);
+        write("target/debug/build.rs", true);
+        write(".git/config.toml", true);
+        assert!(!changed_since(&roots, since), "a file that is no source, or lies under target or a hidden folder, is not a save");
+        write("src/lib.rs", true);
+        assert!(changed_since(&roots, since), "a source file written after the build began is a save");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Start the linked host once the entry point has prepared its environment.
+pub fn start_host(host: &'static Host) {
+    relax_base::host::init();
+    let linked = HOST.get().copied().expect("no host is linked into this binary (relax_runner::linked_host!)");
+    assert!(std::ptr::eq(linked, host), "this binary links host `{}`; it was started as `{}`", linked.tool, host.tool);
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        relax_compiler::reload::snapshot_loader();
         // the entry point's ahead level, unless the environment names one; RELAX_AHEAD
         // carries it to the session (options.rs) and to every process this one starts
         if std::env::var_os("RELAX_AHEAD").is_none() {
             std::env::set_var("RELAX_AHEAD", host.ahead.name());
         }
         (host.init)();
-    }
+    });
 }
 
 fn provided() {
@@ -240,7 +380,7 @@ pub fn main(host: &'static Host) {
     if let Some(args) = bin.or(relaunch) {
         relax_compiler::os::proc::set_args(args);
     }
-    set_host(host);
+    start_host(host);
     warn_legacy_env();
     relax_compiler::wasm_export::startup();
     run(relax_compiler::os::proc::args_bytes())
@@ -264,7 +404,7 @@ fn warn_legacy_env() {
 /// loader's executable (the Android host library in an Activity's process): `exe` is Relax's own
 /// executable, which build scripts and `RELAX_LOADER` programs run as.
 pub fn init_embedded(exe: &std::path::Path, host: &'static Host) {
-    set_host(host);
+    start_host(host);
     relax_compiler::unitgraph::set_self_exe(exe.to_path_buf());
     // the program's argv[0] / current_exe: the embedder has no command line of its own
     relax_compiler::os::proc::set_args(vec![exe.as_os_str().as_encoded_bytes().to_vec()]);

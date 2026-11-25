@@ -6,13 +6,15 @@
 # Read it before you run it; it is this one file. Rust stays in its own folder; no system install.
 #
 #   curl -fsSL https://makepad.nl/runner/unix | sh
+# To install the Runner and open an app by id:
+#   curl -fsSL https://makepad.nl/runner/unix | sh -s -- open fab
 #
 # 1. Use this folder's Rust if ready, else a suitable installed stable Rust (1.98.0 or newer).
 #    Otherwise get Rust 1.98.0 (rustc, cargo, rust-std) from static.rust-lang.org, fetched as
 #    25 MB pieces over parallel connections, checked against the sizes and SHA-256 sums below.
 # 2. At the same time, the loader's source: a ZIP the service's latest licence-free `runner`
 #    release names (size and SHA-256 checked before unpacking), cut from the same Makepad commit as
-#    the runner, so the two always fit; and, with no arguments, the packs of the runner's git
+#    the runner, so the two always fit; and, with no arguments or open <id>, the packs of the runner's git
 #    repositories, which makepad run takes instead of downloading them itself.
 # 3. The loader and its tiny app launcher are compiled for this computer's processor (`cargo build --profile host --offline`:
 #    the ZIP holds every crate) the moment Rust and the source are in place, and started with no
@@ -142,6 +144,18 @@ fail() {
     fi
     exit 1
 }
+open_id=
+prepare_runner=
+if [ $# -eq 0 ]; then
+    prepare_runner=1
+elif [ "$1" = open ] && [ $# -ge 2 ]; then
+    open_id=$2
+    case "$open_id" in
+        ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*) fail "Invalid app id: use only letters, digits, '-' or '_'." ;;
+    esac
+    [ "${#open_id}" -le 64 ] || fail "Invalid app id: use at most 64 characters."
+    prepare_runner=1
+fi
 trap 'stamp stopped; stop_jobs; exit 130' INT TERM
 # job NAME COMMAND...: runs COMMAND in the background; its PID in jobs/NAME.pid, its exit code
 # in jobs/NAME.done when it ends
@@ -182,6 +196,11 @@ loader_folder_ready() {
         *) [ "${#1}" -eq 40 ] || return 1 ;;
     esac
     [ -f "$loader_root/$1/target/host/makepad" ]
+}
+# The loader selected by a pointer (current or previous), falling back to the bootstrap source.
+loader_folder() {
+    folder=$(cat "$loader_root/$1" 2>/dev/null)
+    if loader_folder_ready "$folder"; then printf '%s\n' "$folder"; else printf 'src\n'; fi
 }
 
 # --- The screen -----------------------------------------------------------------------------
@@ -346,6 +365,13 @@ screen_start() {
     for r_n in 1 2 3 4; do row $r_n wait next ''; done
     if [ -z "$tty_out" ]; then
         printf '  %s\n' "$where"
+        if [ -n "$open_id" ]; then
+            pointer=current
+            [ ! -e "$loader_root/pending" ] || pointer=previous
+            if [ ! -x "$loader_root/$(loader_folder "$pointer")/target/host/makepad" ]; then
+                say "First start: Rust, the loader, then $open_id compiles for this computer: many minutes. If your shell stops waiting, run the same line again: it continues where it is."
+            fi
+        fi
         [ -z "$note" ] || printf '  %s\n' "$note"
         [ -z "$note2" ] || printf '  %s\n' "$note2"
         return 0
@@ -589,8 +615,7 @@ export RELAX_HOME="$root"
 
 # Restore an unconfirmed switch before any decision about the loader already here.
 if [ -e "$loader_root/pending" ]; then
-    previous=$(cat "$loader_root/previous" 2>/dev/null)
-    loader_folder_ready "$previous" || previous=src
+    previous=$(loader_folder previous)
     if [ "$previous" = src ]; then
         rm -f "$loader_root/current" || fail "Cannot remove $loader_root/current"
     else
@@ -601,17 +626,16 @@ if [ -e "$loader_root/pending" ]; then
     rm -f "$loader_root/pending" || fail "Cannot remove $loader_root/pending"
     notice "Went back to $(printf '%s' "$previous" | cut -c1-10): the new runner did not confirm its first start."
 fi
-active=$(cat "$loader_root/current" 2>/dev/null)
-loader_folder_ready "$active" || active=src
+active=$(loader_folder current)
 src=$loader_root/$active
 makepad=$src/target/host/makepad
 
 # --- The runner release, from the start ---------------------------------------------------------
 # The release service's latest licence-free `runner` release names the runner's git repositories
 # on the service's read-only git face and the loader's source cut from the same Makepad commit.
-# With no arguments the folder moves to it: each commit's pack goes into
+# With no arguments or open <id> the folder moves to it: each commit's pack goes into
 # $RELAX_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
-# takes it instead of downloading, and the loader is compiled for it. With arguments a loader
+# takes it instead of downloading, and the loader is compiled for it. With other arguments a loader
 # compiled before stays as it is (the runner and the apps it recorded were made for it).
 runner_release=
 repos=
@@ -621,7 +645,7 @@ release_json=
 meta="--retry 2 -m 60"
 if [ -f "$src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
 mkdir -p "$cache/runner" "$cache/incoming"
-if [ $# -eq 0 ] || [ ! -f "$src/.built" ]; then
+if [ -n "$prepare_runner" ] || [ ! -f "$src/.built" ]; then
     cur_row=2
     row 2 doing asking "${c_dim}$svchost for the latest Runner release${c_r0}"
     foot='Asking the release service for the latest Runner.'
@@ -630,7 +654,7 @@ if [ $# -eq 0 ] || [ ! -f "$src/.built" ]; then
 fi
 runner_release=$(printf '%s' "$release_json" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
 prefetch_count=0
-if [ $# -eq 0 ] && [ -n "$runner_release" ]; then
+if [ -n "$prepare_runner" ] && [ -n "$runner_release" ]; then
     # one "<name> <path> <commit>" line per repository of the release
     repos=$(printf '%s\n' "$release_json" | sed 's/"loader":{[^}]*}//' | tr '{}' '\n\n' | while IFS= read -r line; do
         name=$(printf '%s' "$line" | sed -n 's/.*"name":"\([A-Za-z0-9_-]*\)".*/\1/p')
@@ -1062,13 +1086,48 @@ fi
 # stores in $RELAX_HOME/cache and, with --cached, starts the last one at once while it
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
-if [ $# -gt 0 ]; then
+if [ -z "$prepare_runner" ]; then
     row 4 wait 'not started' "${c_dim}the loader runs with your arguments${c_r0}"
     ready 'Running the loader with your arguments.'
     screen_end
     stamp start-loader
     exec "$makepad" "$@"
 fi
+
+# Quote one value for the installed sh entry, including any apostrophes and trailing newlines.
+sh_quote() {
+    printf "'"
+    while [ "$1" != "${1#*\'}" ]; do
+        printf '%s%s' "${1%%\'*}" "'\\''"
+        set -- "${1#*\'}"
+    done
+    printf "%s'" "$1"
+}
+write_entry() {
+    printf '%s\n' '#!/bin/sh' \
+        "export RELAX_HOME=$(sh_quote "$root")" \
+        'export MAKEPAD_LOADER_ROOT="$RELAX_HOME"' \
+        "export MAKEPAD_LOADER_SERVICE=$(sh_quote "$service")" \
+        "export CARGO_HOME=$(sh_quote "$CARGO_HOME")" \
+        "export RUSTC=$(sh_quote "$RUSTC")" \
+        "export PATH=$(sh_quote "$rust/bin"):\"\$PATH\"" || return 1
+    cat <<'ENTRY'
+loader_root=$RELAX_HOME/cache/loader
+active=$(cat "$loader_root/current" 2>/dev/null)
+case "$active" in
+    src|*[!0123456789abcdef]*) active=src ;;
+    *) [ "${#active}" -eq 40 ] && [ -f "$loader_root/$active/target/host/makepad" ] || active=src ;;
+esac
+exec "$loader_root/$active/target/host/makepad" "$@"
+ENTRY
+}
+entry_tmp=$root/makepad.part.$$
+[ ! -d "$root/makepad" ] || fail "Cannot write $root/makepad: it is a folder."
+write_entry > "$entry_tmp" && chmod 755 "$entry_tmp" && mv -f "$entry_tmp" "$root/makepad" || {
+    rm -f "$entry_tmp"
+    fail "Cannot write $root/makepad"
+}
+
 cur_row=4
 # the runner's packs downloaded alongside the build are complete before makepad run looks for them
 if [ -n "$prefetch_pids" ]; then
@@ -1125,9 +1184,14 @@ printf 'arg\t%s\n' "$root_repo" >> "$record.part"
 printf 'arg\tmakepad-runner\n' >> "$record.part"
 mv -f "$record.part" "$record" || fail "Cannot write $record"
 row 4 doing starting "${c_dim}Makepad's loader opens its window${c_r0}"
-ready 'The Runner opens in a moment.'
+if [ -n "$open_id" ]; then
+    ready "Handing over to makepad open $open_id."
+else
+    ready 'The Runner opens in a moment.'
+fi
 screen_end
 stamp start-loader
+if [ -n "$open_id" ]; then exec "$makepad" open "$open_id"; fi
 # The loader stays in the foreground until the runner closes; its output is appended to the log.
 printf '  Makepad is open in its own window; closing it ends this one.\n  %sIts log: %s%s\n' "$c_dim" "$(short "$logs/makepad.log")" "$c_r0"
 "$makepad" >>"$logs/makepad.log" 2>&1

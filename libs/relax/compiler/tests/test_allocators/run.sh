@@ -6,7 +6,7 @@
 # cache (cold, then restored), so cached code never carries one target's allocator into another.
 # Prints "test_allocators: ok" or "test_allocators: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-C=$(mktemp -d) || exit 1
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 1
 for pass in cold warm; do
     OUT=$(cd "$H" && RELAX_CACHE_DIR=$C RELAX_STD=$H/../../std "$1" test ta-app 2>&1)
     rc=$?

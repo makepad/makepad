@@ -34,7 +34,9 @@ def stop(p):
             p.wait()
     try:
         os.killpg(p.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # (macOS refuses a group whose members are all zombies with EPERM; the ps check below
+        # still requires every member to be gone or a zombie)
         pass
     for _ in range(100):
         rows = sp.check_output(['ps', '-eo', 'pid,pgid,stat'], text=True)

@@ -153,7 +153,7 @@ fn put_csig(w: &mut W, s: &CSig) {
         Some(it) => 1 | (it.bits as u64) << 8 | (it.signed as u64) << 16,
         None => 0,
     });
-    w.u(s.unwinds as u64);
+    w.u(s.unwinds as u64 | (s.math as u64) << 1);
     w.u(s.conv as u64);
 }
 fn get_csig(r: &mut R) -> Option<CSig> {
@@ -169,14 +169,15 @@ fn get_csig(r: &mut R) -> Option<CSig> {
     let n_fixed = r.u()? as u32;
     let nw = r.u()?;
     let ret_narrow = if nw & 1 != 0 { Some(IntTy { bits: (nw >> 8) as u8, signed: (nw >> 16) & 1 != 0 }) } else { None };
-    let unwinds = r.u()? != 0;
+    let flags = r.u()?;
+    let (unwinds, math) = (flags & 1 != 0, flags & 2 != 0);
     let conv = match r.u()? {
         0 => CConv::Host,
         1 => CConv::SysV64,
         2 => CConv::Win64,
         _ => return None,
     };
-    Some(CSig { conv, args, ret, n_fixed, ret_narrow, unwinds })
+    Some(CSig { conv, args, ret, n_fixed, ret_narrow, unwinds, math })
 }
 
 fn vw_code(w: VW) -> u64 {

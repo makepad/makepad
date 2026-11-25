@@ -16,7 +16,8 @@
 use super::const_check::ConstCx;
 use crate::mir::visit::Visitor;
 use crate::mir::*;
-use crate::program::DefId;
+use crate::program::{DefId, Program};
+use crate::tcx::{Tcx, TypingEnv};
 use crate::types::{TyId, TyKind, TypeFlags};
 
 /// A question the pass cannot answer for this body: the body is unchecked, never accepted or rejected.
@@ -50,11 +51,16 @@ impl ConstQualifsProvider for NoProvider {
 
 /// qualifs.rs:`in_any_value_of_ty`.
 pub fn in_any_value_of_ty(cx: &ConstCx<'_>, ty: TyId, tainted_by_errors: bool) -> ConstQualifs {
+    in_any_value_of_ty_in_env(cx.prog, cx.tcx, cx.env, ty, cx.features.const_drops, tainted_by_errors)
+}
+
+pub(crate) fn in_any_value_of_ty_in_env(prog: &Program, tcx: &Tcx, env: TypingEnv, ty: TyId, const_drops: bool, tainted_by_errors: bool) -> ConstQualifs {
+    let needs_drop = tcx.needs_drop(prog, env, ty);
     ConstQualifs {
-        has_mut_interior: HasMutInterior::in_any_value_of_ty(cx, ty),
-        not_sync: NotSync::in_any_value_of_ty(cx, ty),
-        needs_drop: NeedsDrop::in_any_value_of_ty(cx, ty),
-        needs_non_const_drop: NeedsNonConstDrop::in_any_value_of_ty(cx, ty),
+        has_mut_interior: has_mut_interior(prog, tcx, env, ty),
+        not_sync: !is_sync(prog, tcx, env, ty),
+        needs_drop,
+        needs_non_const_drop: !const_drops && needs_drop,
         tainted_by_errors,
     }
 }
@@ -99,8 +105,10 @@ pub trait Qualif {
     fn is_structural_in_adt_value(cx: &ConstCx<'_>, adt: DefId) -> bool;
 }
 
-fn is_unsafe_cell(cx: &ConstCx<'_>, ty: TyId) -> bool {
-    matches!(*cx.tcx.tys.kind(ty), TyKind::Adt(d, ..) if cx.tcx.adts.get(&d).is_some_and(|a| a.is_unsafe_cell()))
+fn has_mut_interior(prog: &Program, tcx: &Tcx, env: TypingEnv, ty: TyId) -> bool {
+    // Avoid selecting for `UnsafeCell`.
+    matches!(*tcx.tys.kind(ty), TyKind::Adt(d, ..) if tcx.adts.get(&d).is_some_and(|a| a.is_unsafe_cell()))
+        || !tcx.is_freeze(prog, env, ty)
 }
 
 /// Constant containing interior mutability (`UnsafeCell<T>`). This must be ruled out to make sure
@@ -115,11 +123,7 @@ impl Qualif for HasMutInterior {
     }
 
     fn in_any_value_of_ty(cx: &ConstCx<'_>, ty: TyId) -> bool {
-        // Avoid selecting for `UnsafeCell`
-        if is_unsafe_cell(cx, ty) {
-            return true;
-        }
-        !cx.tcx.is_freeze(cx.prog, cx.env, ty)
+        has_mut_interior(cx.prog, cx.tcx, cx.env, ty)
     }
 
     fn is_structural_in_adt_value(cx: &ConstCx<'_>, adt: DefId) -> bool {
@@ -145,7 +149,7 @@ impl Qualif for NotSync {
 
     /// Requires definite `Sync` when only the type, rather than its value, is known.
     fn in_any_value_of_ty(cx: &ConstCx<'_>, ty: TyId) -> bool {
-        !is_sync(cx, ty)
+        !is_sync(cx.prog, cx.tcx, cx.env, ty)
     }
 
     /// Recurses only when `Sync` follows actual fields: `PhantomData` holds no parameter value,
@@ -160,12 +164,12 @@ impl Qualif for NotSync {
 
 /// Proves `Sync` modulo regions (rustc_ty_utils/src/common_traits.rs:47), accepting only a definite
 /// solver answer. Primitive const items are common, so their known `Sync` needs no solver call.
-fn is_sync(cx: &ConstCx<'_>, ty: TyId) -> bool {
-    if matches!(cx.tcx.tys.kind(ty), TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str | TyKind::Never) {
+fn is_sync(prog: &Program, tcx: &Tcx, env: TypingEnv, ty: TyId) -> bool {
+    if matches!(tcx.tys.kind(ty), TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str | TyKind::Never) {
         return true;
     }
-    let Some(sync) = cx.tcx.lang_items.get(crate::lang_items::LangItem::Sync) else { return false };
-    cx.tcx.type_implements_trait(cx.prog, cx.env, crate::next_solver::TraitRef { def_id: sync, args: vec![crate::consts::GenericArg::Type(ty)] }).must_apply_modulo_regions()
+    let Some(sync) = tcx.lang_items.get(crate::lang_items::LangItem::Sync) else { return false };
+    tcx.type_implements_trait(prog, env, crate::next_solver::TraitRef { def_id: sync, args: vec![crate::consts::GenericArg::Type(ty)] }).must_apply_modulo_regions()
 }
 
 /// Constant containing an ADT that implements `Drop`. This must be ruled out because implicit

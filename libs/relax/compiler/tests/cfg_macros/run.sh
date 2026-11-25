@@ -15,7 +15,7 @@ cd "$fixture"
 for mode in off on; do
     flags=(--no-default-features)
     if [ "$mode" = on ]; then flags+=(--features cfg-macros-defs/tweaker); fi
-    cargo build --release --offline -j 6 --target-dir "$output/rustc" -p cfg-macros-app "${flags[@]}" > "$output/rustc-$mode.log" 2>&1 || {
+    cargo build --release --offline -j "${CARGO_BUILD_JOBS:-6}" --target-dir "$output/rustc" -p cfg-macros-app "${flags[@]}" > "$output/rustc-$mode.log" 2>&1 || {
         cat "$output/rustc-$mode.log"
         exit 1
     }

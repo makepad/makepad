@@ -17,6 +17,11 @@ pub type Http = fn(req: &Request, timeout: Duration) -> Result<Response, String>
 
 static HTTP: OnceLock<Http> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static HTTP_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Installs the network access git fetches go through (once per process).
 pub fn set_http(f: Http) {
     let _ = HTTP.set(f);
@@ -27,6 +32,9 @@ fn offline() -> Result<bool, String> {
 }
 
 fn http(req: &Request, timeout: Duration) -> Result<Response, String> {
+    #[cfg(test)]
+    HTTP_CALLS.with(|calls| calls.set(calls.get() + 1));
+    check_url(&req.url).map_err(|e| format!("git HTTP request refused: {e}"))?;
     if offline()? {
         return Err("git network access is disabled (offline)".into());
     }
@@ -53,6 +61,36 @@ pub struct Repo {
 pub fn check_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") && !url.starts_with("http://127.0.0.1") && !url.starts_with("http://localhost") {
         return Err(format!("not an https repository URL: {url}"));
+    }
+    Ok(())
+}
+
+fn is_ssh(url: &str) -> bool {
+    url.starts_with("ssh://")
+}
+
+/// The URL forms a dependency's git source may take: what `check_url` accepts, and `ssh://` URLs,
+/// which are only ever read from Cargo's checkout or db or the Relax store (`no_ssh_fetch`).
+pub fn check_source_url(url: &str) -> Result<(), String> {
+    if check_url(url).is_ok() { return Ok(()); }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host_port = authority.rsplit('@').next().unwrap_or_default();
+        let host = if let Some(ip) = host_port.strip_prefix('[') {
+            ip.split_once(']').map_or("", |(host, _)| host)
+        } else {
+            host_port.split(':').next().unwrap_or_default()
+        };
+        if !host.is_empty() && !host.chars().any(char::is_whitespace) { return Ok(()); }
+    }
+    Err(format!("{url}: Relax takes git dependencies from https URLs, and from ssh:// URLs that Cargo has already fetched (scp-style and file URLs are not supported)"))
+}
+
+/// Refuses to go to the network for an ssh source: Relax never connects over ssh.
+fn no_ssh_fetch(home: &Path, url: &str, what: &str) -> Result<(), String> {
+    if is_ssh(url) {
+        return Err(format!("{url}: {what} is not in Cargo's git cache ({} or {}); Relax reads ssh git sources only from what Cargo fetched and never connects over ssh: run `cargo fetch` first",
+            home.join("git/checkouts").display(), home.join("git/db").display()));
     }
     Ok(())
 }
@@ -360,7 +398,7 @@ fn is_hex(s: &str) -> bool {
 /// Unlocked: the commit the remote's ref names now, fetched unless the store holds it; with the
 /// remote unreachable or offline the store's newest fetch of the ref, said so.
 pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>, offline: bool) -> Result<Oid, String> {
-    check_url(url)?;
+    check_source_url(url)?;
     let path = store::store_path(cache, url);
     let existing = store::Store::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (name, key) = (r.key(), stored_key(url, &r.key()));
@@ -378,11 +416,17 @@ pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>, of
         }
         if super::cargo::import(&home, url, c, &path, &key)? { return Ok(c); }
         if offline { return Err(super::cargo::missing(&home, url, &store::hex(&c))); }
+        no_ssh_fetch(&home, url, &format!("commit {}", store::hex(&c)))?;
         let adv = advertisement(url).map_err(|e| format!("{url}: the locked commit {} is not in the store and the remote is unreachable: {e}", store::hex(&c)))?;
         fetch_commit(&path, existing.as_ref(), url, &adv, c, &key)?;
         return Ok(c);
     }
-    let adv = match if offline { Err(super::cargo::missing(&home, url, &name)) } else { advertisement(url) } {
+    let adv = if offline {
+        Err(super::cargo::missing(&home, url, &name))
+    } else {
+        no_ssh_fetch(&home, url, &format!("ref {name}")).and_then(|()| advertisement(url))
+    };
+    let adv = match adv {
         Ok(a) => a,
         Err(e) => {
             // a commit id (or an abbreviation of one) the store holds needs no remote; a ref is the
@@ -396,7 +440,11 @@ pub fn fetch_source(cache: &Path, url: &str, r: &GitRef, locked: Option<Oid>, of
                 _ => s.index.refs.iter().filter(|x| x.key == key).max_by_key(|x| x.time).map(|x| x.commit),
             });
             let c = kept.ok_or_else(|| format!("{e} (and the store keeps no fetch of {name})"))?;
-            crate::progress::note(&format!("{} unreachable ({e}): {} {} from the store", host(url), url, &store::hex(&c)[..12]));
+            if is_ssh(url) {
+                crate::progress::note(&format!("{url}: using {name} at {} from the store", &store::hex(&c)[..12]));
+            } else {
+                crate::progress::note(&format!("{} unreachable ({e}): {} {} from the store", host(url), url, &store::hex(&c)[..12]));
+            }
             return Ok(c);
         }
     };
@@ -481,6 +529,37 @@ fn fetch_short_rev(path: &Path, existing: Option<&store::Store>, url: &str, adv:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_source_missing_from_cargo_never_reaches_the_network() {
+        let pid = std::process::id();
+        let cache = std::env::temp_dir().join(format!("relax-ssh-guard-{pid}"));
+        let _ = std::fs::remove_dir_all(&cache);
+        std::fs::create_dir_all(&cache).unwrap();
+        let url = format!("ssh://git@relax.invalid/team/relax-ssh-guard-{pid}.git");
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let commit = store::from_hex(rev).unwrap();
+        let offline = offline().unwrap();
+        HTTP_CALLS.with(|calls| calls.set(0));
+        for (r, pin, name) in [(GitRef::Rev(rev.into()), Some(commit), rev), (GitRef::DefaultBranch, None, "HEAD")] {
+            let err = fetch_source(&cache, &url, &r, pin, false).expect_err("a missing ssh source should be refused");
+            assert_eq!(HTTP_CALLS.with(|calls| calls.get()), 0, "missing ssh revision {name} entered http()");
+            assert!(err.contains(&url), "ssh cache miss for {name} should name the URL: {err}");
+            if offline {
+                let missing = super::super::cargo::missing(&super::super::cargo::home(), &url, name);
+                assert!(err.contains(&missing), "offline ssh cache miss for {name} should report Cargo's cache paths: {err}");
+            } else {
+                assert!(err.contains("cargo fetch"), "ssh cache miss for {name} should suggest cargo fetch: {err}");
+            }
+        }
+        for url in ["git@relax.invalid:team/project.git", "file:///a/b", "ssh:///team/project.git", "ssh://git@:22/team/project.git"] {
+            let reason = check_source_url(url).expect_err("unsupported git source should fail URL validation");
+            let err = fetch_source(&cache, url, &GitRef::DefaultBranch, None, false).expect_err("unsupported git source should be refused");
+            assert_eq!(err, reason, "fetch_source should return the URL validation error for {url}");
+            assert_eq!(HTTP_CALLS.with(|calls| calls.get()), 0, "refused URL {url} entered http()");
+        }
+        std::fs::remove_dir_all(cache).unwrap();
+    }
 
     /// A store answers only for the URL it was fetched from: its name holds the URL's whole hash
     /// (with 8 hex digits a URL made to collide shared another's store), and a fetch another URL

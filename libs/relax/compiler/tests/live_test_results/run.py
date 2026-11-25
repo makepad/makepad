@@ -48,6 +48,17 @@ def fail(why, log=None):
     sys.exit(1)
 
 
+def save(path, text):
+    """Saves `text` to `path`. The session sees a save by its stamp (mtime, size): on a file system
+    with coarse times an equal-size save can keep it, so it is saved again once the time has moved."""
+    before = path.stat()
+    path.write_text(text)
+    after = path.stat()
+    if (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size):
+        time.sleep(1.1)
+        path.write_text(text)
+
+
 with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
     root = Path(tmp)
     pkg = root / "pkg"
@@ -102,8 +113,7 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         if got != want:
             fail("first verdict: %s, want %s" % (got, want), log)
         lib = pkg / "src" / "lib.rs"
-        time.sleep(1.1)
-        lib.write_text(lib.read_text().replace("{ 1 }", "{ 2 }"))
+        save(lib, lib.read_text().replace("{ 1 }", "{ 2 }"))
         edited = verdict(first["seq"])
         if edited["group"] <= first["group"] or edited.get("failures") != ["value_is_one"] or edited.get("statics_reset") != 1:
             fail("the edit's verdict: %s" % edited, log)
@@ -114,8 +124,7 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         stale = inspect(pid, "test-results", "group=%d" % first["group"], check=False)
         if any("name" in r for r in stale) or not any(("group %d" % edited["group"]) in r.get("err", "") for r in stale):
             fail("the first group's results after the edit: %s" % stale, log)
-        time.sleep(1.1)
-        lib.write_text(lib.read_text().replace("{ 2 }", "{ unsafe { (16usize as *const u32).read_volatile() } }"))
+        save(lib, lib.read_text().replace("{ 2 }", "{ unsafe { (16usize as *const u32).read_volatile() } }"))
         faulted = verdict(edited["seq"])
         g = faulted["group"]
         if g <= edited["group"] or faulted.get("faulted") != [g] or "reverted" in faulted:
@@ -126,9 +135,8 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         head = [r for r in inspect(pid, *undone["results"].split()) if "test_count" in r]
         if head != [{"group": g, "test_count": 5, "reverted": [g]}]:
             fail("the results after the revert: %s" % head, log)
-        time.sleep(1.1)
         note = pkg / "src" / "note.txt"
-        note.write_text("another note\n")
+        save(note, "another note\n")
         noted = verdict(undone["seq"])
         if not any(str(p).endswith("src/note.txt") for p in noted.get("edit", [])):
             fail("the included file's edit: its verdict names %s" % noted.get("edit"), log)

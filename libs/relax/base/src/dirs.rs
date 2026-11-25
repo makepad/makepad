@@ -85,17 +85,71 @@ pub struct Anchors {
     dirs: Vec<(&'static str, String)>,
     /// std's sources (absolute, normalized)
     std: String,
+    /// (tag, the folder as this checkout's own paths print it), for an anchor whose printed
+    /// spelling is not its normalized one (Windows: `C:\ws` for `c:/ws`): `learn_printed`
+    printed: Vec<(&'static str, String)>,
 }
+
+/// The tag suffix of a marker that names an anchor's printed folder (`Anchors::anchored_printed`):
+/// the rest after it is as printed, its separator first.
+const PRINTED: &str = ":p";
 
 impl Anchors {
     /// This process's: anchors() and `std`, std's source folder.
     pub fn current(std: &str) -> Anchors {
-        Anchors { dirs: anchors().to_vec(), std: absolute_dir(std) }
+        Anchors { dirs: anchors().to_vec(), std: absolute_dir(std), printed: Vec::new() }
     }
 
     /// The anchors `dirs` (each made absolute) with std at `std`.
     pub fn of(dirs: &[(&'static str, &str)], std: &str) -> Anchors {
-        Anchors { dirs: dirs.iter().map(|(tag, dir)| (*tag, absolute_dir(dir))).collect(), std: absolute_dir(std) }
+        Anchors { dirs: dirs.iter().map(|(tag, dir)| (*tag, absolute_dir(dir))).collect(), std: absolute_dir(std), printed: Vec::new() }
+    }
+
+    /// Learns how this checkout's own paths (its program's files, as it spells them) print each
+    /// anchor's folder, where not as its normalized spelling: a path less as many trailing
+    /// components as its part under the anchor has, when that normalizes to the anchor's folder.
+    /// The first such path decides. A path with neither a `\` nor a drive's colon is spelled as
+    /// it normalizes (near enough: a `./` in one stays unlearned): skipped unread.
+    pub fn learn_printed<'a>(&mut self, paths: impl IntoIterator<Item = &'a str>) {
+        let mut open: Vec<usize> = (0..self.dirs.len()).filter(|&k| self.printed_of(self.dirs[k].0).is_none()).collect();
+        for p in paths {
+            if open.is_empty() { break; }
+            if !p.contains('\\') && p.as_bytes().get(1) != Some(&b':') { continue; }
+            let n = crate::vfs::normalize_path(p);
+            let mut learned = Vec::new();
+            open.retain(|&k| {
+                let (tag, dir) = (self.dirs[k].0, self.dirs[k].1.as_str());
+                if n == p || !crate::vfs::is_under_normalized(&n, dir) { return true; }
+                let drop = n[dir.len()..].split('/').filter(|c| !c.is_empty()).count();
+                let mut end = p.len();
+                for _ in 0..drop {
+                    let Some(i) = p[..end].rfind(['/', '\\']) else { return true };
+                    end = i;
+                }
+                if crate::vfs::normalize_path(&p[..end]) != dir { return true; }
+                learned.push((tag, p[..end].to_string()));
+                false
+            });
+            self.printed.extend(learned);
+        }
+    }
+
+    /// The anchors' printed folders that differ from their normalized ones: (tag, folder).
+    pub fn printed(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        self.printed.iter().map(|(tag, dir)| (*tag, dir.as_str()))
+    }
+
+    fn printed_of(&self, tag: &str) -> Option<&str> {
+        self.printed.iter().find(|(t, _)| *t == tag).map(|(_, dir)| dir.as_str())
+    }
+
+    /// `path` under the longest printed folder that starts it (`learn_printed`): that anchor's
+    /// printed marker, then the rest exactly as `path` has it, its separator first. Read back, it
+    /// is the reading checkout's printed folder and that rest. None: no printed folder starts it.
+    pub fn anchored_printed(&self, path: &str) -> Option<String> {
+        self.printed.iter().filter(|(_, dir)| path.strip_prefix(dir.as_str()).is_some_and(|rest| rest.starts_with(['/', '\\'])))
+            .max_by_key(|(_, dir)| dir.len())
+            .map(|(tag, dir)| format!("\0{tag}{PRINTED}\0{}", &path[dir.len()..]))
     }
 
     /// anchors_key() of these anchors.
@@ -119,6 +173,9 @@ impl Anchors {
     pub fn unanchored<'a>(&self, path: &'a str) -> Option<std::borrow::Cow<'a, str>> {
         let Some(marked) = path.strip_prefix('\0') else { return Some(std::borrow::Cow::Borrowed(path)) };
         let (tag, rel) = marked.split_once('\0')?;
+        if let Some(tag) = tag.strip_suffix(PRINTED) {
+            return Some(std::borrow::Cow::Owned(format!("{}{rel}", self.printed_of(tag)?)));
+        }
         let dir = self.dir_of(tag)?;
         Some(std::borrow::Cow::Owned(if rel.is_empty() { dir.to_string() } else { format!("{}/{rel}", dir.trim_end_matches('/')) }))
     }
@@ -132,8 +189,12 @@ impl Anchors {
         while let Some(i) = rest.find('\0') {
             out.push_str(&rest[..i]);
             let (tag, after) = rest[i + 1..].split_once('\0')?;
-            out.push_str(self.dir_of(tag)?.trim_end_matches('/'));
-            out.push('/');
+            if let Some(tag) = tag.strip_suffix(PRINTED) {
+                out.push_str(self.printed_of(tag)?);
+            } else {
+                out.push_str(self.dir_of(tag)?.trim_end_matches('/'));
+                out.push('/');
+            }
             rest = after;
         }
         out.push_str(rest);
@@ -483,13 +544,31 @@ mod tests {
         assert_eq!(super::anchor_in("/a/wsx/f.rs", &anchors), None);
         assert_eq!(super::anchor_in("C:/a/ws/f.rs", &[("ws", "C:/a/ws".to_string())]).as_deref(), Some("\0ws\0f.rs"));
         // read back under another checkout's anchors: its own folders
+        // (made absolute: on Windows on the current drive, `c:/b/ws`)
         let other = super::Anchors::of(&[("ws", "/b/ws"), ("run", "/b/ws/target/run")], "/s");
-        assert_eq!(other.unanchored("\0ws\0src/f.rs").as_deref(), Some("/b/ws/src/f.rs"), "a path");
-        assert_eq!(other.unanchored("\0run\0").as_deref(), Some("/b/ws/target/run"), "an anchor's own folder");
+        let b = super::absolute_dir("/b/ws");
+        assert_eq!(other.unanchored("\0ws\0src/f.rs").as_deref(), Some(format!("{b}/src/f.rs").as_str()), "a path");
+        assert_eq!(other.unanchored("\0run\0").as_deref(), Some(format!("{b}/target/run").as_str()), "an anchor's own folder");
         assert_eq!(other.unanchored("/b/f.rs").as_deref(), Some("/b/f.rs"), "an unanchored path");
         assert_eq!(other.unanchored("\0cargo\0f.rs"), None, "an anchor it lacks");
-        assert_eq!(other.unanchored_text("\0ws\0f.rs:3:9: warning: x\n  --> \0run\0g.rs:1:2").as_deref(), Some("/b/ws/f.rs:3:9: warning: x\n  --> /b/ws/target/run/g.rs:1:2"), "a text");
+        assert_eq!(other.unanchored_text("\0ws\0f.rs:3:9: warning: x\n  --> \0run\0g.rs:1:2").as_deref(), Some(format!("{b}/f.rs:3:9: warning: x\n  --> {b}/target/run/g.rs:1:2").as_str()), "a text");
         assert_eq!((other.unanchored_text("a \0 b"), other.unanchored_text("\0cargo\0f.rs")), (None, None), "a NUL that starts no marker of its anchors");
+        // a checkout whose own paths print its folder otherwise (Windows: `C:\b\ws` for `c:/b/ws`):
+        // learned from its first path that does, stored with the rest as printed, read back in
+        // the reading checkout's own printed folder
+        let windows = |ws: &str, paths: &[&str]| {
+            let mut a = super::Anchors { dirs: vec![("ws", ws.to_string()), ("run", format!("{ws}/target/run"))], std: "c:/s".into(), printed: Vec::new() };
+            a.learn_printed(paths.iter().copied());
+            a
+        };
+        let b = windows("c:/b/ws", &["c:/b/ws/inc.txt", "C:\\b\\ws\\src/f.rs", "C:\\x\\y.rs"]);
+        assert_eq!(b.printed().collect::<Vec<_>>(), [("ws", "C:\\b\\ws")], "a normalized path and a path under no anchor teach nothing");
+        let stored = b.anchored_printed("C:\\b\\ws\\src/f.rs").unwrap();
+        assert_eq!(stored, "\0ws:p\0\\src/f.rs");
+        let d = windows("d:/c/ws", &["D:\\c\\ws\\lib.rs"]);
+        assert_eq!(d.unanchored(&stored).as_deref(), Some("D:\\c\\ws\\src/f.rs"), "a path");
+        assert_eq!(d.unanchored_text(&format!("{stored}:3:9: warning: x")).as_deref(), Some("D:\\c\\ws\\src/f.rs:3:9: warning: x"), "a text");
+        assert_eq!(windows("d:/c/ws", &[]).unanchored(&stored), None, "a checkout that printed no such folder");
     }
 
     /// A run's link (its runs' folder beside it) and a launch link are no loader; each names the

@@ -96,16 +96,7 @@ fn resolve(pcs: &[u64]) -> String {
 fn jit_symbols(u: &crate::jit::Unit, r: &mut super::codever::Resolver, pc: u64) -> Symbols {
     let Some(c) = super::codever::describe_pc(u, r, pc) else {
         // a slot's thunk or lazy stub, a veneer; the runtime's entries
-        if let Some((n, _)) = super::codever::glue_name(u, pc) {
-            return vec![(n, String::new())];
-        }
-        let glue = u.code.read().unwrap_or_else(|e| e.into_inner()).glue_at(pc);
-        return match glue {
-            Some(at) if at == u.enter => vec![("relax::enter_leave".to_string(), String::new())],
-            Some(at) if at == u.lazy_entry => vec![("relax::lazy_entry".to_string(), String::new())],
-            Some(_) => vec![("relax::glue".to_string(), String::new())],
-            None => Vec::new(),
-        };
+        return super::codever::glue_name(u, pc).map_or_else(Vec::new, |(name, _)| vec![(name, String::new())]);
     };
     let own = std_name(&super::display_name(u, c.slot, 0));
     match c.inlined {

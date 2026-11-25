@@ -5,7 +5,7 @@
 # for [u8]` (chacha20 xchacha.rs:62 in a graph with winnow). Prints "impl_view_xcrate: ok" or
 # "impl_view_xcrate: FAILED" (exit 1); the expected line is `cargo run -p ivx-app`'s.
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off CARGO_NET_OFFLINE=true
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet ivx-app 2>>"$ERR")

@@ -11,9 +11,10 @@ publish = false
 include = ["../self_stamp.rs"]
 
 [package.metadata.makepad.platform-gaps]
-windows = { "lib" = "4 of 204 fail there: root resolution (2), progenv, dirs" }
+windows = { "lib" = "3 of 204 fail there: root resolution (2), progenv" }
 
 [dependencies]
+makepad-thread-local = { path = "../../thread_local", version = "1.0.0" }
 makepad-cpu-budget = { workspace = true }
 relax-lex = { workspace = true }
 relax-session = { workspace = true }

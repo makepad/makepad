@@ -41,6 +41,7 @@ mod boot_probe;
 mod build_flags;
 mod change_report;
 mod devhub_cmd;
+mod open_cmd;
 mod script_answers;
 
 pub use relax_boot::Environment as BootEnvironment;
@@ -137,7 +138,7 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     default_launch: Some(checkout_runner),
     package: env!("CARGO_PKG_NAME"),
     manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
-    commands: &[change_report::COMMAND, devhub_cmd::DEVHUB, devhub_cmd::OBSERVE, devhub_cmd::CI],
+    commands: &[change_report::COMMAND, open_cmd::COMMAND, devhub_cmd::DEVHUB, devhub_cmd::OBSERVE, devhub_cmd::CI],
     // Makepad's script and widget derives run natively (tools/run/native_macros)
     native_sets: &[&makepad_run_native_macros::SET],
     // Splash bodies: lexed by the Splash tokenizer, never as Rust
@@ -160,6 +161,8 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     },
     tool: "makepad",
 };
+
+relax_runner::linked_host!(HOST);
 
 /// `makepad` with no arguments and no `runner` launch record (an installation's entry script
 /// writes one): the default app of the checkout this binary was built from, when it has one,
@@ -361,6 +364,7 @@ fn run_host() {
                 makepad_script::end_run();
                 makepad_script_census::end_run();
                 makepad_script_compute::end_run();
+                makepad_script_audio_aot::end_run();
             },
             makepad_script::end_domain,
         );

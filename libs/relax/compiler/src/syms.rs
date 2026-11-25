@@ -111,7 +111,8 @@ pub struct Syms {
     pub vals: u64,
     /// `rir::SymClass` per id (u8): how a backend may encode the symbol (`Env::sym_class`)
     pub classes: u64,
-    /// a byte per id: the made cell of a vtable's data symbol (`SymKind::Made`, made_cell)
+    /// a byte per id: the made cell of a vtable's data symbol (`SymKind::Made`, made_cell); the
+    /// program's code sets it, so a wasm32 program's are in its window (Unit::new)
     made: u64,
     /// kind per id (append-only: read without a lock)
     kinds: crate::conc::AppendVec<SymKind>,
@@ -196,8 +197,9 @@ pub fn vtable_name_keys(name: &str) -> impl Iterator<Item = &str> {
 }
 
 impl Syms {
-    pub fn new(vals: u64, dom0: u64) -> Syms {
-        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), made: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
+    /// `made`: SYM_CAP zeroed bytes, the made cells (made_cell)
+    pub fn new(vals: u64, dom0: u64, made: u64) -> Syms {
+        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), made, kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
     }
 
 
@@ -596,6 +598,12 @@ pub fn set_unit(u: *mut Unit) {
 /// length read as 0; that O2 code went to the disk cache, so every later warm start ran it).
 pub fn ro_read(ctx: usize, s: Sym, n: u32) -> relax_backend::passes::RoRead {
     let u = unsafe { &*(ctx as *const Unit) };
+    if n == relax_backend::passes::FN_QUERY {
+        return match u.syms.kind(s.id) {
+            Some(SymKind::Thunk(id)) if s.off == 0 => relax_backend::passes::RoRead::Fn(id),
+            _ => relax_backend::passes::RoRead::No,
+        };
+    }
     read_obj(u, s, n)
 }
 
@@ -694,10 +702,12 @@ pub(crate) fn data_obj_vtables(u: &Unit, idx: u32, out: &mut Vec<u32>) {
     }
 }
 
-fn obj_thunks(u: &Unit, mut todo: Vec<u32>, out: &mut Vec<u32>, include_vtables: bool) {
-    let mut seen = crate::fxhash::HashSet::default();
+fn obj_thunks(u: &Unit, todo: Vec<u32>, out: &mut Vec<u32>, include_vtables: bool) {
+    obj_thunks_seen(u, todo, out, include_vtables, &mut crate::fxhash::HashSet::default());
+}
+
+pub(crate) fn obj_thunks_seen(u: &Unit, mut todo: Vec<u32>, out: &mut Vec<u32>, include_vtables: bool, seen: &mut crate::fxhash::HashSet<u32>) {
     while let Some(idx) = todo.pop() {
-        if include_vtables && seen.len() > 4096 { break; }
         if !seen.insert(idx) || (!include_vtables && u.syms.is_vtable_obj(idx)) { continue; }
         let Some((_, _, ptrs, _)) = obj_ptrs(u, idx) else { continue };
         for (_, s) in ptrs.iter() {
@@ -711,20 +721,27 @@ fn obj_thunks(u: &Unit, mut todo: Vec<u32>, out: &mut Vec<u32>, include_vtables:
 }
 
 /// Indexes thunk words in the immutable initializer object or the captured initial bytes.
-/// Vtables have their own keys. Mutable storage is read from its declared initial image.
-pub(crate) fn static_initial_thunks(u: &Unit, d: DefId, initial: Option<u64>) -> Vec<u32> {
+/// Mutable storage is read from its declared initial image. `vtables`: the vtables it names are
+/// walked too (the real-time index keys them on their own and passes false).
+pub(crate) fn static_initial_thunks(u: &Unit, d: DefId, initial: Option<u64>, vtables: bool) -> Vec<u32> {
+    let mut slots = Vec::new();
+    static_initial_thunks_seen(u, d, initial, vtables, &mut slots, &mut crate::fxhash::HashSet::default());
+    slots
+}
+
+/// `static_initial_thunks` into `slots`, skipping the symbols in `seen` (data objects, statics,
+/// thunks): one set over many statics' walks, so a graph they share is walked once.
+pub(crate) fn static_initial_thunks_seen(u: &Unit, d: DefId, initial: Option<u64>, vtables: bool, slots: &mut Vec<u32>, seen: &mut crate::fxhash::HashSet<u32>) {
     let root = initial.and_then(|a| u.syms.data_at(a)).or_else(|| {
         u.statics.get(&d).and_then(|&a| u.static_sym_at(a))
     });
     let mut todo: Vec<_> = root.into_iter().collect();
-    let mut seen = crate::fxhash::HashSet::default();
-    let mut slots = Vec::new();
     while let Some(sym) = todo.pop() {
         if !seen.insert(sym.id) { continue; }
         match u.syms.kind(sym.id) {
             Some(SymKind::Thunk(id)) => { slots.push(id); continue; }
             Some(SymKind::Data(i)) => {
-                if u.syms.is_vtable_obj(i) { continue; }
+                if !vtables && u.syms.is_vtable_obj(i) { continue; }
                 if let Some((_, _, ptrs, _)) = obj_ptrs(u, i) {
                     todo.extend(ptrs.iter().filter_map(|(_, s)| *s));
                     continue;
@@ -746,7 +763,6 @@ pub(crate) fn static_initial_thunks(u: &Unit, d: DefId, initial: Option<u64>) ->
             }
         }
     }
-    slots
 }
 
 /// Thunk at one pointer-sized vtable word, if that word names a function.
@@ -1013,15 +1029,17 @@ mod provenance_tests {
         let source = root.join("later.rs");
         std::fs::write(&source, r#"
             extern "C" {
-                fn labs(x: i64) -> i64;
+                fn llabs(x: i64) -> i64;
                 #[link_name = "abs"] fn abs_later(x: i32) -> i32;
             }
         "#).unwrap();
+        // (llabs, not labs: a 32-bit `long` makes Windows' labs the same code as abs, at abs's
+        // address, which names abs_b)
         u.prog.load_crate("later", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
-        let labs = def(&u, "labs");
-        let addr_labs = u.loaded_foreign_addr(labs).unwrap();
-        let sym_labs = provenance(&u, addr_labs).unwrap();
-        assert_eq!(u.syms.foreign_def(sym_labs.id), Some(labs));
+        let llabs = def(&u, "llabs");
+        let addr_llabs = u.loaded_foreign_addr(llabs).unwrap();
+        let sym_llabs = provenance(&u, addr_llabs).unwrap();
+        assert_eq!(u.syms.foreign_def(sym_llabs.id), Some(llabs));
         assert_eq!(provenance(&u, addr), Some(sym));
         assert_eq!(u.syms.foreign_by_addr.lock().unwrap().defs_scanned, u.prog.defs.len());
         std::fs::remove_dir_all(root).unwrap();
@@ -1321,6 +1339,7 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
             relax_backend::rir::Reloc::Sym(s) => describe(u, *s),
             relax_backend::rir::Reloc::Slot(id) => format!("slot:{}", stable_fn_name(u, *id)),
             relax_backend::rir::Reloc::Call(id) => format!("call:{}", stable_fn_name(u, *id)),
+            relax_backend::rir::Reloc::Body(id) => format!("body:{}", stable_fn_name(u, *id)),
             relax_backend::rir::Reloc::Thunk(id) => format!("thunk:{}", stable_fn_name(u, *id)),
             other => format!("{:?}", other),
         };

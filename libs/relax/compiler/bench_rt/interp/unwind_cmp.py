@@ -10,7 +10,7 @@ comparator) aborts, as under rustc (lower.rs abort_unwinding_calls). Each file i
 interpreter in several mixes; the "| " lines must be identical (compared as sorted sets per run,
 since test threads may interleave). Exit status 1 on any difference.
 """
-import os, subprocess, sys, tempfile
+import os, platform, subprocess, sys, tempfile
 
 here = os.path.dirname(os.path.abspath(__file__))
 comp = os.path.normpath(os.path.join(here, "../.."))
@@ -24,6 +24,9 @@ MODES = [
     ("interp-std", {"RELAX_INTERP": "std::,core::,alloc::"}),
     ("nocodegen", {"RELAX_NO_CODEGEN": "1"}),
 ]
+# (no-codegen mode runs on arm64 Apple targets only: jit.rs refuses RELAX_NO_CODEGEN elsewhere)
+if not (sys.platform == "darwin" and platform.machine() == "arm64"):
+    MODES = [m for m in MODES if m[0] != "nocodegen"]
 if os.environ.get("MODES"):
     MODES = [m for m in MODES if m[0] in os.environ["MODES"].split(",")]
 
@@ -54,7 +57,11 @@ for f in files:
     if aborts and rr.returncode != -6:
         print("%-42s rustc did not abort (rc %d)" % (f, rr.returncode))
         bad += 1
+    src = open(path).read()
     for name, env in MODES:
+        # (RELAX_INTERP=::xi_ interprets the fns named xi_*: in a file without any it is the jit run again)
+        if name == "interp-xi" and "fn xi_" not in src:
+            continue
         e = dict(os.environ, RELAX_CACHE="off", **env)
         p = subprocess.run(["nice", "-n", "5", mk, "test", path], cwd=comp, env=e, capture_output=True, text=True, timeout=900)
         got = lines(p.stdout + p.stderr)

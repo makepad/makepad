@@ -140,6 +140,8 @@ impl AdtT {
                     Ok(discr) => discr,
                     // the cycle's E0391 is the report
                     Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::CyclicConst)) => wrapped,
+                    // (adt.rs eval_explicit_discr: a body with errors already reported them)
+                    Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::Tainted)) => wrapped,
                     Err(_) => { errors.push(diagnostic(prog, def, "E0080: evaluation of enum discriminant failed")); wrapped }
                 },
                 VariantDiscr::Relative(_) => {

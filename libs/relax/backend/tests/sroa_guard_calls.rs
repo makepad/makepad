@@ -9,7 +9,10 @@
 //! flushed before it: the call writes all of it, and a flush keeps the cells live around the loop,
 //! which the copy's path paid for (a BVH walk's popped Option stored and copied each iteration).
 //! The same call as a real call in the loop keeps the slots in memory (a flush and reload per
-//! iteration costs more than it saves).
+//! iteration costs more than it saves). The cells read zero until written, but no zero goes at
+//! the entry: the cells only the slow call's read-back writes (an error variant's fields, which
+//! the copy never writes) take theirs where the copy's path meets the call's, so they are not live
+//! through the function, and a cell no write reaches reads a zero of its own.
 use relax_backend::passes;
 use relax_backend::rir::*;
 
@@ -170,4 +173,95 @@ fn a_guarded_copys_result_buffer_is_read_back_after_its_slow_call_but_not_flushe
     let loaded: Vec<Option<u32>> = s[call + 1..].iter().filter_map(|i| if let Inst::Load(_, _, base, _) = i { Some(addrs[base.0 as usize]) } else { None }).collect();
     assert!(loaded.contains(&Some(0)), "the result is read back after it:\n{}", f.dump());
     assert!(!f.blocks[cont as usize].insts.iter().any(|i| matches!(i, Inst::Load(..))), "the continuation reads the result from a register:\n{}", f.dump());
+}
+
+/// `fn(n, out) -> u64`: `rd(n)?`, as `KnotVector::find_span` reads its knots. `rd` (Fn(7), its
+/// 16-byte result buffer first: a tag byte, 0 = Ok, the Ok value at 8, the error's code byte at 1
+/// and its index at 4) is inlined behind its patch flag as `Ok(n)`: the copy never writes the
+/// error's fields. The error return writes the tag, code and index to `out`, and byte 2 of a slot
+/// no one writes. Returns the function, the copy's block and the slow call's.
+fn build_result() -> (Func, u32, u32) {
+    let mut f = Func::new("sroa_guard_result".into(), 0);
+    let (n, out) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params = vec![n, out];
+    f.rets = vec![Cls::I];
+    let r_slot = f.slot(16, 8);
+    f.slots[r_slot as usize].ret = true;
+    let s_slot = f.slot(8, 8);
+    let b: Vec<u32> = (0..6).map(|_| f.block()).collect();
+    let v: Vec<VReg> = (0..13).map(|_| f.vreg(Cls::I)).collect();
+    let (r, s, zero, flag, w, fast, tag, isok, ok, x, code, idx, junk) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12]);
+    push(&mut f, b[0], Inst::SlotAddr(r, r_slot));
+    push(&mut f, b[0], Inst::SlotAddr(s, s_slot));
+    push(&mut f, b[0], Inst::Iconst(zero, 0));
+    push(&mut f, b[0], Inst::Addr(flag, Sym { id: 9, off: 16 }));
+    push(&mut f, b[0], Inst::AtomicLoad(Mem::Int(8, false), AtomOrd::Relaxed, w, flag));
+    push(&mut f, b[0], Inst::ICmpI(Cond::Eq, false, fast, w, 0));
+    f.blocks[b[0] as usize].term = Term::Branch(fast, b[1], b[2]);
+    // the inlined copy: Ok(n)
+    push(&mut f, b[1], Inst::Store(Mem::Int(1, false), r, 0, zero));
+    push(&mut f, b[1], Inst::Store(Mem::Int(8, false), r, 8, n));
+    f.blocks[b[1] as usize].term = Term::Jump(b[3]);
+    // the slow call
+    f.blocks[b[2] as usize].insts.push(Inst::Call(Callee::Fn(7), vec![r, n], vec![]));
+    f.blocks[b[2] as usize].pos.push(SLOW_POS);
+    f.blocks[b[2] as usize].term = Term::Jump(b[3]);
+    // `?`: Ok returns its value, Err returns the error through `out`
+    push(&mut f, b[3], Inst::Load(Mem::Int(1, false), tag, r, 0));
+    push(&mut f, b[3], Inst::ICmpI(Cond::Eq, false, isok, tag, 0));
+    f.blocks[b[3] as usize].term = Term::Branch(isok, b[4], b[5]);
+    push(&mut f, b[4], Inst::Load(Mem::Int(8, false), ok, r, 8));
+    f.blocks[b[4] as usize].term = Term::Ret(vec![ok]);
+    let err = b[5];
+    push(&mut f, err, Inst::Load(Mem::Int(1, false), x, r, 0));
+    push(&mut f, err, Inst::Load(Mem::Int(1, false), code, r, 1));
+    push(&mut f, err, Inst::Load(Mem::Int(4, false), idx, r, 4));
+    push(&mut f, err, Inst::Store(Mem::Int(1, false), out, 0, x));
+    push(&mut f, err, Inst::Store(Mem::Int(1, false), out, 1, code));
+    push(&mut f, err, Inst::Store(Mem::Int(4, false), out, 4, idx));
+    push(&mut f, err, Inst::Load(Mem::Int(1, false), junk, s, 2));
+    push(&mut f, err, Inst::Store(Mem::Int(1, false), out, 2, junk));
+    f.blocks[err as usize].term = Term::Ret(vec![zero]);
+    f.sret_callees = vec![7];
+    f.guard_calls = vec![(SLOW_POS, 7)];
+    f.verify().unwrap();
+    (f, b[1], b[2])
+}
+
+#[test]
+fn cells_take_their_zeros_where_an_unwritten_path_meets_a_write_not_at_the_entry() {
+    let (mut f, copy, slow) = build_result();
+    let consts = |f: &Func| f.blocks[0].insts.iter().filter(|i| matches!(i, Inst::Iconst(..) | Inst::Fconst(..) | Inst::VConst(..))).count();
+    let before = consts(&f);
+    sroa(&mut f, false);
+    assert_eq!(consts(&f), before, "the entry defines no cell:\n{}", f.dump());
+    let s = &f.blocks[slow as usize].insts;
+    let call = s.iter().position(|i| matches!(i, Inst::Call(Callee::Fn(7), ..))).expect("the slow call stays");
+    assert!(!s[..call].iter().any(|i| matches!(i, Inst::Store(..))), "the result buffer is not flushed before the slow call:\n{}", f.dump());
+    assert!(s[call + 1..].iter().filter(|i| matches!(i, Inst::Load(..))).count() >= 3, "the call's result is read back, the error's fields too:\n{}", f.dump());
+    // the stray byte: no write reaches it, so its read takes a zero defined right before it
+    let err = f.blocks.iter().position(|b| matches!(b.term, Term::Ret(_)) && b.insts.iter().any(|i| matches!(i, Inst::Store(_, _, 2, _)))).expect("the error return");
+    let e = &f.blocks[err].insts;
+    let st = e.iter().position(|i| matches!(i, Inst::Store(_, _, 2, _))).unwrap();
+    let Inst::Store(_, _, _, mut val) = e[st] else { unreachable!() };
+    let defs_of = |v: VReg| -> Vec<&Inst> { f.blocks.iter().flat_map(|b| b.insts.iter()).filter(|i| { let mut d = false; relax_backend::regalloc::for_defs(i, |x| d |= x == v); d }).collect() };
+    // (the load became a move of the cell)
+    if let [Inst::Mov(_, src)] = defs_of(val).as_slice() {
+        val = *src;
+    }
+    assert!(matches!(defs_of(val).as_slice(), [Inst::Iconst(_, 0)]), "the unwritten byte reads one zero of its own:\n{}", f.dump());
+    assert!(e[..st].iter().any(|i| matches!(i, Inst::Iconst(d, 0) if *d == val)), "defined in the error return, before its read:\n{}", f.dump());
+    // the error's code and index: written by the slow call's read-back, zero on the copy's path
+    for off in [1, 4] {
+        let Some(Inst::Store(_, _, _, v)) = e.iter().find(|i| matches!(i, Inst::Store(_, _, o, _) if *o == off)) else { panic!("the error's field at {off} is stored") };
+        let mut cell = None;
+        if let [d] = defs_of(*v).as_slice() {
+            relax_backend::regalloc::for_uses(d, |u| cell = Some(u));
+        }
+        let cell = cell.expect("the field is read from its cell");
+        let defines = |b: u32| f.blocks[b as usize].insts.iter().any(|i| { let mut d = false; relax_backend::regalloc::for_defs(i, |x| d |= x == cell); d });
+        assert!(!defines(0), "the field at {off} gets no zero at the entry:\n{}", f.dump());
+        assert!(f.blocks[copy as usize].insts.iter().any(|i| matches!(i, Inst::Iconst(d, 0) if *d == cell)), "the field at {off} reads zero on the copy's path:\n{}", f.dump());
+        assert!(defines(slow), "the field at {off} is read back after the slow call:\n{}", f.dump());
+    }
 }

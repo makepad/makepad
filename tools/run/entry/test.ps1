@@ -1,7 +1,8 @@
 # First-run test of makepad.bat in a fresh folder against a local release service serving tiny
 # fixture loaders (the same fixture as test.sh): ctrl+c while Rust downloads (in a pseudo console),
-# first run, unchanged run (no rebuild), changed loader (rebuild), broken loader (error, log excerpt
-# and path).
+# first run, unchanged run (no rebuild), changed loader (rebuild), the coding-agent form (makepad.ps1
+# fetching makepad.bat and running `makepad.bat open fab`), broken loader (error, log excerpt and
+# path).
 # Usage: powershell -NoProfile -File test.ps1 BASE_DIR   (BASE_DIR: a new, empty folder)
 # Never run it against an existing installation or on a machine someone works on.
 param([Parameter(Mandatory = $true)][string]$Base)
@@ -27,7 +28,7 @@ function Publish($text, $broken) {
         'fx1/launcher.rs' = "fn main() {}`n"
         # makepad.bat compiles the assembler rust-mingw's dlltool needs from the loader's source
         'fx1/tools/run/entry/assemble.rs' = [IO.File]::ReadAllText("$here\assemble.rs")
-        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"RELAX_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {}`", dep_a::text(), record.is_file());`n}`n" })
+        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"RELAX_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {} args: {:?}`", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());`n}`n" })
     }
     foreach ($k in $files.Keys) { [IO.File]::WriteAllText("$zipdir\$($k.Replace('/', '\'))", $files[$k], $utf8) }
     $zip = "$Base\www\public\app\runner\fx1\loader.zip"
@@ -43,6 +44,15 @@ function Publish($text, $broken) {
 # the entry script as the server sends it: CRLF line ends
 $bat = (Get-Content -Raw -Encoding UTF8 "$here\makepad.bat") -replace "`r?`n", "`r`n"
 [IO.File]::WriteAllText("$Base\home\makepad.bat", $bat, $utf8)
+# the one-line PowerShell entry and the download it fetches (makepad.bat in a ZIP), where the site
+# serves them
+New-Item -ItemType Directory -Force -Path "$Base\batzip", "$Base\www\runner" | Out-Null
+[IO.File]::WriteAllText("$Base\batzip\makepad.bat", $bat, $utf8)
+Push-Location "$Base\batzip"
+& tar.exe -a -cf "$Base\www\runner\windows.zip" makepad.bat
+Pop-Location
+Move-Item "$Base\www\runner\windows.zip" "$Base\www\runner\windows"
+[IO.File]::WriteAllText("$Base\www\runner\windows.ps1", [IO.File]::ReadAllText("$here\makepad.ps1"), $utf8)
 
 Publish 'one' $false
 $port = 20000 + (Get-Random -Maximum 20000)
@@ -56,6 +66,7 @@ $server = Start-Job -ArgumentList $Base, $port -ScriptBlock {
         $f = Join-Path "$base\www" ($c.Request.Url.AbsolutePath.TrimStart('/').Replace('/', '\'))
         if (Test-Path $f -PathType Leaf) {
             $b = [IO.File]::ReadAllBytes($f); $c.Response.ContentLength64 = $b.Length
+            if ($f.EndsWith('.ps1')) { $c.Response.ContentType = 'text/plain; charset=utf-8' }
             $c.Response.OutputStream.Write($b, 0, $b.Length)
         } else { $c.Response.StatusCode = 404 }
         $c.Response.Close()
@@ -248,6 +259,22 @@ try {
     Check 'rollback: line' $r6 'Went back to src: the new runner did not confirm'
     Check 'rollback: src binary runs' $r6 'fixture loader: two'
     Check 'rollback: pointers' ("" + (-not (Test-Path "$loader\pending")) + (-not (Test-Path "$loader\current")) + (Test-Path "$loader\rolled-back")) 'TrueTrueTrue'
+    # The coding-agent form: the one-line PowerShell entry, as from the site, fetches makepad.bat in
+    # its ZIP and runs `makepad.bat open fab`, which hands over to the loader; the stable entry
+    # makepad.cmd runs it again; a mistyped id stops before setup.
+    $line = "& ([scriptblock]::Create((irm http://127.0.0.1:$port/runner/windows.ps1))) open fab"
+    $o1 = & powershell -NoProfile -c $line 2>&1 | Out-String; $codeO1 = $LASTEXITCODE
+    "=== open1 (exit $codeO1)"; $o1
+    Check 'open: exits 0' "$codeO1" '^0$'
+    Check 'open: makepad.bat fetched' (Test-Path "$Base\install\makepad.bat") 'True'
+    Check 'open: hands over' $o1 'Handing over to makepad open fab\.'
+    Check 'open: the loader gets open fab' $o1 'fixture loader: two launch record present: true args: \["open", "fab"\]'
+    $o2 = & cmd.exe /d /c "`"$Base\install\makepad.cmd`" open fab 2>&1" | Out-String
+    "=== open2 (exit $LASTEXITCODE)"; $o2
+    Check 'open: the stable entry runs the loader' $o2 'fixture loader: two launch record present: true args: \["open", "fab"\]'
+    $o3 = & cmd.exe /d /c "`"$Base\home\makepad.bat`" open fab.x 2>&1" | Out-String; $codeO3 = $LASTEXITCODE
+    "=== open3 (exit $codeO3)"; $o3
+    Check 'open: a bad id refused' "$codeO3 $o3" '^1 .*Invalid app id'
     Publish 'three' $true
     $r4 = Run 'run4'
     Check 'broken loader: nonzero exit' "$script:code" '^[1-9]'

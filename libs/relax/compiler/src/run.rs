@@ -216,9 +216,9 @@ pub(crate) fn host_end_app() {
     }
 }
 
-/// The host has no run and waits for a fix ([`MainHost::held`]); false without a hosted run.
+/// A test harness or the app host ([`MainHost::held`]) waits for a source fix.
 pub(crate) fn host_held() -> bool {
-    MAIN_HOST.get().filter(|_| HOSTED_RUN.load(Ordering::Acquire)).is_some_and(|host| (host.held)())
+    crate::harness::live::held() || MAIN_HOST.get().filter(|_| HOSTED_RUN.load(Ordering::Acquire)).is_some_and(|host| (host.held)())
 }
 
 /// The host starts the next run in this process (`run_end`), whose boot is due (`boot_begins`):
@@ -409,6 +409,7 @@ fn run_ended(code: i32, json: bool, args: &[String], start: Instant) -> i32 {
         crate::hot_failure::restart_failed(&format!("the replacement test harness ended before it started (exit {code})"));
         crate::hot_failure::pump();
     }
+    let code = crate::check::finish_app_check(code);
     let code = crate::hot_failure::verdict(code).code();
     crate::tui::exit_code(code);
     if let Some(exit) = EXIT_SUMMARY.get() {
@@ -462,6 +463,20 @@ fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> boo
     let hal = units.units.iter().any(|u| unitgraph::window_host(&unitgraph::manifest_dir_of(&u.src_path)));
     *BOOT_UNITS.lock().unwrap() = Some((package, flags, units));
     hal
+}
+
+/// The manifest folders of the app's crates as the last build of this run knew them (the app scope's
+/// crates and the launched package's): empty until a build has its unit graph.
+static APP_DIRS: relax_session::sync::Mutex<Vec<std::path::PathBuf>> = relax_session::sync::Mutex::new(Vec::new());
+
+/// The folders in which a save can fix this run's build or app check: the held host watches them.
+pub fn app_dirs() -> Vec<std::path::PathBuf> {
+    APP_DIRS.lock().unwrap().clone()
+}
+
+/// Before this live test boot has a graph, the selected package alone can wake it.
+pub(crate) fn watch_test_package(dir: &str) {
+    *APP_DIRS.lock().unwrap() = vec![dir.into()];
 }
 
 /// The unit graph `hosted_program` resolved for the boot, taken by the boot's resolve.
@@ -771,6 +786,24 @@ pub(crate) fn resolve_package(
     let units = with_sysroot_proc_macro(units, std_dir);
     let t_load = Instant::now();
     let mut g = unitgraph::load(&units, check_only, options.allow_c)?;
+    // the app crates' folders, for the host that waits for a fix after a failed build or check
+    // (`app_dirs`), recorded before anything is parsed or compiled: the same crates as the app
+    // scope (`gandalf_app_roots`), each by its manifest folder, and the launched package's
+    if boot {
+        let root_dir = unitgraph::manifest_dir_of(&g.crates[g.root].src_path);
+        let mut dirs: Vec<std::path::PathBuf> = crate::reload::gandalf_app_roots(&resolved_units, &root_dir).iter()
+            .map(|r| unitgraph::manifest_dir_of(r)).chain(std::iter::once(root_dir)).filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from).collect();
+        dirs.sort();
+        dirs.dedup();
+        if crate::harness::live::enabled() {
+            // The manifest may lie outside the source root. Keep the package first for the next exec.
+            let package = std::path::PathBuf::from(&g.pkg[g.root].0);
+            dirs.retain(|dir| dir != &package);
+            dirs.insert(0, package);
+        }
+        *APP_DIRS.lock().unwrap() = dirs;
+    }
     // cargo's `[env]` configuration of the workspace, for every crate's compile-time environment
     // and every build script (a build script's own run has it in its process environment)
     if std::env::var_os("RELAX_SCRIPT_DEPTH").is_none() {
@@ -1032,6 +1065,34 @@ fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::S
 }
 
 
+/// The cold start's one line: why the disk cache did not give a warm start, by level -- the
+/// front (the resolved program: `restore_collected`'s refusal), the crates' code stores (each
+/// store's name holds its crate's key: a missing one is a key that changed) and the startup
+/// manifest (its key: the worktree, the codegen configuration and the root crate's view).
+fn cold_start_line(c: &crate::cache::Cache, crates: usize, restored: usize, front_why: Option<&str>) -> String {
+    let mut why = Vec::new();
+    match front_why {
+        Some(w) => why.push(format!("front: not restored ({w})")),
+        None if restored < crates => why.push(format!("front: {restored} of {crates} crates restored")),
+        None => {}
+    }
+    if (c.stats.packs as usize) < crates {
+        why.push(format!("code: {} of {} crates have a store under their current key", c.stats.packs, crates));
+    }
+    if c.stats.packs_rejected > 0 {
+        why.push(format!("code: {} stores rejected (their inputs changed, or their crate's front did not restore)", c.stats.packs_rejected));
+    }
+    if !c.has_startup_manifest() {
+        why.push("startup manifest: none under this key (a first run, or the worktree, the codegen configuration or the root crate's view changed)".to_string());
+    } else if c.manifest_missing > 0 {
+        why.push(format!("startup manifest: stale ({} of its {} slots' entries are gone)", c.manifest_missing, c.manifest.len()));
+    }
+    if why.is_empty() {
+        why.push("the front records were not all restored".to_string());
+    }
+    format!("relax cache: cold start: {}", why.join("; "))
+}
+
 /// std's folder in one spelling, its canonical one, set back at the loader's start, after the
 /// inherited mounts are installed and before any thread runs (a set_var races every thread that
 /// reads the environment; a run's compile thread runs beside its host's). std's source paths --
@@ -1058,6 +1119,7 @@ pub fn canonical_std_env() {
 }
 
 fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session: Option<&mut Option<crate::serve::Session>>) -> i32 {
+    let boot_start = std::time::SystemTime::now();
     // Restore before resolution so a failed replacement compile is a JIT verdict too.
     if crate::run_end::run_input("RELAX_JIT_RECOVERY").is_some() {
         crate::hot_failure::enable();
@@ -1306,6 +1368,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // the boot progress line (tui.rs): a terminal run of a program, with nothing asking for plain output
     unsafe { std::env::remove_var("RELAX_PROGRESS") };
     if (live_tests && (!harness || no_live || check)) || (test_restart.is_some() && !live_tests) { return usage(); }
+    let test_save = live_tests.then(|| crate::reload::host::TestSave::at_boot(boot_start));
     if live_tests {
         if let Err(e) = crate::harness::live::start(test_restart) {
             eprintln!("relax test: {e}");
@@ -1576,6 +1639,17 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         verbose!("relax: package {} ({}), std {}", package, if cargo_flags.is_empty() { "default features".to_string() } else { cargo_flags.join(" ") }, std_dir);
     }
 
+    if live_tests && app_dirs().is_empty() {
+        if let Ok(dir) = crate::resolve::package_dir(sess, &workspace, &package) { watch_test_package(&dir); }
+    }
+    let compile_failure = |code, errors: &[String]| {
+        if let Some(save) = &test_save {
+            let dirs = app_dirs();
+            if dirs.is_empty() && matches!(save, crate::reload::host::TestSave::Tree(_)) { return code; }
+            crate::harness::live::hold(dirs, save, errors);
+        }
+        code
+    };
     let Resolved { units, g, order, cfgs, live_inputs } = match resolve_package(sess, &workspace, &package, &cargo_flags, &units_json, &target_dir, &std_dir, ResolveFor::Boot, check) {
         Ok(r) => r,
         Err(ResolveError::ProvidedChanged(change)) => return offer_boot_update(&package, change),
@@ -1584,7 +1658,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             eprintln!("relax: {e}");
             // a launcher following the start (--report-to) learns why it ended
             report_failed(&e, 1);
-            return 1;
+            return compile_failure(1, &[e]);
         }
     };
     // a test's package binaries where cargo puts them, above its own executable's `deps/`
@@ -1608,9 +1682,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                     // both spellings, as compared: a mismatch on one OS only (a Windows node) is
                     // read off this line
                     let targets: Vec<String> = g.bins.iter().map(|&ci| crate::vfs::canonical(&g.crates[ci].src_path)).collect();
-                    eprintln!("relax: --subject {path}: no test target of {package}'s graph has that source (compared as {}; the graph's targets: {})",
+                    let error = format!("--subject {path}: no test target of {package}'s graph has that source (compared as {}; the graph's targets: {})",
                         crate::vfs::canonical(path), if targets.is_empty() { "none".to_string() } else { targets.join(", ") });
-                    return 101;
+                    eprintln!("relax: {error}");
+                    return compile_failure(101, &[error]);
                 }
             },
             None if g.bins.len() > 1 => {
@@ -1771,6 +1846,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         Some(images) => warm_front(images, sess, &pre, check_restore),
         None => Err("this run keeps no front images".to_string()),
     };
+    // why the front image did not restore (the cold start's line names it)
+    let front_why = restored.as_ref().err().cloned();
     let restored = if verify_collected {
         // (why there is none: the check that refused it, said on every run)
         let why = match &restored {
@@ -1806,7 +1883,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if let Err(e) = crate::macro_reg::prewarm(sess) {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "macro")); }
             eprintln!("relax: {e}");
-            return 1;
+            return compile_failure(1, &[e]);
         }
     }
     // the whole program came from the collected store: it holds this program already. So it does
@@ -1856,6 +1933,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 Ok(x) => x,
                 Err(e) => {
                     if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&e, "parse")); }
+                    // (Relax's own std: no save of the program's sources fixes it, so no hold)
                     eprintln!("relax: std: {}", e); return 1;
                 }
             }
@@ -1919,6 +1997,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                         watch_load_errors.push(crate::diag::record(e.clone(), d));
                     } else if crate::diag::enabled() { crate::diag::emit(&crate::diag::from_legacy(&e, "parse")); }
                     eprintln!("relax: load error {}: {}", c.name, e);
+                    // (a held live test reports them; `--watch` recorded them above)
+                    if live_tests && !watch { watch_load_errors.push(format!("{}: {e}", c.name)); }
                     load_errors += 1;
                 }
             }
@@ -1962,7 +2042,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // edit's; relax issues 144 and 223). It reads the registered graph, the same however the load
     // went: a load that restored those crates ran no hosted macro of theirs. No world: nothing to
     // keep, and none is built for it. The session holds it from then on either way.
-    let keep_world = live_tests && {
+    let keep_world = live_tests && crate_of[subject_ci] != u32::MAX && {
         let own: Vec<&str> = crate::check::workspace_crates(&prog, crate_of[subject_ci]).into_iter().map(|k| prog.syms.str(prog.crates[k as usize].name)).collect();
         crate::macro_reg::hosted_reachable(&own)
     };
@@ -2030,7 +2110,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if harness || plain_test {
             eprintln!("relax: {crates} did not load (the load errors above), so the tests do not run");
             // its other targets (test_pkg.rs) would end the same way
-            return makepad_remote::hot::LOAD_ERROR_EXIT;
+            return compile_failure(makepad_remote::hot::LOAD_ERROR_EXIT, &watch_load_errors);
         }
         eprintln!("relax: {crates} did not load (the load errors above), so the run stops before `main`; `--watch` runs it anyway");
         return 1;
@@ -2047,7 +2127,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let root = crate_of[subject_ci];
     if root == u32::MAX {
         eprintln!("relax: the package root did not load");
-        return 1;
+        return compile_failure(1, &["the package root did not load".into()]);
     }
     // Collected-image loading can reorder crates; use the loader's final mapping.
     let also: Vec<u32> = also_graph.iter().map(|&ci| crate_of[ci]).collect();
@@ -2079,10 +2159,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             crate::run::first_report(0, e);
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(e, "resolve")); }
         }
-        eprintln!("relax: {} name resolution errors (first {}):", prog.errors.len(), max_err.min(prog.errors.len()));
-        for e in prog.errors.iter().take(max_err) {
-            eprintln!("  {}", e);
-        }
     }
 
     drop(mem_g);
@@ -2106,6 +2182,15 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let checked = if check && !boundary_options {
         crate::check::checked_crates(&prog, root, watch || root_only || session.is_some(), selftest || workspace_check, &also)
     } else { Vec::new() };
+    // the load's resolution errors, but a check's crates' own: the check prints those with its
+    // other errors, each once (as cargo check does)
+    let shown = crate::check::other_resolve_errors(&prog, &checked);
+    if !shown.is_empty() {
+        eprintln!("relax: {} name resolution errors (first {}):", shown.len(), max_err.min(shown.len()));
+        for e in shown.iter().take(max_err) {
+            eprintln!("  {}", e);
+        }
+    }
     // a one-shot check reuses the verdicts of the crates whose inputs did not change since a
     // check that passed (check_reuse.rs); when none changed, that check's diagnostics are all
     // this one prints
@@ -2337,7 +2422,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // static failed ("foreign static not found in the loaded libraries", relax#75) where the
         // run binds it.
         if selftest {
-            match link_libraries(&u.prog, &g.link_libs, g.native.as_ref(), 0, None) {
+            match link_libraries(&u.prog, &g.link_libs, &g.link_search, g.native.as_ref(), None) {
                 Ok((_, missing, _)) => if !missing.is_empty() { verbose!("relax: libraries not found: {:?}", missing); },
                 Err(error) => {
                     eprintln!("relax: {error}");
@@ -2347,7 +2432,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
         // the collected image is the program as its load left it, before the bodies make their
         // types (a run's boot snapshot): the record at the end encodes this snapshot
-        let boot_cache = if selftest { None } else { check_boot_cache(&mut u, options) };
+        let mut boot_cache = if selftest { None } else { check_boot_cache(&mut u, options) };
         let (code, check_foreign) = match reuse.as_mut() {
             Some(r) => crate::check::check_crate_reusing(&mut u, root, &checked, pre, r),
             None => crate::check::check_crate(&mut u, root, &checked, pre, selftest),
@@ -2367,7 +2452,22 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if !selftest {
             let t = Instant::now();
             let std_crates = crate::check::std_crates(&u.prog);
+            // std's clean verdicts are looked up and stored in the unit's cache, as a run's app
+            // check keeps its own (check.rs prepare_check). A check's unit has none: it is lent the
+            // cache this check writes its front images with (opened here when it records no
+            // collected image), whose verdicts are written right after (record_check_front may
+            // write nothing); else every check that repeats no passing one checks all of std again.
+            let lent = u.cache.is_none() && match boot_cache.take().map(Ok).or_else(|| crate::cache::mode_from_env(options).map(|m| crate::cache::Cache::open_collected(&*u, m, None))) {
+                Some(Ok(c)) => { u.cache = Some(Box::new(crate::cache::CacheCell::new(c))); true }
+                Some(Err(e)) => { verbose!("relax check: std's verdicts not looked up: {e}"); false }
+                None => false,
+            };
             let errors = crate::check::run_check_crates(&mut *u, &std_crates, false);
+            if let Some(c) = if lent { u.cache.take() } else { None } {
+                let mut c = (*c).into_inner();
+                if let Err(e) = c.flush() { verbose!("relax check: std's verdicts not written: {e}"); }
+                boot_cache = Some(c);
+            }
             for e in &errors {
                 if crate::diag::enabled() { crate::diag::emit(&crate::diag::from_legacy(e, "typeck")); } else { eprintln!("{e}"); }
             }
@@ -2457,7 +2557,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
 
     // ---- the libraries the build scripts link (#[link] blocks load on the first miss)
     let t = Instant::now();
-    let (n_link, missing, callbacks) = match link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0, None) {
+    let (n_link, missing, callbacks) = match link_libraries(&prog, &g.link_libs, &g.link_search, g.native.as_ref(), None) {
         Ok(linked) => linked,
         Err(error) => {
             eprintln!("relax: {error}");
@@ -2491,7 +2591,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 eprintln!("relax: {e}");
                 // a launcher following the start (--report-to) learns why it ended, as from the resolve
                 report_failed(&e, 1);
-                return 1;
+                return compile_failure(1, &[e]);
             }
             Ok(()) => {}
         }
@@ -2512,7 +2612,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         verbose!("relax collected: verified restored graph against rebuilt graph");
     }
     let enum_errors = u.tcx.check_enum_discriminants(&u.prog, root_crate);
-    if !enum_errors.is_empty() {
+    // The test check reports a failed discriminant with its other item errors, as rustc carries on past it.
+    if test_subjects.is_empty() && !enum_errors.is_empty() {
         for error in enum_errors {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(&error, "typeck")); }
             eprintln!("error: {}", error);
@@ -2549,6 +2650,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 } else if c.has_startup_manifest() && c.manifest_missing > 0 {
                     verbose!("relax cache: startup manifest stale: {} of its {} slots' entries are gone", c.manifest_missing, c.manifest.len());
                 }
+                if !warm {
+                    verbose!("{}", cold_start_line(&c, u.prog.crates.len(), restored_crates, front_why.as_deref()));
+                }
                 verbose!("relax cache: {:?}, {} packs ({} rejected), {} code stores, {} entries, opened in {:.1} ms (interfaces {:.1} ms)", mode, c.stats.packs, c.stats.packs_rejected, c.stats.code_stores, c.stats.index_entries, c.stats.open_ns as f64 / 1e6, c.stats.iface_ns as f64 / 1e6);
                 // warm: this program ran with this cache before (its startup manifest, recorded
                 // after an earlier run reached main); entries other processes of this launch wrote
@@ -2570,7 +2674,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let t_check = Instant::now();
         // after the cache is open: subjects whose check is stored are not checked again, nor
         // are a test's run of its own binary's (its parent checked them and printed the warnings)
-        let n = check_test_subjects(u, root, &test_subjects, harness, self_exec);
+        let errors = check_test_subjects(u, root, &test_subjects, harness, self_exec);
+        let n = errors.len();
         // (what the tests' own code resolves and expands from now on is no lint's input)
         if test_lints { relax_types::macros::uses::record(false); relax_front::program::set_record_import_uses(false); }
         phase("test check", t_check);
@@ -2578,7 +2683,15 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             let names: Vec<String> = test_subjects.iter().map(|&k| u.prog.syms.str(u.prog.crates[k as usize].name).to_string()).collect();
             eprintln!("error: could not compile {} (test) due to {} previous error{}: no test ran (`{tool} test` fails as `cargo test` does on code rustc rejects; if `cargo test` builds it, this is a Relax bug)",
                 names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "), n, if n == 1 { "" } else { "s" }, tool = crate::tool_name());
-            return 101;
+            return compile_failure(101, &errors);
+        }
+        // A stored clean verdict skips the item checks, but the tests still need the discriminant values.
+        if !enum_errors.is_empty() {
+            for error in &enum_errors {
+                if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(error, "typeck")); }
+                eprintln!("error: {}", error);
+            }
+            return compile_failure(1, &enum_errors);
         }
         if !self_exec {
             let names = g.crates.iter().enumerate().filter(|(ci, c)| !c.registry && crate_of[*ci] != u32::MAX).map(|(ci, _)| (crate_of[ci], g.pkg[ci].1.clone())).collect();
@@ -2591,8 +2704,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     } else if !harness && !exports_mode && hal_window_pending() {
         // an app the HAL hosts: its own crates are type-checked whole beside main (the lookups and
-        // the skipped files' loads here); its first window frame waits for that check and an error
-        // ends the run before it (check.rs start_app_check). Every body is still checked before it
+        // the skipped files' loads here). An error ends the run (check.rs start_app_check).
+        // Every body is still checked before it
         // first runs: a lazy compile checks its body, and a compile error ends the run.
         let t_check = Instant::now();
         let app = crate::check::app_crates(&u.prog, root);
@@ -2819,14 +2932,14 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 report("error", e);
                 eprintln!("{}", e);
             }
-            eprintln!("error: could not compile `{}` due to {} previous error{}: stopped before its first frame (`{tool} run` checks the app's own crates whole beside main, as cargo builds them)",
+            eprintln!("error: could not compile `{}` due to {} previous error{} (`{tool} run` checks the app's own crates whole beside main, as cargo builds them)",
                 name, errors.len(), if errors.len() == 1 { "" } else { "s" }, tool = crate::tool_name());
         }));
     }
     relax_codegen::fncost::mark("boot done, calling main");
     // a restarted run's program is in and its main is called next: the restart completed (a hosted
     // app's, at its domain's load)
-    if !HAL_RUN.load(Ordering::Acquire) { crate::hot_failure::restored(); }
+    if !live_tests && !HAL_RUN.load(Ordering::Acquire) { crate::hot_failure::restored(); }
     let main_ms = crate::clock::ms_since_start();
     MAIN_START_MS.store(main_ms as u64, Ordering::Relaxed);
     crate::boot_stats::main_called();
@@ -2907,12 +3020,14 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // start: jit::MainHeld.)
     let deps = {
         let _held = jit::MainHeld::new();
-        crate::check::finish_test_deps(0)
+        crate::check::test_dep_errors()
     };
-    if deps != 0 {
+    if !deps.is_empty() {
         eprintln!("error: no test ran: a path dependency does not compile (`{tool} test` fails as `cargo test` does on code rustc rejects)", tool = crate::tool_name());
-        return 101;
+        return compile_failure(101, deps);
     }
+    // A restarted harness can still refuse the edit until every path dependency passed.
+    if live_tests { crate::hot_failure::restored(); }
     // a build script's run (relax-front unitgraph.rs run_one): confined when its parent and this
     // run, deciding over the same units (`script_confined`), both say so; a run where the two
     // differ is refused
@@ -3341,18 +3456,20 @@ pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks, owner: Optio
 }
 
 /// Loads the libraries the build scripts link (one a confined script named never from the working
-/// folder: os/proc.rs `load_library_outside_cwd`) and the ones `#[link]` blocks of files from
-/// `first_file` on name: (how many, the optional ones not found, the native library's callbacks
+/// folder: os/proc.rs `load_library_outside_cwd`) and the ones `#[link]` blocks of the files of
+/// `crates` name (None: every crate): (how many, the optional ones not found, the native library's callbacks
 /// to bind once the unit is made). A native bundle's load failure is fatal, with the loader's
 /// diagnostic and the crates it carries, and so is a callback the program does not define.
 /// The native library's callbacks are the fns of `crates` (a domain's; None: any).
-pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool, bool)], native: Option<&crate::native::NativeLib>, first_file: usize, crates: Option<&std::collections::HashSet<u32>>) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
+pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool, bool)], link_search: &[String], native: Option<&crate::native::NativeLib>, crates: Option<&std::collections::HashSet<u32>>) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
     let mut missing = Vec::new();
     // no-codegen mode: nothing is linked at run time -- native code is the host binary's, and
     // the program reaches only the symbols the host exports (jit.rs foreign_addr)
     if prog.session.options.no_codegen {
         return Ok((0, missing, NativeCallbacks::default()));
     }
+    // load_library looks for Windows import libraries in the build scripts' folders.
+    crate::os::proc::add_link_search(link_search);
     // `--allow-c`: the native dependencies' library (front native.rs), its symbols global
     let mut callbacks = NativeCallbacks::default();
     if let Some(n) = native {
@@ -3375,7 +3492,12 @@ pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(Strin
     // with #[link] (frameworks register their Objective-C classes and protocols on load, and
     // the program looks those up by name at run time)
     let mut n_link = link_libs.len();
-    for (name, fw) in link_attr_libs(prog, first_file) {
+    let t_scan = Instant::now();
+    let attr_libs = link_attr_libs(prog, crates);
+    if crate::preload::trace() {
+        eprintln!("boot-trace: link scan of {} crate(s) {:.2} ms ({} libraries)", crates.map_or(prog.crates.len(), |c| c.len()), t_scan.elapsed().as_secs_f64() * 1e3, attr_libs.len());
+    }
+    for (name, fw) in attr_libs {
         if link_libs.iter().any(|l| l.0 == name && l.1 == fw) || provided_static(&name) {
             continue;
         }
@@ -3462,8 +3584,8 @@ static TESTS_NATIVE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// targets) are type- and borrow-checked whole before any test runs, as `cargo test` compiles
 /// them first: an unresolved import or a type error anywhere in them fails the run, not only the
 /// test that reaches it (a test whose body did not compile used to fail alone at run time while
-/// the others passed). Prints the errors as `makepad check` does; returns their count.
-pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], harness: bool, self_exec: bool) -> usize {
+/// the others passed). Prints the errors as `makepad check` does and returns them.
+pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], harness: bool, self_exec: bool) -> Vec<String> {
     use crate::borrowck::lazy::StoredVerdict;
     let t0 = Instant::now();
     u.tcx.check_coherence_of(&u.prog, Some(subjects));
@@ -3502,8 +3624,8 @@ pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], har
             if keys.iter().all(|&k| matches!(c.borrowck_stored(k), Some(StoredVerdict::Clean))) { Some(Vec::new()) } else { c.test_warnings(keys) }
         })
     };
-    let (n, warnings) = match &stored {
-        Some(w) => (0, w.clone()),
+    let (errors, warnings) = match &stored {
+        Some(w) => (Vec::new(), w.clone()),
         None => crate::check::check_subjects(u, root, subjects, pre, harness),
     };
     // the summary on every run, a clean one too ("0 warnings"), so a run that checked and found
@@ -3520,7 +3642,7 @@ pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], har
     verbose!("relax: test check: coherence {:.0} ms, skipped files' load {:.0} ms ({} files), check {:.0} ms{}",
         (t1 - t0).as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, u.prog.files.len() - files, t2.elapsed().as_secs_f64() * 1e3,
         match &stored { Some(_) if self_exec => " (its parent's)", Some(w) if w.is_empty() => " (its crates' clean verdicts are stored)", Some(_) => " (its crates' verdicts are stored, with their warnings)", None => "" });
-    if n == 0 && stored.is_none() {
+    if errors.is_empty() && stored.is_none() {
         if let (Some(keys), Some(c)) = (keys, u.cache.as_ref()) {
             let c = unsafe { &mut *c.get() };
             if warnings.is_empty() {
@@ -3530,7 +3652,7 @@ pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], har
             }
         }
     }
-    n
+    errors.into_iter().map(|d| format!("{}:{}:{}: error[{}]: {}", d.file, d.line, d.col, d.code, d.message)).collect()
 }
 
 /// The variables a run sets for its program that name that run: its start, when main was
@@ -3582,12 +3704,16 @@ fn link_trace() -> bool {
 }
 
 /// (name, framework) of every `#[link(name = .., kind = ..)]` on an extern block whose items
-/// are active (got definitions), or an empty link-only block without a cfg; files from
-/// `first_file` on.
-pub(crate) fn link_attr_libs(prog: &crate::program::Program, first_file: usize) -> Vec<(String, bool)> {
+/// are active (got definitions), or an empty link-only block without a cfg, in the files of the
+/// selected crates (None: every crate). A domain selects all of its crates, the ones another load
+/// recorded included: a load stopped before its link leaves its recorded crates unlinked, and a
+/// library loaded twice is the one already loaded.
+pub(crate) fn link_attr_libs(prog: &crate::program::Program, crates: Option<&std::collections::HashSet<u32>>) -> Vec<(String, bool)> {
     let mut out: Vec<(String, bool)> = Vec::new();
-    for (fi, f) in prog.files.iter().enumerate().skip(first_file) {
-        let Some(cfg) = prog.file_crate.get(fi).and_then(|&k| prog.crates.get(k as usize)).map(|c| &c.cfg) else { continue };
+    for (fi, f) in prog.files.iter().enumerate() {
+        let Some(&k) = prog.file_crate.get(fi) else { continue };
+        if crates.is_some_and(|selected| !selected.contains(&k)) { continue; }
+        let Some(cfg) = prog.crates.get(k as usize).map(|c| &c.cfg) else { continue };
         let src = f.src_view();
         // Every item of the file's arena, as before: it also holds the items of macro expansions
         // the collector dropped (libc's cfg_if! branches for other targets carry no #[cfg] of
@@ -4608,7 +4734,8 @@ extern "C" fn at_exit() {
 }
 
 struct ExitSummary {
-    request: std::sync::mpsc::SyncSender<(&'static str, Option<i32>)>,
+    /// The thread to begin exit for after planning, or zero if it already began exit.
+    request: std::sync::mpsc::SyncSender<(&'static str, Option<i32>, u64)>,
     worker: std::thread::JoinHandle<()>,
     code: std::sync::OnceLock<i32>,
 }
@@ -4618,6 +4745,12 @@ static RUN_PANIC: std::sync::OnceLock<jit::PanicInfo> = std::sync::OnceLock::new
 /// it to begin and to end: a worker not yet scheduled when a fixed wait ran out lost the whole
 /// write (the quit's last code: an app's ~4,000 teardown fns, built again by every session).
 static EXIT_STAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// The exit worker waits for the boot's demand plans before exit begins.
+/// The hang guard in finish_run excludes this wait.
+static EXIT_PLAN_WAIT: AtomicBool = AtomicBool::new(false);
+/// While the exit waits for a demand plan, it says so this often: a plan that never finishes
+/// shows at quit instead of a silent hang (the wait itself has no limit).
+const EXIT_PLAN_REPORT: std::time::Duration = std::time::Duration::from_secs(10);
 /// How long the exit waits for background compiles to finish (they are abandoned
 /// at their next safe point). Not getting it means no cache write at all.
 const EXIT_QUIESCE_MS: u64 = 200;
@@ -4634,9 +4767,20 @@ fn exit_quiesce_ms() -> u64 {
 
 fn start_exit_summary() {
     let _k = crate::zone_alloc::kept();
-    let (request, receive) = std::sync::mpsc::sync_channel::<(&'static str, Option<i32>)>(1);
+    let (request, receive) = std::sync::mpsc::sync_channel::<(&'static str, Option<i32>, u64)>(1);
     let worker = std::thread::Builder::new().name("run-exit".into()).spawn(move || {
-        let Ok((why, code)) = receive.recv() else { return };
+        let Ok((why, code, exiting)) = receive.recv() else { return };
+        if exiting != 0 {
+            let t = Instant::now();
+            if crate::owner::call_within(crate::owner::Class::Program, EXIT_QUIESCE_MS, || ()).is_some() {
+                crate::cache::settle_front_plans(Some((EXIT_PLAN_REPORT, &mut |plan: &crate::preload::DemandPlan, waited: std::time::Duration| {
+                    eprintln!("relax: {}", crate::cache::front_plan_wait_line(plan, waited));
+                })));
+            }
+            EXIT_PLAN_WAIT.store(false, Ordering::SeqCst);
+            jit::begin_exit_for(exiting);
+            verbose!("relax: the exit waited {:.1} ms for the boot's demand plan before taking the owner thread", t.elapsed().as_secs_f64() * 1e3);
+        }
         EXIT_STAGE.store(1, Ordering::SeqCst);
         exit_mark("start");
         remove_present_report();
@@ -4680,6 +4824,7 @@ fn finish_run(why: &'static str, code: Option<i32>) {
     jit::exec_check();
     let Some(exit) = EXIT_SUMMARY.get() else { crate::borrowck::lazy::stop(); return };
     if DONE.swap(true, Ordering::AcqRel) { crate::borrowck::lazy::stop(); return; }
+    verbose!("{}", jit::Stats::drains_line());
     // ending on the owner thread itself (an initializer's process::exit): it cannot serve the
     // exit worker while it waits for it
     EXIT_CALLER_HOLDS.store(crate::owner::is_owner(), Ordering::SeqCst);
@@ -4701,20 +4846,33 @@ fn finish_run(why: &'static str, code: Option<i32>) {
     // ran after it kept the startup manifest of the run's first seconds (record_manifest), so the
     // next launch linked the rest of the session on the UI thread at each first call
     crate::borrowck::lazy::stop();
-    jit::begin_exit();
+    // A queued graph needs its finished plan. Discovery may need the owner, which serves
+    // only the exit once it begins. The worker waits on the plans' condvars before then
+    // because this thread may be the UI thread.
+    let plans = !exit_caller_holds_owner() && crate::cache::front_plans_pending();
+    if !plans { jit::begin_exit(); }
     jit::solver_work_report_at_exit();
     // a JIT thread that panicked during the run is said once more at its end (inspect threads has the rows)
     if let Some(l) = crate::lifeline::summary() {
         eprintln!("relax: {}", l);
     }
-    if exit.request.try_send((why, code)).is_err() { return; }
+    EXIT_PLAN_WAIT.store(plans, Ordering::SeqCst);
+    let exiting = if plans { crate::owner::current_thread() } else { 0 };
+    if exit.request.try_send((why, code, exiting)).is_err() {
+        if plans {
+            EXIT_PLAN_WAIT.store(false, Ordering::SeqCst);
+            jit::begin_exit();
+        }
+        return;
+    }
     // 100 ms for the cleanup, counted from the end of the cache write; the write (and the
     // worker's start before it) only has a hang guard (a store on a stalled disk must not keep
     // the process forever)
-    let start = Instant::now();
+    let mut start = Instant::now();
     let mut deadline = start + std::time::Duration::from_millis(100);
     while !exit.worker.is_finished() {
         let now = Instant::now();
+        if EXIT_PLAN_WAIT.load(Ordering::SeqCst) { start = now; }
         if EXIT_STAGE.load(Ordering::SeqCst) < 2 && now.duration_since(start).as_secs() < 30 {
             deadline = now + std::time::Duration::from_millis(100);
         }
@@ -4950,9 +5108,6 @@ pub(crate) extern "C" fn relax_quit_started() {
     if crate::domain::current_app_domain().and_then(crate::domain::info).is_some_and(|i| i.parent.is_some()) {
         return;
     }
-    // an app quitting before its first frame still has its app check's verdict: an error it finds
-    // ends the run as a compile error (check.rs start_app_check)
-    crate::check::wait_app_check();
     quit_mark();
 }
 
@@ -5177,8 +5332,9 @@ pub(crate) fn push_front_images(prog: &crate::program::Program, c: &mut crate::c
 }
 
 /// (verbose) a background owner request's longest stretch between two of its yield checks (the
-/// longest the main thread could wait behind it), and the check that ended it
-struct YieldProbe(std::sync::Mutex<(Option<Instant>, f64, &'static str, u32, &'static str)>);
+/// longest the main thread could wait behind it), the sections of the checks that began and ended
+/// it, how many checks there were, and the section of the last check
+struct YieldProbe(std::sync::Mutex<(Option<Instant>, f64, &'static str, u32, &'static str, &'static str)>);
 /// (YieldProbe) the section of a background owner request running now: a gap between two
 /// checks is reported by the section it began in
 pub(crate) static YIELD_SECTION: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
@@ -5207,7 +5363,7 @@ pub(crate) fn yield_section(s: &'static str) {
     }
 }
 impl YieldProbe {
-    fn new() -> Self { Self(std::sync::Mutex::new((None, 0.0, "", 0, ""))) }
+    fn new() -> Self { Self(std::sync::Mutex::new((None, 0.0, "", 0, "", ""))) }
     fn start(&self) { self.0.lock().unwrap_or_else(|e| e.into_inner()).0 = Some(Instant::now()); }
     fn tick(&self, at: &'static str) {
         let now = Instant::now();
@@ -5215,7 +5371,7 @@ impl YieldProbe {
         let section = *YIELD_SECTION.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(l) = g.0 {
             let ms = (now - l).as_secs_f64() * 1e3;
-            if ms > g.1 { g.1 = ms; g.2 = if g.4.is_empty() { at } else { g.4 }; }
+            if ms > g.1 { g.1 = ms; g.2 = if g.4.is_empty() { at } else { g.4 }; g.5 = if section.is_empty() { at } else { section }; }
         }
         g.4 = section;
         g.0 = Some(now);
@@ -5223,7 +5379,7 @@ impl YieldProbe {
     }
     fn report(&self, what: &str) {
         let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if g.1 >= 5.0 { verbose!("relax cache: {} held the owner up to {:.1} ms without a yield check (ending at {}; {} checks)", what, g.1, g.2, g.3); }
+        if g.1 >= 5.0 { verbose!("relax cache: {} held the owner up to {:.1} ms without a yield check (from a check in {} to the next, in {}; {} checks)", what, g.1, g.2, g.5, g.3); }
     }
 }
 
@@ -5458,7 +5614,7 @@ fn mid_flush(wait: bool) -> Option<(usize, usize)> {
     let asked = Instant::now();
     let behind = (crate::owner::queued_in(crate::owner::Class::Program), crate::owner::SERVED.load(Ordering::Relaxed), crate::owner::MAIN_AHEAD.load(Ordering::Relaxed));
     let mut passed = (0, 0);
-    let Some(Some((held, spill))) = unit_call(wait, || {
+    let Some(Some((held, elapsed, spill))) = unit_call(wait, || {
     let held = Instant::now();
     passed = (crate::owner::SERVED.load(Ordering::Relaxed).saturating_sub(behind.1 + 1), crate::owner::MAIN_AHEAD.load(Ordering::Relaxed).saturating_sub(behind.2));
     probe.start();
@@ -5548,11 +5704,11 @@ fn mid_flush(wait: bool) -> Option<(usize, usize)> {
         s
     };
     yield_section("");
-    Some((held, spill))
+    Some((held, held.elapsed(), spill))
     }) else { yield_section(""); drop_later_now(); return None };
     drop_later_now();
     probe.report("mid write");
-    let held1 = held.elapsed().as_secs_f64() * 1e3;
+    let held1 = elapsed.as_secs_f64() * 1e3;
     let owner_wait_ms = held.saturating_duration_since(asked).as_secs_f64() * 1e3;
     let t_spill = Instant::now();
     let n = match spill {
@@ -5824,6 +5980,7 @@ fn summary_inner(why: &str) {
             verbose!("relax: owner by site: {}", crate::owner::sites_summary(14));
             verbose!("relax: publish O1 on the owner by kind: {}", jit::publish_opt_summary());
             verbose!("relax: O3 candidate takes: {}", jit::cand_skip_summary());
+            verbose!("relax: build trees off the owner (one body per take): {}", jit::tree_summary());
             verbose!("relax: O1 inline candidates by callee RIR (callers baseline/O1/full): {}", jit::inline_state_summary());
             verbose!("relax: provisional bodies (pending slots): {}", jit::provisional_summary());
             verbose!("relax: fronts off the owner by job: {}", jit::prefront_site_summary());
@@ -5854,6 +6011,10 @@ fn summary_inner(why: &str) {
         // lock_wait front back relock inflight_wait (ms) slot-key name (spaces as `~`), then `cpu` front opt codegen (thread cpu ms) `insts` entering opt / codegen; `slot` indexes RELAX_COMPILE_REPORT's rows
         if let Ok(path) = std::env::var("RELAX_MAIN_COMPILE_LOG") {
             let base = MAIN_START_WALL.load(Ordering::Relaxed);
+            let born = std::mem::take(&mut *jit::SLOT_BORN.lock().unwrap());
+            let lowered = std::mem::take(&mut *jit::SLOT_LOWERED.lock().unwrap());
+            // ms since main started, -1: none
+            let at = |ns: u64| if ns == 0 { -1.0 } else { (ns as f64 - base as f64) / 1e6 };
             let mut out = format!("# package {}\n", ROOT_DIR.lock().unwrap());
             let ms = |ns: u64| ns as f64 / 1e6;
             for r in jit::MAIN_COMPILES.lock().unwrap().iter() {
@@ -5866,9 +6027,30 @@ fn summary_inner(why: &str) {
                     ("-", "-".to_string())
                 };
                 out.push_str(&format!(
-                    "{:.3} {:.3} {} {} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {} {}  cpu {:.3} {:.3} {:.3} insts {} {}\n",
-                    ms(r.start.saturating_sub(base)), ms(r.end.saturating_sub(base)), r.slot, how, ms(r.ns[0]), ms(r.ns[1]), ms(r.ns[2]), ms(r.ns[3]), ms(r.ns[4]), ms(r.ns[5]), hint.replace(' ', "~"), name.replace(' ', "~"), ms(r.cpu[0]), ms(r.cpu[1]), ms(r.cpu[2]), r.insts[0], r.insts[1]
+                    "{:.3} {:.3} {} {} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {} {}  cpu {:.3} {:.3} {:.3} insts {} {}{}\n",
+                    ms(r.start.saturating_sub(base)), ms(r.end.saturating_sub(base)), r.slot, how, ms(r.ns[0]), ms(r.ns[1]), ms(r.ns[2]), ms(r.ns[3]), ms(r.ns[4]), ms(r.ns[5]), hint.replace(' ', "~"), name.replace(' ', "~"), ms(r.cpu[0]), ms(r.cpu[1]), ms(r.cpu[2]), r.insts[0], r.insts[1],
+                    {
+                        // the front's and the back's splits, the preparation's shape, the epochs, and
+                        // the slot's birth and lowering ahead (ms since main; -1: none)
+                        let l = lowered.get(r.slot as usize).copied().unwrap_or_default();
+                        // (behind: main's longest owner-queue wait in it, what the owner served
+                        // when it asked -- class, requester thread, call site -- and the take)
+                        let class = match (r.behind, r.behind_own) { (0, 1) => "own-rt", (0, 2) => "own-consts", (0, 3) => "own-leftout", (0, _) => "idle", (c, _) => crate::owner::CLASS_NAMES.get(c as usize - 1).copied().unwrap_or("?") };
+                        let site = r.behind_site.map_or("-".to_string(), |s| format!("{}:{}", s.file().rsplit('/').next().unwrap_or(s.file()), s.line()));
+                        let from = if r.behind_from == 0 { "-".to_string() } else { crate::os::thread::name(r.behind_from).replace(' ', "~") };
+                        format!(" front {:.3} {:.3} {:.3} {:.3} prep {} {} {} back {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} epoch {} {} born {:.3} lowered {:.3} by {} lins {} taken {:.3} take {:.3} {:.3} behind {:.3} {} {} {} gap {:.3} {:.3} {:.3} {:.3} {:.3} fin {:.3} {:.3} {:.3} {:.3}",
+                            ms(r.front[0]), ms(r.front[1]), ms(r.front[2]), ms(r.front[3]), r.prep[0], r.prep[1], r.prep[2],
+                            ms(r.back[0]), ms(r.back[1]), ms(r.back[2]), ms(r.back[3]), ms(r.back[4]), ms(r.back[5]), ms(r.back[6]), r.epoch[0], r.epoch[1],
+                            at(born.get(r.slot as usize).copied().unwrap_or(0)), at(l.0), l.1, l.2, at(l.3),
+                            ms(r.take[0]), ms(r.take[1]), ms(r.behind_ns), if r.behind_ns == 0 { "-" } else { class }, from, site,
+                            ms(r.gap[0]), ms(r.gap[1]), ms(r.gap[2]), ms(r.gap[3]), ms(r.gap[4]),
+                            ms(r.fin[0]), ms(r.fin[1]), ms(r.fin[2]), ms(r.fin[3]))
+                    }
                 ));
+            }
+            // every lowering ahead: `L slot ready by insts taken born` (ms since main; -1: none)
+            for (id, l) in lowered.iter().enumerate().filter(|(_, l)| l.0 != 0) {
+                out.push_str(&format!("L {} {:.3} {} {} {:.3} {:.3}\n", id, at(l.0), l.1, l.2, at(l.3), at(born.get(id).copied().unwrap_or(0))));
             }
             let _ = std::fs::write(path, out);
         }
@@ -6188,6 +6370,7 @@ fn mem_budget_mode() -> bool {
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     RUN_UNIT = std::ptr::null_mut();
+    reset(&APP_DIRS, relax_session::sync::Mutex::new(Vec::new()));
     reset(&PHASES, relax_session::sync::Mutex::new(Vec::new()));
     reset(&MAIN_START_MS, AtomicU64::new(0));
     reset(&ERRORS_SEEN, AtomicU64::new(0));
@@ -6221,6 +6404,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&EXIT_SUMMARY, std::sync::OnceLock::new());
     reset(&RUN_PANIC, std::sync::OnceLock::new());
     reset(&EXIT_STAGE, std::sync::atomic::AtomicU8::new(0));
+    reset(&EXIT_PLAN_WAIT, AtomicBool::new(false));
     reset(&EXIT_CALLER_HOLDS, AtomicBool::new(false));
     reset(&DONE, AtomicBool::new(false));
     reset(&EXIT_MARKS, relax_session::sync::Mutex::new(Vec::new()));

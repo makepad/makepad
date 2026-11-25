@@ -1351,8 +1351,9 @@ pub fn norm(s: &str) -> String {
     for c in s.chars() {
         if c == ':' && out.ends_with(':') {
             for k in ["alloc:", "std:"] {
-                let at = out.len() - k.len();
-                if out.ends_with(k) && !out[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+                // (`out` may be shorter than `k`: the length only once it ends with `k`)
+                let Some(at) = out.strip_suffix(k).map(str::len) else { continue };
+                if !out[..at].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
                     out.truncate(at);
                     out.push_str("core:");
                     break;
@@ -1851,6 +1852,24 @@ fn same_bytes(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, ok: &dyn Fn(DefId)
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    /// The host bridge's keys name std's items by crate and last segment, `core` for std and alloc
+    /// alike, and leave other paths alone: a short or a global path among them (`a::b`, `::x`; their
+    /// first `::` overflowed the `alloc:` test's length in a debug build), an identifier that only
+    /// ends in `std`, and a path inside a type's brackets.
+    #[test]
+    fn norm_keys_std_items_by_crate_and_name() {
+        for (path, key) in [
+            ("std::vec::Vec", "core::Vec"),
+            ("alloc::string::String", "core::String"),
+            ("a::b", "a::b"),
+            ("::x", "::x"),
+            ("mystd::io::Read", "mystd::io::Read"),
+            ("Option<std::rc::Rc<u8>>", "Option<core::Rc<u8>>"),
+        ] {
+            assert_eq!(norm(path), key, "the key of {path}");
+        }
+    }
 
     #[test]
     fn option_layout_checks_every_tag_word() {

@@ -5,7 +5,7 @@
 # Prints "cache_warm_closure_once: ok" or "cache_warm_closure_once: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 bad=""
 k=0
@@ -28,3 +28,5 @@ c = sys.argv[1]
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
 PY
+# the verdict is the exit status too (the corpus reads that)
+[ -z "$bad" ]

@@ -6,7 +6,7 @@
 # the lockfile a run's own native build makes is no edit to the live watcher. One line per case;
 # the last is "self_native: ok" or "self_native: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 [ -n "$T" ] && [ -d "$T" ] || exit 2
 trap 'rm -rf "$T"' EXIT
 CC_REAL=$(command -v cc)

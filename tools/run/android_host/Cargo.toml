@@ -28,3 +28,4 @@ makepad-devhub = { path = "../../../libs/devhub", default-features = false }
 makepad-devhub-conf = { path = "../../../libs/devhub_conf" }
 # the embedded Desk Link endpoint (deskhost.rs): the deskhost engine, NV12 conversion, key codes
 makepad-desk-link = { path = "../../../libs/desk_link", features = ["host"] }
+makepad-platform-video = { path = "../../../platform/video" }

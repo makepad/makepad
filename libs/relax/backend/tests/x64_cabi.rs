@@ -23,7 +23,7 @@ fn signature(conv: CConv) -> CSig {
     let f = CArg::Scalar(Mem::F64);
     let pair = CAgg { size: 16, align: 8, fields: vec![(0, Mem::Int(8, true)), (8, Mem::F64)] };
     CSig { conv, args: vec![i.clone(), f.clone(), CArg::Agg(pair.clone()), i.clone(), i.clone(), f, i.clone(), i.clone(), i],
-        ret: Some(pair), n_fixed: u32::MAX, ret_narrow: None, unwinds: false }
+        ret: Some(pair), n_fixed: u32::MAX, ret_narrow: None, unwinds: false, math: false }
 }
 
 fn forwarding_body(body: CConv, callee: CConv, regs: bool) -> Code {

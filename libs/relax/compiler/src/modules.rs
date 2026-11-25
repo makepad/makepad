@@ -227,7 +227,7 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
 }
 
 fn site_of(prog: &crate::program::Program, f: u32, pos: u32) -> String {
-    let (l, c) = prog.files[f as usize].line_col(pos);
+    let (l, c) = prog.files[f as usize].error_line_col(pos);
     format!("{}:{}:{}", prog.file_paths[f as usize], l, c)
 }
 
@@ -357,10 +357,8 @@ pub(crate) struct NewCrate {
 /// What a new crate depends on.
 #[derive(Clone, Copy)]
 pub(crate) enum Dep {
-    /// a crate of the program (std crates included)
+    /// a crate of the program (std crates included, and the crates a domain load added before)
     Existing(u32),
-    /// a crate of the same batch (an earlier one)
-    New(usize),
 }
 
 /// What `add_crates` put in the program.
@@ -403,10 +401,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
                 Some(done as u64), Some(new.len() as u64), &nc.name); }
             let mut dep_list = Vec::new();
             for (n, d) in &nc.deps {
-                let k = match d {
-                    Dep::Existing(k) => *k,
-                    Dep::New(i) => crates[*i],
-                };
+                let Dep::Existing(k) = *d;
                 dep_list.push((u.prog.syms.intern(n), k));
             }
             let first = u.prog.crates.len();
@@ -454,7 +449,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     for i in u.prog.open_reportable_imports(i0) {
         let im = &u.prog.imports[i];
         {
-            let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
+            let (l, c) = u.prog.files[im.file as usize].error_line_col(im.pos);
             errs.push(format!("{}:{}:{}: unresolved import -- name a crate the module depends on", u.prog.file_paths[im.file as usize], l, c));
         }
     }
@@ -701,7 +696,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
     let mut errs: Vec<String> = u.prog.errors[e0..].iter().filter(|e| e.starts_with(path.as_str())).cloned().collect();
     for im in u.prog.imports.iter().skip(i0) {
         if !im.done {
-            let (l, c) = u.prog.files[im.file as usize].line_col(im.pos);
+            let (l, c) = u.prog.files[im.file as usize].error_line_col(im.pos);
             errs.push(format!("{}:{}:{}: unresolved import", u.prog.file_paths[im.file as usize], l, c));
         }
     }

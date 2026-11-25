@@ -5,6 +5,7 @@
 // real Foundation/CoreGraphics code returning structs and narrow integers; a GCD worker
 // thread calling back into Relax. Frameworks are found through #[link] (the loader
 // dlopens them). Output matches rustc.
+#![cfg(target_os = "macos")]
 
 #[link(name = "Foundation", kind = "framework")]
 extern "C" {}

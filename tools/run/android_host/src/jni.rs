@@ -230,12 +230,15 @@ struct App {
 }
 
 struct Conf {
-    /// the apps the APK carries (`app=<package>`, then its `flag=` lines); the first is the default
+    /// Apps in the APK's source archive, in launch order. The first is the default.
+    /// The window manager reads their comma-separated package names from `RELAX_PACKED_APPS`.
     apps: Vec<App>,
     /// environment of the process (`env=KEY=VALUE`: MAKEPAD_TRACE, MAKEPAD_MUTE, ...)
     env: Vec<(String, String)>,
     /// `privileged=1`: the app that boots is the window manager (domain control)
     privileged: bool,
+    /// Whether to start the embedded devhub node (on by default).
+    devhub: bool,
     /// the embedded devhub node (`devhub_name=`, `rev=<repo> <sha>`, `prefix=<repo> <path>`)
     store: crate::devhub::StoreConf,
     /// the embedded Desk Link endpoint (`desk_link=on|off`, `desk_link_fps=`)
@@ -246,6 +249,7 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
     let mut apps: Vec<App> = Vec::new();
     let mut env = Vec::new();
     let mut privileged = false;
+    let mut devhub = true;
     let mut store = crate::devhub::StoreConf::default();
     let mut desk = crate::deskhost::DeskConf::default();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -258,6 +262,11 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
                 env.push((k.to_string(), val.to_string()));
             }
             "privileged" => privileged = v == "1",
+            "devhub" => devhub = match v {
+                "on" => true,
+                "off" => false,
+                _ => return Err(format!("{CONF_ASSET}: devhub wants on|off, got {v:?}")),
+            },
             "devhub_name" => store.name = v.to_string(),
             "desk_link" => desk.on = v == "on",
             "desk_link_fps" => desk.fps = Some(v.parse().map_err(|_| format!("{CONF_ASSET}: desk_link_fps wants a number, got {v:?}"))?),
@@ -272,7 +281,7 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
     if apps.is_empty() {
         return Err(format!("{CONF_ASSET}: no app"));
     }
-    Ok(Conf { apps, env, privileged, store, desk })
+    Ok(Conf { apps, env, privileged, devhub, store, desk })
 }
 
 /// Starts the process app on its own thread; Activity callbacks never wait for compilation.
@@ -424,6 +433,8 @@ fn boot_thread(
     std::env::set_var("RELAX_EDITS", &edits);
     std::env::set_var("RELAX_STORE_LIVE", "1");
     relax_compiler::vfs::set_edits(Some(edits));
+    let packages: Vec<&str> = conf.apps.iter().map(|app| app.package.as_str()).collect();
+    std::env::set_var("RELAX_PACKED_APPS", packages.join(","));
     for (k, v) in &conf.env {
         std::env::set_var(k, v);
     }
@@ -454,8 +465,12 @@ fn boot_thread(
             let (files, store, desk) = (files.to_path_buf(), conf.store.clone(), conf.desk.clone());
             Some(Box::new(move |workspace: &str| {
                 let name = if store.name.is_empty() { makepad_devhub_conf::default_machine_name() } else { store.name.clone() };
-                // after devhub's start: it sets the fleet dir the endpoint's credential is in
-                crate::devhub::start(&files, workspace, store);
+                if conf.devhub {
+                    crate::devhub::start(&files, workspace, store);
+                } else {
+                    crate::devhub::set_fleet_dir(&files);
+                    logcat::log("devhub: node is off");
+                }
                 crate::deskhost::start(&files, name, desk);
             }))
         },

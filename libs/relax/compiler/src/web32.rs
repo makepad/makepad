@@ -143,6 +143,11 @@ fn map_rw(at: u64, len: usize) -> u64 {
     at
 }
 
+/// Whether native address `a` is in the window (a program pointer can name it).
+pub fn in_window(a: u64) -> bool {
+    a >= BASE && a - BASE <= 0xffff_ffff
+}
+
 /// Whether native address `a` is in the window's misc region (where `alloc` places blocks).
 pub fn in_misc(a: u64) -> bool {
     a >= BASE + MISC_AT && a < BASE + MISC_END

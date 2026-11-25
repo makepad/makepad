@@ -12,9 +12,15 @@ use std::collections::HashMap;
 pub const ERROR_BAND: usize = 0;
 pub const GLYPH: usize = 1;
 pub const FIELD: usize = 2;
-pub const ICON: usize = 3;
+/// the field's stars (`ignition_stars`), drawn after the rest of it
+pub const STARS: usize = 3;
+/// the value noise's lattice (`ignition_lattice`), drawn into `LATTICE` once per program
+pub const LATTICE: usize = 4;
+/// the stars' bake (`ignition_bake`): the stars past the field's frontier, into its layers
+pub const BAKE: usize = 5;
+pub const ICON: usize = 6;
 /// the layer pipe's Id in its bank (its index in `pipes` is `Program::layer`)
-const LAYER_SLOT: u32 = 4;
+const LAYER_SLOT: u32 = 7;
 pub const PIPE_BANK_SIZE: u32 = 8;
 
 #[derive(Clone, Copy)]
@@ -261,7 +267,7 @@ impl Program {
                 hints.insert(key, label);
             }
             let mut pipes = Vec::new();
-            for (index, key) in [id!(error_band), id!(glyph), id!(ignition)]
+            for (index, key) in [id!(error_band), id!(glyph), id!(ignition), id!(ignition_stars), id!(ignition_lattice), id!(ignition_bake)]
                 .into_iter()
                 .enumerate()
             {
@@ -281,6 +287,10 @@ impl Program {
                     dialect,
                     Id::new(bank + ICON as u32, generation),
                 )?);
+            }
+            // the bake draws the stars' own records
+            if !pipes[BAKE].instances.same_layout(&pipes[STARS].instances) {
+                return Err("Boot shader ignition_bake must declare ignition_stars' instances (rect, info)".to_string());
             }
             let icon = pipes.len() > ICON;
             let mut layer = None;

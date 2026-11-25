@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Nothing breaks a running app: real landings replayed as live edits under this tree's JIT.
 
-usage: live_replay.py --app <package> [--count N] [--only <sha,..>] [--history <makepad>,<commercial>]
+usage: live_replay.py --app <package> [--count N] [--only <sha,..>] [--history <makepad>[,apps/<name>=<commit>..]]
        live_replay.py --host --app <package> [--wm]
        live_replay.py --chain --app <package> --only <sha,..>   (one app takes them in turn, no restart)
   (run from the workspace root; results also go to target/live_replay/results-<app>.jsonl)
 
 The JIT under test is always this tree's. The app's tree is a second tree (in the temp dir, one index
-per repository, moved with `git read-tree -u` like a sync moves a node) at the landing's parent, except
+per repository: makepad and each one cloned into apps/<name>, moved with `git read-tree -u` like a sync
+moves a node) at the landing's parent, except
 the crates the JIT binary provides (makepad-run's #[relax_api] crates and their path deps) and the
 JIT's own: those stay at this tree, as the loader requires them to match its build.
 
-A landing is one first-parent commit of makepad or commercial that changes a crate the app builds
-(the other repository at that time), newest first. Far enough back the tree no longer builds against
+A landing is one first-parent commit of makepad or of a nested repository that changes a crate the
+app builds (the other repositories at that time), newest first. Far enough back the tree no longer builds against
 this tree's JIT and provided crates: after DRIFTED such landings in a row the run ends there:
   1. the app runs at the parent, first frame, settled, answers input; its layout at three window
      sizes, then again after `session relaunch` with no edit: the nodes that move are the app's
@@ -30,7 +31,8 @@ The verdict is the user's rule, "restart yes, update yes, crash no":
         crates), so it says nothing about the JIT. rustc accepting what the JIT rejects is a fail;
   unreached: the app loads nothing the landing changed, no verdict to judge: not a pass.
 --history takes the landings from those commits' first parents instead of this tree's (a history cut
-down to one commit has none to replay). A control edit at the start of a run must get a verdict and the health check must see an error view
+down to one commit has none to replay): makepad's, then any nested repository's as apps/<name>=<commit>
+(the others at their HEAD). A control edit at the start of a run must get a verdict and the health check must see an error view
 over the app, or the run stops: its checks could not fail.
 
 --host: the path replay cannot reach, a landing that changes what makepad itself is built from. The
@@ -52,7 +54,21 @@ TREE = os.path.join(tempfile.gettempdir(), "live_replay_tree")
 # beside the tree it describes: a move writes only what differs from the index, so an index that
 # outlived its tree (the tree in a lease's temp dir, the index in target/) left files unwritten
 INDEX = os.path.join(tempfile.gettempdir(), "live_replay_index")
-COMMERCIAL = "apps/commercial"
+
+
+def nested_repos():
+    """The repositories cloned into apps/<name> of this checkout (makepad/apps, the commercial
+    products, Source Library): the second tree holds each at its own commit, as a box's tree does.
+    It held only apps/commercial: once Fab moved into apps/apps, makepad-fab was no member of the
+    second tree's workspace and its control app exited (1) before its first frame (11-23)."""
+    apps = os.path.join(ROOT, "apps")
+    # (named as devhub names them: lowercase letters, digits and dashes)
+    return sorted("apps/" + n for n in os.listdir(apps) if re.fullmatch(r"[a-z0-9-]+", n) and os.path.exists(os.path.join(apps, n, ".git"))) if os.path.isdir(apps) else []
+
+
+NESTED = nested_repos()
+# git's empty tree: a nested repository with no commit at a landing's time is absent from its tree
+EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # the JIT binary's providers (tools/run/Cargo.toml's host-shims dependencies)
 PROVIDERS = ["makepad-live-id", "makepad-script", "makepad-script-std", "makepad-script-compute", "makepad-shader", "makepad-tween-script", "makepad-script-audio-aot", "makepad-hal", "makepad-script-census", "relax-api"]
 JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
@@ -81,11 +97,27 @@ def git(*a, env=None, ok=True):
     return r.stdout.strip()
 
 
-def cgit(*a, env=None, ok=True):
-    r = subprocess.run(["git", *a], cwd=os.path.join(ROOT, COMMERCIAL), env=env, capture_output=True, text=True)
+def ngit(repo, *a, env=None, ok=True):
+    """git in the nested repository `repo` (apps/<name>)."""
+    r = subprocess.run(["git", *a], cwd=os.path.join(ROOT, repo), env=env, capture_output=True, text=True)
     if ok and r.returncode != 0:
-        raise SystemExit("git (commercial) %s: %s" % (" ".join(a), r.stderr.strip()))
+        raise SystemExit("git (%s) %s: %s" % (repo, " ".join(a), r.stderr.strip()))
     return r.stdout.strip()
+
+
+def index_of(repo):
+    """The second tree's index of the nested repository `repo`."""
+    return INDEX + "." + os.path.basename(repo)
+
+
+def under(d):
+    """The nested repository the workspace dir `d` is in, or None (makepad's)."""
+    return next((r for r in NESTED if d == r or d.startswith(r + "/")), None)
+
+
+def parent(repo, sha):
+    """The first parent of a nested repository's commit; a first commit's is the empty tree."""
+    return ngit(repo, "rev-parse", "--verify", "-q", sha + "^1", ok=False) or EMPTY
 
 
 def metadata():
@@ -114,21 +146,23 @@ def kept_dirs(meta):
     return outermost(closure(meta, PROVIDERS) | {"libs/relax", "tools/run", ".cargo"})
 
 
-def landings(meta, package, kept, tip, side, count):
-    """(time, repo, commit) of the landings that change a crate the app builds, oldest first."""
+def landings(meta, package, kept, tip, tips, count):
+    """(time, repo, commit) of the landings that change a crate the app builds, oldest first: of
+    makepad ("makepad") and of each nested repository (its apps/<name>) from its tip in `tips`."""
     dirs = outermost(closure(meta, [package]))
     found = []
     excl = [":(exclude)%s" % d for d in kept]
-    ours = [d for d in dirs if not d.startswith(COMMERCIAL + "/") and d != "."]
-    theirs = [os.path.relpath(d, COMMERCIAL) for d in dirs if d.startswith(COMMERCIAL + "/")]
+    ours = [d for d in dirs if under(d) is None and d != "."]
     if ours:
         for l in git("log", "--first-parent", "--format=%ct %H", "-%d" % count, tip, "--", *ours, *excl).splitlines():
             t, sha = l.split()
             found.append((int(t), "makepad", sha))
-    if theirs:
-        for l in cgit("log", "--first-parent", "--format=%ct %H", "-%d" % count, side, "--", *theirs).splitlines():
-            t, sha = l.split()
-            found.append((int(t), "commercial", sha))
+    for repo in NESTED:
+        theirs = [os.path.relpath(d, repo) for d in dirs if under(d) == repo]
+        if theirs:
+            for l in ngit(repo, "log", "--first-parent", "--format=%ct %H", "-%d" % count, tips[repo], "--", *theirs).splitlines():
+                t, sha = l.split()
+                found.append((int(t), repo, sha))
     return sorted(found)[-count:]
 
 
@@ -145,15 +179,20 @@ def hybrid(commit, tip, kept):
 
 
 def move_tree(state):
-    """The second tree moves to a (makepad tree object, commercial commit): only the files that
-    differ are written."""
-    tree, commercial = state
+    """The second tree moves to a (makepad tree object, ((nested repository, commit or EMPTY), ..)):
+    only the files that differ are written."""
+    tree, nested = state
     os.makedirs(TREE, exist_ok=True)
     git("read-tree", "--reset", "-u", tree, env=dict(os.environ, GIT_INDEX_FILE=INDEX, GIT_WORK_TREE=TREE))
-    if commercial:
-        side = os.path.join(TREE, COMMERCIAL)
+    for repo, commit in nested:
+        side = os.path.join(TREE, repo)
         os.makedirs(side, exist_ok=True)
-        cgit("read-tree", "--reset", "-u", commercial, env=dict(os.environ, GIT_INDEX_FILE=INDEX + ".commercial", GIT_WORK_TREE=side))
+        ngit(repo, "read-tree", "--reset", "-u", commit, env=dict(os.environ, GIT_INDEX_FILE=index_of(repo), GIT_WORK_TREE=side))
+
+
+def heads():
+    """Each nested repository at its HEAD, as a tree state's second half."""
+    return tuple((repo, ngit(repo, "rev-parse", "HEAD")) for repo in NESTED)
 
 
 class App:
@@ -200,6 +239,9 @@ class App:
             if text.count("first frame at") > seen and self.pid:
                 return None
             if not self.alive():
+                # what it said: the reason alone named nothing (makepad-fab's control app, 11-23)
+                tail = text.splitlines()[-30:]
+                print("live_replay: %s exited (%s) before its first frame; its log (%s) ends:\n%s" % (self.package, self.proc.returncode, self.log_path, "\n".join("  " + l[:300] for l in tail)), flush=True)
                 return "exited (%s) before its first frame" % self.proc.returncode
             time.sleep(0.25)
         return "no first frame in %d s" % secs
@@ -405,7 +447,7 @@ def tree_drift():
     """Files of the second tree that differ from what its indexes say it holds (a tree something
     else changed: then a rustc rejection says nothing about the landing): '' when none."""
     out = []
-    for index, work, look in [(INDEX, TREE, git), (INDEX + ".commercial", os.path.join(TREE, COMMERCIAL), cgit)]:
+    for index, work, look in [(INDEX, TREE, git)] + [(index_of(r), os.path.join(TREE, r), lambda *a, r=r, **k: ngit(r, *a, **k)) for r in NESTED]:
         if os.path.exists(index):
             said = look("diff", "--name-only", env=dict(os.environ, GIT_INDEX_FILE=index, GIT_WORK_TREE=work), ok=False).splitlines()
             out += [os.path.relpath(os.path.join(work, f), TREE) for f in said]
@@ -447,7 +489,7 @@ def control(package):
     meta = json.loads(subprocess.run(["cargo", "metadata", "--format-version", "1", "--offline", "--no-deps"], cwd=ROOT, capture_output=True, text=True, check=True).stdout)
     pkg = next(p for p in meta["packages"] if p["name"] == package)
     main = next(t["src_path"] for t in pkg["targets"] if "bin" in t["kind"])
-    move_tree((git("rev-parse", "HEAD^{tree}"), cgit("rev-parse", "HEAD")))
+    move_tree((git("rev-parse", "HEAD^{tree}"), heads()))
     path = os.path.join(TREE, os.path.relpath(main, ROOT))
     app = App(package, os.path.join(WORK, "control.log"))
     try:
@@ -806,20 +848,29 @@ def main():
     count = int(opt("--count", "300"))
     tip = git("rev-parse", "HEAD")
     history = [x for x in opt("--history", "").split(",") if x]
-    base, side_tip = history if history else (tip, cgit("rev-parse", "HEAD"))
+    base = history[0] if history else tip
+    tips = dict(heads())
+    for x in history[1:]:
+        repo, _, commit = x.partition("=")
+        if repo not in tips or not commit:
+            raise SystemExit("live_replay: --history %s: no nested repository %s here (%s)" % (x, repo, " ".join(NESTED) or "none"))
+        tips[repo] = commit
     only = [x for x in opt("--only", "").split(",") if x]
     meta = metadata()
     kept = kept_dirs(meta)
     if only:
-        # (a commit of either repository)
+        # (a commit of any repository)
         items = []
         for x in only:
-            commercial = subprocess.run(["git", "cat-file", "-e", x + "^{commit}"], cwd=ROOT, capture_output=True).returncode != 0
-            look = cgit if commercial else git
-            items.append((int(look("log", "-1", "--format=%ct", x)), "commercial" if commercial else "makepad", look("rev-parse", x)))
+            repo = next((r for r in ["makepad", *NESTED] if subprocess.run(["git", "cat-file", "-e", x + "^{commit}"], cwd=ROOT if r == "makepad" else os.path.join(ROOT, r), capture_output=True).returncode == 0), None)
+            if repo is None:
+                raise SystemExit("live_replay: --only %s: no commit of makepad or %s" % (x, " ".join(NESTED) or "a nested repository"))
+            look = git if repo == "makepad" else lambda *a, r=repo: ngit(r, *a)
+            items.append((int(look("log", "-1", "--format=%ct", x)), repo, look("rev-parse", x)))
     else:
-        items = landings(meta, package, kept, base, side_tip, count)[::-1]
+        items = landings(meta, package, kept, base, tips, count)[::-1]
     print("live_replay: %s, %d landings, kept at this tree: %s" % (package, len(items), " ".join(kept)), flush=True)
+    print("live_replay: the second tree holds makepad and %s" % (" ".join(NESTED) or "no nested repository"), flush=True)
     results = os.path.join(WORK, "results-%s.jsonl" % package)
     drifted = 0
     tally = {}
@@ -834,18 +885,22 @@ def main():
     def makepad_at(t):
         return git("log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, base)
 
-    def commercial_at(t):
-        return cgit("log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, side_tip)
+    def nested_at(t):
+        return tuple((r, ngit(r, "log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, tips[r]) or EMPTY) for r in NESTED)
+
+    def states(t, repo, sha):
+        """The second tree's states before and after a landing."""
+        if repo == "makepad":
+            side = nested_at(t)
+            return (tree_at(sha + "^1"), side), (tree_at(sha), side)
+        ours, side = tree_at(makepad_at(t)), nested_at(t)
+        at = lambda c: tuple((r, c if r == repo else x) for r, x in side)
+        return (ours, at(parent(repo, sha))), (ours, at(sha))
 
     if "--chain" in sys.argv:
         steps = []
         for t, repo, sha in sorted(items):
-            if repo == "makepad":
-                side = commercial_at(t)
-                steps.append((sha, (tree_at(sha + "^1"), side), (tree_at(sha), side)))
-            else:
-                ours = tree_at(makepad_at(t))
-                steps.append((sha, (ours, cgit("rev-parse", sha + "^1")), (ours, sha)))
+            steps.append((sha, *states(t, repo, sha)))
         os.makedirs(TREE, exist_ok=True)
         shutil.copy2(os.path.join(ROOT, "Cargo.lock"), os.path.join(TREE, "Cargo.lock"))
         sys.exit(chain(package, steps))
@@ -856,12 +911,7 @@ def main():
     shutil.copy2(os.path.join(ROOT, "Cargo.lock"), os.path.join(TREE, "Cargo.lock"))
     with open(results, "w") as out:
         for seq, (t, repo, sha) in enumerate(items):
-            if repo == "makepad":
-                side = commercial_at(t)
-                a, b = (tree_at(sha + "^1"), side), (tree_at(sha), side)
-            else:
-                ours = tree_at(makepad_at(t))
-                a, b = (ours, cgit("rev-parse", sha + "^1")), (ours, sha)
+            a, b = states(t, repo, sha)
             if a == b:
                 rec = {"sha": sha, "app": package, "result": "skip", "rung": "-", "kind": "kept", "why": "only the JIT's and the providers' files changed", "s": {}}
             else:

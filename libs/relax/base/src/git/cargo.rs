@@ -245,8 +245,10 @@ mod tests {
         std::fs::create_dir_all(db.join("objects/pack")).unwrap();
         std::fs::write(db.join("objects/pack/local.pack"), pack).unwrap();
         assert!(import(&home, url, commit_id.0, &home.join("packed.store"), "HEAD").unwrap());
+        let ssh = "ssh://git@example.org/team/project.git";
+        assert!(import(&home, ssh, commit_id.0, &home.join("ssh.store"), "HEAD").unwrap(), "ssh source should find Cargo's bare db");
         assert!(!import(&home, url, [0; 20], &home.join("missing.store"), "HEAD").unwrap());
-        for name in ["loose.store", "packed.store"] {
+        for name in ["loose.store", "packed.store", "ssh.store"] {
             let s = store::Store::open(&home.join(name)).unwrap().unwrap();
             assert_eq!(s.index.table(&commit_id.0).unwrap()[0].path, "Cargo.toml");
             assert_eq!(s.object(&blob_id.0).unwrap().unwrap().1, blob);

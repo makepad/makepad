@@ -26,7 +26,7 @@ done
 [ "$(uname -m)" = arm64 ] && [ "$(uname -s)" = Darwin ] || { echo "NOCODEGEN-FAIL: needs an arm64 Mac (uname $(uname -sm))"; exit 75; }
 work=$(mktemp -d "${TMPDIR:-/tmp}/nocodegen.XXXXXX") || exit 2
 echo "toolchain: $(rustc -V)"
-if ! cargo build --profile host -j 8 -p makepad-run --bin makepad --bin makepad-launcher > "$work/build" 2>&1; then
+if ! cargo build --profile host -j${CARGO_BUILD_JOBS:-8} -p makepad-run --bin makepad --bin makepad-launcher > "$work/build" 2>&1; then
     grep -E '^error' -A6 "$work/build" | head -30
     echo "NOCODEGEN-FAIL: makepad build"
     rm -r -- "${work:?}"; exit 1

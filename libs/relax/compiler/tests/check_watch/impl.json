@@ -1,0 +1,8 @@
+[
+  {"name": "body-error", "replace": ["fn area(&self, scale: u32) -> u32 {", "fn area(&self, scale: u32) -> u32 { let _: u32 = \"bad\";"]},
+  {"name": "revert"},
+  {"name": "signature", "replace": ["fn area(&self, scale: u32) -> u32 {", "fn area(&self, scale: bool) -> u32 {"]},
+  {"name": "shifted", "replace": ["fn untouched() {}\ntrait Shape { fn area(&self, scale: u32) -> u32; }\nstruct Square(u32);\nimpl Shape for Square { fn area(&self, scale: u32) -> u32 {", "fn untouched() {\n    let _ = 1;\n    let _ = 2;\n}\ntrait Shape { fn area(&self, scale: u32) -> u32; }\nstruct Square(u32);\nimpl Shape for Square { fn area(&self, scale: bool) -> u32 {"]},
+  {"name": "new-fn", "append": "\nfn added() { let _: u32 = \"bad\"; }\n"},
+  {"name": "unresolved", "replace": ["fn area(&self, scale: u32) -> u32 {", "fn area(&self, scale: u32) -> u32 { missing();"]}
+]

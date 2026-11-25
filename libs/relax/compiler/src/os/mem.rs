@@ -1164,13 +1164,15 @@ mod imp {
     /// committed granules: one bit each, per reservation (up to 4 GB each)
     static BITS: [[AtomicU64; 64]; REGIONS] = [const { [const { AtomicU64::new(0) }; 64] }; REGIONS];
 
-    /// One RUNTIME_FUNCTION for the whole code area, its UNWIND_INFO describing the frame every
-    /// Relax function has (`push rbp; mov rbp, rsp; ...`): unwinding a JIT frame sets rsp = rbp,
-    /// pops rbp and returns -- exact for rip / rsp / rbp in every function body, so the SEH
-    /// dispatcher, RtlVirtualUnwind and debuggers walk through JIT frames instead of stopping
-    /// at them. Not described: callee-saved registers other than rbp (only a handler that
-    /// resumes in a frame above JIT code would need them; Rust panics never cross JIT frames)
-    /// and the first 4 bytes of each prologue / frameless glue (there the walk skips one frame).
+    /// The code area's function table, a callback (RtlInstallFunctionTableCallback,
+    /// `function_entry`): an asm function's own entry (`add_asm_unwind`), else one
+    /// RUNTIME_FUNCTION for the whole area, its UNWIND_INFO describing the frame every Relax
+    /// function has (`push rbp; mov rbp, rsp; ...`): unwinding a JIT frame sets rsp = rbp, pops
+    /// rbp and returns -- exact for rip / rsp / rbp in every function body, so the SEH
+    /// dispatcher and RtlVirtualUnwind walk through JIT frames instead of stopping at them. Not
+    /// described: callee-saved registers other than rbp (only a handler that resumes in a frame
+    /// above JIT code would need them; Rust panics never cross JIT frames) and the first 4 bytes
+    /// of each prologue / frameless glue (there the walk skips one frame).
     fn register_unwind(base: u64, code: usize) {
         // [RUNTIME_FUNCTION { begin, end, unwind rva }][UNWIND_INFO]: in the last page of the code
         // area, which the unit's code allocator leaves alone (CODE_TAIL)
@@ -1194,10 +1196,70 @@ mod imp {
             *ui.add(5) = 3;
             *ui.add(6) = 1;
             *ui.add(7) = (5 << 4) | 0;
-            if RtlAddFunctionTable(at as *const u32, 1, base) == 0 {
-                panic!("RtlAddFunctionTable failed");
+            let len = u32::try_from(code - 4096).expect("a code area of 4 GB or more");
+            if RtlInstallFunctionTableCallback(base | 3, base, len, function_entry, at as *mut u8, std::ptr::null()) == 0 {
+                panic!("RtlInstallFunctionTableCallback failed");
             }
         }
+    }
+
+    /// An asm function's unwind entry (`.seh_proc`, global_asm.rs): its range, and its
+    /// RUNTIME_FUNCTION relative to its code area's base.
+    #[derive(Clone, Copy)]
+    struct AsmEntry {
+        begin: u64,
+        end: u64,
+        rf: [u32; 3],
+    }
+    /// The asm functions' entries, sorted by address. `function_entry` reads them with no lock
+    /// and no allocation (it runs inside exception dispatch and stack walks, on any thread, one
+    /// that faulted holding a lock included): a change publishes a new table, and the old one is
+    /// never freed (a lookup may be reading it; tables change when a unit places its global asm
+    /// or gives its code area back: a few per process).
+    static ASM_UNWIND: std::sync::atomic::AtomicPtr<Vec<AsmEntry>> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+    static ASM_UNWIND_LOCK: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+
+    /// A code area's function table callback: the entry of the asm function holding `pc`, else
+    /// the area's own (`context`, register_unwind).
+    unsafe extern "system" fn function_entry(pc: u64, context: *mut u8) -> *mut u32 {
+        let t = ASM_UNWIND.load(Ordering::Acquire);
+        if !t.is_null() {
+            let t = &*t;
+            let i = t.partition_point(|e| e.begin <= pc);
+            if i > 0 && pc < t[i - 1].end {
+                return t[i - 1].rf.as_ptr() as *mut u32;
+            }
+        }
+        context as *mut u32
+    }
+
+    fn publish_asm_unwind(change: impl FnOnce(&mut Vec<AsmEntry>)) {
+        let _g = ASM_UNWIND_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = ASM_UNWIND.load(Ordering::Acquire);
+        let mut t = if old.is_null() { Vec::new() } else { unsafe { (*old).clone() } };
+        change(&mut t);
+        t.sort_unstable_by_key(|e| e.begin);
+        ASM_UNWIND.store(Box::into_raw(Box::new(t)), Ordering::Release);
+    }
+
+    /// The base of the code area holding `addr`: what its function table's entries are
+    /// relative to.
+    pub fn code_base(addr: u64) -> Option<u64> {
+        let n = RES_N.load(Ordering::Acquire);
+        RES[..n].iter().find(|r| r[2].load(Ordering::Acquire) != 0 && addr >= r[0].load(Ordering::Relaxed) && addr - r[0].load(Ordering::Relaxed) < r[1].load(Ordering::Relaxed)).map(|r| r[0].load(Ordering::Relaxed))
+    }
+
+    /// Asm functions' own unwind entries: (first byte, byte past the last, UNWIND_INFO) each, in
+    /// code memory. Err: one is not, or is out of its code area's reach (RVAs are 32-bit).
+    pub fn add_asm_unwind(entries: &[[u64; 3]]) -> Result<(), String> {
+        let mut add = Vec::with_capacity(entries.len());
+        for &[begin, end, info] in entries {
+            let base = code_base(begin).ok_or_else(|| format!("{:#x} is not code memory", begin))?;
+            let rva = |a: u64| a.checked_sub(base).and_then(|r| u32::try_from(r).ok()).ok_or_else(|| format!("{:#x} is out of reach of its code area at {:#x}", a, base));
+            add.push(AsmEntry { begin, end, rf: [rva(begin)?, rva(end)?, rva(info)?] });
+        }
+        publish_asm_unwind(|t| t.extend(add));
+        Ok(())
     }
 
     /// reserve / release
@@ -1245,8 +1307,8 @@ mod imp {
         base
     }
 
-    /// Gives a reservation back (an auxiliary unit dropped mid-run): its unwind table entry,
-    /// its slot (emptied, reused by the next reservation) and its address space.
+    /// Gives a reservation back (an auxiliary unit dropped mid-run): its function table and asm
+    /// unwind entries, its slot (emptied, reused by the next reservation) and its address space.
     pub fn release(base: u64, code: usize, _rest: usize) {
         let _g = RES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = RES_N.load(Ordering::Acquire);
@@ -1256,7 +1318,8 @@ mod imp {
                 let (rw, sec) = (RES[r][3].load(Ordering::Relaxed), RES[r][4].load(Ordering::Relaxed));
                 RES[r][2].store(0, Ordering::Release);
                 unsafe {
-                    RtlDeleteFunctionTable((base + code as u64 - 4096) as *const u32);
+                    RtlDeleteFunctionTable((base | 3) as *const u32);
+                    publish_asm_unwind(|t| t.retain(|e| e.begin < base || e.begin - base >= code as u64));
                     // decommitted, still reserved: its addresses are never handed out again
                     // (see unix::retire); W^X views: the alias goes, the RX view becomes a
                     // placeholder again (reserved, nothing maps there unless asked to)

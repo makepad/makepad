@@ -68,7 +68,8 @@ fn slot(u: &mut Unit, name: &str) -> (u32, DefId) {
 /// looping thread runs its neighbour in, the thread seen running before the first fill. Then a
 /// fault seen only after its fill ended is that fill's: the same instruction's fault in the next
 /// fill runs again too (taken for the next fill's, the neighbour's fault in that fill was taken
-/// for a repeat and ended the process with no report).
+/// for a repeat and ended the process with no report). A fill ends at its range's last byte: a
+/// body of 6 to 9 bytes on x86-64, the fn after it runs on.
 /// Each access comes from code of the unit (the dead range's own, or a reader of another
 /// generation's arena), as in a run: under the JIT this test's own code is the JIT's, which
 /// contains a fault in its code before any handler the program installed (jit.rs
@@ -139,6 +140,27 @@ fn a_trap_filled_range_traps_at_any_offset_while_its_page_neighbour_runs_on() {
     assert_eq!(call_at(live_at), 7, "the neighbour runs on");
     assert!(invalid::PROT_BYTES.load(Ordering::Relaxed) == 0 && invalid::FILLED_BYTES.load(Ordering::Relaxed) == 100 * 16 && stats.contains("in 100 fills"), "100 ranges filled, nothing inaccessible: {stats}");
     eprintln!("{} calls of the neighbour; {stats}", CALLS.load(Ordering::Relaxed));
+    // A fill writes its range and not a byte past it: a body whose length is no multiple of 4 (a
+    // first body on x86-64 has any length), the next fn's code starting at its next byte.
+    for pad in 0..4u32 {
+        // nops, then `return 30 + pad`: x86-64 bodies of 6..9 bytes (arm64: 8..20)
+        #[cfg(target_arch = "x86_64")]
+        let mut code = vec![0x90u8; pad as usize];
+        #[cfg(target_arch = "aarch64")]
+        let mut code: Vec<u8> = (0..pad).flat_map(|_| 0xd503_201fu32.to_le_bytes()).collect();
+        code.extend(ret_code(30 + pad));
+        let n = code.len();
+        code.extend(ret_code(40 + pad));
+        // its own generation's arena: the chunk the `closed` case empties stays the neighbour's
+        let at = u.emit_grouped(Some(Group::Patch { slot: 4_000_000 + pad, gen: 5 }), &code, &[]).unwrap();
+        let next = at + n as u64;
+        assert_eq!((call_at(at), call_at(next)), (30 + pad, 40 + pad), "the {n}-byte body and the fn after it run before the fill");
+        invalid::trap_fill(&mut [(at & !(page - 1), at, next)]);
+        let bytes = unsafe { std::slice::from_raw_parts(at as *const u8, code.len()) };
+        assert!(bytes[..n].chunks(4).all(|w| w == &invalid::TRAP[..w.len()]), "the {n}-byte body holds the trap at every offset: {:02x?}", bytes);
+        assert_eq!(&bytes[n..], &code[n..], "the fill of the {n}-byte body ends at its last byte");
+        assert_eq!(call_at(next), 40 + pad, "the fn after the filled {n}-byte body runs on");
+    }
     // A fault whose handler reads the fill state only after its fill ended: a thread asks as the
     // handler does (jit.rs `transit_retry`, the neighbour's fetch at `live_at`), then asks on
     // until one of its asks met the next fill and waited for it. Both must run the instruction
@@ -230,6 +252,7 @@ fn a_layout_patch_trap_fills_the_old_version_beside_live_code() {
     };
     let (fe, ge) = (u.entry(f), u.entry(g));
     assert_eq!((run(fe), run(ge)), (11, 20));
+    let f0 = u.fns[f as usize].code;
     let edit = |src: String| crate::reload::Edit { file, path: path.to_string_lossy().into_owned(), src: src.into_bytes() };
     // generation 1: both bodies
     let gen1 = base.replace("s.a + 10", "s.a + 11").replace("= 20", "= 21");
@@ -244,10 +267,14 @@ fn a_layout_patch_trap_fills_the_old_version_beside_live_code() {
     assert_eq!(out.rung, crate::reload::Rung::Patch, "{:?}", out.lines);
     assert_eq!((run(fe), run(ge)), (14, 21), "f runs its new code, g its generation-1 code");
     assert_eq!(u.fns[g as usize].code, g1, "g was not rebuilt");
-    let r = crate::stale::lookup(f1).unwrap_or_else(|| panic!("f's generation-1 code is a stale range: {}", invalid::stats_line()));
-    assert!(r.name.contains(&*u.fns[f as usize].name) && r.reason.contains("layout-changing patch gen 2"), "{} / {}", r.name, r.reason);
-    let bytes = unsafe { std::slice::from_raw_parts(r.lo as *const u8, (r.hi - r.lo) as usize) };
-    assert!(bytes.chunks(4).all(|w| w == invalid::TRAP), "f's generation-1 code is the trap: {:02x?}", &bytes[..16]);
+    for (gen, at) in [(0, f0), (1, f1)] {
+        let r = crate::stale::lookup(at).unwrap_or_else(|| panic!("f's generation-{gen} code is a stale range: {}", invalid::stats_line()));
+        assert!(r.name.contains(&*u.fns[f as usize].name) && r.reason.contains("layout-changing patch gen 2"), "{} / {}", r.name, r.reason);
+        let bytes = unsafe { std::slice::from_raw_parts(r.lo as *const u8, (r.hi - r.lo) as usize) };
+        assert!(bytes.chunks(4).all(|w| w == &invalid::TRAP[..w.len()]), "f's generation-{gen} code holds the trap throughout");
+    }
+    let event = invalid::patch_event_of(2).map(|e| e.1).unwrap_or_default();
+    assert!(event.contains("first code: 1 ranges"), "the patch event says what it filled of first code: {event}");
     assert!(crate::stale::lookup(g1).is_none(), "g's code beside it lives");
     let stats = invalid::stats_line();
     assert!(invalid::PROT_BYTES.load(Ordering::Relaxed) == 0 && invalid::FILLED_BYTES.load(Ordering::Relaxed) >= 16, "a fill, nothing inaccessible: {stats}");

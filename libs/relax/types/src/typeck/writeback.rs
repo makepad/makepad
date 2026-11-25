@@ -89,6 +89,8 @@ impl Fcx<'_> {
                 }
             }
         }
-        if wbcx.unresolved && self.b.errors.is_empty() { self.err(self.last_lo, "E0282: type annotations needed".into()); }
+        // (writeback.rs Resolver::report_error: none when the context is tainted, by an error already
+        // reported elsewhere -- collection's -- or a deduplicated one)
+        if wbcx.unresolved && self.b.errors.is_empty() && !self.infcx.tainted_by_errors() { self.err(self.last_lo, "E0282: type annotations needed".into()); }
     }
 }

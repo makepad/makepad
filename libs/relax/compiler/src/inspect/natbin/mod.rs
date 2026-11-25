@@ -455,7 +455,8 @@ impl NativeBin {
     }
 }
 
-#[cfg(test)]
+// natbin reads ELF and Mach-O with DWARF; rustc's Windows build is a PE with its debug info in a PDB.
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

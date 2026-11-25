@@ -320,6 +320,15 @@ impl Tcx {
     }
 }
 
+impl Tcx {
+    /// `ty` with the RPITIT projections of the trait fn `fn_def_id`'s own signature written as their opaques: what
+    /// they normalize to in its default body, whose param env has `<Self as Trait>::{synthetic} == opaque`
+    /// (ImplTraitInTraitFinder, param_env.rs). rustc's MIR takes the body's typeck-normalized signature.
+    pub(crate) fn own_rpitit_projections_as_opaques(&self, prog: &Program, fn_def_id: DefId, ty: TyId) -> TyId {
+        AssocTyToOpaque { tcx: self, prog, fn_def_id }.fold_ty(&self.tys, ty, 0)
+    }
+}
+
 /// rustc_hir_analysis/src/collect/item_bounds.rs:545-571.
 struct AssocTyToOpaque<'a> { tcx: &'a Tcx, prog: &'a Program, fn_def_id: DefId }
 impl TypeFolder for AssocTyToOpaque<'_> {

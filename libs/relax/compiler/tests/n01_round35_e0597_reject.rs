@@ -1,9 +1,10 @@
+// rejects: E0597
 // A `&'a fn(*const dyn Tr)` (object lifetime 'static) forces the borrow of `f` to 'static: rustc E0597.
 trait Tr {}
 impl Tr for u8 {}
 fn apply<'a>(f: &'a fn(*const dyn Tr), p: *const (dyn Tr + 'a)) { f(p); }
 fn static_object(_: *const dyn Tr) {}
-#[test]
+// (a plain fn, not a #[test]: `cargo check` of the crate, without cfg(test), rejects it too)
 fn fn_pointer_object_lifetime() {
     let f: fn(*const dyn Tr) = static_object;
     let value = 0u8;

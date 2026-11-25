@@ -142,10 +142,32 @@ impl Program {
         Ok(SourceLocation { source, span }.diagnostic("parse", msg))
     }
 
+    /// Where rustc reports an error at `pos` (ParsedFile::lint_pos: a token a macro_rules of the
+    /// file wrote at its place in the definition, a substituted fragment at its argument, else
+    /// the call site), with the authored file and span. source_location stays the call-site
+    /// mapping that source spans, answers and edits use.
+    pub fn error_location(&self, file: u32, pos: u32) -> SourceLocation<'_> {
+        let f = &self.files[file as usize];
+        self.source_location(file, if f.token_input { pos } else { f.lint_pos(pos) })
+    }
+
+    /// `in this macro invocation: path:L:C` when an error at `pos` is reported in a macro's
+    /// definition, away from the call in the file's text that expanded it (rustc's note), else
+    /// None: an error on a substituted argument is at that argument, and needs none.
+    fn invocation_note(&self, file: u32, pos: u32) -> Option<String> {
+        let f = &self.files[file as usize];
+        if f.token_input || pos < f.src_len { return None; }
+        let call = f.src_pos(pos);
+        if f.lint_pos(pos) == call { return None; }
+        let (l, c) = f.line_col(call);
+        Some(format!("in this macro invocation: {}:{}:{}", self.file_paths[file as usize], l, c))
+    }
+
     pub fn diagnostic(&self, file: u32, pos: u32, phase: &'static str, msg: String) -> Diagnostic {
         let f = &self.files[file as usize];
-        let location = self.source_location(file, pos);
+        let location = self.error_location(file, pos);
         let mut d = location.diagnostic(phase, msg);
+        d.notes.extend(self.invocation_note(file, pos));
         if !matches!(d.code.as_str(), "E0425" | "E0432" | "E0433" | "RR0001" | "RM0001") { return d; }
         let module = self.defs.iter().filter(|d| d.file == file && d.item.0 != u32::MAX).filter_map(|d| {
             let it = f.ast.items.get(d.item.0 as usize)?;
@@ -218,7 +240,7 @@ impl Program {
     }
 
     pub fn record_error(&self, file: u32, pos: u32, phase: &'static str, msg: String) -> String {
-        let location = self.source_location(file, pos);
+        let location = self.error_location(file, pos);
         let (l,c) = location.source.line_col(location.span.lo);
         let human = format!("{}:{}:{}: {}",location.source.path(),l,c,msg);
         if crate::diag::enabled() { crate::diag::record(human, self.diagnostic(file,pos,phase,msg)) } else { human }

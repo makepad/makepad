@@ -5,6 +5,10 @@
 //! ([`bitops`]) analyses the emitters run. Front ends: Relax's Rust (relax-codegen optimises
 //! it first) and Splash kernels. [`probe`] lets a front end observe compile phases.
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
 // log in a full tmpfs /tmp aborted a fleet run inside a lazy compile, 2026-10-23), so in this
 // crate every print is a write whose error is dropped. Test builds keep std's captured macros.

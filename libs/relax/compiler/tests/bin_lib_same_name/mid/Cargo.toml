@@ -1,0 +1,12 @@
+[package]
+name = "binlib-mid"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+binlib-dep = { path = "../dep" }
+
+[[bin]]
+name = "binlib-dep"
+path = "src/main.rs"

@@ -1,6 +1,7 @@
 //! A forwarded `expr` fragment is one opaque expression: an `ident` matcher does not take it
 //! even when it is one identifier (rustc's matcher; relax issue 21).
-// rejects: no rule of `want_ident!` matches these arguments
+// rejects: no rules expected `expr` metavariable
+// rejects-at: 9:32 no rules expected `expr` metavariable
 macro_rules! want_ident {
     ($i:ident) => { 0 };
 }

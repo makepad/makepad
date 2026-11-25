@@ -167,12 +167,13 @@ pub struct HostEnv {
 
 static HOST_ENV: std::sync::OnceLock<HostEnv> = std::sync::OnceLock::new();
 
-/// The host's table, once, before anything reads it (relax-runner set_host).
+/// The linked host's table, applied on the first read of its facts.
 pub fn set_host_env(env: HostEnv) {
     let _ = HOST_ENV.set(env);
 }
 
 pub fn host_env() -> HostEnv {
+    crate::host::init();
     HOST_ENV.get().copied().unwrap_or(HostEnv { unseen: &[], offline: &[], detached_remove: &[], recorded: &[] })
 }
 
@@ -779,7 +780,7 @@ pub extern "C" fn host_get_environment_variable_w(name: *const u16, buf: *mut u1
     unsafe { win::get_environment_variable_w(name, buf, size) }
 }
 
-std::thread_local! {
+thread_local! {
     /// the last `env_snapshot` of this thread (std copies it right away)
     static SNAPSHOT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
 }

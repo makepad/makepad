@@ -532,6 +532,13 @@ pub struct Fcx<'a> {
     soft: bool,
     /// position of the expression checked last (patterns have no spans of their own)
     last_lo: u32,
+    /// `Trait::item` value paths (no qualified self) by the position their predicates are
+    /// registered at: (the trait, the item). An ambiguous `_: Trait` there is rustc's E0790.
+    trait_item_paths: HashMap<u32, (DefId, DefId)>,
+    /// positions of the goals a `?` registers (rustc: spans of its desugaring), whose errors
+    /// rustc reports after the others (report_fulfillment_errors: `from_expansion` last). A goal
+    /// of the operand's own at the same position counts too.
+    desugared_spans: crate::fxhash::HashSet<u32>,
     /// traits of the body's generic bounds (and its trait), with supertraits: in scope for
     /// method calls (computed on first use)
     /// trait args of the next trait method call, fixed by a generic bound
@@ -545,7 +552,9 @@ pub struct Fcx<'a> {
     value_path_parent_regions: Vec<crate::types::RegionId>,
     /// `[x; N]` expressions whose `Copy` check waits for the end of the body (rustc
     /// deferred_repeat_expr_checks): (element, element type, the array type)
-    deferred_repeats: Vec<(ExprId, TyId, TyId)>,
+    /// per repeat expression: its operand, the operand's type, the array type and (unless `_`) its
+    /// count expression with the count as lowered, before normalization
+    deferred_repeats: Vec<(ExprId, TyId, TyId, Option<(ExprId, crate::consts::Const)>)>,
     /// goals drained as waiting for this body's coroutines (`TypeckResults::coroutine_stalled_predicates`)
     stalled_coroutine_goals: Vec<crate::next_solver::fulfill::PredicateObligation>,
     /// the probe picked a by-value method of `&U` for receiver U: autoref it
@@ -852,6 +861,8 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         async_body_expected: HashMap::default(),
         soft: false,
         last_lo: 0,
+        trait_item_paths: HashMap::default(),
+        desugared_spans: Default::default(),
         known_method_args: None,
         value_path_lifetimes: Vec::new(),
         value_path_enum_lifetimes: Vec::new(),
@@ -1003,9 +1014,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         fcx.ret_stack.push(out);
         fcx.async_depth += 1;
         let t = fcx.check_block(bid, Some(out));
-        if !fcx.diverges {
-            fcx.coerce_or_unify(t, out, None, ast.block(bid).hi);
-        }
+        fcx.coerce_body_tail(t, out, ast.block(bid).hi);
         fcx.async_depth -= 1;
         fcx.ret_stack.pop();
         fcx.closure_depth.pop();
@@ -1017,23 +1026,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
     } else if let Some(bid) = body {
         fcx.b.body = Some(bid);
         let t = fcx.check_block(bid, Some(ret));
-        if !fcx.diverges {
-            fcx.coerce_or_unify(t, ret, None, ast.block(bid).hi);
-        } else {
-            // a tail after a diverging statement still types the return (rustc coerces the
-            // tail; `panic!(); MyStruct` defines `impl MyTrait` as MyStruct)
-            let st = fcx.shallow(t);
-            if !matches!(fcx.tcx.tys.kind(st), TyKind::Never) {
-                let save = fcx.start_snapshot();
-                if !fcx.try_coerce(t, ret, None) { fcx.rollback_to(save); } else { fcx.commit_from(save); }
-            }
-            // a body that only diverges (`fn f() -> impl Sized { todo!() }`): the return type's
-            // still-open variable falls back like any variable a `!` flowed into
-            let sr = fcx.shallow(ret);
-            if matches!(fcx.tcx.tys.kind(sr), TyKind::Infer(_)) {
-                fcx.diverging.push(sr);
-            }
-        }
+        fcx.coerce_body_tail(t, ret, ast.block(bid).hi);
     }
     fcx.finish();
     fcx.into_body()
@@ -1098,6 +1091,18 @@ impl<'a> Fcx<'a> {
         self.fulfillment_cx = self.suspended_fulfillment.pop().expect("open snapshot");
         self.infcx.commit_from(snapshot.inference);
         for obligation in obligations { self.fulfillment_cx.register_predicate_obligation(&self.infcx, self.prog, obligation); }
+    }
+
+    // Like rustc's commit_if_ok, keep inference changes and obligations only when the probe succeeds.
+    fn commit_if_some<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> {
+        let snap = self.start_snapshot();
+        let result = f(self);
+        if result.is_some() {
+            self.commit_from(snap);
+        } else {
+            self.rollback_to(snap);
+        }
+        result
     }
 
     fn fresh(&mut self, kind: u8) -> TyId {
@@ -1413,20 +1418,22 @@ impl<'a> Fcx<'a> {
     /// the pointee pair is unsized by the solver's `dyn A: Unsize<dyn B>` candidates (rustc
     /// consider_builtin_dyn_upcast_candidates); pointer shapes as for `dyn_coercion`.
     fn dyn_upcast(&mut self, ka: &TyKind, kx: &TyKind) -> Option<(TyId, TyId)> {
-        let (a, d, outer_a, outer_d) = self.unsize_pointee_pair(ka, kx, true)?;
-        let (a, d) = (self.shallow(a), self.shallow(d));
-        if a == d || !matches!(self.tcx.tys.kind(a), TyKind::Dyn(..)) || !matches!(self.tcx.tys.kind(d), TyKind::Dyn(..)) { return None; }
-        // the same object type up to lifetimes is subtyping, not an upcast
-        // (a pointer keeps the coercion: extending a trait object's lifetime must prove `'a: 'b`
-        // through the Unsize goal; a smart pointer's clone of the same type is plain subtyping)
-        if self.tcx.tys.erase_regions(a) == self.tcx.tys.erase_regions(d) && !matches!(ka, TyKind::Ref(..) | TyKind::Ptr(..)) { return None; }
-        let unsize = self.tcx.lang_items.get(crate::lang_items::LangItem::Unsize)?;
-        // through a struct tail the whole pointee pair must unsize (rustc: `S<dyn A>: Unsize<S<dyn B>>`,
-        // the last-field rule), not just the trait objects at its end
-        let (oa, od) = (self.shallow(outer_a), self.shallow(outer_d));
-        if oa != a { self.select_trait(unsize, oa, &[od]).ok()?; }
-        self.select_trait(unsize, a, &[d]).ok()?;
-        Some((a, d))
+        self.commit_if_some(|fcx| {
+            let (a, d, outer_a, outer_d) = fcx.unsize_pointee_pair(ka, kx, true)?;
+            let (a, d) = (fcx.shallow(a), fcx.shallow(d));
+            if a == d || !matches!(fcx.tcx.tys.kind(a), TyKind::Dyn(..)) || !matches!(fcx.tcx.tys.kind(d), TyKind::Dyn(..)) { return None; }
+            // the same object type up to lifetimes is subtyping, not an upcast
+            // (a pointer keeps the coercion: extending a trait object's lifetime must prove `'a: 'b`
+            // through the Unsize goal; a smart pointer's clone of the same type is plain subtyping)
+            if fcx.tcx.tys.erase_regions(a) == fcx.tcx.tys.erase_regions(d) && !matches!(ka, TyKind::Ref(..) | TyKind::Ptr(..)) { return None; }
+            let unsize = fcx.tcx.lang_items.get(crate::lang_items::LangItem::Unsize)?;
+            // through a struct tail the whole pointee pair must unsize (rustc: `S<dyn A>: Unsize<S<dyn B>>`,
+            // the last-field rule), not just the trait objects at its end
+            let (oa, od) = (fcx.shallow(outer_a), fcx.shallow(outer_d));
+            if oa != a { fcx.select_trait(unsize, oa, &[od]).ok()?; }
+            fcx.select_trait(unsize, a, &[d]).ok()?;
+            Some((a, d))
+        })
     }
 
     /// The pointee pair a pointer coercion unsizes: `&A` / `*A` / `P<..A..>` against `&B` / `*B` /
@@ -1497,19 +1504,21 @@ impl<'a> Fcx<'a> {
     }
 
     fn dyn_coercion(&mut self, ka: &TyKind, kx: &TyKind) -> Option<(TyId, TyId)> {
-        let (src, dy, _, _) = self.unsize_pointee_pair(ka, kx, false)?;
-        let src = self.shallow(src);
-        let dy = self.shallow(dy);
-        // An unresolved pointee may itself become `dyn Tr` (for example the `_`
-        // in `object_ref as *const _`). Let the deferred coercion decide after
-        // the cast resolves it; selecting Unsize now can unify it with `dy` and
-        // incorrectly record a thin-to-fat conversion for an already-fat value.
-        if !matches!(self.tcx.tys.kind(dy), TyKind::Dyn(..)) || matches!(self.tcx.tys.kind(src), TyKind::Dyn(..) | TyKind::Infer(_)) { return None; }
-        // coercion.rs:683-698: Unsize selection retains the object's binders,
-        // associated-type equalities and outlives obligations together.
-        let unsize = self.tcx.lang_items.get(crate::lang_items::LangItem::Unsize)?;
-        if self.select_trait(unsize, src, &[dy]).is_err() { return None; }
-        Some((src, dy))
+        self.commit_if_some(|fcx| {
+            let (src, dy, _, _) = fcx.unsize_pointee_pair(ka, kx, false)?;
+            let src = fcx.shallow(src);
+            let dy = fcx.shallow(dy);
+            // An unresolved pointee may itself become `dyn Tr` (for example the `_`
+            // in `object_ref as *const _`). Let the deferred coercion decide after
+            // the cast resolves it; selecting Unsize now can unify it with `dy` and
+            // incorrectly record a thin-to-fat conversion for an already-fat value.
+            if !matches!(fcx.tcx.tys.kind(dy), TyKind::Dyn(..)) || matches!(fcx.tcx.tys.kind(src), TyKind::Dyn(..) | TyKind::Infer(_)) { return None; }
+            // coercion.rs:683-698: Unsize selection retains the object's binders,
+            // associated-type equalities and outlives obligations together.
+            let unsize = fcx.tcx.lang_items.get(crate::lang_items::LangItem::Unsize)?;
+            if fcx.select_trait(unsize, src, &[dy]).is_err() { return None; }
+            Some((src, dy))
+        })
     }
 
     /// method/probe.rs:assemble_inherent_candidates_from_param: read the
@@ -1695,6 +1704,26 @@ impl<'a> Fcx<'a> {
         self.err(self.last_lo, format!("E0308: mismatched types: expected `{}`, found `&{}_`", sx, if m { "mut " } else { "" }));
     }
 
+    /// The end of a body (a fn's, an async fn's, an async block's): its tail is its output. After a
+    /// diverging statement rustc still coerces the tail (`panic!(..); 7u8` defines `impl Debug` as
+    /// u8, `async { loop { x? } Ok::<(), E>(()) }` is a future of `Result<(), E>`), and an output only
+    /// a `!` reached (`todo!()`) falls back like any variable a `!` flowed into.
+    fn coerce_body_tail(&mut self, tail: TyId, out: TyId, pos: u32) {
+        if !self.diverges {
+            self.coerce_or_unify(tail, out, None, pos);
+        } else {
+            let st = self.shallow(tail);
+            if !matches!(self.tcx.tys.kind(st), TyKind::Never) {
+                let save = self.start_snapshot();
+                if !self.try_coerce(tail, out, None) { self.rollback_to(save); } else { self.commit_from(save); }
+            }
+            let so = self.shallow(out);
+            if matches!(self.tcx.tys.kind(so), TyKind::Infer(_)) {
+                self.diverging.push(so);
+            }
+        }
+    }
+
     /// rustc_hir_typeck/src/demand.rs:230-270: report only after the coercion
     /// is required and failed; speculative coercions never emit and retract errors.
     fn coerce_or_unify(&mut self, actual: TyId, expected: TyId, e: Option<ExprId>, pos: u32) -> bool {
@@ -1853,6 +1882,9 @@ impl<'a> Fcx<'a> {
     /// Record their borrow before capture analysis; MIR lowering reads this same
     /// adjustment instead of independently deciding whether a cast moves a reference.
     fn record_cast_borrow(&mut self, e: ExprId, source: TyId, target: TyId) {
+        // a deref coercion (`&s as &str`) already ends in the cast's own borrow, of the target's
+        // type: reborrowing the source would replace it with a borrow of the wrong type
+        if matches!(self.b.coerce(e.0), Some(Coerce::DerefRef(_))) { return; }
         let (source, target) = (self.shallow(source), self.shallow(target));
         let TyKind::Ref(sm, inner, _) = self.tcx.tys.kind(source).clone() else { return };
         match self.tcx.tys.kind(target).clone() {
@@ -3927,6 +3959,11 @@ impl<'a> Fcx<'a> {
                 self.err(at, "E0424: expected value, found module `self`".to_string());
                 return (Res::Err, error);
             }
+            // a generic parameter a constant may not name: collection reported it (Res::Err)
+            if prog.const_param_restricted(self.b.def, self.file, path.lo) {
+                self.infcx.set_tainted_by_errors();
+                return (Res::Err, error);
+            }
             let help = import_help(prog, self.module, s, false);
             let (at, message) = prog.unresolved_name_message(self.file, self.module, path, expected);
             self.err(at, format!("E0425: {message}{help}"));
@@ -3999,6 +4036,9 @@ impl<'a> Fcx<'a> {
                     } else {
                         last_args
                     };
+                    if pk == DefKind::Trait && path.no_qself() {
+                        self.trait_item_paths.insert(self.last_lo, (pd, d));
+                    }
                     let t = self.value_def_ty(d, explicit, key);
                     return (Res::Def(d), t);
                 }
@@ -4774,8 +4814,15 @@ impl<'a> Fcx<'a> {
                 if let Ty::Infer = prog.files[self.file as usize].ast.ty(*t) {
                     return Some(self.fresh_arg(def, index));
                 }
-                let (lt, errors) = self.tcx.with_errors(&self.cx.with_infcx(&self.infcx), ||
-                    self.tcx.type_or_const_arg(&self.cx.with_infcx(&self.infcx), prog, self.file, self.module, &env, *t));
+                // a generic parameter a constant may not name (`size_of::<T>()`, `id::<N>()` in an
+                // array length): collection reported it, and rustc lowers the argument as an error
+                let restricted = match prog.files[self.file as usize].ast.ty(*t) {
+                    Ty::Path(p) => prog.const_param_restricted(self.b.def, self.file, p.lo),
+                    _ => false,
+                };
+                let (lt, errors) = if restricted { self.infcx.set_tainted_by_errors(); (self.tcx.tys.error, Vec::new()) }
+                    else { self.tcx.with_errors(&self.cx.with_infcx(&self.infcx), ||
+                        self.tcx.type_or_const_arg(&self.cx.with_infcx(&self.infcx), prog, self.file, self.module, &env, *t)) };
                 let clean = errors.is_empty();
                 for error in errors { if !self.b.errors.contains(&error) { self.b.errors.push(error); } }
                 // FnCtxt::lower_ty: every explicit type argument is well formed
@@ -4789,7 +4836,9 @@ impl<'a> Fcx<'a> {
                         if self.tcx.tys.has_error(lt) { "E0747: unresolved item provided when a constant was expected" }
                         else { "E0747: type provided when a constant was expected" }
                     } else { "E0747: constant provided when a type was expected" };
-                    self.err(self.last_lo, message.into());
+                    // (generics.rs generic_arg_mismatch_err: at the argument, a path's start)
+                    let at = match prog.files[self.file as usize].ast.ty(*t) { Ty::Path(p) => p.lo, _ => self.last_lo };
+                    self.err(at, message.into());
                     return Some(if expected_const { self.tcx.tys.intern(TyKind::Const(self.tcx.tys.intern_const(crate::consts::ConstKind::Error))) } else { self.tcx.tys.error });
                 }
                 Some(lt)
@@ -5102,6 +5151,13 @@ impl<'a> Fcx<'a> {
                                 // condition, objc's `msg_send!`, is a bool)
                                 let pos = self.ast().expr(*e).lo;
                                 self.coerce_or_unify(t, x, Some(*e), pos);
+                                result = x;
+                            } else if !unsized_x && !soft && matches!(self.tcx.tys.kind(st), TyKind::Never) && !matches!(self.tcx.tys.kind(sx), TyKind::Never | TyKind::Infer(_)) {
+                                // rustc check_block_with_expected: the tail is coerced to the block's
+                                // ExpectHasType type, a `!` tail by NeverToAny (coercion.rs Coerce::coerce), so
+                                // the block has that type; a place read of `!` (`fn f(n: &!) -> u32 { *n }`)
+                                // then reaches MIR as `NeverToAny(*n)`, not as `!` written to the u32
+                                self.never_to_any(Some(*e), x);
                                 result = x;
                             }
                         }
@@ -5427,13 +5483,21 @@ impl<'a> Fcx<'a> {
                     // `p.as_ref() as &Path`: the source referent is open (`AsRef<_>` with several
                     // impls); rustc check_casts coerces at the end of typeck, which decides it
                     self.deferred_casts.push((*x, xt, target));
+                } else if matches!((&kx, &kt), (TyKind::Ref(_, a, _), TyKind::Ref(_, b, _)) if self.has_open_infer(*a) || self.has_open_infer(*b)) {
+                    // `&w as &str` with w: Wrapper<?T>: a deref coercion now would decide `?T`
+                    // from the cast (?T = str); rustc checks every cast after typeck (check_casts),
+                    // when later uses (`let kept: Wrapper<String> = w`) have decided it
+                    self.deferred_casts.push((*x, xt, target));
                 } else if let (TyKind::Ref(m1, a, _), TyKind::Ref(m2, bt, _)) = (&kx, &kt) {
                     // a cast is first a coercion when one applies (rustc cast.rs
                     // try_coercion_cast): `&s as &str` is a deref coercion of &String
                     let (sa, sb) = (self.shallow(*a), self.shallow(*bt));
                     if (*m1 || !*m2) && sa != sb && !matches!(self.tcx.tys.kind(sb), TyKind::Infer(_) | TyKind::Dyn(..)) {
                         if let Some(derefs) = self.deref_coercion(sa, sb) {
-                            self.set_deref_ref(x.0, derefs, None);
+                            // the derefs are borrowed again as the target, as coerce_to_ref's deref
+                            // coercion ends (`&s as &str`: Deref, Deref(String: Deref), Borrow to `&str`),
+                            // and that borrow is the cast's: no reborrow of the source after it
+                            self.set_deref_ref(x.0, derefs, Some((*m2, target)));
                         }
                     }
                 }
@@ -5932,19 +5996,19 @@ impl<'a> Fcx<'a> {
                     let arr = self.tcx.tys.mk_array(t, self.infcx.next_const_var());
                     // expr.rs:1775: the array type is well formed
                     self.register_wf(arr, lo);
-                    self.deferred_repeats.push((*x, t, arr));
+                    self.deferred_repeats.push((*x, t, arr, None));
                     return arr;
                 }
                 let usize_ = self.tcx.tys.usize_;
                 self.check_expr(*n, Some(usize_));
                 // hir_ty_lowering/mod.rs:2390: retain the repeat body's identity;
                 // fulfillment evaluates it through the same query as array types.
-                let len = self.tcx.lower_const_arg(self.prog, self.file, &self.env, *n, usize_);
-                let len = self.tcx.tys.intern(TyKind::Const(len));
+                let lowered = self.tcx.lower_const_arg(self.prog, self.file, &self.env, *n, usize_);
+                let len = self.tcx.tys.intern(TyKind::Const(lowered));
                 let len = self.normalize_body_type(len);
                 let arr = self.tcx.tys.mk_array(t, self.tcx.tys.expect_const(len));
                 self.register_wf(arr, lo);
-                self.deferred_repeats.push((*x, t, arr));
+                self.deferred_repeats.push((*x, t, arr, Some((*n, lowered))));
                 arr
             }
             ExprKind::Field(x, name) => self.check_field(e, *x, *name, lo),
@@ -6479,6 +6543,7 @@ impl<'a> Fcx<'a> {
         let sig = self.tcx.fn_sig(self.prog, branch).unwrap().clone();
         let (ps, flow) = self.instantiate_call_signature(branch, &full, &sig);
         self.coerce_or_unify(t, ps[0], Some(x), lo);
+        self.desugared_spans.extend([lo, self.last_lo]);
         self.register_method_obligation(branch, &full);
         self.apply_fn_bounds(branch, &full, lo);
         let flow = self.normalize_signature(flow);
@@ -6503,6 +6568,7 @@ impl<'a> Fcx<'a> {
         match block {
             Some((_, block_output)) => self.try_block_residual(ret, residual, block_output, lo),
             None => {
+                self.desugared_spans.extend([lo, self.last_lo]);
                 self.register_method_obligation(from_residual, &full);
                 self.apply_fn_bounds(from_residual, &full, lo);
             }
@@ -7093,7 +7159,8 @@ impl<'a> Fcx<'a> {
         // the callee and published the const/value argument split.
         let args = if let Some(split) = &legacy {
             if split.invalid {
-                self.err(lo, "invalid legacy const generic argument".into());
+                // (collection reported it: the call is an error expression, as rustc lowers it)
+                self.infcx.set_tainted_by_errors();
                 return self.tcx.tys.error;
             }
             if let TyKind::FnDef(d, gargs, _) = self.tcx.tys.kind(fs).clone() {
@@ -7286,22 +7353,7 @@ impl<'a> Fcx<'a> {
         self.loops = save_loops;
         self.in_loop_condition = save_condition;
         let points = std::mem::replace(&mut self.await_count, save_awaits);
-        if !self.diverges {
-            self.coerce_or_unify(bt, out, None, self.ast().block(b).hi);
-        } else {
-            // a tail after a diverging statement still types the output (rustc coerces the
-            // tail: `async { loop { x? } Ok::<(), E>(()) }` is a future of `Result<(), E>`)
-            if !matches!(self.tcx.tys.kind(self.shallow(bt)), TyKind::Never) {
-                let save = self.start_snapshot();
-                if self.try_coerce(bt, out, None) { self.commit_from(save); } else { self.rollback_to(save); }
-            }
-            // a body that only diverges (`async { todo!() }`): the return type's still-open
-            // variable falls back like any variable a `!` flowed into
-            let so = self.shallow(out);
-            if matches!(self.tcx.tys.kind(so), TyKind::Infer(_)) {
-                self.diverging.push(so);
-            }
-        }
+        self.coerce_body_tail(bt, out, self.ast().block(b).hi);
         self.async_depth -= 1;
         self.ret_stack.pop();
         self.closure_depth.pop();
@@ -7497,7 +7549,7 @@ impl<'a> Fcx<'a> {
     /// make another repeat's count known); `Copy` is required unless the count is 0 or 1.
     fn check_repeat_exprs(&mut self) {
         let mut todo = Vec::new();
-        for (x, et, arr) in std::mem::take(&mut self.deferred_repeats) {
+        for (x, et, arr, written) in std::mem::take(&mut self.deferred_repeats) {
             let mut y = x;
             while let ExprKind::Paren(i) = self.ast().expr(y).kind.clone() {
                 y = i;
@@ -7520,7 +7572,17 @@ impl<'a> Fcx<'a> {
             let count = self.deeply_resolve_ignoring_regions_with_obligations(count);
             let count = self.tcx.tys.expect_const(count);
             if matches!(self.tcx.tys.const_kind(count), crate::consts::ConstKind::Infer(_)) {
-                if self.b.errors.is_empty() { self.err(self.ast().expr(x).lo, "E0282: type annotations needed".into()); }
+                if self.b.errors.is_empty() {
+                    match written {
+                        // a count whose constant mentions a generic parameter does not evaluate:
+                        // rustc's error for the array type's ConstEvaluatable obligation
+                        // (NotConstEvaluatable::MentionsParam; `const_evaluatable_unchecked`)
+                        Some((n, lowered)) if matches!(self.tcx.tys.const_kind(lowered), crate::consts::ConstKind::Alias(..))
+                            && self.tcx.has_param(self.tcx.tys.intern(TyKind::Const(lowered))) =>
+                            self.err(self.ast().expr(n).lo, "error: constant expression depends on a generic parameter".into()),
+                        _ => self.err(self.ast().expr(x).lo, "E0282: type annotations needed".into()),
+                    }
+                }
                 continue;
             }
             if matches!(self.tcx.tys.const_kind(count), crate::consts::ConstKind::Error) || self.tcx.tys.has_error(self.tcx.tys.intern(TyKind::Const(count))) { continue; }
@@ -8157,12 +8219,64 @@ impl<'a> Fcx<'a> {
 
     fn retry_goals(&mut self, final_: bool) {
         use crate::next_solver::fulfill::NextSolverError;
-        let errors = if final_ { self.fulfillment_cx.evaluate_obligations_error_on_ambiguity(&self.infcx, self.prog) }
+        let mut errors = if final_ { self.fulfillment_cx.evaluate_obligations_error_on_ambiguity(&self.infcx, self.prog) }
             else { self.fulfillment_cx.try_evaluate_obligations(&self.infcx, self.prog) };
-        for error in errors {
+        // rustc_trait_selection error_reporting/traits/mod.rs report_fulfillment_errors: `T: Sized`,
+        // `T: MetaSized`, `T: PointeeSized`, coercion and `WF` errors come last, so the first error
+        // reported carries the most type information (an ambiguity only the first); and the errors
+        // of desugarings (`?`) are reported after all others (its `from_expansion` pass)
+        let sizedness = [crate::lang_items::LangItem::Sized, crate::lang_items::LangItem::MetaSized, crate::lang_items::LangItem::PointeeSized]
+            .map(|l| self.tcx.lang_items.get(l));
+        errors.sort_by_key(|e| {
+            let o = match e { NextSolverError::TrueError(o) | NextSolverError::Ambiguity(o) | NextSolverError::Overflow(o) => o };
+            (self.desugared_spans.contains(&o.cause.span), match &o.goal.predicate.kind {
+                PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) if sizedness.iter().any(|s| *s == Some(p.trait_ref.def_id)) =>
+                    1 + sizedness.iter().position(|s| *s == Some(p.trait_ref.def_id)).unwrap_or(0),
+                PredicateKind::Coerce(_) => 4,
+                PredicateKind::Clause(crate::next_solver::ClauseKind::WellFormed(_)) => 5,
+                _ => 0,
+            })
+        });
+        // report_fulfillment_errors' covered_by_trait_error (fulfillment_errors.rs
+        // trait_error_implies_projection_error): a failing trait goal also fails every projection
+        // goal resting on it, and such a projection at the same span is not reported again
+        let covered: Vec<bool> = {
+            use crate::next_solver::ClauseKind;
+            let tys = &self.tcx.tys;
+            let resolved = |o: &crate::next_solver::fulfill::PredicateObligation| {
+                let mut r = crate::infer::resolve::DeepVariableResolver::new(&self.infcx);
+                crate::next_solver::fold::fold_predicate(tys, &o.goal.predicate, &mut r)
+            };
+            let failed: Vec<_> = errors.iter().filter_map(|e| match e {
+                NextSolverError::TrueError(o) => match resolved(o).kind {
+                    PredicateKind::Clause(ClauseKind::Trait(p)) => Some((o.cause.span, o.goal.param_env, p.trait_ref.def_id,
+                        p.trait_ref.args.iter().filter_map(|a| match a { crate::consts::GenericArg::Type(t) => Some(*t), _ => None }).collect::<Vec<_>>())),
+                    _ => None,
+                },
+                _ => None,
+            }).collect();
+            errors.iter().map(|e| {
+                let NextSolverError::TrueError(o) = e else { return false };
+                let PredicateKind::Clause(ClauseKind::Projection(c)) = resolved(o).kind else { return false };
+                let crate::next_solver::AliasTerm::Ty(t) = c.projection_term else { return false };
+                let crate::types::TyKind::Alias(_, a) = *tys.kind(t) else { return false };
+                let crate::types::AliasTyKind::Projection { def_id } = a.kind else { return false };
+                let (trait_def, args) = (self.prog.def(def_id).parent, tys.list(a.args));
+                failed.iter().any(|(span, env, d, targs)| *span == o.cause.span && *env == o.goal.param_env && *d == trait_def && args.starts_with(targs))
+            }).collect()
+        };
+        for (i, error) in errors.into_iter().enumerate() {
+            if covered[i] { continue; }
             let (code, obligation) = match error {
                 NextSolverError::TrueError(o) => ("E0277", o),
-                NextSolverError::Ambiguity(o) => { if !self.b.errors.is_empty() { continue; } ("E0283", o) },
+                NextSolverError::Ambiguity(o) => {
+                    if !self.b.errors.is_empty() { continue; }
+                    // ambiguity.rs maybe_report_ambiguity: an ambiguity other than a trait goal's is
+                    // fallout of an error already reported (one of collection's, or a deduplicated one)
+                    // when the inference context is tainted
+                    if self.infcx.tainted_by_errors() && !matches!(o.goal.predicate.kind, PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(_))) { continue; }
+                    ("E0283", o)
+                }
                 NextSolverError::Overflow(o) => ("E0275", o),
             };
             let predicate = &obligation.goal.predicate;
@@ -8170,6 +8284,24 @@ impl<'a> Fcx<'a> {
             // rustc's wording (rustc_trait_selection report_selection_error and core's
             // #[rustc_on_unimplemented] messages) for an unmet trait bound
             if let PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) = &predicate.kind {
+                // ambiguity.rs maybe_report_ambiguity: an ambiguous `_: Sized` (or `MetaSized`) is
+                // an inference failure (E0282); one at a `Trait::item` path whose trait is the
+                // predicate's is E0790 (the item named without the type that implements it)
+                if code == "E0283" {
+                    if sizedness[..2].iter().any(|s| *s == Some(p.trait_ref.def_id)) {
+                        self.err(obligation.cause.span, "E0282: type annotations needed".to_string());
+                        continue;
+                    }
+                    if let Some(&(_, item)) = self.trait_item_paths.get(&obligation.cause.span).filter(|(t, _)| *t == p.trait_ref.def_id) {
+                        let (verb, noun) = match self.prog.def(item).kind {
+                            DefKind::AssocFn => ("call", "function"),
+                            DefKind::AssocConst => ("refer to the", "constant"),
+                            _ => ("refer to the", "type"),
+                        };
+                        self.err(obligation.cause.span, format!("E0790: cannot {verb} associated {noun} on trait without specifying the corresponding `impl` type"));
+                        continue;
+                    }
+                }
                 let (prog, tcx) = (self.prog, self.tcx);
                 let p = normalize_clause_for_diagnostics(&self.infcx, prog, &obligation.goal.param_env, p);
                 let mut msg = trait_error_message(prog, tcx, code, &p, &mut |t| self.ty_str(t));
@@ -8282,6 +8414,46 @@ impl<'a> Fcx<'a> {
         }
     }
 
+    /// A call no macro resolved (the parser keeps it without arguments): rustc's resolve error. A
+    /// path's is E0433 at its first segment that names nothing, the macro's own included
+    /// (rustc_resolve finalize_macro_resolutions, FailedToResolve: `not_a_dependency::log!`,
+    /// `dependency::no_such_macro!`, `not_a_crate::vec!`); a name's is "cannot find macro" in this
+    /// scope, uncoded. A built-in the parser reads in place, by its name or through a std crate's
+    /// path, whose arguments did not parse keeps the dialect's message.
+    fn unresolved_macro(&mut self, path: &crate::ast::Path, name: &str, lo: u32) {
+        let prog = self.prog;
+        let segs = crate::program::path_segs(prog, self.file, path);
+        let written = self.ast().segs(path.segs);
+        let n = segs.len();
+        let in_place = crate::parser::args_in_place(name.as_bytes());
+        if n == 1 && !path.global() {
+            if in_place {
+                self.err(lo, format!("macro `{}!` is not supported", name));
+                return;
+            }
+            let (at, message) = prog.unresolved_name_message(self.file, self.module, path, "macro");
+            self.err(at, format!("{}{message}", relax_front::diagnostics::UNCODED_PREFIX));
+            return;
+        }
+        let mut parent = None;
+        let mut failed = n - 1;
+        for k in 0..n - 1 {
+            let _quiet = crate::program::QuietLookups::begin();
+            match prog.resolve_mod_path(self.module, path.global(), &segs[..=k], false, false) {
+                Some(d) => parent = Some(d),
+                None => { failed = k; break; }
+            }
+        }
+        let std_module = parent.is_some_and(|d| matches!(prog.syms.str(prog.crates[prog.def(d).krate as usize].name), "core" | "std" | "alloc"));
+        if failed == n - 1 && in_place && std_module {
+            self.err(lo, format!("macro `{}!` is not supported", name));
+            return;
+        }
+        let names: Vec<_> = written.iter().map(|s| self.text(s.name)).collect();
+        let message = prog.path_resolution_message(self.module, path.global(), &names, failed, parent);
+        self.err(written[failed].name.lo, format!("E0433: {message}"));
+    }
+
     fn check_mac(&mut self, e: ExprId, m: &MacCall, expected: Option<TyId>, lo: u32) -> TyId {
         let ast = self.ast();
         let name = match ast.segs(m.path.segs).last() {
@@ -8334,7 +8506,7 @@ impl<'a> Fcx<'a> {
             return never;
         }
         if m.args == NO_MAC_ARGS {
-            self.err(lo, format!("macro `{}!` is not supported", name));
+            self.unresolved_macro(&m.path, name, lo);
             return self.tcx.tys.error;
         }
         let margs = ast.mac_arg(m.args);

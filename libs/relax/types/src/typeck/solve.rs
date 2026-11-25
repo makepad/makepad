@@ -125,6 +125,8 @@ fn context<'a>(prog: &'a Program, tcx: &'a Tcx, state: &'a crate::tcx::EvalState
         extra_arg: None,
         soft: false,
         last_lo: 0,
+        trait_item_paths: HashMap::default(),
+        desugared_spans: Default::default(),
         known_method_args: None,
         value_path_lifetimes: Vec::new(),
         value_path_enum_lifetimes: Vec::new(),

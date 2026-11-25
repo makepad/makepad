@@ -89,7 +89,7 @@ impl Program {
             }
             // rustc_resolve imports.rs finalize_import: an inaccessible binding is an error only when
             // no namespace resolves, and the macro namespace is one of them
-            if !visible && last && last_ns.is_none() && self.macro_binding_visible(m, name, from) {
+            if !visible && last && last_ns.is_none() && (self.macro_binding_visible(m, name, from) || self.ext_proc_macro_public(m, name)) {
                 return None;
             }
             if !visible {
@@ -101,6 +101,33 @@ impl Program {
             cur = next?;
         }
         None
+    }
+
+    /// A proc macro `name` that module `m` binds publicly, `m` being of a crate the replay of rustc's
+    /// import resolution did not cover: a registry dependency, or a checked crate whose verdict was
+    /// reused, whose names rustc reads from metadata (rsim.rs ExtTable). Its macro namespace has no
+    /// replayed binding (`macro_binding_visible`), and a `pub use` of a proc macro there makes the
+    /// name public beside a private module that has it too (relax issue 268). Only public bindings
+    /// count: a module whose macro of that name is not re-exported, or that has none, stays private.
+    fn ext_proc_macro_public(&self, m: u32, name: Sym) -> bool {
+        let md = &self.mods[m as usize];
+        if self.sim_own.get(md.krate as usize).copied().unwrap_or(false) {
+            return false;
+        }
+        let krate = self.syms.str(self.crates[md.krate as usize].name);
+        let module = self.def_path(md.def);
+        let n = self.syms.str(name);
+        let scope = crate::macros::MacroScope::new(self.macros.clone());
+        [crate::macro_reg::Kind::Bang, crate::macro_reg::Kind::Attr, crate::macro_reg::Kind::Derive]
+            .into_iter()
+            .any(|kind| scope.public_proc_macro(krate, &module, n, kind).is_some())
+    }
+
+    /// The replay's macro namespace (rsim.rs) binds `name` in module `m` at least as widely as `vis`:
+    /// a re-export of the binding at `vis` is no E0364.
+    fn macro_binding_reexportable(&self, m: u32, name: Sym, vis: BindVis) -> bool {
+        let Some(b) = self.sim_macros.as_ref().and_then(|t| t.get(&(m, name))) else { return false };
+        (b.non_glob.is_some() && !self.vis_wider(vis, b.non_glob_vis)) || (b.glob.is_some() && !self.vis_wider(vis, b.glob_vis))
     }
 
     /// The replay's macro namespace (rsim.rs) binds `name` in module `m` where `from` can see it.
@@ -259,10 +286,10 @@ impl Program {
         }
     }
 
-    /// E0603 for the `use` declarations of the own crates (`own[krate]`). With an error, the index
-    /// of an import that never binds in rustc (a path through something private): rustc_resolve
-    /// plants a dummy binding for it and counts it used.
-    pub fn import_privacy_errors(&self, own: &[bool]) -> Vec<(Option<usize>, String)> {
+    /// E0603 for the `use` declarations of the own crates (`own[krate]`), each with its crate and,
+    /// for an import that never binds in rustc (a path through something private), the import's
+    /// index: rustc_resolve plants a dummy binding for it and counts it used.
+    pub fn import_privacy_errors(&self, own: &[bool]) -> Vec<(u32, Option<usize>, String)> {
         let mut out = Vec::new();
         for (i, im) in self.imports.iter().enumerate() {
             let krate = self.mods[im.module as usize].krate;
@@ -285,13 +312,13 @@ impl Program {
             };
             if let Some(e) = single.or_else(|| self.path_privacy(im.module, im.global, segs, ns, edition < 2018, true)).filter(|e| !e.lint) {
                 // (an ambiguous name still binds: rustc reports the import unused as well)
-                out.push(((!e.ambiguous).then_some(i), self.record_error(im.file, im.pos, "resolve", self.privacy_message(&e))));
+                out.push((krate, (!e.ambiguous).then_some(i), self.record_error(im.file, im.pos, "resolve", self.privacy_message(&e))));
             } else if im.glob && im.bound & BOUND_PREFIX_ONLY == 0 && self.glob_of_own_module(im, segs, edition) {
                 // (it binds nothing: rustc reports it unused as well)
-                out.push((None, self.record_error(im.file, im.pos, "resolve", "E0432: unresolved import -- cannot glob-import a module into itself".to_string())));
+                out.push((krate, None, self.record_error(im.file, im.pos, "resolve", "E0432: unresolved import -- cannot glob-import a module into itself".to_string())));
             } else if !im.glob && im.is_pub && !im.ext {
-                if let Some(msg) = self.cannot_reexport(im, segs, edition) {
-                    out.push((None, self.record_error(im.file, im.pos, "resolve", msg)));
+                if let Some((pos, msg)) = self.cannot_reexport(im, segs, edition) {
+                    out.push((krate, None, self.record_error(im.file, pos, "resolve", msg)));
                 }
             }
         }
@@ -332,12 +359,42 @@ impl Program {
     }
 
     /// E0364 / E0365 (rustc_resolve imports.rs finalize_import): a `pub use` whose every
-    /// resolved binding is less visible than the import itself.
-    fn cannot_reexport(&self, im: &Import, segs: &[(SegKind, Sym)], edition: u16) -> Option<String> {
-        let (kind, name) = *segs.last()?;
-        // the import's nominal visibility: the `use` item's
+    /// resolved binding is less visible than the import itself, at the import's use tree.
+    fn cannot_reexport(&self, im: &Import, segs: &[(SegKind, Sym)], edition: u16) -> Option<(u32, String)> {
         let f = self.files.get(im.file as usize)?;
         let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use(_)))?;
+        let ItemKind::Use(u) = item.kind else { return None };
+        let pos = self.import_tree_pos(f, &f.ast.row(u).tree, None, 0, im).unwrap_or(im.pos);
+        self.cannot_reexport_message(im, item, segs, edition).map(|m| (pos, m))
+    }
+
+    /// rustc's span for import `im` in `use` tree `tree` (finalize_import's `import.span`): the tree
+    /// that binds it -- the whole tree, or its own one inside a `{..}` group -- from its first
+    /// segment. `start`: where the tree being walked started; `depth`: the segments matched so far.
+    fn import_tree_pos(&self, f: &ParsedFile, tree: &UseTree, start: Option<u32>, depth: usize, im: &Import) -> Option<u32> {
+        let seg_is = |seg: &PathSeg, i: usize| im.segs.get(i).is_some_and(|&(k, s)| f.text(seg.name) == match k {
+            SegKind::Super => "super", SegKind::Crate => "crate", SegKind::SelfValue => "self", SegKind::SelfType => "Self", SegKind::Ident => self.syms.str(s),
+        });
+        match *tree {
+            UseTree::Path(seg, next) => {
+                if !seg_is(&seg, depth) { return None; }
+                self.import_tree_pos(f, f.ast.use_tree(next), start.or(Some(seg.name.lo)), depth + 1, im)
+            }
+            UseTree::Name(seg, rename) => {
+                let own = f.text(seg.name);
+                // the last segment, or a `self` that names the path so far (`a::{self as m}`)
+                let leaf = if depth == im.segs.len() { own == "self" } else { depth + 1 == im.segs.len() && seg_is(&seg, depth) };
+                let bind = im.bind.map(|b| self.syms.str(b));
+                let binds = match (rename.get(), bind) { (Some(r), Some(b)) => f.text(r) == b, (None, Some(b)) => own == b || own == "self", _ => true };
+                (leaf && binds).then_some(start.unwrap_or(seg.name.lo))
+            }
+            UseTree::Glob => None,
+            UseTree::Group(list) => f.ast.list(list).iter().find_map(|t| self.import_tree_pos(f, t, None, depth, im)),
+        }
+    }
+
+    fn cannot_reexport_message(&self, im: &Import, item: &Item, segs: &[(SegKind, Sym)], edition: u16) -> Option<String> {
+        let (kind, name) = *segs.last()?;
         let import_vis = self.vis_module(im.file, im.module, &item.vis);
         let krate_root = self.crates[self.mods[im.module as usize].krate as usize].root_mod;
         let message = |code: &str, n: &str, bv: BindVis| {
@@ -376,7 +433,10 @@ impl Program {
             self.resolve_mod_path(im.module, im.global, &segs[..segs.len() - 1], edition < 2018, true)?
         };
         let pd = self.def(parent);
-        let mut any_ok = self.lookup_macro_in_container(parent, name);
+        // a macro of that name the module binds as widely re-exports it (a proc macro re-exported
+        // beside a private module of its name, relax issue 268)
+        let mut any_ok = self.lookup_macro_in_container(parent, name)
+            || (pd.kind == DefKind::Mod && (self.macro_binding_reexportable(pd.sub, name, import_vis) || self.ext_proc_macro_public(pd.sub, name)));
         let mut failed: Option<(bool, BindVis)> = None;
         for ns in [true, false] {
             let found = match pd.kind {

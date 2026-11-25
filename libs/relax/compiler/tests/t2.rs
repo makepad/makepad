@@ -1,3 +1,7 @@
+// The file form outlives a test's faults: a hang (the stall watchdog unwinds it), a null read and a
+// division by zero each fail their test, and the next test runs (rustc's build dies at the null read).
+// corpus: fails hang segv div_zero
+// corpus: env RELAX_WATCHDOG_MS=2000
 fn spin() -> u64 {
     let mut i = 0u64;
     loop {

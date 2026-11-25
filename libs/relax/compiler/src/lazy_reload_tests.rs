@@ -1137,7 +1137,8 @@ fn gandalf_scope_uses_package_source_and_project_boundaries() {
         ("path+file://", "widgets", "widgets/core/src/lib.rs", false),
         ("path+file://", "math", "libs/math/src/lib.rs", false),
         ("path+file://", "relax_base", "libs/relax/base/src/lib.rs", false),
-        ("path+file://", "engine", "apps/commercial/engine/motion/src/lib.rs", false),
+        ("path+file://", "engine", "apps/commercial/engine/track_engine/src/lib.rs", false),
+        ("path+file://", "open_engine", "apps/apps/engine/motion/src/lib.rs", false),
         ("path+file://", "external", "../external/src/lib.rs", false),
         ("path+file://", "prefix", "../gandalf-project-extra/src/lib.rs", false),
         ("path+file://", "app_lib", "apps/app/libs/helper/src/lib.rs", true),
@@ -2584,7 +2585,7 @@ fn realtime_reach_reads_the_installed_code() {
         f.normal_rir = None;
         f.lowering = None;
         let mut callees: Vec<u32> = relocs.iter().filter_map(|r| match r.target {
-            relax_backend::rir::Reloc::Call(c) | relax_backend::rir::Reloc::Thunk(c) | relax_backend::rir::Reloc::Slot(c) if c != run => Some(c),
+            relax_backend::rir::Reloc::Call(c) | relax_backend::rir::Reloc::Body(c) | relax_backend::rir::Reloc::Thunk(c) | relax_backend::rir::Reloc::Slot(c) if c != run => Some(c),
             _ => None,
         }).collect();
         callees.sort_unstable();
@@ -3368,7 +3369,8 @@ pub fn value(out: &mut u32) {{
 /// A closure stored by the running version whose captures change keeps its old code (its values
 /// hold the old environment). The edit lands, and the stored closure waits for a restart: a HELD
 /// line, so the watcher offers the restart and `session view` lists it. A closure only called in
-/// its parent's frame takes the new code with its parent and holds nothing back.
+/// its parent's frame takes the new code with its parent and holds nothing back, also when an edit
+/// leaves `let _ = s[i]` its only use of a captured slice (its bounds check reads that slice).
 #[test]
 fn a_stored_closure_whose_captures_change_waits_for_a_restart() {
     const CHILD: &str = "RELAX_STORED_CAPTURES_TEST";
@@ -3442,6 +3444,21 @@ pub fn value(out: &mut u32) {{
     assert!(held.len() == 1 && held[0].contains("make`") && held[0].contains("keep its old code (its captures or signature changed)"), "the stored closure, and only it, waits for a restart: {:?}", o.lines);
     // the stored box keeps its old code; `sum` runs its new one
     assert_eq!(run(), 1609);
+    // `sum`'s closure reads a captured slice, then (Amp's wave line) keeps only `let _ = s[i]` of it,
+    // one past its end on the last x: the index still captures `*s` and checks against its length,
+    // or the patched parent's closure read s through another capture (Amp: "the len is 16 but the
+    // index is 17" for a slice of `take` elements indexed below `take`)
+    let made = format!("{z}let j = 4;\n    Box::new(move |x| x * k + j)");
+    let s = "let s: &[u32] = &[7, 8, 9];\n    ";
+    let o = unsafe { apply(up, vec![Edit { file, path: app.clone(), src: src(&made, &format!("{s}(0..3u32).map(|x| s[x as usize] * k).sum()")).into_bytes() }]) };
+    assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
+    assert_eq!(run(), 1648, "the closure reading s");
+    let o = unsafe { apply(up, vec![Edit { file, path: app.clone(), src: src(&made, &format!("{s}(0..3u32).map(|x| {{ let _ = s[x as usize + 1]; x * k }}).sum()")).into_bytes() }]) };
+    assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
+    assert!(o.lines.iter().filter(|l| l.starts_with(HELD)).all(|l| l.contains("make`")), "only the stored closure still waits: {:?}", o.lines);
+    let mut result = 0u32;
+    let p = unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.err().unwrap_or_else(|| panic!("s[3] of 3 elements did not panic: {result}"));
+    assert!(p.message.contains("the len is 3 but the index is 3"), "the bounds check of the closure's `let _ = s[i]`: {}", p.message);
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -3759,8 +3776,13 @@ impl KeptRig {
     /// O3 code for every instance of fn `name` that has code (one for a fn that is not generic;
     /// tiering is otherwise off: no count reaches the threshold): their slots.
     fn tier_up(&mut self, name: &str) -> Vec<u32> {
+        self.tier_up_with(name, |_| {})
+    }
+
+    /// tier_up, with the O3 tier's config set by `set` (a no-inline set of the lower tiers only)
+    fn tier_up_with(&mut self, name: &str, set: impl FnOnce(&mut crate::jit::Tier1Cfg)) -> Vec<u32> {
         let session = unsafe { crate::jit::unit_session(self.up) };
-        self.unit.tier1 = crate::jit::Tier1Cfg::from_options(&session.options).map(|mut t| { t.threshold = u64::MAX; t });
+        self.unit.tier1 = crate::jit::Tier1Cfg::from_options(&session.options).map(|mut t| { t.threshold = u64::MAX; set(&mut t); t });
         let u = &self.unit;
         let slots: Vec<u32> = (0..u.fns.len() as u32).filter(|&s| u.fns[s as usize].compiled && matches!(&u.fns[s as usize].key, crate::jit::FnKey::Inst(d, _) if u.prog.name(*d) == name)).collect();
         for &s in &slots {
@@ -3929,7 +3951,7 @@ pub fn start(p: *mut u64) {
 /// held for a restart only once the old code makes that box (`late_held`, the live loop's look),
 /// and the box runs the old text, its inner closures included. (O1 inlines nothing
 /// into `pump` and no closure anywhere, so its first code calls the closure; O3 inlines as a
-/// session does.)
+/// session does: the no-inline set is the lower tiers' only.)
 #[test]
 fn a_frame_over_a_kept_closure_blocks_a_layout_patch() {
     isolated_test!(a_frame_over_a_kept_closure_blocks_a_layout_patch);
@@ -3979,8 +4001,12 @@ pub fn start(p: *mut u64) {
     assert_eq!(old.len(), 1, "the closure has code");
     // named as a refused edit names a closure: by the fn that makes it and its place
     let name = rig.shown(old[0]);
-    // (the frame of the first wait stays in the instance's first code)
-    let pumps = rig.tier_up("pump");
+    // (the frame of the first wait stays in the instance's first code; its O3 build takes no
+    // no-inline set)
+    let pumps = rig.tier_up_with("pump", |t| {
+        t.noinl = None;
+        t.noinl_callee = None;
+    });
     assert_eq!(pumps.len(), 1, "one instance of pump");
     let o3 = rig.unit.fns[pumps[0] as usize].code;
     let copied = rig.unit.code.read().unwrap().inlined_at(o3).is_some_and(|l| l.contains(&old[0]));

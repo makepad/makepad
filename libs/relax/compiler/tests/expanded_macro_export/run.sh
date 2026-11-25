@@ -6,7 +6,7 @@
 # warm, warm after an edit of the root, and after an edit of the defining module's expansion (the root sees
 # the new definition). Prints "expanded_macro_export: ok" or "expanded_macro_export: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 WANT="expanded macros 42 7 3 42 16 9 | 4 20"
 ok=1
 run() { # run <label> <expected> [env..]

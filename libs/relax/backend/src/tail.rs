@@ -72,7 +72,7 @@ pub fn sibling_calls(options: &relax_session::Options, f: &Func, reach: &[bool],
         // the block's last call, followed by moves only
         let Some(k) = b.insts.iter().rposition(|i| !matches!(i, Inst::Mov(..))) else { continue };
         let Inst::Call(c, _, rets) = &b.insts[k] else { continue };
-        if !matches!(c, Callee::Asm(_) | Callee::Host(_) | Callee::CHost(..)) && returns_results(f, bi, k + 1, rets) {
+        if !matches!(c, Callee::Part(_) | Callee::Asm(_) | Callee::Host(_) | Callee::CHost(..)) && returns_results(f, bi, k + 1, rets) {
             cands.push((bi, k));
         }
     }
@@ -105,6 +105,7 @@ pub fn sibling_calls(options: &relax_session::Options, f: &Func, reach: &[bool],
             }
         }
         if callee_ok(f, arch, c, args, rets) {
+            assert!(!matches!(c, Callee::Part(_)), "a private part call must keep the host frame");
             out[bi] = Some(k);
             any = true;
         } else if trace {
@@ -328,7 +329,7 @@ pub fn tail_shaped(f: &Func, reach: &[bool]) -> Vec<usize> {
         }
         let Some(k) = b.insts.iter().rposition(|i| !matches!(i, Inst::Mov(..))) else { continue };
         let Inst::Call(c, _, rets) = &b.insts[k] else { continue };
-        if matches!(c, Callee::Asm(_) | Callee::Host(_) | Callee::CHost(..)) {
+        if matches!(c, Callee::Part(_) | Callee::Asm(_) | Callee::Host(_) | Callee::CHost(..)) {
             continue;
         }
         let shaped = match b.term {
@@ -340,4 +341,24 @@ pub fn tail_shaped(f: &Func, reach: &[bool]) -> Vec<usize> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tail_shaped_part_call_keeps_its_record_frame() {
+        let mut f = Func::new("host".into(), 0);
+        let slot = f.slot(16, 16);
+        let (record, result) = (f.vreg(Cls::I), f.vreg(Cls::I));
+        f.rets.push(Cls::I);
+        f.block();
+        f.blocks[0].insts = vec![Inst::SlotAddr(record, slot), Inst::Call(Callee::Part(Some(2)), vec![record], vec![result])];
+        f.blocks[0].term = Term::Ret(vec![result]);
+        assert!(returns_results(&f, 0, 2, &[result]));
+        for arch in [Arch::X64, Arch::Arm64] {
+            assert!(sibling_calls(&relax_session::Options::default(), &f, &[true], arch).is_empty());
+        }
+    }
 }

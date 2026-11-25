@@ -1962,16 +1962,18 @@ pub fn global_allocators_and_lang_items(prog: &Program, own: &[bool], binaries: 
 /// whose feature the crate does not enable is E0658. The crate's own text is judged: the file's,
 /// and the body of a `macro_rules!` defined in it (reported at the token in the definition, as
 /// rustc does); what a built-in macro or another crate's macro produced is not (it may carry
-/// `allow_internal_unstable`).
+/// `allow_internal_unstable`). A body parsed after the load (a run's) is judged once it is parsed.
 pub fn gated_syntax(prog: &Program, own: &[bool]) -> Vec<String> {
     use crate::parser::ExpnKind;
     let mut errors = Vec::new();
     for (f, pf) in prog.files.iter().enumerate() {
-        if pf.ast.gated_syntax.is_empty() { continue; }
+        // the file's text, then its bodies a run parsed on their first need (ParsedFile::part)
+        let asts = || std::iter::successors(Some(&pf.ast), |a| a.part.get().map(|p| &**p));
+        if asts().all(|a| a.gated_syntax.is_empty()) { continue; }
         let krate = prog.file_crate.get(f).copied().unwrap_or(u32::MAX);
         if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
         let features = prog.crates[krate as usize].features(prog);
-        for &(feature, pos) in &pf.ast.gated_syntax {
+        for &(feature, pos) in asts().flat_map(|a| &a.gated_syntax) {
             if features.has(feature) || !matches!(pf.expansion_kind(pos), ExpnKind::Root | ExpnKind::LocalRules) { continue; }
             let msg = match feature {
                 "stmt_expr_attributes" => "attributes on expressions are experimental",

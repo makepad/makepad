@@ -175,6 +175,7 @@ makepad_hal::video_files::FILES	Android: no in-place restart there
 makepad_hal::window_controls::HOST_CAPTION	WM's sheet, set by the host
 makepad_hal::window_controls::HOST_CONTROLS	WM's sheet, set by the host
 makepad_hal::wm_socket::CLIENT_NAME	WM client name of this process
+makepad_hal::wm_socket::FOUND	where this process found its WM after waiting for it, with its probe (discovered::PROBE): the WM connection is the process's, kept over a restart in place
 makepad_hal::wm_socket::discovered::PROBE	WM socket probe
 makepad_hal::xr_remote::ENABLED	this process offers the headset slot once; stays with the HAL
 makepad_hal::xr_remote::remote::R	the headset link of the process; freeing the session clears its window and events
@@ -184,6 +185,7 @@ relax_api::section::START	linker section bound of this binary
 relax_api::section::STOP	linker section bound of this binary
 makepad_remote::cmd::START	clock epoch of this process
 makepad_remote::conn::mono_ns::START	clock epoch of this process
+makepad_remote::conn::LIVE	the process's live connections, as weak pointers: they outlive a run as its endpoints do (carrier::loopback::SERVED), an exec shuts each down (shut_down_all), and one that ended goes at the next connection's start
 makepad_run::HOST	host of the process
 makepad_run::hal_run::COMPILE	the compile closure of this process, the same for each run
 makepad_run::hal_run::ENVIRONMENT	safe area, appearance and a11y of the host shell, kept current, not the app (hal_run.rs:410, lib.rs:96)
@@ -254,9 +256,6 @@ relax_backend::stats::pass_clock::T0	clock epoch of the pass timer
 relax_backend::tail::trace_on::P	env memo
 relax_backend::wasm::ctx_bytes_on::T	env RELAX_WASM_EXPORT_FNLIST read once, nothing sets it
 relax_backend::x64::RIR_MAP	switch set once by the driver
-relax_base::boot_stats::O3_ARMS	ring; the field reads the delta from o3_base
-relax_base::boot_stats::O3_INSTALLED	ring; the field reads the delta from o3_base
-relax_base::boot_stats::O3_KEYS	ring; the field reads the delta from o3_base
 relax_base::clock::wall_ns::T0	wall_ns epoch, only compared with itself
 relax_base::compile_time::POLICY	one policy per process, chosen by the entry point
 relax_base::conc::thread_id::NEXT	thread ids are never reused
@@ -264,6 +263,10 @@ relax_base::dirs::DEFAULT	machine fact
 relax_base::dirs::SET	from args, same next run
 relax_base::dirs::SET_WORKSPACE	from args, same next run
 relax_base::git::fetch::HTTP	one-shot host hook
+relax_base::host::init::APPLIED	the linked host's facts, applied once per process: a second apply panics on relax_runner::HOST, which stays
+relax_base::host::section::ANCHOR	section anchor in this binary, constant
+relax_base::host::section::START	linker section bound of this binary
+relax_base::host::section::STOP	linker section bound of this binary
 relax_base::inflate::adler32::adler32_neon::MULTS	constant multiplier table
 relax_base::inflate::adler32::adler32_sse2::MULTS_A	constant multiplier table
 relax_base::inflate::adler32::adler32_sse2::MULTS_B	constant multiplier table
@@ -396,6 +399,7 @@ relax_codegen::loops::zerofill_trace::VALUE	env RELAX_UNROLL_TRACE read once, no
 relax_codegen::native::compile_freq_inner::DUMP	env RELAX_DUMP read once, nothing sets it
 relax_codegen::native::compile_native::ON	env RELAX_INTERP_STATS read once, nothing sets it
 relax_codegen::native::install_probe::P	unit struct, probe vtable only (native.rs:64)
+relax_codegen::native::outline_whole::SUFFIXES	env RELAX_OUTLINE_WHOLE read once, nothing sets it: a debug option of the process, which a run's end in place keeps
 relax_codegen::opt::inline_trace::T	env memo
 relax_codegen::opt::slotcoal_dump::VALUE	env RELAX_SLOTCOAL_DUMP read once, nothing sets it
 relax_codegen::opt::slotcoal_trace::T	env memo
@@ -714,9 +718,12 @@ relax_compiler::os::fault::HOST_TEXT	the host image's code range, fixed for the 
 relax_compiler::os::fault::PREV_ALLOC_FAILURE	set only on the way to the process's end by SIGABRT (std's default_alloc_error_hook)
 relax_compiler::os::fault::SPARE_ALTSTACKS	spare stacks, reusable
 relax_compiler::os::fault::imp::FAULT_REGS	env; cfg-off: apple
-relax_compiler::os::fault::imp::WATCHDOG	signal number chosen once; cfg-off: android
+relax_compiler::os::fault::imp::install::CONTINUED	the process's one continue handler: each unit's install swaps it, it outlives a run; cfg-off: unix
+relax_compiler::os::fault::imp::install::VECTORED	the process's one vectored handler: each unit's install swaps it, it outlives a run; cfg-off: unix
 relax_compiler::os::fault::imp::trace::T	env RELAX_FAULT_TRACE read once, nothing sets it
 relax_compiler::os::mem::NO_CODEGEN	env
+relax_compiler::os::mem::imp::ASM_UNWIND	asm functions' unwind entries of the code reservations, which span runs as RES does (ended code stays and is walked); release drops an area's, and a replaced table is never freed (a lookup may be reading it); cfg-off: windows
+relax_compiler::os::mem::imp::ASM_UNWIND_LOCK	lock; cfg-off: windows
 relax_compiler::os::mem::imp::BITS	committed code granules, code only grows; siblings REGIONS process (os/mem.rs:1135)
 relax_compiler::os::mem::imp::CODE_REGIONS	region table, a slot empties only on release: 64 slots, then panic; cfg-off: apple
 relax_compiler::os::mem::imp::CODE_REGIONS_LOCK	lock; cfg-off: apple
@@ -741,6 +748,7 @@ relax_compiler::os::proc::imp::HOST_LIBRARY	library handle of the host; cfg-off:
 relax_compiler::os::proc::imp::LOADED	dlopen handles of the process; libraries stay loaded (os/proc.rs:506)
 relax_compiler::os::proc::imp::POOL	Android: no in-place restart there
 relax_compiler::os::proc::imp::find::UCRT	library handle; cfg-off: windows
+relax_compiler::os::proc::imp::system_lib_dirs::DIRS	the machine's import-library folders: env LIB, which nothing sets, and the newest installed SDK; read once into the kept heap
 relax_compiler::os::thread::unix::ENDED_UNTAKEN	kicks still counted on threads of the process when they ended, which the line for a stray watchdog signal says (the kick table's, kicks::FIRST)
 relax_compiler::os::thread::unix::ON_THE_WAY	kicks sent and not yet taken in the process: one sent at a run's end to a thread that ended may reach another thread after the next run started (Darwin), and is told from a stray signal only while it is counted
 relax_compiler::os::thread::unix::kicks::FIRST	the watchdog's kick table of the process (an ending thread clears its entries)
@@ -748,6 +756,8 @@ relax_compiler::os::thread::unix::names::TABLE	thread names by id
 relax_compiler::os::tls::fixed::BASE	offset of the reserve from the thread pointer, a fact of this binary (os/tls.rs:112)
 relax_compiler::os::tls::fixed::NEXT	handed out once per process, survivors hold old offsets; each run burns offsets and the 16 KB reserve falls to the block path
 relax_compiler::os::tls::imp::DTOR	native dtor, overwritten with the same fn; cfg-off: windows
+relax_compiler::os::tls::imp::CELL	a runtime under Relax: its word in the outermost runtime's thread-local block, taken once per process (a run's end keeps it, or each run would take one more word); cfg-off: native
+relax_compiler::os::tls::NESTED_WORDS	a runtime under Relax: the outermost runtime's words it handed to its programs' runtimes; a run's end frees them for reuse (reset_statics), it never drops them; cfg-off: native
 relax_compiler::owner::BETWEEN_REQUESTS	marker address, never read (owner.rs:261)
 relax_compiler::owner::CHILD	fork child latch
 relax_compiler::owner::MAIN_AHEAD	monotone count: readers take differences (run.rs mid_flush)
@@ -765,6 +775,7 @@ relax_compiler::owner::SERVED	rings and monotone count
 relax_compiler::owner::SPIN_PER_US	machine fact
 relax_compiler::owner::WAKE	owner queue, empty once threads ended
 relax_compiler::owner::calibrate::PROBE	spin target of the calibration, always 0 (owner.rs:99)
+relax_compiler::owner::forbid_in_publish::TRACE	env RELAX_BAIL_TRACE read once, nothing sets it
 relax_compiler::pack::MAPPINGS	every cache mapping, removed at unmap (forget_mapping); outlives compiler generations
 relax_compiler::pmhost::BUILDING	lock
 relax_compiler::pmhost::JIT_RUNNER	unit struct, runner vtable (pmhost.rs:114)
@@ -789,6 +800,7 @@ relax_compiler::reload::host::HANDOVER	handover to a rebuilt makepad, still an e
 relax_compiler::reload::host::HARNESS_RESTART	live test session only, the harness restarts by exec
 relax_compiler::reload::host::LOADED	facts of the loader binary, which stays
 relax_compiler::reload::host::PACKAGE	facts of the loader binary, which stays
+relax_compiler::reload::host::SAVE_WAIT	the linked runner supplies its save watcher once per process
 relax_compiler::reload::host::STATE	the JIT's own update: the build under way and what waits belong to the process, which that update execs
 relax_compiler::reload::host::RESTART_AFTER_BUILD	the build belongs to the process and ends in an exec
 relax_compiler::reload::host::loader::LOADER	path of this binary, env set only at runner start (runner/src/lib.rs:148); "what this process runs" (reload_host.rs:40)
@@ -844,6 +856,7 @@ relax_compiler::stale::RANGES	segments of the retired-range table, made once and
 relax_compiler::stale::RUN_ENDS	monotone gate of in_ended_run: the ended runs' ranges stay
 relax_compiler::stale::WAKE_R	pipe of the run-stale watcher, which its ONCE spawns once and which must stay
 relax_compiler::stale::WAKE_W	pipe of the run-stale watcher, which its ONCE spawns once and which must stay
+relax_compiler::stale::WAKE	wake-up event of the run-stale watcher, which its ONCE spawns once and which must stay; cfg-off: unix
 relax_compiler::stale::start_watcher::ONCE	Once of the run-stale watcher thread, which stays (stale.rs:251)
 relax_compiler::std_dir::HINT	path hint
 relax_compiler::std_source::SELECTED	std selection needs one check per process
@@ -874,6 +887,7 @@ relax_compiler::tui::unix::OUT	tee and transcript stay, provided the restart pat
 relax_compiler::tui::unix::READER	tee and transcript stay, provided the restart path does not call tui::finish
 relax_compiler::tui::unix::STATE	tee and transcript stay, provided the restart path does not call tui::finish
 relax_compiler::tui::unix::TEE	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::typeck_bg::trace::on::ON	env RELAX_BG_TRACE read once, nothing sets it
 relax_compiler::wasm_export::block_profile::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::wasm_export::enabled::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::wasm_export::full_o1::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
@@ -920,7 +934,10 @@ relax_front::unitgraph::TEST_PROFILE	the test command's profile, set once from i
 relax_front::unitgraph::TMP_SEQ	temp name counter never reused (unitgraph.rs:849)
 relax_front::unitgraph::path_lock::LOCKS	leaked lock table by path, holds no value (unitgraph.rs:1131)
 relax_front::unitgraph::script_slots::N	CPU count (unitgraph.rs:1103)
+relax_runner::BARE	the bare runner's host, constant
+relax_runner::ENTRY	the linked host's entry in this binary's relax_host section, constant
 relax_runner::HOST	native host, set once
+relax_runner::start_host::STARTED	the host's start (loader snapshot, ahead level, its init) runs once per process, as HOST is set once
 relax_runner::PRIVILEGED	how this process started
 relax_runner::loader_exe::EXE	loader path
 relax_session::RESETS	the test's list
@@ -970,6 +987,7 @@ relax_compiler::run_end::leftovers::GONE	test only: the heaps that went, across 
 makepad_live_id::live_id::UNIQUE_LIVE_ID	ids never reused
 makepad_live_id::live_id::with_table::IDMAP	the process's table of names, keyed by their hash: it holds what any run interned, in the process's heap (process_heap)
 makepad_live_id::live_id::with_table::ONCE	seeds IDMAP once
+makepad_script_audio_aot::boundary::SHADER_COMPILE	WorkerOnly registers its per-run counter reset on first use on a UI thread
 makepad_script_audio_aot::wasm::RECORDING	wasm export only
 makepad_script_audio_aot::wasm::recorded::Q	wasm export only
 makepad_shader::shader_ir_spirv::spirv_val::SEQ	names validation files, only grows
@@ -977,11 +995,14 @@ makepad_shader::shader_schema::POD_SWIZZLES	constant table
 relax_compiler::jit::RUNS_ENDED	counts the ends a staying thread compares with: never goes back
 relax_compiler::run_end::leftovers::ON	a test mode: set once, from the process's start
 relax_front::macro_reg::PURE_CRATES	the host's audited pure proc-macro crates, set once (set_host)
+relax_front::macro_reg::CALL_KRATES	crate names the CALL_KRATE thread-locals index (no destructor, so they read the same at a thread's end): an index a thread holds stays valid, one entry per name
 makepad_run::script_answers::PLATFORM	immutable: makepad-platform's build-script answer entry
 makepad_cpu_budget::JIT_UNSETTLED	the JIT's settle state, which the JIT sets at each run's start (jit.rs: set_jit_settled(false)) and as it settles
 makepad_cpu_budget::monotonic_ns::START	the process's clock origin: every reading of the process is relative to it
 makepad_hal::a11y::USER_SEQ	the person's input count for the process: an act's if_user_seq compares readings, so it only grows
 makepad_hal::backend::apple::appkit::app::shown_for_person::SHOWN	env MAKEPAD_SHOW read once; a run in place has the process's environment
+makepad_hal::backend::apple::appkit::drag_out::DRAGS	drag numbers of the process, never reused: a promise provider of a drag under way across a run in place keeps its number (drag_out.rs drag_started)
+makepad_hal::backend::apple::appkit::drag_out::LOGGED	the drag whose main-thread wait was last logged, one of DRAGS' numbers, which are never reused
 makepad_hal::backend::apple::appkit::tray::IMAGE_SETS	the tray selftest's count "so far" in the process, only logged; nothing decides on it
 makepad_hal::backend::apple::appkit::tray::MENU_SETS	the tray selftest's count "so far" in the process, only logged; nothing decides on it
 makepad_hal::backend::apple::appkit::tray::TOOLTIP_SETS	the tray selftest's count "so far" in the process, only logged; nothing decides on it
@@ -997,6 +1018,8 @@ makepad_hal::backend::vulkan::sets::serial::NEXT	object serials: never reused in
 makepad_hal::backend::vulkan::surface::acquire_wait_ns::FOREVER	a system property read once, nothing sets it
 makepad_hal::backend::windows::win32::clipboard::html_format::FORMAT	the clipboard format id Windows registered for the process
 makepad_hal::backend::windows::win32::clipboard::markdown_format::FORMAT	the clipboard format id Windows registered for the process
+makepad_hal::backend::windows::win32::drag::async_op::VTABLE	constant vtable of the drag data object's IDataObjectAsyncCapability, never written
+makepad_hal::drag_promise::WAITER	the process's drag promise waiter thread and its channel (each side its own, relax_api per_side): a drop's wait queued across a run in place still answers its window system, which stays with the HAL (X11 and Wayland wake their loop, Win32 sets its event)
 makepad_hal::user_input::OPEN	the device reader's open devices as it last said: the reader outlives a run
 makepad_live_id::live_id::NAMES_REPLACED	a generation of the process's name table: it only grows, a reader compares two readings
 makepad_remote::carrier::loopback::OWN	the process's own loopback secret, made with its first endpoint
@@ -1033,6 +1056,18 @@ relax_base::zone_alloc::compiler::HEAPS_HIGH	bounds of every domain heap region 
 relax_base::zone_alloc::compiler::HEAPS_LOW	bounds of every domain heap region the process made: they only widen (arena.rs)
 relax_base::zone_alloc::slots::HEAPS_HIGH	bounds of every domain heap region the process made: they only widen (arena.rs)
 relax_base::zone_alloc::slots::HEAPS_LOW	bounds of every domain heap region the process made: they only widen (arena.rs)
+relax_base::zone_alloc::burst::PARENT_HIGH	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::burst::PARENT_LOW	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::compiler::PARENT_HIGH	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::compiler::PARENT_LOW	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::slots::PARENT_HIGH	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::slots::PARENT_LOW	a plain fork's child's true heap bounds (its HEAPS_LOW/HIGH open to every address): they only widen (arena.rs)
+relax_base::zone_alloc::ARENAS_CLOSED	a plain fork's child closes every arena for good: locks its parent's threads held stay held
+relax_base::zone_alloc::domain::child_system::BUCKETS	a plain fork's child's own system blocks, live across its runs; the nodes stay mapped for a nested fork
+relax_api_phase::sync::NEXT_TOKEN	lock holder tokens: never repeated while their threads live (threads outlive runs)
+relax_api_phase::sync::FORKER	set in a plain fork's child, which stays one for its life: the thread that survived the fork
+relax_api_phase::sync::FORK_MARK	set in a plain fork's child, which stays one for its life: holders up to it are the parent's threads
+relax_api_phase::sync::IN_FORK_CHILD	set in a plain fork's child, which stays one for its life
 relax_compiler::check::BODY_MEM_ROWS	RELAX_MEM_REPORT rows of a check process (one check), written at its end
 relax_compiler::check::BODY_NS	RELAX_CHECK_TIMES sums of a check process (one check), printed at its end
 relax_compiler::check::BODY_ROWS	RELAX_CHECK_BODY_TIMES rows of a check process (one check), written at its end

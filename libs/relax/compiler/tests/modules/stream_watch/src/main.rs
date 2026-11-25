@@ -39,8 +39,16 @@ fn main() {
     // An error is quiet at its feed and reported by the watcher once the stream stalls (a second
     // after its last change and feed): stream_settled returns after that report. (Its feed
     // applies: the watcher's last feed ended over a second ago, past the coalescing window.)
-    assert_eq!(m.stream("pub fn value() -> i32 { missing() }\n").unwrap(), Stream::Incomplete);
+    // The runner's marker goes out while the stream is held, which keeps the stall report back,
+    // so the marker comes first however long the program takes to print it: the sleep is a slow
+    // print past the stall's second, every run (the marker, the program's first eprintln compiled
+    // cold on a loaded machine, once took that long, and the report came first).
+    let fed = m.stream("pub fn value() -> i32 { missing() }\n");
+    let held = m.hold_stream().unwrap();
+    assert_eq!(fed.unwrap(), Stream::Incomplete);
+    std::thread::sleep(std::time::Duration::from_millis(1300));
     eprintln!("stream-watch: fed, nothing reported");
+    drop(held);
     m.stream_settled().unwrap();
     assert_eq!(value(m), 3, "a stalled error keeps the running version");
     m.unload();

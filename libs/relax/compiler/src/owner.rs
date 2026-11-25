@@ -85,6 +85,8 @@ const RELEASED: u8 = 3;
 /// - the owner sleeps on `WAKE` only with `Q` held and `OWNER_ASLEEP` set, after finding the lanes
 ///   empty under `Q`; `push` adds under `Q` and then reads `OWNER_ASLEEP` (SeqCst), so a request
 ///   posted between the owner's check and its wait is either seen by the check or notifies.
+/// - the owner takes `ROLE` before checking the pause in `pick` and releases it on an empty
+///   pick before sleeping, so a pauser can drain even with held-back requests queued.
 const REQUESTER_SPIN_US: u32 = 60;
 const OWNER_SPIN_US: u32 = 60;
 /// The owner's spin after a request of the main thread: a lazy compile on the UI thread asks again
@@ -202,6 +204,17 @@ static OWNER_SERVING: AtomicBool = AtomicBool::new(false);
 
 /// os thread id of the owner thread
 static OWNER_TID: AtomicU64 = AtomicU64::new(0);
+/// The owner holds its thread id here from before pick through its drains, and across a fork
+/// park. An empty pick or the end of that work frees it. Dekker pair: the owner stores ROLE
+/// then reads BG_PAUSE in pick, the pauser stores BG_PAUSE then reads ROLE. All four are
+/// SeqCst, so one sees the other while both claims stand.
+static ROLE: AtomicU64 = AtomicU64::new(0);
+struct RoleGuard;
+impl Drop for RoleGuard {
+    fn drop(&mut self) {
+        ROLE.store(0, Ordering::SeqCst);
+    }
+}
 static OWNER_THREAD: std::sync::OnceLock<std::thread::Thread> = std::sync::OnceLock::new();
 /// the threads ending the process (0: none): from then on only their requests (and Job / Finish
 /// ones) are served -- other threads' requests wait until the process is gone
@@ -219,6 +232,10 @@ pub static MAIN_ACC: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
 /// requester the owner was serving when it began (a frame hitch: run summary)
 pub static MAIN_WAIT_MAX: AtomicU64 = AtomicU64::new(0);
 static MAIN_WAIT_BEHIND: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The owner's own work between requests now (0: none; 1 the real-time vtables, 2 the constants
+/// background fronts asked for, 3 the left-out O3 builds): what main's request queued behind when
+/// the owner served no request (RELAX_MAIN_COMPILE_LOG)
+static OWN_NOW: AtomicU8 = AtomicU8::new(0);
 /// what the owner serves now: class (u8::MAX: idle) and requester
 static NOW_CLASS: AtomicU8 = AtomicU8::new(u8::MAX);
 static NOW_FROM: AtomicU64 = AtomicU64::new(0);
@@ -714,10 +731,18 @@ pub fn forbid_in_publish(what: &'static str, slot: u32) {
             };
             BAILS[cause].fetch_add(1, Ordering::Relaxed);
             // RELAX_BAIL_TRACE: where a background take bailed (diagnosis of the bail rate)
-            if std::env::var_os("RELAX_BAIL_TRACE").is_some() {
+            static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *TRACE.get_or_init(|| std::env::var_os("RELAX_BAIL_TRACE").is_some()) {
                 eprintln!("relax bail: {} (slot {}) at\n{}", what, slot, std::backtrace::Backtrace::force_capture());
+                eprintln!("{}", crate::inspect::report_stack());
             }
-            std::panic::resume_unwind(Box::new(PublishBail { what, slots: if slot == u32::MAX { Vec::new() } else { vec![slot] } }))
+            // (a wait's slot is the one in flight: no front of it helps)
+            let (slots, flight) = match slot {
+                u32::MAX => (Vec::new(), None),
+                s if what == "a wait" => (Vec::new(), Some(s)),
+                s => (vec![s], None),
+            };
+            std::panic::resume_unwind(Box::new(PublishBail { what, slots, builds: Vec::new(), flight }))
         }
         _ => {
             // said here, before it unwinds: on the owner the panic hook is silent (a request's
@@ -854,6 +879,9 @@ fn me() -> u64 {
     crate::os::thread::current()
 }
 
+/// This thread's id as the owner's queue names requesters.
+pub(crate) fn current_thread() -> u64 { me() }
+
 /// Is this the owner thread (or the only thread of a forked child)?
 #[inline]
 /// On the owner, inside a request it serves (its panics resume in the requester).
@@ -873,6 +901,9 @@ pub fn serving() -> (Class, u64) {
 /// (tests) work the owner runs once between two requests, beside its drains (`owner_loop`)
 #[cfg(test)]
 pub(crate) static OWN_WORK_TEST: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+/// Runs once after the owner picks this thread's request and before it serves it.
+#[cfg(test)]
+pub(crate) static PICKED_TEST: std::sync::Mutex<Option<(u64, Box<dyn FnOnce() + Send>)>> = std::sync::Mutex::new(None);
 
 /// A request served inside an earlier request's wait, or inside a wait of the owner's own work
 /// between requests (owner only).
@@ -939,19 +970,21 @@ pub fn serving_detail() -> String {
     }
 }
 
-/// The request queue as a JSON object (makepad inspect; atomics only, never the queue's lock):
+/// The request queue as a JSON object (makepad inspect; without taking the queue's lock):
 /// queued requests, of which foreground (main + app) and main; and `demand`, 1 while a thread of
 /// the program is inside a demand compile (a first call's lazy compile, from its first request
 /// until it runs the code). A queued request is only part of that wait: once the owner served it,
 /// the thread still waits on its compile until it runs again, and an app whose threads
-/// wait so is not idle (makepad_test's idle rule reads it).
+/// wait so is not idle (makepad_test's idle rule reads it). `check` is 1 until the running app check
+/// publishes its verdict, even when the app has already presented.
 pub fn queued_note() -> String {
     format!(
-        "{{\"total\":{},\"foreground\":{},\"main\":{},\"demand\":{}}}",
+        "{{\"total\":{},\"foreground\":{},\"main\":{},\"demand\":{},\"check\":{}}}",
         QUEUED_N.load(Ordering::Relaxed),
         FOREGROUND.load(Ordering::Relaxed),
         MAIN_QUEUED.load(Ordering::Relaxed),
-        u8::from(crate::jit::demand_compile_age().0)
+        u8::from(crate::jit::demand_compile_age().0),
+        u8::from(crate::check::app_check_running())
     )
 }
 
@@ -1146,6 +1179,7 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
         wake: Condvar::new(),
     };
     let behind = NOW_CLASS.load(Ordering::Relaxed);
+    let behind_own = if behind == u8::MAX { OWN_NOW.load(Ordering::Relaxed) } else { 0 };
     let behind_from = NOW_FROM.load(Ordering::Relaxed);
     // SAFETY: only &'static Locations are stored
     let behind_site = unsafe { NOW_SITE.load(Ordering::Relaxed).as_ref() };
@@ -1178,7 +1212,7 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
         let served = req.t_serve.load(Ordering::Relaxed);
         if served != 0 {
             let q = served.saturating_sub(req.t_push);
-            crate::jit::main_rec_behind(q, behind, behind_from, behind_site);
+            crate::jit::main_rec_behind(q, behind, behind_from, behind_site, behind_own);
             if behind_rt {
                 crate::jit::rt_main_waited(q);
             }
@@ -1641,6 +1675,7 @@ fn serve(r: usize, void: bool) {
 
 fn owner_loop() {
     calibrate();
+    let tid = me();
     let mut main_last = false;
     loop {
         // idle: a short spin catches the next request of a burst without a sleep and wake (a wait of
@@ -1653,9 +1688,15 @@ fn owner_loop() {
             std::hint::spin_loop();
         }
         drop(spin);
-        let (r, void) = {
+        let (r, void, _role) = {
             let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
+            let mut role = None;
             loop {
+                role.get_or_insert_with(|| {
+                    let taken = ROLE.compare_exchange(0, tid, Ordering::SeqCst, Ordering::SeqCst);
+                    debug_assert!(taken.is_ok(), "only the owner takes the role");
+                    RoleGuard
+                });
                 // a fork: parked here, between two requests (no request's state half done)
                 if FORK.load(Ordering::SeqCst) == 1 {
                     drop(q);
@@ -1667,8 +1708,9 @@ fn owner_loop() {
                     continue;
                 }
                 if let Some(r) = pick(&mut q, Mode::Top) {
-                    break (r, q.void);
+                    break (r, q.void, role);
                 }
+                drop(role.take());
                 if STOP.load(Ordering::SeqCst) {
                     return;
                 }
@@ -1683,6 +1725,16 @@ fn owner_loop() {
                 OWNER_ASLEEP.store(false, Ordering::SeqCst);
             }
         };
+        #[cfg(test)]
+        {
+            let hook = {
+                let mut picked = PICKED_TEST.lock().unwrap_or_else(|e| e.into_inner());
+                picked.take_if(|(tid, _)| *tid == unsafe { (*(r as *const Req)).from })
+            };
+            if let Some((_, hook)) = hook {
+                hook();
+            }
+        }
         main_last = from_main(r);
         serve(r, void);
         crate::lifeline::beat();
@@ -1692,15 +1744,19 @@ fn owner_loop() {
         // on the owner's stack: that request is cancelled and posted again, as inside a request)
         let frame = crate::jit::frame_enter(std::ptr::null());
         OWN_WORK.with(|w| w.set(true));
+        OWN_NOW.store(1, Ordering::Relaxed);
         if std::panic::catch_unwind(crate::jit::realtime_drain).is_err() {
             eprintln!("relax: the owner's real-time vtable drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
         }
         // ... and the constants background builds' fronts found unevaluated
+        OWN_NOW.store(2, Ordering::Relaxed);
         if std::panic::catch_unwind(crate::jit::const_drain).is_err() {
             eprintln!("relax: the owner's constant drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
         }
         // ... and the O3 builds that left a candidate out for what the drain makes
+        OWN_NOW.store(3, Ordering::Relaxed);
         let _ = crate::jit::left_out_drain();
+        OWN_NOW.store(0, Ordering::Relaxed);
         #[cfg(test)]
         {
             let work = OWN_WORK_TEST.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -1924,7 +1980,11 @@ pub fn wake() {
 /// exit helper's (and Job / Finish ones); other threads' requests stay queued until the process
 /// is gone.
 pub fn begin_exit() {
-    let _ = EXIT_TID.compare_exchange(0, me(), Ordering::AcqRel, Ordering::Acquire);
+    begin_exit_for(me());
+}
+
+pub fn begin_exit_for(tid: u64) {
+    let _ = EXIT_TID.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire);
     wake();
 }
 
@@ -1960,9 +2020,10 @@ pub fn park_for_exit() -> ! {
     std::panic::resume_unwind(Box::new(ExitParked))
 }
 
-/// The owner is serving a request of another thread than `tid` now.
+/// The role is held and the owner is not known to be serving `tid`'s request. This includes
+/// the gap from pick to serve and the owner's own work between requests.
 pub fn busy_for_other(tid: u64) -> bool {
-    NOW_CLASS.load(Ordering::Acquire) != u8::MAX && NOW_FROM.load(Ordering::Acquire) != tid
+    ROLE.load(Ordering::SeqCst) != 0 && !(NOW_CLASS.load(Ordering::SeqCst) != u8::MAX && NOW_FROM.load(Ordering::SeqCst) == tid)
 }
 
 /// The allocator swap ended: the owner serves everyone again.
@@ -2006,6 +2067,8 @@ pub fn fork_parent() {
 }
 
 pub fn fork_child() {
+    // The parked owner stayed in the parent. The child serves inline and never takes its role.
+    ROLE.store(0, Ordering::SeqCst);
     CHILD.store(true, Ordering::SeqCst);
     FORKING.store(false, Ordering::SeqCst);
     IS_OWNER.with(|o| o.set(true));
@@ -2270,9 +2333,9 @@ mod tests {
         if let Some(w) = waiter {
             w.join().unwrap();
         }
+        // (no wall-clock bound: a loaded box took 1.008 s; the 5 s `late` is the hang's mark)
         assert!(!TIMED_OUT.load(Ordering::SeqCst), "the nested constant waited for a query held up by the owner's own stack");
-        assert!(CANCELLED.load(Ordering::SeqCst) >= 1);
-        assert!(t0.elapsed().as_millis() < 1000, "{:?}", t0.elapsed());
+        assert!(CANCELLED.load(Ordering::SeqCst) >= 1, "the nested constant was cancelled, not waited out");
     }
 
     /// The owner-wait table's rows: a wait outside every request (the owner loop draining constants)
@@ -2329,12 +2392,15 @@ mod tests {
         while !ROW.load(Ordering::SeqCst) {
             std::thread::yield_now();
         }
-        let t0 = std::time::Instant::now();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(Class::Program, || pump_latch(RUNNER.load(Ordering::SeqCst), &|| DONE.load(Ordering::SeqCst)))));
+        // the wait's end: whether the runner's query had ended by then
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(Class::Program, || {
+            pump_latch(RUNNER.load(Ordering::SeqCst), &|| DONE.load(Ordering::SeqCst));
+            DONE.load(Ordering::SeqCst)
+        })));
         runner.join().unwrap();
         let msg = r.as_ref().err().map(|p| p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default());
         assert!(r.is_ok(), "the outermost request stopped: {msg:?}");
-        assert!(t0.elapsed().as_millis() < 1000, "{:?}", t0.elapsed());
+        assert_eq!(r.ok(), Some(true), "the outermost request waited until the runner's query ended");
     }
 
     #[test]
@@ -2418,6 +2484,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&OWNER_ASLEEP, AtomicBool::new(false));
     reset(&OWNER_SERVING, AtomicBool::new(false));
     reset(&OWNER_TID, AtomicU64::new(0));
+    reset(&ROLE, AtomicU64::new(0));
     reset(&OWNER_THREAD, std::sync::OnceLock::new());
     reset(&EXIT_TID, AtomicU64::new(0));
     reset(&EXIT_HELPER, AtomicU64::new(0));
@@ -2426,6 +2493,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&MAIN_WAIT_MAX, AtomicU64::new(0));
     reset(&MAIN_WAIT_BEHIND, AtomicU64::new(u64::MAX));
     reset(&NOW_T0, AtomicU64::new(0));
+    reset(&OWN_NOW, AtomicU8::new(0));
     reset(&SITES, [const { SiteAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), class: AtomicU8::new(0), acc: [const { AtomicU64::new(0) }; SITE_FIELDS] } }; SITES_N]);
     reset(&PUMPS, [const { PumpAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), req: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), acc: [const { AtomicU64::new(0) }; 4] } }; PUMPS_N]);
     reset(&MAIN_BEHIND, [const { [const { AtomicU64::new(0) }; 2] }; CLASSES + 1]);

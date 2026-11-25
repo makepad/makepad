@@ -1,18 +1,21 @@
 #!/bin/sh
 # A local release service for whole-flow runner checks: the real web server on loopback, serving
-# the runner release (public, with its loader ZIP) and one licensed app (scope) cut from THIS
-# source tree, and the entry script run against it. Not a fake: the same release, catalog, pack and
+# the runner release (public, with its loader ZIP; Fab's apps repository in it as on makepad.nl)
+# and one licensed app (scope) cut from THIS source tree, and the entry script run against it. Not a fake: the same release, catalog, pack and
 # loader-ZIP code as makepad.nl; only the git sources are local snapshots of this tree (the server
 # is told the GitHub URLs, and its git caches fetch `release` of the snapshots in their place).
 #
-#   fixture.sh BASE init                  snapshot this tree (run it in the tree's root) into git repos
-#                                         under BASE and write the service's source settings
+#   fixture.sh BASE init                  snapshot this tree (run it in the tree's root; with apps/apps,
+#                                         a lane's `--with apps` half) into git repos under BASE and
+#                                         write the service's source settings
 #   fixture.sh BASE variant NAME          a newer snapshot: app (a licensed app's files change), tree (this tree again),
 #                                         loader (the JIT's source changes), broken (the JIT's source
 #                                         does not compile), rebase (the tree again, as a new commit)
-#   fixture.sh BASE up SERVER_BIN         start the service and the entry script, detached (PIDs in BASE/state)
+#   fixture.sh BASE up SERVER_BIN [ARGS]  start the service and the entry script, detached (PIDs in BASE/state);
+#                                         ARGS go to the entry script (`open fab`: its coding-agent form)
 #   fixture.sh BASE log [N [entry|server]]   the tail of a log;   down: stop both by their PIDs
-# SERVER_BIN is the web server (webserver repository) built for this machine. Environment: FIXTURE_PORT (default 47831). Run on a pool node; never against a real installation.
+# SERVER_BIN is the web server (webserver repository) built for this machine. Environment: FIXTURE_PORT (default 47831);
+# FIXTURE_SHOW=1 shows the windows (an app's first frame is on the glass, as for a person). Run on a pool node; never against a real installation.
 set -u
 base=${1:?usage: fixture.sh BASE init|variant|up|log|down}
 cmd=${2:-}
@@ -30,11 +33,12 @@ cache_dir() { # cache_dir URL NAME
 }
 
 # the sources a release is cut from: the git caches read the snapshots for the GitHub URLs
-write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA
-    msha=$1; csha=$2
+write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA APPS_SHA
+    msha=$1; csha=$2; asha=$3
     mk=https://github.com/makepad/makepad.git
     cm=https://github.com/makepad/commercial.git
-    for spec in "$mk makepad" "$cm commercial"; do
+    ap=https://github.com/makepad/apps.git
+    for spec in "$mk makepad" "$cm commercial" "$ap apps"; do
         set -- $spec
         dir=$(cache_dir "$1" "$2")
         mkdir -p "$dir" || exit 2
@@ -48,7 +52,8 @@ write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA
  "cuda":false,"public":true,"loader":{"repository":"makepad","roots":["makepad-run"]},
  "repositories":[
   {"name":"makepad","path":"makepad","url":"$mk"},
-  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","roots":["makepad-runner"]}]}
+  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","roots":["makepad-runner"]},
+  {"name":"apps","path":"makepad/apps/apps","url":"$ap"}]}
 EOF
     cat > "$data/apps/scope/source.json.new" <<EOF
 {"title":"Makepad Scope","rust":"1.98.0","package":"makepad-scope","binary":"scope","workspace":"makepad/apps/commercial/scope",
@@ -62,6 +67,7 @@ EOF
     mv "$data/apps/scope/source.json.new" "$data/apps/scope/source.json"
     echo "$msha" > "$base/state/makepad.sha"
     echo "$csha" > "$base/state/commercial.sha"
+    echo "$asha" > "$base/state/apps.sha"
 }
 
 # post JSON to the admin API (loopback, the admin address file names 127.0.0.1)
@@ -81,21 +87,24 @@ case "$cmd" in
 init)
     tree=$(pwd -P)
     [ -d "$tree/apps/commercial/runner" ] || { echo "run it in the makepad tree's root"; exit 2; }
+    [ -d "$tree/apps/apps/fab" ] || { echo "no apps/apps in this tree (a lane takes it with: devhub lane add <lane> --with apps)"; exit 2; }
     [ ! -e "$base/src" ] || { echo "$base/src exists"; exit 2; }
-    mkdir -p "$base/src/makepad" "$base/src/commercial" "$base/state" "$data" "$base/web" || exit 2
-    rsync -a --exclude target --exclude .git --exclude /apps/commercial --exclude /tmp --exclude /tools/run/webfx --exclude /local --exclude Cargo.lock "$tree/" "$base/src/makepad/" || exit 2
+    mkdir -p "$base/src/makepad" "$base/src/commercial" "$base/src/apps" "$base/state" "$data" "$base/web" || exit 2
+    rsync -a --exclude target --exclude .git --exclude /apps/commercial --exclude /apps/apps --exclude /tmp --exclude /tools/run/webfx --exclude /local --exclude Cargo.lock "$tree/" "$base/src/makepad/" || exit 2
     rsync -a --exclude target --exclude .git "$tree/apps/commercial/" "$base/src/commercial/" || exit 2
-    for r in makepad commercial; do
+    rsync -a --exclude target --exclude .git "$tree/apps/apps/" "$base/src/apps/" || exit 2
+    for r in makepad commercial apps; do
         git -C "$base/src/$r" init -q -b release || exit 2
     done
     m=$(commit_all "$base/src/makepad" "release 1") || exit 2
     c=$(commit_all "$base/src/commercial" "release 1") || exit 2
-    write_sources "$m" "$c"
+    a=$(commit_all "$base/src/apps" "release 1") || exit 2
+    write_sources "$m" "$c" "$a"
     echo 127.0.0.1 > "$data/admin_ip"
-    echo "init: makepad $m commercial $c" ;;
+    echo "init: makepad $m commercial $c apps $a" ;;
 variant)
     name=${3:?variant NAME}
-    m=$(cat "$base/state/makepad.sha"); c=$(cat "$base/state/commercial.sha")
+    m=$(cat "$base/state/makepad.sha"); c=$(cat "$base/state/commercial.sha"); a=$(cat "$base/state/apps.sha")
     case "$name" in
     app)
         # upstream edits to the licensed app: a clean-merge line, a same-line conflict, a new file
@@ -117,20 +126,22 @@ variant)
     tree)
         # this tree again, as the next release (pick up a fix made since init)
         tree=$(pwd -P)
-        rsync -a --delete --exclude target --exclude .git --exclude /apps/commercial --exclude /tmp --exclude /tools/run/webfx --exclude /tools/run/scratch --exclude /local --exclude Cargo.lock "$tree/" "$base/src/makepad/" || exit 2
+        rsync -a --delete --exclude target --exclude .git --exclude /apps/commercial --exclude /apps/apps --exclude /tmp --exclude /tools/run/webfx --exclude /tools/run/scratch --exclude /local --exclude Cargo.lock "$tree/" "$base/src/makepad/" || exit 2
         rsync -a --delete --exclude target --exclude .git "$tree/apps/commercial/" "$base/src/commercial/" || exit 2
+        rsync -a --delete --exclude target --exclude .git "$tree/apps/apps/" "$base/src/apps/" || exit 2
         m=$(commit_all "$base/src/makepad" "release (tree)") || exit 2
-        c=$(commit_all "$base/src/commercial" "release (tree)") || exit 2 ;;
+        c=$(commit_all "$base/src/commercial" "release (tree)") || exit 2
+        a=$(commit_all "$base/src/apps" "release (tree)") || exit 2 ;;
     rebase)
         c=$(commit_all "$base/src/commercial" "release (touch)") || exit 2 ;;
     *) echo "unknown variant $name"; exit 2 ;;
     esac
-    write_sources "$m" "$c"
+    write_sources "$m" "$c" "$a"
     # a running service: publish now (the release is cut and packed on this call)
     if curl -fsS -m 3 "$service/api/loader/public/app/runner/latest" > /dev/null 2>&1; then
         admin refresh '{"app":"runner"}' && admin refresh '{"app":"scope"}' && echo "published"
     fi
-    echo "variant $name: makepad $m commercial $c" ;;
+    echo "variant $name: makepad $m commercial $c apps $a" ;;
 up)
     # start the service and the entry script detached (recorded PIDs in BASE/state), return when
     # the runner is starting; `down` stops them by those PIDs
@@ -149,10 +160,13 @@ up)
     admin save '{"email":"fixture@example.org","limit":50,"apps":["scope"],"enabled":true}' || { echo "could not grant the test email"; exit 2; }
     echo "service up at $api"
     [ "${4:-}" = server-only ] && exit 0
+    shift 3
     cp "$here/makepad.sh" "$base/home/makepad.sh"
+    hide=MAKEPAD_HIDE_WINDOWS=1
+    [ "${FIXTURE_SHOW:-}" != 1 ] || hide=
     env MAKEPAD_LOADER_SERVICE="$api" MAKEPAD_LOADER_ROOT="$base/install" MAKEPAD_RUNNER_APPS_DIR="$base/apps" \
-        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
-        nohup sh "$base/home/makepad.sh" > "$base/logs/entry.log" 2>&1 < /dev/null &
+        ${hide:+"$hide"} MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
+        nohup sh "$base/home/makepad.sh" "$@" > "$base/logs/entry.log" 2>&1 < /dev/null &
     echo $! > "$base/state/entry.pid"
     echo "entry script pid $(cat "$base/state/entry.pid")" ;;
 runner)

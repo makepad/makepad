@@ -1597,7 +1597,7 @@ fn direct_callee(c: &Callee, fn_ix: &HashMap<u32, u32>, link: &dyn Link) -> bool
         Callee::Fn(id) | Callee::CFn(id, _) => fn_ix.contains_key(id),
         Callee::Host(s) | Callee::CHost(s, _) => !matches!(link.host(s.id), HostBind::Trap),
         Callee::Indirect(_) | Callee::CIndirect(..) => true,
-        Callee::Asm(_) => false,
+        Callee::Part(_) | Callee::Asm(_) => false,
     }
 }
 
@@ -3804,6 +3804,7 @@ impl<'a> Fx<'a> {
             // black_box's block: no instruction to run (the passes kept what it stands for)
             Callee::Asm(a) if a.is_empty() => return Ok(()),
             Callee::Asm(_) => return Err("inline assembly (asm!) has no wasm form".to_string()),
+            Callee::Part(_) => return Err("outlined calls are native only".to_string()),
             Callee::Fn(id) | Callee::CFn(id, _) => match self.fn_ix.get(id) {
                 Some(&u) => {
                     let want = sig(self)?;

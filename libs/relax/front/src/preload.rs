@@ -990,7 +990,7 @@ fn plain_str(lit: &[u8]) -> Option<String> {
     (raw.is_some() || !body.contains('\\')).then(|| body.to_string())
 }
 
-std::thread_local! {
+thread_local! {
     /// the files an `include!` scan is inside of on this thread (a file that includes itself, a
     /// rustc error, stops at the repeat)
     static INCLUDING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };

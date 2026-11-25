@@ -3,7 +3,7 @@
 # another crate, cfg-selected) are; a future holding it moves to another thread. Prints
 # "dyn_auto_xcrate: ok" or "dyn_auto_xcrate: FAILED" (exit 1); the expected line is `cargo run -p dax-app`'s.
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off CARGO_NET_OFFLINE=true
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet dax-app 2>>"$ERR")

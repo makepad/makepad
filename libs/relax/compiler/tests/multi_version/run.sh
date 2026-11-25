@@ -2,7 +2,7 @@
 # usage: run.sh <makepad binary>: two versions of one package (mvdep 0.1 renamed `mvold`, 0.2 as itself,
 # 0.1 again through mv-mid) in one graph. Prints "multi_version: ok" or "multi_version: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet mv-app 2>>"$ERR")

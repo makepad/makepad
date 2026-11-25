@@ -1,3 +1,4 @@
+// rejects: E0034
 //~ E0034
 // N01 method-probe inventory: both where-clause candidates must be considered.
 trait A { fn method(&self) {} }

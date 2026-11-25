@@ -1,7 +1,7 @@
 //! Third-party proc macros under the two policies (relax-compiler pmhost.rs): the test writes a
 //! workspace into a temp folder whose macro crates are registry packages of a vendored crates-io
 //! directory (nothing is downloaded), and runs it under `Policy::Open` (bare `relax`'s) and under
-//! `Policy::Sandboxed` (`makepad`'s): this binary re-executes itself as the runner with each host.
+//! `Policy::Sandboxed` (`makepad`'s): this binary re-executes itself as the runner with each policy.
 //!
 //! - bypass: one macro per route around the old token scan (std::os paths, file-system methods of
 //!   `Path`, grouped and renamed imports of std, `r#std`, `#[path]` and `include!` files, a
@@ -18,8 +18,9 @@
 //!   sees the script's packages as the run does: under Open the marker appears, under Sandboxed
 //!   the script's build fails naming the C function and no marker appears.
 //! - script environment: a registry package's build script reports what it reads of the
-//!   environment. Under Open it reads the person's variables (a canary, PATH) and runs
-//!   RUSTC_WRAPPER (a marker-writing program), as cargo's scripts do; under Sandboxed it reads
+//!   environment. Under Open it reads the person's variables (a canary, PATH); under neither does
+//!   it get the person's RUSTC_WRAPPER (a marker-writing program), which wraps their rustc while
+//!   the script's RUSTC is Relax; under Sandboxed it reads
 //!   cargo's variables and the workspace's `[env]` alone, its `rerun-if-env-changed` of the canary
 //!   grants nothing and is said once, and its Open output does not stand for a Sandboxed run of
 //!   the same workspace.
@@ -32,14 +33,14 @@ use std::process::Command;
 const AS_RUNNER: &str = "RELAX_CONFINED_MACROS_RUNNER";
 
 fn main() {
-    // the runner, with the host of the policy asked for
+    // A build script's run is this binary again, under the same policy.
     if let Ok(policy) = std::env::var(AS_RUNNER) {
-        // (kept: a build script's run is this binary again, under the same policy)
-        let host: &'static relax_runner::Host = match policy.as_str() {
-            "open" => Box::leak(Box::new(relax_runner::Host { compile_time_code: relax_compiler::sandbox::Policy::Open, ..makepad_run::HOST })),
-            _ => &makepad_run::HOST,
-        };
-        relax_runner::main(host);
+        if policy == "open" {
+            relax_base::host::init();
+            // This fixture process has yet to start a session or build script.
+            unsafe { relax_compiler::sandbox::replace_policy_in_test(relax_compiler::sandbox::Policy::Open) };
+        }
+        relax_runner::main(&makepad_run::HOST);
         return;
     }
     // a workspace per policy (its own marker folder), the four runs at once, and beside them the
@@ -103,13 +104,17 @@ fn main() {
     if sandboxed.join("markers").join("script").exists() {
         bad.push("script: its build-dependency's macro wrote its marker under Sandboxed".to_string());
     }
-    // script environment: Open reads the person's environment and runs the wrapper; Sandboxed
-    // reads what cargo defines and `[env]`, says the withheld canary once, and runs no wrapper
-    let open_env = "canary Some(\"canary-value\") listed true granted Some(\"from-config\") path true wrapper true out_dir true";
+    // script environment: Open reads the person's environment; Sandboxed reads what cargo defines
+    // and `[env]` and says the withheld canary once. Neither runs the person's RUSTC_WRAPPER: a
+    // script's RUSTC is Relax, which answers its probes itself
+    let open_env = "canary Some(\"canary-value\") listed true granted Some(\"from-config\") path true wrapper false out_dir true";
     let confined_env = "canary None listed false granted Some(\"from-config\") path false wrapper false out_dir true";
     let said = |err: &str| err.lines().filter(|l| l.contains("reads CONFINED_CANARY")).count();
-    if !env_open.0 || env_open.1.trim() != open_env || !open.join("markers").join("wrapper").exists() || said(&env_open.2) != 0 {
-        bad.push(format!("script environment under Open: wanted {open_env:?} and the wrapper's marker:\n{}\n{}", env_open.1, env_open.2));
+    if !env_open.0 || env_open.1.trim() != open_env || said(&env_open.2) != 0 {
+        bad.push(format!("script environment under Open: wanted {open_env:?}:\n{}\n{}", env_open.1, env_open.2));
+    }
+    if open.join("markers").join("wrapper").exists() {
+        bad.push("script environment: RUSTC_WRAPPER ran under Open".to_string());
     }
     if !env_sb.0 || env_sb.1.trim() != confined_env || said(&env_sb.2) != 1 {
         bad.push(format!("script environment under Sandboxed: wanted {confined_env:?} and the withheld canary said once:\n{}\n{}", env_sb.1, env_sb.2));

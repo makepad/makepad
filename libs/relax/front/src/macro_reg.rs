@@ -326,25 +326,46 @@ thread_local! {
     /// this thread works for the macro world's build (the builder, or a parse worker on one of
     /// the world's crates): a macro the boot world lacks must not wait for that build (pmhost)
     static WORLD_BUILDER: Cell<bool> = const { Cell::new(false) };
-    /// the invoking crate name during a proc-macro expansion (`run_derive_entry`, `run_attr`, `run_bang_in`)
-    static CALL_KRATE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// the invoking crate during a proc-macro expansion (`run_derive_entry`, `run_attr`,
+    /// `run_bang_in`): its CALL_KRATES index plus one, 0 for none. A plain number has no
+    /// destructor, so it reads the same inside any other thread-local's destructor: a program's
+    /// `std::env::var` asks it (pmhost `relax_pm_getenv`) wherever it runs, its thread's end too.
+    static CALL_KRATE: Cell<u32> = const { Cell::new(0) };
 }
 
-pub struct CallKrateGuard(String);
+/// The crate names CALL_KRATE indexes: one entry per name, for the process's life (an index a
+/// thread holds stays valid).
+static CALL_KRATES: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
+
+pub struct CallKrateGuard(u32);
 
 impl Drop for CallKrateGuard {
     fn drop(&mut self) {
-        CALL_KRATE.with(|c| *c.borrow_mut() = std::mem::take(&mut self.0));
+        CALL_KRATE.with(|c| c.set(self.0));
     }
 }
 
 pub fn with_call_krate(krate: &str) -> CallKrateGuard {
-    let prev = CALL_KRATE.with(|c| std::mem::replace(&mut *c.borrow_mut(), krate.to_string()));
-    CallKrateGuard(prev)
+    let index = if krate.is_empty() {
+        0
+    } else {
+        let mut names = CALL_KRATES.lock().unwrap_or_else(|e| e.into_inner());
+        match names.iter().position(|n| n == krate) {
+            Some(i) => i as u32 + 1,
+            None => {
+                names.push(krate.to_string());
+                names.len() as u32
+            }
+        }
+    };
+    CallKrateGuard(CALL_KRATE.with(|c| c.replace(index)))
 }
 
 pub fn current_call_krate() -> String {
-    CALL_KRATE.with(|c| c.borrow().clone())
+    match CALL_KRATE.with(|c| c.get()) {
+        0 => String::new(),
+        i => CALL_KRATES.lock().unwrap_or_else(|e| e.into_inner())[i as usize - 1].clone(),
+    }
 }
 
 pub fn call_krate_env(key: &str) -> Option<String> {
@@ -482,6 +503,7 @@ pub fn set_pure_crates(crates: &'static [&'static str]) {
 }
 
 fn pure_crate(name: &str) -> bool {
+    relax_base::host::init();
     PURE_CRATES.get().is_some_and(|c| c.contains(&name))
 }
 pub fn reusable_bang(i: usize) -> bool {
@@ -610,7 +632,7 @@ fn merged_host_units_keep_features_and_dependencies() {
         unit("target_helper", "lib", false, &[], &[]),
         unit("shared", "lib", true, &["full", "visit"], &[(5, "host_helper")]),
         unit("host_helper", "lib", true, &["walk"], &[]),
-    ], roots: vec![0], bins: Vec::new(), script: None, unified: Vec::new() };
+    ], roots: vec![0], workspace_root: String::new(), bins: Vec::new(), script: None, unified: Vec::new() };
     let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let saved = REG.with(|r| r.borrow_mut().take());
@@ -693,7 +715,7 @@ fn a_crate_only_a_build_script_links_is_no_root_of_the_app() {
         unit("codegen", "lib", "build", "src/lib.rs", true, &[], &[(5, "generator")]),
         unit("generator", "lib", "build", "src/lib.rs", true, &[], &[(6, "rand")]),
         unit("rand", "lib", "build", "src/lib.rs", true, &["small_rng", "std"], &[]),
-    ], roots: vec![0], bins: Vec::new(), script: None, unified: Vec::new() };
+    ], roots: vec![0], workspace_root: String::new(), bins: Vec::new(), script: None, unified: Vec::new() };
     let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let saved = REG.with(|r| r.borrow_mut().take());
@@ -1213,7 +1235,7 @@ fn scan_tokens_for_entries(
                         if crate::cfg::active(p_src, &call_attrs, cfg) {
                             if let Some(def) = local_defs.iter().rev().find(|d| d.name == mname) {
                                 let mut p = crate::parser::Parser::new(sess, src, toks.to_vec(), edition);
-                                if let Ok((exp_text, exp_toks, _, _, _)) = p.expand_rules(def, open + 1, close) {
+                                if let Ok((exp_text, exp_toks, ..)) = p.expand_rules(def, open + 1, close) {
                                     scan_tokens_for_entries(sess, reg, unit, exp_text.as_bytes(), &exp_toks, edition, cfg, "", false, local_defs, stack, depth + 1);
                                 }
                             }

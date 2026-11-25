@@ -792,10 +792,15 @@ mod imp {
     use super::{Action, Fault, Hooks};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // ART uses SIGUSR1. Resolve bionic's available RT range at installation.
+    // ART uses SIGUSR1. The watchdog takes bionic's fifth RT signal, as Linux does, from the
+    // first call on: a thread that ends before `install` blocks it too (os::thread kicks_done).
     // NDK r28 signal.h declares __libc_current_sigrtmin / __libc_current_sigrtmax.
-    static WATCHDOG: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-    pub fn watchdog_signal() -> i32 { WATCHDOG.load(Ordering::Relaxed) }
+    pub fn watchdog_signal() -> i32 {
+        extern "C" {
+            fn __libc_current_sigrtmin() -> i32;
+        }
+        unsafe { __libc_current_sigrtmin() + 4 }
+    }
 
     /// LP64 bionic offsets, in bytes, derived from NDK 28.2.13676358 headers.
     /// uc_mcontext is 16-byte aligned: 40-byte prefix + 128-byte signal mask,
@@ -982,13 +987,10 @@ mod imp {
         // sigaction is deliberately the public libc entry: ART's libsigchain intercepts it
         // in an Activity process. Keep its chaining, then preserve prior user handlers.
         extern "C" {
-            fn __libc_current_sigrtmin() -> i32;
             fn __libc_current_sigrtmax() -> i32;
         }
         unsafe {
-            let signal = __libc_current_sigrtmin() + 4;
-            assert!(signal <= __libc_current_sigrtmax(), "no watchdog RT signal");
-            WATCHDOG.store(signal, Ordering::Relaxed);
+            assert!(watchdog_signal() <= __libc_current_sigrtmax(), "no watchdog RT signal");
             for sig in our_signals() {
                 let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: OUR_FLAGS, pad: 0, restorer: 0 };
                 let mut old = SigAction { handler: 0, mask: 0, flags: 0, pad: 0, restorer: 0 };
@@ -1522,6 +1524,7 @@ mod imp {
 mod imp {
     use super::{Action, Fault, Hooks, Kind};
     use crate::os::win32::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     /// never delivered as an exception on Windows (the watchdog suspends the thread instead);
     /// kept so Fault::sig values never collide with it
@@ -1567,7 +1570,12 @@ mod imp {
         if rec.code == EXCEPTION_ACCESS_VIOLATION && rec.n_params >= 2 && crate::jit::transit_retry(rec.info[1] as u64, pc) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        if chained && !crate::jit::in_jit_code(pc) && !crate::stale::in_ended_run(pc) && !crate::domain::current_is_ending() {
+        // (an access into retired memory -- invalidated code's trap fill, a retired window -- is this
+        // runtime's on any thread, as on_fault decides first: on a thread whose current unit does
+        // not own that code it went on to the search, which ended the process with no stale report)
+        let data = matches!(rec.code, EXCEPTION_ACCESS_VIOLATION | EXCEPTION_IN_PAGE_ERROR) && rec.n_params >= 2;
+        let stale = || crate::stale::lookup(pc).is_some() || (data && crate::stale::lookup(rec.info[1] as u64).is_some());
+        if chained && !crate::jit::in_jit_code(pc) && !crate::stale::in_ended_run(pc) && !crate::domain::current_is_ending() && !stale() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         // the data address of an access violation / in-page error (ExceptionInformation[1]);
@@ -1619,16 +1627,24 @@ mod imp {
     }
 
     extern "system" fn vectored(ep: *mut ExceptionPointers) -> i32 {
-        unsafe { handle(ep, true) }
+        let r = unsafe { handle(ep, true) };
+        if r == EXCEPTION_CONTINUE_SEARCH { crate::os::progexc::dispatch_vectored(ep) } else { r }
+    }
+
+    extern "system" fn continued(ep: *mut ExceptionPointers) -> i32 {
+        crate::os::progexc::dispatch_continue(ep)
     }
 
     /// The end of every search, on a thread's own stack and on a program stack (its last frame):
-    /// what the runtime does not resume ends the process here, with its code. The system's way on
+    /// what neither the runtime nor the program's filter resumes ends here, with its code. The system's way on
     /// is an error report, and with no one to answer it (no desktop, a dialog) the process stays.
     extern "system" fn unhandled(ep: *mut ExceptionPointers) -> i32 {
         unsafe {
             let r = handle(ep, false);
             if r != EXCEPTION_CONTINUE_EXECUTION {
+                if crate::os::progexc::program_filter(ep) == Some(EXCEPTION_CONTINUE_EXECUTION) {
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
                 TerminateProcess(GetCurrentProcess(), (*(*ep).record).code);
             }
             r
@@ -1648,8 +1664,20 @@ mod imp {
     pub fn this_thread_done(_sp: u64) {}
 
     pub fn install() {
+        static VECTORED: AtomicUsize = AtomicUsize::new(0);
+        static CONTINUED: AtomicUsize = AtomicUsize::new(0);
+        // Reassert first place for each new unit. Keep the old handler if the add failed.
+        unsafe fn replace(slot: &AtomicUsize, new: *mut u8, remove: unsafe extern "system" fn(*mut u8) -> u32) {
+            if !new.is_null() {
+                let old = slot.swap(new as usize, SeqCst);
+                if old != 0 {
+                    remove(old as *mut u8);
+                }
+            }
+        }
         unsafe {
-            AddVectoredExceptionHandler(1, vectored);
+            replace(&VECTORED, AddVectoredExceptionHandler(1, vectored), RemoveVectoredExceptionHandler);
+            replace(&CONTINUED, AddVectoredContinueHandler(1, continued), RemoveVectoredContinueHandler);
             SetUnhandledExceptionFilter(Some(unhandled));
         }
     }
@@ -1968,6 +1996,8 @@ static PREV_ALLOC_FAILURE: std::sync::atomic::AtomicBool = std::sync::atomic::At
 
 /// Ends the process by signal `sig` with its default action (exit status 128 + sig, as a
 /// rustc build's fault would), from normal context: a contained fault the policy found fatal.
+/// Windows: a fault's `sig` is its exception code, and the process ends with that code, as a
+/// rustc build's unhandled exception does (`unhandled` above); an abort ends with its own.
 pub fn die_by(sig: i32) -> ! {
     #[cfg(unix)]
     unsafe {
@@ -1977,6 +2007,12 @@ pub fn die_by(sig: i32) -> ! {
         }
         signal(sig, 0);
         raise(sig);
+    }
+    // (an exception code has its severity bits high; the watchdog's -1 and a signal number are none)
+    #[cfg(windows)]
+    if sig < 0 && sig != SIG_WATCHDOG {
+        use crate::os::win32::{GetCurrentProcess, TerminateProcess};
+        unsafe { TerminateProcess(GetCurrentProcess(), sig as u32) };
     }
     let _ = sig;
     std::process::abort()

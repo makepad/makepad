@@ -88,7 +88,7 @@ fn a_c_body_forwards_to_a_c_callee_with_its_frame_gone() {
         ret: None,
         n_fixed: u32::MAX,
         ret_narrow: None,
-        unwinds: false,
+        unwinds: false, math: false,
     };
     let mut f = Func::new("forward".into(), 0);
     f.cabi = Some(Box::new(sig.clone()));

@@ -8,7 +8,7 @@
 # for a diff that reaches neither. A guard runs its own target: the library's tests or one test target (Fab's). A
 # workspace of stub crates under the gate's package names in a temporary git repo, its JIT a stub whose `makepad
 # test` fails the guard when the guarded crate says BROKEN; needs cargo, git and python3, nothing of this tree but
-# the gate's scripts.
+# the gate's scripts. A stub app also presents and only reports its check verdict when the gate ends it.
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/guard_units.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT
@@ -102,8 +102,11 @@ guard() {
   rm -f "$dir/ran"
   # only the guards: no app presents in this workspace
   out=$(cd "$dir/repo" && HOT=1 python3 -I "$here/affected.py" "$base" - 2>&1 | grep '^guard ' > "$dir/guards"
-        cd "$dir/repo" && log=$dir B=$MAKEPAD_LOADER GUARD_UNITS_LOG=$dir/ran bash -c '. <(sed -n "/^TP=/p; /^unit_line()/p; /^test_failures()/,/^}/p; /^step_guards()/,/^}/p" "$0"); fail=""; step_guards; echo "fail=$fail"' "$here/land_gate.sh" 2>&1)
+        cd "$dir/repo" && log=$dir B=$MAKEPAD_LOADER GUARD_UNITS_LOG=$dir/ran bash -c '. <(sed -n "/^TP=/p; /^unit_line()/p; /^test_failures()/,/^}/p; /^guard_try()/,/^}/p; /^step_guards()/,/^}/p" "$0"); fail=""; step_guards; echo "fail=$fail"' "$here/land_gate.sh" 2>&1)
   ran=$(sort "$dir/ran" 2>/dev/null | paste -sd' ' -)
+  # a function of the gate this test does not source: its guards never ran, said as such (guard_try, split out
+  # of step_guards by 9b0af63c33, was missing here and every case said only `ran: none`, 11-24)
+  ! echo "$out" | grep -q 'command not found' || fail="$fail $1(a land_gate.sh function step_guards calls is not sourced here: $(echo "$out" | grep -m1 'command not found'))"
   [ "${ran:--}" = "$3" ] || fail="$fail $1(ran: ${ran:-none}; want $3)"
   local IFS='|'
   for want in $4; do
@@ -123,5 +126,43 @@ guard other other - "fail=" "GATEUNIT"
 GATE_RETRY="guard makepad-scope" guard retry other makepad-scope "GATEUNIT ok guard makepad-scope|fail="
 # a red guard reruns alone, not its package's other guards
 GATE_RETRY="guard makepad-sandbox --test penumbra_still" guard retry-one other makepad-sandbox@penumbra_still "GATEUNIT ok guard makepad-sandbox --test penumbra_still|fail="
+# A check that finishes during shutdown must count against the present unit. Install the
+# handler before announcing the frame so even an immediate quit gets the verdict.
+cat > "$dir/present.py" <<'PYAPP'
+import signal
+import sys
+
+report = sys.argv[sys.argv.index("--report-to") + 1]
+case = sys.argv[sys.argv.index("--report-to") + 2]
+
+def quit_app(*_):
+    if case == "late-verdict":
+        with open(report, "a") as stream:
+            stream.write("error\tlate type error\n")
+        sys.exit(101)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, quit_app)
+with open(report, "w") as stream:
+    stream.write("present\n")
+while True:
+    signal.pause()
+PYAPP
+for name in late-verdict clean-verdict; do
+  out=$(log=$dir B="python3 $dir/present.py" DEVHUB_KEEP= SETTLE=0 bash -c '
+    . <(sed -n "/^unit_of()/p; /^unit_line()/p; /^qpresent_one()/,/^}/p; /^present()/,/^}/p; /^present_keep()/,/^}/p; /^settle_errors()/p" "$0")
+    fail="" rerun=""
+    qpresent_one present "$1" .
+    echo "fail=$fail"
+  ' "$here/land_gate.sh" "$name" 2>&1)
+  echo "$out"
+  if [ "$name" = late-verdict ]; then
+    echo "$out" | grep -qxF "fail= $name-check" && echo "$out" | grep -qxF "GATEUNIT fail present $name" &&
+      echo "$out" | grep -q 'app check failed after the first frame.*late type error' || fail="$fail $name"
+  else
+    echo "$out" | grep -qxF "fail=" && echo "$out" | grep -qxF "GATEUNIT ok present $name" || fail="$fail $name"
+  fi
+  if echo "$out" | grep -q 'command not found'; then fail="$fail $name(missing gate function)"; fi
+done
 if [ -n "$fail" ]; then echo "guard_units FAILED:$fail"; exit 1; fi
 echo "guard_units: ok"

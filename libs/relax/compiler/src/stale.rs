@@ -14,8 +14,8 @@
 //!   A quit (a signal, the app's own quit) ends the wait as its domain's stop does: the program
 //!   goes on so its quit runs to the end (inspect::events::quit_releases).
 //!
-//! A thread held at a layout patch (`park_held`: no fault, a frame in code the patch replaced) is
-//! no such bug: it stays held, the rest of the app runs on, and the restart is offered.
+//! A layout patch can also find a frame in replaced code before the thread returns there. The
+//! watcher reports it and offers a restart. Only a fault parks the thread.
 //!
 //! Ranges are registered by whoever retires the memory (sandbox::free_arena; code invalidation).
 //! The table is append-only (ranges are never reused), so the fault handler's lookup is lock-free.
@@ -46,8 +46,8 @@ static RUN_ENDS: AtomicUsize = AtomicUsize::new(0);
 static STUCK: AtomicUsize = AtomicUsize::new(0);
 
 /// How many threads of the run are parked at a stale access. While one is, the program is paused
-/// for its report and never reaches the point that hands its state over to a restart. (A thread
-/// held for good at a layout patch, `park_held`, is not one: the app runs on without it.)
+/// for its report and never reaches the point that hands its state over to a restart. A frame reported before
+/// it returns into replaced code does not count.
 pub fn stuck_threads() -> usize {
     STUCK.load(Ordering::Acquire)
 }
@@ -203,6 +203,29 @@ static REC: [Rec; RECS] = [const {
 static WAKE_W: AtomicI32 = AtomicI32::new(-1);
 #[cfg(unix)]
 static WAKE_R: AtomicI32 = AtomicI32::new(-1);
+/// The watcher's wake-up event (Windows, auto-reset); 0 before it runs.
+#[cfg(windows)]
+static WAKE: AtomicUsize = AtomicUsize::new(0);
+
+/// Wakes the watcher. Signal-safe: write(2) on unix; on Windows SetEvent, a system call that takes
+/// no lock of this process's (a vectored exception handler may call it).
+fn wake(why: &'static [u8; 1]) {
+    #[cfg(unix)]
+    {
+        let w = WAKE_W.load(Ordering::Acquire);
+        if w >= 0 {
+            let _ = unsafe { write(w, why.as_ptr().cast(), 1) };
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = why;
+        let e = WAKE.load(Ordering::Acquire);
+        if e != 0 {
+            unsafe { crate::os::win32::SetEvent(e as crate::os::win32::HANDLE) };
+        }
+    }
+}
 
 #[cfg(unix)]
 extern "C" {
@@ -241,13 +264,7 @@ pub unsafe fn on_fault(f: &crate::os::fault::Fault, r: &'static Range, walk: imp
         rec.state.store(2, Ordering::Release);
     }
     first_line(f, r);
-    #[cfg(unix)]
-    {
-        let w = WAKE_W.load(Ordering::Acquire);
-        if w >= 0 {
-            let _ = write(w, b"s".as_ptr().cast(), 1);
-        }
-    }
+    wake(b"s");
     leave_when(crate::domain::current_is_ending);
 }
 
@@ -302,6 +319,18 @@ fn start_watcher() {
             if pipe(fds.as_mut_ptr()) == 0 {
                 WAKE_R.store(fds[0], Ordering::Release);
                 WAKE_W.store(fds[1], Ordering::Release);
+            } else {
+                eprintln!("relax: the stale-access watcher has no wake-up pipe ({}): it looks every 250 ms instead", std::io::Error::last_os_error());
+            }
+        }
+        // (auto-reset: a wake-up wakes the one waiter once)
+        #[cfg(windows)]
+        {
+            let e = unsafe { crate::os::win32::CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
+            if e != 0 {
+                WAKE.store(e as usize, Ordering::Release);
+            } else {
+                eprintln!("relax: the stale-access watcher has no wake-up event ({}): it looks every 250 ms instead", std::io::Error::last_os_error());
             }
         }
         let _k = crate::zone_alloc::kept();
@@ -327,6 +356,7 @@ fn start_watcher() {
     });
 }
 
+/// Until a wake-up; every 250 ms only when the watcher could make no way to be woken.
 fn wait() {
     #[cfg(unix)]
     {
@@ -334,6 +364,15 @@ fn wait() {
         if r >= 0 {
             let mut b = [0u8; 16];
             unsafe { read(r, b.as_mut_ptr().cast(), b.len()) };
+            return;
+        }
+    }
+    #[cfg(windows)]
+    {
+        const INFINITE: u32 = u32::MAX;
+        let e = WAKE.load(Ordering::Acquire);
+        if e != 0 {
+            unsafe { crate::os::win32::WaitForSingleObject(e as crate::os::win32::HANDLE, INFINITE) };
             return;
         }
     }
@@ -346,7 +385,7 @@ fn decidable() -> bool {
     std::env::var_os("RELAX_STALE_PARK").is_some_and(|v| v != "0") || crate::inspect::events::can_decide()
 }
 
-/// A thread held for good without a fault (`park_held`), waiting for the watcher's report.
+/// A frame in first code retired by a layout patch, waiting for the watcher's report.
 struct Held {
     os_id: u64,
     /// its stack: pc, then return addresses (inspect capture order)
@@ -357,34 +396,17 @@ struct Held {
     what: String,
     /// why that code never runs again
     reason: String,
-    /// false: it could not be held (the process ends after the report)
-    held: bool,
 }
 
 static HELD: relax_session::sync::Mutex<Vec<Held>> = relax_session::sync::Mutex::new(Vec::new());
 
-/// A program thread with a frame in code that never runs again, but that this code is not
-/// protected against (a slot's first code shares its pages with other code: invalid.rs): a
-/// layout-changing patch found it in the stacks it captured while the program was paused (one the
-/// pause did not stop entered that code before the install), and holds it for good
-/// (inspect::instrument::hold_for_good) instead of letting it return there. Reported -- stderr,
-/// the flight recorder, `stale`, `why-hung` -- and the restart is offered (the ring's Update ready,
-/// the WM's toast, `session relaunch`); nothing else stops and nothing waits for a decision: the
-/// app runs on without that thread. (Its report paused the whole app and parked a decision that
-/// the Run panel never showed, and a quit then waited for the paused main forever, 11-08.)
-/// Returns at once (the watcher thread reports). `held` false: the thread could not be held; the
-/// process ends after the report (it must not run that code).
-pub fn park_held(os_id: u64, frames: Vec<u64>, at: usize, what: String, reason: String, held: bool) {
+/// Queue the stack captured by a layout patch. The watcher reports the frame and offers the
+/// restart while the program runs. A return to the trap-filled bytes takes the normal fault path.
+pub fn park_held(os_id: u64, frames: Vec<u64>, at: usize, what: String, reason: String) {
     start_watcher();
     crate::inspect::flightrec::event("stale.held", &format!("tid {}: frame in {}: {}", os_id, what, reason), os_id, frames.get(at).copied().unwrap_or(0));
-    crate::zone_alloc::kept_with(|| HELD.lock().unwrap_or_else(|e| e.into_inner()).push(Held { os_id, frames, at, what, reason, held }));
-    #[cfg(unix)]
-    {
-        let w = WAKE_W.load(Ordering::Acquire);
-        if w >= 0 {
-            let _ = unsafe { write(w, b"h".as_ptr().cast(), 1) };
-        }
-    }
+    crate::zone_alloc::kept_with(|| HELD.lock().unwrap_or_else(|e| e.into_inner()).push(Held { os_id, frames, at, what, reason }));
+    wake(b"h");
 }
 
 fn handle_held(h: Held) {
@@ -394,42 +416,28 @@ fn handle_held(h: Held) {
     let thread = crate::inspect::threads::list().into_iter().find(|t| t.os_id == h.os_id).map(|t| t.name.clone()).unwrap_or_else(|| h.os_id.to_string());
     let frame = if h.at == usize::MAX { "the return address at its sp".to_string() } else { format!("frame #{}", h.at) };
     let message = format!(
-        "stale access on a stack (no fault): thread `{}` (tid {}) has {} in {}: code that never runs again ({}); the thread is held where it was, nothing unwound",
+        "stale access on a stack (no fault): thread `{}` (tid {}) has {} in {}: code that never runs again ({}); the thread parks when it returns there",
         thread, h.os_id, frame, h.what, h.reason
     );
     let report = crate::jit::stale_report(&message, &frames, frames.get(h.at.min(frames.len().saturating_sub(1))).copied().unwrap_or(0));
     eprintln!("relax: {}\n  report: {}", message, report);
     crate::inspect::flightrec::fault_dump(&format!("stale.held tid {} {}", h.os_id, h.what));
     let verdict = format!(
-        "stale access on a stack: thread `{}` (tid {}) {} at a layout-changing patch: its {} is in {} ({}). HOW: frame in first-version code at a layout patch (this code shares pages with other code, so it is not made inaccessible: the pause found the frame in the captured stacks and holds the thread before it returns there). {}",
-        thread,
-        h.os_id,
-        if h.held { "is held" } else { "could NOT be held" },
-        frame,
-        h.what,
-        h.reason,
-        if h.held { "The app runs on without it; the restart is offered" } else { "The process ends" }
+        "stale access on a stack: thread `{}` (tid {}) has {} in {} ({}). The layout patch trap-filled that code. The thread parks when it returns there. The restart is offered",
+        thread, h.os_id, frame, h.what, h.reason
     );
     eprintln!("relax: {}", verdict);
     crate::zone_alloc::kept_with(|| ANSWERS.lock().unwrap_or_else(|e| e.into_inner()).push((verdict.clone(), report.clone())));
-    if !h.held {
-        eprintln!("relax: the thread could not be held: the process ends (it must not run that code)");
-        crate::os::fault::die_by(11);
-    }
-    crate::domain::held_for_good(h.os_id);
-    // one line for `why-hung` and the restart's offer: the thread, the code, the patch. The offer
-    // comes first: whoever reads the held thread finds its restart offered (a test read the line
-    // and then no offer, the watcher between the two on a loaded box, 11-09).
-    let line = format!("thread `{}` (tid {}) is held for good: it had a frame in {} ({}) -- restart the app", thread, h.os_id, h.what, h.reason);
+    // Publish the one-line stack report after its restart offer is available.
+    let line = format!("thread `{}` (tid {}) has a frame in {} ({}) and parks when it returns there -- restart the app", thread, h.os_id, h.what, h.reason);
     crate::reload::offer_restart(&line);
     crate::zone_alloc::kept_with(|| HELD_NOW.lock().unwrap_or_else(|e| e.into_inner()).push(line));
 }
 
-/// The threads held for good at a layout patch (`park_held`), one line each (`why-hung`).
+/// Frames observed at layout patches, one line per thread and patch (`why-hung`).
 static HELD_NOW: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
 
-/// What `handle_held` said of each thread it holds for good (`why-hung`: the app runs on without
-/// them until the restart that is offered).
+/// The stack reports of layout patches (`why-hung`).
 pub fn held_now() -> Vec<String> {
     HELD_NOW.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
@@ -514,6 +522,17 @@ fn site_of(frames: &[u64]) -> String {
 /// What the watcher told, for `makepad inspect <pid> stale`: (verdict line, report JSON).
 static ANSWERS: relax_session::sync::Mutex<Vec<(String, String)>> = relax_session::sync::Mutex::new(Vec::new());
 
+/// The faults the handler recorded so far, as (thread, retired range's name): signal-safe stores
+/// made before any report line, so a test sees its fault however long the report takes. (Its
+/// one test runs on the Apple OSes and Linux: elsewhere it was an unused-function warning.)
+#[cfg(all(test, any(target_vendor = "apple", target_os = "linux")))]
+pub(crate) fn recorded() -> Vec<(u64, String)> {
+    REC.iter()
+        .filter(|r| r.state.load(Ordering::Acquire) >= 2)
+        .map(|r| (r.os_id.load(Ordering::Relaxed), unsafe { &*r.range.load(Ordering::Relaxed) }.name.clone()))
+        .collect()
+}
+
 /// The verdicts of the stale accesses reported so far (a test waits for its access's).
 #[cfg(test)]
 pub(crate) fn verdicts() -> Vec<String> {
@@ -527,6 +546,7 @@ fn where_in(r: &Range, addr: u64) -> String {
         let i = w.installs.iter().rev().find(|i| addr >= i.at && addr < i.at + i.len as u64).copied();
         let what = match i {
             Some(i) => format!("code of slot #{} `{}` v{} +{:#x}", i.slot, crate::jit::slot_name(i.slot).unwrap_or_default(), i.version, addr - i.at),
+            None if matches!(w.group, crate::invalid::Group::Patch { gen: 0, .. }) => format!("first-generation code of `{}` +{:#x}", r.name, addr - w.lo),
             None => format!("{:?} chunk +{:#x} (between code bodies)", w.group, addr - w.lo),
         };
         let made = match w.group {
@@ -660,24 +680,24 @@ static GONE: relax_session::sync::Mutex<Vec<GoneRange>> = relax_session::sync::M
 
 #[cfg(test)]
 mod tests {
-    /// A thread held for good at a layout patch (a frame of it in code the patch replaced) stops
+    /// Reporting a frame in first code retired by a layout patch stops
     /// nothing else: the program is not paused, nothing is parked for a decision, the restart is
     /// offered and `why-hung` names the thread in one line. (Its report paused the whole app and
     /// parked a decision nobody was shown, 11-08.)
     #[test]
-    fn a_thread_held_at_a_layout_patch_stops_nothing_else() {
-        isolated_test!(a_thread_held_at_a_layout_patch_stops_nothing_else);
+    fn reporting_a_frame_at_a_layout_patch_stops_nothing_else() {
+        isolated_test!(reporting_a_frame_at_a_layout_patch_stops_nothing_else);
         std::env::set_var("RELAX_STALE_PARK", "1");
         let what = "slot #7 `work::step` first-version code [0x1000, 0x1100) (+0x10)".to_string();
         let reason = "layout-changing patch gen 2 (fields or variants of Mode) replaced it: code built for the old layout never runs again".to_string();
-        super::park_held(42, vec![0x1010, 0x2000], 0, what, reason, true);
+        super::park_held(42, vec![0x1010, 0x2000], 0, what, reason);
         let t0 = std::time::Instant::now();
         while super::held_now().is_empty() && t0.elapsed().as_secs() < 10 {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let held = super::held_now();
-        assert_eq!(held.len(), 1, "the watcher reported the held thread");
-        assert!(held[0].contains("tid 42") && held[0].contains("`work::step`") && held[0].contains("Mode") && held[0].ends_with("restart the app"), "{held:?}");
+        assert_eq!(held.len(), 1, "the watcher reported the thread with a stale frame");
+        assert!(held[0].contains("tid 42") && held[0].contains("`work::step`") && held[0].contains("Mode") && held[0].contains("parks when it returns there") && held[0].ends_with("restart the app"), "{held:?}");
         assert!(!crate::inspect::instrument::paused(), "the program runs on");
         assert!(crate::inspect::events::parked_now().is_empty(), "nothing waits for a decision");
         assert_eq!(super::stuck_threads(), 0, "the app can still hand its state over");

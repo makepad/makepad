@@ -10,8 +10,8 @@
 //! their build scripts run verbatim: `cargo check --release -p <package> --message-format=json`
 //! in the run's workspace, same Cargo.lock, same cargo flags. Cargo's `RUSTC_WRAPPER` is this
 //! executable (`wrapper`): it compiles with the real rustc only what the native scripts need (the
-//! scripts of the native packages and their build-dependency closure) and answers every other
-//! crate with empty outputs, so cargo decides features, cfgs and env for the whole graph and
+//! scripts of the native packages and their build-dependency closure, host units only) and
+//! answers every other crate with empty outputs, so cargo decides features, cfgs and env for the whole graph and
 //! Relax compiles the Rust. Target scripts query Relax's compiler interface even when Cargo
 //! compiles their executable; scripts feeding native host dependencies query the native rustc.
 //! Cargo's `build-script-executed` messages give the cfgs, rustc-env and
@@ -353,7 +353,8 @@ struct Plan {
 fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     let pk = |bs: &BuildScript| g.pkg[bs.krate].clone();
     // packages whose script runs for real: the native ones and the build-dependency closure of
-    // those; packages whose lib compiles for real: that closure
+    // those; packages whose lib compiles for real (its host unit: the wrapper stubs a target one):
+    // that closure
     let mut script_pkgs: Vec<String> = Vec::new();
     let mut lib_pkgs: Vec<String> = Vec::new();
     for &s in seeds {
@@ -1810,13 +1811,19 @@ pub fn wrapper() -> Option<i32> {
     };
     let is_print = rest.iter().any(|a| a == "--print" || a.starts_with("--print=") || a == "-vV" || a == "--version");
     let name = value("--crate-name");
+    // a unit cargo builds for the program's target (`--target`, which run_cargo_with always
+    // passes; cargo gives it no host unit): no native script runs it, so it is a stub, whatever its
+    // package. A package of the scripts' build-dependency closure that the program depends on too
+    // has one; built for real, it needed the target's own std, which a toolchain may not have
+    // (Windows: x86_64-pc-windows-gnu's beside an msvc toolchain, E0463 at the first such crate)
+    let target_unit = rest.iter().any(|a| a == "--target" || a.starts_with("--target="));
     let real = is_print || match &name {
         None => true,
         Some(n) if n == "___" => true,
         Some(n) => {
             let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
             let list = |v: &str| std::env::var(v).unwrap_or_default().split(',').any(|x| x == pkg);
-            if n.starts_with("build_script_") { scripts.split(',').any(|x| x == pkg) } else { list("RELAX_NATIVE_LIBS") }
+            if n.starts_with("build_script_") { scripts.split(',').any(|x| x == pkg) } else { !target_unit && list("RELAX_NATIVE_LIBS") }
         }
     };
     if real {
@@ -2080,6 +2087,8 @@ fn native_key_follows_the_resolved_closure_and_its_path_sources() {
         cfgs: vec![Vec::new()],
         env: vec![Vec::new()],
         link_libs: Vec::new(),
+        link_search: Vec::new(),
+        workspace_root: String::new(),
         native: None,
         raw: vec![
             unit(root, at(root), &[], &[1, 5], true),

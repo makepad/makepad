@@ -296,17 +296,31 @@ pub struct Compiled {
     /// (code offset, source position) in ascending offset order
     pub pc_map: Vec<(u32, u64)>,
     pub frame_size: u32,
-    /// bytes of instructions (the float literal pool follows)
+    /// End of the last function's instructions (a joined body includes the host pool and alignment).
+    /// The float literal pool follows.
     pub text_len: u32,
     /// regalloc::alloc_sig of the allocation (0 unless regalloc::SIG_ON)
     pub alloc_sig: u64,
     /// the relocated fields, emitted zeroed: the embedder links the code (`rir::link`) where it
     /// installs it
     pub relocs: Vec<RelocAt>,
+    /// Byte offsets of private bl instructions to resolve when joining the outlined part.
+    pub part_calls: Vec<u32>,
     /// (code offset, block, instruction or u32::MAX = terminator) of every RIR instruction
     /// emitted -- filled only while `set_rir_map(true)` (asm dumps)
     pub rir_map: Vec<(u32, u32, u32)>,
     pub rir_emitted: String,
+}
+
+/// Resolve the host's private calls and keep both functions in one installable body.
+pub fn join_part(host: Compiled, part: Compiled) -> Result<Compiled, String> {
+    crate::rir::join_native_part(host, part, |site, p_off| {
+        if !branch_reaches(RelocKind::A64Branch26, site.into(), p_off.into()) {
+            return Err("private call is unaligned or exceeds bl range");
+        }
+        let words = (i64::from(p_off) - i64::from(site)) / 4;
+        Ok(0x9400_0000 | (words as u32 & 0x03ff_ffff))
+    })
 }
 
 /// Addresses the backend needs from the runtime.
@@ -347,8 +361,10 @@ impl Env {
             Reloc::Slot(id) => self.slots.table(id),
             Reloc::Thunk(id) => self.slots.callable(id),
             Reloc::Call(id) => self.slots.thunk(id),
-            // the TSD slot's byte offset (ldr x16, [x16, x17])
-            Reloc::TlsKey => self.tls_key * 8,
+            Reloc::Body(id) => self.slots.body(id),
+            // the TSD slot's byte offset (ldr x16, [x16, x17]); under Relax on Android the
+            // two-load key as it is (`TLS_TWO_LOAD`)
+            Reloc::TlsKey => if TLS_TWO_LOAD { self.tls_key } else { self.tls_key * 8 },
             Reloc::TlsSlow => self.tls_slow,
             Reloc::Resume => self.resume,
             Reloc::Value(v) => v,
@@ -536,9 +552,10 @@ impl Asm {
     fn sub_imm_lsl12(&mut self, d: u8, n: u8, imm: u32) {
         self.e(0xD140_0000 | imm << 10 | (n as u32) << 5 | d as u32);
     }
-    /// d = n + v for any v (n and d may be sp); uses IP1 when v does not fit.
+    /// d = n + v for any v; n and d may be sp. Large constants use IP1,
+    /// or the destination when IP1 holds the base. IP0 is preserved unless it is the destination.
     fn add_any(&mut self, d: u8, n: u8, v: i64) {
-        let (neg, a) = if v < 0 { (true, (-v) as u64) } else { (false, v as u64) };
+        let (neg, a) = (v < 0, v.unsigned_abs());
         if a < (1 << 24) {
             let lo = (a & 0xfff) as u32;
             let hi = (a >> 12) as u32;
@@ -558,10 +575,17 @@ impl Asm {
                     self.add_imm(d, src, lo);
                 }
             }
+        } else if n == IP1 && (d == IP1 || d == SP) {
+            self.e(0xF81F_0FF0); // str x16, [sp, #-16]!
+            self.mov_imm(IP0, v);
+            self.rrr(0x8B00_0000, IP1, IP1, IP0);
+            self.e(0xF841_07F0); // ldr x16, [sp], #16
+            if d == SP { self.mov_sp(SP, IP1); }
         } else {
-            self.mov_imm(IP1, v);
-            // add xd, xn, x17, uxtx (extended form accepts sp)
-            self.e(0x8B20_6000 | (IP1 as u32) << 16 | (n as u32) << 5 | d as u32);
+            let tmp = if n == IP1 { d } else { IP1 };
+            self.mov_imm(tmp, v);
+            // add xd, xn, xm, uxtx (extended form accepts sp)
+            self.e(0x8B20_6000 | (tmp as u32) << 16 | (n as u32) << 5 | d as u32);
         }
     }
     fn cmp(&mut self, n: u8, m: u8) {
@@ -965,12 +989,19 @@ struct Gen<'a> {
     sym_class: u64,
     /// `Env::near`: host and runtime calls are `bl` (the embedder places veneers)
     near: bool,
+    /// the slots' table words name entry wrappers (a live test session's reach marks) and this
+    /// is counted code's O3 build: calls of a block that ran at all (its count above 0) go through
+    /// the callee's body word, past its wrapper (`Reloc::Body`; RELAX_OPT=-bypass: never)
+    bypass: bool,
+    /// `bypass` for the block being emitted
+    bypass_here: bool,
     /// sp offset of the frame word holding the domain base (-1: the function names no domain symbol)
     dom_slot: i64,
     /// per block: whether its start reads the domain base into that slot (block 0: the prologue;
     /// empty: the function names no domain symbol)
     dom_read: Vec<bool>,
     relocs: Vec<RelocAt>,
+    part_calls: Vec<u32>,
     text_words: usize,
     pc_map: Vec<(u32, u64)>,
     cur_pos: u32,
@@ -1150,12 +1181,13 @@ impl<'a> Gen<'a> {
                 if off == 0 && (sh == 0 || scaled) {
                     return (rb, Some((ri, sh != 0)), 0);
                 }
+                // Fold the displacement while the original base and index
+                // are still in their own registers. IP1 is free for add_any.
+                let (rb, off) = if off.unsigned_abs() >= 256 {
+                    self.a.add_any(IP1, rb, i64::from(off));
+                    (IP1, 0)
+                } else { (rb, off) };
                 self.a.e(0x8B00_0000 | ((sh as u32) << 10) | ((ri as u32) << 16) | ((rb as u32) << 5) | IP1 as u32);
-                // ldst's large-offset form needs ip1 itself: fold big offsets in first
-                if (off as i64).abs() >= 256 {
-                    self.a.add_any(IP1, IP1, off as i64);
-                    return (IP1, None, 0);
-                }
                 (IP1, None, off as i64)
             }
         }
@@ -1460,6 +1492,7 @@ impl<'a> Gen<'a> {
             }
             let b = &self.f.blocks[bi];
             let n = b.insts.len();
+            self.bypass_here = self.bypass && b.count > 0.0;
             // the compare the branch reads (fused into cmp + b.cond): the instructions before it
             // (-fuse: a compare made for the branch is a bool the branch tests)
             let (bcmp, mut ne) = match regalloc::branch_compare(b, &self.al.uses) {
@@ -1510,8 +1543,7 @@ impl<'a> Gen<'a> {
             // nor flags: the previous block's terminator (a fused cmp + b.cond) or another
             // predecessor set them, not the compare a select chain was started for
             self.sel_chain = None;
-            // window lookups of this block never see the previous block's last position (an empty
-            // block's terminator reads at its start: no window there, the slot is read)
+            // window lookups of this block never see the previous block's last position
             self.cur_pos = self.al.block_start[bi];
             for (ii, inst) in b.insts.iter().enumerate() {
                 self.pc_map.push(((self.a.pos() * 4) as u32, b.pos[ii]));
@@ -1684,8 +1716,16 @@ impl<'a> Gen<'a> {
             if self.rir_map_on {
                 self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, u32::MAX));
             }
+            // an empty block's terminator reads where regalloc puts terminator uses (block_end - 1),
+            // where a region's window entered live starts: read at the block's start, a value the
+            // region holds in a register came from its slot, stale where the region skips its
+            // stores
+            if b.insts.is_empty() {
+                self.cur_pos = self.al.block_end[bi] - 1;
+            }
             self.term(&b.term, bi, bcmp);
         }
+        self.bypass_here = false;
         if crate::rir::unwind_stats_on() {
             // bytes of blocks only reachable through unwind edges (cleanup pads)
             let nb = self.f.blocks.len();
@@ -2418,15 +2458,26 @@ impl<'a> Gen<'a> {
 
     /// x16 = this thread's thread-local block. Fast path: the block pointer sits in a word of
     /// the thread's slot array (macOS: pthread TSD slot `key` at tpidrro_el0; Android: bionic
-    /// TLS_SLOT_APP at tpidr_el0, os/tls.rs); a null slot calls `tls_slow`, which keeps every
+    /// TLS_SLOT_APP at tpidr_el0, os/tls.rs; under Relax on Android a word of the outermost
+    /// runtime's block, `TLS_TWO_LOAD`); a null slot or word calls `tls_slow`, which keeps every
     /// register but x16/x17 (glue), so no saves here; lr is preserved by the frame record.
     fn tls_block_ip0(&mut self) {
-        // mrs x16, <thread slot base>; and x16, x16, #~7; ldr x17, =key*8; ldr x16, [x16, x17]
+        // mrs x16, <thread slot base>; and x16, x16, #~7; ldr x17, =key
         self.a.e(MRS_SLOT_BASE | IP0 as u32);
-        self.a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
+        self.a.e(AND_SLOT_BASE);
         self.ldr_reloc(IP1, Reloc::TlsKey);
-        self.a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+        let none = if TLS_TWO_LOAD {
+            Some(tls_two_loads(&mut self.a))
+        } else {
+            // ldr x16, [x16, x17] (the key is the slot's byte offset)
+            self.a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+            None
+        };
         let p = self.a.cbnz(IP0);
+        if let Some(none) = none {
+            let slow = self.a.pos();
+            self.a.patch(none, slow);
+        }
         if self.near {
             self.bl_reloc(Reloc::TlsSlow);
         } else {
@@ -4081,6 +4132,12 @@ impl<'a> Gen<'a> {
         self.moves(&mv);
         self.frame_exit();
         match c {
+            // a site that ran: through the callee's body word (`bypass`)
+            Callee::Fn(id) if self.bypass_here => {
+                self.ldr_reloc(IP0, Reloc::Body(*id));
+                self.a.ldst(LDRX, 8, IP0, IP0, 0);
+                self.a.br(IP0);
+            }
             Callee::Fn(id) | Callee::CFn(id, _) => {
                 let at = self.a.pos();
                 self.a.e(0x1400_0000);
@@ -5062,7 +5119,21 @@ impl<'a> Gen<'a> {
         }
         self.moves(&mv);
         match c {
+            // a site that ran: through the callee's body word (`bypass`; x16 is no argument register)
+            Callee::Fn(id) if self.bypass_here => {
+                self.ldr_reloc(IP0, Reloc::Body(*id));
+                self.a.ldst(LDRX, 8, IP0, IP0, 0);
+                self.a.blr(IP0);
+            }
             Callee::Fn(id) => self.bl_reloc(Reloc::Call(*id)),
+            Callee::Part(id) => {
+                if let Some(id) = id {
+                    assert!(ni < INT_ARGS);
+                    self.a.mov_imm(ni as u8, i64::from(*id));
+                }
+                self.part_calls.push((self.a.pos() * 4) as u32);
+                self.a.e(0x9400_0000);
+            }
             Callee::Indirect(_) => self.a.blr(IP0),
             Callee::Host(sym) => self.call_far(Reloc::Sym(*sym)),
             Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) | Callee::Asm(..) => {}
@@ -5851,9 +5922,12 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         asm_veneers: Vec::new(),
         sym_class: env.sym_class,
         near: env.near,
+        bypass: env.slots.wrapped() && f.blocks.first().is_some_and(|b| b.count > 0.0) && !crate::stats::opt_off(options, "-bypass"),
+        bypass_here: false,
         dom_slot: -1,
         dom_read: Vec::new(),
         relocs: Vec::new(),
+        part_calls: Vec::new(),
         text_words: 0,
         pc_map: Vec::new(),
         cur_pos: 0,
@@ -5926,7 +6000,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     } else {
         crate::dbgloc::note_stats(&pc_map, &[], 0);
     }
-    return Ok(Compiled { code, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_emitted: if g.rir_map_on { emitted_dump(g.f) } else { String::new() }, rir_map: g.rir_map });
+    return Ok(Compiled { code, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, part_calls: g.part_calls, rir_emitted: if g.rir_map_on { emitted_dump(g.f) } else { String::new() }, rir_map: g.rir_map });
     }
 }
 
@@ -5994,10 +6068,20 @@ pub fn thunk(slot_addr: u64) -> Vec<u8> {
 pub fn entry_thunk(id: u32, tls: u32, key: u64, slow: u64, body: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new(), flags: None };
     a.e(MRS_SLOT_BASE | IP0 as u32);
-    a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
-    a.mov_imm(IP1, (key * 8) as i64);
-    a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+    a.e(AND_SLOT_BASE);
+    let none = if TLS_TWO_LOAD {
+        a.mov_imm(IP1, key as i64);
+        Some(tls_two_loads(&mut a))
+    } else {
+        a.mov_imm(IP1, (key * 8) as i64);
+        a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+        None
+    };
     let ready = a.cbnz(IP0);
+    if let Some(none) = none {
+        let slow = a.pos();
+        a.patch(none, slow);
+    }
     a.stp_pre(FP, LR, SP, -16);
     a.mov_imm64_fixed(IP1, slow);
     a.blr(IP1);
@@ -6225,18 +6309,31 @@ pub const TLS_SLOW_FRAME: u32 = 640;
 
 /// This thread's thread-local block in x16, preserving every other register JIT code may hold
 /// (x0-x15, q0-q31): the fast path `tls_addr` inlines (slot `key` of the thread's slot
-/// array), and when the slot is still null `host() -> block`. `tls_addr` calls it after its own
-/// fast path found null; a prologue that needs the domain base calls it directly.
+/// array, or under Relax on Android the word `TLS_TWO_LOAD` reads), and when the slot is still
+/// null `host() -> block`. `tls_addr` calls it after its own fast path found null; a prologue
+/// that needs the domain base calls it directly.
 pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new(), flags: None };
-    // mrs x16, <slot base>; and x16, x16, #~7; mov x17, #key*8; ldr x16, [x16, x17]
+    // mrs x16, <slot base>; and x16, x16, #~7
     a.e(MRS_SLOT_BASE | IP0 as u32);
-    a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
-    a.mov_imm(IP1, (key * 8) as i64);
-    a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
-    // cbz x16, +2 (past the ret): the block exists, return it
-    a.e(0xB400_0000 | 2 << 5 | IP0 as u32);
-    a.ret();
+    a.e(AND_SLOT_BASE);
+    if TLS_TWO_LOAD {
+        // mov x17, #key; the two loads; cbz x16, slow; ret
+        a.mov_imm(IP1, key as i64);
+        let none = tls_two_loads(&mut a);
+        let unset = a.cbz(IP0);
+        a.ret();
+        let slow = a.pos();
+        a.patch(none, slow);
+        a.patch(unset, slow);
+    } else {
+        // mov x17, #key*8; ldr x16, [x16, x17]
+        a.mov_imm(IP1, (key * 8) as i64);
+        a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+        // cbz x16, +2 (past the ret): the block exists, return it
+        a.e(0xB400_0000 | 2 << 5 | IP0 as u32);
+        a.ret();
+    }
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
     a.sub_imm(SP, SP, TLS_SLOW_FRAME);
@@ -6265,17 +6362,60 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
 /// `mrs xN, <register holding the thread's slot array>` (N or-ed in). macOS: tpidrro_el0 (the
 /// pthread TSD base; its low 3 bits carry the cpu number, masked off after). Android: tpidr_el0,
 /// bionic's thread pointer = its TLS slot array (bionic libc/platform/bionic/tls_defines.h).
+/// `and x16, x16, #~7` (mask 0xffff_ffff_ffff_fff8): the slot array's base without the low 3
+/// bits, which carry the cpu number in macOS's tpidrro_el0 (a no-op on Android, whose tpidr_el0
+/// is the slot array itself).
+const AND_SLOT_BASE: u32 = 0x927D_F000 | (IP0 as u32) << 5 | IP0 as u32;
+
 #[cfg(not(target_os = "android"))]
 const MRS_SLOT_BASE: u32 = 0xD53B_D060;
 #[cfg(target_os = "android")]
 const MRS_SLOT_BASE: u32 = 0xD53B_D040;
 
+/// Under Relax on Android a runtime's block pointer is a word of the outermost runtime's block,
+/// which that runtime keeps in bionic's TLS_SLOT_APP: the key holds the slot's byte offset from
+/// tpidr_el0 in its high half and the word's offset in that block in its low half (os/tls.rs
+/// android `cell_key`), as `x64::TLS_TWO_LOAD`.
+pub const TLS_TWO_LOAD: bool = cfg!(target_os = "android") && cfg!(relax);
+
+/// With x16 = the thread's slot array and x17 = a two-load key (`TLS_TWO_LOAD`): x16 = the
+/// outermost runtime's block, then this runtime's word in it. Returns the `cbz` taken when the
+/// thread has no outermost block yet, for the caller to patch to its slow path.
+fn tls_two_loads(a: &mut Asm) -> usize {
+    // add x16, x16, x17, lsr #32; ldr x16, [x16]
+    a.e(0x8B40_8000 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+    a.e(0xF940_0000 | (IP0 as u32) << 5 | IP0 as u32);
+    let none = a.cbz(IP0);
+    // ldr x16, [x16, w17, uxtw]
+    a.e(0xF860_4800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+    none
+}
+
 pub fn tsd_reader() -> Vec<u8> {
     let mut a = Asm { w: Vec::new(), flags: None };
     a.e(MRS_SLOT_BASE | IP0 as u32);
-    a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
+    a.e(AND_SLOT_BASE);
     // ldr x0, [x16, x0, lsl #3]
     a.e(0xF860_7800 | (IP0 as u32) << 5);
+    a.ret();
+    words_to_bytes(&a.w)
+}
+
+/// `tls_read(key) -> u64` (key in x0): the word the two-load fetch (`TLS_TWO_LOAD`) reads for
+/// `key`, 0 when the slot word is null. A runtime checks its key with it.
+pub fn tls2_reader() -> Vec<u8> {
+    let mut a = Asm { w: Vec::new(), flags: None };
+    a.e(MRS_SLOT_BASE | IP0 as u32);
+    a.e(AND_SLOT_BASE);
+    // add x16, x16, x0, lsr #32; ldr x16, [x16]; cbz x16, +3
+    a.e(0x8B40_8000 | (IP0 as u32) << 5 | IP0 as u32);
+    a.e(0xF940_0000 | (IP0 as u32) << 5 | IP0 as u32);
+    a.e(0xB400_0000 | 3 << 5 | IP0 as u32);
+    // ldr x0, [x16, w0, uxtw]; ret
+    a.e(0xF860_4800 | (IP0 as u32) << 5);
+    a.ret();
+    // movz x0, #0; ret
+    a.e(0xD280_0000);
     a.ret();
     words_to_bytes(&a.w)
 }
@@ -6283,6 +6423,77 @@ pub fn tsd_reader() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn large_offset_indexed_byte_load_and_store() {
+        const OFFSET: i32 = 1 << 25;
+        let mut f = Func::new("indexed_bytes".into(), 0);
+        let (src, dst, index, byte) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        // Independent bases keep both indexed accesses through instruction selection.
+        f.params.extend([src, dst, index]);
+        f.rets.push(Cls::I);
+        f.block();
+        let mem = Mem::Int(1, false);
+        f.blocks[0].insts = vec![Inst::LoadX(mem, byte, src, index, 1, OFFSET),
+            Inst::StoreX(mem, dst, index, 1, OFFSET, byte)];
+        f.blocks[0].pos = vec![0; 2];
+        f.blocks[0].term = Term::Ret(vec![byte]);
+        let compiled = compile(&Default::default(), &f, &Env::standalone(true)).unwrap();
+        assert!(compiled.relocs.is_empty());
+
+        // Run the emitted address calculations in a six-byte logical memory.
+        // Translate each byte access just before it executes. An out-of-range
+        // result selects guard byte zero and gives an ordinary assertion failure.
+        let mut bytes = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let mut guarded = Asm { w: Vec::new(), flags: None };
+        let mut accesses = Vec::new();
+        for instruction in compiled.code[..compiled.text_len as usize].chunks_exact(4) {
+            let w = u32::from_le_bytes(instruction.try_into().unwrap());
+            let op = w & 0xffff_fc00;
+            if matches!(op, LDRB | STRB) {
+                let base_reg = ((w >> 5) & 31) as u8;
+                assert_ne!(base_reg, IP0);
+                assert_ne!((w & 31) as u8, IP0);
+                guarded.mov_imm(IP0, bytes.len() as i64);
+                guarded.cmp(base_reg, IP0);
+                guarded.csel(IP1, base_reg, ZR, LO);
+                guarded.mov_imm(IP0, bytes.as_mut_ptr() as i64);
+                guarded.rrr(0x8B00_0000, IP1, IP0, IP1);
+                guarded.e(op | (u32::from(IP1) << 5) | (w & 31));
+                accesses.push(op);
+            } else {
+                guarded.e(w);
+            }
+        }
+        assert_eq!(accesses, [LDRB, STRB], "byte access encodings in {:08x?}", guarded.w);
+        let code = crate::exec::Code::new(&words_to_bytes(&guarded.w)).unwrap();
+        // SAFETY: both byte operations address the live buffer through the translation above.
+        let run: extern "C" fn(i64, i64, u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+        let base = -i64::from(OFFSET);
+        let loaded = run(base, base + 1, 2);
+        assert_eq!((loaded, bytes), (0x55, [0x11, 0x22, 0x33, 0x44, 0x55, 0x55]));
+    }
+
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn large_offset_add_preserves_live_scratch() {
+        for (dst, offset) in [(IP1, 1 << 30), (0, i64::MIN)] {
+            let mut a = Asm { w: Vec::new(), flags: None };
+            a.mov(IP1, 0);
+            a.mov(IP0, 1);
+            a.add_any(dst, IP1, offset);
+            a.ldst(STRX, 8, IP0, 2, 0);
+            a.mov(0, dst);
+            a.ret();
+            let code = crate::exec::Code::new(&words_to_bytes(&a.w)).unwrap();
+            // SAFETY: the stub stores x16 in the single output word and returns the sum.
+            let run: extern "C" fn(u64, u64, &mut u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
+            let mut saved = 0;
+            let sum = run(37, 0xabcd_1234, &mut saved);
+            assert_eq!((sum, saved), (37u64.wrapping_add(offset as u64), 0xabcd_1234));
+        }
+    }
 
     /// R13: a conditional branch over more than 1 MB of code (imm19) is relaxed into an
     /// inverted short branch over a `b` instead of being truncated into other code (Amp's

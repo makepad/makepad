@@ -41,6 +41,664 @@ pub struct SplitStats {
     pub moved: u32,
 }
 
+/// What a taken exit must pass to the private continuation. Slot and register
+/// numbers here are those of the split body, before either half is optimised.
+#[derive(Debug, PartialEq)]
+pub enum RecordValue {
+    Register { src: VReg, dst: VReg, class: Cls, result_buffer: bool },
+    Fill { src: u32, dst: u32, offset: i64, kind: FillKind },
+    SharedBase(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FillKind {
+    Cell(Mem),
+    Vector,
+    Bytes(u32),
+}
+
+impl RecordValue {
+    fn size_align(&self) -> Result<(u32, u32), &'static str> {
+        let n = match *self {
+            RecordValue::Register { class: Cls::I | Cls::F64, .. } | RecordValue::SharedBase(_) => 8,
+            RecordValue::Register { class: Cls::F32, .. } => 4,
+            RecordValue::Register { class: Cls::V128, .. } | RecordValue::Fill { kind: FillKind::Vector, .. } => 16,
+            RecordValue::Fill { kind: FillKind::Cell(m @ (Mem::Int(1 | 2 | 4 | 8, _) | Mem::F32 | Mem::F64)), .. } => relax_backend::passes::mem_size(m) as u32,
+            RecordValue::Fill { kind: FillKind::Bytes(n), .. } if n != 0 => return Ok((n, 1)),
+            _ => return Err("unsupported record field"),
+        };
+        Ok((n, n))
+    }
+}
+
+pub struct ExitLayout {
+    pub id: u32,
+    pub block: u32,
+    pub target: u32,
+    /// (byte offset in the record, value)
+    pub fields: Vec<(u32, RecordValue)>,
+    /// Clone-relative addresses built by the parallel copy belong in P's entry leaf.
+    pub remakes: Vec<Inst>,
+}
+
+pub struct SplitLayout {
+    pub region: std::ops::Range<usize>,
+    pub exits: Vec<ExitLayout>,
+    /// Size of the single 16-byte aligned slot to allocate upon extraction.
+    pub record_size: u32,
+    /// The split's maps, also used to move the source locals into P's frame.
+    pub reg_map: Vec<u32>,
+    pub slot_map: Vec<u32>,
+    shared: Vec<u32>,
+}
+
+/// Each entry needs the shared bases mentioned by any successor, pads included.
+/// Use one bit per shared slot, irrespective of the number of host-only slots.
+fn shared_bases(f: &Func, region: std::ops::Range<usize>, shared: &[u32]) -> Vec<u64> {
+    if shared.is_empty() { return Vec::new(); }
+    let mut index = vec![NONE; f.slots.len()];
+    for (k, &s) in shared.iter().enumerate() { index[s as usize] = k as u32; }
+    let words = shared.len().div_ceil(64);
+    let blocks: Vec<_> = region.collect();
+    let mut at = vec![NONE; f.blocks.len()];
+    let mut gen = vec![0; blocks.len() * words];
+    for (k, &b) in blocks.iter().enumerate() {
+        at[b] = k as u32;
+        for i in &f.blocks[b].insts {
+            if let Inst::SlotAddr(_, s) = *i {
+                let bit = index[s as usize];
+                if bit != NONE { gen[k * words + bit as usize / 64] |= 1 << (bit % 64); }
+            }
+        }
+    }
+    liveness_in(f, &blocks, &at, words, &gen, &vec![0; gen.len()])
+}
+
+#[derive(Default)]
+struct ExitFills {
+    values: Vec<RecordValue>,
+    /// Parallel moves and address remakes follow these instructions in the exit.
+    insts: usize,
+}
+
+fn capture_layout(f: &Func, region: std::ops::Range<usize>, reg_map: Vec<u32>, slot_map: Vec<u32>, shared: &[u32],
+                  t: &Taint, fills: Vec<ExitFills>) -> Result<SplitLayout, &'static str> {
+    let bases = shared_bases(f, region.clone(), shared);
+    let words = shared.len().div_ceil(64);
+    let mut exits = Vec::new();
+    let mut record_size = 16;
+    for (id, ExitFills { mut values, insts }) in fills.into_iter().enumerate() {
+        let block = region.end + id;
+        let b = &f.blocks[block];
+        let Term::Jump(target) = b.term else { continue }; // an unreachable exit
+        if !region.contains(&(target as usize)) { return Err("invalid exit target"); }
+        let mut remakes = Vec::new();
+        for i in &b.insts[insts..] {
+            match *i {
+                Inst::Mov(dst, src) => {
+                    let slot = t.slot[src.0 as usize];
+                    if slot == MIXED || slot != NONE && (t.other[src.0 as usize] || slot_map[slot as usize] != NONE) {
+                        return Err("ambiguous pointer provenance");
+                    }
+                    values.push(RecordValue::Register { src, dst, class: f.vregs[src.0 as usize], result_buffer: f.sret == Some(src) });
+                }
+                Inst::SlotAddr(..) | Inst::IBinI(..) => remakes.push(i.clone()),
+                _ => return Err("unsupported exit move"),
+            }
+        }
+        let row = (target as usize - region.start) * words;
+        for (k, &s) in shared.iter().enumerate() {
+            if bases[row + k / 64] >> (k % 64) & 1 != 0 { values.push(RecordValue::SharedBase(s)); }
+        }
+        let mut fields = Vec::with_capacity(values.len());
+        let mut end = 0u32;
+        for value in values {
+            let (n, align) = value.size_align()?;
+            if let RecordValue::Fill { src, dst, offset, .. } = value {
+                if offset < 0 || offset + i64::from(n) > i64::from(f.slots[src as usize].size.min(f.slots[dst as usize].size)) {
+                    return Err("fill outside slot");
+                }
+            }
+            let off = end.checked_next_multiple_of(align).ok_or("record offset overflow")?;
+            end = off.checked_add(n).ok_or("record offset overflow")?;
+            fields.push((off, value));
+        }
+        record_size = record_size.max(end.checked_next_multiple_of(16).filter(|n| *n <= i32::MAX as u32).ok_or("record offset overflow")?);
+        exits.push(ExitLayout { id: id as u32, block: block as u32, target, fields, remakes });
+    }
+    Ok(SplitLayout { region, exits, record_size, reg_map, slot_map, shared: shared.to_vec() })
+}
+
+/// The body kind comes from the build job: a sandbox twin and its base can have
+/// the same RIR name. The native producer must know which one it was given.
+#[derive(Clone, Copy)]
+pub enum OutlineBody { Native, SandboxTwin, Web, Interpreter, WholeBody }
+
+pub struct OutlinedPart {
+    pub part: Func,
+    exits: Vec<ExitLayout>,
+    region: std::ops::Range<usize>,
+    record_size: u32,
+    // Original normal and cleanup edges, and every unwind-resume, in P's numbering.
+    unwind: Vec<(u32, Term)>,
+    bases: Vec<VReg>,
+    // Shared slots in P's current numbering. After verification compaction removes them all.
+    shared_slots: Vec<u32>,
+}
+
+fn record_mem(c: Cls) -> Option<Mem> {
+    match c {
+        Cls::I => Some(Mem::Int(8, false)),
+        Cls::F32 => Some(Mem::F32),
+        Cls::F64 => Some(Mem::F64),
+        Cls::V128 => None,
+        Cls::V256 => unreachable!("unsupported record field"),
+    }
+}
+
+fn load_field(m: Option<Mem>, v: VReg, base: VReg, off: i32) -> Inst {
+    match m { Some(m) => Inst::Load(m, v, base, off), None => Inst::VLoad(v, base, off) }
+}
+
+fn store_field(m: Option<Mem>, base: VReg, off: i32, v: VReg) -> Inst {
+    match m { Some(m) => Inst::Store(m, base, off, v), None => Inst::VStore(base, off, v) }
+}
+
+fn offset_addr(f: &mut Func, out: &mut Vec<Inst>, base: VReg, off: i64) -> VReg {
+    if off == 0 { return base; }
+    let d = f.vreg(Cls::I);
+    out.push(Inst::IBinI(IOp::Add, U64, d, base, off));
+    d
+}
+
+/// Generate both ends of a transfer together. The only address in a fill
+/// crossing frames is the record itself; P restores the bytes to its own slot.
+fn record_exit(f: &mut Func, p: &mut Func, e: &ExitLayout, slot: u32, bases: &[VReg], target: u32) -> (Block, Block) {
+    let pos = f.blocks[e.block as usize].term_pos;
+    let record = f.vreg(Cls::I);
+    let arg = p.params[0];
+    let mut pack = vec![Inst::SlotAddr(record, slot)];
+    let mut unpack = Vec::new();
+    for &(off, ref field) in &e.fields {
+        let off = off as i32;
+        match *field {
+            RecordValue::Register { src, dst, class, .. } => {
+                pack.push(store_field(record_mem(class), record, off, src));
+                unpack.push(load_field(record_mem(class), dst, arg, off));
+            }
+            RecordValue::SharedBase(s) => {
+                let a = f.vreg(Cls::I);
+                pack.push(Inst::SlotAddr(a, s));
+                pack.push(Inst::Store(Mem::Int(8, false), record, off, a));
+                unpack.push(Inst::Load(Mem::Int(8, false), bases[s as usize], arg, off));
+            }
+            RecordValue::Fill { src, dst, offset, kind } => {
+                let (a, b) = (f.vreg(Cls::I), p.vreg(Cls::I));
+                pack.push(Inst::SlotAddr(a, src));
+                unpack.push(Inst::SlotAddr(b, dst));
+                match kind {
+                    FillKind::Bytes(n) => {
+                        let from = offset_addr(f, &mut pack, a, offset);
+                        let to = offset_addr(f, &mut pack, record, off.into());
+                        pack.push(Inst::Copy(to, from, n));
+                        let from = offset_addr(p, &mut unpack, arg, off.into());
+                        let to = offset_addr(p, &mut unpack, b, offset);
+                        unpack.push(Inst::Copy(to, from, n));
+                    }
+                    _ => {
+                        let m = match kind { FillKind::Cell(m) => Some(m), _ => None };
+                        let c = match m { None => Cls::V128, Some(Mem::F32) => Cls::F32, Some(Mem::F64) => Cls::F64, _ => Cls::I };
+                        let (v, w) = (f.vreg(c), p.vreg(c));
+                        pack.extend([load_field(m, v, a, offset as i32), store_field(m, record, off, v)]);
+                        unpack.extend([load_field(m, w, arg, off), store_field(m, b, offset as i32, w)]);
+                    }
+                }
+            }
+        }
+    }
+    unpack.extend(e.remakes.iter().cloned());
+    let results: Vec<_> = p.rets.iter().map(|&c| f.vreg(c)).collect();
+    pack.push(Inst::Call(Callee::Part(Some(e.id)), vec![record], results.clone()));
+    let block = |insts: Vec<Inst>, term| Block { pos: vec![pos; insts.len()], insts, term, term_pos: pos, count: f.blocks[e.block as usize].count };
+    (block(pack, Term::Ret(results)), block(unpack, Term::Jump(target)))
+}
+
+// The leaves are in permanent-ID order, including holes left by dead exits.
+// The root is b0 even for a single leaf.
+fn dispatch(p: &mut Func, b: u32, leaves: &[(u32, u32)]) {
+    if let [(_, leaf)] = leaves {
+        p.blocks[b as usize].term = Term::Jump(*leaf);
+        return;
+    }
+    let (left, right) = leaves.split_at(leaves.len() / 2);
+    let (l, r) = (p.block(), p.block());
+    let cmp = p.vreg(Cls::I);
+    p.blocks[b as usize].insts.push(Inst::ICmpI(Cond::Lt, false, cmp, p.params[1], right[0].0.into()));
+    p.blocks[b as usize].pos.push(0);
+    p.blocks[b as usize].term = Term::Branch(cmp, l, r);
+    dispatch(p, l, left);
+    dispatch(p, r, right);
+}
+
+// Read the actual parallel copy independently of the capture. A missing field
+// must refuse before either function starts relying on the shortened layout.
+fn check_transfers(f: &Func, e: &ExitLayout) -> Result<(), &'static str> {
+    let insts = &f.blocks[e.block as usize].insts;
+    let end = insts.iter().rposition(|i| matches!(i, Inst::Store(..) | Inst::VStore(..) | Inst::Copy(..))).map_or(0, |k| k + 1);
+    let mut fields = e.fields.iter().map(|x| &x.1).filter(|x| !matches!(x, RecordValue::SharedBase(_)));
+    let mut addrs = std::collections::HashMap::new();
+    let mut loaded = std::collections::HashMap::new();
+    let bad = "incomplete exit transfer";
+    for i in &insts[..end] {
+        let value = match *i {
+            Inst::SlotAddr(a, s) => { addrs.insert(a, (s, 0i64)); continue; }
+            Inst::IBinI(IOp::Add, U64, d, a, k) => {
+                let &(s, off) = addrs.get(&a).ok_or(bad)?;
+                addrs.insert(d, (s, off.checked_add(k).ok_or(bad)?));
+                continue;
+            }
+            Inst::Load(_, v, a, k) | Inst::VLoad(v, a, k) => {
+                let &(s, off) = addrs.get(&a).ok_or(bad)?;
+                let kind = match *i { Inst::Load(m, ..) => FillKind::Cell(m), _ => FillKind::Vector };
+                loaded.insert(v, (s, off + i64::from(k), kind));
+                continue;
+            }
+            Inst::Store(_, a, k, v) | Inst::VStore(a, k, v) => {
+                let &(src, offset, kind) = loaded.get(&v).ok_or(bad)?;
+                let &(dst, off) = addrs.get(&a).ok_or(bad)?;
+                let stored = match *i { Inst::Store(m, ..) => FillKind::Cell(m), _ => FillKind::Vector };
+                if off + i64::from(k) != offset || kind != stored { return Err(bad); }
+                RecordValue::Fill { src, dst, offset, kind }
+            }
+            Inst::Copy(d, s, n) => {
+                let &(src, offset) = addrs.get(&s).ok_or(bad)?;
+                let &(dst, off) = addrs.get(&d).ok_or(bad)?;
+                if off != offset { return Err(bad); }
+                RecordValue::Fill { src, dst, offset, kind: FillKind::Bytes(n) }
+            }
+            _ => return Err(bad),
+        };
+        if fields.next() != Some(&value) { return Err(bad); }
+    }
+    let mut remakes = e.remakes.iter();
+    for i in &insts[end..] {
+        match *i {
+            Inst::Mov(dst, src) => {
+                let value = RecordValue::Register { src, dst, class: f.vregs[src.0 as usize], result_buffer: f.sret == Some(src) };
+                if fields.next() != Some(&value) { return Err(bad); }
+            }
+            _ if remakes.next() == Some(i) => {}
+            _ => return Err(bad),
+        }
+    }
+    if fields.next().is_some() || remakes.next().is_some() { return Err(bad); }
+    Ok(())
+}
+
+/// Replace the split in place. The region's instruction vectors move to P.
+/// On a verifier refusal the moves and the edge renumbering are reversible;
+/// the only old blocks held aside are the small parallel copies at the exits.
+pub fn extract_patched_part(f: &mut Func, layout: SplitLayout, body: OutlineBody) -> Result<OutlinedPart, &'static str> {
+    match body {
+        OutlineBody::SandboxTwin => return Err("sandbox twin"),
+        OutlineBody::Web => return Err("web target"),
+        OutlineBody::Interpreter => return Err("interpreter body"),
+        OutlineBody::WholeBody => return Err("whole-body outline"),
+        OutlineBody::Native => {}
+    }
+    if f.naked { return Err("naked function"); }
+    if f.cabi.is_some() { return Err("C ABI host"); }
+    if f.keep_frames { return Err("frame-sensitive function"); }
+    let region = layout.region.clone();
+    if region.start == 0 || region.is_empty() || region.end > f.blocks.len() || layout.exits.is_empty() { return Err("invalid patched region"); }
+    if layout.record_size == 0 || layout.record_size % 16 != 0 || layout.record_size > i32::MAX as u32 { return Err("invalid record size"); }
+    let mut p = Func::new(f.name.clone(), f.file);
+    p.vregs = f.vregs.clone();
+    p.slots = f.slots.clone();
+    for s in &mut p.slots { s.born = false; }
+    p.rets = f.rets.clone();
+    let (arg, id) = (p.vreg(Cls::I), p.vreg(Cls::I));
+    p.params.extend([arg, id]);
+    p.baseline = true;
+    p.inl = f.inl.clone();
+    p.inl_slots = f.inl_slots.clone();
+    p.inl_waits = f.inl_waits.clone();
+    p.inl_digest = f.inl_digest.clone();
+    p.guard_calls = f.guard_calls.clone();
+    p.sret_callees = f.sret_callees.clone();
+    p.dbg = f.dbg.clone();
+    p.dbg_map_vregs(&|v| layout.reg_map.get(v.0 as usize).copied().filter(|&n| n != NONE).map(VReg));
+    let mut bases = vec![DBG_NONE; f.slots.len()];
+    let shared = &layout.shared;
+    for &s in shared { bases[s as usize] = p.vreg(Cls::I); }
+    let target = |t: u32| (t as usize - region.start + 1) as u32;
+    let mut unwind = Vec::new();
+    let mut last = None;
+    let mut old_exit = vec![false; f.blocks.len() - region.end];
+    for e in &layout.exits {
+        if last.is_some_and(|id| id >= e.id) || e.block as usize != region.end + e.id as usize
+            || !region.contains(&(e.target as usize)) || !f.blocks.get(e.block as usize).is_some_and(|b| b.term == Term::Jump(e.target)) {
+            return Err("invalid exit target or ID");
+        }
+        check_transfers(f, e)?;
+        old_exit[e.id as usize] = true;
+        last = Some(e.id);
+        let mut end = 0;
+        for &(off, ref field) in &e.fields {
+            let (n, align) = field.size_align()?;
+            if off < end || off % align != 0 { return Err("invalid record field alignment"); }
+            end = off.checked_add(n).filter(|&end| end <= layout.record_size).ok_or("record field out of bounds")?;
+            match *field {
+                RecordValue::Register { src, dst, class, result_buffer } => {
+                    if [src, dst].iter().any(|v| f.vregs.get(v.0 as usize) != Some(&class)) || result_buffer != (f.sret == Some(src)) {
+                        return Err("invalid register field");
+                    }
+                }
+                RecordValue::SharedBase(s) => {
+                    if bases.get(s as usize).is_none_or(|v| *v == DBG_NONE) { return Err("invalid shared base"); }
+                }
+                RecordValue::Fill { src, dst, offset, .. } => {
+                    if layout.slot_map.get(src as usize) != Some(&dst) || offset < 0 || offset > i32::MAX as i64 ||
+                        [src, dst].iter().any(|&s| f.slots.get(s as usize).is_none_or(|s| offset + i64::from(n) > i64::from(s.size))) {
+                        return Err("fill outside slot");
+                    }
+                }
+            }
+        }
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let inside = region.contains(&bi);
+        if b.insts.iter().any(|i| matches!(i, Inst::Call(Callee::Part(_), ..))) { return Err("nested part"); }
+        if inside && b.insts.iter().any(|i| matches!(i, Inst::Call(Callee::Asm(_), ..))) { return Err("frame-sensitive assembly"); }
+        if bi >= region.end && old_exit[bi - region.end] { continue; }
+        if b.term.succs().any(|t| t as usize >= f.blocks.len() || region.contains(&(t as usize)) != inside) { return Err("edge across patched region"); }
+        if inside && matches!(b.term, Term::Invoke(..) | Term::Resume) {
+            let mut t = b.term.clone();
+            t.map_succs(target);
+            unwind.push((target(bi as u32), t));
+        }
+    }
+    for d in &mut p.dbg {
+        if let DbgLoc::Slot(s, off) = d.loc {
+            if let Some(&base) = bases.get(s as usize).filter(|&&v| v != DBG_NONE) {
+                d.loc = DbgLoc::Mem(base, off);
+            } else if let Some(&clone) = layout.slot_map.get(s as usize).filter(|&&s| s != NONE) {
+                d.loc = DbgLoc::Slot(clone, off);
+            }
+        }
+    }
+
+    let nv = f.vregs.len();
+    let slot = f.slot(layout.record_size, 16);
+    let mut new_exits: Vec<_> = (0..old_exit.len()).map(|_| Block { insts: vec![], pos: vec![], term: Term::Unreachable, term_pos: 0, count: -1.0 }).collect();
+    p.block();
+    let mut leaves = Vec::new();
+    for e in &layout.exits {
+        let (pack, unpack) = record_exit(f, &mut p, e, slot, &bases, target(e.target));
+        new_exits[e.id as usize] = pack;
+        leaves.push((e.id, (region.len() + p.blocks.len()) as u32));
+        p.blocks.push(unpack);
+    }
+    let old_exits = f.blocks.split_off(region.end);
+    let mut moved = f.blocks.split_off(region.start);
+    for b in &mut moved {
+        b.term.map_succs(target);
+        for i in &mut b.insts {
+            if let Inst::SlotAddr(d, s) = *i {
+                let base = bases[s as usize];
+                if base != DBG_NONE { *i = Inst::Mov(d, base); }
+            }
+        }
+    }
+    p.blocks.splice(1..1, moved);
+    dispatch(&mut p, 0, &leaves);
+    for b in &mut f.blocks {
+        b.term.map_succs(|t| if t as usize >= region.end { t - region.len() as u32 } else { t });
+    }
+    f.blocks.extend(new_exits);
+    let mut out = OutlinedPart { part: p, exits: layout.exits, region: layout.region, record_size: layout.record_size, unwind, bases, shared_slots: layout.shared };
+    if let Err(why) = verify_outline(f, &out) {
+        f.blocks.truncate(region.start);
+        for b in &mut f.blocks {
+            b.term.map_succs(|t| if t as usize >= region.start { t + region.len() as u32 } else { t });
+        }
+        let mut original = vec![NONE; out.part.vregs.len() - nv];
+        for (s, v) in out.bases.iter().enumerate().filter(|(_, v)| **v != DBG_NONE) { original[v.0 as usize - nv] = s as u32; }
+        for mut b in out.part.blocks.drain(1..=region.len()) {
+            b.term.map_succs(|t| t - 1 + region.start as u32);
+            for i in &mut b.insts {
+                if let Inst::Mov(d, a) = *i {
+                    if a.0 as usize >= nv { *i = Inst::SlotAddr(d, original[a.0 as usize - nv]); }
+                }
+            }
+            f.blocks.push(b);
+        }
+        f.blocks.extend(old_exits);
+        f.vregs.truncate(nv);
+        f.slots.truncate(slot as usize);
+        return Err(why);
+    }
+    // Frozen leaf destinations follow compact_slots' old-slot order. The
+    // host side is rediscovered from Part's arguments after its own passes.
+    let mut next = 0;
+    let slots: Vec<_> = used_slots(&out.part).into_iter().map(|used| {
+        if used { next += 1; next - 1 } else { NONE }
+    }).collect();
+    crate::opt::compact_slots(&mut out.part);
+    out.shared_slots.clear();
+    for e in &mut out.exits {
+        for (_, value) in &mut e.fields {
+            if let RecordValue::Fill { dst, .. } = value { *dst = slots[*dst as usize]; }
+        }
+        for i in &mut e.remakes {
+            if let Inst::SlotAddr(_, s) = i { *s = slots[*s as usize]; }
+        }
+    }
+    crate::opt::compact_slots(f);
+    Ok(out)
+}
+
+// P stays at baseline. Its dispatch blocks are outside the moved region, and
+// each unpack leaf ends at its original target, even after the host loses an ID.
+fn verify_dispatch(out: &OutlinedPart, b: u32, exits: &[ExitLayout]) -> Result<(), &'static str> {
+    let p = &out.part;
+    let region = &out.region;
+    let bad = "invalid part dispatch";
+    let block = p.blocks.get(b as usize).ok_or(bad)?;
+    if let [e] = exits {
+        let Term::Jump(l) = block.term else { return Err(bad) };
+        let leaf = p.blocks.get(l as usize).ok_or(bad)?;
+        if !block.insts.is_empty() || l as usize <= region.len() || leaf.term != Term::Jump((e.target as usize - region.start + 1) as u32) {
+            return Err(bad);
+        }
+        // Decode the unpacked fields from their actual loads and stores. Address
+        // temporaries may differ; a restore must reach the original slot offset.
+        let mut fields = e.fields.iter();
+        let mut addr = std::collections::HashMap::from([(p.params[0], (NONE, 0i64))]);
+        let mut insts = leaf.insts.strip_suffix(e.remakes.as_slice()).ok_or("missing exit remake")?.iter();
+        while let Some(i) = insts.next() {
+            let (a, off, kind, reg) = match *i {
+                Inst::SlotAddr(a, s) => { addr.insert(a, (s, 0)); continue; }
+                Inst::IBinI(IOp::Add, U64, d, a, k) => {
+                    let &(s, off) = addr.get(&a).ok_or("invalid unpack address")?;
+                    addr.insert(d, (s, off.checked_add(k).ok_or("invalid unpack address")?));
+                    continue;
+                }
+                Inst::Load(m, d, a, off) => (a, i64::from(off), FillKind::Cell(m), d),
+                Inst::VLoad(d, a, off) => (a, i64::from(off), FillKind::Vector, d),
+                Inst::Copy(d, a, n) => (a, 0, FillKind::Bytes(n), d),
+                _ => return Err("invalid unpack instruction"),
+            };
+            let Some(&(at, ref value)) = fields.next() else { return Err("unexpected record read"); };
+            if addr.get(&a) != Some(&(NONE, i64::from(at) - off)) { return Err("invalid record read"); }
+            let expected = match *value {
+                RecordValue::Register { class, dst, .. } if reg == dst && p.vregs[dst.0 as usize] == class =>
+                    record_mem(class).map_or(FillKind::Vector, FillKind::Cell),
+                RecordValue::SharedBase(s) if reg == out.bases[s as usize] => FillKind::Cell(Mem::Int(8, false)),
+                RecordValue::Fill { kind: want, dst, offset, .. } => {
+                    let (to, disp) = match kind {
+                        FillKind::Bytes(_) => (reg, 0),
+                        _ => match insts.next() {
+                            Some(Inst::Store(m, to, off, v)) if *v == reg && kind == FillKind::Cell(*m) => (*to, i64::from(*off)),
+                            Some(Inst::VStore(to, off, v)) if *v == reg && kind == FillKind::Vector => (*to, i64::from(*off)),
+                            _ => return Err("missing part fill"),
+                        },
+                    };
+                    if addr.get(&to) != Some(&(dst, offset - disp)) { return Err("wrong part fill destination"); }
+                    want
+                }
+                _ => return Err("wrong part register"),
+            };
+            if kind != expected { return Err("invalid record read"); }
+        }
+        return if fields.next().is_some() { Err("missing part field") } else { Ok(()) };
+    }
+    let (left, right) = exits.split_at(exits.len() / 2);
+    let ([Inst::ICmpI(Cond::Lt, false, cmp, id, split)], Term::Branch(c, l, r)) = (&block.insts[..], &block.term) else { return Err(bad) };
+    if cmp != c || *id != p.params[1] || *split != i64::from(right[0].id) { return Err(bad); }
+    verify_dispatch(out, *l, left)?;
+    verify_dispatch(out, *r, right)
+}
+
+// At the dispatcher's entry only its two arguments may be live. Number only
+// values used before a local definition: all other vregs are absent from every
+// live-in set, including the host's old (disjoint) register namespace.
+fn verify_part_inputs(p: &Func, reach: &[bool]) -> Result<(), &'static str> {
+    let mut defined = vec![NONE; p.vregs.len()];
+    let mut index = vec![NONE; p.vregs.len()];
+    let mut count = 0;
+    let mut terms = Vec::new();
+    for (bi, b) in p.blocks.iter().enumerate().filter(|(b, _)| reach[*b]) {
+        let mut note = |v: VReg, defined: &[u32]| {
+            let k = v.0 as usize;
+            if defined[k] != bi as u32 && index[k] == NONE && !p.params.contains(&v) {
+                index[k] = count;
+                count += 1;
+            }
+        };
+        for i in &b.insts {
+            for_uses(i, |v| note(v, &defined));
+            for_defs(i, |v| defined[v.0 as usize] = bi as u32);
+        }
+        term_uses(&b.term, &mut terms);
+        for &v in &terms { note(v, &defined); }
+    }
+    let words = (count as usize).div_ceil(64);
+    let blocks: Vec<_> = (0..p.blocks.len()).collect();
+    let (gen, kill) = gen_kill(p, &blocks, &|v| index[v.0 as usize], words);
+    let (live, _) = relax_backend::regalloc::solve_liveness(p, reach, words, &gen, &kill, false);
+    if live[..words].iter().any(|&w| w != 0) { return Err("missing part live-in"); }
+    Ok(())
+}
+
+/// Verify the original extraction, or the surviving calls in an optimised
+/// host against the same frozen layouts. Slot/vreg/block numbers in that host
+/// may all have changed. Recover the record from the actual Part arguments.
+pub fn verify_outline(f: &Func, out: &OutlinedPart) -> Result<(), &'static str> {
+    let p = &out.part;
+    f.verify().map_err(|_| "invalid host RIR")?;
+    p.verify().map_err(|_| "invalid part RIR")?;
+    // Includes the unpack leaves: remaking a host address in P would address P's frame.
+    if !out.shared_slots.is_empty() && p.blocks.iter().flat_map(|b| &b.insts)
+        .any(|i| matches!(i, Inst::SlotAddr(_, s) if out.shared_slots.binary_search(s).is_ok())) {
+        return Err("shared slot address in part");
+    }
+    if p.params.len() != 2 || p.params.iter().any(|v| p.vregs[v.0 as usize] != Cls::I) || p.sret.is_some() ||
+        !p.noalias.is_empty() || p.rets != f.rets || p.slots.iter().any(|s| s.born) { return Err("invalid part frame"); }
+    verify_dispatch(out, 0, &out.exits)?;
+    if p.blocks.is_empty() || f.blocks.is_empty() { return Err("missing entry block"); }
+    let pr = relax_backend::regalloc::reachable(p);
+    verify_part_inputs(p, &pr)?;
+    for (b, t) in &out.unwind {
+        if !pr.get(*b as usize).copied().unwrap_or(false) || p.blocks[*b as usize].term != *t { return Err("missing part unwind edge"); }
+    }
+
+    let reach = relax_backend::regalloc::reachable(f);
+    let addresses = slot_offsets(f);
+    let mut pad = vec![false; f.blocks.len()];
+    for (_, b) in f.blocks.iter().enumerate().filter(|(b, _)| reach[*b]) {
+        if let Term::Invoke(_, cleanup) = b.term { pad[cleanup as usize] = true; }
+    }
+    let mut record = None;
+    let mut sites = vec![None; f.blocks.len()];
+    for (bi, b) in f.blocks.iter().enumerate().filter(|(b, _)| reach[*b]) {
+        for (ii, i) in b.insts.iter().enumerate() {
+            let Inst::Call(Callee::Part(id), args, results) = i else { continue };
+            let Some(id) = id else { return Err("part call without an exit ID") };
+            let [a] = args[..] else { return Err("invalid part arguments") };
+            let ai = a.0 as usize;
+            let Some((s, 0)) = addresses[ai] else { return Err("invalid record address"); };
+            if f.vregs[ai] != Cls::I
+                || !f.slots.get(s as usize).is_some_and(|s| s.align >= 16 && s.size >= out.record_size)
+                || record.replace(s).is_some_and(|old| old != s) { return Err("invalid record address"); }
+            let index = out.exits.binary_search_by_key(id, |e| e.id).map_err(|_| "unknown exit ID")?;
+            if sites[bi].replace(index).is_some() || pad[bi] || matches!(b.term, Term::Invoke(..)) ||
+                !results.iter().map(|v| f.vregs[v.0 as usize]).eq(f.rets.iter().copied()) ||
+                !relax_backend::tail::returns_results(f, bi, ii + 1, results) { return Err("part call must return exactly and have no pad"); }
+        }
+    }
+    let Some(record) = record else {
+        // With no surviving argument, compaction may have erased the record's
+        // identity. Elision is safe when no address of a possible record remains.
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if reach[bi] && b.insts.iter().any(|i| matches!(*i, Inst::SlotAddr(_, s) if f.slots[s as usize].align >= 16 && f.slots[s as usize].size >= out.record_size)) {
+                return Err("unidentified record after exit deletion");
+            }
+        }
+        return Ok(());
+    };
+    let carries = |a: VReg| addresses[a.0 as usize].is_some_and(|(s, _)| s == record);
+    let mut uses = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate().filter(|(b, _)| reach[*b]) {
+        let mut writes = Vec::new();
+        for i in &b.insts {
+            let (a, off, n) = match *i {
+                Inst::Store(m, a, off, v) if carries(a) && !carries(v) => {
+                    let class = match m { Mem::Int(1 | 2 | 4 | 8, _) => Cls::I, Mem::F32 => Cls::F32, Mem::F64 => Cls::F64,
+                        _ => return Err("unsupported record store") };
+                    if f.vregs[v.0 as usize] != class { return Err("invalid record store class"); }
+                    (a, off, relax_backend::passes::mem_size(m) as u32)
+                }
+                Inst::VStore(a, off, v) if carries(a) && f.vregs[v.0 as usize] == Cls::V128 => (a, off, 16),
+                Inst::Copy(d, a, n) if carries(d) && !carries(a) => (d, 0, n),
+                Inst::Mov(d, a) | Inst::IBinI(IOp::Add, IntTy { bits: 64, .. }, d, a, _) if carries(a) && carries(d) => continue,
+                Inst::Call(Callee::Part(Some(_)), ref args, _) if carries(args[0]) => continue,
+                Inst::SlotAddr(d, s) if s == record => {
+                    if !carries(d) { return Err("ambiguous record address"); }
+                    continue;
+                }
+                _ => {
+                    let mut other = false;
+                    for_uses(i, |a| other |= carries(a));
+                    if other { return Err("unsupported use of record address"); }
+                    continue;
+                }
+            };
+            if sites[bi].is_none() { return Err("record write outside part exit"); }
+            let lo = addresses[a.0 as usize].unwrap().1.checked_add(off.into()).and_then(|v| u32::try_from(v).ok()).ok_or("record write out of bounds")?;
+            let hi = lo.checked_add(n).filter(|&hi| hi <= out.record_size).ok_or("record write out of bounds")?;
+            writes.push((lo, hi));
+        }
+        term_uses(&b.term, &mut uses);
+        if uses.iter().any(|&v| carries(v)) { return Err("record address in terminator"); }
+        if let Some(index) = sites[bi] {
+            // A widened store or copy can initialise several adjacent fields.
+            writes.sort_unstable();
+            let mut ranges = writes.into_iter().peekable();
+            let mut through = 0;
+            for &(lo, ref value) in &out.exits[index].fields {
+                let end = lo + value.size_align()?.0;
+                through = through.max(lo);
+                while through < end {
+                    let Some((_, b)) = ranges.next_if(|&(a, _)| a <= through) else { return Err("missing record field"); };
+                    through = through.max(b);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A body whose copy a live patch has to reach (by an exit or a guard): a patchable slot's
 /// (`Func::patch_flag`), or one that holds copies of such (`unguarded_flags`, `guard_calls`).
 pub fn patch_reaches(b: &Func) -> bool {
@@ -1047,6 +1705,19 @@ fn first_need(f: &Func, fl: &Flow, takes: &dyn Fn(&Callee) -> bool, pts: &[Vec<u
 /// temporary and only those cells stay live at the exit. None: nothing to split (no guard, no
 /// call to cover), or a guard whose shape the tests do not know.
 pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func, u8)>) -> Option<SplitStats> {
+    split(f, get, None)
+}
+
+/// Make the same in-function split, retaining the information needed to extract
+/// it. A refusal still leaves the complete split in `f`.
+pub fn split_patched_path_with_layout(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func, u8)>) -> Option<(SplitStats, Result<SplitLayout, &'static str>)> {
+    let mut layout = None;
+    let stats = split(f, get, Some(&mut layout))?;
+    Some((stats, layout.expect("a completed split captured its layout")))
+}
+
+fn split(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func, u8)>,
+         layout: Option<&mut Option<Result<SplitLayout, &'static str>>>) -> Option<SplitStats> {
     let (word, ver) = f.copy_ver?;
     if f.patched_path || f.blocks.is_empty() {
         return None;
@@ -1398,6 +2069,7 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
         cloned.push(s as u32);
     }
     st.cloned = cloned.len() as u32;
+    let mut exit_fills = layout.as_ref().map(|_| (0..exits.len()).map(|_| ExitFills::default()).collect::<Vec<_>>());
     if !cloned.is_empty() {
         for b in &mut f.blocks[base..base + np] {
             for i in &mut b.insts {
@@ -1538,6 +2210,10 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
                         if !lb[lo..hi.min(size)].iter().any(|&x| x) {
                             continue;
                         }
+                        if let Some(exits) = &mut exit_fills {
+                            exits[xb - x0].values.push(RecordValue::Fill { src: s, dst: smap[s as usize], offset: o,
+                                kind: m.map_or(FillKind::Vector, FillKind::Cell) });
+                        }
                         match m {
                             Some(m) => {
                                 let v = f.vreg(match m { Mem::F32 => Cls::F32, Mem::F64 => Cls::F64, Mem::Int(..) => Cls::I });
@@ -1563,6 +2239,10 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
                     while k <= last && lb[k] && !covered[k] {
                         k += 1;
                     }
+                    if let Some(exits) = &mut exit_fills {
+                        exits[xb - x0].values.push(RecordValue::Fill { src: s, dst: smap[s as usize], offset: lo as i64,
+                            kind: FillKind::Bytes((k - lo) as u32) });
+                    }
                     if lo == 0 {
                         fill.push(Inst::Copy(ad, asrc, (k - lo) as u32));
                     } else {
@@ -1571,6 +2251,7 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
                     }
                 }
             }
+            if let Some(exits) = &mut exit_fills { exits[xb - x0].insts = fill.len(); }
             fill.extend(std::mem::take(&mut f.blocks[xb].insts));
             let n = fill.len();
             let blk = &mut f.blocks[xb];
@@ -1584,6 +2265,10 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
         if let Err(e) = verify_patched_path(f) {
             panic!("relax: patched path broken in {}: {}\n{}", f.name, e, f.dump());
         }
+    }
+    if let (Some(out), Some(fills)) = (layout, exit_fills) {
+        let shared: Vec<_> = (0..ns).filter(|&s| in_fast[s] && in_pat_slot[s] && smap[s] == NONE).map(|s| s as u32).collect();
+        *out = Some(capture_layout(f, base..x0, vmap, smap, &shared, &t, fills));
     }
     Some(st)
 }
@@ -1893,6 +2578,7 @@ mod tests {
     const SIX_FLAG: Sym = Sym { id: 10, off: 16 };
     const WORD: Sym = Sym { id: 11, off: 24 };
     const M8: Mem = Mem::Int(8, false);
+    const M1: Mem = Mem::Int(1, false);
 
     /// `fn(x) -> x + 1 + 3` (positions in its own body), patchable by `flag`
     fn leaf(name: &str, flag: Option<Sym>) -> Func {
@@ -1977,6 +2663,285 @@ mod tests {
 
     fn guard_calls_in(f: &Func, blocks: &[bool]) -> usize {
         (0..f.blocks.len()).filter(|&b| blocks[b]).map(|b| (0..f.blocks[b].insts.len()).filter(|&ii| f.guard_call(b, ii)).count()).sum()
+    }
+
+    const WAIT: Sym = Sym { id: 12, off: 0 };
+
+    // Three arms with distinct continuations. Each waits, retaining an alias
+    // of the shared slot, then runs an inlined patchable call. Reading through
+    // the old alias observes whether the continuation wrote the host's slot.
+    fn outline_fixture(indirect: bool, pad: bool) -> (Func, SplitLayout) {
+        let mut f = Func::new("outline_fixture".into(), 0);
+        let (buf, arm, test, a, alias, v, seen, private) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I),
+            f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([buf, arm]);
+        if indirect { f.sret = Some(buf); } else { f.rets.push(Cls::I); }
+        f.copy_ver = Some((WORD, 3));
+        let off = if indirect { 8 } else { 0 };
+        let (shared, cell) = (f.slot(8, 8), f.slot(off + 8, 8));
+        let cell_addr = f.vreg(Cls::I);
+        f.slots[cell as usize].born = true;
+        for (local, loc) in [DbgLoc::Slot(shared, 0), DbgLoc::Slot(cell, off as i32), DbgLoc::Regs(vec![arm])].into_iter().enumerate() {
+            f.dbg.push(DbgVar { ctx: 0, local: local as u32, loc, k: vec![] });
+        }
+        for _ in 0..5 { f.block(); }
+        // The tuple is constructed by cells, but copied whole both into the captured
+        // slot and out to the caller. Its exit field therefore spans all 16 bytes.
+        let (builder, tuple) = (f.slot(16, 8), f.slot(16, 8));
+        let (build, pair, flag) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.blocks[0].insts = vec![Inst::SlotAddr(a, shared), Inst::Store(M8, a, 0, arm),
+            Inst::SlotAddr(private, cell), Inst::IBinI(IOp::Add, U64, cell_addr, private, off.into()), Inst::Store(M8, cell_addr, 0, arm),
+            Inst::SlotAddr(build, builder), Inst::SlotAddr(pair, tuple), Inst::ICmpI(Cond::Eq, false, flag, arm, 1),
+            Inst::Store(M8, build, 0, arm), Inst::Store(M1, build, 8, flag), Inst::Copy(pair, build, 16)];
+        f.blocks[0].term = Term::Branch(arm, 1, 2);
+        f.blocks[1].insts.push(Inst::ICmpI(Cond::Eq, false, test, arm, 1));
+        f.blocks[1].term = Term::Branch(test, 3, 4);
+        for b in 2..5 {
+            f.blocks[b].insts = vec![Inst::Call(Callee::Host(WAIT), vec![a], vec![alias]),
+                Inst::Call(Callee::Fn(1), vec![arm], vec![v]), Inst::IBinI(IOp::Add, U64, v, v, 10 * b as i64),
+                if indirect { Inst::AtomicLoad(M8, AtomOrd::Relaxed, seen, cell_addr) } else { Inst::Load(M8, seen, cell_addr, 0) },
+                Inst::IBin(IOp::Add, U64, v, v, seen),
+                Inst::Copy(buf, pair, 16), Inst::Load(M8, seen, buf, 0), Inst::IBin(IOp::Add, U64, v, v, seen),
+                Inst::Load(M1, seen, buf, 8), Inst::IBin(IOp::Add, U64, v, v, seen),
+                Inst::Store(M8, a, 0, v), Inst::Load(M8, seen, alias, 0)];
+            f.blocks[b].term = if indirect {
+                f.blocks[b].insts.extend([Inst::Store(M8, buf, 0, seen), Inst::Store(M8, buf, 8, arm)]);
+                Term::Ret(vec![])
+            } else { Term::Ret(vec![seen]) };
+        }
+        if pad {
+            let (normal, cleanup) = (f.block(), f.block());
+            f.blocks[normal as usize].term = f.blocks[2].term.clone();
+            f.blocks[2].insts.push(Inst::Call(Callee::Host(WAIT), vec![a], vec![]));
+            f.blocks[2].term = Term::Invoke(normal, cleanup);
+            f.blocks[cleanup as usize].insts.push(Inst::Store(M8, a, 0, arm));
+            f.blocks[cleanup as usize].term = Term::Resume;
+        }
+        for (bi, b) in f.blocks.iter_mut().enumerate() {
+            b.term_pos = (bi as u64 + 1) * 20;
+            b.pos = (1..=b.insts.len() as u64).map(|k| b.term_pos + k).collect();
+        }
+        let lf = leaf("patchable", Some(FLAG));
+        let get = |id| (id == 1).then_some((&lf as *const Func, ATTR_ALWAYS));
+        inline_calls(&relax_session::Options::default(), &mut f, 0, &get, &|_| false, &InlineLimits::tier1());
+        let (_, layout) = split_patched_path_with_layout(&mut f, &get).unwrap();
+        let layout = layout.unwrap();
+        assert_eq!(layout.exits.len(), 3, "one exit after each wait");
+        (f, layout)
+    }
+
+    #[test]
+    fn outlined_exits_execute_the_same_continuations_and_returns() {
+        #[cfg(target_arch = "aarch64")]
+        use relax_backend::arm64 as target;
+        #[cfg(not(target_arch = "aarch64"))]
+        use relax_backend::x64 as target;
+        use relax_backend::exec::Code;
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        let env = target::Env::standalone(false);
+        let options = relax_session::Options::default();
+        let compile = |f: &Func| crate::native::compile(&options, f, &env).unwrap();
+        let mut helper = Func::new("identity".into(), 0);
+        let x = helper.vreg(Cls::I);
+        helper.params.push(x);
+        helper.rets.push(Cls::I);
+        helper.block();
+        helper.blocks[0].term = Term::Ret(vec![x]);
+        let identity = Code::new(&compile(&helper).code).unwrap();
+        let mut changed = leaf("replacement", None);
+        changed.blocks[0].insts = vec![Inst::IBinI(IOp::Add, U64, x, x, 40)];
+        changed.blocks[0].pos = vec![1];
+        changed.blocks[0].term = Term::Ret(vec![x]);
+        let replacement = compile(&changed);
+        assert!(replacement.relocs.is_empty());
+        let (word, flag) = (AtomicU64::new(3), AtomicU64::new(0));
+        for indirect in [false, true] {
+            let (mut f, layout) = outline_fixture(indirect, false);
+            assert!(layout.exits.iter().all(|e| e.fields.iter().any(|(_, v)| matches!(v, RecordValue::SharedBase(_)))));
+            let fill = if indirect { FillKind::Bytes(8) } else { FillKind::Cell(M8) };
+            let off = if indirect { 8 } else { 0 };
+            assert!(layout.exits.iter().all(|e| e.fields.iter().any(|(_, v)| matches!(v, RecordValue::Fill { offset, kind, .. } if *kind == fill && *offset == off))));
+            assert_eq!(indirect, layout.exits.iter().all(|e| e.fields.iter().any(|(_, v)| matches!(v, RecordValue::Register { result_buffer: true, .. }))));
+            assert!(layout.exits.iter().all(|e| e.fields.iter().any(|(_, v)| matches!(v, RecordValue::Fill { kind: FillKind::Bytes(16), .. }))),
+                "each exit must carry the entire tuple");
+            let mut split = f.clone();
+            assert!(relax_backend::passes::sroa(&mut split), "scalarise the in-function split");
+            let split = compile(&split);
+            let out = extract_patched_part(&mut f, layout, OutlineBody::Native).unwrap();
+            assert!(matches!(out.part.dbg[0].loc, DbgLoc::Mem(v, 0) if v != DBG_NONE));
+            assert!(matches!(out.part.dbg[1].loc, DbgLoc::Slot(s, o) if s != NONE && i64::from(o) == off));
+            assert!(matches!(&out.part.dbg[2].loc, DbgLoc::Regs(v) if v[0] != DBG_NONE && v[0] != f.params[1]));
+            assert_eq!(out.part.inl, f.inl);
+            assert!(relax_backend::passes::sroa(&mut f), "scalarise the outlined host");
+            verify_outline(&f, &out).expect("the scalarised tuple covers its exit field");
+            let joined = target::join_part(compile(&f), compile(&out.part)).unwrap();
+            for mut image in [split, joined] {
+                // Direct slot calls are PC-relative: put the replacement in the
+                // same mapping. Pool relocations point at storage owned here.
+                let slow = image.code.len().next_multiple_of(16);
+                image.code.resize(slow, 0);
+                image.code.extend(&replacement.code);
+                link(&mut image.code, 0, &image.relocs, &|r| match r {
+                    Reloc::Sym(WORD) => word.as_ptr() as u64,
+                    Reloc::Sym(FLAG) => flag.as_ptr() as u64,
+                    Reloc::Sym(WAIT) => identity.ptr() as u64,
+                    Reloc::Call(1) => slow as u64,
+                    _ => panic!("unexpected relocation {r:?}"),
+                }).unwrap();
+                let code = Code::new(&image.code).unwrap();
+                for (version, patched, add) in [(3, 0, 4), (4, 0, 4), (4, 1, 40)] {
+                    flag.store(patched, Relaxed);
+                    word.store(version, Relaxed);
+                    for arm in 0..3u64 {
+                        let expected = 3 * arm + u64::from(arm == 1) + 10 * (arm + 2) + add;
+                        let mut buf = [u64::MAX; 2];
+                        if indirect {
+                            let call: relax_backend::host_fn_ptr!(fn(*mut u64, u64)) = unsafe { std::mem::transmute(code.ptr()) };
+                            unsafe { call(buf.as_mut_ptr(), arm); }
+                            assert_eq!(buf, [expected, arm], "indirect result at version {version}, arm {arm}");
+                        } else {
+                            let call: relax_backend::host_fn_ptr!(fn(*mut u64, u64) -> u64) = unsafe { std::mem::transmute(code.ptr()) };
+                            assert_eq!(unsafe { call(buf.as_mut_ptr(), arm) }, expected, "register result at version {version}, arm {arm}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn outline_boundary_survives_pruning_and_rejects_misplaced_writes() {
+        let (mut f, mut layout) = outline_fixture(false, false);
+        let before = f.clone();
+        layout.exits[0].fields.retain(|(_, v)| !matches!(v, RecordValue::SharedBase(_)));
+        assert_eq!(extract_patched_part(&mut f, layout, OutlineBody::Native).err(), Some("missing part live-in"));
+        assert!(f.same_body_mapped(&mut |s| s, &before, &mut |s| s), "a late refusal restores the split and its metadata");
+        let (_, layout) = outline_fixture(false, false);
+        let out = extract_patched_part(&mut f, layout, OutlineBody::Native).unwrap();
+        verify_outline(&f, &out).unwrap();
+        let mut sites: Vec<_> = f.blocks.iter().enumerate().filter_map(|(b, blk)| {
+            let Inst::Call(Callee::Part(Some(_)), _, _) = blk.insts.last()? else { return None };
+            assert!(matches!(blk.term, Term::Ret(_)));
+            Some(b)
+        }).collect();
+        assert_eq!(sites.len(), 3);
+        let site = sites.remove(1);
+        let write = f.blocks[site].insts.iter().position(|i| matches!(i, Inst::Store(..))).unwrap();
+        let i = f.blocks[site].insts.remove(write);
+        assert_eq!(verify_outline(&f, &out), Err("missing record field"));
+        f.blocks[site].insts.insert(write, i);
+        let Some(Inst::Call(Callee::Part(Some(id)), args, _)) = f.blocks[site].insts.last() else { unreachable!() };
+        let record = args[0];
+        let exit = out.exits.iter().find(|e| e.id == *id).unwrap();
+        let cell = exit.fields.iter().find(|(_, v)| matches!(v, RecordValue::Fill { kind: FillKind::Cell(M8), .. })).unwrap().0;
+        let store = f.blocks[site].insts.iter().position(|i| matches!(*i, Inst::Store(M8, a, off, _) if a == record && off == cell as i32)).unwrap();
+        let Inst::Store(_, a, off, v) = f.blocks[site].insts[store] else { unreachable!() };
+        f.blocks[site].insts[store] = Inst::Store(M1, a, off, v);
+        assert_eq!(verify_outline(&f, &out), Err("missing record field"), "narrowing a word Cell must fail coverage");
+        f.blocks[site].insts[store] = Inst::Store(M8, a, off, v);
+
+        let dst = f.blocks[site].insts.iter().find_map(|i| match *i { Inst::Copy(d, _, 16) => Some(d), _ => None }).unwrap();
+        let build = f.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match *i {
+            Inst::Store(M1, a, 8, _) => Some(a), _ => None,
+        }).unwrap();
+        // Keep the captured Bytes(16) layout frozen, as it is during O3. The same
+        // whole-slot copy can carry a tuple, just a variant tag, or no writes at all.
+        for defined in [9, 8, 0] {
+            let mut host = f.clone();
+            for b in &mut host.blocks {
+                for k in (0..b.insts.len()).rev() {
+                    if matches!(b.insts[k], Inst::Store(_, a, off, _) if a == build && off >= defined) {
+                        b.insts.remove(k);
+                        b.pos.remove(k);
+                    }
+                }
+            }
+            assert!(relax_backend::passes::sroa(&mut host), "promote the {defined}-byte source");
+            assert!(!host.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Copy(..))), "a whole copy survived promotion");
+            verify_outline(&host, &out).expect("every byte of the frozen field should be written");
+            let insts = &host.blocks[site].insts;
+            let zeros: Vec<_> = insts.iter().filter_map(|i| match *i { Inst::Iconst(v, 0) => Some(v), _ => None }).collect();
+            assert_eq!(zeros.len(), 1, "one exit-local zero per copy with gaps");
+            let mut filled = Vec::new();
+            for i in insts {
+                if let Inst::Store(m, a, off, v) = *i {
+                    if a == dst && (0..16).contains(&off) && v == zeros[0] {
+                        filled.extend(off..off + relax_backend::passes::mem_size(m));
+                    }
+                }
+            }
+            assert_eq!(filled, (defined..16).collect::<Vec<_>>(), "only bytes outside the {defined}-byte value are zeroed");
+            if defined == 9 {
+                for off in [8, 9] {
+                    let k = host.blocks[site].insts.iter().position(|i| matches!(*i, Inst::Store(M1, a, o, _) if a == dst && o == off)).unwrap();
+                    let i = host.blocks[site].insts.remove(k);
+                    let p = host.blocks[site].pos.remove(k);
+                    assert_eq!(verify_outline(&host, &out), Err("missing record field"), "the store at {off} is required");
+                    host.blocks[site].insts.insert(k, i);
+                    host.blocks[site].pos.insert(k, p);
+                }
+                let buf = host.params[0];
+                let writes: Vec<_> = host.blocks.iter().filter_map(|b| {
+                    let cells: Vec<_> = b.insts.iter().filter_map(|i| match *i {
+                        Inst::Store(m, a, off, _) if a == buf => Some((off, m)), _ => None,
+                    }).collect();
+                    (!cells.is_empty()).then_some(cells)
+                }).collect();
+                assert_eq!(writes, vec![vec![(0, M8), (8, M1)]; 3], "each ordinary destination gets just the two data stores");
+            }
+        }
+        let Inst::SlotAddr(_, slot) = f.blocks[site].insts[0] else { panic!("record address") };
+        let (a, src, vector) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::V128));
+        let data = f.slot(16, 16);
+        f.blocks[0].insts.extend([Inst::SlotAddr(a, slot), Inst::SlotAddr(src, data), Inst::VConst(vector, 0)]);
+        for moved in [Inst::Store(M8, a, 0, f.params[1]), Inst::Copy(a, src, 16), Inst::VStore(a, 0, vector)] {
+            f.blocks[0].insts.push(moved);
+            assert_eq!(verify_outline(&f, &out), Err("record write outside part exit"));
+            f.blocks[0].insts.pop();
+        }
+        // Bypass the middle exit at its version check. Block and slot numbers
+        // are deliberately free to change afterwards.
+        let (head, hit) = f.blocks.iter().enumerate().find_map(|(b, blk)| match blk.term {
+            Term::Branch(_, hit, miss) if miss as usize == site => Some((b, hit)), _ => None,
+        }).unwrap();
+        f.blocks[head].term = Term::Jump(hit);
+        crate::loops::clear_unreachable(&mut f);
+        relax_backend::passes::compact_vregs(&mut f);
+        verify_outline(&f, &out).unwrap();
+    }
+
+    #[test]
+    fn a_shared_slot_address_remade_at_an_exit_keeps_the_in_function_split() {
+        let (mut f, mut layout) = outline_fixture(false, false);
+        let addr = Inst::SlotAddr(f.vreg(Cls::I), layout.shared[0]);
+        let e = &mut layout.exits[0];
+        let b = &mut f.blocks[e.block as usize];
+        b.insts.push(addr.clone());
+        b.pos.push(b.term_pos);
+        e.remakes.push(addr);
+        let original = f.dump();
+        assert_eq!(extract_patched_part(&mut f, layout, OutlineBody::Native).err(), Some("shared slot address in part"));
+        assert_eq!(f.dump(), original, "the refusal restores the split including the host-relative remake");
+    }
+
+    #[test]
+    fn outlined_unwind_edges_and_resume_belong_to_the_part() {
+        let (mut f, layout) = outline_fixture(false, true);
+        let mut out = extract_patched_part(&mut f, layout, OutlineBody::Native).unwrap();
+        let (site, normal, pad) = out.unwind.iter().find_map(|(b, t)| match *t {
+            Term::Invoke(n, u) => Some((*b, n, u)), _ => None,
+        }).unwrap();
+        assert_eq!(out.part.blocks[pad as usize].term, Term::Resume);
+        assert!(out.part.blocks[pad as usize].insts.iter().any(|i| matches!(i, Inst::Store(..))));
+        out.part.blocks[site as usize].term = Term::Jump(normal);
+        assert_eq!(verify_outline(&f, &out), Err("missing part unwind edge"));
+        out.part.blocks[site as usize].term = Term::Invoke(normal, pad);
+        let exit = f.blocks.iter().position(|b| matches!(b.insts.last(), Some(Inst::Call(Callee::Part(Some(_)), ..)))).unwrap();
+        let normal = f.block();
+        f.blocks[normal as usize].term = f.blocks[exit].term.clone();
+        f.blocks[exit].term = Term::Invoke(normal, normal);
+        assert!(verify_outline(&f, &out).is_err(), "the host exit cannot own a cleanup");
     }
 
     #[test]
@@ -2169,7 +3134,21 @@ mod tests {
         each.extend((0..9).map(|k| Inst::Store(M8, a, 8 * k, v)));
         root_head(before, head, &[1], each, v, &mut f);
         inline_calls(options, &mut f, 0, &get, &|_| false, &InlineLimits::tier1());
+        let mut captured = f.clone();
         let st = split_patched_path(&mut f, &get).expect("a split");
+        let (stats, layout) = split_patched_path_with_layout(&mut captured, &get).unwrap();
+        assert_eq!(stats, st);
+        assert_eq!(captured.dump(), f.dump(), "capturing layouts preserves the split");
+        let layout = layout.unwrap();
+        let [exit] = &layout.exits[..] else { panic!("one exit into the loop") };
+        let cells: Vec<_> = exit.fields.iter().filter_map(|(_, value)| match value {
+            RecordValue::Fill { src, dst, offset, kind: FillKind::Cell(M8) } if *src == s && *dst == layout.slot_map[s as usize] => Some(*offset),
+            _ => None,
+        }).collect();
+        assert_eq!(cells, (0..72).step_by(8).collect::<Vec<_>>(), "each live cell in the record");
+        assert_eq!(exit.fields.iter().filter(|(_, v)| matches!(v, RecordValue::Register { class: Cls::I, .. })).count(), 2);
+        assert!(exit.fields.iter().any(|(_, value)| value == &RecordValue::SharedBase(t)), "the escaped slot keeps its identity");
+        assert_eq!(layout.record_size, 96, "nine cells, two registers and a shared base");
         assert_eq!((st.cloned, st.shared), (4, 1), "{:?} {}", st, f.dump());
         assert_eq!((st.filled, st.fill_bytes, st.moved), (1, 72, 2), "{:?} {}", st, f.dump());
         f.verify().unwrap();

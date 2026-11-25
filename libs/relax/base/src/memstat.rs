@@ -89,14 +89,17 @@ pub enum Tag {
     Patterns,
     /// building and transforming a body's MIR for the borrow checker
     Mir,
+    /// `makepad run`'s background check of the crates' items (typeck_bg.rs ItemPass): its own
+    /// blocks; what the phases under it tag (sigs, typeck, ..) stays theirs
+    ItemPass,
 }
 
-pub const N_TAGS: usize = 39;
+pub const N_TAGS: usize = 40;
 pub const TAG_NAMES: [&str; N_TAGS] = [
     "other", "boot", "parse", "parse-body", "derive", "macro_rules", "fmt", "mac-other", "load", "resolve", "syms", "sigs", "types",
     "typeck", "gandalf", "lower", "opt", "codegen", "layout", "unit", "cache-load", "cache-store", "ctfe", "O3", "pmhost", "parse-lazy",
     "rx-sources", "rx-schema", "rx-lower", "rx-input", "source", "front-image", "front-record", "program-items", "macro-output", "planner",
-    "body-lints", "patterns", "mir",
+    "body-lints", "patterns", "mir", "item-pass",
 ];
 
 /// 0 undecided, 1 off, 2 on (decided at the first allocation, never changed)
@@ -1077,7 +1080,11 @@ mod sites {
         let mut h: u64 = 0xcbf29ce484222325;
         for f in fr { h = (h ^ f as u64).wrapping_mul(0x100000001b3); }
         if h == 0 { h = 1; }
-        while LOCK.swap(true, Acquire) { std::hint::spin_loop(); }
+        // (in a plain fork's child the holder may be a thread it does not have: unattributed)
+        while LOCK.swap(true, Acquire) {
+            if crate::zone_alloc::arenas_closed() { return 0; }
+            std::hint::spin_loop();
+        }
         let mut i = (h as usize) & (N - 1);
         let mut id = 0u32;
         for _ in 0..64 {

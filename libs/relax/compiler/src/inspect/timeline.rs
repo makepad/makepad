@@ -767,8 +767,11 @@ fn analyse(l: &FrameLog, t0: u64, t1: u64) -> String {
     let ow: Vec<String> = owner_waits.iter().filter(|w| w.1 - w.0 >= 1_000_000).take(3).map(|(b, e, k)| {
         format!("{{\"wait\":{},\"at_ms\":{:.1},\"ms\":{:.2},\"owner_served\":{}}}", json_str(&short(k, 120)), ms(b.saturating_sub(t0)), ms(e - b), crate::owner::served_during(*b, *e))
     }).collect();
+    // the frame's thread (a hitch only: the frame log is the thread's own), as `threads` names it
+    let thread = super::tid_label(super::threads::self_os_id());
     format!(
-        "\"idle_gap_ms\":{:.1},\"phases\":[{}],\"waits\":[{}],\"owner_waits\":[{}],\"compile\":{{\"ms\":{:.2},\"n\":{}}},\"time_by\":[{}],\"critical_path\":[{}],\"critical_path_other_ms\":{:.2},\"probe_deltas\":[{}],\"records_dropped\":{}",
+        "\"thread\":\"{}\",\"idle_gap_ms\":{:.1},\"phases\":[{}],\"waits\":[{}],\"owner_waits\":[{}],\"compile\":{{\"ms\":{:.2},\"n\":{}}},\"time_by\":[{}],\"critical_path\":[{}],\"critical_path_other_ms\":{:.2},\"probe_deltas\":[{}],\"records_dropped\":{}",
+        thread,
         ms(l.idle),
         ph.join(","),
         wt.join(","),
@@ -1737,6 +1740,8 @@ mod tests {
         };
         let s = super::analyse(&l, 0, 10_000_000);
         assert!(s.contains("\"owner_waits\":[{\"wait\":\"owner (main)\",\"at_ms\":0.0,\"ms\":3.00,"), "{s}");
+        // the hitch names the thread whose frame it was, as `threads` does
+        assert!(s.starts_with(&format!("\"thread\":\"{}\",", super::super::tid_label(super::super::threads::self_os_id()))), "{s}");
     }
 
     fn rec(t: u64, kind: super::Kind, label: &'static str, a: u64, detail: &'static str) -> super::Rec {

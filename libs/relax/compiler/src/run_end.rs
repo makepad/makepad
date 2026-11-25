@@ -5,6 +5,7 @@
 //! What stays is the process: its main loop, the window, the GPU device, the host's threads.
 
 use crate::jit::Unit;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -184,16 +185,17 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
 /// with the errors) until the next save or relaunch starts the next one. That run gets the state
 /// this one was started with: a run that failed its check is not asked for its own. The edit's
 /// outcome is a refusal, never the restart's or the JIT's failure (hot_failure::check_refused).
-pub(crate) fn check_failed(errors: &[String]) -> Result<(), String> {
+pub(crate) fn check_failed(errors: &[String], app_dirs: &[PathBuf]) -> Result<(), String> {
+    let _kept = crate::zone_alloc::kept();
     let first = errors.first().map_or("", |e| e.lines().next().unwrap_or(""));
     let why = format!("its app check found {} error{}: {first}", errors.len(), if errors.len() == 1 { "" } else { "s" });
-    end_in_place(why, None, Some(errors))
+    end_in_place(why, None, Some((errors, app_dirs)))
 }
 
 /// Why the run whose app check failed ends (`check_failed`), from its end until the host takes it
 /// (`take_check_failure`): the host's window goes to the start screen for that end, and its next
-/// run waits for the next save or relaunch.
-static CHECK_FAILED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// run watches the app crates for the next save.
+static CHECK_FAILED: std::sync::Mutex<Option<(String, Vec<PathBuf>)>> = std::sync::Mutex::new(None);
 
 /// The run that ends failed its app check (`check_failed`).
 pub fn check_failing() -> bool {
@@ -201,18 +203,18 @@ pub fn check_failing() -> bool {
 }
 
 /// The host's next run (`MainHost::next_run`): why the run before it ended, when that run failed
-/// its app check; the next run then waits for the next save or relaunch.
-pub fn take_check_failure() -> Option<String> {
+/// its app check, and the folders in which a save starts the next run.
+pub fn take_check_failure() -> Option<(String, Vec<PathBuf>)> {
     CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-fn end_in_place(why: String, state: Option<&[u8]>, failed: Option<&[String]>) -> Result<(), String> {
+fn end_in_place(why: String, state: Option<&[u8]>, failed: Option<(&[String], &[PathBuf])>) -> Result<(), String> {
     if RESTARTING.swap(true, Ordering::AcqRel) {
         return Ok(());
     }
     let _k = crate::zone_alloc::kept();
     // (before the hand-over: a recovery this run was for ends refused, the next run is none's)
-    if let Some(errors) = failed {
+    if let Some((errors, _)) = failed {
         crate::hot_failure::check_refused(&why, errors);
     }
     let next = match crate::reload::next_run_env(state) {
@@ -223,8 +225,8 @@ fn end_in_place(why: String, state: Option<&[u8]>, failed: Option<&[String]>) ->
         }
     };
     let failed_check = failed.is_some();
-    if failed_check {
-        *CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+    if let Some((_, dirs)) = failed {
+        *CHECK_FAILED.lock().unwrap_or_else(|e| e.into_inner()) = Some((why.clone(), dirs.to_vec()));
     }
     // (from here the run is this restart's: `ended_in_place` says so to its threads)
     ENDS.fetch_add(1, Ordering::AcqRel);

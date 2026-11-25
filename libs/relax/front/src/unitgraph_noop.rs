@@ -357,15 +357,20 @@ fn main() {
         f.script.build_deps.push((3, "retained".into()));
         let target = f.dir.join("target").display().to_string();
         let r = rewrite(&f.script, &f.units).unwrap();
-        let (json, hash, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
+        let (json, hash, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target, "");
         let g = super::super::Units::from_json(json.as_bytes()).unwrap();
+        // the child learns the workspace root only when one of its path units compiles from it
+        let ws = f.dir.display().to_string();
+        let (with_root, _, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target, &ws);
+        assert_eq!(super::super::Units::from_json(with_root.as_bytes()).unwrap().workspace_root, ws, "a unit under the workspace root carries it to the child");
+        assert_eq!(super::super::script_units(&f.script, &f.units, Some(&r), &target, "/elsewhere").0, json, "a root none of its units lies under leaves the child's graph and key as they were");
         assert_eq!(g.units.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), ["shared", "retained", "build-script-build"]);
         let root = &g.units[g.roots[0]];
         assert_eq!(root.deps, vec![(1, "retained".into())]);
         assert_eq!(g.units[1].deps, vec![(0, "shared".into())]);
         assert_eq!(root.src_path, format!("{target}/build-scripts/{hash:016x}/build.rs"));
         assert_eq!(root.pkg_id, format!("path+file://{}#build-script-build@0.0.0", f.dir.display()));
-        let (original, original_hash, _) = super::super::script_units(&f.script, &f.units, None, &target);
+        let (original, original_hash, _) = super::super::script_units(&f.script, &f.units, None, &target, "");
         assert_ne!(hash, original_hash);
         let original = super::super::Units::from_json(original.as_bytes()).unwrap();
         assert_eq!(original.units[original.roots[0]].src_path, f.script.src_path);
@@ -375,15 +380,15 @@ fn main() {
         f.write(&source.replace("build", "empty"));
         let r = rewrite(&f.script, &f.units).unwrap();
         std::fs::write(&f.units[0].src_path, "// changed inert helper\n").unwrap();
-        assert_eq!(hash, super::super::script_units(&f.script, &f.units, Some(&r), &target).1);
+        assert_eq!(hash, super::super::script_units(&f.script, &f.units, Some(&r), &target, "").1);
         let changed = Rewrite { source: r.source.replace("work", "changed"), calls: r.calls.clone() };
-        assert_ne!(hash, super::super::script_units(&f.script, &f.units, Some(&changed), &target).1);
+        assert_ne!(hash, super::super::script_units(&f.script, &f.units, Some(&changed), &target, "").1);
         std::fs::write(&f.units[1].src_path, "// changed shared dependency\n").unwrap();
-        assert_ne!(hash, super::super::script_units(&f.script, &f.units, Some(&r), &target).1);
+        assert_ne!(hash, super::super::script_units(&f.script, &f.units, Some(&r), &target, "").1);
 
         // If another root reaches the helper, only its direct edge is removed.
         f.units[3].deps.push((0, "helper".into()));
-        let (json, _, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target);
+        let (json, _, _) = super::super::script_units(&f.script, &f.units, Some(&r), &target, "");
         let g = super::super::Units::from_json(json.as_bytes()).unwrap();
         assert_eq!(g.units.len(), 5);
         assert_eq!(g.units[g.roots[0]].deps, vec![(3, "retained".into())]);

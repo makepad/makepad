@@ -764,7 +764,8 @@ fn a_closure_front_from_its_parents_old_body_is_made_again() {
 /// once per call. A take that gave way counted the slot again from the cost it had, over the
 /// threshold, so its next call queued it for the same take: a live session's O3 workers ran ~68
 /// builds a second for minutes with nothing edited (11-17). A build on the owner or an edit is a
-/// change: one more take each.
+/// change: one more take each. A slot in flight is no such cause: a take that meets one waits for
+/// its end off the owner and builds.
 #[test]
 fn a_take_that_gives_way_waits_for_a_change() {
     isolated_test!(a_take_that_gives_way_waits_for_a_change);
@@ -840,6 +841,36 @@ fn a_take_that_gives_way_waits_for_a_change() {
     assert_eq!(state(), T_QUEUED, "one take per change: twice waits for the next one");
     rearm_bailed(up);
     assert_eq!(state(), T_QUEUED, "nothing changed since: twice still waits");
+    // a take that meets a slot in flight (a candidate's preparation waiting for another thread's
+    // back end) waits for that flight's end off the owner and takes again: it builds, rather than
+    // give way and wait for an unrelated change ("gave way on a wait again")
+    TAKE_GIVES_WAY.store(u32::MAX, Ordering::Relaxed);
+    let m = crate::owner::call(crate::owner::Class::Program, || u.fn_id(FnKey::Inst(main, Vec::new())));
+    *TAKE_MEETS_FLIGHT.lock().unwrap() = Some((id, m));
+    let waits = || crate::owner::BAILS[3].load(Ordering::Relaxed);
+    let waits0 = waits();
+    struct P(*mut Unit);
+    unsafe impl Send for P {}
+    let p = P(up);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let p = p;
+        let me = crate::waits::me();
+        crate::owner::call(crate::owner::Class::Program, || unsafe { begin_flight(p.0, m, me, &[m]) });
+        tx.send(()).unwrap();
+        // the flight ends once the take gave the owner back for it (bounded: a take that never
+        // waits is the failure below, not a hang)
+        let t0 = std::time::Instant::now();
+        while waits() == waits0 && t0.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        crate::owner::call(crate::owner::Class::Program, || unsafe { end_flight(p.0, &[m]) });
+    });
+    rx.recv().unwrap();
+    assert!(unsafe { compile_tier1(up, id) }, "twice's take met a slot in flight: it waited for the flight's end and built");
+    holder.join().unwrap();
+    assert_eq!(waits(), waits0 + 1, "the take met the flight once (a wait bail), then took again after its end");
+    *TAKE_MEETS_FLIGHT.lock().unwrap() = None;
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
@@ -847,19 +878,31 @@ fn a_take_that_gives_way_waits_for_a_change() {
 
 const EDIT_SOURCE: &str = r#"
 pub fn hot(out: &mut u32) { *out = 6; }
+pub struct Key { f: fn() -> u32 }
+fn one() -> u32 { 1 }
+fn two() -> u32 { 2 }
+const KEY: Key = Key { f: one };
+#[inline(always)]
+fn call(k: &'static Key) -> u32 { (k.f)() }
+pub fn keyed(out: &mut u32) { *out = call(&KEY); }
 fn main() {
     let mut x = 0;
     hot(&mut x);
+    keyed(&mut x);
 }
 "#;
 
 /// A hot fn edited mid-run counts its calls again, in front of its patch's code, and returns to O3
 /// within its normal count: whether the edit found it counting, at O3, in its counted (PGO)
 /// window, with its O3 take running, or final by the verdict an earlier run stored (which the
-/// settled state's periodic look leaves final, where it counts a slot this run made final again). A patch left a slot marked queued (O3 code, a counted
+/// settled state's periodic look counts again at a raised bar, final again unless its rate rose
+/// to it, where it counts a slot this run made final again at the threshold). A patch left a slot marked queued (O3 code, a counted
 /// window, a take) with its count stub gone, and a take it dropped left its slot the same: their
 /// calls were never counted again, and a live app's edited draw ran O1 code for the rest of the
-/// run (11-17).
+/// run (11-17). And a hot fn that calls through a fn pointer in constant data (a thread-local
+/// key's getter, a known vtable's method) calls that function directly at O3 and inlines it; an
+/// edit that points the constant at another function makes new data, which the next call and
+/// the next O3 build follow.
 #[test]
 fn a_hot_fn_edited_mid_run_returns_to_o3() {
     isolated_test!(a_hot_fn_edited_mid_run_returns_to_o3);
@@ -872,10 +915,11 @@ fn a_hot_fn_edited_mid_run_returns_to_o3() {
     let path = dir.join("input.rs");
     std::fs::write(&path, EDIT_SOURCE).unwrap();
     let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "edited_hot", false).unwrap();
-    let hot = prog.defs.iter().enumerate().find_map(|(i, d)| {
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = DefId(i as u32);
-        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "hot").then_some(id)
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == n).then_some(id)
     }).unwrap();
+    let (hot, keyed, one, two) = (def(&prog, "hot"), def(&prog, "keyed"), def(&prog, "one"), def(&prog, "two"));
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
@@ -948,6 +992,7 @@ fn a_hot_fn_edited_mid_run_returns_to_o3() {
     assert!(u.fns[id as usize].rir.is_some(), "hot's patch left its RIR for the counted build");
     assert!(unsafe { counted_build(up, id, false) }, "hot gets its counted build");
     assert!(COUNTING.lock().unwrap().iter().any(|e| e.id == id), "hot's counted window is open");
+    assert_eq!(crate::inspect::codever::kind_at(&u, u.fns[id as usize].code).tier_name(), "counted", "its counted code says so (a profile's tier, versions), not O1");
     edit("= 9;", "= 10;");
     assert!(!COUNTING.lock().unwrap().iter().any(|e| e.id == id), "the counted window of hot's old body is closed");
     counting("in its counted window, then edited");
@@ -962,9 +1007,10 @@ fn a_hot_fn_edited_mid_run_returns_to_o3() {
     assert!(unsafe { compile_tier1(up, id) }, "hot gets O3 code after its dropped take");
     assert_eq!(run(), 10);
     // final by the verdict an earlier run stored (a warm launch linking its code: never hot): the
-    // settled state's periodic look leaves it final; edited while final, the settle's re-arm for
-    // the patch counts it again, in front of the patch's code. A warm session re-decided its
-    // stored tiers at the periodic look's second every launch, and built a few dozen O3s then
+    // settled state's periodic look counts it again at STORED_RISE x the threshold, and its sweep
+    // makes it final again, the marks kept; edited while final, the settle's re-arm for the patch
+    // counts it again, in front of the patch's code. A warm session re-decided its stored tiers at
+    // the periodic look's second every launch, and built a few dozen O3s then
     edit("= 10;", "= 11;");
     counting("at O3, then edited before its stored verdict");
     let w5 = || unsafe { (*rec.add(5)).load(Ordering::Relaxed) };
@@ -974,15 +1020,36 @@ fn a_hot_fn_edited_mid_run_returns_to_o3() {
         assert_eq!(SlotWord::of(&u.slots, id).load(Ordering::SeqCst), (*rec.add(1)).load(Ordering::Relaxed), "{what}: hot's slot calls its code, no count stub");
     });
     let rearm = |periodic: bool| crate::owner::call(crate::owner::Class::Program, || unsafe { settle_rearm_all(up, periodic) });
-    crate::owner::call(crate::owner::Class::Program, || unsafe { stored_tier_verdict(&*up, id, crate::cache::TierVerdict::None, false) });
+    let stored = |v: crate::cache::TierVerdict| crate::owner::call(crate::owner::Class::Program, || unsafe { stored_tier_verdict(&*up, id, v, false) });
+    stored(crate::cache::TierVerdict::None);
     final_now("its stored verdict: never hot");
     assert_eq!(w5() & (STORED_FINAL | STORED_PARKED), STORED_FINAL, "a never-hot verdict marks hot final by a stored verdict, not parked");
-    let (_, kept) = rearm(true);
-    assert!(kept >= 1, "the periodic look counts hot among the stored decisions it keeps");
-    final_now("the periodic look over a stored verdict");
+    let (_, recounted, _) = rearm(true);
+    assert!(recounted >= 1, "the periodic look counts hot among the stored decisions it recounts");
+    counting("the periodic look over a stored verdict");
+    assert_eq!(w5() & (STORED_FINAL | STORED_PARKED | STORED_RECOUNT), STORED_FINAL | STORED_RECOUNT, "a recount keeps the stored marks");
+    // half a threshold over it: the check of its next call (rt_hot's) leaves it counting
+    unsafe { tier_charge(rec, threshold + threshold / 2) };
+    let (now, wall) = tier_clocks();
+    assert_eq!(unsafe { tier_check(rec, threshold, now, wall) }, None, "a recount half a threshold over it counts on");
+    let cost = counting("over the threshold, under a recount's bar");
+    assert!(cost >= threshold, "the recount's cost is over the threshold: {cost} of {threshold}");
+    assert_eq!(w5() & STORED_FINAL, STORED_FINAL, "a cost under the raised bar reopens nothing");
+    assert!(crate::owner::call(crate::owner::Class::Program, || unsafe { settle_recount_end(&*up, id) }), "the sweep ends the recount");
+    final_now("a recount under its bar");
+    assert_eq!(w5() & (STORED_FINAL | STORED_PARKED | STORED_RECOUNT), STORED_FINAL, "final again by its stored verdict");
+    // risen to the raised bar: its check queues it (rt_hot), the decision is this run's again
+    rearm(true);
+    counting("recounted again");
+    unsafe { tier_charge(rec, STORED_RISE * threshold + threshold) };
+    let (now, wall) = tier_clocks();
+    assert!(unsafe { tier_check(rec, threshold, now, wall) }.is_some(), "a recount over its bar is for the queue (rt_hot queues it)");
+    assert_eq!(w5() & (STORED_FINAL | STORED_RECOUNT), 0, "a rise clears the stored marks");
+    stored(crate::cache::TierVerdict::None);
+    final_now("its stored verdict again");
     assert_eq!(run(), 11);
     edit("= 11;", "= 12;");
-    let (n, _) = rearm(false);
+    let (n, _, _) = rearm(false);
     assert!(n >= 1, "the settle's re-arm for a patch counts the stored decisions again");
     counting("final by a stored verdict, then edited");
     assert_eq!(w5() & (STORED_FINAL | STORED_PARKED), 0, "counting again clears the stored marks");
@@ -993,14 +1060,52 @@ fn a_hot_fn_edited_mid_run_returns_to_o3() {
     rearm(true);
     counting("final by this run's counts, then the periodic look");
     // parked by a stored verdict: final, its loops included, until a phase change re-arms it
-    crate::owner::call(crate::owner::Class::Program, || unsafe { stored_tier_verdict(&*up, id, crate::cache::TierVerdict::Parked, false) });
+    stored(crate::cache::TierVerdict::Parked);
     assert_eq!(w5() & (STORED_FINAL | STORED_PARKED), STORED_FINAL | STORED_PARKED, "a parked verdict marks hot parked and final by a stored verdict");
-    rearm(true);
+    let (_, _, kept) = rearm(true);
+    assert!(kept >= 1, "the periodic look keeps a parked decision");
     final_now("the periodic look over a parked verdict");
     rearm(false);
     counting("parked by a stored verdict, then new code reached");
     assert_eq!(w5() & (STORED_FINAL | STORED_PARKED), 0, "counting again clears the parked marks");
     assert_eq!(run(), 12);
+    // keyed calls through the fn pointer of constant data: at O3 a direct call, inlined, of the
+    // function the pointer names (passes::simplify, RoReader::fn_slot)
+    let k = crate::owner::call(crate::owner::Class::Program, || {
+        let k = u.fn_id(FnKey::Inst(keyed, Vec::new()));
+        let c = unsafe { compile_fn(up, k) }.unwrap();
+        u.install(k, &c.0, &c.2, c.1, 0).unwrap();
+        let code = u.fns[k as usize].code;
+        u.arm_counter_as(k, code, true);
+        k
+    });
+    let krec = crate::owner::call(crate::owner::Class::Program, || tier_rec(&u.slots, k) as usize) as *const AtomicU64;
+    let run_keyed = || {
+        let entry = unsafe { (&*up).fns[k as usize].code };
+        let mut r = 0u32;
+        unsafe { call_jit(up, entry, &mut r as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        r
+    };
+    let keyed_o3 = |what: &str| unsafe {
+        let (code, stub) = ((*krec.add(1)).load(Ordering::Relaxed), (*krec.add(2)).load(Ordering::Relaxed));
+        let _ = crate::owner::call(crate::owner::Class::Program, || SlotWord::of(&(&*up).slots, k).compare_exchange(stub, code, Ordering::SeqCst, Ordering::SeqCst));
+        assert!((*krec.add(3)).compare_exchange(T_COUNTING, T_QUEUED, Ordering::SeqCst, Ordering::SeqCst).is_ok(), "{what}: keyed was counting");
+        assert!(compile_tier1(up, k), "{what}: keyed gets O3 code");
+    };
+    let inlined = |f: DefId| crate::owner::call(crate::owner::Class::Program, || {
+        let c = u.fn_id(FnKey::Inst(f, Vec::new()));
+        u.fns[c as usize].history().inlined_into.contains(&k)
+    });
+    assert_eq!(run_keyed(), 1);
+    keyed_o3("first");
+    assert!(inlined(one), "keyed's O3 build calls `one` through the constant's fn pointer directly, and inlines it");
+    assert_eq!(run_keyed(), 1);
+    // the constant points at `two` now: new data, which the next call and the next O3 build read
+    edit("Key { f: one }", "Key { f: two }");
+    assert_eq!(run_keyed(), 2, "the call follows the edited constant");
+    keyed_o3("edited");
+    assert!(inlined(two), "the edit's O3 build calls `two` directly, and inlines it");
+    assert_eq!(run_keyed(), 2, "the edit's O3 code calls `two`");
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();

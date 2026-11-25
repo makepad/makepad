@@ -723,11 +723,11 @@ fn park_for_restart(kind: ParkKind, label: &str, os_id: u64, domain: Option<crat
     (id, p.decision.load(SeqCst))
 }
 
-/// How a call parked at a compile error ended.
+/// How a call that hit a compile error ended.
 pub enum CompileParked {
     /// a live patch fixed the callee: its code
     Fixed(u64),
-    /// the user stopped the run
+    /// the user stopped the run or the callee is in unwatched source
     Stop,
     /// its domain is stopping: the call fails as the error's panic, so the domain's cleanup runs
     Unwind,
@@ -738,8 +738,15 @@ pub enum CompileParked {
 /// parked panic (`panics`, `watch`, the Run panel) with the one choice `stop` (the user may end
 /// the run). After every live patch (the patch epoch moved) `rebuild` compiles the callee again:
 /// once it builds, the call goes on with that code. No timeout: a compile error never ends the
-/// program by itself (the user's rule, 2026-11-02).
+/// program by itself (the user's rule, 2026-11-02) -- where a live edit can reach it. Code in
+/// source the live watcher does not watch (reload.rs live_edit_reaches: a registry or git
+/// dependency, std) no edit fixes, so the call parks nothing and the run stops at once with the
+/// error, its place and why.
 pub fn park_compile_error(message: &str, location: &str, frames: &[u64], mut rebuild: impl FnMut() -> Option<u64>) -> CompileParked {
+    if !crate::reload::live_edit_reaches(location) {
+        eprintln!("relax: {message} at {location}. This run does not watch that source (a registry or git dependency, or std), so no live edit can fix it. Stopping the run.");
+        return CompileParked::Stop;
+    }
     let _k = crate::zone_alloc::kept();
     let id = PANIC_IDS.fetch_add(1, SeqCst) + 1;
     let domain = crate::domain::current_app_domain();

@@ -307,20 +307,12 @@ impl Resolver {
     }
 
     fn file_fns(&mut self, u: &Unit, file: u32) -> &[(u32, u32, crate::program::DefId)] {
-        self.by_file.entry(file).or_insert_with(|| {
-            // every fn item of the file (a fn that only runs inlined into code from the disk
-            // cache has no slot of its own)
-            let mut v = Vec::new();
-            for &d in u.prog.defs_in_file(file) {
-                let d = crate::program::DefId(d);
-                if matches!(u.prog.def(d).kind, crate::program::DefKind::Fn | crate::program::DefKind::AssocFn) {
-                    if let Some((_, lo, hi)) = def_lines(u, d) {
-                        v.push((lo, hi, d));
-                    }
-                }
-            }
-            v
-        })
+        if !self.by_file.contains_key(&file) {
+            let spans = u.prog.files.get(file as usize).map(|f| self.file_fn_bytes(u, file).iter()
+                .map(|&(lo, hi, d)| (f.line_col(lo).0 as u32, f.line_col(hi).0 as u32, d)).collect()).unwrap_or_default();
+            self.by_file.insert(file, spans);
+        }
+        &self.by_file[&file]
     }
 
     /// Every fn item of a file by its byte span (expansions included: their bytes follow the source).
@@ -337,6 +329,19 @@ impl Resolver {
                     let item = f.ast.item(def.item);
                     if matches!(item.kind, crate::ast::ItemKind::Fn(..)) {
                         v.push((item.lo, item.hi, d));
+                    }
+                }
+            }
+            // An edit retargets a surviving def to the new file. Its old AST and item_defs
+            // entry still identify the exact function at a byte of that version.
+            if !u.prog.is_current_version(file) {
+                if let Some(f) = u.prog.files.get(file as usize) {
+                    for (i, item) in f.ast.items.iter().enumerate() {
+                        if matches!(item.kind, crate::ast::ItemKind::Fn(..)) {
+                            if let Some(&d) = u.prog.item_defs.get(&(file, i as u32)) {
+                                if u.prog.def(d).file != file { v.push((item.lo, item.hi, d)); }
+                            }
+                        }
                     }
                 }
             }
@@ -526,8 +531,11 @@ impl Resolver {
 
 /// What JIT pc `pc` is in (on the owner or with the unit otherwise stable: reads slots).
 pub(crate) fn describe_pc(u: &Unit, r: &mut Resolver, pc: u64) -> Option<PcCode> {
-    let (start, len, id) = u.code.read().unwrap_or_else(|e| e.into_inner()).entry_at(pc)?;
-    let kind = kind_at(u, start);
+    let (start, len, id, kind, part) = {
+        let t = u.code.read().unwrap_or_else(|e| e.into_inner());
+        let (start, len, id) = t.entry_at(pc)?;
+        (start, len, id, t.kind_of(start), t.function_base(start, pc) != start)
+    };
     let all = bodies(u, id);
     let b = all.iter().find(|b| b.start == start);
     let (state, gen, map) = match b {
@@ -541,12 +549,17 @@ pub(crate) fn describe_pc(u: &Unit, r: &mut Resolver, pc: u64) -> Option<PcCode>
     };
     // the line table's inline stack, else (older code) the fn whose span holds the position
     let inlined = pos.and_then(|p| map.and_then(|m| r.inline_stack(u, id, start, m, p)).or_else(|| r.inlined_fn(u, id, start, p)));
-    let patched = pos.is_some_and(relax_backend::rir::pos_patched);
+    let patched = part || pos.is_some_and(relax_backend::rir::pos_patched);
     Some(PcCode { slot: id, start, len, kind, state, gen, at, inlined, patched })
 }
 
 /// Whether pc `pc` of slot `id`'s code body at `start` lies in a split body's patched path.
 pub(crate) fn in_patched_path(u: &Unit, id: u32, start: u64, pc: u64) -> bool {
+    {
+        let t = u.code.read().unwrap_or_else(|e| e.into_inner());
+        if !t.entry_at(pc).is_some_and(|(s, _, slot)| s == start && slot == id) { return false; }
+        if t.function_base(start, pc) != start { return true; }
+    }
     bodies(u, id).iter().find(|b| b.start == start).and_then(|b| b.map.lookup((pc - start) as u32)).is_some_and(relax_backend::rir::pos_patched)
 }
 
@@ -624,10 +637,29 @@ pub(crate) fn frame_fields_no_owner(u: &Unit, pc: u64) -> Option<(String, String
     ))
 }
 
-/// JIT code that is no fn body: a slot's thunk (what calls branch to), its lazy stub, or a veneer
+/// A report uses the slot's stored diagnostic name; resolving its display name needs the owner.
+pub(super) fn report_name(u: &Unit, pc: u64) -> Option<String> {
+    let t = u.code.try_read().ok()?;
+    let Some((start, _, id)) = t.entry_at(pc) else {
+        return t.glue_at(pc).map(|(_, name)| name.to_string());
+    };
+    let name = crate::jit::slot_name(id)?;
+    Some(format!("{name} (slot#{id}+{:#x})", pc - start))
+}
+
+/// JIT code that is no fn body: a shared runtime entry, a slot's thunk, its lazy stub, or a veneer
 /// (a branch to a host function or a far target): (name, module label). A profile sample on one
 /// is the cost of reaching the callee (a fetch of a thunk line that is not in the i-cache).
 pub(crate) fn glue_name(u: &Unit, pc: u64) -> Option<(String, &'static str)> {
+    if let Some((_, name)) = u.code.read().unwrap_or_else(|e| e.into_inner()).glue_at(pc) {
+        return Some((name.to_string(), "jit/glue"));
+    }
+    // the hop between a slot's table word and its body word: the live harness's entry mark, or
+    // an aux unit's plain thunk
+    if let Some((id, _, marked)) = u.entry_thunk_at(pc).filter(|e| (e.0 as usize) < u.fns.len()) {
+        let name = super::display_name(u, id, 0);
+        return Some(if marked { (format!("[entry mark of {}]", name), "jit/glue entry mark") } else { (format!("[entry thunk of {}]", name), "jit/glue entry") });
+    }
     for (kind, what, module) in [(0usize, "thunk of", "jit/glue thunk"), (1, "lazy stub of", "jit/glue stub")] {
         if let Some((id, _)) = u.slots.find(kind, pc).filter(|(id, _)| (*id as usize) < u.fns.len()) {
             return Some((format!("[{} {}]", what, super::display_name(u, id, 0)), module));
@@ -920,7 +952,7 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
         for (n, q, t, slots) in pins {
             out.line(&format!("{{\"pin\":\"pin{}\",\"fn\":{},\"tier\":\"{}\",\"slots\":{:?}}}", n, json_str(&q), t, slots));
         }
-        out.line("{\"usage\":\"tier <fn|file:line> o1|o3|auto [fresh=1]\"}");
+        out.line("{\"usage\":\"tier <fn|file:line|@slot> o1|o3|auto [fresh=1]\"}");
         return;
     };
     let level: &'static str = match level.to_ascii_lowercase().as_str() {
@@ -939,7 +971,12 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
     let r = crate::owner::call_within(crate::owner::Class::Program, 30_000, move || -> Result<(Vec<String>, Vec<u32>), String> {
         let _kept = crate::zone_alloc::kept();
         let u = unsafe { &mut *up };
-        let mut found: Vec<(u32, Option<u32>)> = super::instrument::find_all(u, &qq, 16).into_iter().map(|x| (x.0, x.1)).collect();
+        // `@slot`: one slot by number (a shim, or a name with spaces the request splits)
+        let mut found: Vec<(u32, Option<u32>)> = match qq.strip_prefix('@').and_then(|s| s.parse::<u32>().ok()) {
+            Some(id) if (id as usize) < u.fns.len() => vec![(id, None)],
+            Some(id) => return Err(format!("no slot @{} (have @0..@{})", id, u.fns.len().saturating_sub(1))),
+            None => super::instrument::find_all(u, &qq, 16).into_iter().map(|x| (x.0, x.1)).collect(),
+        };
         if found.is_empty() {
             return Err(format!("no fn or line matches `{}`{}", qq, super::instrument::closest(u, &qq)));
         }

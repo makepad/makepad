@@ -1,6 +1,7 @@
 // A panic leaving an `extern "C"` function (here a comparator libc's qsort calls back) cannot
 // unwind: the process aborts ("panic in a function that cannot unwind"), as rustc does. Run by
 // bench_rt/interp/unwind_cmp.py.
+// corpus: aborts
 extern "C" {
     fn qsort(base: *mut u8, n: usize, size: usize, cmp: extern "C" fn(*const u8, *const u8) -> i32);
 }

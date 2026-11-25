@@ -1,4 +1,10 @@
 //! Compilation inputs shared by every compiler layer.
+
+// memo_local! declares its thread-locals through this path: on Android they take no pthread key
+// each (libs/thread_local)
+#[doc(hidden)]
+pub use ::makepad_thread_local as __thread_local;
+
 pub mod clock;
 pub mod options;
 pub mod phase;

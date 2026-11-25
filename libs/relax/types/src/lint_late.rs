@@ -2430,7 +2430,8 @@ impl<'a> Dp<'a> {
         let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
         let mut since = None;
         let mut note = None;
-        let unq = |t: &[u8]| String::from_utf8_lossy(t).trim_matches('"').to_string();
+        // a literal's value, as rustc prints it: its escapes read, a raw string's hashes gone
+        let unq = |t: &[u8]| crate::lit::unescape_str(&String::from_utf8_lossy(t));
         // a value that is no string literal is a malformed attribute (an error): it deprecates nothing
         let is_str = |t: &[u8]| t.first() == Some(&b'"') || t.first() == Some(&b'r');
         let mut i = lo + 1;

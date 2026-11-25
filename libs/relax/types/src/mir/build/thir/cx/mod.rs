@@ -229,12 +229,17 @@ impl<'a> Cx<'a> {
     /// it), as the borrow checker's universal regions have it.
     fn declared_output(&self, def: crate::program::DefId) -> Option<TyId> {
         let tcx = self.tcx();
-        let sig = tcx.fn_item_sig(self.prog(), def)?;
-        // (only an `impl Trait` output differs from the typeck's own, normalized signature)
-        if !tcx.tys.has_opaque(sig.ret) { return None; }
+        let prog = self.prog();
+        let sig = tcx.fn_item_sig(prog, def)?;
+        // (only an `impl Trait` output differs from the typeck's own, normalized signature: an opaque type, or in a
+        // trait's default body its own RPITIT projection, which normalizes to that RPITIT's opaque there)
+        let own_rpitits = prog.def(prog.def(def).parent).kind == crate::program::DefKind::Trait
+            && prog.associated_types_for_impl_traits.get(&def).is_some_and(|a| !a.is_empty());
+        if !tcx.tys.has_opaque(sig.ret) && !own_rpitits { return None; }
         let late = |v: crate::types::BoundVar| tcx.tys.intern_region(crate::types::RegionKind::ReLateParam(crate::types::RegionScope::Item(def), crate::types::LateParamKind::Anon(v.0)));
         let mut f = crate::types::fold::BoundVarReplacer::new(late, |_| panic!("signature bound type"));
-        Some(f.instantiate(&tcx.tys, sig.ret))
+        let ret = f.instantiate(&tcx.tys, sig.ret);
+        Some(if own_rpitits { tcx.own_rpitit_projections_as_opaques(prog, def, ret) } else { ret })
     }
 
     // ---- bodies

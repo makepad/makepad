@@ -1,7 +1,7 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: builtin test attributes versus scoped proc macros.
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet bare-test-app 2>>"$ERR")

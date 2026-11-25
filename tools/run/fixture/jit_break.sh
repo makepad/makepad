@@ -3,9 +3,11 @@
 # package that uses no JIT crate fails the fast bucket's checks (land_gate.sh checks) on that landing, naming the
 # package. A resolver change in relax-compiler broke makepad-widgets-core's check, and the bucket ran that check
 # two landings later: its affected set held only the changed crates' Rust dependents (11-05). A JIT change checks
-# affected.py's JIT_CHECKS; a change outside the JIT does not. A workspace of stub crates under the gate's package
-# names in a temporary git repo, its `makepad check` a stub JIT whose resolver is the changed crate; needs cargo,
-# git and python3, nothing of this tree but the gate's scripts.
+# affected.py's JIT_CHECKS; a change outside the JIT does not. And a change in an app runs the boundary audit of that
+# app alone (`boundary <app>`, a unit of its own beside its check), red when its code reaches a provided crate's
+# rustc-laid field, the violation and its way in said: a game call into a provided heap's maps went unaudited (11-23).
+# A workspace of stub crates under the gate's package names in a temporary git repo, its `makepad check` a stub JIT
+# whose resolver is the changed crate; needs cargo, git and python3, nothing of this tree but the gate's scripts.
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/jit_break.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT
@@ -47,10 +49,20 @@ path = "src/main.rs"
 
 [dependencies]
 jit-break-resolve = { path = "../../libs/relax/resolve" }'
-put tools/run/src/main.rs '// `makepad check [options] <package>` in the package dir: its src/lib.rs as the resolver takes it
+put tools/run/src/main.rs '// `makepad check [options] <package>` in the package dir: its src/lib.rs as the resolver takes it; with
+// `--boundary all`, its audit: a call of `reads_provided_field` is a violation
 fn main() {
     let pkg = std::env::args().last().unwrap_or_default();
     let src = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
+    if std::env::args().any(|a| a == "--boundary") {
+        println!("# lowered 2 JIT-side bodies");
+        if src.contains("reads_provided_field()") {
+            println!("violation\tFAIL\tprov\tprov::Heap::get\tsrc/lib.rs:2:1: a field of `Heap` is reached from JIT-compiled code");
+            println!("  reached\t{pkg}::f -> prov::Heap::get");
+            std::process::exit(1);
+        }
+        return;
+    }
     match jit_break_resolve::refuses(&src) {
         Some(why) => println!("src/lib.rs:2:1: error: {why}\nrelax check: {pkg}: 1 crate, all, 1 errors"),
         None => println!("relax check: {pkg}: 1 crate, all, 0 errors"),
@@ -73,6 +85,11 @@ g checkout -q -b app "$base"
 lib apps/fab makepad-fab 'pub fn f() {}
 pub fn g() {}'
 g commit -q -am app
+# an app's code reaches a provided crate's rustc-laid field: its boundary audit fails, its check passes
+g checkout -q -b appbad "$base"
+lib apps/fab makepad-fab 'pub fn f() { reads_provided_field() }
+fn reads_provided_field() {}'
+g commit -q -am appbad
 fail=""
 gate() { # gate <label> <expect ok|fail|app> <rev>: land_gate.sh checks from the base at <rev>
   local out code
@@ -80,16 +97,24 @@ gate() { # gate <label> <expect ok|fail|app> <rev>: land_gate.sh checks from the
   out=$(cd "$dir/repo" && bash "$here/land_gate.sh" checks "$base" - 2>&1); code=$?
   case "$2" in
     ok) [ "$code" = 0 ] && echo "$out" | grep -q '^NODEGATE-OK' && echo "$out" | grep -qx 'GATEUNIT ok check makepad-widgets-core' \
-        && echo "$out" | grep -qx 'GATEUNIT ok check makepad-story-web-export' || { echo "$out" | tail -20; fail="$fail $1"; };;
+        && echo "$out" | grep -qx 'GATEUNIT ok check makepad-story-web-export' && ! echo "$out" | grep -q '^GATEUNIT [a-z]* boundary ' \
+        || { echo "$out" | tail -20; fail="$fail $1"; };;
     fail) [ "$code" = 1 ] && echo "$out" | grep -qx 'GATEUNIT fail check makepad-widgets-core' \
         && [ "$(echo "$out" | grep -c '^GATEUNIT fail')" = 1 ] && echo "$out" | grep -q '^src/lib.rs:2:1: error: unresolved re-export' \
         || { echo "$out" | tail -20; fail="$fail $1"; };;
     app) [ "$code" = 0 ] && echo "$out" | grep -qx 'GATEUNIT ok check makepad-fab' && ! echo "$out" | grep -q 'check makepad-widgets-core' \
+        && echo "$out" | grep -qx 'GATEUNIT ok boundary makepad-fab' && [ "$(echo "$out" | grep -c '^GATEUNIT [a-z]* boundary ')" = 1 ] \
+        || { echo "$out" | tail -20; fail="$fail $1"; };;
+    appbad) [ "$code" = 1 ] && echo "$out" | grep -qx 'GATEUNIT fail boundary makepad-fab' && [ "$(echo "$out" | grep -c '^GATEUNIT fail')" = 1 ] \
+        && echo "$out" | grep -qx 'GATEUNIT ok check makepad-fab' && echo "$out" | grep -q '^violation	FAIL	prov	prov::Heap::get	' \
+        && echo "$out" | grep -qx '  reached	makepad-fab::f -> prov::Heap::get' \
+        && echo "$out" | grep -qx 'GATEREPRO boundary makepad-fab :: cd apps/fab && makepad check --boundary all makepad-fab' \
         || { echo "$out" | tail -20; fail="$fail $1"; };;
   esac
 }
 gate jit-ok ok jitok
 gate jit-break fail jitbreak
 gate app-only app app
+gate app-reaches-provided-field appbad appbad
 if [ -n "$fail" ]; then echo "jit_break FAILED:$fail"; exit 1; fi
 echo "jit_break: ok"

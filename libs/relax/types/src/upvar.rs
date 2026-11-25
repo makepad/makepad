@@ -563,6 +563,22 @@ mod tests {
         assert_eq!(c.place.projections.len(), 1);
     }
     #[test]
+    fn a_wildcard_index_captures_its_base() {
+        // `let _ = s[i]` reads s (its bounds check), so the closure captures `*s` by shared reference;
+        // rustc_capture_analysis: `s[Deref] -> Immutable`, `n[] -> Immutable`, `a[] -> Immutable`.
+        // Left out, the closure's body read s through another capture (Amp's wave line: a false
+        // "len 16, index 17" after an edit made that its only use of s)
+        let (prog, tcx) = crate::mir::build::pattern::tests::program("pub fn f(s: &[u8], n: usize, a: [u8; 4]) { let c = |i: usize| { let _ = s[i * n]; let _ = a[i]; }; }");
+        let body = tcx.typeck(&prog, crate::mir::build::pattern::tests::named(&prog, "f"));
+        assert!(body.errors.is_empty(), "{:?}", body.errors);
+        let got: Vec<(String, usize, CaptureKind)> = body.min_captures[&body.closures[0]].captures.iter().map(|c| (prog.syms.str(body.locals[c.place.root as usize].name).to_string(), c.place.projections.len(), c.info.kind)).collect();
+        let imm = CaptureKind::ByRef(BorrowKind::Imm);
+        for want in [("s", 1, imm), ("n", 0, imm), ("a", 0, imm)] {
+            assert!(got.iter().any(|g| (g.0.as_str(), g.1, g.2) == want), "missing capture {:?}: {:?}", want, got);
+        }
+        assert_eq!(got.len(), 3, "{:?}", got);
+    }
+    #[test]
     fn opaque_index_restricts_to_array() {
         let prog = Program::new(&std::sync::Arc::new(crate::Session::default())); let tcx = Tcx::new(); let state = crate::tcx::EvalState::new(); let cx = crate::tcx::EvalCx::new(&prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state); let tx: TyQ = (&tcx, &cx);
         let t = tcx.tys.bool_; let array = tcx.tys.intern(TyKind::Array(t, tcx.tys.const_usize(3)));

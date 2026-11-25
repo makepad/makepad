@@ -44,6 +44,7 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::FnAddr(d, id) => Inst::FnAddr(m(*d), *id),
         Inst::Call(c, a, r) => {
             let c2 = match c {
+                Callee::Part(id) => Callee::Part(*id),
                 Callee::Indirect(v) => Callee::Indirect(m(*v)),
                 Callee::Fn(i) => Callee::Fn(*i),
                 Callee::Host(h) => Callee::Host(*h),
@@ -121,6 +122,9 @@ pub enum RoRead {
     /// For a zero-size query only: this many bytes starting at the symbol are immutable.
     /// Unlike a scalar read this does not require classifying pointer words or padding.
     Range(u64),
+    /// For a `FN_QUERY` only: the symbol is function slot `.0`'s permanent callable address (what
+    /// a fn pointer stored in data holds), so a call through it is a call of that slot
+    Fn(u32),
     No,
 }
 
@@ -144,7 +148,18 @@ impl RoReader {
     pub fn read(&self, s: Sym, n: u32) -> RoRead {
         (self.read)(self.ctx, s, n)
     }
+
+    /// The function slot whose callable address `s` is (`RoRead::Fn`), if it is one.
+    pub fn fn_slot(&self, s: Sym) -> Option<u32> {
+        match (self.read)(self.ctx, s, FN_QUERY) {
+            RoRead::Fn(id) => Some(id),
+            _ => None,
+        }
+    }
 }
+
+/// `RoReader::read`'s query of a symbol's function (`RoReader::fn_slot`): no byte count.
+pub const FN_QUERY: u32 = u32::MAX;
 
 /// `IBit` on a constant (the semantics every backend implements).
 pub fn bit_op(o: BitOp, x: u64) -> u64 {
@@ -1213,6 +1228,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
         // built on several paths): known like a single definition
         let mut same_k: Vec<Option<(i64, u32)>> = vec![None; nv];
         let mut kn: Vec<Option<K>> = vec![None; nv];
+        let devirt = ro.is_some() && !crate::stats::opt_off(options, "-devirt");
         let mut alias: Vec<u32> = (0..nv as u32).collect();
         let mut def_inst: Vec<Option<(IOp, VReg, i64)>> = vec![None; nv];
         // single-def integer compares: (cond, signed, a, b-or-imm, is_imm); operands must be
@@ -1691,10 +1707,23 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                             new = Inst::Mov(d, x);
                         }
                     }
-                    // a call through a known function's address: a direct call (inlinable)
+                    // a call through a known function's address: a direct call (inlinable). The
+                    // address is the function's (FnAddr), or a symbol that is a function's
+                    // callable address: a fn pointer read from immutable data, such as a
+                    // thread-local key's getter (`LocalKey::with` calls its `inner`). Immutable
+                    // data never changes: an edit makes new data, and the code that read the old
+                    // data is built again. A call through the slot follows the slot's edits.
+                    // In a live test session the indirect call went through the callee's
+                    // marking thunk on every call; a direct one is bypassable (RELAX_OPT=-devirt:
+                    // only FnAddr)
                     if let Inst::Call(Callee::Indirect(v), ref args, ref rets) = new {
-                        if fn_def[v.0 as usize] != u32::MAX {
-                            new = Inst::Call(Callee::Fn(fn_def[v.0 as usize]), args.clone(), rets.clone());
+                        let known = match kn[v.0 as usize] {
+                            _ if fn_def[v.0 as usize] != u32::MAX => Some(fn_def[v.0 as usize]),
+                            Some(K::A(p)) if devirt && p.off == 0 => ro.and_then(|rd| rd.fn_slot(p)),
+                            _ => None,
+                        };
+                        if let Some(id) = known {
+                            new = Inst::Call(Callee::Fn(id), args.clone(), rets.clone());
                         }
                     }
                     // x <=> x
@@ -2148,14 +2177,26 @@ pub static SINCOS: relax_session::sync::Mutex<[Option<(u32, u32, Sym)>; 2]> = re
 /// by the time LLVM selects instructions. The call goes where the earlier of the two was; the
 /// later's result is defined there too, so it must be neither read nor written in between (RIR
 /// vregs are mutable).
+///
+/// The same value is the same as LLVM's GVN makes it: two loads of one address with nothing that
+/// may write memory between them read one value, and `llvm.sin` / `llvm.cos` write none (rustc
+/// emits them for f32/f64 `sin` / `cos`), where here the libm calls count as writes. So a closure
+/// that reads its captured angle for a cos and again for a sin is paired as rustc pairs it, in its
+/// own build and inlined alike: unpaired in the one, paired in the other, a program's floats
+/// changed in the last bit when its code tiered up (a patchmatch normal on arm64). A store, an
+/// unknown call or an opaque value between the loads keeps them apart, as it does for LLVM. Only
+/// the float methods' calls pair (CSig::math): LLVM keeps a `sin` and a `cos` the program
+/// declares itself as calls, which may write errno, and pairs them nowhere.
 pub fn fuse_sincos(f: &mut Func) -> bool {
     let tab = *SINCOS.lock().unwrap_or_else(|e| e.into_inner());
     if tab.iter().all(|t| t.is_none()) {
         return false;
     }
+    // a float method's sin or cos (CSig::math): a C `sin` the program declares itself is a call
+    // that may write errno for LLVM, neither paired nor read through
     let kind = |i: &Inst| -> Option<(usize, bool, VReg, VReg)> {
-        let Inst::Call(Callee::CHost(s, _), args, rets) = i else { return None };
-        if args.len() != 1 || rets.len() != 1 {
+        let Inst::Call(Callee::CHost(s, sig), args, rets) = i else { return None };
+        if args.len() != 1 || rets.len() != 1 || !sig.math {
             return None;
         }
         (0..2).find_map(|w| {
@@ -2165,7 +2206,7 @@ pub fn fuse_sincos(f: &mut Func) -> bool {
     };
     // the value an operand holds at instruction `at`: followed back through `Mov` copies within
     // the block to (vreg, index of its defining instruction or none for a value live into the block)
-    let ident = |insts: &[Inst], at: usize, v: VReg| -> (VReg, Option<usize>) {
+    let def = |insts: &[Inst], at: usize, v: VReg| -> (VReg, Option<usize>) {
         let (mut v, mut at) = (v, at);
         loop {
             let def = (0..at).rev().find(|&k| {
@@ -2185,6 +2226,31 @@ pub fn fuse_sincos(f: &mut Func) -> bool {
             }
         }
     };
+    // instructions that leave memory as it was: pure ones, loads, and the libm calls the pairing
+    // knows (memory(none) in LLVM), lone or already paired
+    let quiet = |i: &Inst| {
+        is_pure(i)
+            || kind(i).is_some()
+            || matches!(i, Inst::Call(Callee::Host(s), a, r) if a.len() == 1 && r.len() == 2 && tab.iter().flatten().any(|t| t.2.id == s.id))
+    };
+    // whether operand `a` at instruction `at_a` and `b` at `at_b` hold one value: one definition, or
+    // loads of one address (the same kind and offset from one base value) with only quiet
+    // instructions between them, the bases compared alike
+    let same = |insts: &[Inst], (mut at_a, mut a): (usize, VReg), (mut at_b, mut b): (usize, VReg)| -> bool {
+        loop {
+            let (da, db) = (def(insts, at_a, a), def(insts, at_b, b));
+            if da == db {
+                return true;
+            }
+            let (Some(ka), Some(kb)) = (da.1, db.1) else { return false };
+            let (Inst::Load(ma, _, base_a, off_a), Inst::Load(mb, _, base_b, off_b)) = (&insts[ka], &insts[kb]) else { return false };
+            let (lo, hi) = (ka.min(kb), ka.max(kb));
+            if ma != mb || off_a != off_b || !insts[lo + 1..hi].iter().all(|i| quiet(i)) {
+                return false;
+            }
+            (at_a, a, at_b, b) = (ka, *base_a, kb, *base_b);
+        }
+    };
     let mut changed = false;
     for bi in 0..f.blocks.len() {
         let mut n = 0;
@@ -2193,10 +2259,9 @@ pub fn fuse_sincos(f: &mut Func) -> bool {
                 let insts = &f.blocks[bi].insts;
                 let (w, is_sin, x, r1) = kind(&insts[n])?;
                 let both = tab[w]?.2;
-                let id1 = ident(insts, n, x);
                 for m in n + 1..insts.len() {
                     if let Some((w2, s2, x2, r2)) = kind(&insts[m]) {
-                        if w2 == w && s2 != is_sin && ident(insts, m, x2) == id1 {
+                        if w2 == w && s2 != is_sin && same(insts, (n, x), (m, x2)) {
                             let touched = |v: VReg| {
                                 insts[n + 1..m].iter().any(|i| {
                                     let mut t = false;
@@ -6123,6 +6188,17 @@ pub const SROA_COPY_CELLS: usize = 8;
 
 pub const SROA_COPY_IN_OUT_CELLS: usize = 16;
 
+/// Bytes of emitted zero stores in copies to outline records, across this run's builds.
+pub static OUTLINE_GAP_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sroa_gap_piece(offset: i64, remaining: i64) -> u8 {
+    let mut n = 8u8;
+    while offset % i64::from(n) != 0 || i64::from(n) > remaining {
+        n /= 2;
+    }
+    n
+}
+
 /// A 128-bit vector cell (VLoad/VStore) in sroa's cell table (no integer access is 16 bytes)
 pub const SROA_V128: Mem = Mem::Int(16, false);
 
@@ -6303,6 +6379,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     // slot right before such a call. Nothing touches the slot after it on any path, so no
     // pointer the callee may keep can see stale cells.
     let mut esc = vec![false; ns];
+    let mut part_record = None;
     let mut touched = false;
     for &(bi, k) in &rel {
         {
@@ -6347,6 +6424,14 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 Inst::IBinI(IOp::Add, it, d, a, _) if it.bits == 64 && at(*a).0 != u32::MAX && at(*d).0 != u32::MAX => {}
                 Inst::Mov(d, a) if at(*a).0 != u32::MAX && at(*d).0 != u32::MAX => {}
                 Inst::Call(c, args, _) => {
+                    // (an exit's call to its part: its one argument is the record; the whole-body
+                    // stub's Part(None) passes the host's parameters)
+                    if let (Callee::Part(Some(_)), [record]) = (c, args.as_slice()) {
+                        let (sl, off) = at(*record);
+                        if sl != u32::MAX && off == 0 {
+                            part_record = Some(sl);
+                        }
+                    }
                     for u in args {
                         if at(*u).0 != u32::MAX {
                             esc[at(*u).0 as usize] = true;
@@ -6431,7 +6516,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     let mut gcells: Vec<Vec<SroaCell>>;
     let mut first_groups = true;
     let depth = crate::regalloc::loop_depths(f, &crate::regalloc::reachable(f));
-    loop {
+    let has_in = loop {
         fn find(p: &mut [u32], dl: &mut [i64], x: u32) -> (u32, i64) {
             // (root, delta of x relative to root)
             let mut path = Vec::new();
@@ -6636,10 +6721,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                             }
                             let end = gcells[g].get(k).map_or(hi, |c| hi.min(c.off));
                             while off < end {
-                                let mut n = 8u8;
-                                while off % n as i64 != 0 || off + n as i64 > end {
-                                    n /= 2;
-                                }
+                                let n = sroa_gap_piece(off, end - off);
                                 gaps.push(SroaCell { off, mem: Mem::Int(n, false), widened: false, lanes: false, sub: false });
                                 off += n as i64;
                             }
@@ -6718,9 +6800,9 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
             }
         }
         if !changed {
-            break;
+            break has_in;
         }
-    }
+    };
     // escaped slots: every escaping call must be a last use (no access of the slot after it,
     // on any path, the call's own block included)
     let mut esc_slots: Vec<u32> = Vec::new();
@@ -6838,8 +6920,9 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
     if !ok.iter().any(|x| *x) {
         return false;
     }
-    // one vreg per (slot, group cell inside the slot), zero at entry (a cell read before any
-    // write of it reads padding or an unwritten variant field: any value will do)
+    // one vreg per (slot, group cell inside the slot), reading zero until written. `init` holds
+    // each cell's zero, which `sroa_late_zeros` places where some read needs it (not at the
+    // entry), and then the escaped slots' addresses, which go at the entry.
     let mut slot_regs: Vec<Vec<u32>> = vec![Vec::new(); ns];
     let mut init: Vec<Inst> = Vec::new();
     for sl in 0..ns {
@@ -6878,6 +6961,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         }
         slot_regs[sl] = regs;
     }
+    let ncell = init.len();
     let esc_addr: Vec<(u32, VReg)> = esc_slots.iter().map(|&sl| (sl, f.vreg(Cls::I))).collect();
     for &(sl, v) in &esc_addr {
         init.push(Inst::SlotAddr(v, sl));
@@ -6951,9 +7035,15 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 }
         })
         .collect();
-    // temporaries of sub-cell accesses (vregs nv0.., added after the rewrite)
+    // Integer temporaries of sub-cell accesses and record fills, added after the rewrite.
     let nv0 = f.vregs.len() as u32;
-    let mut sub_tmps: Vec<Cls> = Vec::new();
+    let mut tmps = Vec::new();
+    let mut tmp = || {
+        let r = VReg(nv0 + tmps.len() as u32);
+        tmps.push(Cls::I);
+        r
+    };
+    let mut gap_bytes = 0u64;
     for (bi, (b, _)) in f.blocks.iter_mut().zip(dirty.iter()).enumerate().filter(|x| *x.1 .1) {
         let mut out: Vec<Inst> = Vec::with_capacity(b.insts.len());
         let mut pos: Vec<u64> = Vec::with_capacity(b.pos.len());
@@ -6975,8 +7065,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                         let k = (o + *off as i64 - c.off) as u32;
                         let n = mem_size(*m) as u8;
                         let t = if k == 0 { r } else {
-                            let t = VReg(sub_tmps.len() as u32 + nv0);
-                            sub_tmps.push(Cls::I);
+                            let t = tmp();
                             out.push(Inst::IBinI(IOp::Shr, IntTy { bits: 64, signed: false }, t, r, 8 * k as i64));
                             pos.push(p);
                             t
@@ -6984,8 +7073,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                         match *m {
                             Mem::Int(_, signed) => out.push(Inst::Conv(Conv::IntToInt(IntTy { bits: n * 8, signed }), *d, t)),
                             Mem::F32 | Mem::F64 => {
-                                let u = VReg(sub_tmps.len() as u32 + nv0);
-                                sub_tmps.push(Cls::I);
+                                let u = tmp();
                                 out.push(Inst::Conv(Conv::IntToInt(IntTy { bits: n * 8, signed: false }), u, t));
                                 pos.push(p);
                                 out.push(Inst::Conv(Conv::BitsToF(*m == Mem::F64), *d, u));
@@ -7021,7 +7109,6 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                         // a part: its bits merged into the cell, the rest of the cell kept
                         let k = (o + *off as i64 - c.off) as u32;
                         let n = mem_size(*m) as u32;
-                        let mut tmp = || { let t = VReg(sub_tmps.len() as u32 + nv0); sub_tmps.push(Cls::I); t };
                         let bits = match m {
                             Mem::F32 | Mem::F64 => { let b = tmp(); out.push(Inst::Conv(Conv::FToBits(*m == Mem::F64), b, *v)); pos.push(p); b }
                             Mem::Int(..) => *v,
@@ -7075,6 +7162,36 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                         });
                         pos.push(p);
                     }
+                    // With no incoming memory copy, no instruction writes the bytes between
+                    // cells. Materialise them only at a part exit, where the whole field is read.
+                    // A cell only partly inside the range is not stored above: its bytes stay
+                    // unwritten for verify_outline to refuse, never zeros in their place.
+                    let end = lo + i64::from(*n);
+                    let inside = |c: &&SroaCell| c.off >= lo && c.off + mem_size(c.mem) as i64 <= end;
+                    let straddles = gcells[g].iter().any(|c| c.off < end && c.off + mem_size(c.mem) as i64 > lo && !inside(&c));
+                    if da.is_none() && part_record == Some(at(*d).0) && !has_in[g] && !straddles {
+                        let mut zero = None;
+                        let mut cursor = lo;
+                        let cells = gcells[g].iter().filter(inside);
+                        for (start, next) in cells.map(|c| (c.off, c.off + i64::from(mem_size(c.mem))))
+                            .chain(std::iter::once((end, end))) {
+                            gap_bytes += (start - cursor) as u64;
+                            while cursor < start {
+                                let r = *zero.get_or_insert_with(|| {
+                                    let r = tmp();
+                                    out.push(Inst::Iconst(r, 0));
+                                    pos.push(p);
+                                    r
+                                });
+                                let rel = cursor - lo;
+                                let width = sroa_gap_piece(at(*d).1 + rel, start - cursor);
+                                out.push(Inst::Store(Mem::Int(width, false), *d, rel as i32, r));
+                                pos.push(p);
+                                cursor += i64::from(width);
+                            }
+                            cursor = next;
+                        }
+                    }
                 }
                 Inst::Call(_, args, _) if !esc_addr.is_empty() => {
                     // an escaped slot's last use: the slot gets its cells' values first
@@ -7116,7 +7233,10 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         b.insts = out;
         b.pos = pos;
     }
-    f.vregs.extend(sub_tmps);
+    f.vregs.extend(tmps);
+    if gap_bytes != 0 {
+        OUTLINE_GAP_BYTES.fetch_add(gap_bytes, std::sync::atomic::Ordering::Relaxed);
+    }
     // an invoked no-capture call: its normal and unwind successors each get a block that
     // reloads the cells first (the callee may have written the slot before unwinding)
     let mut by_block: Vec<(usize, Vec<(u32, VReg)>)> = Vec::new();
@@ -7142,12 +7262,213 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
         }
         f.blocks[bi].term = Term::Invoke(targets[0], targets[1]);
     }
+    let zeros: Vec<Inst> = init.drain(..ncell).collect();
     let p0 = f.blocks[0].pos.first().copied().unwrap_or(0);
     let n0 = init.len();
     let b0 = &mut f.blocks[0];
     b0.insts.splice(0..0, init);
     b0.pos.splice(0..0, std::iter::repeat(p0).take(n0));
+    sroa_late_zeros(f, &zeros);
     true
+}
+
+/// sroa's cells read zero until written, as if zeroed at the entry, but each zero is defined only
+/// where it is needed: on the edges where a path that wrote the cell nowhere meets the cell live
+/// and written on another path (at the end of the unwritten predecessor), and right before a read
+/// that no write can reach on any path (on a vreg of its own). Every read sees what it saw with
+/// the zeros at the entry, and every path to a read still defines the cell, but its live range
+/// starts at its writes and those edges. Zeros at the entry kept each cell live from there to its
+/// last read: a guarded inline copy's slow call writes all of a result's cells and the error
+/// return copies them out whole, so every padding cell of every such result was live through
+/// the function, spilled, and zero-filled by each call's prologue (`KnotVector::find_span`: 80
+/// cells, 78 stack words). `zeros`: each cell's zero, in cell order.
+fn sroa_late_zeros(f: &mut Func, zeros: &[Inst]) {
+    let nc = zeros.len();
+    if nc == 0 {
+        return;
+    }
+    let nv = f.vregs.len();
+    let mut cell = vec![u32::MAX; nv];
+    let mut reg = Vec::with_capacity(nc);
+    for (k, z) in zeros.iter().enumerate() {
+        for_defs(z, |d| {
+            cell[d.0 as usize] = k as u32;
+            reg.push(d);
+        });
+    }
+    let nw = nc.div_ceil(64);
+    let nb = f.blocks.len();
+    let bit = |set: &mut [u64], k: u32| set[k as usize / 64] |= 1 << (k % 64);
+    let has = |set: &[u64], k: u32| set[k as usize / 64] & (1 << (k % 64)) != 0;
+    // (the zeros made below are on vregs past `cell`: not cells)
+    let cell_of = |x: VReg| cell.get(x.0 as usize).copied().unwrap_or(u32::MAX);
+    let each_cell = |i: &Inst, defs: bool, g: &mut dyn FnMut(u32)| {
+        let mut h = |x: VReg| {
+            let k = cell_of(x);
+            if k != u32::MAX {
+                g(k);
+            }
+        };
+        if defs { for_defs(i, &mut h) } else { for_uses(i, &mut h) }
+    };
+    let cells_of = |i: &Inst, defs: bool| -> Vec<u32> {
+        let mut v = Vec::new();
+        each_cell(i, defs, &mut |k| if !v.contains(&k) { v.push(k) });
+        v
+    };
+    let mut tu = Vec::new();
+    let mut term_cells = |t: &Term| -> Vec<u32> {
+        tu.clear();
+        term_uses(t, &mut tu);
+        let mut v: Vec<u32> = Vec::new();
+        for x in &tu {
+            let k = cell_of(*x);
+            if k != u32::MAX && !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    };
+    // the cells each block writes, and those some write may reach at its start (forward, union)
+    let mut gen = vec![0u64; nb * nw];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let g = &mut gen[bi * nw..(bi + 1) * nw];
+        for i in &b.insts {
+            each_cell(i, true, &mut |k| bit(&mut *g, k));
+        }
+    }
+    let mut written_in = vec![0u64; nb * nw];
+    let mut queued = vec![true; nb];
+    let mut work: Vec<usize> = (0..nb).rev().collect();
+    while let Some(bi) = work.pop() {
+        queued[bi] = false;
+        let out: Vec<u64> = (0..nw).map(|w| written_in[bi * nw + w] | gen[bi * nw + w]).collect();
+        for t in f.blocks[bi].term.succs() {
+            let t = t as usize;
+            let mut grew = false;
+            for w in 0..nw {
+                let x = written_in[t * nw + w] | out[w];
+                grew |= x != written_in[t * nw + w];
+                written_in[t * nw + w] = x;
+            }
+            if grew && !queued[t] {
+                queued[t] = true;
+                work.push(t);
+            }
+        }
+    }
+    // A read no write reaches: a zero of its own right before it.
+    let fresh = |f: &mut Func, k: u32| -> (VReg, Inst) {
+        let v = f.vreg(f.vregs[reg[k as usize].0 as usize]);
+        let mut i = zeros[k as usize].clone();
+        i.vregs_mut(|x| *x = v);
+        (v, i)
+    };
+    let mut cur = vec![0u64; nw];
+    for bi in 0..nb {
+        let mut reads = false;
+        for i in &f.blocks[bi].insts {
+            each_cell(i, false, &mut |_| reads = true);
+        }
+        if !reads && term_cells(&f.blocks[bi].term).is_empty() {
+            continue;
+        }
+        cur.copy_from_slice(&written_in[bi * nw..(bi + 1) * nw]);
+        let b = std::mem::take(&mut f.blocks[bi].insts);
+        let pos = std::mem::take(&mut f.blocks[bi].pos);
+        let mut insts = Vec::with_capacity(b.len());
+        let mut npos = Vec::with_capacity(b.len());
+        for (ii, i) in b.into_iter().enumerate() {
+            let p = pos.get(ii).copied().unwrap_or(0);
+            let mut swap: Vec<(VReg, VReg)> = Vec::new();
+            for k in cells_of(&i, false) {
+                if !has(&cur, k) {
+                    let (v, z) = fresh(f, k);
+                    swap.push((reg[k as usize], v));
+                    insts.push(z);
+                    npos.push(p);
+                }
+            }
+            let i = if swap.is_empty() { i } else { rename(&i, &|u| swap.iter().find(|s| s.0 == u).map_or(u, |s| s.1)) };
+            each_cell(&i, true, &mut |k| bit(&mut cur, k));
+            insts.push(i);
+            npos.push(p);
+        }
+        let mut swap: Vec<(VReg, VReg)> = Vec::new();
+        for k in term_cells(&f.blocks[bi].term) {
+            if !has(&cur, k) {
+                let (v, z) = fresh(f, k);
+                swap.push((reg[k as usize], v));
+                insts.push(z);
+                npos.push(f.blocks[bi].term_pos);
+            }
+        }
+        if !swap.is_empty() {
+            crate::regalloc::term_vregs_mut(&mut f.blocks[bi].term, |x| {
+                if let Some(s) = swap.iter().find(|s| s.0 == *x) {
+                    *x = s.1;
+                }
+            });
+        }
+        f.blocks[bi].insts = insts;
+        f.blocks[bi].pos = npos;
+    }
+    // The cells live at each block's start (backward, over the reads left), then the zeros on the
+    // edges from a block no write reaches the end of into one some write reaches, the cell live.
+    let mut upward = vec![0u64; nb * nw];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for k in term_cells(&b.term) {
+            bit(&mut upward[bi * nw..(bi + 1) * nw], k);
+        }
+        // backwards: a write hides the reads after it
+        let up = &mut upward[bi * nw..(bi + 1) * nw];
+        for i in b.insts.iter().rev() {
+            each_cell(i, true, &mut |k| up[k as usize / 64] &= !(1 << (k % 64)));
+            each_cell(i, false, &mut |k| bit(&mut *up, k));
+        }
+    }
+    let mut live_in = upward.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..nb).rev() {
+            for t in f.blocks[bi].term.succs() {
+                let t = t as usize;
+                for w in 0..nw {
+                    let x = live_in[t * nw + w] & !gen[bi * nw + w];
+                    let y = live_in[bi * nw + w] | x;
+                    if y != live_in[bi * nw + w] {
+                        live_in[bi * nw + w] = y;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    for bi in 0..nb {
+        let mut need = vec![0u64; nw];
+        for t in f.blocks[bi].term.succs() {
+            let t = t as usize;
+            for w in 0..nw {
+                need[w] |= live_in[t * nw + w] & written_in[t * nw + w] & !(written_in[bi * nw + w] | gen[bi * nw + w]);
+            }
+        }
+        if need.iter().all(|w| *w == 0) {
+            continue;
+        }
+        let tp = f.blocks[bi].term_pos;
+        // before an invoked call, which ends its block
+        let at = if matches!(f.blocks[bi].term, Term::Invoke(..)) { f.blocks[bi].insts.len().saturating_sub(1) } else { f.blocks[bi].insts.len() };
+        let mut add: Vec<Inst> = Vec::new();
+        for k in 0..nc as u32 {
+            if has(&need, k) {
+                add.push(zeros[k as usize].clone());
+            }
+        }
+        let n = add.len();
+        f.blocks[bi].insts.splice(at..at, add);
+        f.blocks[bi].pos.splice(at..at, std::iter::repeat(tp).take(n));
+    }
 }
 
 pub fn mem_size(m: Mem) -> i32 {
@@ -8767,8 +9088,138 @@ pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -
 }
 
 #[cfg(test)]
+#[path = "../tests/wasm_rt/mod.rs"]
+mod wasm_rt;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sin_and_cos_of_one_address_read_twice_pair_unless_memory_may_change_between() {
+        // Why: a closure read its captured angle for a cos and again for a sin. The libm call
+        // counted as a write, so in the closure's own build the reads stayed two values and the
+        // calls two; inlined, the angle was one value and the calls one __sincos_stret, which
+        // differs in the last bit: a patchmatch normal changed when its code tiered up (arm64).
+        // rustc's LLVM reads the angle once (llvm.sin / llvm.cos write no memory) and pairs the
+        // calls; a store or an unknown call between the reads keeps them two values, unpaired. A
+        // sin and a cos the program declares itself (`extern "C"`) are calls that may write
+        // errno for LLVM: never paired, never read through.
+        let (sin, cos, both, other) = (Sym::new(u32::MAX - 20), Sym::new(u32::MAX - 21), Sym::new(u32::MAX - 22), Sym::new(u32::MAX - 23));
+        SINCOS.lock().unwrap()[1] = Some((sin.id, cos.id, both));
+        let user = |math: bool| Box::new(CSig { conv: CConv::Host, args: vec![CArg::Scalar(Mem::F64)], ret: None, n_fixed: u32::MAX, ret_narrow: None, unwinds: false, math });
+        // the float methods' calls (core's libm: CSig::math)
+        let sig = || user(true);
+        // the angle at [env + 8] (nested: at [[env + 8]]), read for the cos, `between`, read again at
+        // `off2` for the sin: whether the two calls became one. `math`: the calls are the float
+        // methods' (else the program's own `extern "C"` sin and cos)
+        let paired_as = |between: &dyn Fn(&mut Func, VReg, VReg) -> Vec<Inst>, nested: bool, off2: i32, math: bool| -> bool {
+            let mut f = Func::new("sincos_reads".into(), 0);
+            let env = f.vreg(Cls::I);
+            f.params = vec![env];
+            f.rets = vec![Cls::F64, Cls::F64];
+            f.block();
+            let read = |f: &mut Func, off: i32| -> (Vec<Inst>, VReg) {
+                let v = f.vreg(Cls::F64);
+                if nested {
+                    let q = f.vreg(Cls::I);
+                    (vec![Inst::Load(Mem::Int(8, false), q, env, 8), Inst::Load(Mem::F64, v, q, off)], v)
+                } else {
+                    (vec![Inst::Load(Mem::F64, v, env, off)], v)
+                }
+            };
+            let (mut insts, a) = read(&mut f, 8);
+            let (c, s) = (f.vreg(Cls::F64), f.vreg(Cls::F64));
+            insts.push(Inst::Call(Callee::CHost(cos, user(math)), vec![a], vec![c]));
+            insts.extend(between(&mut f, env, c));
+            let (second, b) = read(&mut f, off2);
+            insts.extend(second);
+            insts.push(Inst::Call(Callee::CHost(sin, user(math)), vec![b], vec![s]));
+            f.blocks[0].pos = vec![0; insts.len()];
+            f.blocks[0].insts = insts;
+            f.blocks[0].term = Term::Ret(vec![c, s]);
+            f.verify().unwrap();
+            fuse_sincos(&mut f);
+            f.verify().unwrap();
+            f.blocks[0].insts.iter().any(|i| matches!(i, Inst::Call(Callee::Host(h), _, r) if *h == both && r.len() == 2))
+        };
+        let paired = |between: &dyn Fn(&mut Func, VReg, VReg) -> Vec<Inst>, nested: bool, off2: i32| paired_as(between, nested, off2, true);
+        let nothing = |_: &mut Func, _: VReg, _: VReg| Vec::new();
+        // other reads and float work between: memory as it was
+        let reads = |f: &mut Func, env: VReg, c: VReg| {
+            let (x, y) = (f.vreg(Cls::F64), f.vreg(Cls::F64));
+            vec![Inst::Load(Mem::F64, x, env, 16), Inst::FBin(FOp::Mul, true, y, x, c)]
+        };
+        let store = |_: &mut Func, env: VReg, c: VReg| vec![Inst::Store(Mem::F64, env, 24, c)];
+        let call = |f: &mut Func, _: VReg, c: VReg| {
+            let t = f.vreg(Cls::F64);
+            vec![Inst::Call(Callee::CHost(other, sig()), vec![c], vec![t])]
+        };
+        for nested in [false, true] {
+            assert!(paired(&nothing, nested, 8), "one address read twice, nothing between (nested {nested}): one value, paired");
+            assert!(paired(&reads, nested, 8), "reads and float work between (nested {nested}): paired");
+            assert!(!paired(&store, nested, 8), "a store between (nested {nested}): two values, as LLVM's, unpaired");
+            assert!(!paired(&call, nested, 8), "an unknown call between (nested {nested}): two values, unpaired");
+            assert!(!paired(&nothing, nested, 16), "two addresses (nested {nested}): unpaired");
+            assert!(!paired_as(&nothing, nested, 8, false), "the program's own extern \"C\" sin and cos (nested {nested}): calls, as LLVM keeps them, unpaired");
+        }
+        // ... nor read through: one between two reads may write (errno, for LLVM)
+        let user_call = |f: &mut Func, _: VReg, c: VReg| {
+            let t = f.vreg(Cls::F64);
+            vec![Inst::Call(Callee::CHost(sin, user(false)), vec![c], vec![t])]
+        };
+        assert!(!paired(&user_call, false, 8), "the program's own sin between the reads: two values, unpaired");
+    }
+
+    #[test]
+    fn sroa_preserves_memory_bytes_copied_through_a_slot_to_a_part_record() {
+        use crate::wasm;
+        let mut f = Func::new("record_copy".into(), 0);
+        let (input, output, src, record, tag) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        f.params.extend([input, output]);
+        let (slot, rec) = (f.slot(16, 8), f.slot(16, 16));
+        f.block();
+        f.blocks[0].insts = vec![
+            Inst::SlotAddr(src, slot), Inst::SlotAddr(record, rec), Inst::Copy(src, input, 16),
+            Inst::Load(Mem::Int(1, false), tag, src, 8), Inst::Copy(record, src, 16),
+            Inst::Call(Callee::Part(Some(0)), vec![record], vec![]),
+        ];
+        f.blocks[0].pos = vec![0; f.blocks[0].insts.len()];
+        f.blocks[0].term = Term::Ret(vec![]);
+        assert!(sroa_with(&mut f, true), "the two-way group should be tiled");
+        f.verify().unwrap();
+        let b = &mut f.blocks[0];
+        assert!(!b.insts.iter().any(|i| matches!(i, Inst::Copy(..))), "both memory copies must expand");
+        for i in &b.insts {
+            if let Inst::Store(_, a, _, v) = i {
+                assert_eq!(*a, record, "the tiled stores should target the record");
+                assert!(b.insts.iter().any(|i| matches!(i, Inst::Load(_, d, p, _) if d == v && *p == input)),
+                    "each stored value must come from an input load");
+            }
+        }
+
+        // Part calls are native. At its call site, let the wasm interpreter observe the
+        // exact bytes the rewritten host passes to the part.
+        assert!(matches!(b.insts.last(), Some(Inst::Call(Callee::Part(Some(0)), ..))));
+        *b.insts.last_mut().unwrap() = Inst::Copy(output, record, 16);
+        struct NoSymbols;
+        impl wasm::Link for NoSymbols {
+            fn sym(&self, _: u32) -> u64 { unreachable!() }
+            fn host(&self, _: u32) -> wasm::HostBind { unreachable!() }
+        }
+        let mut module = wasm::Module::new(wasm::Options { stack_size: 1024, heap_pages: 1, ..Default::default() });
+        module.add_func(0, &f);
+        module.export_func(0, "copy");
+        let input = module.place(16, 8);
+        let output = module.place(16, 8);
+        let bytes: Vec<u8> = (1..=16).collect();
+        module.data_at(input, bytes.clone());
+        let image = module.finish(&relax_session::Options::default(), &NoSymbols);
+        assert!(image.stats.failed.is_empty(), "interpreter fixture failed to lower: {:?}", image.stats.failed);
+        let mut vm = wasm_rt::Instance::new(&image.bytes).unwrap();
+        vm.call_export("copy", &[input, output]).unwrap();
+        assert_eq!(&vm.mem[output as usize..output as usize + 16], bytes, "the part must receive every original byte");
+    }
 
     /// lower.rs's high word of `x as i128 * y as i128`: umulh(x, y) + x * (y >> 63) + (x >> 63) * y
     fn wide_mul_high(signed_shift: bool) -> (Func, VReg, VReg, VReg) {
@@ -8878,4 +9329,5 @@ pub(crate) unsafe fn reset_statics() {
     reset(&SINCOS, relax_session::sync::Mutex::new([None, None]));
     reset(&MEM_FNS, std::sync::OnceLock::new());
     reset(&N, std::sync::atomic::AtomicU64::new(0));
+    reset(&OUTLINE_GAP_BYTES, std::sync::atomic::AtomicU64::new(0));
 }

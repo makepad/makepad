@@ -240,9 +240,9 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("remarks", "<fn|@slot> [n=20]", "the O3 tier's optimisation remarks for the fn: every call its last O3 build kept (hot sites first) and why (no rule, budget, growth ceiling, cold, recursive, no body) with the numbers, and the tiers of its code"),
     ("cache", "[verify [fn|all] [n=40]]", "verify: every inlined copy in the installed code (its line table's inline levels) that no edit of the inlined fn would build again (no slot of it reaches the code through the reload's host walk) -- an edit leaves the copy running old text -- marked guarded (a patch flag exits it) and recorded (the code's entry names it among its inputs: a later session's edit refuses the entry); without verify: where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
     ("code", "[n=<top>]", "JIT code growth (code is append-only, never freed): bytes and installs by source (first, tier-up, re-optimize, patch, module) and the fns with the most versions"),
-    ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
-    ("why-tier", "<fn|file:line|@slot> | stuck [n=20] | uncounted [n=20]", "`stuck`: how many hot fns ended below O3 with nothing pending, by reason. Else why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
-    ("tier", "<fn|file:line> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
+    ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/counted/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
+    ("why-tier", "<fn|file:line|@slot> | stuck [n=20] | uncounted [n=20] | parked [n=20]", "`stuck`: how many hot fns ended below O3 with nothing pending, by reason. `parked`: the slots PGO parked in their counted code (too little work of their own a second: no O3 build while that holds), ranked by the work of their last window, with the running share, their code and whether an O2 body was built. Else why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
+    ("tier", "<fn|file:line|@slot> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
     ("break", "<fn>|<file>:<line> [tier=o1]", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
     ("probe", "add <fn|file:line> <probe.rs|code> [mutate=1] [tier=o1] | list | read P<n> | rm <P<n>|all>", "injected Rust probes: your `fn probe(<the hooked fn's params>)` runs at the hook, compiled as a child module of the hooked fn's module (its private items, `use`s and `crate::` paths are in scope); std::relax::probe::{emit, count, hist, sample, pause} record for it. A fn is named by its path: `krate::Type::method`, `Type::method`, `crate::Type::method`, `<Type as Trait>::method`"),
@@ -697,6 +697,8 @@ pub struct Captured {
     pub err: Option<&'static str>,
     /// why the walk ended at the last frame when that is not the stack's outermost (threads::Raw)
     pub stop: Option<&'static str>,
+    /// the return address it could not step into, else 0 (threads::Raw)
+    pub stop_at: u64,
 }
 
 impl Captured {
@@ -712,7 +714,38 @@ impl Captured {
         } else {
             symbols::host_symbol(pc).map_or_else(String::new, |(name, image, d)| format!(" ({name}+{d:#x} in {image})"))
         };
-        Some(format!("walk stops at {pc:#x}{at}: {why}"))
+        let into = match self.stop_at {
+            0 => String::new(),
+            ra => format!(" ({ra:#x}{})", mapping_of(ra)),
+        };
+        Some(format!("walk stops at {pc:#x}{at}: {why}{into}"))
+    }
+}
+
+/// What maps address `a`, for a report of a return address no walk could step into: ", in
+/// <file> (<perms>)", ", in an anonymous <perms> mapping", ", in no mapping" (Linux:
+/// /proc/self/maps; elsewhere nothing). Reads a file: never while a thread is held.
+fn mapping_of(a: u64) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+        for line in maps.lines() {
+            let mut w = line.split_whitespace();
+            let (Some(range), Some(perms)) = (w.next(), w.next()) else { continue };
+            let Some((lo, hi)) = range.split_once('-') else { continue };
+            let (Ok(lo), Ok(hi)) = (u64::from_str_radix(lo, 16), u64::from_str_radix(hi, 16)) else { continue };
+            if !(lo..hi).contains(&a) {
+                continue;
+            }
+            let file = w.nth(3).unwrap_or("");
+            return if file.is_empty() { format!(", in an anonymous {perms} mapping") } else { format!(", in {file} ({perms})") };
+        }
+        ", in no mapping".to_string()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = a;
+        String::new()
     }
 }
 
@@ -735,7 +768,7 @@ pub fn capture_all(want: &dyn Fn(&threads::Thread) -> bool) -> Result<Vec<Captur
         if t.handle == 0 && raw.handle != 0 {
             t.handle = raw.handle;
         }
-        out.push(Captured { frames: raw.frames().to_vec(), lr: raw.lr, sp: raw.sp, err: r.err(), stop: raw.stop, t });
+        out.push(Captured { frames: raw.frames().to_vec(), lr: raw.lr, sp: raw.sp, err: r.err(), stop: raw.stop, stop_at: raw.stop_at, t });
     }
     Ok(out)
 }
@@ -945,6 +978,29 @@ pub struct Frame {
     /// an inlined copy: its logical frames, innermost first, ending with the physical fn at the
     /// call site (fn, file:line:col); empty for a fn's own code
     pub levels: Vec<(String, String)>,
+}
+
+/// The ICE and bail reports already take the loader lock and read symbol files in std's native
+/// backtrace. This walk may do the same; it only tries Relax's locks and never calls the owner.
+pub(crate) fn report_stack() -> String {
+    use std::fmt::Write;
+    let _kept = crate::zone_alloc::kept();
+    let mut pcs = Vec::new();
+    let stop = threads::capture_self_with(&mut pcs, true);
+    let mut text = String::from("the program's stack (Relax's walk, through JIT code):");
+    for pc in pcs {
+        let look = pc.wrapping_sub(1); // capture_self returns only return addresses
+        write!(text, "\n  {pc:#x}").unwrap();
+        if crate::jit::in_jit_code(look) {
+            if let Some(name) = codever::report_name(unsafe { &*crate::jit::cur_unit() }, look) {
+                write!(text, " {name}").unwrap();
+            }
+        } else if let Some((name, image, _)) = symbols::host_symbol_nowait(look) {
+            write!(text, " {name} ({image})").unwrap();
+        }
+    }
+    if let Some(why) = stop { write!(text, "\n  walk stopped: {why}").unwrap(); }
+    text
 }
 
 /// Names for raw pcs: JIT frames by the unit (one owner Job request; on timeout `slot#id+off`),
@@ -1310,6 +1366,7 @@ pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
         crate::waits::Kind::Owner => format!("owner ({} request) for {}; owner serves {}", w.label, ms, crate::owner::serving_note()),
         crate::waits::Kind::Build => format!("build #{} {} held by {} for {}", w.object, w.label, thread_label(w.holder, list), ms),
         crate::waits::Kind::Token => format!("a {} CPU token for {}", w.label, ms),
+        crate::waits::Kind::Check => format!("the app check beside main ({}) held by {} for {}", w.label, thread_label(w.holder, list), ms),
         _ => format!("{} held by {} for {}", kind, thread_label(w.holder, list), ms),
     }
 }
@@ -1456,6 +1513,16 @@ fn cmd_jit(req: &Req, out: &mut Out) {
         max / 1_000_000,
         all / 1_000_000,
         blocks
+    ));
+    // PGO's counted windows: profiled picks that leave again and again are a queue and a pick that disagree
+    let (left, once, more) = crate::jit::profiled_left_counts();
+    out.line(&format!(
+        "PGO: {} counted builds, {} slots parked in their counted code now; profiled O3 picks that left: {} ({} slots once, {} more often)",
+        crate::jit::PGO_STATS[0].load(std::sync::atomic::Ordering::Relaxed),
+        crate::jit::tier_parked(crate::jit::wall_ns()).len(),
+        left,
+        once,
+        more
     ));
     out.line(&crate::jit::queue_held_line());
     // a program that presents frames: its rate in the same window (0 = it draws nothing now)

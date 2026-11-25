@@ -1,4 +1,4 @@
-//! `makepad inspect <pid|app|all|list> <command> [args]`: the client side of the inspect protocol.
+//! `makepad inspect <pid|socket path|app|all|list> <command> [args]`: the client side of the inspect protocol.
 //! Finds running apps by their discovery files (makepad-remote-<pid>.json in the registry dir, `makepad_remote::discovery::registry_dir`), sends
 //! one request line and prints the answer's JSON lines (the `end` line left out). Exit status 1 when
 //! the answer had an error, 2 for usage / no such app.
@@ -7,21 +7,25 @@
 //! of them; `events follow=1` streams all of them; other commands run on each in turn.
 //!
 //! An app name and `all` reach only what this caller started, or anything for someone at a
-//! terminal; other apps are named by pid ([`makepad_remote::discovery::Caller`]).
+//! terminal; other apps are named by pid or endpoint ([`makepad_remote::discovery::Caller`]).
 
 use std::io::Write;
 
 pub use makepad_remote::discovery::App;
-use makepad_remote::discovery::{named, Caller};
+use makepad_remote::discovery::{self, named, Caller};
 
 /// The running apps (discovery files `makepad-remote-<pid>.json`; stale ones of ended processes are removed).
 pub fn apps() -> Vec<App> {
-    makepad_remote::discovery::apps()
+    discovery::apps()
+}
+
+fn names_endpoint(target: &str) -> bool {
+    target.starts_with("tcp:") || discovery::is_socket_path(target) || discovery::is_endpoint_file(target)
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: {tool} inspect <pid|list> <command> [args]   ({tool} inspect <pid> help: the commands)", tool = crate::tool_name());
-    eprintln!("       {tool} inspect <app|all> <command> [args]   (at a terminal, or the apps of your own lease; anything else is named by pid)", tool = crate::tool_name());
+    eprintln!("usage: {tool} inspect <pid|socket path|list> <command> [args]   ({tool} inspect <pid> help: the commands)", tool = crate::tool_name());
+    eprintln!("       {tool} inspect <app|all> <command> [args]   (at a terminal, or the apps of your own lease; anything else is named by pid or endpoint)", tool = crate::tool_name());
     eprintln!("       {tool} inspect <host>:<pid> <command> | <host>:list | <host>:session <launch|kill> .. | hosts | all:list", tool = crate::tool_name());
     eprintln!("       {tool} inspect <pid|app> pf <query> [s=3] [save=x.mkpf] | file=<x.mkpf> pf <query> [base=y.mkpf]   (pf help: the profiler queries)", tool = crate::tool_name());
     2
@@ -61,6 +65,30 @@ pub fn main(args: &[String]) -> i32 {
     if target == "hosts" {
         return remote::hosts();
     }
+    let caller = Caller::command_line();
+    if names_endpoint(target) {
+        let app = if discovery::is_socket_path(target) {
+            // The caller's temp directory may not contain the app's discovery file.
+            apps().into_iter().rfind(|a| a.socket == *target).unwrap_or_else(|| App {
+                pid: 0,
+                app: String::new(),
+                socket: target.clone(),
+                started_ms: 0,
+                caps: Vec::new(),
+                restart_parent: None,
+                fields: Vec::new(),
+            })
+        } else {
+            match discovery::find(target, &caller) {
+                Ok(app) => app,
+                Err(why) => {
+                    eprintln!("relax inspect: {why}");
+                    return 2;
+                }
+            }
+        };
+        return inspect_app(&app, &args[1..], text_out);
+    }
     if let Some((host, app)) = target.split_once(':') {
         let line = makepad_remote::app::typed_line(&args[1..]);
         return remote::main(host, app, &line, text_out);
@@ -69,17 +97,15 @@ pub fn main(args: &[String]) -> i32 {
         println!("{}", super::schema());
         return 0;
     }
-    let line = makepad_remote::app::typed_line(&args[1..]);
-    let cmd = line.split_whitespace().next().unwrap_or("").to_string();
-    let text = text_out;
-    let caller = Caller::command_line();
     let list = apps();
     if target == "all" {
         if let Some(why) = caller.all_refused(&list) {
             eprintln!("relax inspect: {why}");
             return 2;
         }
-        return all(&line, &cmd, text, &caller);
+        let line = makepad_remote::app::typed_line(&args[1..]);
+        let cmd = line.split_whitespace().next().unwrap_or("");
+        return all(&line, cmd, text_out, &caller);
     }
     let chosen = match target.parse::<u32>() {
         Ok(pid) => list.iter().rfind(|a| a.answers_to(pid)).cloned(),
@@ -96,13 +122,19 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("relax inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
         return 2;
     };
+    inspect_app(app, &args[1..], text_out)
+}
+
+fn inspect_app(app: &App, words: &[String], text: bool) -> i32 {
     if let Some(why) = app.unreachable() {
         eprintln!("relax inspect: {why}");
         return 2;
     }
-    if args.get(1).map(String::as_str) == Some("pf") {
-        return super::pf::live_main(app, &args[2..]);
+    if words.first().map(String::as_str) == Some("pf") {
+        return super::pf::live_main(app, &words[1..]);
     }
+    let line = makepad_remote::app::typed_line(words);
+    let cmd = line.split_whitespace().next().unwrap_or("");
     let streaming = cmd == "watch" || (cmd == "events" && line.contains("follow=1"));
     let mut got: Vec<String> = Vec::new();
     let r = ask(app, &line, &mut |l| {
@@ -128,7 +160,11 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
         Err(e) => {
-            eprintln!("relax inspect: {} (pid {}): {}", app.app, app.pid, e);
+            if app.pid == 0 && app.app.is_empty() {
+                eprintln!("relax inspect: {}: {e}", app.socket);
+            } else {
+                eprintln!("relax inspect: {} (pid {}): {}", app.app, app.pid, e);
+            }
             2
         }
     }
@@ -148,8 +184,9 @@ pub(crate) fn ask(app: &App, line: &str, each: &mut dyn FnMut(&str) -> bool) -> 
     }
     let client = makepad_remote::Client::connect(&app.socket).map_err(to_io)?;
     // the commands that are images (`grab`, `gseq`, `gq`) are answered client side from the
-    // `frames` service, like `makepad-remote app` does: the same library function
-    makepad_remote::app::run_line(&client, line, each).map_err(to_io)
+    // `frames` service, like `makepad-remote app` does: the same library function, in the printed
+    // form (a tool result's pictures as files)
+    makepad_remote::app::run_line_printed(&client, line, each).map_err(to_io)
 }
 
 /// `all`: every app of `caller` now and every one that starts while this runs.
@@ -228,7 +265,7 @@ fn all(line: &str, cmd: &str, text: bool, caller: &Caller) -> i32 {
     }
 }
 
-/// Addresses with a host part (`149:stage`), `hosts` and `all:list`: through the hub.
+/// Addresses with a host part (`149:app`), `hosts` and `all:list`: through the hub.
 #[cfg(unix)]
 mod remote {
     use makepad_remote::hosts::{registry_path, Hosts};
@@ -351,5 +388,20 @@ mod remote {
     }
     pub fn main(_: &str, _: &str, _: &str, _: bool) -> i32 {
         hosts()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_endpoint;
+
+    #[test]
+    fn distinguishes_endpoint_targets() {
+        for target in ["/tmp/makepad-remote-1.sock", "tcp:127.0.0.1:5000", r"C:\Users\a\endpoint.json"] {
+            assert!(names_endpoint(target), "expected an explicit endpoint for {target}");
+        }
+        for target in ["149:app", "12345", "demo", "all", "list"] {
+            assert!(!names_endpoint(target), "unexpected explicit endpoint for {target}");
+        }
     }
 }

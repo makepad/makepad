@@ -4,6 +4,8 @@
 //! them reruns without a rustc rebuild. A HAL program runs the HAL's main loop itself, as its
 //! rustc build does (makepad-platform app_main.rs).
 
+relax_runner::linked_host!(relax_runner::BARE);
+
 fn main() {
     relax_runner::main(&relax_runner::BARE)
 }

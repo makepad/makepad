@@ -7,7 +7,7 @@
 # in the crate being run; uncached, then cached: cold, warm, and warm after an edit of a calling
 # file. Prints "macro_rename_from_expansion: ok" or "macro_rename_from_expansion: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 WANT="renamed macros 34 true true | 6 30"
 ok=1
 run() { # run <label> <expected> [env..]

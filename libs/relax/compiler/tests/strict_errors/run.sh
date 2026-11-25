@@ -8,7 +8,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 # the binary as an absolute path (each check runs in its own temporary directory)
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 export RELAX_CACHE=off
 fail=0
 for f in "$H"/*.rs; do

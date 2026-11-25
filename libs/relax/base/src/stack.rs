@@ -908,12 +908,10 @@ mod tests {
         }
         let (lo, hi) = super::stack_bounds();
         assert!(hi > lo, "the thread's stack is known");
-        // Linux: the highest free gap under the stack, from the process's map, taken exactly (a
-        // run under the JIT reserves wide ranges there, and the system places a hint whose range
-        // is taken elsewhere: above). None: no gap, or the map changed meanwhile.
+        // The mapped ranges that start below the stack, sorted: Linux's /proc/self/maps, macOS's
+        // VM regions. None: the system does not say.
         #[cfg(target_os = "linux")]
-        let below_gap = |len: usize| -> Option<usize> {
-            const FIXED_NOREPLACE: i32 = 0x10_0000;
+        let spans_below = || -> Option<Vec<(usize, usize)>> {
             let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
             let mut spans: Vec<(usize, usize)> = maps
                 .lines()
@@ -921,27 +919,96 @@ mod tests {
                     let (a, b) = l.split_whitespace().next()?.split_once('-')?;
                     Some((usize::from_str_radix(a, 16).ok()?, usize::from_str_radix(b, 16).ok()?))
                 })
+                .filter(|s| s.0 < lo)
                 .collect();
             spans.sort_unstable();
-            let (mut end, mut best) = (1usize << 20, None);
-            for &(a, b) in spans.iter().take_while(|s| s.0 < lo) {
-                let at = a.saturating_sub(len) & !0xffff;
-                if at >= end {
-                    best = Some(at);
-                }
-                end = end.max(b);
+            Some(spans)
+        };
+        #[cfg(target_vendor = "apple")]
+        let spans_below = || -> Option<Vec<(usize, usize)>> {
+            extern "C" {
+                static mach_task_self_: u32;
+                fn mach_vm_region(task: u32, addr: *mut u64, size: *mut u64, flavor: i32, info: *mut i32, count: *mut u32, object: *mut u32) -> i32;
             }
-            let at = best?;
+            const VM_REGION_BASIC_INFO_64: i32 = 9;
+            let (mut spans, mut addr) = (Vec::new(), 0u64);
+            loop {
+                let (mut size, mut info, mut count, mut object) = (0u64, [0i32; 16], 9u32, 0u32);
+                // the region at or above `addr` (KERN_INVALID_ADDRESS past the last one)
+                if unsafe { mach_vm_region(mach_task_self_, &mut addr, &mut size, VM_REGION_BASIC_INFO_64, info.as_mut_ptr(), &mut count, &mut object) } != 0 || addr as usize >= lo {
+                    return Some(spans);
+                }
+                spans.push((addr as usize, (addr + size) as usize));
+                addr += size;
+            }
+        };
+        // Maps `len` bytes at exactly `at`, never over another mapping. Ok(false): the range is
+        // taken; Err: the system does not map there.
+        #[cfg(target_os = "linux")]
+        let map_exact = |at: usize, len: usize| -> Result<bool, ()> {
+            const FIXED_NOREPLACE: i32 = 0x10_0000;
+            const EEXIST: i32 = 17;
             let got = unsafe { mmap(at as *mut c_void, len, 3, anon | FIXED_NOREPLACE, -1, 0) } as usize;
-            if got != at && got as isize != -1 {
+            if got == at {
+                return Ok(true);
+            }
+            if got as isize != -1 {
                 // (a kernel without the flag took it as a hint)
                 unsafe { munmap(got as *mut c_void, len) };
+                return Err(());
             }
-            (got == at).then_some(at)
+            if std::io::Error::last_os_error().raw_os_error() == Some(EEXIST) { Ok(false) } else { Err(()) }
+        };
+        #[cfg(target_vendor = "apple")]
+        let map_exact = |at: usize, len: usize| -> Result<bool, ()> {
+            extern "C" {
+                static mach_task_self_: u32;
+                fn mach_vm_allocate(task: u32, addr: *mut u64, size: u64, flags: i32) -> i32;
+            }
+            const VM_FLAGS_FIXED: i32 = 0;
+            const KERN_NO_SPACE: i32 = 3;
+            let mut addr = at as u64;
+            match unsafe { mach_vm_allocate(mach_task_self_, &mut addr, len as u64, VM_FLAGS_FIXED) } {
+                0 => Ok(true),
+                KERN_NO_SPACE => Ok(false),
+                _ => Err(()),
+            }
+        };
+        // A free gap under the stack, from the process's map, taken exactly: under the JIT every
+        // program thread reserves a wide stack and shadow stack there, packed, so a hint's range is
+        // taken and the system maps it elsewhere (Linux: the highest hole, macOS: the first one up
+        // from the hint, both above the stack). Each gap is tried, the highest first: the other
+        // tests' threads start meanwhile, and a new thread's reservation goes to the top of the
+        // highest hole that holds it, where this gap is (Linux: EEXIST, about one take in 3000
+        // while threads start). A gap lost so sends it to the next, all of them lost to a fresh
+        // read of the map. None: no gap, or the system does not map there.
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        let below_gap = |len: usize| -> Option<usize> {
+            loop {
+                let (mut end, mut gaps) = (1usize << 20, Vec::new());
+                for (a, b) in spans_below()? {
+                    let at = a.saturating_sub(len) & !0xffff;
+                    if at >= end {
+                        gaps.push(at);
+                    }
+                    end = end.max(b);
+                }
+                let mut lost = false;
+                for &at in gaps.iter().rev() {
+                    match map_exact(at, len) {
+                        Ok(true) => return Some(at),
+                        Ok(false) => lost = true,
+                        Err(()) => return None,
+                    }
+                }
+                if !lost {
+                    return None;
+                }
+            }
         };
         // (a hint: the system maps there when it is free; further out until one lands on that side)
         let map = |above: bool| -> usize {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_vendor = "apple"))]
             if !above {
                 if let Some(at) = below_gap(SMALL + GUARD) {
                     return at;

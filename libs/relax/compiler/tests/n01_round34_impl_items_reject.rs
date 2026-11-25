@@ -1,3 +1,4 @@
+// rejects: E0046
 trait Tr { type T; const N: usize; fn f(x: i32) -> i32; }
 struct S;
 impl Tr for S {}

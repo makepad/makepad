@@ -405,6 +405,74 @@ pub mod obligations {
     use crate::types::{TyId, TyKind};
     use crate::ast::{self, ItemKind};
 
+    /// error_reporting/infer/region.rs report_region_errors (without the "nice" region errors of
+    /// try_report_nice_region_error): process_errors drops the generic bound failures when there
+    /// are other errors and orders them by span; each is reported by its origin
+    /// (report_concrete_failure, report_placeholder_failure, report_sub_sup_conflict).
+    pub(crate) fn region_error_messages(prog: &Program, tcx: &Tcx, infcx: &crate::infer::InferCtxt<'_>, def: DefId, errors: Vec<crate::infer::lexical_region_resolve::RegionResolutionError>) -> Vec<(u32, String)> {
+        use crate::infer::lexical_region_resolve::RegionResolutionError as E;
+        use crate::infer::region_constraints::SubregionOrigin as O;
+        let tys = &tcx.tys;
+        let placeholder = |r| matches!(tys.region_kind(r), crate::types::RegionKind::RePlaceholder { .. });
+        let bound_failure = |e: &E| matches!(e, E::GenericBoundFailure(..));
+        let mut errors: Vec<E> = if errors.iter().all(bound_failure) { errors } else { errors.into_iter().filter(|e| !bound_failure(e)).collect() };
+        errors.sort_by_key(|e| match *e {
+            E::ConcreteFailure(o, ..) => o.span(),
+            E::GenericBoundFailure(_, _, span) => span,
+            E::SubSupConflict(_, var_span, ..) | E::UpperBoundUniverseConflict(_, var_span, ..) => var_span,
+        });
+        // report_concrete_failure (report_placeholder_failure gives the same codes for these origins)
+        let concrete = |o: O| -> (u32, String) {
+            let msg = match o {
+                O::Subtype(_) => "E0308: lifetime mismatch".to_string(),
+                O::RelateParamBound(_, ty) => format!("E0477: the type `{}` does not fulfill the required lifetime", crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(ty))),
+                O::RelateRegionParamBound(_) | O::Misc => "E0478: lifetime bound not satisfied".to_string(),
+            };
+            (o.span(), msg)
+        };
+        let mut out = Vec::new();
+        for e in errors {
+            match e {
+                E::ConcreteFailure(o, ..) => out.push(concrete(o)),
+                E::GenericBoundFailure(ty, sub, span) => { if let Some(msg) = generic_bound_failure(prog, tcx, infcx, def, ty, sub) { out.push((span, msg)); } }
+                E::SubSupConflict(_, _, sub_origin, sub_r, _, _) if placeholder(sub_r) => out.push(concrete(sub_origin)),
+                E::SubSupConflict(_, _, _, _, sup_origin, sup_r) if placeholder(sup_r) => out.push(concrete(sup_origin)),
+                E::SubSupConflict(_, var_span, ..) => out.push((var_span, "E0803: cannot infer an appropriate lifetime due to conflicting requirements".to_string())),
+                E::UpperBoundUniverseConflict(_, _, _, sup_origin, _) => out.push(concrete(sup_origin)),
+            }
+        }
+        out
+    }
+
+    /// `construct_generic_bound_failure` (E0309, E0310, E0311): the message of a type that must outlive `sub`
+    /// and cannot be shown to.
+    fn generic_bound_failure(prog: &Program, tcx: &Tcx, infcx: &crate::infer::InferCtxt<'_>, def: DefId, ty: TyId, sub: crate::types::RegionId) -> Option<String> {
+        use crate::types::{LateParamKind, RegionKind};
+        let ty = infcx.deeply_resolve_ignoring_regions(ty);
+        let what = match tcx.tys.kind(ty) {
+            TyKind::Param(_) => "parameter type",
+            TyKind::Placeholder(..) => "placeholder type",
+            TyKind::Alias(..) => "associated type",
+            _ => return None,
+        };
+        let named = |r| -> bool {
+            match tcx.tys.region_kind(r) {
+                RegionKind::ReLateParam(_, LateParamKind::Named(_)) => true,
+                RegionKind::ReEarlyParam(_) => {
+                    let contract = tcx.fn_sig(prog, def).map(|s| &s.region_contract).or_else(|| tcx.nominal_region_contracts.get(&def));
+                    contract.and_then(|c| c.regions.iter().find(|(_, x)| *x == r)).map_or(true, |(n, _)| n != "'_")
+                }
+                _ => false,
+            }
+        };
+        let code = match tcx.tys.region_kind(sub) {
+            RegionKind::ReStatic => "E0310",
+            RegionKind::ReEarlyParam(_) | RegionKind::ReLateParam(..) if named(sub) => "E0309",
+            _ => "E0311",
+        };
+        Some(format!("{code}: the {what} `{}` may not live long enough", crate::typeck::ty_to_string(false, prog, tcx, ty)))
+    }
+
     struct Wfcx<'a, 'tcx> {
         prog: &'a Program,
         tcx: &'a Tcx,
@@ -567,43 +635,8 @@ pub mod obligations {
             out
         }
 
-        /// error_reporting/infer/region.rs report_region_errors (without the "nice" region errors of
-        /// try_report_nice_region_error): process_errors drops the generic bound failures when there
-        /// are other errors and orders them by span; each is reported by its origin
-        /// (report_concrete_failure, report_placeholder_failure, report_sub_sup_conflict).
         fn region_error_messages(&self, errors: Vec<crate::infer::lexical_region_resolve::RegionResolutionError>) -> Vec<(u32, String)> {
-            use crate::infer::lexical_region_resolve::RegionResolutionError as E;
-            use crate::infer::region_constraints::SubregionOrigin as O;
-            let tys = &self.tcx.tys;
-            let placeholder = |r| matches!(tys.region_kind(r), crate::types::RegionKind::RePlaceholder { .. });
-            let bound_failure = |e: &E| matches!(e, E::GenericBoundFailure(..));
-            let mut errors: Vec<E> = if errors.iter().all(bound_failure) { errors } else { errors.into_iter().filter(|e| !bound_failure(e)).collect() };
-            errors.sort_by_key(|e| match *e {
-                E::ConcreteFailure(o, ..) => o.span(),
-                E::GenericBoundFailure(_, _, span) => span,
-                E::SubSupConflict(_, var_span, ..) | E::UpperBoundUniverseConflict(_, var_span, ..) => var_span,
-            });
-            // report_concrete_failure (report_placeholder_failure gives the same codes for these origins)
-            let concrete = |o: O| -> (u32, String) {
-                let msg = match o {
-                    O::Subtype(_) => "E0308: lifetime mismatch".to_string(),
-                    O::RelateParamBound(_, ty) => format!("E0477: the type `{}` does not fulfill the required lifetime", crate::typeck::ty_to_string(false, self.prog, self.tcx, self.infcx.deeply_resolve_ignoring_regions(ty))),
-                    O::RelateRegionParamBound(_) | O::Misc => "E0478: lifetime bound not satisfied".to_string(),
-                };
-                (o.span(), msg)
-            };
-            let mut out = Vec::new();
-            for e in errors {
-                match e {
-                    E::ConcreteFailure(o, ..) => out.push(concrete(o)),
-                    E::GenericBoundFailure(ty, sub, span) => { if let Some(msg) = self.generic_bound_failure(ty, sub) { out.push((span, msg)); } }
-                    E::SubSupConflict(_, _, sub_origin, sub_r, _, _) if placeholder(sub_r) => out.push(concrete(sub_origin)),
-                    E::SubSupConflict(_, _, _, _, sup_origin, sup_r) if placeholder(sup_r) => out.push(concrete(sup_origin)),
-                    E::SubSupConflict(_, var_span, ..) => out.push((var_span, "E0803: cannot infer an appropriate lifetime due to conflicting requirements".to_string())),
-                    E::UpperBoundUniverseConflict(_, _, _, sup_origin, _) => out.push(concrete(sup_origin)),
-                }
-            }
-            out
+            region_error_messages(self.prog, self.tcx, self.infcx, self.def, errors)
         }
 
         /// rustc `OutlivesEnvironment::new` of a well-formedness check: the item's outlives clauses (an ADT's
@@ -648,36 +681,6 @@ pub mod obligations {
                 bounds.extend(pairs);
             }
             OutlivesEnvironment::from_normalized_bounds(tys, param_env, known, bounds)
-        }
-
-        /// `construct_generic_bound_failure` (E0309, E0310, E0311): the message of a type that must outlive `sub`
-        /// and cannot be shown to.
-        fn generic_bound_failure(&self, ty: TyId, sub: crate::types::RegionId) -> Option<String> {
-            use crate::types::{LateParamKind, RegionKind};
-            let tcx = self.tcx;
-            let ty = self.infcx.deeply_resolve_ignoring_regions(ty);
-            let what = match tcx.tys.kind(ty) {
-                TyKind::Param(_) => "parameter type",
-                TyKind::Placeholder(..) => "placeholder type",
-                TyKind::Alias(..) => "associated type",
-                _ => return None,
-            };
-            let named = |r| -> bool {
-                match tcx.tys.region_kind(r) {
-                    RegionKind::ReLateParam(_, LateParamKind::Named(_)) => true,
-                    RegionKind::ReEarlyParam(_) => {
-                        let contract = tcx.fn_sig(self.prog, self.def).map(|s| &s.region_contract).or_else(|| tcx.nominal_region_contracts.get(&self.def));
-                        contract.and_then(|c| c.regions.iter().find(|(_, x)| *x == r)).map_or(true, |(n, _)| n != "'_")
-                    }
-                    _ => false,
-                }
-            };
-            let code = match tcx.tys.region_kind(sub) {
-                RegionKind::ReStatic => "E0310",
-                RegionKind::ReEarlyParam(_) | RegionKind::ReLateParam(..) if named(sub) => "E0309",
-                _ => "E0311",
-            };
-            Some(format!("{code}: the {what} `{}` may not live long enough", crate::typeck::ty_to_string(false, self.prog, tcx, ty)))
         }
 
         fn message(&self, code: &str, o: &PredicateObligation) -> Option<String> {
@@ -1320,6 +1323,7 @@ pub mod obligations {
     /// impl's self type are the impl's own distinct parameters (E0366), and every predicate of the impl
     /// holds in the environment of the type's definition (E0367).
     fn always_applicable(prog: &Program, tcx: &Tcx, imp: DefId, item: &ast::Item, file: u32, adt: DefId, args: crate::types::TyList, regions: crate::types::RegionArgsId) -> Vec<String> {
+        use crate::tcx::outlives::OutlivesPredicate;
         use crate::types::RegionKind;
         let tys = &tcx.tys;
         // uses_unique_generic_params(adt_to_impl_args, CheckRegions::OnlyParam)
@@ -1347,7 +1351,16 @@ pub mod obligations {
         // the predicates of the type, at the impl's arguments
         let adt_args = tcx.complete_args(prog, adt, tys.list(args), regions);
         let adt_env = tcx.param_env_id(prog, adt);
-        let clauses: Vec<_> = tcx.param_env_by_id(adt_env).clauses.iter().map(|p| tcx.instantiate_predicate(prog, adt, &adt_args, p)).collect();
+        let mut clauses: Vec<_> = tcx.param_env_by_id(adt_env).clauses.iter().map(|p| tcx.instantiate_predicate(prog, adt, &adt_args, p)).collect();
+        // rustc's `predicates_of` of an ADT includes its `inferred_outlives_of` (RFC 2093).
+        for p in crate::borrowck::implied_bounds::ImpliedBounds::inferred_outlives(tcx, prog, adt) {
+            let kind = match p {
+                OutlivesPredicate::Region(a, b) => ClauseKind::RegionOutlives(a, b),
+                OutlivesPredicate::Type(t, r) => ClauseKind::TypeOutlives(t, r),
+            };
+            let clause = tcx.instantiate_predicate(prog, adt, &adt_args, &Predicate::dummy(PredicateKind::Clause(kind)));
+            if !clauses.contains(&clause) { clauses.push(clause); }
+        }
         let env = tcx.intern_param_env(crate::next_solver::ParamEnv { clauses: clauses.into() });
         let infcx = crate::infer::InferCtxt::for_item(tcx, prog, crate::tcx::TypingMode::non_body_analysis(), imp);
         let mut ocx = ObligationCtxt::new(&infcx, prog);

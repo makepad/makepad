@@ -68,6 +68,8 @@ pub struct PendingPlan {
     pending_crates: Vec<PreCrate>,
     pending_contexts: Vec<Arc<crate::source_context::Context>>,
     plan: std::sync::OnceLock<Plan>,
+    /// A thread is making the plan, or made it.
+    started: std::sync::atomic::AtomicBool,
     early: EarlyCrates,
     parts: Option<crate::crate_image::DemandParts>,
     /// the stored plan of an earlier load, taken over without planning (`carried`): its inputs
@@ -84,7 +86,7 @@ impl PendingPlan {
     /// the edit (a full selection is always a sound one), so nothing is planned. Its parts stay
     /// the stored ones (the next plan validates them by their own inputs).
     pub fn carried(crates: &[PreCrate], contexts: Vec<Arc<crate::source_context::Context>>, image: Arc<DemandImage>) -> Self {
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts: None, carried: true, outlined: std::sync::OnceLock::new(), failed: Default::default() };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), started: Default::default(), early: EarlyCrates::default(), parts: None, carried: true, outlined: std::sync::OnceLock::new(), failed: Default::default() };
         let plan = Plan::build(&pending.pending_crates, pending.pending_contexts.clone(), Some(image), &pending.early, None);
         let _ = pending.plan.set(plan);
         pending
@@ -105,7 +107,7 @@ impl PendingPlan {
             && !crates.iter().any(|c| c.cfg.session.runtime.lazy_verify) {
             images.and_then(|i| i.demand_parts(crates, recipe_identity(crates)))
         } else { None };
-        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), early: EarlyCrates::default(), parts, carried: false, outlined: std::sync::OnceLock::new(), failed: Default::default() };
+        let pending = Self { pending_crates: crates.to_vec(), pending_contexts: contexts, plan: std::sync::OnceLock::new(), started: Default::default(), early: EarlyCrates::default(), parts, carried: false, outlined: std::sync::OnceLock::new(), failed: Default::default() };
         // The crates selected in full (Plan::build) are known before planning.
         pending.early.publish(selected_prefix(crates, pending.parts.as_ref()));
         if image.is_some() || !parallel {
@@ -137,9 +139,58 @@ impl PendingPlan {
         crate::memstat::trim();
         if trace() { eprintln!("boot-trace: plan ready, heap trimmed: rss {} -> {} MB in {:.1} ms", r0 >> 20, crate::memstat::resident() >> 20, t.elapsed().as_secs_f64() * 1e3); }
     }
-    /// The planning thread panicked (`complete`).
+    /// Planning panicked: on the planning thread (`complete`), or on a writer that made the plan (`settle`).
     pub fn failed(&self) -> bool { self.failed.load(std::sync::atomic::Ordering::Acquire) }
     pub fn ready(&self) -> Option<&Plan> { self.plan.get() }
+    /// The plan for a caller off the compiler's owner thread that needs it made (a graph writer):
+    /// made here when no thread is making it, as a dereference would; else waited for on the
+    /// plan's condvar (never polled). None: its planning failed.
+    pub fn settle(&self) -> Option<&Plan> { self.settle_with(None) }
+    /// `settle`, calling `report` with the time waited so far each `every` it waits for another
+    /// thread's planning (an exit says it waits instead of hanging silently). A report never ends
+    /// the wait.
+    pub fn settle_reporting(&self, every: std::time::Duration, report: &mut dyn FnMut(std::time::Duration)) -> Option<&Plan> {
+        self.settle_with(Some((every, report)))
+    }
+    fn settle_with(&self, mut report: Option<(std::time::Duration, &mut dyn FnMut(std::time::Duration))>) -> Option<&Plan> {
+        let start = std::time::Instant::now();
+        // a deadline, not each wait's timeout: the early publications wake the condvar often
+        let mut next = report.as_ref().map(|(every, _)| start + *every);
+        loop {
+            if let Some(plan) = self.ready() { return Some(plan); }
+            if self.failed() { return None; }
+            if !self.started.load(std::sync::atomic::Ordering::Acquire) {
+                // made here: a panic is the plan's failure, as on its planning thread (`complete`),
+                // so no writer makes it again and again
+                return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| std::ops::Deref::deref(self))) {
+                    Ok(plan) => Some(plan),
+                    Err(_) => {
+                        self.failed.store(true, std::sync::atomic::Ordering::Release);
+                        self.early.wake_all();
+                        None
+                    }
+                };
+            }
+            let mut g = self.early.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            while self.ready().is_none() && !self.failed() {
+                let Some(at) = next else {
+                    g = self.early.wake.1.wait(g).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                };
+                let now = std::time::Instant::now();
+                if now >= at {
+                    // reported without the condvar's lock, then checked again from the top
+                    drop(g);
+                    if let Some((every, report)) = report.as_mut() {
+                        report(start.elapsed());
+                        next = Some(at + *every);
+                    }
+                    break;
+                }
+                g = self.early.wake.1.wait_timeout(g, at - now).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
+            }
+        }
+    }
     /// The macro definitions the outline of crate `ci` found, its expansions' included (what
     /// the raw scan a crate's files parse against lacks). Waits for the plan. A restored plan
     /// (an earlier load's, whose inputs the sources still match) holds no outline: the crates
@@ -197,7 +248,26 @@ impl PendingPlan {
 impl std::ops::Deref for PendingPlan {
     type Target = Plan;
     fn deref(&self) -> &Plan {
-        self.plan.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &self.early, self.parts.as_ref()))
+        if let Some(plan) = self.plan.get() { return plan; }
+        let plan = self.plan.get_or_init(|| {
+            self.started.store(true, std::sync::atomic::Ordering::Release);
+            // an unwind leaves the plan unmade and nobody making it: a waiter (`settle`) makes it
+            // then. Not the plan's failure: that is its planning thread's (`complete`) or a
+            // writer's (`settle`), and an unwind here may be a preemption the caller retries
+            struct Unwound<'a>(&'a PendingPlan);
+            impl Drop for Unwound<'_> {
+                fn drop(&mut self) {
+                    if std::thread::panicking() {
+                        self.0.started.store(false, std::sync::atomic::Ordering::Release);
+                        self.0.early.wake_all();
+                    }
+                }
+            }
+            let _unwound = Unwound(self);
+            Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &self.early, self.parts.as_ref())
+        });
+        self.early.wake_all();
+        plan
     }
 }
 

@@ -168,3 +168,42 @@ fn a03_char_boundaries() {
         s.get(core::range::RangeToInclusive::from(..=1)));
     println!("| outside str {:?}", s.get(core::range::RangeToInclusive::from(..=usize::MAX)));
 }
+
+// A str through a generic `SliceIndex<str>` bound, for every classic range (only the new range types
+// met it: E0277 for the others): `get`, the index and their `_mut` forms; then ranges past the end
+// and ranges that do not fall on a char boundary, by `get` (None) and by the index (its panic).
+fn classic_case<R: core::slice::SliceIndex<str, Output = str> + Clone + core::fmt::Debug>(r: R, s: &mut str) {
+    let before = s.get(r.clone()).unwrap().to_string();
+    s.get_mut(r.clone()).unwrap().make_ascii_uppercase();
+    let upper = s[r.clone()].to_string();
+    s[r.clone()].make_ascii_lowercase();
+    let shown = format!("{:?}", r);
+    println!("| classic {}: {:?} -> {:?} -> {:?}", shown, before, upper, &s[r]);
+}
+
+fn cut<R: core::slice::SliceIndex<str, Output = str>>(s: &str, r: R) -> Option<&str> {
+    s.get(r)
+}
+
+fn at<R: core::slice::SliceIndex<str, Output = str>>(s: &str, r: R) -> String {
+    outcome(|| s[r].to_string())
+}
+
+#[test]
+fn a04_classic_ranges() {
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut text = String::from("aébc");
+    let s = text.as_mut_str();
+    classic_case(0..3, s);
+    classic_case(1..=3, s);
+    classic_case(3.., s);
+    classic_case(..3, s);
+    classic_case(.., s);
+    classic_case(..=2, s);
+    let s = "aé€b";
+    println!("| generic {:?} {:?} {:?} {:?} {:?} {:?}", cut(s, 1..3), cut(s, 1..=5), cut(s, 3..), cut(s, ..3), cut(s, ..), cut(s, ..=5));
+    println!("| past the end {:?} {:?} {:?} {:?} / {} / {} / {} / {}", cut(s, 2..9), cut(s, 8..), cut(s, ..=7), cut(s, 0..=7),
+        at(s, 2..9), at(s, 8..), at(s, ..=7), at(s, 0..=7));
+    println!("| not a char boundary {:?} {:?} {:?} {:?} / {} / {} / {} / {}", cut(s, 0..2), cut(s, 2..), cut(s, ..=1), cut(s, 3..=4),
+        at(s, 0..2), at(s, 2..), at(s, ..=1), at(s, 3..=4));
+}

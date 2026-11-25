@@ -1,5 +1,10 @@
 //! Per-thread heap routing shared by every compiler layer and the provided crates' generated op
 //! wrappers; the allocator lives in relax-base.
+
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 pub mod sync;
 
 use std::cell::Cell;

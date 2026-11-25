@@ -47,6 +47,12 @@ const TLS_SEG: u8 = match cabi::HOST {
     cabi::Target::Win64 => 0x65,
     _ => 0x64,
 };
+/// The thread-local block fetch takes two loads, `seg:[key >> 32]` (sign-extended: `sar`) then
+/// `[that + key as u32]`, instead of one (`fs:[key]`): Windows (the TEB word, then the TlsAlloc
+/// index's word: `win_tls_key`) and a runtime that Relax itself runs on Linux (the outermost
+/// runtime's block cell, then this runtime's word in that block: compiler os/tls.rs). A
+/// constant of the build, so a native runtime's code is as it was.
+pub const TLS_TWO_LOAD: bool = matches!(cabi::HOST, cabi::Target::Win64) || (cfg!(target_os = "linux") && cfg!(relax));
 const CALLEE_SAVED: [u8; 5] = [RBX, R12, R13, R14, R15];
 /// bytes per slot thunk (`thunk`) and lazy stub (`stub`); a power of two (sandbox thunk masks)
 pub const THUNK_SIZE: usize = 32;
@@ -61,13 +67,16 @@ pub struct Compiled {
     /// (code offset, source position) in ascending offset order
     pub pc_map: Vec<(u32, u64)>,
     pub frame_size: u32,
-    /// bytes of instructions (the float constant pool follows)
+    /// End of the last function's instructions (a joined body includes the host pool and alignment).
+    /// The float constant pool follows.
     pub text_len: u32,
     /// regalloc::alloc_sig of the allocation (0 unless regalloc::SIG_ON)
     pub alloc_sig: u64,
     /// the relocated fields, emitted zeroed: the embedder links the code (`rir::link`) where it
     /// installs it
     pub relocs: Vec<RelocAt>,
+    /// Offsets of private call rel32 fields to resolve when joining the outlined part.
+    pub part_calls: Vec<u32>,
     /// (code offset, block, instruction index; u32::MAX = the terminator) of the function as
     /// emitted -- filled only while `set_rir_map(true)` (asm dumps: tools/run/tools/asmcmp)
     pub rir_map: Vec<(u32, u32, u32)>,
@@ -76,6 +85,14 @@ pub struct Compiled {
 }
 
 static RIR_MAP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Resolve the host's private calls and keep both functions in one installable body.
+pub fn join_part(host: Compiled, part: Compiled) -> Result<Compiled, String> {
+    crate::rir::join_native_part(host, part, |site, p_off| {
+        let d = i64::from(p_off) - (i64::from(site) + 4);
+        i32::try_from(d).map(|d| d as u32).map_err(|_| "private call exceeds rel32 range")
+    })
+}
 
 /// Record `Compiled::rir_map` (code offset -> RIR block/instruction) in later compiles.
 pub fn set_rir_map(on: bool) {
@@ -86,8 +103,8 @@ pub fn set_rir_map(on: bool) {
 pub struct Env {
     /// where the function slots' tables and thunks are
     pub slots: SlotsPtr,
-    /// where the runtime's per-thread block pointer is: Linux the fs-relative offset of its
-    /// static-TLS cell; Windows `win_tls_key` (a gs-relative word, then an offset into it)
+    /// where the runtime's per-thread block pointer is: native Linux the fs-relative offset of
+    /// its static-TLS cell; Linux under Relax and Windows (`win_tls_key`) a two-load key (`TLS_TWO_LOAD`)
     pub tls_key: u64,
     /// glue that allocates the calling thread's block: returns it in r11, preserves all else
     pub tls_slow: u64,
@@ -121,6 +138,7 @@ impl Env {
             Reloc::Slot(id) => self.slots.table(id),
             Reloc::Thunk(id) => self.slots.callable(id),
             Reloc::Call(id) => self.slots.thunk(id),
+            Reloc::Body(id) => self.slots.body(id),
             // fs-relative offset of the block pointer cell (mov r11, fs:[rax])
             Reloc::TlsKey => self.tls_key,
             Reloc::TlsSlow => self.tls_slow,
@@ -537,6 +555,11 @@ impl Asm {
         self.rex(false, 0, 0, r, false);
         self.byte(0xff);
         self.modrm_rr(2, r);
+    }
+    fn call_mem(&mut self, base: u8, disp: i32) {
+        self.rex(false, 0, 0, base, false);
+        self.byte(0xff);
+        self.modrm_mem(2, base, disp);
     }
     fn jmp_mem(&mut self, base: u8, disp: i32) {
         self.rex(false, 0, 0, base, false);
@@ -1127,12 +1150,19 @@ struct Gen<'a> {
     sym_class: u64,
     /// `Env::near`: host and runtime calls are `call rel32` (the embedder places veneers)
     near: bool,
+    /// the slots' table words name entry wrappers (a live test session's reach marks) and this
+    /// is counted code's O3 build: calls of a block that ran at all (its count above 0) go through
+    /// the callee's body word, past its wrapper (`Reloc::Body`; RELAX_OPT=-bypass: never)
+    bypass: bool,
+    /// `bypass` for the block being emitted
+    bypass_here: bool,
     /// rbp offset of the frame word holding the domain base (0: the function names no domain symbol)
     dom_slot: i32,
     /// per block: whether its start reads the domain base into that slot (block 0: the prologue;
     /// empty: the function names no domain symbol)
     dom_read: Vec<bool>,
     relocs: Vec<RelocAt>,
+    part_calls: Vec<u32>,
     /// emission order successor of each block (u32::MAX for the last)
     next_block: Vec<u32>,
     /// block -> where its code goes on: blocks that emit only their jump (moves the allocator
@@ -1390,6 +1420,20 @@ impl<'a> Gen<'a> {
         match (self.al.loc[v.0 as usize], self.al.remat[v.0 as usize]) {
             (Loc::None, Remat::Const(k)) if k == k as i32 as i64 && self.win_reg(v).is_none() => Some(k),
             _ => None,
+        }
+    }
+    /// The region windows that begin at `at`: their values into their registers (from the slot, or
+    /// recomputed)
+    fn window_loads(&mut self, at: u32) {
+        if let Some(ls) = self.win_start.get(&at).cloned() {
+            for (v, r) in ls {
+                if let Loc::Stack(o) = self.al.loc[v as usize] {
+                    let d = self.spill_disp(o);
+                    self.load_spill(r, d);
+                } else {
+                    self.remat_into(r, VReg(v));
+                }
+            }
         }
     }
     /// Recomputes a value without a location (Alloc::remat) into r, flags-preserving: a fused
@@ -1897,6 +1941,7 @@ impl<'a> Gen<'a> {
             }
             let b = &self.f.blocks[bi];
             let n = b.insts.len();
+            self.bypass_here = self.bypass && b.count > 0.0;
             // the compare the branch reads (fused into cmp + jcc): the instructions before it
             let (bcmp, ne) = regalloc::branch_compare(b, &self.al.uses);
             let fused = bcmp.is_some();
@@ -1975,8 +2020,7 @@ impl<'a> Gen<'a> {
             self.last_spill = None;
             self.last_alu = None;
             self.r11_base = None;
-            // window lookups of this block never see the previous block's last position (an empty
-            // block's terminator reads at its start: no window there, the slot is read)
+            // window lookups of this block never see the previous block's last position
             self.cur_pos = self.al.block_start[bi];
             self.sel_flags = None;
             for (ii, inst) in b.insts.iter().enumerate().take(ne) {
@@ -1991,16 +2035,7 @@ impl<'a> Gen<'a> {
                         self.sel_flags = None;
                     }
                 }
-                if let Some(ls) = self.win_start.get(&self.cur_pos).cloned() {
-                    for (v, r) in ls {
-                        if let Loc::Stack(o) = self.al.loc[v as usize] {
-                            let d = self.spill_disp(o);
-                            self.load_spill(r, d);
-                        } else {
-                            self.remat_into(r, VReg(v));
-                        }
-                    }
-                }
+                self.window_loads(self.cur_pos);
                 if into_branch && ii + 1 == ne {
                     break;
                 }
@@ -2069,6 +2104,16 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // a block whose one instruction is the compare fused into its branch: the compare reads
+            // where it stands, its windows loaded first, as unfused (with an instruction before it,
+            // it reads after that one ran, which regalloc accounts for). Read at the block's start, a
+            // window entered live there (from block_start + 1) had not begun: a value the region
+            // holds in a register came from its slot, stale where the region skips its stores (the
+            // empty block's case below; with RELAX_OPT=-cmpread, or a compare that writes its operand)
+            if fused && ne == 0 && n == 1 {
+                self.cur_pos = self.al.inst_pos(bi, 0);
+                self.window_loads(self.cur_pos);
+            }
             // a sibling call ended the block: its Ret is the callee's
             if self.tail.get(bi).is_some_and(|t| t.is_some()) {
                 continue;
@@ -2091,8 +2136,16 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            // an empty block's terminator reads where regalloc puts terminator uses (block_end - 1),
+            // where a region's window entered live starts: read at the block's start, a value the
+            // region holds in a register came from its slot, stale where the region skips its
+            // stores (an app's slicer `gaps` at O3: `cap + 1 < cap` rebuilt from cap's slot)
+            if b.insts.is_empty() {
+                self.cur_pos = self.al.block_end[bi] - 1;
+            }
             self.term(options, &b.term, bi, bcmp);
         }
+        self.bypass_here = false;
         // landing stubs of invoked calls: the unwinder resumes here with rbp, rsp and the
         // callee-saved registers of this frame restored; reload the caller-saved values the
         // call's normal path reloads, then the cleanup pad
@@ -2766,15 +2819,14 @@ impl<'a> Gen<'a> {
     }
 
     /// r11 = this thread's thread-local block, slow path `tls_slow` when it is still null (keeps
-    /// every register but rax/r11). Linux: `mov r11, fs:[key]` (the runtime's static-TLS block
-    /// pointer). Windows: two loads for any TlsAlloc index (`win_tls_key`): `r11 = gs:[key >> 32]`
-    /// (the TEB itself, or its TlsExpansionSlots array, null until the thread sets an index there),
-    /// then `r11 = [r11 + key as u32]`.
+    /// every register but rax/r11). Native Linux: `mov r11, fs:[key]` (the runtime's static-TLS
+    /// cell). Windows and Linux under Relax: the signed high half selects a gs/fs-relative word,
+    /// then the low half selects this runtime's word in the block it points to (`TLS_TWO_LOAD`).
     fn tls_block_r11(&mut self) {
         self.mov_reloc(RAX, Reloc::TlsKey);
-        let p = if matches!(cabi::HOST, cabi::Target::Win64) {
-            // mov r11, rax; shr r11, 32; mov r11, gs:[r11]
-            self.a.b.extend_from_slice(&[0x49, 0x89, 0xc3, 0x49, 0xc1, 0xeb, 0x20, TLS_SEG, 0x4d, 0x8b, 0x1b]);
+        let p = if TLS_TWO_LOAD {
+            // mov r11, rax; sar r11, 32; mov r11, seg:[r11]
+            self.a.b.extend_from_slice(&[0x49, 0x89, 0xc3, 0x49, 0xc1, 0xfb, 0x20, TLS_SEG, 0x4d, 0x8b, 0x1b]);
             self.a.test_rr(R11, R11);
             let none = self.a.jcc32(CC_E);
             // mov eax, eax; mov r11, [r11 + rax]
@@ -3005,6 +3057,11 @@ impl<'a> Gen<'a> {
         }
         self.frame_exit();
         match c {
+            // a site that ran: through the callee's body word (`bypass`)
+            Callee::Fn(id) if self.bypass_here => {
+                self.mov_reloc(R11, Reloc::Body(*id));
+                self.a.jmp_mem(R11, 0);
+            }
             Callee::Fn(id) | Callee::CFn(id, _) => {
                 self.a.byte(0xe9);
                 let at = self.a.pos();
@@ -6434,7 +6491,21 @@ impl<'a> Gen<'a> {
             self.a.vzeroupper();
         }
         match c {
+            // a site that ran: through the callee's body word (`bypass`; r11 is no argument register)
+            Callee::Fn(id) if self.bypass_here => {
+                self.mov_reloc(R11, Reloc::Body(*id));
+                self.a.call_mem(R11, 0);
+            }
             Callee::Fn(id) => self.call_reloc(Reloc::Call(*id)),
+            Callee::Part(id) => {
+                if let Some(id) = id {
+                    assert!(ni < INT_ARGS.len());
+                    self.a.mov_ri(INT_ARGS[ni], i64::from(*id));
+                }
+                self.a.byte(0xe8);
+                self.part_calls.push(self.a.pos() as u32);
+                self.a.u32(0);
+            }
             Callee::Indirect(_) => self.a.call_r(R11),
             Callee::Host(sym) => {
                 if !self.near {
@@ -7061,9 +7132,12 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         asm_veneers: Vec::new(),
         sym_class: env.sym_class,
         near: env.near,
+        bypass: env.slots.wrapped() && f.blocks.first().is_some_and(|b| b.count > 0.0) && !crate::stats::opt_off(options, "-bypass"),
+        bypass_here: false,
         dom_slot: 0,
         dom_read: Vec::new(),
         relocs: Vec::new(),
+        part_calls: Vec::new(),
         cplan: None,
         cbuf: Vec::new(),
         cret_buf: 0,
@@ -7152,7 +7226,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     } else {
         crate::dbgloc::note_stats(&pc_map, &[], 0);
     }
-    Ok(Compiled { code: g.a.b, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, rir_emitted: if g.rir_map_on { g.f.dump() } else { String::new() }, rir_map: g.rir_map })
+    Ok(Compiled { code: g.a.b, pc_map, frame_size: frame, text_len, alloc_sig, relocs: g.relocs, part_calls: g.part_calls, rir_emitted: if g.rir_map_on { g.f.dump() } else { String::new() }, rir_map: g.rir_map })
 }
 
 /// `jmp target` through r11 (caller-saved, never an argument register): every argument
@@ -7174,7 +7248,7 @@ pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
 }
 
 /// This thread's thread-local block in r11, preserving every other register JIT code may hold:
-/// the fast path `tls_addr` inlines (`mov r11, fs:[key]`, gs on Windows), and when the cell is
+/// the fast path `tls_addr` inlines (`tls_block_r11`), and when the cell is
 /// still null `host() -> block`. `tls_addr` calls it after its own fast path found null; a
 /// prologue that needs the domain base calls it directly. Entered with rsp = 8 mod 16.
 pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
@@ -7182,8 +7256,8 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     // mov r11, seg:[disp32]: modrm 00/011/100 + SIB 0x25 (no base, no index)
     a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x1c, 0x25]);
-    if matches!(cabi::HOST, cabi::Target::Win64) {
-        // Windows (win_tls_key): r11 = gs:[key >> 32]; null -> host; r11 = [r11 + key as u32]
+    if TLS_TWO_LOAD {
+        // Windows or Linux under Relax: r11 = seg:[signed high half]; null -> host; r11 = [r11 + key as u32]
         a.u32((key >> 32) as u32);
         a.test_rr(R11, R11);
         // jz +7 (past the load)
@@ -7293,14 +7367,13 @@ pub fn win_tls_key(index: u64) -> Option<u64> {
     }
 }
 
-/// `tls_read(key) -> u64` (Relax's convention: key in rdi): the word `TlsAddr` reads on Windows
-/// for a `win_tls_key` key, the same two loads (0 when the gs word is null); the runtime checks
-/// it against TlsSetValue.
-pub fn win_tls_reader() -> Vec<u8> {
+/// `tls_read(key) -> u64` (Relax's convention: key in rdi): the word the two-load fetch
+/// (`TLS_TWO_LOAD`) reads for `key`, 0 when the segment word is null. A runtime checks its key with it.
+pub fn tls2_reader() -> Vec<u8> {
     vec![
         0x48, 0x89, 0xf8, // mov rax, rdi
-        0x48, 0xc1, 0xe8, 0x20, // shr rax, 32
-        0x65, 0x48, 0x8b, 0x00, // mov rax, gs:[rax]
+        0x48, 0xc1, 0xf8, 0x20, // sar rax, 32
+        TLS_SEG, 0x48, 0x8b, 0x00, // mov rax, seg:[rax]
         0x48, 0x85, 0xc0, // test rax, rax
         0x74, 0x06, // jz ret
         0x89, 0xff, // mov edi, edi
@@ -7385,10 +7458,10 @@ pub fn thunk(slot_addr: u64) -> Vec<u8> {
 pub fn entry_thunk(id: u32, tls: u32, key: u64, slow: u64, body: u64) -> Vec<u8> {
     let mut a = Asm { b: Vec::new(), sib: None, flags: None };
     a.b.extend_from_slice(&[TLS_SEG, 0x4c, 0x8b, 0x1c, 0x25]); // mov r11, seg:[disp32]
-    if matches!(cabi::HOST, cabi::Target::Win64) {
+    if TLS_TWO_LOAD {
         a.u32((key >> 32) as u32);
         a.test_rr(R11, R11);
-        a.b.extend_from_slice(&[0x74, 0x07]); // null expansion array: skip its load
+        a.b.extend_from_slice(&[0x74, 0x07]); // null expansion array or outer runtime block: skip its load
         a.b.extend_from_slice(&[0x4d, 0x8b, 0x9b]);
         a.u32(key as u32);
     } else {

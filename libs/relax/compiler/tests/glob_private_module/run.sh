@@ -5,7 +5,7 @@
 # "glob_private_module: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
 export RELAX_CACHE=off
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet gpm-app 2>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "glob private module 7" ]; then rm -f "$ERR"; echo "glob_private_module: ok"; else tail -5 "$ERR"; rm -f "$ERR"; echo "glob_private_module: FAILED"; exit 1; fi

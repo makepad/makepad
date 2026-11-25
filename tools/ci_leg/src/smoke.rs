@@ -2034,13 +2034,14 @@ mod tests {
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
         // the default shape: check, launch, comes up. The terminal also builds the pty helper it
-        // starts its shell through; Desk Host is a windowless service, the AI Hub and devhub tray
-        // apps open no window at start; the browser host only builds.
+        // starts its shell through; Desk Host is a windowless service and the AI Hub's tray app
+        // opens no window at start; the browser host only builds, and devhub's panel widgets are a
+        // library its app shows (devhub's own script smokes the panel's window alone, 11-24).
         scripts.extend(apps.into_iter().map(|app| {
             let steps = match app.as_str() {
                 "terminal" => 4,
                 "browser_host" => 2,
-                "deskhost" | "aihub" | "devhub" => 1,
+                "deskhost" | "aihub" | "devhub_panel" => 1,
                 _ => 3,
             };
             (format!("apps/{app}/ci.splash"), steps)

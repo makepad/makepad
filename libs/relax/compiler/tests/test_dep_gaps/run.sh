@@ -12,7 +12,7 @@ if [ $# -ge 1 ]; then J=$1; else
   cargo build --profile host -q --manifest-path "$ROOT/Cargo.toml" -p makepad-run --bin makepad || exit 1
   J=${CARGO_TARGET_DIR:-$ROOT/target}/host/makepad
 fi
-W=$(mktemp -d)
+W=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$W"' EXIT
 mkdir "$W/p"
 cp -R "$H/." "$W/p/"

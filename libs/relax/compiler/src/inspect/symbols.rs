@@ -26,7 +26,15 @@ pub fn host_symbol(pc: u64) -> Option<(String, String, u64)> {
     // IMAGES is process state, filled by whichever thread asks first (a hitch report, a panic):
     // it lives in the kept heap
     let _kept = crate::zone_alloc::kept();
-    let mut images = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    symbol_in_images(pc, IMAGES.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// The report already runs in the kept heap. A busy cache leaves the pc unnamed.
+pub(super) fn host_symbol_nowait(pc: u64) -> Option<(String, String, u64)> {
+    symbol_in_images(pc, IMAGES.try_lock().ok()?)
+}
+
+fn symbol_in_images(pc: u64, mut images: relax_session::sync::MutexGuard<'_, Vec<Image>>) -> Option<(String, String, u64)> {
     if !images.iter().any(|i| pc >= i.lo && pc < i.hi) {
         *images = enumerate();
     }

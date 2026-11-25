@@ -1,6 +1,7 @@
 #!/bin/bash
 # check_platforms_all.sh [pkg...]: the platform check of a lane, from its worktree on the Mac, in parallel legs:
-#   apple : aarch64-apple-darwin and aarch64-apple-ios, on the Mac mini (one lease each, kind test: the mini fits two)
+#   apple : aarch64-apple-darwin and aarch64-apple-ios, on any free Apple-silicon Mac (one lease each, kind test);
+#           MAKEPAD_MAC_NODE=<node> pins both to that Mac, only for a check that needs its files
 #   cross : x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, wasm32-unknown-unknown, aarch64-linux-android on a Linux
 #           pool node (kind build; the node's xtool toolchain, tools/run/fixture/install_xtool.sh)
 # Prints one "PLATFORMS-OK <targets> (<s> s)" when every leg passed, else every leg's PLATFORMS-FAIL lines; exit 0 / 1.
@@ -18,8 +19,9 @@ leg() { # leg <name> <kind> <node args...> -- <CHECK_TARGETS>
   echo $? > "$log/$name.rc"
 }
 PKGS=("$@")
-leg apple_darwin test --node "${MAKEPAD_MAC_NODE:?name a Mac node}" "aarch64-apple-darwin" &
-leg apple_ios test --node "${MAKEPAD_MAC_NODE:?name a Mac node}" "aarch64-apple-ios" &
+if [ -n "${MAKEPAD_MAC_NODE:-}" ]; then mac=(--node "$MAKEPAD_MAC_NODE"); else mac=(--needs os=macos,arch=aarch64); fi
+leg apple_darwin test "${mac[@]}" "aarch64-apple-darwin" &
+leg apple_ios test "${mac[@]}" "aarch64-apple-ios" &
 leg cross build --needs arch=x64,os=linux "x86_64-unknown-linux-gnu x86_64-pc-windows-msvc wasm32-unknown-unknown aarch64-linux-android" &
 wait
 fail=0; ok=""

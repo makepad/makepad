@@ -64,7 +64,7 @@ LOCK
     if [ "${2:-}" = broken ]; then
         printf 'fn main() { this is not rust }\n' > "$base/zipfix/fx1/main.rs"
     else
-        printf 'fn main() {\n    let home = std::env::var("RELAX_HOME").unwrap_or_default();\n    let record = std::path::Path::new(&home).join("apps/runner.launch");\n    println!("fixture loader: {} launch record present: {}", dep_a::text(), record.is_file());\n}\n' > "$base/zipfix/fx1/main.rs"
+        printf 'fn main() {\n    let home = std::env::var("RELAX_HOME").unwrap_or_default();\n    let record = std::path::Path::new(&home).join("apps/runner.launch");\n    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());\n}\n' > "$base/zipfix/fx1/main.rs"
     fi
     (cd "$base/zipfix" && python3 -I -m zipfile -c "$base/www/public/app/runner/fx1/loader.zip" fx1) || exit 2
     zip=$base/www/public/app/runner/fx1/loader.zip
@@ -232,6 +232,24 @@ run "$base/run6.out"
 check "rollback: line" "$base/run6.out" "Went back to src: the new runner did not confirm its first start"
 check "rollback: src binary runs" "$base/install/cache/logs/makepad.log" "fixture loader: two"
 [ ! -e "$loader/pending" ] && [ ! -e "$loader/current" ] && [ -s "$loader/rolled-back" ] && echo "PASS rollback: pointers" || { echo "FAIL rollback: pointers"; failures=$((failures + 1)); }
+
+# The coding-agent form, from a shell with no terminal: plain lines, the stable entry
+# ($root/makepad), then the hand-over to `makepad open <id>`; a mistyped id stops before setup.
+openrun() { # openrun OUTFILE ARGS...
+    out=$1; shift
+    [ "${MAKEPAD_LOADER_ROOT:-}" = "$base/install" ] || { echo "a run without its own MAKEPAD_LOADER_ROOT"; exit 2; }
+    env PATH="$path" sh "$base/home/makepad.sh" "$@" > "$out" 2>&1 < /dev/null
+    code=$?
+    echo "=== $out (exit $code)"; cat "$out"
+}
+openrun "$base/open1.out" open fab
+check "open: hands over" "$base/open1.out" "Handing over to makepad open fab\."
+check "open: the loader gets open fab" "$base/open1.out" 'fixture loader: two launch record present: true args: \["open", "fab"\]'
+env -i HOME="$base/profile" PATH=/usr/bin:/bin "$base/install/makepad" open fab > "$base/open2.out" 2>&1 < /dev/null
+check "open: the stable entry runs the loader" "$base/open2.out" 'fixture loader: two launch record present: true args: \["open", "fab"\]'
+openrun "$base/open3.out" open 'fab;x'
+[ "$code" != 0 ] || { echo "FAIL open: a bad id exited 0"; failures=$((failures + 1)); }
+check "open: a bad id refused" "$base/open3.out" "Invalid app id"
 
 # Rust installed elsewhere (where rustup puts it) and a folder from before: a changed loader compiles
 # while the terminal takes the screen slowly and is resized every few milliseconds. The interrupted

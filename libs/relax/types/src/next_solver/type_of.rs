@@ -56,11 +56,20 @@ impl Tcx {
         trait_to_impl_args.extend_from_slice(&method_args[parent_count..]);
         let mut clauses = self.clauses_of(prog, imp);
         for p in self.own_clauses_of(prog, trait_method) { clauses.push(self.instantiate_predicate(prog, trait_method, &trait_to_impl_args, &p)); }
-        let infcx = InferCtxt::for_item(self, prog, TypingMode::non_body_analysis(), method);
+        let mut infcx = InferCtxt::for_item(self, prog, TypingMode::non_body_analysis(), method);
 
         let env = super::param_env::normalize_param_env_or_error(
             self, prog, ParamEnv { clauses: clauses.into() }, infcx.cause);
         let env = self.intern_param_env(env);
+        // :472-488: the environment is normalized at the method, the comparison at the impl
+        // method's return type (return_span): its obligations, and the region obligations they
+        // register (origin_span), whose errors are reported there
+        let def = prog.def(method);
+        let ret = match prog.files[def.file as usize].ast.item(def.item).kind { crate::ast::ItemKind::Fn(s, ..) => prog.files[def.file as usize].ast.fn_sig(s).ret.get(), _ => None };
+        if let Some(at) = ret.and_then(|t| crate::lint_early::W::new(prog, def.file, method).ty_start(t)) {
+            infcx.cause.span = at;
+            infcx.origin_span.set(at);
+        }
         let mut ocx = ObligationCtxt::new(&infcx, prog);
         for p in self.own_clauses_of(prog, method) { let p = ocx.normalize_predicate(&env, &p); ocx.register_obligation(Goal { param_env: env.clone(), predicate: p }); }
         let impl_fn = self.tys.intern(TyKind::FnPtr(self.tys.mk_list(&impl_sig.params), impl_sig.ret, impl_sig.header, impl_sig.bound_regions));
@@ -95,7 +104,18 @@ impl Tcx {
         ocx.eq(&env, trait_fn, impl_fn)?;
         for (_, ty, _) in &collected { ocx.register_obligation(Goal { param_env: env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::WellFormed(Term::Ty(*ty)))) }); }
         ocx.evaluate_obligations_error_on_ambiguity()?;
-        if !infcx.resolve_regions(prog, env, &wf_tys).is_empty() { return Err(NoSolution); }
+        // :704-706 (resolve_regions_and_report_errors): a region error is reported here, by its origin
+        // (an item bound the hidden type does not meet is E0477), and the hidden types are errors (the
+        // ErrorGuaranteed of type_of), so the method's comparison reports nothing more
+        let errors = infcx.resolve_regions(prog, env, &wf_tys);
+        if !errors.is_empty() {
+            if !infcx.tainted_by_errors() {
+                for (span, message) in crate::wfcheck::obligations::region_error_messages(prog, self, &infcx, method, errors) {
+                    self.dcx.report(super::fulfill::ObligationCause { body_id: method, span: if span == 0 { infcx.cause.span } else { span } }, message);
+                }
+            }
+            return Ok(prog.associated_types_for_impl_traits.get(&trait_method).into_iter().flatten().map(|&def| (def, self.tys.error)).collect());
+        }
         let mut result = Vec::new();
         // compare_impl_item.rs:717-719: only the RPITIT's own (captured) lifetimes are mapped;
         // the trait method's full generics (parent + own) are skipped.

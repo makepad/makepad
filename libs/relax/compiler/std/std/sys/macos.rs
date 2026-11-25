@@ -218,9 +218,11 @@ pub fn executable_path(buf: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
+/// Cut to 63 bytes, MAXTHREADNAMESIZE less its NUL (real std's cut).
 pub fn set_thread_name(name: *const c_char) {
+    let cut = super::cut_thread_name::<64>(name);
     unsafe {
-        pthread_setname_np(name);
+        pthread_setname_np(cut.as_ptr());
     }
 }
 

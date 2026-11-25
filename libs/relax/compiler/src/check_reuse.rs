@@ -438,10 +438,12 @@ impl<'a> Stow<'a> {
         s.contains('\0') || self.checkout.is_none_or(|c| c.found_in(s.as_bytes())) || self.anchors.dirs().any(|(_, dir)| s.contains(dir))
     }
 
-    /// A path as stored: anchored, else as it is when it names no checkout. None: bound.
+    /// A path as stored: anchored (normalized, else by its folder's printed spelling: a Windows
+    /// path), else as it is when it names no checkout. None: bound.
     fn path(&self, p: &str) -> Option<String> {
+        let exact = |a: String| (self.anchors.unanchored(&a).as_deref() == Some(p)).then_some(a);
         match self.anchors.anchored(p) {
-            Some(a) => (self.anchors.unanchored(&a).as_deref() == Some(p)).then_some(a),
+            Some(a) => exact(a).or_else(|| self.anchors.anchored_printed(p).and_then(exact)),
             None => (!self.names_checkout(p)).then(|| p.to_string()),
         }
     }
@@ -460,22 +462,26 @@ impl<'a> Stow<'a> {
     fn text(&self, t: &str) -> Option<String> {
         let b = t.as_bytes();
         let path_byte = |c: u8| c.is_ascii_alphanumeric() || c >= 0x80 || b"/\\._-~+@%".contains(&c);
-        let mut at: Vec<(usize, usize)> = Vec::new();
-        for (_, dir) in self.anchors.dirs().filter(|(_, dir)| !dir.is_empty()) {
+        // (each anchor's folder as normalized, followed by `/`, and as this checkout's paths print
+        // it (a Windows `C:\ws`), followed by either separator)
+        let mut at: Vec<(usize, usize, bool)> = Vec::new();
+        let spellings = self.anchors.dirs().map(|(_, dir)| (dir, false)).chain(self.anchors.printed().map(|(_, dir)| (dir, true)));
+        for (dir, printed) in spellings.filter(|(dir, _)| !dir.is_empty()) {
             for (i, _) in t.match_indices(dir) {
-                if b.get(i + dir.len()) != Some(&b'/') || (i > 0 && path_byte(b[i - 1])) { continue; }
+                let sep = b.get(i + dir.len()).is_some_and(|&c| c == b'/' || (printed && c == b'\\'));
+                if !sep || (i > 0 && path_byte(b[i - 1])) { continue; }
                 let line = t[i..].find('\n').map_or(t.len(), |n| i + n);
                 let end = t[i..line].match_indices(':').map(|(j, _)| i + j)
                     .find(|&j| b.get(j + 1).is_some_and(u8::is_ascii_digit) && self.places.contains(&t[i..j]));
-                if let Some(end) = end { at.push((i, end)); }
+                if let Some(end) = end { at.push((i, end, printed)); }
             }
         }
         at.sort_unstable();
         let (mut out, mut residue, mut last) = (String::with_capacity(t.len()), String::new(), 0);
-        for (i, end) in at {
+        for (i, end, printed) in at {
             if i < last { continue; }
             out.push_str(&t[last..i]);
-            out.push_str(&self.anchors.anchored(&t[i..end])?);
+            out.push_str(&if printed { self.anchors.anchored_printed(&t[i..end]) } else { self.anchors.anchored(&t[i..end]) }?);
             residue.push_str(&t[last..i]);
             residue.push('\n');
             last = end;
@@ -608,7 +614,9 @@ impl Reuse {
         };
         let path = dir.join(format!("check-{:016x}.rcs", set as u64));
         let trace = std::env::var_os("RELAX_CHECK_REUSE_TRACE").is_some();
-        let anchors = crate::dirs::Anchors::current(&crate::std_dir());
+        // (its folders as its own files print them: a stored path is read back in this spelling)
+        let mut anchors = crate::dirs::Anchors::current(&crate::std_dir());
+        anchors.learn_printed(prog.file_paths.iter().map(String::as_str));
         let checkout = if write { crate::cache::CheckoutText::of(&anchors) } else { None };
         let mut r = Reuse {
             path, write, hit: vec![false; checked.len()], raw: vec![None; checked.len()],

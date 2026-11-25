@@ -3,7 +3,7 @@
 //! crates-io directory (nothing is downloaded), and runs each case's app under `Policy::Open`
 //! (bare `relax`'s, where the script is host code with the person's rights) and under
 //! `Policy::Sandboxed` (`makepad`'s, where it runs confined): this binary re-executes itself as
-//! the runner with each host. Under Open every escape acts (its marker appears, or it reports what
+//! the runner with each policy. Under Open every escape acts (its marker appears, or it reports what
 //! it reached), which proves the case live; under Sandboxed it is refused and nothing acts.
 //!
 //! - soft: escapes a script meets as ordinary errors: writes outside OUT_DIR (an absolute path,
@@ -48,14 +48,14 @@ use std::process::Command;
 const AS_RUNNER: &str = "RELAX_CONFINED_SCRIPTS_RUNNER";
 
 fn main() {
-    // the runner, with the host of the policy asked for (a build script's run is this binary
-    // again, under the same policy)
+    // A build script's run is this binary again, under the same policy.
     if let Ok(policy) = std::env::var(AS_RUNNER) {
-        let host: &'static relax_runner::Host = match policy.as_str() {
-            "open" => Box::leak(Box::new(relax_runner::Host { compile_time_code: relax_compiler::sandbox::Policy::Open, ..makepad_run::HOST })),
-            _ => &makepad_run::HOST,
-        };
-        relax_runner::main(host);
+        if policy == "open" {
+            relax_base::host::init();
+            // This fixture process has yet to start a session or build script.
+            unsafe { relax_compiler::sandbox::replace_policy_in_test(relax_compiler::sandbox::Policy::Open) };
+        }
+        relax_runner::main(&makepad_run::HOST);
         return;
     }
     let t = std::env::temp_dir().join(format!("confined-scripts-{}", std::process::id()));

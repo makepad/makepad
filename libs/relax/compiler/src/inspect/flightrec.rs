@@ -15,8 +15,9 @@
 //!
 //! A recording is a `.mkpf` profile file (makepad-prof-stream; profproto.md, kinds EVENT 16 and
 //! INPUT 17): `rec save [last=60s]`, and automatically on a hitch over DUMP_MS
-//! (RELAX_FLIGHTREC_DUMP_MS, default 1000), a panic and a fatal fault, into
-//! <makepad run home>/flightrec/. `makepad inspect file=<x.mkpf> pf ...` answers on it.
+//! (RELAX_FLIGHTREC_DUMP_MS, default 1000), a first frame's wait on the app check over DUMP_MS,
+//! a panic and a fatal fault, into <makepad run home>/flightrec/.
+//! `makepad inspect file=<x.mkpf> pf ...` answers on it.
 
 use makepad_prof_stream as ps;
 use relax_session::sync::Mutex;
@@ -563,7 +564,7 @@ fn watch() {
                 LAST_AUTO.store(now, Relaxed);
                 match save(if why == Why::Hitch { HITCH_LAST_NS } else { DUMP_LAST_NS }, why, None, true) {
                     // a hitch (a cold start has some) and a no-draw (the recorder's, not the log's)
-                    // are named with --verbose; panics and faults always
+                    // are named with --verbose; a gate wait, panics and faults always
                     Ok((path, n)) if !matches!(why, Why::Hitch | Why::NoDraw) || crate::run::VERBOSE.load(Relaxed) => eprintln!("relax flightrec: {} recorded: {} ({} KB; {tool} inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display(), tool = crate::tool_name()),
                     Ok(_) => {}
                     Err(e) => eprintln!("relax flightrec: cannot write the {} recording: {}", why.name(), e),

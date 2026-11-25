@@ -28,6 +28,7 @@ pub use iter::{bytes, char_indices, chars, encode_utf16, escape_debug, escape_de
 pub use split::split_ascii_whitespace;
 
 use crate::fmt;
+use crate::slice::SliceIndex;
 use crate::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 use crate::option::Option::{self, None, Some};
 use crate::result::Result::{self, Err, Ok};
@@ -204,7 +205,8 @@ pub(crate) fn slice_error_fail(s: &str, begin: usize, end: usize) -> ! {
     panic!("end byte index {} is out of bounds for string of length {}", end, len);
 }
 
-/// What can index a str: the usize range types (real core's `SliceIndex<str>`).
+/// What can index a str: every `SliceIndex<str>` whose output is a str (the blanket impl in
+/// traits_impls.rs): the usize ranges below, the Bound pair and the new range types.
 pub trait StrIndex {
     fn get_str(self, s: &str) -> Option<&str>;
     fn get_str_mut(self, s: &mut str) -> Option<&mut str>;
@@ -216,23 +218,30 @@ fn range_ok(s: &str, start: usize, end: usize) -> bool {
     start <= end && is_char_boundary(s, start) && is_char_boundary(s, end)
 }
 
-impl StrIndex for Range<usize> {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for Range<usize> {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         if range_ok(s, self.start, self.end) {
             Some(unsafe { sub(s, self.start, self.end) })
         } else {
             None
         }
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         if range_ok(s, self.start, self.end) {
             Some(unsafe { sub_mut(s, self.start, self.end) })
         } else {
             None
         }
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         if range_ok(s, self.start, self.end) {
             unsafe { sub(s, self.start, self.end) }
         } else {
@@ -240,7 +249,7 @@ impl StrIndex for Range<usize> {
         }
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         if range_ok(s, self.start, self.end) {
             unsafe { sub_mut(s, self.start, self.end) }
         } else {
@@ -249,23 +258,30 @@ impl StrIndex for Range<usize> {
     }
 }
 
-impl StrIndex for RangeTo<usize> {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for RangeTo<usize> {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         if is_char_boundary(s, self.end) {
             Some(unsafe { sub(s, 0, self.end) })
         } else {
             None
         }
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         if is_char_boundary(s, self.end) {
             Some(unsafe { sub_mut(s, 0, self.end) })
         } else {
             None
         }
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         if is_char_boundary(s, self.end) {
             unsafe { sub(s, 0, self.end) }
         } else {
@@ -273,7 +289,7 @@ impl StrIndex for RangeTo<usize> {
         }
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         if is_char_boundary(s, self.end) {
             unsafe { sub_mut(s, 0, self.end) }
         } else {
@@ -282,15 +298,16 @@ impl StrIndex for RangeTo<usize> {
     }
 }
 
-impl StrIndex for RangeFrom<usize> {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for RangeFrom<usize> {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         if is_char_boundary(s, self.start) {
             Some(unsafe { sub(s, self.start, s.len()) })
         } else {
             None
         }
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         if is_char_boundary(s, self.start) {
             let len = s.len();
             Some(unsafe { sub_mut(s, self.start, len) })
@@ -298,8 +315,14 @@ impl StrIndex for RangeFrom<usize> {
             None
         }
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         if is_char_boundary(s, self.start) {
             unsafe { sub(s, self.start, s.len()) }
         } else {
@@ -307,7 +330,7 @@ impl StrIndex for RangeFrom<usize> {
         }
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         let len = s.len();
         if is_char_boundary(s, self.start) {
             unsafe { sub_mut(s, self.start, len) }
@@ -317,17 +340,24 @@ impl StrIndex for RangeFrom<usize> {
     }
 }
 
-impl StrIndex for RangeFull {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for RangeFull {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         Some(s)
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         Some(s)
     }
-    fn index_str(self, s: &str) -> &str {
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
+    fn index(self, s: &str) -> &str {
         s
     }
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         s
     }
 }
@@ -341,8 +371,9 @@ fn inclusive_parts(r: &RangeInclusive<usize>) -> (usize, usize, bool) {
     (start, end, exhausted)
 }
 
-impl StrIndex for RangeInclusive<usize> {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for RangeInclusive<usize> {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         let (start, end, exhausted) = inclusive_parts(&self);
         if end >= s.len() {
             return None;
@@ -351,7 +382,7 @@ impl StrIndex for RangeInclusive<usize> {
         let st = if exhausted { e } else { start };
         (st..e).get_str(s)
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         let (start, end, exhausted) = inclusive_parts(&self);
         if end >= s.len() {
             return None;
@@ -360,8 +391,14 @@ impl StrIndex for RangeInclusive<usize> {
         let st = if exhausted { e } else { start };
         (st..e).get_str_mut(s)
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         let (mut start, mut end, exhausted) = inclusive_parts(&self);
         if end < s.len() {
             end = end + 1;
@@ -373,7 +410,7 @@ impl StrIndex for RangeInclusive<usize> {
         slice_error_fail(s, start, end)
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         let (mut start, mut end, exhausted) = inclusive_parts(&self);
         if end < s.len() {
             end = end + 1;
@@ -386,38 +423,52 @@ impl StrIndex for RangeInclusive<usize> {
     }
 }
 
-impl StrIndex for RangeToInclusive<usize> {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for RangeToInclusive<usize> {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         (0..=self.end).get_str(s)
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         (0..=self.end).get_str_mut(s)
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         (0..=self.end).index_str(s)
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         (0..=self.end).index_str_mut(s)
     }
 }
 
 // core str/traits.rs: `(Bound<usize>, Bound<usize>)` (stable 1.53) is the range it names, found as
 // a slice's pair is, and a pair that names none panics with the slice's message
-impl StrIndex for (crate::ops::Bound<usize>, crate::ops::Bound<usize>) {
-    fn get_str(self, s: &str) -> Option<&str> {
+impl SliceIndex<str> for (crate::ops::Bound<usize>, crate::ops::Bound<usize>) {
+    type Output = str;
+    fn get(self, s: &str) -> Option<&str> {
         crate::slice::index::try_into_slice_range(s.len(), self).ok()?.get_str(s)
     }
-    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+    fn get_mut(self, s: &mut str) -> Option<&mut str> {
         crate::slice::index::try_into_slice_range(s.len(), self).ok()?.get_str_mut(s)
     }
+    unsafe fn get_unchecked(self, slice: *const str) -> *const str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked(self, slice as *const [u8]) as *const str }
+    }
+    unsafe fn get_unchecked_mut(self, slice: *mut str) -> *mut str {
+        unsafe { SliceIndex::<[u8]>::get_unchecked_mut(self, slice as *mut [u8]) as *mut str }
+    }
     #[track_caller]
-    fn index_str(self, s: &str) -> &str {
+    fn index(self, s: &str) -> &str {
         crate::slice::index::into_slice_range(s.len(), self).index_str(s)
     }
     #[track_caller]
-    fn index_str_mut(self, s: &mut str) -> &mut str {
+    fn index_mut(self, s: &mut str) -> &mut str {
         crate::slice::index::into_slice_range(s.len(), self).index_str_mut(s)
     }
 }

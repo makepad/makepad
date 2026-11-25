@@ -9,7 +9,7 @@ FAILS=0
 BASE_BUDGET=""
 for TIER in 0 1; do
 # (stdout and stderr apart: an O3 trace line on stderr can land inside an `out` line of stdout)
-SO=$(mktemp); SE=$(mktemp); PROG=$(mktemp -u)
+SO=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX"); SE=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX"); PROG=$(mktemp -u "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 # (tiering on: the test waits for the tier-up through the JIT's O3 progress file, not for a time)
 if [ "$TIER" = 1 ]; then export RELAX_O3_PROGRESS="$PROG"; fi
 RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/budget.rs" >"$SO" 2>"$SE"
@@ -42,7 +42,7 @@ if [ "$STATUS" = 0 ] && [ "$GOT" = $'out concurrent guards: true\nout nested gua
 # O3 keeps a twin's guarantees: fuel charges and stops, memory bounds and indirect calls are the
 # same with O3 off and with the twins' O3 code installed (tiers.rs waits for it; each twin it
 # warms must have been installed).
-SE=$(mktemp); PROG=$(mktemp -u)
+SE=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX"); PROG=$(mktemp -u "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 LOW=$(RELAX_O3=0 "$1" test --allow-unchecked-modules "$D/tiers.rs" 2>/dev/null | grep '^out ')
 HIGH=$(RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 RELAX_O3_PROGRESS="$PROG" "$1" test --allow-unchecked-modules "$D/tiers.rs" 2>"$SE" | grep '^out ')
 MISSING=""

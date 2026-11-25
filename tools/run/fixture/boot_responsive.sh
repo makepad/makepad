@@ -9,7 +9,7 @@
 # Run from the workspace root (the JIT runs through `cargo run --profile host`); PACKAGE defaults to
 # makepad-example-counter.
 max=${MAX_MS:-50}
-dir=$(mktemp -d)
+dir=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 # the automation script ends the run once the app has presented
 printf 'wait_frame 1\n' > $dir/quit.hal
 hidden=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1)

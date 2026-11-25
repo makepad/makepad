@@ -38,6 +38,7 @@ pub unsafe fn replace_policy_in_test(p: Policy) {
 }
 
 pub fn policy() -> Policy {
+    crate::host::init();
     if POLICY.load(std::sync::atomic::Ordering::SeqCst) == OPEN { Policy::Open } else { Policy::Sandboxed }
 }
 

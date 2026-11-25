@@ -7,7 +7,7 @@
 # (land_gate.sh step_warm_strict).
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 bad=""
 for k in 1 2 3; do

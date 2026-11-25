@@ -33,11 +33,15 @@ too) must be a row of process_statics.tsv, and threads and owned memory must not
 what the allocators handed out plus the anonymous memory outside their mappings (`memory`'s owned
 nodes, from glibc's mapping names), each part too, so a drop in one cannot hide a rise in another;
 elsewhere the resident size.
+A relaunched run whose build fails before the app starts (a syntax error in the sibling dependency) holds
+the host though the window is hidden; the fix's save in that folder, made as soon as the hold shows,
+starts the next run.
 A restarted run whose app check finds an error (a derive's bound, which no lazy compile reaches)
 ends in place: the same process and window, no fault, its end without the program's grace, no app
 code running and the restart pending; the edit's outcome a refusal, never the restart's failure nor
 a JIT error. The fix's save starts the next run with the state the failed run was started with; bad
-and good saves in turn, CHECK_ROUNDS times, and the threads do not grow.
+and good saves in the sibling dependency and the app on alternate rounds, CHECK_ROUNDS times,
+and the threads do not grow.
 A relaunch that lands after the next run's boot but before the app's first event is through (the
 app's start takes seconds on cue) brings the run after it up with the state that run was started
 with. Last, a relaunch that lands while the next run boots (no unit in yet) waits the boot out: the
@@ -67,10 +71,17 @@ ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
 # runs in, and a copy outside it built makepad again without its rustflags (294 s of a 308 s run)
 os.makedirs(os.path.join(ROOT, "target"), exist_ok=True)
 tmp = tempfile.mkdtemp(prefix="restart-in-place-", dir=os.path.join(ROOT, "target"))
-pkg = os.path.join(tmp, "pkg")
+ws = os.path.join(tmp, "ws")
+pkg = os.path.join(ws, "app")
+dep = os.path.join(ws, "dep")
 shutil.copytree(os.path.join(HERE, "live_kinds"), pkg)
 manifest = os.path.join(pkg, "Cargo.toml")
 text = open(manifest).read().replace('"../../../../widgets"', json.dumps(os.path.relpath(os.path.join(ROOT, "widgets"), pkg)))
+open(manifest, "w").write(text.replace("[workspace]", '[dependencies.restart-dep]\npath = "../dep"'))
+os.makedirs(os.path.join(dep, "src"))
+open(os.path.join(dep, "Cargo.toml"), "w").write('[package]\nname = "restart-dep"\nversion = "0.1.0"\nedition = "2021"\n')
+dep_src = os.path.join(dep, "src", "lib.rs")
+open(dep_src, "w").write("pub const LATER: u64 = 123;\n")
 # the workspace's [patch.crates-io] (third-party crates carried in libs/): the copy is a workspace
 # of its own, and without them its window's dependencies would be looked up in the registry
 # (nodes run offline)
@@ -81,8 +92,8 @@ for line in open(os.path.join(ROOT, "Cargo.toml")):
     elif on and 'path = "' in line:
         name, rest = line.split("=", 1)
         path = rest.split('path = "', 1)[1].split('"', 1)[0]
-        patch.append("%s = { path = %s }" % (name.strip(), json.dumps(os.path.relpath(os.path.join(ROOT, path), pkg))))
-open(manifest, "w").write(text + "\n[patch.crates-io]\n" + "\n".join(patch) + "\n")
+        patch.append("%s = { path = %s }" % (name.strip(), json.dumps(os.path.relpath(os.path.join(ROOT, path), ws))))
+open(os.path.join(ws, "Cargo.toml"), "w").write('[workspace]\nmembers = ["app", "dep"]\nresolver = "2"\n\n[patch.crates-io]\n' + "\n".join(patch) + "\n")
 app_src = os.path.join(pkg, "src", "window.rs")
 ready = os.path.join(tmp, "ready")
 home = os.path.join(tmp, "home")
@@ -380,7 +391,7 @@ if not fails:
     n_out, n_err = len(out), len(err)
     src = open(app_src).read()
     for a, b in (("    #[rust]\n    state: Option<crate::kinds::State>,\n", "    #[rust]\n    state: Option<crate::kinds::State>,\n    #[rust(later_of(vm))]\n    later: u64,\n"),
-                 ("impl AppMain for App {", "fn later_of(_vm: &mut ScriptVm) -> u64 { 123 }\n\nimpl AppMain for App {"),
+                 ("impl AppMain for App {", "fn later_of(_vm: &mut ScriptVm) -> u64 { restart_dep::LATER }\n\nimpl AppMain for App {"),
                  ('println!("out {} main_loop={} inlined={} {} {}", self.tick, 1,', 'println!("out {} main_loop={} later={} inlined={} {} {}", self.tick, 1, self.later,')):
         assert src.count(a) == 1, a
         src = src.replace(a, b)
@@ -707,6 +718,39 @@ if not fails:
     if left:
         fails.append("leftovers")
         print("restart_in_place: left of a run in statics no row of process_statics.tsv names:\n  " + "\n  ".join(left))
+# a build that fails before the app starts, in a run a relaunch started (a syntax error in the sibling
+# dependency: the parse fails the build, no app check runs), holds the host even with a hidden window,
+# and the fix's save in that folder (not the package's own) starts the next run: no relaunch after
+# it. The fix is saved as soon as `inputs` says the host holds, with no wait for the watcher the
+# failure starts: a save in that gap is not lost.
+if pid is not None and app_pid() == pid:
+    def save_dep(text):
+        with open(dep_src + ".new", "w") as f:
+            f.write(text)
+        os.rename(dep_src + ".new", dep_src)
+    n_out, n_err = len(out), len(err)
+    dep_good = open(dep_src).read()
+    save_dep(dep_good + "\npub fn broken( {\n")
+    ask(pid, ["session", "relaunch"])
+    def prestart_held():
+        try:
+            # ("held: no run" is HELD_NO_RUN, which `inputs` answers while the host waits for a fix)
+            return "held: no run" in ask(pid, ["inputs"])
+        except subprocess.TimeoutExpired:
+            return False
+    if not wait(prestart_held, 180):
+        fails.append("prestart-not-held")
+        print("\n".join("restart_in_place: prestart: " + l[:260] for _, l in err[n_err:][-25:]))
+    else:
+        n_out = len(out)
+        save_dep(dep_good)
+        if not wait(lambda: len(ticks(n_out)) > 5, 180):
+            fails.append("prestart-not-retried")
+            print("\n".join("restart_in_place: prestart: " + l[:260] for _, l in err[n_err:][-25:]))
+        elif app_pid() != pid:
+            fails.append("prestart-pid-changed")
+        else:
+            print("restart_in_place: prestart: the build failed before the app started, held, and the dependency's save started the next run")
 # a restarted run whose app check fails ends in place and waits for the fix's save (the check's
 # thread ended the process under a GPU driver's threads, W15586): bad and good saves in turn
 if not fails:
@@ -714,9 +758,7 @@ if not fails:
         with open(path + ".new", "w") as f:
             f.write(text)
         os.rename(path + ".new", path)
-    good = open(app_src).read()
-    bad = good.replace("impl AppMain for App {", "#[derive(PartialEq, Eq)]\npub struct CheckBad {\n    x: f32,\n}\n\nimpl AppMain for App {", 1)
-    assert bad != good
+    check_bad = "\n#[derive(PartialEq, Eq)]\npub struct CheckBad {\n    x: f32,\n}\n"
     def ledger():
         found = []
         for name in os.listdir(ledger_dir) if os.path.isdir(ledger_dir) else []:
@@ -729,9 +771,12 @@ if not fails:
     n_check = len(err)
     check_threads, check_names = [], []
     for round in range(CHECK_ROUNDS):
+        path = dep_src if round % 2 == 0 else app_src
+        good = open(path).read()
         n_out, n_err = len(out), len(err)
         before = tick_of(ticks()[-1][1])
-        save(app_src, bad)
+        save(path, good + check_bad)
+        relaunched = time.time()
         ask(pid, ["session", "relaunch"])
         held = lambda: next((t for t, l in err[n_err:] if "relax live: the run ends in place: its app check found" in l), None)
         ends = lambda: [t for t, l in err[n_err:] if "run's threads stayed" in l]
@@ -739,7 +784,14 @@ if not fails:
             fails.append("check-%d-no-end-in-place" % round)
             stuck(pid)
             break
-        # (the program's grace is 5 s: a thread of the app in the first frame's gate leaves at once)
+        # Both lines come from stderr. The previous run finished teardown at ends()[0].
+        frame = next((t for t, l in err[n_err:] if t >= ends()[0] and "first frame at" in l), None)
+        verdict = next((l for _, l in err[n_err:] if "relax: app check:" in l and " errors," in l), None)
+        print("restart_in_place: check %d: %s; first frame %s, end in place %.3f s after relaunch" %
+              (round, verdict, "unseen" if frame is None else "%.3f s" % (frame - relaunched), held() - relaunched))
+        # (the order is reported, not required: the fixture's small app check can end before its
+        # first present; a large app's ends after it)
+        # The failed run should finish teardown before the program's 5 s grace expires.
         if ends()[1] - held() > 4.0:
             fails.append("check-%d-end-took-%.1fs" % (round, ends()[1] - held()))
         time.sleep(2.0)
@@ -759,7 +811,7 @@ if not fails:
             fails.append("check-%d-pid-changed" % round)
             break
         n_out, n_fix = len(out), len(err)
-        save(app_src, good)
+        save(path, good)
         restored = lambda: [int(l.split()[2]) for _, l in out[n_out:] if l.startswith("out restored ")]
         if not wait(lambda: restored() and len(ticks(n_out)) > 5, 180):
             fails.append("check-%d-no-next-run" % round if not restored() else "check-%d-no-ticks" % round)

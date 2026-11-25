@@ -288,6 +288,7 @@ impl ItemPass {
     fn check_ready(&mut self, f: &FrontShared, scope: &Scope, start: u64) -> bool {
         if self.pending.is_empty() { return true; }
         if !checker_turn() { return false; }
+        let _mem = crate::memstat::tag(crate::memstat::Tag::ItemPass);
         let cpu = relax_session::clock::cpu_ns();
         let mut ready: Vec<_> = {
             let r = jit::front_read("item check crates");
@@ -308,6 +309,7 @@ impl ItemPass {
         };
         ready.sort_unstable_by_key(|(k, defs)| (defs.len(), *k));
         for (k, defs) in ready {
+            if trace::on() { trace::crate_items(f, k, defs.len()); }
             let mut errors = Vec::new();
             let mut ice = false;
             let checks: [fn(&Program, &Tcx, DefId) -> crate::check::ItemErrors; 2] = [crate::check::def_item_errors, crate::check::def_wf_errors];
@@ -341,7 +343,96 @@ impl ItemPass {
 
 enum ItemResult { Done(Vec<String>), Panic, Stop }
 
+/// RELAX_BG_TRACE=1: where the background check spends its time and memory, on stderr. Each
+/// crate whose items it starts (its definition count and the process's resident memory), and by
+/// path any definition 2 s after its check began: again at 4, 8, 16 s .. while it runs, and once
+/// when it ends. The time is the wall time since the check began (its yields to the program's
+/// compiles, and its retries after a preemption, count). A check that never returns is named
+/// too: a thread of the trace's own watches it. A trace, never a limit: nothing is stopped or
+/// skipped.
+mod trace {
+    use super::{jit, DefId, FrontShared};
+    use std::time::{Duration, Instant};
+
+    const LONG: Duration = Duration::from_secs(2);
+
+    pub(super) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("RELAX_BG_TRACE").is_some_and(|v| !v.is_empty() && v != "0"))
+    }
+
+    /// the definition being checked, by which check, since when
+    static NOW: relax_session::sync::Mutex<Option<(DefId, &'static str, Instant)>> = relax_session::sync::Mutex::new(None);
+
+    /// A run that ends in place leaves no definition being checked (`NOW`; `on`'s flag is the
+    /// environment's, read once: process_statics.tsv).
+    pub(super) unsafe fn reset_statics() {
+        relax_session::reset_static(&NOW, relax_session::sync::Mutex::new(None));
+    }
+
+    fn resident_mb() -> u64 {
+        crate::memstat::resident() >> 20
+    }
+
+    fn path(f: &FrontShared, d: DefId) -> String {
+        let r = jit::front_read("background check trace");
+        let (prog, _) = r.of(f);
+        if (d.0 as usize) < prog.defs.len() { prog.def_path(d) } else { format!("{d:?} (retired by an edit)") }
+    }
+
+    pub(super) fn crate_items(f: &FrontShared, k: u32, defs: usize) {
+        let name = {
+            let r = jit::front_read("background check trace");
+            let (prog, _) = r.of(f);
+            prog.syms.str(prog.crates[k as usize].name).to_owned()
+        };
+        eprintln!("relax bg trace: the items of `{name}`: {defs} definitions, resident {} MB", resident_mb());
+    }
+
+    /// The trace's current definition while it lives.
+    pub(super) struct Checking<'f>(Option<(&'f FrontShared, DefId, &'static str, Instant)>);
+
+    impl<'f> Checking<'f> {
+        pub(super) fn begin(f: &'f FrontShared, d: DefId, what: &'static str) -> Self {
+            if !on() { return Checking(None); }
+            let t = Instant::now();
+            *NOW.lock().unwrap_or_else(|p| p.into_inner()) = Some((d, what, t));
+            Checking(Some((f, d, what, t)))
+        }
+    }
+
+    impl Drop for Checking<'_> {
+        fn drop(&mut self) {
+            let Some((f, d, what, t)) = self.0 else { return };
+            *NOW.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            let ran = t.elapsed();
+            if ran >= LONG {
+                eprintln!("relax bg trace: the {what} check of `{}` ended {:.1} s after it began, resident {} MB", path(f, d), ran.as_secs_f64(), resident_mb());
+            }
+        }
+    }
+
+    /// Names the definition still being checked at 2 s, 4 s, 8 s ..: one thread, until the
+    /// background check ends.
+    pub(super) fn watch(f: std::sync::Arc<FrontShared>) {
+        let _ = crate::run_threads::spawn("run-typeck-bg-trace", move || {
+            // the definition last seen, its start, and when it is named next
+            let mut seen: Option<(DefId, Instant, Duration)> = None;
+            while crate::run_threads::sleep(Duration::from_millis(500)) && super::running() {
+                let Some((d, what, t)) = *NOW.lock().unwrap_or_else(|p| p.into_inner()) else { continue };
+                let next = match seen { Some((sd, st, n)) if sd == d && st == t => n, _ => LONG };
+                let ran = t.elapsed();
+                if ran >= next {
+                    eprintln!("relax bg trace: still in the {what} check of `{}`, {:.0} s since it began, resident {} MB", path(&f, d), ran.as_secs_f64(), resident_mb());
+                }
+                seen = Some((d, t, if ran >= next { next * 2 } else { next }));
+            }
+        });
+    }
+}
+
 fn check_item_def(f: &FrontShared, d: DefId, check: fn(&Program, &Tcx, DefId) -> crate::check::ItemErrors) -> ItemResult {
+    let _trace = trace::Checking::begin(f, d, "item");
     loop {
         if !checker_turn() { return ItemResult::Stop; }
         let r = jit::front_read("item check def");
@@ -380,6 +471,7 @@ fn run(up: *mut Unit, scope: &Scope) {
     makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
     let (t0, w0) = (relax_session::clock::cpu_ns(), jit::wall_ns());
     let f = unsafe { (*up).front.clone() };
+    if trace::on() { trace::watch(f.clone()); }
     // the crates' skipped files read here, the keys made on the owner (the cache is the owner's)
     let n = { let r = jit::front_read("typeck bg crates"); r.of(&f).0.crates.len() as u32 };
     let skipped_text: Vec<u128> = (0..n).map(crate::check::skipped_text_hash).collect();
@@ -657,6 +749,7 @@ fn finish(t0: u64, w0: u64, audit: Option<&CheckAudit>, items: &ItemPass) {
 /// Type-checks body owner `d` of a crate this check covers and reports its errors; a body of any
 /// other crate is only read when a build checked it already (the walk goes on through it).
 fn check(f: &FrontShared, d: DefId, todo: &[bool], files: &Files, scope: &Scope, failed: &mut HashMap<u32, Vec<String>>, ice: &mut HashSet<u32>, audit: Option<&mut CheckAudit>) -> Checked {
+    let _trace = trace::Checking::begin(f, d, "body");
     loop {
         if !checker_turn() { return Checked::Stop; }
         let r = jit::front_read("typeck bg");
@@ -755,6 +848,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&STATS, [const { AtomicU64::new(0) }; 7]);
     reset(&RUNNING, AtomicBool::new(false));
     reset(&STORED_FINDINGS, relax_session::sync::Mutex::new(Vec::new()));
+    trace::reset_statics();
 }
 
 #[cfg(test)]

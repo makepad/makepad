@@ -280,7 +280,8 @@ fn a_128_bit_value_by_one_word_and_its_quotients_are_rustcs() {
 
 /// `IoSlice` / `IoSliceMut` (now real std's `iovec`-shaped wrappers, WARNZERO class 8): the
 /// slices they borrow, `advance_slices` across them, a vectored write, writes through a mutable
-/// one, and the `iovec` layout (base, then length) FFI code relies on.
+/// one, and the layout FFI code relies on: unix's `iovec` (base, then length), Windows' `WSABUF`
+/// (a 32-bit length, then base), as rustc's std has them.
 const IO_SLICES: &str = r#"
 use std::io::{IoSlice, IoSliceMut, Write};
 pub fn values(out: &mut [usize; 8]) {
@@ -301,9 +302,11 @@ pub fn values(out: &mut [usize; 8]) {
         out[4] = s.len();
     }
     out[5] = m[1] as usize;
-    let words: [usize; 2] = unsafe { core::mem::transmute(IoSlice::new(&b)) };
-    out[6] = (words[0] == b.as_ptr() as usize) as usize;
-    out[7] = words[1];
+    #[cfg(not(windows))] #[repr(C)] struct Raw { base: *const u8, len: usize }
+    #[cfg(windows)] #[repr(C)] struct Raw { len: u32, base: *const u8 }
+    let raw: Raw = unsafe { core::mem::transmute(IoSlice::new(&b)) };
+    out[6] = (raw.base == b.as_ptr()) as usize;
+    out[7] = raw.len as usize;
 }
 "#;
 
@@ -556,28 +559,99 @@ pub(crate) mod vfs_store;
 
 /// A game's store (asset client cache.rs fsync_dir: `File::open(dir)?.sync_all()`): a folder
 /// opens for reading as it does on the disk (open(2) of a directory O_RDONLY succeeds; its reads
-/// fail EISDIR), so a virtual one (an overlay run's sources) is fsync'd, not refused EISDIR.
+/// fail EISDIR), so a virtual one (an overlay run's sources) is fsync'd, not refused EISDIR. On
+/// Windows rustc's std opens no folder (no backup semantics: access denied), and the virtual
+/// one is refused as the disk's is.
 #[test]
 fn a_virtual_folder_opens_for_reading_as_a_disk_folder_does() {
     isolated_test!(a_virtual_folder_opens_for_reading_as_a_disk_folder_does);
     let fixture = vfs_store::Fixture::new(&[("app/cache/a.bin", b"a")]);
     let root = "/relax-values-vfs-dir/vfs/m";
     crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+    let disk = std::env::temp_dir().join(format!("relax-values-disk-dir-{}", std::process::id()));
+    std::fs::create_dir_all(&disk).unwrap();
+    let (disk_dir, virtual_dir) = (disk.to_str().unwrap().to_string(), format!("{root}/app/cache"));
     let src = format!(r#"
-pub fn values(out: &mut [usize; 5]) {{
-    let dir = std::fs::File::open("{root}/app/cache");
-    out[0] = dir.is_ok() as usize;
-    if let Ok(mut d) = dir {{
-        out[1] = d.sync_all().is_ok() as usize;
-        out[2] = d.metadata().map_or(0, |m| m.is_dir() as usize);
-        let mut buf = [0u8; 4];
-        out[3] = matches!(std::io::Read::read(&mut d, &mut buf), Err(e) if e.kind() == std::io::ErrorKind::IsADirectory) as usize;
+pub fn values(out: &mut [usize; 12]) {{
+    for (k, path) in [{disk_dir:?}, {virtual_dir:?}].into_iter().enumerate() {{
+        let out = &mut out[k * 6..k * 6 + 6];
+        let dir = std::fs::File::open(path);
+        out[0] = dir.is_ok() as usize;
+        out[5] = dir.as_ref().err().map_or(0, |e| e.raw_os_error().map_or(usize::MAX, |c| c as usize));
+        if let Ok(mut d) = dir {{
+            out[1] = d.sync_all().is_ok() as usize;
+            out[2] = d.metadata().map_or(0, |m| m.is_dir() as usize);
+            let mut buf = [0u8; 4];
+            out[3] = matches!(std::io::Read::read(&mut d, &mut buf), Err(e) if e.kind() == std::io::ErrorKind::IsADirectory) as usize;
+        }}
+        // a write still needs the edits folder
+        out[4] = std::fs::OpenOptions::new().write(true).open(path).is_err() as usize;
     }}
-    // a write still needs the edits folder
-    out[4] = std::fs::OpenOptions::new().write(true).open("{root}/app/cache").is_err() as usize;
 }}
 "#);
-    assert_eq!(values::<5>(&src, "vfs_dir"), [1, 1, 1, 1, 1]);
+    let got = values::<12>(&src, "vfs_dir");
+    std::fs::remove_dir_all(&disk).unwrap();
+    assert_eq!(&got[6..], &got[..6], "the virtual folder as the disk folder: {got:?}");
+    if cfg!(unix) { assert_eq!(&got[..6], [1, 1, 1, 1, 1, 0], "a folder opens for reading"); }
+}
+
+/// A test that keeps its scratch folder in its own source tree (an overlay run's sources, with an
+/// edits folder): show_control's preset bank makes a folder where a preset file was, removes it,
+/// puts a dangling symlink there, probes it, and removes the whole bank. In a virtual folder
+/// remove_dir went to rmdir(2) on the virtual path (NotFound for the folder create_dir had just
+/// made), the symlink went there too, its probe followed it (Missing), and the dangling link could
+/// not be removed (11-25). Each step answers as it does in a disk folder.
+#[cfg(unix)]
+#[test]
+fn folders_and_symlinks_made_in_a_virtual_folder_behave_as_on_the_disk() {
+    isolated_test!(folders_and_symlinks_made_in_a_virtual_folder_behave_as_on_the_disk);
+    let fixture = vfs_store::Fixture::new(&[("app/a.rs", b"a")]);
+    let root = "/relax-values-vfs-links/vfs/m";
+    crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+    let edits = std::env::temp_dir().join(format!("relax-values-vfs-links-edits-{}", std::process::id()));
+    crate::vfs::set_edits(Some(edits.clone()));
+    let disk = std::env::temp_dir().join(format!("relax-values-disk-links-{}", std::process::id()));
+    std::fs::create_dir_all(disk.join("app")).unwrap();
+    std::fs::write(disk.join("app/a.rs"), "a").unwrap();
+    let disk_root = disk.to_str().unwrap().to_string();
+    let src = format!(r#"
+use std::io::ErrorKind as K;
+fn code<T>(r: std::io::Result<T>) -> usize {{
+    match r {{
+        Ok(_) => 1,
+        Err(e) if e.kind() == K::NotFound => 2,
+        Err(e) if e.kind() == K::AlreadyExists => 3,
+        Err(e) if e.kind() == K::InvalidInput => 4,
+        Err(_) => 9,
+    }}
+}}
+pub fn values(out: &mut [usize; 22]) {{
+    for (k, root) in [{disk_root:?}, {root:?}].into_iter().enumerate() {{
+        let out = &mut out[k * 11..k * 11 + 11];
+        let app = std::path::Path::new(root).join("app");
+        let (dir, slot) = (app.join("t"), app.join("t/slot.ron"));
+        out[0] = code(std::fs::create_dir_all(&dir));
+        out[1] = code(std::fs::create_dir(&slot));
+        out[2] = code(std::fs::remove_dir(&slot));
+        out[3] = code(std::os::unix::fs::symlink(dir.join("missing.ron"), &slot));
+        out[4] = code(std::fs::read_to_string(&slot));
+        out[5] = std::fs::symlink_metadata(&slot).map_or(0, |m| 1 + m.file_type().is_symlink() as usize);
+        out[6] = (std::fs::read_link(&slot).ok() == Some(dir.join("missing.ron"))) as usize;
+        out[7] = code(std::os::unix::fs::symlink("x", &slot));
+        out[8] = code(std::os::unix::fs::symlink("x", app.join("a.rs")));
+        out[9] = code(std::fs::read_link(app.join("a.rs")));
+        out[10] = code(std::fs::remove_dir_all(&dir)) * 10 + std::fs::symlink_metadata(&dir).is_err() as usize;
+    }}
+}}
+"#);
+    let got = values::<22>(&src, "vfs_links");
+    crate::vfs::set_edits(None);
+    std::fs::remove_dir_all(&disk).unwrap();
+    let _ = std::fs::remove_dir_all(&edits);
+    // made, made, removed, linked, read NotFound, a symlink, its text, EEXIST over the link and
+    // over a file, a file is no link (EINVAL), the folder removed with the link in it
+    assert_eq!(&got[..11], [1, 1, 1, 1, 2, 2, 1, 3, 3, 4, 11], "the disk folder: {got:?}");
+    assert_eq!(&got[11..], &got[..11], "the virtual folder as the disk folder: {got:?}");
 }
 
 /// std::backtrace (it was a stub that printed "unsupported backtrace", so a lane learned who held a
@@ -908,4 +982,122 @@ fn a_constants_twins_link_from_the_disk_cache_in_the_next_run() {
     }
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
+}
+
+/// A `global_asm!` function with its own unwind info (`.seh_*`) and no frame pointer, as
+/// rustc's would leave it: `seh_through(data, f)` calls `f(data)`. From `inside`, below it, a
+/// walk by the function tables (RtlLookupFunctionEntry / RtlVirtualUnwind, as the exception
+/// dispatcher and std's backtraces walk) goes through its frame (the code area's entry for Relax
+/// frames would take the caller's frame pointer as its own and skip the caller) to `outer` and on
+/// as `outer`'s own walk goes; an exception raised in `inside` reaches its `.seh_handler`, which
+/// resumes the raise.
+#[cfg(all(windows, target_arch = "x86_64"))]
+const SEH: &str = r#"
+use std::sync::atomic::{AtomicUsize, Ordering};
+std::arch::global_asm!(
+    ".globl seh_through",
+    "seh_through:",
+    ".seh_proc seh_through",
+    ".seh_handler seh_through_handler, @except",
+    "push rbx",
+    ".seh_pushreg rbx",
+    "push rsi",
+    ".seh_pushreg rsi",
+    "sub rsp, 40",
+    ".seh_stackalloc 40",
+    ".seh_endprologue",
+    "call rdx",
+    "nop",
+    "add rsp, 40",
+    "pop rsi",
+    "pop rbx",
+    "ret",
+    ".seh_endproc",
+);
+extern "C" {
+    fn seh_through(data: *mut usize, f: extern "C" fn(*mut usize));
+}
+/// CONTEXT (x64): rsp and rip by their offsets
+#[repr(C, align(16))]
+struct Context([u64; 154]);
+const RSP: usize = 0x98 / 8;
+const RIP: usize = 0xf8 / 8;
+#[link(name = "kernel32")]
+extern "system" {
+    fn RtlCaptureContext(c: *mut Context);
+    fn RtlLookupFunctionEntry(pc: u64, base: *mut u64, history: *mut u8) -> *const u8;
+    fn RtlVirtualUnwind(kind: u32, base: u64, pc: u64, f: *const u8, c: *mut Context, data: *mut *mut u8, frame: *mut u64, pointers: *mut u8) -> *mut u8;
+    fn RaiseException(code: u32, flags: u32, n: u32, args: *const usize);
+}
+const CODE: u32 = 0xE0DE_0001;
+static HANDLED: AtomicUsize = AtomicUsize::new(0);
+static OUTER: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+#[no_mangle]
+unsafe extern "system" fn seh_through_handler(record: *const u32, _frame: *mut u8, _context: *mut u8, _dispatch: *mut u8) -> u32 {
+    if *record != CODE {
+        return 1;
+    }
+    HANDLED.fetch_add(1, Ordering::Relaxed);
+    0
+}
+/// The return addresses from its caller's on (the caller's frame first), by the function tables.
+#[inline(never)]
+fn walk(t: &mut [usize; 8]) -> usize {
+    let mut c = Context([0; 154]);
+    unsafe { RtlCaptureContext(&mut c) };
+    let mut n = 0;
+    while n < t.len() {
+        let pc = c.0[RIP];
+        let mut base = 0;
+        let f = unsafe { RtlLookupFunctionEntry(pc, &mut base, std::ptr::null_mut()) };
+        if f.is_null() {
+            // a leaf: its return address at rsp
+            c.0[RIP] = unsafe { *(c.0[RSP] as *const u64) };
+            c.0[RSP] += 8;
+        } else {
+            let (mut data, mut frame) = (std::ptr::null_mut(), 0);
+            unsafe { RtlVirtualUnwind(0, base, pc, f, &mut c, &mut data, &mut frame, std::ptr::null_mut()) };
+        }
+        if c.0[RIP] == 0 {
+            break;
+        }
+        t[n] = c.0[RIP] as usize;
+        n += 1;
+    }
+    n
+}
+extern "C" fn inside(out: *mut usize) {
+    let mut t = [0usize; 8];
+    let n = walk(&mut t);
+    // here, seh_through, outer, then the frames outer's own walk saw after itself
+    let walked = (1..=4).filter(|&k| k + 2 < n && t[k + 2] == OUTER[k].load(Ordering::Relaxed)).count();
+    unsafe {
+        *out = walked;
+        RaiseException(CODE, 0, 0, std::ptr::null());
+        *out.add(1) = HANDLED.load(Ordering::Relaxed);
+    }
+}
+#[inline(never)]
+fn outer(out: &mut [usize; 3]) {
+    let mut t = [0usize; 8];
+    walk(&mut t);
+    for (o, a) in OUTER.iter().zip(t) {
+        o.store(a, Ordering::Relaxed);
+    }
+    unsafe { seh_through(out.as_mut_ptr(), inside) };
+}
+pub fn values(out: &mut [usize; 3]) {
+    outer(out);
+    out[2] = 7;
+}
+"#;
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+fn an_asm_functions_own_unwind_info_walks_its_frame_and_calls_its_handler() {
+    isolated_test!(an_asm_functions_own_unwind_info_walks_its_frame_and_calls_its_handler);
+    let [walked, handled, done] = values::<3>(SEH, "seh_unwind");
+    assert_eq!(walked, 4, "a walk from below the asm frame goes on through its caller as the caller's own walk does");
+    assert_eq!(handled, 1, "an exception raised below the asm frame reaches its handler, which resumes it");
+    assert_eq!(done, 7, "the program goes on after the asm function returns");
 }

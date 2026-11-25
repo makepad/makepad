@@ -187,6 +187,24 @@ pub fn thread_yield() {
     }
 }
 
+/// A thread's name cut as real std cuts it before naming the thread (sys/thread/unix.rs
+/// `truncate_cstr`): its first `N - 1` bytes and a NUL, `N` the OS's buffer with its NUL. The OS
+/// refuses a longer name (glibc and bionic: ERANGE past 15 bytes; macOS: ENAMETOOLONG past 63),
+/// and the thread kept its creator's name.
+pub fn cut_thread_name<const N: usize>(name: *const c_char) -> [c_char; N] {
+    let mut cut = [0 as c_char; N];
+    let mut n = 0;
+    while n + 1 < N {
+        let c = unsafe { *name.add(n) };
+        if c == 0 {
+            break;
+        }
+        cut[n] = c;
+        n += 1;
+    }
+    cut
+}
+
 /// Real std's (sys/thread/unix.rs): on Linux and Android the CPUs of the affinity mask, capped by
 /// the cgroup CPU quota; on Apple targets (no affinity masks) the online CPUs. 0: unknown.
 pub fn available_parallelism() -> usize {

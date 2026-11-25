@@ -652,6 +652,47 @@ fn allocator_swap_serves_background_finish() {
 }
 
 #[test]
+fn a_pause_waits_for_a_request_the_owner_picked() {
+    isolated_test!(a_pause_waits_for_a_request_the_owner_picked);
+    static PAUSE_DONE: AtomicBool = AtomicBool::new(false);
+    owner::start();
+    let (picked_tx, picked_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let requester = std::thread::spawn(move || {
+        let tid = crate::os::thread::current();
+        *owner::PICKED_TEST.lock().unwrap() = Some((tid, Box::new(move || {
+            picked_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        })));
+        owner::call(owner::Class::Program, || PAUSE_DONE.load(Ordering::SeqCst))
+    });
+    picked_rx.recv().unwrap();
+    let busy_after_pick = owner::busy_for_other(crate::os::thread::current());
+    let (looks, wake) = &PAUSE_LOOKS;
+    *looks.lock().unwrap() = 0;
+    let pauser = std::thread::spawn(move || {
+        pause_compile_jobs("test: picked", false);
+        {
+            let _looks = looks.lock().unwrap();
+            PAUSE_DONE.store(true, Ordering::SeqCst);
+            wake.notify_all();
+        }
+        resume_compile_jobs(false);
+    });
+    let done_while_picked = {
+        let _looks = wake.wait_while(looks.lock().unwrap(), |n| *n < 2 && !PAUSE_DONE.load(Ordering::SeqCst)).unwrap();
+        PAUSE_DONE.load(Ordering::SeqCst)
+    };
+    go_tx.send(()).unwrap();
+    let done_in_request = requester.join().unwrap();
+    pauser.join().unwrap();
+    assert!(busy_after_pick, "a pauser must see the owner busy once it has dequeued a request");
+    assert!(!done_while_picked, "the pause ended while the owner held a picked request");
+    assert!(!done_in_request, "the picked request body must run before the pause ends");
+    assert!(PAUSE_DONE.load(Ordering::SeqCst), "the pause must end after the request");
+}
+
+#[test]
 fn hot_o3_cache_roundtrip() {
     // Tiering is process-global: the second unit is a fresh launch, sharing only disk cache.
     const CHILD: &str = "RELAX_HOT_O3_CACHE_TEST";
@@ -1566,31 +1607,185 @@ fn round50_inline_const_reload() {
 }
 
 #[test]
-fn copy_versions_move_with_the_flags_their_code_reads() {
-    isolated_test!(copy_versions_move_with_the_flags_their_code_reads);
-    // Copy versions (note_guard_reads): code that reads patch flags notes the copy versions it
-    // reads under each. A flag set before the install moves them at the install (a callee patched
-    // before it is caught), one set after moves them at the patch (set_patched); a slot whose code
-    // reads no flag that was set keeps its version. The disk cache never stores code naming a
-    // version that moved: a later session's starts at 0 and would reach the value again while the
-    // code's copies may be stale. Control: the same record naming a version at 0 is encoded.
+fn live_o3_split_keeps_the_saved_host_current() {
+    const CHILD: &str = "RELAX_TEST_OUTLINE_OPT";
+    let Ok(tokens) = std::env::var(CHILD) else {
+        // the default (in-function) form every user runs, and the outlined one; which tokens choose
+        // each is outline_requested_needs_plus_outline_without_minus's
+        for opt in ["", "+outline"] {
+            let result = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::settle_tests::live_o3_split_keeps_the_saved_host_current", "--nocapture"])
+                .env(CHILD, opt).env("RELAX_OPT", opt).env("RELAX_CACHE", "off").env("RELAX_O3_STATS", "1")
+                .env("RELAX_DUMP_RIR", "split_live::caller")
+                .env("RELAX_GANDALF", "0").env_remove("RELAX_OUTLINE_WHOLE"));
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(result.status.success() && stdout.contains("1 passed"), "RELAX_OPT={opt}\n{stdout}\n{stderr}");
+            if opt == "+outline" {
+                assert!(stderr.contains("Call(Part(Some(0)),"), "O3 must pass exit zero as an immediate\n{stderr}");
+            }
+            for line in stderr.lines().filter(|l| l.starts_with("relax o3-stats: outline ")) { eprintln!("{line}"); }
+        }
+        return;
+    };
     crate::borrowck::lazy::disable_gandalf();
     std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
-    let dir = std::env::temp_dir().join(format!("relax-copy-versions-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("relax-outline-live-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("input.rs"), "pub fn hot(out: &mut u32) { *out = 7; }\npub fn cool(out: &mut u32) { *out = 8; }\npub fn early() {}\npub fn late() {}\nfn main() {}\n").unwrap();
-    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
-    let session = std::sync::Arc::new(crate::Session::default());
-    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "copy_versions", false).unwrap();
-    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| (d.krate == krate && prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
-    let defs = [def("hot"), def("cool"), def("early"), def("late")];
+    let path = dir.join("input.rs");
+    // Only the range starts at zero. O3 used to keep that initializer live for exit zero.
+    let source = "#[inline] pub fn leaf(x: u32) -> u32 { (x << 1) ^ (x >> 3) ^ 7 }\n\
+        pub fn caller(out: &mut u32) { let n = *out; let mut s = 1u32; for i in 0..n { s = s.wrapping_add(leaf(i)); } *out = s; }\nfn main() {}";
+    std::fs::write(&path, source).unwrap();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    session.options.opt = tokens.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "split_live", false).unwrap();
+    let [leaf, caller] = ["leaf", "caller"].map(|name| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == name).then_some(id)
+    }).unwrap());
+    let file = prog.def(leaf).file;
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
     assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
     let mut u = Unit::new(prog, tcx, core);
     let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    let caller = crate::owner::call(crate::owner::Class::Program, || {
+        let ids = [leaf, caller].map(|d| u.fn_id(FnKey::Inst(d, vec![])));
+        for id in ids {
+            let (code, map, relocs) = unsafe { compile_fn(up, id) }.unwrap();
+            u.install(id, &code, &relocs, map, 0).unwrap();
+        }
+        ids[1]
+    });
+    assert!(unsafe { compile_tier1(up, caller) }, "the live O3 host installs");
+    tier1_stats_report();
+    let host = &u.fns[caller as usize];
+    let saved = host.code;
+    let end = saved + u64::from(host.code_len);
+    {
+        let tables = u.code.read().unwrap();
+        assert!(crate::invalid::group_of(&u, caller, 0, &[]).is_none(), "the fresh host uses the hot code chunk");
+        assert_eq!(tables.version_of(saved).map(|(v, n, _)| (v, n)), Some((2, 2)), "one baseline and one hot install");
+        let part = tables.function_base(saved, end - 1);
+        if tokens == "+outline" {
+            assert!(part > saved && part < end, "the joined continuation has its own function base");
+            assert_eq!(tables.function_base(saved, part - 1), saved);
+            assert_eq!(tables.function_base(saved, part), part);
+        } else {
+            assert_eq!(part, saved, "the default build keeps its patched path in the function");
+            let mut split = false;
+            host.pc_map.each(|off, pos| { split |= off != u32::MAX && relax_backend::rir::pos_patched(pos); true });
+            assert!(split, "the default build has a patched path");
+        }
+    }
+    let run_saved = || {
+        let mut result = 100u32;
+        unsafe { call_jit(up, saved, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
+        result
+    };
+    assert_eq!(run_saved(), 1 + 9984);
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit {
+        file, path: path.to_string_lossy().into_owned(), src: source.replace("(x << 1) ^ (x >> 3) ^ 7", "((x << 1) ^ (x >> 3) ^ 7) + 1").into_bytes(),
+    }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    assert_eq!(run_saved(), 1 + 10084, "the original host reaches the patched leaf");
+    unsafe { UNIT = std::ptr::null_mut() };
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn outline_requested_needs_plus_outline_without_minus() {
+    for (live, tokens, on) in [(true, "", false), (true, "+outline", true), (true, "+outline,-outline", false), (true, "-outline", false), (false, "+outline", false)] {
+        let mut session = crate::Session::default();
+        session.options.live = live;
+        session.options.opt = tokens.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect();
+        assert_eq!(outline_requested(&session.options), on, "live={live} RELAX_OPT={tokens}");
+    }
+}
+
+#[test]
+fn part_flag_misses_register_each_slot_once() {
+    use relax_backend::rir::{part_trailer_words, unwind_info_words, Reloc, RelocAt, RelocKind};
+    isolated_test!(part_flag_misses_register_each_slot_once);
+    std::env::set_var("RELAX_O3_STATS", "1");
+    let path = std::env::temp_dir().join(format!("relax-part-flags-{}.rs", std::process::id()));
+    std::fs::write(&path, "#![no_std] fn early() {} fn late() {} fn listed() {} fn host() {}").unwrap();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    let session = std::sync::Arc::new(session);
+    let mut prog = Program::new(&session);
+    prog.load_crate("part_flags", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    let defs = ["early", "late", "listed", "host"].map(|name| prog.defs.iter().enumerate()
+        .find_map(|(i, _)| (prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap());
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    let mut u = Unit::new(prog, tcx, 0);
     crate::owner::call(crate::owner::Class::Program, || {
-        let [hot, cool, early, late] = defs.map(|d| u.fn_id(FnKey::Inst(d, Vec::new())));
+        let [early, late, listed, host] = defs.map(|d| u.fn_id(FnKey::Inst(d, vec![])));
+        let flag = |at, slot| RelocAt { at, kind: RelocKind::Pool64, target: Reloc::Sym(patch_flag(&u, slot).unwrap()) };
+        let relocs = [flag(0, host), flag(16, early), flag(24, early), flag(32, late), flag(40, listed), flag(48, host)];
+        let mut words = vec![0u32; 12];
+        let trailer = unwind_info_words(&[], &[], &[], 16);
+        words.extend(&trailer);
+        words.extend(&trailer);
+        words.extend(part_trailer_words(16, trailer.len()));
+        let code: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let ver = |u: &Unit| unsafe { (*tier_rec(&u.slots, host).add((TIER_COPY / 8) as usize)).load(Ordering::Acquire) };
+        set_patched(&u, early);
+        let mut inlined = vec![listed];
+        let n = append_part_flags(&u, &code, &relocs, &mut inlined);
+        assert_eq!(n, 2, "only distinct missing flags in P's range");
+        assert_eq!(inlined, [listed, early, late]);
+        assert_eq!(ver(&u), 0, "checking a candidate does not register it");
+        register_part_flags(&mut u, host, &inlined[inlined.len() - n..]);
+        assert_eq!(TIER1_STATS.lock().unwrap().as_ref().unwrap().outline[&("flag miss", "absent from inlined")].0, 2);
+        assert_eq!(ver(&u), 1, "a pre-set flag moves the host once");
+        set_patched(&u, late);
+        assert_eq!(ver(&u), 2, "a later patch moves the registered host");
+        for c in [early, late] {
+            assert_eq!(u.fns[c as usize].history().copy_hosts, [host]);
+            assert_eq!(u.fns[c as usize].history().inlined_into, [host]);
+        }
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn copy_versions_move_with_the_flags_their_code_reads() {
+    isolated_test!(copy_versions_move_with_the_flags_their_code_reads);
+    // Copy versions (note_guard_reads): code that reads patch flags notes the copy versions it
+    // reads under each. A flag set before the install moves them at the install (a callee patched
+    // before it is caught), one set after moves them at the patch (set_patched); a slot whose code
+    // reads no flag that was set keeps its version. P's flag and the host exit's copy version
+    // pair only when scanned in one relocation list, whether the patch precedes or follows
+    // the scan. The disk cache never stores code naming a version that moved: a later session's
+    // starts at 0 and would reach the value again while the code's copies may be stale.
+    // Control: the same record naming a version at 0 is encoded.
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-copy-versions-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input.rs"), concat!(
+        "pub fn hot(out: &mut u32) { *out = 7; }\npub fn cool(out: &mut u32) { *out = 8; }\n",
+        "pub fn early() {}\npub fn late() {}\npub fn split_leaf() {}\npub fn split_host() {}\n",
+        "pub fn joined_leaf() {}\npub fn joined_host() {}\npub fn later_host() {}\nfn main() {}\n",
+    )).unwrap();
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "copy_versions", false).unwrap();
+    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| (d.krate == krate && prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
+    let defs = ["hot", "cool", "early", "late", "split_leaf", "split_host", "joined_leaf", "joined_host", "later_host"].map(def);
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let (split, joined_before, joined_after, already_set) = crate::owner::call(crate::owner::Class::Program, || {
+        let [hot, cool, early, late, split_leaf, split_host, joined_leaf, joined_host, later_host] =
+            defs.map(|d| u.fn_id(FnKey::Inst(d, Vec::new())));
         let at = |u: &Unit, id: u32, off: i64| {
             let s = loop_counter_sym(u, id);
             relax_backend::rir::Sym { id: s.id, off: s.off + off }
@@ -1605,6 +1800,25 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
         let reads = [at(&u, cool, COPY_VER_OFF)];
         note_guard_reads(&mut u, reads.into_iter());
         assert_eq!(ver(&u, cool), 0, "code that reads no flag keeps its version");
+
+        let flag = at(&u, split_leaf, PATCH_FLAG_OFF);
+        let version = at(&u, split_host, COPY_VER_OFF);
+        note_guard_reads(&mut u, [flag].into_iter());
+        note_guard_reads(&mut u, [version].into_iter());
+        set_patched(&u, split_leaf);
+        let split = ver(&u, split_host);
+
+        let flag = at(&u, joined_leaf, PATCH_FLAG_OFF);
+        let version = at(&u, joined_host, COPY_VER_OFF);
+        note_guard_reads(&mut u, [flag, version].into_iter());
+        let joined_before = ver(&u, joined_host);
+        set_patched(&u, joined_leaf);
+        let joined_after = ver(&u, joined_host);
+
+        let version = at(&u, later_host, COPY_VER_OFF);
+        note_guard_reads(&mut u, [flag, version].into_iter());
+        let already_set = ver(&u, later_host);
+
         let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
         cache.mode = crate::cache::Mode::On;
         u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
@@ -1623,9 +1837,14 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
             assert_eq!(cache.stats.recorded > before, stored, "{}: a record naming a copy version at {} is {}", u.fns[id as usize].name, ver(&u, id), if stored { "encoded" } else { "never encoded" });
             u.cache = Some(cache);
         }
+        (split, joined_before, joined_after, already_set)
     });
     std::fs::remove_dir_all(&dir).unwrap();
     std::mem::forget(u);
+    assert_eq!(split, 0, "two relocation sets scanned apart never pair; a joined payload must carry P's flags and the exit's version in one list");
+    assert_eq!(joined_before, 0, "a joined scan with a clear flag keeps the host's version at install");
+    assert_eq!(joined_after, 1, "a patch after a joined scan moves the host's version");
+    assert_eq!(already_set, 1, "a joined scan with an already-set flag moves the new host's version at install");
 }
 
 #[test]
@@ -1834,7 +2053,12 @@ fn a_preempted_check_gives_way_to_a_pause() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("input.rs");
     std::fs::write(&path, "pub fn checked(x: u32) -> u32 { x + 1 }\nfn main() { let _ = checked(1); }\n").unwrap();
-    let session = std::sync::Arc::new(crate::Session::default());
+    let mut session = crate::Session::default();
+    session.runtime.settle_drop = true;
+    // (no slot is an inline candidate: a completed slot's lowered body is the settle's to drop,
+    // so the fork child's drop_completed_body below would reach the tier queue and TIER_ACTIVE)
+    session.options.inline_src = Some(0);
+    let session = std::sync::Arc::new(session);
     let (prog, core, krate) = crate::load_with_std(&session, path.to_str().unwrap(), "preempted_pause", false).unwrap();
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = DefId(i as u32);
@@ -1867,6 +2091,69 @@ fn a_preempted_check_gives_way_to_a_pause() {
     drop(writer);
     pause.join().unwrap();
     assert!(gave_way, "a preempted check waited for the writer while a pause waited for its job");
+    #[cfg(unix)]
+    {
+        let mut u = u;
+        let up = &mut *u as *mut Unit;
+        // (said outside the owner's call: a panic in a request it serves is a silent compile error)
+        let (id, built, state, droppable) = owner::call(owner::Class::Program, || unsafe {
+            let id = u.fn_id(FnKey::Inst(def, Vec::new()));
+            let built = compile_fn(up, id).map_err(|e| format!("compile: {e:?}"))
+                .and_then(|c| u.install(id, &c.0, &c.2, c.1, 0).map(|_| ()).map_err(|e| format!("install: {e:?}")))
+                .and_then(|_| build_rir(up, id).map(|_| ()).map_err(|e| format!("build_rir: {e:?}")));
+            let f = &u.fns[id as usize];
+            (id, built, (f.compiled, f.building, f.inflight), f.rir.is_some() && !inline_source_wanted(&u, id, false))
+        });
+        built.unwrap();
+        assert_eq!(state, (true, false, false), "the slot is compiled, not building, not in flight");
+        assert!(droppable, "its lowered body is the settle's to drop: drop_completed_body reaches the tier checks when jobs are enabled");
+        let probe = |released: bool| {
+            let (sites, code) = (u.sites.clone(), u.code.clone());
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                loop {
+                    let jit = [sites.try_lock().is_ok(), if released { code.try_write().is_ok() } else { code.try_read().is_ok() },
+                        queue::queue().try_lock().is_ok(), queue::AHEAD_INBOX.try_lock().is_ok(),
+                        TIER_ACTIVE.try_lock().is_ok(), O2_SEEN.try_lock().is_ok()];
+                    let vfs = crate::vfs::fork_locks_available(released);
+                    if !released || (jit, vfs) == ([true; 6], [true; 7]) || start.elapsed().as_secs() >= 10 {
+                        break (jit, vfs);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }).join().unwrap()
+        };
+        fork_prepare();
+        let during = probe(false);
+        fork_parent();
+        assert_eq!(during, ([false; 6], [false; 7]), "prepare must hold every JIT and VFS lock");
+        assert_eq!(probe(true), ([true; 6], [true; 7]), "parent must release every JIT and VFS lock");
+
+        let (stage, progress) = std::sync::mpsc::channel();
+        let address = up as usize;
+        queue::fork_child();
+        let q = queue::queue().lock().unwrap();
+        let active = TIER_ACTIVE.lock().unwrap();
+        let worker = std::thread::spawn(move || {
+            let empty = queue::tiers().is_empty();
+            stage.send(empty).unwrap();
+            owner::call(owner::Class::Program, || unsafe { drop_completed_body(&mut *(address as *mut Unit), id) });
+            stage.send(true).unwrap();
+        });
+        let bound = std::time::Duration::from_secs(10);
+        let tiers = progress.recv_timeout(bound);
+        let dropped = tiers.is_ok() && progress.recv_timeout(bound).is_ok();
+        drop(active);
+        drop(q);
+        let joined = worker.join();
+        queue::leave_child_for_test();
+        joined.unwrap();
+        assert!(tiers.expect("fork-child tiers blocked on QUEUE"), "fork-child tiers must be empty");
+        assert!(dropped, "fork-child drop_completed_body blocked on TIER_ACTIVE");
+        assert!(u.fns[id as usize].rir.is_some(), "a fork child keeps the completed slot's lowered body");
+        drop(u);
+    }
+    #[cfg(not(unix))]
     drop(u);
     std::fs::remove_dir_all(dir).unwrap();
 }

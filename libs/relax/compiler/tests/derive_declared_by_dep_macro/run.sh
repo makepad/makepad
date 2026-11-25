@@ -5,7 +5,7 @@
 # and through a re-export). Prints "derive_declared_by_dep_macro: ok" or
 # "derive_declared_by_dep_macro: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet ddm-app 2>>"$ERR")

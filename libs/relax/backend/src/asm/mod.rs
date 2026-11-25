@@ -584,6 +584,86 @@ pub struct Output {
     /// targets, and labels of other sections / absolute label addresses (global blocks)
     pub fixups: Vec<Fixup>,
     pub defs: Vec<Def>,
+    /// the Windows x64 unwind descriptions of its functions (`.seh_proc` .. `.seh_endproc`)
+    pub seh: Vec<SehProc>,
+}
+
+/// A function's Windows x64 unwind description, from its `.seh_*` directives: what its
+/// RUNTIME_FUNCTION and UNWIND_INFO say (the placer writes them, `unwind_info`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SehProc {
+    pub section: u32,
+    /// its first byte (`.seh_proc`) and the byte past its last (`.seh_endproc`), in `section`
+    pub start: u32,
+    pub end: u32,
+    /// the prologue's length (`.seh_endprologue`)
+    pub prologue: u8,
+    /// `.seh_setframe`: the frame register and its offset from rsp, in 16-byte units
+    pub frame: Option<(u8, u8)>,
+    /// what the prologue does, in its order: each with the offset past the instruction it
+    /// describes
+    pub ops: Vec<(u8, SehOp)>,
+    /// `.seh_handler`: the handler's symbol, and UNW_FLAG_EHANDLER (1) / UNW_FLAG_UHANDLER (2)
+    pub handler: Option<(String, u8)>,
+}
+
+/// One step of a prologue an unwind code describes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SehOp {
+    /// UWOP_PUSH_NONVOL: the register
+    PushReg(u8),
+    /// UWOP_ALLOC_SMALL / UWOP_ALLOC_LARGE: the bytes
+    Alloc(u32),
+    /// UWOP_SET_FPREG
+    SetFrame,
+    /// UWOP_SAVE_NONVOL(_FAR): the register, its offset from rsp
+    SaveReg(u8, u32),
+    /// UWOP_SAVE_XMM128(_FAR): the register, its offset from rsp
+    SaveXmm(u8, u32),
+    /// UWOP_PUSH_MACHFRAME: with an error code
+    PushFrame(bool),
+}
+
+impl SehProc {
+    /// Its unwind codes (UNWIND_CODE slots), the prologue's last step first.
+    fn codes(&self) -> Vec<u16> {
+        let mut c = Vec::new();
+        for &(at, op) in self.ops.iter().rev() {
+            let code = |op: u16, info: u8| at as u16 | op << 8 | (info as u16) << 12;
+            match op {
+                SehOp::PushReg(r) => c.push(code(0, r)),
+                SehOp::Alloc(n) if n <= 128 => c.push(code(2, (n / 8 - 1) as u8)),
+                SehOp::Alloc(n) if n / 8 <= 0xffff => c.extend([code(1, 0), (n / 8) as u16]),
+                SehOp::Alloc(n) => c.extend([code(1, 1), n as u16, (n >> 16) as u16]),
+                SehOp::SetFrame => c.push(code(3, 0)),
+                SehOp::SaveReg(r, o) if o / 8 <= 0xffff => c.extend([code(4, r), (o / 8) as u16]),
+                SehOp::SaveReg(r, o) => c.extend([code(5, r), o as u16, (o >> 16) as u16]),
+                SehOp::SaveXmm(r, o) if o / 16 <= 0xffff => c.extend([code(8, r), (o / 16) as u16]),
+                SehOp::SaveXmm(r, o) => c.extend([code(9, r), o as u16, (o >> 16) as u16]),
+                SehOp::PushFrame(e) => c.push(code(10, e as u8)),
+            }
+        }
+        c
+    }
+
+    /// Its UNWIND_INFO (version 1): the header, the unwind codes (padded to an even count), and
+    /// with a handler its address relative to the image base, `handler_rva`.
+    pub fn unwind_info(&self, handler_rva: u32) -> Vec<u8> {
+        let codes = self.codes();
+        let flags = self.handler.as_ref().map_or(0, |h| h.1);
+        let (reg, off) = self.frame.unwrap_or((0, 0));
+        let mut b = vec![1 | flags << 3, self.prologue, codes.len() as u8, reg | off << 4];
+        for c in &codes {
+            b.extend_from_slice(&c.to_le_bytes());
+        }
+        if codes.len() % 2 == 1 {
+            b.extend_from_slice(&[0, 0]);
+        }
+        if flags != 0 {
+            b.extend_from_slice(&handler_rva.to_le_bytes());
+        }
+        b
+    }
 }
 
 /// Where an error is: the template line and what is wrong.
@@ -623,11 +703,22 @@ pub struct Ctx {
     defs_order: Vec<String>,
     /// inline asm: one text section, no section switching
     inline: bool,
+    /// the functions' unwind descriptions; the one `.seh_proc` opened, and whether its prologue
+    /// ended
+    seh: Vec<SehProc>,
+    seh_open: Option<SehProc>,
+    #[cfg(not(target_arch = "aarch64"))]
+    seh_prologue_done: bool,
 }
 
 impl Ctx {
     fn new(arch: Arch, format: Format, att: bool, inline: bool) -> Ctx {
-        Ctx { arch, format, att, sections: vec![Section { name: ".text".to_string(), bytes: Vec::new(), exec: true, bss: false, align: 4 }], cur: 0, fixups: Vec::new(), labels: HashMap::new(), local_count: HashMap::new(), sets: HashMap::new(), globals: Vec::new(), defs_order: Vec::new(), inline }
+        Ctx { arch, format, att, sections: vec![Section { name: ".text".to_string(), bytes: Vec::new(), exec: true, bss: false, align: 4 }], cur: 0, fixups: Vec::new(), labels: HashMap::new(), local_count: HashMap::new(), sets: HashMap::new(), globals: Vec::new(), defs_order: Vec::new(), inline,
+            seh: Vec::new(),
+            seh_open: None,
+            #[cfg(not(target_arch = "aarch64"))]
+            seh_prologue_done: false,
+        }
     }
 
     /// Offset in the current section.
@@ -1066,6 +1157,8 @@ fn run(ctx: &mut Ctx, enc: &mut dyn Encoder, stmts: &[Stmt], macros: &mut HashMa
             // visibility and symbol type/size: nothing to do for code Relax places itself
             ".hidden" | ".private_extern" | ".protected" | ".internal" | ".weak" | ".weak_definition" | ".weak_reference" | ".type" | ".size" | ".local" | ".file" | ".ident" | ".loc" | ".no_dead_strip" | ".alt_entry" | ".subsections_via_symbols" | ".build_version" | ".end" => {}
             d if d.starts_with(".cfi_") => {}
+            #[cfg(not(target_arch = "aarch64"))]
+            d if d.starts_with(".seh_") => seh_directive(ctx, d, args).map_err(|m| err(line, m))?,
             ".p2align" | ".balign" | ".align" | ".p2alignw" | ".p2alignl" | ".balignw" | ".balignl" => {
                 let parts = split_commas(args);
                 let mut i = 0;
@@ -1189,6 +1282,140 @@ fn canonical_section(n: &str, args: &[Tok]) -> String {
         return ".data".to_string();
     }
     n.to_string()
+}
+
+/// A `.seh_*` directive (Windows x64 unwind info, LLVM's names): what the function it is in
+/// does in its prologue, at the offset past the instruction before the directive.
+#[cfg(not(target_arch = "aarch64"))]
+fn seh_directive(ctx: &mut Ctx, d: &str, args: &[Tok]) -> Result<(), String> {
+    if ctx.inline {
+        return Err(format!("{} in inline assembly: the function holding it has its own unwind info", d));
+    }
+    if ctx.format != Format::Coff {
+        return Err(format!("{}: Windows unwind info, for COFF only", d));
+    }
+    let pos = ctx.pos();
+    if d == ".seh_proc" {
+        if ctx.seh_open.is_some() {
+            return Err(".seh_proc inside another function's: no .seh_endproc before it".to_string());
+        }
+        ctx.seh_open = Some(SehProc { section: ctx.cur, start: pos, end: pos, prologue: 0, frame: None, ops: Vec::new(), handler: None });
+        ctx.seh_prologue_done = false;
+        return Ok(());
+    }
+    let Some(mut p) = ctx.seh_open.take() else { return Err(format!("{} outside a function: no .seh_proc before it", d)) };
+    let r = seh_step(ctx, &mut p, d, args, pos);
+    if d != ".seh_endproc" || r.is_err() {
+        ctx.seh_open = Some(p);
+    }
+    r
+}
+
+/// `seh_directive` in the function `p` (taken out of `ctx` meanwhile; `.seh_endproc` ends it).
+#[cfg(not(target_arch = "aarch64"))]
+fn seh_step(ctx: &mut Ctx, p: &mut SehProc, d: &str, args: &[Tok], pos: u32) -> Result<(), String> {
+    if p.section != ctx.cur {
+        return Err(format!("{} in another section than its function's .seh_proc", d));
+    }
+    let done = ctx.seh_prologue_done;
+    let at = u8::try_from(pos - p.start).map_err(|_| format!("{}: more than 255 bytes into its function", d));
+    let parts = split_commas(args);
+    let reg = |i: usize, vec: bool| -> Result<u8, String> {
+        let t: &[Tok] = parts.get(i).copied().unwrap_or(&[]);
+        let t = if t.first().is_some_and(|x| x.is(b'%')) { &t[1..] } else { t };
+        let r = match t {
+            [Tok::Reg(r, _)] => Some(*r),
+            [Tok::Ident(n)] => x64::parse_reg(n.trim_start_matches('%')).filter(|r| r.1 == if vec { 128 } else { 64 }).map(|r| r.0),
+            _ => None,
+        };
+        r.filter(|r| r.vec == vec && r.n < 16).map(|r| r.n).ok_or_else(|| format!("{} needs {} register", d, if vec { "an xmm" } else { "a 64-bit integer" }))
+    };
+    let konst = |i: usize| -> Result<u32, String> {
+        let mut k = 0;
+        let v = ctx.const_expr(parts.get(i).copied().unwrap_or(&[]), &mut k).map_err(|m| format!("{}: {}", d, m))?;
+        u32::try_from(v).map_err(|_| format!("{}: {} is out of range", d, v))
+    };
+    let step = |op: SehOp| -> Result<(u8, SehOp), String> {
+        if done {
+            return Err(format!("{} after .seh_endprologue", d));
+        }
+        Ok((at.clone()?, op))
+    };
+    match d {
+        ".seh_endproc" => {
+            if !p.ops.is_empty() && !done {
+                return Err(".seh_endproc of a function whose prologue has no .seh_endprologue".to_string());
+            }
+            if p.codes().len() > 255 {
+                return Err("a prologue of more than 255 unwind code slots".to_string());
+            }
+            p.end = pos;
+            ctx.seh.push(p.clone());
+        }
+        // the epilogue marks of unwind info version 2 tell version 1 nothing
+        ".seh_startepilogue" | ".seh_endepilogue" => {}
+        ".seh_handler" => {
+            let name = match parts.first().and_then(|t| t.first()) {
+                Some(Tok::Ident(n)) | Some(Tok::Sym(SymRef::Name(n))) => n.clone(),
+                _ => return Err(".seh_handler needs the handler's symbol".to_string()),
+            };
+            let mut flags = 0;
+            for t in parts.iter().skip(1) {
+                match t.iter().find_map(|x| x.ident()) {
+                    Some("except") => flags |= 1,
+                    Some("unwind") => flags |= 2,
+                    _ => return Err(".seh_handler takes @except and @unwind".to_string()),
+                }
+            }
+            if flags == 0 {
+                return Err(".seh_handler names neither @except nor @unwind".to_string());
+            }
+            p.handler = Some((name, flags));
+        }
+        ".seh_endprologue" => {
+            if done {
+                return Err(".seh_endprologue twice in one function".to_string());
+            }
+            p.prologue = at.clone()?;
+            ctx.seh_prologue_done = true;
+        }
+        ".seh_pushreg" => p.ops.push(step(SehOp::PushReg(reg(0, false)?))?),
+        ".seh_stackalloc" => {
+            let n = konst(0)?;
+            if n == 0 || n % 8 != 0 {
+                return Err(format!(".seh_stackalloc {}: the size is a nonzero multiple of 8", n));
+            }
+            p.ops.push(step(SehOp::Alloc(n))?);
+        }
+        ".seh_setframe" => {
+            let (r, off) = (reg(0, false)?, konst(1)?);
+            if off % 16 != 0 || off > 240 {
+                return Err(format!(".seh_setframe: offset {} is not a multiple of 16 up to 240", off));
+            }
+            if p.frame.is_some() {
+                return Err(".seh_setframe twice in one function".to_string());
+            }
+            p.ops.push(step(SehOp::SetFrame)?);
+            p.frame = Some((r, (off / 16) as u8));
+        }
+        ".seh_savereg" => {
+            let (r, off) = (reg(0, false)?, konst(1)?);
+            if off % 8 != 0 {
+                return Err(format!(".seh_savereg: offset {} is not a multiple of 8", off));
+            }
+            p.ops.push(step(SehOp::SaveReg(r, off))?);
+        }
+        ".seh_savexmm" => {
+            let (r, off) = (reg(0, true)?, konst(1)?);
+            if off % 16 != 0 {
+                return Err(format!(".seh_savexmm: offset {} is not a multiple of 16", off));
+            }
+            p.ops.push(step(SehOp::SaveXmm(r, off))?);
+        }
+        ".seh_pushframe" => p.ops.push(step(SehOp::PushFrame(args.iter().any(|x| x.ident() == Some("code"))))?),
+        _ => return Err(format!("unknown directive `{}`", d)),
+    }
+    Ok(())
 }
 
 fn switch_section(ctx: &mut Ctx, n: &str) -> Result<(), String> {
@@ -1342,7 +1569,10 @@ fn finish(mut ctx: Ctx, _enc: &dyn Encoder) -> Result<Output, AsmError> {
             return Err(err(0, format!("`.globl {}` names no label of the block", g)));
         }
     }
-    Ok(Output { sections, fixups: left, defs })
+    if ctx.seh_open.is_some() {
+        return Err(err(0, ".seh_proc without its .seh_endproc"));
+    }
+    Ok(Output { sections, fixups: left, defs, seh: ctx.seh })
 }
 
 pub fn is_pc_relative(k: FixKind) -> bool {

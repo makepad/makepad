@@ -2,7 +2,7 @@
 # usage: run.sh <makepad binary>: expansion-defined macro exports across crates.
 set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 export RELAX_CACHE=off
 EXPECTED='42 11'

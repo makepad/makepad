@@ -13,7 +13,7 @@
 //! initialisers are pure up to diagnostics, which the publishing caller records (`init_once`'s
 //! `publish` argument), so a value computed twice is reported once.
 
-std::thread_local! {
+thread_local! {
     /// cells this thread is computing, innermost last (a fixed array: no heap in a thread-local
     /// that outlives compiler generations); beyond DEPTH the deepest are not tracked
     static COMPUTING: std::cell::Cell<([usize; DEPTH], usize)> = const { std::cell::Cell::new(([0; DEPTH], 0)) };

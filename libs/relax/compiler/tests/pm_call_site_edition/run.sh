@@ -5,7 +5,7 @@
 # as rustc gives them. Runs cold, then warm from the images the cold run wrote; prints
 # "pm_call_site_edition: ok" or "pm_call_site_edition: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 WANT="block local,temp / temp,local; braces local,temp; if-let else,scrutinee / scrutinee,else; into_iter &u8 / u8; rules local,temp; 4"
 ok=1
 for run in cold warm; do

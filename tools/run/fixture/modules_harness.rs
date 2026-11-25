@@ -91,24 +91,55 @@ fn the_provided_crates_have_every_tagged_option_entry() {
 }
 
 /// What rustc refuses in the app's own crates, a run refuses too and says why, validation-only
-/// checks included: E0436 used to compile and run, and the run said nothing.
+/// checks included: E0436 used to compile and run, and the run said nothing. So did each of the
+/// crate-level checks (`crate_level`: check.rs crate_level_errors), which only `makepad check` made.
 #[test]
 fn a_run_refuses_what_rustc_refuses_in_the_apps_crates() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let scratch = std::env::temp_dir().join(format!("run-refuses-{}", std::process::id()));
-    let output = Command::new(runner())
-        .args(["run", "run-refuses"])
-        .current_dir(root.join("libs/relax/compiler/tests/run_refuses"))
-        .env("RELAX_STD", root.join("libs/relax/compiler/std"))
-        .env("RELAX_CACHE_DIR", scratch.join("cache"))
-        .env("RELAX_TARGET_DIR", scratch.join("target"))
-        .output()
-        .unwrap();
+    let fixture = root.join("libs/relax/compiler/tests/run_refuses");
+    let run = |package: &str, dir: std::path::PathBuf| {
+        let output = Command::new(runner())
+            .args(["run", package])
+            .current_dir(dir)
+            .env("RELAX_STD", root.join("libs/relax/compiler/std"))
+            .env("RELAX_CACHE_DIR", scratch.join("cache"))
+            .env("RELAX_TARGET_DIR", scratch.join("target"))
+            .output()
+            .unwrap();
+        (package.to_string(), output.status.code(), String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
+    };
+    let runs = [run("run-refuses", fixture.clone()), run("crate-level", fixture.join("crate_level"))];
     let _ = std::fs::remove_dir_all(&scratch);
-    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    assert_eq!(output.status.code(), Some(101), "{stdout}\n{stderr}");
-    assert!(!stdout.contains("started"), "it ran: {stdout}\n{stderr}");
-    assert!(stderr.contains("E0436: functional record update syntax requires a struct"), "{stderr}");
+    for (package, code, stdout, stderr) in &runs {
+        assert_eq!(*code, Some(101), "{package}: {stdout}\n{stderr}");
+        assert!(!stdout.contains("started"), "{package} ran: {stdout}\n{stderr}");
+    }
+    let [(_, _, _, validated), (_, _, _, crate_level)] = &runs;
+    assert!(validated.contains("E0436: functional record update syntax requires a struct"), "{validated}");
+    // rustc's words for each (the check that finds it: what the run left out)
+    let missing: Vec<&str> = [
+        "E0428: the name `twice` is defined multiple times",  // duplicate_items
+        "E0428: the name `exported` is defined multiple times",  // duplicate_exported_macros
+        "E0603: module `hidden` is private",  // impl_trait_path_privacy
+        "E0446: private type `Private` in public interface",  // private_assoc_types
+        "E0658: attributes on expressions are experimental",  // gated_syntax, in a body parsed on demand
+        // (rustc now names an attribute "the `inline` attribute", where its older words and Relax's
+        // say "`#[inline]` attribute": the words both say)
+        "attribute cannot be used on enum variants",  // node_attribute_targets
+        "allow, cfg, cfg_attr, deny, expect, forbid, and warn are the only allowed built-in attributes in function parameters",  // param_attributes
+        "items in `extern` blocks without an `unsafe` qualifier cannot have safety qualifiers",  // foreign_blocks
+        "symbol `dup_sym` is already defined",  // duplicate_symbols
+        "cannot define multiple global allocators",  // global_allocators_and_lang_items
+        "entry symbol `main` declared multiple times",  // entry_symbol_conflict
+        "cannot find attribute `not_an_attribute` in this scope",  // attribute_errors
+        "E0449: visibility qualifiers are not permitted here",  // ast_validation_errors
+        "attribute is only usable with crates of the `proc-macro` crate type",  // proc_macro_harness
+    ].into_iter().filter(|words| !crate_level.contains(words)).collect();
+    assert!(missing.is_empty(), "the run's errors lack rustc's:\n{}\n{crate_level}", missing.join("\n"));
+    // strict_import_errors: rustc's words have changed (E0432 unresolved import, now E0433)
+    assert!(crate_level.contains("unresolved import `alloc::vec::Vec`") || crate_level.contains("cannot find module or crate `alloc`"),
+        "the import through alloc without `extern crate alloc;`: {crate_level}");
 }
 
 /// A bin's wasm export (RELAX_WASM_EXPORT, a run checked for wasm32) exports its `main` as `t0`, the
@@ -535,6 +566,115 @@ fn a_live_test_sessions_verdict_is_red_while_a_save_breaks_the_borrow_check() {
     assert!(v(2).contains(" failed=0 ") && v(2).contains(" borrowck=clean"), "the fixing save's run is green again: {:?}\n{all}", v(2));
 }
 
+/// Calls of a macro a dependency exports through glob re-exports (makepad's `log!`: error_log's,
+/// through platform, draw and widgets_core), saved into a running test session and run in full,
+/// as rustc takes or refuses them: by its name or through the dependency's path, the save patches
+/// and its tests run the new code; through a crate that is no dependency of the app, or naming
+/// a macro the dependency does not have, it is refused with rustc's resolve error, E0433 at the
+/// segment that names nothing. (A live save of
+/// `not_a_dependency::log!` was refused as "macro `log!` is not supported", 11-24: a miss
+/// read as a Relax built-in the dialect no longer has.)
+#[cfg(unix)]
+#[test]
+fn a_glob_reexported_macro_call_is_taken_or_refused_as_rustc_does_live_and_in_a_full_run() {
+    use std::io::BufRead;
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let base = std::env::temp_dir().join(format!("live-glob-macro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let package = |name: &str, deps: &str, lib: &str| {
+        std::fs::create_dir_all(base.join(name).join("src")).unwrap();
+        std::fs::write(base.join(name).join("Cargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}")).unwrap();
+        std::fs::write(base.join(name).join("src/lib.rs"), lib).unwrap();
+    };
+    std::fs::write(base.join("Cargo.toml"), "[workspace]\nmembers = [\"gm-log\", \"gm-mid\", \"gm-top\", \"gm-app\"]\nresolver = \"2\"\n").unwrap();
+    package("gm-log", "", "pub fn log_line(file: &str, line: u32, text: String) {\n    eprintln!(\"logged {file}:{line} {text}\");\n}\n\n#[macro_export]\nmacro_rules!log {\n    ( $ ( $ t: tt) *) => {\n        $crate::log_line(file!(), line!() - 1, format!( $ ( $ t) *))\n    }\n}\n");
+    package("gm-mid", "gm-log = { path = \"../gm-log\" }\n", "pub use gm_log;\npub mod log {\n    pub use crate::gm_log::*;\n}\npub use crate::log::*;\n");
+    package("gm-top", "gm-mid = { path = \"../gm-mid\" }\n", "pub use gm_mid::*;\n");
+    package("gm-app", "gm-top = { path = \"../gm-top\" }\n", "mod api;\nmod other;\npub use api::*;\npub use other::hello;\n\n#[test]\nfn keeps_the_named() {\n    hello();\n    assert_eq!(update(&Scene { elements: vec![Element { name: \"a\".into() }, Element { name: String::new() }, Element { name: \"b\".into() }] }), want());\n}\n");
+    std::fs::write(base.join("gm-app/src/other.rs"), "use gm_top::*;\n\npub fn hello() {\n    log!(\"hello {}\", 1);\n}\n").unwrap();
+    let clean = "use gm_top::*;\n\npub fn want() -> usize {\n    2\n}\n\npub struct Element {\n    pub name: String,\n}\n\npub struct Scene {\n    pub elements: Vec<Element>,\n}\n\npub fn update(scene: &Scene) -> usize {\n    let selected: Vec<String> = scene.elements.iter().map(|e| e.name.clone()).collect();\n    let keep: Vec<&String> = selected.iter().filter(|n| !n.is_empty()).collect();\n    keep.len()\n}\n";
+    // the refused line's shape (an env condition, an inline capture, a turbofish collect), the
+    // macro reached through gm_mid (no dependency of the app), a name gm_top has no macro of,
+    // the macro through gm_top, and by its name
+    let args = "\"DBG update_scene selected={selected:?} keep={} names={:?}\", keep.len(), scene.elements.iter().map(|e| e.name.as_str()).filter(|n| !n.starts_with(\"fab.\")).take(12).collect::<Vec<_>>()";
+    // (fn bodies only: the live patcher takes or refuses them, nothing restarts the run)
+    let save = |call: &str| clean.replace("    2\n}", "    3\n}").replace(
+        "    keep.len()\n",
+        &format!("    if std::env::var_os(\"GM_DBG\").is_some() || true {{ {call}!({args}); }}\n    keep.len() + 1\n"),
+    );
+    let saves = [save("gm_mid::log"), save("gm_top::nolog"), save("gm_top::log"), save("log")];
+    let api = base.join("gm-app/src/api.rs");
+    std::fs::write(&api, clean).unwrap();
+    // a full run first: the live session starts from its stored crates, as a person's does
+    let (mut command, scratch) = runner_in(&base);
+    let first = command.args(["test", "gm-app"]).output().unwrap();
+    assert!(first.status.success(), "the first full run\n{}\n{}", String::from_utf8_lossy(&first.stdout), String::from_utf8_lossy(&first.stderr));
+    let (mut command, _) = runner_in(&base);
+    let mut child = command.args(["test", "--live", "gm-app"]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let readers: Vec<_> = [Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>, Box::new(child.stderr.take().unwrap())]
+        .into_iter()
+        .map(|from| {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(from).lines().map_while(Result::ok) {
+                    let _ = tx.send(line);
+                }
+            })
+        })
+        .collect();
+    drop(tx);
+    // the first run's verdict, then each save's: its run's verdict, or its refusal and errors
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let (mut next, mut lines, mut first, mut refused_at) = (0usize, Vec::new(), String::new(), None);
+    let mut outcome = vec![String::new(); saves.len()];
+    while let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+        let ended = if line.starts_with("testverdict ") {
+            if next == 0 { first = line.clone(); } else { outcome[next - 1] = line.clone(); }
+            true
+        } else if line.contains("NOT applied") && next > 0 {
+            outcome[next - 1] = "refused".to_string();
+            refused_at = Some(next - 1);
+            true
+        } else {
+            if let Some(k) = refused_at.filter(|_| line.starts_with("relax live:   ")) { outcome[k] += &format!(" {line}"); }
+            false
+        };
+        lines.push(line);
+        if ended {
+            if next == saves.len() { break; }
+            std::fs::write(&api, &saves[next]).unwrap();
+            next += 1;
+        }
+    }
+    unsafe { kill(child.id() as i32, 15) };
+    let _ = child.wait();
+    for r in readers {
+        let _ = r.join();
+    }
+    let all = lines.join("\n");
+    assert!(first.contains(" failed=0 "), "the first run is green: {first:?}\n{all}");
+    assert!(outcome[0].starts_with("refused") && outcome[0].contains("E0433: cannot find module or crate `gm_mid` in this scope") && !outcome[0].contains("not supported"),
+        "through a crate that is no dependency: refused with rustc's E0433: {:?}\n{all}", outcome[0]);
+    assert!(outcome[1].starts_with("refused") && outcome[1].contains("E0433: cannot find `nolog` in `gm_top`"),
+        "a name the dependency has no macro of: refused with rustc's E0433: {:?}\n{all}", outcome[1]);
+    for (k, how) in [(2, "through the dependency's path"), (3, "by its name")] {
+        assert!(outcome[k].contains(" passed=1 ") && outcome[k].contains(" failed=0 "), "{how}: the save patches and its run is green, with the saved want and update: {:?}\n{all}", outcome[k]);
+    }
+    // full runs of the refused text and of one rustc takes
+    std::fs::write(&api, &saves[0]).unwrap();
+    let (status, stdout, stderr) = run_in(&base, &["test", "gm-app"]);
+    assert!(!status.success() && stderr.contains("E0433: cannot find module or crate `gm_mid` in this scope") && !stderr.contains("not supported"), "a full run of the refused text\n{stdout}\n{stderr}");
+    std::fs::write(&api, &saves[2]).unwrap();
+    let (status, stdout, stderr) = run_in(&base, &["test", "gm-app"]);
+    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&scratch);
+    assert!(status.success(), "a full run of the path-qualified call\n{stdout}\n{stderr}");
+}
+
 /// A sandboxed module's escapes in its fn bodies are refused when the program that loads it is a
 /// `makepad run` (libs/relax/compiler/tests/sandbox_lazy_bodies): such a run parses the bodies a
 /// later parse can do alone on their first need, and the refusal read only the file's first tree,
@@ -772,7 +912,8 @@ item [doc = r" From a macro."] fields []"#;
 /// reported, and failed the build under `deny`). The crate's own impls are still reported, the
 /// hand-written one and the one its local macro_rules writes. The workspace is written here (duc-mac
 /// the derives, duc-support the unsafe trait, duc-app the uses); `cargo check -p duc-app` warns for
-/// the same two impls (rustc points into the macro's body for the second, Relax at its call).
+/// the same two impls at the same lines (the second inside the macro's body, where rustc reports a
+/// lint in a local macro_rules expansion).
 #[test]
 fn a_derives_unsafe_impl_is_not_the_crates_unsafe_code() {
     let ws = std::env::temp_dir().join(format!("derive-unsafe-code-{}", std::process::id()));
@@ -897,7 +1038,7 @@ pub fn sizes() -> [usize; 4] {
         .collect();
     let app = files.iter().find(|(path, _)| *path == "app/src/lib.rs").unwrap().1;
     let line_of = |text: &str| app.lines().position(|l| l == text).unwrap() + 1;
-    let own = vec![line_of("unsafe impl duc_support::Plain for R {}"), line_of("plain!(S);")];
+    let own = vec![line_of("unsafe impl duc_support::Plain for R {}"), line_of("        unsafe impl duc_support::Plain for $t {}")];
     assert_eq!(reported, own, "unsafe_code is reported for the crate's own impls alone, not the derives': {out}");
 }
 
@@ -2033,12 +2174,60 @@ fn a_macro_named_like_its_crate_expands_in_the_importer() {
 
 /// Importing a dependency's exported macro named like the crate does not import its private
 /// module of that name, so the crate's path still reaches its attribute macro, and so does a
-/// public module alias (relax PR 7): libs/relax/compiler/tests/attribute_macro_private_module.
+/// public module alias (relax PR 7). An attribute the dependency re-exports with `pub use` beside a
+/// private module of its name is what a `use` of the name finds, and a module re-exports it again
+/// (relax issue 268): libs/relax/compiler/tests/attribute_macro_private_module, whose app cargo
+/// runs and checks clean. `makepad check` of the app agrees with the path dependency here, and with
+/// a registry one in `a_registry_crates_reexported_attribute_is_not_its_private_module`.
 #[test]
 fn a_crate_named_macro_import_keeps_the_crate_for_its_attributes() {
     let (status, stdout, stderr) = run_fixture("attribute_macro_private_module", "apm-app");
     assert!(status.success(), "{stdout}\n{stderr}");
-    assert_eq!(stdout.trim(), "apm 17", "{stderr}");
+    assert_eq!(stdout.trim(), "apm 17 served 18", "{stderr}");
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libs/relax/compiler/tests/attribute_macro_private_module");
+    let (status, stdout, stderr) = run_in(&fixture, &["check", "apm-app"]);
+    assert!(status.success() && !stderr.contains("E0603"), "the path dependency's check: {stdout}\n{stderr}");
+}
+
+/// The same dependency and its proc-macro crate from a registry: packages of a vendored crates-io
+/// directory (nothing is downloaded), whose names a check reads as rustc reads a dependency's
+/// metadata (rsim.rs ExtTable). `makepad check` of the app finds the attribute the dependency's
+/// `pub use` re-exports beside its private module of the same name, as `cargo check` does (relax
+/// issue 268: "E0603: module `service` is private"). A use of its private module with no such macro
+/// (`hidden`), or of one whose macro it imports privately (`secret`), is still E0603, as cargo says
+/// of both, in a check and in `makepad run`, which started that program (its app check checked no
+/// `use` declaration).
+#[test]
+fn a_registry_crates_reexported_attribute_is_not_its_private_module() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libs/relax/compiler/tests/attribute_macro_private_module");
+    let ws = std::env::temp_dir().join(format!("apm-registry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    let read = |rel: &str| std::fs::read_to_string(fixture.join(rel)).unwrap();
+    let put = |rel: &str, text: &str| {
+        let path = ws.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    put("Cargo.toml", "[workspace]\nmembers = [\"app\", \"private\"]\nresolver = \"2\"\n");
+    put(".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n");
+    for (dir, package) in [("mac", "apm-mac"), ("dep", "apm-dep")] {
+        put(&format!("vendor/{package}/Cargo.toml"), &read(&format!("{dir}/Cargo.toml")).replace("{ path = \"../mac\" }", "\"0.0.0\""));
+        put(&format!("vendor/{package}/src/lib.rs"), &read(&format!("{dir}/src/lib.rs")));
+        put(&format!("vendor/{package}/.cargo-checksum.json"), "{\"files\":{},\"package\":null}");
+    }
+    put("app/Cargo.toml", &read("app/Cargo.toml").replace("{ path = \"../dep\" }", "\"0.0.0\""));
+    put("app/src/main.rs", &read("app/src/main.rs"));
+    put("private/Cargo.toml", "[package]\nname = \"apm-private\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[dependencies]\napm-dep = \"0.0.0\"\n");
+    put("private/src/main.rs", "#![allow(unused_imports)]\nuse apm_dep::hidden;\nuse apm_dep::secret;\n\nfn main() {}\n");
+    let app = run_in(&ws, &["check", "apm-app"]);
+    let private = run_in(&ws, &["check", "apm-private"]);
+    let private_run = run_in(&ws, &["run", "--quiet", "--unattended", "apm-private"]);
+    let _ = std::fs::remove_dir_all(&ws);
+    assert!(app.0.success() && !app.2.contains("E0603"), "the re-exported attribute: {}\n{}", app.1, app.2);
+    let refused = |out: &str, name: &str| out.lines().any(|l| l.contains("E0603") && l.contains(&format!("`{name}`")));
+    assert!(!private.0.success() && refused(&private.2, "hidden") && refused(&private.2, "secret"), "the private modules: {}\n{}", private.1, private.2);
+    // a run builds what cargo builds: it starts no program rustc refuses
+    assert!(!private_run.0.success() && refused(&private_run.2, "hidden") && refused(&private_run.2, "secret"), "a run of the private modules' importer: {}\n{}", private_run.1, private_run.2);
 }
 
 /// A crate Relax provides (std/substitutes.txt) keeps the features the graph enables: smallvec's

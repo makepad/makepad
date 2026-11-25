@@ -392,14 +392,69 @@ fn other() {
 pub fn ran(out: *mut [u32; 2]) {
     unsafe { *out = [RAN[0].load(Ordering::SeqCst), RAN[1].load(Ordering::SeqCst)] };
 }
+
+#[inline(never)] fn table_a() -> u32 { 1 }
+#[inline(never)] fn table_b() -> u32 { 2 }
+static TABLE: [fn() -> u32; 2] = [table_a, table_b];
+
+#[inline(never)] fn slice_a() -> u32 { 3 }
+#[inline(never)] fn slice_b() -> u32 { 4 }
+const C: &[fn() -> u32] = &[slice_a, slice_b];
+
+#[inline(never)] fn deep_a() -> u32 { 5 }
+#[inline(never)] fn deep_b() -> u32 { 6 }
+const D0: &[fn() -> u32] = &[deep_a, deep_b];
+const D1: &&[fn() -> u32] = &D0;
+const D2: &&&[fn() -> u32] = &D1;
+const D3: &&&&[fn() -> u32] = &D2;
+const D4: &&&&&[fn() -> u32] = &D3;
+const D5: &&&&&&[fn() -> u32] = &D4;
+const D6: &&&&&&&[fn() -> u32] = &D5;
+const D7: &&&&&&&&[fn() -> u32] = &D6;
+
+#[inline(never)] fn method_leaf() -> u32 { 7 }
+trait Tr: Sync { fn value(&self) -> u32; }
+struct S;
+impl Tr for S {
+    #[inline(never)] fn value(&self) -> u32 { method_leaf() + 1 }
+}
+static OBJ: &dyn Tr = &S;
+
+#[inline(never)] fn prefix() -> u32 { 9 }
+#[inline(never)] fn inner_a() -> u32 { 10 }
+#[inline(never)] fn inner_b() -> u32 { 11 }
+static TABLE2: [fn() -> u32; 3] = [prefix, inner_a, inner_b];
+static INNER: &[fn() -> u32] = TABLE2.split_at(1).1;
+
+pub fn root(i: usize) -> u32 {
+    let deep = *******D7;
+    TABLE.get(i).map_or(0, |f| f())
+        + C.get(i).map_or(0, |f| f())
+        + deep.get(i).map_or(0, |f| f())
+        + OBJ.value()
+        + INNER.get(i).map_or(0, |f| f())
+}
+
+pub fn root_into(out: *mut u32) {
+    unsafe { *out = root(1) };
+}
+
+#[inline(never)] fn late_a() -> u32 { 12 }
+#[inline(never)] fn late_b() -> u32 { 13 }
+#[inline(never)] fn late_call() -> u32 { 14 }
+static LATE: [fn() -> u32; 2] = [late_a, late_b];
+#[inline(never)] pub fn later(i: usize) -> u32 { LATE.get(i).map_or(0, |f| f()) + late_call() }
+
+pub fn later_into(out: *mut u32) {
+    unsafe { *out = later(1) };
+}
 "#;
 
-    /// `-- --precompile` with a filter and one thread: the selected tests (one returning a value)
-    /// are built before the first starts, the ignored and the filtered-out ones are not built, and
-    /// each selected test runs once (none as a warm-up).
+    /// Precompile builds the selected tests before the first starts. It also builds functions
+    /// reached only through data, including after a settle.
     #[test]
-    fn precompile_builds_the_selected_tests_before_the_first_starts() {
-        isolated_test!(precompile_builds_the_selected_tests_before_the_first_starts);
+    fn precompile_builds_what_the_selected_tests_reach() {
+        isolated_test!(precompile_builds_what_the_selected_tests_reach);
         if std::env::var_os("RELAX_STD").is_none() {
             std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
         }
@@ -447,6 +502,58 @@ pub fn ran(out: *mut [u32; 2]) {
         let mut counts = [0u32; 2];
         unsafe { jit::call_jit(up, ran, &mut counts as *mut [u32; 2] as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
         assert_eq!(counts, [1, 1], "each selected test ran once");
+
+        // the slot of a fixture function or impl method, by name
+        let named = |u: &mut Unit, name: &str| -> u32 {
+            let def = u.prog.defs.iter().position(|d| {
+                d.krate == krate && u.prog.syms.str(d.name) == name &&
+                    (d.kind == DefKind::Fn || d.kind == DefKind::AssocFn && u.prog.def(d.parent).kind == DefKind::Impl)
+            }).unwrap_or_else(|| panic!("no fixture function {name}"));
+            u.fn_id(FnKey::Inst(DefId(def as u32), Vec::new()))
+        };
+        const TARGETS: [&str; 10] = ["table_a", "table_b", "slice_a", "slice_b", "deep_a", "deep_b", "value", "method_leaf", "inner_a", "inner_b"];
+        let entry = crate::owner::call(crate::owner::Class::Program, || {
+            let root_slot = named(&mut *u, "root");
+            jit::precompile_from(&[root_slot], true);
+            for name in TARGETS {
+                let slot = named(&mut *u, name);
+                assert!(u.fns[slot as usize].compiled, "precompile missed {name} before the settle");
+            }
+            let into = named(&mut *u, "root_into");
+            u.entry(into)
+        });
+        // the precompiled code runs: root(1) through every table
+        let call = |entry: u64| {
+            let mut result = 0u32;
+            unsafe { jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
+            result
+        };
+        assert_eq!(call(entry), 31, "root(1) through the tables before the settle");
+
+        // A settle drops compiled code's RIR, and precompile must still reach through that code:
+        // `later` is built alone (its table's targets and its callee stay unbuilt), the settle
+        // evicts it, and a precompile from its caller has to build what it reaches.
+        let (entries, mut drops) = crate::owner::call(crate::owner::Class::Program, || unsafe {
+            let later = named(&mut *u, "later");
+            jit::compile_slot(up, later);
+            for name in ["late_a", "late_b", "late_call"] {
+                let slot = named(&mut *u, name);
+                assert!(!u.fns[slot as usize].compiled, "building later alone built {name}");
+            }
+            let drops = jit::settle_drop(up);
+            assert!(u.fns[later as usize].rir.is_none(), "the settle evicted later's RIR");
+            let roots = [named(&mut *u, "root"), named(&mut *u, "later_into")];
+            jit::precompile_from(&roots, true);
+            for &name in TARGETS.iter().chain(&["late_a", "late_b", "late_call"]) {
+                let slot = named(&mut *u, name);
+                assert!(u.fns[slot as usize].compiled, "precompile after the settle missed {name}");
+            }
+            let (root_into, later_into) = (named(&mut *u, "root_into"), named(&mut *u, "later_into"));
+            ((u.entry(root_into), u.entry(later_into)), drops)
+        });
+        assert_eq!(call(entries.0), 31, "root(1) after the settle");
+        assert_eq!(call(entries.1), 27, "later(1) through its evicted code");
+        drops.release();
         // the harness's threads may still be retiring: the unit outlives them, as the CLI's does
         Box::leak(u);
         let _ = std::fs::remove_dir_all(&dir);

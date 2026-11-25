@@ -195,7 +195,7 @@ pub(crate) fn gandalf_app_roots(units: &crate::unitgraph::Units, launched_dir: &
         let rel = std::path::Path::new(&path).strip_prefix(&tree).ok()?;
         // tools/: the framework's runtime crates apps link (relax, ...)
         if ["platform", "draw", "widgets", "libs", "tools", "engine", "relax",
-            "apps/commercial/engine"].iter().any(|p| rel.starts_with(p)) {
+            "apps/commercial/engine", "apps/apps/engine"].iter().any(|p| rel.starts_with(p)) {
             return None;
         }
         Some(crate::vfs::normalize_path(source))
@@ -430,25 +430,27 @@ fn renames_of(prog: &Program, mut names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
     }
 }
 
+/// Include the names under which imports re-export these names, following chains of renames.
+fn through_imports(prog: &Program, mut names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    loop {
+        let before = names.len();
+        for im in &prog.imports {
+            let (Some(bind), Some(&(_, last))) = (im.bind, im.segs.last()) else { continue };
+            if im.glob || bind == last { continue; }
+            let (b, l) = (prog.syms.str(bind).as_bytes(), prog.syms.str(last).as_bytes());
+            if names.iter().any(|n| n == l) && !names.iter().any(|n| n == b) { names.push(b.to_vec()); }
+        }
+        if names.len() == before { return names; }
+    }
+}
+
 /// The definitions of the contexts `const_contexts_mention` counts; None: it cannot say.
 fn const_contexts_reading(prog: &Program, items: &[DefId]) -> Option<crate::fxhash::HashSet<DefId>> {
     use crate::def_collector::NodeId;
     let mut found = crate::fxhash::HashSet::default();
     let visible = prog.crates_seeing_files(items.iter().map(|d| prog.def(*d).file));
-    let alias_closure = |mut names: Vec<Vec<u8>>| -> Vec<Vec<u8>> {
-        loop {
-            let mut grew = false;
-            for im in &prog.imports {
-                let (Some(bind), Some(&(_, last))) = (im.bind, im.segs.last()) else { continue };
-                if im.glob || bind == last { continue; }
-                let (b, l) = (prog.syms.str(bind).as_bytes().to_vec(), prog.syms.str(last).as_bytes().to_vec());
-                if names.contains(&l) && !names.contains(&b) { names.push(b); grew = true; }
-            }
-            if !grew { return names; }
-        }
-    };
-    let all = alias_closure(items.iter().map(|d| def_name(prog, *d).into_bytes()).collect());
-    let consts = alias_closure(items.iter().filter(|d| matches!(prog.def(**d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn)).map(|d| def_name(prog, *d).into_bytes()).collect());
+    let all = through_imports(prog, items.iter().map(|d| def_name(prog, *d).into_bytes()).collect());
+    let consts = through_imports(prog, items.iter().filter(|d| matches!(prog.def(**d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn)).map(|d| def_name(prog, *d).into_bytes()).collect());
     // the constant-evaluated contexts, per file: (lo, hi, whether static names count, whose); and the
     // ranges of every other item of those files (text there is not a context's, unless a
     // context range inside it holds it)
@@ -2041,7 +2043,10 @@ fn includes_moved(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::I
 /// include_bytes!) that were saved (`changed`): each own source file whose code includes one, with
 /// its running text (`classify` finds the items whose included content moved, and those an
 /// include! expands to read the file anew). `skip`: the source files the batch edits already.
+/// An include's path is normalized (`include_path`), so a saved path is too: a Windows spelling
+/// of the same file (`\`, the drive letter's case) matched no include.
 pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], skip: &[String]) -> Vec<Edit> {
+    let changed: Vec<String> = changed.iter().map(|p| crate::vfs::normalize_path(p)).collect();
     let mut out = Vec::new();
     for (path, file) in prog.current_source_files(|p| !skip.iter().any(|s| s == p)) {
         if !own_source_file(prog, file) { continue; }
@@ -2058,9 +2063,9 @@ pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], 
 }
 
 /// The saved included files (`changed`) no own source file names through text or recorded
-/// expansion sites. Which code read them is not known.
+/// expansion sites. Which code read them is not known. (Normalized, as `include_edits` reads them.)
 pub(crate) fn include_unmatched(prog: &crate::program::Program, changed: &[String]) -> Vec<String> {
-    let mut left: Vec<String> = changed.to_vec();
+    let mut left: Vec<String> = changed.iter().map(|p| crate::vfs::normalize_path(p)).collect();
     for (path, file) in prog.current_source_files(|_| true) {
         if left.is_empty() { break; }
         if !own_source_file(prog, file) { continue; }
@@ -4863,6 +4868,71 @@ fn item_mentions(prog: &crate::program::Program, d: DefId, names: &[&[u8]]) -> b
     toks(pf, it.lo, it.hi, &[]).iter().any(|t| names.contains(t))
 }
 
+/// Promotion reads the value-based qualifs of named consts. Find their readers even when
+/// the reader never ran (no lowering slot), or names another const that reads this one.
+fn const_qualif_readers(u: &Unit, edited: &[DefId], visible: &[bool], changed_bodies: &[DefId]) -> Vec<DefId> {
+    use crate::fxhash::HashSet;
+    use relax_types::mir::transform::qualifs::ConstQualifsProvider;
+    let prog = &u.prog;
+    let provider = relax_types::mir::build::driver::BuildProvider { prog, tcx: &u.tcx, memo: Default::default() };
+    let mut pending: HashSet<_> = edited.iter().copied().filter(|&d| !provider.mir_const_qualif(d)
+        .is_ok_and(|q| !q.has_mut_interior && !q.needs_drop && !q.needs_non_const_drop && !q.not_sync)).collect();
+    let mut readers = Vec::new();
+    if pending.is_empty() { return readers; }
+    let mut seen = pending.clone();
+    // Only these changed bodies have their own borrow check before installation.
+    if crate::jit::CHECK_FIRST.load(Ordering::Relaxed) {
+        seen.extend(changed_bodies.iter().copied().filter(|d| crate::borrowck::event::admit(prog, prog.def(*d).krate)));
+    }
+    while !pending.is_empty() {
+        // An import can rename a macro, and a macro can use a renamed const or macro.
+        let mut names = pending.iter().map(|&d| def_name(prog, d).into_bytes()).collect();
+        loop {
+            names = through_imports(prog, names);
+            let before = names.len();
+            let refs: Vec<_> = names.iter().map(Vec::as_slice).collect();
+            names = through_macros(prog, visible, &refs);
+            if names.len() == before { break; }
+        }
+        let names: HashSet<&[u8]> = names.iter().map(Vec::as_slice).collect();
+        let mut next = HashSet::default();
+        let mut scanned = 0;
+        let mut passed = 0;
+        let mut typechecked = 0;
+        for (i, def) in prog.defs.iter().enumerate() {
+            let d = DefId(i as u32);
+            if !visible[def.krate as usize] || !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst)
+                || seen.contains(&d) || !prog.is_current_version(def.file) || crate::borrowck::body::CheckedBody::item(prog, d).is_none() { continue; }
+            scanned += 1;
+            let pf = &prog.files[def.file as usize];
+            let it = pf.ast.item(def.item);
+            // Ordinary source has to spell the const, an alias or a macro that reaches it.
+            // Generated code and items that can inherit a block-local rename need resolution.
+            if it.hi <= pf.src_len && !prog.block_owner.contains_key(&def.scope) {
+                if let Ok(src) = std::str::from_utf8(pf.bytes(it.lo, it.hi)) {
+                    // Rust's whitespace includes the left-to-right and right-to-left marks.
+                    let separator = |c: char| c.is_ascii_punctuation() && c != '_' || c.is_whitespace() || matches!(c, '\u{200e}' | '\u{200f}');
+                    if !src.split(separator).any(|word| names.contains(word.as_bytes())) { continue; }
+                }
+                passed += 1;
+            }
+            typechecked += 1;
+            let body = u.tcx.typeck_unstored(prog, d);
+            if !body.res.values().chain(body.pat_res.values()).chain(body.fmt_named.values())
+                .any(|r| matches!(r, crate::typeck::Res::Def(c) if pending.contains(c))) { continue; }
+            seen.insert(d);
+            if matches!(def.kind, DefKind::Const | DefKind::AssocConst) { next.insert(d); } else { readers.push(d); }
+        }
+        trace_count("const_qualif_def_visits", prog.defs.len());
+        trace_count("const_qualif_defs_scanned", scanned);
+        trace_count("const_qualif_text_passed", passed);
+        trace_count("const_qualif_typechecked", typechecked);
+        pending = next;
+    }
+    trace_count("const_qualif_readers", readers.len());
+    readers
+}
+
 /// Where a mention of a name an edit adds can resolve to the added item.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum NameReach {
@@ -5039,7 +5109,7 @@ unsafe fn initializer_deps_changed(up: *mut Unit, root: u32, changed: &[DefId], 
 fn referenced_slots(relocs: &[relax_backend::rir::RelocAt], out: &mut Vec<u32>) {
     for r in relocs {
         match r.target {
-            relax_backend::rir::Reloc::Slot(id) | relax_backend::rir::Reloc::Thunk(id) | relax_backend::rir::Reloc::Call(id) => out.push(id),
+            relax_backend::rir::Reloc::Slot(id) | relax_backend::rir::Reloc::Thunk(id) | relax_backend::rir::Reloc::Call(id) | relax_backend::rir::Reloc::Body(id) => out.push(id),
             _ => {}
         }
     }
@@ -7762,6 +7832,19 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     }
     let u = &mut *up;
     trace_stage("typecheck");
+    // A reader outside this patch may have no slot to check after installation. Check it
+    // against the candidate while its borrow error can still refuse the whole edit.
+    if errs.is_empty() && !const_defs.is_empty() && crate::borrowck::enabled(options) {
+        let readers = const_qualif_readers(u, &const_defs, &visible_crates, &out.bodies);
+        if !readers.is_empty() {
+            let check = crate::check::live_lints(&u.prog, &u.tcx, &readers);
+            errs.extend(check.borrows.into_iter().map(|(_, error)| error));
+            if !errs.is_empty() {
+                out.lines.push(format!("refused by the borrow checker ({} error(s))", errs.len()));
+            }
+        }
+        trace_stage("const_qualif");
+    }
     // D3: the gate is synchronous only under `makepad run --check-first`; otherwise the patched
     // instances are queued to Gandalf when their new code is installed (jit.rs install, RANK_EDIT).
     if errs.is_empty() && crate::borrowck::enabled(options) && crate::jit::CHECK_FIRST.load(std::sync::atomic::Ordering::Relaxed) {
@@ -8667,24 +8750,33 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         LAYOUT_GROUP.store(gen, std::sync::atomic::Ordering::Relaxed);
     }
     let layout_names: Vec<String> = saved_adts.iter().map(|(d, _)| def_name(&u.prog, *d)).collect();
-    {
+    let mut event = {
         let mut shown: Vec<&str> = out.names.iter().take(4).map(String::as_str).collect();
         if out.names.len() > 4 { shown.push(".."); }
-        crate::invalid::patch_event(gen, format!("gen {}: {} fn(s) [{}]{}", gen, out.names.len(), shown.join(", "), if layout_names.is_empty() { String::new() } else { format!("; layout of {}", layout_names.join(", ")) }));
-    }
-    // a layout patch: the earlier patch versions of the slots it rebuilt were built for the old
-    // layout and never run again (invalid.rs; a slot's first code shares pages with other code and
-    // is not invalidated: only frames live at the patch can still reach it -- none was, asked under
-    // this pause, but a thread the pause did not stop may have entered it since: held for good)
+        format!("gen {}: {} fn(s) [{}]{}", gen, out.names.len(), shown.join(", "), if layout_names.is_empty() { String::new() } else { format!("; layout of {}", layout_names.join(", ")) })
+    };
+    // A layout patch retires the code built for the old layout under the install's pause.
     if !breaking.is_empty() {
         let breaking_names: Vec<String> = breaking.iter().map(|d| def_name(&u.prog, *d)).collect();
         let rebuilt: std::collections::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
         let why = format!("layout-changing patch gen {} (fields or variants of {}) replaced it: code built for the old layout never runs again", gen, breaking_names.join(", "));
+        let started = std::time::Instant::now();
         crate::invalid::invalidate(u, |g| matches!(g, crate::invalid::Group::Patch { slot, gen: g0 } if g0 < gen && rebuilt.contains(&slot)), gen, "invalidated code", None, &why);
-        let held = crate::invalid::hold_old_frames(u, gen, &breaking_names.join(", "), paused);
-        if held > 0 {
-            out.lines.push(format!("held: {} thread(s) with a frame in the first-version code of a rebuilt fn: the app runs on without them, the restart is offered ({tool} inspect {} stale)", held, std::process::id(), tool = crate::tool_name()));
+        let first = crate::invalid::invalidate_first(u, gen, &why);
+        let us = started.elapsed().as_micros() as u64;
+        crate::invalid::layout_fill_took(us);
+        event.push_str(&format!("; first code: {} ranges, {} bytes; retired in {} us", first.bodies.len(), first.bytes, us));
+        for warning in first.warnings {
+            offer_restart(&warning);
+            out.lines.push(warning);
         }
+        crate::invalid::patch_event(gen, event);
+        let frames = crate::invalid::report_old_frames(u, gen, &why, &first.bodies, paused);
+        if frames > 0 {
+            out.lines.push(format!("{frames} thread(s) have a frame in the first-version code of a rebuilt fn: each parks when it returns there; the restart is offered ({tool} inspect {} stale)", std::process::id(), tool = crate::tool_name()));
+        }
+    } else {
+        crate::invalid::patch_event(gen, event);
     }
     let u = &mut *up;
     u.reload_rir = None;
@@ -9809,6 +9901,7 @@ fn handover_blocked() -> Option<String> {
 /// The next run starts now, without the app's state (the app is not asked: a test run of `makepad
 /// test --live`, an app stopped at a parked panic or at an internal compiler error in a call).
 pub fn restart_run(why: &str) -> Result<(), String> {
+    if crate::harness::live::another_waits() { return Err("held: the next save restarts the tests".into()); }
     *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why.to_string();
     next_run(why, None)
 }
@@ -10174,6 +10267,7 @@ fn note_restart_pending_in(why: &str, files: Vec<String>) {
 /// click (three apps restarted for a landing, 11-06). `anyway` (`anyway=1`): the app is not asked
 /// whether it can restart now ([`RESTART_ANYWAY`]); without it a blocker the app names postpones it.
 pub fn relaunch_pending(who: &str, anyway: bool) -> Result<String, String> {
+    if crate::harness::live::another_waits() { return Err("held: the next save restarts the tests".into()); }
     RELAUNCH_ASKED.store(true, Ordering::SeqCst);
     RESTART_ANYWAY.store(anyway, Ordering::SeqCst);
     let why = restart_pending().join("; ");
@@ -10186,6 +10280,7 @@ pub fn relaunch_pending(who: &str, anyway: bool) -> Result<String, String> {
 /// runs, nothing rebuilt (host::relaunch_process), with the edits that wait; `anyway` as for
 /// [`relaunch_pending`].
 pub fn relaunch_process(who: &str, anyway: bool) -> Result<String, String> {
+    if crate::harness::live::another_waits() { return Err("held: the next save restarts the tests".into()); }
     RELAUNCH_ASKED.store(true, Ordering::SeqCst);
     RESTART_ANYWAY.store(anyway, Ordering::SeqCst);
     let why = restart_pending().join("; ");
@@ -10854,7 +10949,7 @@ mod git;
 pub use inputs::Inputs;
 #[path = "reload_host.rs"]
 pub mod host;
-pub use host::set_loader_package;
+pub use host::{set_loader_package, snapshot_loader};
 
 pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
     crate::hot_failure::enable();
@@ -10943,7 +11038,7 @@ pub(crate) fn input_paths(keep: &dyn Fn(&str) -> bool) -> Result<Vec<String>, St
     while g.is_none() && crate::run::live_session() && !WATCH_GONE.load(std::sync::atomic::Ordering::Acquire) && !crate::run::host_held() {
         g = WATCH_READY.wait(g).unwrap_or_else(|e| e.into_inner());
     }
-    if g.is_none() && crate::run::host_held() {
+    if crate::harness::live::held() || g.is_none() && crate::run::host_held() {
         return Err(HELD_NO_RUN.into());
     }
     let (inputs, loaded) = g.as_ref().map(|v| (v.inputs.clone(), v.loaded.clone())).ok_or("this run watches no sources (not a live session, or its watcher ended)")?;
@@ -11032,8 +11127,38 @@ pub(crate) fn own_source_file(prog: &crate::program::Program, file: u32) -> bool
     prog.file_paths.get(file as usize).is_some_and(|p| own_source(p, std_dir))
 }
 
+/// The watcher's own source rule for the location of a call's code. An unknown location can park.
+pub(crate) fn live_edit_reaches(location: &str) -> bool {
+    let mut parts = location.rsplitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(col), Some(line), Some(path)) if !path.is_empty() && line.parse::<u32>().is_ok() && col.parse::<u32>().is_ok() => {
+            let std_dir = STD.get_or_init(|| std::env::var("RELAX_STD").unwrap_or_default());
+            own_source(path, std_dir)
+        }
+        _ => true,
+    }
+}
+
 fn own_source(path: &str, std_dir: &str) -> bool {
     !(path.is_empty() || (!std_dir.is_empty() && crate::vfs::relative_path(path, std_dir).is_some()) || path.contains("/.cargo/registry/") || path.contains("/.cargo/git/") || path.contains("/rustlib/"))
+}
+
+#[cfg(test)]
+mod live_edit_tests {
+    /// Whether a compile error's call parks for a live edit is the watcher's own rule (own_source)
+    /// on the place's path, its line and column split off from the right (a Windows path keeps its
+    /// drive colon); a place that is not path:line:col parks.
+    #[test]
+    fn a_compile_error_parks_only_where_a_live_edit_reaches() {
+        use super::live_edit_reaches as reaches;
+        assert!(reaches("/w/app/src/main.rs:3:5"), "the program's own source parks");
+        assert!(reaches(r"C:\w\app\src\main.rs:3:5"), "a Windows path keeps its drive colon");
+        assert!(!reaches("/w/.cargo/registry/src/index-0/dep-0.1.0/src/lib.rs:10:1"), "a registry dependency stops");
+        assert!(!reaches("/w/.cargo/git/checkouts/dep-0/abc/src/lib.rs:1:1"), "a git dependency stops");
+        assert!(reaches("source position unknown") && reaches(""), "an unknown place parks");
+        assert!(reaches("/w/.cargo/registry/src/lib.rs:x:1"), "a place without its numbers is unknown, and parks");
+        assert!(!super::own_source("/s/std/core/src/lib.rs", "/s/std"), "std stops");
+    }
 }
 
 pub(crate) fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
@@ -11231,6 +11356,127 @@ fn committed_by_ledger<'a>(mut paths: impl Iterator<Item = &'a str>) -> bool {
         let _ = paths.next();
         false
     }
+}
+
+/// Whether a save of `paths` is whole only at the edits ledger, however still its files are:
+/// each a mounted store's file the program never wrote. Such a file changes only through the
+/// edits folder, and devhub's ship-done renames a ship's files in, then the ledger last
+/// ([`committed_by_ledger`]). The program's own write puts its ledger record before its content,
+/// so it and a disk save settle at the quiet window; so does an edits folder without a ledger.
+fn awaits_ledger<'a>(paths: impl Iterator<Item = &'a str>) -> bool {
+    #[cfg(unix)]
+    {
+        if !crate::vfs::edits_record().is_some_and(|p| p.is_file()) { return false; }
+        let mut any = false;
+        let all = { paths }.all(|p| {
+            any = true;
+            crate::vfs::in_store(p) && crate::vfs::edit_rel(p).is_some_and(|rel| !crate::vfs::program_edited(&rel))
+        });
+        any && all
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = paths;
+        false
+    }
+}
+
+/// What a save's settle ([`settle_save`]) ended with: every watched file's stamp then, the git
+/// identities then, whether anything moved while it waited, how many stamps it read, and whether
+/// it waited on the live watch.
+struct Settled {
+    stamps: Vec<Option<(std::time::SystemTime, u64)>>,
+    git: git::Snapshot,
+    moved: bool,
+    scanned: usize,
+    waited: bool,
+}
+
+/// Lets a save settle across the whole watch set. A native notification is a wakeup, not proof
+/// that a checkout has finished: index.lock must be gone and HEAD, its ref and every changed file
+/// must stay still for a full quiet window. Never give up waiting on a slow writer: a save of a
+/// mounted store's files ends at its ledger, however long the writer takes between two of them
+/// ([`awaits_ledger`]). `changed` takes every file that moved meanwhile, and `files` the sources
+/// new in a changed source folder.
+#[allow(clippy::too_many_arguments)]
+fn settle_save(files: &mut Vec<(String, u32, Option<(std::time::SystemTime, u64)>)>, virt: &Virtual, changed: &mut Vec<usize>, events: &mut Option<LiveWatch>,
+    inputs: &mut Inputs, repositories: &mut git::Repositories, settled_git: &git::Snapshot, wait: &mut SettleWait) -> Settled {
+    let look = Look::new();
+    let mut last: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(virt, k, &f.0)).collect();
+    let mut git_state = repositories.snapshot();
+    let mut still_since = Instant::now();
+    let (mut any_moved, mut scanned) = (false, 0);
+    // an overlay edit its ledger committed is whole: one look, no quiet window (100 ms of
+    // every overlay edit's save -> frame)
+    let mut committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
+    let mut waited = false;
+    loop {
+        if !committed {
+            // the rest of the quiet window, or for an overlay edit until the watch hears a file
+            // or the ledger: one seen between its file's rename and ship-done's last write, the
+            // ledger's, goes on at that rename (a third of overlay edits waited out the whole
+            // window, 11-03). Every file is looked at below, so an event is only a wakeup; a
+            // disk save waits out the window without a look per event (a checkout's files).
+            let left = LIVE_QUIET.saturating_sub(still_since.elapsed());
+            // (past the window, a save that waits for its ledger looks again a window at a time)
+            let left = if left.is_zero() && awaits_ledger(changed.iter().map(|&k| files[k].0.as_str())) { LIVE_QUIET } else { left };
+            let overlay = cfg!(unix) && changed.iter().all(|&k| crate::vfs::in_store(&files[k].0));
+            let rewatch = match events.as_mut().filter(|_| overlay) {
+                Some(w) => {
+                    waited = true;
+                    // whole milliseconds, rounded up: a wait that ends short of the window
+                    // would look again at once
+                    w.wait(Some(std::time::Duration::from_millis(left.as_micros().div_ceil(1000) as u64)));
+                    w.changed().is_none()
+                }
+                None => {
+                    std::thread::sleep(left);
+                    false
+                }
+            };
+            // events lost, or a new edit recorded (it may have made a folder): watched anew
+            if rewatch { *events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
+            committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
+        }
+        let additions = inputs.discover_sources(files.iter().map(|f| f.0.as_str()));
+        if !additions.is_empty() {
+            let known: std::collections::HashSet<_> = files.iter().map(|f| f.0.clone()).collect();
+            for path in additions {
+                if !known.contains(&path) { files.push((path, u32::MAX, None)); }
+            }
+            repositories.include(files.iter().map(|f| f.0.as_str()));
+            *events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
+        }
+        let look = Look::new();
+        let now: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(virt, k, &f.0)).collect();
+        scanned += files.len();
+        for (k, f) in files.iter().enumerate() {
+            if now[k] != f.2 { changed.push(k); }
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        let next_git = repositories.snapshot();
+        let moved = moved_file(files, &now, &last)
+            .or_else(|| next_git.moved_from(&git_state).map(|p| format!("{} moved", p.display())))
+            .or_else(|| next_git.holding(wait.save, settled_git).map(|p| format!("{} is there", p.display())));
+        last = now;
+        git_state = next_git;
+        if let Some(what) = moved {
+            wait.moved(&what, || wait_name(&changed[..], &files[..]));
+            any_moved = true;
+            still_since = Instant::now();
+        } else if committed {
+            break;
+        } else if still_since.elapsed() >= LIVE_QUIET {
+            if !awaits_ledger(changed.iter().map(|&k| files[k].0.as_str())) { break; }
+            // still, and its ledger not in: its writer is between two of its files. A busy box
+            // spaced one ship's two files 300 ms apart; the window took the first alone, and a
+            // struct's new field the second added was refused E0560 on the first's patch (11-24).
+            wait.moved("its edits ledger", || wait_name(&changed[..], &files[..]));
+        }
+        committed = false;
+    }
+    Settled { stamps: last, git: git_state, moved: any_moved, scanned, waited }
 }
 
 /// Whether a changed watched path that no running file has is one a round answers for (a live
@@ -11918,81 +12164,14 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 hot.push(k);
             }
         }
-        // Let the save settle across the whole watch set. A native notification
-        // is a wakeup, not proof that a checkout has finished: index.lock must
-        // be gone and HEAD, its ref and every changed file must stay still for
-        // a full quiet window. Never give up waiting on a slow writer.
-        let look = Look::new();
-        let mut last: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).collect();
-        let mut git_state = repositories.snapshot();
-        let mut still_since = Instant::now();
-        // an overlay edit its ledger committed is whole: one look, no quiet window (100 ms of
-        // every overlay edit's save -> frame)
-        let mut committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
-        let mut waited = false;
-        loop {
-            if !committed {
-                // the rest of the quiet window, or for an overlay edit until the watch hears a file
-                // or the ledger: one seen between its file's rename and ship-done's last write, the
-                // ledger's, goes on at that rename (a third of overlay edits waited out the whole
-                // window, 11-03). Every file is looked at below, so an event is only a wakeup; a
-                // disk save waits out the window without a look per event (a checkout's files).
-                let left = LIVE_QUIET.saturating_sub(still_since.elapsed());
-                let overlay = cfg!(unix) && changed.iter().all(|&k| crate::vfs::in_store(&files[k].0));
-                let rewatch = match events.as_mut().filter(|_| overlay) {
-                    Some(w) => {
-                        waited = true;
-                        // whole milliseconds, rounded up: a wait that ends short of the window
-                        // would look again at once
-                        w.wait(Some(std::time::Duration::from_millis(left.as_micros().div_ceil(1000) as u64)));
-                        w.changed().is_none()
-                    }
-                    None => {
-                        std::thread::sleep(left);
-                        false
-                    }
-                };
-                // events lost, or a new edit recorded (it may have made a folder): watched anew
-                if rewatch { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
-                committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
-            }
-            let additions = inputs.discover_sources(files.iter().map(|f| f.0.as_str()));
-            if !additions.is_empty() {
-                let known: std::collections::HashSet<_> = files.iter().map(|f| f.0.clone()).collect();
-                for path in additions {
-                    if !known.contains(&path) { files.push((path, u32::MAX, None)); }
-                }
-                repositories.include(files.iter().map(|f| f.0.as_str()));
-                events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
-            }
-            let look = Look::new();
-            let now: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).collect();
-            scanned += files.len();
-            for (k, f) in files.iter().enumerate() {
-                if now[k] != f.2 { changed.push(k); }
-            }
-            changed.sort_unstable();
-            changed.dedup();
-            let next_git = repositories.snapshot();
-            let moved = moved_file(&files, &now, &last)
-                .or_else(|| next_git.moved_from(&git_state).map(|p| format!("{} moved", p.display())))
-                .or_else(|| next_git.holding(wait.save, &settled_git).map(|p| format!("{} is there", p.display())));
-            last = now;
-            git_state = next_git;
-            if let Some(what) = moved {
-                wait.moved(&what, || wait_name(&changed, &files));
-                quiet_retry = false;
-                still_since = Instant::now();
-            } else if committed || still_since.elapsed() >= LIVE_QUIET {
-                break;
-            }
-            committed = false;
-        }
-        settled_git = git_state.clone();
-        // a wait above may have taken a wakeup meant for the loop's own (a streamed edit, a
+        let settled = settle_save(&mut files, &virt, &mut changed, &mut events, &mut inputs, &mut repositories, &settled_git, &mut wait);
+        scanned += settled.scanned;
+        if settled.moved { quiet_retry = false; }
+        settled_git = settled.git;
+        // a wait in it may have taken a wakeup meant for the loop's own (a streamed edit, a
         // retry, a domain's inputs): one more round sees what it was for
-        if waited { watch_events::kick(); }
-        let settled_stamps = last;
+        if settled.waited { watch_events::kick(); }
+        let settled_stamps = settled.stamps;
         // (what settled may be a held landing's: it waits, the rest applies)
         changed.retain(|&k| !held_back(&files[k].0, true));
         // The lockfile as the run's own native build left it is no edit (cargo brought it up to
@@ -12294,7 +12473,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let look = Look::new();
         let now: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).collect();
         let next_git = repositories.snapshot();
-        if let Some(what) = moved_file(&files, &now, &settled_stamps).or_else(|| next_git.moved_from(&git_state).map(|p| format!("{} moved", p.display()))) {
+        if let Some(what) = moved_file(&files, &now, &settled_stamps).or_else(|| next_git.moved_from(&settled_git).map(|p| format!("{} moved", p.display()))) {
             wait.moved(&what, || wait_name(&changed, &files));
             settle_wait = Some(wait);
             again = true;
@@ -12333,7 +12512,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             // recovers now, the edit's own errors wait for the tree's next change. A tree that
             // moved while this compiled has that move's events queued: their round retries it.
             let look = Look::new();
-            let unchanged = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).eq(settled_stamps.iter().copied()) && repositories.snapshot() == git_state;
+            let unchanged = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).eq(settled_stamps.iter().copied()) && repositories.snapshot() == settled_git;
             if unchanged {
                 if let Some(failure) = failure {
                     drop(_reloading);
@@ -12836,8 +13015,10 @@ mod removed_module_tests {
         std::fs::write(dir.join("leaf.rs"), "pub fn g() -> u32 { 2 }\n").unwrap();
         let session = std::sync::Arc::new(crate::Session::default());
         let (prog, _, _) = crate::load_with_std(&session, dir.join("main.rs").to_str().unwrap(), "removed_module", false).unwrap();
-        let path = |end: &str| prog.file_paths.iter().find(|p| p.ends_with(end)).cloned().unwrap();
-        let (main, zz, leaf) = (path("/main.rs"), path("/zz/mod.rs"), path("/leaf.rs"));
+        // (a path is spelled as the program has it: the root as given, `\` on Windows, its modules'
+        // joined with `/`; the lookup is by components)
+        let path = |end: &str| prog.file_paths.iter().find(|p| std::path::Path::new(p.as_str()).ends_with(end)).cloned().unwrap();
+        let (main, zz, leaf) = (path("main.rs"), path("zz/mod.rs"), path("leaf.rs"));
         let none = std::collections::HashSet::new();
         let lines = undeclared_removals(&prog, &[zz.as_str(), leaf.as_str()], &none);
         assert_eq!(lines.len(), 2, "{lines:?}");
@@ -13810,6 +13991,69 @@ mod commit_tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(2), "woken by the ledger's rename, not a timeout ({:?})", start.elapsed());
         crate::vfs::set_edits(None);
         let _ = std::fs::remove_dir_all(&edits);
+    }
+
+    /// A ship's files settle as one save however far apart its writer renames them in: a save of
+    /// a mounted store's files is whole at the ledger ship-done renames last, never at a quiet
+    /// window. A busy box spaced one ship's two files 300 ms apart; the first was patched alone,
+    /// refused E0560 on the new field of a struct the second changed, and cargo built the ship
+    /// (11-24). A disk save, a store file the program wrote itself (its ledger record comes before
+    /// its content) and an edits folder without a ledger still settle at the window.
+    #[test]
+    fn a_ships_files_settle_as_one_save_however_far_apart() {
+        isolated_test!(a_ships_files_settle_as_one_save_however_far_apart);
+        let fixture = vfs_store::Fixture::new(&[("app/a.rs", b"a"), ("app/b.rs", b"b"), ("app/c.rs", b"c")]);
+        let root = "/relax-live-apart/vfs/m";
+        crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let edits = std::env::temp_dir().join(format!("relax-live-apart-{}", std::process::id()));
+        std::fs::create_dir_all(edits.join("app")).unwrap();
+        crate::vfs::set_edits(Some(edits.clone()));
+        let put = |rel: &str, text: &str| {
+            let tmp = edits.join(format!("{rel}.part"));
+            std::fs::write(&tmp, text).unwrap();
+            std::fs::rename(&tmp, edits.join(rel)).unwrap();
+        };
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
+        let disk = edits.with_extension("disk.rs").to_string_lossy().into_owned();
+        std::fs::write(&disk, "d").unwrap();
+        put(".makepad-run-edits", "");
+        tick();
+        let (a, b, c) = (format!("{root}/app/a.rs"), format!("{root}/app/b.rs"), format!("{root}/app/c.rs"));
+        let mut files: Vec<(String, u32, Option<(std::time::SystemTime, u64)>)> = [&a, &b, &c, &disk].iter().map(|p| (p.to_string(), 0, None)).collect();
+        let virt = super::Virtual::of(&files);
+        let look = super::Look::new();
+        for k in 0..files.len() { files[k].2 = look.stamp(&virt, k, &files[k].0); }
+        let mut events = super::LiveWatch::new(files.iter().map(|f| f.0.as_str()));
+        let (mut inputs, mut repositories) = (super::Inputs::default(), super::git::Repositories::default());
+        let settled_git = repositories.snapshot();
+        // ship-done: a.rs, b.rs 250 ms after it, then the ledger; the round saw a.rs
+        put("app/a.rs", "a2");
+        let mut changed = vec![0];
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                put("app/b.rs", "b2");
+                tick();
+                put(".makepad-run-edits", "app/a.rs\tnew\napp/b.rs\tnew\n");
+            });
+            let mut wait = super::SettleWait::new(String::new());
+            super::settle_save(&mut files, &virt, &mut changed, &mut events, &mut inputs, &mut repositories, &settled_git, &mut wait);
+        });
+        assert_eq!(changed, [0, 1], "the ship's second file, in 250 ms after its first, settles with it");
+        assert!(super::committed_by_ledger([a.as_str(), b.as_str()].into_iter()), "and the save ends at its ledger");
+        let awaits = |p: &str| super::awaits_ledger(std::iter::once(p));
+        assert!(!awaits(&disk), "a disk save settles at the window");
+        let (mut out, mut len) = (std::ptr::null(), 0usize);
+        let id = crate::vfs::relax_vfs_edit(c.as_ptr(), c.len(), 2, &mut out, &mut len);
+        assert_ne!(id, 0, "the program can write c.rs");
+        crate::vfs::relax_vfs_release(id);
+        assert!(!awaits(&c), "a store file the program wrote itself settles at the window");
+        assert!(awaits(&b), "a store file only a ship writes waits for its ledger");
+        std::fs::remove_file(edits.join(".makepad-run-edits")).unwrap();
+        assert!(!awaits(&b), "an edits folder without a ledger has none to wait for");
+        crate::vfs::set_edits(None);
+        let _ = std::fs::remove_dir_all(&edits);
+        let _ = std::fs::remove_file(&disk);
     }
 }
 

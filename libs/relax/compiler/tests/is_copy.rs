@@ -2,6 +2,7 @@
 // core::intrinsics_mem::is_copy::<T>() (std lane request; Relax-only intrinsic, folded per
 // instance): true exactly when T is Copy, never for a Copy-conditional ADT over a non-Copy arg
 // (std's memcpy paths for extend_from_slice / to_vec / clone rely on it).
+// corpus: relax-only core::intrinsics_mem is Relax's std alone
 use core::intrinsics_mem::is_copy;
 
 #[derive(Clone, Copy)]

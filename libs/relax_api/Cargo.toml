@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-thread-local = { path = "../thread_local", version = "1.0.0" }
 relax-api-macro = { path = "macro", version = "1.0.0" }
 # the host shims' run and kept guards (run_op, host_op, process_heap)
 relax-api-phase = { path = "phase", version = "1.0.0", optional = true }

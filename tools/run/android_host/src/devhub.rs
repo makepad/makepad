@@ -108,6 +108,12 @@ fn identity(files: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The fleet key devhub and Desk Link use stays in the app's internal storage (never the shared
+/// external folder); set whether the node starts or not.
+pub fn set_fleet_dir(files: &Path) {
+    std::env::set_var("MAKEPAD_FLEET_DIR", files.join("fleet"));
+}
+
 /// Installs the store applier and starts the node on its own thread (never in the boot's way).
 pub fn start(files: &Path, workspace: &str, conf: StoreConf) {
     let dir = files.join("devhub");
@@ -117,8 +123,7 @@ pub fn start(files: &Path, workspace: &str, conf: StoreConf) {
         (v >= 0).then(|| ((v & 0xff) as u32, v & 0x100 != 0))
     });
     makepad_devhub::sync::set_source_store(Arc::new(Store { workspace: workspace.to_string(), dir, conf: conf.clone(), lock: Mutex::new(()) }));
-    // the fleet key stays in the app's internal storage (never the shared external folder)
-    std::env::set_var("MAKEPAD_FLEET_DIR", files.join("fleet"));
+    set_fleet_dir(files);
     let files = files.to_path_buf();
     let _ = std::thread::Builder::new().name("devhub".into()).spawn(move || {
         if let Err(e) = identity(&files) {
@@ -142,10 +147,9 @@ pub fn start(files: &Path, workspace: &str, conf: StoreConf) {
                 logcat::log(&format!(
                     "devhub: node `{}` {}",
                     node.conf.name,
-                    match (&node.addr, &node.lan_off) {
-                        (Some(a), _) => format!("serves the master on {a}"),
-                        (None, Some(why)) => why.clone(),
-                        (None, None) => "is local only".into(),
+                    match &*node.lan.lock().unwrap() {
+                        Ok(a) => format!("serves the master on {a}"),
+                        Err(why) => why.clone(),
                     }
                 ));
                 // the node's threads serve; this one keeps it

@@ -4,7 +4,7 @@
 # acted on. No downloads or builds. Usage: sh stop-test.sh
 set -u
 here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
-temp=$(mktemp -d) || exit 2
+temp=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX") || exit 2
 # makepad.sh up to its first helper after the job functions: only what stops and starts jobs
 sed '/^sha256()/,$d' "$here/makepad.sh" > "$temp/prefix.sh"
 mkfifo "$temp/pid" "$temp/never"

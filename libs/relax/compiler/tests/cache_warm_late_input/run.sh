@@ -12,7 +12,7 @@ else
   cargo build --profile host -q -p makepad-run --bin makepad || exit 3
   R=${CARGO_TARGET_DIR:-$PWD/target}/host/makepad
 fi
-C=$(mktemp -d)
+C=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 chmod 700 "$C"
 P=$C/p
 mkdir -p "$P/dep/src" "$P/mid/src" "$P/app/src" "$C/home/tmp"

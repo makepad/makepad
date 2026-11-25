@@ -157,7 +157,7 @@ fn const_body_has_no_fn_scopes() {
 #[test]
 fn destructuring_assignment() {
     let k = kinds(
-        "pub struct S { a: u8, b: u8 } pub struct T(u8, u8) ; pub enum E { V(u8, u8) } pub fn f(s: S, t: T, mut a: u8, mut b: u8, mut arr: [u8; 3]) { (a, b) = (b, a); S { a, b } = s; T(a, ..) = t; (a, _) = (1, 2); [a, .., b] = arr; (a, (b, _)) = (1, (2, 3)); let _ = E::V(1, 2); }",
+        "pub struct S { a: u8, b: u8 } pub struct T(u8, u8) ; pub enum E { V(u8, u8) } pub fn f(s: S, t: T, mut a: u8, mut b: u8, mut arr: [u8; 3]) { (a, b) = (b, a); S { a, b } = s; T(a, ..) = t; (a, _) = (1, 2); [a, .., b] = arr; (a, (b, _)) = (1, (2, 3)); (..) = (a, b); ((..)) = (1, 2); let _ = E::V(1, 2); }",
         "f",
     );
     has(&k, &["Block", "Assign", "VarRef", "Tuple"]);

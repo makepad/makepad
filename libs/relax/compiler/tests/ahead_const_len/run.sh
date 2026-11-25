@@ -7,10 +7,10 @@
 # failed to type-check (in makepad, then read through a null address: a segfault). Prints
 # "ahead_const_len: ok" or "ahead_const_len: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
-ERR=$(mktemp)
+ERR=$(mktemp "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -f "$ERR"' EXIT
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-T=$(mktemp -d)
+T=$(mktemp -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 export RELAX_CACHE=off RELAX_STD="$H/../../std" RELAX_CACHE_DIR="$T/cache"
 bad=()
 for k in 1 2 3; do

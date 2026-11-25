@@ -31,6 +31,10 @@
 //! loader is not built for the web (its `platforms`), so the feature is never on for wasm32.
 //! Nothing generated is checked in.
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 pub use relax_api_macro::relax_api;
 /// Export const-verified `Option<X>` layouts for concrete payload types in unmarked items.
 /// `option_layouts! { u32, MyType }` emits the same entries as the attribute's Option scan,

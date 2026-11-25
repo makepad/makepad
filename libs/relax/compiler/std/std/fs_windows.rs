@@ -1662,6 +1662,12 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 }
 
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    // in a virtual folder: a folder the run made there (in its edits folder), as fs_unix.rs
+    if let Some(disk) = vfs::edit_target(path.as_ref(), vfs::Edit::Existing) {
+        let p = maybe_verbatim(&disk?)?;
+        cvt(unsafe { RemoveDirectoryW(p.as_ptr()) })?;
+        return Ok(());
+    }
     let p = maybe_verbatim(path.as_ref())?;
     cvt(unsafe { RemoveDirectoryW(p.as_ptr()) })?;
     Ok(())

@@ -37,6 +37,7 @@ resolver = "2"
 
 [workspace.dependencies]
 relax-api = { path = "$R/libs/relax_api" }
+makepad-thread-local = { path = "$R/libs/thread_local" }
 EOF
 log="$T/log"
 # a live session (no --no-live), hidden; a call of code that did not compile parks it, so the run
