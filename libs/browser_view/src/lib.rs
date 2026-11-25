@@ -28,7 +28,7 @@ pub mod protocol;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use makepad_app_host::{forward_hit, ChildEvent, ChildSpec, Children, Forwarded, Home, HostAudioRing, HostRing, HostedApp, Life, RingSpec};
+use makepad_app_host::{forward_hit, ChildEvent, ChildSpec, Children, Forwarded, Home, HostAudioRing, HostRing, HostedApp, Life};
 use makepad_error_log::log;
 use makepad_platform::*;
 use makepad_studio_protocol::AppToStudio;
@@ -69,9 +69,11 @@ pub struct ViewState {
 }
 
 /// Slots of a displaying ring.
+#[cfg(not(target_arch = "wasm32"))]
 const DISPLAY_SLOTS: usize = 3;
 /// Ring textures are allocated on this grid, so a resize walks many page
 /// sizes inside one ring.
+#[cfg(not(target_arch = "wasm32"))]
 const RING_GRID: u32 = 256;
 /// The audio ring: a little over a second of 48 kHz stereo.
 const AUDIO_RING_BYTES: usize = 512 * 1024;
@@ -98,6 +100,7 @@ struct View {
     ring: Option<HostRing>,
     /// Replaced rings, kept while their frames are held or shown.
     retired: Vec<HostRing>,
+    #[cfg(not(target_arch = "wasm32"))]
     generation: u64,
     capture: Option<CaptureSpec>,
     captured: VecDeque<RingLease>,
@@ -117,6 +120,7 @@ impl View {
             ring_dirty: false,
             ring: None,
             retired: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             generation: 0,
             capture: None,
             captured: VecDeque::new(),
@@ -128,7 +132,9 @@ impl View {
 
     /// A new ring when the page outgrew the current one or the capture
     /// asks for another depth or other probes.
+    #[cfg(not(target_arch = "wasm32"))]
     fn ensure_ring(&mut self, cx: &mut Cx) {
+        use makepad_app_host::RingSpec;
         let Some((width, height)) = self.page_px else { return };
         let up = |v: u32| v.max(1).div_ceil(RING_GRID) * RING_GRID;
         let (slots, probes, capture) = match &self.capture {
@@ -188,6 +194,9 @@ impl BrowserViews {
     /// (it starts with `cargo run`, built from them when needed, like every app);
     /// installed, its binary is.
     pub fn availability() -> Result<(), String> {
+        if cfg!(target_arch = "wasm32") {
+            return Err("no browser host on the web".into());
+        }
         let entry = makepad_app_registry::find(protocol::HOST_APP).ok_or("no browser host in the app registry")?;
         if makepad_app_registry::is_available(entry) {
             Ok(())
@@ -433,6 +442,7 @@ impl BrowserViews {
             self.start(cx);
         }
         for view in &mut self.views {
+            #[cfg(not(target_arch = "wasm32"))]
             if std::mem::take(&mut view.ring_dirty) {
                 view.ensure_ring(cx);
             }
@@ -449,7 +459,9 @@ impl BrowserViews {
         if !self.views.is_empty() {
             self.send_queued();
         }
-        let changed = self.pump_rings(cx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.send_ring_setups(cx);
+        let changed = self.pump_rings();
         self.flush();
         changed
     }
@@ -490,19 +502,28 @@ impl BrowserViews {
         children.flush();
     }
 
-    /// Ring setups (once their textures are shared), new frames, sound.
-    fn pump_rings(&mut self, cx: &mut Cx) -> bool {
+    /// Ring setups, once their textures are shared (`pump_rings` flushes them).
+    /// Native only: the web has no browser host, so no view gets a ring.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn send_ring_setups(&mut self, cx: &mut Cx) {
         let connected = self.children.as_ref().is_some_and(|children| children.slot(&()).is_some_and(|slot| slot.is_connected()));
+        if !connected {
+            return;
+        }
+        for view in &mut self.views {
+            if let Some(setup) = view.ring.as_mut().and_then(|ring| ring.take_setup(cx)) {
+                if let Some(children) = &mut self.children {
+                    children.send_custom(&(), setup);
+                }
+            }
+        }
+    }
+
+    /// New frames and sound.
+    fn pump_rings(&mut self) -> bool {
         let mut changed = false;
         for view in &mut self.views {
             if let Some(ring) = &mut view.ring {
-                if connected {
-                    if let Some(setup) = ring.take_setup(cx) {
-                        if let Some(children) = &mut self.children {
-                            children.send_custom(&(), setup);
-                        }
-                    }
-                }
                 let (leases, shown) = ring.poll();
                 changed |= shown;
                 if view.capture.is_some() {
