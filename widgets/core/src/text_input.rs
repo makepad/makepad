@@ -1094,13 +1094,10 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.new_string(&text);
-                vm.with_instruction_limit(
-                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64,
-                    |vm| {
-                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
-                    },
-                );
+                vm.with_callback_fuel(|vm| {
+                    let value = vm.new_string(&text);
+                    vm.call(handler.into(), &[value])
+                });
             });
         }
     }
@@ -1115,13 +1112,10 @@ impl TextInput {
                 return;
             };
             cx.with_script_vm_id(vm_id, |vm| {
-                let str_val = vm.new_string(&text);
-                vm.with_instruction_limit(
-                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64,
-                    |vm| {
-                        vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
-                    },
-                );
+                vm.with_callback_fuel(|vm| {
+                    let value = vm.new_string(&text);
+                    vm.call(handler.into(), &[value])
+                });
             });
         }
     }

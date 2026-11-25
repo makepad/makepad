@@ -1,11 +1,12 @@
 use crate::{
+    gauss_view::CaptureGauss,
     makepad_derive_widget::*,
     makepad_draw::*,
     view::View,
     widget::*,
     widget_async::{
         splash_theme, splash_theme_generation, splash_theme_script, CxSplashVmExt, SplashTheme,
-        SplashThemeScript, SplashVmId, MAIN_SPLASH_VM_ID, WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+        SplashThemeScript, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_tree::CxWidgetExt,
 };
@@ -51,6 +52,10 @@ pub struct Splash {
     sandbox_dir: Option<std::path::PathBuf>,
     #[rust]
     vm_id: SplashVmId,
+    /// A child may return a DrawStep with its turtles still open. Keep the
+    /// mark from before its first step until the whole walk has finished.
+    #[rust]
+    draw_start: Option<SplashDrawStart>,
     /// Index of this Splash's script body in its isolate's bodies list, cached
     /// at eval time so host->script calls don't depend on re-deriving the
     /// pointer-based ScriptMod identity (the struct could in principle move
@@ -98,6 +103,12 @@ pub struct Splash {
     /// of evaluating the body a second time in a throwaway isolate to find out.
     #[rust]
     last_errors: Vec<String>,
+    /// Whether the view has already been replaced with the host's stop label.
+    /// The reason and the decision to allow execution belong to the VM.
+    #[rust]
+    showing_stop: bool,
+    #[rust]
+    checked_stop_generation: u64,
     /// `mod.*` entries the body introduced (its persistent models, e.g.
     /// `mod.state`). A style reapply restores them after the body's re-run, as
     /// `!vm.is_reload()`-guarded application state survives a style reload.
@@ -121,6 +132,37 @@ struct StyledTheme {
     script: Option<std::rc::Rc<SplashThemeScript>>,
     pin: Option<SplashTheme>,
     generation: u64,
+}
+
+struct SplashDrawStart {
+    redraw_id: u64,
+    draw: cx_2d::DrawUnwindMark,
+    captures: usize,
+    dispatch: SplashDispatchMark,
+}
+
+struct SplashDispatchMark {
+    accessibility: Option<makepad_platform::a11y::A11yUnwindMark>,
+    scroll: [u32; 2],
+    ime_scope: u64,
+}
+
+impl SplashDispatchMark {
+    fn new(cx: &Cx) -> Self {
+        Self {
+            accessibility: cx.a11y.on.then(|| cx.a11y.unwind_mark()),
+            scroll: cx.scroll_container_depth(),
+            ime_scope: cx.ime_scope,
+        }
+    }
+
+    fn unwind(self, cx: &mut Cx) {
+        if let Some(mark) = self.accessibility {
+            cx.a11y.unwind_to(mark);
+        }
+        cx.unwind_scroll_containers_to(self.scroll);
+        cx.ime_scope = self.ime_scope;
+    }
 }
 
 impl ScriptHook for Splash {
@@ -157,7 +199,7 @@ fn splash_prefix(allow_net: bool) -> String {
     prefix.push_str("let fs = mod.fs\nlet host = mod.host\nView{height:Fit, ");
     prefix
 }
-const SPLASH_EVAL_INSTRUCTION_LIMIT: usize = 200_000;
+
 
 impl Splash {
     /// Stable identity for the streaming script body, based on pointer address.
@@ -267,18 +309,39 @@ impl Splash {
 
     fn eval_body(&mut self, cx: &mut Cx) {self.eval_styled_body(cx,false);}
 
-    fn eval_styled_body(&mut self,cx:&mut Cx,preserve:bool) {
-        let body = self.body.as_ref();
-        if body.is_empty() {
-            return;
-        }
-        self.reloaded_at = cx.reload_generation;
-
+    fn ensure_isolate(&mut self, cx: &mut Cx) {
         if self.vm_id == MAIN_SPLASH_VM_ID {
+            self.showing_stop = false;
             self.host_io_only |= cx.script_data.std.host_io_only();
             self.styled = self.current_style();
             self.vm_id = cx.alloc_splash_vm_with_theme(self.allow_net, self.host_io_only, self.theme);
         }
+    }
+
+    /// Read the original reason and counters, including after the stop label is visible.
+    pub fn vm_policy<'a>(&self, cx: &'a Cx) -> Option<&'a makepad_script::ScriptVmPolicy> {
+        if self.vm_id == MAIN_SPLASH_VM_ID { return None; }
+        Some(crate::widget_async::splash_vm_base(cx, self.vm_id)?.policy())
+    }
+
+    /// Install the host policy before loading the guest body. This creates the isolate
+    /// if necessary so the configuration and counters have a single owner.
+    pub fn set_vm_policy(&mut self, cx: &mut Cx, policy: makepad_script::ScriptVmPolicy) -> Result<(), makepad_script::Poison> {
+        self.ensure_isolate(cx);
+        cx.with_script_vm_id(self.vm_id, |vm| {
+            if !vm.bx.is_poisoned() { crate::widget_async::finish_isolate_ui(vm); }
+            vm.bx.set_policy(policy).map_err(Clone::clone)
+        })
+    }
+
+    fn eval_styled_body(&mut self,cx:&mut Cx,preserve:bool) {
+        if self.show_poison(cx) || self.body.as_ref().is_empty() {
+            return;
+        }
+        self.ensure_isolate(cx);
+        let body = self.body.as_ref();
+        self.reloaded_at = cx.reload_generation;
+
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
         let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key());
@@ -344,13 +407,14 @@ impl Splash {
                 known.retain(|key| !body_modules.contains(key));
                 let saved = if preserve { snapshot_modules(vm, &body_modules) } else { Vec::new() };
                 vm.capture_errors();
-                let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT as u64, |vm| {
+                let value = vm.with_callback_fuel(|vm| {
                     if preserve {
                         vm.with_reload(|vm| vm.eval_with_append_source(script_mod, &code, NIL.into()))
                     } else {
                         vm.eval_with_append_source(script_mod, &code, NIL.into())
                     }
                 });
+                if vm.bx.is_poisoned() { return (None, Vec::new(), Vec::new()); }
                 if preserve {
                     restore_modules(vm, saved);
                 }
@@ -389,6 +453,7 @@ impl Splash {
             body_modules_out = body_modules;
             errors_out = errors;
         });
+        if self.show_poison(cx) { return; }
         self.last_errors = errors_out;
         self.body_modules = body_modules_out;
         self.startup_timers = isolate_timer_ids(cx, heap_key)
@@ -422,10 +487,72 @@ impl Splash {
     /// stops the isolate's timers and drops its storage-jail binding. A later
     /// non-empty `set_text` allocates a fresh isolate as usual.
     fn stop(&mut self, cx: &mut Cx) {
-        if self.vm_id == MAIN_SPLASH_VM_ID {
-            return; // nothing running
+        if self.showing_stop || self.vm_id == MAIN_SPLASH_VM_ID {
+            self.last_errors.clear(); // clear the stopped box along with its message
         }
+        self.showing_stop = false;
         self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
+        self.release_isolate(cx);
+    }
+
+    fn stop_after_panic(&mut self, cx: &mut Cx) {
+        self.show_stopped_view(cx, None);
+        self.release_isolate(cx);
+    }
+
+    fn pending_stop(&mut self, cx: &Cx) -> Option<(usize, String)> {
+        let generation = crate::widget_async::splash_stop_generation();
+        if generation == self.checked_stop_generation || self.vm_id == MAIN_SPLASH_VM_ID {
+            return None;
+        }
+        if !crate::widget_async::splash_stop_notified(cx, self.vm_id) {
+            self.checked_stop_generation = generation;
+            return None;
+        }
+        let vm = crate::widget_async::splash_vm_base(cx, self.vm_id)?;
+        self.checked_stop_generation = generation;
+        vm.poisoned().map(|reason| (vm.heap_ref().heap_key(), reason.to_string()))
+    }
+
+    fn show_poison(&mut self, cx: &mut Cx) -> bool {
+        if self.showing_stop { return self.vm_id != MAIN_SPLASH_VM_ID; }
+        let Some(stopped) = self.pending_stop(cx) else { return false };
+        self.stop_after_poison(cx, stopped);
+        true
+    }
+
+    fn stop_after_poison(&mut self, cx: &mut Cx, (heap, message): (usize, String)) {
+        stop_script_timers(cx, &isolate_timer_ids(cx, heap));
+        crate::widget_async::discard_stopped_work(cx, self.vm_id);
+        self.show_stopped_view(cx, Some(message));
+    }
+
+    fn show_stopped_view(&mut self, cx: &mut Cx, reason: Option<String>) {
+        self.last_errors = vec!["this app stopped".to_owned()];
+        self.last_errors.extend(reason);
+        // Build the replacement in the host VM. The reason is label data.
+        self.view = cx.with_vm(|vm| {
+            let value = vm.eval(makepad_script::script! {
+                use mod.prelude.widgets.*
+                View{
+                    show_bg: true
+                    draw_bg.color: theme.color_bg_app
+                    align: Align{x: 0.5 y: 0.5}
+                    Label{text: "this app stopped"}
+                }
+            });
+            View::script_from_value(vm, value)
+        });
+        if self.last_errors.len() == 2 {
+            self.view.children[0].1.set_text(cx, &self.last_errors.join("\n"));
+        }
+        self.showing_stop = true;
+        cx.widget_tree_mark_dirty(self.uid);
+        cx.redraw_all();
+    }
+
+    fn release_isolate(&mut self, cx: &mut Cx) {
+        self.draw_start = None;
         self.body_id = None;
         self.startup_timers.clear();
         self.body_modules.clear();
@@ -546,7 +673,7 @@ fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_i
         // Capture instead of logging: mid-eval errors otherwise go straight to
         // the error log (see `ScriptVm::take_errors`) and can't be returned.
         vm.capture_errors();
-        let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT as u64, |vm| {
+        let value = vm.with_callback_fuel(|vm| {
             vm.eval_with_append_source(script_mod, &code, NIL.into())
         });
         let mut errors = vm.take_errors();
@@ -674,24 +801,56 @@ impl Widget for Splash {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.allow_net {
-            if let Event::NetworkResponses(responses) = event {
-                crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
-            }
-        }
+        if self.show_poison(cx) { return; }
         if self.host_io_only && matches!(event, Event::TextCopy(_) | Event::TextCut(_)) {
             return;
         }
-        if self.host_io_only {
-            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return self.view.handle_event(cx, event, scope);
+        }
+        let mark = SplashDispatchMark::new(cx);
+        // A panicking child's capture_actions can drop the buffer it swapped out.
+        let pending = (!cx.new_actions.is_empty()).then(|| std::mem::take(&mut cx.new_actions));
+        let mut stopped = None;
+        let ok = crate::widget_async::contain_isolate_panic("widget event", || {
+            if self.allow_net {
+                if let Event::NetworkResponses(responses) = event {
+                    crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
+                    stopped = self.pending_stop(cx);
+                    if stopped.is_some() { return; }
+                }
+            }
+            if self.host_io_only {
+                crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                    self.view.handle_event(cx, event, scope);
+                });
+            } else {
                 self.view.handle_event(cx, event, scope);
-            });
-        } else {
-            self.view.handle_event(cx, event, scope);
+            }
+        });
+        let stopped = stopped.or_else(|| self.pending_stop(cx));
+        if !ok || stopped.is_some() {
+            cx.new_actions.clear();
+        }
+        if let Some(mut pending) = pending {
+            pending.append(&mut cx.new_actions);
+            cx.new_actions = pending;
+        }
+        if !ok || stopped.is_some() {
+            mark.unwind(cx);
+            if let Some(reason) = stopped { self.stop_after_poison(cx, reason); } else { self.stop_after_panic(cx); }
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.show_poison(cx) {
+            if let Some(start) = self.draw_start.take().filter(|s| s.redraw_id == cx.redraw_id()) {
+                cx.unwind_to(start.draw);
+                CaptureGauss::unwind_scope_to(cx, start.captures);
+                start.dispatch.unwind(cx);
+            }
+            return self.view.draw_walk(cx, scope, walk);
+        }
         if self.vm_id != MAIN_SPLASH_VM_ID && self.needs_restyle() {
             self.restyle_theme(cx);
         }
@@ -701,15 +860,42 @@ impl Widget for Splash {
         if self.vm_id != MAIN_SPLASH_VM_ID && self.reloaded_at != cx.reload_generation {
             self.eval_styled_body(cx, true);
         }
-        //let tree = self.view.widget_tree();
-        //cx.with_vm(|vm| {
-        //    log!("{}", tree.display(vm.heap()));
-        //});
-        if self.host_io_only {
-            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+        if self.vm_id == MAIN_SPLASH_VM_ID || self.show_poison(cx) {
+            return self.view.draw_walk(cx, scope, walk);
+        }
+        let start = self.draw_start.take()
+            .filter(|start| start.redraw_id == cx.redraw_id())
+            .unwrap_or_else(|| SplashDrawStart {
+                redraw_id: cx.redraw_id(),
+                draw: cx.unwind_mark(),
+                captures: CaptureGauss::scope_depth(cx),
+                dispatch: SplashDispatchMark::new(cx),
+            });
+        let text_owner = cx.text_runs.as_ref().map_or(0, |runs| runs.owner);
+        let draw_owner = cx.draw_owners.as_ref().map_or(0, |owners| owners.current);
+        let mut step = DrawStep::done();
+        let ok = crate::widget_async::contain_isolate_panic("widget draw", || {
+            step = if self.host_io_only {
+                crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                    self.view.draw_walk(cx, scope, walk)
+                })
+            } else {
                 self.view.draw_walk(cx, scope, walk)
-            })
+            };
+        });
+        let stopped = self.pending_stop(cx);
+        if ok && stopped.is_none() {
+            if step.is_step() {
+                self.draw_start = Some(start);
+            }
+            step
         } else {
+            cx.unwind_to(start.draw);
+            CaptureGauss::unwind_scope_to(cx, start.captures);
+            cx.exit_text_owner(text_owner);
+            cx.exit_draw_owner(draw_owner);
+            start.dispatch.unwind(cx);
+            if let Some(reason) = stopped { self.stop_after_poison(cx, reason); } else { self.stop_after_panic(cx); }
             self.view.draw_walk(cx, scope, walk)
         }
     }
@@ -758,8 +944,8 @@ impl Splash {
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-                vm.call(fnval, args);
+            vm.with_callback_fuel(|vm| {
+                vm.call(fnval, args)
             });
             true
         });
@@ -782,12 +968,9 @@ impl Splash {
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
-            let vals: Vec<ScriptValue> = args
-                .iter()
-                .map(|s| vm.new_string_with(|_vm, out| out.push_str(s)))
-                .collect();
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-                vm.call(fnval, &vals);
+            vm.with_callback_fuel(|vm| {
+                let vals: Vec<ScriptValue> = args.iter().map(|s| vm.new_string(s)).collect();
+                vm.call(fnval, &vals)
             });
             true
         });
@@ -874,7 +1057,7 @@ impl Splash {
     /// request to a specific widget (e.g. to skip an IPC sender's own isolate
     /// when fanning a message out).
     pub fn isolate_heap_key(&mut self, cx: &mut Cx) -> Option<usize> {
-        if self.vm_id == MAIN_SPLASH_VM_ID {
+        if self.vm_id == MAIN_SPLASH_VM_ID || crate::widget_async::splash_poisoned(cx, self.vm_id) {
             return None;
         }
         Some(cx.with_script_vm_id(self.vm_id, |vm| vm.heap_key()))
@@ -887,6 +1070,7 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return;
         }
+        if crate::widget_async::splash_poisoned(cx, self.vm_id) { return; }
         cx.with_script_vm_id(self.vm_id, |vm| {
             vm.set_injected_global(key, value);
         });
@@ -899,7 +1083,7 @@ impl Splash {
     /// ended in, since a `let`/`fn` that shadows a prelude name opens a
     /// child scope the module scope cannot see into.
     fn body_scope(&mut self, cx: &mut Cx) -> Option<ScriptObject> {
-        if self.vm_id == MAIN_SPLASH_VM_ID {
+        if self.vm_id == MAIN_SPLASH_VM_ID || crate::widget_async::splash_poisoned(cx, self.vm_id) {
             return None;
         }
         let body_key = self.body_key();
@@ -920,7 +1104,7 @@ impl SplashRef {
         }
     }
 
-    /// What the last evaluation of the body reported (empty: it evaluated to a view).
+    /// Errors from the last body evaluation, or the reason its widget tree stopped.
     pub fn last_errors(&self) -> Vec<String> {
         self.borrow().map(|inner| inner.last_errors.clone()).unwrap_or_default()
     }
@@ -999,6 +1183,176 @@ impl SplashRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_script_global(cx, key, value);
         }
+    }
+}
+
+#[cfg(test)]
+mod panic_tests {
+    use super::*;
+    use makepad_platform::event::{ScrollEvent, ScrollPhase};
+    use crate::widget_async::current_splash_vm_id;
+
+    #[derive(Default)]
+    struct ObservedScroll(Option<[u32; 2]>);
+
+    #[derive(Script, ScriptHook, Widget)]
+    struct PanicChild {
+        #[uid] uid: WidgetUid,
+        #[source] source: ScriptObjectRef,
+        #[walk] walk: Walk,
+        #[redraw] #[rust] area: Area,
+        #[rust] on_event: bool,
+        #[rust] yielded: bool,
+    }
+
+    impl Widget for PanicChild {
+        fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+            if self.on_event && matches!(event, Event::Scroll(_)) {
+                cx.global::<ObservedScroll>().0 = Some(cx.scroll_container_depth());
+                cx.capture_actions(|_| panic!("child event"));
+            }
+        }
+
+        fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+            if self.on_event {
+                cx.walk_turtle_with_area(&mut self.area, walk);
+                return DrawStep::done();
+            }
+            if self.yielded {
+                cx.add_begin_scroll();
+                cx.sploded_scene = Some(cx.current_pass_id());
+                cx.push_clip_rect(Rect::default());
+                panic!("child draw");
+            }
+            self.yielded = true;
+            cx.begin_turtle(walk, Layout::default());
+            DrawStep::make_step()
+        }
+    }
+
+    #[test]
+    fn a_panicking_child_stops_only_its_splash() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let new_splash = |cx: &mut Cx, restricted, body: &str| {
+            let mut splash = cx.with_vm(|vm| Splash::script_new_with_default(vm));
+            splash.set_host_io_only(restricted);
+            splash.set_text(cx, body);
+            assert!(splash.last_errors.is_empty(), "the test body must load: {:?}", splash.last_errors);
+            splash
+        };
+        let mut on_event = new_splash(&mut cx, false, r#"
+            flow: Down
+            scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
+            spacer := View{width: 20 height: 160}
+        "#);
+        let mut on_draw = new_splash(&mut cx, true, "body := View{}");
+        let mut sibling = new_splash(&mut cx, false, r#"body := Label{text: "host sibling"}"#);
+        let sibling_node = a11y_tree::NodeId::widget(sibling.view.children[0].1.widget_uid().0);
+        for (splash, fail_event) in [(&mut on_event, true), (&mut on_draw, false)] {
+            let child = cx.with_script_vm_id(splash.vm_id, |vm| {
+                let mut child = PanicChild::script_new(vm);
+                child.on_event = fail_event;
+                child.walk = Walk::fixed(20., 20.);
+                WidgetRef::new_with_inner(Box::new(child))
+            });
+            splash.view.children.push((id!(probe), child));
+        }
+
+        let main = cx.with_vm(|vm| vm.heap_key());
+        let (event_id, draw_id) = (on_event.vm_id, on_draw.vm_id);
+        let mut scope = Scope::empty();
+        let window = WindowId(0, 1);
+        let parent = WidgetUid::new();
+        cx.a11y.on = true;
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, dvec2(120., 120.));
+        let mut list = DrawList2d::new(&mut cx);
+        let mut stop_labels = Vec::new();
+        for frame in 0..2 {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&pass, None);
+            list.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(120., 120.), Layout::flow_down());
+            cx.a11y.begin_frame();
+            let token = cx.a11y.begin_node(parent.0, Some(list.id()));
+            cx.a11y.begin_window(window);
+            let mark = cx.unwind_mark();
+            let walk = Walk::fixed(120., 40.);
+            if frame == 0 {
+                assert!(on_draw.draw_walk(&mut cx, &mut scope, walk).is_step(), "a healthy step reaches the host");
+            }
+            on_draw.draw_walk_all(&mut cx, &mut scope, walk);
+            on_event.draw_walk_all(&mut cx, &mut scope, walk);
+            sibling.draw_walk_all(&mut cx, &mut scope, walk);
+            assert!(mark.is_balanced_with(&cx.unwind_mark()), "frame {frame} kept the host draw stacks");
+            let area = sibling.area();
+            cx.add_nav_stop(area, NavRole::TextInput, Inset::default());
+            let (_, scroll_path) = CxDraw::iterate_nav_stops(&mut cx, list.id(), |_, stop| {
+                (stop.area == area).then_some(area)
+            }).expect("the sibling's navigation stop is reachable");
+            assert_eq!(scroll_path, [area], "keyboard navigation reaches the sibling outside the failed scroller");
+            assert!(cx.a11y.is_current_node(parent.0), "the sibling returned to the host accessibility parent");
+            cx.a11y.end_window();
+            cx.a11y.end_node(token, a11y_tree::Node {
+                role: a11y_tree::Role::Window, ..Default::default()
+            }, Area::Empty);
+            cx.end_pass_sized_turtle();
+            list.end(&mut cx);
+            cx.end_pass(&pass);
+            assert_eq!(sibling.area().rect(&cx).pos.y, 80., "both stopped boxes and the sibling occupied their slots");
+            let mut host_children = None;
+            cx.a11y.finish_frame(Area::Empty, |_| Some(1), |_| None, |_| None, |_, bytes| {
+                let update = a11y_tree::wire::decode_update(&bytes).expect("valid semantic update");
+                if let Some(root) = update.nodes.iter().find(|node| node.id == update.root) {
+                    host_children = Some(root.children.clone());
+                }
+            });
+            if frame == 0 {
+                assert!(host_children.expect("the accessibility window was published").contains(&sibling_node),
+                    "the next sibling was published under the host accessibility parent");
+                cx.begin_scroll_container([true, true]);
+                let depth = cx.scroll_container_depth();
+                cx.action(id!(host_action));
+                let actions = cx.new_actions.len();
+                on_event.handle_event(&mut cx, &Event::Scroll(ScrollEvent {
+                    window_id: window,
+                    scroll: dvec2(0., 6.),
+                    abs: dvec2(5., 45.),
+                    modifiers: Default::default(),
+                    handled_x: Default::default(),
+                    handled_y: Default::default(),
+                    is_mouse: true,
+                    time: 0.,
+                    phase: ScrollPhase::None,
+                }), &mut scope);
+                assert_eq!(cx.global::<ObservedScroll>().0, Some([depth[0], depth[1] + 1]),
+                    "the scrolling View opened its vertical event scope before the child panicked");
+                assert_eq!(cx.scroll_container_depth(), depth, "the host kept its enclosing scroll scopes");
+                cx.end_scroll_container([true, true]);
+                assert_eq!(cx.new_actions.len(), actions, "the host kept its pending actions");
+                assert!(!crate::widget_async::splash_vm_is_live(&mut cx, event_id), "the event stopped its isolate");
+            }
+            assert_eq!(current_splash_vm_id(&mut cx), MAIN_SPLASH_VM_ID, "dispatch returned to the host VM");
+            assert_eq!(cx.with_vm(|vm| vm.heap_key()), main, "the host VM survived");
+            assert!(!crate::widget_async::splash_vm_is_live(&mut cx, draw_id), "the draw stopped its isolate");
+            for (i, stopped) in [&mut on_draw, &mut on_event].into_iter().enumerate() {
+                stopped.handle_event(&mut cx, &Event::Signal, &mut scope);
+                assert_eq!(stopped.last_errors, ["this app stopped"], "each box reports one stop");
+                let label = &stopped.view.children[0].1;
+                assert_eq!(label.text(), "this app stopped", "the stopped box shows its error");
+                if frame == 0 {
+                    stop_labels.push(label.widget_uid());
+                } else {
+                    assert_eq!(label.widget_uid(), stop_labels[i], "the stop was handled once");
+                }
+            }
+        }
+        on_draw.set_text(&mut cx, "");
+        assert!(on_draw.view.children.is_empty(), "clearing a stopped body clears the message");
+        sibling.stop(&mut cx);
     }
 }
 

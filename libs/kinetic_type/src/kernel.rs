@@ -185,7 +185,7 @@ mod tests {
     /// Glyph animators at both vector widths (4 and 8 lanes) and on the interpreter: the same
     /// draw records and the same counted work, at glyph counts around multiples of 4 and 8. The
     /// kits: three written here, plus every `*.splash` kit in the directory `KINETIC_KITS`
-    /// names (the stock kits: apps/commercial/engine/resources/kits/kinetic).
+    /// names (the stock kits: apps/apps/engine/resources/kits/kinetic).
     #[test]
     fn kit_animators_are_the_same_at_both_widths() {
         use makepad_script_compute::native_vec::with_lanes;

@@ -133,7 +133,10 @@ script_mod! {
                     sdf.fill(self.edge)
                     sdf.arc_round_caps(c.x, c.y, r - 1.5, a0, a0 + span * max(self.value, 0.001), 3.0)
                     sdf.fill(self.fill)
-                    if abs(self.value2 - self.value) > 0.001 {
+                    if self.value2 < 0.0 {
+                        sdf.circle(c.x, c.y, r - 5.0)
+                        sdf.stroke(self.fill, 1.2)
+                    } else if abs(self.value2 - self.value) > 0.001 {
                         let lo = min(self.value, self.value2)
                         let hi = max(self.value, self.value2)
                         sdf.arc_round_caps(c.x, c.y, r + 1.0, a0 + span * lo, a0 + span * hi, 1.2)
@@ -626,6 +629,8 @@ pub struct PanelControl {
     /// The path in the scene's code it is bound to.
     #[live]
     pub path: String,
+    #[rust]
+    readout: Option<DisplayValue>,
     /// What it is called (else the path's last part).
     #[live]
     pub label: String,
@@ -708,7 +713,33 @@ pub struct PanelControl {
     hovered: bool,
 }
 
+/// A live display independent of the editable field. A read-only value carries its tooltip.
+#[derive(Clone, PartialEq)]
+pub struct DisplayValue {
+    pub value: f64,
+    pub read_only: Option<std::sync::Arc<str>>,
+}
+
 impl PanelControl {
+    pub fn set_display_value(&mut self, cx: &mut Cx, readout: Option<DisplayValue>) {
+        if self.readout == readout { return; }
+        let was_read_only = self.read_only();
+        self.readout = readout;
+        if !was_read_only && self.read_only() {
+            self.close_menu(cx);
+            self.editing = None;
+            self.pastes.clear();
+            if self.press.take().is_some() { host::hold(false); }
+            let uid = self.widget_uid().0;
+            FIELDS.with(|f| f.borrow_mut().retain(|e| e.uid != uid));
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    fn read_only(&self) -> bool {
+        self.readout.as_ref().is_some_and(|value| value.read_only.is_some())
+    }
+
     fn read(&mut self) {
         let rev = host::revision();
         // A keyed value is its value at the playhead.
@@ -1478,7 +1509,7 @@ impl PanelControl {
         self.draw_shape.radius = R_CONTROL;
         self.draw_shape.draw_abs(cx, r);
         self.spots.push((r, Part::Field(i)));
-        let v = self.numbers.get(i).copied().unwrap_or(0.0);
+        let v = self.readout.as_ref().map_or_else(|| self.numbers.get(i).copied().unwrap_or(0.0), |v| v.value);
         let (lo, hi) = self.range();
         let t_of = |v: f64| if hi > lo { ((v - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
         if fill && !editing {
@@ -1608,6 +1639,24 @@ fn mix_colour(a: u32, b: u32, t: f32) -> u32 {
 
 impl Widget for PanelControl {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.read_only() {
+            if self.visible {
+                let was = self.hovered;
+                match event.hits(cx, self.draw_bg.area()) {
+                    Hit::FingerHoverOver(_) | Hit::FingerHoverIn(_) => {
+                        self.hovered = true;
+                        cx.set_cursor(MouseCursor::Default);
+                    }
+                    Hit::FingerHoverOut(_) => self.hovered = false,
+                    _ => {}
+                }
+                if let Event::MouseMove(mouse) = event {
+                    self.hovered &= self.draw_bg.area().clipped_rect(cx).contains(mouse.abs);
+                }
+                if was != self.hovered { self.draw_bg.redraw(cx); }
+            }
+            return;
+        }
         if let Event::Clipboard(reply) = event {
             if let Some(index) = self.pastes.iter().position(|paste| paste.0 == reply.request) {
                 let (_, comp, path, when) = self.pastes.remove(index);
@@ -2036,7 +2085,7 @@ impl Widget for PanelControl {
         let w = if stacked || inside { rect.size.x } else { (rect.size.x - LABEL - GAP).max(40.0) };
         let (lo, hi) = self.range();
         let t_of = |v: f64| if hi > lo { ((v - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
-        let v0 = self.numbers.first().copied().unwrap_or(lo);
+        let v0 = self.readout.as_ref().map_or_else(|| self.numbers.first().copied().unwrap_or(lo), |v| v.value);
         let unit = self.unit().to_string();
         // What the running film holds there now (a modulated value moves
         // away from what is written): the ring or mark at it, followed
@@ -2122,7 +2171,7 @@ impl Widget for PanelControl {
                 if self.kind == PanelKind::Knob {
                     self.draw_shape.shape = 1.0;
                     self.draw_shape.body = color(p.raised, 1.0);
-                    self.draw_shape.value2 = live_t.unwrap_or(t_of(v0) as f32);
+                    self.draw_shape.value2 = if self.read_only() { -1.0 } else { live_t.unwrap_or(t_of(v0) as f32) };
                     self.draw_shape.fill = color(if self.key.keyed() { p.amber } else { p.accent }, 1.0);
                     self.draw_shape.edge = color(if hot(Part::Value(0), self) { p.border_hi } else { p.line }, 1.0);
                     self.draw_shape.value = t_of(v0) as f32;
@@ -2229,7 +2278,7 @@ impl Widget for PanelControl {
         }
         // Where its fields are, for Tab.
         let fields = self.field_count();
-        if fields > 0 {
+        if fields > 0 && !self.read_only() {
             let entry = FieldPlace {
                 uid: me,
                 rect,
@@ -2262,6 +2311,20 @@ impl Widget for PanelControl {
             draw_key(cx, &mut self.key, at, within, &mut self.draw_key, &mut self.draw_value);
             if self.key.keyed() && host::playhead().is_some_and(|p| p.2) {
                 cx.redraw_area_in_draw(self.draw_bg.area());
+            }
+        }
+        if let Some(reason) = self.readout.as_ref().and_then(|v| v.read_only.as_deref()).filter(|_| self.hovered) {
+            let width = advance(&self.draw_value, cx, reason) + 12.0;
+            let tip = Rect { pos: rect.pos + dvec2(44.0, 4.0), size: dvec2(width, 19.0) };
+            if !host::tip(tip, reason.to_owned(), false) {
+                self.draw_shape.shape = 0.0;
+                self.draw_shape.fill = color(p.menu, 1.0);
+                self.draw_shape.edge = color(p.line, 1.0);
+                self.draw_shape.stroke = 1.0;
+                self.draw_shape.radius = R_CONTROL;
+                self.draw_shape.draw_abs(cx, tip);
+                self.draw_value.color = color(p.text, 1.0);
+                self.draw_value.draw_abs(cx, tip.pos + dvec2(6.0, 3.0), reason);
             }
         }
         self.draw_context_menu(cx);

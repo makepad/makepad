@@ -35,6 +35,10 @@
 //!   and is filtered out the same way.
 //! - wm, wm-all and ai-hub are in the Runner's list (`runner_apps.json`) but are not
 //!   windows the WM hosts (`wm_launchable: false`).
+//! - `"android": true` marks the Runner's apps whose sources pass the Android check: the
+//!   Runner's phone APK packs them as source beside the phone WM, which offers the `mobile` ones
+//!   on its home screen and the rest in its drawer. flow and browser are not marked until their
+//!   Android build is fixed; box3d and counter are rigs the phone never shows, so not packed.
 //! - runner is the Runner itself (apps/commercial/runner, `makepad` with no arguments): a
 //!   Mac's dock, never a WM window. Its row lets a node's launches name it like any app.
 
@@ -626,6 +630,11 @@ mod tests {
                 features.as_slice(),
                 "{id}: features differ from the Runner's (order included: a drift alarm)"
             );
+            // `android`: its sources pass the Android check, so the Runner's phone APK packs it
+            // and the phone WM offers it, which only a window the WM hosts can be
+            if row.get("android").and_then(Value::as_bool) == Some(true) {
+                assert!(entry.wm_launchable, "{id}: an app the phone APK packs must be launchable by the WM");
+            }
         }
     }
 

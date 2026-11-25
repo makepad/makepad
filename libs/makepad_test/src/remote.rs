@@ -202,10 +202,11 @@ impl RemoteClient {
         Ok(Self { socket, client, jit: false })
     }
 
-    /// The program is waiting on the JIT right now. Background work (the queues ahead of the
+    /// App startup waits for its queued requests and its whole-crate check. Background work (the queues ahead of the
     /// program, tier-ups, the cache's writes) goes on beside a test and is not a reason to wait.
     pub(crate) fn jit_foreground(&self) -> TestResult<bool> {
-        Ok(owner_queue(&self.get_text("owner", &[])?)?.queued)
+        let queue = owner_queue(&self.get_text("owner", &[])?)?;
+        Ok(queue.queued || queue.check)
     }
 
     /// Under the JIT, the app's state captured before teardown (the host's `capture`: stacks
@@ -248,7 +249,7 @@ impl RemoteClient {
     }
 
     /// Under the JIT, the program waits for code it is about to run: a request of it queued on the
-    /// owner (`jit_foreground`), or a thread of it inside a demand compile (`OwnerQueue::waits`).
+    /// owner or a thread inside a demand compile. A pending app check also keeps the run unsettled.
     /// Natively never.
     pub(crate) fn waits_on_jit(&self) -> TestResult<bool> {
         if !self.jit {
@@ -459,9 +460,8 @@ impl RemoteClient {
         Ok(text)
     }
 
-    /// The answer lines of one `cmd` request, with the response timeout. The
-    /// answer must end with its `end` line; an `{"err":..}` line is an error.
-    fn command_lines(&self, command: &str, params: &[(&str, &str)]) -> TestResult<Vec<String>> {
+    /// Sends a request on the cmd channel. Its answer ends at the protocol's end line.
+    pub(crate) fn start_command(&self, command: &str, params: &[(&str, &str)]) -> TestResult<PendingAnswer> {
         let fail = |what: String| TestError::new(format!("app remote {command}: {what}"));
         let words = [command.to_string()];
         let kv: Vec<(String, String)> = params
@@ -473,54 +473,53 @@ impl RemoteClient {
         channel
             .send(line.into_bytes())
             .map_err(|err| fail(format!("link lost: {err}")))?;
-        let mut pending = String::new();
-        let mut lines = Vec::new();
+        Ok(PendingAnswer { command: command.to_string(), channel, lines: Vec::new(), partial: Some(Vec::new()) })
+    }
+
+    /// The answer lines of one `cmd` request, with the response timeout. The
+    /// answer must end with its `end` line; an `{"err":..}` line is an error.
+    fn command_lines(&self, command: &str, params: &[(&str, &str)]) -> TestResult<Vec<String>> {
+        let fail = |what: String| TestError::new(format!("app remote {command}: {what}"));
+        let mut call = self.start_command(command, params)?;
         let mut jit_wait = makepad_remote::jit::Wait::default();
         loop {
-            let event = match channel.recv_timeout(RESPONSE_TIMEOUT) {
+            let event = match call.channel.recv_timeout(RESPONSE_TIMEOUT) {
                 Err(true) if self.jit => {
                     let wait = jit_wait.keep_waiting(&self.client).map_err(|err| fail(err.to_string()))?;
                     // The app may have answered while inspect sampled the JIT.
-                    match channel.try_recv() {
+                    match call.channel.try_recv() {
                         Err(true) if wait => continue,
                         event => event,
                     }
                 }
                 event => event,
             };
-            match event {
-                Ok(Event::Data(data)) => {
-                    pending.push_str(&String::from_utf8_lossy(&data));
-                    let mut ended = false;
-                    while let Some(newline) = pending.find('\n') {
-                        let answer: String = pending.drain(..=newline).collect();
-                        let answer = answer.trim_end();
-                        if answer.starts_with("{\"end\":") {
-                            ended = true;
-                            break;
-                        }
-                        if !answer.is_empty() {
-                            lines.push(answer.to_string());
-                        }
-                    }
-                    if ended {
-                        break;
-                    }
-                }
-                Ok(Event::Closed(code, why)) => {
-                    return Err(fail(format!("connection closed without an answer ({code}: {why})")));
-                }
-                Ok(Event::Opened(_)) => {}
-                Err(true) => {
-                    return Err(fail(format!(
-                        "no answer within {} s (app busy or not running its event loop)",
-                        RESPONSE_TIMEOUT.as_secs()
-                    )));
-                }
-                Err(false) => return Err(fail("link lost: channel closed".to_string())),
+            if matches!(event, Err(true)) {
+                return Err(fail(format!(
+                    "no answer within {} s (app busy or not running its event loop)",
+                    RESPONSE_TIMEOUT.as_secs()
+                )));
+            }
+            if let Some(answer) = call.read(event) {
+                return answer;
             }
         }
-        check_answer(command, lines)
+    }
+
+    /// Starts one AI tool call of the app's `app` service (`call <tool> <json args>`, as
+    /// `makepad-remote app <pid> call` sends it); [`PendingAnswer::poll`] asks for its answer.
+    pub(crate) fn start_tool_call(&self, tool: &str, args: &str) -> TestResult<PendingAnswer> {
+        let command = format!("call {tool}");
+        let request = match makepad_remote::app::app_request_of(&format!("{command} {args}")) {
+            Some(Ok(request)) => request,
+            Some(Err(usage)) => return Err(TestError::new(format!("app remote {command}: {usage}"))),
+            None => return Err(TestError::new(format!("app remote {command}: not a tool call"))),
+        };
+        let channel = self
+            .client
+            .open("app", &request)
+            .map_err(|err| TestError::new(format!("app remote {command}: {err}")))?;
+        Ok(PendingAnswer { command, channel, lines: Vec::new(), partial: None })
     }
 
     /// A command answered client side (`grab`, `gq`): `makepad_remote::app`
@@ -537,6 +536,62 @@ impl RemoteClient {
         })
         .map_err(|err| TestError::new(format!("app remote {command}: {err}")))?;
         check_answer(command, lines)
+    }
+}
+
+/// An in-flight request. Dropping it closes its channel.
+pub(crate) struct PendingAnswer {
+    pub(crate) command: String,
+    channel: makepad_remote::Channel,
+    lines: Vec<String>,
+    /// `cmd` streams bytes through its end line. The tool service sends whole lines and closes.
+    partial: Option<Vec<u8>>,
+}
+
+impl PendingAnswer {
+    pub(crate) fn poll(&mut self) -> Option<TestResult<Vec<String>>> {
+        loop {
+            let event = self.channel.try_recv();
+            if matches!(event, Err(true)) {
+                return None;
+            }
+            if let Some(answer) = self.read(event) {
+                return Some(answer);
+            }
+        }
+    }
+
+    fn read(&mut self, event: Result<Event, bool>) -> Option<TestResult<Vec<String>>> {
+        match event {
+            Ok(Event::Data(data)) => match &mut self.partial {
+                Some(partial) => {
+                    for chunk in data.split_inclusive(|&b| b == b'\n') {
+                        partial.extend_from_slice(chunk);
+                        if chunk.ends_with(b"\n") {
+                            let text = String::from_utf8_lossy(partial);
+                            let line = text.trim_end();
+                            if line.starts_with("{\"end\":") {
+                                return Some(check_answer(&self.command, std::mem::take(&mut self.lines)));
+                            }
+                            if !line.is_empty() {
+                                self.lines.push(line.to_string());
+                            }
+                            partial.clear();
+                        }
+                    }
+                }
+                None => self.lines.extend(
+                    String::from_utf8_lossy(&data).lines().filter(|line| !line.is_empty()).map(str::to_string),
+                ),
+            },
+            Ok(Event::Closed(makepad_remote::conn::CLOSE_NORMAL, _)) if self.partial.is_none() => {
+                return Some(check_answer(&self.command, std::mem::take(&mut self.lines)));
+            }
+            Ok(Event::Closed(code, why)) => return Some(Err(TestError::new(format!("app remote {}: closed without an answer ({code}: {why})", self.command)))),
+            Err(false) => return Some(Err(TestError::new(format!("app remote {}: link lost: channel closed", self.command)))),
+            Ok(Event::Opened(_)) | Err(true) => {}
+        }
+        None
     }
 }
 
@@ -572,6 +627,8 @@ struct OwnerQueue {
     /// a thread of the program is inside a demand compile: its first call of a fn, from its first
     /// request until it runs the code
     demand: bool,
+    /// the JIT is still checking the app's own crates
+    check: bool,
 }
 
 impl OwnerQueue {
@@ -581,7 +638,7 @@ impl OwnerQueue {
     /// round trip, the owner idle 91% of it with nothing queued at the looks: read as "sat idle
     /// 10.6 s", 11-11.)
     fn waits(&self) -> bool {
-        self.queued || self.demand
+        self.queued || self.demand || self.check
     }
 }
 
@@ -591,7 +648,7 @@ fn owner_queue(reply: &str) -> TestResult<OwnerQueue> {
     let json = parse_json(json)?;
     let queued = json.key("queued");
     let count = |key: &str| json_f64(queued.and_then(|queued| queued.key(key))).ok_or_else(|| fail(&format!("the owner's queue state has no count `{key}`")));
-    Ok(OwnerQueue { queued: count("foreground")? + count("main")? > 0.0, demand: count("demand")? > 0.0 })
+    Ok(OwnerQueue { queued: count("foreground")? + count("main")? > 0.0, demand: count("demand")? > 0.0, check: count("check")? > 0.0 })
 }
 
 fn json_f64(value: Option<&JsonValue>) -> Option<f64> {
@@ -737,18 +794,20 @@ fn format_num(value: f64) -> String {
 mod tests {
     use super::*;
 
-    /// A thread inside a demand compile waits on the JIT with nothing queued (its request served,
-    /// the thread not running yet): the idle rule must not read that app as idle.
+    /// A demand compile or an app check can keep the run unsettled with nothing queued.
     #[test]
-    fn a_demand_compile_waits_on_the_jit_with_nothing_queued() {
+    fn owner_queue_counts_the_programs_waits_on_the_jit() {
         let reply = |queue: &str| format!("{{\"seq\":3,\"serving\":\"idle\",\"queued\":{queue}}}\n{{\"holds\":\"...\"}}");
-        let served = owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"demand":1}"#)).unwrap();
-        assert_eq!(served, OwnerQueue { queued: false, demand: true });
+        let served = owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"demand":1,"check":0}"#)).unwrap();
+        assert_eq!(served, OwnerQueue { queued: false, demand: true, check: false });
         assert!(served.waits(), "a demand compile whose request was served still waits on the JIT");
-        let quiet = owner_queue(&reply(r#"{"total":2,"foreground":0,"main":0,"demand":0}"#)).unwrap();
+        let check = owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"demand":0,"check":1}"#)).unwrap();
+        assert!(check.waits(), "the run is unsettled until its app check ends");
+        let quiet = owner_queue(&reply(r#"{"total":2,"foreground":0,"main":0,"demand":0,"check":0}"#)).unwrap();
         assert!(!quiet.waits(), "background requests alone are no wait of the program");
-        assert!(owner_queue(&reply(r#"{"total":1,"foreground":1,"main":0,"demand":0}"#)).unwrap().waits(), "a queued program request waits");
-        assert!(owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0}"#)).is_err(), "a reply without the demand count is an error, not a quiet app");
+        assert!(owner_queue(&reply(r#"{"total":1,"foreground":1,"main":0,"demand":0,"check":0}"#)).unwrap().waits(), "a queued program request waits");
+        assert!(owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"check":0}"#)).is_err(), "a reply without the demand count is an error, not a quiet app");
+        assert!(owner_queue(&reply(r#"{"total":0,"foreground":0,"main":0,"demand":0}"#)).is_err(), "a reply must include the check count");
     }
 
     #[test]

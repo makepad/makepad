@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="studio" x1="0" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#28595d"/>
+      <stop offset="0.50" stop-color="#13363d"/>
+      <stop offset="1" stop-color="#071c26"/>
+    </linearGradient>
+    <linearGradient id="enamel" x1="0.1" y1="0" x2="0.82" y2="1">
+      <stop offset="0" stop-color="#fffdf1"/>
+      <stop offset="0.43" stop-color="#e7ebe1"/>
+      <stop offset="0.78" stop-color="#c9d6cf"/>
+      <stop offset="1" stop-color="#8ca6a5"/>
+    </linearGradient>
+    <linearGradient id="alloy" x1="0" y1="0" x2="1" y2="0.1">
+      <stop offset="0" stop-color="#4f686e"/>
+      <stop offset="0.22" stop-color="#a8bbb8"/>
+      <stop offset="0.45" stop-color="#647d82"/>
+      <stop offset="0.81" stop-color="#334e57"/>
+      <stop offset="1" stop-color="#708b8e"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#studio)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#94d5ca" stroke-opacity="0.20" stroke-width="4"/>
+
+  <!-- Mounting foot, drive pedestal and offset shoulder bearing. -->
+  <ellipse cx="360" cy="790" rx="154" ry="24" fill="#061820" opacity="0.55"/>
+  <path d="M273 682 Q276 668 292 666 L387 663 Q405 661 411 678 L432 746 L462 756 Q474 760 474 771 L474 782 Q474 793 459 793 L241 793 Q229 793 229 783 L229 771 Q229 759 243 755 L264 748 Z" fill="url(#alloy)"/>
+  <path d="M239 761 Q249 753 269 750 L425 748 Q447 749 459 756 L463 762 Q460 770 446 771 L248 775 Q236 774 239 761Z" fill="#ced8cc"/>
+  <path d="M284 623 Q282 582 313 566 Q342 551 373 568 Q405 587 407 620 L412 691 Q410 710 387 715 L306 718 Q282 717 278 701Z" fill="url(#enamel)"/>
+  <path d="M282 688 Q343 699 412 682 L412 701 Q357 721 279 711Z" fill="#55737a"/>
+
+  <!-- The elbow sits forward of the shoulder, leaving the inside of the arm open. -->
+  <path d="M304 588 C321 556 348 552 361 519 L408 393 C420 365 415 331 437 290 C459 250 512 234 548 255 C578 272 586 302 575 338 C566 370 543 385 523 399 L463 538 C449 569 446 609 422 640 C406 661 381 674 351 670 C313 665 290 626 304 588Z" fill="url(#enamel)"/>
+  <path d="M330 565 C347 558 358 548 368 527 L422 388 C429 369 431 349 432 336" fill="none" stroke="#ffffff" stroke-opacity="0.66" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="360" cy="608" r="45" fill="url(#alloy)"/>
+  <circle cx="359" cy="606" r="29" fill="#aebfb9"/>
+  <circle cx="357" cy="603" r="22" fill="#dae1d6"/>
+
+  <!-- Elbow cover, forearm and the short angled wrist roll. -->
+  <path d="M481 252 C509 233 543 237 564 261 L620 347 C635 369 646 386 671 407 L715 444 C737 464 740 496 719 517 C699 539 667 541 643 520 L587 461 C566 439 552 415 536 393 L471 319 C452 296 456 269 481 252Z" fill="url(#enamel)"/>
+  <path d="M549 261 Q567 270 582 295 L607 335" fill="none" stroke="#fffcef" stroke-opacity="0.85" stroke-width="13" stroke-linecap="round"/>
+  <path d="M585 306 L609 340 L554 378 L530 345Z" fill="url(#alloy)"/>
+  <circle cx="503" cy="292" r="42" fill="url(#alloy)"/>
+  <circle cx="502" cy="291" r="29" fill="#274650"/>
+  <circle cx="502" cy="291" r="18" fill="#85e4d5"/>
+  <path d="M650 430 C667 415 692 418 708 434 L745 466 Q755 475 767 477 L791 482 L773 554 L728 544 Q709 541 691 528 L646 493 C627 477 630 449 650 430Z" fill="url(#enamel)"/>
+  <path d="M781 477 L803 483 Q817 488 813 502 L802 544 Q799 557 786 556 L764 551Z" fill="url(#alloy)"/>
+  <path d="M798 483 Q812 484 811 496 L797 548 Q794 556 783 554 L779 553 L797 483Z" fill="#72e7d5"/>
+</svg>

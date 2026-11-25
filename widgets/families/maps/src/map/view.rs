@@ -21,8 +21,6 @@ use std::fs;
 use std::path::Path;
 use std::cell::RefCell;
 use std::rc::Rc;
-#[cfg(test)]
-use std::sync::Arc;
 use crate::makepad_draw::text::fonts::{Fonts, FontsMemoryBytes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9063,6 +9061,7 @@ impl MapView {
         {
             // Pure parsing/tessellation has an explicit serial fallback when
             // wasm was built without atomics.
+            let _ = cx;
             guarded_job();
             Ok(())
         }
@@ -13640,6 +13639,15 @@ mod tests {
         assert!(map.archive_pending_tiles[&key].reuse_base_as_detail);
     }
 
+    /// Tile builds the pool has taken: requested, yet no longer staged.
+    fn taken_tile_builds(map: &MapView) -> HashSet<TileKey> {
+        map.local_requested_tiles
+            .keys()
+            .filter(|key| !map.tile_queue.contains(key))
+            .copied()
+            .collect()
+    }
+
     #[test]
     fn same_zoom_pan_prunes_queued_build_and_loading_placeholder() {
         let path = temp_mbtiles_with_zoom("map-view-same-zoom-prune", "3", "3", 3);
@@ -13655,23 +13663,11 @@ mod tests {
             },
         );
         map.local_source_zoom_range = Some((3, 3));
-        // Park every pool worker so tile builds stay staged in the map's
-        // queue, where a pan can still prune them.
+        // The test parks no pool worker: the app pool is the process's, and a
+        // test that waits for its parked jobs to start can wait forever on
+        // workers another test holds. The pool takes what its window allows,
+        // and may finish it before the pan; what it took is counted by name.
         let pool = cx.task_pool();
-        let thread_count = pool.worker_count();
-        let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
-        let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
-        for _ in 0..thread_count {
-            let reached = reached.clone();
-            let release = release.clone();
-            pool.submit(Class::Visible, move || {
-                reached.wait();
-                release.wait();
-            })
-            .unwrap()
-            .detach();
-        }
-        reached.wait();
         let rect = Rect {
             pos: dvec2(0.0, 0.0),
             size: dvec2(64.0, 64.0),
@@ -13687,7 +13683,9 @@ mod tests {
         // Builds the queue still holds, however wide the pool's window: tiles
         // far from both views.
         let staged = [TileKey { z: 3, x: 0, y: 0 }, TileKey { z: 3, x: 1, y: 0 }];
-        map.tile_queue.set_in_flight_limit(map.tile_queue.in_flight());
+        // A window of none: the far tiles stay staged whatever the pool
+        // finishes meanwhile.
+        map.tile_queue.set_in_flight_limit(0);
         for key in staged {
             map.tile_queue.push(&pool, key, true, QueueOrder::Lifo, || {}).unwrap();
             map.local_requested_tiles.insert(key, 0.0);
@@ -13714,13 +13712,19 @@ mod tests {
             assert!(map.tile_queue.contains(&key), "{key:?} was pushed with no window free, yet is not staged");
         }
 
+        // What the pool took before the pan: requested, no longer staged. A
+        // taken build cannot be pulled back, and its key leaves the request
+        // set only when its result is handled, which this test never does,
+        // so it stays requested even once the build has finished.
+        let taken = taken_tile_builds(&map);
+
         map.set_center(&mut cx, 0.0, 0.0);
         map.ensure_visible_tiles(&mut cx, rect);
         let visible = map.visible_tiles.iter().copied().collect::<HashSet<_>>();
         assert!(requested_before.iter().any(|key| !visible.contains(key)), "the pan left no tile of the first view off-screen");
-        // Every tile either view, the test or the map asked for. The queue hands
-        // one window over whatever the pool is doing, and that much is out of
-        // reach; what it still holds is the new view's, whatever the pool's width.
+        // Every tile either view, the test or the map asked for. What the pool
+        // took is out of reach; what the queue still holds is the new view's,
+        // whatever the pool's width.
         let keys = requested_before
             .iter()
             .chain(&staged)
@@ -13732,15 +13736,13 @@ mod tests {
         let handed_over = map.tile_queue.in_flight();
         let window = map.bake_window(&cx, &pool);
         assert!(handed_over <= window, "a window of {window}, yet {handed_over} tile jobs were handed over");
-        let mut off_screen_requested = 0;
         for key in keys.iter().filter(|key| !visible.contains(key)) {
             assert!(!map.tile_queue.contains(key), "{key:?} is off-screen after the pan, yet still staged");
             let requested = map.local_requested_tiles.contains_key(key);
-            off_screen_requested += requested as usize;
+            assert!(!requested || taken.contains(key), "{key:?} is off-screen after the pan and still requested, yet the pool had not taken it");
             let placeholder = map.tiles.get(key).is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal));
             assert!(!placeholder || requested, "{key:?} is off-screen after the pan, its build pruned, yet its loading placeholder stays");
         }
-        assert!(off_screen_requested <= handed_over, "{off_screen_requested} off-screen builds survived the pan; only the {handed_over} handed over are out of reach");
         // the two far tiles were never handed over: gone entirely
         for key in staged {
             assert!(!map.local_requested_tiles.contains_key(&key) && !map.tiles.contains_key(&key), "{key:?} was staged off-screen and survived the pan");
@@ -13751,9 +13753,12 @@ mod tests {
             .any(|key| map.visible_tiles.contains(key)));
 
         map.visible_tiles.clear();
+        let taken = taken_tile_builds(&map);
         map.request_visible_tiles_from_local_source(&mut cx);
-        assert!(map.local_requested_tiles.len() <= handed_over);
-        release.wait();
+        assert_eq!(map.tile_queue.staged_len(), 0, "nothing is visible, yet tile builds stay staged");
+        for key in map.local_requested_tiles.keys() {
+            assert!(taken.contains(key), "{key:?} is requested with nothing visible, yet the pool had not taken it");
+        }
         std::fs::remove_file(path).unwrap();
     }
 

@@ -2476,3 +2476,71 @@ mod open_tests {
         });
     }
 }
+
+#[cfg(test)]
+mod icon_layout_tests {
+    use super::*;
+    use crate::ui_checks::UiCheckTarget;
+
+    fn icon_button(cx: &mut Cx, name: &'static str, align_x: f64) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                let Face = mod.widgets[#(name)]
+                Face{
+                    width: 100. height: 40.
+                    align: Align{x: #(align_x) y: 0.5}
+                    text: ""
+                    icon_walk: Walk{width: 16. height: 16.}
+                    draw_icon +: {
+                        svg: crate_resource("makepad_widgets:resources/icons/icon_lock_open.svg")
+                    }
+                }
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{name} with align.x={align_x} failed to build: {errors:?}");
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// A lone icon follows the face's alignment on both axes.
+    /// Walking an empty label used to add spacing and push the icon off centre.
+    #[test]
+    fn icon_only_buttons_follow_the_face_alignment() {
+        let mut cx = crate::checkout_test_cx();
+        let mut target = UiCheckTarget::new(&mut cx);
+        for (name, align_x) in [
+            ("Button", 0.5),
+            ("ButtonIcon", 0.5),
+            ("ButtonFlatIcon", 0.5),
+            ("Button", 0.0),
+        ] {
+            let widget = icon_button(&mut cx, name, align_x);
+            target.draw(&mut cx, &widget, Vec2d { x: 120.0, y: 60.0 });
+
+            let case = format!("{name} with align.x={align_x}");
+            let face = widget.area().rect(&cx);
+            let button = widget.borrow::<Button>().unwrap_or_else(|| panic!("{case} has no Button"));
+            let icon = button.draw_icon.area().rect(&cx);
+            assert!(face.size.x > 0.0 && face.size.y > 0.0, "{case} drew an empty face: {face:?}");
+            assert!(icon.size.x > 0.0 && icon.size.y > 0.0, "{case} drew an empty icon: {icon:?}");
+            assert!(
+                (icon.center().y - face.center().y).abs() <= 0.5,
+                "{case} icon is off centre vertically: {icon:?} in {face:?}"
+            );
+            if align_x == 0.0 {
+                let left = face.pos.x + button.layout.padding.left;
+                assert!(
+                    (icon.pos.x - left).abs() <= 0.5,
+                    "{case} icon starts at {}, expected the padded edge {left}",
+                    icon.pos.x
+                );
+            } else {
+                assert!(
+                    (icon.center().x - face.center().x).abs() <= 0.5,
+                    "{case} icon is off centre horizontally: {icon:?} in {face:?}"
+                );
+            }
+        }
+    }
+}

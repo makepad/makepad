@@ -769,9 +769,9 @@ impl DropDown {
         // Nothing to call into if the isolate that minted it is gone.
         let Some(vm_id) = cx.script_ref_vm_id(&self.source) else { return };
         cx.with_script_vm_id(vm_id, |vm| {
-            let label = vm.new_string(&label);
-            vm.with_instruction_limit(crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-                vm.call(ScriptValue::from(handler), &[ScriptValue::from(label)]);
+            vm.with_callback_fuel(|vm| {
+                let label = vm.new_string(&label);
+                vm.call(handler.into(), &[label])
             });
         });
     }

@@ -5,6 +5,7 @@
     "package": "makepad-app-aichat",
     "binary": "makepad-app-aichat",
     "workspace": "makepad/apps/aichat",
+    "android": true,
     "features": [
       "engine",
       "gen"
@@ -50,6 +51,7 @@
     "package": "makepad-app-aihub",
     "binary": "makepad-app-aihub",
     "workspace": "makepad/apps/aihub",
+    "android": true,
     "features": [
       "localai"
     ],
@@ -61,6 +63,7 @@
     "package": "makepad-app-amp",
     "binary": "makepad-app-amp",
     "workspace": "makepad/apps/amp",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -78,7 +81,8 @@
     "title": "Synth",
     "package": "makepad-app-synth",
     "binary": "makepad-app-synth",
-    "workspace": "makepad/apps/synth",
+    "workspace": "makepad/apps/apps/synth",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -88,6 +92,7 @@
     "package": "makepad-app-code",
     "binary": "makepad-app-code",
     "workspace": "makepad/apps/code",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -121,6 +126,7 @@
     "package": "makepad-app-calculator",
     "binary": "makepad-app-calculator",
     "workspace": "makepad/apps/calculator",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -132,6 +138,7 @@
     "package": "makepad-app-calendar",
     "binary": "makepad-app-calendar",
     "workspace": "makepad/apps/calendar",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -143,6 +150,7 @@
     "package": "makepad-app-camera",
     "binary": "makepad-app-camera",
     "workspace": "makepad/apps/camera",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -152,6 +160,7 @@
     "package": "makepad-app-party",
     "binary": "makepad-app-party",
     "workspace": "makepad/apps/party",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -161,6 +170,7 @@
     "package": "makepad-app-clock",
     "binary": "makepad-app-clock",
     "workspace": "makepad/apps/clock",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -172,6 +182,7 @@
     "package": "makepad-fab",
     "binary": "makepad-fab",
     "workspace": "makepad/apps/apps/fab/app",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -181,6 +192,7 @@
     "package": "makepad-app-fabric",
     "binary": "makepad-app-fabric",
     "workspace": "makepad/apps/fabric",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -190,6 +202,7 @@
     "package": "makepad-app-files",
     "binary": "makepad-app-files",
     "workspace": "makepad/apps/files",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -201,6 +214,7 @@
     "package": "makepad-app-finance",
     "binary": "makepad-app-finance",
     "workspace": "makepad/apps/finance",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -212,6 +226,7 @@
     "package": "makepad-app-image",
     "binary": "makepad-app-image",
     "workspace": "makepad/apps/image",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -221,6 +236,7 @@
     "package": "makepad-app-mail",
     "binary": "makepad-app-mail",
     "workspace": "makepad/apps/mail",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -232,6 +248,7 @@
     "package": "makepad-app-mixer",
     "binary": "makepad-app-mixer",
     "workspace": "makepad/apps/mixer",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -241,6 +258,7 @@
     "package": "makepad-app-notes",
     "binary": "makepad-app-notes",
     "workspace": "makepad/apps/notes",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -252,6 +270,7 @@
     "package": "makepad-app-pdf",
     "binary": "makepad-app-pdf",
     "workspace": "makepad/apps/pdf",
+    "android": true,
     "features": []
   },
   {
@@ -260,6 +279,7 @@
     "package": "makepad-app-photos",
     "binary": "makepad-app-photos",
     "workspace": "makepad/apps/photos",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -271,10 +291,19 @@
     "package": "makepad-app-reminders",
     "binary": "makepad-app-reminders",
     "workspace": "makepad/apps/reminders",
+    "android": true,
     "features": [
       "standalone"
     ],
     "menu": "other"
+  },
+  {
+    "id": "robot",
+    "title": "Robot",
+    "package": "makepad-app-robot",
+    "binary": "makepad-app-robot",
+    "workspace": "makepad/apps/robot",
+    "features": []
   },
   {
     "id": "route",
@@ -282,6 +311,7 @@
     "package": "makepad-app-route",
     "binary": "makepad-app-route",
     "workspace": "makepad/apps/route",
+    "android": true,
     "features": [
       "standalone",
       "localai"
@@ -294,6 +324,7 @@
     "package": "makepad-app-score",
     "binary": "makepad-app-score",
     "workspace": "makepad/apps/score",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -303,6 +334,7 @@
     "package": "makepad-app-sheets",
     "binary": "makepad-app-sheets",
     "workspace": "makepad/apps/sheets",
+    "android": true,
     "features": [
       "standalone"
     ],
@@ -314,6 +346,7 @@
     "package": "makepad-app-task",
     "binary": "makepad-app-task",
     "workspace": "makepad/apps/task",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -323,6 +356,7 @@
     "package": "makepad-app-terminal",
     "binary": "makepad-app-terminal",
     "workspace": "makepad/apps/terminal",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -332,6 +366,7 @@
     "package": "makepad-app-video",
     "binary": "makepad-app-video",
     "workspace": "makepad/apps/video",
+    "android": true,
     "features": []
   },
   {
@@ -340,6 +375,7 @@
     "package": "makepad-app-translator",
     "binary": "makepad-app-translator",
     "workspace": "makepad/apps/translator",
+    "android": true,
     "features": [],
     "menu": "other"
   },
@@ -349,6 +385,7 @@
     "package": "makepad-app-weather",
     "binary": "makepad-app-weather",
     "workspace": "makepad/apps/weather",
+    "android": true,
     "features": [
       "standalone"
     ],

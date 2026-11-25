@@ -143,6 +143,8 @@ impl Drop for Cx2d<'_, '_> {
 /// host redraws it.
 #[derive(Clone, Copy, Debug)]
 pub struct DrawUnwindMark {
+    nav: Option<(DrawListId, usize)>,
+    sploded_scene: Option<DrawPassId>,
     turtles: usize,
     finished_rows: usize,
     finished_walks: usize,
@@ -168,6 +170,7 @@ impl DrawUnwindMark {
     /// is not compared.
     pub fn is_balanced_with(&self, other: &DrawUnwindMark) -> bool {
         self.turtles == other.turtles
+            && self.sploded_scene == other.sploded_scene
             && self.turtle_clips == other.turtle_clips
             && self.clip_rects == other.clip_rects
             && self.draw_call_parent_stack == other.draw_call_parent_stack
@@ -184,6 +187,8 @@ impl DrawUnwindMark {
 impl<'a, 'b> Cx2d<'a, 'b> {
     pub fn unwind_mark(&self) -> DrawUnwindMark {
         DrawUnwindMark {
+            nav: self.nav_mark(),
+            sploded_scene: self.sploded_scene,
             turtles: self.turtles.len(),
             finished_rows: self.finished_rows.len(),
             finished_walks: self.finished_walks.len(),
@@ -206,6 +211,8 @@ impl<'a, 'b> Cx2d<'a, 'b> {
     /// stacks are cut: a mark taken before a guest's draw is always at or
     /// below where the guest left them.
     pub fn unwind_to(&mut self, mark: DrawUnwindMark) {
+        self.unwind_nav_to(mark.nav);
+        self.sploded_scene = mark.sploded_scene;
         self.turtles.truncate(mark.turtles);
         self.finished_rows.truncate(mark.finished_rows);
         self.finished_walks.truncate(mark.finished_walks);

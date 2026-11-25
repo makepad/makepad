@@ -18,9 +18,9 @@
 //! Main-loop cost: a drain of each part's channel per pump; the
 //! conversations run off the main thread.
 
-use makepad_widgets::Cx;
+use makepad_widgets::{Class, Cx, TaskHandle, TaskPool};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 
 /// What a part's conversation sends.
@@ -36,9 +36,16 @@ pub enum Piece {
 /// One part being written.
 pub struct Part {
     rx: Receiver<Piece>,
+    writer: Option<TaskHandle<Result<(), String>>>,
     pub text: String,
     pub done: bool,
     pub failed: Option<String>,
+}
+
+impl Part {
+    fn new(rx: Receiver<Piece>) -> Self {
+        Self { rx, writer: None, text: String::new(), done: false, failed: None }
+    }
 }
 
 /// The parts of one make, as they come. Dropped, its writers stop.
@@ -62,48 +69,48 @@ impl Job {
     /// A make whose parts answer on these channels (in part order); the
     /// host's writers watch `cancel`.
     pub fn new(parts: Vec<Receiver<Piece>>, started: f64, cancel: Arc<AtomicBool>) -> Job {
-        Job { parts: parts.into_iter().map(|rx| Part { rx, text: String::new(), done: false, failed: None }).collect(), started, cancel }
+        Job { parts: parts.into_iter().map(Part::new).collect(), started, cancel }
     }
 
-    /// Each text written by `write` on a thread of its own, at once.
-    pub fn spawn(texts: Vec<String>, started: f64, write: Write) -> Job {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let mut parts = Vec::new();
+    /// Each part streams its text from a visible pool job.
+    pub fn spawn(pool: &TaskPool, texts: Vec<String>, started: f64, write: Write) -> Result<Job, String> {
+        let mut job = Job::new(Vec::new(), started, Arc::new(AtomicBool::new(false)));
         for text in texts {
             let (tx, rx) = channel();
-            let (write, cancel) = (write.clone(), cancel.clone());
-            std::thread::spawn(move || {
-                let mut piece = |t: &str| {
-                    let _ = tx.send(Piece::Text(t.to_string()));
-                };
-                let end = match write(text, &cancel, &mut piece) {
-                    Ok(()) => Piece::Done,
-                    Err(e) => Piece::Failed(e),
-                };
-                let _ = tx.send(end);
-            });
-            parts.push(rx);
+            let (write, cancel) = (write.clone(), job.cancel.clone());
+            let writer = pool.submit(Class::Visible, move || {
+                if cancel.load(Ordering::Relaxed) { return Err("stopped".into()); }
+                write(text, &cancel, &mut |t| { let _ = tx.send(Piece::Text(t.to_string())); })
+            }).map_err(|e| e.to_string())?;
+            let mut part = Part::new(rx);
+            part.writer = Some(writer);
+            job.parts.push(part);
         }
-        Job::new(parts, started, cancel)
+        Ok(job)
     }
 
     /// Take what the parts sent since; whether every part is in.
     pub fn pump(&mut self) -> bool {
-        for part in &mut self.parts {
-            while let Ok(piece) = part.rx.try_recv() {
-                match piece {
-                    Piece::Text(t) => part.text.push_str(&t),
-                    Piece::Done => part.done = true,
-                    Piece::Failed(e) => {
-                        part.failed = Some(e);
+        for part in self.parts.iter_mut().filter(|part| !part.done) {
+            // Read completion first so the drain below includes the writer's last text.
+            let finished = part.writer.as_mut().and_then(TaskHandle::try_take);
+            loop {
+                match part.rx.try_recv() {
+                    Ok(Piece::Text(t)) => part.text.push_str(&t),
+                    Ok(Piece::Done) => { part.done = true; break; }
+                    Ok(Piece::Failed(e)) => { part.failed = Some(e); part.done = true; break; }
+                    Err(TryRecvError::Disconnected) if part.writer.is_none() => {
+                        part.failed = Some("the writer stopped".into());
                         part.done = true;
+                        break;
                     }
+                    Err(_) => break,
                 }
             }
-            // A conversation that went away without a word failed.
-            if !part.done && matches!(part.rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
-                part.failed = Some("the writer stopped".into());
+            if let Some(result) = finished {
+                part.failed = result.map_err(|e| e.to_string()).and_then(|answer| answer).err();
                 part.done = true;
+                part.writer = None;
             }
         }
         self.parts.iter().all(|p| p.done)

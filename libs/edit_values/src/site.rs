@@ -173,6 +173,9 @@ pub enum Taper {
     #[default]
     Linear,
     Log,
+    /// Fine near min, which may be zero. Travel t maps to
+    /// min + (max - min) * (exp(a * t) - 1) / (exp(a) - 1), with a = ln(1000).
+    Exp,
     /// Whole numbers.
     Int,
 }

@@ -1,0 +1,5 @@
+New Computer Modern Math (NewCMMath-Regular.otf), version 4.0
+(C) 2019-2021 Antonis Tsolomitis.
+
+As its name table states: this work is released under the GUST Font License; see
+http://tug.org/fonts/licenses/GUST-FONT-LICENSE.txt for details.

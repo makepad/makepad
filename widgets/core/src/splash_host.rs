@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use crate::makepad_draw::makepad_platform::makepad_script;
 use crate::makepad_draw::makepad_platform::SignalToUI;
-use crate::widget_async::{CxSplashVmExt, WIDGET_SCRIPT_INSTRUCTION_LIMIT};
+use crate::widget_async::CxSplashVmExt;
 use crate::makepad_draw::makepad_platform::Cx;
 use makepad_script::*;
 
@@ -171,21 +171,21 @@ pub fn splash_host_respond(
             delivered = false;
             return;
         }
-        let (ok, data, error) = match result {
-            Ok(json) => {
-                let mut parser = makepad_script::json::JsonParserThread::default();
-                let data = parser.read_json(json, vm.heap_mut());
-                (true, data, NIL)
-            }
-            Err(msg) => (false, NIL, vm.new_string_with(|_vm, s| s.push_str(msg))),
-        };
-        let obj = vm.new_object();
-        // `is_ok`, never `ok`: `ok` is a script keyword and unusable as a field.
-        vm.set_value_trap(obj, id!(is_ok), ok);
-        vm.set_value_trap(obj, id!(data), data);
-        vm.set_value_trap(obj, id!(error), error);
-        vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-            vm.call(callback.as_object().into(), &[obj.into()]);
+        vm.with_callback_fuel(|vm| {
+            let (ok, data, error) = match result {
+                Ok(json) => {
+                    let mut parser = makepad_script::json::JsonParserThread::default();
+                    let data = parser.read_json(json, vm.heap_mut());
+                    (true, data, NIL)
+                }
+                Err(msg) => (false, NIL, vm.new_string(msg)),
+            };
+            let obj = vm.new_object();
+            // `is_ok`, never `ok`: `ok` is a script keyword and unusable as a field.
+            vm.set_value_trap(obj, id!(is_ok), ok);
+            vm.set_value_trap(obj, id!(data), data);
+            vm.set_value_trap(obj, id!(error), error);
+            vm.call(callback.as_object().into(), &[obj.into()])
         });
         // A callback that errors (or pauses and errors later on its own
         // thread) leaves its errors queued on the trap; nothing else drains

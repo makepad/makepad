@@ -367,11 +367,6 @@ impl Fonts {
 
     /// Glyph rasters queued for or running on the MSDF worker: text that
     /// draws with a fallback until they land (`Cx::pending_async_loads`).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn pending_glyph_rasters(&self) -> usize {
-        self.layouter.rasterizer().try_borrow().map_or(0, |rasterizer| rasterizer.client().pending())
-    }
-
     #[cfg(target_arch = "wasm32")]
     pub fn pending_glyph_rasters(&self) -> usize {
         let queued = self

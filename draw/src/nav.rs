@@ -189,6 +189,18 @@ impl<'a> CxDraw<'a> {
         nav_tree[draw_list_id].nav_list.clear();
     }
 
+    pub(crate) fn nav_mark(&self) -> Option<(DrawListId, usize)> {
+        let id = *self.draw_list_stack.last()?;
+        let tree = self.nav_tree_rc.0.borrow();
+        Some((id, tree.nav_lists.get(id.index())?.nav_list.len()))
+    }
+
+    pub(crate) fn unwind_nav_to(&mut self, mark: Option<(DrawListId, usize)>) {
+        if let Some((id, len)) = mark {
+            self.nav_tree_rc.0.borrow_mut()[id].nav_list.truncate(len);
+        }
+    }
+
     pub fn nav_list_item_push(&mut self, draw_list_id: DrawListId, item: NavItem) {
         let mut nav_tree = self.nav_tree_rc.0.borrow_mut();
         nav_tree[draw_list_id].nav_list.push(item);

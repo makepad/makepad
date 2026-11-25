@@ -30,6 +30,7 @@ const DEFAULT_COALESCE_MAX_LEN: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ReadToken(pub u64);
 
+#[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
 const ARCHIVE_QUEUE_CAPACITY: usize = 256;
 
 /// Archive reads and parses go to the runtime pool's light lane through a

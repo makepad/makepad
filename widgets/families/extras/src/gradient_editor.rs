@@ -1635,7 +1635,7 @@ impl GradientEditor {
                         changed = true;
                     }
                     ValueInputAction::Ended(_) => ended = true,
-                    ValueInputAction::None => {}
+                    ValueInputAction::Formula { .. } | ValueInputAction::None => {}
                 }
             } else if wa.widget_uid == amount_uid {
                 match wa.cast::<ValueInputAction>() {
@@ -1649,7 +1649,7 @@ impl GradientEditor {
                         changed = true;
                     }
                     ValueInputAction::Ended(_) => ended = true,
-                    ValueInputAction::None => {}
+                    ValueInputAction::Formula { .. } | ValueInputAction::None => {}
                 }
             }
         }

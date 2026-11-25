@@ -10,7 +10,7 @@
 //!
 //! Editing writes the source: a key becomes a plan of source replacements
 //! (`makepad_markdown_edit::plan`), applied as this view's own edit in the
-//! document's one history, so undo steps the same in both views.
+//! document's one history. By default undo steps the same in both views.
 
 use crate::highlight::{Highlights, RowBlocks, RowHighlight, WholeBlock};
 use crate::print::{PrintJob, PrintUpdate};
@@ -130,6 +130,12 @@ pub enum MarkdownEditorAction {
     Caret,
     /// The view edited the document (the host's other views take it in).
     Changed,
+    /// A press or Primary+Return flipped a task box. Sent after its `Changed`.
+    TaskToggled,
+    /// The user requested undo with `host_history` enabled.
+    Undo,
+    /// The user requested redo with `host_history` enabled.
+    Redo,
     /// A key the view did not use (Cmd/Ctrl+S and the like), for the host.
     UnhandledKey(KeyEvent),
     /// Cmd/Ctrl+K: the host asks for a URL (starting from the one of the
@@ -624,6 +630,9 @@ impl Finding {
 pub struct MarkdownEditor {
     #[deref]
     view: View,
+    /// Send undo and redo requests to the host. By default the view steps the document's history.
+    #[live]
+    pub host_history: bool,
     #[live]
     draw_caret: DrawColor,
     /// A printed page's number, under its text.
@@ -2005,6 +2014,11 @@ impl MarkdownEditor {
     }
 
     fn undo(&mut self, cx: &mut Cx, redo: bool) {
+        if self.host_history {
+            let action = if redo { MarkdownEditorAction::Redo } else { MarkdownEditorAction::Undo };
+            cx.widget_action(self.widget_uid(), action);
+            return;
+        }
         let Some(doc) = &self.doc else { return };
         let selections = self.history_selection();
         let done = if redo {
@@ -2131,6 +2145,7 @@ impl MarkdownEditor {
 
     /// Flips the task box of the item at `position`; the selection stays.
     fn toggle_task(&mut self, cx: &mut Cx, position: Position) -> bool {
+        if self.doc.as_ref().is_none_or(|doc| doc.document.is_read_only()) { return false }
         let line = position.line_index;
         let Some((slice, events)) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines)) else {
             return false;
@@ -2138,6 +2153,7 @@ impl MarkdownEditor {
         let at = Self::slice_offset(&slice, position);
         let Some(planned) = plan::toggle_task(&slice.text, &events, at) else { return false };
         self.apply_plan(cx, &slice, &planned, EditKind::Other, After::Keep);
+        cx.widget_action(self.widget_uid(), MarkdownEditorAction::TaskToggled);
         true
     }
 
@@ -2850,6 +2866,63 @@ fn picture_alt(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_and_task_shortcuts_notify_the_host() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut editor = cx.with_vm(MarkdownEditor::script_new);
+        let document = CodeDocument::new(Text::default(), Default::default());
+        editor.attach(&mut cx, document.clone());
+        editor.type_text(&mut cx, "one", false);
+        editor.type_text(&mut cx, " two", true);
+
+        let primary = KeyModifiers {
+            logo: cfg!(target_vendor = "apple"),
+            control: !cfg!(target_vendor = "apple"),
+            ..Default::default()
+        };
+        let undo = KeyEvent { key_code: KeyCode::KeyZ, modifiers: primary, ..Default::default() };
+        let redo = KeyEvent { modifiers: KeyModifiers { shift: true, ..primary }, ..undo };
+        let ctrl_y = KeyEvent {
+            key_code: KeyCode::KeyY,
+            modifiers: KeyModifiers { control: true, ..Default::default() },
+            ..Default::default()
+        };
+        assert_eq!(document.as_text().to_string(), "one two");
+        editor.handle_key(&mut cx, &undo);
+        assert_eq!(document.as_text().to_string(), "one", "default undo removes the paste");
+
+        editor.host_history = true;
+        for (key, expected) in [
+            (undo, MarkdownEditorAction::Undo),
+            (redo, MarkdownEditorAction::Redo),
+            (ctrl_y, MarkdownEditorAction::Redo),
+        ] {
+            let actions = cx.capture_actions(|cx| editor.handle_key(cx, &key));
+            let emitted: Vec<_> = actions.filter_widget_actions_cast::<MarkdownEditorAction>(editor.widget_uid()).collect();
+            assert_eq!(emitted, [expected], "the host receives one request for {key:?}");
+            assert_eq!(document.as_text().to_string(), "one", "host shortcut {key:?} changed the text");
+        }
+        editor.host_history = false;
+        editor.handle_key(&mut cx, &redo);
+        assert_eq!(document.as_text().to_string(), "one two", "the paste is still available to redo");
+
+        let toggle = KeyEvent { key_code: KeyCode::ReturnKey, modifiers: primary, ..Default::default() };
+        let actions = cx.capture_actions(|cx| editor.handle_key(cx, &toggle));
+        assert!(!actions.filter_widget_actions_cast::<MarkdownEditorAction>(editor.widget_uid())
+            .any(|action| action == MarkdownEditorAction::TaskToggled), "a paragraph has no box to flip");
+
+        let task = CodeDocument::new(Text::from("- [ ] ship"), Default::default());
+        editor.attach(&mut cx, task.clone());
+        for expected in ["- [x] ship", "- [ ] ship"] {
+            let actions = cx.capture_actions(|cx| editor.handle_key(cx, &toggle));
+            let edits: Vec<_> = actions.filter_widget_actions_cast::<MarkdownEditorAction>(editor.widget_uid())
+                .filter(|action| matches!(action, MarkdownEditorAction::Changed | MarkdownEditorAction::TaskToggled))
+                .collect();
+            assert_eq!(task.as_text().to_string(), expected);
+            assert_eq!(edits, [MarkdownEditorAction::Changed, MarkdownEditorAction::TaskToggled]);
+        }
+    }
 
     #[test]
     fn pictures_brought_in_take_a_free_name_beside_the_document() {

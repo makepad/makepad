@@ -1355,7 +1355,7 @@ impl Widget for EaseEditor {
                         self.emit(cx, false, true);
                     }
                 }
-                ValueInputAction::None => {}
+                ValueInputAction::Formula { .. } | ValueInputAction::None => {}
             }
         }
     }

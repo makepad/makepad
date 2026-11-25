@@ -31,7 +31,12 @@
   },
   {
     "id": "synth", "label": "Synth", "package": "makepad-app-synth",
-    "dir": "apps/synth", "bin": "makepad-app-synth", "manifest": null, "args": [],
+    "dir": "apps/apps/synth", "bin": "makepad-app-synth", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
+    "id": "robot", "label": "Robot", "package": "makepad-app-robot",
+    "dir": "apps/robot", "bin": "makepad-app-robot", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {

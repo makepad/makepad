@@ -302,6 +302,16 @@ impl TestApp {
         self.client().get_text("hal lose", &[]).map(|_| ())
     }
 
+    /// Runs `frames` frames of the app's virtual clock (`--virtual-clock` in `app_args`), at
+    /// 60 fps; with `wait_loads` each frame opens only once the app's asynchronous loads have
+    /// landed. Answers the `step` command's line, `{"frame":..,"time":..}` after the last frame.
+    pub fn try_step(&self, frames: u64, wait_loads: bool) -> TestResult<String> {
+        self.ensure_running()?;
+        let frames = frames.to_string();
+        let wait_loads = if wait_loads { "1" } else { "0" };
+        self.client().get_text("step", &[("frames", frames.as_str()), ("wait_loads", wait_loads)])
+    }
+
     pub fn widget_dump(&self) -> String {
         match self.try_widget_dump() {
             Ok(dump) => dump,
@@ -422,6 +432,47 @@ impl TestApp {
         if let Err(err) = self.try_wait_until_within(budget, pending) {
             panic_for_error(err);
         }
+    }
+
+    /// One AI tool call of the app (`call <service>.<tool> <json args>`, as
+    /// `makepad-remote app <pid> call` sends it): its answer lines; an `{"err":..}` line is an
+    /// error. The answer is waited for as [`Self::wait_until_within`] waits with `budget`, so a
+    /// call the app takes long over (a render while its scene builds, on a loaded box) is
+    /// judged by the app's progress, never by a clock. A failed wait drops the call, which
+    /// cancels it.
+    pub fn call_tool(&self, budget: Duration, tool: &str, args: &str) -> Vec<String> {
+        match self.try_call_tool(budget, tool, args) {
+            Ok(lines) => lines,
+            Err(err) => panic_for_error(err),
+        }
+    }
+
+    pub fn try_call_tool(&self, budget: Duration, tool: &str, args: &str) -> TestResult<Vec<String>> {
+        let call = self.client().start_tool_call(tool, args)?;
+        self.wait_for_answer(budget, call)
+    }
+
+    /// Sends words and parameters on the app's cmd channel and waits for the answer lines
+    /// with the main-thread CPU budget and idle rule of [`Self::wait_until_within`].
+    pub fn command(&self, budget: Duration, words: &[&str], params: &[(&str, &str)]) -> Vec<String> {
+        self.try_command(budget, words, params).unwrap_or_else(|err| panic_for_error(err))
+    }
+
+    pub fn try_command(&self, budget: Duration, words: &[&str], params: &[(&str, &str)]) -> TestResult<Vec<String>> {
+        let call = self.client().start_command(&words.join(" "), params)?;
+        self.wait_for_answer(budget, call)
+    }
+
+    fn wait_for_answer(&self, budget: Duration, mut call: crate::remote::PendingAnswer) -> TestResult<Vec<String>> {
+        let mut answer = None;
+        self.try_wait_until_within(budget, || match call.poll() {
+            None => Some(format!("waiting for the answer of {}", call.command)),
+            done => {
+                answer = done;
+                None
+            }
+        })?;
+        answer.unwrap_or_else(|| Err(TestError::new(format!("{}: the wait ended without its answer", call.command))))
     }
 
     pub fn try_wait_until_within(&self, budget: Duration, mut pending: impl FnMut() -> Option<String>) -> TestResult<()> {
@@ -1152,7 +1203,11 @@ impl Locator {
             None => self.resolve_unique_visible()?.window_arg(),
         };
         let mut budget = None;
-        if let Err(refused) = self.app.client().get_json(&command, &args) {
+        // The app builds its tree for the act's own request: one with none yet (its first, a
+        // look's time on a busy box) did nothing, and is asked again under the same Budget.
+        let acted = self.app.wait_looks(&mut budget, &format!("{command}: the app built no tree to act in"),
+            || self.app.client().get_json(&command, &args), |e| e.contains(makepad_hal::a11y::remote::NO_TREE_YET));
+        if let Err(refused) = acted {
             let Some(req) = pending_action(refused.message()) else {
                 // The app's refusal ("no such node", "ambiguous") names no selector: when the
                 // selector does not pick one visible widget, say which selector and what it matched.
@@ -1384,7 +1439,8 @@ pub fn run_current_package_test<F, R>(
 /// but nothing it runs brings what it waits on either: that stretch counts against the wait's
 /// budget as wall time, and once it lasts the budget (the idle limit at least) the wait fails,
 /// naming what the app said was pending. (A Fab test's wait for its view at rest sat 17 min beside
-/// a load the test held, its app at 0% and saying the load was on its way, 11-20.)
+/// a load the test held, its app at 0% and saying the load was on its way, 11-20.) That verdict
+/// names disk, memory and pool stalls by the same rules, over the stretch with work pending.
 struct Budget {
     /// The main thread's CPU the wait may spend.
     limit: Duration,
@@ -1400,13 +1456,13 @@ struct Budget {
     /// Of the idle stretch, how long only a tick ran (its main thread nothing, its other threads
     /// under 1/[`TICK_SHARE`] of a core), and the CPU they ran in it.
     ticked: (Duration, Duration),
-    /// The process's major page faults at the last look, and of the idle stretch, the memory wait
+    /// The process's major page faults at the last look, and of the idle or pending stretch, the memory wait
     /// that lasts to the last look (how long its looks took them at a swapping rate, and how many),
     /// and the memory waits before it, whose faults stopped.
     faults: u64,
     memory: (Duration, u64),
     paged: (Duration, u64),
-    /// Of the idle stretch, the disk wait that lasts to the last look (how long its looks found
+    /// Of the idle or pending stretch, the disk wait that lasts to the last look (how long its looks found
     /// threads of it waiting in the kernel uninterruptibly, and the most at once), and the disk
     /// waits before it, which ended.
     disk: (Duration, u32),
@@ -1414,7 +1470,7 @@ struct Budget {
     /// The jobs the app pool's workers had taken at the last look, and whether it found jobs queued.
     taken: u64,
     queued: bool,
-    /// Of the idle stretch, the starve that lasts to the last look (how long its looks found the
+    /// Of the idle or pending stretch, the starve that lasts to the last look (how long its looks found the
     /// jobs the look before found queued still there, none taken), and the jobs queued per class at
     /// the last; and how long the starves before it lasted, whose jobs got their permits.
     starved: (Duration, [u64; 3]),
@@ -1523,6 +1579,12 @@ impl Budget {
         // it ran nothing (or only ticked) with something pending that is not its pool: what it
         // waits on runs nowhere it would show
         let waiting = !stalled && settled.as_ref().is_some_and(|s| !s.settled && !s.only_pool) && !waits_on_jit()?;
+        let continuing = (stalled && !self.idle.is_zero()) || (waiting && !self.pending.0.is_zero());
+        if !continuing {
+            (self.memory, self.paged, self.disk, self.disked, self.starved, self.granted) = Default::default();
+            self.queued = false;
+            self.slots.clear();
+        }
         match (waiting, settled.as_mut()) {
             (true, Some(s)) => self.pending = (self.pending.0 + over, std::mem::take(&mut s.pending)),
             _ => self.pending = (Duration::ZERO, Vec::new()),
@@ -1534,6 +1596,11 @@ impl Budget {
             if ticking {
                 self.ticked = (self.ticked.0 + over, self.ticked.1 + ran);
             }
+        } else {
+            self.idle = Duration::ZERO;
+            self.ticked = (Duration::ZERO, Duration::ZERO);
+        }
+        if stalled || waiting {
             if faults as f64 >= SWAP_FAULTS_PER_S * over.as_secs_f64() {
                 self.memory = (self.memory.0 + over, self.memory.1 + faults);
             } else {
@@ -1548,53 +1615,51 @@ impl Budget {
                 let (waited, n) = std::mem::take(&mut self.disk);
                 self.disked = (self.disked.0 + waited, self.disked.1.max(n));
             }
-            if queue && self.queued {
+            if queue && self.queued && taken == self.taken {
                 // the jobs the last look found queued are there still, none taken: they waited the
                 // whole look for a permit (a job queued since has waited for nothing yet)
                 self.starved = (self.starved.0 + over, queued);
                 self.slots = slots;
-            } else if !queue {
-                // its queue emptied: the starve ended, and what stalls the app now is not it
+            } else {
+                // its queue emptied or a worker took a job: any previous starve ended
                 self.granted += std::mem::take(&mut self.starved).0;
             }
-        } else {
-            (self.idle, self.ticked, self.memory, self.paged, self.starved, self.granted) = (Duration::ZERO, (Duration::ZERO, Duration::ZERO), (Duration::ZERO, 0), (Duration::ZERO, 0), (Duration::ZERO, [0; 3]), Duration::ZERO);
-            (self.disk, self.disked) = ((Duration::ZERO, 0), (Duration::ZERO, 0));
         }
         self.last = (now, cpu.own, cpu.main, cpu.waited);
         self.faults = cpu.faults;
         self.taken = taken;
         self.queued = queue;
-        if self.pending.0 >= self.limit.max(self.idle_limit) {
-            return Ok(Some(format!(
-                "it ran nothing for {:.1} s while it said it waited on {} (budget {:.0} s): nothing it ran brought that on (its main thread ran {:.1} s of CPU)",
-                self.pending.0.as_secs_f64(),
-                self.pending.1.join(", "),
-                self.limit.max(self.idle_limit).as_secs_f64(),
-                main.as_secs_f64()
-            )));
-        }
-        if self.idle < self.idle_limit {
+        let pending_limit = self.limit.max(self.idle_limit);
+        let pending = self.pending.0 >= pending_limit;
+        let (stretch, limit, waited_on) = if pending {
+            (self.pending.0, pending_limit, format!(" while it said it waited on {}", self.pending.1.join(", ")))
+        } else if self.idle >= self.idle_limit {
+            (self.idle, self.idle_limit, String::new())
+        } else {
             return Ok(None);
-        }
-        let (idle, budget, main) = (self.idle.as_secs_f64(), self.idle_limit.as_secs_f64(), main.as_secs_f64());
-        let beside = match self.beside.1 {
-            Duration::ZERO => String::new(),
-            busy => format!("; before that the test process's own threads (a service the test runs in it, as a hub) were busy for {:.1} s, which the wait counted as progress", busy.as_secs_f64()),
         };
-        // a memory or disk wait is why the app ran nothing only when every look of the idle
-        // stretch found it, to the last
-        let covers = |waited: Duration| waited == self.idle;
+        let (seconds, budget, main) = (stretch.as_secs_f64(), limit.as_secs_f64(), main.as_secs_f64());
+        let beside = match self.beside.1 {
+            busy if !busy.is_zero() && !pending => format!("; before that the test process's own threads (a service the test runs in it, as a hub) were busy for {:.1} s, which the wait counted as progress", busy.as_secs_f64()),
+            _ => String::new(),
+        };
+        // A memory or disk wait explains the stretch only when every look found it.
+        let covers = |waited: Duration| waited == stretch;
+        let whole_stretch = || if pending {
+            format!("{seconds:.1} s{waited_on}")
+        } else {
+            format!("{seconds:.1} of the {seconds:.1} s it ran nothing")
+        };
         Ok(Some(match (self.memory, self.disk, self.starved) {
             ((waited, n), _, _) if n > 0 && covers(waited) => format!(
-                "it was waiting on memory (swapping) for {:.1} of the {idle:.1} s it ran nothing (budget {budget:.0} s): {n} major page faults, {:.0} a second while it waited{} (its main thread ran {main:.1} s of CPU){beside}",
-                waited.as_secs_f64(),
+                "it was waiting on memory (swapping) for {} (budget {budget:.0} s): {n} major page faults, {:.0} a second while it waited{} (its main thread ran {main:.1} s of CPU){beside}",
+                whole_stretch(),
                 n as f64 / waited.as_secs_f64(),
                 pressure("memory").map_or(String::new(), |p| format!("; the box's memory pressure: tasks waited on memory {p:.1}% of the last 10 s"))
             ),
             (_, (waited, n), _) if n > 0 && covers(waited) => format!(
-                "it was waiting on the disk for {:.1} of the {idle:.1} s it ran nothing (budget {budget:.0} s): up to {n} of its threads at a time waited in the kernel uninterruptibly (a file's sync, a read){} (its main thread ran {main:.1} s of CPU){beside}",
-                waited.as_secs_f64(),
+                "it was waiting on the disk for {} (budget {budget:.0} s): up to {n} of its threads at a time waited in the kernel uninterruptibly (a file's sync, a read){} (its main thread ran {main:.1} s of CPU){beside}",
+                whole_stretch(),
                 pressure("io").map_or(String::new(), |p| format!("; the box's I/O pressure: tasks waited on the disk {p:.1}% of the last 10 s"))
             ),
             (_, _, (starved, queued)) if starved > Duration::ZERO => {
@@ -1604,40 +1669,51 @@ impl Budget {
                     false => format!("; the process's CPU budget slots at the last look: {}", self.slots.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")),
                 };
                 format!(
-                    "its pool was starved: {}, none granted for {:.1} s of the {idle:.1} s it ran nothing (budget {budget:.0} s; its main thread ran {main:.1} s of CPU){slots}{beside}",
+                    "its pool was starved: {}, none granted for {:.1} s of the {seconds:.1} s it ran nothing{waited_on} (budget {budget:.0} s; its main thread ran {main:.1} s of CPU){slots}{beside}",
                     classes.join(", "),
                     starved.as_secs_f64()
                 )
             }
+            _ if pending => format!(
+                "it ran nothing for {seconds:.1} s{waited_on} (budget {budget:.0} s): nothing it ran brought that on{} (its main thread ran {main:.1} s of CPU)",
+                self.stall_clauses(seconds)
+            ),
             _ => format!(
-                "it sat idle for {idle:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{}{}{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
+                "it sat idle for {seconds:.1} s (budget {budget:.0} s), nothing running and nothing pending{}{}{} (its main thread ran {main:.1} s of CPU){beside}",
                 if running > 0 { format!(" ({running} pool jobs on its workers ran no CPU)") } else { String::new() },
                 match self.ticked {
                     (Duration::ZERO, _) => String::new(),
                     (ticked, cpu) => format!("; for {:.1} s of it only a steady tick ran, {:.0}% of a core, its main thread nothing (no progress)", ticked.as_secs_f64(), 100.0 * cpu.as_secs_f64() / ticked.as_secs_f64()),
                 },
-                match self.granted {
-                    Duration::ZERO => String::new(),
-                    granted => format!("; for {:.1} s of it its pool's jobs waited for a CPU permit, granted since", granted.as_secs_f64()),
-                },
-                match self.paged {
-                    (_, 0) => String::new(),
-                    (waited, n) => format!("; for {:.1} s of it it waited on memory ({n} major page faults), {}", waited.as_secs_f64(), if self.memory.1 == 0 { "none since" } else { "which stopped" }),
-                },
-                match self.memory {
-                    (_, 0) => String::new(),
-                    (waited, n) => format!("; for the last {:.1} s of it it took {n} major page faults ({:.0} a second), which began after it had run nothing for {:.1} s", waited.as_secs_f64(), n as f64 / waited.as_secs_f64(), idle - waited.as_secs_f64()),
-                },
-                match self.disked {
-                    (_, 0) => String::new(),
-                    (waited, n) => format!("; for {:.1} s of it up to {n} of its threads waited on the disk, {}", waited.as_secs_f64(), if self.disk.1 == 0 { "none since" } else { "which ended" }),
-                },
-                match self.disk {
-                    (_, 0) => String::new(),
-                    (waited, n) => format!("; for the last {:.1} s of it up to {n} of its threads waited on the disk, which began after it had run nothing for {:.1} s", waited.as_secs_f64(), idle - waited.as_secs_f64()),
-                }
+                self.stall_clauses(seconds)
             ),
         }))
+    }
+
+    /// Stalls that accounted for only part of the idle or pending stretch.
+    fn stall_clauses(&self, seconds: f64) -> String {
+        format!("{}{}{}{}{}",
+            match self.granted {
+                Duration::ZERO => String::new(),
+                granted => format!("; for {:.1} s of it its pool's jobs waited for a CPU permit, granted since", granted.as_secs_f64()),
+            },
+            match self.paged {
+                (_, 0) => String::new(),
+                (waited, n) => format!("; for {:.1} s of it it waited on memory ({n} major page faults), {}", waited.as_secs_f64(), if self.memory.1 == 0 { "none since" } else { "which stopped" }),
+            },
+            match self.memory {
+                (_, 0) => String::new(),
+                (waited, n) => format!("; for the last {:.1} s of it it took {n} major page faults ({:.0} a second), which began after it had run nothing for {:.1} s", waited.as_secs_f64(), n as f64 / waited.as_secs_f64(), seconds - waited.as_secs_f64()),
+            },
+            match self.disked {
+                (_, 0) => String::new(),
+                (waited, n) => format!("; for {:.1} s of it up to {n} of its threads waited on the disk, {}", waited.as_secs_f64(), if self.disk.1 == 0 { "none since" } else { "which ended" }),
+            },
+            match self.disk {
+                (_, 0) => String::new(),
+                (waited, n) => format!("; for the last {:.1} s of it up to {n} of its threads waited on the disk, which began after it had run nothing for {:.1} s", waited.as_secs_f64(), seconds - waited.as_secs_f64()),
+            }
+        )
     }
 }
 
@@ -1899,25 +1975,71 @@ mod tests {
     /// A wait beside an app that runs nothing while it says a load is on its way (a load the test
     /// holds) fails once that lasted the wait's budget, naming the load: a wait with a budget ends.
     /// One whose main thread works meanwhile is held to its CPU budget instead. (A Fab test's wait
-    /// sat 17 min beside a held load, its app at 0%, 11-20.)
+    /// sat 17 min beside a held load, its app at 0%, 11-20.) A pending wait names the stall that
+    /// lasted, or says how long a shorter stall lasted, counting only looks with work pending.
+    /// (The store test's startup thread spent the whole wait in a file sync on a loaded box and
+    /// the verdict read "it ran nothing" for 40.2 s, 11-24.)
     #[test]
     fn a_pending_app_that_runs_nothing_fails_within_the_budget() {
         let secs = Duration::from_secs_f64;
-        let wait = |main: f64| -> Option<(u64, String)> {
-            let (t0, cpu) = (Instant::now(), |m: f64| AppCpu { main: secs(m), own: secs(m), faults: 0, waited: Duration::ZERO, io_threads: 0 });
+        let cpu = |main: f64| AppCpu { main: secs(main), own: secs(main), faults: 0, waited: Duration::ZERO, io_threads: 0 };
+        let quiet = |_| cpu(0.0);
+        let load = || AppSettled {
+            settled: false, only_pool: false, pool: None, slots: Vec::new(),
+            pending: vec!["loads (build: 1)".into()],
+        };
+        let pending = |_| load();
+        let wait = |cpu_at: &dyn Fn(u64) -> AppCpu, settled_at: &dyn Fn(u64) -> AppSettled| -> Option<(u64, String)> {
+            let t0 = Instant::now();
             let mut budget = Budget::at(secs(30.0), secs(10.0), cpu(0.0), t0, Duration::ZERO);
             (1..=120u64).find_map(|look| {
-                let pending = || vec!["loads (build: 1)".to_string()];
-                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: false, only_pool: false, pool: None, slots: Vec::new(), pending: pending() }) };
-                let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
-                budget.judge(cpu(main * look as f64), t0 + Duration::from_secs(look), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
+                let now = t0 + Duration::from_secs(look);
+                budget.judge(cpu_at(look), now, Duration::ZERO, &mut || Ok(settled_at(look)), &mut || Ok(false))
+                    .unwrap().map(|why| (look, why))
             })
         };
-        let (look, why) = wait(0.0).expect("a load that never comes ends the wait");
+        let (look, why) = wait(&quiet, &pending).expect("a load that never comes ends the wait");
         assert_eq!(look, 30, "the wait ends after its budget, not at the idle limit: {why}");
         assert!(why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1) (budget 30 s)"), "the verdict names what was pending: {why}");
-        let (look, why) = wait(0.5).expect("a main thread at work spends the CPU budget");
+        let (look, why) = wait(&|n| cpu(0.5 * n as f64), &pending).expect("a main thread at work spends the CPU budget");
         assert!(look == 60 && why.starts_with("its main thread ran 30.0 s"), "a working app is held to its CPU budget: {look}: {why}");
+
+        let disk = |waiting: bool| AppCpu { io_threads: u32::from(waiting), ..cpu(0.0) };
+        let (look, why) = wait(&|_| disk(true), &pending).expect("a load waiting on the disk spends the budget");
+        assert_eq!(look, 30, "a disk wait ends at the same budget: {why}");
+        assert!(why.starts_with("it was waiting on the disk for 30.0 s while it said it waited on loads (build: 1) (budget 30 s): up to 1 of its threads at a time waited in the kernel uninterruptibly"), "{why}");
+        let (look, why) = wait(&|n| disk(n > 25), &pending).unwrap();
+        assert!(look == 30 && why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1)"), "{look}: {why}");
+        assert!(why.contains("for the last 5.0 s of it up to 1 of its threads waited on the disk, which began after it had run nothing for 25.0 s"), "a late disk wait explains only part of the stretch: {why}");
+
+        let (look, why) = wait(&|n| AppCpu { faults: 100 * n, ..cpu(0.0) }, &pending).unwrap();
+        assert!(look == 30 && why.starts_with("it was waiting on memory (swapping) for 30.0 s while it said it waited on loads (build: 1) (budget 30 s): 3000 major page faults, 100 a second"), "{look}: {why}");
+        let queued_load = |taken| {
+            let mut state = load();
+            state.pool = Some(([0, 2, 0], 0, taken));
+            state.pending.push("pool".into());
+            state
+        };
+        let (look, why) = wait(&quiet, &|_| queued_load(0)).unwrap();
+        assert!(look == 30 && why.starts_with("its pool was starved: 2 jobs queued at Visible, none granted for 29.0 s of the 30.0 s it ran nothing while it said it waited on loads (build: 1), pool"), "{look}: {why}");
+        assert!(why.contains("no slot of the process's CPU budget was held at the last look"), "{why}");
+
+        let (look, why) = wait(
+            &|n| AppCpu { faults: 100 * n.min(4), ..disk(n <= 6) },
+            &|n| queued_load(u64::from(n >= 30)),
+        ).unwrap();
+        assert!(look == 30 && why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1), pool"), "a job taken ends the starve even with jobs still queued: {look}: {why}");
+        assert!(why.contains("for 28.0 s of it its pool's jobs waited for a CPU permit, granted since"), "{why}");
+        assert!(why.contains("for 4.0 s of it it waited on memory (400 major page faults), none since"), "{why}");
+        assert!(why.contains("for 6.0 s of it up to 1 of its threads waited on the disk, none since"), "{why}");
+
+        let after_idle = |n| if n <= 5 {
+            AppSettled { settled: true, pending: Vec::new(), ..load() }
+        } else {
+            load()
+        };
+        let (look, why) = wait(&|n| disk(n <= 5), &after_idle).unwrap();
+        assert!(look == 35 && why.starts_with("it ran nothing for 30.0 s while it said it waited on loads (build: 1)") && !why.contains("disk"), "the preceding idle stretch's disk wait belongs to that stretch: {look}: {why}");
     }
 
     /// A wait whose app sits idle names a stall (a starved pool, a memory wait) only while it lasts

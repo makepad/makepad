@@ -941,7 +941,8 @@ mod tests {
         let registry = dir.join("registry");
         fs::create_dir(&registry).unwrap();
         let server = fixture_with_window();
-        server.route("owner", r#"{"queued":{"foreground":0,"main":0,"demand":0}}"#);
+        // (the owner's queue state as the JIT answers it, its pending app check too)
+        server.route("owner", r#"{"queued":{"foreground":0,"main":0,"demand":0,"check":0}}"#);
         let mut spec = fake_app_spec(dir.clone());
         spec.env.insert("MAKEPAD_REMOTE_REGISTRY".into(), registry.display().to_string());
         // (the fake spec's 5 s idle window: a shell starting on a loaded box runs a few ms in a

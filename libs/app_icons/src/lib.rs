@@ -55,6 +55,7 @@ pub static ICONS: &[BundledIcon] = &[
     icon!("score"),
     icon!("video"),
     icon!("route"),
+    icon!("robot"),
     icon!("vj"),
     icon!("fab"),
     icon!("studio"),

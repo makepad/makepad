@@ -1,22 +1,29 @@
-//! Property-panel rows on an 18 pt field / 20 pt row scale with one 11 px type size, a capped
-//! label column and a trailing slot a host can reserve for actions. Stacks join fields at 1 pt gaps.
+//! Property-panel rows with a capped label column. Narrow rows put the label and its
+//! trailing actions above a full-width field. PropStack switches its rows together and joins their fields.
 
 use crate::{
+    bare_step::BareStep,
+    label::Label,
     makepad_derive_widget::*,
     makepad_draw::*,
     tip::{TipAction, TipPlace, TipRequest},
     value_input::*,
     view::View,
     widget::*,
+    widget_async::{ScriptAsyncId, ScriptAsyncResult},
 };
 
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
-    mod.widgets.PropRow = View{
+    mod.widgets.PropRowBase = #(PropRow::register_widget(vm))
+    mod.widgets.PropRow = set_type_default() do mod.widgets.PropRowBase{
         width: Fill height: theme.prop_row_height
+        stack_line_height: theme.prop_row_height
         flow: Right align: Align{y: 0.5} spacing: 0
+        // Allow 2.9 em for a value such as "100.0" (font points × 96/72), plus both arrow zones.
+        value_min: theme.prop_font_size * (96.0 / 72.0) * 2.9 + 2.0 * theme.prop_arrow_zone
         label := Label{
             text: ""
             width: Fill{weight: 0 basis: "42%" max: theme.prop_label_width}
@@ -108,6 +115,243 @@ script_mod! {
     }
 }
 
+#[derive(Script, Widget)]
+pub struct PropRow {
+    #[source]
+    source: ScriptObjectRef,
+    #[deref]
+    #[cast]
+    view: View,
+    /// Minimum inline field width before the label moves above it, in layout points.
+    #[live(59.9)]
+    pub value_min: f64,
+    /// Height available to Fill children on each stacked line when the row itself is Fit.
+    #[live]
+    stack_line_height: f64,
+    #[rust]
+    stack_layout: Option<(u64, bool)>,
+    #[rust]
+    draw_state: DrawStateWrap<PropRowDraw>,
+    #[rust]
+    frame_children: SmallVec<[(LiveId, WidgetRef); 2]>,
+}
+
+#[derive(Clone)]
+enum PropRowDraw {
+    Wide,
+    Trail(Option<DeferredWalk>),
+    Label(Option<Walk>),
+    Value(Walk),
+}
+
+impl ScriptHook for PropRow {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        if self.frame_children.is_empty() {
+            let step = WidgetRef::new_with_inner(Box::new(BareStep::script_new(vm)));
+            self.frame_children.push((id!(body_step), step));
+        }
+    }
+}
+
+impl PropRow {
+    /// Keep the original wide layout whenever a child's width cannot be priced before drawing.
+    fn needs_stack(&self, cx: &mut Cx2d, width: f64) -> bool {
+        if !width.is_finite() || self.view.child_reserve().is_some()
+            || !matches!(self.view.layout.flow, Flow::Right { wrap: false, .. }) {
+            return false;
+        }
+        let inner = (width - self.view.layout.padding.width()).max(0.0);
+        let mut remaining = inner;
+        // A missing or hidden value needs no space. A Fill value uses the final remainder.
+        let mut value_needs_stack = Some(false);
+        let mut count = 0usize;
+        for (id, child) in &self.view.children {
+            if !child.visible() { continue; }
+            let walk = child.walk(cx);
+            let margin = walk.margin.width();
+            let Some(size) = in_flow_width(walk) else { return false };
+            let used = match size {
+                size if *id == id!(value) && size == Size::fill() => 0.0,
+                Size::Fixed(w) => w.max(0.0),
+                Size::Fit { min: None, max: None } => {
+                    let Some(width) = intrinsic_width(cx, child, walk) else { return false };
+                    width - margin
+                }
+                Size::Fill { weight, shrink, basis, min, max }
+                    if *id == id!(label) && weight == 0.0 && shrink == 0.0 => {
+                    // The row is still unopened. A percentage basis belongs to its inner width.
+                    let basis = match basis {
+                        FitBound::Abs(w) => w,
+                        FitBound::Rel { base: Base::Parent, factor } => inner * factor,
+                        _ => return false,
+                    };
+                    basis.min(max.map_or(f64::INFINITY, |w| w - margin))
+                        .max(min.map_or(0.0, |w| w - margin)).max(0.0)
+                }
+                _ => return false,
+            };
+            if *id == id!(value) {
+                value_needs_stack = (!size.is_fill()).then_some(used < self.value_min);
+            }
+            remaining -= used + margin;
+            count += 1;
+        }
+        remaining -= count.saturating_sub(1) as f64 * self.view.layout.spacing;
+        value_needs_stack.unwrap_or(remaining.max(0.0) < self.value_min)
+    }
+
+    // Let View own the background, clip and hit area around both lines. Its draw step
+    // opens the frame for our layout. Restore its children before drawing any of them
+    // or returning a child's step to the host.
+    fn draw_frame(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        std::mem::swap(&mut self.view.children, &mut self.frame_children);
+        let flow = std::mem::replace(&mut self.view.layout.flow, Flow::Overlay);
+        let step = self.view.draw_walk(cx, scope, Walk { height: Size::fit(), ..walk });
+        self.view.layout.flow = flow;
+        std::mem::swap(&mut self.view.children, &mut self.frame_children);
+        step
+    }
+}
+
+fn in_flow_width(walk: Walk) -> Option<Size> {
+    (walk.abs_pos.is_none() && walk.min_width.is_none() && walk.max_width.is_none()
+        && walk.aspect.is_none()).then_some(walk.width)
+}
+
+// Fit slots can be ordinary views containing actions. Buttons and labels measure their
+// own text; the enclosing view adds its padding, margins and inter-child spacing.
+fn intrinsic_width(cx: &mut Cx2d, child: &WidgetRef, walk: Walk) -> Option<f64> {
+    if let Some(width) = child.measure_width(cx, None) { return Some(width); }
+    let view = child.borrow::<View>()?;
+    if view.child_reserve().is_some() { return None; }
+    let horizontal = match view.layout.flow {
+        Flow::Right { wrap: false, .. } => true,
+        Flow::Down | Flow::Overlay => false,
+        _ => return None,
+    };
+    let mut width = 0.0_f64;
+    let mut count = 0usize;
+    for (_, child) in &view.children {
+        if !child.visible() { continue; }
+        let walk = child.walk(cx);
+        let child_width = match in_flow_width(walk)? {
+            Size::Fixed(w) => w.max(0.0) + walk.margin.width(),
+            Size::Fit { min: None, max: None } => intrinsic_width(cx, child, walk)?,
+            _ => return None,
+        };
+        width = if horizontal { width + child_width } else { width.max(child_width) };
+        count += 1;
+    }
+    if horizontal { width += count.saturating_sub(1) as f64 * view.layout.spacing; }
+    Some(walk.margin.width() + view.layout.padding.width() + width)
+}
+
+impl Widget for PropRow {
+    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+        self.view.semantics(cx, node);
+    }
+
+    fn is_interactive(&self) -> bool {
+        self.view.is_interactive()
+    }
+
+    fn clips_content(&self) -> bool {
+        self.view.clips_content()
+    }
+
+    fn script_call(&mut self, vm: &mut ScriptVm, method: LiveId, args: ScriptValue) -> ScriptAsyncResult {
+        self.view.script_call(vm, method, args)
+    }
+
+    fn script_result(&mut self, vm: &mut ScriptVm, id: ScriptAsyncId, result: ScriptValue) {
+        self.view.script_result(vm, id, result);
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.draw_state.begin(cx, PropRowDraw::Wide) {
+            let stacked = match self.stack_layout.take() {
+                Some((frame, stacked)) if frame == cx.redraw_id() => stacked,
+                _ => {
+                    let width = cx.peek_walk_turtle(walk).size.x;
+                    self.needs_stack(cx, width)
+                }
+            };
+            if stacked {
+                if self.draw_frame(cx, scope, walk).is_done() {
+                    self.draw_state.end();
+                    return DrawStep::done();
+                }
+                cx.begin_turtle(Walk::fill_fit(), Layout::flow_down());
+                let label = self.view.child(id!(label));
+                let row_height = self.view.walk.height.to_fixed();
+                cx.begin_turtle(Walk::fill_fit(), Layout::flow_right().with_align_x(1.0).with_align_y(0.5));
+                if label.visible() || self.view.child(id!(trail)).visible() {
+                    cx.turtle_mut().allocate_height(row_height.unwrap_or(self.stack_line_height));
+                }
+                // Leave the label's width open until the trail has taken its own width.
+                let deferred = if label.visible() {
+                    let mut walk = Walk { width: Size::fill(), abs_pos: None, ..label.walk(cx) };
+                    if let Some(height) = row_height {
+                        walk.height = Size::Fixed(height);
+                    }
+                    cx.defer_walk_turtle(walk)
+                } else {
+                    None
+                };
+                self.draw_state.set(PropRowDraw::Trail(deferred));
+            }
+        }
+        match self.draw_state.as_ref() {
+            Some(PropRowDraw::Wide) => return self.view.draw_walk(cx, scope, walk),
+            None => return DrawStep::done(),
+            _ => {}
+        }
+        if let Some(PropRowDraw::Trail(mut deferred)) = self.draw_state.get() {
+            let trail = self.view.child(id!(trail));
+            if trail.visible() {
+                let walk = trail.walk(cx);
+                trail.draw_walk(cx, scope, walk)?;
+            }
+            self.draw_state.set(PropRowDraw::Label(deferred.as_mut().map(|label| label.resolve(cx))));
+        }
+        if let Some(PropRowDraw::Label(walk)) = self.draw_state.get() {
+            if let Some(walk) = walk {
+                let label = self.view.child(id!(label));
+                let align = label.borrow_mut::<Label>().map(|mut label| std::mem::replace(&mut label.align.x, 0.0));
+                let step = label.draw_walk(cx, scope, walk);
+                if let Some(x) = align {
+                    label.borrow_mut::<Label>().unwrap().align.x = x;
+                }
+                step?;
+            }
+            cx.end_turtle();
+            // A Fill field gets one line. A wrapping Fit field can grow the line as it draws.
+            cx.begin_turtle(Walk::fill_fit(), Layout::flow_overlay().with_align_y(0.5));
+            let value = self.view.child(id!(value));
+            if value.visible() {
+                let line_height = self.view.walk.height.to_fixed().unwrap_or(self.stack_line_height);
+                cx.turtle_mut().allocate_height(line_height);
+                let mut walk = Walk { width: Size::fill(), abs_pos: None, ..value.walk(cx) };
+                if walk.height.is_fit() && walk.min_height.is_none() {
+                    walk.min_height = Some(FitBound::Abs(line_height));
+                }
+                self.draw_state.set(PropRowDraw::Value(walk));
+            }
+        }
+        if let Some(PropRowDraw::Value(walk)) = self.draw_state.get() {
+            self.view.child(id!(value)).draw_walk(cx, scope, walk)?;
+        }
+        cx.end_turtle();
+        cx.end_turtle();
+        self.draw_state.end();
+        self.draw_frame(cx, scope, walk)
+    }
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct PropStack {
     #[source]
@@ -116,6 +360,8 @@ pub struct PropStack {
     view: View,
     #[rust]
     fields: Vec<ValueInputRef>,
+    #[rust]
+    draw_state: DrawStateWrap<()>,
 }
 
 impl Widget for PropStack {
@@ -124,12 +370,38 @@ impl Widget for PropStack {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.draw_state.begin(cx, ()) {
+            return self.view.draw_walk(cx, scope, walk);
+        }
+        // A down-flow stack gives each Fill row its inner width less that row's margins.
+        let inner = cx.peek_walk_turtle(walk).size.x - self.view.layout.padding.width();
+        let reserve = self.view.child_reserve();
+        let mut stacked = false;
         self.fields.clear();
-        for (_, row) in &self.view.children {
+        for (id, row) in &self.view.children {
             if !row.visible() { continue; }
+            if !stacked {
+                if let Some(row) = row.borrow::<PropRow>() {
+                    let walk = row.view.walk;
+                    stacked = match in_flow_width(walk) {
+                        Some(Size::Fill { min: None, max: None, .. }) => {
+                            let reserved = reserve.filter(|(child, _)| child == id)
+                                .map_or(0.0, |(_, inset)| inset.width());
+                            row.needs_stack(cx, inner - walk.margin.width() - reserved)
+                        }
+                        Some(Size::Fixed(width)) => row.needs_stack(cx, width),
+                        _ => false,
+                    };
+                }
+            }
             let field = row.value_input(cx, ids!(value.num));
             if field.borrow().is_some_and(|field| field.visible()) {
                 self.fields.push(field);
+            }
+        }
+        for (_, row) in &self.view.children {
+            if let Some(mut row) = row.borrow_mut::<PropRow>() {
+                row.stack_layout = Some((cx.redraw_id(), stacked));
             }
         }
         let count = self.fields.len();

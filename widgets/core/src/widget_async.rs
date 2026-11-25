@@ -12,7 +12,6 @@ use {
 };
 
 static SCRIPT_ASYNC_COUNTER: AtomicU64 = AtomicU64::new(1);
-pub(crate) const WIDGET_SCRIPT_INSTRUCTION_LIMIT: usize = 200_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ScriptAsyncId(u64);
@@ -317,14 +316,27 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         state.vm_root_uids.remove(&vm_id);
         state.loaders.remove(&vm_id);
         state.ui_in_progress.remove(&vm_id);
-        state.done.retain(|d| d.vm_id != vm_id);
-        state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
-        state.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
-        state
-            .pending_script_to_widget_returns
-            .retain(|(v, _), _| *v != vm_id);
-        state.thread_map.retain(|(v, _), _| *v != vm_id);
+        state.stop_notices.remove(&vm_id);
+        state.discard_calls(vm_id);
         state.isolated_vms.vms.remove(&vm_id);
+    }
+}
+
+impl CxWidgetAsync {
+    fn discard_calls(&mut self, vm_id: SplashVmId) {
+        self.done.retain(|d| d.vm_id != vm_id);
+        self.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
+        self.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
+        self.pending_script_to_widget_returns.retain(|(v, _), _| *v != vm_id);
+        self.thread_map.retain(|(v, _), _| *v != vm_id);
+    }
+}
+
+pub(crate) fn discard_stopped_work(cx: &mut Cx, vm_id: SplashVmId) {
+    cx.global::<CxWidgetAsync>().discard_calls(vm_id);
+    crate::tween_script::gc_vms(cx, &[vm_id]);
+    if let Some(vm) = splash_vm_base(cx, vm_id) {
+        crate::splash_host::gc_bridge(&[vm.heap_ref().heap_key()]);
     }
 }
 
@@ -568,7 +580,7 @@ fn run_isolate_ui_unit(vm: &mut ScriptVm, unit: &UiUnit, loader: Option<&ScriptO
 /// An isolate entry's first step when the host left its UI registration part way
 /// ([`CxSplashVmExt::step_isolate_ui`]): the rest of it, so nothing but the host's own steps sees
 /// it half done. Before a live edit's reload pass, which then finds it registered.
-fn finish_isolate_ui(vm: &mut ScriptVm) {
+pub(crate) fn finish_isolate_ui(vm: &mut ScriptVm) {
     let heap_key = vm.heap_key();
     let key = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).and_then(|ui| ui.lazy_key);
     if let Some(key) = key {
@@ -724,6 +736,8 @@ struct CxWidgetAsync {
     /// Isolates whose host stepped their UI registration part way
     /// ([`CxSplashVmExt::step_isolate_ui`]): any other entry finishes it first.
     ui_in_progress: std::collections::HashSet<SplashVmId>,
+    /// Isolates whose first stop has been published to their widget.
+    stop_notices: std::collections::HashSet<SplashVmId>,
     /// Heaps of isolates that have been reclaimed. A widget can outlive the
     /// isolate that minted it by a frame or two and still try to call back into
     /// it; this is what tells such a ref apart from an app-VM one, so it can be
@@ -787,16 +801,19 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     // app its VM and the table its isolate. Catch, restore, then let the
     // panic continue to the containment layer at the entry funnel.
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if finish {
+        if finish && !splash_poisoned(cx, vm_id) {
             cx.with_vm(finish_isolate_ui);
         }
-        if reload {
+        if reload && !splash_poisoned(cx, vm_id) {
             contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
         }
         f(cx)
     }));
 
     isolated.vm = cx.script_vm.take();
+    if isolated.vm.as_deref().is_some_and(ScriptVmBase::is_poisoned) {
+        notify_splash_stop(cx, vm_id);
+    }
     cx.script_vm = outer_vm;
     isolated.std = std::mem::replace(&mut cx.script_data.std, outer_std);
 
@@ -1210,7 +1227,7 @@ impl CxSplashVmExt for Cx {
         }
         let state = self.global::<CxWidgetAsync>();
         if let Some(vm_id) = state.heap_to_vm.get(&heap_key).copied() {
-            return Some(vm_id);
+            return (!splash_poisoned(self, vm_id)).then_some(vm_id);
         }
         // Not a live isolate's heap. Either the app VM's own — the common case,
         // since the app VM is never in `heap_to_vm` — or one that has been
@@ -1236,9 +1253,40 @@ impl CxSplashVmExt for Cx {
     }
 }
 
+/// Reads a parked isolate without selecting a script thread or running lazy registration.
+pub(crate) fn splash_vm_base(cx: &Cx, id: SplashVmId) -> Option<&ScriptVmBase> {
+    let state = cx.get_global_ref::<CxWidgetAsync>()?;
+    if id == state.current_vm_id { return cx.script_vm.as_deref(); }
+    state.isolated_vms.vms.get(&id)?.vm.as_deref()
+}
+
+// A parked isolate publishes its stop on the UI thread. Healthy boxes can
+// skip the VM table until some isolate has actually stopped.
+thread_local! { static STOP_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+
+pub(crate) fn splash_stop_generation() -> u64 {
+    STOP_GENERATION.with(|g| g.get())
+}
+
+pub(crate) fn splash_stop_notified(cx: &Cx, id: SplashVmId) -> bool {
+    cx.get_global_ref::<CxWidgetAsync>().is_some_and(|state| state.stop_notices.contains(&id))
+}
+
+fn notify_splash_stop(cx: &mut Cx, id: SplashVmId) {
+    if cx.global::<CxWidgetAsync>().stop_notices.insert(id) {
+        STOP_GENERATION.with(|g| g.set(g.get().wrapping_add(1)));
+        cx.redraw_all();
+    }
+}
+
+pub(crate) fn splash_poisoned(cx: &Cx, id: SplashVmId) -> bool {
+    id != MAIN_SPLASH_VM_ID && splash_vm_base(cx, id).is_some_and(ScriptVmBase::is_poisoned)
+}
+
 /// The isolate (if any) that owns a heap, for host-bridge response routing.
 pub(crate) fn vm_for_heap(cx: &mut Cx, heap_key: usize) -> Option<SplashVmId> {
-    cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()
+    let id = cx.global::<CxWidgetAsync>().heap_to_vm.get(&heap_key).copied()?;
+    (!splash_poisoned(cx, id)).then_some(id)
 }
 
 /// Whether `vm_id` can be entered with `with_script_vm_id` right now: the
@@ -1250,7 +1298,7 @@ pub(crate) fn splash_vm_is_live(cx: &mut Cx, vm_id: SplashVmId) -> bool {
             .global::<CxWidgetAsync>()
             .isolated_vms
             .vms
-            .contains_key(&vm_id)
+            .get(&vm_id).and_then(|iso| iso.vm.as_deref()).is_some_and(|vm| !vm.is_poisoned())
 }
 
 /// The widget a script `ui` handle names (`ui`, `ui.card`): its uid, read
@@ -1472,18 +1520,18 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         args: ScriptValue,
         from_method: LiveId,
     ) -> ScriptAsyncResult {
-        if script_fn.as_object() == ScriptObject::ZERO {
+        if self.bx.is_poisoned() || script_fn.as_object() == ScriptObject::ZERO {
             return ScriptAsyncResult::MethodNotFound;
         }
 
         let async_id = ScriptAsyncId::new();
-        let ui_handle = self.build_ui_handle_for_uid(target_uid);
-        let call_args =
-            self.make_call_args_object_with_context(source.as_object(), ui_handle, args);
-        let result = self.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
+        let result = self.with_callback_fuel(|vm| {
+            let ui_handle = vm.build_ui_handle_for_uid(target_uid);
+            let call_args = vm.make_call_args_object_with_context(source.as_object(), ui_handle, args);
             vm.call_with_args_object_with_me(script_fn.clone().into(), call_args, me)
         });
 
+        if self.bx.is_poisoned() { return ScriptAsyncResult::Return(result); }
         if self.is_paused() {
             let thread_id = self.thread_id();
             let me = HeldValue::new(self, me);
@@ -1557,7 +1605,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         script_fn: ScriptFnRef,
         args: ScriptValue,
     ) {
-        if script_fn.as_object() == ScriptObject::ZERO {
+        if self.bx.is_poisoned() || script_fn.as_object() == ScriptObject::ZERO {
             return;
         }
         let (me, args) = (HeldValue::new(self, me), HeldValue::new(self, args));
@@ -1948,6 +1996,7 @@ fn on_widget_script_thread_completed(
     thread_id: ScriptThreadId,
     result: ScriptValue,
 ) -> bool {
+    if splash_poisoned(cx, vm_id) { return false; }
     cx.global::<CxWidgetAsync>()
         .pending_script_to_widget_returns
         .remove(&(vm_id, thread_id.to_index()));
@@ -1982,16 +2031,15 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
             .pop_front();
         if let Some(req) = req {
             progressed = true;
+            if splash_poisoned(cx, req.vm_id) { continue; }
             contain_isolate_panic("widget->script dispatch", || {
                 cx.with_script_vm_id(req.vm_id, |vm| {
                     if req.script_fn.as_object() != ScriptObject::ZERO {
-                        let ui_handle = vm.build_ui_handle_for_uid(req.target_uid);
-                        let call_args = vm.make_call_args_object_with_context(
-                            req.source.as_object(),
-                            ui_handle,
-                            req.args.get(),
-                        );
-                        let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
+                        vm.with_callback_fuel(|vm| {
+                            let ui_handle = vm.build_ui_handle_for_uid(req.target_uid);
+                            let call_args = vm.make_call_args_object_with_context(
+                                req.source.as_object(), ui_handle, req.args.get(),
+                            );
                             vm.call_with_args_object_with_me(
                                 req.script_fn.clone().into(),
                                 call_args,
@@ -2010,6 +2058,7 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
             .pop_front();
         if let Some(req) = req {
             progressed = true;
+            if splash_poisoned(cx, req.vm_id) { continue; }
             contain_isolate_panic("script->widget dispatch", || {
             let ret = cx.with_script_vm_id_thread(req.vm_id, req.caller_thread, |vm| {
                 let widget_ref = vm.with_cx(|cx| cx.widget_tree().widget(req.target_uid));
@@ -2019,7 +2068,7 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                         req.method, req.target_uid, req.vm_id
                     );
                 }
-                let value = match widget_ref.script_call(vm, req.method, req.args.as_object().into()) {
+                let value = vm.host_entry(|vm| match widget_ref.script_call(vm, req.method, req.args.as_object().into()) {
                     ScriptAsyncResult::Return(value) => value,
                     ScriptAsyncResult::Pending => NIL,
                     ScriptAsyncResult::MethodNotFound => script_err_not_found!(
@@ -2028,9 +2077,10 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                         req.method,
                         req.target_uid
                     ),
-                };
-                HeldValue::new(vm, value)
+                });
+                (!vm.bx.is_poisoned()).then(|| HeldValue::new(vm, value))
             });
+            let Some(ret) = ret else { return };
             cx.global::<CxWidgetAsync>()
                 .pending_script_to_widget_returns
                 .insert(
@@ -2056,6 +2106,7 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         let done = cx.global::<CxWidgetAsync>().done.pop_front();
         if let Some(done) = done {
             progressed = true;
+            if splash_poisoned(cx, done.vm_id) { continue; }
             contain_isolate_panic("async result delivery", || {
                 cx.with_script_vm_id(done.vm_id, |vm| {
                     let widget_ref = vm.with_cx(|cx| cx.widget_tree().widget(done.target_uid));
@@ -2065,7 +2116,10 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                             done.target_uid, done.vm_id
                         );
                     }
-                    widget_ref.script_result(vm, done.id, done.result.get());
+                    vm.host_entry(|vm| {
+                        widget_ref.script_result(vm, done.id, done.result.get());
+                        NIL
+                    });
                 });
             });
             continue;
@@ -2093,7 +2147,7 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
         state.gc_rr_last = next;
         if let Some(iso) = state.isolated_vms.vms.get_mut(&SplashVmId(next)) {
             if let Some(bx) = iso.vm.as_mut() {
-                if bx.heap_ref().needs_gc() {
+                if !bx.is_poisoned() && bx.heap_ref().needs_gc() {
                     contain_isolate_panic("isolate gc", || bx.gc_if_needed());
                 }
             }
@@ -2137,6 +2191,7 @@ fn script_heap_route(cx: &mut Cx, heap_key: usize, f: &mut dyn FnMut(&mut Script
     if state.current_vm_id != vm_id && !state.isolated_vms.vms.contains_key(&vm_id) {
         return false;
     }
+    if splash_poisoned(cx, vm_id) { return false; }
     with_script_vm_id_dyn(cx, vm_id, f);
     true
 }
@@ -2155,13 +2210,18 @@ fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptVa
         .get(&heap_key)
         .copied();
     match vm_id {
+        Some(vm_id) if splash_poisoned(cx, vm_id) => {
+            cx.stop_timer(timer.timer);
+            cx.script_data.timers.timers.retain(|t| t.id != timer.id);
+            true
+        }
         Some(vm_id) => {
             // The same instruction limit as any other isolate entry, so a runaway
             // timer callback can't hang the host.
             contain_isolate_panic("timer callback", || {
                 cx.with_script_vm_id(vm_id, |vm| {
-                    vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-                        vm.call(timer.callback.as_object().into(), &[time]);
+                    vm.with_callback_fuel(|vm| {
+                        vm.call(timer.callback.as_object().into(), &[time])
                     });
                 });
             });
@@ -2290,11 +2350,11 @@ pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
     cx.script_vm = isolated.vm;
     // A UI registration the host left part way, then the first entry after a live edit, as in
     // `with_isolate_installed`.
-    if take_isolate_ui_in_progress(cx, vm_id) {
+    if take_isolate_ui_in_progress(cx, vm_id) && !splash_poisoned(cx, vm_id) {
         cx.with_vm(finish_isolate_ui);
     }
     let reloaded_at = cx.reload_generation;
-    if isolated.reloaded_at != reloaded_at && !isolated.host_reloads {
+    if isolated.reloaded_at != reloaded_at && !isolated.host_reloads && !splash_poisoned(cx, vm_id) {
         contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
     }
     IsolateEntry { vm_id, previous_vm_id, network_enabled: isolated.network_enabled, reloaded_at, host_reloads: isolated.host_reloads, outer_std: Some(outer_std), outer_vm }
@@ -2307,6 +2367,9 @@ pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
     }
     let IsolateEntry { vm_id, previous_vm_id, network_enabled, reloaded_at, host_reloads, outer_std, outer_vm } = entry;
     let isolate_vm = cx.script_vm.take();
+    if isolate_vm.as_deref().is_some_and(ScriptVmBase::is_poisoned) {
+        notify_splash_stop(cx, vm_id);
+    }
     cx.script_vm = outer_vm;
     let isolate_std = std::mem::replace(&mut cx.script_data.std, outer_std.expect("an entered isolate has an outer std"));
     cx.global::<CxWidgetAsync>().current_vm_id = previous_vm_id;
@@ -2506,6 +2569,7 @@ mod isolate_tests {
     use crate::splash::Splash;
     use crate::view::View;
     use crate::widget_tree::set_ui_root;
+    use crate::widget::*;
 
     const BODY: &str = r#"
     let items = []
@@ -2569,6 +2633,97 @@ mod isolate_tests {
             .borrow::<View>()
             .map(|v| v.children.len())
             .unwrap_or(usize::MAX)
+    }
+
+    #[derive(Script, ScriptHook, crate::makepad_derive_widget::Widget)]
+    struct EventProbe {
+        #[uid] uid: WidgetUid,
+        #[source] source: ScriptObjectRef,
+        #[walk] walk: Walk,
+        #[redraw] #[rust] area: Area,
+        #[rust] signals: usize,
+        #[rust] results: usize,
+    }
+
+    impl crate::widget::Widget for EventProbe {
+        fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+            if matches!(event, Event::Signal) { self.signals += 1; }
+        }
+        fn script_result(&mut self, _vm: &mut ScriptVm, _id: ScriptAsyncId, _value: ScriptValue) {
+            self.results += 1;
+        }
+    }
+
+    #[test]
+    fn a_stopped_splash_discards_callbacks_and_widget_delivery() {
+        use makepad_script::{Limit, Poison, ScriptVmPolicy};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(makepad_script::script! {
+                use mod.prelude.widgets.*
+                View{ box_ := Splash{} }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        set_ui_root(&mut cx, &root);
+        let guest = root.widget(&cx, &[id!(box_)]);
+        guest.set_text(&mut cx, r#"
+            label := Label{text: "before"}
+            fn later(){ ui.label.set_text("after") }
+            fn fail(){ for i in 0..1000 { i } }
+            mod.std.start_interval(60, || later())
+        "#);
+        let label = root.widget(&cx, &[id!(box_), id!(label)]);
+        assert_eq!(label.text(), "before", "the guest tree loaded before the failure");
+        let mut splash = guest.borrow_mut::<Splash>().expect("the guest box");
+        let key = splash.isolate_heap_key(&mut cx).expect("the live box owns a heap");
+        let id = vm_for_heap(&mut cx, key).expect("the heap routes to the box");
+        let probe = cx.with_script_vm_id(id, |vm| WidgetRef::new_with_inner(Box::new(EventProbe::script_new(vm))));
+        splash.view.children.push((id!(probe), probe.clone()));
+        cx.widget_tree_insert_child_deep(splash.widget_uid(), id!(probe), probe.clone());
+        splash.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert_eq!(probe.borrow::<EventProbe>().unwrap().signals, 1, "the guest child receives events while running");
+        let timer = cx.script_data.timers.timers.iter().find(|t| t.callback.heap_key() == key)
+            .expect("the guest owns its interval").clone();
+        let mut policy = ScriptVmPolicy::untrusted();
+        policy.fuel = Some(128);
+        splash.set_vm_policy(&mut cx, policy).expect("the host installed the box policy");
+
+        assert!(splash.call_script_fn(&mut cx, id!(later), &[]), "the first callback queues a ref method");
+        assert!(cx.global::<CxWidgetAsync>().script_to_widget_calls.iter().any(|req| req.vm_id == id), "the deferred widget write is pending");
+        // A completed render, retained until the pump can deliver it to its widget.
+        let result = cx.with_script_vm_id(id, |vm| HeldValue::new(vm, NIL));
+        cx.global::<CxWidgetAsync>().done.push_back(WidgetAsyncDone {
+            vm_id: id, target_uid: probe.widget_uid(), id: ScriptAsyncId::new(), result,
+        });
+
+        assert!(splash.call_script_fn(&mut cx, id!(fail), &[]), "the failing callback was entered on another thread");
+        let vm = splash_vm_base(&cx, id).unwrap();
+        assert_eq!(vm.poisoned(), Some(&Poison::Limit(Limit::Fuel)), "the second callback stopped the box on fuel");
+        let used = vm.policy().total();
+        let published = splash_stop_generation();
+        assert!(splash_stop_notified(&cx, id), "the first stop was published to its own box");
+        cx.with_script_vm_id(id, |vm| assert!(vm.bx.is_poisoned(), "the stopped VM remains inspectable"));
+        assert_eq!(splash_stop_generation(), published, "parking the same stopped VM twice must not notify every box again");
+
+        // Force a late timer and a pump before the box receives its next event or draw.
+        assert!(script_timer_dispatch_hook(&mut cx, &timer, NIL), "the late timer cannot fall through to the host VM");
+        pump_widget_async(&mut cx);
+        assert_eq!(probe.borrow::<EventProbe>().unwrap().results, 0, "no deferred result was applied to the stopped guest tree");
+        assert_eq!(label.text(), "before", "the pending ref method did not reach the old widget");
+        assert!(!splash_vm_is_live(&mut cx, id), "the tween driver cannot enter the stopped box");
+        assert!(!splash.call_script_fn(&mut cx, id!(later), &[]), "later host hooks receive no delivery");
+        splash.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert_eq!(probe.borrow::<EventProbe>().unwrap().signals, 1, "the poisoned child received no more events");
+        let stopped = splash.view.children[0].1.clone();
+        assert!(stopped.text().contains("instruction fuel"), "the host stop view shows the reason");
+        splash.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert_eq!(splash.view.children[0].1.widget_uid(), stopped.widget_uid(), "the stop view is installed once");
+        assert!(!cx.script_data.timers.timers.iter().any(|t| t.id == timer.id), "the interval was removed");
+        assert_eq!(splash_vm_base(&cx, id).unwrap().policy().total(), used, "events, timers and the pump spent no more guest fuel or bytes");
+        splash.set_text(&mut cx, "");
+        assert!(!splash_stop_notified(&cx, id), "retiring the isolate removes its stop notification");
     }
 
     #[test]

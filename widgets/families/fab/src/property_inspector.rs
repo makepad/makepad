@@ -984,7 +984,7 @@ impl Widget for PropertyInspector {
                             FabValueInputAction::None => match action.cast::<ValueInputAction>() {
                                 ValueInputAction::Changed(v) => Some((number_text(v), false)),
                                 ValueInputAction::Ended(v) => Some((number_text(v), true)),
-                                ValueInputAction::None => None,
+                                ValueInputAction::Formula { .. } | ValueInputAction::None => None,
                             },
                         },
                         PropKind::Text => match action.cast::<TextInputAction>() {

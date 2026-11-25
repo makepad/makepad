@@ -2,16 +2,23 @@
 //! Shift refines, Ctrl snaps, modifiers and limits re-anchor; Escape restores.
 //! Changed follows live edits; Ended marks each completed gesture. Track mode
 //! retains absolute pointer mapping. Tab opens the next field in draw order.
-//! Refused values can pulse a red outline inside the field without changing layout.
+//! Typed arithmetic previews in the display unit. A linked value opens on its
+//! formula, and a rejected edit shows its reason without moving the row.
 
 use crate::{
     badge::advance, focus_order, makepad_derive_widget::*, makepad_draw::{event::TouchState, *},
-    text_input::*, widget::*,
+    makepad_draw::text::selection::{Cursor, Selection},
+    makepad_script::syntax::quantity::{evaluate, NamedValue, Reading, ReckonError, Reckoned},
+    overlay_place::{place_overlay, PlaceRequest, Placement},
+    text_input::*, tip::{TipAction, TipRequest}, widget::*,
 };
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum ValueInputAction {
     Changed(f64),
+    /// A typed expression read a name. A host that keeps links stores this Splash expression.
+    Formula { value: f64, script: String },
     Ended(f64),
     #[default]
     None,
@@ -47,6 +54,9 @@ script_mod! {
     set_type_default() do #(DrawValueInputArrows::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
+    set_type_default() do #(DrawValueInputLink::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
     mod.widgets.ValueInputBase = #(ValueInput::register_widget(vm))
     mod.widgets.ValueInput = set_type_default() do mod.widgets.ValueInputBase{
         width: 76
@@ -54,6 +64,7 @@ script_mod! {
         arrow_zone: theme.prop_arrow_zone
         pad: theme.prop_pad
         arrow_color: theme.prop_ink_dim
+        chip_error_color: theme.color_error
         draw_bg +: {
             color: uniform(theme.prop_field)
             color_hover: uniform(theme.prop_field_hover)
@@ -94,7 +105,7 @@ script_mod! {
                     sdf.stroke_keep(self.color_focus, hairline * 0.5)
                 }
                 if self.invalid > 0.0 {
-                    sdf.stroke(vec4(self.color_invalid.rgb, self.color_invalid.a * self.invalid), 1.5)
+                    sdf.stroke(vec4(self.color_invalid.rgb, self.color_invalid.a * self.invalid), 1.5 + self.invalid_pulse)
                 }
                 return sdf.result
             }
@@ -126,6 +137,30 @@ script_mod! {
             }
         }
         draw_text +: {
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
+        }
+        draw_link +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, self.draw_pass.dpi_factor)
+                let w = self.rect_size.x
+                sdf.rotate(0.785398, w * 0.5, w * 0.5)
+                sdf.box(w * 0.04, w * 0.34, w * 0.55, w * 0.32, w * 0.16)
+                sdf.stroke(self.color, 0.6)
+                sdf.box(w * 0.41, w * 0.34, w * 0.55, w * 0.32, w * 0.16)
+                sdf.stroke(self.color, 0.6)
+                return sdf.result
+            }
+        }
+        draw_chip +: {
+            pixel: fn() {
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, self.draw_pass.dpi_factor)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, theme.prop_radius)
+                sdf.fill(theme.prop_field_active)
+                return sdf.result
+            }
+        }
+        draw_chip_text +: {
             color: theme.color_text
             text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
         }
@@ -191,6 +226,9 @@ script_mod! {
 const DRAG_THRESHOLD: f64 = 3.0;
 const TRACK_INSET: f64 = 1.0;
 const INVALID_SECS: f64 = 0.7;
+/// How long the reason for a refused edit stays after the box lost focus. A host that closes
+/// the box itself can show [`ValueInput::refusal`] for as long.
+pub const INVALID_LINGER_SECS: f64 = 2.0;
 
 pub fn track_span(width: f64) -> (f64, f64) {
     (TRACK_INSET, (width - TRACK_INSET).max(TRACK_INSET + 1.0))
@@ -285,6 +323,7 @@ pub struct DrawValueInput {
     #[live] round_bottom: f32,
     #[live] flat: f32,
     #[live] invalid: f32,
+    #[live] invalid_pulse: f32,
 }
 
 #[derive(Script, ScriptHook)]
@@ -294,6 +333,13 @@ pub struct DrawValueInputArrows {
     #[live] color: Vec4f,
     #[live] left: f32,
     #[live] right: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawValueInputLink {
+    #[deref] draw_super: DrawQuad,
+    #[live] color: Vec4f,
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -306,6 +352,10 @@ pub struct ValueInput {
     #[redraw] #[live] draw_bg: DrawValueInput,
     #[live] draw_text: DrawText,
     #[live] draw_arrows: DrawValueInputArrows,
+    #[live] draw_link: DrawValueInputLink,
+    #[live] draw_chip: DrawQuad,
+    #[live] draw_chip_text: DrawText,
+    #[live] chip_error_color: Vec4f,
     #[live] pub arrow_color: Vec4f,
     #[live] draw_label: DrawText,
     #[live] text_input: TextInput,
@@ -318,6 +368,8 @@ pub struct ValueInput {
     #[live] pub track: bool,
     #[live] pub show_fill: bool,
     #[live] pub wrap: bool,
+    /// The range sets drag reach. Explicit values may go beyond it.
+    #[live] pub reach_only: bool,
     #[live] pub snap: f64,
     #[live] pub read_only: bool,
     #[live] pub mixed: bool,
@@ -331,12 +383,18 @@ pub struct ValueInput {
     #[live] pad: f64,
     #[live] value: f64,
     #[rust] editing: bool,
+    #[rust] names: Option<Arc<[NamedValue]>>,
+    #[rust] links: bool,
+    #[rust] formula: Option<String>,
+    #[rust] chip_list: Option<DrawList2d>,
+    #[rust] linger: Option<String>,
     #[rust] edit_focus: bool,
     #[rust] hovered: bool,
     #[rust] hover_zone: i32,
     #[rust] drag: Option<DragState>,
     #[rust] track_press_value: f64,
     #[rust] editor_layout: Option<(f64, f64, f64, f64)>,
+    #[rust] editor_room: Option<f64>,
     #[rust] invalid_at: f64,
     #[rust] invalid_level: f32,
     #[rust] invalid_frame: NextFrame,
@@ -357,26 +415,153 @@ impl ValueInput {
     fn format(&self) -> String {
         if self.mixed { return "—".to_string(); }
         if self.value == self.placeholder_value && !self.placeholder.is_empty() { return self.placeholder.clone(); }
-        if self.format == ValueInputFormat::HoursMinutes {
-            let minute = (self.value * 60.0).round().rem_euclid(1440.0) as u32;
-            return format!("{:02}:{:02}", minute / 60, minute % 60);
-        }
-        format!("{:.*}{}", self.precision.max(0.0) as usize, self.value, self.suffix)
+        self.format_value(self.value)
     }
 
-    fn parse(&self, text: &str) -> Option<f64> {
-        let text = text.trim();
+    fn format_value(&self, value: f64) -> String {
+        if self.format == ValueInputFormat::HoursMinutes {
+            let minute = (value * 60.0).round().rem_euclid(1440.0) as u32;
+            return format!("{:02}:{:02}", minute / 60, minute % 60);
+        }
+        format!("{:.*}{}", self.precision.max(0.0) as usize, value, self.suffix)
+    }
+
+    fn typed_value(&self, value: f64) -> f64 {
+        if self.reach_only && !self.wrap { value } else { self.normalize(value) }
+    }
+
+    /// A drag or step keeps to the range. With `reach_only` the range widens to
+    /// hold a value typed beyond it, so a gesture from there never jumps.
+    fn reach(&self, value: f64, around: f64) -> f64 {
+        if self.reach_only && !self.wrap && self.max > self.min {
+            value.clamp(self.min.min(around), self.max.max(around))
+        } else { self.normalize(value) }
+    }
+
+    fn parse(&self, text: &str) -> Result<Reckoned, ReckonError> {
         if self.format == ValueInputFormat::HoursMinutes {
             if let Some((hours, minutes)) = text.split_once(':') {
-                let hours = hours.trim().parse::<u32>().ok()?;
-                let minutes = minutes.trim().parse::<u32>().ok()?;
-                return (minutes < 60).then_some(hours as f64 + minutes as f64 / 60.0);
+                if let (Ok(h), Ok(m @ 0..=59)) = (hours.trim().parse::<u32>(), minutes.trim().parse::<u32>()) {
+                    let value = h as f64 + m as f64 / 60.0;
+                    return Ok(Reckoned { value, plain: true, names: Vec::new(), script: value.to_string() });
+                }
+                return Err(ReckonError { span: 0..text.len(), message: format!("type hours and minutes like `12:30` in place of `{text}`") });
             }
         }
-        text.strip_suffix(self.suffix.trim()).unwrap_or(text).trim().parse().ok()
+        evaluate(text, &Reading::from_suffix(&self.suffix), self.names.as_deref().unwrap_or(&[]))
+    }
+
+    fn preview(&self, text: &str, clipped: impl FnOnce() -> bool) -> Option<(String, bool)> {
+        let result = match self.parse(text) {
+            Ok(result) => result,
+            Err(error) => return Some((error.message, true)),
+        };
+        let value = self.typed_value(result.value);
+        let held = !self.wrap && value != result.value;
+        if result.plain && !held { return None; }
+        let mut message = if clipped() { format!("{text} ") } else { String::new() };
+        message.push_str(&format!("= {}", self.format_value(result.value)));
+        if !result.names.is_empty() {
+            message.push_str(if self.links { ", follows " } else { ", set once: this value can't follow " });
+            message.push_str(&result.names.join(", "));
+        }
+        if held {
+            let limit = if value < result.value { "most" } else { "least" };
+            message.push_str(&format!(", held at {}, the {limit} it takes", self.format_value(value)));
+        }
+        Some((message, false))
+    }
+
+    // Semantics has an immutable Cx. Measure the current text with the font the editor drew,
+    // against its last viewport, even if the next frame has not drawn the new text yet.
+    fn editor_clips(&self, cx: &Cx, text: &str) -> bool {
+        use crate::makepad_draw::text::{fonts::Fonts, layouter::{BorrowedLayoutParams, Style}};
+        use std::{cell::RefCell, rc::Rc};
+        let (Some(room), Some(fonts)) = (self.editor_room, cx.get_global_ref::<Rc<RefCell<Fonts>>>()) else { return false };
+        let style = &self.draw_text.text_style;
+        let run = fonts.borrow_mut().get_or_layout(BorrowedLayoutParams {
+            text,
+            style: Style { font_family_id: style.font_family_id(), font_size_in_pts: style.font_size, color: None },
+            options: Default::default(),
+        });
+        run.rows.first().is_some_and(|row| (row.width_in_lpxs * self.draw_text.font_scale) as f64 > room)
+    }
+
+    fn draw_preview(&mut self, cx: &mut Cx2d, text: &str, invalid: bool) {
+        let pass = cx.current_pass_size();
+        let scale = self.draw_chip_text.font_scale as f64;
+        let max_width = (pass.x - 16.0).max(0.0);
+        if max_width == 0.0 { return; }
+        let inset = 6.0_f64.min(max_width * 0.25);
+        let pad = Inset { left: inset, right: inset, top: 3.0, bottom: 3.0 };
+        let mut line = self.draw_chip_text.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        let natural = (line.size_in_lpxs.width as f64 * scale + pad.width()).ceil();
+        let width = natural.min(max_width);
+        let room = width - pad.width();
+        if width < natural {
+            line = self.draw_chip_text.layout(cx, 0.0, 0.0, Some((room / scale) as f32), true, Align::default(), text);
+        }
+        let height = (line.size_in_lpxs.height as f64 * scale + pad.height()).ceil();
+        let anchor = self.draw_bg.area().rect(cx);
+        let placed = place_overlay(&PlaceRequest {
+            anchor, size: dvec2(width, height), bounds: rect(0.0, 0.0, pass.x, pass.y),
+            gap: 3.0, placement: Placement::BOTTOM_START, match_anchor_width: false,
+        }).rect;
+        // The panel is turtle content at the overlay root. Its shift follows the face when
+        // the enclosing layout aligns or scrolls it.
+        let list = self.chip_list.get_or_insert_with(|| DrawList2d::new(cx));
+        list.begin_popup_overlay(cx);
+        cx.begin_root_turtle(pass, Layout::flow_down());
+        self.draw_chip.begin(cx, Walk::fixed(placed.size.x, placed.size.y), Layout { padding: pad, ..Layout::flow_down() });
+        let ink = self.draw_chip_text.color;
+        if invalid { self.draw_chip_text.color = self.chip_error_color; }
+        self.draw_chip_text.draw_walk_laidout(cx, Walk::fit(), &line);
+        self.draw_chip_text.color = ink;
+        self.draw_chip.end(cx);
+        cx.end_pass_sized_turtle_with_shift(self.draw_bg.area(), placed.pos - anchor.pos);
+        list.end(cx);
+    }
+
+    fn follow_text(&self) -> Option<String> {
+        let formula = self.formula.as_deref()?;
+        Some(match self.parse(formula) {
+            Ok(result) if !result.names.is_empty() => format!("follows {} · {formula}", result.names.join(", ")),
+            _ => format!("follows {formula}"),
+        })
+    }
+
+    /// Supply the names the editor can read and whether the host keeps their links.
+    pub fn set_names(&mut self, cx: &mut Cx, names: Arc<[NamedValue]>, links: bool) {
+        if self.links == links && self.names.as_ref().is_some_and(|old| Arc::ptr_eq(old, &names)) { return; }
+        self.names = Some(names);
+        self.links = links;
+        if self.formula.is_some() { self.refresh_tip(cx); }
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Show the expression the host follows, and open that expression for typing.
+    pub fn set_formula(&mut self, cx: &mut Cx, formula: Option<&str>) {
+        if self.formula.as_deref() == formula { return; }
+        self.formula = formula.map(str::to_owned);
+        self.drag = None;
+        self.refresh_tip(cx);
+        self.draw_bg.redraw(cx);
+    }
+
+    fn refresh_tip(&self, cx: &mut Cx) {
+        if self.hovered && !self.editing {
+            let action = self.follow_text().map_or(TipAction::HoverOut, |text|
+                TipAction::HoverInWith(TipRequest::plain(text, self.draw_bg.area().rect(cx))));
+            cx.widget_action(self.uid, action);
+        }
     }
 
     pub fn value(&self) -> f64 { self.value }
+
+    /// Why the box kept its value when it last lost focus with text it could not read, until
+    /// that reason lapses or the box opens again. A host that stops drawing the box when it
+    /// closes shows this itself, or the person never learns why nothing changed.
+    pub fn refusal(&self) -> Option<&str> { self.linger.as_deref() }
     pub fn is_editing(&self) -> bool { self.editing }
     pub fn is_interacting(&self) -> bool { self.editing || self.drag.is_some() }
 
@@ -390,7 +575,7 @@ impl ValueInput {
 
     pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
         if self.is_interacting() || !value.is_finite() { return; }
-        let value = self.normalize(value);
+        let value = self.typed_value(value);
         if value != self.value {
             self.value = value;
             self.draw_bg.redraw(cx);
@@ -411,7 +596,7 @@ impl ValueInput {
     /// Hold `value` without an action or pulse, leaving a drag in progress alone.
     pub fn hold(&mut self, cx: &mut Cx, value: f64) {
         if !value.is_finite() { return; }
-        self.value = self.normalize(value);
+        self.value = self.typed_value(value);
         self.mixed = false;
         self.draw_bg.redraw(cx);
     }
@@ -425,7 +610,7 @@ impl ValueInput {
 
     fn commit(&mut self, cx: &mut Cx, uid: WidgetUid, value: f64) {
         if !value.is_finite() { return; }
-        self.value = self.normalize(value);
+        self.value = value;
         self.mixed = false;
         cx.widget_action(uid, ValueInputAction::Changed(self.value));
         self.draw_bg.redraw(cx);
@@ -436,8 +621,9 @@ impl ValueInput {
     }
 
     fn step_once(&mut self, cx: &mut Cx, direction: f64, shift: bool) {
+        if self.formula.is_some() { return; }
         let step = self.step * if shift { 0.1 } else { 1.0 };
-        self.commit(cx, self.uid, self.value + direction * step);
+        self.commit(cx, self.uid, self.reach(self.value + direction * step, self.value));
         self.ended(cx, self.uid);
     }
 
@@ -450,7 +636,7 @@ impl ValueInput {
 
     fn type_here(&mut self, cx: &mut Cx, uid: WidgetUid) {
         self.drag = None;
-        self.commit(cx, uid, self.track_press_value);
+        self.commit(cx, uid, self.typed_value(self.track_press_value));
         self.ended(cx, uid);
         self.enter_edit(cx);
     }
@@ -461,10 +647,18 @@ impl ValueInput {
 
     fn enter_edit(&mut self, cx: &mut Cx) {
         self.drag = None;
+        if self.hovered && self.formula.is_some() {
+            cx.widget_action(self.uid, TipAction::HoverOut);
+            self.hovered = false;
+        }
+        self.linger = None;
+        self.invalid_frame = NextFrame::default();
+        self.invalid_level = 0.0;
         self.editing = true;
         self.edit_focus = true;
         self.editor_layout = None;
-        let text = if self.format == ValueInputFormat::HoursMinutes { self.format() }
+        let text = if let Some(formula) = &self.formula { formula.clone() }
+            else if self.format == ValueInputFormat::HoursMinutes { self.format() }
             else { self.value.to_string() };
         self.text_input.set_text(cx, &text);
         self.text_input.take_key_focus_from_user(cx);
@@ -475,23 +669,48 @@ impl ValueInput {
     fn exit_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
         self.edit_focus = false;
+        self.invalid_level = 0.0;
+        self.invalid_frame = NextFrame::default();
         self.draw_bg.redraw(cx);
     }
 
-    fn commit_edit(&mut self, cx: &mut Cx) {
-        if let Some(value) = self.parse(&self.text_input.text()) {
-            if value.is_finite() {
-                self.commit(cx, self.uid, value);
+    fn reject_edit(&mut self, cx: &mut Cx, error: ReckonError, lost_focus: bool) {
+        if lost_focus {
+            self.exit_edit(cx);
+            self.linger = Some(error.message);
+        } else {
+            self.text_input.set_selection(cx, Selection {
+                anchor: Cursor { index: error.span.start, ..Default::default() },
+                cursor: Cursor { index: error.span.end, ..Default::default() },
+            });
+            // The window may already have requested the next Tab stop.
+            cx.set_key_focus_from_user(self.text_input.area());
+        }
+        self.pulse_invalid(cx);
+    }
+
+    fn commit_edit(&mut self, cx: &mut Cx, lost_focus: bool) -> bool {
+        match self.parse(&self.text_input.text()) {
+            Ok(result) => {
+                self.commit(cx, self.uid, self.typed_value(result.value));
+                if !result.names.is_empty() {
+                    cx.widget_action(self.uid, ValueInputAction::Formula { value: self.value, script: result.script });
+                }
                 self.ended(cx, self.uid);
+                self.exit_edit(cx);
+                true
+            }
+            Err(error) => {
+                self.reject_edit(cx, error, lost_focus);
+                false
             }
         }
-        self.exit_edit(cx);
     }
 
     fn cancel_drag(&mut self, cx: &mut Cx) {
         if let Some(drag) = self.drag.take() {
             if drag.engaged {
-                self.commit(cx, self.uid, drag.press_value);
+                self.commit(cx, self.uid, self.typed_value(drag.press_value));
                 self.ended(cx, self.uid);
             }
             self.draw_bg.redraw(cx);
@@ -506,12 +725,20 @@ impl ValueInput {
     fn hover(&mut self, cx: &mut Cx, abs: Vec2d) {
         let rect = self.draw_bg.area().rect(cx);
         let zone = self.zone(abs.x - rect.pos.x, rect.size.x);
+        let entering = !self.hovered;
         if !self.hovered || self.hover_zone != zone {
             self.hovered = true;
             self.hover_zone = zone;
             self.draw_bg.redraw(cx);
         }
-        cx.set_cursor(MouseCursor::Hand);
+        if entering && self.formula.is_some() { self.refresh_tip(cx); }
+        if !self.read_only { cx.set_cursor(MouseCursor::Hand); }
+    }
+
+    fn hover_out(&mut self, cx: &mut Cx) {
+        if self.formula.is_some() { cx.widget_action(self.uid, TipAction::HoverOut); }
+        self.hovered = false;
+        self.draw_bg.redraw(cx);
     }
 
     fn sync_read_only(&mut self, cx: &mut Cx) {
@@ -519,7 +746,7 @@ impl ValueInput {
             if self.key_focus(cx) { cx.set_key_focus(Area::Empty); }
             self.cancel_drag(cx);
             if self.editing { self.exit_edit(cx); }
-            self.hovered = false;
+            if self.formula.is_none() { self.hovered = false; }
         }
     }
 
@@ -550,9 +777,13 @@ impl Widget for ValueInput {
         use a11y_tree::{ActionArg, ActionResult, Actions};
         if self.read_only || self.disabled(cx) { return ActionResult::Disabled; }
         let value = match (request.action, &request.arg) {
-            (Actions::SET_VALUE, ActionArg::Number(value)) => *value,
-            (Actions::INCREMENT, _) => self.value + self.step,
-            (Actions::DECREMENT, _) => self.value - self.step,
+            (Actions::SET_VALUE, ActionArg::Number(value)) => {
+                if !value.is_finite() { return ActionResult::Unsupported; }
+                self.typed_value(*value)
+            }
+            (Actions::INCREMENT | Actions::DECREMENT, _) if self.formula.is_some() => return ActionResult::Disabled,
+            (Actions::INCREMENT, _) => self.reach(self.value + self.step, self.value),
+            (Actions::DECREMENT, _) => self.reach(self.value - self.step, self.value),
             _ => return ActionResult::Unhandled,
         };
         if !value.is_finite() { return ActionResult::Unsupported; }
@@ -565,15 +796,30 @@ impl Widget for ValueInput {
         node.role = a11y_tree::Role::SpinButton;
         makepad_platform::a11y::set_string(&mut node.name, &self.label);
         node.value = self.format();
+        if self.editing {
+            let text = self.text_input.text();
+            node.description = self.preview(&text, || self.editor_clips(cx, &text))
+                .map(|(message, _)| message).or_else(|| self.follow_text()).unwrap_or_default();
+        } else if let Some(message) = &self.linger {
+            node.description.clone_from(message);
+        } else if let Some(follows) = self.follow_text() {
+            node.description = follows;
+        }
         node.states = a11y_tree::States::FOCUSABLE;
         node.states.set(a11y_tree::States::DISABLED, self.disabled(cx));
         node.states.set(a11y_tree::States::READ_ONLY, self.read_only);
         if !self.read_only {
-            node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE
-                | a11y_tree::Actions::INCREMENT | a11y_tree::Actions::DECREMENT;
+            node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE;
+            if self.formula.is_none() {
+                node.actions = node.actions | a11y_tree::Actions::INCREMENT | a11y_tree::Actions::DECREMENT;
+            }
         }
-        node.range = Some(a11y_tree::RangeValue { min: self.min, max: self.max,
-            now: self.value, step: self.step });
+        let (min, max) = if self.reach_only && !self.wrap {
+            (self.min.min(self.value), self.max.max(self.value))
+        } else {
+            (self.min, self.max)
+        };
+        node.range = Some(a11y_tree::RangeValue { min, max, now: self.value, step: self.step });
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -594,26 +840,47 @@ impl Widget for ValueInput {
         self.draw_bg.hover = (self.hovered && !self.read_only) as u8 as f32;
         self.draw_bg.drag = self.drag.is_some_and(|drag| drag.engaged) as u8 as f32;
         self.draw_bg.focus = self.editing as u8 as f32;
-        self.draw_bg.invalid = self.invalid_level;
         self.draw_bg.marked = self.marked as u8 as f32;
         (self.draw_bg.round_top, self.draw_bg.round_bottom) = match self.join {
             ValueInputJoin::None => (0.0, 0.0), ValueInputJoin::Top => (1.0, 0.0),
             ValueInputJoin::Bottom => (0.0, 1.0), ValueInputJoin::Both => (1.0, 1.0),
         };
-        self.draw_bg.draw_abs(cx, face);
         let size = self.draw_text.text_style.font_size as f64;
         // Share DrawText's cap-height centering with labels and choice faces.
         let line = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "0");
         let scale = self.draw_text.font_scale as f64;
         let shift = line.ink_center_offset_in_lpxs() as f64 * scale;
         let y = face.pos.y + (face.size.y - line.size_in_lpxs.height as f64 * scale) * 0.5 + shift;
-        let edge = if self.track { self.pad.min(face.size.x * 0.5) }
+        let linked = self.formula.is_some() && !self.editing;
+        let glyph = if linked { size.min(face.size.x).min(face.size.y) } else { 0.0 };
+        let edge = if linked { self.pad.min((face.size.x - glyph) * 0.5) }
+            else if self.track { self.pad.min(face.size.x * 0.5) }
             else { self.arrow_zone.min(face.size.x / 3.0) };
         let text = self.format();
         let width = advance(&self.draw_text, cx, &text);
         let labelled = !self.label.is_empty() && !self.mixed;
-        let left = if labelled {
-            let label_width = (face.size.x - edge * 2.0 - width - self.pad).max(0.0);
+        let row = face.size.x - edge * 2.0;
+        let glyph_gap = if linked { (row - glyph).clamp(0.0, 3.0) } else { 0.0 };
+        let label_gap = if labelled { self.pad.min((row - glyph - glyph_gap).max(0.0)) } else { 0.0 };
+        let label_width = if labelled { (row - label_gap - glyph - glyph_gap - width).max(0.0) } else { 0.0 };
+        let mut left = edge + label_width + label_gap;
+        let glyph_x = if linked && !labelled { ((face.size.x - width) * 0.5 - glyph - glyph_gap).max(left) } else { left };
+        if linked { left = glyph_x + glyph + glyph_gap; }
+        let room = (face.size.x - left - edge).max(0.0);
+        let mut edit_width = 0.0;
+        let preview = if self.editing {
+            let text = self.text_input.text();
+            edit_width = advance(&self.draw_text, cx, &text);
+            self.editor_room = Some(room);
+            self.preview(&text, || edit_width > room)
+        } else {
+            self.linger.as_ref().map(|message| (message.clone(), true))
+        };
+        let typing_error = self.editing && preview.as_ref().is_some_and(|(_, invalid)| *invalid);
+        self.draw_bg.invalid = if typing_error { 1.0 } else { self.invalid_level };
+        self.draw_bg.invalid_pulse = if typing_error { self.invalid_level } else { 0.0 };
+        self.draw_bg.draw_abs(cx, face);
+        if labelled {
             let line = self.draw_label.layout(cx, 0.0, 0.0, None, false, Align::default(), &self.label);
             let scale = self.draw_label.font_scale as f64;
             let label_y = face.pos.y + (face.size.y - line.size_in_lpxs.height as f64 * scale) * 0.5
@@ -621,15 +888,16 @@ impl Widget for ValueInput {
             cx.push_clip_rect(rect(face.pos.x + edge, face.pos.y, label_width, face.size.y));
             self.draw_label.draw_abs(cx, dvec2(face.pos.x + edge, label_y), &self.label);
             cx.pop_clip_rect();
-            edge + label_width + self.pad
-        } else { edge };
-        cx.push_clip_rect(rect(face.pos.x + left, face.pos.y,
-            (face.size.x - left - edge).max(0.0), face.size.y));
+        }
+        if linked {
+            self.draw_link.color = self.arrow_color;
+            self.draw_link.draw_abs(cx, rect(face.pos.x + glyph_x, face.pos.y + (face.size.y - glyph) * 0.5, glyph, glyph));
+        }
+        cx.push_clip_rect(rect(face.pos.x + left, face.pos.y, room, face.size.y));
         if self.editing {
             // Match the display's measured line origin, including selection/caret geometry.
             // Single-line inputs lay out at intrinsic width; padding carries the alignment.
-            let edit_width = advance(&self.draw_text, cx, &self.text_input.text());
-            let spare = (face.size.x - left - edge - edit_width).max(0.0);
+            let spare = (room - edit_width).max(0.0);
             let align = if labelled { 1.0 } else { 0.5 };
             let edit_left = left + spare * align;
             let edit_right = edge + spare * (1.0 - align);
@@ -659,19 +927,25 @@ impl Widget for ValueInput {
         } else {
             let color = self.draw_text.color;
             if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.draw_label.color; }
-            let x = if labelled { face.pos.x + face.size.x - edge - width }
+            let x = if linked { face.pos.x + left }
+                else if labelled { face.pos.x + face.size.x - edge - width }
                 else { face.pos.x + (face.size.x - width) * 0.5 };
             self.draw_text.draw_abs(cx, dvec2(x, y), &text);
             self.draw_text.color = color;
         }
         cx.pop_clip_rect();
-        if self.hovered && !self.editing && !self.read_only && !self.track {
+        if self.hovered && !self.editing && !linked && !self.read_only && !self.track {
             self.draw_arrows.color = self.arrow_color;
             self.draw_arrows.left = (self.hover_zone < 0) as u8 as f32;
             self.draw_arrows.right = (self.hover_zone > 0) as u8 as f32;
             self.draw_arrows.draw_abs(cx, face);
         }
         cx.end_turtle();
+        if let Some((text, invalid)) = preview {
+            self.draw_preview(cx, &text, invalid);
+        } else {
+            self.chip_list = None;
+        }
         if !self.read_only {
             cx.add_nav_stop(self.draw_bg.area(), NavRole::Slider, Inset::default());
             focus_order::register(cx, self.draw_bg.area(), id!(property_number));
@@ -682,18 +956,29 @@ impl Widget for ValueInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Some(ne) = self.invalid_frame.is_event(event) {
             if self.invalid_at.is_nan() { self.invalid_at = ne.time; }
-            let p = ((ne.time - self.invalid_at) / INVALID_SECS).clamp(0.0, 1.0);
+            let seconds = if self.linger.is_some() { INVALID_LINGER_SECS } else { INVALID_SECS };
+            let p = ((ne.time - self.invalid_at) / seconds).clamp(0.0, 1.0);
             self.invalid_level = ((1.0 - p) * (1.0 - p)) as f32;
             self.draw_bg.redraw(cx);
             if p < 1.0 {
                 self.invalid_frame = cx.new_next_frame();
             } else {
                 self.invalid_level = 0.0;
+                self.linger = None;
             }
         }
         if !self.visible { return; }
         self.sync_read_only(cx);
-        if self.read_only { return; }
+        if self.read_only {
+            if self.formula.is_some() && matches!(event, Event::MouseMove(_) | Event::MouseLeave(_)) {
+                match event.hits(cx, self.draw_bg.area()) {
+                    Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.hover(cx, fe.abs),
+                    Hit::FingerHoverOut(_) => self.hover_out(cx),
+                    _ => {}
+                }
+            }
+            return;
+        }
         if matches!(event, Event::KeyFocus(_)) && focus_order::take_request(cx, self.draw_bg.area()) {
             self.enter_edit(cx);
             return;
@@ -714,12 +999,17 @@ impl Widget for ValueInput {
             }
         }
         if let Event::Scroll(e) = event {
-            if self.key_focus(cx) && self.drag.is_none() && !e.handled_y.get()
+            if self.formula.is_none() && self.key_focus(cx) && self.drag.is_none() && !e.handled_y.get()
                 && e.scroll.y != 0.0 && self.draw_bg.area().clipped_rect(cx).contains(e.abs)
             {
                 if self.editing {
-                    if let Some(value) = self.parse(&self.text_input.text()) {
-                        if value.is_finite() { self.value = self.normalize(value); }
+                    match self.parse(&self.text_input.text()) {
+                        Ok(result) => self.value = self.typed_value(result.value),
+                        Err(error) => {
+                            self.reject_edit(cx, error, false);
+                            e.handled_y.set(true);
+                            return;
+                        }
                     }
                     self.exit_edit(cx);
                     cx.set_key_focus(self.draw_bg.area());
@@ -732,20 +1022,26 @@ impl Widget for ValueInput {
         if self.editing {
             if let Event::KeyDown(key) = event {
                 if self.key_focus(cx) && key.key_code == KeyCode::Tab {
-                    self.commit_edit(cx);
-                    focus_order::advance(cx, self.draw_bg.area(), id!(property_number), key.modifiers.shift);
+                    if self.commit_edit(cx, false) {
+                        focus_order::advance(cx, self.draw_bg.area(), id!(property_number), key.modifiers.shift);
+                    }
                     return;
                 }
             }
             for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     TextInputAction::Returned(_, _) => {
-                        self.commit_edit(cx); cx.set_key_focus(self.draw_bg.area());
+                        if self.commit_edit(cx, false) { cx.set_key_focus(self.draw_bg.area()); }
                     }
                     TextInputAction::Escaped => {
                         self.exit_edit(cx); cx.set_key_focus(self.draw_bg.area());
                     }
-                    TextInputAction::KeyFocusLost if self.editing => self.commit_edit(cx),
+                    TextInputAction::KeyFocusLost if self.editing => { self.commit_edit(cx, true); }
+                    TextInputAction::Changed(_) => {
+                        self.invalid_level = 0.0;
+                        self.invalid_frame = NextFrame::default();
+                        self.draw_bg.redraw(cx);
+                    }
                     _ => {}
                 }
             }
@@ -765,13 +1061,11 @@ impl Widget for ValueInput {
         }
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.hover(cx, fe.abs),
-            Hit::FingerHoverOut(_) => {
-                self.hovered = false; self.draw_bg.redraw(cx);
-            }
+            Hit::FingerHoverOut(_) => self.hover_out(cx),
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus_from_user(self.draw_bg.area());
                 if fe.tap_count >= 2 {
-                    if self.track { self.type_here(cx, self.uid); }
+                    if self.track && self.formula.is_none() { self.type_here(cx, self.uid); }
                     else { self.enter_edit(cx); }
                     return;
                 }
@@ -779,13 +1073,13 @@ impl Widget for ValueInput {
                 self.track_press_value = self.value;
                 self.drag = Some(DragState {
                     press_x: fe.abs.x, press_value: self.value, width: face.size.x,
-                    engaged: self.track, anchor: DragAnchor { x: fe.abs.x, value: self.value },
+                    engaged: self.track && self.formula.is_none(), anchor: DragAnchor { x: fe.abs.x, value: self.value },
                     last_x: fe.abs.x, shift: fe.modifiers.shift,
                     ctrl: fe.modifiers.control || fe.modifiers.logo,
                     relative_track: fe.modifiers.shift || fe.modifiers.control || fe.modifiers.logo,
                 });
-                cx.claim_finger_drag(fe.digit_id);
-                if self.track {
+                if self.formula.is_none() { cx.claim_finger_drag(fe.digit_id); }
+                if self.track && self.formula.is_none() {
                     let value = self.track_value(cx, fe.abs.x);
                     self.commit(cx, self.uid, value);
                     if let Some(drag) = &mut self.drag { drag.anchor.value = self.value; }
@@ -794,6 +1088,10 @@ impl Widget for ValueInput {
             }
             Hit::FingerMove(fe) => {
                 let Some(mut drag) = self.drag else { return };
+                if self.formula.is_some() {
+                    if fe.move_distance() >= DRAG_THRESHOLD { self.drag = None; }
+                    return;
+                }
                 cx.set_cursor(MouseCursor::EwResize);
                 let hovered = fe.is_over && fe.device.has_hovers();
                 let face = self.draw_bg.area().rect(cx);
@@ -826,10 +1124,15 @@ impl Widget for ValueInput {
                 let value = if self.track && !drag.relative_track {
                     self.track_value(cx, fe.abs.x)
                 } else {
-                    let (value, anchor) = drag_map(self.params(), drag.anchor, fe.abs.x,
+                    let mut params = self.params();
+                    if self.reach_only && !self.wrap && params.max > params.min {
+                        params.min = params.min.min(drag.press_value);
+                        params.max = params.max.max(drag.press_value);
+                    }
+                    let (value, anchor) = drag_map(params, drag.anchor, fe.abs.x,
                         drag.width, drag.shift, drag.ctrl);
                     drag.anchor = anchor;
-                    value
+                    self.reach(value, drag.press_value)
                 };
                 drag.last_x = fe.abs.x;
                 self.drag = Some(drag);
@@ -838,7 +1141,10 @@ impl Widget for ValueInput {
             Hit::FingerUp(fe) => {
                 if fe.cancelled { self.cancel_drag(cx); return; }
                 let Some(drag) = self.drag.take() else { return };
-                if drag.engaged { self.ended(cx, self.uid); }
+                if self.formula.is_some() {
+                    if fe.is_over && (fe.abs - fe.abs_start).length() < DRAG_THRESHOLD { self.enter_edit(cx); }
+                }
+                else if drag.engaged { self.ended(cx, self.uid); }
                 else if fe.is_over {
                     let face = self.draw_bg.area().rect(cx);
                     let zone = self.zone(fe.abs.x - face.pos.x, face.size.x);
@@ -862,6 +1168,14 @@ impl Widget for ValueInput {
 }
 
 impl ValueInputRef {
+    pub fn set_names(&self, cx: &mut Cx, names: Arc<[NamedValue]>, links: bool) {
+        if let Some(mut inner) = self.borrow_mut() { inner.set_names(cx, names, links); }
+    }
+
+    pub fn set_formula(&self, cx: &mut Cx, formula: Option<&str>) {
+        if let Some(mut inner) = self.borrow_mut() { inner.set_formula(cx, formula); }
+    }
+
     pub fn changed(&self, actions: &Actions) -> Option<f64> {
         actions.filter_widget_actions_cast::<ValueInputAction>(self.widget_uid())
             .filter_map(|action| match action { ValueInputAction::Changed(value) => Some(value), _ => None }).last()
@@ -909,11 +1223,12 @@ mod track {
     struct Target {
         pass: DrawPass,
         draw_list: DrawList2d,
+        overlay: Overlay,
     }
 
     impl Target {
         fn new(cx: &mut Cx) -> Self {
-            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay: Overlay { draw_list: DrawList::new(cx) } }
         }
 
         fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
@@ -923,9 +1238,11 @@ mod track {
             let mut cx2d = Cx2d::new(&mut draw);
             cx2d.begin_pass(&self.pass, None);
             self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
             cx2d.begin_root_turtle(SIZE, Layout::flow_down());
             root.draw_all(&mut cx2d, &mut Scope::empty());
             cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
             self.draw_list.end(&mut cx2d);
             cx2d.end_pass(&self.pass);
         }
@@ -1226,7 +1543,9 @@ mod track {
     /// commits it. On a track the way to the editor is the keyboard's own
     /// Return, or a second press on the heels of the first.
     #[test]
-    fn typing_an_exact_number_still_commits_on_a_track() {
+    fn typing_numbers_expressions_and_links_on_a_track() {
+        use crate::makepad_script::syntax::quantity::Measure;
+        use ValueInputAction::{Changed, Ended, Formula};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (root, band, _scrub) = start(&mut cx);
         cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
@@ -1252,15 +1571,99 @@ mod track {
         // keyboard: a widget that has never been drawn has no area to take it
         // with.
         let mut target = Target::new(&mut cx);
+        let wide = "1234567890 - 1234567890 + 1234567890 - 1234567890 + 64";
+        band.borrow_mut::<ValueInput>().unwrap().text_input.set_text(&mut cx, wide);
         target.draw(&mut cx, &root);
         settle_focus(&mut cx);
         let editor = band.borrow::<ValueInput>().unwrap().text_input.area();
         assert!(cx.has_key_focus(editor), "the editor opened without the keyboard");
+        assert!(!band.borrow::<ValueInput>().unwrap().draw_chip.area().is_empty(), "the expression draws a floating preview");
+        let mut node = a11y_tree::Node::default();
+        band.borrow::<ValueInput>().unwrap().semantics(&cx, &mut node);
+        assert_eq!(node.description, format!("{wide} = 64"), "the chip and its description include a clipped expression");
         band.borrow_mut::<ValueInput>().unwrap().text_input.set_text(&mut cx, "200");
         let actions = send(&mut cx, &root, &key(KeyCode::ReturnKey));
         assert_eq!(changed(&actions, &band), Some(200.0), "the typed number never committed");
         assert_eq!(ended(&actions, &band), Some(200.0), "and a commit is the end of a gesture");
         assert!(!band.borrow::<ValueInput>().unwrap().editing, "the editor stayed open");
+
+        // Reuse the drawn editor so every keystroke below arrives before another frame.
+        let field = root.value_input(&cx, ids!(band));
+        {
+            let mut input = field.borrow_mut().unwrap();
+            input.suffix = " mm".into();
+            input.precision = 1.0;
+            input.max = 1000.0;
+        }
+        let type_text = |cx: &mut Cx, text: &str| {
+            field.begin_edit(cx);
+            settle_focus(cx);
+            send(cx, &root, &Event::TextInput(TextInputEvent { input: text.into(), ..Default::default() }));
+        };
+        let description = |cx: &Cx| {
+            let mut node = a11y_tree::Node::default();
+            field.borrow().unwrap().semantics(cx, &mut node);
+            node.description
+        };
+        let press_key = |cx: &mut Cx, code| {
+            send(cx, &root, &key(code)).filter_widget_actions_cast::<ValueInputAction>(field.widget_uid()).collect::<Vec<_>>()
+        };
+        type_text(&mut cx, "3mm + 0.5cm");
+        assert_eq!(description(&cx), "= 8.0 mm", "the unit sum is readable before Return");
+        assert_eq!(press_key(&mut cx, KeyCode::ReturnKey), [Changed(8.0), Ended(8.0)], "a constant commits without a formula");
+        assert!(!field.is_editing(), "a successful unit sum closes the editor");
+
+        let names: Arc<[NamedValue]> = Arc::from([NamedValue {
+            name: "wall".into(), label: "Wall".into(), value: 0.002, measure: Measure::Length,
+        }]);
+        field.set_names(&mut cx, names.clone(), false);
+        type_text(&mut cx, "wall * 2");
+        assert!(description(&cx).contains("set once: this value can't follow wall"), "a host that takes a number explains it");
+        field.set_names(&mut cx, names, true);
+        assert!(description(&cx).contains("follows wall"), "a linking host previews the parameter it will follow");
+        assert_eq!(press_key(&mut cx, KeyCode::ReturnKey),
+            [Changed(4.0), Formula { value: 4.0, script: "wall * 2".into() }, Ended(4.0)],
+            "the standard-unit formula arrives between the change and the end");
+
+        type_text(&mut cx, "wal * 2");
+        for key in [KeyCode::ReturnKey, KeyCode::Tab] {
+            assert!(press_key(&mut cx, key).is_empty(), "an invalid submission publishes no value");
+            assert!(field.is_editing(), "an invalid submission keeps the editor open");
+            assert!(description(&cx).contains("did you mean `wall`"), "the error names the suggested parameter");
+            assert_eq!(field.borrow().unwrap().text_input.selected_text(), "wal", "the editor selects the name at fault");
+        }
+        assert!(press_key(&mut cx, KeyCode::Escape).is_empty(), "Escape cancels without an action");
+        assert!(!field.is_editing(), "Escape closes the invalid editor");
+
+        type_text(&mut cx, "1 / 0");
+        cx.set_key_focus(Area::Empty);
+        settle_focus(&mut cx);
+        let lost = send(&mut cx, &root, &Event::KeyFocus(KeyFocusEvent { prev: editor, focus: Area::Empty }));
+        assert!(lost.filter_widget_actions_cast::<ValueInputAction>(field.widget_uid()).next().is_none(),
+            "losing focus with an error publishes no value");
+        assert!(!field.is_editing() && field.value() == 4.0, "focus loss restores the committed face");
+        assert!(description(&cx).contains("divides by zero"), "the reason for refusal lingers after focus loss");
+        assert!(field.borrow().unwrap().refusal().is_some_and(|why| why.contains("divides by zero")),
+            "a host that closes the box can read the reason");
+
+        type_text(&mut cx, "2000");
+        assert!(description(&cx).contains("held at 1000.0 mm"), "a hard maximum is explained even for a plain literal");
+        assert_eq!(press_key(&mut cx, KeyCode::ReturnKey), [Changed(1000.0), Ended(1000.0)], "the hard maximum is committed");
+        field.borrow_mut().unwrap().reach_only = true;
+        type_text(&mut cx, "2000");
+        assert!(!description(&cx).contains("held at"), "drag reach places no limit on typing");
+        assert_eq!(press_key(&mut cx, KeyCode::ReturnKey), [Changed(2000.0), Ended(2000.0)], "typing may exceed drag reach");
+        settle_focus(&mut cx);
+        assert_eq!(press_key(&mut cx, KeyCode::ArrowDown), [Changed(1999.0), Ended(1999.0)],
+            "a step from beyond the reach moves one step, never back to the reach's end");
+
+        settle_focus(&mut cx);
+        field.set_formula(&mut cx, Some("wall * 2"));
+        assert_eq!(description(&cx), "follows wall · wall * 2", "a linked value describes its source at rest");
+        assert!(press_key(&mut cx, KeyCode::ArrowUp).is_empty(), "an arrow step preserves a live link");
+        press_key(&mut cx, KeyCode::ReturnKey);
+        assert!(field.is_editing(), "Return opens the linked field");
+        assert_eq!(field.borrow().unwrap().text_input.text(), "wall * 2", "a linked editor opens on its formula");
     }
 
     /// The second press of a double means "type here", and it puts the field

@@ -170,7 +170,7 @@ use crate::{
     widget::{WidgetRef, WidgetUid, WidgetWeakRef},
     widget_async::{
         contain_isolate_panic, current_splash_vm_id, splash_vm_is_live, ui_handle_uid,
-        CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID, WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+        CxSplashVmExt, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_tree::CxWidgetExt,
 };
@@ -778,8 +778,8 @@ fn call_closure(cx: &mut Cx, vm_id: SplashVmId, f: &ScriptFnRef) {
             if key != 0 && vm.heap_key() != key {
                 return;
             }
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
-                vm.call(f.as_object().into(), &[]);
+            vm.with_callback_fuel(|vm| {
+                vm.call(f.as_object().into(), &[])
             });
             for err in vm.take_errors() {
                 error!("tween callback error: {err}");
