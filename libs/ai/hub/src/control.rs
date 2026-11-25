@@ -282,8 +282,10 @@ pub fn process_gpu_mb() -> Option<u64> {
     let value = makepad_ai_common::backend::device_memory()
         .ok()
         .map(|(current, _)| current / (1 << 20));
+    // nvidia-smi only while the GPU facts' probe finds it there and working (never on a Mac): a
+    // Mac's hub ran it twice a second for days, each try a refused exec per PATH dir (11-24)
     #[cfg(not(all(target_os = "macos", feature = "ai-common")))]
-    let value = {
+    let value = crate::gpu::nvidia_smi_usable().then(|| {
         let pid = std::process::id().to_string();
         crate::child_process::output(
             std::process::Command::new("nvidia-smi")
@@ -297,7 +299,7 @@ pub fn process_gpu_mb() -> Option<u64> {
                     (p.trim() == pid).then(|| mb.trim().parse::<u64>().ok()).flatten()
                 })
             })
-    };
+    }).flatten();
     *guard = Some((Instant::now(), value));
     value
 }

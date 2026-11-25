@@ -63,6 +63,14 @@ pub fn start_listener() -> Discovery {
     }
 }
 
+/// How long ago the beacons stop counting as heard; nothing is heard here.
+pub const BEACON_EXPIRY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// No listener runs here.
+pub fn listener_age() -> Option<std::time::Duration> {
+    None
+}
+
 /// Nothing listens here: nothing to stop.
 pub fn stop_listener() {
     crate::fleet_report::stop_probe_workers();

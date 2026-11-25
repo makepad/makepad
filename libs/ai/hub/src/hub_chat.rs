@@ -507,7 +507,8 @@ fn fleet_provider(
 
 /// The hubs a chat may reach, ranked (this machine, pinned, the LAN).
 fn chat_bases(discovery: &crate::discovery::Discovery) -> Vec<String> {
-    let mut bases = fleet_chat_bases(&discovery.nodes());
+    let heard = fleet_chat_bases(&discovery.nodes());
+    let mut bases = heard.clone();
     // A serving node on this machine does not need to announce over
     // LAN discovery. Entries may be stale; probing, not mere presence,
     // decides whether they are usable.
@@ -515,8 +516,8 @@ fn chat_bases(discovery: &crate::discovery::Discovery) -> Vec<String> {
         |(_, entry)| (entry.port != 0).then(|| format!("http://127.0.0.1:{}", entry.port)),
     ));
     // A pinned hub (MAKEPAD_AI_HUB, the client's `pinned` file) is
-    // reached without its LAN beacon.
-    bases.extend(crate::hub_order::pinned_bases());
+    // reached without its LAN beacon; a pin without a port takes its beacon's.
+    bases.extend(crate::hub_order::pinned_bases_beside(&heard));
     crate::hub_order::order(&mut bases);
     dedup_in_order(bases)
 }

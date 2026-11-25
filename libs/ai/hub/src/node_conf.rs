@@ -34,7 +34,9 @@
 //! (`makepad-cargo build --features <features> aihub`, same CUDA environment), so the start
 //! compiles nothing. `enabled = off` also records the app's Quit: the tray menu's Quit writes
 //! it, and the WM starts the app again only when the person starts it from the launcher
-//! (which writes `enabled = on`).
+//! (which writes `enabled = on`). A Mac's hub, whose LaunchAgent owns it
+//! (tools/devhub/install-node-mac.sh `--ai-hub`), holds the Quit the same way: its start ends
+//! while the file says off, and launchd starts it again once `enabled = on` is written there.
 
 use crate::activity::ComputeMode;
 use std::path::{Path, PathBuf};

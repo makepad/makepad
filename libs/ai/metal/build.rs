@@ -90,6 +90,15 @@ fn build_metallib() {
     println!("cargo:rustc-env=MAKEPAD_METAL_SHADER_DIR={metal_dir}");
     println!("cargo:rustc-env=MAKEPAD_GGML_METAL_SHADER_DIR={metal_dir}");
 
+    // Only an explicit request (the env var) makes a failed precompile a cargo warning;
+    // with just the cargo feature the runtime source compile is an expected fallback.
+    let precompile_explicit = env::var("MAKEPAD_GGML_METAL_PRECOMPILE")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(false);
     let precompile_default = env::var_os("CARGO_FEATURE_METAL_PRECOMPILE").is_some();
     let precompile_enabled = env::var("MAKEPAD_GGML_METAL_PRECOMPILE")
         .ok()
@@ -135,9 +144,7 @@ fn build_metallib() {
 
     let ok = metal_status.as_ref().is_ok_and(|s| s.success());
     if !ok {
-        println!(
-            "cargo:warning=failed to compile ggml-metal.metal to AIR; runtime source compile will be used"
-        );
+        report_fallback(precompile_explicit, "failed to compile ggml-metal.metal to AIR");
         let _ = fs::write(&metallib_path, []);
         emit_metallib_env(&metallib_path);
         return;
@@ -149,9 +156,7 @@ fn build_metallib() {
 
     let ok = metallib_status.as_ref().is_ok_and(|s| s.success());
     if !ok {
-        println!(
-            "cargo:warning=failed to build ggml default metallib; runtime source compile will be used"
-        );
+        report_fallback(precompile_explicit, "failed to build ggml default metallib");
         let _ = fs::write(&metallib_path, []);
     }
 
@@ -166,4 +171,12 @@ fn emit_metallib_env(metallib_path: &str) {
     // links-metadata handshake: flows to immediate dependents (libs/ggml)
     // as DEP_MAKEPAD_AI_METAL_METALLIB=<metallib_path>.
     println!("cargo:metallib={}", metallib_path);
+}
+
+fn report_fallback(explicit: bool, what: &str) {
+    if explicit {
+        println!("cargo:warning={what}; runtime source compile will be used");
+    } else {
+        eprintln!("makepad-ai-metal: {what}; runtime source compile will be used");
+    }
 }

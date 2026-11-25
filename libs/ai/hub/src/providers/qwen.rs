@@ -343,6 +343,10 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// not): an unavailable pinned model reports those nodes' reasons, and
     /// one no node offers says so in one line.
     wanted_listed: Vec<String>,
+    /// Why this process has the local network off, if it has
+    /// ([`makepad_network::lan::off_why`]): a model no hub offers then says so, since no LAN
+    /// hub was heard or reachable (a lane's live app, MAKEPAD_LAN=0, 11-24).
+    lan_off: fn() -> Option<String>,
     /// `None` leaves the field off the wire so the serving node chooses its
     /// own default. A positive value is forwarded without alteration.
     max_tokens: Option<u32>,
@@ -453,6 +457,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             bases,
             preferred_model: None,
             wanted_listed: Vec::new(),
+            lan_off: makepad_network::lan::off_why,
             // NOT a policy number: the client requests the maximum and the
             // serving lane clamps to its physics (context minus prompt).
             // Every policy cap tried here got observed cutting a real
@@ -692,14 +697,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         }
         if let Some(wanted) = &self.preferred_model {
             if self.wanted_listed.is_empty() {
-                let unreachable = notes.reasons.iter().filter(|r| r.contains("probe failed") || r.contains("recently unreachable")).count();
-                let heard = self.bases.len();
-                let hubs = if heard == 1 { "hub" } else { "hubs" };
-                return Err(if unreachable > 0 {
-                    format!("no fleet hub offers {wanted} ({heard} {hubs} heard, {unreachable} unreachable)")
-                } else {
-                    format!("no fleet hub offers {wanted} ({heard} {hubs} heard)")
-                });
+                return Err(no_offer(wanted, self.bases.len(), &notes.reasons, (self.lan_off)()));
             }
             let listed = &self.wanted_listed;
             notes.reasons.retain(|r| listed.iter().any(|base| r.starts_with(&format!("{base}:"))));
@@ -1062,6 +1060,29 @@ fn preferred_rank(id: &str) -> usize {
         .iter()
         .position(|w| *w == id)
         .unwrap_or(PREFERRED.len())
+}
+
+/// Why no hub offers `wanted`, in one line that reads as the cause: how many hubs were heard, each
+/// unreachable one with its reason (a pin's port, the local-network gate's refusal), and the local
+/// network being off for this process (`lan_off`), which leaves only this machine's hub to hear.
+fn no_offer(wanted: &str, heard: usize, reasons: &[String], lan_off: Option<String>) -> String {
+    let unreachable: Vec<String> = reasons.iter().filter(|r| r.contains("probe failed") || r.contains("recently unreachable")).map(|r| {
+        let base = r.split(": ").next().unwrap_or("");
+        match crate::hub_order::bare_pin_port(base) {
+            Some(port) => format!("{r} (a pin without a port means :{port}; the AI Hub app serves on :{})", crate::hub_order::APP_PORT),
+            None => r.clone(),
+        }
+    }).collect();
+    let hubs = if heard == 1 { "hub" } else { "hubs" };
+    let mut line = if unreachable.is_empty() {
+        format!("no fleet hub offers {wanted} ({heard} {hubs} heard)")
+    } else {
+        format!("no fleet hub offers {wanted} ({heard} {hubs} heard, {} unreachable: {})", unreachable.len(), unreachable.join("; "))
+    };
+    if let Some(off) = lan_off {
+        line.push_str(&format!("; {off}"));
+    }
+    line
 }
 
 /// One chat model a hub offers, as its `/models` lists it.
@@ -1910,9 +1931,23 @@ mod wire_transcript_tests {
         let claude = || Some(crate::claude_cli::MODEL_ID.to_string());
         let mut none = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://n2:1".into()])
             .with_preferred_model(claude());
+        none.lan_off = || None;
         assert_eq!(none.availability(), ProviderAvailability::Unavailable {
             reason: "no fleet hub offers claude-cli (2 hubs heard)".into(),
         });
+        // A process with the local network off (a lane's live app) hears only its own hub, and an
+        // unreachable hub gives its reason: the line reads as the cause, not as the hubs' (11-24)
+        let mut off = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://down:1".into()])
+            .with_preferred_model(claude());
+        off.lan_off = || Some("the local network is off for this process (a lane's test instance)".into());
+        match off.availability() {
+            ProviderAvailability::Unavailable { reason } => {
+                assert!(reason.starts_with("no fleet hub offers claude-cli (2 hubs heard, 1 unreachable: http://down:1: "), "the unreachable hub, by name: {reason}");
+                assert!(reason.contains("connect refused"), "with its reason: {reason}");
+                assert!(reason.ends_with("; the local network is off for this process (a lane's test instance)"), "and the process's local network: {reason}");
+            }
+            other => panic!("{other:?}"),
+        }
         let mut tired = FleetQwenChatProvider::new(QwenOnly, vec!["http://n1:1".into(), "http://tired:1".into()])
             .with_preferred_model(claude());
         match tired.availability() {

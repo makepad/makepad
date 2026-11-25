@@ -17,4 +17,6 @@ default = ["download"]
 download = ["dep:makepad-ai-hub"]
 
 [dependencies]
-makepad-ai-hub = { path = "../ai/hub", default-features = false, features = ["local"], optional = true }
+# The hub's featureless part: its downloader, registry entries, hashes and
+# home; not its in-process runner (`local`), which pulls the model substrate.
+makepad-ai-hub = { path = "../ai/hub", default-features = false, optional = true }

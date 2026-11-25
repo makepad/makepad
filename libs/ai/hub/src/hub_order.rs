@@ -54,6 +54,11 @@ fn is_this_machine_with(base: &str, own_ip: Option<IpAddr>) -> bool {
     own_ip.is_some_and(|ip| host.parse::<IpAddr>() == Ok(ip))
 }
 
+/// The port a fleet node's hub serves on, and what a pin without a port means.
+pub const FLEET_PORT: u16 = 8123;
+/// The port the AI Hub desktop app serves on (apps/aihub).
+pub const APP_PORT: u16 = 8124;
+
 fn pinned_entries() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     if let Ok(list) = std::env::var("MAKEPAD_AI_HUB") {
@@ -70,18 +75,45 @@ fn pinned_entries() -> Vec<String> {
 /// The pinned hubs as base URLs (`host` alone means the fleet port 8123), so a client
 /// reaches a paired hub even before (or without) its LAN beacon.
 pub fn pinned_bases() -> Vec<String> {
-    pinned_entries()
-        .into_iter()
+    pins_to_bases(&pinned_entries(), &[])
+}
+
+/// [`pinned_bases`] beside the hubs `heard` on the LAN: a pin without a port takes the port its
+/// host's beacon names, so a pinned AI Hub app (it serves on [`APP_PORT`]) is not looked for on the
+/// fleet port, where nothing answers (11-24).
+pub fn pinned_bases_beside(heard: &[String]) -> Vec<String> {
+    pins_to_bases(&pinned_entries(), heard)
+}
+
+fn has_port(pin: &str) -> bool {
+    pin.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn pins_to_bases(pins: &[String], heard: &[String]) -> Vec<String> {
+    pins.iter()
         .map(|pin| {
             if pin.starts_with("http://") || pin.starts_with("https://") {
                 pin.trim_end_matches('/').to_string()
-            } else if pin.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+            } else if has_port(pin) {
                 format!("https://{pin}")
+            } else if let Some(beacon) = heard.iter().find(|b| host_of(b) == host_of(pin)) {
+                beacon.clone()
             } else {
-                format!("https://{pin}:8123")
+                format!("https://{pin}:{FLEET_PORT}")
             }
         })
         .collect()
+}
+
+/// The fleet port, when `base` is where a pin without a port sent a client ([`pinned_bases`]):
+/// for an error that names it, since such a hub may serve on another port.
+pub fn bare_pin_port(base: &str) -> Option<u16> {
+    bare_pin_port_with(base, &pinned_entries())
+}
+
+fn bare_pin_port_with(base: &str, pins: &[String]) -> Option<u16> {
+    let bare = pins.iter().any(|p| !p.starts_with("http://") && !p.starts_with("https://") && !has_port(p) && host_of(p) == host_of(base));
+    (bare && base.trim_end_matches('/').ends_with(&format!(":{FLEET_PORT}"))).then_some(FLEET_PORT)
 }
 
 /// Does `base` match a pin (same host, and the same port when the pin names one)?
@@ -184,5 +216,13 @@ mod tests {
         let b = pinned_bases();
         std::env::remove_var("MAKEPAD_AI_HUB");
         assert_eq!(b, vec!["https://192.0.2.73:8123", "https://192.0.2.9:8123", "https://h:1"]);
+        // a pin without a port takes its host's beacon port (the AI Hub app's 8124); a pin that
+        // names its port keeps it, and an unheard host keeps the fleet port, said so if unreachable
+        let pins = ["192.0.2.9".to_string(), "192.0.2.73:8123".to_string(), "192.0.2.5".to_string()];
+        let heard = ["https://192.0.2.9:8124".to_string(), "https://192.0.2.73:8124".to_string()];
+        assert_eq!(pins_to_bases(&pins, &heard), ["https://192.0.2.9:8124", "https://192.0.2.73:8123", "https://192.0.2.5:8123"]);
+        assert_eq!(bare_pin_port_with("https://192.0.2.5:8123", &pins), Some(FLEET_PORT));
+        assert_eq!(bare_pin_port_with("https://192.0.2.73:8123", &pins), None, "a pin with its port named is no bare pin");
+        assert_eq!(bare_pin_port_with("https://192.0.2.9:8124", &pins), None);
     }
 }

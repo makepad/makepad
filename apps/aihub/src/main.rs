@@ -118,6 +118,30 @@ struct Hub {
     usage_minute: u64,
 }
 
+/// A node's LaunchAgent that runs its hub (`tools/devhub/install-node-mac.sh --ai-hub`), under
+/// `~/Library/LaunchAgents`.
+const NODE_AGENT: &str = "nl.makepad.ai-hub";
+
+/// Whether this Mac's hub is its node's LaunchAgent's ([`NODE_AGENT`]).
+fn node_agent_installed() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home).join("Library/LaunchAgents").join(format!("{NODE_AGENT}.plist")).is_file())
+}
+
+/// Started by the app's own "Open at login" item (launchd names its job in `XPC_SERVICE_NAME`).
+fn login_launch() -> bool {
+    std::env::var("XPC_SERVICE_NAME").is_ok_and(|job| job == login::LABEL)
+}
+
+/// The node settings a launch of the app hands the hub's start to: on a Mac whose hub is a
+/// LaunchAgent's, unless this is that agent's own start ([`NODE_CONF_ENV`]) or a launch that runs
+/// on its own (an agent's, a test's, a host's). None elsewhere: there the app is the hub.
+fn node_agent_conf() -> Option<PathBuf> {
+    if std::env::var_os(NODE_CONF_ENV).is_some() || makepad_widgets::makepad_platform::app_open::launch_runs_on_its_own() {
+        return None;
+    }
+    node_agent_installed().then(NodeConf::path)
+}
+
 /// What the dropdown does, for a tray selftest (`MAKEPAD_TRAY_SELFTEST`) to read.
 fn selftest_note(what: &str) {
     makepad_shell_kit::tray_app::selftest_note("aihub", what);
@@ -394,6 +418,27 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        if let Some(conf) = node_agent_conf() {
+            // On a box whose hub is its LaunchAgent's, this app serves nothing: one hub per box,
+            // the node's. Its login item leaves the hub to that agent, which starts it at login
+            // unless a Quit said off.
+            if login_launch() {
+                log!("aihub: this box's hub is its LaunchAgent's ({NODE_AGENT}): the login item leaves it to it");
+                cx.quit();
+                return;
+            }
+            // A person's launch: with that hub running, the launch went to it (the single
+            // instance). It is not running, so the person starts it its owner's way, as the WM's
+            // launcher does: `enabled = on` in the node's settings, which launchd watches.
+            let mut node = NodeConf::load_from(&conf);
+            node.enabled = true;
+            match node.save_to(&conf) {
+                Ok(()) => log!("aihub: this box's hub is its LaunchAgent's ({NODE_AGENT}): {} says on, and launchd starts it", conf.display()),
+                Err(e) => log!("aihub: this box's hub is its LaunchAgent's ({NODE_AGENT}), but {e}"),
+            }
+            cx.quit();
+            return;
+        }
         login::write_pid();
         // compute programs' GPU work runs on this Cx: the sessions the hub opens get it
         match GpuDevice::new(cx) {
@@ -462,6 +507,19 @@ impl AppMain for App {
     /// A service in the WM's tray: it keeps serving, with its models loaded, when the WM restarts
     /// and comes back on the next one.
     fn outlives_window_manager() -> bool {
+        true
+    }
+
+    /// One hub per box: a later launch of any build (a Dock entry's, while the node's LaunchAgent
+    /// runs its kept copy) opens the running hub's panel and exits, rather than serve beside it.
+    /// A second hub ran beside a node's, and the update roll read the wrong one's pid (11-24).
+    /// (Not the login item's launch on a node's box: the node's hub then needs no panel opened
+    /// at login, and that launch only ends, [`App::handle_startup`].)
+    fn single_instance() -> bool {
+        !(login_launch() && node_agent_installed())
+    }
+
+    fn single_instance_across_builds() -> bool {
         true
     }
 

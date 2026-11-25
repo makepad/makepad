@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 /// The port the Mac hub has served on (the fleet's pins and Amp's writer name it).
-pub const DEFAULT_PORT: u16 = 8124;
+pub const DEFAULT_PORT: u16 = makepad_ai_hub::hub_order::APP_PORT;
 
 /// After how long without a request a service switches itself off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

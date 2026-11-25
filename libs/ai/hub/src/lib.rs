@@ -58,8 +58,8 @@ pub mod fabric;
 pub mod fleet;
 pub mod fleet_report;
 // Which hub routes each fleet role reaches (the front itself is
-// makepad_network::fleet).
-#[cfg(not(target_arch = "wasm32"))]
+// makepad_network::fleet). Its route lists build on every target: the
+// loopback surface's caller check reads them too (server.rs `caller_of`).
 pub mod fleet_routes;
 pub mod job;
 pub mod board;

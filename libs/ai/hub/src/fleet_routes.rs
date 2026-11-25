@@ -14,7 +14,12 @@
 //!
 //! The two Claude switches (the LAN's use, PR reviews) are the person's, set in
 //! the hub's own process by the AI Hub app; no route switches either.
+//!
+//! The route lists build on every target: the hub's loopback caller check reads
+//! them for this machine's apps ([`this_machine_route_allowed`]). The policy by
+//! fleet peer is native only, as are the fronts that apply it and the peers.
 
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_network::fleet::id::{Peer, Role};
 
 /// The job API: submit, poll, fetch, cancel, discard a finished job's results; listing models and
@@ -42,6 +47,7 @@ fn blob_route(method: &str, path: &str) -> bool {
 
 /// Whether `peer` may reach `method path`. `edge` (the internet front)
 /// narrows everyone to the job API.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn route_allowed(peer: &Peer, edge: bool, method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     // the hostile-intake jail's credential: its own narrow scope, whatever its role
@@ -80,7 +86,7 @@ pub fn this_machine_route_allowed(method: &str, path: &str) -> bool {
     machine_control_route(method, path) || machine_route(method, path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::net::IpAddr;

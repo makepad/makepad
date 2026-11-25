@@ -5027,7 +5027,9 @@ mod lifecycle_tests {
             jobs: SharedJobs::new(),
             models: Mutex::new(HashMap::new()),
             artifacts: Mutex::new(HashMap::new()),
-            gpu: GpuCache::new(),
+            // A discrete card with no figures, whatever this machine has: the routes' answers
+            // must not depend on the host (a Mac reports unified memory).
+            gpu: GpuCache::fixed(crate::gpu::GpuInfo::default()),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
             lan_listening: front_secret.is_some(),
@@ -5622,17 +5624,27 @@ mod lifecycle_tests {
             .insert("flux2-dev".into(), ModelTrack::Ready);
         inner.vram_usable = residency::UsableVram::new(Some(30_000));
 
-        let model = models_json(&shared)
-            .models
-            .into_iter()
-            .find(|model| model.id == "flux2-dev")
-            .unwrap();
-        assert!(!model.available);
-        assert_eq!(model.state, MODEL_STATE_TOO_SMALL);
+        let model = |shared: &Arc<ServiceShared>| {
+            models_json(shared).models.into_iter().find(|model| model.id == "flux2-dev").unwrap()
+        };
+        // The fixture's card is discrete: a model that needs more than it can ever free is
+        // refused for good, and says why.
+        let discrete = model(&shared);
+        assert!(!discrete.available, "a discrete card too small for the model must not advertise it");
+        assert_eq!(discrete.state, MODEL_STATE_TOO_SMALL, "a discrete card too small for the model: state");
         assert_eq!(
-            model.note.as_deref(),
-            Some("needs 31744 MB, this card can free 30000")
+            discrete.note.as_deref(),
+            Some("needs 31744 MB, this card can free 30000"),
+            "a discrete card too small for the model: note"
         );
+        // Unified memory's figures are advisory (they size and evict, never refuse): the same
+        // model on the same figures stays available.
+        Arc::get_mut(&mut shared).unwrap().gpu =
+            GpuCache::fixed(crate::gpu::GpuInfo { unified: true, ..Default::default() });
+        let unified = model(&shared);
+        assert!(unified.available, "unified memory must not refuse the model: {:?}", unified.unavailable_reason);
+        assert_eq!(unified.state, MODEL_STATE_READY, "unified memory: state");
+        assert_eq!(unified.note, None, "unified memory: no too-small note");
     }
 
     /// The lease lifecycle over the wire (aicore §8): a renewed job stays,

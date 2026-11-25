@@ -44,7 +44,7 @@ pub fn fleet_from_env() -> String {
 const BEACON_INTERVAL: Duration = Duration::from_secs(2);
 /// A node whose beacon has been silent this long drops out of the
 /// discovered set (its fleet snapshot then goes down via health polling).
-const BEACON_EXPIRY: Duration = Duration::from_secs(15);
+pub const BEACON_EXPIRY: Duration = Duration::from_secs(15);
 
 /// Random-enough node id: wall-clock nanos xor pid. Uniqueness only needs
 /// to hold across a handful of LAN boxes.
@@ -366,7 +366,15 @@ static DISCOVERED: OnceLock<Discovered> = OnceLock::new();
 static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
 static BIND_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// How long the listener has been running, `None` while none is. A set that is empty
+/// while this is under [`BEACON_EXPIRY`] may only be empty because no beacon round has
+/// arrived yet.
+pub fn listener_age() -> Option<Duration> {
+    LISTENER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|l| l.started.elapsed())
+}
+
 struct Listener {
+    started: Instant,
     stop: Arc<std::sync::atomic::AtomicBool>,
     /// where one datagram wakes the listener's wait: its private loopback socket (unix), or the
     /// discovery port itself on loopback (Windows binds that port exclusively: it is this
@@ -448,7 +456,7 @@ impl Listener {
                 }
             })
             .ok()?;
-        Some(Listener { stop, wake, thread })
+        Some(Listener { started: Instant::now(), stop, wake, thread })
     }
 }
 

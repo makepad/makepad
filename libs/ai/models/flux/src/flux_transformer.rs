@@ -36,7 +36,9 @@ use std::time::Instant;
 
 const FLUX_TIMESTEP_EMBED_DIM: i32 = 256;
 const FLUX_LAYER_NORM_EPSILON: f32 = 1.0e-6;
-const DEFAULT_GRAPH_EXTRA_BYTES: usize = 4usize * 1024 * 1024 * 1024;
+/// 4 GiB of graph scratch, or the whole address space where that is smaller (wasm32).
+const DEFAULT_GRAPH_EXTRA_BYTES: usize =
+    if (usize::MAX as u64) < (4u64 << 30) { usize::MAX } else { (4u64 << 30) as usize };
 
 #[derive(Clone, Debug)]
 pub struct LoadedFluxTransformerWeights {
