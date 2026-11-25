@@ -428,6 +428,7 @@ impl WmDesk {
         self.phone_ui.focus_search(cx,phone);
     }
     pub fn phone_search_scroll_max(&self)->f64 {self.phone_ui.search_scroll_max}
+    pub fn phone_drawer_scroll_max(&self)->f64 {self.phone_ui.drawer_scroll_max}
     /// A frame from `client` landed in the given face: that face's capture
     /// re-records on the next draw. A frame that belongs to neither (a stale
     /// size while the client switches faces) is left out of both.
@@ -823,7 +824,6 @@ impl WmDesk {
             }
         }
         let phone=state.phone.clone();
-        let launchable=state.launchable.clone();
         // Each client's app id and ground, for the zoom's solid card.
         let faces:HashMap<ClientId,(String,Option<Vec4f>)>=state.clients.iter().map(|(c,s)|(*c,(s.app.clone(),s.ground))).collect();
         let style=state.style.target;
@@ -846,6 +846,8 @@ impl WmDesk {
         if phone.drawer>0.001 && style==crate::desktop::DesktopStyle::Android {
             let state=scope.data.get_mut::<WmState>().unwrap();
             self.phone_ui.draw_android_drawer_layer(cx,state,screen);
+            state.phone.drawer_scroll_max=self.phone_drawer_scroll_max();
+            state.phone.drawer_scroll=state.phone.drawer_scroll.min(state.phone.drawer_scroll_max);
             self.compositor.as_mut().unwrap().content(screen);
         }
         if phone.overview>0.001 && phone.android {
@@ -900,7 +902,8 @@ impl WmDesk {
             let mut lands=true;
             let mut zoom_from=Rect::default();
             let mut display=if foreground {
-                let (icon,has_place)=self.phone_zoom_origin(&phone,&launchable,style,screen,app,client,&app_id);
+                let launchable=&scope.data.get::<WmState>().unwrap().launchable;
+                let (icon,has_place)=self.phone_zoom_origin(&phone,launchable,style,screen,app,client,&app_id);
                 lands=has_place;
                 zoom_from=icon;
                 let springs=mobile::mix_rect(mobile::mix_rect(icon,app,phone.openness),card,phone.overview);

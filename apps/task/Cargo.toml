@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+# The platforms Task is built for (devhub ci reads this; one place): the desktop.
+# It finds running apps through makepad-remote's discovery, which is native only (unix sockets,
+# process control); not meant for a browser.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [[bin]]
 name = "makepad-app-task"
 path = "src/main.rs"

@@ -10,6 +10,12 @@ edition = "2021"
 license = "MIT"
 default-run = "makepad-app-desklink"
 
+# The platforms Desk Link is built for (devhub ci reads this; one place): the desktop.
+# Desk Link's viewer dials its hosts through makepad-remote and makepad_network's TLS, which are
+# native only; not meant for a browser.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [[bin]]
 name = "makepad-app-desklink"
 path = "src/main.rs"

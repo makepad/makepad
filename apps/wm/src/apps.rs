@@ -41,8 +41,10 @@ pub enum Hosting {
 pub struct Launchable {
     pub linked: Vec<&'static str>,
     pub processes: bool,
-    /// A phone build: only the registry's `mobile` apps are offered.
+    /// A phone build keeps the registry's mobile apps on home.
     pub mobile: bool,
+    /// Cargo packages carried in the host's source archive, when supplied.
+    pub packed: Vec<String>,
 }
 
 impl Default for Launchable {
@@ -53,18 +55,30 @@ impl Default for Launchable {
             linked: Vec::new(),
             processes: crate::host::processes_available(),
             mobile: false,
+            packed: Vec::new(),
         }
     }
 }
 
 impl Launchable {
     pub fn allows(&self, app: &AppDef) -> bool {
-        if self.mobile && !makepad_app_registry::find(&app.id).is_some_and(|entry| entry.mobile) {
+        if self.mobile && !makepad_app_registry::find(&app.id).is_some_and(|entry| {
+            entry.mobile || self.packed.iter().any(|package| package == entry.package)
+        }) {
             return false;
         }
         self.linked.contains(&app.id.as_str())
             || (self.processes && app.is_available())
     }
+
+    /// Home keeps the phone-sized apps even when the drawer can launch more.
+    pub fn on_home(&self, id: &str) -> bool {
+        !self.mobile || makepad_app_registry::find(id).is_some_and(|entry| entry.mobile)
+    }
+}
+
+fn parse_packed(text: &str) -> Vec<String> {
+    text.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
 }
 
 pub struct AppRegistry {
@@ -75,8 +89,9 @@ pub struct AppRegistry {
     /// This build links the assistant's widget families (`WmBuild::assistant`).
     assistant: bool,
     domains: bool,
-    /// The build comes up in a phone style: its lists offer the registry's mobile apps only.
+    /// The build comes up in a phone style.
     mobile: bool,
+    packed: Vec<String>,
 }
 
 impl Default for AppRegistry {
@@ -88,6 +103,7 @@ impl Default for AppRegistry {
             assistant: false,
             domains: false,
             mobile: false,
+            packed: Vec::new(),
         }
     }
 }
@@ -107,6 +123,7 @@ impl AppRegistry {
             assistant: build.assistant.is_some(),
             domains: false,
             mobile: build.style.mobile(),
+            packed: parse_packed(&std::env::var("RELAX_PACKED_APPS").unwrap_or_default()),
         };
         if let Ok(text) = std::fs::read_to_string(settings) {
             for (id, hosting) in Self::parse_overrides(&text) {
@@ -182,7 +199,7 @@ impl AppRegistry {
         let linked = if self.domains {
             makepad_app_registry::apps().iter().filter(|a| a.wm_launchable).map(|a| a.id).collect()
         } else { self.linked_ids() };
-        Launchable { linked, processes: self.processes, mobile: self.mobile }
+        Launchable { linked, processes: self.processes, mobile: self.mobile, packed: self.packed.clone() }
     }
 
     /// `~/.makepad/wm/apps.splash`: one `id: Module`, `id: Process` or `id: Jit` per
@@ -305,14 +322,15 @@ mod tests {
         let plain = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &build(false, true), true);
         assert_eq!(plain.hosting("sheets"), Hosting::Jit, "desktop default is a process under the JIT");
         assert!(!plain.pane_in_process(), "the desktop's assistant is the child process unless switched");
-        assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true, mobile: false });
+        assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true, mobile: false, packed: plain.packed.clone() });
     }
 
     #[test]
     fn a_phone_build_offers_only_the_registry_mobile_apps() {
-        let all: Vec<&'static str> = makepad_app_registry::apps().iter().filter(|a| a.wm_launchable).map(|a| a.id).collect();
-        let phone = Launchable { linked: all.clone(), processes: false, mobile: true };
-        let desk = Launchable { linked: all, processes: false, mobile: false };
+        let shared = makepad_app_registry::apps().iter().filter(|a| a.wm_launchable && !a.local);
+        let all: Vec<&'static str> = shared.clone().map(|a| a.id).collect();
+        let mut phone = Launchable { linked: all.clone(), processes: false, mobile: true, packed: Vec::new() };
+        let desk = Launchable { linked: all, processes: false, mobile: false, packed: Vec::new() };
         let offered = |l: &Launchable| -> Vec<String> {
             crate::clients::registry().iter().filter(|a| l.allows(a)).map(|a| a.id.clone()).collect()
         };
@@ -323,6 +341,24 @@ mod tests {
         for id in ["code", "task", "terminal", "files", "score"] {
             assert!(desk_ids.iter().any(|d| d == id), "the desktop still offers {id}");
         }
+        assert_eq!(parse_packed(" a, ,b,"), ["a", "b"]);
+        let mut other = shared.filter(|a| !a.mobile);
+        let visible = other.clone().filter(|a| a.menu_visible).max_by_key(|a| a.label).unwrap();
+        let hidden = other.clone().filter(|a| !a.menu_visible).min_by_key(|a| a.label).unwrap();
+        for entry in [visible, hidden] {
+            phone.packed.push(entry.package.into());
+            assert!(phone.allows(&crate::clients::find_app(entry.id).unwrap()));
+            assert!(!phone.on_home(entry.id));
+            assert!(desk.on_home(entry.id));
+        }
+        let unpacked = other.find(|a| a.id != visible.id && a.id != hidden.id).unwrap();
+        assert!(!phone.allows(&crate::clients::find_app(unpacked.id).unwrap()));
+        assert!(phone_ids.iter().all(|id| phone.on_home(id)));
+        // the drawer lists the menu's rows only: a hidden one starts by id (Files opens a viewer).
+        // Its registry rows are what the packing decides; the foreign Wayland apps a Linux box has
+        // installed (wl.*, its .desktop entries) join the launcher's list there and are left out.
+        let registry_rows: Vec<_> = crate::mobile_surface::PhoneSurface::more_apps(&phone).into_iter().filter(|(id, _)| crate::clients::find_app(id).is_some()).collect();
+        assert_eq!(registry_rows, [(visible.id.to_owned(), visible.label.to_owned())]);
     }
 
     #[test]

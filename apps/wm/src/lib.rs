@@ -607,6 +607,12 @@ pub struct App {
     /// client they came from and their paths, carried until the pointer is let go.
     #[rust]
     file_carry: Option<(ClientId, Vec<String>)>,
+    /// Carries let go while one of their promised files was still being made, oldest first:
+    /// the promise waiter's answer finishes each drop (`Self::file_drops_answered`), so the UI
+    /// thread never waits on a producer.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    file_drops: Vec<FileDrop>,
     #[rust]
     shot_thumb_screen: Rect,
     /// This node's AI hub: the AI Hub app the WM starts, and what the WM tells it.
@@ -7732,6 +7738,10 @@ impl AppMain for App {
             if self.state.is_some() {
                 self.portal_calls(cx);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.state.is_some() {
+                self.file_drops_answered(cx);
+            }
         }
 
         // An in-process assistant's calls arrive on channels, not events:
@@ -7780,11 +7790,22 @@ impl AppMain for App {
     }
 }
 
+/// A carry let go before its promised files were made: where it came from, what it carries,
+/// where it was let go, and the promise waiter's answer (made or not).
+#[cfg(not(target_arch = "wasm32"))]
+struct FileDrop {
+    from: ClientId,
+    paths: Vec<String>,
+    abs: Vec2d,
+    answered: makepad_widgets::makepad_platform::thread::ToUIOneshotReceiver<bool>,
+}
+
 impl App {
     /// Files carried out of a hosted app's window: the pointer takes them to another window,
     /// which gets them as a file drop where the pointer is let go (the drop a screenshot
-    /// thumbnail makes). Promised files are waited for first: their producer started with the
-    /// drag, so this is usually no wait at all.
+    /// thumbnail makes). Promised files are dropped once made: their producer started with the
+    /// drag, so this is usually at once; otherwise the promise waiter waits for them, never this
+    /// thread, and its answer finishes the drop.
     fn file_carry_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
         if self.file_carry.is_none() {
             return false;
@@ -7800,19 +7821,17 @@ impl App {
                 let Some((from, paths)) = self.file_carry.take() else { return false };
                 cx.set_cursor(MouseCursor::Default);
                 let items: Vec<(u32, String)> = paths.iter().map(|p| (makepad_hal::input::drag_item::FILE, p.clone())).collect();
-                if !makepad_hal::drag_promise::wait_promised(&items) {
-                    log!("wm: a dragged file could not be made; nothing dropped");
-                    return true;
-                }
-                let target = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| {
-                    if d.window_at(e.abs) == Some(from) {
-                        return None;
-                    }
-                    d.drop_files_at(cx, e.abs, paths)
-                });
-                if let Some(client) = target {
-                    log!("wm: files from client {from} dropped on client {client}");
-                    self.focus_client(cx, client);
+                if makepad_hal::drag_promise::pending(&items) || !self.file_drops.is_empty() {
+                    // (behind an earlier drop still waiting, so the drops land in order)
+                    let (answer, answered) = makepad_widgets::makepad_platform::thread::to_ui_oneshot();
+                    makepad_hal::drag_promise::when_made(items, move |made| {
+                        let _ = answer.send(made);
+                    });
+                    self.file_drops.push(FileDrop { from, paths, abs: e.abs, answered });
+                } else {
+                    // made, failed or its producer gone: no wait
+                    let made = makepad_hal::drag_promise::wait_promised(&items);
+                    self.finish_file_drop(cx, from, paths, e.abs, made);
                 }
                 true
             }
@@ -7823,4 +7842,42 @@ impl App {
             _ => false,
         }
     }
+
+    /// Finishes the waiting drops the promise waiter has answered, oldest first (on every
+    /// signal: one answer is a channel read).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn file_drops_answered(&mut self, cx: &mut Cx) {
+        use std::sync::mpsc::TryRecvError;
+        while let Some(drop) = self.file_drops.first() {
+            let made = match drop.answered.try_recv() {
+                Ok(made) => made,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    log!("wm: the promise waiter went away without an answer");
+                    false
+                }
+            };
+            let FileDrop { from, paths, abs, .. } = self.file_drops.remove(0);
+            self.finish_file_drop(cx, from, paths, abs, made);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_file_drop(&mut self, cx: &mut Cx, from: ClientId, paths: Vec<String>, abs: Vec2d, made: bool) {
+        if !made {
+            log!("wm: a dragged file could not be made; nothing dropped");
+            return;
+        }
+        let target = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| {
+            if d.window_at(abs) == Some(from) {
+                return None;
+            }
+            d.drop_files_at(cx, abs, paths)
+        });
+        if let Some(client) = target {
+            log!("wm: files from client {from} dropped on client {client}");
+            self.focus_client(cx, client);
+        }
+    }
 }
+

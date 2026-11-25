@@ -32,12 +32,49 @@ pub fn tile_apps(launchable: &crate::apps::Launchable) -> Vec<(&'static str, Til
     TILE_APPS
         .iter()
         .copied()
-        .filter(|(id, _)| crate::clients::find_app(id).is_some_and(|app| launchable.allows(&app)))
+        .filter(|(id, _)| launchable.on_home(id) && crate::clients::find_app(id).is_some_and(|app| launchable.allows(&app)))
         .collect()
 }
 
 /// Screen margin around the home content (iOS and Android both use 16pt).
 pub const HOME_MARGIN: f64 = 16.0;
+
+pub const MORE_APPS_TITLE: &str = "All apps";
+
+pub struct DrawerGrid {
+    columns: usize,
+    pitch: f64,
+    /// First app, count and top of each section in the shared drawer list.
+    sections: [(usize, usize, f64); 2],
+    pub header_y: Option<f64>,
+    pub height: f64,
+}
+
+/// The two sections start on whole rows and keep their pitch on short screens.
+pub fn drawer_grid(phone: usize, more: usize, columns: usize, pitch: f64, header: f64) -> DrawerGrid {
+    let home_height = phone.div_ceil(columns) as f64 * pitch;
+    let header_y = (more > 0).then_some(home_height);
+    let more_y = home_height + if more > 0 { header } else { 0.0 };
+    DrawerGrid {
+        columns, pitch, sections: [(0, phone, 0.0), (phone, more, more_y)], header_y,
+        height: more_y + more.div_ceil(columns) as f64 * pitch,
+    }
+}
+
+impl DrawerGrid {
+    /// Index, column and y of each cell meeting the visible slice of the grid.
+    pub fn visible_cells(&self, scroll: f64, height: f64) -> impl Iterator<Item = (usize, usize, f64)> + '_ {
+        self.sections.iter().flat_map(move |&(base, count, top)| {
+            let first_row = ((scroll - top) / self.pitch).floor().max(0.0) as usize;
+            let end_row = ((scroll + height - top) / self.pitch).ceil().max(0.0) as usize;
+            let end = if height > 0.0 { (end_row * self.columns).min(count) } else { 0 };
+            (first_row * self.columns..end).map(move |i| {
+                (base + i, i % self.columns, top + (i / self.columns) as f64 * self.pitch)
+            })
+        })
+    }
+}
+
 /// The home page's and the app cards' measures, per skin. Android takes
 /// the Material targets; iOS keeps the measures it always had.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -649,6 +686,21 @@ mod tests {
     use crate::mobile::{app_rect, phone_size, PhoneChrome};
     use crate::mobile_surface::PhoneSurface;
 
+    #[test]
+    fn drawer_sections_keep_their_pitch_and_clip_partial_rows() {
+        let grid = drawer_grid(8, 24, 4, 104.0, 40.0);
+        assert_eq!(grid.header_y, Some(208.0));
+        assert_eq!(grid.height, 8.0 * 104.0 + 40.0);
+        assert_eq!(grid.visible_cells(248.0, 1.0).next(), Some((8, 0, 248.0)));
+        assert_eq!(grid.visible_cells(207.0, 42.0).count(), 8);
+        assert_eq!(grid.visible_cells(208.0, 40.0).count(), 0);
+        let phone_only = drawer_grid(8, 0, 4, 104.0, 40.0);
+        assert_eq!(phone_only.header_y, None);
+        assert_eq!(phone_only.height, 2.0 * 104.0);
+        let partial = drawer_grid(5, 1, 4, 104.0, 40.0);
+        assert_eq!(partial.visible_cells(104.0, 200.0).collect::<Vec<_>>(), [(4, 0, 104.0), (5, 0, 248.0)]);
+    }
+
     fn screen(size: Vec2d) -> Rect {
         Rect { pos: dvec2(0.0, 26.0), size: size - dvec2(0.0, 26.0) }
     }
@@ -704,7 +756,7 @@ mod tests {
         assert_eq!(two.tiles[0].rect, all.tiles[0].rect);
         assert_eq!(two.tiles[1].rect, all.tiles[2].rect);
         // The build's tile apps follow what it can launch.
-        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false, mobile: false };
+        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false, mobile: false, packed: Vec::new() };
         assert_eq!(tile_apps(&linked), vec![("photos", TileKind::Wide)]);
     }
 
@@ -736,7 +788,7 @@ mod tests {
     #[test]
     fn android_home_keeps_its_favorites_row_on_its_side() {
         let android = crate::desktop::DesktopStyle::Android;
-        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false };
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false, packed: Vec::new() };
         let size = phone_size(android);
         let side = Rect { pos: dvec2(0.0, 32.0), size: dvec2(size.y, size.x - 32.0) };
         let layout = PhoneSurface::home_layout(android, side, PhoneChrome::Simulated, &launchable);
@@ -761,7 +813,7 @@ mod tests {
         let ios = crate::desktop::DesktopStyle::Ios;
         let m = HomeMetrics::of(ios);
         assert_eq!((m.tile_gap, m.favorites_gap, m.landscape_tile_max, m.tile_radius, m.card_radius, m.card_gap), (14.0, 20.0, None, 44.0, 52.0, 22.0));
-        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false };
+        let launchable = crate::apps::Launchable { linked: vec!["clock", "weather", "photos"], processes: false, mobile: false, packed: Vec::new() };
         let size = phone_size(ios);
         let upright = Rect { pos: dvec2(0.0, 32.0), size: size - dvec2(0.0, 32.0) };
         let layout = PhoneSurface::home_layout(ios, upright, PhoneChrome::Simulated, &launchable);

@@ -144,6 +144,23 @@ pub const AXIS_LOCK: f64 = 1.2;
 pub const VELOCITY_WINDOW: f64 = 0.08;
 pub const VELOCITY_REST: f64 = 0.12;
 
+/// At the top a downward drag belongs to the sheet. Decide once at axis lock.
+fn grid_takes_drag(scroll: f64, max: f64, dy: f64) -> bool {
+    max > 0.0 && (scroll > 0.0 || dy < 0.0)
+}
+
+/// Integrate the decaying release speed over one frame, stopping at either edge.
+fn fling_step(scroll: f64, v: f64, max: f64, dt: f64) -> (f64, f64) {
+    const DECAY_SECS: f64 = 0.33;
+    const STOP_SPEED: f64 = 20.0;
+    let scroll = scroll.clamp(0.0, max);
+    if v.abs() < STOP_SPEED { return (scroll, 0.0); }
+    let decay = (-dt / DECAY_SECS).exp();
+    let next = (scroll + v * DECAY_SECS * (1.0 - decay)).clamp(0.0, max);
+    let speed = v * decay;
+    (next, if next == 0.0 || next == max || speed.abs() < STOP_SPEED { 0.0 } else { speed })
+}
+
 /// The motion every surface of the shell settles with: a critically damped
 /// spring (mass 1, stiffness 900, damping 60 — 30 per second), seeded with
 /// the finger's speed at release so a flick carries on and a slow release
@@ -331,6 +348,8 @@ pub struct PhoneGesture {
     /// Decided once the finger has travelled: a sideways pan of the home
     /// pages (true) or not (false).
     pub pan: Option<bool>,
+    /// The grid owns this vertical drag through release, even at an edge.
+    pub drawer_grid: bool,
     /// When the finger last moved, and how fast it was going then (points
     /// per second, up is negative): what tells a flick from a swipe-and-hold.
     pub last_time: f64,
@@ -354,7 +373,7 @@ pub struct PhoneGesture {
 
 impl PhoneGesture {
     pub fn new(p: Vec2d, time: f64, hit: Option<PhoneHit>, bottom: bool, edge: bool, screen: PhoneScreen) -> Self {
-        PhoneGesture { start: p, last: p, time, max_travel: 0.0, long_pressed: false, pan: None, last_time: time, vy: 0.0, vx: 0.0, samples: vec![(time, p)], rest_at: p, committed: false, hit, bottom, edge, screen }
+        PhoneGesture { start: p, last: p, time, max_travel: 0.0, long_pressed: false, pan: None, drawer_grid: false, last_time: time, vy: 0.0, vx: 0.0, samples: vec![(time, p)], rest_at: p, committed: false, hit, bottom, edge, screen }
     }
     /// The finger is at `p` at `time`: its speed is the travel over the last
     /// [`VELOCITY_WINDOW`] seconds of samples, measured by time rather
@@ -560,6 +579,13 @@ pub struct PhoneState {
     /// step: 0 = the last home page, 1 = the library, the finger's own
     /// value in between (rubber past either end).
     pub drawer: f64,
+    /// Points scrolled into the Android drawer's grid.
+    pub drawer_scroll: f64,
+    /// Release speed in points per second and the extent from the last layout.
+    pub drawer_fling: f64,
+    pub drawer_scroll_max: f64,
+    /// Keep the departing grid in place under the closing sheet or opening app.
+    pub drawer_exit_scroll: f64,
     /// The home page's icon order and the dock, as arranged (mobile_tiles
     /// `HomeOrder`); `home_order_loaded` once storage answered (or had
     /// nothing), so a first-run default is never saved over a real one.
@@ -675,6 +701,7 @@ impl Default for PhoneState {
     fn default() -> Self {
         Self { settings: 0, settings_press: None, clock: "9:41".into(), wallpaper_time: 0.0, wallpaper_phase: 0.0, wallpaper_speed: 0.0, touch_time_offset: 0.0, frame_clock_delta: 0.0, screen: PhoneScreen::Home, client: None, order: Vec::new(),
             openness: 0.0, overview: 0.0, openness_v: 0.0, overview_v: 0.0, launch_from: None, origin: None, cards: Paging::default(), pager: Paging::default(), home_pages: 1, drawer: 0.0,
+            drawer_scroll: 0.0, drawer_fling: 0.0, drawer_scroll_max: 0.0, drawer_exit_scroll: 0.0,
             home: HomeOrder::default(), home_order_loaded: false, edit: HomeEdit::default(), last_interaction: 0.0, dismiss_y: 0.0, gesture: None, touch: None,
             keyboard: 0.0, keyboard_target: 0.0, keyboard_sent_height: 0.0, keyboard_client: None,
             search_query: String::new(), search_focused: false, search_scroll: 0.0,
@@ -747,7 +774,7 @@ impl PhoneState {
         }
         self.flight = None;
         self.reveal_elapsed = None;
-        self.screen = PhoneScreen::App;
+        self.set_screen(PhoneScreen::App);
         self.dismiss_y = 0.0;
     }
     pub fn navigate(&mut self, screen: PhoneScreen) {
@@ -760,7 +787,7 @@ impl PhoneState {
             }
             self.neighbours_target = 1.0;
         }
-        self.screen = screen;
+        self.set_screen(screen);
         self.keyboard_target = 0.0;
         self.gesture = None;
         self.dismiss_y = 0.0;
@@ -789,6 +816,34 @@ impl PhoneState {
     pub fn last_home_page(&self) -> f64 {
         self.library_page() - 1.0
     }
+    fn set_screen(&mut self, screen: PhoneScreen) {
+        if self.screen == PhoneScreen::Drawer && screen != PhoneScreen::Drawer {
+            self.drawer_exit_scroll = self.drawer_scroll;
+            self.drawer_scroll = 0.0;
+            self.drawer_fling = 0.0;
+            self.gesture = None;
+        }
+        self.screen = screen;
+    }
+    /// A vertical Android drag chooses the grid or the sheet on its first move.
+    pub fn drawer_drag_move(&mut self, dy: f64, first: bool) {
+        let Some(g) = self.gesture.as_mut() else { return };
+        if first && g.screen == PhoneScreen::Drawer {
+            g.drawer_grid = grid_takes_drag(self.drawer_scroll, self.drawer_scroll_max, dy);
+        }
+        if g.drawer_grid {
+            if first {
+                self.pager.set(self.library_page());
+                self.drawer = 1.0;
+            }
+            self.scroll_drawer_by(-dy);
+        } else {
+            self.library_drag_move(dy, crate::launcher_motion::ALL_APPS_SHIFT);
+        }
+    }
+    pub fn scroll_drawer_by(&mut self, dy: f64) {
+        self.drawer_scroll = (self.drawer_scroll.min(self.drawer_scroll_max) + dy).clamp(0.0, self.drawer_scroll_max);
+    }
     /// The finger lands on the home page or the library: the pager holds
     /// its page until the finger lifts.
     pub fn library_drag_begin(&mut self) {
@@ -813,7 +868,7 @@ impl PhoneState {
         self.pager.drag_end(v, extent, count, flick_speed);
         let screen = if self.pager.target() >= self.library_page() - 0.5 { PhoneScreen::Drawer } else { PhoneScreen::Home };
         self.search_focused = false;
-        self.screen = screen;
+        self.set_screen(screen);
         self.keyboard_target = 0.0;
         self.dismiss_y = 0.0;
         if screen != PhoneScreen::Home { self.leave_edit(); }
@@ -826,12 +881,13 @@ impl PhoneState {
     pub fn cancel_gesture(&mut self) -> bool {
         let gesture = self.gesture.take();
         self.touch = None;
+        self.drawer_fling = 0.0;
         self.dismiss_y = 0.0;
         self.cards.cancel_drag(self.order.len());
         if self.pager.dragging() {
             self.pager.cancel_drag(self.page_count());
             if matches!(self.screen, PhoneScreen::Home | PhoneScreen::Drawer) {
-                self.screen = if self.pager.target() >= self.library_page() - 0.5 { PhoneScreen::Drawer } else { PhoneScreen::Home };
+                self.set_screen(if self.pager.target() >= self.library_page() - 0.5 { PhoneScreen::Drawer } else { PhoneScreen::Home });
             }
         }
         if gesture.is_some() { self.openness_v = 0.0; self.overview_v = 0.0; }
@@ -877,6 +933,14 @@ impl PhoneState {
         // wobble while the switcher fades in).
         let (open, overview) = self.spring_targets();
         let mut active = false;
+        if self.drawer_fling != 0.0 {
+            if self.searching() {
+                self.drawer_fling = 0.0;
+            } else {
+                (self.drawer_scroll, self.drawer_fling) = fling_step(self.drawer_scroll, self.drawer_fling, self.drawer_scroll_max, dt);
+                active |= self.drawer_fling != 0.0;
+            }
+        }
         let dragging = self.gesture.as_ref().is_some_and(|g| g.bottom);
         // Android's timed and spring-driven motion (`launcher_motion`) runs
         // the values it owns; the generic springs leave those alone.
@@ -927,6 +991,7 @@ impl PhoneState {
             active |= self.pager.step(dt);
         }
         self.drawer = self.pager.page - self.last_home_page();
+        if self.drawer <= 0.001 { self.drawer_exit_scroll = 0.0; }
         // A Recents page crossed: a low tick.
         if self.android && self.screen == PhoneScreen::Recents {
             let page = self.cards.page.round() as i64;
@@ -1091,7 +1156,7 @@ impl PhoneState {
         self.search_focused = false;
         self.keyboard_target = 0.0;
         self.dismiss_y = 0.0;
-        self.screen = if open { PhoneScreen::Drawer } else { PhoneScreen::Home };
+        self.set_screen(if open { PhoneScreen::Drawer } else { PhoneScreen::Home });
         if self.screen != PhoneScreen::Home { self.leave_edit(); }
     }
     /// A bottom drag in flight, `dy` points up the screen (negative). From
@@ -1715,6 +1780,52 @@ mod tests {
         assert_eq!(g.lock_axis(dvec2(0.0, 90.0), true), Some(true), "decided once");
         let mut g = PhoneGesture::new(dvec2(0.0, 0.0), 0.0, None, false, false, PhoneScreen::Home);
         assert_eq!(g.lock_axis(dvec2(2.0, -30.0), true), Some(false));
+    }
+
+    #[test]
+    fn the_grid_keeps_its_drag_until_release() {
+        assert!(!grid_takes_drag(0.0, 0.0, -12.0));
+        assert!(!grid_takes_drag(0.0, 100.0, 12.0));
+        assert!(grid_takes_drag(0.0, 100.0, -12.0));
+        assert!(grid_takes_drag(40.0, 100.0, 12.0));
+
+        let mut phone = PhoneState::default();
+        phone.android = true;
+        phone.navigate(PhoneScreen::Drawer);
+        phone.pager.set(phone.library_page());
+        phone.drawer_scroll_max = 100.0;
+        phone.library_drag_begin();
+        phone.gesture = Some(PhoneGesture::new(dvec2(0.0, 0.0), 0.0, None, false, false, PhoneScreen::Drawer));
+        phone.drawer_drag_move(-40.0, true);
+        assert_eq!(phone.drawer_scroll, 40.0);
+        phone.drawer_drag_move(70.0, false);
+        assert_eq!(phone.drawer_scroll, 0.0);
+        assert_eq!(phone.drawer, 1.0);
+        assert!(!phone.pager.dragging(), "release must leave the sheet open");
+
+        phone.gesture = None;
+        phone.drawer_fling = 400.0;
+        assert!(phone.step(0.016));
+        assert!(phone.drawer_scroll > 0.0 && phone.drawer_fling < 400.0);
+        phone.navigate(PhoneScreen::Home);
+        assert_eq!((phone.drawer_scroll, phone.drawer_fling), (0.0, 0.0));
+        phone.navigate(PhoneScreen::Drawer);
+        phone.drawer_scroll = 99.0;
+        phone.drawer_fling = 400.0;
+        phone.step(0.016);
+        assert_eq!((phone.drawer_scroll, phone.drawer_fling), (100.0, 0.0));
+        assert!(!phone.step(0.016), "a settled drawer needs no more frames");
+        phone.activate(1);
+        assert_eq!(phone.drawer_scroll, 0.0, "a fresh drawer after opening an app");
+    }
+
+    #[test]
+    fn drawer_fling_slows_and_stops_at_either_end() {
+        let (scroll, speed) = fling_step(50.0, 200.0, 100.0, 0.016);
+        assert!(scroll > 50.0 && scroll < 100.0 && speed > 0.0 && speed < 200.0);
+        assert_eq!(fling_step(1.0, -200.0, 100.0, 0.016), (0.0, 0.0));
+        assert_eq!(fling_step(99.0, 200.0, 100.0, 0.016), (100.0, 0.0));
+        assert_eq!(fling_step(50.0, -19.0, 100.0, 0.016), (50.0, 0.0));
     }
 
     #[test]

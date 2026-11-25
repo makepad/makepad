@@ -2,6 +2,7 @@
 use crate::{desktop::DesktopStyle, desk::WmState, mobile::*, mobile_tiles::{self, HomeLayout, HomeMetrics, TileSlot}, shell::{alpha, rgb, ui::{rect, HAlign, Ico, ShellDraw}}};
 use makepad_widgets::{app_icon::AppIconDraw, gauss_view::{GaussRoundedView, GaussBlurSnapshot, GlassProfile}, *};
 use crate::desktop::DrawDesktopChrome;
+use crate::apps::Launchable;
 mod search;
 
 script_mod! {
@@ -148,6 +149,12 @@ fn band_ink(luma: f32, target: f32) -> (Vec4f, Vec4f) {
 /// 8 above, the 56-tall clock, the 20-tall date.
 const ANDROID_HEADER: f64 = 84.0;
 
+/// The home rows come first so the drawer and search can share one list.
+struct DrawerApps {
+    apps: Vec<(String, String)>,
+    home_len: usize,
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct PhoneSurface {
     #[uid] uid: WidgetUid,
@@ -189,6 +196,7 @@ pub struct PhoneSurface {
     #[rust] search_rect: Rect,
     #[rust] search_pointer: bool,
     #[rust] pub search_scroll_max: f64,
+    #[rust] pub drawer_scroll_max: f64,
     #[rust] pub pad_left: f64,
     /// The relative luminance of the app's own rows under the status and
     /// the navigation bar (desk/phone.rs `Bands`), each None when that bar
@@ -228,12 +236,32 @@ impl PhoneSurface {
     pub fn icon_at(&self, p: Vec2d, app: &str) -> Option<Rect> {
         self.app_icons.iter().rev().find(|(hit, id, _)| id == app && hit.contains(p)).map(|(_, _, icon)| *icon)
     }
-    /// The phone's app list (id, label): the launcher's apps for this build, then the shell's
-    /// own Settings, which opens the settings page (`SETTINGS_APP`).
-    pub fn phone_apps(launchable: &crate::apps::Launchable) -> Vec<(String,String)> {
-        let mut ids: Vec<(String,String)>=crate::shell::launcher::apps(launchable).iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+    /// Home keeps the launcher's order and ends with the shell's Settings.
+    pub fn phone_apps(launchable: &Launchable) -> Vec<(String,String)> {
+        let mut ids: Vec<_> = crate::shell::launcher::apps(launchable).into_iter().filter_map(|app| {
+            let id = app.id.trim_start_matches("apps.");
+            launchable.on_home(id).then(|| (id.to_string(), app.label))
+        }).collect();
         ids.push((SETTINGS_APP.to_string(),"Settings".to_string()));
         ids
+    }
+    /// The drawer's "All apps" section: the launcher's apps this build can start that are not
+    /// phone apps (on a phone whose host packed them), by name. The launcher's own rules hold:
+    /// the viewers, rigs and the pane's assistant, which open only by id, are not rows.
+    pub fn more_apps(launchable: &Launchable) -> Vec<(String, String)> {
+        let mut apps: Vec<(String, String)> = crate::shell::launcher::apps(launchable).into_iter().filter_map(|app| {
+            let id = app.id.trim_start_matches("apps.");
+            (!launchable.on_home(id)).then(|| (id.to_string(), app.label))
+        }).collect();
+        apps.sort_by_cached_key(|(_, label)| label.to_lowercase());
+        apps
+    }
+    /// The phone apps, then the drawer's other section, in one list.
+    fn drawer_apps(launchable: &Launchable) -> DrawerApps {
+        let mut apps = Self::phone_apps(launchable);
+        let home_len = apps.len();
+        apps.extend(Self::more_apps(launchable));
+        DrawerApps { apps, home_len }
     }
     /// An app hit, with the icon drawn for it.
     fn app_hit(&mut self, hit: Rect, app: &str, icon: Rect) {
@@ -420,9 +448,9 @@ impl PhoneSurface {
         if opacity<0.01 && drawer<0.001 {return;}
         self.xf=(!ios && (home_scale-1.0).abs()>1e-4).then(||(screen.pos+screen.size*0.5,home_scale));
         let landscape=screen.size.x>screen.size.y;
-        let ids=Self::phone_apps(&state.launchable);
+        let apps=Self::drawer_apps(&state.launchable);
         if drawer>0.001 && ios {
-            self.draw_app_library(cx,state,screen,&ids,phone.drawer as f32,backdrop.clone());
+            self.draw_app_library(cx,state,screen,&apps.apps,phone.drawer as f32,backdrop.clone());
         }
         if drawer>0.999 {return;}
         if opacity<0.01 {return;}
@@ -470,6 +498,7 @@ impl PhoneSurface {
         if !edit.active {self.icon_at.clear();}
         let ease=1.0-(-dt*16.0).exp();
         let held=edit.drag.as_ref().map(|d|d.id.clone());
+        let ids=&apps.apps[..apps.home_len];
         let label_of=|id:&str|ids.iter().find(|(i,_)|i==id).map(|(_,l)|l.clone()).unwrap_or_else(||id.to_string());
         // The page: the arranged order, as many as fit above the dock. The
         // rest live in the App Library / the drawer.
@@ -661,12 +690,12 @@ impl PhoneSurface {
         let phone=&state.phone;
         if state.style.target==DesktopStyle::Ios || phone.drawer<=0.001 || (phone.screen==PhoneScreen::App && phone.openness>=0.999) {return;}
         self.use_fonts(false);
-        let ids=Self::phone_apps(&state.launchable);
+        let apps=Self::drawer_apps(&state.launchable);
         // `drawer` past 1 is the overscroll: the grid stretches.
-        self.draw_android_drawer(cx,state,screen,&ids,phone.drawer.min(1.2));
+        self.draw_android_drawer(cx,state,screen,&apps,phone.drawer.min(1.2));
     }
     /// Android's app drawer: a sheet with every launchable app on one grid.
-    fn draw_android_drawer(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, ids: &[(String,String)], progress: f64) {
+    fn draw_android_drawer(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, apps: &DrawerApps, progress: f64) {
         let style=state.style.target;
         let landscape=screen.size.x>screen.size.y;
         let arrived=progress>0.5;
@@ -676,31 +705,45 @@ impl PhoneSurface {
         // rises the last 300 dp; past the top the grid stretches.
         let (_,_,ground,content,shift)=crate::launcher_motion::all_apps_frame(progress);
         let stretch=1.0+(progress-1.0).max(0.0)*0.6;
-        let _=drawer_extent(screen,state.phone.chrome);
+        let bottom=screen.pos.y+screen.size.y-state.phone.chrome.bottom_reserve(screen)-8.0;
         self.rounded(cx,screen,0.0,alpha(if state.style.dark {rgb(24,22,31)}else{rgb(249,245,255)},ground as f32));
         if content<=0.001 {return;}
         let screen=Rect{pos:screen.pos+dvec2(0.0,shift.max(0.0)),size:screen.size};
         let ink=alpha(if state.style.dark {rgb(255,255,255)}else{rgb(31,27,38)},content as f32);
         let pill=self.draw_search(cx,state,screen,ink,None,content as f32);
-        if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,ids,ink);return;}
-        // The grid starts 16 under the search bar and keeps its pitch (104 a
-        // row upright, 88 on its side); only a list too long for the sheet
-        // packs its rows tighter.
+        if state.phone.searching() {self.draw_search_results(cx,state,screen,pill,&apps.apps,ink);return;}
         let top=pill.pos.y+pill.size.y+16.0;
         let columns=if landscape {7}else{4};
         let cell=(screen.size.x-32.0)/columns as f64;
-        let rows=(ids.len()+columns-1)/columns;
-        let bottom=screen.pos.y+screen.size.y-state.phone.chrome.bottom_reserve(screen)-8.0;
-        let pitch=if landscape {88.0}else{104.0};
-        let row_h=pitch.min((bottom-top)/rows.max(1) as f64).max(64.0)*stretch;
+        let pitch=(if landscape {88.0}else{104.0})*stretch;
+        let header=40.0;
+        let grid=mobile_tiles::drawer_grid(apps.home_len,apps.apps.len()-apps.home_len,columns,pitch,header);
+        let height=(bottom-top).max(0.0);
+        self.drawer_scroll_max=(grid.height-height).max(0.0);
+        let scroll=if state.phone.screen==PhoneScreen::Drawer {state.phone.drawer_scroll}else{state.phone.drawer_exit_scroll};
+        let scroll=scroll.clamp(0.0,self.drawer_scroll_max);
+        if height==0.0 {return;}
+        cx.begin_turtle(Walk::abs_rect(rect(screen.pos.x,top,screen.size.x,height)),Layout::default());
+        if let Some(y)=grid.header_y {
+            let y=top+y-scroll;
+            if y+header>top && y<bottom {
+                self.d.label_elided(cx,rect(screen.pos.x+16.0,y,screen.size.x-32.0,header),true,15.0,
+                    alpha(ink,ink.w*0.6),HAlign::Left,mobile_tiles::MORE_APPS_TITLE);
+            }
+        }
         let size=if landscape {48.0}else{60.0};
-        for (index,(id,label)) in ids.iter().enumerate() {
-            let r=rect(screen.pos.x+16.0+(index%columns)as f64*cell,top+(index/columns)as f64*row_h,cell,row_h);
+        for (index,column,y) in grid.visible_cells(scroll,height) {
+            let (id,label)=&apps.apps[index];
+            let r=rect(screen.pos.x+16.0+column as f64*cell,top+y-scroll,cell,pitch);
             let icon=rect(r.pos.x+(cell-size)*0.5,r.pos.y,size,size);
             self.icons.draw(cx,id,style,icon,content as f32,ink);
             self.label(cx,rect(r.pos.x,r.pos.y+size+8.0,cell,16.0),label,12.0,false,ink);
-            if arrived {self.app_hit(r,id,icon);}
+            if arrived {
+                let y0=r.pos.y.max(top);
+                self.app_hit(rect(r.pos.x,y0,cell,(r.pos.y+pitch).min(bottom)-y0),id,icon);
+            }
         }
+        cx.end_turtle();
     }
     /// iOS's App Library: a search field over category cards, each card a
     /// folder with three large icons and a mini grid of the rest. Every

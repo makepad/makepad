@@ -9,6 +9,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# The platforms Desk Host is built for (devhub ci reads this; one place): the desktop.
+# Desk Link's server for a macOS or Windows session, serving over makepad_network's TLS and
+# libs/desk_link's server (makepad-remote), all native only.
+[package.metadata.makepad]
+platforms = ["desktop"]
+
 [[bin]]
 name = "makepad-app-deskhost"
 path = "src/main.rs"

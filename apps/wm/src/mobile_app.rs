@@ -324,7 +324,7 @@ impl App {
     // namespace, the old favorites rule as the first-run default.
     // --------------------------------------------------------------
 
-    /// Every app the launcher lists for this build, in its order, then the shell's Settings.
+    /// The build's home apps in launcher order, then the shell's Settings.
     fn home_app_ids(&mut self) -> Vec<String> {
         let launchable=&self.state_mut().launchable;
         PhoneSurface::phone_apps(launchable).into_iter().map(|(id,_)|id).collect()
@@ -609,7 +609,11 @@ impl App {
         // In edit mode an icon is for arranging, not launching.
         if self.state_mut().phone.edit.active && matches!(hit,PhoneHit::App(_)) {return;}
         match hit {
-            PhoneHit::App(app) if app==SETTINGS_APP=>{crate::jit_cache::refresh();self.state_mut().phone.settings=1;}
+            PhoneHit::App(app) if app==SETTINGS_APP=>{
+                crate::jit_cache::refresh();
+                let phone=&mut self.state_mut().phone;
+                phone.drawer_scroll=0.0;phone.drawer_fling=0.0;phone.settings=1;
+            }
             PhoneHit::App(app)=>{
                 // A running window of the app, a home tile's own client
                 // included: the same client opens, never a second one.
@@ -852,6 +856,7 @@ impl App {
                 if !screen.contains(p) {return false;}
                 if bottom || edge || hit.is_some() || phone.screen!=PhoneScreen::App {
                     let old=phone.screen;
+                    if old==PhoneScreen::Drawer {self.state_mut().phone.drawer_fling=0.0;}
                     if old==PhoneScreen::Recents {self.state_mut().phone.cards.drag_begin();}
                     if matches!(old,PhoneScreen::Home|PhoneScreen::Drawer) && !bottom {self.state_mut().phone.library_drag_begin();}
                     self.state_mut().phone.gesture=Some(PhoneGesture::new(p,time,hit.clone(),bottom,edge,old));
@@ -948,7 +953,7 @@ impl App {
                     if g.lock_axis(delta,!android)==Some(true) {
                         let d=if undecided {delta}else{last};
                         // All Apps rises 300 dp for the whole drag (linear).
-                        if android {phone.library_drag_move(d.y,crate::launcher_motion::ALL_APPS_SHIFT);}
+                        if android {phone.drawer_drag_move(d.y,undecided);}
                         else {phone.library_drag_move(d.x,screen.size.x);}
                     }
                 }
@@ -957,11 +962,16 @@ impl App {
             PhonePointerPhase::Up=>{
                 let Some(mut g)=self.state_mut().phone.gesture.take() else{return self.state_mut().phone.screen!=PhoneScreen::App;};
                 let delta=p-g.start;
+                let last=p-g.last;
                 if p!=g.last {g.sample(p,time);g.last=p;g.track(p);}
                 let velocity=g.release_velocity(time);
                 self.state_mut().phone.last_interaction=time;
                 let android=self.state_mut().style.target==desktop::DesktopStyle::Android;
-                if self.state_mut().phone.edit.drag.is_some() {
+                if g.drawer_grid {
+                    let phone=&mut self.state_mut().phone;
+                    phone.scroll_drawer_by(-last.y);
+                    phone.drawer_fling=-velocity.y;
+                }else if self.state_mut().phone.edit.drag.is_some() {
                     // Dropped: the order already holds the icon's new slot;
                     // it eases down into it and the document is saved.
                     self.state_mut().phone.edit.drag=None;
@@ -1063,14 +1073,22 @@ impl App {
                 self.state_mut().phone.dismiss_y=0.0;
                 self.animate_phone(cx);true
             }
-            PhonePointerPhase::Scroll if self.state_mut().phone.screen==PhoneScreen::Recents=>{
+            PhonePointerPhase::Scroll if phone.screen==PhoneScreen::Recents=>{
                 let p=&mut self.state_mut().phone;let count=p.order.len();p.cards.flip(scroll.signum() as i64,count);
                 self.animate_phone(cx);true
             }
-            PhonePointerPhase::Scroll if self.state_mut().phone.searching()=>{
+            PhonePointerPhase::Scroll if phone.searching()=>{
                 let phone=&mut self.state_mut().phone;
                 phone.search_scroll=(phone.search_scroll.min(search_scroll_max)+scroll).clamp(0.0,search_scroll_max);
                 self.animate_phone(cx);true
+            }
+            PhonePointerPhase::Scroll if phone.android && phone.screen==PhoneScreen::Drawer && !phone.edit.active=>{
+                let phone=&mut self.state_mut().phone;
+                let before=phone.drawer_scroll;
+                phone.drawer_fling=0.0;
+                phone.scroll_drawer_by(scroll);
+                if phone.drawer_scroll!=before {self.animate_phone(cx);}
+                true
             }
             _=>self.state_mut().phone.screen!=PhoneScreen::App,
         }
