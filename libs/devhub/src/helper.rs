@@ -11,7 +11,10 @@
 //! ended) the helper ends. Should the helper end first, the parent says so once, starts another
 //! after a pause and gives it the newest state. An image that runs other code than the one that
 //! started the helper ([`Spec::version`]) replaces it: a self-update brings the helper its fixes
-//! too (11-17: a fixed menu-bar item waited for the master's next full restart).
+//! too (11-17: a fixed menu-bar item waited for the master's next full restart). With
+//! [`Spec::ready`] the new helper starts beside the old one, which ends once the new one says it
+//! is ready: what the old one shows stays on screen until the new one shows it (the devhub panel's
+//! window, 11-24).
 
 use std::io::{BufRead, Write};
 use std::mem::ManuallyDrop;
@@ -37,6 +40,10 @@ pub struct Spec {
     /// The pause before another helper starts after one ended. It doubles while helpers end
     /// within a minute of their start, up to a minute.
     pub pause: Duration,
+    /// Whether a line of a new helper says it is ready to take over. With it, a helper of other
+    /// code is replaced by one started beside it, and the old one ends once the new one says so
+    /// (or ends); meanwhile the old one's answers still count. Without it the old one ends first.
+    pub ready: Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 /// The parent's helper.
@@ -59,6 +66,8 @@ struct State {
     fresh: bool,
     /// the helper a write failed to (gone; the next is waited for)
     failed: Option<u32>,
+    /// the helper that said it is ready ([`Spec::ready`]): the one it replaces ends
+    ready: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -75,12 +84,22 @@ impl Helper {
     /// The helper this pid's last image left it ([`Spec::env`]), else a new one.
     pub fn start(spec: Spec) -> Helper {
         let shared = Arc::new(Shared { spec, state: Mutex::new(State::default()), wake: Condvar::new() });
+        let mut old = None;
         let adopted = match adopt(shared.spec.env) {
             Some((link, version)) if version != shared.spec.version => {
                 let was = if version.is_empty() { "unnamed" } else { &version };
-                (shared.spec.say)(format!("its helper (pid {}) runs other code than this image ({was}, now {}): another replaces it", link.pid, shared.spec.version));
-                end(link);
+                let how = if shared.spec.ready.is_some() { "another replaces it once that one is ready" } else { "another replaces it" };
+                (shared.spec.say)(format!("its helper (pid {}) runs other code than this image ({was}, now {}): {how}", link.pid, shared.spec.version));
                 set_link(&shared, None);
+                match shared.spec.ready {
+                    Some(_) => old = Some(link),
+                    None => {
+                        let pid = link.pid;
+                        let ended = end(link);
+                        let s = shared.clone();
+                        let _ = std::thread::Builder::new().name("devhub-helper-end".into()).spawn(move || say_end(&s, pid, ended, "its replaced helper", ""));
+                    }
+                }
                 None
             }
             adopted => adopted.map(|(link, _)| link),
@@ -91,9 +110,25 @@ impl Helper {
                 set_link(&shared, Some(link));
             }
             None => match spawn(&shared.spec) {
-                Ok(link) => set_link(&shared, Some(link)),
+                Ok(link) => {
+                    let new = link.pid;
+                    set_link(&shared, Some(link));
+                    if let Some(old) = old.take() {
+                        let s = shared.clone();
+                        let _ = std::thread::Builder::new().name("devhub-helper-retire".into()).spawn(move || retire(&s, old, new));
+                    }
+                }
                 Err(e) => (shared.spec.say)(format!("its helper did not start: {e}; it tries again in {} s", shared.spec.pause.as_secs_f64())),
             },
+        }
+        // (no new one: the old one ends now, off the caller's thread)
+        if let Some(old) = old {
+            let s = shared.clone();
+            let _ = std::thread::Builder::new().name("devhub-helper-retire".into()).spawn(move || {
+                let pid = old.pid;
+                let ended = end(old);
+                say_end(&s, pid, ended, "its replaced helper", "");
+            });
         }
         let s = shared.clone();
         let _ = std::thread::Builder::new().name("devhub-helper-write".into()).spawn(move || write_loop(&s));
@@ -113,6 +148,49 @@ impl Helper {
     /// The helper's pid, while there is one.
     pub fn pid(&self) -> Option<u32> {
         self.0.state.lock().unwrap_or_else(|e| e.into_inner()).link.as_ref().map(|l| l.pid)
+    }
+}
+
+/// The replaced helper `old` beside its successor `new`: its answers still count until it ends,
+/// which it does once `new` said it is ready or is gone.
+fn retire(shared: &Arc<Shared>, old: Link, new: u32) {
+    let (s, from) = (shared.clone(), old.from.clone());
+    let _ = std::thread::Builder::new().name("devhub-helper-read-old".into()).spawn(move || {
+        // SAFETY: `from` keeps the descriptor open while this borrows it; ManuallyDrop never closes it
+        let input = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(from.as_raw_fd()) });
+        for line in std::io::BufReader::new(&*input).lines().map_while(Result::ok) {
+            if !line.is_empty() {
+                (s.spec.answer)(line);
+            }
+        }
+    });
+    {
+        let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        while st.ready != Some(new) && st.link.as_ref().is_some_and(|l| l.pid == new) {
+            st = shared.wake.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+    let pid = old.pid;
+    let ended = end(old);
+    say_end(shared, pid, ended, "its replaced helper", &format!(": pid {new} took over"));
+}
+
+/// Says how a helper's end went, as it went: one that still runs after its KILL is looked at
+/// again, less often each time, until it is gone, and that is said too.
+fn say_end(shared: &Shared, pid: u32, ended: Ended, which: &str, then: &str) {
+    match ended {
+        Ended::Gone => (shared.spec.say)(format!("{which} (pid {pid}) ended{then}")),
+        Ended::Killed => (shared.spec.say)(format!("{which} (pid {pid}) did not end within {} s of its TERM and was killed{then}", GRACE.as_secs_f64())),
+        Ended::Runs => {
+            (shared.spec.say)(format!("{which} (pid {pid}) still runs after its TERM and KILL{then}; it is looked at until it is gone"));
+            let t = Instant::now();
+            let mut wait = Duration::from_secs(1);
+            while !gone(pid) {
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(MINUTE);
+            }
+            (shared.spec.say)(format!("{which} (pid {pid}) is gone, {} s after its KILL", t.elapsed().as_secs()));
+        }
     }
 }
 
@@ -199,7 +277,7 @@ fn write_loop(shared: &Shared) {
 }
 
 /// Reads the helper's answers until it ends; then another starts after a pause.
-fn supervise(shared: &Shared) {
+fn supervise(shared: &Arc<Shared>) {
     let spec = &shared.spec;
     let mut pause = spec.pause;
     loop {
@@ -218,46 +296,98 @@ fn supervise(shared: &Shared) {
         for line in std::io::BufReader::new(&*input).lines() {
             match line {
                 Ok(line) if line.is_empty() => {}
-                Ok(line) => (spec.answer)(line),
+                Ok(line) => {
+                    if spec.ready.as_ref().is_some_and(|r| r(&line)) {
+                        shared.state.lock().unwrap_or_else(|e| e.into_inner()).ready = Some(link.pid);
+                        shared.wake.notify_all();
+                    }
+                    (spec.answer)(line)
+                }
                 Err(_) => break,
             }
         }
         let (pid, lived) = (link.pid, link.at.elapsed());
         set_link(shared, None);
-        end(link);
+        let ended = end(link);
         // (one that ran a minute starts the pauses over)
         if lived >= MINUTE {
             pause = spec.pause;
         }
-        (spec.say)(format!("its helper (pid {pid}) ended after {} s; another starts in {} s", lived.as_secs(), pause.as_secs_f64()));
+        let how = if ended == Ended::Gone { "ended" } else { "closed its output" };
+        (spec.say)(format!("its helper (pid {pid}) {how} after {} s; another starts in {} s", lived.as_secs(), pause.as_secs_f64()));
+        if ended != Ended::Gone {
+            // (the next one starts meanwhile: this one is followed on a thread of its own)
+            let s = shared.clone();
+            let _ = std::thread::Builder::new().name("devhub-helper-end".into()).spawn(move || say_end(&s, pid, ended, "its helper", ""));
+        }
     }
 }
 
-/// A helper whose output ended: its input closes as the last copy of its end drops (the writer's,
-/// at the latest when its write fails), it is asked to end, and it is reaped (or the reaper of an
-/// earlier image's children has: ECHILD).
-fn end(link: Link) {
+/// How a helper's end went, checked by its pid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    /// it ended within [`GRACE`] of its TERM
+    Gone,
+    /// it did not, and ended at its KILL
+    Killed,
+    /// it still ran [`GRACE`] after its KILL
+    Runs,
+}
+
+/// How long a helper gets to end after its TERM, and again after its KILL.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// A helper that is to end: its input closes as the last copy of its end drops (the writer's, at
+/// the latest when its write fails), it is asked to end (TERM), and killed (KILL) when it has not
+/// within [`GRACE`]. Each step looks by its pid whether it is gone ([`gone`]).
+fn end(link: Link) -> Ended {
+    let pid = link.pid;
+    drop(link);
+    end_pid(pid, GRACE)
+}
+
+fn end_pid(pid: u32, grace: Duration) -> Ended {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
-        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     }
     const SIGTERM: i32 = 15;
     const SIGKILL: i32 = 9;
-    const WNOHANG: i32 = 1;
-    let pid = link.pid as i32;
-    drop(link);
-    let mut status = 0i32;
-    // SAFETY: signals and waits for one pid, its own child
-    unsafe {
-        let _ = kill(pid, SIGTERM);
-        for _ in 0..40 {
-            if waitpid(pid, &mut status, WNOHANG) != 0 {
-                return;
+    let gone_within = |grace: Duration| {
+        let t = Instant::now();
+        loop {
+            if gone(pid) {
+                return true;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            if t.elapsed() >= grace {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = kill(pid, SIGKILL);
-        while waitpid(pid, &mut status, 0) < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {}
+    };
+    // SAFETY: signals one pid, the helper this process started
+    let _ = unsafe { kill(pid as i32, SIGTERM) };
+    if gone_within(grace) {
+        return Ended::Gone;
+    }
+    // SAFETY: as above
+    let _ = unsafe { kill(pid as i32, SIGKILL) };
+    if gone_within(grace) { Ended::Killed } else { Ended::Runs }
+}
+
+/// Whether `pid` is gone: reaped here when it is this process's child, else (no child here, or
+/// one the reaper of an earlier image's children took: ECHILD) no process has the pid. ECHILD
+/// alone was taken for an end, and a helper that ran on was said to have ended.
+fn gone(pid: u32) -> bool {
+    extern "C" {
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    }
+    const WNOHANG: i32 = 1;
+    let mut status = 0i32;
+    // SAFETY: waits for one pid without blocking
+    match unsafe { waitpid(pid as i32, &mut status, WNOHANG) } {
+        r if r == pid as i32 => true,
+        0 => false,
+        _ => !alive(pid),
     }
 }
 
@@ -274,12 +404,18 @@ mod tests {
         std::path::PathBuf::from(std::env::var_os(OUT).expect("the test's sandbox"))
     }
 
-    /// The helper role: answers each state it gets with the state and its pid, and ends with its
-    /// input.
+    /// The helper role: notes whether the helper before it still ran at its start, says it is
+    /// ready, answers each state it gets with the state and its pid, and ends with its input.
     #[test]
     fn helper_role_item() {
         if std::env::var_os(OUT).is_none() { return; }
+        let list = sandbox().join("helpers");
+        let before = std::fs::read_to_string(&list).unwrap_or_default();
+        let beside = before.lines().last().and_then(|l| l.split(' ').next()?.parse::<u32>().ok()).is_some_and(alive);
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&list).unwrap();
+        writeln!(f, "{} {}", std::process::id(), if beside { "beside" } else { "alone" }).unwrap();
         let out = std::io::stdout();
+        let _ = writeln!(out.lock(), "ready");
         for line in std::io::stdin().lock().lines() {
             let Ok(line) = line else { break };
             if line.is_empty() { continue; }
@@ -309,13 +445,14 @@ mod tests {
             answer: Box::new(move |line| if line.starts_with("got ") { let _ = tx.lock().unwrap().send(line); }),
             say: Box::new(|line| eprintln!("helper test: {line}")),
             pause: Duration::from_millis(100),
+            ready: Some(Box::new(|line| line == "ready")),
         });
         let log = |line: String| {
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("seen")).unwrap();
             writeln!(f, "{line}").unwrap();
         };
         let heard = |what: &str| -> String {
-            let line = rx.recv_timeout(Duration::from_secs(60)).unwrap_or_else(|e| panic!("no answer to {what}: {e}"));
+            let line = rx.recv().unwrap_or_else(|e| panic!("no answer to {what}: {e}"));
             assert!(line.starts_with(&format!("got {what} ")), "{line}");
             line.rsplit(' ').next().unwrap().to_string()
         };
@@ -339,9 +476,12 @@ mod tests {
     }
 
     /// A helper outlives an exec of its parent in place, and each image hands it states; an image
-    /// that runs other code replaces it, and one that ends gets a successor with the newest state.
-    /// The master's menu-bar item lives in one (11-17: an exec'd process's status items are
-    /// refused on macOS 27; a self-update brings it its fixes).
+    /// that runs other code replaces it by one started beside it, and one that ends gets a
+    /// successor with the newest state. The master's menu-bar item lives in one (11-17: an exec'd
+    /// process's status items are refused on macOS 27; a self-update brings it its fixes), with
+    /// the panel's window (11-24: it stays on screen through a self-update). A helper's end is
+    /// looked at by its pid: one that ignores its TERM is killed, and one that is no child here is
+    /// not taken for gone.
     #[test]
     fn a_helper_is_kept_over_its_parents_execs_and_replaced_when_it_ends() {
         let dir = std::env::temp_dir().join(format!("devhub-helper-{}", std::process::id()));
@@ -358,6 +498,11 @@ mod tests {
         let first: u32 = lines[0].1.parse().unwrap();
         assert!(!alive(first), "the replaced helper ended: {seen}");
         assert!(lines[3].1 != lines[2].1 && lines[4].1 == lines[3].1, "a new helper after the end of the last: {seen}");
+        let helpers = std::fs::read_to_string(dir.join("helpers")).unwrap();
+        let starts: Vec<(&str, &str)> = helpers.lines().map(|l| l.split_once(' ').unwrap()).collect();
+        assert_eq!(starts.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), [lines[0].1, lines[2].1, lines[3].1], "{helpers}");
+        assert_eq!(starts.iter().map(|(_, how)| *how).collect::<Vec<_>>(), ["alone", "beside", "alone"],
+            "the replacement started beside the helper it replaced, which ended once it was ready; a successor of one that ended, alone: {helpers}");
         // the parent ended: so does its helper
         let last: u32 = lines[4].1.parse().unwrap();
         let t = Instant::now();
@@ -365,6 +510,33 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!alive(last), "the helper outlived its parent");
+
+        // a helper's end, by its pid ([`end_pid`]), with a short grace: `sh` holds its input open
+        use std::io::Read;
+        let grace = Duration::from_millis(200);
+        let sh = |script: &str| {
+            std::process::Command::new("/bin/sh").args(["-c", script]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap()
+        };
+        let mut ends = sh("read x");
+        assert_eq!(end_pid(ends.id(), grace), Ended::Gone, "one that ends at its TERM is gone");
+        // (once its trap is set: a TERM before it ends the shell)
+        let mut stays = sh("trap '' TERM; echo up; read x");
+        let mut up = String::new();
+        std::io::BufReader::new(stays.stdout.take().unwrap()).read_line(&mut up).unwrap();
+        assert_eq!(up.trim(), "up");
+        let pid = stays.id();
+        assert_eq!(end_pid(pid, grace), Ended::Killed, "one that ignores its TERM is killed after its grace");
+        assert!(!alive(pid), "the killed one is gone");
+        // (a TERM-proof `sleep` whose `sh` ended: no child of this process, waitpid says ECHILD)
+        let mut parent = sh("trap '' TERM; sleep 30 > /dev/null 2>&1 & echo $!");
+        let mut said = String::new();
+        parent.stdout.take().unwrap().read_to_string(&mut said).ok();
+        let _ = parent.wait();
+        let orphan: u32 = said.trim().parse().unwrap_or_else(|e| panic!("the orphan's pid {said:?}: {e}"));
+        assert!(alive(orphan), "the orphan runs");
+        assert_eq!(end_pid(orphan, grace), Ended::Killed, "one that is no child here is looked at by its pid, not taken for gone at ECHILD");
+        assert!(!alive(orphan), "the orphan is gone");
+        drop((ends.stdin.take(), stays.stdin.take()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

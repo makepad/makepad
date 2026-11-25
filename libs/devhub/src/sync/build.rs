@@ -241,14 +241,28 @@ pub fn kept_dir() -> PathBuf {
 }
 
 /// `built`, the app's new build, as its kept copy in `dir` when the node keeps one ([`kept_dir`]):
-/// a copy beside it, renamed over it, so a start never runs a half-written file.
-fn keep(dir: &Path, app: &AppTarget, built: &Path) -> Result<(), String> {
+/// a copy beside it, renamed over it, so a start never runs a half-written file. A build of the
+/// same bytes leaves the copy as it is; a new one's modification time is the moment it replaced
+/// the copy (a copy may carry the build's own), which the node's caps read as the service running
+/// an older build than its kept one ([`crate::lease::caps`]'s `kept_replaced`): the roll restarts
+/// it. True when it replaced the copy.
+fn keep(dir: &Path, app: &AppTarget, built: &Path) -> Result<bool, String> {
     let kept = dir.join(app.bin);
     if !kept.exists() {
-        return Ok(());
+        return Ok(false);
+    }
+    let said = |e: std::io::Error| format!("prebuild: {} as its kept copy {}: {e}", built.display(), kept.display());
+    let same = std::fs::metadata(built).map_err(said)?.len() == std::fs::metadata(&kept).map_err(said)?.len()
+        && std::fs::read(built).map_err(said)? == std::fs::read(&kept).map_err(said)?;
+    if same {
+        return Ok(false);
     }
     let new = dir.join(format!("{}.new", app.bin));
-    std::fs::copy(built, &new).and_then(|_| std::fs::rename(&new, &kept)).map_err(|e| format!("prebuild: {} as its kept copy {}: {e}", built.display(), kept.display()))
+    std::fs::copy(built, &new)
+        .and_then(|_| std::fs::File::options().write(true).open(&new)?.set_modified(std::time::SystemTime::now()))
+        .and_then(|_| std::fs::rename(&new, &kept))
+        .map_err(said)?;
+    Ok(true)
 }
 
 /// The modification time of a built binary (to tell whether a prebuild replaced it).
@@ -275,12 +289,20 @@ mod tests {
         let app = makepad_app_registry::AppTarget { id: "svc", package: "pkg-svc", dir: "apps/svc", bin: "svc", manifest: None, profile: "release" };
         let built = dir.join("built");
         std::fs::write(&built, "new build").unwrap();
-        super::keep(&dir, &app, &built).unwrap();
+        assert!(!super::keep(&dir, &app, &built).unwrap());
         assert!(!dir.join("svc").exists(), "a node that keeps none gets no copy");
         std::fs::write(dir.join("svc"), "last good").unwrap();
-        super::keep(&dir, &app, &built).unwrap();
+        // the build itself is old (a copy may carry its time): the kept copy says when it was replaced
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&built).unwrap().set_modified(old).unwrap();
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(1);
+        assert!(super::keep(&dir, &app, &built).unwrap(), "a new build replaces the copy");
         assert_eq!(std::fs::read_to_string(dir.join("svc")).unwrap(), "new build");
+        let replaced = std::fs::metadata(dir.join("svc")).unwrap().modified().unwrap();
+        assert!(replaced >= before, "the copy's time is when it was replaced, not the build's: a service started before it reads as running an older build");
         assert!(!dir.join("svc.new").exists(), "renamed over it");
+        assert!(!super::keep(&dir, &app, &built).unwrap(), "a build of the same bytes leaves the copy alone");
+        assert_eq!(std::fs::metadata(dir.join("svc")).unwrap().modified().unwrap(), replaced, "and its time: a relink of the same bytes restarts no service");
         assert!(super::keep(&dir, &app, &dir.join("missing")).is_err(), "a build that left no binary keeps the last");
         assert_eq!(std::fs::read_to_string(dir.join("svc")).unwrap(), "new build");
         let _ = std::fs::remove_dir_all(&dir);

@@ -26,6 +26,19 @@ struct Slot {
 }
 
 impl Slot {
+    /// One slot's record, as slots.json and a `lane offers` row hold it ([`offered`]).
+    fn parse(v: &Value) -> Result<Slot, String> {
+        let lane = string(v, "lane")?;
+        let n = number(&v.get("n").and_then(Value::as_u64).unwrap_or(0).to_string())?;
+        let path = PathBuf::from(string(v, "path")?);
+        let b = v.get("base").ok_or("slot: missing base")?;
+        let base = [string(b, "makepad")?, string(b, "commercial")?];
+        if !super::lane::valid_name(&lane) || !path.is_absolute() || base[0].is_empty() || base.iter().any(|s| !s.is_empty() && !(matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))) {
+            return Err("slots.json: invalid or duplicate slot".into());
+        }
+        Ok(Slot { lane, n, path, base, job: string(v, "job")?, made_ms: v.get("made_ms").and_then(Value::as_u64).ok_or("slot: missing made_ms")? })
+    }
+
     fn json(&self) -> String {
         format!("{{\"lane\":{},\"n\":{},\"path\":{},\"base\":{{\"makepad\":{},\"commercial\":{}}},\"job\":{},\"made_ms\":{}}}", json_str(&self.lane), self.n, json_str(&self.path.to_string_lossy()), json_str(&self.base[0]), json_str(&self.base[1]), json_str(&self.job), self.made_ms)
     }
@@ -55,15 +68,11 @@ impl Records {
         let v = makepad_strict_json::parse(&bytes).map_err(|e| format!("{}: {e:?}", file.display()))?;
         let mut slots = Vec::new();
         for v in v.as_arr().ok_or("slots.json: expected an array")? {
-            let lane = string(v, "lane")?;
-            let n = number(&v.get("n").and_then(Value::as_u64).unwrap_or(0).to_string())?;
-            let path = PathBuf::from(string(v, "path")?);
-            let b = v.get("base").ok_or("slot: missing base")?;
-            let base = [string(b, "makepad")?, string(b, "commercial")?];
-            if !super::lane::valid_name(&lane) || !path.is_absolute() || base[0].is_empty() || base.iter().any(|s| !s.is_empty() && !(matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit()))) || slots.iter().any(|s: &Slot| s.lane == lane && s.n == n) {
+            let s = Slot::parse(v)?;
+            if slots.iter().any(|o: &Slot| o.lane == s.lane && o.n == s.n) {
                 return Err("slots.json: invalid or duplicate slot".into());
             }
-            slots.push(Slot { lane, n, path, base, job: string(v, "job")?, made_ms: v.get("made_ms").and_then(Value::as_u64).ok_or("slot: missing made_ms")? });
+            slots.push(s);
         }
         Ok(Self { file, slots })
     }
@@ -108,8 +117,13 @@ fn shown(n: usize, file: &str) -> String { if n == 0 { file.into() } else { form
 
 /// Check every half before any index or worktree write (11-15).
 fn verify(l: &Lane, s: &Slot) -> Result<(), String> {
+    verify_in(&l.dir(), s)
+}
+
+/// [`verify`] against its lane's slots dir `dir` ([`Lane::dir`]).
+fn verify_in(dir: &Path, s: &Slot) -> Result<(), String> {
     let fail = |i, why: String| format!("slot {} of {}: {} half: {why}", s.n, s.lane, if i == 0 { "makepad" } else { "commercial" });
-    let expected = l.dir().join(s.n.to_string());
+    let expected = dir.join(s.n.to_string());
     let root = s.path.canonicalize().map_err(|e| fail(0, format!("{}: {e}", s.path.display())))?;
     let expected = expected.canonicalize().map_err(|e| fail(0, format!("{}: {e}", expected.display())))?;
     if root != expected { return Err(fail(0, format!("record names {}, expected {}", root.display(), expected.display()))) }
@@ -584,6 +598,33 @@ pub(crate) fn check_clean(ctx: &Ctx, l: &LaneRec) -> Result<(), String> {
     let _lock = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
     for s in Records::load(&ctx.home)?.slots.iter().filter(|s| s.lane == l.name && !gone(s)) { verify(&Lane::new(&ctx.repo, l), s)?; clean(s)?; }
     Ok(())
+}
+
+/// A `lane offers` row's slot fields: the lane's slots dir and its slots' records, read from
+/// slots.json (their worktrees are read by the asking CLI, [`offer_refusal`]).
+pub(crate) fn offered(ctx: &Ctx, l: &LaneRec) -> String {
+    let _lock = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+    match Records::load(&ctx.home) {
+        Ok(r) => {
+            let slots: Vec<String> = r.slots.iter().filter(|s| s.lane == l.name).map(Slot::json).collect();
+            format!(",\"slots_dir\":{},\"slots\":[{}]", json_str(&Lane::new(&ctx.repo, l).dir().to_string_lossy()), slots.join(","))
+        }
+        Err(e) => format!(",\"slots_error\":{}", json_str(&e)),
+    }
+}
+
+/// Why `lane retire` would refuse an offered lane for its slots, as [`check_clean`] checks them,
+/// from the row [`offered`] wrote: read in the asking CLI. None for a row without slots (an
+/// older master's).
+pub(crate) fn offer_refusal(offer: &Value) -> Option<String> {
+    if let Some(e) = offer.get("slots_error").and_then(Value::as_str) { return Some(e.to_string()); }
+    let dir = PathBuf::from(offer.get("slots_dir").and_then(Value::as_str)?);
+    for v in offer.get("slots").and_then(Value::as_arr).unwrap_or(&[]) {
+        let s = match Slot::parse(v) { Ok(s) => s, Err(e) => return Some(e) };
+        if gone(&s) { continue; }
+        if let Err(why) = verify_in(&dir, &s).and_then(|_| clean(&s)) { return Some(why); }
+    }
+    None
 }
 
 /// Prune runs outside the master too; records remain protected if their lane is live.

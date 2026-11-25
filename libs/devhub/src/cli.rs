@@ -76,7 +76,10 @@ call $DH; a landing's CLI goes live when its rebuild finishes
                                           <pkg> --test a, --test b: #N .. turned it red`, then `green at its
                                           red tip, not reproduced: <targets>` for those that passed there;
                                           `flaky or not reproduced` only when all passed, and a probe that
-                                          ran none of them stops at its red tip (no answer)
+                                          ran none of them stops at its red tip (no answer); `INTERMITTENT`:
+                                          a test red again at its red tip that a later run passed, said
+                                          until cleared or green in its bucket's next 3 runs of it
+  bucket clear <unit key>                 closes that key's INTERMITTENT line (`test <pkg>`)
   bucket run <fast|tests|hot|mac|ci|full> that bucket's run now, of the tip then (full: every package's tests;
                                           mac: the test targets only a Mac can fail, a package's
                                           [package.metadata.makepad.macos-tests])
@@ -121,10 +124,18 @@ pub fn user_at(mut names: impl Iterator<Item = String>, terminal: bool) -> Resul
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
+    c.set_ping_limit(CONTROL_PING_LIMIT);
     c.conn().map_err(|e| format!("no devhub master at {} (connect: {e}); `makepad devhub master start` starts one", proto::control_socket().display()))?;
     agent_seen(&c);
     Ok(c)
 }
+
+/// How long the master's connection may leave a ping unanswered before a command takes it for
+/// lost and asks again ([`retry_master`]): six of the link's keepalives. The master's reader
+/// answers pings whatever its services do, so only a process that holds the socket without
+/// serving it is silent so long: a run that inherited a command's connection kept it open past
+/// the master's exec into its next build, and a `live act` call waited on it for good (11-23).
+const CONTROL_PING_LIMIT: std::time::Duration = std::time::Duration::from_secs(6 * makepad_remote::conn::KEEPALIVE.as_secs());
 
 /// At most once a minute per process, including while a request waits for its answer.
 /// Only the agent's own CLI has `DEVHUB_AGENT`; the master's runners do not speak for it.
@@ -625,7 +636,7 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
     } else if local {
         // this machine: the JIT's own socket, exactly `makepad inspect`
         match Client::connect(app) {
-            Ok(j) if here => makepad_remote::app::run(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
+            Ok(j) if here => makepad_remote::app::run_printed(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
             Ok(j) => j.cmd(&line).map_err(|e| e.to_string()).map(|lines| {
                 for l in lines {
                     match l {
@@ -644,7 +655,7 @@ fn inspect(c: &Client, args: &[String]) -> i32 {
     } else if let Some(Ok(request)) = &request {
         hub::ask_app(c, &format!("{machine}:{app}"), request, &mut print).map(|_| ())
     } else if here {
-        makepad_remote::app::run(&Client::routed(c, &format!("{machine}:{app}")), words, &mut print).map(|_| ()).map_err(|e| e.to_string())
+        makepad_remote::app::run_printed(&Client::routed(c, &format!("{machine}:{app}")), words, &mut print).map(|_| ()).map_err(|e| e.to_string())
     } else {
         hub::ask(c, &format!("{machine}:{app}"), "cmd", "", &line, &mut print).map(|_| ())
     };
@@ -1172,8 +1183,14 @@ fn cache_fleet(c: &Client) {
 
 #[cfg(feature = "checkout")]
 fn bucket(c: &Client, args: &[&str]) -> i32 {
-    if let ["run", name] = args {
-        let lines = match ask(c, None, "bucket", &format!("run {name}")) {
+    let asked = match args {
+        ["run", name] => Some(format!("run {name}")),
+        // a human or a lane closes an intermittent red `devhub bucket` says
+        ["clear", key @ ..] if !key.is_empty() => Some(format!("clear {}", key.join(" "))),
+        _ => None,
+    };
+    if let Some(asked) = asked {
+        let lines = match ask(c, None, "bucket", &asked) {
             Ok(lines) => lines,
             Err(e) => { eprintln!("makepad devhub bucket: {e}"); return 2; }
         };
@@ -1184,7 +1201,7 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
         };
     }
     if !matches!(args, [] | ["status"]) {
-        eprintln!("makepad devhub bucket [status] | bucket run <bucket>");
+        eprintln!("makepad devhub bucket [status] | bucket run <bucket> | bucket clear <unit key>");
         return 2;
     }
     let lines = match ask(c, None, "bucket", "status") {
@@ -1223,6 +1240,13 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
                 _ => String::new(),
             };
             println!("{name} STILL FAILING: {units}");
+            continue;
+        }
+        // a test red again at its red tip that a later run passed: until cleared or green again
+        if let Some(name) = v.get("intermittent").and_then(Value::as_str) {
+            let ms = v.get("ms").and_then(Value::as_u64).unwrap_or(0);
+            println!("{name} INTERMITTENT: {} (reproduced at {}, passed at {}; {} ago; tip log {}; `makepad devhub bucket clear {}` when it is understood)",
+                text(&v, "key"), text(&v, "at"), text(&v, "passed"), ago(ms), text(&v, "log"), text(&v, "key"));
             continue;
         }
         // when each bucket's last run ended, and how
@@ -1436,30 +1460,40 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             // on one, and each other nested repository's as `<name>=<branch>`: the master leaves
             // out one with nothing to land)
             let args: Vec<String> = if a.is_empty() {
-                let g = |dir: &str, args: &[&str]| crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
                 let Some(top) = crate::lease::client::makepad_top() else {
                     eprintln!("makepad devhub land: run it in a lane worktree, or name the branch");
                     return 2;
                 };
-                let b = g(&top, &["branch", "--show-current"]).unwrap_or_default();
-                let cdir = format!("{top}/apps/commercial");
-                let cb = g(&cdir, &["branch", "--show-current"]).unwrap_or_default();
-                let mut v = vec![if b.is_empty() || b == "work" { "-".to_string() } else { b }];
-                if !cb.is_empty() && cb != "main" {
-                    v.extend([cdir, cb]);
-                }
-                for name in crate::nested::names(std::path::Path::new(&top)).into_iter().filter(|n| n != crate::state::PAIRED) {
-                    if let Some(nb) = g(&format!("{top}/{}", crate::nested::dir(&name)), &["branch", "--show-current"]).filter(|nb| !nb.is_empty()) {
-                        v.push(format!("{name}={nb}"));
+                let v = match crate::land::worktree_hand_in(std::path::Path::new(&top)) {
+                    Ok(v) => v,
+                    Err(why) => {
+                        eprintln!("makepad devhub land: {why}");
+                        return 2;
                     }
-                }
+                };
                 if v.len() == 1 && v[0] == "-" {
                     eprintln!("makepad devhub land: this worktree is on no lane branch");
                     return 2;
                 }
                 v
             } else {
-                a.iter().map(|x| x.to_string()).collect()
+                // a lane's makepad branch alone: every half of the lane, as its worktree hands it
+                // in (`land rc-fabpick2` landed its makepad half and left its apps half, #8947)
+                let lane = match a {
+                    [b] if *b != "-" && !b.contains('=') => crate::lease::client::makepad_top().and_then(|top| crate::land::lane_hand_in(std::path::Path::new(&top), b)),
+                    _ => None,
+                };
+                match lane {
+                    Some(Ok(v)) => {
+                        if v.len() > 1 { eprintln!("devhub land: {} is a lane worktree's branch: its halves land together: {}", a[0], v.join(" ")); }
+                        v
+                    }
+                    Some(Err(why)) => {
+                        eprintln!("makepad devhub land: {why}");
+                        return 2;
+                    }
+                    None => a.iter().map(|x| x.to_string()).collect(),
+                }
             };
             // Both gates check the same hand-in, at its one merge onto the tips.
             #[cfg(feature = "checkout")]
@@ -1473,6 +1507,10 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 // a branch that does not resolve here is the master's to refuse, as before
                 if let (Some(ms), Some(cs)) = (ms, cs.unwrap_or(Some(String::new()))) {
                     let mut rev = if cs.is_empty() { format!("{branch}@{ms}") } else { format!("{branch}@{ms},{}={}@{cs}", crate::state::PAIRED, com.map_or("", |(_, b)| b.as_str())) };
+                    // the commits the gates check are the ones that land, pinned here as the command
+                    // starts: the master took each branch's head as it queued, minutes later, and a
+                    // commit made during the checks landed unchecked (#8844, 11-24)
+                    let mut pin = format!("pin={},{cs}", if args[0] == "-" { "" } else { ms.as_str() });
                     // its halves in the other nested repositories, merged onto their tips there
                     // (a followed one it has no half in is checked at its tip, 11-19)
                     let top = crate::lease::client::makepad_top().unwrap_or_default();
@@ -1480,6 +1518,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     for (name, nb) in args.iter().filter_map(|a| a.split_once('=')).filter(|(n, b)| *n != crate::state::PAIRED && here.iter().any(|h| h == n) && !b.is_empty()) {
                         if let Some(sha) = g(&format!("{top}/{}", crate::nested::dir(name)), &["rev-parse", "--verify", &format!("refs/heads/{nb}^{{commit}}")]) {
                             rev.push_str(&format!(",{name}={nb}@{sha}"));
+                            pin.push_str(&format!(",{name}@{sha}"));
                         }
                     }
                     // how long the hand-in waits on its gates, said to the train (`land status --json`)
@@ -1508,7 +1547,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                         }
                     };
                     if failed { return 1; }
-                    words.into_iter().chain([format!("gate_ms={gate_ms}")]).collect()
+                    words.into_iter().chain([format!("gate_ms={gate_ms}"), pin]).collect()
                 } else {
                     vec!["unchecked=unresolved".to_string()]
                 }
@@ -1800,6 +1839,7 @@ mod tests {
             (&["test"], "  test <lane> <pkg>"),
             (&["run"], "  run <lane> <kind>"),
             (&["lane", "new"], "  lane new <name>"),
+            (&["lane", "add"], "  lane add <name>"),
             (&["lane", "keep"], "  lane keep|unkeep"),
             (&["lane", "unkeep"], "  lane keep|unkeep"),
             (&["live", "start"], "  live start <app>"),

@@ -1,8 +1,10 @@
 // CI for makepad-app-devhub. devhub is a tray app and a single-instance service of macOS and
 // Linux (its master, nodes and leases are unix sockets and processes; the CI Mac runs its own
-// devhub node, so a second one quits with "a devhub already serves"): it opens no window at
-// start, and the default smoke test (launch, wait for a window, grab and judge it) cannot pass
-// here. Its checks are the builds of the platforms it runs on.
+// devhub node, so a second one quits with "a devhub already serves"): as a master or a node it
+// opens no window at start. Its checks are the builds of the platforms it runs on, and the smoke
+// test of its fleet panel's window alone (`MAKEPAD_DEVHUB_PANEL=1`: no master, no tray), on its
+// demo fleet: a CI box has no master to watch, and the empty page that leaves proves little (the
+// vision model read its one line as an error panel, four runs in a row).
 
 use mod.std.*
 use mod.ci;
@@ -10,4 +12,16 @@ use mod.ci;
 ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-app-devhub"] targets: ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]})
 })
+
+let app = ci.launch({package: "makepad-app-devhub" binary: "makepad-app-devhub" cwd: "." app_env: {MAKEPAD_DEVHUB_PANEL: "1" DEVHUB_PANEL_DEMO: "1"}})
+
+ci.step("the panel comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The window should show a working application: panels, buttons, text, lists, a canvas, a map, a document or some other user interface. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Is any user interface visible, such as text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO")
+})
+
+app.no_errors()
+app.quit()
 nil

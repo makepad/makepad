@@ -96,6 +96,11 @@ impl SyncConf {
         Self::parse(&std::fs::read_to_string(path()).unwrap_or_default())
     }
 
+    /// An apply that asks for its build builds something here (`build` is not `off`).
+    pub fn builds(&self) -> bool {
+        self.build != Build::Off
+    }
+
     /// The apply's prebuild builds the AI Hub the WM runs (`build = wm` with `hub`): after it, the
     /// checkout's binary is the deployment's.
     pub fn builds_hub(&self) -> bool {

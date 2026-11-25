@@ -8,7 +8,11 @@
 //!   to end: [`super::master::LeaseMaster::test_route`]);
 //! - a test run that selects a target its package's Cargo.toml runs under cargo
 //!   ([`crate::jit_misses::native_selected`]: `[package.metadata.makepad.native-tests]`);
-//! - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
+//! - `--native "<reason>"`: native-vs-JIT baselines and timed perf series. Its reason's words are
+//!   not judged; what devhub knows is ([`review`]): a reason passes for a timed or bench series, a
+//!   baseline (the same command runs the JIT), a crate of the JIT binary, or with an open JIT miss
+//!   it names. Any other is refused once [`REVIEW_REFUSES`] is on; until then it runs, its lane
+//!   hears the review at once and main a count a day (main, 11-23).
 //!
 //! Every verdict but the JIT's own crates is a line of `native.jsonl` (what `devhub prof` counts
 //! per lane; `not_over` says why a lane's choice is no sign it passes the JIT by: it builds crates
@@ -244,6 +248,10 @@ pub struct Ask<'a> {
     pub class: &'a str,
     /// devhub's measured routing for a JIT test class: Some(why, both walls) when it picks cargo
     pub route: &'a dyn Fn(&str) -> Option<String>,
+    /// the cargo route `devhub test` was granted at its run's start (`stats route`'s why); empty:
+    /// none. Kept when the measure has moved since its ask: a run that ended between, or a master
+    /// restart (11-25). Its CLI sends it only as the master answered it, as it runs this check.
+    pub granted: &'a str,
     /// [`platform`]
     pub os: &'a str,
     pub arch: &'a str,
@@ -333,6 +341,64 @@ pub fn windows_verdict(repo_dir: &Path, rev: &str, cmd: &[String]) -> (bool, Str
     }
 }
 
+/// The review of a `--native "<reason>"` refuses what it would only warn of (main, 11-23: a day of
+/// warnings first, then main sees their count and what they would have refused before this flips).
+const REVIEW_REFUSES: bool = false;
+
+/// When main last heard the review's count (wall ms), in the master's home ([`review_count`]).
+const REVIEW_DAY: &str = "native-review-day";
+
+/// The review's count goes to main once a day, not once a run (main, 11-23).
+const REVIEW_DAY_MS: u64 = 24 * 3600 * 1000;
+
+/// Why a `--native "<reason>"` build of `gated` (packages the JIT runs, no open miss, no target its
+/// Cargo.toml declares, no measured route) does not pass on its reason; None: it does. Not its
+/// words, which a lane can reword around: a timed or bench series, a native-vs-JIT baseline (the
+/// same command runs the JIT, or builds a tree it made: `not_over` "baseline"), a crate of the JIT
+/// binary (only a rebuild of that binary tries it), or a reason that names an open JIT miss.
+fn review(home: &Path, a: &Ask, gated: &[Built], not_over: &str) -> Option<String> {
+    if a.kind == Kind::Timed || !not_over.is_empty() || gated.iter().all(|b| b.verb == "bench") { return None; }
+    let open: BTreeSet<String> = std::fs::read_to_string(home.join("jit_misses.jsonl")).unwrap_or_default().lines()
+        .filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+        .filter(|v| v.get("closed_ms").and_then(Value::as_u64) == Some(0))
+        .filter_map(|v| v.get("id")?.as_str().map(str::to_string)).collect();
+    if words(a.reason).iter().any(|w| open.contains(w.trim_end_matches(['.', ':']))) { return None; }
+    Some("it is no timed or bench series, no native-vs-JIT baseline (the same command runs the JIT), no crate of the JIT binary, and its reason names no open JIT miss".into())
+}
+
+/// What a review that refuses says: where the run goes instead, the JIT's command and the
+/// metadata route for a target that needs native.
+fn review_route(a: &Ask, b: &Built) -> String {
+    format!("{}; a test target that needs native (its own runner, a display server, input devices, an app bundle) is declared in its Cargo.toml's [package.metadata.makepad.native-tests] with its reason, reviewed with its landing",
+        hint(a.lane, a.rev, b))
+}
+
+/// Main's count of the review's warnings, once [`REVIEW_DAY_MS`] passed since the last (the
+/// first check starts the day): the runs it would have refused since, by lane, and the first few.
+/// A read of the native ledger once a day; one small file's read a check otherwise.
+fn review_count(home: &Path, now: u64) {
+    let mark = home.join(REVIEW_DAY);
+    let Some(since) = std::fs::read_to_string(&mark).ok().and_then(|t| t.trim().parse::<u64>().ok()) else {
+        let _ = std::fs::write(&mark, now.to_string());
+        return;
+    };
+    if now.saturating_sub(since) < REVIEW_DAY_MS { return; }
+    let _ = std::fs::write(&mark, now.to_string());
+    let rows: Vec<Value> = std::fs::read_to_string(home.join(LEDGER)).unwrap_or_default().lines()
+        .filter_map(|l| makepad_strict_json::parse_depth(l.as_bytes(), 8).ok())
+        .filter(|v| v.get("ms").and_then(Value::as_u64).is_some_and(|ms| ms >= since) && v.get("review").and_then(Value::as_str).is_some_and(|r| !r.is_empty())).collect();
+    let mut by: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for v in &rows { *by.entry(v.get("lane").and_then(Value::as_str).unwrap_or("?").to_string()).or_default() += 1; }
+    let lanes: Vec<String> = by.iter().map(|(lane, n)| format!("{lane} {n}")).collect();
+    let first: Vec<String> = rows.iter().take(5).map(|v| format!("{} `{}` (--native \"{}\")", v.get("lane").and_then(Value::as_str).unwrap_or("?"),
+        v.get("cmd").and_then(Value::as_str).unwrap_or(""), v.get("reason").and_then(Value::as_str).unwrap_or(""))).collect();
+    let line = format!("native-reason review, the last day: {} run(s) it would have refused{}{}{}", rows.len(),
+        if lanes.is_empty() { String::new() } else { format!(" (by lane: {})", lanes.join(", ")) },
+        if first.is_empty() { String::new() } else { format!("; the first: {}", first.join("; ")) },
+        if REVIEW_REFUSES { "" } else { "; it warns only until you say it refuses" });
+    if let Err(e) = crate::notes::leave(home, "main", &line) { eprintln!("devhub native review: agent notes: {e}"); }
+}
+
 /// The rule (master only). Ok: the command may run, with a line to print (empty: nothing gated);
 /// Err: refused, saying what to do instead.
 pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
@@ -377,6 +443,21 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
     verdict(home, a, &gated, &elsewhere, not_over, &declared.join("; "), now)
 }
 
+/// The class `devhub test` gives a cargo test of one package and at most one target
+/// ([`super::client::test_class`]); None for any other command.
+fn selected_class(gated: &[Built]) -> Option<String> {
+    let [b] = gated else { return None };
+    if b.verb != "test" { return None; }
+    let target = match b.select.as_slice() {
+        [] => None,
+        [s] if s == "lib" || s.starts_with("bin:") => Some(s.clone()),
+        [s] if s == "tests" => Some(super::client::ALL_TESTS.to_string()),
+        [s] => Some(s.strip_prefix("test:")?.to_string()),
+        _ => return None,
+    };
+    Some(super::client::test_class(&b.pkg, target.as_deref()))
+}
+
 /// The verdict on what the command builds natively on a JIT platform (`gated`) and elsewhere,
 /// appended to the ledger. `declared`: the targets its Cargo.toml runs under cargo that a test
 /// selects, each with why (empty: none, or a build that selects none).
@@ -385,6 +466,7 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over:
     let reason = a.reason.trim();
     let mut measured_reason = None;
     let mut miss = None;
+    let mut reviewed = None;
     let (word, pkgs, answer) = if gated.is_empty() {
         let pkgs = names(elsewhere);
         let b = &elsewhere[0];
@@ -395,8 +477,14 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over:
         let pkgs = names(gated);
         let list = pkgs.join(", ");
         miss = pkgs.iter().find_map(|p| crate::jit_misses::open(home, p).map(|id| (p.clone(), id)));
-        // the class names the package it measures: `test:<pkg>[:<target>]`
-        let routed = a.class.strip_prefix("native:").map(super::base_class).filter(|c| a.kind == Kind::Test && c.split(':').nth(1).is_some_and(|p| pkgs.iter().all(|q| q == p))).and_then(|c| (a.route)(c));
+        // the class it was routed by names the package it measures, `test:<pkg>[:<target>]`: the
+        // lease's own, else (a custom --class names the lease's series) the package's as the
+        // command selects it, which `devhub test` routes such a run by. A route granted at the run's
+        // start is its own class's alone: the class it asked the route for
+        let class = a.class.strip_prefix("native:").filter(|_| a.kind == Kind::Test).map(super::base_class);
+        let own = class.filter(|c| c.split(':').nth(1).is_some_and(|p| pkgs.iter().all(|q| q == p))).map(str::to_string);
+        let routed = class.and_then(|_| own.clone().or_else(|| selected_class(gated))).and_then(|c| (a.route)(&c))
+            .or_else(|| own.filter(|_| !a.granted.is_empty()).map(|_| format!("{}, as granted at its run's start (the measure moved since)", a.granted)));
         let (word, answer) = if let Some((pkg, id)) = &miss {
             ("miss", Ok(format!("devhub: native build of {list}: {pkg} has the open JIT miss {id}, so cargo is the way until it closes")))
         } else if !declared.is_empty() {
@@ -407,23 +495,32 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over:
             measured_reason = Some(why.clone());
             ("measured", Ok(format!("devhub: native test of {list}: devhub's measured routing picked {why}")))
         } else if !reason.is_empty() {
-            ("reason", Ok(format!("devhub: native build of {list} (--native \"{reason}\", logged)")))
+            match review(home, a, gated, not_over) {
+                None => ("reason", Ok(format!("devhub: native build of {list} (--native \"{reason}\", logged)"))),
+                Some(why) if REVIEW_REFUSES => ("refused", Err(format!("native build of {list} refused on review of its reason: {why}. Instead: {}", review_route(a, &gated[0])))),
+                Some(why) => {
+                    reviewed = Some(why.clone());
+                    ("reason", Ok(format!("devhub: native build of {list} (--native \"{reason}\", logged). Review, a warning for now (devhub will refuse this): {why}. Instead: {}", review_route(a, &gated[0]))))
+                }
+            }
         } else {
             ("refused", Err(format!("native build of {list} refused: lanes iterate and check under the JIT: {}. Native runs only for the JIT's own crates, a package with an open JIT miss, a platform without a JIT, a test devhub's measured routing sends to cargo, a test target its Cargo.toml's native-tests names, or with --native \"<reason>\" (a native-vs-JIT baseline, a timed perf series; logged)", hint(a.lane, a.rev, &gated[0]))))
         };
         (word, pkgs, answer)
     };
     let reason = measured_reason.as_deref().unwrap_or(reason);
-    let line = format!("{{\"ms\":{now},\"lane\":{},\"agent\":{},\"kind\":{},\"pkgs\":[{}],\"platform\":{},\"verdict\":{},\"reason\":{},\"not_over\":{},\"class\":{},\"miss\":{},\"cmd\":{}}}\n",
+    let line = format!("{{\"ms\":{now},\"lane\":{},\"agent\":{},\"kind\":{},\"pkgs\":[{}],\"platform\":{},\"verdict\":{},\"reason\":{},\"not_over\":{},\"class\":{},\"miss\":{},\"cmd\":{}{}}}\n",
         json_str(a.lane), json_str(a.agent), json_str(a.kind.as_str()), pkgs.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), json_str(&format!("{} {}", a.os, a.arch)),
-        json_str(word), json_str(reason), json_str(not_over), json_str(a.class), json_str(miss.as_ref().map_or("", |(_, id)| id.as_str())), json_str(&crate::proto::clean(&a.cmd.join(" "), 200)));
+        json_str(word), json_str(reason), json_str(not_over), json_str(a.class), json_str(miss.as_ref().map_or("", |(_, id)| id.as_str())), json_str(&crate::proto::clean(&a.cmd.join(" "), 200)),
+        reviewed.as_deref().map_or(String::new(), |why| format!(",\"review\":{}", json_str(why))));
     use std::io::Write;
     let path = home.join(LEDGER);
     std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(line.as_bytes())).map_err(|e| format!("{}: {e}", path.display()))?;
+    review_count(home, now);
     answer
 }
 
-/// `native check {"lane","agent","kind","cmd":[..],"repo_dir","cwd","rev","reason","class","needs","node"}`
+/// `native check {"lane","agent","kind","cmd":[..],"repo_dir","cwd","rev","reason","class","needs","node","route"}`
 /// → `{"note":".."}`, or the refusal as the error.
 pub fn serve(home: &Path, line: &str, now: u64, nodes: &[NodeView], route: &dyn Fn(&str) -> Option<String>) -> Result<String, String> {
     let body = line.strip_prefix("check ").ok_or("native check {json}")?;
@@ -433,9 +530,9 @@ pub fn serve(home: &Path, line: &str, now: u64, nodes: &[NodeView], route: &dyn 
     let cmd: Vec<String> = v.get("cmd").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect();
     // a lease asked outside a worktree: its words alone, against the master's checkout
     let repo_dir = Some(std::path::PathBuf::from(s("repo_dir"))).filter(|d| d.join(".git").exists()).unwrap_or_else(crate::orch::repo);
-    let (lane, agent, cwd, rev, reason, class) = (s("lane"), s("agent"), s("cwd"), s("rev"), s("reason"), s("class"));
+    let (lane, agent, cwd, rev, reason, class, granted) = (s("lane"), s("agent"), s("cwd"), s("rev"), s("reason"), s("class"), s("route"));
     let (os, arch) = platform(&super::sched::parse_needs(&s("needs")), &s("node"), nodes);
-    let ask = Ask { lane: &lane, agent: &agent, kind, cmd: &cmd, repo_dir: &repo_dir, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &class, route, os: &os, arch: &arch };
+    let ask = Ask { lane: &lane, agent: &agent, kind, cmd: &cmd, repo_dir: &repo_dir, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &class, route, granted: &granted, os: &os, arch: &arch };
     let note = check(home, &ask, now)?;
     let (windows, gap) = windows_verdict(&repo_dir, &rev, &cmd);
     let note = [note, gap].into_iter().filter(|n| !n.is_empty()).collect::<Vec<_>>().join("\n");
@@ -484,10 +581,12 @@ mod tests {
     #[test]
     fn refused_unless_a_miss_a_route_a_reason_or_no_jit() {
         let home = std::env::temp_dir().join(format!("devhub-native-{}", std::process::id()));
+        // a warm live process keeps its pid: a failed run's home is still there
+        let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let cmd = argv("cargo test --release -p demo-model");
         let route = |class: &str| (class == "test:demo-model:lib").then(|| "cargo (cargo 2m, JIT 4m)".to_string());
-        let ask = |reason, class, os| Ask { lane: "l1", agent: "", kind: Kind::Test, cmd: &cmd, repo_dir: &home, cwd: ".", rev: "", reason, class, route: &route, os, arch: "x64" };
+        let ask = |reason, class, os| Ask { lane: "l1", agent: "", kind: Kind::Test, cmd: &cmd, repo_dir: &home, cwd: ".", rev: "", reason, class, route: &route, granted: "", os, arch: "x64" };
         let test = [built("demo-model", "test", "")];
         let refused = verdict(&home, &ask("", "", "linux"), &test, &[], "", "", 1).unwrap_err();
         assert!(refused.contains("`devhub test l1 demo-model --live`") && refused.contains("--native"), "{refused}");
@@ -510,6 +609,54 @@ mod tests {
         let measured = makepad_strict_json::parse_depth(ledger.lines().nth(4).unwrap().as_bytes(), 8).unwrap();
         assert_eq!(measured.get("reason").and_then(Value::as_str), Some("cargo (cargo 2m, JIT 4m)"), "a measured native verdict records the route and both medians");
         assert!(ledger.lines().nth(2).unwrap().contains(r#""not_over":"baseline""#), "{ledger}");
+        // A reason is reviewed by what devhub knows, not by its words (main, 11-23): a timed or
+        // bench series, a baseline, a crate of the JIT binary, or a reason naming an open JIT miss
+        // passes; any other runs with a warning for now, naming the JIT's command and the metadata
+        // route, and main hears one count a day.
+        let other = [built("demo-view", "test", "")];
+        let warned = verdict(&home, &ask("verify the regressions natively", "", "linux"), &other, &[], "", "", 7).unwrap();
+        assert!(warned.contains("Review, a warning for now (devhub will refuse this): it is no timed or bench series") && warned.contains("`devhub test l1 demo-view --live`")
+            && warned.contains("[package.metadata.makepad.native-tests]"), "{warned}");
+        std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"demo-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n{\"id\":\"M9\",\"pkg\":\"demo-core\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
+        let passed = [
+            verdict(&home, &ask("compare with M9.", "", "linux"), &other, &[], "", "", 8).unwrap(),
+            verdict(&home, &Ask { kind: Kind::Timed, ..ask("perf series", "", "linux") }, &other, &[], "", "", 9).unwrap(),
+            verdict(&home, &ask("bench", "", "linux"), &[built("demo-view", "bench", "")], &[], "", "", 10).unwrap(),
+            verdict(&home, &ask("platform crate", "", "linux"), &other, &[], "jit crate", "", 11).unwrap(),
+        ];
+        assert!(passed.iter().all(|said| !said.contains("Review")), "an open miss it names, a timed run, a bench, a crate of the JIT binary: {passed:?}");
+        let reviews: Vec<bool> = std::fs::read_to_string(home.join(LEDGER)).unwrap().lines().skip(9).map(|l| l.contains("\"review\":")).collect();
+        assert_eq!(reviews, [true, false, false, false, false], "the ledger marks the run it would refuse");
+        // a run of a custom --class (a timed series' `--class timed`) is routed by its package's
+        // class, which the gate names from the command's selection: routed to cargo, it builds
+        // (one was refused, 11-24); another target's or package's class still routes nothing. An
+        // open miss comes first: the file is set aside for them
+        let misses = std::fs::read_to_string(home.join("jit_misses.jsonl")).unwrap();
+        std::fs::remove_file(home.join("jit_misses.jsonl")).unwrap();
+        let lib = [Built { select: vec!["lib".into()], ..built("demo-model", "test", "") }];
+        let routed = verdict(&home, &ask("", "native:timed", "linux"), &lib, &[], "", "", 12).unwrap();
+        assert!(routed.contains("measured routing picked cargo (cargo 2m, JIT 4m)"), "{routed}");
+        let one_test = [Built { select: vec!["test:zz_drag".into()], ..built("demo-model", "test", "") }];
+        assert!(verdict(&home, &ask("", "native:timed", "linux"), &one_test, &[], "", "", 13).is_err(), "test:demo-model:zz_drag is measured JIT-first");
+        assert!(verdict(&home, &ask("", "timed", "linux"), &lib, &[], "", "", 14).is_err(), "a class devhub did not send to cargo routes nothing");
+        assert_eq!(selected_class(&one_test).as_deref(), Some("test:demo-model:zz_drag"));
+        assert_eq!(selected_class(&[Built { select: vec!["tests".into()], ..built("demo-model", "test", "") }]).as_deref(), Some("test:demo-model:tests:*"));
+        assert_eq!(selected_class(&[Built { select: vec!["lib".into(), "bins".into()], ..built("demo-model", "test", "") }]), None);
+        // a run devhub's routing sent to cargo keeps that route when the measure moved after its
+        // route ask (a run ended between, or the master restarted, 11-25): its check carries the
+        // route it was granted. Another package's class still routes nothing, granted or not
+        let granted = |class| Ask { granted: "cargo (cargo 1m, JIT 3m)", ..ask("", class, "linux") };
+        let kept = verdict(&home, &granted("native:test:demo-view:lib"), &other, &[], "", "", 15).unwrap();
+        assert!(kept.contains("measured routing picked cargo (cargo 1m, JIT 3m), as granted at its run's start"), "{kept}");
+        assert!(verdict(&home, &ask("", "native:test:demo-view:lib", "linux"), &other, &[], "", "", 16).is_err(), "no grant, no measure: refused");
+        assert!(verdict(&home, &granted("native:test:other:lib"), &other, &[], "", "", 17).is_err(), "a grant routes only its own package's class");
+        std::fs::write(home.join("jit_misses.jsonl"), misses).unwrap();
+        assert!(crate::notes::take(&home, "main").is_empty(), "the first check starts the day");
+        verdict(&home, &ask("again", "", "linux"), &other, &[], "", "", 1 + 24 * 3_600_000).unwrap();
+        let heard = crate::notes::take(&home, "main");
+        assert!(heard.len() == 1 && heard[0].1.starts_with("native-reason review, the last day: 2 run(s) it would have refused (by lane: l1 2); the first: l1 `cargo test --release -p demo-model` (--native \"verify the regressions natively\")"), "one count a day: {heard:?}");
+        verdict(&home, &ask("again", "", "linux"), &other, &[], "", "", 2 + 24 * 3_600_000).unwrap();
+        assert!(crate::notes::take(&home, "main").is_empty(), "not once a run");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

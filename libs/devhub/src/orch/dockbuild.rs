@@ -27,7 +27,7 @@ const TICK: Duration = Duration::from_secs(120);
 const LOOK: Duration = Duration::from_secs(30);
 /// The Runner's own start (a cold JIT cache compiles it first).
 const START_WAIT: Duration = Duration::from_secs(900);
-const AGENT: &str = "devhub-dockbuild";
+const AGENT: &str = crate::lease::sched::DOCKBUILD_AGENT;
 
 fn ctl() -> makepad_remote::link::Client {
     makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), AGENT)
@@ -230,14 +230,59 @@ fn run(ctx: &Ctx, node: &str, pair: String, why: &str) {
         }
     });
     let line = format!("dockbuild {node} at {pair}: {verdict} in {secs} s, {current} of {} apps current{}", apps.len(), if failed.is_empty() { String::new() } else { format!("; failed: {}", failed.join(", ")) });
-    ctx.store.event("dockbuild", if done && failed.is_empty() { Sev::Info } else { Sev::Warn }, line, None);
+    ctx.store.event("dockbuild", verdict_sev(&verdict, failed.is_empty()), line, None);
+}
+
+/// A run's verdict line's severity: a warning when it did not finish or an app failed, but not
+/// for a run its hub's restart cut ([`CUT`]): that is the roll's, and the next tick builds again.
+fn verdict_sev(verdict: &str, none_failed: bool) -> Sev {
+    if (verdict == "done" && none_failed) || verdict.starts_with(CUT) { Sev::Info } else { Sev::Warn }
+}
+
+/// The verdict of a run whose node's hub restarted under it and whose lease ended meanwhile.
+const CUT: &str = "its hub restarted under the run";
+
+/// Whether the node's hub answers again after a restart cut a call (its self-update: runs and
+/// leases go on), asked each second while `lease` is held; false once the lease ended.
+fn hub_back(ctx: &Ctx, node: &str, lease: &str) -> bool {
+    loop {
+        if !super::leg::lease_held(ctx, lease) { return false; }
+        std::thread::sleep(Duration::from_secs(1));
+        if crate::cli::ask(&ctl(), Some(node), "caps", "caps").is_ok() { return true; }
+    }
+}
+
+/// The pid of the Runner a launch under `lease` started, of the node's `launch list` lines (one
+/// from a hub that names no lease there is none).
+fn runner_under(listed: &[String], lease: &str) -> Option<u64> {
+    listed.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+        .find(|v| v.get("lease").and_then(Value::as_str) == Some(lease) && v.get("app").and_then(Value::as_str) == Some("runner"))
+        .and_then(|v| v.get("pid")?.as_u64())
 }
 
 /// The hidden Runner from the node's tree under `lease`, asked `compile all`, until its queue is
 /// done or a timed lease waits; it is stopped either way. Returns how it ended and the builds.
 fn compile_all(ctx: &Ctx, node: &str, lease: &str) -> (String, Vec<AppBuild>) {
-    let lines = match launch_ask(node, &format!("launch lease={lease} hidden release runner")) {
+    let launch = format!("launch lease={lease} hidden release runner");
+    let lines = match launch_ask(node, &launch) {
         Ok(l) => l,
+        // its hub restarted under the launch, for its self-update: once it answers, the Runner the
+        // launch started is the run's, or it launches again (a Mac's hub restarted 33 s into one, and
+        // the run warned "launch failed: connection closed by the peer", 11-22)
+        Err(e) if crate::lease::master::unreachable(&e) => {
+            if !hub_back(ctx, node, lease) {
+                return (format!("{CUT}, and its lease ended meanwhile: the next tick builds again"), Vec::new());
+            }
+            let found = runner_under(&launch_ask(node, "list").unwrap_or_default(), lease);
+            ctx.store.event("dockbuild", Sev::Info, format!("dockbuild {node}: its hub restarted under the Runner's launch ({}); {}", crate::proto::clean(&e, 120), found.map_or("launched again once it answered".to_string(), |p| format!("its Runner {p} goes on"))), None);
+            match found {
+                Some(pid) => vec![format!("{{\"launched\":{pid}}}")],
+                None => match launch_ask(node, &launch) {
+                    Ok(l) => l,
+                    Err(e) => return (format!("launch failed: {}", crate::proto::clean(&e, 160)), Vec::new()),
+                },
+            }
+        }
         Err(e) => return (format!("launch failed: {}", crate::proto::clean(&e, 160)), Vec::new()),
     };
     let Some(pid) = lines.iter().find_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()?.get("launched")?.as_u64()) else {
@@ -249,7 +294,15 @@ fn compile_all(ctx: &Ctx, node: &str, lease: &str) -> (String, Vec<AppBuild>) {
     // the Runner's JIT, once it shows its first frame
     let t = Instant::now();
     let jit = loop {
-        let listed = launch_ask(node, "list").unwrap_or_default();
+        let listed = match launch_ask(node, "list") {
+            Ok(l) => l,
+            // (a hub restart cut the look: the Runner runs on under the lease)
+            Err(e) if crate::lease::master::unreachable(&e) => {
+                if !hub_back(ctx, node, lease) { return (format!("{CUT}, and its lease ended meanwhile: the next tick builds again"), Vec::new()); }
+                continue;
+            }
+            Err(_) => Vec::new(),
+        };
         let Some(e) = listed.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).find(|e| e.get("pid").and_then(Value::as_u64) == Some(pid)) else {
             return ("the Runner exited before its first frame".into(), Vec::new());
         };
@@ -268,6 +321,11 @@ fn compile_all(ctx: &Ctx, node: &str, lease: &str) -> (String, Vec<AppBuild>) {
         std::thread::sleep(LOOK);
         let status = inspect(&jit, "compile");
         if status.is_empty() {
+            // (its hub restarting cuts the call too: asked again once it answers)
+            if crate::cli::ask(&ctl(), Some(node), "caps", "caps").is_err() {
+                if hub_back(ctx, node, lease) { continue; }
+                break format!("{CUT}, and its lease ended meanwhile: the next tick builds again");
+            }
             break "the Runner stopped answering".to_string();
         }
         if !status[0].starts_with("{\"note\"") {
@@ -349,5 +407,16 @@ mod tests {
         assert_eq!(back, n);
         let text = render(&Value::Arr(vec![n.to_value()]));
         assert!(text.contains("aaaa,bbbb") && text.contains("clock") && text.contains("exit 101"), "{text}");
+        // a hub restart under the launch: the Runner its lease started goes on (a hub from before
+        // the list named leases has none), and a run it cut is told as info, not a failure (11-22)
+        let listed: Vec<String> = [
+            r#"{"pid":7,"id":"m9/runner#7","app":"runner","visible":false,"jit":true,"inspect":null,"present_ms":null,"log":"/l","lease":"L2"}"#,
+            r#"{"pid":8,"id":"m9/fab#8","app":"fab","visible":false,"jit":true,"inspect":null,"present_ms":null,"log":"/l","lease":"L1"}"#,
+            r#"{"pid":9,"id":"m9/runner#9","app":"runner","visible":false,"jit":true,"inspect":null,"present_ms":null,"log":"/l","lease":"L1"}"#,
+            r#"{"pid":10,"id":"m9/runner#10","app":"runner","visible":false,"jit":true,"inspect":null,"present_ms":null,"log":"/l"}"#,
+        ].iter().map(|l| l.to_string()).collect();
+        assert_eq!((runner_under(&listed, "L1"), runner_under(&listed, "L3")), (Some(9), None), "the lease's own Runner");
+        assert_eq!(verdict_sev(&format!("{CUT}, and its lease ended meanwhile"), true), Sev::Info, "a cut run is the roll's");
+        assert_eq!((verdict_sev("done", true), verdict_sev("done", false), verdict_sev("launch failed: x", true)), (Sev::Info, Sev::Warn, Sev::Warn));
     }
 }

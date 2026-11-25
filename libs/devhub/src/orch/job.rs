@@ -48,9 +48,12 @@ pub fn start(ctx: Arc<Ctx>) {
     // it (one job lost two placements' JIT builds to two master restarts, 11-02). A job whose
     // lease is still going or whose snapshot is still shipping, or whose lease ended meanwhile,
     // is placed again; one still waiting for a box asks again.
+    // A run that ended, whose lease went before its verdict was recorded ([`ended`]: the release is
+    // a round trip to its box), is finished from the exit it noted. Placed again, J16837's passing
+    // 39 s run ran a second time after the master restarted in that gap (11-23).
     let held = |j: &Job| super::leg::lease_held(&ctx, &j.lease) && (j.run_n > 0 || j.granted_ms > 0 && j.shipped_ms >= j.granted_ms);
-    let (back, moved, stray): (Vec<Job>, Vec<Job>, Vec<String>) = ctx.store.update(|d| {
-        let (mut back, mut moved, mut stray) = (Vec::new(), Vec::new(), Vec::new());
+    let (back, moved, stray, exited): (Vec<Job>, Vec<Job>, Vec<String>, Vec<Job>) = ctx.store.update(|d| {
+        let (mut back, mut moved, mut stray, mut exited) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let pending: std::collections::HashSet<String> = d.jobs.iter().filter(|j| matches!(j.state.as_str(), "queued" | "leasing"))
             .flat_map(|j| j.after.iter().cloned()).collect();
         for j in d.jobs.iter_mut() {
@@ -62,6 +65,7 @@ pub fn start(ctx: Arc<Ctx>) {
                 // A restart between finish and release resumes the handoff, not the run.
                 "ok" if j.kind == "timed" && (held(j) || pending.contains(&j.id)) => back.push(j.clone()),
                 "running" | "paused" if held(j) => back.push(j.clone()),
+                "running" | "paused" if j.exit.is_some() && !super::leg::lease_held(&ctx, &j.lease) => exited.push(j.clone()),
                 "running" | "paused" => {
                     if j.run_n == 0 {
                         j.attempts = j.attempts.saturating_sub(1);
@@ -73,13 +77,15 @@ pub fn start(ctx: Arc<Ctx>) {
                     } else {
                         "its lease did not outlive the master's restart"
                     };
-                    if j.attempts < ATTEMPTS {
-                        j.state = "queued".into();
-                        j.note = format!("{what}; placed again");
-                    } else {
+                    // placed again however often ([`again_after`]): the restart is its pause. One
+                    // taken over from its client never is: it would run without that client's tree
+                    if j.adopted {
                         j.state = "lost".into();
                         j.ended_ms = wall_ms();
-                        j.note = format!("{what} (no placements left)");
+                        j.note = format!("{what} (taken over from its client: never placed again)");
+                    } else {
+                        j.state = "queued".into();
+                        j.note = format!("{what}; placed again");
                     }
                     j.lease.clear();
                     j.node.clear();
@@ -89,10 +95,15 @@ pub fn start(ctx: Arc<Ctx>) {
                 _ => {}
             }
         }
-        (back, moved, stray)
+        (back, moved, stray, exited)
     }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for l in stray {
         end_lease(&l);
+    }
+    for j in exited {
+        let code = j.exit.unwrap_or_default();
+        event(&ctx, Sev::Info, format!("job {}: its run on {} had ended (exit {code}) as the master restarted; that exit is its result", j.id, j.node), Some(&j));
+        finish(&ctx, &j.id, Ok(code), &ctx.logs("jobs").join(format!("{}.log", j.id)));
     }
     for j in moved {
         event(&ctx, Sev::Warn, format!("job {}: {}", j.id, j.note), Some(&j));
@@ -174,20 +185,27 @@ fn dispatch(ctx: &Arc<Ctx>) {
     dispatch_following(ctx, &[]);
 }
 
+/// The queued jobs to start at `now`: those whose jobs before them are ok, once past the pause
+/// a lost placement gave them ([`again_after`]); and those to skip, a job before them having ended
+/// otherwise, with why.
+fn ready(d: &crate::state::Doc, now: u64) -> (Vec<String>, Vec<(String, String)>) {
+    let state = |id: &str| d.jobs.iter().find(|j| j.id == id).map(|j| j.state.clone());
+    let (mut go, mut skip) = (Vec::new(), Vec::new());
+    for j in d.jobs.iter().filter(|j| j.state == "queued") {
+        let deps: Vec<(String, Option<String>)> = j.after.iter().map(|a| (a.clone(), state(a))).collect();
+        if let Some((a, s)) = deps.iter().find(|(_, s)| s.as_deref().is_none_or(|s| matches!(s, "failed" | "panicked" | "cancelled" | "skipped" | "lost" | "jit-error"))) {
+            skip.push((j.id.clone(), format!("{a} {}", s.as_deref().unwrap_or("is unknown"))));
+        } else if deps.iter().all(|(_, s)| s.as_deref() == Some("ok")) && j.again_ms <= now {
+            go.push(j.id.clone());
+        }
+    }
+    (go, skip)
+}
+
 fn dispatch_following(ctx: &Arc<Ctx>, following: &[String]) -> Vec<mpsc::Receiver<()>> {
     let mut asked = Vec::new();
     let (go, skip): (Vec<String>, Vec<(String, String)>) = ctx.store.read(|d| {
-        let state = |id: &str| d.jobs.iter().find(|j| j.id == id).map(|j| j.state.clone());
-        let (mut go, mut skip) = (Vec::new(), Vec::new());
-        for j in d.jobs.iter().filter(|j| j.state == "queued") {
-            let deps: Vec<(String, Option<String>)> = j.after.iter().map(|a| (a.clone(), state(a))).collect();
-            if let Some((a, s)) = deps.iter().find(|(_, s)| s.as_deref().is_none_or(|s| matches!(s, "failed" | "panicked" | "cancelled" | "skipped" | "lost" | "jit-error"))) {
-                skip.push((j.id.clone(), format!("{a} {}", s.as_deref().unwrap_or("is unknown"))));
-            } else if deps.iter().all(|(_, s)| s.as_deref() == Some("ok")) {
-                go.push(j.id.clone());
-            }
-        }
-        (go, skip)
+        ready(d, wall_ms())
     });
     for (id, why) in skip {
         let j = ctx.store.update(|d| {
@@ -347,12 +365,9 @@ pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<String, St
         return Err(format!("{}: {e}", held.node));
     }
     let source = r.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string)).unwrap_or_default();
-    // it runs what was submitted, or not at all
+    // it runs what was submitted, or not at all: on the pin the master granted
     if let Some(v) = &manifest {
-        let hashes: std::collections::BTreeMap<&str, &str> = v.get("changed").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| Some((x.get("path")?.as_str()?, x.get("hash")?.as_str()?))).collect();
-        let files: Vec<(String, String)> = changed.iter().map(|p| (p.clone(), hashes.get(p.as_str()).unwrap_or(&"").to_string())).collect();
-        let pin = v.get("rev").and_then(|r| r.as_str()).and_then(crate::lease::Pin::of_rev).map_or(String::new(), |p| p.key());
-        let want = crate::lease::ship::source_id(&pin, &files, &deleted);
+        let want = snap_source(v, ctx.leases.rev_of(&held.id).as_deref(), &changed, &deleted);
         if !source.is_empty() && source != want {
             return Err(format!("{}: took source {source}, snapshot {snap} is {want}: its files differ on the box", held.node));
         }
@@ -360,12 +375,45 @@ pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<String, St
     Ok(source)
 }
 
-/// How often a job is placed again when its box is lost under it.
-pub const ATTEMPTS: u32 = 3;
+/// The source id ([`crate::lease::ship::source_id`]) a box's tree has once a snapshot (its
+/// `manifest`, its `changed` and `deleted` paths) shipped on top of the pin its lease runs at:
+/// `granted`, the master's `--rev` for the lease, else the manifest's own. The master pins the
+/// followed nested repositories beside the asked pin's halves ([`beside_absent`]), so the lease's
+/// pin can name a nested repository the snapshot's rev does not, or another commit of it: every
+/// worktree run of a lane whose makepad side lacked a landing in makepad/apps was refused as
+/// "its files differ on the box" (11-22).
+fn snap_source(manifest: &Value, granted: Option<&str>, changed: &[String], deleted: &[String]) -> String {
+    let hashes: std::collections::BTreeMap<&str, &str> = manifest.get("changed").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| Some((x.get("path")?.as_str()?, x.get("hash")?.as_str()?))).collect();
+    let files: Vec<(String, String)> = changed.iter().map(|p| (p.clone(), hashes.get(p.as_str()).unwrap_or(&"").to_string())).collect();
+    let rev = granted.or_else(|| manifest.get("rev").and_then(|r| r.as_str()));
+    let pin = rev.and_then(crate::lease::Pin::of_rev).map_or(String::new(), |p| p.key());
+    crate::lease::ship::source_id(&pin, &files, deleted)
+}
+
+/// The pause before work whose box was lost under it `lost` times in a row is placed again: 2 s,
+/// doubling to 60 s. It is placed again however often, each time said: three losses dropped a
+/// job as "lost", work a box's trouble threw away (a cap of three placements for jobs, verify
+/// legs and live sessions, 11-25).
+pub fn again_after(lost: u32) -> Duration {
+    Duration::from_secs((2u64 << lost.saturating_sub(1).min(5)).min(60))
+}
+
+/// Waits [`again_after`]`(lost)` a second at a time, cut short once `gone` says the work ended;
+/// whether it is still wanted.
+pub fn pause_again(lost: u32, gone: &dyn Fn() -> bool) -> bool {
+    let until = std::time::Instant::now() + again_after(lost);
+    loop {
+        if gone() { return false; }
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() { return true; }
+        std::thread::sleep(left.min(Duration::from_secs(1)));
+    }
+}
 
 /// One job: lease, ship its snapshot, run, release, result.
 fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
-    let Some(j) = set(ctx, id, |j| j.attempts += 1) else { return };
+    // (a placement's exit is its own run's: [`start`] reads it as that run's)
+    let Some(j) = set(ctx, id, |j| { j.attempts += 1; j.exit = None; }) else { return };
     let dir = ctx.logs("jobs");
     let _ = std::fs::create_dir_all(&dir);
     let log = dir.join(format!("{id}.log"));
@@ -396,7 +444,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
         Ok(h) => h,
         // the master's socket or a box's link went away, or the master answered its ask with
         // nothing: no verdict on the job, which never ran
-        Err(e) if super::leg::exit_lost(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
+        Err(e) if super::leg::exit_lost(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160)), false) => return,
         Err(e) => {
             ended_by_hand(ctx, id, &e);
             return finish(ctx, id, Err(e), &log);
@@ -432,7 +480,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, notify: Option<mpsc::Sender<()>>) {
             Ok(s) => source = s,
             Err(e) => {
                 held.release(None);
-                if super::leg::exit_lost(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
+                if super::leg::exit_lost(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160)), true) {
                     return;
                 }
                 return finish(ctx, id, Err(format!("shipping {}: {e}", j.snap)), &log);
@@ -533,7 +581,7 @@ fn adopt(ctx: &Ctx, json: &str, take: &dyn Fn(&str, u32) -> Result<(String, u64)
         let id = format!("J{}", d.jobs_next);
         let log = ctx.logs("jobs").join(format!("{id}.log")).to_string_lossy().into_owned();
         // its wait was told this lease's verdict: the client said it
-        let j = Job { id, lane: text("lane"), agent: text("agent"), kind: text("kind"), cmd: cmd.clone(), cwd: text("cwd"), rev: text("rev"), repo_dir: text("repo_dir"), class: text("class"), priority: text("priority"), src: text("src"), state: "running".into(), submitted_ms: granted, asked_ms: granted, granted_ms: granted, shipped_ms: granted, started_ms: granted, lease: lease.clone(), node: node.clone(), run_n, log, attempts: ATTEMPTS, idle_told: lease.clone(), note: format!("{lease}'s client handed its run over at the idle verdict"), ..Default::default() };
+        let j = Job { id, lane: text("lane"), agent: text("agent"), kind: text("kind"), cmd: cmd.clone(), cwd: text("cwd"), rev: text("rev"), repo_dir: text("repo_dir"), class: text("class"), priority: text("priority"), src: text("src"), state: "running".into(), submitted_ms: granted, asked_ms: granted, granted_ms: granted, shipped_ms: granted, started_ms: granted, lease: lease.clone(), node: node.clone(), run_n, log, attempts: 1, adopted: true, idle_told: lease.clone(), note: format!("{lease}'s client handed its run over at the idle verdict"), ..Default::default() };
         d.jobs.push(j.clone());
         j
     })?;
@@ -560,6 +608,9 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
         // handoff. No grant wait: that grant needs this lease to end. No timeout.
         for next in asked { let _ = next.recv(); }
     }
+    // the run's exit, durable before its lease goes: a master restarted before the verdict below
+    // finishes the job from it ([`start`])
+    if let (Ok(code), false) = (&r, finished) { set(ctx, id, |j| j.exit = Some(*code)); }
     let node = held.node.clone();
     let (fault, toolchain) = held.release_seeing_toolchain(r.as_ref().ok().copied());
     if get(ctx, id).is_some_and(|j| !j.shadow_of.is_empty()) {
@@ -578,7 +629,7 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
     // job runs again (four lanes' runs failed with rustup's "binary not applicable" as a toolchain
     // move ran beside them, each read as the lane's own bug, 11-13)
     if let Some(t) = toolchain.filter(|_| !finished && !matches!(r, Ok(0))) {
-        if again(ctx, id, &format!("the toolchain changed under it on {node} ({t}): its run has no verdict")) {
+        if again(ctx, id, &format!("the toolchain changed under it on {node} ({t}): its run has no verdict"), false) {
             return;
         }
     }
@@ -586,7 +637,7 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
     if let Some(e) = r.as_ref().err().filter(|e| !e.starts_with(super::leg::REFUSED)) {
         if !ended_by_hand(ctx, id, e) && !e.contains(" ended (disk): ") && !e.contains(" ended (memory): ") {
             let node = get(ctx, id).map_or(String::new(), |j| j.node);
-            if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160))) {
+            if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160)), true) {
                 return;
             }
         }
@@ -616,12 +667,28 @@ fn ended_by_hand(ctx: &Ctx, id: &str, e: &str) -> bool {
     true
 }
 
-/// Back to the queue, with what happened as its note, if it has placements left; whether it went.
-fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
+/// What a job that lost two or more boxes under it may be, and where it goes next ([`again`]).
+fn lost_boxes_said(j: &Job) -> Option<String> {
+    let [rest @ .., last] = j.lost_on.as_slice() else { return None };
+    (!rest.is_empty()).then(|| format!("job {} has lost boxes {} and {last} under it: it may be what takes them down. Its next placement takes none of them while another box can, nor a box whose RAM budget is under its measured need", j.id, rest.join(", ")))
+}
+
+/// Back to the queue after its pause ([`again_after`] of its placements so far), with what
+/// happened as its note; whether it went (an ended job, one taken over from its client, or one
+/// whose client is gone, does not). `box_lost`: its box went under it (not a lease never granted,
+/// nor a toolchain that changed): the box joins those its next placement shuns ([`Job::lost_on`]).
+fn again(ctx: &Ctx, id: &str, why: &str, box_lost: bool) -> bool {
+    let grew = std::cell::Cell::new(false);
     let j = set(ctx, id, |j| {
-        if matches!(j.state.as_str(), "leasing" | "running") && j.attempts < ATTEMPTS && j.holder.is_none_or(crate::os::pid_alive) {
+        if matches!(j.state.as_str(), "leasing" | "running") && !j.adopted && j.holder.is_none_or(crate::os::pid_alive) {
+            if box_lost && !j.node.is_empty() && !j.lost_on.contains(&j.node) {
+                j.lost_on.push(j.node.clone());
+                grew.set(j.lost_on.len() >= 2);
+            }
+            let pause = again_after(j.attempts);
             j.state = "queued".into();
-            j.note = format!("{why}; placed again");
+            j.again_ms = wall_ms() + pause.as_millis() as u64;
+            j.note = format!("{why}; placed again in {} s (its placement {})", pause.as_secs(), j.attempts + 1);
             j.unquiet.clear();
             j.lease.clear();
             j.node.clear();
@@ -631,6 +698,9 @@ fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
     match j.filter(|j| j.state == "queued") {
         Some(j) => {
             event(ctx, Sev::Warn, format!("job {id}: {}", j.note), Some(&j));
+            // a job that takes its boxes down, said once per box it took (the master's inbox
+            // keeps it): it is placed again however often ([`again_after`])
+            if let Some(line) = lost_boxes_said(&j).filter(|_| grew.get()) { event(ctx, Sev::Warn, line, Some(&j)); }
             true
         }
         None => false,
@@ -1125,6 +1195,52 @@ pub(crate) fn whole_pair(ctx: &Ctx, rev: &str) -> Result<(), String> {
     }
 }
 
+/// A run's pin with each followed nested repository its worktree `tree` lacks (named at its landed
+/// tip, [`crate::nested::absent`], or not named at all: a master's own pin of the pair alone, for
+/// warm legs, CI, jitlegs or a show, names it from its tip) where it stood beside the pin's makepad and commercial commits
+/// ([`crate::land::beside_pin`], off the land queue's entries, and the whole land history when the
+/// pin lacks every landing of the queue it was asked about: a pin from before the queue): the rev
+/// and a line for each side it moved. None: none moves. A lane's own half of a repository stays
+/// as the lane pinned it.
+pub(crate) fn beside_absent(ctx: &Ctx, rev: &str, tree: &std::path::Path) -> Option<(String, Vec<String>)> {
+    let (mk, mut nested) = crate::lease::parse_pinned(rev).ok()?;
+    // after Fab moved into makepad/apps (#8321) makepad's and commercial's manifests read
+    // apps/apps: a tree without it, a warm leg's of the pair alone, built nothing (11-22)
+    let unnamed: Vec<(String, crate::lease::RevPin)> = crate::nested::tips(&ctx.repo).into_iter().filter(|(n, _, _)| !nested.iter().any(|(m, _)| m == n)).map(|(n, branch, sha)| (n, crate::lease::RevPin { branch, sha })).collect();
+    let added: Vec<String> = unnamed.iter().map(|(n, _)| n.clone()).collect();
+    nested.extend(unnamed);
+    let lacks = |n: &str| n != crate::state::PAIRED && (added.iter().any(|a| a == n) || !tree.join(crate::nested::dir(n)).join(".git").exists());
+    if !nested.iter().any(|(n, _)| lacks(n)) {
+        return None;
+    }
+    let main = nested.iter().find(|(n, _)| n == crate::state::PAIRED).map_or("", |(_, side)| side.sha.as_str());
+    let landed = live_landings(ctx);
+    let history = std::cell::OnceCell::new();
+    let (mut out, mut said) = (format!("{}@{}", mk.branch, mk.sha), Vec::new());
+    for (name, side) in &nested {
+        let moved = lacks(name).then(|| crate::nested::checkout(tree, name)).flatten().and_then(|dir| {
+            let (at, held) = crate::land::beside_pin(&landed, &ctx.repo, &dir, name, &mk.sha, main, &side.sha);
+            let at = at.map(|(c, e)| (c, e.clone()));
+            if at.is_none() || held {
+                return at;
+            }
+            // the pin lacks every landing of the queue it was asked about: how far back it goes
+            // is the whole history's to say
+            let all = history.get_or_init(|| ctx.store.history("land").map(|h| h.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect::<Vec<_>>()).unwrap_or_default());
+            crate::land::beside_pin(all, &ctx.repo, &dir, name, &mk.sha, main, &side.sha).0.map(|(c, e)| (c, e.clone())).or(at)
+        });
+        let sha = match moved {
+            Some((before, e)) => {
+                said.push(format!("{name} at {before:.10}, not its tip {:.10}: the run's makepad or commercial side lacks #{} {} ({}), which landed in {name} too", side.sha, e.id, e.label(), e.agent));
+                before
+            }
+            None => side.sha.clone(),
+        };
+        out.push_str(&format!(",{name}={}@{sha}", side.branch));
+    }
+    (!said.is_empty() || !added.is_empty()).then_some((out, said))
+}
+
 /// The land queue's current entries: the recent landings a lane merges.
 fn live_landings(ctx: &Ctx) -> Vec<crate::land::Entry> {
     ctx.store.read(|d| d.land.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect())
@@ -1280,6 +1396,7 @@ fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.windows = j.windows;
     r.holder = j.holder;
     r.series = (!j.series.is_empty()).then(|| j.series.clone());
+    r.lost_on = j.lost_on.clone();
 }
 
 /// `submit {"tree","rev"?,"batch","jobs":[{kind,needs,node,prio,lane,agent,cmd,after}]}`: ids at
@@ -1371,7 +1488,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let priority = match s(r, "priority").as_str() { "" => Priority::Background, p => Priority::parse(p).ok_or("priority is interactive or background")? };
         let (agent, rev, reason) = (s(r, "agent"), s(&v, "rev"), s(r, "native"));
         let (os, arch) = crate::lease::native::platform(&crate::lease::sched::parse_needs(&s(r, "needs")), &s(r, "node"), &ctx.leases.nodes());
-        let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
+        let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), granted: "", route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
         let (windows, gap) = crate::lease::native::windows_verdict(&tree, &rev, &cmd);
@@ -1412,6 +1529,23 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             (rev, String::new(), 0)
         }
         r if r.is_empty() => snapshot(ctx, &tree, &lane)?,
+        // `--rev` with DEVHUB_ALSO: the commits alone, with only the named files they do not track
+        r if !list(&v, "also").is_empty() => {
+            let rev = crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)))?;
+            let pin = crate::lease::Pin::of_rev(&rev).ok_or_else(|| format!("rev `{rev}` is not pinned"))?;
+            let mut named = Vec::new();
+            for p in list(&v, "also") {
+                if !crate::lease::ship::inside(&p) { return Err(format!("DEVHUB_ALSO needs a repository-relative path: {p}")); }
+                if crate::lease::ship::never_ships_named(&p) { return Err(format!("DEVHUB_ALSO path never ships: {p}")); }
+                let mut entries = Vec::new();
+                crate::lease::ship::entries(&tree, &p, &mut entries)?;
+                named.extend(entries.into_iter().map(|e| e.path).filter(|p| !crate::lease::ship::never_ships_named(p)));
+            }
+            named.sort(); named.dedup();
+            let tracked = crate::lease::ship::tracked_at_pin(&tree, &pin, &named)?;
+            if !tracked.is_empty() { return Err(crate::lease::ship::also_with_rev(&tracked, &r)); }
+            copy_snapshot(ctx, &tree, rev, named, Vec::new())?
+        }
         r => (crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)))?, String::new(), 0),
     };
     whole_pair(ctx, &rev)?;
@@ -1729,7 +1863,7 @@ mod tests {
         let j = adopt(&c, body, &taken).unwrap();
         assert_eq!((j.state.as_str(), j.lease.as_str(), j.node.as_str(), j.run_n, j.started_ms, j.cmd.join(" ")), ("running", "L7", "node-a", 2, 5_000, "cargo test".to_string()));
         assert_eq!(told_idle(&c, std::slice::from_ref(&j.id), &|lease| Some(format!("{lease} idle")), &|_| None).unwrap(), "[]", "its client said the verdict");
-        assert!(!again(&c, &j.id, "box node-a lost"), "never placed again");
+        assert!(!again(&c, &j.id, "box node-a lost", true), "never placed again");
         std::fs::create_dir_all(c.logs("jobs")).unwrap();
         std::fs::create_dir_all(c.logs(LEASE_LOGS)).unwrap();
         let log = std::path::PathBuf::from(&j.log);
@@ -1762,11 +1896,40 @@ mod tests {
             finish(&c, id, Err(e.into()), &log);
             let j = get(&c, id).unwrap();
             assert_eq!((j.state.as_str(), j.note.as_str()), ("cancelled", e));
-            assert!(!again(&c, id, "box box-a lost"), "an ended job stays ended");
+            assert!(!again(&c, id, "box box-a lost", true), "an ended job stays ended");
         }
         assert!(!ended_by_hand(&c, "J3", "L1 ended (expired)"));
-        assert!(again(&c, "J3", "box box-a lost (L1 ended (expired))"));
+        assert!(again(&c, "J3", "box box-a lost (L1 ended (expired))", true));
         assert_eq!(get(&c, "J3").unwrap().state, "queued");
+        // placed again however often, later each time, and started by none before its pause:
+        // three losses dropped one as "lost" (11-25)
+        assert_eq!((1..=7).map(|n| again_after(n).as_secs()).collect::<Vec<_>>(), [2, 4, 8, 16, 32, 60, 60]);
+        let (j3, now) = (get(&c, "J3").unwrap(), wall_ms());
+        assert!(j3.again_ms > now && j3.again_ms <= now + 2_000 && j3.note.ends_with("placed again in 2 s (its placement 2)"), "{} {}", j3.again_ms, j3.note);
+        assert!(c.store.read(|d| ready(d, j3.again_ms - 1)).0.is_empty(), "not before its pause");
+        assert_eq!(c.store.read(|d| ready(d, j3.again_ms)).0, ["J3"]);
+        c.store.update(|d| for j in d.jobs.iter_mut().filter(|j| j.id == "J3") { (j.state, j.attempts) = ("running".into(), 3); }).unwrap();
+        assert!(again(&c, "J3", "box box-a lost", true), "a fourth placement");
+        assert!(get(&c, "J3").unwrap().note.ends_with("placed again in 8 s (its placement 4)"), "{}", get(&c, "J3").unwrap().note);
+        assert!(pause_again(1, &|| true) == false, "work that ended waits no more");
+        // the boxes lost under it go with its next lease, which shuns them; a second box lost is
+        // said as what it may be, once per box (a job that takes its boxes down, 11-25); a lease
+        // never granted and a toolchain change are no box lost
+        let j3 = get(&c, "J3").unwrap();
+        assert_eq!(j3.lost_on, ["box-a"], "one box, said once");
+        let mut r = crate::lease::sched::Req::new("lane", Kind::Test);
+        configure_request(&mut r, &j3);
+        assert_eq!(r.lost_on, ["box-a"]);
+        let lost_on = |node: &str, why: &str, box_lost: bool| {
+            c.store.update(|d| for j in d.jobs.iter_mut().filter(|j| j.id == "J3") { (j.state, j.node) = ("running".into(), node.into()); }).unwrap();
+            assert!(again(&c, "J3", why, box_lost));
+            get(&c, "J3").unwrap().lost_on
+        };
+        assert_eq!(lost_on("box-b", "no lease (x)", false), ["box-a"]);
+        assert_eq!(lost_on("box-b", "box box-b lost", true), ["box-a", "box-b"]);
+        assert_eq!(lost_on("box-a", "box box-a lost", true), ["box-a", "box-b"], "a box once");
+        assert!(lost_boxes_said(&get(&c, "J3").unwrap()).is_some_and(|w| w.starts_with("job J3 has lost boxes box-a and box-b under it: it may be what takes them down")));
+        assert_eq!(lost_boxes_said(&j3), None, "one box lost says nothing of it");
         let _ = std::fs::remove_dir_all(&c.home);
     }
 
@@ -1920,6 +2083,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("files/apps/commercial/a.rs")).unwrap(), "c2");
         let man = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         assert!(man.contains("\"deleted\":[\"gone.rs\"]") && man.contains("\"path\":\"new.rs\""), "{man}");
+        // the box's source is the snapshot on the pin the master granted, which names a nested
+        // repository the snapshot's rev does not (beside_absent): checked against that, and the
+        // snapshot's own rev where the master has none (11-22: every worktree run was refused)
+        let v = makepad_strict_json::parse(man.as_bytes()).unwrap();
+        let (changed, deleted) = snap_paths(&c, "S1").unwrap();
+        let granted = format!("rc-t@{head},commercial=rc-t@{chead},extra=main@{}", "e".repeat(40));
+        let pin = |rev: &str| crate::lease::Pin::of_rev(rev).unwrap().key();
+        let hash = |p: &str| v.get("changed").and_then(|a| a.as_arr()).unwrap().iter().find(|x| x.get("path").and_then(|q| q.as_str()) == Some(p)).and_then(|x| x.get("hash")?.as_str()).unwrap().to_string();
+        let files = |new: &str| changed.iter().map(|p| (p.clone(), if p == "new.rs" { new.to_string() } else { hash(p) })).collect::<Vec<_>>();
+        let n = hash("new.rs");
+        let on_box = crate::lease::ship::source_id(&pin(&granted), &files(&n), &deleted);
+        assert_eq!(snap_source(&v, Some(&granted), &changed, &deleted), on_box, "the granted pin's");
+        assert_eq!(snap_source(&v, None, &changed, &deleted), crate::lease::ship::source_id(&pin(&format!("rc-t@{head},commercial=rc-t@{chead}")), &files(&n), &deleted), "the snapshot's own rev's");
+        assert_ne!(snap_source(&v, Some(&granted), &changed, &deleted), crate::lease::ship::source_id(&pin(&granted), &files("x"), &deleted), "a file the box has otherwise differs");
         assert_eq!(c.store.read(|d| d.jobs[2].after.clone()), vec!["J1".to_string(), "J2".to_string()]);
         // the commits alone with a rev; one naming only the makepad side gets the nested
         // commercial HEAD too (a commercial package was missing from the overlay without it)
@@ -1967,6 +2144,16 @@ mod tests {
         // a lane named in upper case is the same lane: folded at submit
         submit_line(&c, "rc-t", false, &[req("x", &[]).replace("\"lane1\"", "\"LANE1\"")]).unwrap();
         assert_eq!(c.store.read(|d| d.jobs.last().map(|j| j.lane.clone())), Some("lane1".to_string()));
+        // the master's lease ask names each followed nested repository a pin does not name, from
+        // its tip, beside the pin's halves: a warm leg's pin of the pair alone built a tree without
+        // makepad/apps once commercial read Fab there (#8321, 11-22). A side the pin names and the
+        // tree holds stays as pinned
+        let extra = tree.join("apps/extra");
+        repo(&extra, "main");
+        let x = g(&extra, &["rev-parse", "HEAD"]);
+        let pair = format!("work@{head},commercial=main@{chead}");
+        assert_eq!(beside_absent(&c, &pair, &tree), Some((format!("{pair},extra=main@{x}"), Vec::new())), "the pair alone: extra at its tip");
+        assert_eq!(beside_absent(&c, &format!("{pair},extra=rc-t@{x}"), &tree), None, "a side the pin names, in the tree: as pinned");
         let home = c.repo.parent().unwrap().to_path_buf();
         drop(c);
         let _ = std::fs::remove_dir_all(&home);

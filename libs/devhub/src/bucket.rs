@@ -146,6 +146,21 @@ pub struct Outcome {
 /// whose log has it runs no third time.
 const RERUN: &str = "bucket: its lease was lost under the gate (the fleet, not the code): running it once more";
 
+/// A gate's log line where it said its start (`GATE <mode>: `) and exited 0 without its verdict
+/// line, and runs once more as a lost lease's does ([`again`]): it said nothing of the landings. A
+/// box's disk reclaim took the run log of a full run's libraries' sweep under it; the sweep ended 0
+/// four seconds into its checks, and the run had no verdict beside 691 judged units (L1561802,
+/// 11-22).
+const RERUN_UNSAID: &str = "bucket: the gate exited 0 without its verdict line (it said nothing of the landings): running it once more";
+
+/// The lines after which a gate's log holds its run once more.
+const RERUN_LINES: [&str; 2] = [RERUN, RERUN_UNSAID];
+
+/// A log's text before its last [`RERUN_LINES`] line, and after it.
+fn rerun_cut(text: &str) -> Option<(&str, &str)> {
+    RERUN_LINES.iter().filter_map(|m| text.rfind(&format!("{m}\n")).map(|i| (i, i + m.len() + 1))).max().map(|(i, j)| (&text[..i], &text[j..]))
+}
+
 /// The log's line of an adopted run whose holder ended with no exit and no verdict while no master
 /// watched it: the master's box restarted under it, its holder and lease went with it, and the run
 /// is a lost lease's ([`adopted_end`]).
@@ -1046,8 +1061,10 @@ fn is_unit(unit: &str) -> bool {
         // <pkg>`: its tests run under the JIT (the tests bucket, land_gate.sh testrun); `guard
         // <pkg>`: its GPU guard of a user-visible effect (the hot bucket, step_guards); `wasm <pkg>`:
         // its wasm32 check (the fast bucket, step_wasmcheck); `windows <pkg>`: its cargo check on a
-        // Windows box (the windows bucket)
-        (Some("check" | "present" | "cargo" | "tests" | "test" | "guard" | "wasm" | "windows"), Some(_)) => true,
+        // Windows box (the windows bucket); `wintest <pkg>/<target>`: its tests on a Windows box
+        // (the windows-tests bucket); `boundary <app>`: its boundary audit (the fast bucket,
+        // qboundary_one)
+        (Some("check" | "present" | "cargo" | "tests" | "test" | "guard" | "wasm" | "windows" | "wintest" | "boundary"), Some(_)) => true,
         (Some("suite"), Some(_)) => words.next().is_none(),
         (Some("devhub"), Some("makepad-devhub")) => words.next().is_none(),
         _ => false,
@@ -1076,6 +1093,25 @@ fn landings(repo: &Path, base: &Pair, tip: &Pair, entries: &[Entry]) -> Result<V
     }).cloned().collect())
 }
 
+/// The landings a search from `from` to `tip` walks ([`run_bisect`]), in their chains' order
+/// ([`order_landings`]), with what it left out and why, and the chains of the other nested
+/// repositories `tip` pins, which it walked too.
+fn chain_landings(repo: &Path, history: &[Entry], from: &Pin, tip: &Pin) -> Result<(Vec<Entry>, Vec<String>, Vec<(String, Vec<String>)>), String> {
+    let (a, b) = (from.pair(), tip.pair());
+    let work = bisect_chain(repo, &a.work, &b.work)?;
+    let main = bisect_chain(&repo.join("apps/commercial"), &a.main, &b.main)?;
+    // every other nested repository the red tip pinned is walked too, as the bucket names its tip
+    // (`apps=..`): a landing of its halves alone is a candidate, and each probe pins it where that
+    // landing left it, where every probe took the red tip's (11-23)
+    let (nested, unread) = nested_chains(repo, from, tip);
+    let mut range = landings(repo, &a, &b, history)?;
+    let alone: Vec<Entry> = history.iter().filter(|e| !nested_moves(e, &nested).is_empty() && !range.iter().any(|r| r.id == e.id)).cloned().collect();
+    range.extend(alone);
+    let (ordered, mut left_out) = order_landings(&work, &main, &nested, &range);
+    left_out.extend(unread);
+    Ok((ordered, left_out, nested))
+}
+
 /// A tip's first-parent chain, oldest first, including `from` at position zero (11-15).
 fn bisect_chain(dir: &Path, from: &str, tip: &str) -> Result<Vec<String>, String> {
     if from == tip { return Ok(vec![from.to_string()]); }
@@ -1093,8 +1129,12 @@ fn bisect_chain(dir: &Path, from: &str, tip: &str) -> Result<Vec<String>, String
 }
 
 /// Serial landings grow along both chains; an unchanged side stays at its pre's position.
-/// Record times and hand-in numbers do not order the commits they landed (11-15).
-fn order_landings(work: &[String], main: &[String], entries: &[Entry]) -> (Vec<Entry>, Vec<String>) {
+/// Record times and hand-in numbers do not order the commits they landed (11-15). A landing of
+/// other nested repositories' halves alone ([`nested_moves`]: its pair the one before it left)
+/// comes after the landing that made its pair, and such landings by their own chains' positions.
+/// They were none: their pair did not move, and a red an apps landing caused was laid to a
+/// makepad landing or to nobody (11-23).
+fn order_landings(work: &[String], main: &[String], nested: &[(String, Vec<String>)], entries: &[Entry]) -> (Vec<Entry>, Vec<String>) {
     let positions = |chain: &[String]| chain.iter().enumerate().map(|(i, sha)| (sha.clone(), i)).collect::<HashMap<_, _>>();
     let (work, main) = (positions(work), positions(main));
     let (mut ordered, mut left_out) = (Vec::new(), Vec::new());
@@ -1103,15 +1143,118 @@ fn order_landings(work: &[String], main: &[String], entries: &[Entry]) -> (Vec<E
             left_out.push(format!("#{} has no commit pair: left out", e.id));
             continue;
         };
-        if pre == landed { continue; }
+        let moves = nested_moves(e, nested);
+        if pre == landed && moves.is_empty() { continue; }
         let w = work.get(if pre.work == landed.work { &pre.work } else { &landed.work });
         let m = main.get(if pre.main == landed.main { &pre.main } else { &landed.main });
         if w.is_none() { left_out.push(format!("#{} is not on work's first-parent chain: left out", e.id)); }
         if m.is_none() { left_out.push(format!("#{} is not on main's first-parent chain: left out", e.id)); }
-        if let (Some(w), Some(m)) = (w, m) { ordered.push(((*w, *m), e.clone())); }
+        let alone = usize::from(pre == landed);
+        if let (Some(w), Some(m)) = (w, m) { ordered.push(((*w, *m, alone, moves, e.changed_ms), e.clone())); }
     }
-    ordered.sort_by_key(|(at, _)| *at);
+    ordered.sort_by(|(a, _), (b, _)| a.cmp(b));
     (ordered.into_iter().map(|(_, e)| e).collect(), left_out)
+}
+
+/// The positions a landing moved the other nested repositories to along their chains (`nested`:
+/// each walked one's, [`nested_chains`]), by chain: none at a chain's base (its last pass's
+/// commit) or off it.
+fn nested_moves(e: &Entry, nested: &[(String, Vec<String>)]) -> Vec<(usize, usize)> {
+    let mut moves: Vec<(usize, usize)> = e.nested.iter().filter_map(|side| {
+        let (k, (_, chain)) = nested.iter().enumerate().find(|(_, (name, _))| *name == side.name)?;
+        chain.iter().position(|c| *c == side.landed).filter(|at| *at > 0).map(|at| (k, at))
+    }).collect();
+    moves.sort();
+    moves
+}
+
+/// The first-parent chains of the other nested repositories a bisect's red tip pinned (11-23),
+/// each from its last pass's commit (its red tip's alone when that named none: nothing of it to
+/// walk). One that does not read stays at its red tip's commit, said.
+fn nested_chains(repo: &Path, from: &Pin, tip: &Pin) -> (Vec<(String, Vec<String>)>, Vec<String>) {
+    let (mut chains, mut unread) = (Vec::new(), Vec::new());
+    for (name, at) in tip.nested.iter().filter(|(name, _)| *name != crate::state::PAIRED) {
+        let base = from.nested.get(name).unwrap_or(at);
+        match bisect_chain(&repo.join(crate::nested::dir(name)), base, at) {
+            Ok(chain) => chains.push((name.clone(), chain)),
+            Err(e) => unread.push(format!("{name} not walked, at its red tip's commit: {e}")),
+        }
+    }
+    (chains, unread)
+}
+
+/// Each candidate's pin: its landed pair, each walked nested repository at the last candidate up
+/// to it that moved it (its last pass's commit before one did), and never behind where its chain
+/// stood when the candidate's pair was made (`times`: each chain's commit times; `when`: each
+/// candidate's pair's, [`pair_time`]), any other at the red tip's. A probe pins commits that
+/// existed together, whether or not a landing moved them (main, 11-24).
+fn candidate_pins(candidates: &[Entry], tip: &Pin, nested: &[(String, Vec<String>)], times: &[Vec<i64>], when: &[Option<i64>]) -> Vec<Pin> {
+    let mut at = vec![0usize; nested.len()];
+    candidates.iter().enumerate().map(|(c, e)| {
+        for (k, i) in nested_moves(e, nested) { at[k] = at[k].max(i); }
+        if let Some(t) = when.get(c).copied().flatten() {
+            for (k, ts) in times.iter().enumerate().take(nested.len()) {
+                at[k] = at[k].max(ts.iter().position(|x| *x > t).map_or(ts.len().saturating_sub(1), |p| p.saturating_sub(1)));
+            }
+        }
+        let mut pin = bisect_pin(pin_of(&entry_pair(&e.landed).expect("landed pair")), tip);
+        for (k, (name, chain)) in nested.iter().enumerate() { pin.nested.insert(name.clone(), chain[at[k]].clone()); }
+        pin
+    }).collect()
+}
+
+/// The last pass's pin of each other nested repository the red tip pins and the pass did not (one
+/// the bucket followed only after it): that repository's first-parent commit at the pass's time,
+/// the newest no later than its pair's commits ([`pair_time`]), never the red tip's. A CI red's
+/// bisect pinned apps at its red tip (Fab moved in) beside makepad and commercial from before Fab
+/// moved out of commercial, and every probe, its last pass too, failed on two `fab-ai` packages,
+/// a pin set that never existed (main, 11-24). One with no commit by then stays at the red tip's,
+/// said.
+fn place_from(repo: &Path, from: &Pin, tip: &Pin) -> (Pin, Vec<String>) {
+    let (mut from, mut said) = (from.clone(), Vec::new());
+    let at = pair_time(repo, &from.pair());
+    for (name, sha) in tip.nested.iter().filter(|(n, _)| *n != crate::state::PAIRED) {
+        if from.nested.contains_key(name) { continue; }
+        let then = at.and_then(|t| chain_at(&repo.join(crate::nested::dir(name)), sha, t));
+        if then.is_none() { said.push(format!("{name} had no commit at its last pass's time to read: at its red tip's")); }
+        from.nested.insert(name.clone(), then.unwrap_or_else(|| sha.clone()));
+    }
+    (from, said)
+}
+
+/// When a pair was made: its newer commit's committer time (s), each side read in its repository.
+fn pair_time(repo: &Path, pair: &Pair) -> Option<i64> {
+    [commit_time(repo, &pair.work), commit_time(&repo.join("apps/commercial"), &pair.main)].into_iter().flatten().max()
+}
+
+fn commit_time(dir: &Path, sha: &str) -> Option<i64> {
+    if sha.is_empty() { return None; }
+    crate::gitread::with(dir, |p, repo| {
+        let oid = crate::gitread::resolve(p, repo, sha)?;
+        repo.read_commit(&oid).ok().map(|c| c.committer.timestamp)
+    }).flatten()
+}
+
+/// Each commit's committer time along a chain (i64::MAX where one does not read: never chosen by
+/// its time).
+fn chain_times(dir: &Path, chain: &[String]) -> Vec<i64> {
+    chain.iter().map(|sha| commit_time(dir, sha).unwrap_or(i64::MAX)).collect()
+}
+
+/// The newest commit of `tip`'s first-parent chain in `dir` made no later than `t` (s).
+fn chain_at(dir: &Path, tip: &str, t: i64) -> Option<String> {
+    crate::gitread::with(dir, |p, repo| {
+        let tip = crate::gitread::resolve(p, repo, tip)?;
+        repo.first_parents(tip).map_while(Result::ok).find(|(_, c)| c.committer.timestamp <= t).map(|(oid, _)| oid.to_hex())
+    }).flatten()
+}
+
+/// The lane a landing was: its makepad branch, else its commercial one's, else its first other
+/// nested half's (a landing of those alone).
+fn lane_of(e: &Entry) -> &str {
+    if e.branch != "-" { return &e.branch; }
+    if !e.cbranch.is_empty() { return &e.cbranch; }
+    e.nested.first().map_or(e.branch.as_str(), |side| side.branch.as_str())
 }
 
 fn attribute(repo: &Path, entries: &[Entry], failing: &[String]) -> (Vec<Vec<String>>, bool) {
@@ -1226,15 +1369,19 @@ fn message(text: &str) -> &str {
 /// A run's failing units with their compile errors (each unit's own output: the lines after the
 /// unit before it), or the tests a hung unit still ran (land_gate.sh's `HUNG: ` line), and the
 /// units that passed, by package (a proven one passed at these inputs).
+/// A build that could not compile (cargo's and the JIT's `error: could not compile `<crate>`
+/// (<target>)`) is kept after its unit's errors, so its first line is still an error
+/// ([`NOT_BUILT`], [`compile_red`]).
 fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
-    let (mut errors, mut passed, mut own) = (BTreeMap::new(), BTreeSet::new(), Vec::new());
+    let (mut errors, mut passed, mut own, mut built) = (BTreeMap::new(), BTreeSet::new(), Vec::new(), Vec::<String>::new());
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("GATEUNIT ") {
             match rest.split_once(' ') {
-                Some(("fail", unit)) if !own.is_empty() => {
+                Some(("fail", unit)) if !own.is_empty() || !built.is_empty() => {
                     let mut e = std::mem::take(&mut own);
                     e.sort();
                     e.dedup();
+                    for b in built.drain(..) { if !e.contains(&b) { e.push(b); } }
                     errors.insert(unit.to_string(), e);
                 }
                 // (`gone`: its package left the tree, nothing is left to fail)
@@ -1242,8 +1389,12 @@ fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
                 _ => {}
             }
             own.clear();
+            built.clear();
         } else if line.starts_with("STEP ") {
             own.clear();
+            built.clear();
+        } else if let Some(build) = line.strip_prefix("error: could not compile ").filter(|b| b.starts_with('`')) {
+            built.push(format!("{NOT_BUILT}{}", crate::proto::clean(build.split(" due to ").next().unwrap_or(build).trim_end(), 200)));
         } else if line.starts_with("HUNG: ") {
             own.push(crate::proto::clean(line, 400));
         } else if let Some(said) = line.strip_prefix("EXIT: ") {
@@ -1254,6 +1405,48 @@ fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
         }
     }
     (errors, passed)
+}
+
+/// The files a run's failing units and steps say their box's tree lacked: cargo's `failed to read
+/// `<path>`` and relax's `relax: <path>: .. no such file`, each as its path in the tree (what
+/// follows the run's root: the JIT's `dev/src/`, a native run's `tree/`), by the unit
+/// (`GATEUNIT fail`) or step (`GATESTEP fail`) whose lines they are.
+fn lacked_files(text: &str) -> BTreeMap<String, Vec<String>> {
+    let (mut by, mut own) = (BTreeMap::new(), Vec::<String>::new());
+    for line in text.lines().map(str::trim) {
+        if let Some(item) = line.strip_prefix("GATEUNIT fail ").or_else(|| line.strip_prefix("GATESTEP fail ")) {
+            if !own.is_empty() { by.insert(item.trim().to_string(), std::mem::take(&mut own)); }
+        } else if line.starts_with("GATEUNIT ") || line.starts_with("GATESTEP ") || line.starts_with("STEP ") {
+            own.clear();
+        } else if let Some(path) = lacked_path(line) {
+            let path = path.replace('\\', "/");
+            for root in ["/dev/src/", "/dev/tree/", "/tree/"] {
+                let Some((_, at)) = path.split_once(root) else { continue };
+                if !at.is_empty() && !own.iter().any(|o| o == at) { own.push(at.to_string()); }
+            }
+        }
+    }
+    by
+}
+
+/// The path of a line that says its run could not read a file: cargo's `failed to read `<path>``
+/// (a manifest), relax's `relax: <path>: <path>: no such file`.
+fn lacked_path(line: &str) -> Option<&str> {
+    if let Some((_, rest)) = line.split_once("failed to read `") { return rest.split_once('`').map(|(p, _)| p); }
+    let rest = line.strip_prefix("relax: ").filter(|_| line.to_ascii_lowercase().ends_with("no such file"))?;
+    rest.split_once(": ").map(|(p, _)| p)
+}
+
+/// The failing units and steps whose box's tree lacked a file the pinned tree holds
+/// ([`lacked_files`]), each with that file: the box's fault, no landing's. The pinned tree is
+/// `tip`'s, with each followed repository it does not name at its tip in `repo`.
+fn lacked_in_tree(repo: &Path, tip: &Pin, text: &str, failing: &[String]) -> BTreeMap<String, String> {
+    let lacked: BTreeMap<String, Vec<String>> = lacked_files(text).into_iter().filter(|(u, _)| failing.contains(u)).collect();
+    if lacked.is_empty() { return BTreeMap::new(); }
+    let mut pin = tip.clone();
+    for (name, _, sha) in crate::nested::tips(repo) { pin.nested.entry(name).or_insert(sha); }
+    let Ok(tree) = crate::orch::ci::Tree::at_pin(repo, &pin) else { return BTreeMap::new() };
+    lacked.into_iter().filter_map(|(u, paths)| Some((u, paths.into_iter().find(|p| tree.has(p))?))).collect()
 }
 
 /// A run's failing tests by unit, as `makepad test` names each (`FAILED <test>`: the unit's own
@@ -1302,6 +1495,55 @@ fn panic_lines(text: &str) -> BTreeMap<String, Vec<String>> {
         }
     }
     out
+}
+
+/// The lines of the tree each failing test's message names, by unit and test: `<path>:<line>` (a
+/// column after it or not) after `panicked at <where> -- ` and in the indented lines under it.
+/// Where it panicked is no such line: a harness's assert stands over the line its check found
+/// (`relax check --boundary options` names the line that needs an Option entry, 11-25).
+fn said_lines(text: &str) -> BTreeMap<(String, String), Vec<(String, usize)>> {
+    let (mut out, mut own, mut said) = (BTreeMap::new(), Vec::<(String, Vec<(String, usize)>)>::new(), false);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("GATEUNIT ") {
+            if let Some(("fail", unit)) = rest.split_once(' ') {
+                for (test, mut lines) in own.drain(..).filter(|(_, l)| !l.is_empty()) {
+                    lines.sort();
+                    lines.dedup();
+                    out.insert((unit.to_string(), test), lines);
+                }
+            }
+            own.clear();
+            said = false;
+        } else if line.starts_with("STEP ") {
+            own.clear();
+            said = false;
+        } else if let Some(test) = line.strip_prefix("FAILED ").filter(|t| !t.is_empty() && !t.contains(char::is_whitespace)) {
+            own.push((test.to_string(), Vec::new()));
+            said = false;
+        } else {
+            let msg = line.trim_start().strip_prefix("panicked at ").and_then(|r| r.split_once(" -- ")).map(|(_, m)| m);
+            let more = msg.or_else(|| (said && line.starts_with("    ")).then_some(line));
+            match (own.last_mut(), more) {
+                (Some((_, lines)), Some(more)) => {
+                    lines.extend(tree_lines(more));
+                    said = true;
+                }
+                _ => said = false,
+            }
+        }
+    }
+    out
+}
+
+/// The `<path>:<line>` words of `text` that can name a file of the tree: a relative path with a
+/// directory and a file name with an extension, its line a number (a column after it dropped).
+fn tree_lines(text: &str) -> Vec<(String, usize)> {
+    text.split(|c: char| c.is_whitespace() || "()[]{}<>,;'\"`".contains(c)).filter_map(|w| {
+        let mut parts = w.split(':');
+        let (path, n) = (parts.next()?, parts.next()?.parse::<usize>().ok()?);
+        let file = path.rsplit_once('/')?.1;
+        (!path.starts_with('/') && file.contains('.') && n > 0).then(|| (path.to_string(), n))
+    }).collect()
 }
 
 /// How a failed listing's end with no error of its own starts when it had listed its targets whole
@@ -1384,7 +1626,10 @@ fn log_name(row: &Value) -> Option<String> {
 /// A test that failed before that pass too fails off and on: it passed at a tip as new as its
 /// earlier red's or newer, so the landings since that pass are no more why than the ones before
 /// ([`INTERMITTENT`]). A Fab test's E2BIG, red in 2 of 5 runs, named two emulator landings of the
-/// third red's range (11-19).
+/// third red's range (11-19). Unless both reds kept their panics and these share none
+/// ([`breaks_differ`]): then that pass ended one break and the newer red is another, laid to its
+/// run's landings as any first failure is. An added lease field's round trip failed for `untimed`
+/// on 11-24 and for `lost_on` on 11-25, passing between, and read as a test failing off and on.
 /// `rows`: newest first, from a run where it failed.
 fn test_blame(rows: &[Value], unit: &str, test: &str) -> String {
     let mut first: Option<(&Value, String)> = None;
@@ -1394,7 +1639,8 @@ fn test_blame(rows: &[Value], unit: &str, test: &str) -> String {
             Some(Look::Not) => {}
             Some(Look::Passed) => {
                 let Some((failed, ran)) = first else { return ORIGIN_UNKNOWN.to_string() };
-                if let Some(before) = rows[i + 1..].iter().find(|r| matches!(looked(r, unit, test), Some(Look::Failed(_)))) {
+                let before = rows[i + 1..].iter().find_map(|r| match looked(r, unit, test) { Some(Look::Failed(was)) => Some((r, was)), _ => None });
+                if let Some((before, _)) = before.filter(|(before, was)| !breaks_differ(before, was, failed, &ran)) {
                     return format!("{INTERMITTENT}: it failed in {}, passed in the later {}, and fails again", log_name(before).unwrap_or_default(), log_name(row).unwrap_or_default());
                 }
                 let row = failed;
@@ -1418,13 +1664,33 @@ fn test_blame(rows: &[Value], unit: &str, test: &str) -> String {
     }
 }
 
+/// Whether unit `ua`'s red in row `a` and unit `ub`'s in row `b` are two breaks: both rows kept
+/// their panics ([`panic_lines`]) and no message is in both, each said without where it panicked
+/// and with each run of digits as one `#` (a flaky test's timings differ from run to run; two
+/// breaks of one assertion name different things). False when either kept none: nothing tells.
+fn breaks_differ(a: &Value, ua: &str, b: &Value, ub: &str) -> bool {
+    let said = |row: &Value, unit: &str| -> BTreeSet<String> {
+        let Some(Value::Obj(p)) = row.get("panics") else { return BTreeSet::new() };
+        p.iter().filter(|(u, _)| u.as_str() == unit).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).map(|l| {
+            let mut out = String::new();
+            for c in l.split_once(" -- ").map_or(l, |(_, m)| m).chars() {
+                if !c.is_ascii_digit() { out.push(c) } else if !out.ends_with('#') { out.push('#') }
+            }
+            out
+        }).collect()
+    };
+    let (x, y) = (said(a, ua), said(b, ub));
+    !x.is_empty() && !y.is_empty() && x.is_disjoint(&y)
+}
+
 /// Who broke each failing test of one package's units ([`test_blame`]), those with one breaker
-/// together: `by test: a, b since X; c origin unknown, first failed in L`.
-fn tests_blame(rows: &[Value], named: &[(String, Vec<String>)]) -> String {
+/// together: `by test: a, b since X; c origin unknown, first failed in L`. `by_line`: who added a
+/// line of the tree a test's message names, which comes first ([`said_lines`]).
+fn tests_blame(rows: &[Value], named: &[(String, Vec<String>)], by_line: &dyn Fn(&str, &str) -> Option<String>) -> String {
     let mut by: Vec<(String, Vec<&str>)> = Vec::new();
     for (unit, tests) in named {
         for test in tests {
-            let who = test_blame(rows, unit, test);
+            let who = by_line(unit, test).unwrap_or_else(|| test_blame(rows, unit, test));
             match by.iter_mut().find(|(w, _)| *w == who) {
                 Some((_, them)) => them.push(test.as_str()),
                 None => by.push((who, vec![test.as_str()])),
@@ -1490,7 +1756,8 @@ fn carried_since(rows: &[Value], failing: &[String], errors: &BTreeMap<String, V
             let listed = row.get("failing").and_then(Value::as_arr).is_some_and(|f| f.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
             if failed.is_none() && !listed { continue; }
             let before: Vec<&str> = failed.and_then(|(_, b)| b.as_arr()).unwrap_or_default().iter().filter_map(Value::as_str).map(message).collect();
-            if row.get("errors").is_none() || now.iter().all(|e| before.contains(&e.as_str())) {
+            // (its build's line frames its errors: a row from before it was kept is the same break)
+            if row.get("errors").is_none() || now.iter().filter(|e| !e.starts_with(NOT_BUILT)).all(|e| before.contains(&e.as_str())) {
                 out.insert(unit.clone(), origin(rows, &key));
             }
             break;
@@ -1500,8 +1767,8 @@ fn carried_since(rows: &[Value], failing: &[String], errors: &BTreeMap<String, V
 }
 
 /// Who broke unit `key`, failing with no pass since: what the first run to fail it said, else that
-/// nobody knows, with that run's log. A later run's name is no better: it named who changed the
-/// unit then. `rows`: the bucket's earlier rows, newest first.
+/// nobody knows, with that run's log and where its output is kept. A later run's name is no
+/// better: it named who changed the unit then. `rows`: the bucket's earlier rows, newest first.
 fn origin(rows: &[Value], key: &str) -> String {
     let lists = |list: &str, row: &Value| row.get(list).and_then(Value::as_arr).is_some_and(|l| l.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
     let failed = |row: &Value| lists("failing", row) || matches!(row.get("errors"), Some(Value::Obj(e)) if e.iter().any(|(u, _)| unit_key(u) == key));
@@ -1512,15 +1779,55 @@ fn origin(rows: &[Value], key: &str) -> String {
         if let Some(who) = rows[i].get("broke").and_then(|b| b.get(key)).and_then(Value::as_str).filter(|w| w.starts_with(BY_TEST)).filter(|_| !named.is_empty()) {
             return who.to_string();
         }
-        if !named.is_empty() { return tests_blame(&rows[i..], &named); }
+        if !named.is_empty() { return tests_blame(&rows[i..], &named, &|_, _| None); }
+        // one that could not build named no test: that build is its red
+        if let Some(red) = compile_red(rows, i, key) { return red; }
     }
     let first = rows.iter().take_while(|row| !lists("passed", row)).filter(|row| failed(row)).last();
     if let Some(who) = first.and_then(|row| row.get("broke")).and_then(|b| b.get(key)).and_then(Value::as_str) {
         return who.to_string();
     }
     let log = first.and_then(|row| row.get("log")).and_then(Value::as_str).and_then(|l| Path::new(l).file_name()).map(|l| l.to_string_lossy().into_owned());
-    log.map_or(ORIGIN_UNKNOWN.to_string(), |log| format!("{ORIGIN_UNKNOWN}, first failed in {log}"))
+    // a CI leg's red read "origin unknown, first failed in ci-...log" for 21 h, and its own log,
+    // which said why, was gone (11-24)
+    let kept = first.and_then(|row| row.get("kept")).and_then(|k| k.get(key)).and_then(Value::as_str).map_or(String::new(), |at| format!(" (its output: {at})"));
+    log.map_or(ORIGIN_UNKNOWN.to_string(), |log| format!("{ORIGIN_UNKNOWN}, first failed in {log}{kept}"))
 }
+
+/// Unit `key`'s red in `rows[i]`, its newest failing run, when it could not build there: that
+/// build, its first error and who broke it (as the oldest run with those errors since, by
+/// [`carried_since`]'s rule, said), never a test an older run failed. A run that stops at a
+/// build says nothing of that test: a test build's E0433 read "by test: requests_round_trip
+/// since .." for a test the same run passed (11-24). None: it built.
+fn compile_red(rows: &[Value], i: usize, key: &str) -> Option<String> {
+    let lines = |row: &Value| -> Vec<String> {
+        match row.get("errors") {
+            Some(Value::Obj(e)) => e.iter().filter(|(u, _)| unit_key(u) == key).flat_map(|(_, l)| l.as_arr().unwrap_or_default()).filter_map(Value::as_str).map(|l| message(l).to_string()).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let now = lines(&rows[i]);
+    let built: Vec<&str> = now.iter().filter_map(|l| l.strip_prefix(NOT_BUILT)).collect();
+    if built.is_empty() { return None; }
+    let errors: Vec<&String> = now.iter().filter(|l| !l.starts_with(NOT_BUILT)).collect();
+    let mut from = i;
+    for (j, row) in rows.iter().enumerate().skip(i + 1) {
+        let before = lines(row);
+        if row_lists(row, "passed", key) || before.is_empty() || !errors.iter().all(|e| before.contains(e)) { break; }
+        from = j;
+    }
+    let who = rows[from].get("broke").and_then(|b| b.get(key)).and_then(Value::as_str).filter(|w| !w.is_empty() && !w.starts_with(BY_TEST));
+    if let Some(who) = who.filter(|w| w.starts_with(COMPILE_RED)) { return Some(who.to_string()); }
+    let first = errors.first().map_or(String::new(), |e| format!(": {e}"));
+    let since = who.map_or_else(|| format!(", {ORIGIN_UNKNOWN}"), |who| format!(" {}", still_since(who)));
+    Some(format!("{COMPILE_RED}{}{first}{since}", built.join(" and ")))
+}
+
+/// What a red that could not build is laid to ([`compile_red`]).
+pub const COMPILE_RED: &str = "compile red: ";
+
+/// How a build that could not compile starts among its unit's errors ([`unit_lines`]).
+const NOT_BUILT: &str = "could not compile ";
 
 /// A failure older than what the ledger can name a landing for.
 pub const ORIGIN_UNKNOWN: &str = "origin unknown";
@@ -1598,6 +1905,15 @@ fn landing_files(repo: &Path, e: &Entry) -> Option<Vec<String>> {
     let mut files = if pre.work == landed.work { Vec::new() } else { crate::gitread::files_differing(repo, &pre.work, &landed.work)? };
     if pre.main != landed.main {
         files.extend(crate::gitread::files_differing(&repo.join("apps/commercial"), &pre.main, &landed.main)?.into_iter().map(|f| format!("apps/commercial/{f}")));
+    }
+    // its other nested halves: each landed commit against its first parent, the tip it landed on
+    for side in e.nested.iter().filter(|side| side.name != crate::state::PAIRED && !side.landed.is_empty()) {
+        let dir = repo.join(crate::nested::dir(&side.name));
+        let parent = crate::gitread::with(&dir, |p, r| {
+            let oid = crate::gitread::resolve(p, r, &side.landed)?;
+            r.first_parents(oid).nth(1).and_then(Result::ok).map(|(o, _)| o.to_hex())
+        }).flatten()?;
+        files.extend(crate::gitread::files_differing(&dir, &parent, &side.landed)?.into_iter().map(|f| format!("{}{f}", crate::nested::prefix(&side.name))));
     }
     Some(files)
 }
@@ -1712,10 +2028,10 @@ fn step_files(text: &str) -> Vec<String> {
 
 /// The tip of the last of `rows` (the bucket's earlier rows, newest first) that passed unit `key`;
 /// a step (no unit) passed in each row that does not list it failing.
-fn last_pass(rows: &[Value], key: &str) -> Option<Pair> {
+fn last_pass(rows: &[Value], key: &str) -> Option<Pin> {
     let has = |row: &Value, list: &str| row.get(list).and_then(Value::as_arr).is_some_and(|p| p.iter().any(|k| k.as_str() == Some(key)));
     rows.iter().find(|row| if is_unit(key) || is_leg(key) { has(row, "passed") } else { row.get("failing").is_some() && !has(row, "failing") })
-        .and_then(|row| row.get("tip")).and_then(read_tip).map(|t| t.pair())
+        .and_then(|row| row.get("tip")).and_then(read_tip)
 }
 
 /// A new red whose attribution names nobody or several landings, or a failing test's: one search
@@ -1784,8 +2100,7 @@ fn named_ids(who: &str) -> BTreeSet<u64> {
 }
 
 /// The pair's pin with the other repositories the red run pinned (11-15).
-fn bisect_pin(pair: &Pair, tip: &Pin) -> Pin {
-    let mut pin = pin_of(pair);
+fn bisect_pin(mut pin: Pin, tip: &Pin) -> Pin {
     for (name, sha) in &tip.nested { pin.nested.entry(name.clone()).or_insert_with(|| sha.clone()); }
     pin
 }
@@ -1907,6 +2222,8 @@ enum Named<'a> {
 /// Only a proven landing gets a lane note, and a test's owner when the test did not fail again;
 /// doubtful attributions go to main (11-15).
 fn bisect_result(home: &Path, job: &Bisect, emit: &dyn Fn(Sev, String, String), named: Named, probes: Vec<Value>, line: String) -> Result<(), String> {
+    // (a flake's logs: its red run's, then its probes')
+    let flaky = matches!(named, Named::Owner(_)).then(|| std::iter::once(job.log.clone()).chain(probes.iter().filter_map(|p| p.get("log")?.as_str().map(str::to_string))).collect::<Vec<_>>());
     let mut extra = vec![("result", s(&line)), ("probes", Value::Arr(probes))];
     let agent = match named {
         Named::Landing(e) => {
@@ -1925,7 +2242,163 @@ fn bisect_result(home: &Path, job: &Bisect, emit: &dyn Fn(Sev, String, String), 
     for agent in agent.into_iter().filter(|a| *a != "main").chain(std::iter::once("main")) {
         if let Err(e) = crate::notes::leave(home, agent, &line) { eprintln!("devhub bucket {}: agent notes: {e}", job.bucket); }
     }
+    // (its red run's failing tests of the unit: the flake list's by test)
+    if let Some(logs) = flaky {
+        let tests: Vec<String> = test_lines(last_run(&std::fs::read_to_string(&job.log).unwrap_or_default())).0.into_iter()
+            .filter(|(u, _)| unit_key(u) == job.key).flat_map(|(_, t)| t).collect::<BTreeSet<_>>().into_iter().collect();
+        flake_said(home, &job.bucket, &job.unit, &tests, &job.tip, &logs, wall_ms(), emit);
+    }
     Ok(())
+}
+
+/// The flake list, in the hub's home: one row per red that ran again at its red tip and passed
+/// there (a bucket's rerun on its box, mac_tests.sh `GATEFLAKE`; a bisect's red-tip probe), by its
+/// unit's key and failing tests.
+const FLAKES: &str = "flakes.jsonl";
+
+/// A test that flakes twice within this span is a bug, and main hears it with both logs (main, 11-24).
+const FLAKE_SPAN_MS: u64 = 7 * 24 * 3600 * 1000;
+
+static FLAKE_LIST: Mutex<()> = Mutex::new(());
+
+/// A run's flakes (`GATEFLAKE <unit> :: <its first run's failing tests>`): red, then green on its
+/// rerun on its box at its tip.
+fn flake_lines(text: &str) -> Vec<(String, Vec<String>)> {
+    text.lines().filter_map(|l| l.strip_prefix("GATEFLAKE ")?.split_once(" ::"))
+        .map(|(unit, tests)| (unit.trim().to_string(), tests.split_whitespace().map(str::to_string).collect())).collect()
+}
+
+/// Adds a flake to the flake list: `unit` red at `tip` with `tests` failing (none named: the unit
+/// as a whole), then green there, its `logs` kept. Main's note when the same test (the same unit
+/// key, a test in common, or neither naming one) flaked before within [`FLAKE_SPAN_MS`] and main
+/// heard of none of those: a test that flakes twice in seven days is a bug, with both logs, and
+/// not a landing's red (main, 11-24). A read of the list per flake: flakes are rare.
+fn record_flake(home: &Path, bucket: &str, unit: &str, tests: &[String], tip: &Pin, logs: &[String], at_ms: u64) -> std::io::Result<Option<String>> {
+    let _lock = FLAKE_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    let path = home.join(FLAKES);
+    let key = unit_key(unit);
+    let named = |v: &Value| -> Vec<String> { v.get("tests").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect() };
+    let earlier: Vec<Value> = std::fs::read_to_string(&path).unwrap_or_default().lines().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+        .filter(|v| v.get("key").and_then(Value::as_str) == Some(key.as_str()) && v.get("ms").and_then(Value::as_u64).is_some_and(|ms| at_ms.saturating_sub(ms) <= FLAKE_SPAN_MS))
+        .filter(|v| { let them = named(v); them.is_empty() && tests.is_empty() || them.iter().any(|t| tests.contains(t)) }).collect();
+    let tell = !earlier.is_empty() && !earlier.iter().any(|v| v.get("told").and_then(Value::as_bool) == Some(true));
+    let row = obj(vec![("ms", Value::Int(at_ms as i64)), ("bucket", s(bucket)), ("unit", s(unit)), ("key", s(&key)), ("tests", Value::Arr(tests.iter().map(s).collect())),
+        ("tip", tip_value(tip)), ("at", s(&tip_short(tip))), ("logs", Value::Arr(logs.iter().map(s).collect())), ("told", Value::Bool(tell))]);
+    std::fs::create_dir_all(home)?;
+    let mut line = row.to_json();
+    line.push('\n');
+    std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(line.as_bytes())?;
+    if !tell { return Ok(None); }
+    let what = if tests.is_empty() { unit.to_string() } else { format!("{unit} {}", tests.join(", ")) };
+    let said: Vec<String> = earlier.iter().chain(std::iter::once(&row)).map(|v| {
+        let field = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("?").to_string();
+        let logs: Vec<String> = v.get("logs").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect();
+        format!("bucket {} at {}: {}", field("bucket"), field("at"), logs.join(", "))
+    }).collect();
+    Ok(Some(format!("flaky {} times in 7 days: {what}: a bug for its owner, not a landing's red; red, then green at the same tip: {}", said.len(), said.join("; "))))
+}
+
+/// A test a bucket run measured at or past this is slow ([`slow_notes`]): unit tests run well under
+/// a second and scenario tests a few seconds (AGENTS.md); the rest is room for a JIT's warm-up and a
+/// box's noise (main, 11-24). The tests and full buckets measure each test (land_gate.sh
+/// test_times, GATETESTS).
+const SLOW_TEST_S: f64 = 10.0;
+
+/// Main hears the slowest tests of the buckets' runs once a week, under the line too (main, 11-24).
+const SLOW_WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
+
+/// How many tests that weekly list names (main, 11-24).
+const SLOW_WEEK_TOP: usize = 10;
+
+/// When main last heard the weekly list (wall ms), in the hub's home.
+const SLOW_WEEK: &str = "slow-tests-week";
+
+/// Each slow test is said at most once in this span (main, 11-23: once a day).
+const SLOW_SAID_SPAN_MS: u64 = 24 * 3600 * 1000;
+
+/// The slow tests said, in the hub's home: one row per test said (`key`, `ms`, `agent`).
+const SLOW_SAID: &str = "slow-tests.jsonl";
+
+static SLOW_LIST: Mutex<()> = Mutex::new(());
+
+/// The notes, `(agent, line)`, for the tests of `tests` (each unit's GATETESTS) at or past
+/// [`SLOW_TEST_S`] and not said within [`SLOW_SAID_SPAN_MS`], recorded as said: each to the agent
+/// of the newest landing of `history` that touched its package, while `live` says its lane is,
+/// else main's. Its time and the run's log are said; the bucket's verdict is not changed by it
+/// (main, 11-23). A read of the list only on a run with a slow test.
+fn slow_notes(home: &Path, bucket: &str, tip: &Pin, log: &str, tests: &BTreeMap<String, Vec<(String, f64, u64)>>, history: &[Entry], live: &dyn Fn(&Entry) -> bool, now: u64) -> std::io::Result<Vec<(String, String)>> {
+    let slow: Vec<(&String, &String, f64)> = tests.iter().flat_map(|(unit, ts)| ts.iter().filter(|(_, secs, _)| *secs >= SLOW_TEST_S).map(move |(test, secs, _)| (unit, test, *secs))).collect();
+    if slow.is_empty() { return Ok(Vec::new()); }
+    let _lock = SLOW_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    let path = home.join(SLOW_SAID);
+    let said: Vec<(String, u64)> = std::fs::read_to_string(&path).unwrap_or_default().lines().filter_map(|l| {
+        let v = makepad_strict_json::parse(l.as_bytes()).ok()?;
+        Some((v.get("key")?.as_str()?.to_string(), v.get("ms")?.as_u64()?))
+    }).collect();
+    let (mut out, mut rows): (Vec<(String, String)>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for (unit, test, secs) in slow {
+        let key = format!("{} {test}", unit_key(unit));
+        if said.iter().any(|(k, ms)| *k == key && now.saturating_sub(*ms) < SLOW_SAID_SPAN_MS) || !keys.insert(key.clone()) { continue; }
+        let pkg = unit.split_whitespace().nth(1).unwrap_or_default();
+        let (agent, whose) = match history.iter().filter(|e| e.touched.iter().any(|p| p == pkg)).max_by_key(|e| (e.changed_ms, e.id)) {
+            Some(e) if live(e) => (e.agent.clone(), format!("{} last touched {pkg}", who_of(e))),
+            Some(e) => ("main".to_string(), format!("{} last touched {pkg}, and its lane has ended", who_of(e))),
+            None => ("main".to_string(), format!("no landing devhub keeps touched {pkg}")),
+        };
+        out.push((agent.clone(), format!("bucket {bucket} {}: slow test {test} of {unit}: {secs:.0} s, past the {SLOW_TEST_S:.0} s line (unit tests run well under a second, scenario tests a few seconds); {whose}; log {log}", tip_short(tip))));
+        rows.push(obj(vec![("key", s(&key)), ("ms", Value::Int(now as i64)), ("agent", s(&agent))]).to_json());
+    }
+    if !rows.is_empty() {
+        std::fs::create_dir_all(home)?;
+        std::fs::OpenOptions::new().create(true).append(true).open(&path)?.write_all(format!("{}\n", rows.join("\n")).as_bytes())?;
+    }
+    Ok(out)
+}
+
+/// Main's weekly list, once [`SLOW_WEEK_MS`] passed since the last (or none was said): the
+/// [`SLOW_WEEK_TOP`] slowest tests the buckets' runs of that span measured, each at its slowest, with
+/// its unit and bucket, under the line too. A read of the ledger once a week; one small file's read
+/// a run otherwise.
+fn weekly_slowest(home: &Path, now: u64) -> std::io::Result<Option<String>> {
+    let _lock = SLOW_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    let mark = home.join(SLOW_WEEK);
+    if std::fs::read_to_string(&mark).ok().and_then(|t| t.trim().parse::<u64>().ok()).is_some_and(|ms| now.saturating_sub(ms) < SLOW_WEEK_MS) { return Ok(None); }
+    let since = now.saturating_sub(SLOW_WEEK_MS);
+    let mut slowest: BTreeMap<String, (f64, String)> = BTreeMap::new();
+    for row in ledger(home, usize::MAX).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) {
+        if row.get("started_ms").and_then(Value::as_u64).is_none_or(|ms| ms < since) { continue; }
+        let bucket = row.get("bucket").and_then(Value::as_str).unwrap_or("?").to_string();
+        let Some(Value::Obj(units)) = row.get("unit_tests") else { continue };
+        for (unit, tests) in units {
+            for t in tests.as_arr().unwrap_or_default() {
+                let t = t.as_arr().unwrap_or_default();
+                let (Some(name), Some(secs)) = (t.first().and_then(Value::as_str), t.get(1).and_then(crate::lease::num)) else { continue };
+                let at = slowest.entry(format!("{name} of {}", unit_key(unit))).or_insert((secs, bucket.clone()));
+                if secs > at.0 { *at = (secs, bucket.clone()); }
+            }
+        }
+    }
+    std::fs::create_dir_all(home)?;
+    std::fs::write(&mark, now.to_string())?;
+    let mut top: Vec<(String, f64, String)> = slowest.into_iter().map(|(test, (secs, bucket))| (test, secs, bucket)).collect();
+    top.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    top.truncate(SLOW_WEEK_TOP);
+    if top.is_empty() { return Ok(None); }
+    let said: Vec<String> = top.iter().map(|(test, secs, bucket)| format!("{test} {secs:.1} s ({bucket})")).collect();
+    Ok(Some(format!("the week's {} slowest tests the buckets measured (each at its slowest; the line is {SLOW_TEST_S:.0} s): {}", top.len(), said.join("; "))))
+}
+
+/// [`record_flake`], with main's note said and left when it has one.
+fn flake_said(home: &Path, bucket: &str, unit: &str, tests: &[String], tip: &Pin, logs: &[String], at_ms: u64, emit: &dyn Fn(Sev, String, String)) {
+    match record_flake(home, bucket, unit, tests, tip, logs, at_ms) {
+        Ok(Some(note)) => {
+            emit(Sev::Warn, format!("bucket {bucket} {}: {note}", tip_short(tip)), String::new());
+            if let Err(e) = crate::notes::leave(home, "main", &note) { eprintln!("devhub bucket {bucket}: agent notes: {e}"); }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("devhub bucket {bucket}: flake list: {e}"),
+    }
 }
 
 /// Retire a failed search too; a ledger failure must not hide its reason from the event feed.
@@ -1955,10 +2428,134 @@ fn till_night(secs: i64, offset: i64) -> Option<u64> {
     (day / 3600 >= NIGHT_END_HOUR).then(|| (86_400 - day) as u64)
 }
 
-/// Distinct probe logs keep the start last, where the lease runner reads it.
-fn bisect_log(logs: &Path, bucket: &str, started: u64, i: Option<usize>) -> PathBuf {
-    let label = i.map_or_else(|| "from".to_string(), |i| i.to_string());
-    logs.join(format!("{bucket}-{label}-{started}.log"))
+/// A bisect's probe log at `at` (`from`, `tip` or a candidate's landing id), named by its bucket,
+/// its key and `started`, its red run's start ([`bisect_start`]): the same names in every image of
+/// the master. A restart is an exec that keeps the probes' lease holders, and its bisect starts its
+/// job again: by its logs' `.run` it adopts the probe in flight and reads the ones that ended
+/// ([`lease_run`]). Named by the time each search started, every restart on 11-24 asked for the
+/// probes once more beside the ones still held, all in the bisect lane's tree, one lease at a time
+/// per box: six of one test's red tip, four of one fast probe, two of them hung for hours, and the
+/// bisect queue starved (L1687102). The start stays last, where the lease runner reads it.
+fn bisect_log(logs: &Path, job: &Bisect, started: u64, at: &str) -> PathBuf {
+    let key: String = job.key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    logs.join(format!("{}-{key}-{at}-{started}.log", job.bucket))
+}
+
+/// The start its probes' logs carry ([`bisect_log`]): its red run's, as that run's log names it
+/// (`<bucket>-<start>.log`, each a key of its own); one not named so, the search's own.
+fn bisect_start(job: &Bisect) -> u64 {
+    log_started(Path::new(&job.log)).unwrap_or_else(wall_ms)
+}
+
+/// A later run that passed a red ([`passed_since_red`]): its bucket, its tip (short, and whole
+/// where its row says it) and its start.
+struct PassedSince {
+    bucket: String,
+    at: String,
+    tip: Option<Pin>,
+    started: u64,
+}
+
+/// The run that passed `job`'s red after its red run started, the newest: its own bucket's next
+/// runs too, the hot gate's aside (a hand-in's merge, not a landed tip). Its search stops there
+/// ([`run_bisect`]): the bisects of a red #8817 had fixed went on probing the landings before it
+/// while every bucket was green (11-24). None for a red log not named by its start.
+fn passed_since_red(home: &Path, job: &Bisect) -> Option<PassedSince> {
+    let started = log_started(Path::new(&job.log))?;
+    let all: Vec<Value> = ledger(home, 2_000).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+    let row = all.iter().filter(|r| r.get("bucket").and_then(Value::as_str).is_some_and(|b| b != "hot"))
+        .filter(|r| r.get("started_ms").and_then(Value::as_u64).is_some_and(|at| at > started))
+        .find(|r| row_lists(r, "passed", &job.key))?;
+    let tip = row.get("tip").and_then(read_tip);
+    Some(PassedSince { bucket: row.get("bucket")?.as_str()?.to_string(), at: tip.as_ref().map_or_else(|| "?".to_string(), tip_short), tip,
+        started: row.get("started_ms")?.as_u64()? })
+}
+
+/// What fixed a red that was red twice at its red tip `red` and passed at `passed`, a later run's
+/// tip ([`run_bisect`]): the one landing between them, or how many and which; nothing when none
+/// is read.
+fn fixed_by(repo: &Path, history: &[Entry], red: &Pin, passed: &Pin) -> String {
+    // (the landings a search between them would walk: off its first-parent chains, none)
+    let between = chain_landings(repo, history, red, passed).map(|(between, _, _)| between).unwrap_or_default();
+    match between.as_slice() {
+        [] => String::new(),
+        [e] => format!(", by #{} {} ({}) lane {}", e.id, e.label(), e.agent, lane_of(e)),
+        all => format!("; {} landings between: {}{}", all.len(), all.iter().take(8).map(|e| format!("#{}", e.id)).collect::<Vec<_>>().join(", "), if all.len() > 8 { ", …" } else { "" }),
+    }
+}
+
+/// The intermittent reds, in the hub's home: a test red again at its red tip whose search a later
+/// run's pass stopped ([`run_bisect`]), a row each; a `cleared` row (`devhub bucket clear <key>`)
+/// closes its key's before it. A lucky pass had closed such a search as fixed since, and a real
+/// intermittent regression went unseen (main, 11-24): `devhub bucket` says each open one
+/// ([`open_intermittent`]), with no probe queued behind it.
+const INTERMITTENTS: &str = "intermittent.jsonl";
+
+/// The runs of its bucket after its pass, each that ran it green, that close an intermittent red
+/// (main, 11-24).
+const INTERMITTENT_GREEN: usize = 3;
+
+static INTERMITTENT_LIST: Mutex<()> = Mutex::new(());
+
+/// Adds `job`'s red to the intermittent list: red again at its red tip `tip_log`, passed by
+/// `passed` (None: a run the ledger no longer holds, or a red log not named by its start). What
+/// its bisect's line says of it.
+fn record_intermittent(home: &Path, job: &Bisect, passed: Option<&PassedSince>, tip_log: &Path, at_ms: u64) -> String {
+    let by = passed.map_or_else(|| "a later run".to_string(), |p| format!("{} {}", p.bucket, p.at));
+    let row = obj(vec![("ms", Value::Int(at_ms as i64)), ("bucket", s(&job.bucket)), ("key", s(&job.key)), ("unit", s(&job.unit)), ("at", s(&tip_short(&job.tip))),
+        ("passed", s(&by)), ("since_ms", Value::Int(passed.map_or(at_ms, |p| p.started) as i64)), ("log", s(tip_log.display().to_string())), ("red_log", s(&job.log))]);
+    let _lock = INTERMITTENT_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    let mut line = row.to_json();
+    line.push('\n');
+    let kept = std::fs::create_dir_all(home).and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(home.join(INTERMITTENTS))?.write_all(line.as_bytes()));
+    let said = format!("intermittent: reproduced at {}, passed at {by}", tip_short(&job.tip));
+    match kept {
+        Ok(()) => format!("{said}; `devhub bucket` says it until it is cleared (`devhub bucket clear {}`) or green in its bucket's next {INTERMITTENT_GREEN} runs of it", job.key),
+        Err(e) => format!("{said}; the intermittent list did not take it: {e}"),
+    }
+}
+
+/// The intermittent reds still open ([`INTERMITTENTS`]), each its newest row: not cleared since, and
+/// not green in each of its bucket's last [`INTERMITTENT_GREEN`] runs that ran it after the run
+/// that passed it (`rows`: every bucket's, newest first). A run red again since keeps it open; that
+/// red is its bucket's STILL FAILING too.
+fn open_intermittent(home: &Path, rows: &[Value]) -> Vec<Value> {
+    let text = {
+        let _lock = INTERMITTENT_LIST.lock().unwrap_or_else(|e| e.into_inner());
+        std::fs::read_to_string(home.join(INTERMITTENTS)).unwrap_or_default()
+    };
+    let mut open: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for v in text.lines().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()) {
+        if let Some(key) = v.get("cleared").and_then(Value::as_str) {
+            open.retain(|(_, k), _| k != key);
+            continue;
+        }
+        let field = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+        if let (Some(bucket), Some(key)) = (field("bucket"), field("key")) { open.insert((bucket, key), v); }
+    }
+    open.into_iter().filter(|((bucket, key), v)| {
+        let since = v.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
+        let ran: Vec<bool> = rows.iter().filter(|r| r.get("bucket").and_then(Value::as_str) == Some(bucket.as_str()))
+            .filter(|r| r.get("started_ms").and_then(Value::as_u64).is_some_and(|at| at > since))
+            .filter_map(|r| if row_lists(r, "failing", key) { Some(false) } else if row_lists(r, "passed", key) { Some(true) } else { None })
+            .take(INTERMITTENT_GREEN).collect();
+        !(ran.len() == INTERMITTENT_GREEN && ran.iter().all(|green| *green))
+    }).map(|(_, v)| v).collect()
+}
+
+/// `devhub bucket clear <key>`: a human or a lane closes the open intermittent reds of `key`
+/// ([`open_intermittent`]). The service's answer: `{"said":..}` or `{"error":..}`.
+pub fn clear_intermittent(home: &Path, key: &str) -> String {
+    let rows: Vec<Value> = ledger(home, 2_000).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+    let n = open_intermittent(home, &rows).iter().filter(|v| v.get("key").and_then(Value::as_str) == Some(key)).count();
+    if n == 0 { return obj(vec![("error", s(&format!("no open intermittent red of `{}`", crate::proto::clean(key, 120))))]).to_json(); }
+    let mut line = obj(vec![("cleared", s(key)), ("ms", Value::Int(wall_ms() as i64))]).to_json();
+    line.push('\n');
+    let _lock = INTERMITTENT_LIST.lock().unwrap_or_else(|e| e.into_inner());
+    match std::fs::OpenOptions::new().create(true).append(true).open(home.join(INTERMITTENTS)).and_then(|mut f| f.write_all(line.as_bytes())) {
+        Ok(()) => obj(vec![("said", s(&format!("cleared {key}: {n} intermittent red{}", if n == 1 { "" } else { "s" })))]).to_json(),
+        Err(e) => obj(vec![("error", s(&format!("{INTERMITTENTS}: {e}")))]).to_json(),
+    }
 }
 
 /// Where a bisect probes: its last pass, its red tip (a test's, first), or a landing of its range.
@@ -1972,6 +2569,10 @@ enum At {
 /// `night`: returns when a CI leg's bisect may probe ([`wait_for_night`]).
 fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), probe: &Probe, night: &dyn Fn(), job: Bisect) -> Result<(), String> {
     let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
+    // its last pass's other nested repositories where they stood then, the ones it did not pin
+    // too: every probe is gated against it, its red tip's too
+    let (placed, unplaced) = place_from(repo, &job.from, &job.tip);
+    let job = Bisect { from: placed, ..job };
     // a leg's red tip first, once: red, and its error lines pin it on no one landing, it is bisected
     let tip_red = match (job.of_a_leg(), job.tip_probe.clone()) {
         (false, _) => None,
@@ -1983,10 +2584,11 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
             Some(probe)
         }
     };
-    let (from, tip) = (job.from.pair(), job.tip.pair());
-    let work = bisect_chain(repo, &from.work, &tip.work)?;
-    let main = bisect_chain(&repo.join("apps/commercial"), &from.main, &tip.main)?;
-    let (candidates, left_out) = order_landings(&work, &main, &landings(repo, &from, &tip, &history)?);
+    let (candidates, mut left_out, nested) = chain_landings(repo, &history, &job.from, &job.tip)?;
+    left_out.extend(unplaced);
+    let times: Vec<Vec<i64>> = nested.iter().map(|(name, chain)| chain_times(&repo.join(crate::nested::dir(name)), chain)).collect();
+    let when: Vec<Option<i64>> = candidates.iter().map(|e| entry_pair(&e.landed).and_then(|p| pair_time(repo, &p))).collect();
+    let pins = candidate_pins(&candidates, &job.tip, &nested, &times, &when);
     let heading = format!("bucket {} {}: bisect", job.bucket, tip_short(&job.tip));
     // A test's every failing target of its package is probed (the key's verdict is any of them
     // failing); at its red tip the search narrows to those red there again, and the result says
@@ -1996,8 +2598,61 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
     let unreproduced = std::cell::RefCell::new(Vec::<String>::new());
     let red_line = std::cell::RefCell::new(job.line.clone());
     let failed_at = std::cell::RefCell::new(Vec::<String>::new());
+    // each red probe's way: its failing targets and their failing tests
+    let ways = std::cell::RefCell::new(Vec::<Vec<(String, Vec<String>)>>::new());
     let what = || said_targets(&targets.borrow());
-    let finish = |named, probes, mut line: String| {
+    let logs = home.join("bucket-logs/bisect");
+    let started = bisect_start(&job);
+    // a test red again at its red tip that a later run passed: a lucky pass of a real intermittent
+    // red looks the same as a fix, and it stays said until it is cleared or green again (main, 11-24)
+    let intermittent = |probes, passed: Option<&PassedSince>, note: Option<String>| {
+        let said = record_intermittent(home, &job, passed, &bisect_log(&logs, &job, started, "tip"), wall_ms());
+        let note = note.map_or_else(String::new, |n| format!(" ({n})"));
+        let mut line = format!("{heading} of {}: {said}{note}; tip log {}", what(), bisect_log(&logs, &job, started, "tip").display());
+        for why in &left_out { line.push_str(&format!("; {why}")); }
+        bisect_result(home, &job, emit, Named::Nobody, probes, line)
+    };
+    // ... and before it is said so, its red tip is probed once more (main, 11-24): red again, it
+    // is deterministic there, fixed since, between its red tip and the passing run's tip, the
+    // landing between named when there is one; green, the same revision went both ways, and it is
+    // intermittent. RELAX263's red, red at its tip every time and fixed by a later landing, was
+    // listed intermittent. A pass at its red tip itself went both ways already: no probe.
+    let settle = |mut probes: Vec<Value>, passed: Option<&PassedSince>| {
+        if passed.is_some_and(|p| p.at == tip_short(&job.tip)) {
+            return intermittent(probes, passed, None);
+        }
+        let (first, again) = (bisect_log(&logs, &job, started, "tip"), bisect_log(&logs, &job, started, "tip-again"));
+        let outcome = probe(&targets.borrow().join(";"), Some(&job.from), &job.tip, &again);
+        let answer = probe_says(&job.key, &outcome, &std::fs::read_to_string(&again).unwrap_or_default());
+        let why = outcome.no_verdict.clone().unwrap_or_else(|| outcome.summary.clone());
+        let mut fields = vec![("tip", tip_value(&job.tip)), ("red", answer.map_or(Value::Null, Value::Bool)), ("log", s(again.display().to_string())), ("red_tip", Value::Bool(true)), ("again", Value::Bool(true))];
+        if answer.is_none() { fields.push(("why", s(&why))); }
+        probes.push(obj(fields));
+        match answer {
+            Some(true) => {
+                let tip = tip_short(&job.tip);
+                let fixed = match passed {
+                    Some(p) => format!("a later {} run at {} passed it: fixed since: between {tip} and {}{}", p.bucket, p.at, p.at, p.tip.as_ref().map_or_else(String::new, |t| fixed_by(repo, &history, &job.tip, t))),
+                    None => format!("a later run passed it: fixed since: after {tip}"),
+                };
+                let mut line = format!("{heading} of {}: red at its red tip {tip} on both probes, and {fixed}; tip logs {}, {}", what(), first.display(), again.display());
+                for why in &left_out { line.push_str(&format!("; {why}")); }
+                bisect_result(home, &job, emit, Named::Nobody, probes, line)
+            }
+            Some(false) => intermittent(probes, passed, None),
+            None => intermittent(probes, passed, Some(format!("its red tip's second probe gave no answer: {why}"))),
+        }
+    };
+    // the later run that passed its red, once one has ([`passed_since_red`]): its search stops
+    // before its next probe, whatever answer it ends on
+    let fixed = std::cell::RefCell::new(None::<PassedSince>);
+    let finish = |named, probes, line: String| {
+        let (named, mut line) = match fixed.borrow().as_ref() {
+            // (a test's search goes on only from its red tip red again)
+            Some(by) if job.of_a_test() => return settle(probes, Some(by)),
+            Some(by) => (Named::Nobody, format!("{heading} of {}: a later {} run passed it: fixed since, nobody told; its search stopped there", what(), by.bucket)),
+            None => (named, line),
+        };
         let not = unreproduced.borrow();
         if !not.is_empty() { line.push_str(&format!("; green at its red tip, not reproduced: {}", said_targets(&not))); }
         for why in &left_out { line.push_str(&format!("; {why}")); }
@@ -2007,15 +2662,13 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
         let still = if tip_red.is_some() { "; red at its red tip, it stays STILL FAILING" } else { "" };
         return finish(Named::Nobody, tip_red.into_iter().collect(), format!("{heading} of {}: no landings on its first-parent chains{still}", job.unit));
     }
-    let logs = home.join("bucket-logs/bisect");
     std::fs::create_dir_all(&logs).map_err(|e| format!("bisect logs: {e}"))?;
-    let started = wall_ms();
     let log_at = |at: At| match at {
-        At::Base => bisect_log(&logs, &job.bucket, started, None),
-        At::Tip => logs.join(format!("{}-tip-{started}.log", job.bucket)),
-        At::Landing(i) => bisect_log(&logs, &job.bucket, started, Some(i)),
+        At::Base => bisect_log(&logs, &job, started, "from"),
+        At::Tip => bisect_log(&logs, &job, started, "tip"),
+        At::Landing(i) => bisect_log(&logs, &job, started, &candidates[i].id.to_string()),
     };
-    let pin_at = |i: usize| bisect_pin(&entry_pair(&candidates[i].landed).expect("landed pair"), &job.tip);
+    let pin_at = |i: usize| pins[i].clone();
     let (mut why, mut probes, mut said) = (String::new(), Vec::new(), Vec::new());
     if let Some(p) = tip_red {
         probes.push(p);
@@ -2023,6 +2676,14 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
     }
     let mut check = |at: At| {
         if job.of_a_leg() { night(); }
+        // a red a later run passed needs no landing's probe; a test's red tip still tells a flaky
+        // test from one fixed since
+        if !matches!(at, At::Tip) {
+            if let Some(by) = passed_since_red(home, &job) {
+                *fixed.borrow_mut() = Some(by);
+                return None;
+            }
+        }
         let (pin, mark, name) = match at {
             At::Base => (job.from.clone(), ("base", Value::Bool(true)), format!("last pass {}", tip_short(&job.from))),
             At::Tip => (job.tip.clone(), ("red_tip", Value::Bool(true)), format!("red tip {}", tip_short(&job.tip))),
@@ -2039,6 +2700,12 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
             why = outcome.no_verdict.clone().unwrap_or_else(|| format!("no verdict for {}{}", what(), if stopped.is_empty() { String::new() } else { format!("; {stopped}") }));
         }
         *failed_at.borrow_mut() = outcome.failing.clone();
+        if answer == Some(true) {
+            let tests = test_lines(last_run(&text)).0;
+            let mut way: Vec<(String, Vec<String>)> = outcome.failing.iter().map(|u| (u.clone(), tests.get(u).cloned().unwrap_or_default())).collect();
+            way.sort();
+            ways.borrow_mut().push(way);
+        }
         let mut fields = vec![("tip", tip_value(&pin)), ("red", answer.map_or(Value::Null, Value::Bool)), ("log", s(log.display().to_string())), mark];
         if answer.is_none() { fields.push(("why", s(&why))); }
         probes.push(obj(fields));
@@ -2076,13 +2743,13 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
             None => return finish(Named::Nobody, probes, format!("{heading} of {} stopped at its red tip: {why}; log {}", what(), log_at(At::Tip).display())),
         }
         if job.closed {
-            return finish(Named::Nobody, probes, format!("{heading} of {}: red again at its tip, and a later run passed it: fixed since, nobody told; log {}", what(), log_at(At::Tip).display()));
+            return settle(probes, passed_since_red(home, &job).as_ref());
         }
         if candidates.is_empty() { return finish(Named::Nobody, probes, format!("{heading} of {}: no landings on its first-parent chains", what())); }
     }
     // Leaving a landing out can leave the last candidate short of the known red tip (11-15).
     let last = candidates.len() - 1;
-    if pin_at(last).pair() != tip {
+    if pin_at(last) != job.tip {
         match check(At::Landing(last)) {
             Some(true) => {}
             Some(false) => return finish(Named::Nobody, probes, format!("{heading} of {}: attribution doubtful: last candidate #{} is green; log {}", what(), candidates[last].id, log_at(At::Landing(last)).display())),
@@ -2102,7 +2769,14 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
     if i == 0 && (!is_unit(&job.key) || job.of_a_test()) {
         match check(At::Base) {
             Some(false) => {}
-            Some(true) if job.of_a_test() => return flaky(probes, format!("red at its last pass {}, where it had passed (log {})", tip_short(&job.from), log_at(At::Base).display())),
+            // red the same way at every probe, its last pass too: deterministic, whatever turned
+            // it red is outside the range (a box, a tool, a repository it does not walk), not a
+            // flaky test's owner's to hear
+            Some(true) if job.of_a_test() && ways.borrow().windows(2).all(|w| w[0] == w[1]) => {
+                return finish(Named::Nobody, probes, format!("{heading} of {}: deterministic, not flaky: red the same way at every probe, its last pass {} too, where it had passed: no landing of this range is its cause; red: {}; log {}",
+                    what(), tip_short(&job.from), crate::proto::clean(&red_line.borrow(), 200), log_at(At::Base).display()));
+            }
+            Some(true) if job.of_a_test() => return flaky(probes, format!("red at its last pass {}, where it had passed, and not the same way (log {})", tip_short(&job.from), log_at(At::Base).display())),
             answer => {
                 let result = if answer == Some(true) { format!("red at its last pass {} already; no landing of this range broke it", tip_short(&job.from)) }
                     else { format!("attribution doubtful: its last pass {} did not answer: {why}", tip_short(&job.from)) };
@@ -2124,7 +2798,7 @@ fn run_bisect(repo: &Path, home: &Path, store: &Store, emit: &dyn Fn(Sev, String
     }
     let said = said.join(", ");
     finish(Named::Landing(e), probes, format!("{heading}: #{} {} ({}) lane {} turned {} red: {}; first red of {} landings since it last passed (probes: {said}); log {log}",
-        e.id, e.label(), e.agent, e.branch, what(), crate::proto::clean(&red_line.borrow(), 300), candidates.len()))
+        e.id, e.label(), e.agent, lane_of(e), what(), crate::proto::clean(&red_line.borrow(), 300), candidates.len()))
 }
 
 /// A bisect's targets as its lines say them: one unit as it is; several of one package as the
@@ -2162,7 +2836,7 @@ fn jit_note_of(line: &str) -> Option<String> {
 fn leg_at_tip(repo: &Path, home: &Path, emit: &dyn Fn(Sev, String, String), probe: &Probe, history: &[Entry], job: &Bisect) -> Result<Option<Value>, String> {
     let logs = home.join("bucket-logs/bisect");
     std::fs::create_dir_all(&logs).map_err(|e| format!("bisect logs: {e}"))?;
-    let log = logs.join(format!("{}-tip-{}.log", job.bucket, wall_ms()));
+    let log = bisect_log(&logs, job, bisect_start(job), "tip");
     let outcome = probe(&job.unit, Some(&job.from), &job.tip, &log);
     let answer = probe_says(&job.key, &outcome, &std::fs::read_to_string(&log).unwrap_or_default());
     let why = outcome.no_verdict.clone().unwrap_or_else(|| outcome.summary.clone());
@@ -2301,7 +2975,7 @@ fn file_blame(files: &[String], since: &[Entry], touched: &[Option<&[String]>], 
 
 /// `<unit> still failing since <who>`, for a `who` from [`origin`] or a row.
 pub fn still_since(who: &str) -> String {
-    if who.starts_with(ORIGIN_UNKNOWN) || who.starts_with(INTERMITTENT) || who.starts_with(BY_TEST) || who.starts_with(FIRST_RUN) { who.to_string() } else { format!("since {who}") }
+    if who.starts_with(ORIGIN_UNKNOWN) || who.starts_with(INTERMITTENT) || who.starts_with(BY_TEST) || who.starts_with(FIRST_RUN) || who.starts_with(COMPILE_RED) { who.to_string() } else { format!("since {who}") }
 }
 
 /// A `, `-joined list cut to its first `n` items and how many more: a red laid to the dozens of
@@ -2321,7 +2995,7 @@ const SOURCE_STEPS: [&str; 3] = [STATICS_STEP, "private", "rustfmt"];
 /// The buckets whose next run looks again at what failed (land_gate.sh's GATE_RETRY). CI needs no
 /// telling: a shard with no proof at its inputs runs; prebuild lists its legs under each new JIT;
 /// the full bucket runs everything.
-const RERUNS: [&str; 5] = ["fast", "hot", "tests", "mac", WINDOWS];
+const RERUNS: [&str; 6] = ["fast", "hot", "tests", "mac", WINDOWS, WINDOWS_TESTS];
 
 /// The full bucket's name ([`full`]).
 pub const FULL: &str = "full";
@@ -2517,17 +3191,17 @@ fn proven_since(all: &[Value], key: &str, units: Option<&Vec<Vec<crate::orch::ci
 /// it and started before the failing run (`started`), the hot gate's aside (a hand-in's merge). Only the landings after it can have broken
 /// it: the full bucket's range since its last run named 187 landings for one red the tests bucket
 /// had passed within it (11-17). `all`: every bucket's rows, newest first.
-fn passed_before(all: &[Value], key: &str, started: u64) -> Option<Pair> {
+fn passed_before(all: &[Value], key: &str, started: u64) -> Option<Pin> {
     all.iter().filter(|r| r.get("bucket").and_then(Value::as_str) != Some("hot") && r.get("started_ms").and_then(Value::as_u64).is_some_and(|at| at < started))
-        .find(|r| row_lists(r, "passed", key)).and_then(|r| r.get("tip")).and_then(read_tip).map(|t| t.pair())
+        .find(|r| row_lists(r, "passed", key)).and_then(|r| r.get("tip")).and_then(read_tip)
 }
 
 /// [`passed_before`] of a test unit itself (`test <pkg> --test T`), as a run's `ran_ok` names it,
 /// else of its package: a pass of another target of the package is no pass of this one.
-fn unit_passed_before(all: &[Value], unit: &str, started: u64) -> Option<Pair> {
+fn unit_passed_before(all: &[Value], unit: &str, started: u64) -> Option<Pin> {
     let ran = |r: &&Value| r.get("ran_ok").and_then(Value::as_arr).is_some_and(|l| l.iter().any(|u| u.as_str() == Some(unit)));
     all.iter().filter(|r| r.get("bucket").and_then(Value::as_str) != Some("hot") && r.get("started_ms").and_then(Value::as_u64).is_some_and(|at| at < started))
-        .find(ran).and_then(|r| r.get("tip")).and_then(read_tip).map(|t| t.pair())
+        .find(ran).and_then(|r| r.get("tip")).and_then(read_tip)
         .or_else(|| passed_before(all, &unit_key(unit), started))
 }
 
@@ -2582,6 +3256,12 @@ pub fn status(home: &Path, landed: &[Entry]) -> Vec<String> {
         if !changed.is_empty() { line.push(("changed", Value::Obj(changed))); }
         out.push(obj(line).to_json());
     }
+    // a test red again at its red tip that a later run passed, until cleared or green again
+    out.extend(open_intermittent(home, &rows).into_iter().map(|v| {
+        let field = |k: &str| s(v.get(k).and_then(Value::as_str).unwrap_or(""));
+        obj(vec![("intermittent", field("bucket")), ("key", field("key")), ("at", field("at")), ("passed", field("passed")), ("log", field("log")),
+            ("ms", v.get("ms").cloned().unwrap_or(Value::Int(0)))]).to_json()
+    }));
     // each bucket's last run: when it ended, and whether it passed; and a run after it that had no
     // verdict, which writes no row ([`note_no_verdict`])
     let last: Vec<(String, Value)> = KICKED.into_iter().filter_map(|name| {
@@ -2671,8 +3351,9 @@ pub enum Proven {
 
 /// Where a box that takes only proven tips moves (the user's WM node, sync/autosync.rs), by the
 /// fast bucket's runs: to the newest tip a run looked at that did not stop at a step and has no
-/// check, cargo or present unit red after it that was not red after the run of the newest tip the
-/// box holds (`holds(tip)`: its deployment has it; never back). A box that holds none of the tips
+/// check, cargo, present or boundary unit red after it that was not red after the run of the newest
+/// tip the box holds (`holds(tip)`: its deployment has it; never back). A boundary red is an app
+/// that would stop at a JIT boundary when it runs there (`check --boundary all`, qboundary_one). A box that holds none of the tips
 /// (it took every tip unproven until then) starts at the newest run that did not stop, red and all.
 pub fn proven_tip(home: &Path, holds: &dyn Fn(&Pin) -> bool) -> Proven {
     let fast = rows_of(home, "fast");
@@ -2694,7 +3375,7 @@ pub fn proven_tip(home: &Path, holds: &dyn Fn(&Pin) -> bool) -> Proven {
             continue;
         }
         let red = still_failing(&fast[i..]);
-        let new = red.iter().find(|(key, _)| matches!(key.split_whitespace().next(), Some("check" | "cargo" | "present")) && !took.contains_key(*key));
+        let new = red.iter().find(|(key, _)| matches!(key.split_whitespace().next(), Some("check" | "cargo" | "present" | "boundary")) && !took.contains_key(*key));
         match new {
             Some((_, (unit, who, log))) => {
                 why.get_or_insert_with(|| format!("tip {} has {unit} failing {} (log {log})", tip_short(&t), still_since(who)));
@@ -2792,6 +3473,22 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         entries.iter().filter(|e| u128::from(started.saturating_sub(e.changed_ms)) <= recent).find_map(|e| entry_pair(&e.pre)).map(|p| pin_of(&p))
     });
     let mut outcome = run(base.as_ref())?;
+    // a unit or step that failed on a file its box's tree lacked, which the pinned tree holds, is
+    // the box's: no lane's. A warm leg's tree without makepad/apps failed makepad-game-blocks on
+    // its missing manifest, and the bucket laid it to four landings of the lane that changed the
+    // package last (11-22)
+    if !outcome.ok && outcome.no_verdict.is_none() {
+        let infra = lacked_in_tree(repo, tip, last_run(&std::fs::read_to_string(&outcome.log).unwrap_or_default()), &outcome.failing);
+        if !infra.is_empty() {
+            let said = format!("infra, no lane's: {}", infra.iter().map(|(u, path)| format!("{u}: its box's tree lacked {path}, which the pinned tree holds")).collect::<Vec<_>>().join("; "));
+            outcome.failing.retain(|u| !infra.contains_key(u));
+            if outcome.failing.is_empty() {
+                outcome.no_verdict = Some(said);
+            } else {
+                outcome.summary.push_str(&format!("{}{said}", if outcome.summary.is_empty() { "" } else { "; " }));
+            }
+        }
+    }
     // the landings' ledger and attribution read work and main
     let base_pin = base.clone();
     let (base, tip_pin, tip) = (base.map(|b| b.pair()), tip, &tip.pair());
@@ -2849,7 +3546,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     // the statics step names each static's line: the landing that added it, alone (the fast
     // bucket named all four lanes of its range "(ambiguous)" for two statics one landing added, 11-14)
     if blame.iter().any(|u| u.as_str() == STATICS_STEP) {
-        let from = last_pass(&earlier, STATICS_STEP).or_else(|| base.clone());
+        let from = last_pass(&earlier, STATICS_STEP).map(|p| p.pair()).or_else(|| base.clone());
         let landed = since.entry(from.clone()).or_insert_with(|| from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).unwrap_or_default());
         let mut who: Vec<(u64, String)> = Vec::new();
         for (path, n, line) in statics_lines(last_run(&text)) {
@@ -2863,7 +3560,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     let by_files: Vec<String> = blame.iter().filter(|u| !by_file.contains_key(*u)).cloned().collect();
     for unit in &by_files {
         let Some(files) = located.get(unit) else { continue };
-        let from = last_pass(&earlier, &unit_key(unit)).or_else(|| base.clone());
+        let from = last_pass(&earlier, &unit_key(unit)).map(|p| p.pair()).or_else(|| base.clone());
         let landed = since.entry(from.clone()).or_insert_with(|| from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).unwrap_or_default());
         for e in landed.iter() { diffs.entry(e.id).or_insert_with(|| landing_files(repo, e)); }
         let touched: Vec<Option<&[String]>> = landed.iter().map(|e| diffs[&e.id].as_deref()).collect();
@@ -2895,7 +3592,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     // [`passed_before`]; units with the same start share one look)
     let mut ranges: BTreeMap<Option<String>, (Option<Vec<Entry>>, Vec<String>)> = BTreeMap::new();
     for unit in &named {
-        let from = passed_before(&all, &unit_key(unit), started);
+        let from = passed_before(&all, &unit_key(unit), started).map(|p| p.pair());
         let slot = ranges.entry(from.as_ref().map(|p| format!("{}:{}", p.work, p.main))).or_insert_with(|| {
             (from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).filter(|narrow| narrow.len() < entries.len()), Vec::new())
         });
@@ -2908,11 +3605,30 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     let tests_value = Value::Obj(tests_failed.iter().map(|(u, t)| (u.clone(), Value::Arr(t.iter().map(s).collect()))).collect());
     let ran_value = Value::Arr(ran_ok.iter().map(s).collect());
     let changed_value = Value::Obj(changed.iter().map(|(u, who)| (u.clone(), s(who))).collect());
-    let looked_back: Vec<Value> = std::iter::once(obj(vec![("log", s(&outcome.log)), ("tests_failed", tests_value.clone()), ("ran_ok", ran_value.clone()), ("changed", changed_value.clone())]))
+    // (its panics too: a test's first red after a pass is this run's, and without them its earlier
+    // red's other break read as the same failure off and on, 11-25)
+    let panics_value = Value::Obj(panics.iter().map(|(u, p)| (u.clone(), Value::Arr(p.iter().map(s).collect()))).collect());
+    let looked_back: Vec<Value> = std::iter::once(obj(vec![("log", s(&outcome.log)), ("tests_failed", tests_value.clone()), ("panics", panics_value.clone()), ("ran_ok", ran_value.clone()), ("changed", changed_value.clone())]))
         .chain(earlier.iter().take(TIMES_ROWS).map(named_row)).collect();
     let mut by_key: BTreeMap<String, Vec<(String, Vec<String>)>> = BTreeMap::new();
     for unit in &named { by_key.entry(unit_key(unit)).or_default().push((unit.clone(), tests_failed[unit].clone())); }
-    let by_test: BTreeMap<String, String> = by_key.iter().map(|(key, named)| (key.clone(), tests_blame(&looked_back, named))).collect();
+    // a failing test whose message names a line of the tree: the landing since the test last
+    // passed that added that line ([`said_lines`], [`line_blame`]), ahead of who changed its unit (a
+    // missing Option entry the boundary check named at its line, under the harness's assert, read
+    // "intermittent, origin unknown", and one of the three landings that changed the unit added it, 11-25)
+    let mut by_line: BTreeMap<(String, String), String> = BTreeMap::new();
+    for ((unit, test), lines) in said_lines(last_run(&text)) {
+        let from = looked_back[1..].iter().find(|r| matches!(looked(r, &unit, &test), Some(Look::Passed))).and_then(|r| r.get("tip")).and_then(read_tip).map(|p| p.pair()).or_else(|| base.clone());
+        let landed = since.entry(from.clone()).or_insert_with(|| from.as_ref().and_then(|from| landings(repo, from, tip, &history).ok()).unwrap_or_default());
+        let mut who: Vec<(u64, String)> = Vec::new();
+        for (path, n) in &lines {
+            let Some(e) = line_blame(landed, tip, path, *n, &|at, p| file_text(repo, at, p)) else { continue };
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if !who.iter().any(|(id, _)| *id == e.id) { who.push((e.id, format!("{} (it added {name}:{n})", who_of(e)))); }
+        }
+        if !who.is_empty() { by_line.insert((unit, test), who.into_iter().map(|(_, w)| w).collect::<Vec<_>>().join(", ")); }
+    }
+    let by_test: BTreeMap<String, String> = by_key.iter().map(|(key, named)| (key.clone(), tests_blame(&looked_back, named, &|unit, test| by_line.get(&(unit.to_string(), test.to_string())).cloned()))).collect();
     // who broke each failing unit: for the next run of the bucket to name, should it still fail
     let mut broke: BTreeMap<String, String> = by_test.clone();
     // (a bucket's first run has no green baseline: what its range changed is no more why than what
@@ -2962,8 +3678,10 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
             if before.contains_key(&key) || jobs.iter().any(|j| j.key == key) || first.contains_key(unit) || !(is_unit(unit) || leg || unit == STATICS_STEP) { continue; }
             if !test && !leg && (closed || broke.get(&key).is_some_and(|who| named_ids(who).len() == 1)) { continue; }
             let pass = if test { unit_passed_before(&all, unit, started).or_else(|| last_pass(&earlier, &key)) } else { last_pass(&earlier, &key) };
-            // (a leg's from: its last pass, else the run before; its tip alone, with neither)
-            let Some(from) = pass.map(|pair| bisect_pin(&pair, tip_pin)).or_else(|| base_pin.clone()).or_else(|| leg.then(|| tip_pin.clone())) else { continue };
+            // (a leg's from: its last pass, else the run before; its tip alone, with neither; its
+            // other nested repositories where that pass ran them; the bisect places the ones it
+            // named none of where they stood at its time, never at the red tip's ([`place_from`]))
+            let Some(from) = pass.or_else(|| base_pin.clone()).or_else(|| leg.then(|| tip_pin.clone())) else { continue };
             if !test && !leg {
                 let landed = since.entry(Some(from.pair())).or_insert_with(|| landings(repo, &from.pair(), tip, &history).unwrap_or_default());
                 if landed.len() < 2 { continue; }
@@ -2986,7 +3704,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         let failing = statics_errors.get(&id).filter(|_| key == STATICS_STEP).and_then(|lines| lines.first())
             .or_else(|| [&errors, &panics, &tests_failed].into_iter().find_map(|lines| lines.iter().filter(|(u, _)| unit_key(u) == key).find_map(|(_, lines)| lines.first())))
             .map(String::as_str).unwrap_or(key);
-        format!("{}{}", crate::proto::clean(failing, 300), kept.get(key).map_or(String::new(), |lease| format!(" (its output: devhub job result {lease})")))
+        format!("{}{}", crate::proto::clean(failing, 300), kept.get(key).map_or(String::new(), |at| format!(" (its output: {at})")))
     };
     // a red at its first run here, as its owner and main hear it
     let first_keys: BTreeMap<String, &String> = first.iter().map(|(u, who)| (unit_key(u), who)).collect();
@@ -3031,11 +3749,13 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         // each failing unit's failing tests, the units that passed and who changed each named unit:
         // what a test's blame reads back ([`test_blame`])
         ("tests_failed", tests_value),
-        ("panics", Value::Obj(panics.iter().map(|(u, p)| (u.clone(), Value::Arr(p.iter().map(s).collect()))).collect())),
+        ("panics", panics_value),
         ("ran_ok", ran_value),
         ("changed", changed_value),
         ("still", Value::Obj(still.iter().map(|(u, (who, _))| (u.clone(), s(who))).collect())),
         ("broke", Value::Obj(broke.iter().map(|(k, who)| (k.clone(), s(who))).collect())),
+        // where each failed unit's output is kept, which a red that stays open names ([`origin`])
+        ("kept", Value::Obj(kept.iter().map(|(k, at)| (k.clone(), s(at))).collect())),
         ("proven", Value::Arr(proven.iter().map(s).collect())),
         ("repro", Value::Obj(repro.iter().map(|(u, cmd)| (u.clone(), s(cmd))).collect())),
         // each unit's seconds, which the next runs deal the slowest out by first (tests)
@@ -3048,6 +3768,28 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         ("unit_tests", Value::Obj(tests_s.iter().map(|(u, t)| (u.clone(), Value::Arr(t.iter().map(|(n, secs, mb)| Value::Arr(vec![s(n), Value::F64(*secs), Value::Int(*mb as i64)])).collect()))).collect())),
         ("unit_peak_tests", Value::Obj(peak_tests.iter().map(|(u, p)| (u.clone(), obj(vec![("mb", Value::Int(p.mb as i64)), ("at_s", Value::Int(p.at_s as i64)), ("tests", Value::Arr(p.tests.iter().map(s).collect()))]))).collect())),
     ])).map_err(|e| format!("bucket ledger: {e}"))?;
+    // each red its gate ran once more on its box at its tip and that passed there: a flake, on the
+    // flake list with both runs' outputs, and nobody named (main, 11-24)
+    for (unit, tests) in flake_lines(last_run(&text)) {
+        let logs: Vec<String> = std::iter::once(outcome.log.clone()).chain(kept.get(&unit_key(&unit)).map(|at| format!("both runs' output: {at}"))).collect();
+        flake_said(home, name, &unit, &tests, tip_pin, &logs, started, emit);
+    }
+    // each test it measured past libtest's own warning: the lane of the newest landing that touched
+    // its package hears it, once a day (main, 11-23)
+    let live: BTreeSet<String> = store.read(|d| d.lanes.iter().filter(|l| l.state == "live").map(|l| l.branch.clone()).collect());
+    match slow_notes(home, name, tip_pin, &outcome.log, &tests_s, &history, &|e| live.contains(&e.branch), started) {
+        Ok(notes) => for (agent, line) in notes {
+            if let Err(e) = crate::notes::leave(home, &agent, &line) { eprintln!("devhub bucket {name}: agent notes: {e}"); }
+        },
+        Err(e) => eprintln!("devhub bucket {name}: slow tests: {e}"),
+    }
+    if !tests_s.is_empty() {
+        match weekly_slowest(home, started) {
+            Ok(Some(line)) => if let Err(e) = crate::notes::leave(home, "main", &line) { eprintln!("devhub bucket {name}: agent notes: {e}"); },
+            Ok(None) => {}
+            Err(e) => eprintln!("devhub bucket {name}: weekly slow tests: {e}"),
+        }
+    }
     // The red row must precede its probes: GATE_RETRY then includes the red unit (11-15).
     if let Some(bisect) = bisect {
         for job in &jobs { bisect(job.clone()); }
@@ -3077,7 +3819,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         // each red unit with its label (a run's exit after its listing) and where its output is kept
         let failing = outcome.failing.iter().map(|u| {
             let label = errors.get(u).and_then(|e| e.first()).filter(|e| e.starts_with(EXIT_AFTER_LISTING)).map(|_| EXIT_AFTER_LISTING.to_string());
-            let said: Vec<String> = label.into_iter().chain(kept.get(&unit_key(u)).map(|lease| format!("its output: devhub job result {lease}"))).collect();
+            let said: Vec<String> = label.into_iter().chain(kept.get(&unit_key(u)).map(|at| format!("its output: {at}"))).collect();
             if said.is_empty() { u.clone() } else { format!("{u} ({})", said.join("; ")) }
         }).collect::<Vec<_>>().join(", ");
         (Sev::Err, format!("bucket {name} {} FAILED {failing}: {blamed}{} ({latency}{})", tip_short(tip_pin), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
@@ -3296,7 +4038,11 @@ fn fast_gate(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>,
         // shard on the third, every landing behind it 15 min, and it ran at a background CPU
         // weight beside live calls (L657290, 11-08).
         let needs = gate_needs();
-        let mut lease = vec!["lease", kind, "--needs", &needs, "--cores", "8", "--priority", priority, "--lane", lane];
+        let mut lease = vec!["lease", kind, "--needs", &needs, "--priority", priority, "--lane", lane];
+        // a bisect's probe asks no count: its class's measure charges it, as devhub's other legs.
+        // It used 7.3 cores for a minute on an aged start of 3 against the gate's 8, while its
+        // runs average 3-5 (L1632210, 11-23)
+        if lane != BISECT_LANE { lease.extend(["--cores", "8"]); }
         if let Some(prio) = prio { lease.extend(["--prio", prio]); }
         lease.extend(["--rev", &rev]);
         let proven = format!("GATE_PROVEN={}", units.join(";"));
@@ -3494,7 +4240,19 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
         }
         proofs.record_log(&repo, &tip.pair(), &text, &format!("bucket tests {}", tip_short(tip)));
         let judged: Vec<_> = ran.iter().enumerate().filter(|(i, _)| !covered.contains(i)).map(|(_, r)| r.clone()).collect();
-        let mut outcome = verdict(worst(&judged), &text, log);
+        let status = worst(&judged);
+        let mut outcome = verdict(status.clone(), &text, log);
+        // a part that said nothing of the landings is named; the rest's verdicts stand: a red on
+        // its failing units, and with none, no verdict that names it
+        let named = unsaid_parts(log, shards, &judged);
+        if !named.is_empty() {
+            match &mut outcome.no_verdict {
+                // (beside a part that ended without an exit status, which keeps its own words)
+                Some(why) if status == Ok(None) => *why = if judged.iter().any(|(_, (s, _))| *s == Ok(None)) { format!("{why}; {}", named.join("; ")) } else { named.join("; ") },
+                _ if !outcome.ok => outcome.summary = [outcome.summary.as_str(), &named.join("; ")].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", "),
+                _ => {}
+            }
+        }
         if !unsaid.is_empty() {
             outcome.ok = false;
             outcome.failing.extend(unsaid);
@@ -3542,16 +4300,38 @@ fn unjudged(status: &Result<Option<i32>, String>, part: &str) -> Option<Unjudged
         if !said.contains(unit) && !ended.contains(unit) && !units.iter().any(|u| u == unit) { units.push(unit.to_string()); }
     }
     if units.is_empty() { return None; }
-    let (lease, node) = part.lines().find_map(|l| {
-        let (lease, node) = l.split_once(": sources at ")?.0.split_once(' ')?;
-        (lease.starts_with('L') && !node.contains(' ')).then(|| (lease.to_string(), node.to_string()))
-    }).unwrap_or_default();
+    let (lease, node) = part_box(part);
     let why = part.lines().rev().find(|l| l.starts_with("LEASE CANCELLED") || l.starts_with("LEASE LOST") || l.starts_with("TOOLCHAIN CHANGED")).map(|l| crate::proto::clean(l, 160)).unwrap_or_else(|| match status {
         Err(e) => e.clone(),
         Ok(Some(code)) => format!("exit {code}"),
         Ok(None) => "it ended without an exit status".into(),
     });
     Some(Unjudged { lease, node, why, units })
+}
+
+/// The lease and box of a shard's part of a run (its `L1 box-a: sources at ..` line), else empty.
+fn part_box(part: &str) -> (String, String) {
+    part.lines().find_map(|l| {
+        let (lease, node) = l.split_once(": sources at ")?.0.split_once(' ')?;
+        (lease.starts_with('L') && !node.contains(' ')).then(|| (lease.to_string(), node.to_string()))
+    }).unwrap_or_default()
+}
+
+/// The parts of the run of `log` (its `shards`, the rerun of what they left, the libraries' sweep)
+/// that exited 0 without their verdict line, each named with its lease and box: `no verdict,
+/// twice` when it ran once more ([`RERUN_UNSAID`]) and said nothing again. The other parts'
+/// verdicts stand.
+fn unsaid_parts(log: &Path, shards: usize, ran: &[(PathBuf, (Result<Option<i32>, String>, String))]) -> Vec<String> {
+    ran.iter().filter(|(_, (status, part))| matches!(status, Ok(Some(0))) && !part.lines().any(|l| l.starts_with("NODEGATE-OK") || l.starts_with("NODEGATE-FAIL") || l == NOT_NEEDED)).map(|(at, (_, part))| {
+        let name = if *at == libs_log(log) { "the libraries' sweep".to_string() } else {
+            (1..=shards + 1).find(|i| shard_log(log, *i) == *at).map_or_else(|| at.display().to_string(), |i| if i > shards { "the rerun of what its shards left".to_string() } else { format!("shard {i}") })
+        };
+        let raw = std::fs::read_to_string(at).unwrap_or_default();
+        let twice = raw.rsplit_once(&format!("{YIELDED}\n")).map_or(raw.as_str(), |(_, p)| p).lines().any(|l| l == RERUN_UNSAID);
+        let (lease, node) = part_box(part);
+        let at = if lease.is_empty() { String::new() } else { format!(" ({lease} on {node})") };
+        if twice { format!("{name}{at}: no verdict, twice (it exited 0 without its verdict line, and again as it ran once more)") } else { format!("{name}{at}: no verdict (it exited 0 without its verdict line)") }
+    }).collect()
 }
 
 /// The row's line for each shard whose units its rerun (`again`, its part) left without verdicts
@@ -3794,7 +4574,9 @@ struct QueueInput {
 impl QueueInput {
     fn write(log: &Path, vars: &[&str]) -> Result<QueueInput, String> {
         let file = log.with_extension("log.queue.tar");
-        std::fs::write(&file, queue_tar(vars)).map_err(|e| format!("bucket queue input {}: {e}", file.display()))?;
+        // (whole or not at all: a restarted master's run writes it again under a holder it adopts)
+        let temp = log.with_extension("log.queue.tar.tmp");
+        std::fs::write(&temp, queue_tar(vars)).and_then(|_| std::fs::rename(&temp, &file)).map_err(|e| format!("bucket queue input {}: {e}", file.display()))?;
         Ok(QueueInput { arg: format!("{QUEUE_INPUT}={}", file.display()), file })
     }
 }
@@ -4248,7 +5030,7 @@ impl Dealer {
                 None
             }
             // (a part that gave its slot up ended as a lost one does: its units back unless judged)
-            _ if line == RERUN || line == YIELDED => {
+            _ if RERUN_LINES.contains(&line) || line == YIELDED => {
                 self.over(shard);
                 None
             }
@@ -4773,8 +5555,10 @@ pub fn hot(repo: PathBuf, home: PathBuf) -> Run {
 /// Runs the test targets only a Mac can fail ([package.metadata.makepad.macos-tests]) that the
 /// landings reach, on a Mac's lease under its own JIT (tools/run/fixture/mac_tests.sh: the Mac's
 /// bash runs no land_gate.sh). The Linux buckets build them empty or never reach what they guard: a
-/// menu-bar item's restart guard (JITPERF) had no post-land run (11-17). A small background lease
-/// beside the Mac's other work; with nothing reached it ends at once, before any test.
+/// menu-bar item's restart guard (JITPERF) had no post-land run (11-17). Then the boundary audits
+/// (`boundary <app>` units, as the fast bucket's) of the apps the landings reach: only a Mac lowers
+/// their Apple-only provided code (26 violations no Linux audit saw, 11-24). A small background
+/// lease beside the Mac's other work; with nothing reached it ends at once, before any test.
 pub fn mac(repo: PathBuf, home: PathBuf) -> Run {
     Arc::new(move |base, tip, log| {
         // (a first run with no landing in the last hour to diff from: nothing to say yet)
@@ -4904,6 +5688,533 @@ fn windows_units(status: &Result<Option<i32>, String>, text: &str, pkgs: &[(Stri
     out
 }
 
+/// The windows-tests bucket's name ([`windows_tests`]).
+pub const WINDOWS_TESTS: &str = "windows-tests";
+
+/// The windows-tests bucket's class, one for all its runs (its command names its packages).
+const WINDOWS_TESTS_CLASS: &str = "test cargo test @landq-windows-tests";
+
+/// Its corpus leg's class ([`corpus_argv`]: the JIT's build and its files under it).
+const WINDOWS_CORPUS_CLASS: &str = "test makepad corpus @landq-windows-tests";
+
+/// Runs the test targets a Windows box runs ([`windows_tests_reach`]: each package's
+/// `[package.metadata.makepad.windows-tests]`) that the landings reach, and those still red there,
+/// with one plain `cargo test` on a Windows box's lease (argv: a Windows run is never a shell's,
+/// and the lease has no path to the box's JIT or devhub, so cargo runs them, as the windows
+/// bucket's check). Each target is a unit (`wintest <package>/<target>`); its known reds (its
+/// declaration's `skip`, until the queue item it names lands their fixes) stay out by their exact
+/// names. A unit red on its run runs once more, its failing tests alone, in a second lease: green
+/// then is a flake, red again names the landings. Its known reds then run alone, in a lease of
+/// their own, judging nothing: one that passes is said, and main hears it once, to take it off
+/// the list. The list kept itself honest only as long as someone relayed each fix (main, 11-24). No other run tests `cfg(windows)` code: the
+/// tests bucket and the CI run on Linux and the Mac, and 13 of one lib's tests and one of another's
+/// had gone red on Windows unseen (11-24). A declared corpus file (`corpus:<file>`) runs under
+/// the JIT there, `makepad test <file>`, in a lease of its own ([`corpus_argv`]): no other run tests
+/// what the JIT does on Windows. With nothing reached it takes no lease.
+pub fn windows_tests(repo: PathBuf, home: PathBuf) -> Run {
+    Arc::new(move |base, tip, log| {
+        let Some(base) = base else { return no_verdict("no base to read the landings' reach from".into()) };
+        let again: BTreeSet<String> = still_failing(&rows_of(&home, WINDOWS_TESTS)).into_values().filter_map(|(unit, _, _)| unit.strip_prefix("wintest ").map(str::to_string)).collect();
+        let (from, to) = (base.pair(), tip.pair());
+        let Some(paths) = crate::gitread::files_differing(&repo, &from.work, &to.work) else {
+            return no_verdict(format!("the files between work {} and {} are not readable here", crate::state::short(&from.work), crate::state::short(&to.work)));
+        };
+        let tree = match crate::orch::ci::Tree::at(&repo, &to) { Ok(t) => t, Err(e) => return no_verdict(e) };
+        let (units, gone) = windows_tests_reach(&tree, &paths, &again);
+        // (a red unit no longer declared, or gone from the tree: nothing is left to fail)
+        let gone: String = gone.iter().map(|u| format!("{WINDOWS_TESTS}: wintest {u} is run on Windows no more (no longer declared, or it left the tree)\nGATEUNIT gone wintest {u}\n")).collect();
+        if units.is_empty() {
+            let said = format!("{WINDOWS_TESTS}: the landings reach no test target run on Windows, and none is red there\n{gone}NODEGATE-OK\n");
+            if let Err(e) = std::fs::write(log, &said) { return no_verdict(format!("{}: {e}", log.display())); }
+            return verdict(Ok(Some(0)), &said, log);
+        }
+        let rev = match tip_rev(&repo, tip) { Ok(r) => r, Err(e) => return no_verdict(e) };
+        let lease = ["lease", "test", "--needs", "os=windows", "--cost", "medium", "--priority", "background", "--lane", "landq-windows-tests", "--class", WINDOWS_TESTS_CLASS, "--rev", &rev];
+        // each unit's first run and its rerun, by the units' order: the corpus files' leg, then the
+        // cargo targets' (the main log is the cargo leg's, or the corpus leg's when it is alone)
+        let (cargo, corpus): (Vec<WinUnit>, Vec<WinUnit>) = units.iter().cloned().partition(|u| u.corpus().is_none());
+        let at = |u: &WinUnit| units.iter().position(|v| v == u).unwrap_or(0);
+        let mut first: Vec<WinRun> = vec![WinRun::NotRun; units.len()];
+        let mut rerun: Vec<Option<WinRun>> = vec![None; units.len()];
+        let mut text = String::new();
+        if !corpus.is_empty() {
+            let corpus_log = if cargo.is_empty() { log.to_path_buf() } else { shard_log(log, 3) };
+            let (runs, faulty): (Vec<WinUnit>, Vec<WinUnit>) = corpus.into_iter().partition(|u| u.fault.is_none());
+            for u in &faulty { first[at(u)] = WinRun::Broke(u.fault.clone().unwrap_or_default(), Vec::new()); }
+            let mut leg = String::new();
+            if !runs.is_empty() {
+                let lease = ["lease", "test", "--needs", "os=windows", "--cost", "medium", "--priority", "background", "--lane", "landq-windows-tests", "--class", WINDOWS_CORPUS_CLASS, "--rev", &rev];
+                let argv = corpus_argv(&runs);
+                let gate: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let why = [format!("{WINDOWS_TESTS}: {} corpus file(s) under the JIT, which the landings reach or still red there, a red one once more: {}", runs.len(), runs.iter().map(|u| format!("{} ({})", u.name(), u.why)).collect::<Vec<_>>().join(", "))];
+                let (status, out) = lease_run(&repo, &lease, &gate, &why, &corpus_log, (base, tip), &|| true, &mut |_| true, &|| false, &|| false);
+                let Some(ran) = corpus_runs(&status, &out, &runs) else { return verdict(status, &out, &corpus_log) };
+                for (u, (one, again)) in runs.iter().zip(ran) {
+                    first[at(u)] = one;
+                    rerun[at(u)] = again;
+                }
+                leg = out;
+            } else if cargo.is_empty() {
+                leg = format!("{WINDOWS_TESTS}: no corpus file of them can run: {}\n", faulty.iter().map(WinUnit::name).collect::<Vec<_>>().join(", "));
+                if let Err(e) = std::fs::write(log, &leg) { return no_verdict(format!("{}: {e}", log.display())); }
+            }
+            if cargo.is_empty() { text = leg; }
+        }
+        // the cargo targets' leg
+        if !cargo.is_empty() {
+            let argv = windows_tests_argv(&cargo, &[]);
+            let gate: Vec<&str> = argv.iter().map(String::as_str).collect();
+            let why = [format!("{WINDOWS_TESTS}: cargo test of {} target(s) the landings reach or still red there: {}", cargo.len(), cargo.iter().map(|u| format!("{} ({})", u.name(), u.why)).collect::<Vec<_>>().join(", "))];
+            let (status, out) = lease_run(&repo, &lease, &gate, &why, log, (base, tip), &|| true, &mut |_| true, &|| false, &|| false);
+            let Some(ran) = win_runs(&status, &out, &cargo) else { return verdict(status, &out, log) };
+            text = out;
+            for (u, run) in cargo.iter().zip(ran) { first[at(u)] = run; }
+            // the red ones once more, their failing tests alone (whole where one broke), in a log of
+            // their own beside this run's
+            let red: Vec<WinUnit> = cargo.iter().filter(|u| matches!(first[at(u)], WinRun::Failed(..) | WinRun::Broke(..))).cloned().collect();
+            if !red.is_empty() {
+                let only: Vec<String> = match red.iter().any(|u| matches!(first[at(u)], WinRun::Broke(..))) {
+                    true => Vec::new(),
+                    false => red.iter().flat_map(|u| match &first[at(u)] { WinRun::Failed(tests, _) => tests.clone(), _ => Vec::new() }).collect(),
+                };
+                let argv = windows_tests_argv(&red, &only);
+                let gate: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let why = [format!("{WINDOWS_TESTS}: the red target(s) once more at this tip before anyone is named: {}", red.iter().map(WinUnit::name).collect::<Vec<_>>().join(", "))];
+                let (again_status, again_text) = lease_run(&repo, &lease, &gate, &why, &shard_log(log, 1), (base, tip), &|| true, &mut |_| true, &|| false, &|| false);
+                if let Some(runs) = win_runs(&again_status, &again_text, &red) {
+                    for (unit, run) in red.iter().zip(runs) { rerun[at(unit)] = Some(run); }
+                }
+            }
+        }
+        let (said, ok) = windows_tests_said(&units, &first, &rerun);
+        let said = format!("{gone}{said}");
+        // the known reds alone, after the verdict's runs, in a log of their own: none gates
+        let known: Vec<WinUnit> = units.iter().zip(&first).filter(|(u, r)| !u.skip.is_empty() && u.corpus().is_none() && !matches!(r, WinRun::NotRun)).map(|(u, _)| u.clone()).collect();
+        let known_said = match known.is_empty() {
+            true => String::new(),
+            false => {
+                let argv = known_argv(&known);
+                let gate: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let why = [format!("{WINDOWS_TESTS}: the known reds alone, to see which pass now (they judge nothing): {}", known.iter().map(WinUnit::name).collect::<Vec<_>>().join(", "))];
+                let (known_status, known_text) = lease_run(&repo, &lease, &gate, &why, &shard_log(log, 2), (base, tip), &|| true, &mut |_| true, &|| false, &|| false);
+                let ran = matches!(known_status, Ok(Some(0 | 101))).then(|| test_outcomes(&known_text));
+                let (lines, passes) = known_reds_said(&known, ran.as_ref());
+                tell_known_passes(&home, &known, &passes);
+                lines
+            }
+        };
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(log) { let _ = file.write_all(format!("{said}{known_said}").as_bytes()); }
+        verdict(Ok(Some(if ok { 0 } else { 1 })), &format!("{text}{said}"), log)
+    })
+}
+
+/// A test target the windows-tests bucket runs: its package and directory, its target (`lib`,
+/// `test:<name>`, or a corpus file `corpus:<file>`), its test binary's name, why it runs on
+/// Windows, and the known reds it leaves out by their exact names until the queue item `known`
+/// lands their fixes; what keeps a corpus entry from running (`fault`, [`corpus_fault`]).
+#[derive(Clone, Debug, PartialEq)]
+struct WinUnit {
+    package: String,
+    dir: String,
+    target: String,
+    binary: String,
+    why: String,
+    known: String,
+    skip: Vec<String>,
+    fault: Option<String>,
+}
+
+impl WinUnit {
+    /// Its unit's name: `wintest <package>/<target>`, two words, so each target is a unit of its own.
+    fn name(&self) -> String {
+        format!("wintest {}/{}", self.package, self.target)
+    }
+
+    /// Its target as cargo selects it.
+    fn select(&self) -> Vec<String> {
+        match self.target.strip_prefix("test:") {
+            Some(t) => vec!["--test".into(), t.into()],
+            None => vec!["--lib".into()],
+        }
+    }
+
+    /// Its corpus file from the tree's root (`corpus:<file>`, the file from its package's
+    /// directory), which runs under the JIT alone: `makepad test <file>`. None: a cargo target.
+    fn corpus(&self) -> Option<String> {
+        let file = self.target.strip_prefix("corpus:")?;
+        Some(if self.dir.is_empty() { file.to_string() } else { format!("{}/{file}", self.dir) })
+    }
+
+    /// The command that runs it alone on a Windows box (`exact`: a cargo target's failing tests).
+    fn repro(&self, exact: &[String]) -> String {
+        if let Some(file) = self.corpus() {
+            return format!("makepad devhub run <lane> test --needs os=windows -- cargo run --profile host -p makepad-run --bin makepad -- test {file}");
+        }
+        let exact = if exact.is_empty() { String::new() } else { format!(" -- --exact{}", exact.iter().map(|t| format!(" {t}")).collect::<String>()) };
+        format!("makepad devhub test <lane> {} {} --needs os=windows --native \"its Windows red\"{exact}", self.package, self.select().join(" "))
+    }
+}
+
+/// What keeps corpus entry `u` from running in `tree` (None: it runs): its file is a plain relative
+/// `.rs` path in the tree (no `..`, nothing a PowerShell literal would read: [`corpus_argv`]), and it
+/// has no skip list (`makepad test` runs a file whole).
+fn corpus_fault(tree: &crate::orch::ci::Tree, u: &WinUnit) -> Option<String> {
+    let file = u.corpus()?;
+    let plain = file.ends_with(".rs") && file.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && c.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)));
+    if !plain { return Some(format!("its corpus entry {} is no plain relative .rs path", u.target)); }
+    if !tree.files.iter().any(|f| *f == file) { return Some(format!("its corpus file {file} is not in the tree")); }
+    if !u.skip.is_empty() { return Some("a corpus file runs whole under `makepad test`: its skip list cannot apply".into()); }
+    None
+}
+
+/// How a unit's run went ([`win_runs`]): passed; tests failed (their names, and the panics their
+/// output gave); its binary broke (did not build, ended before its result, or never ran: why, and
+/// the error lines that say it); or it did not run, another package's build having stopped the
+/// cargo test (no verdict on it: that package is the red one).
+#[derive(Clone, Debug, PartialEq)]
+enum WinRun {
+    Passed,
+    Failed(Vec<String>, Vec<String>),
+    Broke(String, Vec<String>),
+    NotRun,
+}
+
+/// The test targets a Windows box runs: each `[package.metadata.makepad.windows-tests]` target of
+/// a package that `paths` reach (a crate they touch, or one depending on it; a workspace-wide file
+/// or the cargo config reaches every one), and those of `again` (still red there, by
+/// `<package>/<target>`) whatever they reach; then those of `again` declared no more.
+fn windows_tests_reach(tree: &crate::orch::ci::Tree, paths: &[String], again: &BTreeSet<String>) -> (Vec<WinUnit>, Vec<String>) {
+    use crate::orch::ci::{in_set, krate, touched_crates};
+    let all = paths.iter().any(|p| WORKSPACE_WIDE.contains(&p.as_str()) || p.starts_with(".cargo/"));
+    let touched = touched_crates(tree, paths);
+    let reached = in_set(tree, &touched, &touched);
+    let declared: Vec<WinUnit> = tree.files.iter().filter(|f| f.ends_with("/Cargo.toml")).filter_map(|m| krate(tree, m)).flat_map(|k| {
+        k.windows_tests.iter().map(|(target, decl)| WinUnit {
+            package: k.package.clone(),
+            dir: k.dir.clone(),
+            target: target.clone(),
+            binary: match target.strip_prefix("test:") { Some(t) => t.replace('-', "_"), None if target.starts_with("corpus:") => String::new(), None => k.lib_name.clone() },
+            why: decl.why.clone(),
+            known: decl.known.clone(),
+            skip: decl.skip.clone(),
+            fault: None,
+        }).collect::<Vec<_>>()
+    }).map(|u| WinUnit { fault: corpus_fault(tree, &u), ..u }).collect();
+    let key = |u: &WinUnit| format!("{}/{}", u.package, u.target);
+    let gone: Vec<String> = again.iter().filter(|a| !declared.iter().any(|u| key(u) == **a)).cloned().collect();
+    let mut out: Vec<WinUnit> = declared.into_iter().filter(|u| all || reached.contains(&u.package) || again.contains(&key(u))).collect();
+    out.sort_by_key(key);
+    (out, gone)
+}
+
+/// The cargo test of `units`: every package's targets and, past `--`, the known reds left out by
+/// their exact names; `only`: these tests alone (by their exact names), else all of them.
+fn windows_tests_argv(units: &[WinUnit], only: &[String]) -> Vec<String> {
+    let mut argv: Vec<String> = ["cargo", "test", "--no-fail-fast", "--message-format", "short"].map(String::from).to_vec();
+    let mut selected = BTreeSet::new();
+    for u in units {
+        if selected.insert(("-p".to_string(), u.package.clone())) { argv.extend(["-p".to_string(), u.package.clone()]); }
+    }
+    let mut targets: Vec<Vec<String>> = units.iter().map(WinUnit::select).collect();
+    targets.sort();
+    targets.dedup();
+    argv.extend(targets.into_iter().flatten());
+    argv.extend(["--".to_string(), "--exact".to_string()]);
+    argv.extend(only.iter().cloned());
+    let mut skips: Vec<&String> = units.iter().flat_map(|u| &u.skip).collect();
+    skips.sort();
+    skips.dedup();
+    for s in skips { argv.extend(["--skip".to_string(), s.clone()]); }
+    argv
+}
+
+/// The cargo test of `units`' known reds alone ([`WinUnit::skip`]), by their exact names.
+fn known_argv(units: &[WinUnit]) -> Vec<String> {
+    let names: Vec<String> = units.iter().flat_map(|u| u.skip.iter().cloned()).collect();
+    let all: Vec<WinUnit> = units.iter().map(|u| WinUnit { skip: Vec::new(), ..u.clone() }).collect();
+    windows_tests_argv(&all, &names)
+}
+
+/// The corpus leg of `units` (corpus files whose entries can run, [`corpus_fault`]): one Windows
+/// PowerShell script (a Windows run is plain argv; the node runs a `-Command` script from a .ps1
+/// file, lease/argv.rs windows_plain), as `devhub test` runs a file under the JIT: the JIT built once
+/// in the lease's target (`cargo build --profile host -p makepad-run --bin makepad`), then each file
+/// under it (`makepad test <file>`, one file a run), a red one once more at once. Its markers, which
+/// [`corpus_runs`] reads: `CORPUSBUILD ok|fail <exit>`, `CORPUSRUN <file>` (`CORPUSAGAIN` for the
+/// second run) and `CORPUSEXIT <file> <exit>` around each run, `CORPUSDONE` at its end. The files
+/// are single-quoted literals: [`corpus_fault`] lets none through a quote could end.
+fn corpus_argv(units: &[WinUnit]) -> Vec<String> {
+    let files: Vec<String> = units.iter().filter_map(WinUnit::corpus).map(|f| format!("'{f}'")).collect();
+    let script = format!(r#"$TD = if ($env:CARGO_TARGET_DIR) {{ $env:CARGO_TARGET_DIR }} else {{ Join-Path (Get-Location) 'target' }}
+cargo build --profile host -q -p makepad-run --bin makepad --message-format short 2>&1 | ForEach-Object {{ "$_" }}
+if ($LASTEXITCODE -ne 0) {{ "CORPUSBUILD fail $LASTEXITCODE"; exit 1 }}
+'CORPUSBUILD ok'
+$J = Join-Path $TD 'host/makepad.exe'
+$red = 0
+foreach ($T in @({})) {{
+  foreach ($M in @('CORPUSRUN', 'CORPUSAGAIN')) {{
+    "$M $T"
+    & $J test $T 2>&1 | ForEach-Object {{ "$_" }}
+    $code = $LASTEXITCODE
+    "CORPUSEXIT $T $code"
+    if ($code -eq 0) {{ break }}
+    if ($M -eq 'CORPUSAGAIN') {{ $red = 1 }}
+  }}
+}}
+'CORPUSDONE'
+exit $red"#, files.join(", "));
+    ["powershell", "-NoProfile", "-NonInteractive", "-Command"].iter().map(|w| w.to_string()).chain([script]).collect()
+}
+
+/// Each of `units`' runs in the corpus leg's output (`text`, [`corpus_argv`]'s markers): its first
+/// and, when that was red, its second. A run passed by its exit 0 and its `test result: <n> passed;
+/// 0 failed` line; its failing tests (`test <name> ... FAILED (<ms>)`) with the reason lines under
+/// each (`  report: ...`, as the JIT's harness prints them); or it broke: the file did not compile
+/// under the JIT (its error lines, the JIT's `could not compile` last), it ended before its result,
+/// or its output names no test. The JIT not built breaks every unit, its build's error lines said.
+/// None: the script did not run to its end (its lease's verdict stands).
+fn corpus_runs(status: &Result<Option<i32>, String>, text: &str, units: &[WinUnit]) -> Option<Vec<(WinRun, Option<WinRun>)>> {
+    #[derive(Default)]
+    struct Run { file: String, failed: Vec<String>, why: Vec<String>, errors: Vec<String>, result: Option<bool>, exit: Option<i64> }
+    if !matches!(status, Ok(Some(_))) { return None; }
+    let (mut runs, mut build, mut built, mut done, mut reasons) = (Vec::<Run>::new(), Vec::<String>::new(), None::<bool>, false, false);
+    let error = |line: &str| -> Option<String> {
+        match location(line).filter(|(_, said)| said.starts_with("error")) {
+            Some((_, said)) => Some(crate::proto::clean(&format!("{}{said}", line[..line.len() - said.len()].replace('\\', "/")), 300)),
+            None => line.trim().starts_with("error").then(|| crate::proto::clean(line.trim(), 300)),
+        }
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("CORPUSBUILD ") {
+            built = Some(rest == "ok");
+        } else if let Some(file) = t.strip_prefix("CORPUSRUN ").or_else(|| t.strip_prefix("CORPUSAGAIN ")) {
+            runs.push(Run { file: file.to_string(), ..Default::default() });
+            reasons = false;
+        } else if let Some(rest) = t.strip_prefix("CORPUSEXIT ") {
+            if let Some(r) = runs.last_mut().filter(|r| r.exit.is_none()) { r.exit = rest.rsplit_once(' ').and_then(|(_, c)| c.parse().ok()); }
+        } else if t == "CORPUSDONE" {
+            done = true;
+        } else if let Some(r) = runs.last_mut().filter(|r| r.exit.is_none()) {
+            if let Some(rest) = t.strip_prefix("test ").filter(|r| r.contains(" ... ")) {
+                reasons = false;
+                if let Some((name, _)) = rest.split_once(" ... FAILED") {
+                    r.failed.push(name.to_string());
+                    reasons = true;
+                }
+            } else if let Some(result) = t.strip_prefix("test result: ") {
+                r.result = Some(result.contains("; 0 failed"));
+                reasons = false;
+            } else if reasons && line.starts_with("  ") && !t.is_empty() {
+                if r.why.len() < PANICS_KEPT { r.why.push(crate::proto::clean(t, 300)); }
+            } else if let Some(e) = error(line) {
+                r.errors.push(e);
+            }
+        } else if built.is_none() {
+            build.extend(error(line));
+        }
+    }
+    if built == Some(false) {
+        return Some(units.iter().map(|_| (WinRun::Broke("the JIT did not build on Windows".into(), build.clone()), None)).collect());
+    }
+    if !done { return None; }
+    let of = |r: &Run| -> WinRun {
+        if r.exit == Some(0) && r.result == Some(true) { return WinRun::Passed; }
+        if !r.failed.is_empty() {
+            let mut failed = r.failed.clone();
+            failed.sort();
+            failed.dedup();
+            return WinRun::Failed(failed, r.why.clone());
+        }
+        let exit = r.exit.map_or("none".to_string(), |c| c.to_string());
+        match r.result {
+            None if r.errors.iter().any(|e| e.contains("could not compile")) => WinRun::Broke("it did not compile under the JIT on Windows".into(), r.errors.clone()),
+            None => WinRun::Broke(format!("the JIT ended before its result (exit {exit})"), r.errors.clone()),
+            Some(_) => WinRun::Broke(format!("its run failed (exit {exit}), and its output names no test"), r.errors.clone()),
+        }
+    };
+    Some(units.iter().map(|u| {
+        let file = u.corpus().unwrap_or_default();
+        let mut mine = runs.iter().filter(|r| r.file == file);
+        match mine.next() {
+            Some(one) => (of(one), mine.next().map(of)),
+            None => (WinRun::Broke("the corpus leg ran no run of it".into(), Vec::new()), None),
+        }
+    }).collect())
+}
+
+/// Each test's outcome in a cargo test's output: passed (`test <name> ... ok`) or not (`...
+/// FAILED`), its last line deciding (a test that runs a child prints the child's line first).
+fn test_outcomes(text: &str) -> BTreeMap<String, bool> {
+    let mut out = BTreeMap::new();
+    for t in text.lines().map(str::trim) {
+        let Some(rest) = t.strip_prefix("test ") else { continue };
+        if let Some(name) = rest.strip_suffix(" ... ok") { out.insert(name.to_string(), true); }
+        else if let Some(name) = rest.strip_suffix(" ... FAILED") { out.insert(name.to_string(), false); }
+    }
+    out
+}
+
+/// The known reds' run's lines (`ran`: each test's outcome, None when the lease ran no cargo
+/// test), none a verdict's (no `FAILED`, panic or unit line): each that passes now, and how many
+/// are still red or did not finish (a crash ends its binary's run). With the passes, by unit.
+fn known_reds_said(units: &[WinUnit], ran: Option<&BTreeMap<String, bool>>) -> (String, Vec<(String, String)>) {
+    let (mut out, mut passes) = (String::new(), Vec::new());
+    for u in units {
+        let name = u.name();
+        let Some(ran) = ran else {
+            out.push_str(&format!("{name}: its {} known red(s) did not run: the lease ran no cargo test\n", u.skip.len()));
+            continue;
+        };
+        let (mut red, mut unfinished) = (0, 0);
+        for test in &u.skip {
+            match ran.get(test) {
+                Some(true) => {
+                    out.push_str(&format!("{name}: known red now passes on Windows: take it off its windows-tests skip list: {test}\n"));
+                    passes.push((name.clone(), test.clone()));
+                }
+                Some(false) => red += 1,
+                None => unfinished += 1,
+            }
+        }
+        if red + unfinished > 0 {
+            out.push_str(&format!("{name}: of its known reds, {red} still red and {unfinished} did not finish (left out until {} lands their fixes)\n", if u.known.is_empty() { "the item that fixes them" } else { &u.known }));
+        }
+    }
+    (out, passes)
+}
+
+/// Main hears each known red that passes once (`passes`: unit, test), kept in the hub's home
+/// ([`KNOWN_TOLD`]); a test that left its unit's list (of `units`, this run's) leaves the record,
+/// so one listed again is told again.
+fn tell_known_passes(home: &Path, units: &[WinUnit], passes: &[(String, String)]) {
+    let path = home.join(KNOWN_TOLD);
+    let listed = |unit: &str, test: &str| units.iter().find(|u| u.name() == unit).is_none_or(|u| u.skip.iter().any(|t| t == test));
+    let mut told: Vec<String> = std::fs::read_to_string(&path).unwrap_or_default().lines()
+        .filter(|l| l.split_once('\t').is_some_and(|(unit, test)| listed(unit, test))).map(str::to_string).collect();
+    for (unit, test) in passes {
+        let line = format!("{unit}\t{test}");
+        if told.contains(&line) { continue; }
+        let note = format!("{WINDOWS_TESTS}: {unit}'s known red {test} now passes on Windows: take it off the skip list in its Cargo.toml's [package.metadata.makepad.windows-tests]");
+        if let Err(e) = crate::notes::leave(home, "main", &note) { eprintln!("devhub bucket {WINDOWS_TESTS}: agent notes: {e}"); }
+        told.push(line);
+    }
+    if let Err(e) = std::fs::write(&path, told.iter().map(|l| format!("{l}\n")).collect::<String>()) { eprintln!("devhub bucket {WINDOWS_TESTS}: {}: {e}", path.display()); }
+}
+
+/// The known reds main heard pass ([`tell_known_passes`]): `<unit>\t<test>` a line.
+const KNOWN_TOLD: &str = "windows-tests-known-told";
+
+/// Each of `units`' run in a cargo test's output (`text`), by its test binary (cargo's `Running
+/// … (<dir>/<binary>-<hash>[.exe])` line): its failing tests (`test <name> ... FAILED`) and panics,
+/// or why it broke: its package did not build (a compile error in its directory, or cargo's
+/// `could not compile` of it), its binary ended before its result (cargo's exit line for it with
+/// an exit other than a test failure's 101), or cargo ran no such binary (cargo's own errors
+/// beside it). A binary passed by its last `test result` line and no exit line of cargo's: a test
+/// that runs the binary again for a child prints the child's results in its section too (some of
+/// relax-compiler's lib tests do). None: the lease ran no cargo test (cargo exits 0 or 101; its
+/// verdict is then the lease's).
+fn win_runs(status: &Result<Option<i32>, String>, text: &str, units: &[WinUnit]) -> Option<Vec<WinRun>> {
+    struct Bin { name: String, failed: Vec<String>, panics: Vec<String>, result: Option<bool> }
+    if !matches!(status, Ok(Some(0 | 101))) { return None; }
+    let (mut bins, mut panic_at) = (Vec::<Bin>::new(), None::<String>);
+    // compile errors by file (its path with `/`), and cargo's own error lines
+    let (mut compile, mut cargo) = (Vec::<(String, String)>::new(), Vec::<String>::new());
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("Running ") {
+            let exe = rest.rsplit_once('(').map_or(rest, |(_, e)| e.trim_end_matches(')'));
+            let file = exe.rsplit(['/', '\\']).next().unwrap_or(exe).trim_end_matches(".exe");
+            let name = file.rsplit_once('-').filter(|(_, hash)| hash.chars().all(|c| c.is_ascii_hexdigit())).map_or(file, |(n, _)| n);
+            bins.push(Bin { name: name.to_string(), failed: Vec::new(), panics: Vec::new(), result: None });
+            panic_at = None;
+        } else if t.starts_with("Doc-tests ") {
+            bins.push(Bin { name: String::new(), failed: Vec::new(), panics: Vec::new(), result: None });
+        } else if let (Some(at), Some(bin)) = (panic_at.take(), bins.last_mut()) {
+            // (the line after a panic's place is its message, whatever it starts with)
+            if bin.panics.len() < PANICS_KEPT { bin.panics.push(crate::proto::clean(&format!("panicked at {at}: {t}"), 300)); }
+        } else if let Some((path, said)) = location(line).filter(|(_, said)| said.starts_with("error")) {
+            compile.push((path.replace('\\', "/"), crate::proto::clean(&format!("{}{said}", line[..line.len() - said.len()].replace('\\', "/")), 300)));
+        } else if t.starts_with("error") || t.contains("process didn't exit successfully") {
+            cargo.push(crate::proto::clean(t, 300));
+        } else if let Some(bin) = bins.last_mut() {
+            if let Some(test) = t.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
+                bin.failed.push(test.to_string());
+            } else if let Some(result) = t.strip_prefix("test result: ") {
+                bin.result = Some(result.starts_with("ok"));
+            } else if let Some((_, at)) = t.split_once(" panicked at ") {
+                panic_at = Some(at.trim_end_matches(':').to_string());
+            }
+        }
+    }
+    let own = |u: &WinUnit| -> Vec<String> {
+        compile.iter().filter(|(file, _)| file.starts_with(&format!("{}/", u.dir))).map(|(_, l)| l.clone())
+            .chain(cargo.iter().filter(|l| l.starts_with(&format!("error: could not compile `{}`", u.package))).cloned()).collect()
+    };
+    let unbuilt = units.iter().any(|u| !own(u).is_empty());
+    Some(units.iter().map(|u| {
+        let own = own(u);
+        // cargo's line for a binary that exited other than 0, and whether that was a test failure's
+        let exited: Vec<String> = cargo.iter().filter(|l| l.contains("process didn't exit successfully") && l.contains(&u.binary)).cloned().collect();
+        let failed_tests = exited.iter().all(|l| l.contains("exit code: 101)") || l.contains("exit status: 101)"));
+        match bins.iter().find(|b| b.name == u.binary) {
+            Some(_) if !failed_tests => WinRun::Broke("its test binary ended before its result".into(), exited),
+            Some(b) if exited.is_empty() && b.result == Some(true) => WinRun::Passed,
+            Some(b) if !b.failed.is_empty() => {
+                let mut failed = b.failed.clone();
+                failed.sort();
+                failed.dedup();
+                WinRun::Failed(failed, b.panics.clone())
+            }
+            Some(b) if b.result.is_some() || !exited.is_empty() => WinRun::Broke("its tests failed, and its output names none".into(), exited),
+            Some(_) => WinRun::Broke("its test binary ended before its result".into(), exited),
+            None if !own.is_empty() => WinRun::Broke("it did not build on Windows".into(), own),
+            None if unbuilt => WinRun::NotRun,
+            None => WinRun::Broke("cargo ran no test binary of it".into(), compile.iter().map(|(_, l)| l.clone()).chain(cargo.iter().cloned()).collect()),
+        }
+    }).collect())
+}
+
+/// The windows-tests bucket's unit lines, after its `STEP` line (which keeps the cargo output's own
+/// FAILED and panic lines from any unit): each unit's known reds left out; a unit green, or green
+/// on its rerun (`rerun`: a flake, `GATEFLAKE` with the tests that failed first); a unit red on both
+/// runs, with its failing tests, its panics, its repro and `GATEUNIT fail`; then the NODEGATE line.
+/// With whether every unit passed.
+fn windows_tests_said(units: &[WinUnit], first: &[WinRun], rerun: &[Option<WinRun>]) -> (String, bool) {
+    let mut out = format!("STEP {WINDOWS_TESTS}: {} target(s) on Windows\n", units.len());
+    let mut red = Vec::new();
+    for ((u, run), again) in units.iter().zip(first).zip(rerun) {
+        let name = u.name();
+        if !u.skip.is_empty() && u.corpus().is_none() {
+            out.push_str(&format!("{name}: leaves out its {} known red(s) on Windows by their names, until {} lands their fixes\n", u.skip.len(), if u.known.is_empty() { "the item that fixes them" } else { &u.known }));
+        }
+        // (a rerun that did not get to it leaves its first run's red standing)
+        let last = match again { Some(WinRun::NotRun) | None => run, Some(r) => r };
+        match (run, last) {
+            (WinRun::Passed, _) => out.push_str(&format!("GATEUNIT ok {name}\n")),
+            (WinRun::NotRun, _) | (_, WinRun::NotRun) => out.push_str(&format!("{name}: not run: another package's build stopped the cargo test\n")),
+            (_, WinRun::Passed) => {
+                let tests = match run { WinRun::Failed(t, _) => t.join(" "), _ => String::new() };
+                out.push_str(&format!("{name}: a flake: red, then green on its rerun\nGATEFLAKE {name} :: {tests}\nGATEUNIT ok {name}\n"));
+            }
+            (_, WinRun::Failed(tests, panics)) => {
+                for t in tests { out.push_str(&format!("FAILED {t}\n")); }
+                for p in panics { out.push_str(&format!("{p}\n")); }
+                out.push_str(&format!("{name}: {} test(s) failed on Windows{}\nGATEREPRO {name} :: {}\nGATEUNIT fail {name}\n",
+                    tests.len(), if matches!(again, Some(WinRun::Failed(..) | WinRun::Broke(..))) { ", on its rerun too" } else { "" }, u.repro(tests)));
+                red.push(name);
+            }
+            (_, WinRun::Broke(why, errors)) => {
+                for e in errors.iter().take(40) { out.push_str(&format!("{e}\n")); }
+                out.push_str(&format!("{name}: {why}\nGATEREPRO {name} :: {}\nGATEUNIT fail {name}\n", u.repro(&[])));
+                red.push(name);
+            }
+        }
+    }
+    out.push_str(&if red.is_empty() { "NODEGATE-OK\n".to_string() } else { format!("NODEGATE-FAIL: {WINDOWS_TESTS} {}\n", red.join(", ")) });
+    (out, red.is_empty())
+}
+
 /// Runs land_gate.sh under a devhub lease, its output in `log` after the `why` lines; a failed
 /// step's logs, which go with the node's scratch at the lease's end, in `<log>.keep` beside it
 /// (`lease --keep`). A lost lease ([`crate::lease::client::LOST_EXIT`]) runs it once more in the
@@ -4941,12 +6252,15 @@ fn lease_run(repo: &Path, lease: &[&str], gate: &[&str], why: &[String], log: &P
         if gave { slot(Need::Gave); }
         if sidecar.exists() {
             let (pid, _, _, _) = read_run(&sidecar).ok_or_else(|| format!("invalid bucket run {}", sidecar.display()))?;
-            slot(match crate::procinfo::exited(pid) { Some(_) => Need::Ended, None => Need::Running(modified_ms(&sidecar)) });
+            // its holder's exit written names its end, whatever process its pid is since: a
+            // restarted bisect adopts probes that ended hours before ([`bisect_log`])
+            let ended = || crate::procinfo::exited(pid).or_else(|| crate::lease::client::read_exit(&exit, pid).map(|_| None));
+            slot(match ended() { Some(_) => Need::Ended, None => Need::Running(modified_ms(&sidecar)) });
             let mut stopped = false;
             let stopped_before = || this_part(&std::fs::read_to_string(log).unwrap_or_default()).lines().any(|l| l == NOT_NEEDED);
             loop {
                 // (the holder writes its file before it exits: read once it is gone)
-                if let Some(code) = crate::procinfo::exited(pid) {
+                if let Some(code) = ended() {
                     if stopped { return not_needed(); }
                     let (status, unwatched) = adopted_end(crate::lease::client::read_exit(&exit, pid), code, stopped_before(), verdict_said(log));
                     if unwatched { note(UNWATCHED); }
@@ -5011,8 +6325,8 @@ fn lease_run(repo: &Path, lease: &[&str], gate: &[&str], why: &[String], log: &P
             note(WITHDREW);
             let _ = std::fs::remove_file(&sidecar);
             status = execute(true, true);
-        } else if again(&status, &std::fs::read_to_string(log).unwrap_or_default()) {
-            note(RERUN);
+        } else if let Some(why) = rerun_why(&status, &std::fs::read_to_string(log).unwrap_or_default()) {
+            note(why);
             let _ = std::fs::remove_file(&sidecar);
             status = execute(true, false);
         } else if matches!(status, Ok(Some(_))) && verdict_said(log) && more() {
@@ -5073,19 +6387,21 @@ fn part_lease(line: &str) -> Option<&str> {
     (id.len() > 1 && id.starts_with('L') && id[1..].bytes().all(|b| b.is_ascii_digit())).then_some(id)
 }
 
-/// Where each failed unit's output is kept, by unit key: the lease `devhub job result <lease>`
-/// shows it under. A gate's unit that named its output files (`GATEOUT <unit> :: <file>..`), kept
-/// under the lease of the part it ran in ([`keep_failed_units`]), and a prebuild listing's whole
-/// stream (`GATEKEPT <unit> :: <lease>`, orch/warm.rs). A red named only its unit, and its kept
-/// output was found by reading the bucket's code (11-18).
+/// Where each failed unit's output is kept, by unit key, as it is read: the lease `devhub job
+/// result <lease>` shows it under, or the file. A gate's unit that named its output files
+/// (`GATEOUT <unit> :: <file>..`), kept under the lease of the part it ran in
+/// ([`keep_failed_units`]); a prebuild listing's whole stream (`GATEKEPT <unit> :: <lease>`,
+/// orch/warm.rs); a CI leg's log, kept beside the bucket's (`GATEKEPT <leg> :: <file>`, orch/ci.rs).
+/// A red named only its unit, and its kept output was found by reading the bucket's code (11-18).
 fn kept_outputs(text: &str) -> BTreeMap<String, String> {
     let (mut out, mut lease) = (BTreeMap::new(), None);
     for line in text.lines() {
         if let Some(id) = part_lease(line) { lease = Some(id); }
-        if let Some((unit, id)) = line.strip_prefix("GATEKEPT ").and_then(|r| r.split_once(" :: ")) {
-            out.insert(unit_key(unit), id.trim().to_string());
+        if let Some((unit, at)) = line.strip_prefix("GATEKEPT ").and_then(|r| r.split_once(" :: ")) {
+            let at = at.trim();
+            out.insert(unit_key(unit), if Path::new(at).is_absolute() { at.to_string() } else { format!("devhub job result {at}") });
         } else if let (Some(id), Some((unit, _))) = (lease, line.strip_prefix("GATEOUT ").and_then(|r| r.split_once(" :: "))) {
-            out.insert(unit_key(unit), id.to_string());
+            out.insert(unit_key(unit), format!("devhub job result {id}"));
         }
     }
     out
@@ -5096,17 +6412,31 @@ fn lost(status: &Result<Option<i32>, String>) -> bool {
 }
 
 /// A lost lease's gate runs once more, and so does one the kernel's OOM killer ended (its box ran
-/// out, or a scope's memory): neither is a verdict on the landings. Not when its log says it
-/// already ran again.
+/// out, or a scope's memory), and one that exited 0 without its verdict line ([`unsaid`]): none is
+/// a verdict on the landings. Not when its log says it already ran again.
 fn again(status: &Result<Option<i32>, String>, log: &str) -> bool {
     let oom = this_part(log).lines().any(|l| l.contains(" ended without its summary: ") && l.contains("the kernel's OOM killer killed"));
     let since = log.rsplit_once(&format!("{YIELDED}\n")).map_or(log, |(_, part)| part);
-    (lost(status) || oom) && !since.lines().any(|l| l == RERUN)
+    (lost(status) || oom || unsaid(status, log)) && !since.lines().any(|l| RERUN_LINES.contains(&l))
+}
+
+/// A gate that said its start (land_gate.sh's `GATE <mode>: ` line) in its part of the log and
+/// exited 0 without a verdict line, not stopped as not needed: it said nothing of the landings
+/// ([`RERUN_UNSAID`]). A cargo check says no verdict line, nor its start.
+fn unsaid(status: &Result<Option<i32>, String>, log: &str) -> bool {
+    let part = this_part(log);
+    matches!(status, Ok(Some(0))) && part.lines().any(|l| l.starts_with("GATE ") && l.contains(": "))
+        && !part.lines().any(|l| l.starts_with("NODEGATE-OK") || l.starts_with("NODEGATE-FAIL") || l == NOT_NEEDED)
+}
+
+/// The line a gate that runs once more ([`again`]) writes before it: why.
+fn rerun_why(status: &Result<Option<i32>, String>, log: &str) -> Option<&'static str> {
+    again(status, log).then(|| if unsaid(status, log) { RERUN_UNSAID } else { RERUN })
 }
 
 /// The last run's part of a log.
 fn last_run(text: &str) -> &str {
-    text.rsplit_once(&format!("{RERUN}\n")).map_or(text, |(_, last)| last)
+    rerun_cut(text).map_or(text, |(_, last)| last)
 }
 
 /// A shard's log line where its lease gave its pool slot to a run that goes first, and its gate
@@ -5130,14 +6460,14 @@ fn verdict_said(log: &Path) -> bool {
 
 /// The gate's part of a log now: after its last [`RERUN`] or [`YIELDED`] line.
 fn this_part(text: &str) -> &str {
-    let at = [RERUN, YIELDED, WITHDREW].iter().filter_map(|m| text.rfind(&format!("{m}\n")).map(|i| i + m.len() + 1)).max().unwrap_or(0);
+    let at = [RERUN, RERUN_UNSAID, YIELDED, WITHDREW].iter().filter_map(|m| text.rfind(&format!("{m}\n")).map(|i| i + m.len() + 1)).max().unwrap_or(0);
     &text[at..]
 }
 
 /// What a log says of its run: each part a yield ended ([`YIELDED`]) and the last part's last run,
 /// a lost lease's run before its [`RERUN`] cut ([`last_run`]).
 fn kept(text: &str) -> String {
-    let Some((before, after)) = text.rsplit_once(&format!("{RERUN}\n")) else { return text.to_string() };
+    let Some((before, after)) = rerun_cut(text) else { return text.to_string() };
     let done = before.rfind(&format!("{YIELDED}\n")).map_or("", |at| &before[..at + YIELDED.len() + 1]);
     format!("{}{after}", kept(done))
 }
@@ -5185,7 +6515,9 @@ fn verdict(status: Result<Option<i32>, String>, text: &str, log: &Path) -> Outco
     }
     failing.sort();
     failing.dedup();
-    let summary = text.lines().filter(|l| l.starts_with("STEP ")).map(str::to_string).chain(memory.into_iter().map(|(_, said)| said)).collect::<Vec<_>>().join(", ");
+    let flakes = flake_lines(last_run(text)).into_iter().map(|(unit, tests)| format!("{unit}: a flake, red{}, then green on its rerun at this tip",
+        if tests.is_empty() { String::new() } else { format!(" ({})", tests.join(", ")) }));
+    let summary = text.lines().filter(|l| l.starts_with("STEP ")).map(str::to_string).chain(memory.into_iter().map(|(_, said)| said)).chain(flakes).collect::<Vec<_>>().join(", ");
     let no_verdict = if lost_run { Some("its lease was lost under the gate twice (the fleet, not the landings)".to_string()) } else { unsaid };
     Outcome { ok, failing, log: log.display().to_string(), summary, no_verdict }
 }
@@ -5337,7 +6669,7 @@ mod tests {
         let main = bisect_chain(&c, m0, m1).unwrap();
         assert_eq!(work, [w0.clone(), w1.clone(), w2.clone()], "work's base is position zero and second parents stay out");
         assert_eq!(main, [m0.clone(), m1.clone()], "main's base is position zero and second parents stay out");
-        let (ordered, left_out) = order_landings(&work, &main, &entries);
+        let (ordered, left_out) = order_landings(&work, &main, &[], &entries);
         assert_eq!(ordered.iter().map(|e| e.id).collect::<Vec<_>>(), [12, 10, 11], "paired chain positions order work-only and commercial-only landings, not ids or record times");
         assert_eq!(left_out, ["#98 is not on main's first-parent chain: left out", "#99 is not on work's first-parent chain: left out"], "each off-chain landing names the side that excluded it");
         assert!(bisect_chain(&d, &ws, w2).is_err(), "a base reachable only through a second parent is no first-parent base");
@@ -5417,7 +6749,8 @@ mod tests {
         store.update(|doc| doc.land = entries.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
         // A test's red tip is probed first: green there, it is flaky or not reproduced and names no
         // landing (the owner's lookup finds no package here: main hears it); red, the search names
-        // one; red down to candidate zero, its last pass is probed, and red there it is flaky too; one
+        // one; red down to candidate zero, its last pass is probed, and red there the same way it is
+        // deterministic, no flake (11-23); one
         // a later run passed stops at its tip (11-17).
         let test = "test pkg";
         let (row, calls) = run("test-flaky", test, "the_test", [Some(false), Some(false), Some(true), Some(false)], None);
@@ -5425,16 +6758,118 @@ mod tests {
         assert_eq!(row.get("flaky").and_then(Value::as_bool), Some(true), "the ledger says flaky");
         let result = row.get("result").and_then(Value::as_str).unwrap();
         assert!(result.contains(&format!("flaky or not reproduced: green at its red tip {}", pins[3].short())) && result.contains("its owner unknown"), "{result}");
+        let listed = std::fs::read_to_string(d.join("test-flaky").join(FLAKES)).unwrap_or_default();
+        assert!(listed.lines().count() == 1 && listed.contains("known-red.log") && listed.contains("\"key\":\"test pkg\""), "the flake list keeps a bisect's flake with its red log: {listed}");
         let (row, calls) = run("test-red", test, "the_test", [Some(false), Some(false), Some(true), Some(true)], Some(10));
         assert_eq!(calls, [3, 2, 1], "the red tip, then the search");
         assert_eq!(row.get("probes").and_then(Value::as_arr).unwrap()[0].get("red_tip").and_then(Value::as_bool), Some(true), "the tip's probe is marked");
         let (row, calls) = run("test-red-at-its-pass", test, "the_test", [Some(true), Some(true), Some(true), Some(true)], None);
         assert_eq!(calls, [3, 2, 1, 0], "candidate zero of a test needs its last pass probed");
-        assert!(row.get("result").and_then(Value::as_str).unwrap().contains(&format!("flaky or not reproduced: red at its last pass {}", pins[0].short())));
+        let result = row.get("result").and_then(Value::as_str).unwrap();
+        assert!(result.contains(&format!("deterministic, not flaky: red the same way at every probe, its last pass {} too", pins[0].short())) && row.get("flaky").is_none(), "red the same way at every probe: {result}");
+        assert!(!d.join("test-red-at-its-pass").join(FLAKES).exists(), "no flake");
+        // red again there, and passed by a later run, its red tip is probed once more: red again, it
+        // is deterministic there and fixed since (RELAX263, red at its tip every time and fixed by a
+        // later landing, was listed intermittent, 11-24); green, the same revision went both ways:
+        // intermittent, and `devhub bucket` says it until it is cleared or green again (main, 11-24)
         let (row, calls) = run("closed-test", test, "the_test", [Some(false), Some(false), Some(true), Some(true)], None);
-        assert_eq!(calls, [3], "a red a later run passed is probed at its tip alone");
-        assert!(row.get("result").and_then(Value::as_str).unwrap().contains("fixed since, nobody told"));
-        assert!(row.get("flaky").is_none());
+        assert_eq!(calls, [3, 3], "a red a later run passed is probed at its tip, twice");
+        let result = row.get("result").and_then(Value::as_str).unwrap();
+        assert!(result.contains(&format!("red at its red tip {0} on both probes, and a later run passed it: fixed since: after {0}", pins[3].short())) && !result.contains("intermittent"), "{result}");
+        let again = row.get("probes").and_then(Value::as_arr).unwrap().last().unwrap();
+        assert_eq!((again.get("again").and_then(Value::as_bool), again.get("red").and_then(Value::as_bool)), (Some(true), Some(true)), "the ledger keeps the second probe");
+        assert!(row.get("flaky").is_none() && open_intermittent(&d.join("closed-test"), &[]).is_empty(), "deterministic: no flake, not intermittent");
+        // with the passing run's tip in its row: red twice, fixed between the two tips, by the one
+        // landing between them, which is told nothing (it fixed, it broke nothing); red, then green
+        // there, intermittent and listed
+        for (case, again) in [("fixed-between", true), ("red-then-green", false)] {
+            let home = d.join(case);
+            std::fs::create_dir_all(&home).unwrap();
+            let red_started = 1795521038382u64;
+            let passed = obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(red_started as i64 + 1)), ("passed", Value::Arr(vec![s(test)])), ("tip", tip_value(&pin_of(&pins[3])))]);
+            std::fs::write(home.join("buckets.jsonl"), format!("{}\n", passed.to_json())).unwrap();
+            let job = Bisect { bucket: "tests".into(), unit: test.into(), key: test.into(), from: pin_of(&pins[0]), tip: pin_of(&pins[2]), line: "the_test".into(),
+                log: home.join(format!("tests-{red_started}.log")).display().to_string(), closed: true, named: Vec::new(), tip_probe: None, units: Vec::new() };
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let (said, at) = (asked.clone(), pins.clone());
+            let probe: Probe = Arc::new(move |unit, _, tip, log| {
+                let mut said = said.lock().unwrap();
+                said.push(at.iter().position(|p| *p == tip.pair()).unwrap());
+                let red = said.len() == 1 || again;
+                std::fs::write(log, if red { format!("FAILED the_test\nGATEUNIT fail {unit}\n") } else { format!("GATEUNIT ok {unit}\n") }).unwrap();
+                Outcome { ok: !red, failing: if red { vec![unit.to_string()] } else { Vec::new() }, log: log.display().to_string(), summary: String::new(), no_verdict: None }
+            });
+            run_bisect(&d, &home, &store, &|_, _, _| {}, &probe, &|| panic!("{case}: no night"), job).unwrap();
+            let row = bisect_rows(&home).unwrap().pop().unwrap();
+            assert_eq!(*asked.lock().unwrap(), [2, 2], "{case}: its red tip, twice");
+            let result = row.get("result").and_then(Value::as_str).unwrap();
+            let listed = open_intermittent(&home, &[]);
+            if again {
+                assert!(result.contains(&format!("fixed since: between {} and {}, by #11 rc-l11 (bisect-11) lane rc-l11", pins[2].short(), pins[3].short())) && listed.is_empty(), "{case}: {result}");
+                assert!(row.get("landing").is_none() && entries.iter().all(|e| crate::notes::take(&home, &e.agent).is_empty()), "{case}: a fix blames no landing");
+            } else {
+                assert!(result.contains(&format!("intermittent: reproduced at {}, passed at tests {}", pins[2].short(), pins[3].short())) && listed.len() == 1, "{case}: {result}");
+            }
+        }
+        // A master's restart starts its bisect again: its probes' logs are its red run's, the same
+        // again, and its lease runner adopts the probes the last image left by them; named by each
+        // search's start, every restart asked for them once more beside the ones still held, and
+        // the bisect lane starved (11-24). A red a later run passed, its own bucket's next one too,
+        // stops its search before its next probe: fixed since, no landing told.
+        let home = d.join("restarted");
+        std::fs::create_dir_all(&home).unwrap();
+        let red_started = 1795521038382u64;
+        let job = Bisect { bucket: "tests".into(), unit: test.into(), key: test.into(), from: pin_of(&pins[0]), tip: pin_of(&pins[3]), line: "the_test".into(),
+            log: home.join(format!("tests-{red_started}.log")).display().to_string(), closed: false, named: Vec::new(), tip_probe: None, units: Vec::new() };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (said, at, ledger_home) = (asked.clone(), pins.clone(), home.clone());
+        let probe: Probe = Arc::new(move |unit, _, tip, log| {
+            let i = at.iter().position(|p| *p == tip.pair()).unwrap();
+            let mut said = said.lock().unwrap();
+            said.push((i, log.to_path_buf()));
+            // the tests bucket's next run passes it as the search probes its first landing
+            if said.len() == 2 {
+                let row = obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(red_started as i64 + 1)), ("passed", Value::Arr(vec![s(unit)])), ("tip", tip_value(&pin_of(&at[3])))]);
+                std::fs::write(ledger_home.join("buckets.jsonl"), format!("{}\n", row.to_json())).unwrap();
+            }
+            std::fs::write(log, format!("FAILED the_test\nGATEUNIT fail {unit}\n")).unwrap();
+            Outcome { ok: false, failing: vec![unit.to_string()], log: log.display().to_string(), summary: String::new(), no_verdict: None }
+        });
+        let search = |job: Bisect| {
+            run_bisect(&d, &home, &store, &|_, _, _| {}, &probe, &|| panic!("no night"), job).unwrap();
+            bisect_rows(&home).unwrap().pop().unwrap()
+        };
+        let row = search(job.clone());
+        let first: Vec<(usize, PathBuf)> = asked.lock().unwrap().drain(..).collect();
+        assert_eq!(first.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [3, 2], "its red tip, then #10, as which a later run passed it: no more");
+        let result = row.get("result").and_then(Value::as_str).unwrap();
+        let said = format!("intermittent: reproduced at {0}, passed at tests {0}", pins[3].short());
+        assert!(result.contains(&said) && row.get("landing").is_none(), "red again at its red tip, then passed: intermittent ({result})");
+        assert!(entries.iter().all(|e| crate::notes::take(&home, &e.agent).is_empty()), "no landing hears of it");
+        assert_eq!(log_started(&first[0].1), Some(red_started), "its logs carry its red run's start: {}", first[0].1.display());
+        // `devhub bucket` says it until a human or a lane clears it
+        let ledger_rows = || ledger(&home, 100).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect::<Vec<Value>>();
+        let said_open = || status(&home, &[]).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).filter(|v| v.get("intermittent").is_some()).collect::<Vec<Value>>();
+        let open = said_open();
+        assert!(open.len() == 1 && open[0].get("key").and_then(Value::as_str) == Some(test) && open[0].get("log").and_then(Value::as_str) == first[0].1.to_str(), "said with its tip log: {open:?}");
+        assert!(clear_intermittent(&home, test).contains("cleared test pkg: 1 intermittent red"), "a lane clears it");
+        assert!(said_open().is_empty() && clear_intermittent(&home, test).contains("no open intermittent red"), "cleared, it is said no more");
+        let row = search(job);
+        assert_eq!(*asked.lock().unwrap(), first[..1], "restarted, its red tip's probe has the same log, and no landing is probed");
+        assert!(row.get("result").and_then(Value::as_str).unwrap().contains(&said));
+        // or until its bucket's next three runs of it are green
+        let ran = |at: u64, list: &str| {
+            let row = obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(at as i64)), (list, Value::Arr(vec![s(test)]))]);
+            let mut file = std::fs::OpenOptions::new().append(true).open(home.join("buckets.jsonl")).unwrap();
+            writeln!(file, "{}", row.to_json()).unwrap();
+        };
+        ran(red_started + 2, "passed");
+        ran(red_started + 3, "failing");
+        ran(red_started + 4, "passed");
+        ran(red_started + 5, "passed");
+        assert_eq!(open_intermittent(&home, &ledger_rows()).len(), 1, "red again in one of its last three runs: still said");
+        ran(red_started + 6, "passed");
+        assert!(open_intermittent(&home, &ledger_rows()).is_empty() && said_open().is_empty(), "green in its bucket's next three runs: said no more");
         // A test whose run failed several targets of its package probes them all: at its red tip
         // the search narrows to the ones red there again, and names their landing; one green there
         // is said as not reproduced. A probe that ran none of them has no answer: one that selected
@@ -5475,6 +6910,76 @@ mod tests {
         assert_eq!(asked.len(), 1, "an empty probe stops at the red tip");
         let result = row.get("result").and_then(Value::as_str).unwrap();
         assert!(row.get("flaky").is_none() && row.get("landing").is_none() && result.contains("of test pkg --test chrome, --test monitor stopped at its red tip"), "{result}");
+        // A red only an apps move causes: the landing of its apps half alone (its pair the one the
+        // landing before it left) is a candidate, each probe pins apps where the landings up to it
+        // left it, and the search names it, a test's or a unit's. Each probe took the red tip's
+        // apps: every one was red, and the red went to a makepad landing or to nobody (11-23). A
+        // test red at every probe, its last pass too, is flaky only when not the same way.
+        let apps = d.join("apps/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let o = std::process::Command::new("git").arg("-C").arg(&apps).args(["init", "-q", "--template=", "-b", "main"])
+            .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE").output().unwrap();
+        assert!(o.status.success(), "the apps repository initializes: {}", String::from_utf8_lossy(&o.stderr));
+        // (the fixture's pairs were made at time 0; the apps move after them, at 1)
+        let commit = |parents: &[&str], text: &str, at: i64| crate::gitread::with(&apps, |_, repo| {
+            use makepad_git::{Commit, ObjectId, Signature, Tree, TreeEntry};
+            let blob = repo.write_blob(text.as_bytes()).unwrap();
+            let tree = repo.write_tree(&Tree { entries: vec![TreeEntry { name: "fab.rs".into(), mode: 0o100644, oid: blob }] }).unwrap();
+            let sig = Signature { name: String::new(), email: String::new(), timestamp: at, tz_offset: "+0000".into() };
+            repo.write_commit(&Commit { tree, parents: parents.iter().map(|s| ObjectId::from_hex(s).unwrap()).collect(), author: sig.clone(), committer: sig, message: text.into() }).unwrap().to_hex()
+        }).unwrap();
+        let a0 = commit(&[], "fab\n", 0);
+        let a1 = commit(&[&a0], "fab moved\n", 1);
+        // #13 lands apps alone after #10, at #10's pair
+        let mut alone = entries.iter().find(|e| e.id == 10).unwrap().clone();
+        (alone.id, alone.branch, alone.agent, alone.pre) = (13, "-".into(), "bisect-13".into(), alone.landed.clone());
+        alone.nested = vec![crate::land::Side { name: "apps".into(), branch: "rc-appsfix".into(), sha: a1.clone(), landed: a1.clone() }];
+        store.update(|doc| doc.land = entries.iter().chain(std::iter::once(&alone)).map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
+        let moved_from = |case: &str, key: &str, from: Pin, red_at: &dyn Fn(&Pin) -> Option<&'static str>| {
+            let home = d.join(case);
+            let job = Bisect { bucket: "fast".into(), unit: key.into(), key: key.into(), from, tip: pin_of(&pins[3]).with("apps", &a1), line: "the_test".into(),
+                log: "known-red.log".into(), closed: false, named: Vec::new(), tip_probe: None, units: Vec::new() };
+            let asked = Arc::new(Mutex::new(Vec::new()));
+            let (said, at, unit) = (asked.clone(), pins.clone(), key.to_string());
+            let red: Vec<(Pin, Option<&'static str>)> = [pin_of(&pins[0]).with("apps", &a0), pin_of(&pins[1]).with("apps", &a0), pin_of(&pins[2]).with("apps", &a0), pin_of(&pins[2]).with("apps", &a1), pin_of(&pins[3]).with("apps", &a1)]
+                .into_iter().map(|p| { let r = red_at(&p); (p, r) }).collect();
+            let probe: Probe = Arc::new(move |_, _, tip, log| {
+                let i = at.iter().position(|p| *p == tip.pair()).expect("a chain candidate or the base");
+                let apps = tip.nested.get("apps").cloned().unwrap_or_default();
+                said.lock().unwrap().push((i, apps));
+                let way = red.iter().find(|(p, _)| p == tip).unwrap_or_else(|| panic!("{unit}: a probe at no landing's pin: {tip:?}")).1;
+                std::fs::write(log, match way { Some(test) => format!("FAILED {test}\nGATEUNIT fail {unit}\n"), None => format!("GATEUNIT ok {unit}\n") }).unwrap();
+                Outcome { ok: way.is_none(), failing: way.map(|_| vec![unit.clone()]).unwrap_or_default(), log: log.display().to_string(), summary: String::new(), no_verdict: None }
+            });
+            run_bisect(&d, &home, &store, &|_, _, _| {}, &probe, &|| panic!("{case}: no night"), job).unwrap();
+            let row = bisect_rows(&home).unwrap().into_iter().next().unwrap();
+            let asked = asked.lock().unwrap().clone();
+            (row, asked)
+        };
+        let moved = |case: &str, key: &str, red_at: &dyn Fn(&Pin) -> Option<&'static str>| moved_from(case, key, pin_of(&pins[0]).with("apps", &a0), red_at);
+        let apps_red = |p: &Pin| (p.nested.get("apps").map(String::as_str) == Some(a1.as_str())).then_some("the_test");
+        for key in ["check pkg", "test pkg"] {
+            let (row, asked) = moved(&format!("apps-{key}"), key, &apps_red);
+            let result = row.get("result").and_then(Value::as_str).unwrap();
+            assert_eq!(row.get("landing").and_then(Value::as_u64), Some(13), "{key}: the apps landing is named: {result}");
+            assert!(result.contains(&format!("#13 -+apps=rc-appsfix (bisect-13) lane rc-appsfix turned {key} red")), "{key}: by its lane: {result}");
+            assert!(asked.contains(&(2, a0.clone())) && asked.contains(&(2, a1.clone())), "{key}: #10 probed at its apps (green), #13 at its own (red): {asked:?}");
+        }
+        // a last pass that pinned no apps (the bucket followed it only later): its apps is where
+        // apps stood at its time, never the red tip's. A CI red's every probe pinned apps at its
+        // red tip beside the commercial of before Fab left it, and failed on two `fab-ai`
+        // packages, its last pass too ("red at its last pass already", 11-24)
+        let (row, asked) = moved_from("apps-unpinned", "check pkg", pin_of(&pins[0]), &apps_red);
+        let result = row.get("result").and_then(Value::as_str).unwrap();
+        assert_eq!(row.get("landing").and_then(Value::as_u64), Some(13), "the apps landing is named: {result}");
+        assert_eq!(row.get("from").and_then(|f| f.get("nested")).and_then(|n| n.get("apps")).and_then(Value::as_str), Some(a0.as_str()), "its last pass at the apps of its time: {row:?}");
+        assert_eq!(asked, [(2, a0.clone()), (2, a1.clone())], "#10 at the apps of its time (green), #13 at its own (red)");
+        let (row, _) = moved("apps-every-probe", "test pkg", &|_| Some("the_test"));
+        assert!(row.get("result").and_then(Value::as_str).unwrap().contains("deterministic, not flaky") && row.get("flaky").is_none(), "red the same way everywhere");
+        let (row, _) = moved("apps-other-way", "test pkg", &|p| Some(if *p == pin_of(&pins[0]).with("apps", &a0) { "another_test" } else { "the_test" }));
+        let result = row.get("result").and_then(Value::as_str).unwrap();
+        assert!(result.contains("flaky or not reproduced: red at its last pass") && result.contains("not the same way") && row.get("flaky").and_then(Value::as_bool) == Some(true), "red another way at its last pass: {result}");
+        store.update(|doc| doc.land = entries.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
         // A CI leg's red tip is probed first: green, its owner hears it is flaky with the JIT's note
         // from the leg's own log; red, the one landing its error lines name, else its range is
         // bisected, each probe after the night's wait, and only the landing it proves is told; a
@@ -5609,16 +7114,19 @@ mod tests {
         let (pins, entries, ws) = bisect_fixture(&d);
         let home = d.join("home");
         let started = 1794010109906;
-        let logs = [None, Some(0), Some(1), Some(2)].map(|i| bisect_log(&home.join("bucket-logs/bisect"), "fast", started, i));
-        assert_eq!(logs.iter().collect::<BTreeSet<_>>().len(), 4, "the base and three candidates have distinct logs");
-        for log in &logs {
-            assert_eq!(log_started(log), Some(started), "each probe's lease reads the bisect start from {}", log.display());
-        }
-
         let store = Store::open_quiet(&d.join("store"), "").unwrap();
         store.update(|doc| doc.land = entries.iter().map(|e| makepad_strict_json::parse(e.to_json().as_bytes()).unwrap()).collect()).unwrap();
         let job = Bisect { bucket: "fast".into(), unit: "check pkg".into(), key: "check pkg".into(), from: pin_of(&Pair::new(&ws, &pins[0].main)),
-            tip: pin_of(&pins[3]), line: "error: failed".into(), log: "known-red.log".into(), closed: false, named: Vec::new(), tip_probe: None, units: Vec::new() };
+            tip: pin_of(&pins[3]), line: "error: failed".into(), log: format!("fast-{started}.log"), closed: false, named: Vec::new(), tip_probe: None, units: Vec::new() };
+        // each probe's log is its bucket's, its key's and its red run's: the same in a restarted
+        // master, which adopts the probes by them (11-24)
+        let logs = ["from", "12", "10", "11", "tip"].map(|at| bisect_log(&home.join("bucket-logs/bisect"), &job, bisect_start(&job), at));
+        assert_eq!(logs.iter().collect::<BTreeSet<_>>().len(), 5, "the base, three candidates and the red tip have distinct logs");
+        for log in &logs {
+            assert_eq!(log_started(log), Some(started), "each probe's lease reads the red run's start from {}", log.display());
+        }
+        let other = Bisect { key: "check other".into(), ..job.clone() };
+        assert_ne!(bisect_log(&home, &other, started, "tip"), bisect_log(&home, &job, started, "tip"), "another red of the same run has logs of its own");
         assert!(queue_bisect(&home, &job).unwrap(), "the off-chain job starts queued");
         let probe: Probe = Arc::new(|_, _, _, _| panic!("an off-chain base must stop before probing"));
         let feed = Mutex::new(Vec::new());
@@ -5679,15 +7187,20 @@ mod tests {
     #[test]
     fn the_windows_bucket_checks_what_the_landings_reach_and_reads_its_cargo_check() {
         let tree = crate::orch::ci::Tree::mem(vec![
-            ("Cargo.toml", "[workspace]\nmembers = [\"libs/base\", \"libs/hub\", \"libs/unix\", \"apps/app\"]\n"),
-            ("libs/base/Cargo.toml", "[package]\nname = \"base\"\n[package.metadata.makepad.platform-gaps]\nwindows = {}\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"libs/base\", \"libs/hub\", \"libs/unix\", \"apps/app\", \"libs/jit\"]\n"),
+            ("libs/base/Cargo.toml", "[package]\nname = \"base\"\n[package.metadata.makepad.platform-gaps]\nwindows = {}\n[package.metadata.makepad.windows-tests]\nlib = \"its Win32 clipboard\"\n"),
             ("libs/base/src/lib.rs", ""),
-            ("libs/hub/Cargo.toml", "[package]\nname = \"hub\"\n[dependencies]\nbase = { path = \"../base\" }\n[package.metadata.makepad.platform-gaps]\nwindows = { \"lib\" = \"2 of 9 fail there\" }\n"),
+            ("libs/hub/Cargo.toml", "[package]\nname = \"hub\"\n[lib]\nname = \"hub_core\"\n[dependencies]\nbase = { path = \"../base\" }\n[package.metadata.makepad.platform-gaps]\nwindows = { \"lib\" = \"2 of 9 fail there\" }\n[package.metadata.makepad.windows-tests]\n\"test:ui-hang\" = \"its watchdog\"\n[package.metadata.makepad.windows-tests.lib]\nwhy = \"its Win32 drag\"\nknown = \"fixq\"\nskip = [\n  \"a::b\",\n  \"a::c\",\n]\n"),
             ("libs/hub/src/lib.rs", ""),
             ("libs/unix/Cargo.toml", "[package]\nname = \"unix\"\n[package.metadata.makepad.platform-gaps]\nwindows = { \"build\" = \"its Unix-only deps\" }\n"),
             ("libs/unix/src/lib.rs", ""),
             ("apps/app/Cargo.toml", "[package]\nname = \"app\"\n[dependencies]\nhub = { path = \"../../libs/hub\" }\n"),
             ("apps/app/src/main.rs", ""),
+            ("libs/jit/Cargo.toml", "[package]\nname = \"jit\"\n[package.metadata.makepad.windows-tests]\n\"corpus:tests/name_cut.rs\" = \"its thread names\"\n\"corpus:tests/tls.rs\" = \"its thread-local keys\"\n\"corpus:tests/gone.rs\" = \"a file it lost\"\n\"corpus:../x.rs\" = \"a path out of it\"\n\"corpus:tests/skips.rs\" = { why = \"a skip list\", skip = [\"a\"] }\n"),
+            ("libs/jit/src/lib.rs", ""),
+            ("libs/jit/tests/name_cut.rs", ""),
+            ("libs/jit/tests/tls.rs", ""),
+            ("libs/jit/tests/skips.rs", ""),
         ]);
         let reach = |paths: &[&str], again: &[&str]| -> Vec<String> {
             let again: BTreeSet<String> = again.iter().map(|p| p.to_string()).collect();
@@ -5726,6 +7239,124 @@ mod tests {
         assert!(said.contains("GATEUNIT fail windows base\n") && said.contains("GATEUNIT fail windows hub\n") && said.ends_with("NODEGATE-FAIL: windows base hub\n"), "{said}");
         assert_eq!(units(1, "devhub lease: no box of os=windows is up\n"), "");
         assert_eq!(windows_units(&Err("lost".into()), "", &pkgs), "");
+
+        // the windows-tests bucket: the test targets a package declares for Windows, each a unit,
+        // run where the landings reach them or still red there; no other run tests `cfg(windows)`
+        // code, and 14 tests of two libs had gone red there unseen (11-24)
+        let wreach = |paths: &[&str], again: &[&str]| -> Vec<String> {
+            let again: BTreeSet<String> = again.iter().map(|p| p.to_string()).collect();
+            windows_tests_reach(&tree, &paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), &again).0.iter().map(WinUnit::name).collect()
+        };
+        assert_eq!(wreach(&["libs/base/src/lib.rs"], &[]), ["wintest base/lib", "wintest hub/lib", "wintest hub/test:ui-hang"], "a crate it touches, and one that depends on it");
+        assert_eq!(wreach(&["libs/hub/src/lib.rs"], &[]), ["wintest hub/lib", "wintest hub/test:ui-hang"]);
+        assert!(wreach(&["apps/app/src/main.rs"], &[]).is_empty(), "a package that declares none");
+        assert_eq!(wreach(&["apps/app/src/main.rs"], &["base/lib"]), ["wintest base/lib"], "a red one again, whatever the landings reach");
+        let again: BTreeSet<String> = ["hub/lib", "left/lib"].iter().map(|p| p.to_string()).collect();
+        assert_eq!(windows_tests_reach(&tree, &[], &again).1, ["left/lib"], "a red one declared no more");
+        // (its cargo targets: its corpus files run in a leg of their own, below)
+        let (all, corpus): (Vec<WinUnit>, Vec<WinUnit>) = windows_tests_reach(&tree, &["Cargo.lock".to_string()], &BTreeSet::new()).0.into_iter().partition(|u| u.corpus().is_none());
+        assert_eq!(corpus.len(), 5, "a workspace-wide file reaches the corpus files too");
+        assert_eq!((all[1].binary.as_str(), all[1].skip.as_slice(), all[2].binary.as_str()), ("hub_core", &["a::b".to_string(), "a::c".to_string()][..], "ui_hang"), "its binary by its lib's name, a test's with `_`; its known reds");
+        assert!(is_unit("wintest hub/lib") && unit_key("wintest hub/lib") != unit_key("wintest hub/test:ui-hang"), "each target a unit of its own");
+        // one plain cargo test (argv: a Windows run is never a shell's), the known reds left out by name
+        let argv = windows_tests_argv(&all, &[]);
+        assert_eq!(argv.join(" "), "cargo test --no-fail-fast --message-format short -p base -p hub --lib --test ui-hang -- --exact --skip a::b --skip a::c");
+        assert_eq!(windows_tests_argv(&all[1..2], &["a::d".into()]).join(" "), "cargo test --no-fail-fast --message-format short -p hub --lib -- --exact a::d --skip a::b --skip a::c", "a rerun: its failing tests alone");
+        // its output, by test binary: passed, tests failed (with their panics), or a binary that ended
+        // before its result
+        let out = "     Running unittests src\\lib.rs (target\\debug\\build\\base/0a1b2c3d4e5f6071\\out\\base-0a1b2c3d4e5f6071.exe)\nrunning 2 tests\n\
+            test inner::child ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 517 filtered out\ntest x::one ... ok\ntest result: ok. 2 passed; 0 failed\n\
+            Running unittests src\\lib.rs (target\\debug\\deps\\hub_core-1234abcd.exe)\ntest a::d ... FAILED\ntest a::e ... ok\n---- a::d stdout ----\n\
+            thread 'a::d' panicked at libs\\hub\\src\\lib.rs:10:5:\nerror of its own: assertion failed\ntest result: FAILED. 1 passed; 1 failed\nerror: test failed, to rerun pass `-p hub --lib`\n\
+            Caused by:\n  process didn't exit successfully: `C:\\t\\deps\\hub_core-1234abcd.exe --exact` (exit code: 101)\n\
+            Running tests\\ui-hang.rs (target\\debug\\deps\\ui_hang-99aa.exe)\nerror: test failed, to rerun pass `-p hub --test ui-hang`\nCaused by:\n\
+            process didn't exit successfully: `C:\\t\\deps\\ui_hang-99aa.exe --exact` (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)\n";
+        let first = win_runs(&Ok(Some(101)), out, &all).unwrap();
+        assert_eq!(first[0], WinRun::Passed, "by its last result: a test's child prints its own in the binary's section");
+        assert_eq!(first[1], WinRun::Failed(vec!["a::d".into()], vec!["panicked at libs\\hub\\src\\lib.rs:10:5: error of its own: assertion failed".into()]), "its panic's message, whatever it starts with");
+        assert!(matches!(&first[2], WinRun::Broke(why, lines) if why == "its test binary ended before its result" && lines.len() == 1 && lines[0].contains("STATUS_ACCESS_VIOLATION")), "{:?}", first[2]);
+        assert_eq!((win_runs(&Ok(Some(1)), "devhub lease: no box of os=windows is up\n", &all), win_runs(&Err("lost".into()), "", &all)), (None, None), "a lease that ran no cargo: its own verdict");
+        // a package that did not build is its red; the others it stopped get no verdict
+        let unbuilt = win_runs(&Ok(Some(101)), "libs\\hub\\src\\lib.rs:3:9: error[E0425]: cannot find value `x`\nerror: could not compile `hub` (lib test) due to 1 previous error\n", &all).unwrap();
+        assert!(matches!(&unbuilt[1], WinRun::Broke(why, lines) if why == "it did not build on Windows" && lines[0].starts_with("libs/hub/src/lib.rs:3:9: error[E0425]")), "{:?}", unbuilt[1]);
+        assert_eq!(unbuilt[0], WinRun::NotRun);
+        // the units' lines: red on its rerun too names the landings, green on its rerun is a flake
+        let (said, ok) = windows_tests_said(&all, &first, &[None, Some(first[1].clone()), Some(WinRun::Passed)]);
+        assert!(!ok && said.starts_with("STEP windows-tests: 3 target(s) on Windows\nGATEUNIT ok wintest base/lib\n"), "{said}");
+        assert!(said.contains("wintest hub/lib: leaves out its 2 known red(s) on Windows by their names, until fixq lands their fixes\n") && said.contains("GATEREPRO wintest hub/lib :: makepad devhub test <lane> hub --lib --needs os=windows --native \"its Windows red\" -- --exact a::d\n"), "{said}");
+        assert!(said.contains("GATEFLAKE wintest hub/test:ui-hang :: \nGATEUNIT ok wintest hub/test:ui-hang\n") && said.ends_with("NODEGATE-FAIL: windows-tests wintest hub/lib\n"), "{said}");
+        let v = verdict(Ok(Some(1)), &format!("{out}{said}"), Path::new("windows-tests.log"));
+        assert_eq!((v.ok, v.failing.as_slice()), (false, &["wintest hub/lib".to_string()][..]), "its red unit, as a run's verdict reads it");
+        let (tests, _) = test_lines(&format!("{out}{said}"));
+        assert_eq!(tests.get("wintest hub/lib"), Some(&vec!["a::d".to_string()]), "its failing test, none of the cargo output's own lines before its STEP");
+        assert_eq!(panic_lines(&format!("{out}{said}")).get("wintest hub/lib").map(Vec::len), Some(1));
+        let (said, ok) = windows_tests_said(&all[..1], &first[..1], &[None]);
+        assert!(ok && said.ends_with("GATEUNIT ok wintest base/lib\nNODEGATE-OK\n") && verdict(Ok(Some(0)), &said, Path::new("windows-tests.log")).ok, "{said}");
+        // its known reds run alone, judging nothing: one that passes now is said, and main hears it
+        // once, to take it off the list; the list kept itself honest only while someone relayed each
+        // fix (main, 11-24)
+        assert_eq!(known_argv(&all[1..2]).join(" "), "cargo test --no-fail-fast --message-format short -p hub --lib -- --exact a::b a::c", "the known reds alone, none left out");
+        let ran = test_outcomes("test a::b ... ok\ntest a::c ... ok\ntest a::c ... FAILED\n");
+        assert_eq!(ran, BTreeMap::from([("a::b".to_string(), true), ("a::c".to_string(), false)]), "its last line decides: a child's comes first");
+        let (lines, passes) = known_reds_said(&all[1..2], Some(&ran));
+        assert_eq!(lines, "wintest hub/lib: known red now passes on Windows: take it off its windows-tests skip list: a::b\nwintest hub/lib: of its known reds, 1 still red and 0 did not finish (left out until fixq lands their fixes)\n");
+        assert_eq!(passes, [("wintest hub/lib".to_string(), "a::b".to_string())]);
+        let v = verdict(Ok(Some(0)), &format!("GATEUNIT ok wintest hub/lib\n{lines}NODEGATE-OK\n"), Path::new("windows-tests.log"));
+        assert!(v.ok && test_lines(&lines).0.is_empty() && panic_lines(&lines).is_empty(), "its lines judge nothing");
+        assert_eq!(known_reds_said(&all[1..2], None).0, "wintest hub/lib: its 2 known red(s) did not run: the lease ran no cargo test\n");
+        // a corpus file (`corpus:<file>`, from its package's directory) runs under the JIT there,
+        // `makepad test <file>`, as its package's unit; an entry that cannot run is its red unrun
+        assert_eq!(wreach(&["libs/jit/tests/tls.rs"], &[]), ["wintest jit/corpus:../x.rs", "wintest jit/corpus:tests/gone.rs", "wintest jit/corpus:tests/name_cut.rs", "wintest jit/corpus:tests/skips.rs", "wintest jit/corpus:tests/tls.rs"], "reached as its package is");
+        assert!(is_unit("wintest jit/corpus:tests/tls.rs") && unit_key("wintest jit/corpus:tests/tls.rs") != unit_key("wintest jit/corpus:tests/name_cut.rs"), "each file a unit of its own");
+        let faults: Vec<Option<&str>> = corpus.iter().map(|u| u.fault.as_deref()).collect();
+        assert_eq!(faults, [Some("its corpus entry corpus:../x.rs is no plain relative .rs path"), Some("its corpus file libs/jit/tests/gone.rs is not in the tree"), None, Some("a corpus file runs whole under `makepad test`: its skip list cannot apply"), None]);
+        let runs: Vec<WinUnit> = corpus.iter().filter(|u| u.fault.is_none()).cloned().collect();
+        assert_eq!(runs.iter().map(|u| u.corpus().unwrap()).collect::<Vec<_>>(), ["libs/jit/tests/name_cut.rs", "libs/jit/tests/tls.rs"]);
+        // one PowerShell script (a Windows run is plain argv): the JIT built once, each file under it,
+        // a red one once more at once, its markers around each run
+        let argv = corpus_argv(&runs);
+        assert_eq!(argv[..4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"]);
+        assert!(argv[4].contains("cargo build --profile host -q -p makepad-run --bin makepad") && argv[4].contains("foreach ($T in @('libs/jit/tests/name_cut.rs', 'libs/jit/tests/tls.rs'))") && argv[4].contains("& $J test $T"), "{}", argv[4]);
+        assert!(crate::lease::argv::windows_plain(&argv, Path::new("corpus")).unwrap().is_some_and(|r| r.text.contains("'CORPUSDONE'")), "the node runs it from a .ps1 file");
+        // its output by file: a JIT that ended before its result, then passed (a flake); tests that
+        // failed on both runs, with the reason lines under each, in the per-test blame as a cargo
+        // target's are
+        let out = "CORPUSBUILD ok\nCORPUSRUN libs/jit/tests/name_cut.rs\nCORPUSEXIT libs/jit/tests/name_cut.rs -1073741819\nCORPUSAGAIN libs/jit/tests/name_cut.rs\n\
+            test test_crate::cut ... ok (2.00 ms)\ntest result: 1 passed; 0 failed. compiled 9 fns\nCORPUSEXIT libs/jit/tests/name_cut.rs 0\n\
+            CORPUSRUN libs/jit/tests/tls.rs\ntest test_crate::keys ... FAILED (3.00 ms)\n  report: panic at libs/jit/tests/tls.rs:9:5: left == right\ntest test_crate::grow ... ok (1.00 ms)\ntest result: 1 passed; 1 failed. compiled 9 fns\nCORPUSEXIT libs/jit/tests/tls.rs 101\n\
+            CORPUSAGAIN libs/jit/tests/tls.rs\ntest test_crate::keys ... FAILED (3.00 ms)\n  report: panic at libs/jit/tests/tls.rs:9:5: left == right\ntest result: 1 passed; 1 failed. compiled 9 fns\nCORPUSEXIT libs/jit/tests/tls.rs 101\nCORPUSDONE\n";
+        let ran = corpus_runs(&Ok(Some(1)), out, &runs).unwrap();
+        let keys = WinRun::Failed(vec!["test_crate::keys".into()], vec!["report: panic at libs/jit/tests/tls.rs:9:5: left == right".into()]);
+        assert_eq!(ran, [(WinRun::Broke("the JIT ended before its result (exit -1073741819)".into(), Vec::new()), Some(WinRun::Passed)), (keys.clone(), Some(keys))]);
+        let (first, rerun): (Vec<WinRun>, Vec<Option<WinRun>>) = ran.into_iter().unzip();
+        let (said, ok) = windows_tests_said(&runs, &first, &rerun);
+        assert!(!ok && said.contains("GATEFLAKE wintest jit/corpus:tests/name_cut.rs :: \nGATEUNIT ok wintest jit/corpus:tests/name_cut.rs\n"), "{said}");
+        assert!(said.contains("FAILED test_crate::keys\nreport: panic at libs/jit/tests/tls.rs:9:5: left == right\nwintest jit/corpus:tests/tls.rs: 1 test(s) failed on Windows, on its rerun too\nGATEREPRO wintest jit/corpus:tests/tls.rs :: makepad devhub run <lane> test --needs os=windows -- cargo run --profile host -p makepad-run --bin makepad -- test libs/jit/tests/tls.rs\nGATEUNIT fail wintest jit/corpus:tests/tls.rs\n"), "{said}");
+        let v = verdict(Ok(Some(1)), &format!("{out}{said}"), Path::new("windows-tests.log"));
+        assert_eq!((v.ok, v.failing.as_slice()), (false, &["wintest jit/corpus:tests/tls.rs".to_string()][..]));
+        assert_eq!(test_lines(&format!("{out}{said}")).0.get("wintest jit/corpus:tests/tls.rs"), Some(&vec!["test_crate::keys".to_string()]), "its failing test, as the per-test blame reads it");
+        // a file that did not compile under the JIT; the JIT not built breaks them all; a script cut
+        // short is no verdict (its lease's)
+        let unbuilt = corpus_runs(&Ok(Some(1)), "CORPUSBUILD ok\nCORPUSRUN libs/jit/tests/tls.rs\nerror[E0425]: cannot find value `k` in this scope\nerror: could not compile `libs/jit/tests/tls.rs` (test) due to 1 previous error: no test ran\nCORPUSEXIT libs/jit/tests/tls.rs 1\nCORPUSDONE\n", &runs[1..]).unwrap();
+        assert!(matches!(&unbuilt[0].0, WinRun::Broke(why, lines) if why == "it did not compile under the JIT on Windows" && lines.len() == 2 && lines[0].starts_with("error[E0425]")), "{unbuilt:?}");
+        let nojit = corpus_runs(&Ok(Some(1)), "libs\\relax\\x.rs:3:9: error[E0425]: cannot find value `x`\nCORPUSBUILD fail 101\n", &runs).unwrap();
+        assert!(nojit.iter().all(|(r, again)| again.is_none() && matches!(r, WinRun::Broke(why, l) if why == "the JIT did not build on Windows" && l[0].starts_with("libs/relax/x.rs:3:9: error[E0425]"))), "{nojit:?}");
+        assert_eq!((corpus_runs(&Ok(Some(1)), "CORPUSBUILD ok\nCORPUSRUN libs/jit/tests/tls.rs\n", &runs), corpus_runs(&Err("lost".into()), "", &runs)), (None, None));
+        let (said, _) = windows_tests_said(&corpus[3..4], &[WinRun::Broke(corpus[3].fault.clone().unwrap(), Vec::new())], &[None]);
+        assert!(said.contains("wintest jit/corpus:tests/skips.rs: a corpus file runs whole under `makepad test`: its skip list cannot apply\nGATEREPRO") && !said.contains("leaves out"), "an entry that cannot run, red unrun: {said}");
+        let home = std::env::temp_dir().join(format!("devhub-bucket-known-reds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        tell_known_passes(&home, &all[1..2], &passes);
+        tell_known_passes(&home, &all[1..2], &passes);
+        let told = crate::notes::take(&home, "main");
+        assert_eq!(told.len(), 1, "main hears it once: {told:?}");
+        assert!(told[0].1.contains("wintest hub/lib's known red a::b now passes on Windows"), "{told:?}");
+        // off the list, its record goes: listed again, it is told again
+        let off = vec![WinUnit { skip: vec!["a::c".into()], ..all[1].clone() }];
+        tell_known_passes(&home, &off, &[]);
+        tell_known_passes(&home, &all[1..2], &passes);
+        assert_eq!(crate::notes::take(&home, "main").len(), 1, "told again once listed again");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -5771,8 +7402,9 @@ mod tests {
         let from = pin_of(&Pair::new(&"a".repeat(40), &"b".repeat(40))).with("repo-b", &"c".repeat(40));
         let tip = pin_of(&Pair::new(&"d".repeat(40), &"e".repeat(40))).with("repo-b", &"f".repeat(40));
         let mut job = Bisect { bucket: "fast".into(), unit: "check pkg".into(), key: "check pkg".into(), from: from.clone(), tip: tip.clone(), line: "error: missing value".into(), log: "fast-1.log".into(), closed: false, named: Vec::new(), tip_probe: None, units: Vec::new() };
-        assert_eq!(bisect_pin(&from.pair(), &tip).nested.get("repo-b"), tip.nested.get("repo-b"), "the pair takes the red run's other nested pins");
-        assert_eq!(bisect_pin(&from.pair(), &tip).pair(), from.pair(), "its paired side stays at the candidate");
+        assert_eq!(bisect_pin(pin_of(&from.pair()), &tip).nested.get("repo-b"), tip.nested.get("repo-b"), "the pair takes the red run's other nested pins");
+        assert_eq!(bisect_pin(from.clone(), &tip), from, "a pass's own nested pins stay its own");
+        assert_eq!(bisect_pin(pin_of(&from.pair()), &tip).pair(), from.pair(), "its paired side stays at the candidate");
         assert!(queue_bisect(&home, &job).unwrap());
         assert!(!queue_bisect(&home, &job).unwrap());
         job.tip = from.clone();
@@ -5829,11 +7461,13 @@ mod tests {
         };
         let still = || status(&home, &[]).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).find(|v| v.get("still_failing").and_then(Value::as_str) == Some(CI))
             .and_then(|v| v.get("units").cloned());
-        judged(1, "fail smoke:linux:apps/pdf: 1 step failed (x.log)\nGATEUNIT fail smoke:linux:apps/pdf\nok live:kinds: 1 step ok (y.log)\nGATEUNIT ok live:kinds\n");
+        judged(1, "fail smoke:linux:apps/pdf: 1 step failed (x.log)\nGATEKEPT smoke:linux:apps/pdf :: /kept/ci-1.keep/x.log\nGATEUNIT fail smoke:linux:apps/pdf\nok live:kinds: 1 step ok (y.log)\nGATEUNIT ok live:kinds\n");
         let row = rows_of(&home, CI).remove(0);
         assert_eq!(row.get("passed").and_then(Value::as_arr).unwrap().iter().filter_map(Value::as_str).collect::<Vec<_>>(), ["live:kinds"], "its passed legs");
         let units = still().expect("a STILL FAILING line for ci");
-        assert_eq!(units.get("smoke:linux:apps/pdf").and_then(Value::as_str), Some("origin unknown, first failed in ci-1.log"), "no file named: nobody");
+        // and where its own log is kept: a live:replay red said only its bucket's log for 21 h, and
+        // its own was gone (11-24)
+        assert_eq!(units.get("smoke:linux:apps/pdf").and_then(Value::as_str), Some("origin unknown, first failed in ci-1.log (its output: /kept/ci-1.keep/x.log)"), "no file named: nobody");
         assert!(units.get("live:kinds").is_none());
         judged(2, "ok live:kinds: 1 step ok (y.log)\nGATEUNIT ok live:kinds\n");
         assert!(still().is_some(), "a run that did not look at it leaves it open");
@@ -5890,7 +7524,7 @@ mod tests {
         for step in &steps {
             assert!(step.split_whitespace().count() == 1 && !is_unit(step), "{step}: a step's key is one word, no unit");
             assert!(o.failing.contains(step), "{step} fails beside failing units: {:?}", o.failing);
-            assert_eq!(last_pass(&rows, step).as_ref(), Some(&green), "{step}: red beside units is no pass of it");
+            assert_eq!(last_pass(&rows, step).map(|p| p.pair()).as_ref(), Some(&green), "{step}: red beside units is no pass of it");
         }
         assert_eq!(o.failing.len(), steps.len() + units.len(), "the units and the steps, not the units' own words: {:?}", o.failing);
         // a gate from before the marks: its words, when no unit failed
@@ -5924,6 +7558,33 @@ mod tests {
         assert_eq!(last_run(&text), "STEP jit 3 s\nNODEGATE-OK\n");
         let o = verdict(Ok(Some(0)), last_run(&text), Path::new("x.log"));
         assert!(o.ok && o.no_verdict.is_none() && o.summary == "STEP jit 3 s", "{:?} {}", o.failing, o.summary);
+        // a gate that said its start and exited 0 without its verdict line said nothing of the
+        // landings: once more, then no verdict naming it, twice (a box's disk reclaim took a sweep's
+        // run log under it, L1561802, 11-22). A cargo check says no verdict line; one stopped as not
+        // needed, or that said its verdict, is as it said
+        let started = "why\nL7 box-a: sources at work@abc\nGATE libs: steps before\nGATESTART check a 1\n";
+        assert_eq!((again(&Ok(Some(0)), started), rerun_why(&Ok(Some(0)), started)), (true, Some(RERUN_UNSAID)));
+        assert_eq!(rerun_why(&lost_exit, "why\nL1 test@node-a: granted\n"), Some(RERUN), "a lost lease says so");
+        let twice = format!("{started}{RERUN_UNSAID}\nL8 box-b: sources at work@abc\nGATE libs: steps before\n");
+        assert!(!again(&Ok(Some(0)), &twice), "only once");
+        assert!(!again(&lost_exit, &twice), "once in all: a lost lease after it is no verdict");
+        assert!(!again(&Ok(Some(0)), "why\n    Finished `dev` profile\n"), "a cargo check says no verdict line");
+        assert!(!again(&Ok(Some(0)), &format!("{started}NODEGATE-OK libs 3 checks\n")) && !again(&Ok(Some(0)), &format!("{started}{NOT_NEEDED}\n")));
+        assert_eq!(last_run(&twice), "L8 box-b: sources at work@abc\nGATE libs: steps before\n", "the verdict reads the last run only");
+        let dir = std::env::temp_dir().join(format!("devhub-bucket-unsaid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = dir.join(format!("{FULL}-5.log"));
+        std::fs::write(libs_log(&run), &twice).unwrap();
+        std::fs::write(shard_log(&run, 1), started).unwrap();
+        let ran = [(libs_log(&run), (Ok(Some(0)), kept(&twice))), (shard_log(&run, 1), (Ok(Some(0)), started.to_string())), (shard_log(&run, 2), (Ok(Some(0)), format!("{started}NODEGATE-OK testrun 3 packages\n")))];
+        assert_eq!(unsaid_parts(&run, 2, &ran), ["the libraries' sweep (L8 on box-b): no verdict, twice (it exited 0 without its verdict line, and again as it ran once more)", "shard 1 (L7 on box-a): no verdict (it exited 0 without its verdict line)"], "each named, its last lease and box; the shard that said its verdict stands");
+        let _ = std::fs::remove_dir_all(&dir);
+        // both gates say the start the rule reads (land_gate.sh for every mode, mac_tests.sh)
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture");
+        for (gate, start) in [("land_gate.sh", "echo \"GATE $mode: "), ("mac_tests.sh", "echo \"GATE mac: ")] {
+            assert!(std::fs::read_to_string(fixture.join(gate)).unwrap().lines().any(|l| l.starts_with(start)), "{gate} says its start");
+        }
         // lost twice: no verdict, nothing for the landings to answer for
         assert!(verdict(lost_exit, "STEP affected 0 s\n", Path::new("x.log")).no_verdict.is_some());
         assert!(verdict(Ok(Some(1)), "", Path::new("x.log")).no_verdict.is_none());
@@ -6720,6 +8381,11 @@ mod tests {
         assert_eq!(adopt(gone, "L1 test@a: granted\nNODEGATE-FAIL: x\n"), Ok(None), "another holder's exit is not its own: not known");
         std::fs::remove_file(&exit).unwrap();
         assert_eq!(adopt(gone, &format!("L1 test: 1st in queue (a: busy)\n{NOT_NEEDED}\n")), Ok(Some(0)), "stopped as not needed before the restart");
+        // its pid another process's since (a restarted bisect adopts probes that ended hours
+        // before): its exit written is its end
+        let alive = std::process::id();
+        std::fs::write(&exit, format!("{alive} 5\n")).unwrap();
+        assert_eq!(adopt(alive, "L3 test@a: granted\n"), Ok(Some(5)), "its own exit file, though its pid runs on");
         // runs on after the restart and is not this process's child (a crash's or a switch-over's
         // master started it): its file once it ends
         let script = format!("sleep 1; echo \"$$ 7\" > '{0}.tmp' && mv '{0}.tmp' '{0}'", exit.display());
@@ -6792,6 +8458,13 @@ mod tests {
         let why = board.try_take(&home, &tests, 2, Need::Lease, &say).err().expect("its second shard waits");
         assert!(why.ends_with("a full run keeps one slot, its floor, until its run ends"), "{why}");
         assert!(!board.give_queued(&full, 2, &say), "a tests shard waits, but the full run's last slot is its floor");
+        // a lease its ask heard granted reads as granted whether or not a poll saw it start: one set
+        // up between two polls said no grant, and its shard ended its running gate as an ask not
+        // granted yet, 32 units in (L1561926, 11-22); one said as it started is not said again
+        use crate::lease::{client::grant_line, Kind};
+        assert_eq!(grant_line("L9", Kind::Test, "box-a", "L9 test: 1st in queue (box-a: busy)", "").as_deref().and_then(granted), Some("L9"));
+        assert_eq!(grant_line("L9", Kind::Test, "box-a", "L9 test@box-a: granted, setting up", ""), None);
+        assert_eq!(grant_line("L9", Kind::Test, "box-a", "L9 test@box-a: granted, setting up", "; class x").as_deref(), Some("L9 test@box-a: granted; class x"), "a class note is said as before");
         // (its slots let go before their files' dir goes)
         drop((taken, _held, _on_full, _on_tests));
         let _ = std::fs::remove_dir_all(&home);
@@ -7178,6 +8851,36 @@ mod tests {
         let older = obj(vec![("unit_tests", obj(vec![("test f --bin f part 2/3", Value::Arr(vec![Value::Arr(vec![s("print::slow"), Value::F64(9.0), Value::Int(1)]), Value::Arr(vec![s("old::one"), Value::Int(4), Value::Int(1)])]))]))]);
         assert_eq!(test_times_env(&[row, older]), "GATE_TEST_TIMES=test f --bin f :: a::b=1.5 old::one=4.0 print::slow=312.4 xr::grip=120.0;test g --lib :: g::t=2.0");
         assert_eq!(test_times_env(&[]), "GATE_TEST_TIMES=");
+        // A test past the 10 s line goes to the lane of the newest landing that touched its package,
+        // with its time and the run's log, once a day; to main once that lane has ended (main,
+        // 11-24). print::slow and xr::grip are; a::b and g::t are not.
+        let home = std::env::temp_dir().join(format!("devhub-bucket-slow-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let landing = |id: u64, pkg: &str, changed_ms: u64| Entry { id, branch: format!("rc-l{id}"), cwt: String::new(), cbranch: String::new(), nested: Vec::new(), state: St::Landed, held: String::new(),
+            ms: String::new(), cs: String::new(), checked: String::new(), touched: vec![pkg.to_string()], wide: Vec::new(), set: Vec::new(), node: String::new(), job: String::new(), unchecked: String::new(), gate_ms: 0,
+            landed: String::new(), pre: String::new(), detail: Vec::new(), agent: format!("a{id}"), proof: false, wire: false, witness: String::new(), asked_ms: 0, changed_ms };
+        let history = [landing(1, "f", 10), landing(2, "f", 20), landing(3, "g", 30)];
+        let tip = pin_of(&Pair::new(&"a".repeat(40), &"b".repeat(40)));
+        let said = |live: &dyn Fn(&Entry) -> bool, now: u64| slow_notes(&home, "tests", &tip, "tests-1.log", &tests, &history, live, now).unwrap();
+        let notes = said(&|_| true, 1_000);
+        assert_eq!(notes.iter().map(|(agent, _)| agent.as_str()).collect::<Vec<_>>(), ["a2", "a2"], "print::slow and xr::grip, to the newest landing that touched f: {notes:?}");
+        assert!(notes[0].1.contains("slow test print::slow of test f --bin f part 1/2: 312 s, past the 10 s line") && notes[0].1.contains("rc-l2 (a2) #2 last touched f; log tests-1.log"), "{notes:?}");
+        assert!(said(&|_| true, 1_000 + 3_600_000).is_empty(), "once a day");
+        let notes = said(&|e| e.id != 2, 1_000 + 24 * 3_600_000);
+        assert!(notes.len() == 2 && notes.iter().all(|(agent, line)| agent == "main" && line.contains("its lane has ended")), "a day on, its lane ended: main hears it: {notes:?}");
+        // main's weekly list: the slowest tests of the week's runs, each at its slowest, under the line too
+        let ran = |started: u64, unit: &str, tests: &[(&str, f64)]| append(&home, obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(started as i64)),
+            ("unit_tests", obj(vec![(unit, Value::Arr(tests.iter().map(|(n, secs)| Value::Arr(vec![s(*n), Value::F64(*secs), Value::Int(1)])).collect()))]))])).unwrap();
+        let week = 7 * 24 * 3_600_000;
+        ran(1, "test old", &[("old::t", 900.0)]);
+        ran(week + 10, "test f --bin f part 1/2", &[("print::slow", 300.0), ("a::b", 1.5)]);
+        ran(week + 20, "test f --bin f part 2/2", &[("print::slow", 312.4)]);
+        ran(week + 30, "test g --lib", &[("g::t", 2.0)]);
+        let list = weekly_slowest(&home, week + 40).unwrap().unwrap();
+        assert_eq!(list, "the week's 3 slowest tests the buckets measured (each at its slowest; the line is 10 s): print::slow of test f 312.4 s (tests); g::t of test g 2.0 s (tests); a::b of test f 1.5 s (tests)");
+        assert_eq!(weekly_slowest(&home, week + 50).unwrap(), None, "once a week");
+        assert!(weekly_slowest(&home, 2 * week + 40).unwrap().is_none(), "a week on, no run in that week: nothing to say");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A unit that runs far over its measure is said while it runs: one still running past three
@@ -7293,6 +8996,12 @@ mod tests {
         let repro = repro_lines("GATEREPRO check w --also=x :: cd libs/w && makepad check --also=x w\nGATEUNIT fail check w --also=x\nGATEREPRO test t :: makepad test t\n");
         assert_eq!(repro.get("check w").map(String::as_str), Some("cd libs/w && makepad check --also=x w"));
         assert_eq!(repro.get("test t").map(String::as_str), Some("makepad test t"));
+        // a boundary audit's red: a unit of its own, apart from its app's check, and blamed by the provided
+        // fn's file its violation names (its way in, the `reached` row, names none)
+        let audit = "violation\tFAIL\tmakepad_s\tmakepad_s::Heap::get\t/n/tree/platform/s/src/heap.rs:108:1: a field of `Heap` (`objects: Vec<Obj>`) is reached from JIT-compiled code\n  reached\tgame::camera -> makepad_s::Heap::get\nGATEREPRO boundary makepad-x :: cd apps/x && makepad check --boundary all makepad-x\nGATEUNIT fail boundary makepad-x\n";
+        assert!(is_unit("boundary makepad-x") && unit_key("boundary makepad-x") != unit_key("check makepad-x"), "a unit of its own");
+        assert_eq!(repro_lines(audit).get("boundary makepad-x").map(String::as_str), Some("cd apps/x && makepad check --boundary all makepad-x"));
+        assert_eq!(error_files(audit).get("boundary makepad-x"), Some(&vec!["/n/tree/platform/s/src/heap.rs".to_string()]), "its violation's file");
         // as said: a present with the live session a lane runs it in
         assert_eq!(repro_said("test t", "makepad test t"), "test t: shown alone by `makepad test t`");
         let present = repro_said("present makepad-x", "cd apps/x && makepad run makepad-x");
@@ -7359,7 +9068,7 @@ mod tests {
         let rows = [obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w2, &m)))), ("passed", Value::Arr(vec![s("check example")]))]),
             obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("passed", Value::Arr(vec![s("present example")]))])];
         let tip = Pair::new(&w3, &m);
-        let from = last_pass(&rows, "present example").unwrap();
+        let from = last_pass(&rows, "present example").unwrap().pair();
         assert_eq!(from, Pair::new(&w0, &m));
         let since = landings(&d, &from, &tip, &history).unwrap();
         assert_eq!(since.iter().map(|e| e.id).collect::<Vec<_>>(), [1, 2, 3]);
@@ -7457,6 +9166,15 @@ mod tests {
         let held = test_red(FULL, Some(&queue));
         assert!(held.iter().any(|(_, line, _)| line.contains("test example --test t runs once more at its red tip")), "{held:?}");
         assert_eq!(queued.lock().unwrap().iter().map(|j| j.closed).collect::<Vec<_>>(), [true], "a red a later run passed is closed: its tip is probed alone");
+        // its range starts where its last pass ran each nested repository, as the bucket's row
+        // names it, not at the red tip's: each probe took the red tip's apps, every one was red
+        // the same way, and the red of an apps landing went to no landing (11-23)
+        let apps_at = "a".repeat(40);
+        append(&home, obj(vec![("bucket", s("tests")), ("started_ms", Value::Int(0)), ("passed", Value::Arr(vec![s("test example")])), ("tip", tip_value(&pin_of(&Pair::new(&w0, &m)).with("apps", &apps_at)))])).unwrap();
+        queued.lock().unwrap().clear();
+        test_red("fast", Some(&queue));
+        let jobs = std::mem::take(&mut *queued.lock().unwrap());
+        assert_eq!(jobs.iter().map(|j| j.from.nested.get("apps")).collect::<Vec<_>>(), [Some(&apps_at)], "the last pass's own apps commit starts the range");
         // a CI leg's new red runs once more at its tip first, the landing its errors name kept for then
         let log = home.join("ci-p.log");
         std::fs::write(&log, "fail check:macos:example: 1 step failed (c.log)\n/n/tree/apps/example/src/main.rs:1:13: E0425: cannot find function `tree`\nGATEUNIT fail check:macos:example\n").unwrap();
@@ -7481,7 +9199,7 @@ mod tests {
         assert!(!fed.iter().any(|(_, line, _)| line.contains("rc-l1 (L1)") || line.contains("rc-l3 (L3)")), "no other landing of the range: {fed:?}");
         for agent in ["L2", "main"] { assert_eq!(crate::notes::take(&home, agent).len(), 1, "{agent}"); }
         // the check last passed at w2: since then only #3, which did not touch main.rs (the callee changed elsewhere)
-        let from = last_pass(&rows, "check example").unwrap();
+        let from = last_pass(&rows, "check example").unwrap().pair();
         let since = landings(&d, &from, &tip, &history).unwrap();
         let diffs: Vec<Option<Vec<String>>> = since.iter().map(|e| landing_files(&d, e)).collect();
         let touched: Vec<Option<&[String]>> = diffs.iter().map(Option::as_deref).collect();
@@ -7496,7 +9214,7 @@ mod tests {
         assert_eq!(step_files(log), ["/n/tree/platform/script/std/src/vm.rs"]);
         let rows = [obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w2, &m)))), ("failing", Value::Arr(vec![s("build")]))]),
             obj(vec![("tip", tip_value(&pin_of(&Pair::new(&w0, &m)))), ("failing", Value::Arr(vec![s("check example")]))])];
-        let from = last_pass(&rows, "build").unwrap();
+        let from = last_pass(&rows, "build").unwrap().pair();
         assert_eq!(from, Pair::new(&w0, &m), "a row without the step failing got through it");
         let since = landings(&d, &from, &tip, &history).unwrap();
         let diffs: Vec<Option<Vec<String>>> = since.iter().map(|e| landing_files(&d, e)).collect();
@@ -7541,6 +9259,56 @@ mod tests {
         earlier("listed", false);
         let (fed, row) = listings("listed", "example:old");
         assert!(!fed.iter().any(|(_, line, _)| line.contains(FIRST_RUN)) && !broke_of(&row).starts_with(FIRST_RUN), "its listing ran here before (an earlier row's log): {fed:?}");
+        // a unit that failed on a file its box's tree lacked, which the pinned tree holds, is the
+        // box's: no verdict, no landing told (a warm leg's tree without makepad/apps, 11-22); one
+        // whose manifest names a file the tree lacks too is the code's, a red
+        let lacked = |text: &str, failing: &[&str]| {
+            let log = home.join("infra.log");
+            std::fs::write(&log, text).unwrap();
+            let outcome = Outcome { ok: false, failing: failing.iter().map(|u| u.to_string()).collect(), log: log.display().to_string(), summary: String::new(), no_verdict: None };
+            let fed = Mutex::new(Vec::new());
+            let r = judge("infra", &home, &d, &store, &|sev, line, detail| fed.lock().unwrap().push((sev, line, detail)), 1, Some(pin_of(&Pair::new(&w0, &m))), &pin_of(&tip), None, |_| Ok(outcome));
+            (r.err().map(|e| e.to_string()), fed.into_inner().unwrap())
+        };
+        let relax = "warming example:lib\nrelax: /n/dev/src/apps/example/src/main.rs: /n/dev/src/apps/example/src/main.rs: no such file\nrelax test: the run of the lib's unit tests exited with status 1\nGATEUNIT fail suite example\n";
+        let cargo = "error: failed to load manifest for workspace member `/n/tree/apps/example`\nCaused by:\n  failed to read `/n/tree/apps/example/Cargo.toml`\nCaused by:\n  No such file or directory (os error 2)\nGATESTEP fail check\n";
+        let (none, told) = lacked(&format!("{relax}{cargo}"), &["suite example", "check"]);
+        let none = none.unwrap_or_default();
+        assert!(none.contains("infra, no lane's: check: its box's tree lacked apps/example/Cargo.toml, which the pinned tree holds; suite example: its box's tree lacked apps/example/src/main.rs"), "{none}");
+        assert!(!told.iter().any(|(sev, _, _)| *sev == Sev::Err) && rows_of(&home, "infra").is_empty(), "no red, no landing told: {told:?}");
+        let gone = "  failed to read `/n/tree/apps/example/gone/Cargo.toml`\nGATEUNIT fail check gone\n";
+        let (verdict, _) = lacked(&format!("{relax}{gone}"), &["suite example", "check gone"]);
+        let row = rows_of(&home, "infra").into_iter().next().unwrap();
+        assert!(verdict.is_none() && row.get("failing").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).eq(["check gone"]), "a file the tree lacks too is the code's red, the box's is not: {row:?}");
+        assert!(row.get("summary").and_then(Value::as_str).unwrap_or("").contains("infra, no lane's: suite example"), "{row:?}");
+        // A failing test is blamed by its own message (11-25). Its first red after a pass keeps its
+        // panics in the look back, so a new break of a test that broke before for another reason is
+        // no failure off and on; and a line of the tree its message names is laid to the landing
+        // since the test last passed that added it, alone (a missing Option entry the boundary
+        // check named at its line, under the harness's assert, read "intermittent, origin unknown")
+        let unit = "test example --lib";
+        let run = |log: &str, at: &str, said: Option<&str>| -> String {
+            let path = home.join(log);
+            let text = match said {
+                Some(said) => format!("FAILED live::t\n  panicked at apps/example/tests/fresh.rs:1:1 -- {said}\nGATEUNIT fail {unit}\nNODEGATE-FAIL: tests\n"),
+                None => format!("GATEUNIT ok {unit}\nNODEGATE-OK\n"),
+            };
+            std::fs::write(&path, &text).unwrap();
+            // (the run's verdict: this test's `verdict` above is a refusal's text)
+            let outcome = super::verdict(Ok(Some(if said.is_some() { 1 } else { 0 })), &text, &path);
+            judge("lines", &home, &d, &store, &|_, _, _| {}, 1, Some(pin_of(&Pair::new(&w0, &m))), &pin_of(&Pair::new(at, &m)), None, |_| Ok(outcome)).unwrap();
+            rows_of(&home, "lines").first().and_then(|r| r.get("broke")).and_then(|b| b.get("test example")).and_then(Value::as_str).unwrap_or("").to_string()
+        };
+        run("lines-1.log", &w0, Some("kept the old value"));
+        run("lines-2.log", &w0, None);
+        let again = run("lines-3.log", &w3, Some("lost the new value"));
+        assert!(again.starts_with("by test: live::t ") && !again.contains(INTERMITTENT), "another break than its first red's: {again}");
+        let named = run("lines-4.log", &w3, Some("1 missing entry:\n    entry\tFAIL\tplatform/script/std/src/vm.rs:2 (makepad_script_std::vm)\tadd it"));
+        assert_eq!(named, format!("by test: live::t since {} (it added vm.rs:2)", who_of(&history[0])), "the landing that added the line it names, not the three since its pass");
+        let said = said_lines(&std::fs::read_to_string(home.join("lines-4.log")).unwrap());
+        assert_eq!(said, BTreeMap::from([((unit.to_string(), "live::t".to_string()), vec![("platform/script/std/src/vm.rs".to_string(), 2)])]), "where it panicked is no line it names");
+        for agent in ["L1", "L2", "L3"] { let _ = crate::notes::take(&home, agent); }
+        let _ = crate::notes::take(&home, "main");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -7755,7 +9523,7 @@ mod tests {
         let rows = [now.clone(), three.clone(), two, one.clone()];
         assert_eq!(test_blame(&rows, unit, b), "rc-b (B) #3");
         assert_eq!(test_blame(&rows, unit, a), "rc-late (L) #4", "a failed first now");
-        assert_eq!(tests_blame(&rows, &[(unit.to_string(), vec![a.to_string(), b.to_string()])]), "by test: live::tests::a since rc-late (L) #4; live::tests::b since rc-b (B) #3");
+        assert_eq!(tests_blame(&rows, &[(unit.to_string(), vec![a.to_string(), b.to_string()])], &|_, _| None), "by test: live::tests::a since rc-late (L) #4; live::tests::b since rc-b (B) #3");
         // a whole package's pass is a pass of each of its targets' tests
         assert_eq!(test_blame(&[three.clone(), row("tests-2.log", &[], &["test p"], &[])], unit, b), "rc-b (B) #3");
         // no pass among the runs that named their tests: nobody knows
@@ -7771,13 +9539,43 @@ mod tests {
         let off_and_on = "intermittent, origin unknown: it failed in tests-3.log, passed in the later tests-5.log, and fails again";
         assert_eq!(test_blame(&flaps, unit, b), off_and_on);
         assert_eq!(test_blame(&flaps, unit, a), "rc-late (L) #4");
-        assert_eq!(tests_blame(&flaps, &[(unit.to_string(), vec![a.to_string(), b.to_string()])]), format!("by test: live::tests::a since rc-late (L) #4; live::tests::b {off_and_on}"));
+        assert_eq!(tests_blame(&flaps, &[(unit.to_string(), vec![a.to_string(), b.to_string()])], &|_, _| None), format!("by test: live::tests::a since rc-late (L) #4; live::tests::b {off_and_on}"));
+        // two breaks of one test with a pass between are no flapping: their panics share nothing,
+        // so the newer is laid to its run's landings (an added lease field's round trip failed for
+        // `untimed`, passed for a day, then failed for `lost_on`, and read as intermittent, 11-25);
+        // the same panic, its numbers aside, is the same failure off and on
+        let panicked = |r: &Value, line: &str| {
+            let mut r = r.clone();
+            if let Value::Obj(f) = &mut r { f.push(("panics".into(), obj(vec![(unit, Value::Arr(vec![s(line)]))]))); }
+            r
+        };
+        let passed = row("tests-5.log", &[], &[unit], &[]);
+        let two_breaks = [panicked(&now, "panicked at p/src/live.rs:90:2 -- field lost_on is written"), passed.clone(), panicked(&three, "panicked at p/src/live.rs:60:2 -- field untimed is written"), one.clone()];
+        assert_eq!(test_blame(&two_breaks, unit, b), "rc-late (L) #4");
+        let timings = [panicked(&now, "panicked at p/src/live.rs:90:2 -- took 812 ms"), passed.clone(), panicked(&three, "panicked at p/src/live.rs:60:2 -- took 95 ms"), one.clone()];
+        assert_eq!(test_blame(&timings, unit, b), off_and_on);
+        assert_eq!(test_blame(&[panicked(&now, "panicked at p/src/live.rs:90:2 -- field lost_on is written"), passed, three.clone(), one.clone()], unit, b), off_and_on, "one red kept no panics: nothing tells them apart");
         // `devhub bucket` says the same, past three tests counted
         let many = ["t0", "t1", "t2", "t3", "t4"];
         let wide = row("tests-5.log", &[(unit, &many[..])], &[], &[]);
         let said = "by test: t0, t1, t2 and 2 more origin unknown: no landing of its first failing run (tests-5.log) changed test p --lib";
-        assert_eq!(still_failing(&[wide, one])["test p"].1, said);
+        assert_eq!(still_failing(&[wide, one.clone()])["test p"].1, said);
         assert_eq!(still_since(said), said);
+        // a newer run that could not build its tests names no test: that build is the red, with its
+        // first error and who broke it, not a test an older run failed (a test build's E0433 read
+        // "by test: requests_round_trip since .." for a test that run passed, 11-24)
+        let (errors, _) = unit_lines("test result: ok. 9 passed\nlibs/p/src/disk.rs:12:3: E0433: cannot find `tree` in `super`\nerror: could not compile `p` (test) due to 1 previous error: no test ran\nGATEUNIT fail test p --lib\n");
+        assert_eq!(errors[unit], ["disk.rs: E0433: cannot find `tree` in `super`", "could not compile `p` (test)"], "its build after its errors");
+        let built = |log: &str, broke: &str| obj(vec![("failing", Value::Arr(vec![s(unit)])), ("log", s(&format!("/h/bucket-logs/{log}"))),
+            ("errors", Value::Obj(vec![(unit.to_string(), Value::Arr(errors[unit].iter().map(|e| s(e)).collect()))])), ("broke", obj(vec![("test p", s(broke))]))]);
+        let red = "compile red: `p` (test): disk.rs: E0433: cannot find `tree` in `super` since rc-c (C) #5";
+        assert_eq!(still_failing(&[built("tests-5.log", "rc-c (C) #5"), now.clone(), three.clone(), one.clone()])["test p"].1, red);
+        // still red at the next run, which carried that name: the build's first breaker
+        assert_eq!(still_failing(&[built("tests-6.log", red), built("tests-5.log", "rc-c (C) #5"), now.clone()])["test p"].1, red);
+        assert_eq!(still_since(red), red);
+        // its errors the same as a row's from before builds were kept: the same break, carried
+        let older = obj(vec![("failing", Value::Arr(vec![s(unit)])), ("errors", Value::Obj(vec![(unit.to_string(), Value::Arr(vec![s(&errors[unit][0])]))])), ("broke", obj(vec![("test p", s("rc-c (C) #5"))]))]);
+        assert_eq!(carried_since(&[older], &[unit.to_string()], &errors).get(unit).map(String::as_str), Some("rc-c (C) #5"));
     }
 
     /// A row from before rows named their tests reads its kept log for them, and its landings'
@@ -7872,6 +9670,31 @@ mod tests {
         // a red run that reached its units moves it too
         let (next, _) = judged(3, &t2, &t3, &unit("test p: FAILED (exit 101, 0 passed, 1 failed)\nGATEUNIT fail test p\nNODEGATE-FAIL: test p [lease L3]\n"));
         assert_eq!(next, t3);
+        // A red its gate ran once more on its box at its tip, green there, is a flake: the run is
+        // ok and names nobody, and the flake list keeps it with both runs' outputs. The same test's
+        // second flake within seven days goes to main as a bug with both logs, once in the span. A
+        // Fab test red once was laid to the last landing of its batch, which could not reach it
+        // (11-23); main's rule (11-24).
+        let flake = |n: u32| format!("L{n} box-a: sources at work@abc\n{}", unit(&format!("test p: red (exit 101; 0 passed, 1 failed): it runs once more on this box at this tip before anyone is named\n  its first run: FAILED t::a\n\
+            test p: a flake: red (exit 101), then green on its rerun (1 passed, 0 failed)\nGATEOUT test p :: mac-unit-1.log mac-unit-1-rerun.log\nGATEFLAKE test p :: t::a \n\
+            test p: ok (1 passed, 0 failed, 3 s)\nGATEUNIT ok test p\nNODEGATE-OK mac 1 unit(s) [lease L{n}]\n")));
+        let main_heard = || crate::notes::take(&home, "main").into_iter().map(|(_, line)| line).filter(|l| l.contains("flaky")).collect::<Vec<_>>();
+        let (t4, t5, t6) = (pin("e"), pin("1"), pin("2"));
+        let (_, row) = judged(4, &t3, &t4, &flake(4));
+        assert_eq!((row.get("ok").and_then(Value::as_bool), row.get("failing").and_then(Value::as_arr).map(|f| f.len())), (Some(true), Some(0)), "a flake is no red: {row:?}");
+        assert!(row.get("summary").and_then(Value::as_str).unwrap().contains("test p: a flake, red (t::a), then green on its rerun at this tip"), "{row:?}");
+        let listed: Vec<Value> = std::fs::read_to_string(home.join(FLAKES)).unwrap().lines().map(|l| makepad_strict_json::parse(l.as_bytes()).unwrap()).collect();
+        assert_eq!(listed.len(), 1, "the flake list keeps it");
+        assert_eq!(listed[0].get("tests").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).collect::<Vec<_>>(), ["t::a"], "by its failing test");
+        let logs = listed[0].get("logs").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+        assert!(logs.len() == 2 && logs[0].ends_with("mac-4.log") && logs[1] == "both runs' output: devhub job result L4", "its run's log and both runs' kept output: {logs:?}");
+        assert!(main_heard().is_empty(), "one flake is a row on the list");
+        judged(5, &t4, &t5, &flake(5));
+        let heard = main_heard();
+        assert!(heard.len() == 1 && heard[0].starts_with("flaky 2 times in 7 days: test p t::a: a bug for its owner, not a landing's red")
+            && ["mac-4.log", "mac-5.log", "devhub job result L4", "devhub job result L5"].iter().all(|l| heard[0].contains(l)), "twice in seven days: main hears it with both logs: {heard:?}");
+        judged(6, &t5, &t6, &flake(6));
+        assert!(main_heard().is_empty(), "once in the span");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -7961,14 +9784,14 @@ mod tests {
         assert_eq!(super::passed_after(&all, "tests", "tests pkg-a", 100), None, "never the bucket's own");
         assert_eq!(super::passed_after(&all, FULL, "tests pkg-b", 100), None, "a pass before the red's run");
         // the breakers of a red start after the newest pass of any bucket before the failing run
-        assert_eq!(super::passed_before(&all, "tests pkg-a", 250).map(|p| p.work), None, "these rows name no tip: none to start from");
+        assert_eq!(super::passed_before(&all, "tests pkg-a", 250).map(|p| p.makepad), None, "these rows name no tip: none to start from");
         let sha = |c: char| c.to_string().repeat(40);
         let tipped = |bucket: &str, started: u64, passed: &[&str], work: char| obj(vec![("bucket", s(bucket)), ("started_ms", Value::Int(started as i64)),
             ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())), ("tip", obj(vec![("work", s(&sha(work))), ("main", s(&sha('e')))]))]);
         let rows = [tipped("full", 400, &[], '4'), tipped("hot", 350, &["tests pkg-a"], '5'), tipped("tests", 300, &["tests pkg-a"], '3'), tipped("fast", 200, &["tests pkg-a"], '2'), tipped("tests", 100, &["tests pkg-b"], '1')];
         assert_eq!(super::passed_after(&rows, FULL, "tests pkg-a", 320), None, "the hot gate's run is a hand-in's merge, no landed tip");
-        assert_eq!(super::passed_before(&rows, "tests pkg-a", 400).map(|p| p.work), Some(sha('3')), "the newest pass before the run, of any bucket but the hot gate");
-        assert_eq!(super::passed_before(&rows, "tests pkg-a", 250).map(|p| p.work), Some(sha('2')), "never a run that started after it");
+        assert_eq!(super::passed_before(&rows, "tests pkg-a", 400).map(|p| p.makepad), Some(sha('3')), "the newest pass before the run, of any bucket but the hot gate");
+        assert_eq!(super::passed_before(&rows, "tests pkg-a", 250).map(|p| p.makepad), Some(sha('2')), "never a run that started after it");
         assert_eq!(super::passed_before(&rows, "tests pkg-c", 400), None, "a unit no run passed");
         // a red's waiting note is unsaid once later runs passed each of its units (notes.rs take_open)
         let keys = |k: &[&str]| k.iter().map(|k| k.to_string()).collect::<Vec<String>>();
@@ -8310,7 +10133,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let pair = |c: char| pin_of(&Pair::new(&c.to_string().repeat(40), &"f".repeat(40)));
-        let tips: Vec<Pin> = "abcdef".chars().map(pair).collect();
+        let tips: Vec<Pin> = "abcdef9".chars().map(pair).collect();
         let row = |tip: &Pin, failing: &[&str], passed: &[&str], log: &str| obj(vec![
             ("bucket", s("fast")), ("tip", tip_value(tip)), ("started_ms", Value::Int(1)),
             ("failing", Value::Arr(failing.iter().map(|u| s(*u)).collect())), ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())), ("log", s(log)),
@@ -8344,6 +10167,10 @@ mod tests {
         append(&home, row(&tips[5], &["present makepad-foo"], &[], "l5")).unwrap();
         let stay = proven_tip(&home, &at(4));
         assert!(matches!(&stay, Proven::Stay(why) if why.contains("has present makepad-foo failing")), "{stay:?}");
+        // g: the present fixed, its app's boundary audit red: the app would stop at a JIT boundary there
+        append(&home, row(&tips[6], &["boundary makepad-foo"], &["present makepad-foo"], "l6")).unwrap();
+        let stay = proven_tip(&home, &at(5));
+        assert!(matches!(&stay, Proven::Stay(why) if why.contains("has boundary makepad-foo failing")), "{stay:?}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

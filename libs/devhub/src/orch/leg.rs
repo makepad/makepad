@@ -59,9 +59,8 @@ pub const BACKGROUND_PRIO: i32 = 9;
 /// waiting lane work and asks at [`OWED_PRIO`], so it takes the next free box ahead of new lane
 /// leases (landing gates still go first); running lane leases are never ended for it, and as it is
 /// no longer background it is not preempted. Verify first and past the N-2 cap too, then jitlegs,
-/// allapps later.
-/// CI shards always stay behind lane work. Counted from the run's start in the state: no
-/// master restart, preemption or re-ask starts it over.
+/// allapps later. A CI gate run's shards age the same way ([`owes`]); a sweep's never do.
+/// Counted from the run's start in the state: no master restart, preemption or re-ask starts it over.
 fn owed_after(agent: &str) -> Duration {
     match agent {
         "devhub-verify" => Duration::from_secs(20 * 60),
@@ -76,8 +75,21 @@ fn run_started_ms(agent: &str) -> Option<u64> {
         "devhub-verify" => d.verify.run.as_ref().map(|r| r.started_ms),
         "devhub-allapps" => d.allapps.running.as_ref().map(|r| r.at_ms),
         "devhub-jitlegs" => d.jitlegs.runs.last().filter(|r| r.ended_ms == 0).map(|r| r.started_ms),
+        // (the gate run's: a sweep's run start is not counted, and it never ages)
+        "devhub-ci" => d.ci.run.as_ref().map(|r| r.started_ms),
         _ => None,
     })
+}
+
+/// Whether work asked `waited` into its run is owed boxes ([`owed_after`]): background work at
+/// the background priority (`background`: what steps back for waiting lane work), and a CI gate
+/// run's ci-kind shards, which the scheduler alone queues behind lane work
+/// ([`crate::lease::sched::owed_ci`]). Owed, it asks at [`OWED_PRIO`]: ahead of new lane leases,
+/// still after landing gates and interactive work, within the background cap (a ci-kind shard
+/// within its box's CI slot). A gate run waited hours behind landings, 30 of its 117 shards
+/// unplaced, and found its reds hours late (11-24).
+pub(crate) fn owes(background: bool, kind: Kind, priority: crate::lease::Priority, prio: i32, agent: &str, waited: Duration) -> bool {
+    prio == BACKGROUND_PRIO && (background || kind == Kind::Ci && priority == crate::lease::Priority::Background) && waited > owed_after(agent)
 }
 
 /// The priority of owed background work: just ahead of a lane's default.
@@ -88,6 +100,24 @@ const BACKGROUND_AGENTS: [&str; 4] = crate::lease::sched::OWN_LEG_AGENTS;
 
 /// Background leases the master ended for waiting lane work: their legs ask again.
 static PREEMPTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A queued or starting ask's wait line, as [`Held::acquire_following`] tells its waiter: its id,
+/// state and reason, and a queued exclusive ask's expected start as its asker reads it in `devhub
+/// lease` (minutes, in 5-minute steps past 10, so it changes the line at most once a step). A
+/// live session's timed start said only what held its box: one waited 26 min on a box with no
+/// word of how long (11-23).
+fn wait_line(id: &str, v: &Value) -> String {
+    let eta = if s(v, "state") == "queued" { crate::lease::client::eta_of(v) } else { String::new() };
+    format!("{} {} {}{eta}", id, s(v, "state"), s(v, "reason"))
+}
+
+/// The ask a wait line of [`Held::acquire_following`] names: its answers' lines start with the
+/// ask's id (`L12 queued <reason>`, `L12 granted`). None for a line before the ask (held back,
+/// owed a box).
+pub fn asked_lease(line: &str) -> Option<&str> {
+    let w = line.split(' ').next()?;
+    (w.len() > 1 && w.starts_with('L') && w[1..].bytes().all(|b| b.is_ascii_digit())).then_some(w)
+}
 
 pub fn mark_preempted(id: &str) {
     let mut p = PREEMPTED.lock().unwrap();
@@ -317,8 +347,9 @@ impl Held {
         let mut class_notified = false;
         let since = run_started_ms(&spec.agent);
         let waited = || Duration::from_millis(since.map_or(0, |t| crate::proto::wall_ms().saturating_sub(t)));
-        // CI and sweeps stay at background priority even after a long wait.
-        let owed = || background && spec.prio == BACKGROUND_PRIO && spec.lane != crate::lease::sched::CI_LANE && waited() > owed_after(&spec.agent);
+        // a sweep stays at background priority even after a long wait (its run start is not counted)
+        let ages = (spec.kind, req.priority);
+        let owed = || owes(background, ages.0, ages.1, spec.prio, &spec.agent, waited());
         'ask: loop {
             // background work asks only while no lane work waits and it holds under N-2 boxes;
             // owed, only the cap holds it back, and it asks ahead of new lane leases
@@ -362,7 +393,7 @@ impl Held {
                         return Ok(Held { id, node: s(&v, "node"), rev, ctl, released: false, _beats: beats });
                     }
                     "queued" | "starting" => {
-                        let line = format!("{} {} {}", id, s(&v, "state"), s(&v, "reason"));
+                        let line = wait_line(&id, &v);
                         if line != last || !note.is_empty() {
                             on_wait(&format!("{line}{note}"));
                             last = line;
@@ -404,7 +435,7 @@ impl Held {
                 }
                 // lane work started waiting: a queued background request steps back
                 // owed now: asked again at the owed priority
-                if background && owed() && req.prio != OWED_PRIO && s(&v, "state") == "queued" {
+                if owed() && req.prio != OWED_PRIO && s(&v, "state") == "queued" {
                     let _ = ask(&ctl, None, "release", &id);
                     continue 'ask;
                 }
@@ -763,6 +794,15 @@ mod tests {
         assert_eq!(said(&queued), "lane live-w1 queued on box-b: waits there on budget cores 16");
         let fresh = json(r#"{"id":"L1","lane":"lane-a","state":"queued","node":null,"eta_box":null,"reason":""}"#).unwrap();
         assert_eq!(said(&fresh), "lane lane-a queued on no box: ");
+        // its waiter's line: a queued timed ask's expected start, or why none is known
+        let timed = json(r#"{"id":"L2","state":"queued","reason":"held by gpu L7","eta_box":"box-b","eta_ms":1500000}"#).unwrap();
+        assert_eq!(wait_line("L2", &timed), "L2 queued held by gpu L7; expected start in ~25 min", "a timed start says how long it waits");
+        let late = json(r#"{"id":"L2","state":"queued","reason":"held by test L8","eta_late":true,"eta_late_by":"L8 runs past its measure"}"#).unwrap();
+        assert_eq!(wait_line("L2", &late), "L2 queued held by test L8; no expected start: L8 runs past its measure");
+        assert_eq!(wait_line("L3", &fresh), "L3 queued ", "no estimate: none said");
+        let starting = json(r#"{"id":"L2","state":"starting","reason":"","eta_ms":1500000}"#).unwrap();
+        assert_eq!(wait_line("L2", &starting), "L2 starting ", "a start under way waits on no queue");
+        assert_eq!(asked_lease(&wait_line("L2", &timed)), Some("L2"), "a live start reads its ask off the line");
     }
 
     /// A release whose box found the lease wrote under the overlay's virtual root fails its work.

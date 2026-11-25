@@ -791,6 +791,7 @@ fn build_dev(jits: &super::jitstore::Store, base: &Path, pin: &super::Pin, input
     for name in present.iter().filter(|n| !pin.nested.contains_key(*n)) {
         let (store, dir) = (Store::open(name)?, side(name.as_str()));
         if store.admin_of(&dir).is_none() { return Err(format!("dev JIT: {name} tree is not owned by the bare store")); }
+        let _admin = store.admin();
         run(None, Some(&store.git_dir), &[], &["worktree", "remove", &dir.to_string_lossy()])?;
     }
     for (repo, sha, prefix) in pin.repos() {
@@ -806,8 +807,10 @@ fn build_dev(jits: &super::jitstore::Store, base: &Path, pin: &super::Pin, input
         } else {
             std::fs::create_dir_all(dir.parent().ok_or("dev tree parent")?).map_err(|e| format!("{}: {e}", dir.display()))?;
             // a tree removed with its directory (lane cleanup, disk reclaim) is still registered
+            let admin = store.admin();
             run(None, Some(&store.git_dir), &[], &["worktree", "prune"])?;
             run(None, Some(&store.git_dir), &[], &["worktree", "add", "--detach", &dir.to_string_lossy(), sha])?;
+            drop(admin);
         }
         if let Some(p) = dirty(&dir)? { return Err(format!("dev JIT: {} still differs from {sha} after moving to it ({p})", dir.display())); }
     }

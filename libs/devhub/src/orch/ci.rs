@@ -301,6 +301,22 @@ pub struct Krate {
     /// `build` for the whole package, `{}` for none). Only plain cargo work of a package checked
     /// on Windows, selecting none of its gaps, goes to a Windows box ([`crate::lease::native::on_windows`]).
     pub platform_gaps: BTreeMap<String, BTreeMap<String, String>>,
+    /// its lib target's crate name (`[lib] name`, else the package's with `_` for `-`): what its
+    /// unit tests' binary is called
+    pub lib_name: String,
+    /// the test targets a Windows box runs after the landings that reach them (the windows-tests
+    /// bucket): its `[package.metadata.makepad.windows-tests]`, by target (`lib`, `test:<name>`)
+    pub windows_tests: BTreeMap<String, WindowsTests>,
+}
+
+/// A test target the windows-tests bucket runs: `"lib" = "<why>"`, or `"lib" = { why = "..",
+/// known = "<the queue item that fixes them>", skip = ["<test>", ..] }` for one with known reds
+/// there, which it leaves out by their exact names until that item lands their fixes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowsTests {
+    pub why: String,
+    pub known: String,
+    pub skip: Vec<String>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -363,7 +379,20 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
         .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
     let platform_gaps = doc.get_path(&["package", "metadata", "makepad", "platform-gaps"]).and_then(Toml::as_table)
         .map(|t| t.iter().filter_map(|(os, gaps)| Some((os.clone(), gaps.as_table()?.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()))).collect()).unwrap_or_default();
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests, platform_gaps })
+    let lib_name = doc.get_path(&["lib", "name"]).and_then(Toml::as_str).map_or_else(|| package.replace('-', "_"), str::to_string);
+    let windows_tests = doc.get_path(&["package", "metadata", "makepad", "windows-tests"]).and_then(Toml::as_table)
+        .map(|t| t.iter().filter_map(|(target, decl)| {
+            let tests = match decl.as_table() {
+                Some(d) => WindowsTests {
+                    why: d.get("why").and_then(Toml::as_str).unwrap_or_default().to_string(),
+                    known: d.get("known").and_then(Toml::as_str).unwrap_or_default().to_string(),
+                    skip: d.get("skip").and_then(Toml::as_array).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+                },
+                None => WindowsTests { why: decl.as_str()?.to_string(), ..Default::default() },
+            };
+            Some((target.clone(), tests))
+        }).collect()).unwrap_or_default();
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests, platform_gaps, lib_name, windows_tests })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -1683,6 +1712,9 @@ fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64
         // a live test session answers each test's outcome and whether it ran for the edit, and
         // refuses another edit's group
         ("live:test-results", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_test_results/run.py"], 67.0),
+        // a live test session reruns the test that reaches an edited fn only through an O3 body-word call
+        // (the O3 install's note, and a second session's warm link from the cache)
+        ("live:reach", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_reach/run.py"], 10.0),
         // a live test session in a workspace of several crates applies each save: a member's, the
         // package's and the test file's, in a checkout a crashed git left a lock in (relax issue 33)
         ("live:test-workspace", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_workspace/run.py"], 5.0),
@@ -2901,7 +2933,8 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
 /// The CI bucket's run (or a leg's probe) as its log says it: the verdict, then each leg's line, its
 /// first error lines and its verdict as the bucket reads a unit's (GATEUNIT): a row's passed legs
 /// close their reds, and a failed one's errors are its own lines (their files name who touched them).
-/// A leg the arm64 classification skipped did not run, and passes nothing.
+/// A leg the arm64 classification skipped did not run, and passes nothing. A failed leg's log is
+/// kept beside the bucket's ([`keep_leg_log`], `GATEKEPT <leg> :: <file>`).
 fn bucket_log(tip: &Pair, verdict: Verdict, legs: &[crate::state::Leg], log: &Path) -> crate::bucket::Outcome {
     let mut outcome = bucket_outcome(verdict, legs, log);
     let summary = &mut outcome.summary;
@@ -2909,6 +2942,12 @@ fn bucket_log(tip: &Pair, verdict: Verdict, legs: &[crate::state::Leg], log: &Pa
     for leg in legs {
         text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
         for error in &leg.errors { text.push_str(&format!("{error}\n")); }
+        if leg.state == "fail" && !leg.log.is_empty() {
+            match keep_leg_log(log, Path::new(&leg.log)) {
+                Ok(kept) => text.push_str(&format!("GATEKEPT {} :: {}\n", leg.name, kept.display())),
+                Err(e) => text.push_str(&format!("its log is not kept: {e}\n")),
+            }
+        }
         let ran = leg.state == "fail" || (leg.state == "ok" && !leg.summary.starts_with(ARM_SKIPPED));
         if ran { text.push_str(&format!("GATEUNIT {} {}\n", leg.state, leg.name)); }
     }
@@ -2916,6 +2955,19 @@ fn bucket_log(tip: &Pair, verdict: Verdict, legs: &[crate::state::Leg], log: &Pa
         summary.push_str(&format!("; log: {e}"));
     }
     outcome
+}
+
+/// A failed leg's log, kept whole beside the bucket's log (`<log>.keep/<its file>`) for as long as
+/// that is: the run's own log directory goes with the runs past the last 40 ([`prune_runs`]), and
+/// a bisect's leg probes made 40 in six minutes. A `live:replay` red stood 21 h with "origin
+/// unknown", its log gone before anyone read why it exited 1 (11-24). A leg's log ran to 1 MB.
+fn keep_leg_log(log: &Path, leg_log: &Path) -> std::io::Result<PathBuf> {
+    let name = leg_log.file_name().ok_or_else(|| std::io::Error::other(format!("{}: no file name", leg_log.display())))?;
+    let dir = log.with_extension("keep");
+    std::fs::create_dir_all(&dir)?;
+    let kept = dir.join(name);
+    std::fs::copy(leg_log, &kept)?;
+    Ok(kept)
 }
 
 /// What a leg the arm64 classification skipped says ([`arm_plan`]).
@@ -5729,6 +5781,22 @@ shared = { workspace = true }
         assert!(why.starts_with("1 of 2 shards have no verdict, smoke:a: the run stalled"), "{why}");
         assert!(bucket_outcome(Verdict::Ok, &[leg("t", "ok", "")], log).no_verdict.is_none());
         assert!(bucket_outcome(Verdict::Incomplete, &[], log).no_verdict.is_some(), "no legs at all");
+        // a failed leg's log is kept beside the bucket's: the run's own directory goes with the
+        // runs past the last 40, and a live:replay red's went before anyone read it (11-24)
+        let dir = std::env::temp_dir().join(format!("devhub-ci-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("run")).unwrap();
+        let with_log = |name: &str, state: &str| crate::state::Leg { log: dir.join("run").join(format!("{name}.log")).display().to_string(), ..leg(name, state, "exit 1") };
+        std::fs::write(dir.join("run/smoke_b.log"), "error: two packages named `x`\n== exit 1\n").unwrap();
+        let bucket = dir.join("ci-7.log");
+        bucket_log(&Pair::new(&"a".repeat(40), ""), Verdict::Fail, &[with_log("t", "ok"), with_log("smoke_b", "fail")], &bucket);
+        let text = std::fs::read_to_string(&bucket).unwrap();
+        let kept = dir.join("ci-7.keep/smoke_b.log");
+        assert!(text.contains(&format!("GATEKEPT smoke_b :: {}\nGATEUNIT fail smoke_b\n", kept.display())), "the failed leg names its kept log: {text}");
+        assert!(!text.contains("GATEKEPT t ::"), "a passed leg's is not kept: {text}");
+        let _ = std::fs::remove_dir_all(dir.join("run"));
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "error: two packages named `x`\n== exit 1\n", "whole, and still there once the run's directory is gone");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

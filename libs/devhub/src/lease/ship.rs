@@ -33,6 +33,22 @@ pub fn never_ships(path: &str) -> bool {
     path == "local" || path.starts_with("local/") || rel == "local" || rel.starts_with("local/") || never_ships_named(path)
 }
 
+/// Why a run at `rev` alone (`--rev`) refuses the `tracked` files its `DEVHUB_ALSO` paths hold: it
+/// runs exactly those commits. The worktree's copies of such files went on top of R, so a bench
+/// lease's tree held work's copy of one file beside the lane's copy of another (11-24), which
+/// neither revision was; ignoring them instead would run what the caller did not ask for. Files R
+/// does not track (a bench script in `local/`) change none of R's and ship ([`tracked_at_pin`]).
+pub fn also_with_rev(tracked: &[String], rev: &str) -> String {
+    format!("DEVHUB_ALSO names {}, which --rev {rev} tracks: a --rev run is those commits alone, never the worktree's copies of their files; commit the changes into the revision, or take the files out of DEVHUB_ALSO (files it does not track, local/ among them, ship with it)", tracked.join(" "))
+}
+
+/// Which of `files` the pin's commits hold: a run at the pin alone (`--rev`) refuses them in
+/// `DEVHUB_ALSO` ([`also_with_rev`]), and ships the rest beside its commits.
+pub fn tracked_at_pin(root: &Path, pin: &super::Pin, files: &[String]) -> Result<Vec<String>, String> {
+    let blobs = pin_blobs(root, pin, files)?;
+    Ok(files.iter().filter(|p| blobs.get(*p).is_some_and(|b| b != "new")).cloned().collect())
+}
+
 /// What never ships even when a run names it (`DEVHUB_ALSO`): `local/` does then (a lane's
 /// bench scripts), build output, agent state and atomic writes' temp files never.
 pub fn never_ships_named(path: &str) -> bool {

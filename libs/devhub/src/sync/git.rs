@@ -346,6 +346,17 @@ impl Store {
         run(None, Some(&self.git_dir), &[], args)
     }
 
+    /// The store's admin commands (`worktree add`, `remove`, `prune`, `repair`) one at a time on
+    /// this store: two trees moving beside each other (their checkouts run outside the tree lock,
+    /// lease/tree.rs) would race on its list of worktrees and its config lock, which git refuses
+    /// at once rather than waits for. Held only around those commands, and never across a lock.
+    pub fn admin(&self) -> std::sync::MutexGuard<'static, ()> {
+        // one mutex per store, kept for the process's life: a box has a handful of stores
+        static ADMIN: std::sync::Mutex<std::collections::BTreeMap<PathBuf, &'static std::sync::Mutex<()>>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        let one = *ADMIN.lock().unwrap_or_else(|e| e.into_inner()).entry(self.git_dir.clone()).or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))));
+        one.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// The commit a ref names, if any.
     /// The commit `r` names here (makepad-git: a node's caps read three of these every 10 s).
     pub fn rev(&self, r: &str) -> Option<String> {
@@ -498,6 +509,7 @@ impl Store {
             let _ = std::fs::remove_dir(&tmp);
         }
         std::fs::create_dir_all(&adopt).map_err(|e| format!("{}: {e}", adopt.display()))?;
+        let admin = self.admin();
         self.git(&["worktree", "add", "-q", "--no-checkout", "--detach", &tmp.to_string_lossy(), at])?;
         let text = std::fs::read_to_string(tmp.join(".git")).map_err(|e| format!("{}: {e}", tmp.display()))?;
         std::fs::write(&dotgit, &text).map_err(|e| format!("{}: {e}", dotgit.display()))?;
@@ -505,6 +517,7 @@ impl Store {
         let _ = std::fs::remove_dir(&tmp);
         let _ = std::fs::remove_dir(&adopt);
         self.git(&["worktree", "repair", &work.to_string_lossy()])?;
+        drop(admin);
         self.read_index(work, at)?;
         crate::ci_merge::install_merge_driver(work, root)
     }

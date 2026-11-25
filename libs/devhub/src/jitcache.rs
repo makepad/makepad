@@ -337,12 +337,23 @@ fn retire_superseded(dirs: impl Iterator<Item = PathBuf>, since: u64, keep: &std
 /// on a box that is no person's own (`users`: its role's) the deployment checkout's `target`. A
 /// landing that changes the JIT writes a cold set there as in the dev run dirs; a CI box's work
 /// target held 709 GB of stores, 698 GB of them from the last day, and its disk guard could take
-/// none of it while a lease ran (11-22).
+/// none of it while a lease ran (11-22). And each lane's native target (`<work>/native-target/<lane>`,
+/// lease/tree.rs native_target), which runs the box's JIT as the work target does, but a lane `devhub
+/// lane keep` keeps (lease/disk.rs kept_natives: its tree is left whole): the land queue's tests tree
+/// held 66.5 GB of five builds' stores beside 0.7 GB of cargo's, and went whole for room at 80.7 GB,
+/// so its next run started cold (11-24).
 pub(crate) fn tree_runs(work: &Path, checkout: &Path, users: bool) -> Vec<PathBuf> {
     let mut dirs = vec![work.join("ci-target").join("relax")];
     if !users {
         dirs.push(checkout.join("target").join("relax"));
     }
+    let kept = crate::lease::disk::kept_natives(work);
+    let mut lanes: Vec<PathBuf> = std::fs::read_dir(work.join("native-target")).into_iter().flatten().flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|l| lane_name(l) && !kept.iter().any(|k| k == l)))
+        .map(|e| e.path().join("relax"))
+        .collect();
+    lanes.sort();
+    dirs.extend(lanes);
     dirs.retain(|d| d.join("cache").is_dir());
     dirs
 }
@@ -742,32 +753,37 @@ mod tests {
         assert_eq!(superseded(&builds, since, &[6].into()), vec![5], "a timed series' last build stays between its runs");
         assert_eq!(superseded(&builds[..2], u64::MAX, &none), Vec::<u64>::new(), "the current and the previous build stay however long unused");
         assert_eq!(superseded(&[b(1, 10, false), b(2, 5, false), b(3, 1, false)], since, &none), vec![3], "an idle box keeps its two newest builds");
-        // the tree runs' relax dirs too: the work tree's target, and the deployment's on a box
-        // that is no person's own
+        // the tree runs' relax dirs too: the work tree's target, the deployment's on a box that is
+        // no person's own, and each lane's native target but a kept lane's
         let d = std::env::temp_dir().join(format!("devhub-tree-runs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (work, checkout) = (d.join("devhub"), d.join("makepad"));
         let (ci, deploy) = (work.join("ci-target/relax"), checkout.join("target/relax"));
-        for c in [&ci, &deploy] {
+        let (lane, kept) = (work.join("native-target/landq-tests/relax"), work.join("native-target/keptlane/relax"));
+        for c in [&ci, &deploy, &lane, &kept] {
             std::fs::create_dir_all(c.join("cache")).unwrap();
         }
-        assert_eq!(tree_runs(&work, &checkout, false), vec![ci.clone(), deploy.clone()]);
-        assert_eq!(tree_runs(&work, &checkout, true), vec![ci.clone()], "a person's own checkout keeps its JIT's stores");
+        std::fs::write(work.join("native-kept"), "keptlane\n").unwrap();
+        assert_eq!(tree_runs(&work, &checkout, false), vec![ci.clone(), deploy.clone(), lane.clone()], "a lane's native target runs the box's JIT too; a kept lane's tree is left whole");
+        assert_eq!(tree_runs(&work, &checkout, true), vec![ci.clone(), lane.clone()], "a person's own checkout keeps its JIT's stores");
         assert_eq!(tree_runs(&d.join("none"), &d.join("none"), false), Vec::<PathBuf>::new());
         let now = crate::proto::wall_ms() / 1000;
-        let store = |name: &str, build: u64, ago: u64| {
+        let store = |dir: &Path, name: &str, build: u64, ago: u64| {
             let mut h = vec![0u8; header::HEADER];
             h[..4].copy_from_slice(header::MAGIC);
             h[4..8].copy_from_slice(&header::FORMAT.to_le_bytes());
             h[header::BUILD_AT..header::BUILD_AT + 8].copy_from_slice(&build.to_le_bytes());
-            let p = ci.join("cache").join(name);
+            let p = dir.join("cache").join(name);
             std::fs::write(&p, h).unwrap();
             std::fs::File::options().write(true).open(&p).unwrap().set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(now - ago)).unwrap();
             p
         };
-        let (old, prev, cur) = (store("serde-00000000000000a1.rcs", 0xa1, 3 * 3600), store("serde-00000000000000b2.rcs", 0xb2, 2 * 3600), store("serde-00000000000000c3.rcs", 0xc3, 60));
-        assert_eq!(retire_superseded(tree_runs(&work, &checkout, false).into_iter(), now - 600, &none).0, 1, "the work target's oldest build goes");
+        let builds = |dir: &Path| (store(dir, "serde-00000000000000a1.rcs", 0xa1, 3 * 3600), store(dir, "serde-00000000000000b2.rcs", 0xb2, 2 * 3600), store(dir, "serde-00000000000000c3.rcs", 0xc3, 60));
+        let ((old, prev, cur), (lold, lprev, lcur), (kold, _, _)) = (builds(&ci), builds(&lane), builds(&kept));
+        assert_eq!(retire_superseded(tree_runs(&work, &checkout, false).into_iter(), now - 600, &none).0, 2, "the work target's and the lane's native target's oldest builds go");
         assert!(!old.exists() && prev.exists() && cur.exists(), "the current and the previous build stay");
+        assert!(!lold.exists() && lprev.exists() && lcur.exists(), "a lane's native target keeps its current and previous build");
+        assert!(kold.exists(), "a kept lane's stores stay");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

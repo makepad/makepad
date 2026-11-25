@@ -13,8 +13,9 @@
 //! (`<work>/dev/run-home`), a run dir no run uses whole, the others by Relax build, never a
 //! running build's ([`jit_items`]), + `<run home>/cache` + `flightrec`; weights
 //! `~/.makepad/weights`; desk-link `~/.makepad/wm/desk-link`; screencaps
-//! `~/makepad/local/screencap`; logs `~/.makepad/{devhub,wm}/*.log` and their rotations
-//! `*.log.<n>`; homes-tmp `<work>/tmp/*` of ended leases + `/tmp/landgate.*`; job inputs `<work>/inputs/*`
+//! `~/makepad/local/screencap`, an ended lane's folder an item of its own ([`screencap_items`]); logs `~/.makepad/{devhub,wm}/*.log` and their rotations
+//! `*.log.<n>`; homes-tmp `<work>/tmp/*` of ended leases + `/tmp/landgate.*`; stray tmp: a bare
+//! `mktemp`'s dirs (`tmp.` and ten characters) in the system temp ([`system_tmp`]); job inputs `<work>/inputs/*`
 //! (lease/ship.rs [`super::ship::Input`]); retired run dirs: the JIT's run dirs under their name
 //! before the 2026-11-12 relax rename (`<home>/<OLD_HOME>` and `<OLD>` in the targets above), listed
 //! but never in a reclaim plan: [`Guard::check`] removes them when a work node is idle and no
@@ -23,7 +24,8 @@
 //! Reclaim order (stops at floor + 10 GB): 1 targets, native trees and job inputs no lease or process uses (LRU), 2 JIT
 //! run dirs no run uses and the stores of builds that are not a run dir's newest (LRU), a tree
 //! run's relax dir's in the deployment and work targets alike ([`tree_jit_items`]), 3 ended
-//! leases' tmp + orphaned gate dirs, 4 rotated logs, 5 (work nodes only) a run dir's newest build's
+//! leases' tmp + orphaned gate dirs + stray tmp no running lease can be writing (never on a user
+//! machine: its system temp is the person's), 4 rotated logs and the grabs of ended lanes, 5 (work nodes only) a run dir's newest build's
 //! stores and the deployment and work targets' cargo units by their day of last use
 //! ([`cargo_items`]), 6 (work nodes only, no lease on the box) the rest of the target of
 //! deployment and work trees. Never automatic: retired trees, worktrees (lease end owns them,
@@ -63,10 +65,11 @@ pub enum Cat {
     Screencaps,
     Logs,
     HomesTmp,
+    StrayTmp,
     Inputs,
 }
 
-pub const CATS: [Cat; 14] = [Cat::Worktrees, Cat::Native, Cat::Targets, Cat::DeployTarget, Cat::WorkTarget, Cat::RetiredTree, Cat::RetiredRunDir, Cat::JitCache, Cat::Weights, Cat::DeskLink, Cat::Screencaps, Cat::Logs, Cat::HomesTmp, Cat::Inputs];
+pub const CATS: [Cat; 15] = [Cat::Worktrees, Cat::Native, Cat::Targets, Cat::DeployTarget, Cat::WorkTarget, Cat::RetiredTree, Cat::RetiredRunDir, Cat::JitCache, Cat::Weights, Cat::DeskLink, Cat::Screencaps, Cat::Logs, Cat::HomesTmp, Cat::StrayTmp, Cat::Inputs];
 
 impl Cat {
     pub fn as_str(self) -> &'static str {
@@ -84,6 +87,7 @@ impl Cat {
             Cat::Screencaps => "screencaps",
             Cat::Logs => "logs",
             Cat::HomesTmp => "homes-tmp",
+            Cat::StrayTmp => "stray tmp",
             Cat::Inputs => "job inputs",
         }
     }
@@ -116,6 +120,9 @@ pub struct Live {
     /// (path, lease id)
     pub leases: Vec<(PathBuf, String)>,
     pub cwds: Vec<(u32, PathBuf)>,
+    /// the oldest lease running: when it started (wall ms; 0 unknown) and its id. A stray tmp dir
+    /// written since then may be that lease's, or a later one's: it stays ([`Cat::StrayTmp`])
+    pub oldest: Option<(u64, String)>,
 }
 
 impl Live {
@@ -145,7 +152,7 @@ pub fn plan(items: &[Item], free: u64, floor: u64, user_machine: bool) -> Plan {
     if free >= floor {
         return Plan { reaches: true, ..Default::default() };
     }
-    let mut c: Vec<&Item> = items.iter().filter(|i| i.step.is_some_and(|s| s < 5 || !user_machine)).collect();
+    let mut c: Vec<&Item> = items.iter().filter(|i| i.step.is_some_and(|s| s < 5 || !user_machine) && !(user_machine && i.cat == Cat::StrayTmp)).collect();
     c.sort_by_key(|i| (i.step, i.mtime));
     let mut p = Plan::default();
     let mut got = free;
@@ -211,6 +218,8 @@ pub struct Roots {
     pub work: PathBuf,
     pub run_home: PathBuf,
     pub tmp: PathBuf,
+    /// where a bare `mktemp` makes its dir ([`system_tmp`])
+    pub sys_tmp: PathBuf,
     /// the deployment checkout, whose target holds the apps' build output and JIT cache
     pub deploy: Option<PathBuf>,
 }
@@ -223,7 +232,49 @@ impl Roots {
         let deploy = Some(crate::sync::SyncConf::load().checkout).filter(|p| super::tree::ours(p));
         #[cfg(not(feature = "checkout"))]
         let deploy = None;
-        Roots { home, work: work.to_path_buf(), run_home, tmp: std::env::temp_dir(), deploy }
+        Roots { home, work: work.to_path_buf(), run_home, tmp: std::env::temp_dir(), sys_tmp: system_tmp(), deploy }
+    }
+}
+
+/// Where a bare `mktemp` (or `mktemp -t`) makes its dir: on macOS the user's own temp
+/// (`_CS_DARWIN_USER_TEMP_DIR`), which its mktemp takes before TMPDIR (TMPDIR only when that is
+/// unavailable, its man page), so a lease's TMPDIR never reaches it and what its run leaves there
+/// outlives the lease: 86 such dirs, 124 GB, filled a node Mac (11-24). Elsewhere TMPDIR, else /tmp.
+pub fn system_tmp() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn confstr(name: i32, buf: *mut u8, len: usize) -> usize;
+        }
+        const CS_DARWIN_USER_TEMP_DIR: i32 = 65537;
+        let mut buf = [0u8; 1024];
+        // SAFETY: confstr writes at most `buf.len()` bytes, NUL included, and returns the length
+        // the whole value needs (0 on an error)
+        let n = unsafe { confstr(CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), buf.len()) };
+        if n > 1 && n <= buf.len() {
+            return PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&buf[..n - 1]));
+        }
+    }
+    std::env::temp_dir()
+}
+
+/// A bare `mktemp`'s own name: `tmp.` and ten letters or digits (BSD's and GNU's default template).
+fn bare_mktemp(n: &str) -> bool {
+    n.strip_prefix("tmp.").is_some_and(|r| r.len() == 10 && r.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// Whether `a` and `b` are on one filesystem (unknown: no): a stray tmp on another (a tmpfs /tmp)
+/// frees nothing of the work volume, which the guard keeps above its floor.
+fn same_volume(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!((std::fs::metadata(a), std::fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
     }
 }
 
@@ -358,7 +409,6 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     add(Cat::JitCache, r.run_home.join("flightrec"), None, false, "bounded flight recordings");
     add(Cat::Weights, r.home.join(".makepad/weights"), None, false, "served weights: the AI hub owns them");
     add(Cat::DeskLink, r.home.join(".makepad/wm/desk-link"), None, true, "Desk Link history");
-    add(Cat::Screencaps, r.home.join("makepad/local/screencap"), None, true, "the user's recordings");
     for d in [r.home.join(".makepad/devhub"), r.home.join(".makepad/wm")] {
         for p in children(&d) {
             let n = name(&p);
@@ -375,6 +425,19 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     for p in children(&r.tmp).into_iter().filter(|p| name(p).starts_with("landgate.")) {
         add(Cat::HomesTmp, p, Some(3), false, "orphaned gate dir");
     }
+    // a bare `mktemp`'s dirs in the system temp: on macOS a lease's own, whatever its TMPDIR said
+    // ([`system_tmp`]). Reclaimed only when nothing in one is newer than the oldest running lease's
+    // start: no running lease is writing it. (A process's cwd in it keeps it too, as any item.)
+    if same_volume(&r.sys_tmp, &r.work) {
+        for p in children(&r.sys_tmp).into_iter().filter(|p| bare_mktemp(&name(p)) && p.is_dir()) {
+            let (_, mtime) = dir_size(&p);
+            match live.oldest.as_ref().filter(|(since_ms, _)| mtime >= since_ms / 1000) {
+                Some((_, id)) => add(Cat::StrayTmp, p, None, false, &format!("written since lease {id} began: it may be that lease's")),
+                None => add(Cat::StrayTmp, p, Some(3), false, "a bare mktemp's dir, which no running lease writes"),
+            }
+        }
+    }
+    screencap_items(&mut out, r);
     jit_items(&mut out, &dev.join("run-home"), live);
     jit_items(&mut out, &r.run_home, live);
     for (cat, target) in [(Cat::DeployTarget, r.deploy.as_ref().map(|t| t.join("target"))), (Cat::WorkTarget, Some(r.work.join("ci-target")))] {
@@ -389,15 +452,80 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
         for p in children(&r.work.join("native-target")) {
             if p.is_dir() && super::exec::valid_name(&name(&p)) { lanes.entry(name(&p)).or_insert(0); }
         }
+        // (a kept lane's tree is never swept: [`kept_natives`])
+        let kept = kept_natives(&r.work);
         for (lane, mtime) in lanes {
             let path = super::tree::native_root(&r.work, &lane);
             let target = super::tree::native_target(&r.work, &lane);
             let bytes = dir_size(&path).0 + dir_size(&target).0;
-            let used = live.user_of(&path).or_else(|| live.user_of(&target)).or_else(|| super::tree::held(&path).then(|| "tree hold".into()));
+            let used = live.user_of(&path).or_else(|| live.user_of(&target)).or_else(|| super::tree::held(&path).then(|| "tree hold".into()))
+                .or_else(|| kept.contains(&lane).then(|| "its lane is kept (`devhub lane keep`)".into()));
             out.push(Item { cat: Cat::Native, path, bytes, mtime: mtime / 1000, step: used.is_none().then_some(1), user_data: false, note: used.map_or_else(|| "native tree and target".into(), |u| format!("in use: {u}")), build: None, units: None });
         }
     }
     out
+}
+
+/// The user's checkout's `local/screencap` (`~/makepad`): the folder of each lane its master
+/// said ended ([`ended_lanes`]) and `devhub lane keep` does not keep is that lane's grabs, one
+/// item, reclaimed with the rotated logs (step 4), the oldest first. The rest is the user's: their
+/// recordings, loose files, and the grabs of lanes live or not known to have ended, one item. As
+/// one item of the user's, 38.9 GB of a box's screencaps had nothing reclaimable (11-24).
+fn screencap_items(out: &mut Vec<Item>, r: &Roots) {
+    let dir = r.home.join("makepad/local/screencap");
+    if !dir.is_dir() { return; }
+    let (ended, kept) = (ended_lanes(&r.work), kept_natives(&r.work));
+    let (mut rest, mtime) = dir_size(&dir);
+    for p in children(&dir) {
+        let lane = name(&p).to_ascii_lowercase();
+        if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) || !ended.contains(&lane) || kept.contains(&lane) { continue; }
+        let (bytes, mtime) = dir_size(&p);
+        rest = rest.saturating_sub(bytes);
+        out.push(Item { cat: Cat::Screencaps, path: p, bytes, mtime, step: Some(4), user_data: false, note: format!("the grabs of lane {lane}, which ended"), build: None, units: None });
+    }
+    out.push(Item { cat: Cat::Screencaps, path: dir, bytes: rest, mtime, step: None, user_data: true, note: "the user's recordings, and the grabs of lanes live or not known to have ended".into(), build: None, units: None });
+}
+
+/// The lanes `devhub lane keep` keeps, as the master last named them in a lease start here
+/// (`kept`, `tree::note_kept`): their native trees stand outside the box's limit and are
+/// never taken for room (`tree::take_native`) nor swept, nor their grabs ([`screencap_items`]).
+/// A plain note, read by every build: only a checkout hub writes it.
+pub fn kept_natives(work: &Path) -> Vec<String> {
+    std::fs::read_to_string(work.join("native-kept")).unwrap_or_default().lines().filter(|l| super::exec::valid_name(l)).map(str::to_string).collect()
+}
+
+/// Where a box keeps the lanes its master said ended: a lane a line.
+fn ended_path(work: &Path) -> PathBuf {
+    work.join("lanes-ended")
+}
+
+/// The lanes this box's master said ended (`disk clean <lane>` at its cleanup, or `disk ended`
+/// for lanes that ended before), less those a lease of which started here since.
+pub fn ended_lanes(work: &Path) -> Vec<String> {
+    std::fs::read_to_string(ended_path(work)).unwrap_or_default().lines().filter(|l| super::exec::valid_name(l)).map(str::to_string).collect()
+}
+
+/// Notes `lanes` as ended (`ended`) or live again (a lease of it started here); written only when
+/// that changes the list.
+pub fn note_lanes(work: &Path, lanes: &[&str], ended: bool) {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let was = ended_lanes(work);
+    let mut now = was.clone();
+    for lane in lanes.iter().map(|l| l.to_ascii_lowercase()).filter(|l| super::exec::valid_name(l)) {
+        match (ended, now.iter().position(|l| *l == lane)) {
+            (true, None) => now.push(lane),
+            (false, Some(i)) => { now.remove(i); }
+            _ => {}
+        }
+    }
+    if now == was { return; }
+    let text: String = now.iter().map(|l| format!("{l}\n")).collect();
+    let path = ended_path(work);
+    let tmp = path.with_extension("new");
+    if let Err(e) = std::fs::create_dir_all(work).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, path)) {
+        eprintln!("devhub disk: the ended lanes' note: {e}");
+    }
 }
 
 /// The JIT's run dirs in run home `home` (relax dirs.rs: `target/<8 hex>` per virtual workspace,
@@ -755,8 +883,9 @@ impl Guard {
     }
 
     /// The periodic look: floor / warn crossings, and automatic reclaim below the floor; `quiet`
-    /// (a timed lease runs) skips the walk that refreshes what the roots hold.
-    pub fn check(&self, live: &dyn Fn() -> Live, quiet: bool) {
+    /// (a timed lease runs) skips the walk that refreshes what the roots hold. `leases`: the
+    /// leases' paths now, which a reclaim asks again at each deletion ([`Guard::reclaim`]).
+    pub fn check(&self, live: &dyn Fn() -> Live, leases: &dyn Fn() -> Vec<(PathBuf, String)>, quiet: bool) {
         let (free, warn) = (self.free(), self.warn_at());
         let (floor_cross, warn_cross) = {
             let mut st = self.state.lock().unwrap();
@@ -774,7 +903,7 @@ impl Guard {
             if floor_cross {
                 self.emit(Sev::Warn, format!("disk_floor: {} has {:.0} GB free, floor {:.0} GB: reclaiming", self.machine, gb(free), gb(self.floor())));
             }
-            self.reclaim(&live(), false, 0);
+            self.reclaim(&live(), leases, false, 0);
         } else if !quiet {
             let _ = self.items(&live(), false);
         }
@@ -808,7 +937,12 @@ impl Guard {
     /// lease's cost; 0: the floor itself), oldest and most reclaimable first ([`plan`]), past
     /// what it must keep ([`walk`]); answer lines: the outcome first, then the categories, then
     /// each item taken or kept. A dry run keeps what a reclaim would keep now.
-    pub fn reclaim(&self, live: &Live, dry: bool, need: u64) -> Vec<String> {
+    /// `live` is what was in use as it began; `leases`, the leases' paths now, is asked again at
+    /// each deletion: a lease granted while a reclaim lists and walks the roots uses dirs that look
+    /// saw as free. A box's reclaim for a head waiting on its disk took the tmp dir of a lease
+    /// granted there while it ran, the libraries' sweep of a full run, whose output, in the run
+    /// log there, stopped 4 s into its checks: the run had no verdict (L1561802, 11-22).
+    pub fn reclaim(&self, live: &Live, leases: &dyn Fn() -> Vec<(PathBuf, String)>, dry: bool, need: u64) -> Vec<String> {
         let items = self.items(live, !dry);
         let free = self.free();
         let goal = self.floor() + need;
@@ -824,7 +958,9 @@ impl Guard {
             };
             // looked at again at the moment of deletion: a lease may have started using it (a
             // build's stores: a run of it, which holds its live lock; retire refuses then)
-            if let Some(u) = live.user_of(&i.path).filter(|_| i.build.is_none() && i.units.is_none()) {
+            let now = Live { leases: leases(), ..Default::default() };
+            let user = |p: &Path| live.user_of(p).or_else(|| now.user_of(p));
+            if let Some(u) = user(&i.path).filter(|_| i.build.is_none() && i.units.is_none()) {
                 return keep(&mut lines, &mut kept, u);
             }
             let _lock = match i.build.map_or_else(|| item_lock(&dev, i), |_| Ok(None)) {
@@ -843,7 +979,7 @@ impl Guard {
                 remove_units(&i.path, day).map(|_| ())
             } else if i.cat == Cat::Native {
                 let target = super::tree::native_target(&self.roots.work, &name(&i.path));
-                if let Some(u) = live.user_of(&target) {
+                if let Some(u) = user(&target) {
                     return keep(&mut lines, &mut kept, u);
                 }
                 super::tree::remove_native(&self.roots.work, &name(&i.path)).map(|r| {
@@ -897,7 +1033,7 @@ impl Guard {
                 continue;
             }
             let total: u64 = of.iter().map(|i| i.bytes).sum();
-            let reclaimable: u64 = of.iter().filter(|i| i.step.is_some() || (i.cat == Cat::RetiredTree && live.user_of(&i.path).is_none())).map(|i| i.bytes).sum();
+            let reclaimable: u64 = of.iter().filter(|i| (i.step.is_some() && !(i.cat == Cat::StrayTmp && self.user_machine())) || (i.cat == Cat::RetiredTree && live.user_of(&i.path).is_none())).map(|i| i.bytes).sum();
             out.push(format!("{{\"cat\":\"{}\",\"gb\":{:.2},\"n\":{},\"reclaimable_gb\":{:.2}}}", c.as_str(), gb(total), of.len(), gb(reclaimable)));
         }
         out.extend(lines);
@@ -1078,7 +1214,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("devhub-jit-builds-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let work = base.join("home/devhub");
-        let r = Roots { home: base.join("home"), work: work.clone(), deploy: None, run_home: base.join("home/.relax"), tmp: base.join("tmp") };
+        let r = Roots { home: base.join("home"), work: work.clone(), deploy: None, run_home: base.join("home/.relax"), tmp: base.join("tmp"), sys_tmp: base.join("systmp") };
         let (dir, idle) = (work.join("dev/run-home/target/bb676d1f"), work.join("dev/run-home/target/0002"));
         for d in [dir.join("cache/live"), idle.join("cache"), dir.join("build/out")] {
             std::fs::create_dir_all(d).unwrap();
@@ -1110,7 +1246,7 @@ mod tests {
         let t = std::time::SystemTime::now() - Duration::from_secs(5 * 3600);
         std::fs::File::open(&idle).unwrap().set_modified(t).unwrap();
         // an overlay lease runs on the box: it pins the dev run home
-        let live = Live { leases: vec![(work.join("dev/run-home"), "L1".into())], cwds: vec![] };
+        let live = Live { leases: vec![(work.join("dev/run-home"), "L1".into())], cwds: vec![], oldest: None };
         let items = list(&r, &live);
         let of = |b: u64| items.iter().find(|i| i.build == Some(b)).unwrap_or_else(|| panic!("{b:x}: {items:?}"));
         assert_eq!((of(old).step, of(mid).step, of(run).step), (Some(2), Some(2), None), "the running build's stores stay; the others go at step 2: {items:?}");
@@ -1146,7 +1282,7 @@ mod tests {
     fn lists_categories_and_keeps_what_is_in_use() {
         let base = std::env::temp_dir().join(format!("devhub-disk-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let r = Roots { home: base.join("home"), work: base.join("home/devhub"), deploy: Some(base.join("home/makepad")), run_home: base.join("home/.relax"), tmp: base.join("tmp") };
+        let r = Roots { home: base.join("home"), work: base.join("home/devhub"), deploy: Some(base.join("home/makepad")), run_home: base.join("home/.relax"), tmp: base.join("tmp"), sys_tmp: base.join("systmp") };
         for d in ["home/makepad/target", "home/devhub/ci-target", "home/devhub/tree/target", "home/devhub/target/abc/release", "home/devhub/target/lane-x", "home/devhub/tmp/L1", "home/devhub/wt/x-L2", "home/.makepad/wm", "home/.relax/target/0001", "tmp/landgate.Q1", "home/devhub/inputs/aa/ui", "home/devhub/inputs/bb/ui"] {
             std::fs::create_dir_all(base.join(d)).unwrap();
         }
@@ -1154,7 +1290,7 @@ mod tests {
         std::fs::write(base.join("home/devhub/target/lane-x.last"), "abc").unwrap();
         std::fs::write(base.join("home/.makepad/wm/ai-hub.log"), "x").unwrap();
         std::fs::write(base.join("home/.makepad/wm/ai-hub.log.2"), "x").unwrap();
-        let live = Live { leases: vec![(base.join("home/devhub/target/lane-x"), "L9".into()), (base.join("home/devhub/inputs/bb"), "L8".into())], cwds: vec![] };
+        let live = Live { leases: vec![(base.join("home/devhub/target/lane-x"), "L9".into()), (base.join("home/devhub/inputs/bb"), "L8".into())], cwds: vec![], oldest: None };
         let items = list(&r, &live);
         let find = |p: &str| items.iter().find(|i| i.path == base.join(p)).unwrap_or_else(|| panic!("{p}: {items:?}"));
         assert_eq!(find("home/makepad/target").cat, Cat::DeployTarget);
@@ -1184,6 +1320,38 @@ mod tests {
         assert_eq!(find("home/devhub/inputs/bb").step, None);
         assert!(find("home/devhub/inputs/bb").note.contains("L8"));
         assert!(rotated_log("x.log.10") && rotated_log("x.log.1.gz") && !rotated_log("x.log") && !rotated_log("x.logs"));
+        // an ended lane's grabs are reclaimable, with the rotated logs; a kept lane's, a live one's,
+        // one never said ended and the user's own files are the user's (38.9 GB of a box's
+        // screencaps were one item of the user's, none of it reclaimable, 11-24)
+        let caps = base.join("home/makepad/local/screencap");
+        for (lane, len) in [("oldlane", 4000), ("keptlane", 300), ("livelane", 200)] {
+            std::fs::create_dir_all(caps.join(lane)).unwrap();
+            std::fs::write(caps.join(lane).join("W1-1.png"), vec![1u8; len]).unwrap();
+        }
+        std::fs::write(caps.join("rec.mp4"), vec![1u8; 500]).unwrap();
+        note_lanes(&r.work, &["oldlane", "KeptLane", "gone"], true);
+        // (the note [`kept_natives`] reads: the tree module that writes it is a checkout build's)
+        std::fs::write(r.work.join("native-kept"), "keptlane\n").unwrap();
+        note_lanes(&r.work, &["gone"], false);
+        assert_eq!(ended_lanes(&r.work), ["oldlane", "keptlane"], "noted lowercase, and a lane at work again leaves the list");
+        let lanes = ["ended-a", "ended-b", "ended-c"];
+        let together = std::sync::Barrier::new(lanes.len());
+        std::thread::scope(|scope| {
+            let (together, work) = (&together, &r.work);
+            for lane in lanes {
+                scope.spawn(move || {
+                    together.wait();
+                    note_lanes(work, &[lane], true);
+                });
+            }
+        });
+        let ended = ended_lanes(&r.work);
+        assert!(lanes.iter().all(|lane| ended.iter().any(|l| l == *lane)), "every concurrently ended lane is in the note: {ended:?}");
+        let items = list(&r, &live);
+        let shots: Vec<&Item> = items.iter().filter(|i| i.cat == Cat::Screencaps).collect();
+        assert_eq!(shots.iter().map(|i| (i.path.clone(), i.step, i.user_data)).collect::<Vec<_>>(), [(caps.join("oldlane"), Some(4), false), (caps.clone(), None, true)], "{shots:?}");
+        assert_eq!(shots[0].bytes + shots[1].bytes, dir_size(&caps).0, "the user's item counts the rest");
+        assert!(plan(&items, 0, 100 << 30, false).take.iter().any(|i| i.path == caps.join("oldlane")) && plan(&items, 0, 100 << 30, true).ask.iter().any(|i| i.path == caps));
         // the work target's cargo units, in both layouts, by their day of last use (a box's
         // targets held 131 GB of units unused for weeks, none reclaimable while a lease ran,
         // 11-22); the target's own item counts the rest, and a unit goes under the build lock
@@ -1210,13 +1378,47 @@ mod tests {
         assert!(bar.bytes >= 20_200 && bar.note.starts_with("1 cargo units"), "the older layout's unit is its fingerprint, build dir and deps files: {bar:?}");
         let target = items.iter().find(|i| i.cat == Cat::WorkTarget && i.units.is_none()).unwrap();
         assert_eq!(target.bytes + units.iter().map(|i| i.bytes).sum::<u64>(), dir_size(&base.join("home/devhub/ci-target")).0, "the target's own item counts the rest");
-        let held = std::fs::File::options().write(true).open(rel.join(".cargo-lock")).unwrap();
-        held.lock().unwrap();
-        assert!(remove_units(&rel, day(10)).unwrap_err().contains("a cargo build holds"), "never under a running build");
-        drop(held);
         assert!(remove_units(&rel, day(10)).unwrap() >= 20_200);
         assert!(!rel.join("deps/libbar-fedcba9876543210.rlib").exists() && !rel.join(".fingerprint/bar-fedcba9876543210").exists() && !rel.join("build/bar-fedcba9876543210").exists(), "the unit went whole");
         assert!(rel.join("build/foo/0123456789abcdef/fingerprint/lib-foo").exists() && rel.join("incremental/baz-1x2y3z/s-a/dep-graph.bin").exists(), "the other days' units stay");
+        // (held last: a process another test spawns holds a copy of the lock's fd until its exec,
+        // so a lock let go here may still be held a moment after)
+        let held = std::fs::File::options().write(true).open(rel.join(".cargo-lock")).unwrap();
+        held.lock().unwrap();
+        assert!(remove_units(&rel, day(3)).unwrap_err().contains("a cargo build holds") && rel.join("build/foo/0123456789abcdef").exists(), "never under a running build");
+        drop(held);
+        // a bare mktemp's dirs in the system temp: macOS's mktemp makes a lease's there whatever
+        // its TMPDIR said, and 86 of them (124 GB, Relax run dirs) filled a node Mac (11-24). One
+        // nothing was written in since before the oldest running lease began goes at step 3; one
+        // written since stays, as it may be that lease's; another name is no mktemp's; and on a
+        // user machine none goes, its system temp being the person's
+        let sys = base.join("systmp");
+        for d in ["tmp.0ldRunDir1/cache", "tmp.FreshDir22", "tmp.short", "keepme.AbCdEfGhIj"] { std::fs::create_dir_all(sys.join(d)).unwrap(); }
+        std::fs::write(sys.join("tmp.0ldRunDir1/cache/front.rcs"), vec![1u8; 3000]).unwrap();
+        let hour_ago = std::time::UNIX_EPOCH + Duration::from_secs(now - 3600);
+        for d in ["tmp.0ldRunDir1/cache/front.rcs", "tmp.0ldRunDir1/cache", "tmp.0ldRunDir1"] {
+            std::fs::File::open(sys.join(d)).unwrap().set_times(std::fs::FileTimes::new().set_modified(hour_ago)).unwrap();
+        }
+        let started_ms = crate::proto::wall_ms();
+        std::fs::write(sys.join("tmp.FreshDir22/out"), "written after L7 began").unwrap();
+        let running = Live { oldest: Some((started_ms, "L7".into())), ..live.clone() };
+        let items = list(&r, &running);
+        let stray: Vec<(String, Option<u8>)> = items.iter().filter(|i| i.cat == Cat::StrayTmp).map(|i| (name(&i.path), i.step)).collect();
+        assert_eq!(stray, [("tmp.0ldRunDir1".to_string(), Some(3)), ("tmp.FreshDir22".to_string(), None)], "{stray:?}");
+        assert!(items.iter().any(|i| i.path == sys.join("tmp.FreshDir22") && i.note.contains("lease L7")), "it says which lease it may be");
+        assert!(items.iter().any(|i| i.path == sys.join("tmp.0ldRunDir1") && i.bytes >= 3000));
+        assert!(!plan(&items, 0, 100 << 30, true).take.iter().chain(&plan(&items, 0, 100 << 30, true).more).any(|i| i.cat == Cat::StrayTmp), "never on a user machine");
+        assert!(bare_mktemp("tmp.km5SVaoGD0") && !bare_mktemp("tmp.short") && !bare_mktemp("landgate.Q1XyZa") && !bare_mktemp("tmp.km5SVaoGD0x"));
+        // a lease granted while a reclaim walks keeps the dirs its first look saw as free: the
+        // leases are asked again at each deletion (a box's reclaim took the tmp dir, and with it
+        // the run log, of a lease granted while it ran, 11-22)
+        let g = Guard::new("box-a", Roots { home: base.join("home"), work: base.join("home/devhub"), deploy: Some(base.join("home/makepad")), run_home: base.join("home/.relax"), tmp: base.join("tmp"), sys_tmp: base.join("systmp") }, 1e6, false, std::sync::Arc::new(|_| {}));
+        let granted = vec![(base.join("home/devhub/tmp/L1"), "L1".to_string())];
+        let lines = g.reclaim(&running, &|| granted.clone(), false, 0);
+        assert!(base.join("home/devhub/tmp/L1").exists() && lines.iter().any(|l| l.contains("tmp/L1\"") && l.contains("\"why\":\"lease L1\"")), "{lines:?}");
+        assert!(!base.join("tmp/landgate.Q1").exists(), "what no lease uses goes: {lines:?}");
+        assert!(!sys.join("tmp.0ldRunDir1").exists() && sys.join("tmp.FreshDir22").exists() && sys.join("tmp.short").exists() && sys.join("keepme.AbCdEfGhIj").exists(), "only the stray dir no running lease writes goes: {lines:?}");
+        assert!(!caps.join("oldlane").exists() && caps.join("keptlane").exists() && caps.join("livelane").exists() && caps.join("rec.mp4").exists(), "an ended lane's grabs go, nothing else of the folder: {lines:?}");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

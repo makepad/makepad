@@ -257,17 +257,21 @@ pub(crate) fn display() -> Option<String> {
 /// Why a WM's `status` answer (its windows) shows nothing: its one window is 0x0, which it is
 /// when no output is attached or live, and every window opened under it then times out on its
 /// first frame (fourteen gui and screen leases on one node in 3 h, 11-07). Empty when a window
-/// has a size, or the answer says nothing of them. `connectors` are the box's DRM connector
-/// states (`/sys/class/drm/*/status`): when each reads `disconnected`, no output is plugged in
-/// or the display is off, a cable or a screen to see to, not the WM (a node's line said only
-/// "window is 0x0", 11-13).
-pub fn dark_of(status: &str, connectors: &[String]) -> String {
+/// has a size, or the answer says nothing of them. `connectors` are the box's DRM connectors and
+/// their states (`/sys/class/drm/<name>/status`): when each that could show a screen reads
+/// `disconnected`, no output is plugged in or the display is off, a cable or a screen to see to,
+/// not the WM (a node's line said only "window is 0x0", 11-13). A writeback connector shows none
+/// (the kernel's capture sink, `connected` whatever is plugged in): counted as a connected
+/// output, it laid a box with no screen at its WM's door (11-25). The WM's renderer lights an
+/// output as it appears (a rescan a second and at each hotplug): nothing to restart.
+pub fn dark_of(status: &str, connectors: &[(String, String)]) -> String {
     let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return String::new() };
     let Some(windows) = v.get("w").and_then(|w| w.as_arr()).filter(|w| !w.is_empty()) else { return String::new() };
     let empty = |w: &makepad_strict_json::Value| w.get("sz").and_then(|s| s.as_arr()).is_some_and(|s| s.iter().all(|n| super::num(n).is_some_and(|n| n <= 0.0)));
     if !windows.iter().all(empty) { return String::new(); }
-    if !connectors.is_empty() && connectors.iter().all(|c| c.trim() == "disconnected") {
-        return format!("no output connected (its {} DRM connectors read disconnected; its WM's window is 0x0)", connectors.len());
+    let screens: Vec<&str> = connectors.iter().filter(|(name, _)| !name.contains("-Writeback-")).map(|(_, state)| state.trim()).collect();
+    if !screens.is_empty() && screens.iter().all(|c| *c == "disconnected") {
+        return format!("no output connected (its {} DRM connectors read disconnected; its WM's window is 0x0, and lights one as it is plugged in or switched on)", screens.len());
     }
     "its WM's window is 0x0: no output shows it".into()
 }
@@ -313,7 +317,19 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     #[cfg(feature = "checkout")]
     { c.wm_drain = crate::sync::serve::wm_drain(); }
     #[cfg(feature = "checkout")]
-    { (c.stale, c.stale_since_ms) = crate::sync::serve::stale_runs(&crate::sync::SyncConf::load().checkout, crate::proto::wall_ms()); }
+    {
+        let pids;
+        let sync = crate::sync::SyncConf::load();
+        (c.stale, c.stale_since_ms, pids) = crate::sync::serve::stale_runs(&sync.checkout, crate::proto::wall_ms());
+        let wm = makepad_network::fleet::makepad_home().join("wm");
+        c.services_stale = services_running(&wm, &pids);
+        c.services_stale.extend(kept_replaced(&wm, &crate::sync::kept_dir(), &crate::procinfo::alive));
+        c.services_stale.sort();
+        c.services_stale.dedup();
+        // its applies build (the roll's push to a node off the auto-sync asks for the build then:
+        // a kept service follows the tip only through it, sync/build.rs `keep`)
+        if sync.builds() { c.features.push("deploy-builds".into()); }
+    }
     #[cfg(feature = "checkout")]
     { c.prewarming = crate::sync::prewarm::running(); }
     #[cfg(feature = "checkout")]
@@ -413,6 +429,39 @@ fn services_in(dir: &Path, alive: &dyn Fn(u32) -> bool) -> Vec<(String, u64)> {
             Some((name, t))
         })
         .collect();
+    out.sort();
+    out
+}
+
+/// The services whose state files in `dir` record one of `pids` (those that run a build their
+/// checkout has since replaced, [`crate::sync::serve::stale_runs`]).
+#[cfg_attr(not(feature = "checkout"), allow(dead_code))]
+fn services_running(dir: &Path, pids: &[u32]) -> Vec<String> {
+    if pids.is_empty() { return Vec::new(); }
+    let mut out: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().strip_suffix(".state")?.to_string();
+        state_pid(&std::fs::read_to_string(e.path()).ok()?).filter(|p| pids.contains(p)).map(|_| name)
+    }).collect();
+    out.sort();
+    out
+}
+
+/// The services whose state files in `dir` name a kept binary (one in `kept`, [`crate::sync::kept_dir`]:
+/// a node no WM runs on starts its services from those) that the prebuild replaced after the
+/// service started: the copy's modification time, which `keep` sets as it replaces it, is after
+/// the state file's, which the start writes. The update roll restarts them onto it
+/// ([`crate::lease::Caps::services_stale`]). A Mac's AI hub ran a two-week-old kept copy, and
+/// nothing said it ran older code than its node kept (11-24).
+#[cfg_attr(not(feature = "checkout"), allow(dead_code))]
+fn kept_replaced(dir: &Path, kept: &Path, alive: &dyn Fn(u32) -> bool) -> Vec<String> {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut out: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+        let name = e.file_name().to_string_lossy().strip_suffix(".state")?.to_string();
+        let text = std::fs::read_to_string(e.path()).ok()?;
+        state_pid(&text).filter(|p| alive(*p))?;
+        let binary = PathBuf::from(text.lines().find_map(|l| l.strip_prefix("identity = "))?.split(' ').next()?);
+        (binary.parent() == Some(kept) && modified(&binary)? > modified(&e.path())?).then_some(name)
+    }).collect();
     out.sort();
     out
 }
@@ -699,7 +748,7 @@ pub fn hwmon_temps(root: &Path) -> Vec<Temp> {
 }
 
 /// Uses the GPU query caps already made; no second nvidia-smi process per poll.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "android", test))]
 fn nvidia_temps(gpus: &[crate::top::GpuUse]) -> Vec<Temp> {
     gpus.iter().enumerate().filter(|(_, g)| g.temp_c.is_finite()).map(|(i, g)| Temp { sensor: format!("gpu{i}"), c: g.temp_c, limit: Some(85.0) }).collect()
 }
@@ -892,10 +941,11 @@ mod os {
         }
     }
 
-    /// The states of the box's DRM connectors (`connected`, `disconnected`, `unknown`).
-    fn drm_connectors() -> Vec<String> {
+    /// The box's DRM connectors (`card1-DP-1`) and their states (`connected`, `disconnected`,
+    /// `unknown`).
+    fn drm_connectors() -> Vec<(String, String)> {
         let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
-        dir.flatten().filter_map(|e| std::fs::read_to_string(e.path().join("status")).ok()).map(|s| s.trim().to_string()).collect()
+        dir.flatten().filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), std::fs::read_to_string(e.path().join("status")).ok()?.trim().to_string()))).collect()
     }
 
     /// Whether the WM at `path` takes today's apps, asked the way an app asks it
@@ -1107,7 +1157,9 @@ mod os {
             ram_gb: sysctl_u64("hw.memsize") as f64 / GB,
             ram_avail_gb: m.mem_avail_mb as f64 / 1024.0,
             mem_pressure: sysctl_u64("kern.memorystatus_vm_pressure_level") as u32,
-            // a Mac shows windows on its own session; the GPU is the SoC's (not a lease resource)
+            // a Mac shows windows on its own session; its GPU is no lease resource (not in `gpus`),
+            // but it has one: Apple silicon's is its chip's, an Intel Mac's its Metal device
+            shared_gpu: if cfg!(target_arch = "aarch64") { sysctl_str("machdep.cpu.brand_string") } else { "Metal".into() },
             display: Some("macos".into()),
             ..Default::default()
         }
@@ -1349,6 +1401,22 @@ mod tests {
         assert_eq!(names(&|p| p == 11), ["devhub"], "the AI hub ended: its state file is no service");
         assert_eq!(super::state_pid("identity = x\npid = 42\n"), Some(42));
         assert_eq!(super::state_pid("pid = x\n"), None);
+        // a service its node starts from a kept binary: one the prebuild replaced after the start
+        // (the copy's time after its state file's) runs an older build than its node keeps
+        let kept = dir.join("kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("aihub"), "build").unwrap();
+        std::fs::write(dir.join("ai-hub.state"), format!("pid = 12\nidentity = {}\n", kept.join("aihub").display())).unwrap();
+        std::fs::write(dir.join("other.state"), format!("pid = 12\nidentity = {} 0 0 nice=0 features=node env=[]\n", dir.join("aihub").display())).unwrap();
+        let at = |p: &std::path::Path, secs: u64| std::fs::File::options().write(true).open(p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+        at(&kept.join("aihub"), 1000);
+        at(&dir.join("ai-hub.state"), 2000);
+        assert!(super::kept_replaced(&dir, &kept, &|_| true).is_empty(), "started on its kept copy: current");
+        at(&kept.join("aihub"), 3000);
+        assert_eq!(super::kept_replaced(&dir, &kept, &|_| true), ["ai-hub"], "the prebuild replaced the copy after the start: the roll restarts it");
+        assert!(super::kept_replaced(&dir, &kept, &|p| p != 12).is_empty(), "an ended service is none");
+        at(&dir.join("ai-hub.state"), 4000);
+        assert!(super::kept_replaced(&dir, &kept, &|_| true).is_empty(), "its restart wrote its state after the copy: current again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1364,6 +1432,7 @@ mod tests {
     }
 
     /// macOS measures CPU use like Linux (two samples of all cores' ticks): the busy check uses it.
+    /// A Mac reports the GPU it draws on.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_measures_cpu_use_and_memory_pressure() {
@@ -1379,6 +1448,9 @@ mod tests {
         let p = c.cpu_pct.expect("a measure once the counters moved has the CPU use");
         assert!((0.0..=100.0).contains(&p), "{p}");
         assert!(matches!(c.mem_pressure, 1 | 2 | 4), "{}", c.mem_pressure);
+        // every Mac draws on a GPU no lease reserves: without it, a `--needs gpu=1` ask never met a
+        // Mac (L1616264, 11-23)
+        assert!(!c.shared_gpu.is_empty() && c.gpus.is_empty(), "{:?} {:?}", c.shared_gpu, c.gpus);
     }
     use super::*;
 
@@ -1405,10 +1477,17 @@ mod tests {
     fn a_wm_window_of_0x0_is_a_dark_display() {
         let dark = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[0,0],"px":[0,0],"dpi":2.43,"pos":[0,0]}]}"#;
         let lit = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[1920,1080],"px":[3840,2160],"dpi":2,"pos":[0,0]}]}"#;
-        let s = |v: &[&str]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let s = |v: &[&str]| v.iter().enumerate().map(|(i, c)| (format!("card0-DP-{i}"), c.to_string())).collect::<Vec<_>>();
+        let none = "no output connected (its 2 DRM connectors read disconnected; its WM's window is 0x0, and lights one as it is plugged in or switched on)";
         assert_eq!(dark_of(dark, &[]), "its WM's window is 0x0: no output shows it");
         assert_eq!(dark_of(dark, &s(&["connected", "disconnected"])), "its WM's window is 0x0: no output shows it", "a connected output: the WM's to look at");
-        assert_eq!(dark_of(dark, &s(&["disconnected", "disconnected"])), "no output connected (its 2 DRM connectors read disconnected; its WM's window is 0x0)");
+        assert_eq!(dark_of(dark, &s(&["disconnected", "disconnected"])), none);
+        // a writeback connector is the kernel's capture sink, no screen: a box with every screen
+        // connector disconnected and one of those `connected` has no output (a pool box, 11-25)
+        let mut writeback = s(&["disconnected", "disconnected"]);
+        writeback.push(("card1-Writeback-1".into(), "connected".into()));
+        assert_eq!(dark_of(dark, &writeback), none);
+        assert_eq!(dark_of(dark, &writeback[2..]), "its WM's window is 0x0: no output shows it", "a writeback connector alone says nothing of the outputs");
         assert_eq!(dark_of(lit, &s(&["disconnected"])), "", "a window with a size shows, whatever the connectors say");
         assert_eq!(dark_of(r#"{"app":"makepad-app-wm","pid":7,"w":[]}"#, &[]), "");
         assert_eq!(dark_of("not json", &[]), "");

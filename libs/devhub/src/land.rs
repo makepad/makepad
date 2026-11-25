@@ -311,6 +311,48 @@ pub fn half_landed<'a>(landed: &'a [Entry], repo: &Path, work: &str, main: &str)
     None
 }
 
+/// Where nested repository `name` stood beside a pin's makepad commit `work` and commercial commit
+/// `main` (empty: the pin has none), for a pin whose worktree lacks `name` and so names it at its
+/// landed tip `tip` ([`crate::nested::absent`]): Some((commit, the newest landing it steps past))
+/// when that is not `tip`, and whether the walk reached a landing the pin holds (else the pin is
+/// older than every one of `landed` it was asked about); `dir` is a checkout of `name`. Of the landings with a half in `name`
+/// that also landed in makepad or commercial, newest first, each the pin lacks there steps `name`
+/// back to the commit before its merge; the first the pin holds ends the walk (a landing's halves
+/// landed together: a pin holds all or none of them). A landing in `name` alone landed beside
+/// makepad's tip of then, what its code builds on: a pin whose makepad half lacks that tip stands
+/// before it too, at the newest commit of `name` that landed with or before its makepad half. A
+/// lane's two landings, #8815 in makepad and then #8817 in makepad/apps alone using what #8815
+/// added, and a run of another lane from before #8815 built Fab on apps' tip: E0599 (11-24). Fab moved from
+/// commercial into makepad/apps in one landing (#8321), and every run of a lane whose commercial
+/// half had not taken it named apps at its tip: Fab twice, and cargo stopped at "two packages
+/// named `fab-ai`" before it built anything, box after box (11-22).
+pub fn beside_pin<'a>(landed: &'a [Entry], repo: &Path, dir: &Path, name: &str, work: &str, main: &str, tip: &str) -> (Option<(String, &'a Entry)>, bool) {
+    let commercial = repo.join("apps/commercial");
+    let mut halves: Vec<(&Entry, &str, (String, String), (String, String))> = landed.iter().filter(|e| e.state == St::Landed && !e.proof).filter_map(|e| {
+        let side = e.nested.iter().find(|s| s.name == name && !s.landed.is_empty())?;
+        Some((e, side.landed.as_str(), pair_sides(&e.pre)?, pair_sides(&e.landed)?))
+    }).collect();
+    halves.sort_by_key(|(e, ..)| std::cmp::Reverse((e.changed_ms, e.id)));
+    let mut at: Option<(String, &Entry)> = None;
+    for (e, merged, pre, done) in halves {
+        let alone = pre == done;
+        let (in_work, in_main) = (alone || pre.0 != done.0, pre.1 != done.1 && !main.is_empty());
+        if !in_work && !in_main {
+            continue;
+        }
+        if (!in_work || is_ancestor(repo, &done.0, work)) && (!in_main || is_ancestor(&commercial, &done.1, main)) {
+            return (at, true);
+        }
+        let now = at.as_ref().map_or(tip, |(c, _)| c.as_str());
+        if !is_ancestor(dir, merged, now) {
+            continue;
+        }
+        let Some(before) = crate::gitread::commit_parts(dir, merged).and_then(|(_, parents)| parents.into_iter().next()) else { return (at, false) };
+        at = Some((before, at.map_or(e, |(_, newest)| newest)));
+    }
+    (at, false)
+}
+
 /// A landing's recorded pair (`work <sha> main <sha>`): its work and main commits.
 fn pair_sides(text: &str) -> Option<(String, String)> {
     match text.split_whitespace().collect::<Vec<_>>()[..] {
@@ -380,8 +422,98 @@ pub fn torn_pair_said(e: &Entry, makepad: bool, repo: &Path, mk: (&str, &str), c
     format!("{lacks_repo} rev {:.10} (branch {}) lacks #{} {} ({}), which your {has_repo} half {:.10} (branch {}) holds: a run would build a pair that never landed together; {fix}", lacks.1, lacks.0, e.id, e.label(), e.agent, has.1, has.0)
 }
 
+/// The commit a hand-in lands of one half (`branch` in `dir`, landing into `target`): the one its
+/// pre-land checks ran on, which the client pinned as the command started (`pin`; empty where it
+/// pinned none, as for an unresolved hand-in), not the branch's `head` as it queues. The checks
+/// take minutes, and a commit made on the branch meanwhile rode into the landing unchecked: one
+/// commit handed in, two landed (#8844, 11-24). A branch that moved on is no error: the pinned
+/// commit lands, and `moved` says what waits for the next hand-in, counting the lane's own commits
+/// (a merge of the tip into the branch brings none). One rewritten under its checks, its pin no
+/// longer on it, is refused: the lane dropped the commit that was checked (a rebase onto a
+/// re-pointed `work` would bring the old chain back).
+fn pinned_half(dir: &Path, branch: &str, target: &str, head: String, pin: &str, moved: &mut Vec<String>) -> Result<String, String> {
+    if pin.is_empty() || head.is_empty() || pin == head {
+        return Ok(head);
+    }
+    if !is_ancestor(dir, pin, &head) {
+        return Err(format!("branch {branch} was rewritten during the checks: {pin:.10}, the commit they checked, is no longer on it (now {head:.10}); nothing queued, hand in again"));
+    }
+    let (ok, n) = git(dir, &["rev-list", "--count", "--no-merges", &head, &format!("^{pin}"), &format!("^refs/heads/{target}")]);
+    let newer = match n.trim().parse::<u64>().ok().filter(|_| ok) {
+        Some(0) => "0 newer commits not included (it moved by a merge of the tip alone)".to_string(),
+        Some(1) => "1 newer commit not included, for the next hand-in".to_string(),
+        Some(n) => format!("{n} newer commits not included, for the next hand-in"),
+        None => "its newer commits are not included, for the next hand-in".to_string(),
+    };
+    moved.push(format!("branch {branch} moved during checks: landed {pin:.10}; {newer}"));
+    Ok(pin.to_string())
+}
+
 fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     crate::gitread::is_ancestor(dir, a, b)
+}
+
+/// What the worktree at `top` hands in (`land` with no words there): its makepad branch (`-` on
+/// work or none), its commercial half (`<worktree> <branch>`) when that is on a branch besides
+/// main, and its half in each other nested repository on a branch (`<name>=<branch>`; the master
+/// leaves out one with nothing to land). Err: the commercial checkout is on a branch that is not
+/// its lane's own ([`unnamed_half`]), which is never picked up unnamed.
+pub fn worktree_hand_in(top: &Path) -> Result<Vec<String>, String> {
+    let on = |dir: &Path| git(dir, &["branch", "--show-current"]).1;
+    let b = on(top);
+    let cdir = top.join("apps/commercial");
+    let cb = if cdir.join(".git").exists() { on(&cdir) } else { String::new() };
+    let mut v = vec![if b.is_empty() || b == "work" { "-".to_string() } else { b }];
+    if !cb.is_empty() && cb != "main" {
+        if let Some(why) = unnamed_half(top, &v[0], &cdir, &cb) {
+            return Err(why);
+        }
+        v.extend([cdir.display().to_string(), cb]);
+    }
+    for name in crate::nested::names(top).into_iter().filter(|n| n != crate::state::PAIRED) {
+        let nb = on(&top.join(crate::nested::dir(&name)));
+        if !nb.is_empty() {
+            v.push(format!("{name}={nb}"));
+        }
+    }
+    Ok(v)
+}
+
+/// Why the commercial checkout `cdir` of the worktree at `top`, on `cb`, may not hand in its
+/// half unnamed: `cb` is neither its lane's own commercial branch (`rc-<lane>`, the pair `lane
+/// new` makes; the lane by the makepad `branch`'s name, a slot's `<lane>.slots/<n>` or the
+/// worktree's own name) nor the makepad branch's name. `land sandeng-gloss` from a slot paired
+/// the slot's commercial checkout, a measurement branch carrying a scratch hook, and landed it in
+/// commercial main (#9062, 11-25). Naming the half (`land <branch> <worktree> <branch>`) lands it.
+fn unnamed_half(top: &Path, branch: &str, cdir: &Path, cb: &str) -> Option<String> {
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_string);
+    let slot = top.parent().and_then(name).and_then(|n| n.strip_suffix(".slots").map(str::to_string));
+    let lanes: Vec<String> = [branch.strip_prefix("rc-").map(str::to_string), slot.clone(), if slot.is_none() { name(top) } else { None }].into_iter().flatten().collect();
+    if (branch != "-" && cb == branch) || lanes.iter().any(|l| cb == format!("rc-{l}")) {
+        return None;
+    }
+    let own = lanes.iter().map(|l| format!("rc-{l}")).find(|b| crate::gitread::rev(cdir, &format!("refs/heads/{b}")).is_some());
+    let cd = cdir.display();
+    Some(format!(
+        "the commercial checkout {cd} is on {cb}, not this lane's own commercial branch{} or main, so it is not picked up unnamed. To land {cb} with this hand-in, name it: makepad devhub land {branch} {cd} {cb}. To land without it, put that checkout on {} or detach it (git -C {cd} switch --detach) and hand in again",
+        own.as_ref().map_or(String::new(), |o| format!(" ({o})")),
+        own.as_deref().unwrap_or("the lane's own branch"),
+    ))
+}
+
+/// A hand-in named by its lane's makepad branch alone (`land rc-x`), as that lane's worktree of
+/// `repo` hands it in ([`worktree_hand_in`]): every half of the lane. `land rc-fabpick2` landed
+/// its makepad half alone and left its apps half behind (#8947, 11-24). None when no worktree of
+/// `repo` is on `branch`; Err when that worktree's commercial half may not be picked up.
+pub fn lane_hand_in(repo: &Path, branch: &str) -> Option<Result<Vec<String>, String>> {
+    let (ok, list) = git(repo, &["worktree", "list", "--porcelain"]);
+    if !ok { return None; }
+    let on = format!("branch refs/heads/{branch}");
+    let tree = list.split("\n\n").find(|w| w.lines().any(|l| l == on))?.lines().find_map(|l| l.strip_prefix("worktree "))?;
+    match worktree_hand_in(Path::new(tree)) {
+        Ok(v) if v[0] != branch => None,
+        halves => Some(halves),
+    }
 }
 
 /// Whether `tree`, a lane's worktree of one repository, sits on a detached HEAD holding commits
@@ -679,6 +811,78 @@ fn wire_refusal(dir: &Path, from: &str, to: &str, marked: bool) -> Option<Vec<St
     }
 }
 
+/// The scratch mark: a lane writes it on each line of a measurement hook or other code of its own
+/// that must not land (`// MEASURE (<the mark>): ...`, the mark being "scratch", a comma and
+/// "never lands"), and a landing that adds such a line in any half is refused
+/// ([`scratch_refusal`]). A slot's measurement branch with a freeze hook so marked landed in
+/// commercial main unasked (#9062, 11-25). Matched without case, backticks or not; the plain
+/// phrase "never lands" is common prose and no mark. Documentation that asks lanes to write it
+/// ([`scratch_doc`]) is the one place it may land. Written in two pieces, so this file adds no
+/// marked line.
+const SCRATCH: &str = concat!("scratch, never", " lands");
+
+/// Whether `path` is documentation the scratch mark may land in: `docs/**/*.md` and any
+/// `AGENTS.md`. A backtick exemption let a Rust doc comment's "`<mark>`" pass, and doc comments
+/// use backticks all the time (main, 11-25).
+fn scratch_doc(path: &str) -> bool {
+    (path.starts_with("docs/") && path.ends_with(".md")) || path.rsplit('/').next() == Some("AGENTS.md")
+}
+
+/// The lines `from..to` adds in `dir` outside [`scratch_doc`] that hold [`SCRATCH`], as
+/// `<path>:<line>` in `to`.
+fn scratch_lines(dir: &Path, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let (ok, diff) = git(dir, &["diff", "-U0", "--no-color", "--no-ext-diff", "--no-renames", from, to]);
+    if !ok {
+        return Err(format!("what {from:.10}..{to:.10} adds did not read, so its scratch lines are unknown"));
+    }
+    let (mut path, mut line, mut hunk, mut hits) = ("", 0u64, false, Vec::new());
+    for l in diff.lines() {
+        if l.starts_with("diff --git ") {
+            hunk = false;
+        } else if let Some(h) = l.strip_prefix("@@ ") {
+            // `@@ -a,b +c,d @@`: the added lines that follow start at line c
+            hunk = true;
+            line = h.split(' ').find_map(|t| t.strip_prefix('+')).and_then(|t| t.split(',').next()?.parse().ok()).unwrap_or(0);
+        } else if !hunk {
+            if let Some(p) = l.strip_prefix("+++ ") {
+                path = p.strip_prefix("b/").unwrap_or(p);
+            }
+        } else if let Some(added) = l.strip_prefix('+') {
+            if !scratch_doc(path) && added.as_bytes().windows(SCRATCH.len()).any(|w| w.eq_ignore_ascii_case(SCRATCH.as_bytes())) {
+                hits.push(format!("{path}:{line}"));
+            }
+            line += 1;
+        }
+    }
+    Ok(hits)
+}
+
+/// Why a landing may not land: what it adds in a half (`(name, dir, from, to)`) holds the
+/// scratch mark ([`SCRATCH`]), each line named as `<half>: <path>:<line>`, or that could not be
+/// read. A refusal fails this entry only; the queue goes on.
+fn scratch_refusal(sides: &[(&str, &Path, &str, &str)]) -> Option<Vec<String>> {
+    let (mut hits, mut unread) = (Vec::new(), Vec::new());
+    for (name, dir, from, to) in sides {
+        if from == to || to.is_empty() {
+            continue;
+        }
+        match scratch_lines(dir, from, to) {
+            Ok(lines) => hits.extend(lines.into_iter().map(|l| format!("{name}: {l}"))),
+            Err(e) => unread.push(format!("{name}: {e}")),
+        }
+    }
+    if hits.is_empty() && unread.is_empty() {
+        return None;
+    }
+    let mut said = Vec::new();
+    if !hits.is_empty() {
+        said.push(format!("it adds {} line(s) marked \"{SCRATCH}\", a lane's own scratch code (a measurement hook): take them out of the branch, or hand in without that half", hits.len()));
+    }
+    said.extend(hits);
+    said.extend(unread);
+    Some(said)
+}
+
 fn only_proofs(dir: &Path, from: &str, to: &str) -> bool {
     let (ok, files) = git(dir, &["diff", "--name-only", from, to]);
     ok && files.lines().all(proof_file)
@@ -974,7 +1178,7 @@ impl Train {
     /// A hand-in's halves in the other nested repositories (`<name>=<branch>`): each branch in
     /// the user's checkout of it, which is on a branch; one with nothing that branch lacks lands
     /// nothing and is left out.
-    fn sides(&self, words: &[&str]) -> Result<Vec<Side>, String> {
+    fn sides(&self, words: &[&str], pins: &std::collections::BTreeMap<String, String>, moved: &mut Vec<String>) -> Result<Vec<Side>, String> {
         let mut out: Vec<Side> = Vec::new();
         for (name, branch) in words.iter().filter_map(|x| x.split_once('=')) {
             if name == crate::state::PAIRED {
@@ -984,11 +1188,12 @@ impl Train {
                 return Err(format!("{name} twice"));
             }
             let dir = self.repo.join(crate::nested::dir(name));
-            let sha = rev(&dir, &format!("refs/heads/{branch}")).ok_or_else(|| format!("no {name} branch {branch} in {} (a lane's {name} is a worktree of it)", dir.display()))?;
+            let head = rev(&dir, &format!("refs/heads/{branch}")).ok_or_else(|| format!("no {name} branch {branch} in {} (a lane's {name} is a worktree of it)", dir.display()))?;
             let target = git(&dir, &["branch", "--show-current"]).1;
             if target.is_empty() {
                 return Err(format!("{} is on no branch: nothing to land {name} into", dir.display()));
             }
+            let sha = pinned_half(&dir, branch, &target, head, pins.get(name).map_or("", String::as_str), moved)?;
             let tip = rev(&dir, &format!("refs/heads/{target}")).unwrap_or_default();
             if branch != target && !is_ancestor(&dir, &sha, &tip) {
                 out.push(Side { name: name.to_string(), branch: branch.to_string(), sha, landed: String::new() });
@@ -1032,8 +1237,10 @@ impl Train {
         let wire = w.contains(&"wire-change");
         let supersede = w.contains(&"supersede");
         let agent = w.iter().find_map(|x| x.strip_prefix("agent=")).unwrap_or("").to_string();
-        let gate_words = ["checked", "touched", "wide", "set", "node", "unchecked", "gate_ms"];
+        let gate_words = ["checked", "touched", "wide", "set", "node", "unchecked", "gate_ms", "pin"];
         let (mut checked, mut node, mut unchecked) = (String::new(), String::new(), String::new());
+        // the commits its checks ran on, pinned by the client as the command started ([`pinned_half`])
+        let (mut pin_ms, mut pin_cs, mut pin_nested) = (String::new(), String::new(), std::collections::BTreeMap::new());
         let mut gate_ms = 0;
         let (mut touched, mut wide, mut set) = (Vec::new(), Vec::new(), Vec::new());
         let mut seen = std::collections::BTreeSet::new();
@@ -1056,6 +1263,18 @@ impl Train {
                     match key { "touched" => touched = names, "wide" => wide = names, _ => set = names }
                 }
                 "node" => node = value.to_string(),
+                "pin" => {
+                    let sha = |s: &str| s.is_empty() || (s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+                    let bad = || format!("{word}: expected <40 hex or empty>,<40 hex or empty>[,<name>@<40 hex>..]");
+                    let mut parts = value.split(',');
+                    let (m, c) = (parts.next().unwrap_or(""), parts.next().ok_or_else(bad)?);
+                    if !sha(m) || !sha(c) { return Err(bad()); }
+                    (pin_ms, pin_cs) = (m.to_string(), c.to_string());
+                    for part in parts {
+                        let (name, at) = part.split_once('@').filter(|(n, at)| crate::nested::valid(n) && !at.is_empty() && sha(at)).ok_or_else(bad)?;
+                        pin_nested.insert(name.to_string(), at.to_string());
+                    }
+                }
                 "gate_ms" => gate_ms = value.parse().map_err(|_| format!("{word}: expected milliseconds"))?,
                 "unchecked" => {
                     if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c == '=') { return Err(format!("{word}: expected an unchecked reason without spaces or =")); }
@@ -1082,7 +1301,8 @@ impl Train {
             [b, wt, cb] => (*b, *wt, *cb),
             _ => return Err(ADD_USAGE.into()),
         };
-        let nested = self.sides(&sides)?;
+        let mut moved = Vec::new();
+        let nested = self.sides(&sides, &pin_nested, &mut moved)?;
         // check the lane's omitted half before checking branches or looking up the queue entry
         let lanes = self.store().read(|d| d.lanes.clone());
         let lane = match w.as_slice() {
@@ -1098,6 +1318,19 @@ impl Train {
             for (dir, b, repo_name) in [(tree.to_path_buf(), &l.branch, "makepad"), (tree.join("apps/commercial"), &l.cbranch, "commercial")] {
                 if let Some(why) = detached_off(&dir, b) {
                     return Err(format!("lane {}'s {repo_name} worktree {why}", l.name));
+                }
+            }
+            // its halves in the other nested repositories (`lane new --with`: on its own branch's
+            // name there), each named or with nothing to land: `land rc-fabpick2` landed its makepad
+            // half alone and left its apps half behind, and the tip held by luck (#8947, 11-24)
+            for name in crate::nested::names(&self.repo).into_iter().filter(|n| n != crate::state::PAIRED && !sides.iter().any(|x| x.split_once('=').is_some_and(|(s, _)| s == n))) {
+                let dir = self.repo.join(crate::nested::dir(&name));
+                let target = git(&dir, &["branch", "--show-current"]).1;
+                if l.branch.is_empty() || target.is_empty() || target == l.branch || rev(&dir, &format!("refs/heads/{}", l.branch)).is_none() { continue; }
+                let (ok, count) = git(&dir, &["rev-list", "--count", &format!("refs/heads/{target}..refs/heads/{}", l.branch)]);
+                if !ok || count != "0" {
+                    let given: Vec<&str> = w.iter().chain(&sides).copied().collect();
+                    return Err(format!("lane {} has commits on {} in {name} too; land every half: makepad devhub land {} {name}={}", l.name, l.branch, given.join(" "), l.branch));
                 }
             }
         }
@@ -1125,11 +1358,23 @@ impl Train {
                 }
             }
         }
-        // the commits this hand-in lands, pinned now ([`Entry::ms`])
+        // the commits this hand-in lands ([`Entry::ms`]): those its checks ran on ([`pinned_half`])
         let ms = if branch == "-" { String::new() } else { rev(&self.repo, &format!("refs/heads/{branch}")).ok_or_else(|| format!("no makepad branch {branch}"))? };
         let cs = if cb.is_empty() { String::new() } else { rev(Path::new(cwt), &format!("refs/heads/{cb}")).ok_or_else(|| format!("no commercial branch {cb} in {cwt}"))? };
+        let ms = pinned_half(&self.repo, branch, "work", ms, &pin_ms, &mut moved)?;
+        let cs = pinned_half(Path::new(cwt), cb, "main", cs, &pin_cs, &mut moved)?;
         if branch == "-" && cb.is_empty() && nested.is_empty() {
             return Err("nothing to land".into());
+        }
+        // a hand-in whose every half its target holds already lands nothing: refused here, each
+        // half named, not queued and marked landed. One sent while its commit was refused queued
+        // the lane's last landing again, an empty entry (#8334, 11-22). (A nested half its target
+        // holds is left out above.)
+        let held = |dir: &Path, target: &str, sha: &str| sha.is_empty() || rev(dir, &format!("refs/heads/{target}")).is_some_and(|tip| is_ancestor(dir, sha, &tip));
+        if !proof && nested.is_empty() && held(&self.repo, "work", &ms) && held(Path::new(cwt), "main", &cs) {
+            let half = |name: &str, b: &str, sha: &str, target: &str| (!sha.is_empty()).then(|| format!("{name} {b} at {sha:.10} is in {target}"));
+            let said: Vec<String> = [half("makepad", branch, &ms, "work"), half("commercial", cb, &cs, "main")].into_iter().flatten().collect();
+            return Err(format!("nothing to land: {}; commit the change first", said.join(", ")));
         }
         // an old tree with a newer parent silently undid other lanes' landings (11-15)
         let mut refused = Vec::new();
@@ -1167,7 +1412,7 @@ impl Train {
         }
         if !refused.is_empty() { return Err(refused.join("; ")); }
         // each merge it brings is its parents' merge outside its conflicts ([`merges_checked`])
-        let mut warn = Vec::new();
+        let mut warn = moved;
         if !ms.is_empty() { warn.extend(merges_checked(&self.repo, "work", &ms, branch)?); }
         if !cs.is_empty() { warn.extend(merges_checked(Path::new(cwt), "main", &cs, cb)?); }
         if let Some(lane) = lane { warn.extend(self.live_open(lane, (&ms, &cs, cwt))); }
@@ -1286,9 +1531,36 @@ impl Train {
         BTreeSet::new()
     }
 
+    /// A failed or conflicting entry whose lane is over (dropped, retired or removed, and no live
+    /// lane has its branches) leaves the list: only a new hand-in lands those branches, and its lane
+    /// makes none. A dropped intake lane's refusal stood in `land status` 27 h (#8225, 11-23).
+    /// The event that says so carries the entry as it stood (`land drop` keeps none).
+    fn forget_ended(&self) {
+        let lanes = self.store().read(|d| d.lanes.clone());
+        let ended = |e: &Entry| -> Option<String> {
+            let of = |l: &&crate::state::LaneRec| (e.branch != "-" && l.branch == e.branch) || (!e.cbranch.is_empty() && l.cbranch == e.cbranch);
+            if lanes.iter().filter(of).any(|l| l.state == "live") { return None; }
+            lanes.iter().filter(of).find(|l| matches!(l.state.as_str(), "dropped" | "retired" | "removed")).map(|l| format!("lane {} was {}", l.name, l.state))
+        };
+        let mut list = self.st.lock().unwrap();
+        let gone: Vec<(u64, String, String, String)> = list.iter().filter(|e| matches!(e.state, St::Failed | St::Conflict)).filter_map(|e| ended(e).map(|why| (e.id, e.label(), why, e.to_json()))).collect();
+        if gone.is_empty() { return; }
+        list.retain(|e| !gone.iter().any(|(id, ..)| *id == e.id));
+        if let Err(err) = self.save(&mut list) {
+            drop(list);
+            self.event(Sev::Err, format!("land: the failed entries of ended lanes stay listed: {err}"), &[]);
+            return;
+        }
+        drop(list);
+        for (id, label, why, entry) in gone {
+            self.event(Sev::Info, format!("land #{id} {label} leaves the list: {why}"), &[entry]);
+        }
+    }
+
     /// Lands ready entries one at a time, oldest first.
     fn start_ready(self: &Arc<Self>) -> bool {
         let _round = self.round.lock().unwrap();
+        self.forget_ended();
         let r = &self.repo;
         let c = r.join("apps/commercial");
         let mut list: Vec<Entry> = self.st.lock().unwrap().iter().filter(|e| e.state != St::Landed).cloned().collect();
@@ -1377,6 +1649,15 @@ impl Train {
                 continue;
             }
             if let Some(why) = wire_refusal(r, &w0, &cm, e.wire) {
+                self.set(e.id, |e| {
+                    e.state = St::Failed;
+                    e.detail = why.clone();
+                }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
+                continue;
+            }
+            let mut sides = vec![("makepad", r.as_path(), w0.as_str(), cm.as_str()), ("commercial", c.as_path(), m0.as_str(), cc.as_str())];
+            sides.extend(halves.iter().map(|h| (h.name.as_str(), h.dir.as_path(), h.tip.as_str(), h.merged.as_str())));
+            if let Some(why) = scratch_refusal(&sides) {
                 self.set(e.id, |e| {
                     e.state = St::Failed;
                     e.detail = why.clone();
@@ -1952,7 +2233,9 @@ mod tests {
     /// A second hand-in of a branch whose first is still queued is refused unless it supersedes
     /// it: two lanes batched two reviewed changes into one landing that way, re-pinned in silence
     /// (11-16). The same commits again are the same hand-in; superseded, it is the same entry at
-    /// the new commits; a failed one is handed in again as before.
+    /// the new commits; a failed one is handed in again as before. A hand-in lands the commits its
+    /// client pinned as the command started (`pin=`), which its checks ran on: one made during the
+    /// checks waits for the next hand-in, said (#8844, 11-24: one commit handed in, two landed).
     #[cfg(unix)]
     #[test]
     fn a_queued_hand_in_is_re_pinned_only_when_superseded() {
@@ -1976,6 +2259,31 @@ mod tests {
         assert!(git(&r.repo, &["update-ref", "refs/heads/rc-s", &third]).0);
         assert!(words(&[]).is_ok(), "a failed hand-in is handed in again as before");
         assert_eq!(TrainRepos::entry(&t, id).ms, third);
+        // pinned at `fourth` as the command starts; `fifth` is committed while its checks run
+        t.set(id, |e| e.state = St::Failed, None);
+        let fourth = TrainRepos::commit(&r.repo, &[&third], "rc-s fourth", "s.rs", "pub fn s() { fourth() }\n");
+        let fifth = TrainRepos::commit(&r.repo, &[&fourth], "rc-s mid-check", "s.rs", "pub fn s() { fifth() }\n");
+        assert!(git(&r.repo, &["update-ref", "refs/heads/rc-s", &fifth]).0);
+        let pin = format!("pin={fourth},");
+        let said = words(&[pin.as_str()]).expect("a branch that moved during its checks is no error");
+        assert_eq!(TrainRepos::entry(&t, id).ms, fourth, "mid-check: the landing takes the commit its checks ran on, not the head");
+        assert!(said.contains(&format!("branch rc-s moved during checks: landed {fourth:.10}; 1 newer commit not included, for the next hand-in")), "mid-check: the hand-in says what waits: {said}");
+        // a merge of the tip into the branch is none of the lane's commits
+        t.set(id, |e| e.state = St::Failed, None);
+        let tip = TrainRepos::commit(&r.repo, &[&r.base], "work moves", "w.rs", "pub fn w() {}\n");
+        assert!(git(&r.repo, &["update-ref", "refs/heads/work", &tip]).0);
+        let merged = TrainRepos::commit(&r.repo, &[&fifth, &tip], "merge work into rc-s", "s.rs", "pub fn s() { fifth() }\n");
+        assert!(git(&r.repo, &["update-ref", "refs/heads/rc-s", &merged]).0);
+        let pin = format!("pin={fifth},");
+        let said = words(&[pin.as_str()]).expect("a branch the tip was merged into during its checks is no error");
+        assert_eq!(TrainRepos::entry(&t, id).ms, fifth, "tip merge: the checked commit lands");
+        assert!(said.contains(&format!("landed {fifth:.10}; 0 newer commits not included (it moved by a merge of the tip alone)")), "tip merge: counts the lane's own commits only: {said}");
+        // rewritten under its checks: the checked commit is no longer the lane's
+        let rewritten = TrainRepos::commit(&r.repo, &[&third], "rc-s rewritten", "s.rs", "pub fn s() { other() }\n");
+        assert!(git(&r.repo, &["update-ref", "refs/heads/rc-s", &rewritten]).0);
+        let refused = words(&["supersede", pin.as_str()]).expect_err("a branch rewritten during its checks is refused");
+        assert_eq!(refused, format!("branch rc-s was rewritten during the checks: {fifth:.10}, the commit they checked, is no longer on it (now {rewritten:.10}); nothing queued, hand in again"));
+        assert_eq!(TrainRepos::entry(&t, id).ms, fifth, "rewritten: the queued entry keeps its commits");
     }
 
     /// Nothing re-checks a hand-in at its merge, and nothing waits for a check: each lands as
@@ -2051,6 +2359,21 @@ mod tests {
         };
         branch(&r, "rc-ok", "ok");
         branch(&c, "rc-ok", "cok");
+        let commit = |dir: &Path, file: &str, text: &str| {
+            std::fs::write(dir.join(file), text).unwrap();
+            g(dir, &["add", "."]);
+            g(dir, &["commit", "-qm", file]);
+        };
+        commit(&c, "prose", "a frame that misses its slot never lands\n");
+        std::fs::create_dir_all(c.join("docs/agents")).unwrap();
+        let ask_for_it = format!("mark each line of a measurement hook with `{SCRATCH}`\n");
+        commit(&c, "docs/agents/flow.md", &ask_for_it);
+        commit(&c, "AGENTS.md", &ask_for_it);
+        branch(&r, "rc-scratch", "scr");
+        branch(&c, "rc-scratch", "cscr");
+        commit(&c, "hook", &format!("fn hook() {{}}\n/// `{}`: a freeze hook\n", SCRATCH.to_uppercase()));
+        std::fs::create_dir_all(c.join("src")).unwrap();
+        commit(&c, "src/notes.md", &format!("// MEASURE ({SCRATCH}): a freeze hook's notes\n"));
         branch(&r, "rc-no", "no");
         branch(&r, "rc-later", "later");
         branch(&r, "rc-hard", "AGENTS.md");
@@ -2082,6 +2405,7 @@ mod tests {
         assert!(ask(&format!("add rc-ok {} rc-ok", c.display()))[0].contains("\"id\":1"));
         assert!(ask("add rc-no")[0].contains("\"id\":2"));
         assert!(ask("add rc-later")[0].contains("\"id\":3"));
+        assert!(ask(&format!("add rc-scratch {} rc-scratch", c.display()))[0].contains("\"id\":4"));
         t.start_ready();
         let st = |b: &str| Entry::parse(&ask(&format!("status {b}"))[0]).unwrap();
         assert_eq!(st("rc-ok").state, St::Landed, "{:?}", st("rc-ok"));
@@ -2094,6 +2418,14 @@ mod tests {
         assert_eq!((st("rc-no").state, st("rc-no").detail.clone()), (St::Failed, vec!["the rule says no".to_string()]), "a refusal fails the landing");
         assert_eq!((st("rc-later").state, st("rc-later").detail.clone()), (St::Waiting, vec!["not built yet".to_string()]), "a rule not built yet holds it");
         assert!(!r.join("no").exists() && !r.join("later").exists(), "neither landed");
+        // a line marked as a lane's scratch code, in either half, refuses the landing (a slot's
+        // freeze hook landed in commercial main, #9062, 11-25), backticks or not, and Markdown
+        // outside docs/ too; prose saying "never lands" is none, and docs/**/*.md and AGENTS.md
+        // that ask lanes to write the mark land
+        let s = st("rc-scratch");
+        assert!(s.state == St::Failed && s.detail[1..] == ["commercial: hook:2", "commercial: src/notes.md:1"] && s.detail[0].starts_with("it adds 2 line(s) marked"), "the scratch lines, named: {s:?}");
+        assert!(!r.join("scr").exists() && !c.join("hook").exists(), "no half of it landed");
+        assert!(c.join("prose").exists() && c.join("docs/agents/flow.md").exists() && c.join("AGENTS.md").exists(), "rc-ok's prose and docs did");
         // switched off, no landing runs the rule: one the rule refuses lands, saying so
         assert_eq!(ask("rule"), vec!["{\"rule\":\"on\",\"why\":\"\"}".to_string()], "the rule is on until switched off");
         // switching it off is the user's, at a terminal: an agent's identity, or no terminal, is
@@ -2109,7 +2441,7 @@ mod tests {
         assert_eq!(ask(&off), vec!["{\"rule\":\"off\",\"why\":\"user 11-15\"}".to_string()]);
         assert_eq!(t.store().read(|d| d.land_witness.clone()), "", "the user's off drops the witness: the next landing after on starts a fresh one");
         assert_eq!(train_ruled(&home, &r, Path::new("/usr/bin/true"), events.clone(), rule).rule_off().as_deref(), Some("user 11-15"), "the switch outlives a master restart");
-        assert!(ask("add rc-hard")[0].contains("\"id\":4"));
+        assert!(ask("add rc-hard")[0].contains("\"id\":5"));
         t.start_ready();
         assert_eq!(st("rc-hard").state, St::Landed, "off, a landing the rule refuses lands: {:?}", st("rc-hard"));
         assert!(r.join("AGENTS.md").exists(), "its T1-hard path landed");
@@ -2121,6 +2453,16 @@ mod tests {
         assert_eq!((st("rc-no").state, st("rc-no").detail.clone()), (St::Failed, vec!["the rule says no".to_string()]), "on, the rule refuses again");
         assert!(!r.join("no").exists(), "nothing of it landed");
         assert_eq!(HANDED.lock().unwrap().last().map(String::as_str), Some("rc-no  before after rc-ok"), "with no witness since the off, the last landed entry's goes with it, for the rule to say what was lost");
+        // its lane over (dropped, and none live with its branch), its failed entry leaves the list;
+        // while a live lane has the branch it stays (a dropped intake lane's refusal stood 27 h, 11-23)
+        let lane = |name: &str, state: &str| crate::state::LaneRec { name: name.into(), path: format!("/nowhere/{name}"), branch: "rc-no".into(), state: state.into(), ..Default::default() };
+        t.store().update(|d| d.lanes.extend([lane("no-old", "dropped"), lane("no", "live")])).unwrap();
+        t.start_ready();
+        assert_eq!(st("rc-no").state, St::Failed, "a live lane's failed entry stays");
+        t.store().update(|d| d.lanes.retain(|l| l.state != "live")).unwrap();
+        t.start_ready();
+        assert!(Entry::parse(ask("status rc-no").first().map_or("", String::as_str)).is_none(), "its lane dropped, its failed entry leaves the list");
+        assert!(events.lock().unwrap().iter().any(|l| l.starts_with("land #2 rc-no") && l.ends_with("leaves the list: lane no-old was dropped")), "and says so: {:?}", events.lock().unwrap());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2251,7 +2593,20 @@ mod tests {
         assert!(ask("add rc-n commercial=rc-n")[0].contains("err"), "commercial's half is the worktree form");
         assert!(ask("add rc-n extra=rc-n extra=rc-o")[0].contains("extra twice"));
         assert!(ask("add - extra=rc-in")[0].contains("nothing to land"), "a half with nothing new is left out");
-        let added = ask("add rc-n extra=rc-n agent=lane-n");
+        // lane n's makepad and extra halves, both on rc-n: its branch alone is refused, the half it
+        // would leave behind named, and the branch resolves to every half of the lane, as its
+        // worktree hands it in (`land rc-fabpick2` landed its makepad half alone and left its apps
+        // half behind, #8947, 11-24)
+        let lane = d.join("lane-n");
+        g(&r, &["worktree", "add", "-q", &lane.display().to_string(), "rc-n"]);
+        g(&x, &["worktree", "add", "-q", &lane.join("apps/extra").display().to_string(), "rc-n"]);
+        t.store().update(|d| d.lanes.push(crate::state::LaneRec { name: "n".into(), path: lane.display().to_string(), branch: "rc-n".into(), state: "live".into(), ..Default::default() })).unwrap();
+        let alone = ask("add rc-n");
+        assert!(alone[0].contains("\"err\"") && alone[0].contains("lane n has commits on rc-n in extra too; land every half: makepad devhub land rc-n extra=rc-n"), "a lane's branch alone never leaves its extra half behind: {alone:?}");
+        let halves = super::lane_hand_in(&r, "rc-n").expect("rc-n is the lane worktree's branch").expect("its halves");
+        assert_eq!(halves, ["rc-n", "extra=rc-n"], "a lane's branch resolves to both its halves");
+        assert_eq!(super::lane_hand_in(&r, "rc-o"), None, "a branch no worktree is on names itself only");
+        let added = ask(&format!("add {} agent=lane-n", halves.join(" ")));
         assert!(added[0].contains("\"label\":\"rc-n+extra=rc-n\""), "{added:?}");
         assert!(ask("add - extra=rc-o")[0].contains("\"label\":\"-+extra=rc-o\""));
         assert!(ask("add - extra=rc-k")[0].contains("\"id\":3"));
@@ -2275,6 +2630,23 @@ mod tests {
         assert!(r.join("n").exists() && x.join("xn").exists() && x.join("xo").exists());
         assert_eq!(o.nested[0].landed, trunk, "the tip it landed at");
         assert!(n.nested[0].landed.len() == 40 && is_ancestor(&x, &n.nested[0].landed, &trunk));
+        // a commercial checkout on a branch that is not its lane's own is never picked up unnamed:
+        // `land sandeng-gloss` from a slot paired the slot's measurement branch and landed it in
+        // commercial main (#9062, 11-25). On the lane's own rc-n it is one of the halves; a slot of
+        // lane n (`n.slots/1`) on a side branch takes rc-n, never a branch of its own
+        let lc = lane.join("apps/commercial");
+        let lcs = lc.display().to_string();
+        g(&c, &["branch", "measure", "main"]);
+        g(&c, &["worktree", "add", "-q", &lcs, "measure"]);
+        let refused = super::lane_hand_in(&r, "rc-n").expect("rc-n is the lane worktree's branch").expect_err("its commercial checkout is on measure");
+        assert!(refused.contains(&format!("{lcs} is on measure")) && refused.contains(&format!("makepad devhub land rc-n {lcs} measure")), "the branch and how to name it: {refused}");
+        g(&lc, &["checkout", "-qb", "rc-n"]);
+        assert_eq!(super::lane_hand_in(&r, "rc-n").unwrap().unwrap(), ["rc-n", lcs.as_str(), "rc-n", "extra=rc-n"], "the lane's own commercial branch is one of its halves");
+        let slot = d.join("n.slots/1");
+        g(&r, &["worktree", "add", "-q", "-b", "n-gloss", &slot.display().to_string(), "work"]);
+        g(&c, &["worktree", "add", "-q", &slot.join("apps/commercial").display().to_string(), "measure"]);
+        let refused = super::lane_hand_in(&r, "n-gloss").expect("a worktree is on n-gloss").expect_err("the slot's checkout is on measure");
+        assert!(refused.contains("is on measure, not this lane's own commercial branch (rc-n) or main"), "a slot's lane is its slots dir's: {refused}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2703,6 +3075,36 @@ mod tests {
         let behind = commit(&c, "other", "behind\n", "a commit of its own before the landing");
         g(&c, &["checkout", "-q", "main"]);
         assert!(beside_head(&landed, &r, &work, &behind).is_err_and(|e| e.contains("makepad devhub lanes merge")), "a head of its own that lacks the landing is refused, naming the merge");
+        // a followed nested repository the pin's worktree lacks stands where it stood beside the
+        // pin's halves: before a landing that also landed in it, which the pin lacks, and before a
+        // later landing in it alone whose makepad tip the pin lacks; a pin holding the landing keeps
+        // its tip (#8321, 11-22)
+        let x = d.join("x");
+        std::fs::create_dir_all(&x).unwrap();
+        g(&x, &["init", "-q", "-b", "main"]);
+        g(&x, &["config", "user.email", "t@t"]);
+        g(&x, &["config", "user.name", "t"]);
+        let x0 = commit(&x, "readme", "x\n", "x base");
+        g(&x, &["checkout", "-qb", "rc-s"]);
+        commit(&x, "fab", "fab\n", "fab moves in");
+        g(&x, &["checkout", "-q", "main"]);
+        g(&x, &["merge", "-q", "--no-ff", "-m", "land rc-s", "rc-s"]);
+        let x1 = rev(&x, "HEAD").unwrap();
+        let x2 = commit(&x, "fab", "fab 2\n", "a landing in x alone");
+        let side = |landed: &str| Side { name: "x".into(), branch: "rc-s".into(), sha: String::new(), landed: landed.into() };
+        let moved = Entry { nested: vec![side(&x1)], ..e.clone() };
+        let alone = Entry { id: 3, pre: e.landed.clone(), nested: vec![side(&x2)], changed_ms: e.changed_ms + 2, ..e.clone() };
+        let both = [moved, alone.clone()];
+        let at = |work: &str, main: &str| { let (at, held) = beside_pin(&both, &r, &x, "x", work, main, &x2); (at.map(|(c, e)| (c, e.id)), held) };
+        assert_eq!(at(&w0, &m0), (Some((x0.clone(), 3)), false), "a pin before the landing: x before it and the later one in x alone, the pin older than every landing asked about");
+        assert_eq!(at(&work, &main), (None, true), "a pin that holds it: x at its tip");
+        assert_eq!(at(&w0, ""), (Some((x0, 3)), false), "a pin with no commercial side, by its makepad half");
+        // a landing in x alone stands beside the makepad tip it landed on: a pin from before that
+        // tip has x before it (#8817 in apps alone used #8815's makepad half: E0599, 11-24); one
+        // whose makepad half holds that tip has x at its tip, whatever its commercial side
+        let at_alone = |work: &str, main: &str| { let (at, held) = beside_pin(std::slice::from_ref(&alone), &r, &x, "x", work, main, &x2); (at.map(|(c, e)| (c, e.id)), held) };
+        assert_eq!(at_alone(&w0, &m0), (Some((x1.clone(), 3)), false), "a landing in x alone, beside a makepad tip the pin lacks");
+        assert_eq!(at_alone(&work, &m0), (None, true), "beside a makepad tip the pin holds");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3038,11 +3440,17 @@ mod tests {
         }
         assert!(ask("drop rc-z")[0].contains("ok"));
         assert_eq!(ask("status all").len(), 4);
-        // a branch already in work lands nothing: it is just before what it landed
+        // a branch already in work lands nothing: refused at its hand-in, its half named (#8334)
         g(&r, &["branch", "rc-in", "work"]);
-        assert!(ask("add rc-in")[0].contains("\"id\":6"));
+        let said = ask("add rc-in")[0].clone();
+        assert!(said.contains("nothing to land: makepad rc-in at ") && said.contains(" is in work; commit the change first"), "{said}");
+        // one work took after its hand-in is marked landed: it is just before what it landed
+        branch(&r, "rc-in2", "in", "in\n", "work");
+        g(&r, &["checkout", "-q", "work"]);
+        assert!(ask("add rc-in2")[0].contains("\"id\":6"));
+        g(&r, &["merge", "-q", "--no-edit", "rc-in2"]);
         t.start_ready();
-        let e = st("rc-in");
+        let e = st("rc-in2");
         assert_eq!((e.state, e.pre.clone()), (St::Landed, e.landed.clone()), "{e:?}");
         assert!(!e.landed.is_empty());
         let _ = std::fs::remove_dir_all(&d);

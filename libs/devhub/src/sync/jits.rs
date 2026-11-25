@@ -72,6 +72,27 @@ pub fn exe_replaced(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
 }
 
+/// When a build replaced the executable `pid` runs (wall ms; 0: not replaced, or this platform
+/// cannot tell): the change time of the file it runs, which its unlink set and nothing moves
+/// after it (a later build replaces a file this process does not run), so a hub's restart reads
+/// it the same. Not its start: an app 25 min old whose binary a build replaced 34 s before was
+/// read as 25 min behind its checkout (11-24).
+pub fn replaced_ms(pid: u32) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !exe_replaced(pid) {
+            return 0;
+        }
+        return std::fs::metadata(format!("/proc/{pid}/exe")).map_or(0, |m| (m.ctime().max(0) as u64) * 1000 + m.ctime_nsec().max(0) as u64 / 1_000_000);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        0
+    }
+}
+
 /// Whether what the JIT `pid` itself is built from changed since the binary it runs (its `session
 /// pending`'s `inputs_changed`). A build that replaced its loader for sources it does not run
 /// (devhub's own, which the makepad binary links, and which no running app takes as an update)

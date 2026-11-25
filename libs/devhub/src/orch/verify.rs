@@ -679,15 +679,16 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
         }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() })
     };
     // a background leg: preempted by lane work, it asks again (a fresh log); a run whose exit was
-    // lost runs again too, as a job whose box was lost is placed again: up to its attempts in all
+    // lost runs again too, as a job whose box was lost is placed again: however often, after a
+    // pause that grows ([`super::job::again_after`]); a skipped verify waits no more
     let mut lost: Vec<String> = Vec::new();
     let mut again = |r: &Result<i32, String>| -> bool {
         let Some(e) = r.as_ref().err().filter(|e| super::leg::exit_lost(e)) else { return false };
         lost.push(e.clone());
-        if lost.len() >= super::job::ATTEMPTS as usize { return false; }
-        ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {}: its exit was lost ({e}); it runs again", pair.short()), None);
-        set("wait", "", "", &format!("its exit was lost ({e}); asks again"));
-        true
+        let pause = super::job::again_after(lost.len() as u32).as_secs();
+        ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {}: its exit was lost ({e}); it runs again in {pause} s", pair.short()), None);
+        set("wait", "", "", &format!("its exit was lost ({e}); asks again in {pause} s"));
+        super::job::pause_again(lost.len() as u32, &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire))
     };
     let (r, exit) = loop {
         if let Some(l) = back.take() {

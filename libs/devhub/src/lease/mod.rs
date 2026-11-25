@@ -232,8 +232,11 @@ impl Priority {
 /// for a decision. A timed lease on a bench box waited 13 min on an app parked at a compile
 /// refusal with its window up, for someone to stop it (11-14). One that still parks (a JIT that
 /// started some other way) is ended once it has gone quiet ([`sched::PANIC_QUIET_MS`]).
-pub fn nobody_attends(kind: Kind, priority: Priority, live: bool) -> bool {
-    !live && !matches!(kind, Kind::Screen | Kind::Inspect) && (kind == Kind::Timed || priority == Priority::Background)
+/// A land queue's lease (`lane`: [`sched::land_queue_lane`]) is nobody's at any priority: the
+/// pipeline, which nobody watches. The hot bucket and the fast gates ask interactive, and a
+/// panicking test of theirs would park for a person who never comes, the land queue behind it (11-22).
+pub fn nobody_attends(kind: Kind, priority: Priority, live: bool, lane: &str) -> bool {
+    !live && (sched::land_queue_lane(lane) || !matches!(kind, Kind::Screen | Kind::Inspect) && (kind == Kind::Timed || priority == Priority::Background))
 }
 
 /// Placement class from measured walls, estimates or kind defaults.
@@ -533,6 +536,12 @@ pub struct Caps {
     pub gpus: Vec<(String, f64)>,
     /// per GPU, in the order of `gpus`: (use %, VRAM used GB)
     pub gpu_busy: Vec<(f64, f64)>,
+    /// The GPU the box draws on that no lease reserves, by name: a Mac's (Apple silicon's is its
+    /// chip's, named by the chip). No lease resource, so not in `gpus` (the GPUs leases reserve,
+    /// with their VRAM: gpu lease slots), but what a `--needs gpu=1` ask asks for: without it every
+    /// Mac read gpu=none, and a Metal session pinned to a Mac was denied (L1616264, 11-23).
+    /// Empty: none, or an older hub.
+    pub shared_gpu: String,
     /// Temperatures and the hub's hysteresis state; empty on older hubs and other platforms.
     pub temps: Vec<Temp>,
     pub hot: Vec<HotTemp>,
@@ -577,7 +586,8 @@ pub struct Caps {
     /// WM or a JIT app whose binary a build replaced, how long ago, and a waiting WM restart's wait,
     /// since when and on what; empty: everything there runs its checkout's build
     pub stale: String,
-    /// since when the oldest of [`Self::stale`] has been so (wall ms; 0: none)
+    /// since when the oldest of [`Self::stale`] has been so: when a build first replaced what it
+    /// runs, else its start (wall ms; 0: none)
     pub stale_since_ms: u64,
     /// percent and charging, on devices with a battery
     pub battery: Option<(u32, bool)>,
@@ -651,6 +661,9 @@ pub struct Caps {
     pub jit_store: Option<std::sync::Arc<jitstore::Snapshot>>,
     /// the services the node's WM supervises (`~/.makepad/wm/<name>.state`): name, start wall ms
     pub services: Vec<(String, u64)>,
+    /// those of [`Self::services`] that run a build their checkout has since replaced
+    /// ([`crate::sync::serve::stale_runs`]): the update roll restarts them, whenever they started
+    pub services_stale: Vec<String>,
     /// ms since a person's last input at the box, as its WM or a Mac's HID system saw it
     /// ([`user`]; None: none since its hub started, or nothing senses it): a visible live
     /// session there is in use meanwhile. It takes the box out of no pool.
@@ -740,6 +753,7 @@ pub const FEATURES: &[&str] = &[
     "pool-cores", // a live test session's long-lived pools size from its call's charge, `cost.pool_cores`
     "serial", // its USB serial devices, their claims and sessions (`crate::serial`)
     "start-unquiet", // a timed start past its wait for a quiet box starts beside the work outside every lease, `unquiet`
+    "kept-native", // a kept lane's native tree is never taken for room nor swept, `kept` in a lease start names them
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -785,7 +799,7 @@ impl Caps {
         let hot = self.hot.iter().map(HotTemp::to_json).collect::<Vec<_>>().join(",");
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"temps\":[{temps}],\"hot\":[{hot}],\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"cpu_wait\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"cef_dist\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"stale\":{},\"stale_since_ms\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"input_idle_ms\":{},\"watched\":{},\"hand_held\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"temps\":[{temps}],\"hot\":[{hot}],\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"cpu_wait\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"shared_gpu\":{},\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"cef_dist\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"stale\":{},\"stale_since_ms\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"services_stale\":[{}],\"input_idle_ms\":{},\"watched\":{},\"hand_held\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -804,6 +818,7 @@ impl Caps {
             self.disk_free_gb,
             self.disk_total_gb,
             gpus.join(","),
+            json_str(&self.shared_gpu),
             self.display.as_deref().map_or("null".to_string(), json_str),
             self.battery.map_or("null".to_string(), |(p, c)| format!("{{\"pct\":{p},\"charging\":{c}}}")),
             self.role().as_str(),
@@ -842,6 +857,7 @@ impl Caps {
                 self.lease_builds.iter().map(|(lease, cores, what)| format!("{{\"lease\":{},\"cores\":{cores:.2},\"what\":{}}}", json_str(lease), json_str(what))).collect::<Vec<_>>().join(",")),
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
+            self.services_stale.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","),
             self.input_idle_ms.map_or("null".to_string(), |m| m.to_string()),
             self.watched,
             self.hand_held.as_ref().map_or("null".to_string(), |h| h.to_json()),
@@ -912,9 +928,11 @@ impl Caps {
                 Some(makepad_strict_json::Value::Obj(o)) => o.iter().filter_map(|(k, x)| num(x).map(|t| (k.clone(), t as u64))).collect(),
                 _ => Vec::new(),
             },
+            services_stale: v.get("services_stale").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             input_idle_ms: v.get("input_idle_ms").and_then(num).map(|m| m as u64),
             watched: v.get("watched").and_then(|x| x.as_bool()).unwrap_or(false),
             hand_held: v.get("hand_held").and_then(HandHeld::parse),
+            shared_gpu: v.get("shared_gpu").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             ..Default::default()
         };
         if let Some(a) = v.get("gpus").and_then(|x| x.as_arr()) {
@@ -1174,11 +1192,16 @@ mod tests {
     /// changes. A live session, a screen lease or an inspection is someone's, background or not.
     #[test]
     fn a_lease_nobody_attends_runs_its_jit_runs_unattended() {
-        assert!(nobody_attends(Kind::Timed, Priority::Interactive, false), "timed work runs alone");
-        assert!(nobody_attends(Kind::Test, Priority::Background, false) && nobody_attends(Kind::Build, Priority::Background, false));
-        assert!(!nobody_attends(Kind::Test, Priority::Interactive, false), "an agent waits on it");
-        assert!(!nobody_attends(Kind::Test, Priority::Background, true), "a live session");
-        assert!(!nobody_attends(Kind::Screen, Priority::Background, false) && !nobody_attends(Kind::Inspect, Priority::Background, false));
+        assert!(nobody_attends(Kind::Timed, Priority::Interactive, false, "lane"), "timed work runs alone");
+        assert!(nobody_attends(Kind::Test, Priority::Background, false, "lane") && nobody_attends(Kind::Build, Priority::Background, false, "lane"));
+        assert!(!nobody_attends(Kind::Test, Priority::Interactive, false, "lane"), "an agent waits on it");
+        assert!(!nobody_attends(Kind::Test, Priority::Background, true, "lane"), "a live session");
+        assert!(!nobody_attends(Kind::Screen, Priority::Background, false, "lane") && !nobody_attends(Kind::Inspect, Priority::Background, false, "lane"));
+        // the land queue's work is nobody's at any priority: the hot bucket and the fast gates ask
+        // interactive, and nobody watches the pipeline
+        for (kind, lane) in [(Kind::Test, sched::TOP_LANE), (Kind::Gate, "landq-fast"), (Kind::Test, "landq-mac"), (Kind::Gate, sched::LANDING_LANE)] {
+            assert!(nobody_attends(kind, Priority::Interactive, false, lane), "{lane}");
+        }
         let argv = |a: &str| a.split(' ').map(String::from).collect::<Vec<_>>();
         let un = |a: &str| loaders::unattended_run(argv(a)).join(" ");
         assert_eq!(un("makepad run -p app -- --x"), "makepad run --unattended -p app -- --x");
@@ -1276,6 +1299,7 @@ mod tests {
             disk_total_gb: 1200.0,
             gpus: vec![("GPU-B".into(), 32.0)],
             gpu_busy: vec![(37.0, 4.5)],
+            shared_gpu: "CHIP-A".into(),
             temps: vec![Temp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: Some(90.0) }, Temp { sensor: "unknown:temp1".into(), c: 55.5, limit: None }],
             hot: vec![HotTemp { sensor: "k10temp:Tctl".into(), c: 87.125, limit: 90.0 }],
             cpu_pct: Some(12.5),
@@ -1324,6 +1348,7 @@ mod tests {
             features: FEATURES.iter().map(|f| f.to_string()).collect(),
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],
+            services_stale: vec!["ai-hub".into()],
             input_idle_ms: Some(42_000),
             watched: true,
             hand_held: Some(HandHeld { app: "Fab".into(), pid: 41, how: "an XR headset".into() }),

@@ -329,15 +329,18 @@ fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
 
 /// Execs `cmd` in place of this process, the control listener ([`keep_control_over_exec`]), the
 /// log's stamper ([`crate::logstamp::keep_over_exec`]) and [`keep_fds`]'s descriptors kept over
-/// it. Returns only when the exec failed, with its error: the hooks ran in this process, so
-/// close-on-exec is set again and no child this image starts inherits the listener, the log or
-/// those descriptors.
+/// it, every connection shut down first ([`makepad_remote::conn::shut_down_all`]). Returns only
+/// when the exec failed, with its error: the hooks ran in this process, so close-on-exec is set
+/// again and no child this image starts inherits the listener, the log or those descriptors; the
+/// connections' peers dial again.
 #[cfg(unix)]
 pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
     crate::logstamp::keep_over_exec(cmd);
     let kept = keep_kept_fds(cmd);
     let hooks = EXEC_HOOKS.get();
     if let Some((before, _)) = hooks { before(); }
+    // each connection ends for its peer, even where a child holds a copy of its socket
+    makepad_remote::conn::shut_down_all();
     let e = exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
     if let Some((_, failed)) = hooks { failed(); }
     crate::logstamp::exec_failed();

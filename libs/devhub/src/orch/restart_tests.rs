@@ -2,7 +2,8 @@
 //! allapps, warm) over real node executors in another process, killed under a job, a job whose
 //! lease is still building its JIT, a verify leg, a CI shard, its own allapps run and a box's JIT
 //! prebuild mid-build, and started again on its state after the nodes went longer than their
-//! no-beat limit without it. All finish with their real exit codes, each command and each build run
+//! no-beat limit without it; and a job whose run had ended and whose lease had gone before its
+//! verdict was recorded. All finish with their real exit codes, each command and each build run
 //! once. The tools wait for a release file, created once the restarted master has taken its state
 //! back.
 
@@ -13,7 +14,7 @@ use makepad_remote::hosts::{Host, Hosts, Via};
 use makepad_remote::hub::Hub;
 use makepad_remote::{lines, Endpoint};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The first two are the CI boxes (their lease.conf opts in).
 const NODES: [&str; 6] = ["c1", "c2", "n3", "n4", "n5", "n6"];
@@ -164,12 +165,21 @@ fn script(path: &std::path::Path, text: &str) {
     crate::testenv::exec_script(path, text);
 }
 
-/// Kills the role processes it started, by the pids it holds.
-struct Roles(Vec<Child>);
+/// Kills the role processes it started, by the pids it holds; each by its role's name.
+struct Roles(Vec<(&'static str, Child)>);
+
+impl Roles {
+    /// The first of them that has ended, with how: the end of every wait on what it would have
+    /// done. Each lives its role's 600 s at most, so that is a wait's only bound: none by the
+    /// clock, which a loaded box ran past (a 180 s wait failed on one, 11-24).
+    fn ended(&mut self) -> Option<String> {
+        self.0.iter_mut().find_map(|(name, c)| c.try_wait().ok().flatten().map(|status| format!("the {name} process ended ({status})")))
+    }
+}
 
 impl Drop for Roles {
     fn drop(&mut self) {
-        for c in &mut self.0 {
+        for (_, c) in &mut self.0 {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -220,6 +230,8 @@ fn a_master_restart_ends_nothing() {
     script(&bin.join("leg"), &once("leg", "echo TESTLEG-OK\nexit 0"));
     script(&bin.join("job"), &once("job", "echo after\nexit 7"));
     script(&bin.join("allapps"), &once("allapps", "echo allapps done\nexit 0"));
+    // (ends at once: its verdict is in before the kill)
+    script(&bin.join("quick"), &format!("#!/bin/sh\necho \"$*\" >> {}/quick\necho quick ran\nexit 3\n", ran.display()));
 
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let role = |name: &str, test: &str| {
@@ -227,18 +239,17 @@ fn a_master_restart_ends_nothing() {
         c.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_RESTART_ROLE", name).env("DEVHUB_RESTART_BASE", &base).env("TMPDIR", &tmp).env("MAKEPAD_HOME", &home).env("CARGO_HOME", base.join("no-cargo-home")).env("DEVHUB_TEST_REPO", &repo).env("DEVHUB_TEST_LEG", bin.join("leg")).env("DEVHUB_TEST_ALLAPPS", bin.join("allapps")).stdin(Stdio::null());
         c
     };
-    let mut roles = Roles(Vec::new());
-    roles.0.push(role("nodes", "orch::restart_tests::restart_role_nodes").env("PATH", &path).env("XDG_RUNTIME_DIR", base.join("rt")).stderr(std::fs::File::create(base.join("nodes.log")).unwrap()).spawn().unwrap());
+    let roles = std::cell::RefCell::new(Roles(Vec::new()));
+    roles.borrow_mut().0.push(("nodes", role("nodes", "orch::restart_tests::restart_role_nodes").env("PATH", &path).env("XDG_RUNTIME_DIR", base.join("rt")).stderr(std::fs::File::create(base.join("nodes.log")).unwrap()).spawn().unwrap()));
     let sock = base.join("n6.sock");
-    let t = Instant::now();
     while !sock.exists() {
-        assert!(t.elapsed() < Duration::from_secs(30), "the nodes did not come up");
+        if let Some(why) = roles.borrow_mut().ended() { panic!("the nodes did not come up: {why}"); }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}},{{\"kind\":\"test\",\"lane\":\"refused\",\"cmd\":[\"env\"]}},{{\"kind\":\"test\",\"lane\":\"built\",\"cmd\":[\"env\",\"BUILD_HELD=1\",\"cargo\",\"run\",\"--profile\",\"host\",\"-p\",\"makepad-run\",\"--bin\",\"makepad\",\"--\",\"built-job\"]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")));
+    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}},{{\"kind\":\"test\",\"lane\":\"refused\",\"cmd\":[\"env\"]}},{{\"kind\":\"test\",\"lane\":\"built\",\"cmd\":[\"env\",\"BUILD_HELD=1\",\"cargo\",\"run\",\"--profile\",\"host\",\"-p\",\"makepad-run\",\"--bin\",\"makepad\",\"--\",\"built-job\"]}},{{\"kind\":\"test\",\"lane\":\"exited\",\"cmd\":[{}]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")), json(&bin.join("quick")));
     let mut first = role("master", "orch::restart_tests::restart_role_master");
     first.env("DEVHUB_RESTART_SUBMIT", submit);
-    let mut master = first.spawn().unwrap();
+    roles.borrow_mut().0.push(("first master", first.spawn().unwrap()));
 
     // everything is on its box, running
     let state = || {
@@ -248,24 +259,26 @@ fn a_master_restart_ends_nothing() {
     };
     let num = |v: &makepad_strict_json::Value, k: &str| v.get(k).and_then(crate::lease::num).unwrap_or(0.0) as u64;
     let text = |v: &makepad_strict_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    // each wait is for the event it proves, until it comes or a role process that would bring it
+    // ends ([`Roles::ended`]): never a time, which a loaded box ran past (11-24)
     let until = |what: &str, f: &dyn Fn(&makepad_strict_json::Value) -> bool| {
-        let t = Instant::now();
         loop {
             if state().is_some_and(|s| f(&s)) {
                 return;
             }
-            if t.elapsed() >= Duration::from_secs(180) {
+            if let Some(why) = roles.borrow_mut().ended() {
                 let now = crate::state::committed(&home.join("devhub")).map(|v| v.map(|v| v.to_json()).unwrap_or_default()).unwrap_or_else(|e| e);
                 // and the master's leases, which the state leaves out: where each is, why one waits
                 let client = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(home.join("devhub/devhub.sock")), "observe");
                 let leases = crate::cli::ask(&client, None, "leases", "leases all").map(|l| l.join("\n")).unwrap_or_else(|e| e);
-                panic!("{what}: {now}\nthe master's leases:\n{leases}");
+                panic!("{what}: {why} before it: {now}\nthe master's leases:\n{leases}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     };
     let job0 = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.first()).cloned();
     let built = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.iter().find(|j| text(j, "lane") == "built").cloned());
+    let exited = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.iter().find(|j| text(j, "lane") == "exited").cloned());
     let count = |name: &str| std::fs::read_to_string(ran.join(name)).unwrap_or_default().lines().count();
     let leg0 = |s: &makepad_strict_json::Value| s.get("jitlegs").and_then(|v| v.get("runs")).and_then(|r| r.as_arr()).and_then(|r| r.last()).and_then(|r| r.get("legs")).and_then(|l| l.as_arr()).and_then(|l| l.first()).cloned();
     let shards_of = |s: &makepad_strict_json::Value| s.get("ci").and_then(|c| c.get("run")).and_then(|r| r.get("shards")).and_then(|x| x.as_arr()).map(|a| a.to_vec()).unwrap_or_default();
@@ -286,6 +299,8 @@ fn a_master_restart_ends_nothing() {
             && built(s).is_some_and(|j| !text(&j, "lease").is_empty()) && count("build") == 1
             // and the box's prebuild on its lease, its build running
             && prebuild(s).is_some_and(|p| text(&p, "state") == "building" && !text(&p, "lease").is_empty()) && count("prebuild") == 1
+            // and the quick job's verdict in, its lease released
+            && exited(s).is_some_and(|j| text(&j, "state") == "failed")
     });
     let s = state().unwrap();
     let mid_build = built(&s).unwrap();
@@ -321,8 +336,39 @@ fn a_master_restart_ends_nothing() {
     });
 
     // the master dies under all three, and comes back on its state
+    let (_, mut master) = { let mut r = roles.borrow_mut(); let i = r.0.iter().position(|(name, _)| *name == "first master").unwrap(); r.0.remove(i) };
     let _ = master.kill();
     let _ = master.wait();
+    // the quick job as a master leaves it that dies between its lease's release and its verdict
+    // ([`super::job`]'s `ended`): its run's exit noted, its lease gone from the live set, the
+    // verdict not written (J16837 ran again after a restart there, 11-23)
+    let quick = exited(&state().unwrap()).unwrap();
+    let quick_lease = text(&quick, "lease");
+    // (a cleanup its box has not confirmed yet keeps it there as `cleaning`, never held)
+    let live = std::fs::read_to_string(home.join("devhub/leases.live")).unwrap_or_default();
+    assert!(!quick_lease.is_empty() && !live.lines().any(|l| l.contains(&format!("\"id\":\"{quick_lease}\"")) && !l.contains("\"state\":\"cleaning\"")), "released: {}\n{live}", quick.to_json());
+    crate::state::Store::open_quiet(&home.join("devhub"), "").unwrap().update(|d| {
+        let j = d.jobs.iter_mut().find(|j| j.lane == "exited").unwrap();
+        (j.state, j.ended_ms, j.log) = ("running".into(), 0, String::new());
+        (j.errors, j.tail) = (Vec::new(), Vec::new());
+    }).unwrap();
+    // and its lease's end as a master leaves it that dies before its ledger line: the line kept
+    // in the live set, none in the ledger (L1596652 had none after a restart, 11-23)
+    let ledger = home.join("devhub/leases.jsonl");
+    let named = format!("\"id\":\"{quick_lease}\"");
+    let lines = std::fs::read_to_string(&ledger).unwrap();
+    let quick_line = lines.lines().find(|l| l.contains(&named)).unwrap_or_else(|| panic!("{quick_lease} in the ledger: {lines}")).to_string();
+    std::fs::write(&ledger, lines.lines().filter(|l| !l.contains(&named)).map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    let mut kept = std::fs::OpenOptions::new().append(true).open(home.join("devhub/leases.live")).unwrap();
+    std::io::Write::write_all(&mut kept, format!("{}\n", crate::lease::sched::Sched::unledgered_line(&quick_lease, &quick_line)).as_bytes()).unwrap();
+    // and its costs line likewise: kept in the live set, none in costs.jsonl (a lease whose end a
+    // restart cut had none, and its class lost the run's measure, 11-23)
+    let costs = home.join("devhub/costs.jsonl");
+    let costed = format!("\"lease\":\"{quick_lease}\"");
+    let lines = std::fs::read_to_string(&costs).unwrap();
+    let quick_cost = lines.lines().find(|l| l.contains(&costed)).unwrap_or_else(|| panic!("{quick_lease} in costs.jsonl: {lines}")).to_string();
+    std::fs::write(&costs, lines.lines().filter(|l| !l.contains(&costed)).map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+    std::io::Write::write_all(&mut kept, format!("{}\n", crate::lease::sched::Sched::uncosted_line(&quick_lease, &quick_cost)).as_bytes()).unwrap();
     // gone past the nodes' no-beat limit: each box holding its leases says it keeps them for it.
     // Their word, not a time: when a box's watchdog sees it gone depends on the box's load.
     // Readiness below, not elapsed time either, releases the tools
@@ -332,7 +378,7 @@ fn a_master_restart_ends_nothing() {
         held.iter().all(|n| log.contains(&away(n)))
     });
     let ready = base.join("master.log");
-    roles.0.push(role("master", "orch::restart_tests::restart_role_master").stderr(std::fs::File::create(&ready).unwrap()).spawn().unwrap());
+    roles.borrow_mut().0.push(("restarted master", role("master", "orch::restart_tests::restart_role_master").stderr(std::fs::File::create(&ready).unwrap()).spawn().unwrap()));
     // only the new master writes this log, after restoring leases and starting every workflow
     until("the restarted master ready", &|_| std::fs::read_to_string(&ready).unwrap_or_default().lines().any(|l| l == "restart master ready"));
     std::fs::write(&release, "").unwrap();
@@ -359,6 +405,16 @@ fn a_master_restart_ends_nothing() {
     let log = std::fs::read_to_string(home.join(format!("devhub/jobs/{}.log", text(&j, "id")))).unwrap();
     assert!(log.contains("devhub: cargo built this tree's JIT in") && log.contains("the built JIT ran"), "{log}");
     assert_eq!((count("build"), count("built-job")), (1, 1), "one build, one command: {log}");
+
+    // the job whose run had ended: its noted exit is its result, its command not run again
+    until("the exited job's result", &|s| exited(s).is_some_and(|j| !matches!(text(&j, "state").as_str(), "queued" | "leasing" | "running")));
+    let j = exited(&state().unwrap()).unwrap();
+    assert_eq!((text(&j, "state").as_str(), num(&j, "exit"), text(&j, "lease"), num(&j, "attempts"), count("quick")), ("failed", 3, quick_lease, 1, 1), "{}", j.to_json());
+    // and its lease's ledger line, written once by the restarted master, marked cut
+    let cut: Vec<String> = std::fs::read_to_string(&ledger).unwrap().lines().filter(|l| l.contains(&named)).map(str::to_string).collect();
+    assert!(cut.len() == 1 && cut[0].contains("\"cut\":\"restart\"") && cut[0].strip_suffix(",\"cut\":\"restart\"}") == quick_line.strip_suffix('}'), "{quick_line}\n{cut:?}");
+    let cut: Vec<String> = std::fs::read_to_string(&costs).unwrap().lines().filter(|l| l.contains(&costed)).map(str::to_string).collect();
+    assert!(cut.len() == 1 && cut[0].strip_suffix(",\"cut\":\"restart\"}") == quick_cost.strip_suffix('}'), "its costs line, written once, marked cut: {quick_cost}\n{cut:?}");
 
     let verified = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("verified")).and_then(|v| v.as_arr()).is_some_and(|v| !v.is_empty());
     until("the verdict", &|s| (verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()))
@@ -392,7 +448,7 @@ fn a_master_restart_ends_nothing() {
     assert!(warm_log.contains("devhub: cargo built this tree's JIT in") && warm_log.contains("makepad\n"), "its build made the JIT its step ran: {warm_log}");
     let ended = std::fs::read_to_string(home.join("devhub/leases.jsonl")).unwrap_or_default();
     assert!(ended.lines().any(|l| l.contains(&format!("\"id\":\"{leg_lease}\""))), "the leg kept its lease {leg_lease}: {ended}");
-    drop(roles);
+    drop(roles.into_inner());
     for name in NODES {
         let _ = std::fs::remove_dir_all(work_dir(&base, name));
     }

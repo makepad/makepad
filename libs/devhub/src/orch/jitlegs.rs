@@ -6,12 +6,19 @@ use super::verify::{self, Verdict};
 use super::{snapshot, stamp, Ctx};
 use crate::proto::{wall_ms, Sev};
 use crate::state::{JitLegsRun, Leg, Pair, NOT_RUN};
+use makepad_remote::json_str;
 use makepad_strict_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const TICK: Duration = Duration::from_secs(60);
+
+/// An open `jitlegs wait` answers at least this often, as `job wait` does: the CLI asks again, and
+/// waits a master restart out in between.
+const WAIT: Duration = Duration::from_secs(30);
+
+const WAIT_USAGE: &str = "jitlegs wait [<run>] [--leg <name>]";
 
 /// The warm leg: its verdicts are times, so it runs as a timed lease on the bench box.
 const WARM: &str = "warm";
@@ -163,7 +170,45 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
     ctx.store.event("jitlegs", Sev::Info, format!("jitlegs {} ended (wall {}s){classified}", r.pair.short(), ended_ms.saturating_sub(r.started_ms) / 1000), None);
 }
 
-/// `jitlegs [status|run]`.
+/// `jitlegs wait`'s words: `[<run>] [--leg <name>]`.
+pub(super) fn wait_words<'a>(words: &[&'a str]) -> Result<(Option<&'a str>, Option<&'a str>), String> {
+    let (mut run, mut leg) = (None, None);
+    let mut it = words.iter();
+    while let Some(w) = it.next() {
+        match *w {
+            "--leg" => leg = Some(*it.next().ok_or_else(|| WAIT_USAGE.to_string())?),
+            w if !w.starts_with('-') && run.is_none() => run = Some(w),
+            _ => return Err(WAIT_USAGE.into()),
+        }
+    }
+    Ok((run, leg))
+}
+
+/// What `jitlegs wait` waits on in `runs`: the run `run` names (its log folder's stamp, or its pair
+/// as `status` prints it, `<work>[,<main>]` prefixes, the newest such; none: the newest run) and,
+/// with `leg`, that leg alone. Its index, whether it has its verdict (a leg: ok, fail, incomplete
+/// or not run; the whole run: its end), and whether nothing it waited on failed or was incomplete
+/// (a leg not run says why, and is no failure).
+fn waited(runs: &[JitLegsRun], run: Option<&str>, leg: Option<&str>) -> Result<(usize, bool, bool), String> {
+    let named = |r: &JitLegsRun| run.is_none_or(|name| {
+        let (work, main) = name.split_once(',').unwrap_or((name, ""));
+        stamp(r.started_ms) == name || !work.is_empty() && r.pair.work.starts_with(work) && r.pair.main.starts_with(main)
+    });
+    let i = runs.iter().rposition(named).ok_or_else(|| format!("jitlegs wait: no run {}", run.unwrap_or("yet")))?;
+    let r = &runs[i];
+    let legs: Vec<&Leg> = r.legs.iter().filter(|l| leg.is_none_or(|name| l.name == name)).collect();
+    if let Some(name) = leg.filter(|_| legs.is_empty()) {
+        let names: Vec<&str> = r.legs.iter().map(|l| l.name.as_str()).collect();
+        return Err(format!("jitlegs wait: the run {} has no leg {name} (its legs: {})", stamp(r.started_ms), names.join(", ")));
+    }
+    let settled = if leg.is_some() { legs.iter().all(|l| matches!(l.state.as_str(), "ok" | "fail" | "incomplete" | NOT_RUN)) } else { r.ended_ms > 0 };
+    let ok = !legs.iter().any(|l| matches!(l.state.as_str(), "fail" | "incomplete"));
+    Ok((i, settled, ok))
+}
+
+/// `jitlegs [status|run|wait [<run>] [--leg <name>]]`. A wait answers once what it names has its
+/// verdict, or after [`WAIT`]: its run's stamp (the CLI names it from then on, through new runs),
+/// whether it is settled, whether nothing failed, and that run.
 pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let words: Vec<&str> = line.split_whitespace().skip(1).collect();
     match words.as_slice() {
@@ -173,11 +218,39 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             ctx.store.event("jitlegs", Sev::Info, "jitlegs: asked for the newest landed pair".into(), None);
             Ok("{\"queued\":true}".into())
         }
-        _ => Err("jitlegs [status|run]".into()),
+        ["wait", rest @ ..] => {
+            let (run, leg) = wait_words(rest)?;
+            // a change to the runs wakes it ([`crate::state::Store::update`]); subscribed before reading
+            let signal = ctx.store.subscribe("jitlegs", &["runs"]);
+            let deadline = Instant::now() + WAIT;
+            loop {
+                let seen = signal.generation();
+                let settled = ctx.store.read(|d| waited(&d.jitlegs.runs, run, leg))?.1;
+                let left = deadline.saturating_duration_since(Instant::now());
+                if settled || left.is_zero() { break; }
+                signal.wait(seen, left);
+            }
+            ctx.store.read(|d| {
+                let (i, settled, ok) = waited(&d.jitlegs.runs, run, leg)?;
+                let r = &d.jitlegs.runs[i];
+                let leg = leg.map_or(String::new(), |l| format!(",\"leg\":{}", json_str(l)));
+                Ok(format!("{{\"stamp\":{},\"settled\":{settled},\"ok\":{ok}{leg},\"runs\":[{}]}}", json_str(&stamp(r.started_ms)), crate::state::jitlegs_run_value(r).to_json()))
+            })
+        }
+        _ => Err(format!("jitlegs [status|run] | {WAIT_USAGE}")),
     }
 }
 
 pub fn render(v: &Value) -> String {
+    render_legs(v, None)
+}
+
+/// `jitlegs wait`'s verdict: its run, and the leg it waited on alone.
+pub fn render_wait(v: &Value) -> String {
+    render_legs(v, v.get("leg").and_then(|x| x.as_str()))
+}
+
+fn render_legs(v: &Value, only: Option<&str>) -> String {
     let Some(r) = v.get("runs").and_then(|a| a.as_arr()).and_then(|a| a.last()) else { return "jitlegs: no run yet\n".into() };
     let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let n = |k: &str| r.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
@@ -185,7 +258,7 @@ pub fn render(v: &Value) -> String {
     let ended = n("ended_ms");
     let wall = (if ended == 0 { wall_ms() } else { ended }).saturating_sub(n("started_ms")) / 1000;
     let mut out = format!("jitlegs {},{} {} wall {}s\n", super::short(&s(pair, "work")), super::short(&s(pair, "main")), if ended == 0 { "running" } else { "ended" }, wall);
-    for l in r.get("legs").and_then(|a| a.as_arr()).unwrap_or(&[]) {
+    for l in r.get("legs").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter(|l| only.is_none_or(|name| s(l, "name") == name)) {
         out.push_str(&format!("  {:<9} {:<10} {} {}\n", s(l, "name"), s(l, "state"), s(l, "node"), s(l, "summary")));
         // a failed leg's output: its log, not the lease's
         if matches!(s(l, "state").as_str(), "fail" | "incomplete") && !s(l, "log").is_empty() {
@@ -206,9 +279,10 @@ mod tests {
 
     /// The warm leg runs at most once per window: a pair inside it skips it and says when it ran;
     /// once the window has passed, the newest pair gets it, with its other legs as they ended,
-    /// and nothing is owed after that run or for a pair the window did not skip.
+    /// and nothing is owed after that run or for a pair the window did not skip. `jitlegs wait`
+    /// ends at the verdict it names: a leg's own, or the run's end, a leg not run no failure.
     #[test]
-    fn the_warm_leg_runs_once_per_window_and_then_on_the_newest_pair() {
+    fn the_warm_leg_runs_once_per_window_and_a_wait_ends_at_its_verdict() {
         let skipped = format!("{} it ran on a 60 min ago", warm_skipped_why());
         let hour = 3_600_000;
         let mut runs = vec![legs_run("a", 0, "ok", ""), legs_run("b", hour, NOT_RUN, &skipped), legs_run("c", 2 * hour, NOT_RUN, &skipped)];
@@ -223,7 +297,20 @@ mod tests {
         assert_eq!(owed.legs.iter().find(|l| l.name == "full-a").map(|l| l.state.as_str()), Some("ok"), "its other legs stay as they ended");
         runs.push(owed);
         assert!(warm_owed(&runs, WARM_EVERY_MS + 1, &log).is_none(), "a run going is owed nothing");
+        assert_eq!(waited(&runs, None, None), Ok((3, false, true)), "a wait on the newest run, going, waits on");
+        assert_eq!(waited(&runs, None, Some(WARM)), Ok((3, false, true)), "so does one on its leg still to run");
+        assert_eq!(waited(&runs, None, Some("full-a")), Ok((3, true, true)), "its leg with a verdict ends the wait");
+        assert_eq!(waited(&runs, Some("c"), None).map(|w| w.0), Ok(3), "a pair names its newest run");
+        assert_eq!(waited(&runs, Some("c,m"), None).map(|w| w.0), Ok(3), "named as status prints it");
+        assert_eq!(waited(&runs, Some(&stamp(hour)), Some(WARM)), Ok((1, true, true)), "a stamp names its run; a leg not run is a verdict, no failure");
+        assert!(waited(&runs, Some("c,x"), None).is_err() && waited(&runs, Some("z"), None).is_err(), "no such run");
+        assert!(waited(&runs, None, Some("nope")).unwrap_err().contains("its legs: full-a, warm"), "no such leg names the run's legs");
+        assert_eq!(wait_words(&["c", "--leg", WARM]), Ok((Some("c"), Some(WARM))));
+        assert!(wait_words(&["--leg"]).is_err() && wait_words(&["a", "b"]).is_err(), "a usage error");
         runs.last_mut().unwrap().ended_ms = WARM_EVERY_MS + 1;
+        runs.last_mut().unwrap().legs.iter_mut().find(|l| l.name == WARM).unwrap().state = "fail".into();
+        assert_eq!(waited(&runs, None, None), Ok((3, true, false)), "the run's end is its verdict; a failed leg fails it");
+        assert_eq!(waited(&runs, None, Some("full-a")), Ok((3, true, true)), "a leg's own verdict is its wait's");
         assert_eq!(warm_ran(&runs).map(|(at, _)| at), Some(WARM_EVERY_MS), "it ran with that run");
         assert!(warm_owed(&runs, 3 * WARM_EVERY_MS, &log).is_none(), "the newest run's warm leg ran: nothing owed");
         runs.push(legs_run("d", 3 * WARM_EVERY_MS, NOT_RUN, "arm64-style skip"));

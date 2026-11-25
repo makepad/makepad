@@ -80,7 +80,7 @@ fn starter_left(ctx: &Ctx, id: &str) {
 /// Whether `x`'s starter left [`LEFT_MS`] ago or more, and nothing touched it since (a call, or a
 /// verdict for nobody: the time counts from it). A save on its box keeps it ([`start`]'s sweep).
 fn left_long(x: &Live, now: u64) -> bool {
-    x.active() && x.left_ms > 0 && now.saturating_sub(x.left_ms.max(x.touched_ms)) >= LEFT_MS
+    x.held.is_empty() && x.active() && x.left_ms > 0 && now.saturating_sub(x.left_ms.max(x.touched_ms)) >= LEFT_MS
 }
 /// How long a session has gone unused at `now`: since its last edit or call, and a visible one also
 /// since a person's last input at its box (`input_ms`, [`crate::lease::sched::Sched::user_input_ms`]):
@@ -89,6 +89,30 @@ fn left_long(x: &Live, now: u64) -> bool {
 fn unused_ms(x: &Live, input_ms: Option<u64>, now: u64) -> u64 {
     let last = if x.visible { x.touched_ms.max(input_ms.unwrap_or(0)) } else { x.touched_ms };
     now.saturating_sub(last)
+}
+
+/// The sessions past their idle end at `now`: active, not held, placed, joined by none, and unused
+/// for [`IDLE_MS`] ([`unused_ms`]); a run or a build may keep them still ([`sweep_end`],
+/// [`kept_by_build`]). Only on a box this master has asked for its caps: a person's input there
+/// and its builds come with them, and a restarted master has none before its first ask. A restart
+/// is no call: its sessions keep their own touch through it ([`take_back`]). Its touch had kept
+/// W19220, with no save or call, on its box through four restarts in most of an hour (11-25).
+fn idle_now(ctx: &Ctx, now: u64) -> Vec<Live> {
+    let past: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.held.is_empty() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS && !joined(&d.lives, &x.id)).cloned().collect());
+    past.into_iter().filter(|x| ctx.leases.caps_asked(&x.node) && unused_ms(x, ctx.leases.user_input_ms(&x.node), now) >= IDLE_MS).collect()
+}
+
+/// A test session's saves wait for its next call and keep it meanwhile, as a call does: the last
+/// one is noted as its touch at the ship loop's next look, so that it keeps it through a master's
+/// restart too, which forgets the saves its runs had queued. (To within the look's second: read
+/// back from its instant, the save's time moves with the clocks' drift at every look.)
+fn note_save(ctx: &Ctx, id: &str, r: &Running) {
+    let Some(t) = r.pending.lock().unwrap().2 else { return };
+    let at = wall_ms().saturating_sub(t.elapsed().as_millis() as u64);
+    let look = HOUSEKEEPING.as_millis() as u64;
+    if ctx.store.read(|d| d.lives.iter().any(|x| x.id == id && x.active() && x.touched_ms.saturating_add(look) <= at)) {
+        let _ = try_set(ctx, id, |s| s.touched_ms = s.touched_ms.max(at));
+    }
 }
 
 /// A command routed to an app on `node` (`spec`: its pid or name, as `devhub inspect <node>/<spec>`
@@ -176,22 +200,40 @@ fn run_holds(inflight: bool, waiting: usize, quiet_ms: Option<u64>) -> bool {
 /// ([`run_holds`]), its park note is set (no call or edit starts after it) and it ends now, its
 /// orphaned run with it. Whether it ended.
 fn sweep_end(ctx: &Ctx, x: &Live, r: &Running, now: u64, note: impl FnOnce() -> String) -> bool {
-    {
+    let quiet = quiet_ms(x, now);
+    let parked = ctx.store.read(|d| {
+        let Some(current) = d.lives.iter().find(|s| s.id == x.id && s.active()) else { return false };
         let mut calls = r.calls.lock().unwrap();
+        if calls.keeps_refusal(current) { return false; }
         let inflight = r.inflight.load(std::sync::atomic::Ordering::SeqCst);
-        let quiet = quiet_ms(x, now);
         if calls.count > 0 || run_holds(inflight, r.waiting.load(std::sync::atomic::Ordering::SeqCst), quiet) { return false; }
         let mut note = note();
         if inflight {
             note += &format!("; its run wrote nothing for {} min and no call waited for its answer", quiet.unwrap_or(0) / 60_000);
         }
         calls.park.get_or_insert(note);
-    }
+        true
+    });
+    if !parked { return false; }
     end_parked(ctx, &x.id, r, false);
     true
 }
 
 static RUNNING: Mutex<Option<HashMap<String, Arc<Running>>>> = Mutex::new(None);
+/// The ask a starting session's start waits on, by session, from the first answer that names it
+/// until its run is joined ([`RUNNING`] names its lease from then on): a release gives the ask up
+/// at once ([`release`]), queued, or granted while its sources ship. Left to the start's next look at its session, a released
+/// session's queued timed ask stood for up to a beat, and its lane's next start was refused as a
+/// second timed lease of the lane (11-23).
+static ASKED: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+/// [`ASKED`]'s entry of a start, until its run is joined.
+struct Asking<'a>(&'a str);
+impl Asking<'_> {
+    fn names(&self, lease: &str) { ASKED.lock().unwrap().insert(self.0.to_string(), lease.to_string()); }
+}
+impl Drop for Asking<'_> {
+    fn drop(&mut self) { ASKED.lock().unwrap().remove(self.0); }
+}
 /// Wakes the ship loop: a save came, or an edit's call ended (its box takes the next save). The
 /// loop shipped a save after a 30 ms quiet window and a 10 ms poll: a third of a design edit's
 /// save -> frame (11-04). macOS's file events come at once for a save and 100 ms later for any
@@ -208,11 +250,93 @@ static STARTING: Mutex<()> = Mutex::new(());
 #[derive(Default)]
 struct Calls {
     count: usize,
+    checks: Vec<CargoCheck>,
     park: Option<String>,
     ended: bool,
 }
 
+/// The test client keeps its connection open through cargo. A check protects this refusal
+/// from time sweeps without admitting a live call or preventing the scheduler from parking it.
+struct CargoCheck {
+    caller: String,
+    refusal: String,
+    diagnostic: String,
+    gone: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+fn test_reply(x: &Live, r: Option<&Running>, caller: &str) -> String {
+    let value = crate::state::live_value(x);
+    if !caller.is_empty() && !x.offline && x.held.is_empty() {
+        if let (Some(refusal), Some(r), Some(conn)) = (x.refusal_key(), r, makepad_remote::lines::asked_on()) {
+            r.calls.lock().unwrap().checking(&crate::state::live_from(&value), caller, refusal, Box::new(move || conn.is_closed()));
+        }
+    }
+    value.to_json()
+}
+
+/// Consume only this caller's check. A newer edit or run invalidates both possible verdicts.
+/// End the refusal in the same store transaction that checks its identity, before freeing the
+/// lease. Concurrent checks on the same refusal may still confirm it.
+fn checked(ctx: &Ctx, id: &str, calls: &Mutex<Calls>, caller: &str, refusal: &str, confirmed: bool) -> Result<String, String> {
+    let mut released = None;
+    let mut consumed = None;
+    let mut diagnostic = String::new();
+    // An armed check carries its diagnostic. Without one (below), read it from the record with
+    // its spilled text loaded, as the call's reply had it, outside the store's lock.
+    let unarmed = (confirmed && !calls.lock().unwrap().checks.iter().any(|c| c.caller == caller && c.refusal == refusal))
+        .then(|| get(ctx, id).and_then(|x| crate::state::live_from(&crate::state::live_value(&x)).compile_errors().first().map(|e| crate::proto::clean(e, 240))))
+        .flatten();
+    let result = try_set(ctx, id, |x| {
+        let mut calls = calls.lock().unwrap();
+        let Some(i) = calls.checks.iter().position(|c| c.caller == caller && c.refusal == refusal) else {
+            // No check of this caller: the master restarted since the call armed it (its checks
+            // live in memory). The caller is still here and cargo confirmed this very refusal,
+            // so it holds as an armed check would.
+            if confirmed && x.refusal_key().as_deref() == Some(refusal) && calls.park.is_none() {
+                if let (true, Some(first)) = (x.held.is_empty(), unarmed.as_ref()) { x.held.clone_from(first); }
+                diagnostic.clone_from(&x.held);
+            }
+            return;
+        };
+        let check = consumed.insert(calls.checks.remove(i));
+        if x.refusal_key().as_deref() != Some(refusal) || calls.park.is_some() { return; }
+        if confirmed {
+            x.held.clone_from(&check.diagnostic);
+            diagnostic = x.held.clone();
+        } else if x.held.is_empty() && !calls.checks.iter().any(|c| c.refusal == refusal) {
+            x.state = "ended".into();
+            x.ended_ms = wall_ms();
+            x.note = "released: cargo did not confirm the live refusal".into();
+            released = Some(x.lease.clone());
+        }
+    });
+    if let Err(e) = result {
+        if let Some(check) = consumed { calls.lock().unwrap().checks.push(check); }
+        return Err(e);
+    }
+    if let Some(lease) = released { free_lease(ctx, id, lease); }
+    Ok(format!("{{\"held\":{}}}", json_str(&diagnostic)))
+}
+
+fn departed_checks(ctx: &Ctx, id: &str, calls: &Mutex<Calls>) {
+    let gone: Vec<_> = calls.lock().unwrap().checks.iter().filter(|c| (c.gone)()).map(|c| (c.caller.clone(), c.refusal.clone())).collect();
+    for (caller, refusal) in gone {
+        if let Err(e) = checked(ctx, id, calls, &caller, &refusal, false) { eprintln!("live {id}: {e}"); }
+    }
+}
+
 impl Calls {
+    fn checking(&mut self, x: &Live, caller: &str, refusal: String, gone: Box<dyn Fn() -> bool + Send + Sync>) {
+        if let Some(first) = x.compile_errors().first() {
+            self.checks.retain(|c| c.refusal == refusal && c.caller != caller);
+            self.checks.push(CargoCheck { caller: caller.into(), refusal, diagnostic: crate::proto::clean(first, 240), gone });
+        }
+    }
+
+    fn keeps_refusal(&self, x: &Live) -> bool {
+        !x.held.is_empty() || (!self.checks.is_empty() && x.refusal_key().is_some_and(|key| self.checks.iter().any(|c| c.refusal == key)))
+    }
+
     fn ready_to_park(&mut self, inflight: bool) -> Option<String> {
         if self.ended || self.count > 0 || inflight { return None; }
         let note = self.park.clone()?;
@@ -237,7 +361,13 @@ impl Drop for Call<'_> {
 }
 
 fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
-    let Some(r) = running(id) else { return Ok(None) };
+    let client = makepad_remote::lines::asked_on();
+    let waits = || get(ctx, id).is_some_and(|x| x.active() && x.pid != 0) && !client.as_ref().is_some_and(|c| c.is_closed());
+    let Some(r) = rejoined(&mut || running(id), &waits, &mut || {
+        let line = format!("live call {id} waits for its session's box: the master restarted and takes it back now");
+        makepad_remote::lines::say_waiting(&line);
+        event(ctx, Sev::Info, line, None);
+    }) else { return Ok(None) };
     {
         let mut calls = r.calls.lock().unwrap();
         if let Some(note) = &calls.park { return Err(format!("{id}: {note}")); }
@@ -246,6 +376,31 @@ fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
     let mut call = Call(ctx, id, r, None);
     call.3 = admit(ctx, id, &call.2, makepad_remote::lines::asked_on())?;
     Ok(Some(call))
+}
+
+/// Wakes a call that waits for its session's box ([`rejoined`]): a reattach joined it.
+static JOINED: (Mutex<()>, std::sync::Condvar) = (Mutex::new(()), std::sync::Condvar::new());
+
+/// A call's session box (`find`), waited for while `waits`: a session whose app runs (it has a
+/// pid) and that this master holds no box for is a previous master's, which its reattach takes
+/// back on a thread of its own once the master serves. A call there ran unheld, and the idle sweep
+/// ended its session under it: W16863's call, asked again into the master's restart as a cut
+/// call is, waited on its app while its session ended "after 10 min with no edit or call" (11-23).
+/// `say` once as it starts waiting. None at once, or once the session ends, has no app (placed
+/// again: its call says so) or its client goes.
+fn rejoined<T>(find: &mut dyn FnMut() -> Option<T>, waits: &dyn Fn() -> bool, say: &mut dyn FnMut()) -> Option<T> {
+    let mut said = false;
+    loop {
+        if let Some(r) = find() { return Some(r); }
+        if !waits() { return None; }
+        if !said {
+            say();
+            said = true;
+        }
+        // (a join between the look and this wait is seen at the next look)
+        let g = JOINED.0.lock().unwrap();
+        let _ = JOINED.1.wait_timeout(g, ADMIT_LOOK);
+    }
 }
 
 fn begin_call(r: &Running) -> bool {
@@ -489,11 +644,31 @@ fn end_parked(ctx: &Ctx, id: &str, r: &Running, wait_run: bool) {
     };
     // the one line its lane gets (its next call on it answers with it; the inbox has it too): why
     // it ended, and the one command that starts it again, or that it starts again by itself
-    let note = if note.ends_with(RESTARTS_BY_ITSELF) { note } else { format!("{note}; `devhub live again {id}` starts it again") };
-    if let Some(x) = set(ctx, id, |s| { s.state = "ended".into(); s.note = note.clone(); s.ended_ms = wall_ms(); }) {
-        ctx.store.event(if note.starts_with("parked for ") { "live_parked" } else { "live" }, Sev::Info, format!("live {id} ({}) of lane {}: {note}", x.app, x.lane), Some(crate::state::live_value(&x).to_json()));
+    if let Some(x) = set(ctx, id, |s| record_park(s, &note, wall_ms())) {
+        ctx.store.event(if x.note.starts_with("parked for ") { "live_parked" } else { "live" }, Sev::Info, format!("live {id} ({}) of lane {}: {}", x.app, x.lane, x.note), Some(crate::state::live_value(&x).to_json()));
     }
     ctx.leases.release_live(&r.lease);
+}
+
+fn record_park(x: &mut Live, note: &str, now: u64) {
+    x.state = "ended".into();
+    x.ended_ms = now;
+    if !x.held.is_empty() && note.starts_with("parked") {
+        x.resume_after.clear();
+        x.note = note.trim_end_matches(RESTARTS_BY_ITSELF).trim_end_matches("; ").into();
+    } else {
+        x.note = if note.ends_with(RESTARTS_BY_ITSELF) { note.into() } else { format!("{note}; `devhub live again {}` starts it again", x.id) };
+    }
+}
+
+/// Consume the previous parked hold when placing its replacement. The notice precedes even
+/// the new session's first queue line.
+fn cold_start(previous: &mut Live, new: &Live) -> Option<String> {
+    if previous.active() || previous.held.is_empty() { return None; }
+    previous.held.clear();
+    (previous.note.starts_with("parked") && previous.tree == new.tree && previous.src == new.src && previous.timed == new.timed && previous.also == new.also
+        && answers(previous, &new.lane, &new.app, true, new.offline, &new.test_args, &new.needs, &new.pin, &new.avoid, &new.loader, &new.env))
+        .then(|| format!("the held session {} was {} at {}; this run started cold", previous.id, previous.note, hhmm(previous.ended_ms)))
 }
 
 /// A session joins the running ones (started, or reattached after a master restart): from now its
@@ -505,6 +680,7 @@ fn end_parked(ctx: &Ctx, id: &str, r: &Running, wait_run: bool) {
 fn join(monitor: &crate::monitor::Monitor, id: &str, r: Arc<Running>) {
     follow(monitor, &r.tree);
     RUNNING.lock().unwrap().get_or_insert_with(HashMap::new).insert(id.to_string(), r.clone());
+    JOINED.1.notify_all();
     if !r.test { due(&r.pending, []); }
 }
 
@@ -575,7 +751,13 @@ fn try_set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Live)) -> Result<Option<Live
     let x = ctx.store.update(|d| {
         let x = d.lives.iter_mut().find(|x| x.id == id)?;
         was = Some(x.state.clone());
+        let held = (!x.held.is_empty() && x.active()).then(|| x.refusal_key());
         f(x);
+        // The saved diagnostic belongs to one refusal. Preserve it on a scheduler park so the
+        // next caller can explain its cold start, including after a master restart.
+        if let Some(key) = held {
+            if x.refusal_key() != key && !(x.state == "ended" && x.note.starts_with("parked")) { x.held.clear(); }
+        }
         Some(x.clone())
     })?;
     if let (Some(x), Some(was)) = (&x, was) { say_in_log(x, &was); }
@@ -815,22 +997,13 @@ pub fn start(ctx: Arc<Ctx>) {
     // run it had asked for (the lease is noted once shipped): the node may be building its JIT
     // for it. Placed again, that lease went unbeaten until it expired and the build was lost
     // (a lease lost 160 s into a dev JIT build on its box, 11-03). Else it is placed again and its
-    // app starts again.
+    // app starts again. A restart is no call: each keeps its own touch ([`restarted`]).
     for (x, held) in restarted(&ctx) {
         let c = ctx.clone();
         event(&ctx, Sev::Info, format!("live {} ({}): the master restarted; {}", x.id, x.app, if held { "its app runs on" } else { "placed again, its app starts again" }), Some(&x));
         if held {
             let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || reattach(&c, &x));
         } else {
-            set(&ctx, &x.id, |s| {
-                s.state = "starting".into();
-                (s.pid, s.run_pid) = (0, 0);
-                s.lease.clear();
-                s.run_n = 0;
-                s.ask.clear();
-                s.patch = None;
-                s.touched_ms = wall_ms();
-            });
             let id = x.id.clone();
             let _ = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, false));
         }
@@ -854,7 +1027,11 @@ pub fn start(ctx: Arc<Ctx>) {
         let list: Vec<(String, Arc<Running>)> = RUNNING.lock().unwrap().as_ref().map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
         for (id, r) in list {
             // Only the test caller ships its source state and owns the resulting verdict.
-            if r.test { continue; }
+            if r.test {
+                departed_checks(&c, &id, &r.calls);
+                note_save(&c, &id, &r);
+                continue;
+            }
             let due = {
                 let mut p = r.pending.lock().unwrap();
                 match p.2 {
@@ -873,15 +1050,13 @@ pub fn start(ctx: Arc<Ctx>) {
                     // the box charges the session as active again before the edit runs: beside the
                     // ship, an edit ran past its box's cores (11-05). A session parking ships no more.
                     if admit(&c2, &id2, &r, None).is_err() { return; }
-                    ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, called, None, None);
+                    let _ = ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, called, None, None);
                 });
             }
         }
         // the idle timeout, from its placement on (a job still queued for a box is not idle)
         let now = wall_ms();
-        let idle: Vec<Live> = c.store.read(|d| d.lives.iter().filter(|x| x.active() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS && !joined(&d.lives, &x.id)).cloned().collect());
-        for x in idle {
-            if x.visible && unused_ms(&x, c.leases.user_input_ms(&x.node), now) < IDLE_MS { continue; }
+        for x in idle_now(&c, now) {
             let Some(r) = running(&x.id) else { continue };
             // (a test session's saves wait for its next call: one within the timeout keeps it)
             if r.test && r.pending.lock().unwrap().2.is_some_and(|t| t.elapsed() < Duration::from_millis(IDLE_MS)) { continue; }
@@ -916,7 +1091,10 @@ pub fn start(ctx: Arc<Ctx>) {
 
 /// The master's start squares the sessions with the leases, both ways, a line each: an ended
 /// session whose lease still runs frees it, and a running one whose lease is gone ends (its app
-/// went with it). The rest go on: each active session, and whether its lease is held. (Every
+/// went with it). The rest go on: each active session, and whether its lease is held; one not held
+/// is set to be placed again. A restart is no call: each keeps its own touch, and its idle end with
+/// it ([`idle_now`]); a queued one whose starter left ends as the left sweep would end it
+/// ([`left_long`]), not placed again. (Every
 /// string of the store names a lease the restart keeps, an ended session's too: W9068's lease
 /// outlived its release, 11-15.)
 fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
@@ -928,11 +1106,30 @@ fn restarted(ctx: &Ctx) -> Vec<(Live, bool)> {
         }
     }
     let mut on = Vec::new();
+    let now = wall_ms();
+    let joins: std::collections::HashSet<String> = active.iter().map(|x| x.joins.clone()).collect();
     for x in active {
-        let held = open.contains(&x.lease);
+        if open.contains(&x.lease) {
+            on.push((x, true));
+            continue;
+        }
         // (a session still starting waits for its box, or builds on one: placed again)
-        if held || x.state == "starting" {
-            on.push((x, held));
+        if x.state == "starting" {
+            if left_long(&x, now) && !joins.contains(&x.id) {
+                let note = format!("ended {} min after its starter's call went, with no call or save since: the master's restart did not place it again; the lane's next call starts it again", LEFT_MS / 60_000);
+                event(ctx, Sev::Info, format!("live {} ({}) of lane {}: {note}", x.id, x.app, x.lane), Some(&x));
+                let _ = release(ctx, &x.id, &note);
+                continue;
+            }
+            let again = set(ctx, &x.id, |s| {
+                s.state = "starting".into();
+                (s.pid, s.run_pid) = (0, 0);
+                s.lease.clear();
+                s.run_n = 0;
+                s.ask.clear();
+                s.patch = None;
+            });
+            on.push((again.unwrap_or(x), false));
             continue;
         }
         let gone = if x.lease.is_empty() { "it held no lease".to_string() } else { format!("its lease {} had ended", x.lease) };
@@ -965,9 +1162,9 @@ pub(crate) fn owned_lease(lives: &[Live], lease: &str) -> Option<String> {
 /// nothing (W9068, 11-15). What became of its lease.
 fn release(ctx: &Ctx, id: &str, note: &str) -> Result<String, String> {
     let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
-    let r = RUNNING.lock().unwrap().as_mut().and_then(|m| m.remove(id));
     try_set(ctx, id, |s| {
         s.note = note.into();
+        s.held.clear();
         // (released by its lane: it no longer starts again by itself)
         s.resume_after.clear();
         if s.active() {
@@ -975,12 +1172,22 @@ fn release(ctx: &Ctx, id: &str, note: &str) -> Result<String, String> {
             s.ended_ms = wall_ms();
         }
     })?;
-    let lease = r.map_or(x.lease, |r| r.lease.clone());
-    Ok(match lease.as_str() {
-        "" => "it held no lease".into(),
-        l if ctx.leases.release_live(l) => format!("its lease {l} freed"),
-        l => format!("its lease {l} had ended"),
-    })
+    Ok(free_lease(ctx, id, x.lease))
+}
+
+fn free_lease(ctx: &Ctx, id: &str, lease: String) -> String {
+    let r = RUNNING.lock().unwrap().as_mut().and_then(|m| m.remove(id));
+    let asked = ASKED.lock().unwrap().remove(id);
+    let lease = r.map_or(lease, |r| r.lease.clone());
+    match (lease.as_str(), asked) {
+        // (still asked, or granted while its sources ship: it goes with the session, before the
+        // release answers)
+        ("", Some(q)) if ctx.leases.release_live(&q) => format!("its asked lease {q} given up"),
+        ("", Some(q)) => format!("its lease {q} had ended"),
+        ("", None) => "it held no lease".into(),
+        (l, _) if ctx.leases.release_live(l) => format!("its lease {l} freed"),
+        (l, _) => format!("its lease {l} had ended"),
+    }
 }
 
 /// No live job outlives its lane: one whose worktree is gone, or whose pinned commit no longer
@@ -993,6 +1200,8 @@ fn release_orphans(ctx: &Ctx) {
             format!("its worktree {} is gone", x.tree)
         } else if let Some(sha) = crate::lease::Pin::of_rev(&x.rev).map(|p| p.makepad).filter(|sha| crate::gitread::lacks_commit(&ctx.repo, sha)) {
             format!("its commit {} no longer resolves", super::short(&sha))
+        } else if !x.held.is_empty() {
+            continue;
         } else if let Some(head) = lane_landed(ctx, &x, &mut pass) {
             format!("its lane landed ({} in work, its worktree clean) and the lane has been quiet for {} min (no call, lease, job or file change)", super::short(&head), DONE_IDLE_MS / 60_000)
         } else {
@@ -1217,9 +1426,31 @@ fn jit_fault(line: &str) -> bool {
 /// that ended without a verdict. Every live run of relax-compiler --lib was stopped at the first
 /// such line and restarted, then failed as a JIT error (11-12).
 fn jit_fault_of(app: &str, line: &str) -> bool {
-    if JIT_SOURCES.iter().any(|(package, _)| *package == app) {
-        return false;
-    }
+    !jit_crate(app) && jit_words(line)
+}
+
+/// A test program of one of the JIT's own crates ([`jit_fault_of`]).
+fn jit_crate(app: &str) -> bool {
+    JIT_SOURCES.iter().any(|(package, _)| *package == app)
+}
+
+/// A place in the JIT's own sources.
+fn in_jit(location: &str) -> bool {
+    JIT_SOURCES.iter().any(|(_, dir)| location.contains(dir))
+}
+
+/// A panic of package `app`'s run, by its structured frame (its event, or its `report:` line):
+/// the JIT's fault when it is located in the JIT's sources, or when the JIT made it (a failed
+/// update, a compile error in a call: any kind but a program's own `panic`), whose message is the
+/// JIT's words. A program's own panic is judged by where it is, never by what it says: a lane's
+/// test whose assertion quoted an internal compiler error was said to be a JIT error, "not your
+/// change" (11-23), and lanes carry on past those.
+fn panic_fault(app: &str, kind: &str, message: &str, location: &str) -> bool {
+    !jit_crate(app) && (in_jit(location) || kind != "panic" && jit_words(message))
+}
+
+/// The JIT's words for its own faults in a line.
+fn jit_words(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
     // This diagnostic invites a cargo comparison; its "makepad run bug" explanation is not
     // an internal compiler fault. Let devhub test check the same target with cargo.
@@ -1232,10 +1463,36 @@ fn jit_fault_of(app: &str, line: &str) -> bool {
     })
 }
 
-fn fault_line(app: &str, line: &str, captured: &mut bool) -> bool {
-    if line.starts_with("---- ") && line.ends_with(" stdout ----") { *captured = true; }
-    if line == "failures:" || line.starts_with("test result:") { *captured = false; }
-    !*captured && jit_fault_of(app, line)
+/// Where [`fault_line`] is in a run's output: in a test's captured output, or in a panic's
+/// message (the lines after its `panicked at` header, up to its note or `report:` frame).
+#[derive(Clone, Copy, Default)]
+struct Scan {
+    captured: bool,
+    message: bool,
+}
+
+/// A fault of the JIT in a line of package `app`'s run output. A panic's header is judged by where
+/// it panicked, its `report:` frame by its structured fields ([`panic_fault`]); the lines between
+/// are its message, the program's words, and judged not at all.
+fn fault_line(app: &str, line: &str, scan: &mut Scan) -> bool {
+    if line.starts_with("---- ") && line.ends_with(" stdout ----") { scan.captured = true; }
+    if line == "failures:" || line.starts_with("test result:") { scan.captured = false; }
+    if scan.captured { return false; }
+    let t = line.trim_start();
+    if let Some(at) = t.strip_prefix("thread '").and_then(|r| r.split_once(" panicked at ")).map(|(_, at)| at) {
+        scan.message = true;
+        return !jit_crate(app) && in_jit(at);
+    }
+    if let Some(frame) = t.find("report: {").map(|i| &t[i + "report: ".len()..]) {
+        scan.message = false;
+        let v = makepad_strict_json::parse(frame.as_bytes()).ok();
+        let f = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(Value::as_str).unwrap_or("").to_string();
+        return v.is_some() && panic_fault(app, &f("kind"), &f("message"), &f("location"));
+    }
+    // (its message ends at its note, a blank line or the harness's verdict line: whatever its words,
+    // a quoted JIT line among them)
+    if scan.message && (t.is_empty() || t.starts_with("note: run with") || t.starts_with("test ") && t.contains(" ... ")) { scan.message = false; }
+    !scan.message && jit_fault_of(app, line)
 }
 
 fn terminal(p: &LivePatch) -> bool {
@@ -1411,7 +1668,7 @@ fn relaunch(ctx: &Ctx, id: &str, resend: bool, anyway: bool) -> Result<Vec<Strin
     let result = (|| {
         let x = get(ctx, id).ok_or_else(|| not_running(ctx, id))?;
         let (files, edit_ms, current) = call_saves(ctx, &r, &x)?;
-        if !files.is_empty() { ship_edit(ctx, id, &r, files, edit_ms, wall_ms(), Some(current), None); }
+        if !files.is_empty() { ship_edit(ctx, id, &r, files, edit_ms, wall_ms(), Some(current), None)?; }
         let mut x = get(ctx, id).filter(|x| x.active() && x.pid > 0).ok_or_else(|| not_running(ctx, id))?;
         x.load_text()?;
         let mut p = x.patch.clone().unwrap_or_else(|| LivePatch { edit_ms, shipped_ms: wall_ms(), ..Default::default() });
@@ -1600,16 +1857,34 @@ fn lease_end(ctx: &Ctx, id: &str) -> Option<String> {
 }
 
 fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> Result<(), String> {
-    if x.pid == 0 { return Ok(()); }
-    let _ = inspect(&x.node, x.pid, "quit");
-    let asked = Instant::now();
-    while asked.elapsed() < Duration::from_secs(2) {
-        if get(ctx, &x.id).is_none_or(|s| s.pid != x.pid || s.run_n != x.run_n) { return Ok(()); }
-        std::thread::sleep(Duration::from_millis(20));
+    let Some(mut pid) = run_to_stop(x, Some(x)) else { return Ok(()) };
+    loop {
+        let _ = inspect(&x.node, pid, "quit");
+        let (asked, mut moved) = (Instant::now(), None);
+        while asked.elapsed() < Duration::from_secs(2) {
+            match run_to_stop(x, get(ctx, &x.id).as_ref()) {
+                None => return Ok(()),
+                Some(now) if now != pid => { moved = Some(now); break; }
+                Some(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let Some(now) = moved else { break };
+        event(ctx, Sev::Info, format!("live {}: its JIT restarted in place as its restart began (pid {pid}, now {now}): the run goes on, so pid {now} stops too", x.id), Some(x));
+        pid = now;
     }
     // The original run is still followed; only its recorded pid is stopped. (A lease that ended
     // stopped it already: its caller says that end.)
-    r.held.kill(x.pid).inspect_err(|e| if super::leg::lease_held(ctx, &r.lease) { event(ctx, Sev::Warn, format!("live {}: stopping pid {}: {e}", x.id, x.pid), Some(x)) })
+    r.held.kill(pid).inspect_err(|e| if super::leg::lease_held(ctx, &r.lease) { event(ctx, Sev::Warn, format!("live {}: stopping pid {pid}: {e}", x.id), Some(x)) })
+}
+
+/// The process a stop of `x`'s run quits, at the session as it is now (`now`); none once its run
+/// has ended (no session, no process, another run). A pid that moved within the run is a restart
+/// in place behind the restart parent, and the run goes on: its new process is the one to stop.
+/// Read as stopped, a restart devhub asked (a file the tests read but do not compile) met the
+/// JIT's own (statics an earlier run left) and waited 10 min on a run whose new process had given
+/// its verdict and waited in the harness for its next run, until its lease ended (W18336, 11-24).
+fn run_to_stop(x: &Live, now: Option<&Live>) -> Option<u32> {
+    now.filter(|s| s.pid != 0 && s.run_n == x.run_n).map(|s| s.pid)
 }
 
 /// The failed tests' captured output in this verdict's log interval.
@@ -1736,8 +2011,8 @@ fn finish_tests(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
                     return;
                 }
             }
-            let mut captured = false;
-            if let Some(reason) = log.lines().find(|l| fault_line(&x.app, l, &mut captured)).filter(|_| p.outcome != "jit_error" && p.outcome != "refused" && p.reason != "patched after refusal" && !p.tests.as_ref().is_some_and(|t| t.restarted)) {
+            let mut scan = Scan::default();
+            if let Some(reason) = log.lines().find(|l| fault_line(&x.app, l, &mut scan)).filter(|_| p.outcome != "jit_error" && p.outcome != "refused" && p.reason != "patched after refusal" && !p.tests.as_ref().is_some_and(|t| t.restarted)) {
                 p.tests = None;
                 p.reason = reason.to_string();
                 recover(ctx, id, x, p, true);
@@ -2131,9 +2406,13 @@ fn hosted_verdict(node: &str, h: &Hosted, newer: &dyn Fn() -> bool) -> (String, 
 
 /// Tests finish independently of the caller's wait timeout.
 fn test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
+    collect_test_verdict(ctx, id, x, p, |x, p| test_event(ctx, id, x, p, "testverdict,patchverified,patchrefused,patchreverted,patchfailed,patchrestarted,jiterror"));
+}
+
+fn collect_test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch, mut next: impl FnMut(&mut Live, &mut LivePatch) -> Option<Value>) {
     // No verdict can come from this binary for the edit. Let finish_tests start the new JIT.
     if rebuild_tests(x, p) { return; }
-    while let Some(v) = test_event(ctx, id, x, p, "testverdict,patchverified,patchrefused,patchreverted,patchfailed,patchrestarted,jiterror") {
+    while let Some(v) = next(x, p) {
         if v.get("event").and_then(Value::as_str) == Some("patchverified") {
             if p.outcome == "hot-recovery" {
                 p.outcome = "patched".into();
@@ -2186,6 +2465,12 @@ fn test_verdict(ctx: &Ctx, id: &str, x: &mut Live, p: &mut LivePatch) {
 /// The first run, or a verdict still pending when the master restarted.
 fn resume_tests(ctx: &Ctx, id: &str, r: &Running) {
     let Some(mut x) = get(ctx, id) else { return };
+    if !x.held.is_empty() {
+        // A confirmed refusal is complete. Reattaching restores the idle charge without
+        // reinterpreting the failed run's log or requesting a second verdict.
+        if r.resuming.swap(false, std::sync::atomic::Ordering::SeqCst) { finish_call(ctx, id, r); }
+        return;
+    }
     if let Err(e) = x.load_text() { eprintln!("live log: {e}"); return; }
     let Some(mut p) = x.patch.clone() else { return };
     if p.outcome == "recovering" { return; }
@@ -2332,8 +2617,10 @@ impl Steps {
 /// `called_ms`: when the call came (a test session's `live sync`, before it waits for its box's
 /// room or an earlier call): what follows it is devhub's, what comes before it the caller's.
 /// `queued`: how long a test call waited for the previous call's tests, and behind what.
-fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64, called_ms: u64, current: Option<(Vec<String>, Vec<String>)>, queued: Option<(u64, String)>) {
-    let Some(mut x) = get(ctx, id).filter(|x| x.active() && x.pid > 0) else { return };
+fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64, called_ms: u64, current: Option<(Vec<String>, Vec<String>)>, queued: Option<(u64, String)>) -> Result<Option<String>, String> {
+    let mut room = Ok(None);
+    let Some(mut x) = get(ctx, id).filter(|x| x.active() && x.pid > 0) else { return room };
+    let mut needs_room = x.test && !x.held.is_empty();
     let mut note = None;
     // the saved files the app read at run time that are none of its sources ([`told_verdict`])
     let mut resources: Vec<String> = Vec::new();
@@ -2372,15 +2659,22 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         if x.test {
             sources.extend(x.sources.iter().filter(|(p, _)| !selected.contains(p)).map(|(p, h)| (p.clone(), h.clone())));
         }
-        if sources == x.sources {
-            // Nothing new to ship: the last verdict answers while the tests still run what it ran.
-            // A change the JIT took after it is this call's edit, its verdict waited for from
-            // that verdict's cursor: a two-file ship the JIT patched as two groups had the first
-            // group's verdict answered again 9 s later, while the second's tests ran (11-17).
+        let unchanged = sources == x.sources;
+        if unchanged {
             let Some(old) = x.patch.as_ref().filter(|old| x.test && terminal(old)) else { return Ok(false) };
             if !taken_since(&inspect(&r.node, x.pid, "events")?, old) { return Ok(false); }
+        }
+        // A confirmed refusal with the same manifest and event cursor has already answered.
+        // Take back its full lease charge only when there really is a round to run.
+        if std::mem::take(&mut needs_room) {
+            room = admit(ctx, id, r, makepad_remote::lines::asked_on());
+            if room.is_err() { return Ok(false); }
+        }
+        if unchanged {
+            let old = x.patch.as_ref().unwrap();
             p.files = old.files.clone();
             (p.seq, p.cursor, p.log_start) = (old.seq, old.cursor.clone(), old.log_end);
+            held = !x.held.is_empty();
             set(ctx, id, |s| { s.patch = Some(p.clone()); s.touched_ms = wall_ms(); });
             return Ok(true);
         }
@@ -2435,6 +2729,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         set(ctx, id, |s| s.sources = sources);
         // One query for the exact shipped set. Unknown or incomplete inputs cannot
         // justify waiting for a patch event (nor claiming this edit missed the target).
+        if held { return Ok(true); }
         let lines = inputs?;
         // (its inputs answer says so too, when its wait began after the look at `live`)
         held |= held_app(&[], &lines);
@@ -2489,17 +2784,17 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         }
     };
     if p.shipped_ms == 0 { p.shipped_ms = wall_ms(); }
-    if matches!(shipped, Ok(false)) { return; }
+    if matches!(shipped, Ok(false)) { return room; }
     if p.files.is_empty() { p.files = files; }
     let count = p.files.len();
     if let Err(e) = shipped {
         // released meanwhile: its release said so, the ship it cut short says nothing
-        if !get(ctx, id).is_some_and(|s| s.active()) { return; }
+        if !get(ctx, id).is_some_and(|s| s.active()) { return room; }
         // no edit can reach it again: it ends, said once (before, each save failed, 11-04)
         if let Some(why) = session_over(&e, &r.lease) {
             event(ctx, Sev::Warn, format!("live {id} ({}): ended, {why}; `makepad devhub live start {}` starts a new session", x.app, x.app), Some(&x));
             let _ = release(ctx, id, &format!("ended: {why}"));
-            return;
+            return room;
         }
         p.outcome = "failed".into();
         p.outcome_ms = wall_ms();
@@ -2507,11 +2802,29 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         let x = set(ctx, id, |s| s.patch = Some(p.clone()));
         event(ctx, Sev::Warn, format!("live {id}: shipping {count} file(s) failed: {e}"), x.as_ref());
         if let Some(x) = &x { unapplied(ctx, x, &p); }
-        return;
+        return room;
     }
     if held {
-        held_relaunch(ctx, id, &x, r, p, count);
-        return;
+        if x.test {
+            // The harness restarts itself on publication. Follow its pre-ship cursor even if
+            // the new PID was already announced before ship-done answered.
+            p.outcome = "restart".into();
+            set_patch(ctx, id, &p);
+            loop {
+                test_verdict(ctx, id, &mut x, &mut p);
+                finish_tests(ctx, id, &x, &mut p);
+                let now = get(ctx, id);
+                if now.as_ref().is_none_or(|s| s.pid == x.pid || s.patch.as_ref().is_some_and(terminal)) || !watch_on(&mut x, now.as_ref(), &mut p) { break; }
+                p.tests = None;
+                p.outcome = "restart".into();
+                p.reason.clear();
+                p.verdict_ms = 0;
+            }
+            wait_tests(ctx, id);
+        } else {
+            held_relaunch(ctx, id, &x, r, p, count);
+        }
+        return room;
     }
     // An edit the session's app does not read and an app it started does (a WM's hosted app):
     // that app's verdict, named. Read literally, "edit does not reach makepad-app-wm" sent a lane
@@ -2528,15 +2841,15 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         p.outcome = said.iter().map(|(o, _)| o.clone()).max_by_key(|o| rank(o)).unwrap_or_default();
         p.reason = format!("{}; {} itself does not read {}", said.into_iter().map(|(_, l)| l).collect::<Vec<_>>().join("; "), x.app, p.files[0]);
         p.outcome_ms = wall_ms();
-        let Some(current) = set_patch(ctx, id, &p) else { return };
+        let Some(current) = set_patch(ctx, id, &p) else { return room };
         if matches!(p.outcome.as_str(), "none" | "failed") { unapplied(ctx, &current, &p); }
         let sev = if matches!(p.outcome.as_str(), "patched" | "unchanged" | "superseded") { Sev::Info } else { Sev::Warn };
         event(ctx, sev, format!("live {id}: {count} file(s) {}: {}", p.outcome, p.reason), Some(&current));
-        return;
+        return room;
     }
     if !resources.is_empty() {
         told_verdict(ctx, id, &x, r, &mut p, &resources, count);
-        return;
+        return room;
     }
     if let Some(note) = note {
         // A lane's scratch file beside the packages: the verdict is still about everything the
@@ -2548,14 +2861,14 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
                 }
             });
             event(ctx, Sev::Info, format!("live {id}: {note}"), current.as_ref());
-            return;
+            return room;
         }
         p.outcome = "skipped".into();
         p.reason = note.clone();
         p.outcome_ms = wall_ms();
         let current = set_patch(ctx, id, &p);
         event(ctx, Sev::Info, format!("live {id}: {note}"), current.as_ref());
-        return;
+        return room;
     }
     // It is none of the running program's sources, so no patch and no selection can say what it
     // does to the tests, yet they read it or can: a process they start, a data file. The last verdict is
@@ -2564,7 +2877,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         p.reason = format!("{file} is not a source of the running tests: they start again on it");
         restart_session(ctx, id, &x, r, &mut p, true);
         wait_tests(ctx, id);
-        return;
+        return room;
     }
     set(ctx, id, |s| {
         if let Some(current) = &mut s.patch {
@@ -2575,10 +2888,10 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         patch_verdict(ctx, id, &mut x, &mut p);
     } else {
         wait_tests(ctx, id);
-        return;
+        return room;
     }
     if x.test {
-        if p.tests.is_none() && set_test_patch(ctx, id, &x, &p).is_none() { wait_tests(ctx, id); return; }
+        if p.tests.is_none() && set_test_patch(ctx, id, &x, &p).is_none() { wait_tests(ctx, id); return room; }
         if p.tests.is_none() && matches!(p.outcome.as_str(), "patched" | "restart" | "hot-recovery") {
             test_verdict(ctx, id, &mut x, &mut p);
         }
@@ -2590,7 +2903,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         }
         if get(ctx, id).is_some_and(|s| s.run_n == x.run_n && s.pid == x.pid && s.state == "running") { finish_tests(ctx, id, &x, &mut p); }
         wait_tests(ctx, id);
-        return;
+        return room;
     }
     // the first frame on the glass built with it: the JIT's `live` says the patches it installed
     // (this one among them, its verdict came) and the ones the newest presented window frame was
@@ -2612,7 +2925,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    let Some(mut x) = set_patch(ctx, id, &p) else { return };
+    let Some(mut x) = set_patch(ctx, id, &p) else { return room };
     if matches!(p.outcome.as_str(), "none" | "failed") { unapplied(ctx, &x, &p); }
     // an app's save that waits for a restart is counted until the app restarts; a later one that
     // patched asks whether the app restarted meanwhile (a postponed relaunch, the person's click)
@@ -2642,6 +2955,7 @@ fn ship_edit(ctx: &Ctx, id: &str, r: &Running, files: Vec<String>, edit_ms: u64,
         },
         Some(&x),
     );
+    room
 }
 
 /// An edit that reached no JIT verdict (not shipped, not watched, no answer) is a hot failure:
@@ -2673,7 +2987,7 @@ struct RunOut {
     /// the package the job runs: whose announce names the program's pid
     app: String,
     r: Arc<Running>,
-    captured: bool,
+    scan: Scan,
 }
 
 /// The program's own announce (`makepad-remote: pid <n> app <package> [run <pid>] socket ..`): its
@@ -2704,7 +3018,7 @@ impl std::io::Write for RunOut {
                 self.pid = Some(pid);
                 self.run_pid = run.or(self.run_pid);
             }
-            if fault_line(&self.app, &line, &mut self.captured) { *self.r.fault.lock().unwrap() = Some(line.into_owned()); }
+            if fault_line(&self.app, &line, &mut self.scan) { *self.r.fault.lock().unwrap() = Some(line.into_owned()); }
             consumed = end + 1;
         }
         self.buf.drain(..consumed);
@@ -2732,7 +3046,7 @@ fn cut_by_restart(x: &Live, now: u64) -> Option<Cut> {
     let mut cut = LivePatch { outcome_ms: now, ..p.clone() };
     if x.test || p.files.is_empty() {
         cut.outcome = "failed".into();
-        cut.reason = "the master restarted before this edit's verdict: the session's next call ships its saves again".into();
+        cut.reason = if x.test && p.shipped_ms > 0 { CUT_RERUN } else { "the master restarted before this edit's verdict: the session's next call ships its saves again" }.into();
         return Some(Cut::Said(cut));
     }
     cut.outcome = "superseded".into();
@@ -2740,15 +3054,32 @@ fn cut_by_restart(x: &Live, now: u64) -> Option<Cut> {
     Some(Cut::Ship(cut, p.files.clone()))
 }
 
+/// A test session's edit its node took before the master's restart cut its verdict: nothing is
+/// left to ship, and the next call answered that cut verdict again, call after call, until the
+/// session ended (W18256, 11-24). That call runs its tests again on its JIT restarted warm.
+const CUT_RERUN: &str = "the master restarted before this edit's verdict: the session's next call runs its tests again";
+
+/// Whether `p` is such a cut verdict ([`CUT_RERUN`]).
+fn rerun_cut(p: &LivePatch) -> bool {
+    p.outcome == "failed" && p.shipped_ms > 0 && p.reason == CUT_RERUN
+}
+
 /// Holds a live job whose lease and app outlived the previous master, until it ends.
-fn reattach(ctx: &Arc<Ctx>, x: &Live) {
+/// The run of a session the restarted master took back on its held lease, followed again: its
+/// saves are heard ([`join`]). A restart is no call: the session keeps its own touch, and its idle
+/// end with it ([`idle_now`]).
+fn take_back(ctx: &Ctx, x: &Live) -> Arc<Running> {
     let held = Held::attach(&x.lease, &x.node);
     let tree = PathBuf::from(&x.tree);
     // an app's ships wait for its pid, as a started session's do (the run's watcher frees them):
     // one shipped before it found no app and dropped its files
     let r = Arc::new(Running { node: x.node.clone(), lease: x.lease.clone(), held, tree, test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
     join(&ctx.monitor, &x.id, r.clone());
-    set(ctx, &x.id, |s| s.touched_ms = wall_ms());
+    r
+}
+
+fn reattach(ctx: &Arc<Ctx>, x: &Live) {
+    let r = take_back(ctx, x);
     let len = std::fs::metadata(&x.log).map_or(0, |m| m.len());
     // a run asked for and not noted: the node has it (followed), or is still getting it ready (the
     // same ask answers from that: an overlay's JIT resolution goes on), or never got the ask
@@ -2908,8 +3239,8 @@ fn finished(ctx: &Ctx, id: &str, r: &Running, res: Result<i32, String>) {
     let x = set(ctx, id, |s| {
         if s.active() {
             s.state = "ended".into();
+            s.ended_ms = wall_ms();
         }
-        s.ended_ms = wall_ms();
         if let Some(verdict) = &jit_verdict {
             s.note = verdict.clone();
             s.panic = None;
@@ -2966,7 +3297,8 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     };
     set(ctx, id, |x| x.rev = rev.clone());
     // Overlays are keyed by lease lane: each target needs its own source state.
-    let spec = Spec { since_ms: None, lane: if x.test { format!("live-{id}") } else { x.lane.clone() }, agent: x.agent.clone(), kind: if x.visible { Kind::Screen } else { Kind::Test }, needs: x.needs.clone(), prio: crate::lease::sched::DEFAULT_PRIO, rev, repo_dir: x.tree.clone(), node: (!x.pin.is_empty()).then(|| x.pin.clone()) };
+    let (kind, needs) = lease_kind(&x);
+    let spec = Spec { since_ms: None, lane: if x.test { format!("live-{id}") } else { x.lane.clone() }, agent: x.agent.clone(), kind, needs: needs.clone(), prio: crate::lease::sched::DEFAULT_PRIO, rev, repo_dir: x.tree.clone(), node: (!x.pin.is_empty()).then(|| x.pin.clone()) };
     let argv: Vec<String> = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "run"].iter().map(|s| s.to_string()).chain(std::iter::once(x.app.clone())).collect();
     let src = Src::for_run(spec.kind, &argv, x.src == "tree", false);
     // (the session it joins, by its lease: never idle while this one is queued or runs)
@@ -2983,7 +3315,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         r.loader = (!x.loader.is_empty()).then(|| x.loader.clone());
         // its box as a lease's flags place it: `--node` (or the box of the session it joins),
         // `--needs`, `--avoid`, `--series`, `--pin-why`
-        r.place(&x.pin, &x.needs, &x.avoid, &x.series, &x.pin_why);
+        r.place(&x.pin, &needs, &x.avoid, &x.series, &x.pin_why);
     };
     // A box that goes away while the sources ship is no verdict on the session (its hub restarts
     // for its self-update, most often): the lease goes back and it is placed again, as a job is.
@@ -2995,7 +3327,9 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     // three headless sessions per lane, a lane's next one ended its least recently used one
     // between two calls, and a lane's WM screenshot tests ran again (11-13).
     let waited: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+    let asking = Asking(id);
     let mut on_wait = |line: &str| {
+        if let Some(lease) = super::leg::asked_lease(line) { asking.names(lease); }
         if line.contains(" granted") { return; }
         let first = waited.get().is_none();
         if first { waited.set(Some(wall_ms())); }
@@ -3007,11 +3341,13 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     let (held, ship_started, home_dir) = loop {
         let held = match Held::acquire_with(&spec, &configure, &mut on_wait, &|| get(ctx, id).is_none_or(|x| !x.active())) {
             Ok(h) => h,
-            Err(e) if placed + 1 < super::job::ATTEMPTS && super::leg::exit_lost(&e) => {
+            // placed again however often, after a pause that grows ([`super::job::again_after`])
+            Err(e) if super::leg::exit_lost(&e) => {
                 placed += 1;
-                let why = format!("no box ({}); placed again", crate::proto::clean(&e, 160));
+                let why = format!("no box ({}); placed again in {} s", crate::proto::clean(&e, 160), super::job::again_after(placed).as_secs());
                 let x = set(ctx, id, |s| s.note = why.clone());
                 event(ctx, Sev::Warn, format!("live {id}: {why}"), x.as_ref());
+                if !super::job::pause_again(placed, &|| get(ctx, id).is_none_or(|x| !x.active())) { return; }
                 continue;
             }
             Err(e) => return fail(e),
@@ -3035,10 +3371,11 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         };
         let node = held.node.clone();
         held.release(None);
-        if placed >= super::job::ATTEMPTS || !super::leg::exit_lost(&e) {
+        if !super::leg::exit_lost(&e) {
             return fail(format!("{what}: {e}"));
         }
-        event(ctx, Sev::Warn, format!("live {id}: {what} to {node} failed ({}); placed again", crate::proto::clean(&e, 160)), Some(&x));
+        event(ctx, Sev::Warn, format!("live {id}: {what} to {node} failed ({}); placed again in {} s", crate::proto::clean(&e, 160), super::job::again_after(placed).as_secs()), Some(&x));
+        if !super::job::pause_again(placed, &|| get(ctx, id).is_none_or(|x| !x.active())) { return; }
     };
     // (one ended while its box was granted or its sources shipped starts no app: its lease goes)
     if get(ctx, id).is_none_or(|x| !x.active()) {
@@ -3064,6 +3401,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     };
     let r = Arc::new(Running { node: held.node.clone(), lease: held.id.clone(), held, tree: tree.clone(), test: x.test, pending: Mutex::new((BTreeSet::new(), 0, None)), up_pid: Default::default(), calls: Mutex::new(Calls::default()), inflight: std::sync::atomic::AtomicBool::new(true), restart: std::sync::atomic::AtomicBool::new(false), resuming: std::sync::atomic::AtomicBool::new(x.test && !first_call), fault: Mutex::new(None), waiting: Default::default(), relaunch_waits: Default::default(), kept_said: Default::default() });
     join(&ctx.monitor, id, r.clone());
+    drop(asking);
     let x = set(ctx, id, |s| {
         s.state = "running".into();
         // (a placement's "placed again" note says how it waited, not how it runs)
@@ -3119,7 +3457,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         argv.extend(x.test_args.iter().cloned());
         let file = std::fs::OpenOptions::new().append(true).create(true).open(&x.log).map_err(|e| e.to_string())?;
         let log_start = file.metadata().map_err(|e| e.to_string())?.len();
-        let out = RunOut { file, buf: Vec::new(), pid: follow.map(|_| x.pid).filter(|p| *p > 0), run_pid: follow.map(|_| x.run_pid).filter(|p| *p > 0), app: x.app.clone(), r: r.clone(), captured: false };
+        let out = RunOut { file, buf: Vec::new(), pid: follow.map(|_| x.pid).filter(|p| *p > 0), run_pid: follow.map(|_| x.run_pid).filter(|p| *p > 0), app: x.app.clone(), r: r.clone(), scan: Scan::default() };
         let shared = Arc::new(Mutex::new(out));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (c2, id2, s2, d2, r2) = (ctx.clone(), id.to_string(), shared.clone(), done.clone(), r.clone());
@@ -3198,8 +3536,8 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         if x.test && x.active() && !r.restart.load(std::sync::atomic::Ordering::SeqCst) {
             let mut p = x.patch.clone().unwrap_or_default();
             let log = run_log(r, x.run_n, p.log_start).map(|(_, log)| log).unwrap_or_default();
-            let mut captured = false;
-            let fault = r.fault.lock().unwrap().take().or_else(|| log.lines().find(|l| fault_line(&x.app, l, &mut captured)).map(str::to_string));
+            let mut scan = Scan::default();
+            let fault = r.fault.lock().unwrap().take().or_else(|| log.lines().find(|l| fault_line(&x.app, l, &mut scan)).map(str::to_string));
             if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &log) {
                 p.tests = None;
                 p.reason = verdict.line();
@@ -3249,7 +3587,7 @@ pub fn on_record(ctx: &Ctx, r: &Record) {
     let Some(x) = ctx.store.read(|d| d.lives.iter().find(|x| x.state == "running" && x.node == r.machine && x.pid == r.pid).cloned()) else { return };
     let d = makepad_strict_json::parse(r.detail.as_bytes()).ok();
     let f = |k: &str| d.as_ref().and_then(|d| d.get(k)).and_then(|v| v.as_str()).map(str::to_string).unwrap_or_default();
-    if x.test && jit_fault_of(&x.app, &format!("{} panicked at {}", f("message"), f("location"))) {
+    if x.test && panic_fault(&x.app, &f("kind"), &f("message"), &f("location")) {
         if let Some(r) = running(&x.id) { *r.fault.lock().unwrap() = Some(format!("{}: {}", f("location"), f("message"))); }
         return;
     }
@@ -3300,7 +3638,10 @@ mod verified_outcome_tests {
     /// A test watch follows its session's process: a restart behind the restart parent moves the
     /// pid, and the watch reads the new process's events from its first (W12859 waited 6 min on
     /// the old pid for the verdict its restarted tests gave in 3 s, 11-18). Another run, a newer
-    /// edit, an ended session or one with no process yet ends it.
+    /// edit, an ended session or one with no process yet ends it. A stop of the run follows it
+    /// too: the moved pid is the run going on, its new process the one to stop (W18336 read it as
+    /// stopped and waited 10 min for a run that never ended, 11-24); no process or another run is
+    /// the run's end.
     #[test]
     fn a_test_watch_follows_its_sessions_restarted_process() {
         use crate::state::{Live, LivePatch};
@@ -3317,6 +3658,11 @@ mod verified_outcome_tests {
             assert!(!super::watch_on(&mut x.clone(), Some(&now), &mut p.clone()), "{why} ends the watch");
         }
         assert!(!super::watch_on(&mut x, None, &mut p), "a session that is gone ends it");
+        assert_eq!(super::run_to_stop(&session, Some(&session)), Some(7), "a stop quits the run's process");
+        assert_eq!(super::run_to_stop(&session, Some(&moved)), Some(9), "a restart in place as the stop began: the run goes on, and its new process is stopped");
+        for (now, why) in [(Some(Live { pid: 0, ..session.clone() }), "no process"), (Some(Live { run_n: 2, ..moved.clone() }), "another run"), (None, "no session")] {
+            assert_eq!(super::run_to_stop(&session, now.as_ref()), None, "{why}: the run has ended");
+        }
     }
 }
 
@@ -3457,7 +3803,7 @@ mod gone_tests {
         ctx.store.update(|d| d.lives.push(Live { id: "WG1".into(), app: "app".into(), lane: "lane".into(), lease: "L1".into(), node: "node".into(), state: "running".into(), test: true, pid, patch: Some(patch), ..Default::default() })).unwrap();
         // its caller waits for the first run's verdict
         let c = ctx.clone();
-        let caller = std::thread::spawn(move || initial_call(&c, "WG1"));
+        let caller = std::thread::spawn(move || initial_call(&c, "WG1", ""));
         let mut look = AliveLook::default();
         assert_eq!(alive_look(&ctx, "WG1", "L1", false, &mut look), None, "it runs");
         assert!(look.start.is_some() && look.gone == 0, "its start is kept: a pid used again is another process");
@@ -3604,6 +3950,12 @@ mod cut_tests {
         let test = Live { test: true, ..shipped.clone() };
         let Some(Cut::Said(cut)) = cut_by_restart(&test, 50) else { panic!("a test session's cut edit must be said") };
         assert!(super::terminal(&cut) && cut.reason.contains("next call"), "`live wait verdict` answers at once and names the call that ships it again: {} {}", cut.outcome, cut.reason);
+        // its node has it, so the next call has nothing to ship: that call runs its tests again,
+        // where every call answered the cut verdict again until the session ended (W18256, 11-24)
+        assert!(super::rerun_cut(&cut), "a shipped test edit's cut is rerun by the next call: {}", cut.reason);
+        let Some(Cut::Said(unshipped)) = cut_by_restart(&Live { test: true, ..app.clone() }, 50) else { panic!("a test session's cut edit must be said") };
+        assert!(!super::rerun_cut(&unshipped) && unshipped.reason.contains("ships its saves again"), "one its node never had ships on the next call: {}", unshipped.reason);
+        assert!(!super::rerun_cut(&LivePatch { outcome: "failed".into(), shipped_ms: 20, reason: "3 tests failed".into(), ..Default::default() }), "a failed verdict of the tests is no cut");
         let done = Live { patch: Some(LivePatch { outcome: "patched".into(), ..edit }), ..app.clone() };
         assert!(cut_by_restart(&done, 50).is_none(), "an edit with its verdict is left as it is");
         assert!(cut_by_restart(&Live { patch: None, ..app }, 50).is_none(), "a session with no edit has nothing cut");
@@ -3643,6 +3995,79 @@ mod owner_tests {
         let live = |id: &str, lease: &str, state: &str| Live { id: id.into(), app: "app".into(), lane: "lane".into(), lease: lease.into(), state: state.into(), ..Default::default() };
         ctx.store.update(|d| d.lives.extend([live("WR1", "L1", "running"), live("WR2", "L2", "running"), live("WR3", "L4", "ended"), live("WR4", "L6", "running"), live("WR5", "", "starting"), live("WR6", "L5", "paused")])).unwrap();
         let field = |reply: &str, k: &str| makepad_strict_json::parse(reply.as_bytes()).unwrap().get(k).and_then(Value::as_str).unwrap_or("").to_string();
+
+        let refused = |id: &str, lease: &str| Live {
+            test: true, pid: 7, run_n: 2, patch: Some(LivePatch { edit_ms: 42, outcome: "compile_error".into(), reason: "error: missing item\nerror: second error".into(), ..Default::default() }),
+            ..live(id, lease, "running")
+        };
+        let calls = Mutex::new(Calls::default());
+        let arm = |x: &Live, caller: &str, gone: bool| calls.lock().unwrap().checking(x, caller, x.refusal_key().unwrap(), Box::new(move || gone));
+        let mut x = refused("WR1", "L1");
+        set(&ctx, "WR1", |s| *s = x.clone());
+        arm(&x, "first", false);
+        let old = x.refusal_key().unwrap();
+        x.run_n += 1;
+        set(&ctx, "WR1", |s| s.run_n = x.run_n);
+        checked(&ctx, "WR1", &calls, "first", &old, true).unwrap();
+        assert!(get(&ctx, "WR1").unwrap().held.is_empty() && open("L1"), "a confirmation for the previous run neither holds nor releases");
+        arm(&x, "second", false);
+        assert!(calls.lock().unwrap().keeps_refusal(&x), "the cargo caller protects its current refusal from the master's sweeps");
+        checked(&ctx, "WR1", &calls, "second", &x.refusal_key().unwrap(), true).unwrap();
+        let held = get(&ctx, "WR1").unwrap();
+        assert_eq!(held.held, "error: missing item", "only the first compile diagnostic is kept");
+        assert!(calls.lock().unwrap().keeps_refusal(&held), "the confirmed refusal survives the sweeps after the client goes");
+        // A master restart between the call and its cargo answer loses the armed check: the
+        // caller's confirmation still holds, its non-confirmation changes nothing.
+        let unarmed = refused("WR-restart", "L-restart");
+        ctx.store.update(|d| d.lives.push(unarmed.clone())).unwrap();
+        let fresh = Mutex::new(Calls::default());
+        checked(&ctx, "WR-restart", &fresh, "after", &unarmed.refusal_key().unwrap(), false).unwrap();
+        assert!(get(&ctx, "WR-restart").is_some_and(|x| x.active() && x.held.is_empty()), "an unarmed non-confirmation neither holds nor releases");
+        let reply = checked(&ctx, "WR-restart", &fresh, "after", &unarmed.refusal_key().unwrap(), true).unwrap();
+        assert_eq!((get(&ctx, "WR-restart").unwrap().held, field(&reply, "held")), ("error: missing item".to_string(), "error: missing item".to_string()), "a confirmation after a master restart holds");
+
+        assert!(render(&held).contains("  held: error: missing item\n"), "live list and live get render the diagnostic");
+        assert_eq!(field(&serve(&ctx, "live list held-leases").unwrap(), "L1"), held.held, "the lease diagnostic is keyed by lease ID");
+        assert!(!left_long(&Live { left_ms: 1, ..held.clone() }, LEFT_MS + IDLE_MS), "a departed starter does not end a confirmed hold");
+
+        // A held edit needs no second check until the node takes a change. On a publication
+        // the node can already have moved to a fresh PID with its own event sequence.
+        let refusal_event = r#"{"event":"patchrefused","seq":8,"reasons":["error: missing item"]}"#;
+        let mut old_patch = held.patch.clone().unwrap();
+        old_patch.seq = 8;
+        old_patch.cursor = event_cursor(&makepad_strict_json::parse(refusal_event.as_bytes()).unwrap());
+        assert!(!taken_since(&[refusal_event.into()], &old_patch), "unchanged manifest and refusal cursor reuse the held answer");
+        let answer = crate::state::live_from(&makepad_strict_json::parse(test_reply(&held, None, "again").as_bytes()).unwrap());
+        assert_eq!((answer.test_code(), answer.held.as_str()), (1, "error: missing item"), "the unchanged call answers with the confirmed refusal");
+        let repaired = Live { id: "WR-edit".into(), lease: "L-edit".into(), ..held.clone() };
+        ctx.store.update(|d| d.lives.push(repaired.clone())).unwrap();
+        for (failed, expected) in [(0, 0), (1, 1)] {
+            let mut watch = set(&ctx, &repaired.id, |s| *s = repaired.clone()).unwrap();
+            let mut patch = LivePatch { edit_ms: old_patch.edit_ms + 1, outcome: "restart".into(), seq: old_patch.seq, cursor: old_patch.cursor.clone(), ..Default::default() };
+            let id = watch.id.clone();
+            set_patch(&ctx, &id, &patch);
+            let moved = set(&ctx, &id, |s| s.pid += 1).unwrap();
+            let mut events = [false, true].into_iter();
+            collect_test_verdict(&ctx, &id, &mut watch, &mut patch, |x, p| {
+                assert!(watch_on(x, Some(&moved), p));
+                assert_eq!((x.pid, p.seq), (moved.pid, 0), "the watch follows the fast PID change from the new queue's first event");
+                let restarted = events.next().expect("the restarted verdict ends the call");
+                let event = format!(r#"{{"event":"testverdict","seq":1,"group":0,"ran":1,"passed":{},"failed":{failed},"ms":1,"restarted":{restarted}}}"#, 1-failed);
+                makepad_strict_json::parse(event.as_bytes()).ok()
+            });
+            let saved = set_test_patch(&ctx, &id, &watch, &patch).unwrap();
+            assert!(saved.held.is_empty() && saved.patch.as_ref().unwrap().tests.as_ref().unwrap().restarted, "the restarted round supersedes the held refusal");
+            assert_eq!((saved.lease.as_str(), saved.test_code()), ("L-edit", expected), "the fixed edit's verdict on the same lease");
+        }
+        release(&ctx, &repaired.id, "done").unwrap();
+
+        let orphan = refused("WR-check", "L11");
+        ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":\"L11\",\"node\":\"node\",\"req\":{}}}", req.to_json()), 1); });
+        ctx.store.update(|d| d.lives.push(orphan.clone())).unwrap();
+        assert!(open("L11"), "the cargo caller owns a granted lease");
+        arm(&orphan, "gone", true);
+        departed_checks(&ctx, &orphan.id, &calls);
+        assert!(!get(&ctx, &orphan.id).unwrap().active() && !open("L11"), "a departed cargo caller releases its unconfirmed session and lease");
 
         // released by its id alone, with no run of it followed here
         assert!(running("WR1").is_none());
@@ -3685,6 +4110,43 @@ mod owner_tests {
         let reply = serve(&ctx, "live release WR2").unwrap();
         assert!(field(&reply, "lease") == "its lease L2 freed" && !open("L2") && owner("L2").is_none(), "the session's own release ends its lease: {reply}");
 
+        // a restart is no call: a session keeps its own touch through it, and its idle end with it.
+        // That end waits for the restarted master's first ask of its box's caps, which say a
+        // person's input there; a queued session whose starter left ends, not placed again (W19220
+        // held its box through four restarts with no save or call, 11-25)
+        let (now, min) = (wall_ms(), 60_000);
+        for id in ["L21", "L22", "L23", "L24"] {
+            ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":{},\"node\":\"idle-box\",\"req\":{}}}", json_str(id), req.to_json()), 1); });
+        }
+        let tree = home.join("idle");
+        std::fs::create_dir_all(&tree).unwrap();
+        let on_box = |id: &str, lease: &str, touched_ms: u64| Live { app: "idle-app".into(), node: "idle-box".into(), tree: tree.to_string_lossy().into_owned(), touched_ms, ..live(id, lease, "running") };
+        let quiet = on_box("WR11", "L21", now - 30 * min);
+        let called = on_box("WR12", "L22", now - 2 * min);
+        let saving = Live { test: true, ..on_box("WR13", "L23", now - 30 * min) };
+        let watched = Live { visible: true, ..on_box("WR14", "L24", now - 30 * min) };
+        let left = Live { app: "idle-app".into(), left_ms: now - 20 * min, touched_ms: now - 30 * min, ..live("WR15", "", "starting") };
+        ctx.store.update(|d| d.lives.extend([quiet.clone(), called.clone(), saving.clone(), watched.clone(), left])).unwrap();
+        let ours: Vec<(String, bool)> = restarted(&ctx).into_iter().filter(|(x, _)| x.app == "idle-app").map(|(x, held)| (x.id, held)).collect();
+        assert_eq!(ours, [("WR11".to_string(), true), ("WR12".to_string(), true), ("WR13".to_string(), true), ("WR14".to_string(), true)], "the held ones go on");
+        let x = get(&ctx, "WR15").unwrap();
+        assert!(x.state == "ended" && x.note.contains("starter's call went") && x.note.contains("did not place it again"), "a queued session whose starter left ends, not placed again: {x:?}");
+        assert_eq!(get(&ctx, "WR5").unwrap().touched_ms, 0, "one placed again keeps its own touch");
+        let runs: Vec<Arc<Running>> = [&quiet, &called, &saving, &watched].into_iter().map(|x| take_back(&ctx, x)).collect();
+        let touched = |id: &str| get(&ctx, id).unwrap().touched_ms;
+        assert_eq!([touched("WR11"), touched("WR12"), touched("WR13"), touched("WR14")], [quiet.touched_ms, called.touched_ms, saving.touched_ms, watched.touched_ms], "taken back, each keeps its own touch");
+        // a test session's save waits for its next call: noted as its touch, a restart keeps it
+        due(&runs[2].pending, ["src/a.rs".to_string()]);
+        note_save(&ctx, "WR13", &runs[2]);
+        assert!(touched("WR13") >= now, "a test session's save is its touch");
+        let idle = |at: u64| idle_now(&ctx, at).into_iter().filter(|x| x.app == "idle-app").map(|x| x.id).collect::<Vec<_>>();
+        assert!(idle(now).is_empty(), "the restarted master has not asked its box yet: a person's input there and its builds are not known");
+        ctx.leases.test_sched(|s| { s.set_caps("idle-box", crate::lease::Caps { input_idle_ms: Some(min), ..Default::default() }, now); });
+        assert_eq!(idle(now), ["WR11"], "once asked, the session past its idle end ends; one with a call or a save inside the window stays, and so does a visible one its person works at");
+        for id in ["WR11", "WR12", "WR13", "WR14"] {
+            release(&ctx, id, "done").unwrap();
+        }
+
         // sessions parked in use for a timed lease start again by themselves once it ends, under
         // their id; one whose lane runs the same app anew meanwhile, or released it, stays ended
         ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":\"L7\",\"node\":\"node\",\"req\":{}}}", req.to_json()), 1); });
@@ -3702,6 +4164,90 @@ mod owner_tests {
         let x = get(&ctx, "WR7").unwrap();
         assert!(x.state == "starting" && x.resume_after.is_empty() && x.lease.is_empty() && x.note.contains("timed L7"), "{x:?}");
         assert!(resume_due(&ctx).is_empty(), "once");
+
+        // a starting session's queued ask goes with its release, before the release answers: left
+        // to its start's next look, it stood a beat, and its lane's next timed start was refused as
+        // a second timed lease of the lane (11-23)
+        let mut timed = Req::new("lane", Kind::Timed);
+        timed.live = true;
+        let mut queued = String::new();
+        ctx.leases.test_sched(|s| { queued = s.request(timed.clone(), 4); });
+        ctx.store.update(|d| d.lives.push(live("WR10", "", "starting"))).unwrap();
+        let asking = Asking("WR10");
+        asking.names(super::super::leg::asked_lease(&format!("{queued} queued waits for a drained box")).unwrap());
+        assert!(open(&queued), "{queued} waits in the queue");
+        let reply = serve(&ctx, "live release WR10").unwrap();
+        assert_eq!(field(&reply, "lease"), format!("its asked lease {queued} given up"), "{reply}");
+        let timed_left = ctx.leases.view().iter().filter(|l| l.req.kind == Kind::Timed && l.req.lane == "lane" && !matches!(l.state, State::Ended(_))).map(|l| l.id.clone()).collect::<Vec<_>>();
+        assert!(timed_left.is_empty(), "the release gave the ask up at once: no timed lease of the lane is left to refuse its next start: {timed_left:?}");
+        // The held session's resident RAM keeps another lane's ask queued until the call-end grace passes.
+        req.src = Src::Overlay;
+        req.rev = Some(format!("work@{}", "a".repeat(40)));
+        ctx.leases.test_sched(|s| { s.restore(&format!("{{\"id\":\"L31\",\"node\":\"ram-box\",\"req\":{}}}", req.to_json()), 1); });
+        let parked_hold = Live { id: "WR-park".into(), lease: "L31".into(), tree: home.to_string_lossy().into_owned(), src: req.src.as_str().into(), ..held.clone() };
+        ctx.store.update(|d| d.lives.push(parked_hold.clone())).unwrap();
+        ctx.leases.live_idle(&parked_hold.lease);
+        assert!(open("L31"));
+        let mut park_note = None;
+        ctx.leases.test_sched(|s| {
+            let after_grace = 2 + crate::lease::sched::LIVE_IN_USE_MS;
+            s.add_node("ram-box", "192.0.2.1", None);
+            s.set_caps("ram-box", crate::lease::Caps {
+                cores: 16, ram_gb: 16.0, ram_avail_gb: 16.0, disk_free_gb: 100.0, role: Some(crate::lease::Role::Pool),
+                features: crate::lease::FEATURES.iter().map(|f| f.to_string()).collect(), ..Default::default()
+            }, after_grace);
+            s.beat("L31", after_grace);
+            s.set_info("L31", r#"{"running":"makepad","held_mb":8192,"idle_s":30}"#, after_grace);
+            assert!(s.live_idle.contains("L31"), "the lease charges its idle share");
+            let mut waiting = Req::new("waiting", Kind::Test);
+            waiting.src = req.src;
+            waiting.rev = req.rev.clone();
+            waiting.ram_gb = Some(8.0);
+            let ask = s.request(waiting, after_grace);
+            let actions = s.tick(after_grace);
+            park_note = actions.iter().find_map(|action| match action {
+                crate::lease::sched::Action::ParkLive { leases, note, .. } if leases.iter().any(|id| id == "L31") && note.starts_with(&format!("parked for {ask} ")) => Some(note.clone()),
+                _ => None,
+            });
+            assert!(park_note.is_some(), "the RAM ask parks the held lease: {actions:?}; ask: {:?}", s.get(&ask));
+        });
+        let note = park_note.unwrap();
+        let parked = set(&ctx, &parked_hold.id, |s| record_park(s, &note, 3_660_000)).unwrap();
+        ctx.leases.release_live(&parked.lease);
+        assert!(!parked.active() && !open("L31"), "parking frees the box");
+        std::fs::create_dir(home.join(".git")).unwrap();
+        let request = format!(r#"live test {{"app":"app","lane":"lane","repo_dir":{}}}"#, json_str(&parked.tree));
+        let notices = std::cell::RefCell::new(Vec::new());
+        let reply = serve_with(&ctx, &request, &|line| notices.borrow_mut().push(line.to_string()), &|ctx, id, first_call| {
+            assert_eq!(*notices.borrow(), [format!("the held session WR-park was {note} at 01:01Z; this run started cold")], "the caller hears why before the new run starts");
+            assert!(first_call && id != parked.id, "the call starts a fresh session");
+            set(ctx, id, |s| {
+                s.state = "running".into();
+                s.patch = Some(LivePatch { outcome: "initial".into(), tests: Some(crate::state::LiveTests { ran: 1, passed: 1, ..Default::default() }), ..Default::default() });
+            });
+            Ok(())
+        }).expect("the call on the parked session starts cold");
+        let fresh = crate::state::live_from(&makepad_strict_json::parse(reply.as_bytes()).unwrap());
+        assert!(fresh.id != parked.id && fresh.test_code() == 0, "the fresh run's passing verdict reaches the caller: {reply}");
+        assert!(get(&ctx, &parked.id).unwrap().held.is_empty(), "the cold-start notice is consumed once");
+
+        // A lane may never call again. Its parked records share the ordinary history bound.
+        ctx.store.update(|d| {
+            for i in 0..=crate::state::KEEP {
+                let lane = if i == 1 { "finished" } else { "continuing" };
+                d.lives.push(Live { id: format!("WH{i}"), lane: lane.into(), state: "ended".into(), held: held.held.clone(), ..Default::default() });
+            }
+            d.lives.push(live("WR-plain", "", "ended"));
+        }).unwrap();
+        assert_eq!(ctx.store.read(|d| d.lives.iter().filter(|s| !s.active()).count()), crate::state::KEEP, "held and plain records share KEEP");
+        assert!(get(&ctx, "WR-plain").is_none() && get(&ctx, "WH0").is_none(), "plain ended records go first, then the oldest parked record");
+        assert_eq!(get(&ctx, "WH1").unwrap().held, held.held, "the next parked note survives trimming");
+        assert!(get(&ctx, &fresh.id).unwrap().active(), "active sessions survive history trimming");
+        serve(&ctx, "live end-lane finished").unwrap();
+        assert!(get(&ctx, "WH1").unwrap().held.is_empty(), "lane cleanup clears the ended record's diagnostic");
+        assert_eq!(get(&ctx, "WH2").unwrap().held, held.held, "another lane keeps its cold-start note");
+        drop(asking);
+        assert_eq!(super::super::leg::asked_lease("held back: lane work waits"), None, "a line before the ask names none");
         drop(ctx);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -3815,7 +4361,8 @@ mod owner_tests {
 
     /// A session joins one of its lane's that runs placed, on that one's box (`--node` naming the
     /// same box or none), and keeps it from its idle end while it is active (11-16: a hidden test
-    /// WM parked under the visible app that joined it left the app a dead socket).
+    /// WM parked under the visible app that joined it left the app a dead socket). And the lease a
+    /// session asks for: a timed one's is timed (`--timed`), a visible one's needs a display.
     #[test]
     fn a_session_joins_a_placed_session_of_its_lane_on_its_box() {
         let live = |id: &str, lane: &str, state: &str, node: &str, joins: &str| crate::state::Live { id: id.into(), lane: lane.into(), state: state.into(), node: node.into(), joins: joins.into(), note: if state == "ended" { "parked for L9".into() } else { String::new() }, ..Default::default() };
@@ -3831,6 +4378,14 @@ mod owner_tests {
         assert!(!super::joined(&ended, "W1"), "an ended session joins nothing");
         let back = crate::state::live_from(&crate::state::live_value(&with[1]));
         assert_eq!(back.joins, "W1", "a session's join survives the store");
+        // its lease's kind and needs: a timed one's is timed, and visible it needs a display there
+        use crate::lease::Kind;
+        let x = |visible: bool, timed: bool, needs: &str| super::lease_kind(&crate::state::Live { visible, timed, needs: needs.into(), ..Default::default() });
+        assert_eq!(x(false, false, "os=linux"), (Kind::Test, "os=linux".to_string()));
+        assert_eq!(x(true, false, ""), (Kind::Screen, String::new()));
+        assert_eq!(x(false, true, "os=macos"), (Kind::Timed, "os=macos".to_string()), "a headless timed session");
+        assert_eq!(x(true, true, "os=macos"), (Kind::Timed, "os=macos,gui=1".to_string()), "a visible timed session needs a display");
+        assert_eq!(x(true, true, "display=1"), (Kind::Timed, "display=1".to_string()), "one that names a display keeps it");
     }
 
     /// A test session whose starter left ends after LEFT_MS with nothing since: queued or on its
@@ -3904,12 +4459,24 @@ mod owner_tests {
         assert_eq!(calls.ready_to_park(false), None, "release happens once");
     }
 
+    /// A grab names its file on every OS, and a gseq every frame in order, each with what it was
+    /// drawn at; they come here named as a look's frames, numbered on after the session's own.
     #[test]
     fn a_grab_names_its_file_on_every_os() {
         let lines = |l: &str| vec!["{\"frame\":3}".to_string(), l.to_string()];
-        assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L7/g/a.png"}"#), "L7").as_deref(), Some("g/a.png"));
-        assert_eq!(super::grab_file(&lines(r#"{"png":"C:\\Users\\u\\devhub\\tmp\\L7\\g\\a.png"}"#), "L7").as_deref(), Some("g/a.png"));
-        assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L70/g/a.png"}"#), "L7"), None);
+        let first = |l: &str| super::grab_files(&lines(l), "L7").first().map(|(rel, _)| rel.clone());
+        assert_eq!(first(r#"{"png":"/h/devhub/tmp/L7/g/a.png"}"#).as_deref(), Some("g/a.png"));
+        assert_eq!(first(r#"{"png":"C:\\Users\\u\\devhub\\tmp\\L7\\g\\a.png"}"#).as_deref(), Some("g/a.png"));
+        assert_eq!(first(r#"{"png":"/h/devhub/tmp/L70/g/a.png"}"#), None);
+        assert_eq!(first(r#"{"png":"/h/devhub/tmp/L7/g/a.png","capture_ms":NaN}"#).as_deref(), Some("g/a.png"), "a line no JSON reader takes still names its file");
+        assert_eq!(super::grab_files(&lines(r#"{"png":"/h/devhub/tmp/L7/g/a.png","frame":9,"patch":2}"#), "L7"), [("g/a.png".to_string(), Some((9, 2)))]);
+        let seq = r#"{"png":["/h/devhub/tmp/L7/g/1.png","/h/devhub/tmp/L7/g/2.png","/h/devhub/tmp/L7/g/3.png"],"n":3,"every_ms":20,"frames":[{"png":"/h/devhub/tmp/L7/g/1.png","frame":40,"patch":1},{"png":"/h/devhub/tmp/L7/g/2.png","frame":41,"patch":1},{"png":"/h/devhub/tmp/L7/g/3.png"}]}"#;
+        let files = super::grab_files(&lines(seq), "L7");
+        assert_eq!(files, [("g/1.png".to_string(), Some((40, 1))), ("g/2.png".into(), Some((41, 1))), ("g/3.png".into(), None)], "a gseq names every frame, in order");
+        let drawn: Vec<_> = files.iter().map(|(_, d)| *d).collect();
+        let dir = std::path::Path::new("/l/screencap/lane");
+        assert_eq!(super::frame_paths(dir, "W5", 2, &drawn), [dir.join("W5-3-f40-p1.png"), dir.join("W5-4-f41-p1.png"), dir.join("W5-5.png")], "named as a look's, numbered on");
+        assert_eq!(super::frames_said(&super::frame_paths(dir, "W5", 2, &drawn)), "its 3 frames: W5-3-f40-p1.png .. W5-5.png in /l/screencap/lane");
     }
 
     /// A call's wait for room ends when its client leaves, however long the box stays full: no
@@ -3937,6 +4504,28 @@ mod owner_tests {
         let (mut n, mut said) = (0, Vec::new());
         assert_eq!(super::wait_for_room(&mut || { n += 1; if n < 3 { Err(format!("full {n}")) } else { Ok(()) } }, &|| None, std::time::Duration::ZERO, &mut |why| said.push(why.to_string())), Ok(Some("full 1".to_string())));
         assert_eq!(said, ["full 1", "full 2"]);
+        // a call that comes before the restarted master took its session's box back waits for it,
+        // and holds the session there: W16863's call, asked again into the restart, ran unheld and
+        // the idle sweep ended its session under it (11-23)
+        let joined: std::sync::Arc<std::sync::Mutex<Option<u32>>> = Default::default();
+        let j = joined.clone();
+        let reattach = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            *j.lock().unwrap() = Some(7);
+            super::JOINED.1.notify_all();
+        });
+        let mut said = 0;
+        assert_eq!(super::rejoined(&mut || *joined.lock().unwrap(), &|| true, &mut || said += 1), Some(7), "the box its reattach joined");
+        reattach.join().unwrap();
+        assert_eq!(said, 1, "said once, as it starts to wait");
+        let mut said = 0;
+        assert_eq!(super::rejoined(&mut || None::<u32>, &|| false, &mut || said += 1), None, "no app or no session: at once");
+        assert_eq!(said, 0);
+        let gone = std::sync::Arc::new(AtomicBool::new(false));
+        let leaves = gone.clone();
+        let client = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(200)); leaves.store(true, Ordering::SeqCst); });
+        assert_eq!(super::rejoined(&mut || None::<u32>, &|| !gone.load(Ordering::SeqCst), &mut || {}), None, "its client went");
+        client.join().unwrap();
     }
 
     /// A watch with no verdict asks the JIT's `live` where the edit is: still on it, installed (and
@@ -4324,8 +4913,8 @@ fn act(ctx: &Arc<Ctx>, id: &str, arg: &str, held: Option<&Call<'_>>) -> Result<S
     }
     try_set(ctx, id, |s| s.touched_ms = wall_ms())?;
     let t = Instant::now();
-    // a grab's file: (node, lease, path under the lease's dir), for `live look` to fetch
-    let mut png = None;
+    // a grab's file: (node, lease, path under the lease's dir), and every frame the call drew, here
+    let (mut png, mut paths) = (None, Vec::new());
     let mut lines = match arg.split_whitespace().next() {
         _ if devhub_relaunch(&x, arg) => relaunch(ctx, id, resend, relaunch_anyway(arg) == Some(true))?,
         // a resent relaunch its JIT serves: sent only while an edit still waits for it
@@ -4368,10 +4957,21 @@ fn act(ctx: &Arc<Ctx>, id: &str, arg: &str, held: Option<&Call<'_>>) -> Result<S
             if unpatched {
                 lines.insert(0, format!("STALE: a save waits to ship or for its verdict: this frame shows the code before it (`makepad devhub live look {id}` waits for it)"));
             }
-            if let Some(rel) = grab_file(&lines, &r.lease) {
-                lines.push(format!("copy it here: makepad devhub get {} tmp/{rel} <dir> --node {} --lease {} (or `live look {id}`)", x.lane, x.node, r.lease));
+            let files = grab_files(&lines, &r.lease);
+            if let Some((rel, _)) = files.first() {
                 let drawn = drawn.map_or(String::new(), |(frame, patch)| format!(",\"frame\":{frame},\"patch\":{patch}"));
                 png = Some(format!("{{\"node\":{},\"lease\":{},\"rel\":{}{drawn}}}", json_str(&x.node), json_str(&r.lease), json_str(&format!("tmp/{rel}"))));
+            }
+            // the frames come here, as a look's does: left on the box, a gseq's were gone with
+            // the session (a path camera's pop could not be shown, 11-23)
+            if !files.is_empty() {
+                match fetch_frames(ctx, &x, &r.lease, &files) {
+                    Ok(got) => {
+                        lines.push(frames_said(&got));
+                        paths = got;
+                    }
+                    Err(e) => lines.push(format!("its {} frame(s) stay on {}: {e}; copy one: makepad devhub get {} tmp/{} <dir> --node {} --lease {}", files.len(), x.node, x.lane, files[0].0, x.node, r.lease)),
+                }
             }
             lines
         }
@@ -4390,7 +4990,39 @@ fn act(ctx: &Arc<Ctx>, id: &str, arg: &str, held: Option<&Call<'_>>) -> Result<S
             }
         })?;
     }
-    Ok(format!("{{\"ms\":{},\"png\":{},\"lines\":[{}]}}", t.elapsed().as_millis(), png.as_deref().unwrap_or("null"), lines.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",")))
+    let paths: Vec<String> = paths.iter().map(|p| json_str(&p.to_string_lossy())).collect();
+    Ok(format!("{{\"ms\":{},\"png\":{},\"paths\":[{}],\"lines\":[{}]}}", t.elapsed().as_millis(), png.as_deref().unwrap_or("null"), paths.join(","), lines.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(",")))
+}
+
+/// Copies the frames a call drew ([`grab_files`]) off the lease's tmp dir into the lane's
+/// `local/screencap/<lane>/`, named as a look's frames are ([`frame_paths`]): their paths here.
+fn fetch_frames(ctx: &Ctx, x: &Live, lease: &str, files: &[(String, Option<(u64, u64)>)]) -> Result<Vec<PathBuf>, String> {
+    let dir = ctx.repo.join("local/screencap").join(&x.lane);
+    let had = std::fs::read_dir(&dir).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{}-", x.id))).count()).unwrap_or(0);
+    let drawn: Vec<Option<(u64, u64)>> = files.iter().map(|(_, d)| *d).collect();
+    let mut got = Vec::new();
+    for ((rel, _), path) in files.iter().zip(frame_paths(&dir, &x.id, had, &drawn)) {
+        let fetched = ctx.leases.fetch(&x.node, &x.lane, lease, &format!("tmp/{rel}"), &dir)?;
+        std::fs::rename(&fetched[0].0, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        got.push(path);
+    }
+    Ok(got)
+}
+
+/// Where a call's frames landed, for its caller.
+fn frames_said(paths: &[PathBuf]) -> String {
+    let name = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match paths {
+        [one] => format!("its frame: {}", one.display()),
+        [first, .., last] => format!("its {} frames: {} .. {} in {}", paths.len(), name(first), name(last), first.parent().map(|d| d.display().to_string()).unwrap_or_default()),
+        [] => String::new(),
+    }
+}
+
+/// A look's naming of session `id`'s frames in `dir`, after the `had` of its there:
+/// `<id>-<n>[-f<frame>-p<patch>].png`, numbered on, each stamped with what it was drawn at.
+fn frame_paths(dir: &Path, id: &str, had: usize, drawn: &[Option<(u64, u64)>]) -> Vec<PathBuf> {
+    drawn.iter().enumerate().map(|(i, d)| dir.join(format!("{id}-{}{}.png", had + i + 1, d.map_or(String::new(), |(f, p)| format!("-f{f}-p{p}"))))).collect()
 }
 
 /// A `live wait`'s timeout when it names none, s.
@@ -4483,20 +5115,13 @@ fn look(ctx: &Arc<Ctx>, id: &str, timeout: &str) -> Result<String, String> {
         x = crate::state::live_from(&makepad_strict_json::parse(answer.as_bytes()).map_err(|e| e.to_string())?);
         if x.state != "running" { return Err(no_frame(&x)); }
     }
+    // (the act copies its frame here: [`fetch_frames`])
     let answer = act(ctx, id, "grab", held.as_ref())?;
     let v = makepad_strict_json::parse(answer.as_bytes()).map_err(|e| e.to_string())?;
-    let png = v.get("png");
-    let s = |k: &str| png.and_then(|p| p.get(k)).and_then(Value::as_str).unwrap_or("");
     let lines = v.get("lines").cloned().unwrap_or(Value::Arr(Vec::new()));
-    if s("rel").is_empty() {
-        return Err(format!("the grab named no file: {}", lines.as_arr().unwrap_or(&[]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" | ")));
-    }
-    let dir = ctx.repo.join("local/screencap").join(&x.lane);
-    let got = ctx.leases.fetch(s("node"), &x.lane, s("lease"), s("rel"), &dir)?;
-    let n = std::fs::read_dir(&dir).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(&format!("{id}-"))).count()).unwrap_or(0);
-    let drawn = png.and_then(|p| Some(format!("-f{}-p{}", crate::lease::num(p.get("frame")?)? as u64, crate::lease::num(p.get("patch")?)? as u64))).unwrap_or_default();
-    let path = dir.join(format!("{id}-{}{drawn}.png", n + 1));
-    std::fs::rename(&got[0].0, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let Some(path) = v.get("paths").and_then(Value::as_arr).and_then(|p| p.first()).and_then(Value::as_str).map(PathBuf::from) else {
+        return Err(format!("the grab brought no file here: {}", lines.as_arr().unwrap_or(&[]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" | ")));
+    };
     Ok(with_room(format!("{{\"live\":{},\"path\":{},\"lines\":{}}}", crate::state::live_value(&x).to_json(), json_str(&path.to_string_lossy()), lines.to_json()), room_of(&held)))
 }
 
@@ -4538,6 +5163,21 @@ fn joined(lives: &[Live], id: &str) -> bool {
 /// A session asked with another JIT (`--jit`) or other `--env` is not one either: its call ran in
 /// the lane's session under its old JIT and environment, the asked ones dropped unsaid, and a saved
 /// JIT state could not be replayed (11-18).
+/// The kind and needs of session `x`'s lease. A timed one's (`--timed`) is timed: it waits for a
+/// drained box and holds it while it lives, as a timed lease does ([`crate::lease::sched`]'s
+/// `parks_for`), and a visible one needs a display there (`gui=1`), as a screen lease has one.
+/// Else a visible one's is a screen lease, a headless one's a test lease.
+pub(crate) fn lease_kind(x: &Live) -> (Kind, String) {
+    let needs = if x.timed && x.visible {
+        let mut needs = crate::lease::sched::parse_needs(&x.needs);
+        if !needs.iter().any(|(k, _)| k == "gui" || k == "display") { needs.push(("gui".to_string(), "1".to_string())); }
+        needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
+    } else {
+        x.needs.clone()
+    };
+    (if x.timed { Kind::Timed } else if x.visible { Kind::Screen } else { Kind::Test }, needs)
+}
+
 fn answers(x: &Live, lane: &str, app: &str, test: bool, offline: bool, test_args: &[String], needs: &str, pin: &str, avoid: &str, loader: &str, env: &[(String, String)]) -> bool {
     let placed = |s: &str| {
         let mut n = crate::lease::sched::parse_needs(s);
@@ -4549,7 +5189,7 @@ fn answers(x: &Live, lane: &str, app: &str, test: bool, offline: bool, test_args
         n.sort();
         n
     };
-    x.active() && x.lane == lane && x.app == app && x.test == test && x.offline == offline && x.test_args == test_args && x.loader == loader && x.env == env
+    x.lane == lane && x.app == app && x.test == test && x.offline == offline && x.test_args == test_args && x.loader == loader && x.env == env
         && if test { suits(x, needs, pin, avoid) } else { placed(&x.needs) == placed(needs) && x.pin == pin && avoided(&x.avoid) == avoided(avoid) }
 }
 
@@ -4575,6 +5215,13 @@ fn suits(x: &Live, needs: &str, pin: &str, avoid: &str) -> bool {
 /// `live start {"app","repo_dir","tree"?,"lane","agent","needs","node"?,"avoid"?,"series"?,"pin_why"?,"visible","test","offline"?,"test_args","env"?}`, `live act <id> <cmd>`,
 /// `live wait <id> patched|verdict|settled|frame [timeout_s]`, `live sync|release|get <id>`, `live list [all]`.
 pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
+    serve_with(ctx, line, &makepad_remote::lines::say_waiting, &|ctx, id, first_call| {
+        let (c, id) = (ctx.clone(), id.to_string());
+        std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, first_call)).map(|_| ())
+    })
+}
+
+fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&Arc<Ctx>, &str, bool) -> std::io::Result<()>) -> Result<String, String> {
     // `live --as <lane> <verb> ..`: the calling lane (see [`owned`])
     let (line, caller) = match line.strip_prefix("live --as ").and_then(|r| r.split_once(' ')) {
         Some((lane, rest)) => (format!("live {rest}"), Some(lane.to_string())),
@@ -4612,6 +5259,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             // Older clients sent the path as `tree`; new clients reserve it for the opt-out.
             let tree = v.get("repo_dir").and_then(Value::as_str).or_else(|| v.get("tree").and_then(Value::as_str)).unwrap_or("").to_string();
             let (app, lane) = (s("app"), makepad_devhub_conf::lane_name(&s("lane")));
+            let timed = v.get("timed").map(|t| t.as_bool().ok_or("live: timed must be a bool")).transpose()?.unwrap_or(false);
             let src = if v.get("tree").and_then(Value::as_bool).unwrap_or(false) { Src::Tree } else { Src::Overlay };
             let test = verb == "test" || v.get("test").and_then(Value::as_bool).unwrap_or(false);
             let offline = v.get("offline").map(|v| v.as_bool().ok_or("live: offline must be a bool")).transpose()?.unwrap_or(false);
@@ -4662,15 +5310,27 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let mut asked = crate::lease::sched::Req::new(&lane, Kind::Test);
             asked.place(&pin, &needs, &avoid, &series, &pin_why);
             asked.check_series().map_err(|e| format!("live: {e}"))?;
-            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid, &s("loader"), &env) && accepting(&x.id)).cloned()) {
+            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| x.active() && answers(x, &lane, &app, test, offline, &test_args, &needs, &pin, &avoid, &s("loader"), &env) && (accepting(&x.id) || verb == "test" && !x.held.is_empty())).cloned()) {
+                if verb == "test" && !old.held.is_empty() && !accepting(&old.id) {
+                    drop(starting);
+                    let signal = ctx.store.subscribe("live", &[&old.id]);
+                    loop {
+                        let seen = signal.generation();
+                        if get(ctx, &old.id).is_none_or(|x| !x.active()) || accepting(&old.id) { break; }
+                        if makepad_remote::lines::client_gone() { return Err("the test caller went away".into()); }
+                        signal.wait(seen, Duration::from_secs(1));
+                    }
+                    return serve_with(ctx, line, say, launch);
+                }
                 if verb == "test" {
                     // (a call from another checkout read the session's log, its run before the
                     // edit, as this call's verdict: ELANG took W9372's 221 for stale code, 11-15)
                     if old.tree != tree { return Err(format!("{} belongs to worktree {}, and this was asked from {tree}: run it from {}; nothing shipped or ran for this call (the session's log still ends with its last run)", old.id, old.tree, old.tree)); }
                     if old.src != src.as_str() { return Err(format!("{} uses {}; live release {} before changing its source mode", old.id, old.src, old.id)); }
+                    if old.timed != timed { return Err(format!("{} is {}a timed session; live release {} before changing that", old.id, if old.timed { "" } else { "not " }, old.id)); }
                     if old.also != also { return Err(format!("{} ships DEVHUB_ALSO `{}`; live release {} before changing it", old.id, old.also.join(" "), old.id)); }
                     drop(starting);
-                    return match test_call(ctx, &old.id)? { Some(answer) => Ok(answer), None => serve(ctx, line) };
+                    return match test_call(ctx, &old.id, &s("check"))? { Some(answer) => Ok(answer), None => serve_with(ctx, line, say, launch) };
                 }
                 return Err(format!("{} already runs {app} for lane {lane} on {} (live release {} first)", old.id, old.node, old.id));
             }
@@ -4682,20 +5342,24 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let est_min = v.get("est_min").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|m| m.is_finite() && *m >= 0.0).ok_or("est_min is a nonnegative number")).transpose()?;
             let cores = v.get("cores").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("cores is a positive number")).transpose()?;
             let ram_gb = v.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
-            let x = ctx.store.update(|d| {
+            let (x, cold) = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, offline, test_args, env, also, home, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: pin.clone(), avoid: avoid.clone(), series: series.clone(), pin_why: pin_why.clone(), joins: joins.clone(), visible, state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, offline, test_args, env, also, home, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: pin.clone(), avoid: avoid.clone(), series: series.clone(), pin_why: pin_why.clone(), joins: joins.clone(), visible, timed, state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
+                let cold = if test {
+                    d.lives.iter_mut().rev().find(|p| p.test && p.app == app && p.lane == lane).and_then(|previous| cold_start(previous, &x))
+                } else { None };
                 d.lives.push(x.clone());
-                x
+                (x, cold)
             })?;
+            if let Some(line) = cold { say(&line); }
             retire_replaced(ctx, &x);
             drop(starting);
             event(ctx, Sev::Info, format!("live {}: {app} for lane {lane} asks for a box", x.id), Some(&x));
-            let (c, id, first_call) = (ctx.clone(), x.id.clone(), verb == "test");
-            if let Err(e) = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, first_call)) {
+            let first_call = verb == "test";
+            if let Err(e) = launch(ctx, &x.id, first_call) {
                 try_set(ctx, &x.id, |s| { s.state = "failed".into(); s.note = e.to_string(); })?;
             }
-            if first_call { initial_call(ctx, &x.id) }
+            if first_call { initial_call(ctx, &x.id, &s("check")) }
             else { Ok(format!("{{\"id\":{},\"app\":{},\"state\":\"starting\",\"note\":{}}}", json_str(&x.id), json_str(&app), json_str(&x.note))) }
         }
         "act" => {
@@ -4713,7 +5377,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         "look" => look(ctx, id, arg),
         "sync" => {
             let x = try_set(ctx, id, |s| s.touched_ms = wall_ms())?.filter(|x| x.active()).ok_or_else(|| not_running(ctx, id))?;
-            if x.test { return test_call(ctx, id)?.ok_or_else(|| format!("{id}: parked; take a new live job")); }
+            if x.test { return test_call(ctx, id, "")?.ok_or_else(|| format!("{id}: parked; take a new live job")); }
             let held = call(ctx, id)?;
             let r = running(id).ok_or_else(|| format!("{id} has no box yet"))?;
             let tree = PathBuf::from(&x.tree);
@@ -4724,6 +5388,12 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let n = files.len();
             due(&r.pending, files);
             Ok(with_room(format!("{{\"id\":{},\"queued\":{n}}}", json_str(id)), room_of(&held)))
+        }
+        "checked" => {
+            let words: Vec<_> = arg.split_whitespace().collect();
+            let [caller, refusal, verdict @ ("confirmed" | "release")] = words.as_slice() else { return Err("live checked: invalid cargo verdict".into()) };
+            let Some(r) = running(id) else { return Ok("{}".into()) };
+            checked(ctx, id, &r.calls, caller, refusal, *verdict == "confirmed")
         }
         "release" => {
             let lease = release(ctx, id, "released")?;
@@ -4737,11 +5407,11 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let strs = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
             let env = x.env.iter().map(|(k, v)| format!("[{},{}]", json_str(k), json_str(v))).collect::<Vec<_>>().join(",");
             let req = format!(
-                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{},\"visible\":{},\"test\":{},\"offline\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"home\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{},\"joins\":{}}}",
-                json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(if x.joins.is_empty() { &x.pin } else { "" }), json_str(&x.avoid), json_str(&x.series), json_str(&x.pin_why), x.visible, x.test, x.offline,
+                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"series\":{},\"pin_why\":{},\"visible\":{},\"timed\":{},\"test\":{},\"offline\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"home\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{},\"joins\":{}}}",
+                json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(if x.joins.is_empty() { &x.pin } else { "" }), json_str(&x.avoid), json_str(&x.series), json_str(&x.pin_why), x.visible, x.timed, x.test, x.offline,
                 strs(&x.test_args), strs(&x.also), json_str(&x.home), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader), json_str(&x.joins),
             );
-            serve(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }))
+            serve_with(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }), say, launch)
         }
         // `devhub clean <lane>`: the lane is done, so are its live jobs
         "end-lane" => {
@@ -4751,9 +5421,14 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 event(ctx, Sev::Info, format!("live {id} of lane {rest}: released, the lane was cleaned"), get(ctx, id).as_ref());
                 release(ctx, id, "released: its lane was cleaned")?;
             }
+            ctx.store.update(|d| {
+                for x in d.lives.iter_mut().filter(|x| x.lane == rest && !x.active()) { x.held.clear(); }
+            })?;
             Ok(format!("{{\"released\":[{}]}}", ids.iter().map(|i| json_str(i)).collect::<Vec<_>>().join(",")))
         }
         "get" => get(ctx, id).map(|x| crate::state::live_value(&x).to_json()).ok_or_else(|| format!("no live job {id}")),
+        "list" if rest == "held-leases" => Ok(ctx.store.read(|d| Value::Obj(d.lives.iter().filter(|x| x.active() && !x.held.is_empty() && !x.lease.is_empty())
+            .map(|x| (x.lease.clone(), Value::Str(x.held.clone()))).collect()).to_json())),
         "list" => {
             let all = rest == "all";
             // each with what devhub tells its owner of its lease (a call far past its measure)
@@ -4777,16 +5452,27 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
 /// The first caller owns the initial run until its verdict is copied.
 /// A grab's png under its lease's tmp dir, from the lines that name it (a JSON string; Windows
 /// paths come with escaped backslashes).
-fn grab_file(lines: &[String], lease: &str) -> Option<String> {
+/// Every frame a grab, gq or gseq answer names under lease `lease`'s tmp dir, in order: its path
+/// there and the frame and patch it was drawn at, when stamped (a grab's one, each of a sequence's).
+fn grab_files(lines: &[String], lease: &str) -> Vec<(String, Option<(u64, u64)>)> {
     let tmp = format!("/tmp/{lease}/");
-    lines.iter().find_map(|l| {
-        let l = l.replace("\\\\", "/");
-        let path = l.split('"').find(|w| w.contains(&tmp) && w.ends_with(".png"))?;
-        path.split(&tmp).nth(1).map(str::to_string)
-    })
+    let under = |p: &str| { let p = p.replace('\\', "/"); p.ends_with(".png").then(|| p.split(&tmp).nth(1).map(str::to_string)).flatten() };
+    let stamp = |f: &Value| Some((crate::lease::num(f.get("frame")?)? as u64, crate::lease::num(f.get("patch")?)? as u64));
+    let mut out = Vec::new();
+    for l in lines {
+        let Ok(v) = makepad_strict_json::parse_depth(l.as_bytes(), 16) else {
+            // (a line no JSON reader takes: its paths as words, unstamped)
+            let l = l.replace("\\\\", "/");
+            out.extend(l.split('"').filter(|w| w.ends_with(".png")).filter_map(|w| w.split(&tmp).nth(1)).map(|rel| (rel.to_string(), None)));
+            continue;
+        };
+        let frames: Vec<&Value> = v.get("frames").and_then(Value::as_arr).map_or_else(|| vec![&v], |f| f.iter().collect());
+        out.extend(frames.into_iter().filter_map(|f| Some((under(f.get("png")?.as_str()?)?, stamp(f)))));
+    }
+    out
 }
 
-fn initial_call(ctx: &Ctx, id: &str) -> Result<String, String> {
+fn initial_call(ctx: &Ctx, id: &str, check: &str) -> Result<String, String> {
     let signal = ctx.store.subscribe("live", &[id]);
     // what its session waits for (its box: its lease's queue line), said to the caller as it
     // changes: a lane's tests waited behind its own screen lease, said only in the queue (11-15)
@@ -4810,7 +5496,7 @@ fn initial_call(ctx: &Ctx, id: &str) -> Result<String, String> {
             told = waits.to_string();
         }
         if !x.active() || x.state == "paused" || x.patch.as_ref().is_some_and(terminal) {
-            let answer = crate::state::live_value(&x).to_json();
+            let answer = test_reply(&x, running(id).as_deref(), check);
             try_set(ctx, id, |s| s.touched_ms = wall_ms())?;
             if let Some(r) = running(id) { finish_call(ctx, id, &r); }
             return Ok(answer);
@@ -4847,7 +5533,7 @@ fn call_saves(ctx: &Ctx, r: &Running, x: &Live) -> Result<(Vec<String>, u64, (Ve
 }
 
 /// Holds shipping until this call has copied the verdict for its exact source state.
-fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
+fn test_call(ctx: &Arc<Ctx>, id: &str, check: &str) -> Result<Option<String>, String> {
     let called = wall_ms();
     try_set(ctx, id, |s| { s.touched_ms = called; s.left_ms = 0; })?;
     let signal = ctx.store.subscribe("live", &[id]);
@@ -4879,13 +5565,23 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
             } else {
                 let queued = behind.take().map(|b| (wall_ms().saturating_sub(called), b));
                 let _inflight = Inflight(ctx, id, &r);
-                let room = admit(ctx, id, &r, makepad_remote::lines::asked_on()).inspect_err(|_| if makepad_remote::lines::client_gone() { starter_left(ctx, id) })?;
                 let mut x = get(ctx, id).ok_or("live job disappeared")?;
                 let fault = r.fault.lock().unwrap().clone();
-                if let Some(reason) = fault {
+                let held = !x.held.is_empty();
+                let room = if held && fault.is_none() { None } else {
+                    let admitted = admit(ctx, id, &r, makepad_remote::lines::asked_on());
+                    if held && !accepting(id) { return Ok(None); }
+                    x = get(ctx, id).ok_or("live job disappeared")?;
+                    admitted.inspect_err(|_| if makepad_remote::lines::client_gone() { starter_left(ctx, id) })?
+                };
+                // (an edit whose verdict the master's restart cut: its tests again, as after a fault)
+                let cut = fault.is_none() && x.patch.as_ref().is_some_and(rerun_cut);
+                if let Some(reason) = fault.or_else(|| cut.then(|| "its tests run again: the master's restart cut their verdict".to_string())) {
                     let mut p = x.patch.clone().ok_or("live: no test state")?;
                     p.tests = None;
                     p.reason = reason;
+                    // (the cut was no failure of its JIT: its warm retry is still to come)
+                    if cut { p.retried = false; }
                     recover(ctx, id, &x, &mut p, true);
                     wait_tests(ctx, id);
                     // (that run had the bytes of the last ship, not of this call)
@@ -4894,10 +5590,12 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
                 let (files, edit_ms, current) = call_saves(ctx, &r, &x)?;
                 // (with nothing to ship too: the last verdict answers only while the JIT took no
                 // change after it, [`taken_since`])
-                ship_edit(ctx, id, &r, files, edit_ms, called, Some(current), queued);
+                let shipped = ship_edit(ctx, id, &r, files, edit_ms, called, Some(current), queued);
+                if held && !accepting(id) { return Ok(None); }
+                let room = shipped.inspect_err(|_| if makepad_remote::lines::client_gone() { starter_left(ctx, id) })?.or(room);
                 let x = try_set(ctx, id, |s| s.touched_ms = wall_ms())?.ok_or("live job disappeared")?;
                 if makepad_remote::lines::client_gone() { starter_left(ctx, id); }
-                return Ok(Some(with_room(crate::state::live_value(&x).to_json(), room.as_deref())));
+                return Ok(Some(with_room(test_reply(&x, Some(&r), check), room.as_deref())));
             }
         }
         signal.wait(seen, Duration::from_secs(1));
@@ -4996,6 +5694,7 @@ pub fn render(x: &Live) -> String {
         (false, false) => format!(" of {} ({})", x.lane, x.agent),
     };
     let mut out = format!("{} {} {}{owner} on {} pid {}{}\n", x.id, x.state, x.app, if x.node.is_empty() { "-" } else { &x.node }, x.pid, if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) });
+    if x.active() && !x.held.is_empty() { out.push_str(&format!("  held: {}\n", x.held)); }
     if let Some(ms) = quiet_ms(x, wall_ms()).filter(|ms| *ms >= crate::state::QUIET_SAID_MS) { out.push_str(&format!("  last output {} ago\n", crate::state::ago(ms))); }
     if let Some(line) = kept_line(x, wall_ms()) { out.push_str(&line); }
     if !x.env.is_empty() { out.push_str(&format!("  env: {}\n", x.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","))); }
@@ -5067,17 +5766,48 @@ mod person_tests {
 mod fault_tests {
     /// In an app's output a panic in the JIT's sources and the JIT's own lines are the JIT's
     /// faults. A test program of the JIT's own crates is the JIT and prints both on purpose: its
-    /// live runs were stopped at the first one and failed as JIT errors (11-12).
+    /// live runs were stopped at the first one and failed as JIT errors (11-12). A program's own
+    /// panic is judged by its frame, where it panicked and what kind it is, never by its message: a
+    /// lane's test whose assertion quoted an internal compiler error was said to be a JIT error,
+    /// "not your change" (11-23).
     #[test]
     fn the_jits_own_crates_tests_print_the_jits_lines_as_their_own() {
+        use super::Scan;
         let panic = "thread '<unnamed>' (2729363) panicked at libs/relax/compiler/src/jit.rs:2200:49:";
         let restart = "relax: JIT thread `lifeline-test-restart` panicked: lifeline test panic (at libs/relax/compiler/src/lifeline.rs:271) -- restarted (1 of 16)";
         for line in [panic, restart] {
-            assert!(super::fault_line("makepad-fab", line, &mut false), "an app's run: the JIT's fault: {line}");
-            assert!(!super::fault_line("relax-compiler", line, &mut false), "relax-compiler's tests: its own line: {line}");
+            assert!(super::fault_line("makepad-fab", line, &mut Scan::default()), "an app's run: the JIT's fault: {line}");
+            assert!(!super::fault_line("relax-compiler", line, &mut Scan::default()), "relax-compiler's tests: its own line: {line}");
         }
-        assert!(!super::fault_line("relax-front", "thread 't' panicked at libs/relax/front/src/parse.rs:1:1:", &mut false), "relax-front's tests: its own panic");
+        assert!(!super::fault_line("relax-front", "thread 't' panicked at libs/relax/front/src/parse.rs:1:1:", &mut Scan::default()), "relax-front's tests: its own panic");
         assert!(super::jit_fault(panic), "a refused patch's reasons are the JIT's");
+        let ice = "compile error in x::f: internal compiler error: RELAX_TEST_HOT_BUILD_ERROR: forced for `f` -- a Relax bug, report it";
+        let quoted = format!("assertion `left == right` failed: a forced failure is no red: panic: The live update failed in this call: {ice}");
+        let report = format!(r#"  report: {{"kind":"panic","message":{},"location":"libs/devhub/src/proto.rs:330:9"}}"#, makepad_remote::json_str(&quoted));
+        let failed = [
+            "thread 'proto::tests::panic_event' (1008411) panicked at libs/devhub/src/proto.rs:330:9:",
+            quoted.as_str(), "  left: Info", " right: Err",
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+            report.as_str(), "test proto::tests::panic_event ... FAILED",
+        ];
+        let mut scan = Scan::default();
+        for line in failed {
+            assert!(!super::fault_line("makepad-devhub", line, &mut scan), "a lane's test that quotes an internal compiler error fails as the lane's: {line}");
+        }
+        let mut scan = Scan::default();
+        for line in &failed[..2] { super::fault_line("makepad-devhub", line, &mut scan); }
+        assert!(!super::fault_line("makepad-devhub", "relax: JIT thread `x` panicked: quoted -- restarted (1 of 16)", &mut scan), "a JIT line quoted in its message is its message");
+        let jits = [
+            "error: internal compiler error while checking x::f -- Relax bug, report it".to_string(),
+            format!(r#"  report: {{"kind":"update failed","message":"The live update failed in this call: {}","location":""}}"#, ice),
+        ];
+        let mut scan = Scan::default();
+        for line in failed.iter().map(|l| l.to_string()).chain(jits.iter().cloned()) {
+            let fault = super::fault_line("makepad-devhub", &line, &mut scan);
+            assert_eq!(fault, jits.contains(&line), "after the test's failure, a real internal compiler error is still the JIT's: {line}");
+        }
+        assert!(!super::panic_fault("makepad-devhub", "panic", &quoted, "libs/devhub/src/proto.rs:330:9"), "a lane's panic event that quotes one is the lane's");
+        assert!(super::panic_fault("makepad-devhub", "update failed", &format!("The live update failed in this call: {ice}"), ""), "a failed update's is the JIT's");
     }
 }
 

@@ -6,7 +6,7 @@
 //! thread: a bench box's lease starts and ends waited 25 min and nothing said why (11-03).
 
 use std::panic::Location;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,8 @@ const SAY_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 struct Who {
+    // A gate entry's key. A closer or a mutex holder takes it alone.
+    key: Option<Arc<str>>,
     at: &'static Location<'static>,
     thread: ThreadId,
     name: String,
@@ -25,25 +27,67 @@ impl Who {
     #[track_caller]
     fn here() -> Who {
         let t = std::thread::current();
-        Who { at: Location::caller(), thread: t.id(), name: t.name().unwrap_or("unnamed").to_string(), since: Instant::now() }
+        Who { key: None, at: Location::caller(), thread: t.id(), name: t.name().unwrap_or("unnamed").to_string(), since: Instant::now() }
     }
 
     fn line(&self) -> String {
         format!("{}:{} ({})", self.at.file().rsplit_once("src/").or_else(|| self.at.file().rsplit_once("src\\")).map_or(self.at.file(), |(_, f)| f), self.at.line(), self.name)
     }
+
+    fn warn_own(&self, name: &str, holders: &[Who]) {
+        if let Some(h) = holders.iter().find(|h| h.thread == self.thread) {
+            eprintln!("devhub: {} waits on {} that its own thread holds since {}: it never frees", self.line(), name, h.line());
+        }
+    }
+
+    fn waited(&self, name: &str, holders: &[Who]) {
+        let waited = self.since.elapsed();
+        if waited >= SAY_WAIT {
+            let lines = if holders.is_empty() { "one gone by then".into() } else { holders.iter().map(Who::line).collect::<Vec<_>>().join(", ") };
+            eprintln!("devhub: {} waited {:.1} s on {} held by {}", self.line(), waited.as_secs_f64(), name, lines);
+        }
+    }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Seen {
-    holder: Option<Who>,
+    holders: Vec<Who>,
     waiting: Vec<Who>,
 }
 
-/// Every live [`Held`] by name, for [`stalls`].
+impl Seen {
+    fn closer_waits(&self) -> bool { self.waiting.iter().any(|w| w.key.is_none()) }
+
+    fn blockers<'a>(&'a self, w: &'a Who) -> impl Iterator<Item = &'a Who> {
+        let all = w.key.is_none() || self.closer_waits();
+        self.holders.iter().filter(move |h| all || h.key.is_none() || h.key == w.key || h.thread == w.thread)
+    }
+
+    fn wait(&mut self, me: &Who) -> Vec<Who> {
+        self.waiting.push(me.clone());
+        self.blockers(me).cloned().collect()
+    }
+
+    fn waited(&mut self, me: &Who) {
+        if let Some(i) = self.waiting.iter().position(|w| w.thread == me.thread && w.since == me.since) {
+            self.waiting.swap_remove(i);
+        }
+    }
+}
+
+/// Every live [`Held`] and [`Gate`] by name, for [`stalls`].
 static ALL: Mutex<Vec<(&'static str, Weak<Mutex<Seen>>)>> = Mutex::new(Vec::new());
 
 fn seen_of(seen: &Mutex<Seen>) -> MutexGuard<'_, Seen> {
     seen.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn register(name: &'static str) -> Arc<Mutex<Seen>> {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let mut all = ALL.lock().unwrap_or_else(PoisonError::into_inner);
+    all.retain(|(_, w)| w.strong_count() > 0);
+    all.push((name, Arc::downgrade(&seen)));
+    seen
 }
 
 /// A mutex that knows its holder and its waiters ([`stalls`]).
@@ -73,7 +117,7 @@ impl<T> std::ops::DerefMut for HeldGuard<'_, T> {
 
 impl<T> Drop for HeldGuard<'_, T> {
     fn drop(&mut self) {
-        seen_of(self.seen).holder = None;
+        seen_of(self.seen).holders.clear();
     }
 }
 
@@ -85,15 +129,11 @@ pub type HeldResult<'a, T> = Result<HeldGuard<'a, T>, PoisonError<HeldGuard<'a, 
 
 impl<T> Held<T> {
     pub fn new(name: &'static str, value: T) -> Held<T> {
-        let seen = Arc::new(Mutex::new(Seen::default()));
-        let mut all = ALL.lock().unwrap_or_else(PoisonError::into_inner);
-        all.retain(|(_, w)| w.strong_count() > 0);
-        all.push((name, Arc::downgrade(&seen)));
-        Held { name, mu: Mutex::new(value), seen }
+        Held { name, mu: Mutex::new(value), seen: register(name) }
     }
 
     fn held<'a>(&'a self, guard: MutexGuard<'a, T>, me: Who) -> HeldGuard<'a, T> {
-        seen_of(&self.seen).holder = Some(me);
+        seen_of(&self.seen).holders.push(me);
         HeldGuard { guard, seen: &self.seen }
     }
 
@@ -106,24 +146,11 @@ impl<T> Held<T> {
             Ok(g) => Ok(g),
             Err(TryLockError::Poisoned(p)) => Err(p),
             Err(TryLockError::WouldBlock) => {
-                let holder = {
-                    let mut seen = seen_of(&self.seen);
-                    seen.waiting.push(me.clone());
-                    seen.holder.clone()
-                };
-                if holder.as_ref().is_some_and(|h| h.thread == me.thread) {
-                    eprintln!("devhub: {} waits on {} that its own thread holds since {}: it never frees", me.line(), self.name, holder.as_ref().map_or(String::new(), Who::line));
-                }
+                let holders = seen_of(&self.seen).wait(&me);
+                me.warn_own(self.name, &holders);
                 let got = self.mu.lock();
-                let mut seen = seen_of(&self.seen);
-                if let Some(i) = seen.waiting.iter().position(|w| w.thread == me.thread && w.since == me.since) {
-                    seen.waiting.swap_remove(i);
-                }
-                drop(seen);
-                let waited = me.since.elapsed();
-                if waited >= SAY_WAIT {
-                    eprintln!("devhub: {} waited {:.1} s on {} held by {}", me.line(), waited.as_secs_f64(), self.name, holder.as_ref().map_or("one gone by then".to_string(), Who::line));
-                }
+                seen_of(&self.seen).waited(&me);
+                me.waited(self.name, &holders);
                 got
             }
         };
@@ -146,7 +173,85 @@ impl<T> Held<T> {
 
     /// Who holds it now (`file:line (thread)` and for how long), if anyone.
     pub fn holder(&self) -> Option<String> {
-        seen_of(&self.seen).holder.as_ref().map(|h| format!("{} for {} s", h.line(), h.since.elapsed().as_secs()))
+        seen_of(&self.seen).holders.first().map(|h| format!("{} for {} s", h.line(), h.since.elapsed().as_secs()))
+    }
+}
+
+/// Entries with different keys share the gate. A closer takes it alone.
+pub struct Gate {
+    name: &'static str,
+    seen: Arc<Mutex<Seen>>,
+    changed: Condvar,
+}
+
+#[must_use]
+pub struct GateEntry<'a> {
+    gate: &'a Gate,
+    key: Option<Arc<str>>,
+    // The recorded holder is the thread that took the entry.
+    thread: std::marker::PhantomData<MutexGuard<'a, ()>>,
+}
+
+#[must_use]
+pub struct GateClosed<'a> {
+    _entry: GateEntry<'a>,
+}
+
+impl Gate {
+    pub fn new(name: &'static str) -> Gate {
+        Gate { name, seen: register(name), changed: Condvar::new() }
+    }
+
+    /// Waits out closers and another entry of this key.
+    #[track_caller]
+    pub fn enter(&self, key: &str) -> GateEntry<'_> {
+        self.take(Some(Arc::from(key)))
+    }
+
+    /// Waits for every holder. New entries wait until all closers are done.
+    #[track_caller]
+    pub fn close(&self) -> GateClosed<'_> {
+        GateClosed { _entry: self.take(None) }
+    }
+
+    #[track_caller]
+    fn take(&self, key: Option<Arc<str>>) -> GateEntry<'_> {
+        let mut me = Who::here();
+        me.key.clone_from(&key);
+        let blocked = |s: &Seen| match &key {
+            None => !s.holders.is_empty(),
+            Some(_) => s.closer_waits() || s.holders.iter().any(|h| h.key.is_none() || h.key == key),
+        };
+        let mut seen = seen_of(&self.seen);
+        if blocked(&seen) {
+            let holders = seen.wait(&me);
+            drop(seen);
+            me.warn_own(self.name, &holders);
+            seen = self.changed.wait_while(seen_of(&self.seen), |s| blocked(s)).unwrap_or_else(PoisonError::into_inner);
+            seen.waited(&me);
+            seen.holders.push(me.clone());
+            drop(seen);
+            me.waited(self.name, &holders);
+        } else {
+            seen.holders.push(me);
+        }
+        GateEntry { gate: self, key, thread: std::marker::PhantomData }
+    }
+
+    /// No holder and no closer waiting.
+    pub fn is_idle(&self) -> bool {
+        let seen = seen_of(&self.seen);
+        seen.holders.is_empty() && !seen.closer_waits()
+    }
+}
+
+impl Drop for GateEntry<'_> {
+    fn drop(&mut self) {
+        let mut seen = seen_of(&self.gate.seen);
+        let i = seen.holders.iter().position(|h| h.key == self.key).expect("entry in the gate");
+        seen.holders.remove(i);
+        drop(seen);
+        self.gate.changed.notify_all();
     }
 }
 
@@ -180,32 +285,34 @@ struct Wait {
 
 fn waits() -> Vec<Wait> {
     let all: Vec<(&'static str, Arc<Mutex<Seen>>)> = ALL.lock().unwrap_or_else(PoisonError::into_inner).iter().filter_map(|(n, w)| Some((*n, w.upgrade()?))).collect();
-    let view: Vec<(&'static str, Option<Who>, Vec<Who>)> = all.iter().map(|(n, s)| {
-        let s = seen_of(s);
-        (*n, s.holder.clone(), s.waiting.clone())
-    }).collect();
+    let view: Vec<_> = all.iter().map(|(n, s)| (*n, seen_of(s).clone())).collect();
     let mut out = Vec::new();
-    for (name, holder, waiting) in &view {
-        for w in waiting {
+    for (name, seen) in &view {
+        for w in &seen.waiting {
             let mut line = format!("{} waits on {name}", w.line());
             let mut deadlock = false;
-            match holder {
-                Some(h) if h.thread == w.thread => {
-                    line.push_str(&format!(" that its own thread holds ({}): a deadlock", h.line()));
-                    deadlock = true;
-                }
-                Some(h) => {
-                    line.push_str(&format!(" held by {}", h.line()));
-                    // what the holder waits on, if anything: a chain ends at a holder that runs
-                    if let Some((other, oh)) = view.iter().find_map(|(n, oh, ws)| ws.iter().any(|x| x.thread == h.thread).then_some((n, oh))) {
+            if let Some(h) = seen.holders.iter().find(|h| h.thread == w.thread) {
+                line.push_str(&format!(" that its own thread holds ({}): a deadlock", h.line()));
+                deadlock = true;
+            } else {
+                let mut blockers = seen.blockers(w).peekable();
+                if blockers.peek().is_none() { line.push_str(" (freed just now)"); }
+                for (i, h) in blockers.enumerate() {
+                    line.push_str(if i == 0 { " held by " } else { ", " });
+                    line.push_str(&h.line());
+                    // what this holder waits on, if anything
+                    if let Some((other, s, waiter)) = view.iter().find_map(|(n, s)| s.waiting.iter().find(|x| x.thread == h.thread).map(|x| (n, s, x))) {
                         line.push_str(&format!(", which waits on {other}"));
-                        if let Some(oh) = oh {
-                            deadlock = oh.thread == h.thread || oh.thread == w.thread;
-                            line.push_str(&format!(" held by {}{}", oh.line(), if deadlock { ": a deadlock" } else { "" }));
+                        for (j, oh) in s.blockers(waiter).enumerate() {
+                            line.push_str(if j == 0 { " held by " } else { ", " });
+                            line.push_str(&oh.line());
+                            if oh.thread == h.thread || oh.thread == w.thread {
+                                line.push_str(": a deadlock");
+                                deadlock = true;
+                            }
                         }
                     }
                 }
-                None => line.push_str(" (freed just now)"),
             }
             let waited = w.since.elapsed();
             line.push_str(&format!(" (for {} s)", waited.as_secs()));
@@ -265,9 +372,9 @@ mod tests {
         // two threads, each waiting on the lock the other holds
         let other = std::thread::Builder::new().name("held-other".into()).spawn(Who::here).unwrap().join().unwrap();
         let (d, e) = (Held::new("held-test-d", ()), Held::new("held-test-e", ()));
-        seen_of(&d.seen).holder = Some(Who::here());
+        seen_of(&d.seen).holders.push(Who::here());
         seen_of(&d.seen).waiting.push(other.clone());
-        seen_of(&e.seen).holder = Some(other);
+        seen_of(&e.seen).holders.push(other);
         seen_of(&e.seen).waiting.push(Who::here());
         let both = deadlocks(Duration::ZERO);
         let line = both.iter().find(|l| l.contains("(held-other) waits on held-test-d")).unwrap();
@@ -280,5 +387,55 @@ mod tests {
             *seen_of(&h.seen) = Seen::default();
         }
         assert!(!deadlocks(Duration::ZERO).iter().any(|l| l.contains("held-test-")), "and none after");
+
+        let gate = Arc::new(Gate::new("held-test-gate"));
+        let a = gate.enter("a");
+        seen_of(&gate.seen).waiting.push(Who::here());
+        let own = deadlocks(Duration::ZERO).into_iter().find(|l| l.contains("held-test-gate")).expect("a closer on its entry's thread deadlocks");
+        assert!(own.contains("that its own thread holds (held.rs:") && own.contains(": a deadlock"), "{own}");
+        seen_of(&gate.seen).waiting.clear();
+
+        let limit = Duration::from_secs(10);
+        let wait_line = |name: &str| {
+            let end = Instant::now() + limit;
+            let what = format!("({name}) waits on held-test-gate held by held.rs:");
+            while !stalls().iter().any(|l| l.contains(&what)) {
+                assert!(Instant::now() < end, "the gate reports {what}");
+                std::thread::yield_now();
+            }
+        };
+        let g = gate.clone();
+        let same = std::thread::Builder::new().name("same-key".into()).spawn(move || drop(g.enter("a"))).unwrap();
+        wait_line("same-key");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let g = gate.clone();
+        let other = std::thread::spawn(move || {
+            let _b = g.enter("b");
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(limit).expect("a different key enters while a is held");
+        other.join().unwrap();
+
+        let (tx, order) = std::sync::mpsc::channel();
+        let (release, go) = std::sync::mpsc::channel();
+        let (g, closed) = (gate.clone(), tx.clone());
+        let closer = std::thread::Builder::new().name("closer".into()).spawn(move || {
+            let _closed = g.close();
+            closed.send("closed").unwrap();
+            go.recv_timeout(limit).expect("the test releases the closed gate");
+        }).unwrap();
+        wait_line("closer");
+        let g = gate.clone();
+        let late = std::thread::Builder::new().name("late-key".into()).spawn(move || {
+            let _c = g.enter("c");
+            tx.send("c").unwrap();
+        }).unwrap();
+        wait_line("late-key");
+        drop(a);
+        assert_eq!(order.recv_timeout(limit).expect("the closer enters"), "closed", "a waiting closer goes before a new key");
+        release.send(()).unwrap();
+        assert_eq!(order.recv_timeout(limit).expect("the new key enters once the closer drops"), "c");
+        for t in [same, closer, late] { t.join().unwrap(); }
+        assert!(gate.is_idle() && !stalls().iter().any(|l| l.contains("held-test-gate")), "the gate has no holder or wait left");
     }
 }

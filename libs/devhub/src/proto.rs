@@ -205,6 +205,18 @@ fn text(v: &Value, k: &str) -> String {
     }
 }
 
+/// The test knob that a JIT's failure says forced it: its test hooks' failures say so
+/// (`RELAX_TEST_HOT_BUILD_ERROR: forced for ...`, an internal compiler error on purpose). A real
+/// one names none. A probe of trees from before the hot-fail fixture said RELAX_EXPECTED_CRASH
+/// (11-19) put its forced errors in the feed as four reds in a minute (11-22).
+fn forced_by(message: &str) -> Option<&str> {
+    message.match_indices("RELAX_TEST_").find_map(|(at, _)| {
+        let rest = &message[at..];
+        let end = rest.find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')).unwrap_or(rest.len());
+        rest[end..].starts_with(": forced").then(|| &rest[..end])
+    })
+}
+
 /// A JIT's `watch` event as a record; `None` for what is not worth a line (probes, breaks, short
 /// hitches, verified patches, feed bookkeeping).
 pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: f64) -> Option<Record> {
@@ -221,9 +233,14 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
             let at = if loc.is_empty() { String::new() } else { format!(" at {loc}") };
             let line = format!("panic: {}{at} [{}]", text(&v, "message"), text(&v, "thread"));
             // a crash its process said it expects (RELAX_EXPECTED_CRASH: a test that parks or
-            // crashes it on purpose and decides it) is the test's own: a note, never a red
+            // crashes it on purpose and decides it) is the test's own: a note, never a red. So is
+            // one a JIT's test knob forced, whatever its tree's fixture says ([`forced_by`])
             let expected = text(&v, "expected");
-            if expected.is_empty() { ("panic", Sev::Err, line, false) } else { ("panic", Sev::Info, format!("{line} (expected: {expected})"), false) }
+            match v.get("message").and_then(|m| m.as_str()).and_then(forced_by) {
+                _ if !expected.is_empty() => ("panic", Sev::Info, format!("{line} (expected: {expected})"), false),
+                Some(knob) => ("panic", Sev::Info, format!("{line} (forced by its test: {knob})"), false),
+                None => ("panic", Sev::Err, line, false),
+            }
         }
         "hang" => ("hang", Sev::Err, format!("hang: {} blocked {} ms on {}", text(&v, "thread"), num(&v, "blocked_ms").unwrap_or(0.0), text(&v, "waits")), false),
         "deadlock" => ("deadlock", Sev::Err, format!("deadlock: cycle {}", text(&v, "cycle")), false),
@@ -310,6 +327,17 @@ mod tests {
         let r = from_jit_event("node-a", "stale-access", 7, ev, HITCH_MS).unwrap();
         assert_eq!((r.kind.as_str(), r.sev), ("panic", Sev::Info), "an expected crash is no red");
         assert!(r.line.ends_with("(expected: stale_park.py parks a stale access and decides it)"), "{}", r.line);
+        // so is a failure a JIT's test knob forced, which its message says; a real internal
+        // compiler error stays a red
+        let ice = |message: &str| {
+            let ev = format!(r#"{{"event":"panic","seq":3,"pid":8,"app":"relax-hot-fail","at_ms":3139,"verified":true,"id":"P1","kind":"update failed","message":{},"location":"","thread":"relax-hot-fail","frames":[]}}"#, json_str(message));
+            from_jit_event("node-a", "relax-hot-fail", 8, &ev, HITCH_MS).unwrap()
+        };
+        let r = ice("The live update failed in this call: compile error in relax_hot_fail::tick::hot_fail_target: internal compiler error: RELAX_TEST_HOT_BUILD_ERROR: forced for `hot_fail_target` -- a Relax bug, report it. Restart starts the app again with the update");
+        assert_eq!(r.sev, Sev::Info, "a forced failure is no red: {}", r.line);
+        assert!(r.line.ends_with("(forced by its test: RELAX_TEST_HOT_BUILD_ERROR)"), "{}", r.line);
+        let r = ice("The live update failed in this call: compile error in relax_hot_fail::tick::hot_fail_target: internal compiler error in hot_fail_target: index out of bounds (RELAX_TEST_HOT_BUILD_ERROR is unset) -- Relax bug, report it");
+        assert_eq!(r.sev, Sev::Err, "a real one is: {}", r.line);
     }
 
     #[test]

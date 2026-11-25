@@ -478,7 +478,7 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                         let present = present_ms(&log).map_or("null".to_string(), |ms| ms.to_string());
                         let jit = jits::announced_jit(pid).map(|(_, p)| p);
                         let inspect = jit.map_or("null".to_string(), |p| json_str(&format!("{machine}/{p}")));
-                        out.push(format!("{{\"pid\":{pid},\"id\":{},\"app\":{},\"visible\":{},\"jit\":{},\"inspect\":{inspect},\"present_ms\":{present},\"log\":{}}}", json_str(&format!("{machine}/{}#{pid}", s.app)), json_str(&s.app), s.visible, jit.is_some(), json_str(&log.display().to_string())));
+                        out.push(format!("{{\"pid\":{pid},\"id\":{},\"app\":{},\"visible\":{},\"jit\":{},\"inspect\":{inspect},\"present_ms\":{present},\"log\":{},\"lease\":{}}}", json_str(&format!("{machine}/{}#{pid}", s.app)), json_str(&s.app), s.visible, jit.is_some(), json_str(&log.display().to_string()), s.lease.as_deref().map_or("null".to_string(), json_str)));
                     }
                 }
             }

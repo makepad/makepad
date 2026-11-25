@@ -5,6 +5,10 @@
 //! channels, the relay's `fwd` for full inspect, the hub's `route`); how hubs trust each other is
 //! behind [`trust::Trust`].
 
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 // Output never panics: a CLI piped into `head` gets EPIPE (std's print macros would abort the
 // command). Test builds keep std's captured macros.
 #[cfg(not(test))]

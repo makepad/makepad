@@ -265,15 +265,20 @@ mod tests {
     /// and the same short name quoted alone (a screw's size) is none. An exit code, a count, a
     /// lease or a line number is none, and without the untracked file's numbers and names the
     /// shapes are off. Fake numbers and a fake name here, defined as the untracked file defines
-    /// the real ones; the tree scan takes the same rules.
+    /// the real ones; the tree scan takes the same rules. A message also names none of the fleet's
+    /// machines as a bare word, from devhub's own list of them ("then avoided <name>" reached
+    /// work, 11-24); a diff or the tree may (a matrix's or a size's name), and so may a capital (a
+    /// product's), a longer word or a number (a count).
     #[cfg(unix)]
     #[test]
     fn a_node_number_as_a_machine_is_one_and_a_count_is_not() {
         let staged = Staged::new().unwrap();
         let defs = staged.0.join("fake-patterns");
         std::fs::write(&defs, "define node-number 90[1-7]\ndefine mac-name qz9\n").unwrap();
+        // (and its fleet beside it, as nodes.conf lists one)
+        std::fs::write(defs.with_extension("nodes"), "# the fleet\n901 addr=192.0.2.1\nqz9 addr=192.0.2.9 # a Mac\nzorp.lan addr=192.0.2.7\n").unwrap();
         let scan = |dir: &Path, patterns: &Path, args: &[&str], input: &str| {
-            let mut child = Command::new("sh").arg(staged.0.join("scan.sh")).args(args).current_dir(dir).env("MAKEPAD_PRIVATE_PATTERNS", patterns).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+            let mut child = Command::new("sh").arg(staged.0.join("scan.sh")).args(args).current_dir(dir).env("MAKEPAD_PRIVATE_PATTERNS", patterns).env("MAKEPAD_NODES_CONF", patterns.with_extension("nodes")).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
             child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
             String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
         };
@@ -291,16 +296,27 @@ mod tests {
         for s in ["HeatSet { name: \"QZ9\", diameter: 3.0 }", "g(\"qz9\", p)", "node(\"qz90\")", "node(\"aqz9\")", "\"qz9.x\"", "match n { -3 => \"qz9\" }"] {
             assert!(!named(s), "{s}");
         }
+        let fleet = |args: &[&str], s: &str| scan(&root(), &defs, args, &format!("{s}\n")).contains(": fleet-name");
+        for s in ["The lane then avoided qz9, the GPU target", "qz9's hub restarted", "(ran on zorp.lan)", "--node qz9"] {
+            assert!(fleet(&["text", "t"], s), "{s}");
+        }
+        assert!(fleet(&["messages"], "\u{1}message of a\nsubject\n\nran on qz9"), "a landing's messages");
+        for s in ["a QZ9 heat-set insert", "Qz9 screws", "qz90", "aqz9", "qz9x", "zorpXlan", "901 tests passed"] {
+            assert!(!fleet(&["text", "t"], s), "{s}");
+        }
+        assert!(!fleet(&["diff"], "+++ b/a.rs\n@@ -0,0 +1 @@\n+let m = qz9;"), "a diff's code is no message");
         let none = staged.0.join("no-patterns");
         std::fs::write(&none, "").unwrap();
-        assert_eq!(scan(&root(), &none, &["text", "t"], "(901, 11-06)\nNode::new(\"qz9.0\")\n"), "", "no numbers or names defined: the shapes are off");
+        assert_eq!(scan(&root(), &none, &["text", "t"], "(901, 11-06)\nNode::new(\"qz9.0\")\navoided qz9\n"), "", "no numbers, names or fleet list: the shapes are off");
         // the tree scan: its candidate lines come from the same rules, defines put in
         let repo = staged.0.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(repo.join("a.txt"), "exit 903\n(903 sat, 11-06)\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "exit 903\n(903 sat, 11-06)\navoided qz9\n").unwrap();
         let git = |args: &[&str]| crate::git_exec::command().arg("-C").arg(&repo).args(args).output().unwrap();
         assert!(git(&["init", "-q", "--template="]).status.success() && git(&["add", "a.txt"]).status.success());
-        assert_eq!(scan(&repo, &defs, &["tree"], "").lines().next(), Some("a.txt:2: node-number"));
+        let tree = scan(&repo, &defs, &["tree"], "");
+        assert_eq!(tree.lines().next(), Some("a.txt:2: node-number"));
+        assert!(!tree.contains("fleet-name"), "the tree is no message: {tree}");
     }
 
     /// A lane's commit with a private shape in its message is refused as it is written, in both

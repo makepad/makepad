@@ -22,6 +22,7 @@ path = "src/main.rs"
 required-features = ["checkout"]
 
 [dependencies]
+makepad-thread-local = { path = "../thread_local", version = "1.0.0" }
 relax-base = { workspace = true, optional = true }
 # the JIT store's free-space rule (store_floor), which the disk guard warns by
 relax-session = { workspace = true }

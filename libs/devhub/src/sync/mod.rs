@@ -63,6 +63,8 @@ use makepad_remote::Endpoint;
 
 #[cfg(feature = "checkout")]
 pub use conf::SyncConf;
+#[cfg(feature = "checkout")]
+pub use build::kept_dir;
 pub use store::{set_source_store, SourceStore};
 
 /// What a node gives sync: its name and the records sink.
@@ -111,14 +113,17 @@ pub fn followed(repo: &std::path::Path) -> Vec<(String, String)> {
     std::iter::once(("makepad".to_string(), "work".to_string())).chain(crate::nested::branches(repo)).collect()
 }
 
-/// Moves `node`'s tree to the tips of the followed repositories ([`followed`]), with no build and
-/// no restart (a node the auto-sync does not follow: the self-update brings its code itself), or
-/// to `at` (a timed ask's pin, [`crate::lease::Pin::key`]). Returns the exit code and the node's
-/// lines.
+/// Moves `node`'s tree to the tips of the followed repositories ([`followed`]), with no restart (a
+/// node the auto-sync does not follow: the self-update brings its code itself), or to `at` (a
+/// timed ask's pin, or the deployment it has, [`crate::lease::Pin::key`]). Returns the exit code
+/// and the node's lines. `build`: the node's own prebuild runs too (its sync.conf says what), in
+/// its deployment-build room, which a timed run or ask there makes wait (`waits:`): the services
+/// it keeps follow the tip only through it ([`kept_dir`]).
 #[cfg(feature = "checkout")]
-pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>) -> (i32, Vec<String>) {
+pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>, build: bool) -> (i32, Vec<String>) {
     let mut lines = Vec::new();
-    let code = cli::push_and_apply(control, repo, &followed(repo), at, &[node.to_string()], "off", "none", false, "", None, &mut |n, l| lines.push(format!("{n} {l}")));
+    let build = if build { "on" } else { "off" };
+    let code = cli::push_and_apply(control, repo, &followed(repo), at, &[node.to_string()], build, "none", false, "", None, &mut |n, l| lines.push(format!("{n} {l}")));
     (code, lines)
 }
 

@@ -856,7 +856,7 @@ fn crate_of(pid: u32) -> Option<String> {
 
 /// The crate a compiler's argv builds: rustc's `--crate-name`, else cargo's package (`-p`,
 /// `--package`) or binary (`--bin`); none when it names none (a linker).
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, not(windows))))]
 fn build_crate(words: &[String]) -> Option<String> {
     let after = |flags: &[&str]| {
         words.windows(2).find(|w| flags.contains(&w[0].as_str())).map(|w| w[1].clone())

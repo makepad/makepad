@@ -4,13 +4,15 @@
 //! - Master (the user's Mac): the master itself and its menu-bar icon, in one process; the glyph
 //!   (devhub's eye) says idle, busy or needs a look; a click opens its menu: the fleet at a glance
 //!   (nodes up, leases, the land queue, the newest verify, lanes, the last events), Open panel
-//!   (apps/devhub_panel, shown as its own app: [`open_panel`]), Open devhub (the inbox and the
-//!   explorer, machines → JITs → inspect views), Pause landing, Run verify now, each node's dev
-//!   switch. It listens on nothing but its control socket and dials the nodes with the Mac's fleet
-//!   identity. It is a native build, never under the JIT it schedules: the Dock wrapper builds it in
-//!   its own target dir and runs it there, and its self-update execs into the next build there
-//!   (`makepad_devhub::orch::roll::MasterBin`); "Open at login" makes the per-user LaunchAgent that
-//!   starts that wrapper at login and again after a crash ([`installed`]).
+//!   (apps/devhub_panel's fleet panel in a window of devhub's own: [`panel_window`]), Open devhub
+//!   (the inbox and the explorer, machines → JITs → inspect views), Pause landing, Run verify now,
+//!   each node's dev switch. On the Mac the item and the panel's window are its helper's
+//!   ([`menu_item`]), a child that never execs. It listens on nothing but its control socket and
+//!   dials the nodes with the Mac's fleet identity. It is a native build, never under the JIT it
+//!   schedules: the Dock wrapper builds it in its own target dir and runs it there, and its
+//!   self-update execs into the next build there (`makepad_devhub::orch::roll::MasterBin`); "Open
+//!   at login" makes the per-user LaunchAgent that starts that wrapper at login and again after a
+//!   crash ([`installed`]).
 //! - Node (a Linux WM): a tray icon in the WM's bar with a status menu; it serves this machine's
 //!   JITs to the master. Quit writes `enabled = off` into its conf, so the WM leaves it off until
 //!   the person starts it from the launcher.
@@ -18,6 +20,9 @@
 //!   task `tools/devhub/windows/install-node.ps1` makes (through `cargo run`, under a headless
 //!   console: no window); its conf is `%USERPROFILE%\.makepad\devhub\node.conf` unless the env
 //!   names one.
+//!
+//! - The panel alone (`MAKEPAD_DEVHUB_PANEL=1`): its window and nothing else, no master and no
+//!   tray (a frame grab, CI's smoke test; `DEVHUB_PANEL_DEMO=1` shows its demo fleet).
 //!
 //! Without the fleet identity (`~/.makepad/fleet`, tools/fleet-identity.md) both serve this
 //! machine's JITs only. `makepad devhub serve [--node <conf>]` runs the same core without a
@@ -34,6 +39,7 @@ mod graph;
 mod installed;
 mod live;
 mod menu_item;
+mod panel_window;
 mod taskview;
 mod view;
 
@@ -52,6 +58,8 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use live::{Sampler, Watch};
 use makepad_shell_kit::tray_app::{DropdownChange, TrayDropdown};
+use panel_window::{PanelWindow, Said};
+use std::sync::atomic::AtomicU64;
 use taskview::{DevhubTasks, Head, TasksAction};
 use view::{Confirm, DevhubAction, DevhubView, EventRow, InboxRow, JitDo, LeaseRow, Tab, ViewState};
 
@@ -67,6 +75,17 @@ script_mod! {
                 window.inner_size: vec2(620, 820)
                 body +: {
                     hub_view := mod.widgets.DevhubView{}
+                }
+            }
+            // the fleet panel (apps/devhub_panel): Open panel in the menu-bar item's menu
+            panel_window := Window{
+                create_on_start: false
+                window.title: "devhub panel"
+                window.inner_size: vec2(1440, 860)
+                pass +: {clear_color: theme.color_chart_ground}
+                body +: {
+                    padding: 0 spacing: 0
+                    fleet_panel := mod.widgets.DevhubPanel{}
                 }
             }
             // a node's tray dropdown: the task-manager view of this machine's JITs
@@ -309,95 +328,51 @@ fn item_name(item: LiveId) -> String {
     }
 }
 
-/// The menu's open of the panel ([`open_panel`]) while it is under way, and why it did not open
-/// for [`OPEN_FAILED_SAID`] after: (what it says, whether it is still opening, since when).
-static OPENING: Mutex<Option<(String, bool, std::time::Instant)>> = Mutex::new(None);
+/// The panel's window asked open from outside its menu (a launch of devhub beside the running
+/// master, through the control socket's `app open panel`): when, in wall ms (0: never).
+static PANEL_ASKED: AtomicU64 = AtomicU64::new(0);
 
-/// How long the `Open panel` item says why the open failed.
-const OPEN_FAILED_SAID: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// The `Open panel` item's label: what the open does now (`Opening panel · building the runner
-/// (about 42 s)`), why it failed, or the plain item.
-fn panel_item() -> (String, bool) {
-    match OPENING.lock().unwrap().as_ref() {
-        Some((what, true, _)) => (format!("Opening panel \u{b7} {what}"), true),
-        Some((why, false, at)) if at.elapsed() < OPEN_FAILED_SAID => (format!("Open panel \u{b7} did not open: {why}"), false),
-        _ => ("Open panel".into(), false),
-    }
-}
-
-/// The devhub panel's package ([`open_panel`]).
-const PANEL_APP: &str = "makepad-app-devhub-panel";
-
-/// A person's launch of devhub (the Dock, Spotlight, a shell) handed to its LaunchAgent: while
-/// that agent's master runs, it opens its panel, as the menu's Open panel does, and this copy
-/// ends. It touches no log: the master's own start alone moves one to `.old`. Each launch opened
+/// A launch of devhub outside its LaunchAgent (the Dock, Spotlight, a shell) handed to that agent:
+/// while the agent's master runs, a person's launch opens its panel, as the menu's Open panel
+/// does, and this copy ends. It touches no log: the master's own start alone moves one to `.old`. Each launch opened
 /// nothing while a master ran, and its Dock wrapper moved the running master's log away (11-19).
 /// While the agent's master starts (its wrapper builds it first), nothing answers yet: its
-/// menu-bar item comes when it is up.
+/// menu-bar item comes when it is up. A person's launch is LaunchServices's (the Dock, Spotlight,
+/// Finder, `open`): one from a shell or a script leaves the panel as it is.
 fn launched_beside_master() {
     let socket = proto::control_socket();
     let Some(who) = makepad_devhub::node::who_serves(&socket) else {
         return log_line(&format!("devhub: the master starts under {}", makepad_devhub::master::AGENT));
     };
+    if !makepad_devhub::master::launched_by_person() {
+        return log_line(&format!(
+            "devhub: the master runs (pid {}); this launch came from a shell or a script, not the Dock, Spotlight or Finder: its panel stays as it is (its menu's Open panel, or `open -a devhub`, opens it)",
+            who.pid
+        ));
+    }
     let c = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(socket), "devhub-launch");
-    let line = format!("show add {{\"app\":\"{PANEL_APP}\",\"on\":\"mac\",\"by\":\"a launch of devhub\"}}");
-    match makepad_devhub::cli::ask(&c, None, "show", &line) {
-        Ok(said) => log_line(&format!("devhub: the master runs (pid {}): its panel opens: {}", who.pid, said.join(" "))),
+    match makepad_devhub::cli::ask(&c, None, "app", "open panel") {
+        Ok(_) => log_line(&format!("devhub: the master runs (pid {}): its panel opens", who.pid)),
         Err(e) => log_line(&format!("devhub: the master runs (pid {}); its panel did not open: {e}", who.pid)),
     }
 }
 
-/// The devhub panel (apps/devhub_panel: every box's leases and load on one time axis, the queue,
-/// the landing strip), the master's menu's "Open panel": a show on the Mac (`devhub show
-/// makepad-app-devhub-panel`), so it is the latest landed panel under the JIT in a process of its
-/// own (a fault in it never ends the master), started once and brought to the front after. From
-/// the click until its first frame the item says what the open does, and the glyph is busy; a
-/// refused or failed open says why on the item ([`makepad_devhub::orch::show::opening`]). A click
-/// looked dead for the 46 s cargo rebuilt the runner before the first frame (11-18).
-fn open_panel() {
-    let say = |what: &str, busy: bool| {
-        let mut o = OPENING.lock().unwrap();
-        if o.as_ref().is_none_or(|(w, b, _)| w != what || *b != busy) {
-            log_line(&format!("devhub: open panel: {what}"));
-            *o = Some((what.to_string(), busy, std::time::Instant::now()));
+/// The master app's own control service, `app`: `open panel` opens its panel's window (on the Mac
+/// its menu-bar item's helper does, with the next state it gets).
+fn register_app_service(master: &Master) {
+    master.control.register("app", 1, makepad_remote::lines::service("app", Arc::new(|line, out| match line.trim() {
+        "open panel" => {
+            PANEL_ASKED.store(proto::wall_ms(), Ordering::Relaxed);
+            makepad_widgets::makepad_platform::thread::SignalToUI::set_ui_signal();
+            out.push("{\"line\":\"the panel opens\"}".into());
         }
-    };
-    if OPENING.lock().unwrap().as_ref().is_some_and(|(_, busy, _)| *busy) {
-        return log_line("devhub: open panel: it is opening already");
-    }
-    let Some(ctx) = makepad_devhub::orch::ctx() else {
-        return say("the master's jobs have not started", false);
-    };
-    say("starting", true);
-    // (a show of a running app asks its JIT to come to the front: never on the UI thread)
-    let _ = std::thread::Builder::new().name("devhub-open-panel".into()).spawn(move || {
-        let line = format!("show add {{\"app\":\"{PANEL_APP}\",\"on\":\"mac\",\"by\":\"the devhub menu\"}}");
-        let said = match makepad_devhub::orch::show::serve(ctx, &line) {
-            Ok(said) => said,
-            Err(e) => return say(&makepad_devhub::proto::clean(&e, 160), false),
-        };
-        let v = makepad_strict_json::parse(said.as_bytes()).ok();
-        let id = v.as_ref().and_then(|v| v.get("id")).and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if id.is_empty() || v.as_ref().and_then(|v| v.get("front")).is_some() {
-            log_line(&format!("devhub: open panel: {said}"));
-            *OPENING.lock().unwrap() = None;
-            return;
-        }
-        // its show, until its first frame or its end: a few looks a second on this thread
-        loop {
-            match makepad_devhub::orch::show::opening(&ctx, &id) {
-                makepad_devhub::orch::show::Opening::Doing(what) => say(&what, true),
-                makepad_devhub::orch::show::Opening::Open => {
-                    log_line(&format!("devhub: open panel: {id} open"));
-                    *OPENING.lock().unwrap() = None;
-                    return;
-                }
-                makepad_devhub::orch::show::Opening::Failed(why) => return say(&makepad_devhub::proto::clean(&why, 160), false),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        }
-    });
+        other => out.push(format!("{{\"err\":{}}}", makepad_remote::json_str(&format!("app: {other:?}: the line is `open panel`")))),
+    })));
+}
+
+/// `MAKEPAD_DEVHUB_PANEL=1`: the panel alone in a window ([`App::panel_only`]).
+fn panel_alone() -> bool {
+    std::env::var_os("MAKEPAD_DEVHUB_PANEL").is_some_and(|v| v == "1")
 }
 
 fn start_master() -> Result<MasterCore, String> {
@@ -414,6 +389,7 @@ fn start_master() -> Result<MasterCore, String> {
     }
     let name = std::env::var("MAKEPAD_DEVHUB_NAME").ok().filter(|n| makepad_devhub_conf::valid_name(n)).unwrap_or_else(|| "mac".into());
     let master = Master::start(&name, makepad_devhub_conf::HITCH_MS, trust(&name), Arc::new(|_r| {}))?;
+    register_app_service(&master);
     log_line(&format!("devhub: master {name} up; control {}", proto::control_socket().display()));
     if let Some(why) = makepad_devhub::master::unsupervised() {
         log_line(&format!("devhub: {why}"));
@@ -531,9 +507,18 @@ pub struct App {
     /// the master's menu-bar item on the Mac, shown by its helper process ([`menu_item`])
     #[rust]
     item_link: Option<menu_item::ItemLink>,
-    /// this process as that helper (`--menu-bar-item`): it shows the item, nothing else
+    /// this process as that helper (`--menu-bar-item`): it shows the item and the panel's window
     #[rust]
     item_host: Option<menu_item::Host>,
+    /// the fleet panel's window: the helper's on the Mac, else the master's
+    #[rust]
+    panel: PanelWindow,
+    /// the newest [`PANEL_ASKED`] this master acted on
+    #[rust]
+    panel_asked: u64,
+    /// the panel alone in a window (`MAKEPAD_DEVHUB_PANEL=1`): no master, no tray
+    #[rust]
+    panel_only: bool,
 }
 
 impl App {
@@ -565,15 +550,12 @@ impl App {
     fn refresh(&mut self, cx: &mut Cx) {
         let glance = self.glance();
         let (g, status) = self.status(glance.as_ref());
-        // an open of the panel under way: the glyph is busy from the click on
-        let (panel, opening) = panel_item();
-        let g = if opening && matches!(self.core, Some(Core::Master(_))) { glyph::Glyph::Busy } else { g };
         // name, dev switch (the only thing that takes a box out of the pool)
         let nodes: Vec<(String, bool)> = match &self.core {
             Some(Core::Master(m)) => m.master.leases.nodes().into_iter().map(|n| (n.name.clone(), n.dev)).collect(),
             _ => Vec::new(),
         };
-        let key = format!("{g:?}|{status}|{glance:?}|{:?}|{nodes:?}|{}|{panel}", self.login, makepad_devhub::lease::exec::writes_allowed());
+        let key = format!("{g:?}|{status}|{glance:?}|{:?}|{nodes:?}|{}|{}", self.login, makepad_devhub::lease::exec::writes_allowed(), self.panel_asked);
         if key != self.tray_key {
             self.tray_key = key;
             let text = |i: usize, label: String| TrayMenuItem::Item { id: LiveId(LINE_BASE + i as u64), label, enabled: false, checked: None };
@@ -588,7 +570,7 @@ impl App {
                     menu.extend(gl.events.iter().enumerate().map(|(i, e)| text(n + i, e.clone())));
                     menu.push(TrayMenuItem::Line);
                 }
-                menu.push(TrayMenuItem::item(PANEL, panel));
+                menu.push(TrayMenuItem::item(PANEL, "Open panel"));
                 menu.push(TrayMenuItem::item(OPEN, "Open devhub"));
                 menu.push(TrayMenuItem::check(PAUSE, "Pause landing", gl.land_paused.is_some()));
                 if gl.verify != makepad_devhub::glance::Verify::None {
@@ -620,7 +602,7 @@ impl App {
             // no tooltip: AppKit shows a status item's changed tooltip wherever the pointer is
             let icon = TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(g) }, tooltip: String::new(), menu, dropdown: glance.is_none() };
             match &self.item_link {
-                Some(link) => link.show(&icon),
+                Some(link) => link.show(&icon, self.panel_asked),
                 None => cx.set_tray(icon),
             }
         }
@@ -822,7 +804,12 @@ impl App {
                 self.act(DevhubAction::SeenAll);
                 self.refresh(cx);
             }
-            id if id == PANEL => open_panel(),
+            // (on the Mac the menu is the helper's, and so is the panel: it opened it already)
+            id if id == PANEL => {
+                if self.item_link.is_none() {
+                    self.panel.open(cx, &self.ui);
+                }
+            }
             id if id == OPEN => {
                 self.window_shown = true;
                 self.set_looking();
@@ -997,16 +984,28 @@ impl App {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // the master's menu-bar item's helper: the item, and nothing of the master
+        // the master's menu-bar item's helper: the item and the panel's window, nothing of the
+        // master; the panel shows again if it showed (the helper this one replaces goes once it
+        // does)
         if std::env::args().any(|a| a == menu_item::FLAG) {
-            match menu_item::Host::start() {
-                Ok(host) => self.item_host = Some(host),
+            let host = match menu_item::Host::start() {
+                Ok(host) => host,
                 Err(e) => {
                     log_line(&format!("devhub: menu-bar item: {e}; this helper ends"));
                     std::process::exit(0);
                 }
-            }
+            };
             cx.show_in_dock(false);
+            self.panel = PanelWindow::new(Some(panel_window::kept()));
+            if !self.panel.restore(cx, &self.ui) {
+                host.say(menu_item::Answer::Ready);
+            }
+            self.item_host = Some(host);
+            return;
+        }
+        if panel_alone() {
+            self.panel_only = true;
+            self.panel.open(cx, &self.ui);
             return;
         }
         match start_core() {
@@ -1030,6 +1029,9 @@ impl MatchEvent for App {
         // the master's menu-bar item is its helper's on the Mac: an exec'd process gets none
         if matches!(self.core, Some(Core::Master(_))) {
             self.item_link = menu_item::ItemLink::start();
+            if self.item_link.is_none() {
+                self.panel = PanelWindow::new(Some(panel_window::kept()));
+            }
         }
         self.state.tab = Tab::Fleet;
         self.state.view = "jit";
@@ -1095,22 +1097,57 @@ impl AppMain for App {
     }
 
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        // the panel follows the system's appearance, light or dark, as the window system says at
+        // start (the helper's process and the panel alone show nothing else)
+        if std::env::args().any(|a| a == menu_item::FLAG) || panel_alone() {
+            let dark = makepad_widgets::makepad_platform::host_dark().unwrap_or(true);
+            makepad_widgets::set_base_theme(vm.cx_mut(), if dark { makepad_widgets::BaseTheme::Dark } else { makepad_widgets::BaseTheme::Light });
+        }
         crate::makepad_widgets::script_mod(vm);
         makepad_shell_kit::eval_default_theme(vm);
         makepad_shell_kit::script_mod(vm);
         crate::view::script_mod(vm);
         crate::taskview::script_mod(vm);
+        makepad_app_devhub_panel::script_mod(vm);
         self::script_mod(vm)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        // the menu-bar item's helper: the master's newest state, and the items chosen in it
+        // the menu-bar item's helper: the master's newest state, the items chosen in it, and the
+        // panel's window
         if let Some(host) = &self.item_host {
             match event {
-                Event::Signal => host.apply(cx, TRAY),
-                Event::TrayMenu(e) if e.tray == TRAY => host.chose(e.item),
+                Event::Signal => {
+                    if let Some((icon, open)) = host.take(TRAY) {
+                        cx.set_tray(icon);
+                        if open {
+                            self.panel.open(cx, &self.ui);
+                        }
+                    }
+                }
+                Event::TrayMenu(e) if e.tray == TRAY => {
+                    host.say(menu_item::Answer::Item(e.item));
+                    if e.item == PANEL {
+                        self.panel.open(cx, &self.ui);
+                    }
+                }
                 _ => {}
             }
+            self.panel.handle_event(cx, &self.ui, event, true);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+            self.panel.after_event(event);
+            for said in self.panel.said() {
+                host.say(match said {
+                    Said::Opened => menu_item::Answer::Panel(true),
+                    Said::Closed => menu_item::Answer::Panel(false),
+                    Said::Ready => menu_item::Answer::Ready,
+                });
+            }
+            return;
+        }
+        if self.panel_only {
+            self.panel.handle_event(cx, &self.ui, event, false);
+            self.ui.handle_event(cx, event, &mut Scope::empty());
             return;
         }
         match event {
@@ -1136,6 +1173,16 @@ impl AppMain for App {
                 }
             }
             Event::Signal => {
+                // an ask to open the panel from outside the menu: the helper's next state carries
+                // it, or the master opens its own
+                let asked = PANEL_ASKED.load(Ordering::Relaxed);
+                if asked > self.panel_asked {
+                    self.panel_asked = asked;
+                    match self.item_link {
+                        Some(_) => self.refresh(cx),
+                        None => self.panel.open(cx, &self.ui),
+                    }
+                }
                 let chosen = self.item_link.as_ref().map(|l| l.chosen()).unwrap_or_default();
                 for item in chosen {
                     // (a choice in the helper's menu is seen in the log)
@@ -1145,7 +1192,7 @@ impl AppMain for App {
                     }
                 }
             }
-            Event::WindowCloseRequested(e) if self.in_tray(cx) => {
+            Event::WindowCloseRequested(e) if self.in_tray(cx) && self.ui.window(cx, ids!(main_window)).window_id() == Some(e.window_id) => {
                 e.accept_close.set(false);
                 self.ui.window(cx, ids!(main_window)).set_visible(cx, false);
                 self.window_shown = false;
@@ -1166,8 +1213,13 @@ impl AppMain for App {
                 }
             }
         }
+        let in_tray = self.in_tray(cx);
+        self.panel.handle_event(cx, &self.ui, event, in_tray);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+        for said in self.panel.said() {
+            log_line(&format!("devhub: the panel: {said:?}"));
+        }
         if let (Event::Draw(_), Some(Core::Node(_))) = (event, &self.core) {
             let window = self.ui.window(cx, ids!(node_window));
             let content = self.ui.widget(cx, ids!(tasks)).borrow::<DevhubTasks>().map_or(0.0, |v| v.content_h);

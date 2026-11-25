@@ -130,9 +130,9 @@ impl Package {
 
 fn resolve(repo: &Path, rev: &str, packages: &[Package], overlay: bool) -> (Vec<Package>, String) {
     if packages.is_empty() { return (Vec::new(), String::new()); }
-    let tree = crate::lease::Pin::of_rev(rev).ok_or_else(|| "missing commit pair".to_string()).and_then(|pin| {
-        super::ci::Tree::at(repo, &pin.pair())
-    });
+    // every repository the rev names: Fab's packages are makepad/apps' (11-22: "dropped
+    // fab-elec-sim:lib (no such package)" read the pair alone)
+    let tree = crate::lease::Pin::of_rev(rev).ok_or_else(|| "missing commit pair".to_string()).and_then(|pin| super::ci::Tree::at_pin(repo, &pin));
     match tree {
         Ok(tree) => resolve_in(&tree, packages, overlay),
         Err(e) => (Vec::new(), format!("targets unknown at {rev}: {e}")),
@@ -600,7 +600,7 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     let mut apps = apps_by_box(&crate::proto::home().join("records.jsonl"), started_ms.saturating_sub(APPS_MS));
     let off = apps_off(&crate::master::nodes_conf());
     apps.retain(|node, _| !off.contains(node));
-    let nodes = plan_nodes(nodes, &by_compiler, activity, &apps, &pair.rev(), started_ms);
+    let nodes = plan_nodes(nodes, &by_compiler, activity, &apps, &crate::nested::tips_rev(&ctx.repo, &pair), started_ms);
     let (plan, previous, followed) = {
         let mut p = PLAN.lock().unwrap();
         let generation = p.as_ref().map_or(1, |p| p.generation + 1);
@@ -697,21 +697,26 @@ fn waited_out(s: &Spare, running: bool, now: u64, value_ms: u64) -> bool {
 struct Tips {
     work: Option<String>,
     main: Option<String>,
+    /// each other followed nested repository's tip ([`crate::nested::tips`])
+    nested: BTreeMap<String, String>,
 }
 
 impl Tips {
     fn read(repo: &std::path::Path) -> Tips {
-        Tips { work: crate::gitread::rev(repo, "refs/heads/work"), main: crate::gitread::rev(&repo.join("apps/commercial"), "refs/heads/main") }
+        let nested = crate::nested::tips(repo).into_iter().map(|(n, _, sha)| (n, sha)).collect();
+        Tips { work: crate::gitread::rev(repo, "refs/heads/work"), main: crate::gitread::rev(&repo.join("apps/commercial"), "refs/heads/main"), nested }
     }
 
-    /// Every commit a lease's `rev` names (`branch@sha`, then `commercial=branch@sha`) is in its
-    /// repository's tip; false for a rev that names none, or a tip not read.
+    /// Every commit a lease's `rev` names (`branch@sha`, then `<name>=branch@sha` each) is in its
+    /// repository's tip; false for a rev that names none, or a tip not read. A lane's rev names
+    /// makepad/apps too (its worktree lacks it), and read as makepad's no landed lane held (11-22).
     fn hold(&self, repo: &std::path::Path, rev: &str) -> bool {
         let mut any = false;
         for part in rev.split(',').filter(|p| !p.is_empty()) {
-            let (dir, tip, part) = match part.strip_prefix("commercial=") {
-                Some(p) => (repo.join("apps/commercial"), &self.main, p),
-                None => (repo.to_path_buf(), &self.work, part),
+            let (dir, tip, part) = match part.split_once('=') {
+                Some((crate::state::PAIRED, p)) => (repo.join("apps/commercial"), self.main.as_ref(), p),
+                Some((name, p)) => (repo.join(crate::nested::dir(name)), self.nested.get(name), p),
+                None => (repo.to_path_buf(), self.work.as_ref(), part),
             };
             let (Some(tip), Some((_, sha))) = (tip, part.rsplit_once('@')) else { return false };
             if sha.is_empty() || !crate::gitread::is_ancestor(&dir, sha, tip) {
@@ -908,6 +913,13 @@ fn adopt(plan: &Option<Plan>, run: &mut Run) -> bool {
     true
 }
 
+/// Whether the master told lease `id` to yield: a lease would start on its box but for this
+/// warm-up (`Sched::yield_warm`). Its leg ends after the step it ran and asks again for the rest,
+/// behind that lease.
+fn told_to_yield(id: &str) -> bool {
+    super::leases().is_some_and(|lm| lm.told_to_yield(id))
+}
+
 fn run_leg(ctx: &Ctx, run: &Run) {
     if run.apps {
         let result = apps_leg(ctx, run);
@@ -951,6 +963,11 @@ fn run_leg(ctx: &Ctx, run: &Run) {
         let give_up = || if prebuild { gone() } else { stale() };
         // the lease a previous master held it on: taken back once, its runs asked again by name
         let mut adopted = run.borrow_mut().adopt.take();
+        // what this leg ran already at its target, across a yield's or a preemption's ask again:
+        // its JIT build, and the listings that ran, which are not run twice (by label, each one's
+        // failure); a newer plan's target, taken while it asked again, starts over. `killed`: its
+        // listings' runs a kill from outside ended in a row, which space its asks again
+        let (mut built, mut listed, mut failures, mut done_at, mut killed) = (false, BTreeSet::new(), BTreeMap::new(), None, 0u32);
         loop {
             if stale() { return Ok(String::new()); }
             let (asked, ship) = if let Some((lease, shipped)) = adopted.take() {
@@ -1038,13 +1055,21 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                 continue;
             }
             let r = run.borrow().clone();
+            let at = Some((r.key.rev.clone(), r.key.id.clone()));
+            if done_at != at {
+                (built, done_at, killed) = (false, at, 0);
+                listed.clear();
+                failures.clear();
+            }
             // (taken back, its listings are asked again: the box answers each from its run)
-            if !set(&r, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); p.listed.clear(); }) { return Ok(String::new()); }
+            if !set(&r, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); if listed.is_empty() { p.listed.clear(); } }) { return Ok(String::new()); }
             persist();
             let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages, true);
             dropped = note;
             if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
-            let mut failures = Vec::new();
+            let mut yielded = false;
+            // the listings a kill from outside ended on this grant: no verdict, asked again
+            let mut kills: Vec<String> = Vec::new();
             // each step asked by its name in the lease: a master that takes the lease back asks
             // again, and the box answers with the run the first ask started (the build goes on)
             let result = (if ship { held.ship_nothing() } else { Ok(()) }).and_then(|_| {
@@ -1054,16 +1079,33 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                 let argv = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "--version"].map(String::from);
                 let code = held.run_asked("warm-jit", ".", &argv, &mut log, &mut |_| {})?;
                 if code != 0 { return Ok(code); }
+                // a step of its own on each grant before it yields: asked again, its JIT is built
+                // and the next listing runs, so a lane that keeps its box busy never stops it
+                let mut ran = !built;
+                built = true;
                 for package in &packages {
                     if stale() { break; }
                     let label = package.label();
+                    if listed.contains(&label) { continue; }
+                    if ran && told_to_yield(&held.id) {
+                        yielded = true;
+                        break;
+                    }
                     set(&r, |p| p.state = format!("warming {label}"));
                     let _ = writeln!(log, "warming {label}");
                     let mut tee = Tee(&mut log, Vec::new());
                     let result = held.run_asked(&format!("warm-list-{label}"), ".", &package.argv(), &mut tee, &mut |_| {});
+                    ran = true;
+                    // a run a kill from outside ended is no verdict on the tip: listed again later
+                    if let Some(cause) = result.as_ref().ok().filter(|c| **c != 0).and_then(|c| killed_from_outside(*c, &String::from_utf8_lossy(&tee.1))) {
+                        let _ = writeln!(log, "warm killed {label}: {cause}: no verdict, listed again");
+                        kills.push(label);
+                        continue;
+                    }
                     // a listing that ran is a verdict on the tip (a lease's error is none); a failed
                     // one keeps its output (its errors), a passing one only its line
                     if let Ok(code) = result {
+                        listed.insert(label.clone());
                         let unit = format!("suite {}", package.pkg);
                         let head = format!("{label} on {}: exit {code}", r.node);
                         let text = if code == 0 { format!("{head}\n") } else {
@@ -1078,9 +1120,12 @@ fn run_leg(ctx: &Ctx, run: &Run) {
                         Ok(code) => Some(format!("{label}: exit {code}")),
                         Err(e) => Some(format!("{label}: {e}")),
                     };
-                    if let Some(e) = failure {
-                        let _ = writeln!(log, "warm skipped {e}");
-                        failures.push(e);
+                    match failure {
+                        Some(e) => {
+                            let _ = writeln!(log, "warm skipped {e}");
+                            failures.insert(label, e);
+                        }
+                        None => { failures.remove(&label); }
                     }
                 }
                 // Cache-warm failures do not fail the JIT build or skip subsequent packages.
@@ -1090,12 +1135,27 @@ fn run_leg(ctx: &Ctx, run: &Run) {
             held.release(result.as_ref().ok().copied());
             set(&r, |p| p.lease = None);
             if stale() { return Ok(String::new()); }
-            if preempted {
-                let _ = writeln!(log, "preempted for lane work; asking again");
-                set(&r, |p| { p.state = "waiting".into(); p.note = "preempted for lane work".into(); });
+            if preempted || yielded {
+                let why = if preempted { "preempted for lane work" } else { "yielded to a lease that waits on its box" };
+                let _ = writeln!(log, "{why}; asking again");
+                set(&r, |p| { p.state = "waiting".into(); p.note = why.into(); });
                 continue;
             }
-            return match result { Ok(0) => Ok(failures.join("; ")), Ok(code) => Err(format!("exit {code}")), Err(e) => Err(e) };
+            // a listing a kill from outside ended is asked again on a later grant, the asks spaced
+            // further at each such grant in a row (a box's policy kill or its memory's, while it
+            // lasts), never given up: the next plan's target starts over
+            if !kills.is_empty() && matches!(result, Ok(0)) {
+                let wait = RETRY.saturating_mul(1 << killed.min(16));
+                killed += 1;
+                let why = format!("{} ended by a kill from outside: listed again in {} s", kills.join(", "), wait.as_secs());
+                let _ = writeln!(log, "{why}");
+                ctx.store.event("warm", Sev::Warn, format!("warm {} on {}: {why}", r.key.rev, r.node), None);
+                set(&r, |p| { p.state = "waiting".into(); p.note = why.clone(); });
+                let until = Instant::now() + wait;
+                while Instant::now() < until && !stale() { std::thread::sleep(Duration::from_secs(1)); }
+                continue;
+            }
+            return match result { Ok(0) => Ok(failures.into_values().collect::<Vec<_>>().join("; ")), Ok(code) => Err(format!("exit {code}")), Err(e) => Err(e) };
         }
     })();
     let run = run.into_inner();
@@ -1192,6 +1252,8 @@ fn apps_leg(ctx: &Ctx, run: &Run) -> Result<String, String> {
                     let _ = writeln!(log, "warm skipped {e}");
                     failures.push(e);
                 }
+                // (told to yield: the apps not run yet are asked for again, behind that lease)
+                if told_to_yield(&held.id) { preempted = true; break; }
             }
             Ok(0)
         });
@@ -1305,10 +1367,12 @@ fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write)
             let _ = writeln!(log, "warming native {label}");
             let code = held.run_asked(&format!("warm-native-{label}"), ".", &package.native_argv(&run.os), log, &mut |_| {})?;
             if code != 0 { return Ok(code); }
+            // (told to yield, it ends as a preempted one does: the spare asks again later)
+            if told_to_yield(&held.id) { break; }
         }
         Ok(0)
     })();
-    let preempted = leg::was_preempted(&held.id);
+    let preempted = leg::was_preempted(&held.id) || told_to_yield(&held.id);
     held.release(result.as_ref().ok().copied());
     set(run, |p| p.lease = None);
     if preempted { return Err("preempted for lane work".into()); }
@@ -1406,6 +1470,15 @@ fn judge(ctx: &Ctx, plan: &Plan, superseded: bool) {
     if let Err(e) = crate::bucket::prebuild(&ctx.home, &ctx.repo, &ctx.store, plan.started_ms, plan.base.clone(), &plan.pair, outcome) {
         ctx.store.event("warm", Sev::Warn, format!("prebuild {}: no verdict: {e}", plan.pair.short()), None);
     }
+}
+
+/// Why a listing's run is no verdict on its tip: SIGKILL from outside ended it (its test run's, said
+/// by `relax test`, or its own, as 128 + 9), a box's policy, its memory's or a lease's end, never
+/// the code under test. `makepad-csg-brep-model:corpus` listed whole on other boxes and was a red of
+/// the lane that landed its tip when a Mac's system policy killed its test run (11-24).
+fn killed_from_outside(code: i32, output: &str) -> Option<String> {
+    if code == 128 + 9 { return Some("its run ended by signal 9".into()); }
+    output.lines().rev().find(|l| l.starts_with("relax test: the run of ") && l.contains(" ended by signal 9:")).map(|l| l.trim_start_matches("relax test: ").split(": no test result").next().unwrap_or(l).to_string())
 }
 
 /// What a failed listing keeps in its bucket's log: its line, its output's last [`LISTING_TAIL`]
@@ -1782,7 +1855,24 @@ mod tests {
         let ahead = commit(&d, "lane 2, not landed");
         g(&com, &["checkout", "-q", "-b", "rc-x"]);
         let private_ahead = commit(&com, "lane 2 private");
+        // a followed nested repository on its branch: a lane's rev names it beside the pair
+        let x = d.join("apps/x");
+        std::fs::create_dir_all(x.join("src")).unwrap();
+        g(&x, &["init", "-q", "-b", "main"]);
+        std::fs::write(x.join("Cargo.toml"), "[package]\nname = \"x-pkg\"\n").unwrap();
+        std::fs::write(x.join("src/lib.rs"), "").unwrap();
+        g(&x, &["add", "."]);
+        let x_landed = commit(&x, "x 1");
+        g(&x, &["checkout", "-q", "-b", "rc-x"]);
+        let x_ahead = commit(&x, "x 2, not landed");
+        g(&x, &["checkout", "-q", "main"]);
         let tips = super::Tips::read(&d);
+        assert!(tips.hold(&d, &format!("rc-x@{landed},commercial=rc-x@{private},x=rc-x@{x_landed}")), "landed in each repository");
+        assert!(!tips.hold(&d, &format!("rc-x@{landed},commercial=rc-x@{private},x=rc-x@{x_ahead}")), "the nested half not landed");
+        // a warm run's packages resolve in every repository its rev names: Fab's are makepad/apps'
+        let pkg = super::Package::from_class("test:x-pkg:lib").unwrap();
+        let (kept, note) = super::resolve(&d, &format!("work@{landed},commercial=main@{private},x=main@{x_landed}"), std::slice::from_ref(&pkg), false);
+        assert!(kept == [pkg] && note.is_empty(), "a package of a nested repository: {note}");
         assert!(tips.hold(&d, &format!("rc-x@{landed}")), "landed");
         assert!(tips.hold(&d, &format!("rc-x@{landed},commercial=rc-x@{private}")), "landed in both halves");
         assert!(!tips.hold(&d, &format!("rc-x@{ahead}")), "a commit work lacks");
@@ -2042,6 +2132,14 @@ mod tests {
         assert!(said("     Running src/lib.rs\na: test\n").is_some_and(|s| s.contains("inside its listing of src/lib.rs")), "a listing cut short is no whole one");
         assert!(said("     Running a\n1 test, 0 benchmarks\nerror: test failed\n").is_some_and(|s| s.contains("its last line: error: test failed")), "a line after the count is where it stopped");
         assert!(said("").is_some_and(|s| s.ends_with("it printed nothing")));
+        // a run a kill from outside ended is no verdict, asked again (a Mac's system policy killed
+        // one's test run, and its tip's lane had the red, 11-24); a crash of its own is one
+        let killed = |code: i32, out: &str| super::killed_from_outside(code, out);
+        let corpus = "     Running tests/corpus.rs\nrelax test: the run of tests/corpus.rs ended by signal 9: no test result is from it\n";
+        assert_eq!(killed(101, corpus).as_deref(), Some("the run of tests/corpus.rs ended by signal 9"), "its test run killed from outside");
+        assert!(killed(137, "").is_some(), "its own run killed from outside");
+        assert_eq!(killed(101, "relax test: the run of tests/a.rs ended by signal 11 (core dumped): no test result is from it\n"), None, "a crash of its own is a verdict");
+        assert_eq!(killed(101, stream), None, "an exit after its listing is a verdict");
         let long = format!("{}\nend\n", "x".repeat(super::LISTING_TAIL));
         assert_eq!(super::tail_of(&long, super::LISTING_TAIL), "end\n", "a tail starts at a line");
         super::judge(&ctx, &plan(vec![node("a", &["x", "z"], 5, vec![broken, silent]), node("b", &["y"], 5, vec![fine.clone()])]), false);

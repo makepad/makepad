@@ -53,6 +53,8 @@ pub struct Master {
     pub flow: Option<crate::sync::FlowServe>,
     /// the landing train (`land`): its queue and its pause
     pub land: Arc<crate::land::Train>,
+    /// the control socket's services: the app the master runs in adds its own (its window's)
+    pub control: makepad_remote::Endpoint,
 }
 
 /// A master's nice level is handed to what it starts without a level of its own: the apps
@@ -104,6 +106,18 @@ fn agent_plist() -> Option<PathBuf> {
 /// place keep it.
 fn under_agent() -> bool {
     std::env::var("XPC_SERVICE_NAME").is_ok_and(|s| s == AGENT)
+}
+
+/// Whether a person asked for this launch: LaunchServices started it (the Dock, Spotlight,
+/// Finder, `open`), whose jobs launchd names `application.<bundle id>.…`. A launch from a shell
+/// or a script carries its parent's name instead ("0" under Terminal): 11-24, three launches of
+/// the Dock wrapper from a shell in a minute each brought the panel up in front.
+pub fn launched_by_person() -> bool {
+    by_launch_services(std::env::var("XPC_SERVICE_NAME").ok().as_deref())
+}
+
+fn by_launch_services(service: Option<&str>) -> bool {
+    service.is_some_and(|s| s.starts_with("application."))
 }
 
 /// Why nothing starts this master again after a crash (`devhub nodes` says it); None when launchd
@@ -236,6 +250,17 @@ pub fn start_by_agent(socket: &std::path::Path) -> Option<Result<u32, String>> {
 /// The running master's pid (`~/.makepad/devhub/master.pid`): what a switch-over stops it by.
 pub fn pid_file() -> PathBuf {
     proto::home().join("master.pid")
+}
+
+/// Whether a master runs on this box: its pid file names a live process. The file outlives its
+/// master (nothing removes it), so its being there says only that a master once ran here: a node
+/// Mac kept one for two weeks and took itself for the master's box (11-24).
+pub fn runs_here() -> bool {
+    runs_by(&pid_file())
+}
+
+pub(crate) fn runs_by(file: &std::path::Path) -> bool {
+    std::fs::read_to_string(file).ok().and_then(|p| p.trim().parse().ok()).is_some_and(crate::os::pid_alive)
 }
 
 /// The master's node list, `~/.makepad/devhub/nodes.conf`: one line per node,
@@ -512,6 +537,15 @@ impl Master {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None, None);
+            // the test targets declared for Windows, a cargo test there after the landings that
+            // reach them: batched as the windows bucket's, the Windows box being shared
+            let run = crate::bucket::windows_tests(repo.clone(), home.clone());
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
+            crate::bucket::spawn(crate::bucket::WINDOWS_TESTS, timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run, |_| None, None);
             let run = crate::orch::ci::regression(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             // once a night, 02:00 on this Mac's clock, of the tip then (user, 11-05)
@@ -526,6 +560,7 @@ impl Master {
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |line, out| {
                 match line.split_whitespace().skip_while(|w| *w == "bucket").collect::<Vec<_>>()[..] {
                     ["run", name] => out.push(crate::bucket::kick(&home, name)),
+                    ["clear", ref key @ ..] if !key.is_empty() => out.push(crate::bucket::clear_intermittent(&home, &key.join(" "))),
                     _ => out.extend(crate::bucket::status(&home, &crate::orch::ctx().map(|c| crate::bucket::landed(&c.store)).unwrap_or_default())),
                 }
             })));
@@ -559,7 +594,7 @@ impl Master {
         let _ = std::fs::write(pid_file(), format!("{}\n", std::process::id()));
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
         local.ready();
-        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, heard_from: Mutex::new(Default::default()), asking_peers: Mutex::new(HashSet::new()), on_record, inbox, leases, recent, flow, land });
+        let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, heard_from: Mutex::new(Default::default()), asking_peers: Mutex::new(HashSet::new()), on_record, inbox, leases, recent, flow, land, control: ep });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
         let m2 = m.clone();
@@ -754,9 +789,14 @@ mod tests {
 
     /// A master knows whether launchd starts it again after a crash: under its agent it is quiet;
     /// started outside it, or with no agent installed, `devhub nodes` says so and how to fix it.
-    /// launchd's job reads from `launchctl print`'s own fields, not its endpoints' deeper ones.
+    /// launchd's job reads from `launchctl print`'s own fields, not its endpoints' deeper ones. A
+    /// launch beside it is a person's only when LaunchServices made it.
     #[test]
     fn a_master_says_when_nothing_starts_it_again_after_a_crash() {
+        assert!(by_launch_services(Some("application.nl.makepad.devhub.6074224.6074231")), "the Dock, Spotlight, Finder or `open` is a person's launch");
+        for other in [Some("0"), Some(AGENT), Some("application"), None] {
+            assert!(!by_launch_services(other), "a shell's, a script's or the agent's launch is no person's: {other:?}");
+        }
         assert_eq!(unsupervised_why(true, true), None);
         assert_eq!(unsupervised_why(true, false), None);
         let outside = unsupervised_why(false, true).unwrap();
@@ -821,7 +861,8 @@ mod tests {
     /// The role of [`a_dial_during_the_masters_exec_waits_for_the_next_build`]: a master's control
     /// socket whose "ping" names the image that answers. "before" execs into "after" as
     /// `restart_master` does; "after" listens only once the test has dialed, then starts a run
-    /// ("child"), which says which listeners it holds.
+    /// ("child"), which says which listeners it holds. "before"'s "hang" never answers, and a run
+    /// ("holder") it starts meanwhile holds that call's connection; "after"'s answers.
     #[cfg(unix)]
     #[test]
     fn exec_role_master() {
@@ -839,10 +880,50 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         };
+        if role == "holder" {
+            std::fs::write(base.join("holder up"), "").unwrap();
+            // (until the test is done, or a minute should it fail before it says so)
+            let t = std::time::Instant::now();
+            while !base.join("done").exists() && t.elapsed() < std::time::Duration::from_secs(60) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            return;
+        }
         let hub = Hub::new(&Hosts::default());
         let ep = hub.client_endpoint();
         let me = role.clone();
         ep.register("ping", 1, makepad_remote::lines::service("ping", Arc::new(move |_, out: &mut Vec<String>| out.push(me.clone()))));
+        if role == "before" {
+            let (b, s) = (base.clone(), sock.clone());
+            ep.register("hang", 1, makepad_remote::lines::service("hang", Arc::new(move |_, _: &mut Vec<String>| {
+                // a run started while the call is open inherits its connection, as one started
+                // between an accept and its close-on-exec does (macOS sets it once accept has
+                // returned): it holds the connection open past this image's exec
+                let connected = |fd: i32| {
+                    use std::os::unix::io::FromRawFd;
+                    // SAFETY: getpeername on a descriptor number; ManuallyDrop leaves it open
+                    std::mem::ManuallyDrop::new(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) }).peer_addr().is_ok()
+                };
+                let accepted: Vec<i32> = sockets_held().into_iter().filter(|(fd, at)| *at == s && connected(*fd)).map(|(fd, _)| fd).collect();
+                for &fd in &accepted {
+                    crate::node::close_on_exec(fd, false).unwrap();
+                }
+                let mut holder = crate::testenv::role("master::tests::exec_role_master", &b);
+                let _ = holder.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "holder").spawn().unwrap();
+                for &fd in &accepted {
+                    crate::node::close_on_exec(fd, true).unwrap();
+                }
+                while !b.join("holder up").exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                std::fs::write(b.join("hanging"), "").unwrap();
+                loop {
+                    std::thread::park();
+                }
+            })));
+        } else {
+            ep.register("hang", 1, makepad_remote::lines::service("hang", Arc::new(|_, out: &mut Vec<String>| out.push("after".into()))));
+        }
         if role == "after" {
             std::fs::write(base.join("kept"), crate::node::control_kept().to_string()).unwrap();
             std::fs::write(base.join("execd"), "").unwrap();
@@ -862,20 +943,30 @@ mod tests {
             let mut cmd = crate::testenv::role("master::tests::exec_role_master", &base);
             cmd.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "after");
             crate::node::keep_control_over_exec(&mut cmd);
-            panic!("exec: {}", std::os::unix::process::CommandExt::exec(&mut cmd));
+            panic!("exec: {}", crate::node::exec(&mut cmd));
         }
         wait_for("done");
     }
 
     /// The control socket's listener stays open over the master's exec into its next build: a dial
     /// while that build starts queues and is answered by it, where the closed socket refused it
-    /// and every lease holder said "master not reachable: waiting" (11-05).
+    /// and every lease holder said "master not reachable: waiting" (11-05). A call in flight
+    /// across the exec whose connection a run of the old image holds open is asked again of the
+    /// next build once its ping goes unanswered: it waited for good (W16863, 11-23).
     #[cfg(unix)]
     #[test]
     fn a_dial_during_the_masters_exec_waits_for_the_next_build() {
         let base = std::env::temp_dir().join(format!("devhub-exec-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        // its roles end however it ends
+        struct Done(std::path::PathBuf);
+        impl Drop for Done {
+            fn drop(&mut self) {
+                let _ = std::fs::write(self.0.join("done"), "");
+            }
+        }
+        let _done = Done(base.clone());
         let log = base.join("role.log");
         let mut role = crate::testenv::role("master::tests::exec_role_master", &base);
         role.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "before").env("DEVHUB_EXEC_BASE", &base).env("MAKEPAD_HOME", base.join("home")).env_remove("DEVHUB_CONTROL_FD");
@@ -898,6 +989,20 @@ mod tests {
         assert_eq!(ask().unwrap(), vec!["before".to_string()]);
         let before = crate::node::who_serves(&sock).expect("the first image answers who it is");
         assert_eq!(before.pid, pid);
+        // a call in flight across the exec, its connection held open by a run of the old image (no
+        // ping limit: the exec's shutdown alone ends it for this side, 11-23)
+        let (said, heard) = std::sync::mpsc::channel();
+        let cut = {
+            let sock = sock.clone();
+            std::thread::spawn(move || {
+                let c = Client::new(Target::Unix(sock), "exec-test-call");
+                let _ = said.send(crate::cli::retry_master_wait(|| crate::cli::ask(&c, None, "hang", "hang"), || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    true
+                }));
+            })
+        };
+        wait_for("hanging");
         std::fs::write(base.join("exec"), "").unwrap();
         // the next build runs and does not listen yet: it waits for "dialed"
         wait_for("execd");
@@ -907,6 +1012,10 @@ mod tests {
         let answer = std::thread::spawn(ask.clone());
         std::fs::write(base.join("dialed"), "").unwrap();
         assert_eq!(answer.join().unwrap().unwrap(), vec!["after".to_string()]);
+        // (on the event itself: a 10 s deadline was missed on a loaded box, W17262, 11-23)
+        let asked_again = heard.recv().expect("a call in flight across the exec still waits on the connection a run of the old image holds");
+        assert_eq!(asked_again, Ok(vec!["after".to_string()]), "its connection shut down at the exec, it was asked again of the next build");
+        cut.join().unwrap();
         wait_for("after listens");
         // the same process, a later image: who answers tells them apart
         let after = crate::node::who_serves(&sock).expect("the next image answers who it is");

@@ -39,7 +39,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           (it runs on); release ends the job `panicked`, its box freed and the parked
                                           process ended with it (10 min with no action release it; a job no longer
                                           paused is refused: `job cancel` ends it)
-  live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
+  live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--timed] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>]
         [--joins <W id>]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
@@ -56,6 +56,10 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           --joins W<n>: its app joins that session's app (a hidden test WM it reaches
                                           through --env MAKEPAD_WM_SOCKET=<path>): it runs on that session's box, and
                                           that session is never parked or ended idle while this one runs
+                                          --timed: a session for timings: it waits for a drained box and holds it while
+                                          it lives, as a timed lease does (nothing else starts there, the box's other
+                                          live sessions park, a Mac drains for it); only other timed work parks it, by
+                                          the rules it parks any session by, and it starts again after that
   live look <id> [timeout_s]              that one look (before any edit: the app up and drawing); default 300 s, counted
                                           from the first ask through restarts
   live start <pkg> --test [--env K=V ..] [--lib|--bin B|--test T] [-- args...]
@@ -67,7 +71,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           other cut act exits 75: whether it reached the app isn't known.
                                           `session relaunch` lets the app postpone it (unsaved work, a turn in
                                           flight: the reply names it); `session relaunch --anyway` restarts it now,
-                                          its state carried over, as the window caption's restart does
+                                          its state carried over, as the window caption's restart does.
+                                          A grab's, gq's or gseq's frames come here, named as a look's:
+                                          local/screencap/<lane>/<id>-<n>-f<frame>-p<patch>.png (it says where)
   live wait <id> patched|verdict|settled|frame [timeout_s]   the newest edit's patch or test verdict, the JIT idle,
                                           or a frame drawn; verdict gives save → shipped → patched → tests times; the
                                           timeout (default 120 s) counts from the first ask through restarts
@@ -92,6 +98,10 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           on (Fab's makepad/apps: --with apps); prints its path. Lanes never run
                                           git worktree themselves; once it lands the master cleans its node dirs
                                           after 30 min idle, its worktree and branches once its agents are idle 1 h
+  lane add <name> --with <repo>..        a live lane's half in another nested repository, made as --with makes
+                                          one (apps/<repo> on rc-<name> from the branch its checkout is on): a
+                                          lane from before Fab's move takes an apps half so (--with apps). It
+                                          ports nothing: the lane carries its own changes over
   lane drop <name>                        abandon a lane: unlanded commits (uncommitted work committed first) are
                                           bundled into ~/.makepad/devhub/dropped, then worktrees, branches, node dirs go
   lane stop <name>                        end its live and queued leases; it may take new leases at once
@@ -141,6 +151,9 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
   jitlegs [status] [--json]                the newest background JIT correctness run, its legs and wall time
   jitlegs run                             run the newest landed pair now; otherwise runs after JIT input changes,
                                           one leg at a time at the lowest priority, outside verify and CI
+  jitlegs wait [<run>] [--leg <name>]     wait for a run's end (its log folder's stamp or its pair; default the
+                                          newest) or one leg's verdict, and print it; exit 0 nothing failed,
+                                          1 a leg failed or was incomplete, 2 no such run or leg
   warm [status] [--json]                  the dev JIT/cache box plan and each active lane's spare
   after <condition> -- <devhub words>     run the words once: landed <branch> | free <node> | verified [<commit>];
                                           words: any devhub command (verify kick, job submit ...); an app on the
@@ -185,6 +198,50 @@ fn master() -> Result<Client, String> {
         return Err("the devhub here is not the master, or an older one without verify/after/allapps/push".into());
     }
     Ok(c)
+}
+
+/// `jitlegs wait [<run>] [--leg <name>]`: until that leg, or the whole run, has its verdict, through
+/// master restarts, as `job wait` waits; each leg's state as it changes on stderr, the verdict on
+/// stdout. Exit 0: nothing failed (a leg not run says why), 1: a leg failed or was incomplete, 2: no
+/// such run or leg.
+fn jitlegs_wait(c: &Client, words: &[&str], json: bool) -> i32 {
+    let (run, leg) = match super::jitlegs::wait_words(words) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("makepad devhub {e}");
+            return 2;
+        }
+    };
+    let mut run = run.map(str::to_string);
+    let mut told: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    loop {
+        let line = format!("jitlegs wait{}{}", run.as_ref().map_or(String::new(), |r| format!(" {r}")), leg.map_or(String::new(), |l| format!(" --leg {l}")));
+        let v = match retry_master(|| one(c, "jitlegs", &line)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("makepad devhub {e}");
+                return 2;
+            }
+        };
+        // the run it named first, through runs that start meanwhile
+        run = v.get("stamp").and_then(Value::as_str).map(str::to_string).or(run);
+        let s = |l: &Value, k: &str| l.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let legs = v.get("runs").and_then(Value::as_arr).and_then(|a| a.last()).and_then(|r| r.get("legs")).and_then(Value::as_arr).unwrap_or(&[]);
+        for l in legs.iter().filter(|l| leg.is_none_or(|name| s(l, "name") == name)) {
+            let said = format!("{} {}", s(l, "state"), s(l, "node"));
+            if told.insert(s(l, "name"), said.clone()).as_ref() != Some(&said) {
+                eprintln!("{}: {said} {}", s(l, "name"), s(l, "summary"));
+            }
+        }
+        if v.get("settled").and_then(Value::as_bool) == Some(true) {
+            if json {
+                println!("{}", v.to_json());
+            } else {
+                print!("{}", super::jitlegs::render_wait(&v));
+            }
+            return if v.get("ok").and_then(Value::as_bool) == Some(true) { 0 } else { 1 };
+        }
+    }
 }
 
 /// One request; the answer's first line (an `err` line is the error).
@@ -280,6 +337,7 @@ pub fn main(args: &[&str]) -> Option<i32> {
             let line = format!("jitlegs {}", words.join(" "));
             match words.first() {
                 None | Some(&"status") => done(one(&c, "jitlegs", &line), json, &super::jitlegs::render),
+                Some(&"wait") => jitlegs_wait(&c, &words[1..], json),
                 _ => done(one(&c, "jitlegs", &line), json, &flat),
             }
         }
@@ -803,6 +861,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
         ["start", app, rest @ ..] => {
             let (mut needs, mut visible, mut lane, mut node) = (String::new(), false, None::<String>, String::new());
             let (mut use_tree, mut cost, mut est_min, mut class) = (false, String::new(), "null".to_string(), String::new());
+            let mut timed = false;
             let (mut cores, mut ram_gb) = ("null".to_string(), "null".to_string());
             let mut priority = "interactive";
             let mut loader = None;
@@ -859,6 +918,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     ("--jit", Some(key)) if !key.is_empty() && !key.starts_with('-') => { loader = Some(key.to_string()); i += 1; }
                     ("--visible", _) => visible = true,
                     ("--tree", _) => use_tree = true,
+                    ("--timed", _) => timed = true,
                     ("--priority", Some(p)) if crate::lease::Priority::parse(p).is_some() => { priority = p; i += 1; }
                     ("--cost", Some(c)) if crate::lease::CostClass::parse(c).is_some() => { cost = c.to_string(); i += 1; }
                     ("--class", Some(c)) => { class = c.to_string(); i += 1; }
@@ -891,7 +951,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--avoid N,..] [--visible] [--timed] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--joins W<n>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -907,7 +967,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), json_str(&avoid), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"timed\":{timed},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"avoid\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{},\"joins\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), json_str(&avoid), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home), json_str(&joins));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])
@@ -1245,6 +1305,25 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             let req = format!("{{\"name\":{},\"from\":{},\"commercial\":{commercial},\"with\":[{}]}}", json_str(name), json_str(&from), with.join(","));
             done(one(c, "lane", &format!("lane new {req}")), json, &|v| format!("{}\n", v.get("path").and_then(|p| p.as_str()).unwrap_or("")))
         }
+        ["add", name, rest @ ..] => {
+            let mut with = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match (rest[i], rest.get(i + 1)) {
+                    ("--with", Some(r)) => {
+                        with.push(json_str(r));
+                        i += 1;
+                    }
+                    (w, _) => {
+                        eprintln!("makepad devhub lane add <name> --with <repo>..: unknown `{w}`");
+                        return 2;
+                    }
+                }
+                i += 1;
+            }
+            let req = format!("{{\"name\":{},\"with\":[{}]}}", json_str(name), with.join(","));
+            done(one(c, "lane", &format!("lane add {req}")), json, &|v| v.get("text").and_then(Value::as_str).unwrap_or("").to_string())
+        }
         ["retire", "--clean-offers"] => clean_offers(c, json),
         ["slot" | "slots", ..] => match super::slot::request(words) {
             Ok(req) => done(one(c, "lane", &format!("lane slot {req}")), json, &|v| v.get("text").and_then(Value::as_str).unwrap_or("").to_string()),
@@ -1333,7 +1412,7 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
             out
         }),
         _ => {
-            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] [--with <repo>].. | drop <name> | stop <name> | keep|unkeep <name> | park <name> [why] | unpark <name> | retire <name> | offers [--check] | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
+            eprintln!("makepad devhub lane new <name> [--from work] [--no-commercial] [--with <repo>].. | add <name> --with <repo>.. | drop <name> | stop <name> | keep|unkeep <name> | park <name> [why] | unpark <name> | retire <name> | offers [--check] | live <name> on|off | adopt | remove <name> | sweep [--dry] | sweep status | dormant");
             2
         }
     }

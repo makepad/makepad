@@ -231,10 +231,12 @@ mod node {
     /// The node's pre-warm slot: at most one runs.
     pub struct Prewarm {
         run: Mutex<Option<Run>>,
+        // A second cancel waits for the first to finish joining the worker.
+        joining: Mutex<()>,
     }
 
     /// This node's ([`start`], [`cancel`], [`running`]).
-    static NODE: Prewarm = Prewarm { run: Mutex::new(None) };
+    static NODE: Prewarm = Prewarm { run: Mutex::new(None), joining: Mutex::new(()) };
 
     /// Whether a pre-warm runs on this node now.
     pub fn running() -> bool {
@@ -253,6 +255,7 @@ mod node {
         }
 
         pub fn cancel(&self, why: &str) -> bool {
+            let _joining = self.joining.lock().unwrap();
             let Some(r) = self.run.lock().unwrap().take() else { return false };
             let was = !r.thread.is_finished();
             *r.why.lock().unwrap() = why.to_string();
@@ -434,7 +437,7 @@ mod node {
     /// foreground (no hub), its records on stdout; `cancel_after`: cancelled then, the way a lease
     /// preempts it. 0 when it finished (or was cancelled as asked) with no failed step.
     pub fn foreground(root: PathBuf, cancel_after: Option<u64>) -> i32 {
-        let pw = Prewarm { run: Mutex::new(None) };
+        let pw = Prewarm { run: Mutex::new(None), joining: Mutex::new(()) };
         let failed = Arc::new(AtomicBool::new(false));
         let f2 = failed.clone();
         let t0 = Instant::now();
@@ -549,12 +552,26 @@ mod node {
                 lv.fetch_sub(1, Ordering::SeqCst);
                 r
             });
-            let pw = Prewarm { run: Mutex::new(None) };
+            let pw = Prewarm { run: Mutex::new(None), joining: Mutex::new(()) };
             pw.start_with(PathBuf::from("/t"), "abc/def".into(), Arc::new(move |r: crate::proto::Record| ev.lock().unwrap().push(r.line)), "n1".into(), run);
             // stage check+present, scope check, then the scope present blocks
             wait_for(|| started.load(Ordering::SeqCst) == 4);
             assert!(pw.running());
-            assert!(pw.cancel("lease L7"));
+            let together = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let cancel = || {
+                    together.wait();
+                    let stopped = pw.cancel("lease L7");
+                    if !stopped {
+                        assert!(events.lock().unwrap().last().is_some_and(|e| e.contains("cancelled")),
+                            "the cancel that found no run waited for the worker's last record");
+                    }
+                    stopped
+                };
+                let first = scope.spawn(cancel);
+                let second = scope.spawn(cancel);
+                assert_ne!(first.join().unwrap(), second.join().unwrap(), "exactly one cancel stopped the running pre-warm");
+            });
             // joined: nothing runs, nothing more starts
             assert_eq!(live.load(Ordering::SeqCst), 0);
             assert!(!pw.running());
@@ -586,7 +603,9 @@ mod node {
             let t0 = Instant::now();
             let r = run_step(&step("sleep", &["30"], Some(dir.join("never.report"))), &log, &flag);
             assert_eq!(r, Err("cancelled".to_string()));
-            assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
+            // (it ended before its 30 s sleep did: the cancel, not the step's end; a 3 s bound was
+            // the box's speed, not the property)
+            assert!(t0.elapsed() < Duration::from_secs(20), "{:?}", t0.elapsed());
             canceller.join().unwrap();
             // a present whose report says present: Ok (cp writes the report and exits)
             let src = dir.join("src");

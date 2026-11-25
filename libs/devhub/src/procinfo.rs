@@ -156,6 +156,28 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// Whether a process `pid` exists, whether or not this process may signal it: `kill(pid, 0)` says
+/// EPERM for a process that exists but is not ours to signal, and a sandboxed agent's shell may
+/// signal only its own sandbox, so to its runs every other process reads as gone by [`alive`].
+/// For a sweep of what other processes left behind: one that took EPERM for gone removed the
+/// stages of other agents' runs waiting in the queue, and their ships failed with "No such file
+/// or directory" for files their lanes had (11-23).
+pub fn exists(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const EPERM: i32 = 1;
+        let signalled = unsafe { kill(pid as i32, 0) } == 0;
+        (signalled || std::io::Error::last_os_error().raw_os_error() == Some(EPERM)) && !crate::os::zombie(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        crate::os::pid_alive(pid)
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod os {
     use super::*;

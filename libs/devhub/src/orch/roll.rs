@@ -117,17 +117,21 @@ impl Drop for Slot {
     }
 }
 
-/// The services the self-update restarts on nodes: (name, the package whose graph rolls it).
-pub const SERVICES: [(&str, &str); 2] = [("devhub", "libs/devhub"), ("ai-hub", "apps/aihub")];
+/// The services the self-update restarts on nodes: (name, the package whose graph rolls it, the
+/// features a node builds it with). The WM builds the AI hub with `--features node` (its
+/// NodeConf's default), whose graph holds crates the default one does not (libs/render, scene,
+/// the model families): a landing in libs/render rebuilt every Linux box's AI hub, and the roll,
+/// reading the default graph, never restarted one (11-22).
+pub const SERVICES: [(&str, &str, &str); 2] = [("devhub", "libs/devhub", ""), ("ai-hub", "apps/aihub", "node")];
 
 /// The repo dirs of the crates the binary of the package at `pkg` is built from: cargo's resolved
 /// graph, for every target. Reading `path` lines is not enough for this: an optional dependency
 /// no feature turns on reads as one (libs/ai/hub's took platform, draw and 100 more crates into
 /// libs/devhub's closure, 157 crates to the 48 it builds).
-fn linked_dirs(repo: &Path, pkg: &str) -> Result<BTreeSet<String>, String> {
+fn linked_dirs(repo: &Path, pkg: &str, features: &str) -> Result<BTreeSet<String>, String> {
     // (no --locked: the lockfile is not tracked; each checkout's own goes stale with a landing's new
     // crate, and cargo refreshes it here as any build in this checkout would)
-    let o = std::process::Command::new(cargo_bin()).current_dir(repo).args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "--target", "all", "--manifest-path"]).arg(format!("{pkg}/Cargo.toml")).output().map_err(|e| format!("cargo: {e}"))?;
+    let o = std::process::Command::new(cargo_bin()).current_dir(repo).args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "--target", "all", "--manifest-path"]).arg(format!("{pkg}/Cargo.toml")).args(if features.is_empty() { Vec::new() } else { vec!["--features", features] }).output().map_err(|e| format!("cargo: {e}"))?;
     if !o.status.success() {
         return Err(crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 300));
     }
@@ -167,9 +171,9 @@ fn built_changes(repo: &Path, from: &str, to: &str, dirs: &BTreeSet<String>) -> 
 /// Each service's crates at this landing, and why they are the whole repo. A landing whose graph
 /// cargo cannot read rolls every service: a missed update is the worse error.
 fn service_dirs(repo: &Path) -> (HashMap<String, BTreeSet<String>>, Option<String>) {
-    match SERVICES.iter().map(|(n, d)| Ok((n.to_string(), linked_dirs(repo, d)?))).collect::<Result<HashMap<_, _>, String>>() {
+    match SERVICES.iter().map(|(n, d, f)| Ok((n.to_string(), linked_dirs(repo, d, f)?))).collect::<Result<HashMap<_, _>, String>>() {
         Ok(dirs) => (dirs, None),
-        Err(e) => (SERVICES.iter().map(|(n, _)| (n.to_string(), BTreeSet::from([String::new()]))).collect(), Some(format!("cargo does not read the services' crates ({e}): the whole repo counts"))),
+        Err(e) => (SERVICES.iter().map(|(n, _, _)| (n.to_string(), BTreeSet::from([String::new()]))).collect(), Some(format!("cargo does not read the services' crates ({e}): the whole repo counts"))),
     }
 }
 
@@ -214,6 +218,22 @@ fn note_roll(node: &str, svc: &str, fields: &[(&str, &str)]) {
     if let Err(e) = wrote {
         eprintln!("devhub: {}: {e}", rolls_path().display());
     }
+}
+
+/// A box's WM restart as its hub said it (`sync: WM restarted (<service> <state>): <why>, after
+/// <how long> waiting on: <what>`, or `with nothing to wait for`): a `wm` line of the record, so
+/// `devhub rolls` shows each WM restart and its wait. Only a wait's start was kept, an inbox line,
+/// and a box's WM was read as 37 min behind while each restart there had waited 3-92 s (11-24).
+pub fn on_record(r: &crate::proto::Record) {
+    if let Some(ended) = wm_restarted(r) {
+        note_roll(&r.machine, "wm", &[("ended", &ended)]);
+    }
+}
+
+/// [`on_record`]'s line of a hub's WM restart record: what follows "WM restarted".
+fn wm_restarted(r: &crate::proto::Record) -> Option<String> {
+    (r.kind == "sync").then_some(())?;
+    r.line.strip_prefix("sync: WM restarted ").map(|rest| format!("restarted {rest}"))
 }
 
 /// The commit each box's hub runs by the record: the short sha of its newest devhub `runs` line.
@@ -277,9 +297,11 @@ fn rolls_text(text: &str, node: Option<&str>, n: usize, clock: &dyn Fn(u64) -> S
         }
         let short = |k: &str| { let f = field(k); f[..f.len().min(10)].to_string() };
         let at = clock(v.get("ms").and_then(|x| x.as_u64()).unwrap_or(0));
-        Some(match field("ended").as_str() {
-            "" => format!("{at} {} {}: {} -> {}: {}", field("node"), field("svc"), short("from"), short("to"), field("why")),
-            ended => format!("{at} {} {}: {} ended: {ended}", field("node"), field("svc"), short("to")),
+        Some(match (field("ended").as_str(), field("to").is_empty()) {
+            ("", _) => format!("{at} {} {}: {} -> {}: {}", field("node"), field("svc"), short("from"), short("to"), field("why")),
+            // a WM restart ([`on_record`]): no commit of its own
+            (ended, true) => format!("{at} {} {}: {ended}", field("node"), field("svc")),
+            (ended, false) => format!("{at} {} {}: {} ended: {ended}", field("node"), field("svc"), short("to")),
         })
     }).collect();
     lines[lines.len().saturating_sub(n)..].join("\n")
@@ -362,6 +384,14 @@ fn normalize(p: &str) -> String {
 
 /// Whether a tree at `at` lacks the code of `to` in `dirs`: false when `at` contains `to` (a later
 /// landing moved it past) or differs from it nowhere in `dirs`.
+/// Whether a hub at `hub_rev` lacks code of the deployment its box has (`deploy`): built there, it
+/// runs that code while the deployment cannot move on ([`roll_node`]: held for the timed ask first
+/// in line). A Mac's hub ran ee658cc475 for over an hour while its deployment stood at 2549ec0082,
+/// held for a timed ask that waited 25 min to start (11-24). An older hub (no `hub_rev`) is not one.
+fn hub_behind_deployment(repo: &Path, hub_rev: &str, deploy: &str, dirs: &BTreeSet<String>) -> bool {
+    !hub_rev.is_empty() && !deploy.is_empty() && lacks(repo, hub_rev, deploy, dirs)
+}
+
 fn lacks(repo: &Path, at: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     if at.is_empty() {
         return true;
@@ -381,8 +411,12 @@ fn touches(repo: &Path, from: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     built_changes(repo, from, to, dirs).is_none_or(|c| !c.is_empty())
 }
 
-/// The newest commit of `to` that touched `dirs`, as wall ms (its commit time). The answer for one
-/// commit never changes: asked once per landing and dir set, not per tick.
+/// When `to`'s line (its first parents: the landings) last took a change to `dirs`, as wall ms: the
+/// landing's commit time, not its lane commit's. A lane's commit is older than its landing by as
+/// long as the lane took to hand it in (16 min for the AI hub's last change at ce27b321b7, 11-22),
+/// and a service started in between ran without it while it counted as started after it, so the
+/// roll never asked. The answer for one commit never changes: asked once per landing and dir set,
+/// not per tick.
 fn last_change_ms(repo: &Path, to: &str, dirs: &BTreeSet<String>) -> u64 {
     static KNOWN: Mutex<Option<(String, HashMap<BTreeSet<String>, u64>)>> = Mutex::new(None);
     let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
@@ -393,11 +427,22 @@ fn last_change_ms(repo: &Path, to: &str, dirs: &BTreeSet<String>) -> u64 {
     if let Some(ms) = by_dirs.get(dirs) {
         return *ms;
     }
-    let mut args = vec!["log", "-1", "--format=%ct", to, "--"];
+    let mut args = vec!["log", "-1", "--first-parent", "--format=%ct", to, "--"];
     args.extend(dirs.iter().map(|d| if d.is_empty() { "." } else { d.as_str() }));
     let ms = git(repo, &args).ok().and_then(|s| s.trim().parse::<u64>().ok()).map_or(0, |s| s * 1000);
     by_dirs.insert(dirs.clone(), ms);
     ms
+}
+
+/// Whether a WM-supervised service that started at `started` (wall ms) rolls: its code changed
+/// after it started (at `at`, the last landing of its closure) and has been still for
+/// [`SETTLE_MS`], or its node says it runs a build its checkout has since replaced (`rebuilt`,
+/// [`crate::lease::Caps::services_stale`]), whenever it started; not once its node said it runs
+/// the deployment's build for that change (`asked`). Started after the landing but before its
+/// box's deployment had it, a Linux node's AI hub ran its old build 1 h: its start was later than the
+/// change, so no roll came (11-23).
+fn service_due(started: u64, at: u64, rebuilt: bool, asked: bool, now: u64) -> bool {
+    !asked && (rebuilt || started < at && at + SETTLE_MS <= now)
 }
 
 /// An update event, also in the master's log: its feed keeps none past its readers, and a restart
@@ -493,7 +538,8 @@ pub fn start(ctx: Arc<Ctx>) {
             let Some(work) = crate::gitread::rev(&ctx.repo, "refs/heads/work") else { continue };
             // where a box catches up to, and how far behind one is
             if let Some(main) = crate::gitread::rev(&ctx.repo.join("apps/commercial"), "refs/heads/main") {
-                let tips = crate::state::Pair::new(&work, &main).pin_key();
+                // every followed repository's: a catch-up moves only what its pin names
+                let tips = crate::nested::tips_pin(&ctx.repo, &work, &main).key();
                 if tips != tips_at {
                     ctx.leases.set_tips(&tips, landed_since(&ctx, wall_ms().saturating_sub(LANDINGS_KNOWN.as_millis() as u64)));
                     tips_at = tips;
@@ -553,7 +599,7 @@ pub fn start(ctx: Arc<Ctx>) {
             let good = cli_good();
             // each service rolls once its own code settled: the hub's frequent landings never hold
             // back an AI hub whose code is still (11-01: the fleet's AI hubs ran 1 h old code)
-            let changed: HashMap<&str, u64> = SERVICES.iter().skip(1).map(|(s, _)| (*s, last_change_ms(&ctx.repo, &work, &closures[*s]))).collect();
+            let changed: HashMap<&str, u64> = SERVICES.iter().skip(1).map(|(s, _, _)| (*s, last_change_ms(&ctx.repo, &work, &closures[*s]))).collect();
             push_back_behind(&ctx, &tips_at, &busy, &mut was_up);
             // never a tip that did not build (11-02: hubs rolled onto a landing that broke
             // makepad-devhub, which the master's build had refused minutes before)
@@ -582,12 +628,13 @@ pub fn start(ctx: Arc<Ctx>) {
                     Some(("devhub", hub.clone()))
                 } else {
                     // the WM-supervised services that run there and started before their code's last change
-                    SERVICES.iter().skip(1).find_map(|(s, _)| {
+                    SERVICES.iter().skip(1).find_map(|(s, _, _)| {
                         let started = c.services.iter().find(|(x, _)| x == s)?.1;
                         let dirs = &closures[*s];
                         let at = changed[*s];
                         let asked = current.lock().unwrap().get(&(n.name.clone(), s.to_string())) == Some(&(at, c.deploy.clone()));
-                        (started < at && !asked && at + SETTLE_MS <= wall_ms()).then(|| (*s, dirs.clone()))
+                        let rebuilt = c.services_stale.iter().any(|x| x == s);
+                        service_due(started, at, rebuilt, asked, wall_ms()).then(|| (*s, dirs.clone()))
                     })
                 };
                 let Some((svc, dirs)) = job else { continue };
@@ -596,6 +643,8 @@ pub fn start(ctx: Arc<Ctx>) {
                 let from = if svc == "devhub" { c.hub_rev.clone() } else { String::new() };
                 let why = if svc == "devhub" {
                     built_changes(&ctx.repo, &from, &target, &dirs).map_or("the commit it runs is not known here".to_string(), |c| why_of(&c))
+                } else if c.services_stale.iter().any(|x| x == svc) {
+                    "its checkout rebuilt it after it started".to_string()
                 } else {
                     "its code changed after it started".to_string()
                 };
@@ -906,7 +955,7 @@ fn push_back_behind(ctx: &Arc<Ctx>, tips: &str, busy: &Arc<Mutex<BTreeSet<String
         let spawned = std::thread::Builder::new().name("devhub-push-back".into()).spawn(move || {
             let busy = busy_push;
             let ctl = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-update");
-            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, &node, None);
+            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, &node, None, false);
             busy.lock().unwrap().remove(&node);
             if code == 0 {
                 event(&ctx, Sev::Info, format!("update: {node} is back with its deployment at {at}: pushed to the tips"));
@@ -947,6 +996,8 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     // a push a timed run makes wait: an update wait (no new timed lease there until it moves), said
     // once, asked again at USER_WAIT (it was a warning every 5 s, 26 times for one run, 11-03)
     let mut push_wait = UpdateWaits { ctx, node, what: "deployment", on: false };
+    // the deployment the hub builds at instead of the target, while that cannot move (None: the target)
+    let mut builds_at: Option<String> = None;
     loop {
         let c = caps().unwrap_or_default();
         if has_it() {
@@ -966,10 +1017,17 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             break;
         }
         let to = deploy_to(ctx.leases.update_pin(node), &c.deploy, |d, a| crate::sync::deploy_has(&ctx.repo, d, a));
-        if let DeployTo::Held { lease, at } = &to {
+        if let DeployTo::Held { lease, at: pin } = &to {
+            // its hub behind the deployment its box has builds there meanwhile, not after that
+            // ask's start and run ([`hub_behind_deployment`])
+            if svc == "devhub" && !leased_checkout && hub_behind_deployment(&ctx.repo, &c.hub_rev, at, dirs) {
+                event(ctx, Sev::Info, format!("update: {node}'s deployment is held at {} until {lease} (timed, first in line) starts: its hub, at {}, builds at that deployment meanwhile", super::short(at), super::short(&c.hub_rev)));
+                builds_at = Some(at.to_string());
+                break;
+            }
             if !held {
                 push_wait.set(None);
-                updating(Some(&format!("held at {} until {lease} (timed, first in line) starts", super::short(at))));
+                updating(Some(&format!("held at {} until {lease} (timed, first in line) starts", super::short(pin))));
                 held = true;
             }
             std::thread::sleep(Duration::from_secs(5));
@@ -997,7 +1055,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                 kicked = true;
             }
         } else if pushed.as_ref() != Some(&pin) {
-            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, node, pin.as_deref());
+            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, node, pin.as_deref(), false);
             if code == 0 {
                 pushed = Some(pin.clone());
             }
@@ -1071,6 +1129,33 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             }
         }
     };
+    // A service its node keeps (the AI hub of a node no WM runs, started from its kept copy) rolls
+    // onto its node's build of what the deployment holds: the node's prebuild runs first, at that
+    // deployment (it moves nothing), in the box's deployment-build room, and replaces the kept
+    // copy when it built other bytes. A timed run or ask there makes it wait, as a push does. A
+    // build that fails leaves the service on its kept copy, said, until the next change. Only a
+    // node off the auto-sync: the auto-sync's apply builds as its sync.conf says, and off it no
+    // apply built, so a Mac's AI hub ran the installer's build for two weeks (11-24).
+    if svc != "devhub" && !crate::sync::autosync_covers(&ctx.home, node) && caps().is_some_and(|c| c.has("deploy-builds")) {
+        let mut waited = UpdateWaits { ctx, node, what: "build", on: false };
+        loop {
+            let at = caps().map(|c| c.deploy).filter(|d| !d.is_empty());
+            let (code, lines) = crate::sync::push_tree(&ctl, &ctx.repo, node, at.as_deref(), true);
+            if code == 0 {
+                waited.set(None);
+                break;
+            }
+            if let Some(why) = push_waits(&lines) {
+                waited.set(Some(format!("its {svc} build ({why})")));
+                std::thread::sleep(USER_WAIT);
+                continue;
+            }
+            waited.set(None);
+            let err = lines.iter().rev().find(|l| l.contains("err")).cloned().unwrap_or_default();
+            event(ctx, Sev::Warn, format!("update: {node}'s build of {svc} for {short} failed: {err}; {svc} runs on its kept copy, the last build that succeeded, until the next change"));
+            return RollEnd::Current;
+        }
+    }
     let mut room = None;
     if svc == "devhub" {
         match take_room() {
@@ -1081,6 +1166,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         // A hub without `handover` restarts only between runs: it drains, once.
         let old = caps().is_some_and(|c| !c.has("handover"));
         if old { ctx.leases.set_updating(node, Some(&format!("its hub updates to {short}; an older hub: no new leases until it restarts")), true); }
+        let short = builds_at.as_deref().map_or(short, super::short);
         event(ctx, Sev::Info, format!("update: {node} restarts its hub for {short}{}", if old { " once its runs end (an older hub: no new leases until then)" } else { " now (runs and leases go on)" }));
     } else {
         slot.take();
@@ -1682,13 +1768,17 @@ fn swap_gate(repo: &Path, target: &Path) -> Result<(), String> {
 
 /// The lanes' CLI takes the newest devhub build ([`build_devhub`]), as the master execs into it
 /// ([`restart_master`]): one build at a time, so never a binary cargo is writing. None built yet:
-/// the CLI stays as it is.
+/// the CLI stays as it is. The CLI it replaces is kept ([`prev_cli`]) for a rollback to put back.
 fn swap_cli(repo: &Path) -> Result<(), String> {
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let target = MasterBin::this().cli_target(repo);
     let built = target.join("host").join(cli_name());
     if !built.is_file() { return Ok(()); }
-    swap_in(&built, &repo.join("target/host").join(cli_name()))?;
+    let live = repo.join("target/host").join(cli_name());
+    if live.is_file() {
+        swap_in(&live, &prev_cli(repo))?;
+    }
+    swap_in(&built, &live)?;
     // the land rule's binary built with it goes live with it
     swap_gate(repo, &target)
 }
@@ -1828,6 +1918,26 @@ fn prev_binary(repo: &Path) -> PathBuf {
     live.with_file_name(name)
 }
 
+/// The lanes' CLI a restart replaced ([`swap_cli`]), the one that went with the master build it
+/// left ([`prev_binary`]): a rollback puts it back ([`cli_back`]).
+fn prev_cli(repo: &Path) -> PathBuf {
+    // (not `.prev`: a master that runs as the CLI keeps its own previous build under that name)
+    repo.join("target/host").join(format!("{}.prev-cli", cli_name()))
+}
+
+/// At a rollback: the lanes' CLI back to the build kept with the master's previous one, as a
+/// restart moves it forward ([`swap_cli`]). A rollback left the newer CLI in place, and a CLI ahead
+/// of its master sends words the master does not know: a rollback below the hand-in's `pin=` word
+/// would have refused every hand-in (#8853, 11-24). Ok(false): none kept (a master restarted
+/// before CLIs were kept), the CLI stays.
+fn cli_back(repo: &Path) -> Result<bool, String> {
+    let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
+    let kept = prev_cli(repo);
+    if !kept.is_file() { return Ok(false); }
+    swap_in(&kept, &repo.join("target/host").join(cli_name()))?;
+    Ok(true)
+}
+
 /// The build this master started from, copied as it starts: a CLI rebuild swaps a new file in at
 /// the path it ran from, and a rollback needs the build that ran.
 fn started_binary(repo: &Path) -> PathBuf {
@@ -1929,6 +2039,13 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
     mark_bad(&ctx.home, from, &format!("rolled back from ({by})"));
     let to = if back_to.is_empty() { "of a commit it does not know".to_string() } else { super::short(&back_to).to_string() };
     event(ctx, Sev::Warn, format!("update: the master rolls back from {} to its previous build {to} ({by})", super::short(from)));
+    // the lanes' CLI goes back with it; one that cannot is said, and the rollback goes on: a master
+    // that panics is the worse of the two
+    match cli_back(&ctx.repo) {
+        Ok(true) => {}
+        Ok(false) => event(ctx, Sev::Warn, format!("update: no CLI was kept with the previous build: the lanes' CLI stays at {}'s; `devhub master restart` brings both onto work's tip", super::short(from))),
+        Err(e) => event(ctx, Sev::Err, format!("update: the lanes' CLI could not go back with the master ({e}): it stays at {}'s until `devhub master restart`", super::short(from))),
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut cmd = std::process::Command::new(exec_image(ctx, MasterBin::this(), &prev));
     // it says the commit it runs (none when unknown: then it takes no self-update until a hand
@@ -2100,7 +2217,7 @@ mod tests {
         for n in 1..=2 {
             let _ = std::thread::Builder::new().name("devhub-panicky".into()).spawn(move || panic!("boom {n}")).unwrap().join();
         }
-        let first = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let first = rx.recv().unwrap();
         let again = rx.recv_timeout(std::time::Duration::from_millis(300)).is_ok();
         std::fs::write(out, format!("{first}\nagain={again}\n")).unwrap();
     }
@@ -2172,6 +2289,8 @@ mod tests {
     }
 
     /// A restart keeps the running build beside the new one; a master that runs that copy keeps it.
+    /// The lanes' CLI it replaces is kept with it, and a rollback puts that CLI back: a newer CLI
+    /// left with a rolled-back master sends words it does not know (#8853's `pin=`, 11-24).
     #[test]
     fn the_previous_master_build_is_kept_for_a_rollback() {
         let d = std::env::temp_dir().join(format!("devhub-prev-{}", std::process::id()));
@@ -2188,6 +2307,17 @@ mod tests {
         super::keep_started_binary(&d).unwrap();
         assert_eq!(std::fs::read(super::started_binary(&d)).unwrap(), std::fs::read(std::env::current_exe().unwrap()).unwrap());
         assert!(super::keep_running_binary(std::path::Path::new("/nonexistent-devhub-repo")).is_err(), "no restart without a build to roll back to");
+        let cli = d.join("target/host").join(super::cli_name());
+        std::fs::write(&cli, b"old cli").unwrap();
+        assert_eq!(super::cli_back(&d), Ok(false), "none kept: the CLI stays");
+        assert_eq!(std::fs::read(&cli).unwrap(), b"old cli");
+        let built = super::MasterBin::this().cli_target(&d).join("host").join(super::cli_name());
+        std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+        std::fs::write(&built, b"new cli").unwrap();
+        super::swap_cli(&d).unwrap();
+        assert_eq!((std::fs::read(&cli).unwrap(), std::fs::read(super::prev_cli(&d)).unwrap()), (b"new cli".to_vec(), b"old cli".to_vec()), "a restart keeps the CLI it replaces");
+        assert_eq!(super::cli_back(&d), Ok(true));
+        assert_eq!(std::fs::read(&cli).unwrap(), b"old cli", "a rollback puts the CLI of the previous build back");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2453,6 +2583,14 @@ mod tests {
         for file in ["ci.toml", "README.md", "src/notes.md", "tests/a.rs", "benches/b.rs", "examples/c/main.rs"] {
             assert!(!super::builds(file), "{file}");
         }
+        // a service rolls once its code changed after it started and settled, or once its node
+        // says its checkout rebuilt it, however late it started; never twice for one change
+        let (at, settled) = (1_000_000u64, 1_000_000 + super::SETTLE_MS);
+        assert!(super::service_due(at - 1, at, false, false, settled), "started before the change");
+        assert!(!super::service_due(at - 1, at, false, false, settled - 1), "the change not settled yet");
+        assert!(!super::service_due(at + 1, at, false, false, settled), "started after the change, on its build");
+        assert!(super::service_due(at + 1, at, true, false, at + 2), "started after the change but before its box built it: rebuilt, it rolls at once");
+        assert!(!super::service_due(at - 1, at, true, true, settled), "its node said it runs the deployment's build");
     }
 
     /// A landing cargo cannot read rolls, for whatever changed, and says why.
@@ -2478,13 +2616,32 @@ mod tests {
         let (one, two) = (save("1"), save("2"));
         let (dirs, why) = super::service_dirs(&d);
         assert!(why.as_deref().is_some_and(|w| w.contains("the whole repo counts")), "{why:?}");
-        for (svc, _) in super::SERVICES {
+        for (svc, _, _) in super::SERVICES {
             let mut changed = super::built_changes(&d, &one, &two, &dirs[svc]).unwrap();
             changed.sort();
             assert_eq!(changed, ["libs/a/tests/t.rs", "libs/a/x.rs", "top.rs"], "{svc}: the whole repo, less what no crate reads");
             assert!(super::touches(&d, &one, &two, &dirs[svc]) && !super::touches(&d, &two, &two, &dirs[svc]));
             assert!(super::last_change_ms(&d, &two, &dirs[svc]) > 0, "{svc}");
         }
+        // a lane's change counts from its landing (the merge into work), not from its own commit
+        g(&["checkout", "-q", "-b", "lane"]);
+        std::fs::write(d.join("libs/a/x.rs"), "3").unwrap();
+        g(&["add", "."]);
+        let o = std::process::Command::new("git").arg("-C").arg(&d).args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "lane"]).env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z").env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z").output().unwrap();
+        assert!(o.status.success());
+        g(&["checkout", "-q", "work"]);
+        g(&["merge", "-q", "--no-ff", "-m", "land", "lane"]);
+        let landed = g(&["rev-parse", "HEAD"]);
+        let at: u64 = g(&["log", "-1", "--format=%ct", &landed]).parse().unwrap();
+        for (svc, _, _) in super::SERVICES {
+            assert_eq!(super::last_change_ms(&d, &landed, &dirs[svc]), at * 1000, "{svc}: the landing's time, past the lane commit's");
+        }
+        // a hub behind the deployment its box has builds there while that cannot move; one at it or
+        // past it, or an older hub that says no commit, does not
+        let hub = &dirs["devhub"];
+        assert!(super::hub_behind_deployment(&d, &one, &two, hub), "the hub at one, its box deployed at two");
+        assert!(!super::hub_behind_deployment(&d, &two, &two, hub) && !super::hub_behind_deployment(&d, &landed, &two, hub), "at its deployment or past it");
+        assert!(!super::hub_behind_deployment(&d, "", &two, hub) && !super::hub_behind_deployment(&d, &one, "", hub));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2492,7 +2649,7 @@ mod tests {
     #[test]
     fn devhub_rolls_for_its_own_graph_and_not_its_panels() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let d = super::linked_dirs(&repo, "libs/devhub").unwrap();
+        let d = super::linked_dirs(&repo, "libs/devhub", "").unwrap();
         assert!(d.contains("libs/devhub") && d.contains("libs/remote") && d.contains("libs/strict_json"), "{d:?}");
         for not_linked in ["libs/ai/hub", "libs/ci_judge"] {
             assert!(!d.contains(not_linked), "{not_linked}: the hubs would roll for AI hub edits: {d:?}");
@@ -2500,6 +2657,11 @@ mod tests {
         for not_built in ["apps/devhub", "widgets", "draw", "platform"] {
             assert!(!d.contains(not_built), "{not_built}: {d:?}");
         }
+        // the AI hub's graph as the WM builds it (`--features node`): a landing in a crate only
+        // that feature builds rebuilt every box's AI hub, and the roll never restarted one (11-22)
+        let (_, dir, features) = super::SERVICES[1];
+        let hub = super::linked_dirs(&repo, dir, features).unwrap();
+        assert!(hub.contains("apps/aihub") && hub.contains("libs/render") && hub.contains("libs/scene"), "the node build's crates: {hub:?}");
     }
 
     #[test]
@@ -2512,6 +2674,15 @@ mod tests {
         let text = "{\"ms\":1,\"node\":\"n1\",\"svc\":\"devhub\",\"from\":\"aaaaaaaaaaaaaa\",\"to\":\"bbbbbbbbbbbbbb\",\"why\":\"1 file: a\"}\n{\"ms\":2,\"node\":\"n2\",\"svc\":\"devhub\",\"from\":\"a\",\"to\":\"b\",\"why\":\"w\"}\n{\"ms\":3,\"node\":\"n1\",\"svc\":\"devhub\",\"to\":\"bbbbbbbbbbbbbb\",\"ended\":\"runs bbbbbbbbbb\"}\nnot a whole li";
         let clock = |ms: u64| format!("t{ms}");
         assert_eq!(super::rolls_text(text, Some("n1"), 10, &clock), "t1 n1 devhub: aaaaaaaaaa -> bbbbbbbbbb: 1 file: a\nt3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
+        // a box's WM restart, as its hub said it, is a `wm` line with its wait (11-24)
+        let rec = |kind: &str, line: &str| crate::proto::hub_record("n1", "", 0, kind, crate::proto::Sev::Info, line.into(), String::new());
+        let said = "sync: WM restarted (makepad-wm.service active): the build replaced the WM binary, after 45 s waiting on: test lease L1 of lane-h (its windows)";
+        let ended = super::wm_restarted(&rec("sync", said)).unwrap();
+        assert_eq!(ended, "restarted (makepad-wm.service active): the build replaced the WM binary, after 45 s waiting on: test lease L1 of lane-h (its windows)");
+        assert_eq!(super::wm_restarted(&rec("sync", "sync: the WM restart (the build replaced the WM binary) waits for: test lease L1 of lane-h (its windows)")), None, "a wait's start is no restart");
+        assert_eq!(super::wm_restarted(&rec("hub", said)), None, "only the hub's sync says it");
+        let wm = format!("{{\"ms\":4,\"node\":\"n1\",\"svc\":\"wm\",\"ended\":{}}}\n", makepad_remote::json_str(&ended));
+        assert_eq!(super::rolls_text(&format!("{}\n{wm}", text.trim_end()), Some("n1"), 1, &clock), format!("t4 n1 wm: {ended}"));
         assert_eq!(super::rolls_text(text, None, 1, &clock), "t3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
         // the record says what each hub runs: one seen elsewhere gets its own line, once
         let runs = super::hubs_run(text);

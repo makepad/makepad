@@ -106,10 +106,12 @@ pub(crate) fn usage_error(line: &str) -> bool {
 }
 
 /// A line of the program's own log (`log!`, `error!`: `[I] <file>:<line>:<col> - <message>`, and
-/// `[E]`, `[W]`, `[!]`, `[.]`): what the app said while it ran, never a build's error. An app's
-/// `[I]` line at a source line read as one, and its runs went to cargo as JIT misses (M75-M77, 11-07).
+/// `[E]`, `[W]`, `[!]`, `[.]`, or the same as error_log's JSON record, `{"reason":"makepad-error-log",..}`,
+/// at any level): what the app said while it ran, never a build's error. An app's `[I]` line at a
+/// source line read as one, and its runs went to cargo as JIT misses (M75-M77, 11-07); so did a
+/// platform test's own quit, logged as a record naming its test file's line (M117, M119, 11-23).
 fn app_log(line: &str) -> bool {
-    ["[I] ", "[E] ", "[W] ", "[!] ", "[.] "].iter().any(|p| line.starts_with(p))
+    ["[I] ", "[E] ", "[W] ", "[!] ", "[.] ", "{\"reason\":\"makepad-error-log\""].iter().any(|p| line.starts_with(p))
 }
 
 /// A located diagnostic that is no error: `<file>.rs:<line>:<col>: warning|note|help: ..`. A JIT
@@ -224,6 +226,18 @@ pub(crate) struct TestPackage {
     pub app_tests: bool,
     /// the platforms it was checked on and its gaps there ([`crate::orch::ci::Krate::platform_gaps`])
     pub platform_gaps: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+}
+
+impl TestPackage {
+    /// Whether a run selecting `select` (as [`native_selected`] takes it) opens app windows: its
+    /// package depends on makepad-test, whose tests launch the app and wait for its window, and the
+    /// run reaches a test target (the default run, `tests`, `all-targets`, `test:<name>`); its lib
+    /// or bins alone run unit tests. Such a run needs a box that shows windows (`gui=1`): a plain
+    /// test lease is placed with no regard to a display and given no WM session, and SANDENG's
+    /// ground-detail test never got a window on one (11-25).
+    pub fn opens_windows(&self, select: &[String]) -> bool {
+        self.app_tests && (select.is_empty() || select.iter().any(|s| matches!(s.as_str(), "tests" | "all-targets") || s.starts_with("test:")))
+    }
 }
 
 /// The declared native targets (`native`, as its Cargo.toml names them: `lib`, `bin:<name>`,
@@ -841,6 +855,11 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert!(compile_errors(log).is_empty(), "{:?}", compile_errors(log));
         let error = "/tree/src/b.rs:1:2: E0308: mismatched types";
         assert_eq!(compile_errors(&format!("{log}{error}\n")), vec![error.to_string()]);
+        // ... nor its log's JSON records, at any level: a platform test's own quit was M117 and M119
+        let record = |level: &str| format!("{{\"reason\":\"makepad-error-log\",\"message\":{{\"message\":\"the app quits: Cx::quit at platform/tests/frame_trace.rs:82:20\",\"level\":\"{level}\",\"spans\":[{{\"file_name\":\"platform/src/cx_api.rs\",\"byte_start\":0,\"byte_end\":0,\"line_start\":1586,\"line_end\":1586,\"column_start\":8,\"column_end\":12,\"is_primary\":true,\"text\":[]}}],\"children\":[]}}}}\n");
+        let records = record("log") + &record("error");
+        assert!(compile_errors(&records).is_empty(), "{:?}", compile_errors(&records));
+        assert_eq!(compile_errors(&format!("{records}{error}\n")), vec![error.to_string()]);
     }
 
     /// A test binary that refuses its arguments made a usage error, not a JIT miss (M98, 11-16).
@@ -890,6 +909,13 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         let runs = |select: &[&str]| !super::native_selected(&native, &select.iter().map(|w| w.to_string()).collect::<Vec<_>>()).is_empty();
         let selects: [&[&str]; 6] = [&[], &["tests"], &["test:spawns"], &["lib"], &["bins"], &["test:other"]];
         assert_eq!(selects.map(runs), [true, true, true, false, false, false]);
+        // a run of a makepad-test package's test targets opens the app's windows, so it needs a
+        // box that shows them; one of its lib or bins alone does not, nor any run of a package
+        // without makepad-test
+        let b = super::package_of(&t, "b");
+        let opens = |select: &[&str]| b.opens_windows(&select.iter().map(|w| w.to_string()).collect::<Vec<_>>());
+        assert_eq!(selects.map(opens), [true, true, true, false, false, true]);
+        assert!(!a.opens_windows(&[]) && !a.opens_windows(&["tests".to_string()]), "no makepad-test, no windows");
         let touched = |paths: &[&str]| super::packages_touched(&t, &paths.iter().map(|p| p.to_string()).collect::<Vec<_>>());
         assert_eq!(touched(&["libs/a/src/lib.rs", "libs/a/inner/src/x.rs", "libs/a/Cargo.toml"]), ["a", "a-inner"], "each path in the package that holds it most closely");
         assert_eq!(touched(&["libs/b/README.md", "libs/b/tests/t.rs", "libs/b/benches/x.rs", "libs/b/examples/e.rs", "libs/own/src/lib.rs", "docs/x.rs", "libs/bb/src/y.rs"]), Vec::<String>::new(),

@@ -826,6 +826,9 @@ pub struct Live {
     /// session is never parked or ended idle while this one is active
     pub joins: String,
     pub visible: bool,
+    /// `--timed`: its lease is a timed one ([`crate::orch::live::lease_kind`]): a drained box,
+    /// held while it lives
+    pub timed: bool,
     pub lease: String,
     pub node: String,
     /// the app's JIT on the box: its newest announce's pid, which a process restart behind a
@@ -866,6 +869,8 @@ pub struct Live {
     /// The timed lease it was parked for while in use: once that lease ends it starts again by
     /// itself, under its id ([`crate::lease::sched::Sched::park_live`]); empty: none.
     pub resume_after: String,
+    /// First compile diagnostic of the current refusal confirmed by cargo.
+    pub held: String,
     /// the last edit: files, when saved, shipped, patched (or refused), the first frame after
     pub patch: Option<LivePatch>,
     /// when a save first waited for a restart (0: none waits), how many have since and why the
@@ -880,7 +885,23 @@ pub struct Live {
 }
 
 impl Live {
+    pub(crate) fn refusal_key(&self) -> Option<String> {
+        let p = self.patch.as_ref()?;
+        (self.test && self.state == "running" && self.pid != 0 && p.tests.is_none()
+            && matches!(p.outcome.as_str(), "compile_error" | "refused" | "jit_error" | "failed"))
+            .then(|| format!("{}:{}:{}", self.run_n, self.pid, p.edit_ms))
+    }
+
+    /// On a loaded record, the diagnostics that warrant a cargo cross-check.
+    pub(crate) fn compile_errors(&self) -> Vec<String> {
+        let Some(p) = self.patch.as_ref() else { return Vec::new() };
+        if self.state == "paused" || p.tests.is_some() || !matches!(p.outcome.as_str(), "compile_error" | "refused" | "jit_error" | "failed")
+            || makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason).is_some() { return Vec::new(); }
+        crate::jit_misses::compile_errors(&format!("{}\n{}", p.reason, p.output))
+    }
+
     pub fn test_code(&self) -> i32 {
+        if !self.held.is_empty() { return 1; }
         let x = self;
         match &x.patch {
             Some(p) if p.outcome == "jit_error" => 3,
@@ -1250,6 +1271,13 @@ pub struct Job {
     pub source: String,
     /// placements so far (a box lost under it places it again)
     pub attempts: u32,
+    /// wall ms before which a placed-again job stays queued (`orch::job::again_after`); 0: none
+    pub again_ms: u64,
+    /// taken over from its client's lease (`job adopt`): never placed again, as it would run
+    /// without that client's tree
+    pub adopted: bool,
+    /// the boxes lost under it, oldest first: its next placement shuns them (`Req::lost_on`)
+    pub lost_on: Vec<String>,
     pub cmd: Vec<String>,
     pub cwd: String,
     pub holder: Option<u32>,
@@ -1520,15 +1548,17 @@ impl Doc {
                 !old
             });
         }
-        let ended_lives = self.lives.iter().filter(|x| !x.active()).count();
-        if ended_lives > KEEP {
-            let mut drop = ended_lives - KEEP;
+        // Prefer to keep a parked hold's cold-start note. Within each group the records
+        // are already oldest first, and together the two groups keep at most KEEP.
+        let mut excess = self.lives.iter().filter(|x| !x.active()).count().saturating_sub(KEEP);
+        for plain in [true, false] {
+            if excess == 0 { break; }
             self.lives.retain(|x| {
-                let old = drop > 0 && !x.active();
-                if old {
-                    drop -= 1;
+                if excess > 0 && !x.active() && x.held.is_empty() == plain {
+                    excess -= 1;
+                    return false;
                 }
-                !old
+                true
             });
         }
         let ended = self.shows.iter().filter(|x| !x.active()).count();
@@ -1658,7 +1688,7 @@ fn run_from(v: &Value) -> Run {
     Run { id: text(o, "id"), pair: Pair::from_value(v.get("pair")), started_ms: uint(o, "started_ms"), diff: text(o, "diff"), dry: flag(o, "dry", false), purpose: text(o, "purpose"), legs: arr(o, "legs").iter().map(leg_from).collect(), asked: flag(o, "asked", false), tries: uint(o, "tries") as u32 }
 }
 
-fn jitlegs_run_value(r: &JitLegsRun) -> Value {
+pub(crate) fn jitlegs_run_value(r: &JitLegsRun) -> Value {
     obj(vec![("pair", r.pair.to_value()), ("started_ms", int(r.started_ms)), ("ended_ms", int(r.ended_ms)), ("legs", Value::Arr(r.legs.iter().map(leg_value).collect()))])
 }
 
@@ -1830,6 +1860,7 @@ fn live_state_value(x: &Live) -> Value {
         ("joins", s(&x.joins)),
         ("resume_after", s(&x.resume_after)),
         ("visible", Value::Bool(x.visible)),
+        ("timed", Value::Bool(x.timed)),
         ("lease", s(&x.lease)),
         ("node", s(&x.node)),
         ("pid", int(x.pid as u64)),
@@ -1838,6 +1869,7 @@ fn live_state_value(x: &Live) -> Value {
         ("started_ms", int(x.started_ms)),
         ("touched_ms", int(x.touched_ms)),
         ("left_ms", int(x.left_ms)),
+        ("held", s(&x.held)),
         ("kept_by", s(&x.kept_by)),
         ("kept_ms", int(x.kept_ms)),
         ("ended_ms", int(x.ended_ms)),
@@ -1902,6 +1934,7 @@ fn live_state_from(v: &Value) -> Live {
         joins: text(o, "joins"),
         resume_after: text(o, "resume_after"),
         visible: flag(o, "visible", false),
+        timed: flag(o, "timed", false),
         lease: text(o, "lease"),
         node: text(o, "node"),
         pid: uint(o, "pid") as u32,
@@ -1910,6 +1943,7 @@ fn live_state_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         left_ms: uint(o, "left_ms"),
+        held: text(o, "held"),
         kept_by: text(o, "kept_by"),
         kept_ms: uint(o, "kept_ms"),
         ended_ms: uint(o, "ended_ms"),
@@ -2021,6 +2055,9 @@ pub fn job_value(j: &Job) -> Value {
         ("run_n", int(j.run_n)),
         ("log_base", int(j.log_base)),
         ("attempts", int(j.attempts as u64)),
+        ("again_ms", int(j.again_ms)),
+        ("adopted", Value::Bool(j.adopted)),
+        ("lost_on", strs(&j.lost_on)),
         ("granted_ms", int(j.granted_ms)),
         ("shipped_ms", int(j.shipped_ms)),
         ("first_out_ms", int(j.first_out_ms)),
@@ -2087,6 +2124,9 @@ pub fn job_from(v: &Value) -> Job {
         run_n: uint(o, "run_n"),
         log_base: uint(o, "log_base"),
         attempts: uint(o, "attempts") as u32,
+        again_ms: uint(o, "again_ms"),
+        adopted: flag(o, "adopted", false),
+        lost_on: strs_from(o, "lost_on"),
         granted_ms: uint(o, "granted_ms"),
         shipped_ms: uint(o, "shipped_ms"),
         first_out_ms: uint(o, "first_out_ms"),
@@ -2168,7 +2208,8 @@ pub fn committed(home: &Path) -> Result<Option<Value>, String> {
     }
 }
 
-/// A subscription belongs only to the requested job/session ids. Subscribe before reading.
+/// A subscription belongs only to the requested job/session ids (or `jitlegs:runs`, the jitlegs
+/// runs). Subscribe before reading.
 #[derive(Default)]
 pub struct Signal {
     generation: Mutex<u64>,
@@ -2370,6 +2411,9 @@ impl Store {
                 state.doc.jobs.iter().find(|j| j.id == id) != next.jobs.iter().find(|j| j.id == id)
             } else if let Some(id) = key.strip_prefix("live:") {
                 state.doc.lives.iter().find(|j| j.id == id) != next.lives.iter().find(|j| j.id == id)
+            } else if key.starts_with("jitlegs:") {
+                // only the newest run goes on; an older one has ended
+                state.doc.jitlegs.runs.last() != next.jitlegs.runs.last()
             } else { false };
             if changed { for signal in subscribers.iter().filter_map(std::sync::Weak::upgrade) { signal.notify(); } }
         }
@@ -2745,7 +2789,7 @@ mod tests {
             pushes: vec![Pushed { pair: pair('a'), commit: "1".repeat(40), origin_was: "2".repeat(40), at_ms: 4, files: 12 }],
             jobs: vec![
                 Job { id: "J1".into(), batch: "B1".into(), lane: "l".into(), kind: "test".into(), prio: 5, cmd: vec!["cargo".into(), "test".into()], after: vec!["J0".into()], state: "paused".into(), snap: "S2".into(), snap_files: 3, attempts: 1, granted_ms: 5, shipped_ms: 6, first_out_ms: 7, exit: None, panic: Some(JobPanic { id: "P1".into(), pid: 9, message: "index".into(), thread: "main".into(), location: "a.rs:1".into(), at_ms: 3 }), ..Default::default() },
-                Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
+                Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, again_ms: 7, adopted: true, lost_on: vec!["box-a".into(), "box-b".into()], ..Default::default() },
             ],
             lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, active_ms: 6, dirs_ms: 7, agent_ms: 8, keep: true, waited: true, first: true, parked: "waits".into(), ended_ms: 0, note: "n".into() }],
             shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), main: "m".into(), held: "held at s: tip t waits".into(), restart: "restart pending since s: 1 landed edit not running".into(), restart_since: "s".into(), ran_before: "r".into(), took_red: vec!["check a".into()], exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
@@ -2788,12 +2832,16 @@ mod tests {
     }
 
     /// A session keeps what it asked through a master's restart, and `live again` reads it there:
-    /// its cores and RAM, and its home (the archive, and where its box holds the app's copy); and
-    /// when its starter left, which ends it after a restart too.
+    /// its cores and RAM, its home (the archive, and where its box holds the app's copy), whether
+    /// it is timed; and when its starter left, which ends it after a restart too.
     #[test]
     fn a_live_session_keeps_its_asks_and_its_home() {
-        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), left_ms: 1_794_836_017_627, ..Default::default() };
+        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), left_ms: 1_794_836_017_627, held: "error: missing item".into(), timed: true, ..Default::default() };
         let back = live_from(&live_value(&x));
+        assert_eq!(back.held, x.held, "the session view keeps the confirmed diagnostic");
+        assert_eq!(live_state_from(&live_state_value(&x)).held, x.held, "the persisted session keeps it across restart");
+        assert!(live_from(&obj(vec![])).held.is_empty(), "older records default to unheld");
+        assert!(back.timed && !live_from(&live_value(&Live::default())).timed, "a timed session stays timed (`live again` asks it so)");
         assert_eq!(back.left_ms, 1_794_836_017_627, "when its starter left");
         assert_eq!((back.cores, back.ram_gb), (Some(4.0), Some(12.5)));
         assert_eq!((back.home.as_str(), back.home_dir.as_str()), ("/a/scan.tar", "/w/tmp/L1/app-home"));

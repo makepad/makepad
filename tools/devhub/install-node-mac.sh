@@ -19,7 +19,10 @@
 #   (apps/wm/src/hub_app.rs): the app (apps/aihub) with the node's settings (~/.makepad/wm/ai-hub.conf, written
 #   when there is none: the Mac hub's port 8124 on every address), its pid and program in ~/.makepad/wm/ai-hub.state
 #   (the update roll's restart reads them) and its output in ~/.makepad/wm/ai-hub.log, under the LaunchAgent
-#   nl.makepad.ai-hub (restarted on every exit). It runs its kept copy ~/.makepad/devhub/kept/makepad-app-aihub,
+#   nl.makepad.ai-hub, the box's one owner of its hub (a Mac's WM starts none). A Quit from its tray writes
+#   `enabled = off` into those settings, and it stays off whichever start comes next (a login, a crash, the roll)
+#   until `enabled = on` is written there, which starts it (launchd watches the file); any other end is started
+#   again. It runs its kept copy ~/.makepad/devhub/kept/makepad-app-aihub,
 #   never `cargo run`: with KeepAlive a tip that does not build would rebuild at every start with no hub serving.
 #   The first copy is built here, from the tree; then the deployment's prebuild (sync.conf `build = apps`,
 #   `prebuild = aihub`) replaces it only once its build succeeds (libs/devhub/src/sync/build.rs `keep`), and the
@@ -87,15 +90,34 @@ if [ -n "$ai_hub" ]; then
   cat > "$ASTART.new" <<START
 #!/bin/bash
 # this node's AI hub (tools/devhub/install-node-mac.sh --ai-hub): its kept copy, the last build of it that
-# succeeded, with the node's settings; launchd restarts it on every exit
+# succeeded, with the node's settings. A Quit from its tray writes \`enabled = off\` there: then this ends
+# cleanly, and launchd starts it again only when the settings change. Any other end of the hub (a crash, the
+# update roll's TERM) ends this with an error, and launchd starts it again.
+off() { grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*(off|false|no|0)([[:space:]#]|\$)' "$ACONF" 2> /dev/null; }
+if off; then
+  echo "---- \$(date) AI hub: enabled = off in $ACONF (its Quit): it stays off until enabled = on is written there"
+  exit 0
+fi
 echo "---- \$(date) AI hub start: $KEPT"
 [ -f "$H/devhub/node.env" ] && { set -a; . "$H/devhub/node.env"; set +a; }
 [ -x "$KEPT" ] || { echo "no kept AI hub at $KEPT: install-node-mac.sh --ai-hub builds the first"; exit 1; }
-# what a WM's supervisor records: its pid (exec keeps it) and what it was started as
-printf 'pid = %s\nidentity = %s\n' "\$\$" "$KEPT" > "$H/wm/ai-hub.state.new" && mv "$H/wm/ai-hub.state.new" "$H/wm/ai-hub.state"
 export MAKEPAD_AI_HUB_NODE_CONF="$ACONF"
 cd "$H" || exit 1
-exec "$KEPT"
+"$KEPT" &
+hub=\$!
+# what a WM's supervisor records, this box's one record of its hub: its pid and what it was started as
+printf 'pid = %s\nidentity = %s\n' "\$hub" "$KEPT" > "$H/wm/ai-hub.state.new" && mv "$H/wm/ai-hub.state.new" "$H/wm/ai-hub.state"
+# launchd's stop of this job stops the hub too
+trap 'kill -TERM "\$hub" 2> /dev/null' TERM
+# (a wait the TERM interrupted returns early: wait again while the hub runs)
+wait "\$hub"; code=\$?
+while kill -0 "\$hub" 2> /dev/null; do wait "\$hub"; code=\$?; done
+if off; then
+  echo "---- \$(date) AI hub: it quit (exit \$code) and enabled = off: it stays off"
+  exit 0
+fi
+echo "---- \$(date) AI hub ended (exit \$code): launchd starts it again"
+exit 1
 START
   chmod 755 "$ASTART.new" && mv "$ASTART.new" "$ASTART" || fail "write $ASTART"
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -110,7 +132,8 @@ START
     <key>PATH</key><string>$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>WatchPaths</key><array><string>$ACONF</string></array>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>ProcessType</key><string>Interactive</string>
   <key>LimitLoadToSessionType</key><string>Aqua</string>

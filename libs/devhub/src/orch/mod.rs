@@ -307,6 +307,7 @@ pub fn preempt(ctx: &Ctx, last: &mut u64) {
 pub fn on_record(r: &crate::proto::Record) {
     // JIT ownership is independent of the app/lane that happened to expose it.
     if matches!(r.kind.as_str(), "patch_failed" | "jit_error" | "jit_hot") { return; }
+    roll::on_record(r);
     if let Some(ctx) = CTX.get() {
         job::on_record(ctx, r);
         show::on_record(ctx, r);

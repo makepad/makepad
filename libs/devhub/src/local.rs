@@ -442,8 +442,15 @@ impl Local {
         } else if crashed {
             let tail = jit.session_log.as_deref().map(log_tail).unwrap_or_default();
             let last = tail.lines().rev().find(|l| !l.trim().is_empty()).map(|l| proto::clean(l, 200)).unwrap_or_default();
-            let detail = format!("{{\"socket\":{},\"session_log\":{},\"log_tail\":{}}}", json_str(&jit.socket), json_str(jit.session_log.as_deref().unwrap_or("")), json_str(&tail));
-            hub_record(&self.machine, &jit.app, jit.pid, "crash", Sev::Err, format!("crash: ended without its exit cleanup after {up} s; last log: {last}"), detail)
+            let at = proto::wall_ms();
+            let end = crate::lease::exec::jit_end(jit.pid, jit.lease.as_deref());
+            // what the kernel logged of its end: its run's waiter read that for a SIGKILL; a JIT
+            // no run of its lease's own was, or whose waiter read nothing, reads it once here
+            let cause = end.as_ref().and_then(|e| e.cause.clone()).or_else(|| {
+                end.as_ref().is_none_or(|e| e.exit.is_none_or(|x| x == 137)).then(|| crate::lease::exec::kernel_cause(&[jit.pid], at)).flatten()
+            });
+            let detail = format!("{{\"socket\":{},\"session_log\":{},\"log_tail\":{},\"run_tail\":{}}}", json_str(&jit.socket), json_str(jit.session_log.as_deref().unwrap_or("")), json_str(&tail), json_str(end.as_ref().map_or("", |e| e.stderr.as_str())));
+            hub_record(&self.machine, &jit.app, jit.pid, "crash", Sev::Err, crate::lease::exec::jit_crash_said(up, end.as_ref(), &last, cause.as_deref()), detail)
         } else {
             hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("exit after {up} s"), String::new())
         };
@@ -708,6 +715,12 @@ pub fn ai_hub_answers() -> Option<bool> {
     ai_hub_endpoint().map(|e| probe_ai_hub(e).running == Some(true))
 }
 
+/// The local AI hub's generation jobs, queued and running, as its health says them (None: no hub
+/// set up, or none that answers with a count).
+pub fn ai_hub_jobs() -> Option<u64> {
+    ai_hub_endpoint().and_then(|e| probe_ai_hub(e).jobs)
+}
+
 /// Reach the TLS front as a fleet peer. Only a refused front connection permits plain
 /// loopback HTTP (networking off); only two refused connections mean the hub is stopped.
 fn probe_ai_hub(endpoint: AiHubEndpoint) -> AiHub {
@@ -805,6 +818,7 @@ pub(crate) fn ai_hub_status(health: &Value, models: Option<&Value>, fleet: Optio
     AiHub {
         running: Some(true), serving, models,
         peers: peers.map(|p| p.len() as u64), peers_ok,
+        jobs: health.get("jobs_pending").and_then(Value::as_u64),
         why: reasons.join("; "),
     }
 }

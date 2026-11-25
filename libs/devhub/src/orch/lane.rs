@@ -4,6 +4,8 @@
 //!   `--with` nested repository's `apps/<repo>` on `rc-<name>` from the branch the user's checkout
 //!   of it is on ([`Other`]); registered and watched ([`crate::monitor`]: its dirty files without
 //!   scans). Every half lands, is merged, dropped and cleaned up with the others.
+//! - `devhub lane add <name> --with <repo>..`: a live lane's half in another nested repository,
+//!   made as `--with` makes one ([`add`]).
 //! - after it lands, the master removes it: both halves in work and main (the branch tips are in
 //!   them and are not work's own first-parent commits, so a fresh lane never counts), nothing
 //!   uncommitted, no process inside, no lease, job or land entry of the lane open, and no file
@@ -552,11 +554,28 @@ fn retire(ctx: &Ctx, name: &str) -> Result<String, String> {
 /// the lane's copy goes beside it as `<name>.<lane>` (`.<lane>.2`, … when that one differs too).
 /// Symlinks and cargo targets (a CACHEDIR.TAG) are not copied. Returns the files and bytes copied.
 fn keep_local(from: &Path, to: &Path, lane: &str) -> Result<(usize, u64), String> {
-    let mut stack = vec![PathBuf::new()];
     let (mut files, mut bytes) = (0, 0);
+    for rel in local_files(from) {
+        let src = from.join(&rel);
+        let dest = kept_at(&src, to, &rel, lane);
+        if dest.symlink_metadata().is_ok() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        bytes += std::fs::copy(&src, &dest).map_err(|e| format!("{} -> {}: {e}", src.display(), dest.display()))?;
+        files += 1;
+    }
+    Ok((files, bytes))
+}
+
+/// The files under `from` (a lane's `local/`) as [`keep_local`] takes them, relative to it: no
+/// symlink, nothing under a cargo target (a CACHEDIR.TAG).
+fn local_files(from: &Path) -> Vec<PathBuf> {
+    let (mut stack, mut out) = (vec![PathBuf::new()], Vec::new());
     while let Some(rel) = stack.pop() {
-        let dir = from.join(&rel);
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(from.join(&rel)) else { continue };
         for e in entries.flatten() {
             let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
             let rel = rel.join(e.file_name());
@@ -564,30 +583,35 @@ fn keep_local(from: &Path, to: &Path, lane: &str) -> Result<(usize, u64), String
                 if !e.path().join("CACHEDIR.TAG").exists() {
                     stack.push(rel);
                 }
-                continue;
+            } else if m.is_file() {
+                out.push(rel);
             }
-            if !m.is_file() {
-                continue;
-            }
-            let src = e.path();
-            let mut dest = to.join(&rel);
-            let mut n = 1;
-            while dest.symlink_metadata().is_ok() && !same_file(&src, &dest) {
-                let name = rel.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                dest = to.join(&rel).with_file_name(if n == 1 { format!("{name}.{lane}") } else { format!("{name}.{lane}.{n}") });
-                n += 1;
-            }
-            if dest.symlink_metadata().is_ok() {
-                continue;
-            }
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-            }
-            bytes += std::fs::copy(&src, &dest).map_err(|e| format!("{} -> {}: {e}", src.display(), dest.display()))?;
-            files += 1;
         }
     }
-    Ok((files, bytes))
+    out.sort();
+    out
+}
+
+/// Where [`keep_local`] keeps `src` (`rel` under the lane's `local/`) in `to`: the same path, or
+/// beside a different file there as `<name>.<lane>` (`.<lane>.2`, ...). A path that exists holds it
+/// already.
+fn kept_at(src: &Path, to: &Path, rel: &Path, lane: &str) -> PathBuf {
+    let mut dest = to.join(rel);
+    let mut n = 1;
+    while dest.symlink_metadata().is_ok() && !same_file(src, &dest) {
+        let name = rel.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        dest = to.join(rel).with_file_name(if n == 1 { format!("{name}.{lane}") } else { format!("{name}.{lane}.{n}") });
+        n += 1;
+    }
+    dest
+}
+
+/// The lane's own files under its worktree's `local/` (a harness, its runs, reports): git ignores
+/// them, so neither the status checks nor `git worktree remove` see them, and a removal deletes
+/// them. Own: the main checkout's `local/` (`to`) holds no copy of them as [`keep_local`] keeps one.
+fn own_local(path: &Path, to: &Path, lane: &str) -> Vec<PathBuf> {
+    let from = path.join("local");
+    local_files(&from).into_iter().filter(|rel| kept_at(&from.join(rel), to, rel, lane).symlink_metadata().is_err()).collect()
 }
 
 /// Whether `a` and `b` are files with the same content.
@@ -731,12 +755,13 @@ fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
             Err(why) => {
                 // a lane that landed and is still referenced says why once
                 let landed = views.makepad.landed_since(&l.branch, Path::new(&l.path), l.created_ms, &land).is_ok();
-                if l.landed_ms != 0 || (landed && l.note != why) {
+                let note = if landed { format!("landed, kept: {why}") } else { String::new() };
+                if (l.landed_ms != 0 && !landed) || l.note != note {
                     set(ctx, &l.name, |x| {
                         if !landed {
                             x.landed_ms = 0;
                         }
-                        x.note = if landed { format!("landed, kept: {why}") } else { String::new() };
+                        x.note = note.clone();
                     });
                 }
             }
@@ -784,12 +809,32 @@ fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
                 }
                 // the worktree and branches: no landing, file event, devhub call of its agents or
                 // run of it for the hour. The ledger is read once per idle hour, not every pass.
-                if now.saturating_sub(last.max(l.agent_ms)) < AGENT_IDLE_MS {
+                // An agent that called devhub after the landing went on with the lane (a next
+                // step, a consult it waits on): its worktree stays until it is silent as long as
+                // `lane quiet` takes an agent for gone. Its harness went an hour after its last
+                // call while it waited on a consult (fpsplay, 11-23).
+                let went_on = l.agent_ms > l.landed_ms;
+                let idle = if went_on { RETIRE_OFFER_MS } else { AGENT_IDLE_MS };
+                if now.saturating_sub(last.max(l.agent_ms)) < idle {
+                    if went_on {
+                        let at = makepad_civil_time::utc((l.agent_ms / 1000) as i64).hm();
+                        kept_said(ctx, &l, format!("landed, kept: its agent went on after its landing (a devhub call at {at} UTC): its worktree stays until its agents are silent for {} h (`devhub lane remove {}` removes it now)", RETIRE_OFFER_MS / 3_600_000, l.name));
+                    }
                     continue;
                 }
                 let ran = newest_run(ctx, &l);
                 if now.saturating_sub(ran) < AGENT_IDLE_MS {
                     agents.insert(l.name.clone(), l.agent_ms.max(ran));
+                    continue;
+                }
+                // its own files under local/, which the removal would delete unseen: kept, the
+                // lane with them, until they are kept in the main checkout (`lane remove` keeps
+                // them there, as a retire does)
+                let own = own_local(Path::new(&l.path), &ctx.repo.join("local"), &l.name);
+                if !own.is_empty() {
+                    let names: Vec<String> = own.iter().take(4).map(|p| p.to_string_lossy().into_owned()).collect();
+                    let more = if own.len() > 4 { format!(" and {} more", own.len() - 4) } else { String::new() };
+                    kept_said(ctx, &l, format!("landed, kept: {} file(s) of its own in its local/, which git ignores ({}{more}) and the main checkout's local/ has no copy of (`devhub lane remove {}` keeps them there and removes it)", own.len(), names.join(", "), l.name));
                     continue;
                 }
                 let what = remove(ctx, &l, false, true);
@@ -809,6 +854,15 @@ fn cleanup_pass(ctx: &Ctx, cwds: impl FnOnce() -> Vec<(u32, PathBuf)>) {
     if let Some(c) = views.commercial.as_mut() {
         c.forget_unused();
     }
+}
+
+/// A landed lane the cleanup keeps for its work: the note and an event, once for each reason.
+fn kept_said(ctx: &Ctx, l: &LaneRec, note: String) {
+    if l.note == note {
+        return;
+    }
+    let rec = set(ctx, &l.name, |x| x.note = note.clone());
+    event(ctx, Sev::Info, format!("lane {}: {note}", l.name), rec.as_ref());
 }
 
 /// The end of the lane's newest job, live session or lease (reads the lease ledger).
@@ -1029,12 +1083,9 @@ fn clean_node_dirs(ctx: &Ctx, l: &LaneRec) -> String {
     format!("node dirs ({total:.0} MB{each})")
 }
 
-/// `lane new`: the worktree pair on `rc-<name>`.
-fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool, with: &[String]) -> Result<LaneRec, String> {
-    if !valid_name(name) {
-        return Err(format!("{name}: a lane name is a-z, 0-9, - and _"));
-    }
-    // each `--with` half: a nested repository the user's checkout holds, on a branch to land on
+/// Each `--with` half: a nested repository the user's checkout holds, on a branch to land on:
+/// (name, the checkout, its branch).
+fn with_halves(ctx: &Ctx, with: &[String]) -> Result<Vec<(String, PathBuf, String)>, String> {
     let mut withs: Vec<(String, PathBuf, String)> = Vec::new();
     for n in with {
         if !crate::nested::valid(n) || n == crate::state::PAIRED || withs.iter().any(|w| w.0 == *n) {
@@ -1047,6 +1098,60 @@ fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool, with: &[String]) 
         let target = crate::gitread::branch(&repo).ok_or_else(|| format!("--with {n}: {} is on no branch: nothing to land its half into", repo.display()))?;
         withs.push((n.clone(), repo, target));
     }
+    Ok(withs)
+}
+
+/// The nested halves `(repository, tree, from)` on `branch`, each a worktree of its repository;
+/// a failure undoes the halves made (fresh worktrees and branches with no commits of their own).
+fn nested_halves(nested: &[(PathBuf, PathBuf, &str)], branch: &str) -> Result<(), String> {
+    for (i, (repo, tree, target)) in nested.iter().enumerate() {
+        let n = tree.to_string_lossy().into_owned();
+        if let Err(e) = wt::git(Some(repo), None, &["worktree", "add", "-q", "-b", branch, &n, target]) {
+            for (repo, tree, _) in nested[..i].iter().rev() {
+                let _ = wt::git(Some(repo), None, &["worktree", "remove", "--force", &tree.to_string_lossy()]);
+                let _ = wt::git(Some(repo), None, &["branch", "-D", branch]);
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// `lane add`: a live lane's halves in other nested repositories, made as `lane new --with` makes
+/// them (on its branch, from the branch the user's checkout of each is on), so the lane lands,
+/// merges and drops them with its others. Nothing is ported: the lane carries its own changes
+/// over. Lanes from before Fab moved into makepad/apps had no way to take an apps half (11-22).
+fn add(ctx: &Ctx, name: &str, with: &[String]) -> Result<(LaneRec, Vec<(String, String)>), String> {
+    let l = rec(ctx, name).ok_or_else(|| format!("no live lane {name} (devhub lanes)"))?;
+    let withs = with_halves(ctx, with)?;
+    if withs.is_empty() {
+        return Err("lane add <name> --with <repo>..: which repository's half".into());
+    }
+    let path = PathBuf::from(&l.path);
+    for (n, repo, _) in &withs {
+        let tree = path.join(crate::nested::dir(n));
+        if tree.exists() {
+            return Err(format!("--with {n}: {} exists", tree.display()));
+        }
+        if branch_tip(repo, &l.branch).is_some() {
+            return Err(format!("--with {n}: {n} branch {} exists", l.branch));
+        }
+    }
+    let nested: Vec<(PathBuf, PathBuf, &str)> = withs.iter().map(|(n, repo, target)| (repo.clone(), path.join(crate::nested::dir(n)), target.as_str())).collect();
+    nested_halves(&nested, &l.branch)?;
+    for (_, tree, _) in &nested {
+        crate::ci_merge::install_merge_driver(tree, &path)?;
+        let _ = ctx.monitor.dirty(tree);
+    }
+    Ok((l, withs.into_iter().map(|(n, _, target)| (n, target)).collect()))
+}
+
+/// `lane new`: the worktree pair on `rc-<name>`.
+fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool, with: &[String]) -> Result<LaneRec, String> {
+    if !valid_name(name) {
+        return Err(format!("{name}: a lane name is a-z, 0-9, - and _"));
+    }
+    let withs = with_halves(ctx, with)?;
     let path = root(ctx).join(name);
     if path.exists() {
         return Err(format!("{} exists", path.display()));
@@ -1068,17 +1173,10 @@ fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool, with: &[String]) 
     // worktrees and branches with no commits of their own)
     let nested: Vec<(PathBuf, PathBuf, &str)> = commercial.then(|| (ctx.commercial(), path.join("apps/commercial"), "main")).into_iter()
         .chain(withs.iter().map(|(n, repo, target)| (repo.clone(), path.join(crate::nested::dir(n)), target.as_str()))).collect();
-    for (i, (repo, tree, target)) in nested.iter().enumerate() {
-        let n = tree.to_string_lossy().into_owned();
-        if let Err(e) = wt::git(Some(repo), None, &["worktree", "add", "-q", "-b", &branch, &n, target]) {
-            for (repo, tree, _) in nested[..i].iter().rev() {
-                let _ = wt::git(Some(repo), None, &["worktree", "remove", "--force", &tree.to_string_lossy()]);
-                let _ = wt::git(Some(repo), None, &["branch", "-D", &branch]);
-            }
-            let _ = wt::git(Some(&ctx.repo), None, &["worktree", "remove", "--force", &p]);
-            let _ = wt::git(Some(&ctx.repo), None, &["branch", "-D", &branch]);
-            return Err(e);
-        }
+    if let Err(e) = nested_halves(&nested, &branch) {
+        let _ = wt::git(Some(&ctx.repo), None, &["worktree", "remove", "--force", &p]);
+        let _ = wt::git(Some(&ctx.repo), None, &["branch", "-D", &branch]);
+        return Err(e);
     }
     let l = LaneRec { name: name.into(), path: p, branch: branch.clone(), cbranch: if commercial { branch } else { String::new() }, created_ms: wall_ms(), state: "live".into(), ..Default::default() };
     ctx.store.update(|d| d.lanes.push(l.clone()))?;
@@ -1388,7 +1486,10 @@ fn remove_now(ctx: &Ctx, name: &str) -> Result<String, String> {
     if !only_the_record(ctx, &l, &views) {
         removable(ctx, &l, &mut views, &wt::live_cwds(), &land_entries(ctx), true)?;
     }
-    let what = remove(ctx, &l, false, true);
+    // its own local/ goes to the main checkout's first, as a retire's does
+    let (files, bytes) = keep_local(&Path::new(&l.path).join("local"), &ctx.repo.join("local"), name).map_err(|e| format!("its local/ was not kept, nothing removed: {e}"))?;
+    let kept = if files == 0 { String::new() } else { format!(", local/: {files} file(s) kept in {} ({} MB)", ctx.repo.join("local").display(), bytes / 1_000_000) };
+    let what = remove(ctx, &l, false, true).map(|w| w + &kept);
     let out = what.clone();
     finish(ctx, name, "removed", what);
     out
@@ -2027,7 +2128,7 @@ fn offers(ctx: &Ctx) -> String {
         let (class, why) = run_refusal(ctx, l, &cwds, &land).map_or(("", String::new()), |(c, w)| (c, w));
         let b = branches(l);
         let held = held.iter().find(|(branch, _)| b.contains(branch)).map_or("", |(_, why)| why.as_str());
-        Some(format!("{{\"name\":{},\"path\":{},\"branch\":{},\"cbranch\":{},\"idle_ms\":{},\"row\":{},\"refused_class\":{},\"refused\":{},\"held\":{}}}", json_str(&l.name), json_str(&l.path), json_str(&l.branch), json_str(&l.cbranch), o.idle_ms, json_str(&o.row), json_str(class), json_str(&why), json_str(held)))
+        Some(format!("{{\"name\":{},\"path\":{},\"branch\":{},\"cbranch\":{},\"idle_ms\":{},\"row\":{},\"refused_class\":{},\"refused\":{},\"held\":{}{}}}", json_str(&l.name), json_str(&l.path), json_str(&l.branch), json_str(&l.cbranch), o.idle_ms, json_str(&o.row), json_str(class), json_str(&why), json_str(held), super::slot::offered(ctx, l)))
     }).collect();
     format!("{{\"lanes\":[{}]}}", rows.join(","))
 }
@@ -2037,6 +2138,7 @@ pub(crate) fn clean_offer_refusal(offer: &makepad_strict_json::Value) -> Option<
     let s = |k: &str| offer.get(k).and_then(|v| v.as_str()).unwrap_or("");
     if !s("refused").is_empty() { return Some(s("refused").to_string()); }
     if !s("held").is_empty() { return Some(format!("its branch is held: {}", s("held"))); }
+    if let Some(why) = super::slot::offer_refusal(offer) { return Some(why); }
     let path = Path::new(s("path"));
     if let Some((_, why)) = dirty_refusal(path) { return Some(why); }
     // An older master's offer has no branch names: never guess what may be removed.
@@ -2053,6 +2155,9 @@ pub(crate) fn clean_offer_refusal(offer: &makepad_strict_json::Value) -> Option<
     }
     None
 }
+
+/// The class `lane offers --check` counts a lane in whose slot holds changes ([`check_offers`]).
+const SLOT_REFUSAL: &str = "changes in a slot";
 
 /// One lane [`retire_offers`] offers: its name, how long nothing came of it, and its row.
 #[derive(Clone, Debug, PartialEq)]
@@ -2079,7 +2184,10 @@ pub fn check_offers(offers: &makepad_strict_json::Value, nodes: &[(String, Resul
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some((_, path, class, _)) = todo.get(i) else { break };
                 let path = Path::new(path);
-                let class = dirty_refusal(path).map_or_else(|| class.clone(), |(c, _)| c.to_string());
+                // its slots first, as `lane retire` checks them ([`super::slot::check_clean`]): two
+                // lanes counted as retiring cleanly were refused for their slots' changes (11-25)
+                let class = super::slot::offer_refusal(&list[i]).map(|_| SLOT_REFUSAL.to_string())
+                    .or_else(|| dirty_refusal(path).map(|(c, _)| c.to_string())).unwrap_or_else(|| class.clone());
                 done.lock().unwrap().push((i, class, tree_bytes(path)));
             });
         }
@@ -2284,7 +2392,7 @@ fn timeline(ctx: &Ctx, name: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// `lane new {"name","from","commercial"}`, `lane drop|remove|retire|keep|unkeep|unpark <name>`,
+/// `lane new {"name","from","commercial","with"}`, `lane add {"name","with"}`, `lane drop|remove|retire|keep|unkeep|unpark <name>`,
 /// `lane park <name> [why]`, `lane adopt`, `lane list`.
 pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let mut w = line.splitn(3, ' ');
@@ -2358,6 +2466,16 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 event(ctx, Sev::Warn, format!("lane first {}: {} ({now})", if on { "on" } else { "off" }, changed.join(" ")), None);
             }
             Ok(format!("{{\"first\":[{}]}}", first.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(",")))
+        }
+        "add" => {
+            let v = makepad_strict_json::parse(rest.as_bytes()).map_err(|_| "lane add: bad request")?;
+            let name = &makepad_devhub_conf::lane_name(v.get("name").and_then(|x| x.as_str()).unwrap_or(""));
+            let with: Vec<String> = v.get("with").and_then(|x| x.as_arr()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            let (l, made) = add(ctx, name, &with)?;
+            let said: Vec<String> = made.iter().map(|(n, target)| format!("{} on {} from {target}", crate::nested::dir(n), l.branch)).collect();
+            event(ctx, Sev::Info, format!("lane add {name}: {}", said.join(", ")), Some(&l));
+            Ok(format!("{{\"name\":{},\"path\":{},\"branch\":{},\"with\":[{}],\"text\":{}}}", json_str(name), json_str(&l.path), json_str(&l.branch),
+                made.iter().map(|(n, _)| json_str(n)).collect::<Vec<_>>().join(","), json_str(&format!("{name}: {}\n", said.join(", ")))))
         }
         "adopt" => adopt(ctx),
         "sweep" => match rest {
@@ -2468,7 +2586,7 @@ mod tests {
         g(dir, &["config", "user.email", "t@t"]);
         g(dir, &["config", "user.name", "t"]);
         std::fs::write(dir.join("a.txt"), "a").unwrap();
-        std::fs::write(dir.join(".gitignore"), "apps/commercial/\ntarget/\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "apps/commercial/\ntarget/\nlocal/\n").unwrap();
         g(dir, &["add", "."]);
         g(dir, &["commit", "-q", "-m", "base"]);
     }
@@ -2676,11 +2794,29 @@ mod tests {
         restart(&mut ctx);
         assert_eq!(ctx.leases.agent_seen_ms("AGENT-X"), 0, "the restarted master heard no one");
         assert_eq!(kept(&ctx, "the saved call keeps it after a master restart").dirs_ms, l.dirs_ms, "the node dirs are cleaned once per quiet spell");
-        set(&ctx, "x", |l| l.agent_ms = old);
-        cleanup_pass(&ctx, Vec::new);
+        // its agent called after the landing: it went on with the lane (a consult it waits on), so
+        // an hour's silence does not take the worktree; 6 h does (fpsplay, 11-23)
+        let landed_at = old - RETIRE_OFFER_MS;
+        let landing = |at: u64| makepad_strict_json::parse(format!(r#"{{"branch":"rc-x","agent":"AGENT-X","state":"landed","changed_ms":{at}}}"#).as_bytes()).unwrap();
+        ctx.store.update(|d| d.land = vec![landing(landed_at)]).unwrap();
+        set(&ctx, "x", |l| { l.landed_ms = landed_at; l.agent_ms = old; });
+        let l = kept(&ctx, "its agent went on after the landing, silent for an hour");
+        assert!(l.note.contains("its agent went on after its landing") && l.note.contains("silent for 6 h"), "said: {}", l.note);
+        // its agent's last call before the landing, an hour of silence: only its harness and runs
+        // under local/, which git ignores, keep it now, named
+        set(&ctx, "x", |l| { l.agent_ms = landed_at - 1; l.active_ms = old; });
+        std::fs::create_dir_all(lane.join("local/yard")).unwrap();
+        std::fs::write(lane.join("local/yard/ratchet.tsv"), "run 1").unwrap();
+        let l = kept(&ctx, "its own files under local/ keep it");
+        assert!(l.note.contains("1 file(s) of its own in its local/") && l.note.contains("yard/ratchet.tsv"), "named: {}", l.note);
+        assert_eq!(l.state, "live");
+        // `lane remove` keeps them in the main checkout's local/, then removes it
+        let r = serve(&ctx, "lane remove x").unwrap();
+        assert!(r.contains("local/: 1 file(s) kept"), "{r}");
+        assert_eq!(std::fs::read_to_string(mk.join("local/yard/ratchet.tsv")).unwrap(), "run 1");
         let l = ctx.store.read(|d| d.lanes[0].clone());
-        assert_eq!(l.state, "removed", "its agent idle for the hour too: {}", l.note);
-        assert!(!lane.exists() && g(&mk, &["branch", "--list", "rc-x"]).is_empty(), "the idle landed worktree and branch are removed");
+        assert_eq!(l.state, "removed", "{}", l.note);
+        assert!(!lane.exists() && g(&mk, &["branch", "--list", "rc-x"]).is_empty(), "the landed worktree and branch are removed");
         drop(ctx);
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -2851,8 +2987,17 @@ mod tests {
         g(&extra, &["merge", "-q", "--no-ff", "-m", "land t", "rc-t"]);
         serve(&ctx, "lane remove t").unwrap();
         assert!(!t.exists() && g(&extra, &["branch", "--list", "rc-t"]).is_empty() && g(&extra, &["worktree", "list"]).lines().count() == 1, "its extra half and branch went");
-        serve(&ctx, "lane new {\"name\":\"u\",\"with\":[\"extra\"]}").unwrap();
+        // a live lane takes a half later (`lane add`), on its branch from the checkout's tip, once;
+        // a lane that is not live and a request that names no repository are refused
+        serve(&ctx, "lane new {\"name\":\"u\"}").unwrap();
         let u = base.join("wt.noindex/u");
+        assert!(!u.join("apps/extra").exists());
+        assert!(serve(&ctx, "lane add {\"name\":\"nosuch\",\"with\":[\"extra\"]}").unwrap_err().contains("no live lane nosuch"));
+        assert!(serve(&ctx, "lane add {\"name\":\"u\",\"with\":[]}").unwrap_err().contains("which repository"));
+        let r = serve(&ctx, "lane add {\"name\":\"U\",\"with\":[\"extra\"]}").unwrap();
+        assert!(r.contains("apps/extra on rc-u from main"), "{r}");
+        assert_eq!((g(&u.join("apps/extra"), &["branch", "--show-current"]), g(&u.join("apps/extra"), &["rev-parse", "HEAD"])), ("rc-u".to_string(), g(&extra, &["rev-parse", "main"])));
+        assert!(serve(&ctx, "lane add {\"name\":\"u\",\"with\":[\"extra\"]}").unwrap_err().contains("exists"));
         std::fs::write(u.join("draft.txt"), "d").unwrap();
         std::fs::write(u.join("apps/extra/draft.txt"), "d").unwrap();
         let r = serve(&ctx, "lane drop u").unwrap();
@@ -2887,6 +3032,23 @@ mod tests {
         assert!(clean.split_whitespace().nth(2) == Some("1") && clean.ends_with("1.0 GB"), "{out}");
         assert!(out.contains("uncommitted or untracked files: untracked\n") && out.contains("a lease of the lane is open: leased\n"), "{out}");
         assert!(out.contains("node dirs not read: box-b (link lost)"), "{out}");
+        // a lane whose slot holds changes: `lane retire` refuses it there first, so the check counts
+        // it there too (two lanes counted as retiring cleanly were refused for their slots, 11-25)
+        let slots = base.join("slotted.slots");
+        repo(&base.join("slotted"), "rc-x");
+        repo(&slots.join("2"), "rc-x");
+        let head = g(&slots.join("2"), &["rev-parse", "HEAD"]);
+        std::fs::write(slots.join("2/a.txt"), "changed").unwrap();
+        let slot = format!("{{\"lane\":\"slotted\",\"n\":2,\"path\":{},\"base\":{{\"makepad\":\"{head}\",\"commercial\":\"\"}},\"job\":\"\",\"made_ms\":1}}", json_str(&slots.join("2").to_string_lossy()));
+        let row = format!("{},\"slots_dir\":{},\"slots\":[{slot}]}}", lane("slotted", "").strip_suffix('}').unwrap(), json_str(&slots.to_string_lossy()));
+        let with = makepad_strict_json::parse(format!("{{\"lanes\":[{row}]}}").as_bytes()).unwrap();
+        let out = check_offers(&with, &[]);
+        assert!(!out.contains("retire cleanly") && out.contains(&format!("{SLOT_REFUSAL}: slotted\n")), "{out}");
+        let offer = &with.get("lanes").unwrap().as_arr().unwrap()[0];
+        let refused = clean_offer_refusal(offer).unwrap_or_default();
+        assert!(refused.starts_with("slot 2 of slotted holds changes from job (none recorded): \"a.txt\""), "retire's own words: {refused}");
+        g(&slots.join("2"), &["checkout", "-q", "--", "a.txt"]);
+        assert!(check_offers(&with, &[]).lines().any(|l| l.starts_with("retire cleanly")), "a clean slot keeps it from nothing");
         let list = offers.get("lanes").unwrap().as_arr().unwrap();
         assert_eq!(clean_offer_refusal(&list[0]), None, "a fresh clean branch changes nothing");
         assert!(clean_offer_refusal(&list[1]).unwrap().contains("notes.txt"), "untracked work keeps the lane");

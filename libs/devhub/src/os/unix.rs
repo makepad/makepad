@@ -613,6 +613,37 @@ pub fn held_where(pid: u32, start: u64, unit: Option<&str>, usage: &Path, n: usi
     (split, top)
 }
 
+/// A process's memory picture, read before a memory end stops it (Linux): its `smaps_rollup`
+/// totals (the non-zero ones) and its `n` largest mappings by resident size (`smaps`), each with
+/// its size, permissions and name, one line each. A memory end used to kill and leave nothing
+/// behind: a live session ended at 43.9 GB, all of it anonymous memory in its app, and nobody
+/// could tell what held it (L1613074, 11-23). None: no such process.
+#[cfg(target_os = "linux")]
+pub fn memory_picture(pid: u32, n: usize) -> Option<Vec<String>> {
+    use std::io::BufRead;
+    let size = |kb: u64| if kb >= 1 << 20 { format!("{:.1} GB", kb as f64 / (1u64 << 20) as f64) } else { format!("{:.1} MB", kb as f64 / 1024.0) };
+    let kb = |v: &str| v.trim().strip_suffix("kB").and_then(|n| n.trim().parse::<u64>().ok());
+    let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
+    let totals: Vec<String> = rollup.lines().filter_map(|l| l.split_once(':')).filter_map(|(k, v)| kb(v).filter(|n| *n > 0).map(|n| format!("{k} {}", size(n)))).collect();
+    let mut out = vec![format!("totals (smaps_rollup): {}", totals.join(", "))];
+    // `smaps`: a header per mapping (`start-end perms offset dev inode [name]`), then its fields
+    let (mut maps, mut head): (Vec<(u64, String)>, String) = (Vec::new(), String::new());
+    let file = std::fs::File::open(format!("/proc/{pid}/smaps")).ok();
+    for line in file.into_iter().flat_map(|f| std::io::BufReader::new(f).lines().map_while(Result::ok)) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let range = words.first().and_then(|r| r.split_once('-')).and_then(|(a, b)| Some((u64::from_str_radix(a, 16).ok()?, u64::from_str_radix(b, 16).ok()?)));
+        if let Some((from, to)) = range {
+            let name = if words.len() > 5 { words[5..].join(" ") } else { "anonymous".to_string() };
+            head = format!("of {} {} {name}", size(to.saturating_sub(from) >> 10), words.get(1).unwrap_or(&""));
+        } else if let Some(n) = line.strip_prefix("Rss:").and_then(kb).filter(|n| *n > 0) {
+            maps.push((n, head.clone()));
+        }
+    }
+    maps.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    out.extend(maps.into_iter().take(n).map(|(rss, what)| format!("mapping: {} resident {what}", size(rss))));
+    Some(out)
+}
+
 /// The processes in a scoped run's scope now (its `cgroup.procs`), each with its command line's
 /// start: what its leader left behind once it ended. None: no scope (or it is gone).
 pub fn scope_procs(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Vec<(u32, String)> {

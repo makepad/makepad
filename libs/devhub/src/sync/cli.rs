@@ -23,7 +23,8 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
   sync push <node,...|all> [--makepad <branch>] [--commercial <branch>|--no-commercial]
             [--repo <dir>] [--build on|off] [--restart none|auto|wm|apps] [--prewarm]
             [--session <node>/<pid>[:<arg>],... --tick '<inspect cmd, {} = arg>' [--lead <ticks>]]
-                                                push branches (default work + commercial main) as signed
+                                                push branches (default work + commercial main, and each
+                                                other followed nested repository's branch) as signed
                                                 bundles, fast-forward the node's checkout, prebuild,
                                                 restart; --session: every listed JIT patches at one tick
   lanes [--json]                                the open lane branches the master keeps merged with work/main:
@@ -822,7 +823,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
         },
     };
     let mut pushes = Vec::new();
-    let mut add = |repo_name: &'static str, dir: PathBuf, branch: &str| match branch_sha(&dir, branch) {
+    let mut add = |repo_name: &str, dir: PathBuf, branch: &str| match branch_sha(&dir, branch) {
         Ok(sha) => {
             pushes.push(Push { repo: repo_name.to_string(), dir, branch: branch.to_string(), sha });
             Ok(())
@@ -836,6 +837,14 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     if !args.contains(&"--no-commercial") {
         if let Err(e) = add("commercial", repo.join("apps").join("commercial"), flag(args, "--commercial").unwrap_or("main")) {
             eprintln!("makepad devhub sync: {e} (or --no-commercial)");
+            return 2;
+        }
+    }
+    // each other followed nested repository at the branch its checkout is on, as the auto-sync
+    // moves them: commercial read Fab in a makepad/apps a push left behind (11-22)
+    for (name, branch) in crate::nested::branches(&repo).into_iter().filter(|(n, _)| n != crate::state::PAIRED) {
+        if let Err(e) = add(&name, repo.join(crate::nested::dir(&name)), &branch) {
+            eprintln!("makepad devhub sync: {e}");
             return 2;
         }
     }

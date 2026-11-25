@@ -103,10 +103,27 @@ pub fn tips(root: &Path) -> Vec<(String, String, String)> {
 /// Those of [`tips`] the checkout at `root` does not hold: a lane's worktree has makepad and
 /// commercial alone. A lane's run pins each at its landed tip, so its packages are in the lease's
 /// tree as they are in the buckets': #7425 broke Source Library's build, and its lane could not
-/// test it, nor its hand-in's check see it (11-19).
+/// test it, nor its hand-in's check see it (11-19). A lease's ask moves each to where it stood
+/// beside the pin's own halves ([`crate::land::beside_pin`]): a lane behind a landing that moved
+/// packages between repositories would build them twice.
 pub fn absent(root: &Path) -> Vec<(String, String, String)> {
     let here = names(root);
     tips(root).into_iter().filter(|(n, _, _)| !here.contains(n)).collect()
+}
+
+/// The followed repositories at their tips in the checkout at `root` (the user's): makepad at
+/// `work`, the paired one at `main`, each other at its branch's tip ([`tips`]). What a box's
+/// deployment catches up to: a catch-up of the pair alone left makepad/apps where it was, before
+/// Fab moved in, beside a commercial that reads Fab there, and the box's hub built no more (11-22).
+pub fn tips_pin(root: &Path, work: &str, main: &str) -> crate::lease::Pin {
+    tips(root).into_iter().fold(crate::lease::Pin::at(work).with(crate::state::PAIRED, main), |p, (n, _, sha)| p.with(&n, &sha))
+}
+
+/// [`tips_pin`] as a lease `--rev`: the pair's, then each other followed repository's
+/// `,<name>=<branch>@<sha>`. The warm plan pins it: a plan of the pair alone built boxes' trees
+/// without makepad/apps, where commercial's crates read Fab (11-22).
+pub fn tips_rev(root: &Path, pair: &crate::state::Pair) -> String {
+    tips(root).into_iter().fold(pair.rev(), |rev, (n, branch, sha)| format!("{rev},{n}={branch}@{sha}"))
 }
 
 /// [`absent`] as sides of a pinned `--rev`: `,<name>=<branch>@<sha>` each.
@@ -178,6 +195,9 @@ mod tests {
         assert_eq!(super::absent_sides(&lane), format!(",repo-b=side@{side}"));
         assert_eq!(canon(super::checkout(&lane, "repo-b")), canon(Some(d.join(super::dir("repo-b")))), "read in the user's checkout");
         assert!(super::absent(&d).is_empty() && super::checkout(&lane, "repo-x").is_none(), "the checkout holds them all");
+        let (w, m) = ("a".repeat(40), "c".repeat(40));
+        assert_eq!(super::tips_pin(&d, &w, &m).key(), format!("{w},{}={m},repo-b={side}", crate::state::PAIRED), "a deployment's tips name every followed repository");
+        assert_eq!(super::tips_rev(&d, &crate::state::Pair::new(&w, &m)), format!("work@{w},{}=main@{m},repo-b=side@{side}", crate::state::PAIRED), "and a warm plan's pin");
         // a job's rev naming it is pinned again in the lane, where it resolves in the user's
         // checkout (a carry gate's job found "no commit" in the lane, #7434), and the lane's
         // uncommitted files leave it alone: nothing of it is the lane's, nothing deleted

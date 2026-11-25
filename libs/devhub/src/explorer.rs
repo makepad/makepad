@@ -107,6 +107,8 @@ pub struct AiHub {
     pub models: Option<Vec<String>>,
     pub peers: Option<u64>,
     pub peers_ok: Option<u64>,
+    /// its generation jobs, queued and running (its health's `jobs_pending`)
+    pub jobs: Option<u64>,
     pub why: String,
 }
 
@@ -121,6 +123,7 @@ impl AiHub {
             models: v.get("models").and_then(Value::as_arr).and_then(|a| a.iter().map(|m| m.as_str().map(str::to_string)).collect()),
             peers: v.get("peers").and_then(Value::as_u64),
             peers_ok: v.get("peers_ok").and_then(Value::as_u64),
+            jobs: v.get("jobs").and_then(Value::as_u64),
             why: text(v, "why"),
         })
     }
@@ -131,8 +134,8 @@ impl AiHub {
         let models = self.models.as_ref().map_or("null".to_string(), |models| {
             format!("[{}]", models.iter().map(|s| makepad_remote::json_str(s)).collect::<Vec<_>>().join(","))
         });
-        format!("{{\"running\":{},\"serving\":{},\"models\":{models},\"peers\":{},\"peers_ok\":{},\"why\":{}}}",
-            boolean(self.running), boolean(self.serving), number(self.peers), number(self.peers_ok), makepad_remote::json_str(&self.why))
+        format!("{{\"running\":{},\"serving\":{},\"models\":{models},\"peers\":{},\"peers_ok\":{},\"jobs\":{},\"why\":{}}}",
+            boolean(self.running), boolean(self.serving), number(self.peers), number(self.peers_ok), number(self.jobs), makepad_remote::json_str(&self.why))
     }
 
     /// Shared by the CLI and panel; formatting work is bounded even for a large model catalog.
@@ -349,7 +352,7 @@ mod tests {
         assert_eq!(m.ai_hub, Some(AiHub {
             running: Some(true), serving: Some(true),
             models: Some(vec!["trellis-2 ready".into(), "qwen installing".into()]),
-            peers: Some(6), peers_ok: Some(5), why: String::new(),
+            peers: Some(6), peers_ok: Some(5), jobs: None, why: String::new(),
         }));
         let mut out = String::new();
         crate::cli::render_ps(Some("node"), &lines, &mut out);
@@ -449,9 +452,14 @@ mod tests {
         assert_eq!(h.peers, Some(2));
         assert_eq!(h.peers_ok, Some(1));
         assert_eq!(h.line(), "AI hub: serving yes, models: trellis-2 ready, qwen installing, peers 1/2 answer");
+        // its generation jobs, queued and running: what its self-update waits on
+        let busy = crate::local::ai_hub_status(&parse(r#"{"serving_fleet":true,"lan_listening":true,"jobs_pending":2}"#), None, None);
+        assert_eq!(busy.jobs, Some(2));
+        assert_eq!(AiHub::parse(&parse(&busy.to_json())).and_then(|h| h.jobs), Some(2), "they round-trip");
 
         let empty = parse("{}");
         let h = crate::local::ai_hub_status(&empty, None, None);
+        assert_eq!(h.jobs, None, "an older hub says no count");
         assert_eq!(h.serving, None);
         assert_eq!(h.models, None);
         assert_eq!(h.peers, None);

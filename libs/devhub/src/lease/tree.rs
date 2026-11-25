@@ -13,6 +13,10 @@
 //!   worktree of its store at `apps/<name>`. All trees share the bare stores' objects. Native moves use
 //!   `read-tree -m -u`, preserving unchanged files' mtimes. At the configured cap, the oldest
 //!   unheld tree and its target go first; if all are held, the request waits.
+//! - The tree lock is held only for choices: who holds a tree, which tree goes for room, and a
+//!   claim on each tree whose git work then runs outside it ([`Busy`]). A tree's checkout, scrub,
+//!   warm or removal holds up only that tree; two checkouts run at once at most ([`CHECKOUTS`]),
+//!   and a store's worktree admin commands one at a time ([`Store::admin`]).
 //!
 //! The last release scrubs its tree and leaves it at its pin: tracked edits are bundled to
 //! `<work>/recovered/`, untracked files go, ignored files stay. Startup scrubs an unheld tree
@@ -22,21 +26,136 @@
 //! Overlay JIT leases never enter this module: their pinned stores and lane edits stay
 //! under `<work>/dev`, separate from these trees; CI overlay leases are keyed per pin.
 
+use super::disk::kept_natives;
 use super::Pin;
 use crate::sync::git::{fleet_revision, run, Store, CHECKOUT_REF, SYNCED_REF};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-/// Who holds the tree now: lease id -> its pin; which of them share it ([`take_native`]); and the
-/// nested repositories a take left as someone left them ([`prepare`]): the release leaves them too.
+/// Who holds the tree now: lease id -> its pin; which of them share it ([`take_native`]); the
+/// nested repositories a take left as someone left them ([`prepare`]): the release leaves them
+/// too; and the work that runs on it outside the tree lock now ([`Busy`]).
 #[derive(Default)]
-pub struct Holders(BTreeMap<String, Pin>, std::collections::BTreeSet<String>, std::collections::BTreeSet<String>);
+pub struct Holders(BTreeMap<String, Pin>, std::collections::BTreeSet<String>, std::collections::BTreeSet<String>, Option<Busy>);
 
-static TREE: Mutex<BTreeMap<PathBuf, Holders>> = Mutex::new(BTreeMap::new());
+/// Work on one tree that runs outside the tree lock, claimed under it first ([`Claim`]): a take's
+/// checkout for its holder (`Moving`), work that leaves the tree free once it ends (`Upkeep`: a
+/// release's scrub, a sync's warm, the startup scrub), or its removal (`Going`: a disk reclaim,
+/// an eviction for a new lane's tree). Only that tree waits for it. With the lock held across
+/// each, every tree start on a box waited for any other tree's checkout, scrub or warm, behind
+/// the start lock too (the start waits' measure, 11-24).
+#[derive(Clone, Debug, PartialEq)]
+enum Busy { Moving(String), Upkeep(String), Going(String) }
 
-fn lock() -> MutexGuard<'static, BTreeMap<PathBuf, Holders>> {
+type Trees = BTreeMap<PathBuf, Holders>;
+
+static TREE: Mutex<Trees> = Mutex::new(BTreeMap::new());
+
+/// Woken at every claim's end ([`Claim`]): a take that waits on a tree's work looks again.
+static FREED: Condvar = Condvar::new();
+
+fn lock() -> MutexGuard<'static, Trees> {
     TREE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A claim on one tree ([`Busy`]), marked under the tree lock, while its work runs outside it.
+/// Ended with [`Claim::end`]; dropped unended (an error, a panic) it takes back what it put there,
+/// a take's hold with it. Either way the tree's waiters look again. Never dropped while the tree
+/// lock is held: its end takes that lock.
+struct Claim {
+    root: PathBuf,
+    /// the take's lease, held from the claim on
+    holder: Option<String>,
+    ended: bool,
+}
+
+impl Claim {
+    /// Marks `root` busy with `busy` in `h` (with `holder`'s hold: its id, pin, and whether it
+    /// shares the tree).
+    fn mark(h: &mut Trees, root: &Path, busy: Busy, holder: Option<(&str, &Pin, bool)>) -> Claim {
+        let x = h.entry(root.to_path_buf()).or_default();
+        if let Some((id, pin, shares)) = holder { x.insert(id, pin, shares); }
+        x.3 = Some(busy);
+        Claim { root: root.to_path_buf(), holder: holder.map(|(id, _, _)| id.to_string()), ended: false }
+    }
+
+    /// Ends the claim: `f` updates the tree's holders, and a tree left with none leaves the table.
+    fn end(mut self, f: impl FnOnce(&mut Holders)) {
+        self.ended = true;
+        self.close(f);
+    }
+
+    fn close(&self, f: impl FnOnce(&mut Holders)) {
+        let mut h = lock();
+        if let Some(x) = h.get_mut(&self.root) {
+            f(x);
+            x.3 = None;
+            if x.0.is_empty() { h.remove(&self.root); }
+        }
+        FREED.notify_all();
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if self.ended { return; }
+        let holder = self.holder.clone();
+        self.close(|x| if let Some(id) = holder {
+            x.0.remove(&id);
+            x.1.remove(&id);
+        });
+    }
+}
+
+/// Waits on the tree lock for a claim's end ([`FREED`]), noting since when and for what.
+fn wait_freed(h: MutexGuard<'static, Trees>, waited: &mut Option<(Instant, String)>, what: String) -> MutexGuard<'static, Trees> {
+    waited.get_or_insert_with(|| (Instant::now(), what));
+    FREED.wait_timeout(h, Duration::from_secs(1)).map(|(h, _)| h).unwrap_or_else(|e| e.into_inner().0)
+}
+
+/// A wait of a second or more on a tree, said in the hub log once it ended, with what it waited for.
+fn said_wait(id: &str, root: &Path, waited: Option<(Instant, String)>) {
+    if let Some((since, what)) = waited.filter(|(since, _)| since.elapsed() >= Duration::from_secs(1)) {
+        eprintln!("devhub: {id} waited {:.1} s for {} ({what})", since.elapsed().as_secs_f64(), root.display());
+    }
+}
+
+/// Tree checkouts that run at once on this box: past it a take waits for one to end, and is never
+/// refused. One ran at a time under the tree lock; two keep a slow disk's IO from summing past
+/// that (the design's fallback for the box with the slowest disk, 11-24).
+const CHECKOUTS: usize = 2;
+static CHECKING_OUT: Mutex<usize> = Mutex::new(0);
+static CHECKED_OUT: Condvar = Condvar::new();
+
+/// One of the [`CHECKOUTS`], given back as it drops.
+struct Slot;
+
+impl Slot {
+    /// Waits for a checkout slot, said once it has one after a second or more.
+    fn wait(id: &str, root: &Path) -> Slot {
+        let since = Instant::now();
+        let mut n = CHECKING_OUT.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= CHECKOUTS { n = CHECKED_OUT.wait(n).unwrap_or_else(|e| e.into_inner()); }
+        *n += 1;
+        drop(n);
+        said_wait(id, root, Some((since, format!("{CHECKOUTS} tree checkouts running on this box"))));
+        Slot
+    }
+
+    /// A slot if one is free now.
+    fn free() -> Option<Slot> {
+        let mut n = CHECKING_OUT.lock().unwrap_or_else(|e| e.into_inner());
+        (*n < CHECKOUTS).then(|| { *n += 1; Slot })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        *CHECKING_OUT.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        CHECKED_OUT.notify_one();
+    }
 }
 
 impl Holders {
@@ -57,6 +176,22 @@ impl Holders {
     fn insert(&mut self, id: &str, pin: &Pin, shares: bool) {
         self.0.insert(id.to_string(), pin.clone());
         if shares { self.1.insert(id.to_string()); }
+    }
+
+    /// Held by a lease, or busy with work outside the lock: no upkeep starts on it, and no disk
+    /// reclaim or eviction takes it.
+    fn taken(&self) -> bool {
+        !self.0.is_empty() || self.3.is_some()
+    }
+
+    /// What a take of the tree waits for, if it waits: upkeep and a removal end with the tree free,
+    /// and a sibling shard's checkout (`joining`) with the tree there to join.
+    fn wait_for(&self, joining: bool) -> Option<String> {
+        match &self.3 {
+            Some(Busy::Upkeep(what) | Busy::Going(what)) => Some(what.clone()),
+            Some(Busy::Moving(id)) if joining => Some(format!("{id}'s checkout of it")),
+            _ => None,
+        }
     }
 
     /// A take asked for `asked` and holds the tree at `at`: the nested repositories `at` names
@@ -86,6 +221,20 @@ pub fn natives(work: &Path) -> Vec<(String, u64)> {
     lanes
 }
 
+/// Notes the kept lanes a lease start named ([`kept_natives`]); written only when they changed.
+pub fn note_kept(work: &Path, lanes: &[String]) {
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _write = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if kept_natives(work) == lanes {
+        return;
+    }
+    let text: String = lanes.iter().map(|l| format!("{l}\n")).collect();
+    let tmp = work.join("native-kept.new");
+    if let Err(e) = std::fs::create_dir_all(work).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, work.join("native-kept"))) {
+        eprintln!("devhub: the kept lanes' note: {e}");
+    }
+}
+
 pub(super) fn touch_native(root: &Path) {
     if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
         if let Some(lane) = root.file_name() {
@@ -94,7 +243,7 @@ pub(super) fn touch_native(root: &Path) {
     }
 }
 
-pub fn held(root: &Path) -> bool { lock().get(root).is_some_and(|h| !h.0.is_empty()) }
+pub fn held(root: &Path) -> bool { lock().get(root).is_some_and(Holders::taken) }
 
 /// Whether the sync checkout is (or can become) devhub's deployment tree.
 pub fn ours(dir: &Path) -> bool {
@@ -184,7 +333,9 @@ fn move_to(store: &Store, dir: &Path, from: Option<&str>, to: &str, native: bool
         }
         None => {
             std::fs::create_dir_all(dir.parent().ok_or("work tree has no parent")?).map_err(|e| e.to_string())?;
+            let admin = store.admin();
             run(None, Some(&store.git_dir), &[], &["worktree", "add", "-q", "--detach", &dir.to_string_lossy(), to])?;
+            drop(admin);
             Ok(run(Some(dir), None, &[], &["ls-files"])?.lines().count())
         }
     }
@@ -199,6 +350,7 @@ fn undo_move(store: &Store, dir: &Path, from: Option<&str>) {
             let _ = store.clean_tree(dir);
         }
         None => {
+            let _admin = store.admin();
             let _ = run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()]);
             let _ = run(None, Some(&store.git_dir), &[], &["worktree", "prune"]);
         }
@@ -230,7 +382,9 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
             continue;
         }
         // (--force for its build output, or a clean submodule's checkout: anything else held it above)
+        let admin = store.admin();
         run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+        drop(admin);
         taken.cleared.removed.push(prefix(&name));
     }
     for (repo, to, _) in pin.repos() {
@@ -308,61 +462,125 @@ pub struct Taken {
 
 /// Takes the work tree at `pin`; another lease holding it refuses the take.
 pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path) -> Result<Taken, String> {
-    let mut h = lock();
-    if let Some(why) = h.get(root).and_then(|h| h.conflict(id)) {
-        return Err(why);
-    }
+    let claim = {
+        let (mut h, mut waited) = (lock(), None);
+        loop {
+            let Some(x) = h.get(root) else { break };
+            if let Some(why) = x.conflict(id) { return Err(why); }
+            let Some(what) = x.wait_for(false) else { break };
+            h = wait_freed(h, &mut waited, what);
+        }
+        said_wait(id, root, waited);
+        Claim::mark(&mut h, root, Busy::Moving(id.to_string()), Some((id, pin, false)))
+    };
+    let slot = Slot::wait(id, root);
     let t = prepare(id, pin, root, out, false)?;
-    let holds = h.entry(root.to_path_buf()).or_default();
-    holds.0.insert(id.to_string(), t.pin.clone());
-    holds.left(pin, &t.pin);
+    drop(slot);
+    let at = t.pin.clone();
+    claim.end(|x| {
+        x.0.insert(id.to_string(), at.clone());
+        x.left(pin, &at);
+    });
     Ok(t)
 }
 
 /// Take a lane's native tree; capacity and disk pressure are retryable waits, never fallback
-/// to the shared work tree. The same lock protects creation, holds, scrub and disk reclaim.
+/// to the shared work tree. Under the tree lock it only chooses: whether it joins, waits or is
+/// refused, which idle trees go for room (claimed, [`Busy::Going`]), and its own claim; the
+/// removals and its checkout run with the lock free ([`Claim`]), so one lane's checkout holds up
+/// no other tree's start. The limit counts the trees on disk and those claimed on their way there,
+/// less those leaving: two new lanes at the limit never both pass it.
 /// `shares`: the lease reads the tree at its pin beside others that do, the shards of one tests
 /// bucket run ([`super::sched::tests_shard`]): one joins the tree as its sharing holders keep it,
-/// untouched, and the last one's release scrubs it.
+/// untouched, and the last one's release scrubs it. A shard that finds a sibling still checking
+/// the tree out waits for it, and joins the tree it wrote, or takes it itself if that failed:
+/// never a half-written tree.
 pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, floor: u64, shares: bool) -> Result<Taken, String> {
     if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
     std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let root = native_root(work, lane);
     let out = work.join("recovered");
-    let mut h = lock();
-    if let Some(held) = h.get_mut(&root).filter(|held| shares && held.joins(id, pin)) {
-        held.insert(id, pin, true);
-        touch_native(&root);
-        let moved = pin.repos().into_iter().map(|(repo, _, _)| (repo.to_string(), 0)).collect();
-        return Ok(Taken { root, pin: pin.clone(), moved, cleared: Released::default() });
-    }
-    if let Some(why) = h.get(&root).and_then(|h| h.conflict(id)) { return Err(why); }
-    let mut cleared = Released::default();
-    if !root.exists() {
-        if limit == 0 { return Err("native trees busy: capacity is zero".into()); }
-        let mut lanes = natives(work);
-        lanes.sort_by_key(|(_, used)| *used);
-        while lanes.len() >= limit {
-            let at = lanes.iter().position(|(lane, _)| !h.get(&native_root(work, lane)).is_some_and(|h| !h.0.is_empty()))
-                .ok_or("native trees busy: waiting for a free tree")?;
-            let (old, _) = lanes.remove(at);
-            let r = remove_native_idle(work, &old)?;
-            cleared.bundles.extend(r.bundles);
-            cleared.removed.extend(r.removed);
-            h.remove(&native_root(work, &old));
-            super::disk::empty_trash_soon(work);
+    let (claim, evict) = {
+        let (mut h, mut waited) = (lock(), None);
+        loop {
+            let Some(x) = h.get_mut(&root) else { break };
+            let joining = shares && x.joins(id, pin);
+            if let Some(what) = x.wait_for(joining) {
+                h = wait_freed(h, &mut waited, what);
+                continue;
+            }
+            if joining {
+                x.insert(id, pin, true);
+                drop(h);
+                said_wait(id, &root, waited);
+                touch_native(&root);
+                let moved = pin.repos().into_iter().map(|(repo, _, _)| (repo.to_string(), 0)).collect();
+                return Ok(Taken { root, pin: pin.clone(), moved, cleared: Released::default() });
+            }
+            if let Some(why) = x.conflict(id) { return Err(why); }
+            break;
         }
+        said_wait(id, &root, waited);
+        let evict = if root.exists() { Vec::new() } else { room_for(&mut h, work, lane, limit)? };
+        (Claim::mark(&mut h, &root, Busy::Moving(id.to_string()), Some((id, pin, shares))), evict)
+    };
+    let mut cleared = Released::default();
+    for (old, going) in evict {
+        let bytes = super::disk::dir_size(&native_root(work, &old)).0 + super::disk::dir_size(&native_target(work, &old)).0;
+        let r = remove_native_idle(work, &old)?;
+        going.end(|_| {});
+        cleared.bundles.extend(r.bundles);
+        cleared.removed.extend(r.removed);
+        cleared.evicted.push((old, bytes));
+        super::disk::empty_trash_soon(work);
     }
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor".into()); }
+    let slot = Slot::wait(id, &root);
     let mut t = prepare(id, pin, &root, &out, true)?;
+    drop(slot);
     t.cleared.bundles.extend(cleared.bundles);
     t.cleared.removed.extend(cleared.removed);
+    t.cleared.evicted.extend(cleared.evicted);
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor after checkout".into()); }
-    let holds = h.entry(root.clone()).or_default();
-    holds.insert(id, &t.pin, shares);
-    holds.left(pin, &t.pin);
+    let at = t.pin.clone();
+    claim.end(|x| {
+        x.0.insert(id.to_string(), at.clone());
+        x.left(pin, &at);
+    });
     touch_native(&root);
     Ok(t)
+}
+
+/// Room for one more native tree (`lane`'s, not on disk) under `limit`, chosen under the tree lock
+/// `h`: the least recently used idle trees, claimed for their removal ([`Busy::Going`]), which the
+/// caller runs with the lock free. Counted are the trees on disk and those claimed on their way
+/// there, less those leaving; a kept lane's tree stands outside the limit (the disk floor still
+/// holds for it), so no start waits on one, and none is taken: two lanes' trees took a kept lane's,
+/// its 47-min build's target with it, and nothing said so (11-24). None idle: a retryable wait.
+fn room_for(h: &mut Trees, work: &Path, lane: &str, limit: usize) -> Result<Vec<(String, Claim)>, String> {
+    if limit == 0 { return Err("native trees busy: capacity is zero".into()); }
+    let kept = kept_natives(work);
+    let mut lanes: Vec<_> = natives(work).into_iter().filter(|(l, _)| !kept.contains(l) && l != lane).collect();
+    lanes.sort_by_key(|(_, used)| *used);
+    let busy = |h: &Trees, l: &str| h.get(&native_root(work, l)).and_then(|x| x.3.clone());
+    let leaving = lanes.iter().filter(|(l, _)| matches!(busy(h, l), Some(Busy::Going(_)))).count();
+    let coming = h.iter().filter(|(root, x)| matches!(x.3, Some(Busy::Moving(_))) && !root.exists() && root.parent() == Some(work.join("native").as_path())
+        && root.file_name().is_some_and(|n| n != lane && !kept.iter().any(|k| n == k.as_str()))).count();
+    let mut count = lanes.len() - leaving + coming;
+    let mut chosen = Vec::new();
+    for (old, _) in &lanes {
+        if count < limit { break; }
+        if h.get(&native_root(work, old)).is_some_and(Holders::taken) { continue; }
+        chosen.push(old.clone());
+        count -= 1;
+    }
+    // claimed only once there is room: a claim dropped here, under the tree lock its end takes,
+    // would hold this thread on that lock for ever (the first cut's at-the-limit case did)
+    if count >= limit { return Err("native trees busy: waiting for a free tree".into()); }
+    Ok(chosen.into_iter().map(|old| {
+        let c = Claim::mark(h, &native_root(work, &old), Busy::Going(format!("its eviction for {lane}'s tree")), None);
+        (old, c)
+    }).collect())
 }
 
 fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
@@ -383,43 +601,44 @@ fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
         super::disk::to_trash(work, path).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     for store in stores {
+        let _admin = store.admin();
         run(None, Some(&store.git_dir), &[], &["worktree", "prune"])?;
     }
     let _ = std::fs::remove_file(root.with_file_name(format!(".last-{lane}")));
     Ok(r)
 }
 
-/// Who holds a native tree while [`remove_native`] takes it apart.
-const REMOVING: &str = "its-removal";
-
 /// Reclaim a native tree and its target (to the trash: the caller empties it), checking its holds
-/// again at deletion time. Its scrub and its moves hold the tree alone: the other trees' leases
-/// go on.
+/// again at deletion time. Its scrub and its moves hold the tree alone ([`Busy::Going`]): the
+/// other trees' leases go on.
 pub fn remove_native(work: &Path, lane: &str) -> Result<Released, String> {
     if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
     let root = native_root(work, lane);
-    {
+    let going = {
         let mut h = lock();
-        let holds = h.entry(root.clone()).or_default();
-        if !holds.0.is_empty() { return Err(format!("native tree {lane} is held")); }
-        holds.0.insert(REMOVING.to_string(), Pin::default());
-    }
+        if h.get(&root).is_some_and(Holders::taken) { return Err(format!("native tree {lane} is held")); }
+        Claim::mark(&mut h, &root, Busy::Going("its removal for disk".into()), None)
+    };
     let r = remove_native_idle(work, lane);
-    lock().remove(&root);
+    going.end(|_| {});
     r
 }
 
-/// A sync warms the idle work tree without waiting for a lease's tree operation.
+/// A sync warms the idle work tree without waiting: not while anything holds or works on it, nor
+/// while the box's checkouts are all running ([`CHECKOUTS`]). A take of the tree meanwhile waits
+/// for the warm ([`Busy::Upkeep`]).
 pub fn sync(work: &Path, pin: &Pin) -> Result<Option<Taken>, String> {
-    let h = match TREE.try_lock() {
-        Ok(h) => h,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+    let root = root(work);
+    let claim = {
+        let mut h = lock();
+        if h.get(&root).is_some_and(Holders::taken) { return Ok(None); }
+        Claim::mark(&mut h, &root, Busy::Upkeep("a sync's warm".into()), None)
     };
-    if h.get(&root(work)).is_some_and(|h| !h.0.is_empty()) {
-        return Ok(None);
-    }
-    prepare("sync", pin, &root(work), &work.join("recovered"), false).map(Some)
+    let Some(slot) = Slot::free() else { return Ok(None) };
+    let t = prepare("sync", pin, &root, &work.join("recovered"), false);
+    drop(slot);
+    claim.end(|_| {});
+    t.map(Some)
 }
 
 /// Leaves `dir` (`repo`'s side of the tree, no lease on it) with tracked and ignored files only,
@@ -446,14 +665,17 @@ fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &
 
 /// Startup clears an unheld work tree without changing its pin.
 pub fn scrub_if_idle(root: &Path, out: &Path) -> Released {
-    let h = lock();
-    if h.get(root).is_some_and(|h| !h.0.is_empty()) {
-        return Released::default();
-    }
+    let claim = {
+        let mut h = lock();
+        if h.get(root).is_some_and(Holders::taken) { return Released::default(); }
+        Claim::mark(&mut h, root, Busy::Upkeep("the startup scrub".into()), None)
+    };
     let tag = if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
         format!("startup-{}-{}", root.file_name().unwrap().to_string_lossy(), crate::proto::wall_ms())
     } else { "startup".into() };
-    scrub_tree(root, "startup", out, &tag, &Default::default())
+    let r = scrub_tree(root, "startup", out, &tag, &Default::default());
+    claim.end(|_| {});
+    r
 }
 
 /// Scrubs every repository of the tree but those `left` names (kept as someone left them).
@@ -543,18 +765,26 @@ pub struct Released {
     /// git lock files a writer that is gone left, cleared, or one a live writer held, waited for
     /// ([`crate::gitlock::settle`])
     pub locks: Vec<String>,
+    /// the idle native trees taken for room (lane, bytes of its tree and target)
+    pub evicted: Vec<(String, u64)>,
 }
 
 /// The last holder bundles tracked edits and removes untracked files; the pin and target stay.
+/// The scrub runs with the tree lock free ([`Busy::Upkeep`]): the tree's next take waits for it,
+/// no other tree does.
 pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Released {
-    let mut h = lock();
-    let Some(holders) = h.get_mut(root) else { return Released::default() };
-    holders.1.remove(id);
-    if holders.0.remove(id).is_none() || !holders.0.is_empty() {
-        return Released::default();
-    }
-    let r = scrub_tree(root, id, out, tag, &holders.2);
-    h.remove(root);
+    let (claim, left) = {
+        let mut h = lock();
+        let Some(holders) = h.get_mut(root) else { return Released::default() };
+        holders.1.remove(id);
+        if holders.0.remove(id).is_none() || !holders.0.is_empty() {
+            return Released::default();
+        }
+        let left = std::mem::take(&mut holders.2);
+        (Claim::mark(&mut h, root, Busy::Upkeep(format!("{id}'s release scrub")), None), left)
+    };
+    let r = scrub_tree(root, id, out, tag, &left);
+    claim.end(|_| {});
     touch_native(root);
     r
 }
@@ -777,6 +1007,81 @@ mod tests {
         take("L8", &at(&three), &root, &out).unwrap();
         assert_eq!((current(&root), std::fs::read_to_string(root.join("c.rs")).unwrap()), (Some(at(&three)), "c3".to_string()));
         release("L8", &root, &out, "x-L8");
+
+        // native trees at their limit: the least recently used idle one goes for a new lane's,
+        // said with its lane and size, and never a kept lane's (`devhub lane keep`): two lanes'
+        // trees took a kept lane's, its 47-min build's target with it, unsaid (11-24)
+        let native = |id: &str, lane: &str| take_native(id, &at(&two), &work, lane, 2, 0, false);
+        let free = |id: &str, lane: &str| { release(id, &native_root(&work, lane), &out, id); };
+        native("N1", "a-kept").unwrap();
+        std::fs::create_dir_all(native_target(&work, "a-kept")).unwrap();
+        std::fs::write(native_target(&work, "a-kept").join("apk"), "47 min").unwrap();
+        free("N1", "a-kept");
+        native("N2", "b-idle").unwrap();
+        free("N2", "b-idle");
+        note_kept(&work, &["a-kept".to_string()]);
+        assert_eq!(kept_natives(&work), ["a-kept"]);
+        let t = native("N3", "c-new").unwrap();
+        assert!(t.cleared.evicted.is_empty() && native_target(&work, "a-kept").join("apk").exists(), "a kept tree stands outside the limit: nothing goes, {:?}", t.cleared.evicted);
+        free("N3", "c-new");
+        let t = native("N4", "d-new").unwrap();
+        assert!(t.cleared.evicted.len() == 1 && t.cleared.evicted[0].0 == "b-idle" && t.cleared.evicted[0].1 > 0, "the least recently used unkept one goes, with its size: {:?}", t.cleared.evicted);
+        assert!(native_target(&work, "a-kept").join("apk").exists(), "the kept lane's tree and target stay");
+        free("N4", "d-new");
+        note_kept(&work, &[]);
+        let t = native("N5", "e-new").unwrap();
+        let gone: Vec<&str> = t.cleared.evicted.iter().map(|(lane, _)| lane.as_str()).collect();
+        assert_eq!(gone, ["a-kept", "c-new"], "unkept, it counts again: the least recently used go");
+        free("N5", "e-new");
+
+        // claims (step 2 of the start-lock fix, 11-24): a tree's checkout, scrub and removal run
+        // with the tree lock free, each tree claimed while its work runs. With tree d-new claimed
+        // mid-checkout (by hand), a take of e-new goes on; a shard sharing d-new waits for the
+        // checkout and joins the tree it wrote
+        let (d, at2) = (native_root(&work, "d-new"), at(&two));
+        let hand = Claim::mark(&mut lock(), &d, Busy::Moving("H1".into()), Some(("H1", &at2, true)));
+        native("N6", "e-new").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let (work, at2, tx) = (&work, &at2, tx.clone());
+            scope.spawn(move || { tx.send(take_native("S7", at2, work, "d-new", 2, 0, true)).unwrap(); });
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(rx.try_recv().is_err(), "a sharing shard waits for its sibling's checkout, never joins a half-written tree");
+            hand.end(|x| { x.0.insert("H1".into(), at2.clone()); });
+            let joined = rx.recv().unwrap().unwrap();
+            assert_eq!(joined.moved, vec![("makepad".to_string(), 0)], "it joins the tree as its sibling wrote it");
+        });
+        assert!(lock().get(&d).is_some_and(|x| x.0.contains_key("H1") && x.0.contains_key("S7") && x.3.is_none()));
+        free("S7", "d-new");
+        free("H1", "d-new");
+        assert!(!held(&d), "the last release's scrub leaves the tree free");
+        // at the limit (d-new idle, e-new held), a lane claimed on its way to disk counts: a second
+        // new lane finds no room, and the idle tree it chose stays; a failed checkout leaves no claim
+        let f = Claim::mark(&mut lock(), &native_root(&work, "f-new"), Busy::Moving("F1".into()), Some(("F1", &at2, false)));
+        let why = native("G1", "g-new").unwrap_err();
+        assert!(why.contains("waiting for a free tree"), "two new lanes at the limit never both pass: {why}");
+        assert!(d.exists() && !held(&d), "the tree it would have taken stays, unclaimed");
+        drop(f);
+        assert!(lock().get(&native_root(&work, "f-new")).is_none(), "a checkout that failed leaves no claim");
+        let t = native("G1", "g-new").unwrap();
+        assert_eq!(t.cleared.evicted.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), ["d-new"]);
+        free("G1", "g-new");
+        let why = take_native("B1", &at(&"0".repeat(40)), &work, "h-bad", 2, 0, false).unwrap_err();
+        assert!(!why.contains("busy"), "{why}");
+        assert!(lock().get(&native_root(&work, "h-bad")).is_none() && !held(&native_root(&work, "h-bad")), "a failed prepare leaves no claim: {why}");
+        free("N6", "e-new");
+        let lists = [vec!["alpha".into()], vec!["beta".into(), "gamma".into()], vec!["delta".into(), "epsilon".into(), "zeta".into()]];
+        let together = std::sync::Barrier::new(lists.len());
+        std::thread::scope(|scope| {
+            let (together, work) = (&together, &work);
+            for lanes in &lists {
+                scope.spawn(move || {
+                    together.wait();
+                    note_kept(work, lanes);
+                });
+            }
+        });
+        assert!(lists.contains(&kept_natives(&work)), "concurrent writers publish one complete kept-lane list");
         let _ = std::fs::remove_dir_all(&base);
     }
 
