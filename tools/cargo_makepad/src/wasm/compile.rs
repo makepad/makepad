@@ -811,7 +811,8 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     shell_env(&env, &cwd, "rustup", &args_out_refs)?;
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
-    let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    // (where cargo put it: `CARGO_TARGET_DIR` under devhub, a config's `build.target-dir`)
+    let build_dir = cargo_target_dir(&cwd)?.join(format!("{WASM_TARGET_TRIPLE}/{profile}"));
     // Read and validate the application contract immediately after linking. Later size/strip
     // passes intentionally remove custom sections from the shipping wasm.
     let linked_wasm = build_dir.join(format!("{}.wasm", build_bin));

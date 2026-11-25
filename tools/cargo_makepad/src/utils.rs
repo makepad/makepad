@@ -244,6 +244,25 @@ fn crate_dirs_from_metadata(cwd: &Path) -> HashMap<String, PathBuf> {
     crate_dirs_from_metadata_json(json)
 }
 
+/// The directory cargo builds into from `cwd`, as cargo itself resolves it (`cargo metadata`'s
+/// `target_directory`): `CARGO_TARGET_DIR`, else `build.target-dir` of its config, else the
+/// workspace's `target`. What a build reads back of cargo's output is found there: every devhub
+/// run sets `CARGO_TARGET_DIR`, and a wasm build that read its module from `<cwd>/target` found
+/// none (11-24).
+pub fn cargo_target_dir(cwd: &Path) -> Result<PathBuf, String> {
+    let json = shell_env_cap(&[], cwd, "cargo", &["metadata", "--format-version", "1", "--no-deps"])?;
+    target_dir_from_metadata_json(&json).ok_or_else(|| format!("cargo metadata in {} named no target directory", cwd.display()))
+}
+
+#[derive(DeJson)]
+struct CargoTargetDir {
+    target_directory: String,
+}
+
+fn target_dir_from_metadata_json(metadata_json: &str) -> Option<PathBuf> {
+    CargoTargetDir::deserialize_json_lenient(metadata_json).ok().map(|m| PathBuf::from(m.target_directory))
+}
+
 fn crate_dirs_from_metadata_json(metadata_json: &str) -> HashMap<String, PathBuf> {
     let mut dirs = HashMap::new();
     let Ok(metadata) = CargoMetadata::deserialize_json_lenient(metadata_json) else {
@@ -595,11 +614,17 @@ mod crate_dir_tests {
             dirs.get("robrix").map(|p| p.as_path()),
             Some(Path::new("/work/robrix"))
         );
+        assert_eq!(
+            target_dir_from_metadata_json(json).as_deref(),
+            Some(Path::new("/work/robrix/target")),
+            "cargo's own target directory, wherever it put it"
+        );
     }
 
     #[test]
     fn unparseable_metadata_yields_no_dirs() {
         assert!(crate_dirs_from_metadata_json("not json").is_empty());
+        assert_eq!(target_dir_from_metadata_json("not json"), None);
     }
 }
 

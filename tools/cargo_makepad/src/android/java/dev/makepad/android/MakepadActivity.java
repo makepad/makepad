@@ -464,8 +464,9 @@ class MakepadSurface
     static final int RETURN_KEY_NONE = 6;
     static final int RETURN_KEY_PREVIOUS = 7;
 
-    // Keyboard configuration (set by Rust via configureKeyboard)
-    private int mInputMode = INPUT_MODE_TEXT;
+    // Keyboard configuration (set by Rust via configureKeyboard). No mode until a text field asks
+    // for the keyboard: the IME then has no input connection and passes hardware keys on as they are.
+    private int mInputMode = INPUT_MODE_NONE;
     private int mAutocapitalize = AUTOCAP_SENTENCES;
     private int mAutocorrect = AUTOCORRECT_DEFAULT;
     private int mReturnKeyType = RETURN_KEY_DEFAULT;
@@ -675,10 +676,6 @@ class MakepadSurface
         MakepadSystemInsets.report(this, insets);
     }
 
-    // The keys pressed while Ctrl or Meta was held. They're shortcuts,
-    // so letting go of one types nothing, even when Ctrl comes up first.
-    private final HashSet<Integer> mShortcutKeys = new HashSet<>();
-
     // docs says getCharacters are deprecated
     // but somehow on non-latyn input all keyCode and all the relevant fields in the KeyEvent are zeros
     // and only getCharacters has some usefull data
@@ -691,34 +688,45 @@ class MakepadSurface
             return MakepadActivity.mBackGoesThroughCallback;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
+            // A key the IME passes on while it is composing (Backspace, an arrow, Enter) acts on
+            // the text as it stands: commit the composition first, so the key does not act on
+            // text the IME still holds as its own. Modifiers, locks and system keys edit nothing.
+            boolean editsText = !KeyEvent.isModifierKey(keyCode) && !event.isSystem()
+                && keyCode != KeyEvent.KEYCODE_CAPS_LOCK && keyCode != KeyEvent.KEYCODE_NUM_LOCK
+                && keyCode != KeyEvent.KEYCODE_SCROLL_LOCK;
+            if (editsText && mInputConnection != null
+                    && BaseInputConnection.getComposingSpanStart(mEditable) >= 0) {
+                mInputConnection.finishComposingText();
+            }
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
-            if ((metaState & (KeyEvent.META_CTRL_ON | KeyEvent.META_META_ON)) != 0) {
-                mShortcutKeys.add(keyCode);
-            } else {
-                mShortcutKeys.remove(keyCode);
-            }
             MakepadNative.surfaceOnKeyDown(keyCode, metaState, isRepeat);
         }
 
-        boolean shortcut = false;
         if (event.getAction() == KeyEvent.ACTION_UP && keyCode != 0) {
             int metaState = event.getMetaState();
-            shortcut = mShortcutKeys.remove(keyCode);
             MakepadNative.surfaceOnKeyUp(keyCode, metaState);
         }
 
-        if (event.getAction() == KeyEvent.ACTION_UP || event.getAction() == KeyEvent.ACTION_MULTIPLE) {
+        // A key types as it goes down (and again as it repeats), as an IME types the keys it
+        // takes: an IME passes on only the up of a key it typed, so typing on the up typed such
+        // a key twice. A key pressed with Ctrl or Meta is a shortcut and types nothing.
+        boolean shortcut = (event.getMetaState() & (KeyEvent.META_CTRL_ON | KeyEvent.META_META_ON)) != 0;
+        if (!shortcut && (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_MULTIPLE)) {
             int character = event.getUnicodeChar();
-            if (character == 0) {
-                String characters = event.getCharacters();
-                if (characters != null && characters.length() > 0) {
-                    character = characters.charAt(0);
-                }
-            }
-
-            if (character != 0 && !shortcut) {
+            if (character != 0) {
                 MakepadNative.surfaceOnCharacter(character);
+            } else {
+                // a multi-character event (KEYCODE_UNKNOWN with ACTION_MULTIPLE): all of its text,
+                // one code point at a time
+                String characters = event.getCharacters();
+                if (characters != null) {
+                    for (int i = 0; i < characters.length(); ) {
+                        int codePoint = characters.codePointAt(i);
+                        MakepadNative.surfaceOnCharacter(codePoint);
+                        i += Character.charCount(codePoint);
+                    }
+                }
             }
         }
 
@@ -737,12 +745,15 @@ class MakepadSurface
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         if (!hasFocus()) return null;
+        // No text field wants the keyboard: no connection, so the IME passes hardware keys on to
+        // onKey as they are instead of taking them into a composition of its own.
+        if (mInputMode == INPUT_MODE_NONE) {
+            mInputConnection = null;
+            return null;
+        }
         int inputType = InputType.TYPE_CLASS_TEXT;
 
         switch (mInputMode) {
-            case INPUT_MODE_NONE:
-                inputType = InputType.TYPE_NULL;
-                break;
             case INPUT_MODE_ASCII:
                 // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD shows ASCII keyboard without masking
                 // This is the closest Android equivalent to iOS's UIKeyboardTypeASCIICapable
@@ -880,6 +891,13 @@ class MakepadSurface
         return mInputConnection;
     }
 
+    // The keyboard was hidden: no text field wants it, so back to no mode and no connection
+    // (configureKeyboard restarts the input only when the mode was not none already).
+    void releaseInputMode() {
+        configureKeyboard(INPUT_MODE_NONE, mAutocapitalize, mAutocorrect, mReturnKeyType,
+                          mIsMultiline, mIsSecure);
+    }
+
     void takeImeStateFrom(MakepadSurface previous) {
         mEditable.replace(0, mEditable.length(), previous.mEditable.toString());
         Selection.setSelection(mEditable,
@@ -907,8 +925,10 @@ class MakepadSurface
         mIsMultiline = isMultiline;
         mIsSecure = isSecure;
 
-        // If config changed and keyboard is already showing, restart input to apply new settings
-        if (changed && mInputConnection != null && hasFocus()) {
+        // A changed config restarts the input, so the IME asks for a connection again: this also
+        // gives a text field its first connection after INPUT_MODE_NONE had none, and takes the
+        // connection away when the mode goes back to none.
+        if (changed && hasFocus()) {
             // Finalize any in-progress composition before restart to avoid stale state
             BaseInputConnection.removeComposingSpans(mEditable);
             InputMethodManager imm = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
@@ -2986,7 +3006,13 @@ public class MakepadActivity
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (mNativeLayers != null && mNativeLayers.ownsFocus()) return;
+                if (mNativeLayers != null && mNativeLayers.ownsFocus()) {
+                    // a native layer's own field has the keyboard; a hide still ends our mode
+                    if (!show && view != null) {
+                        view.releaseInputMode();
+                    }
+                    return;
+                }
                 if (show) {
                     if (view == null || view.getInputMode() == MakepadSurface.INPUT_MODE_NONE) {
                         return;
@@ -3025,6 +3051,10 @@ public class MakepadActivity
                         if (imm != null && view != null) {
                             imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
                         }
+                    }
+                    // no text field wants the keyboard now: hardware keys go to onKey again
+                    if (view != null) {
+                        view.releaseInputMode();
                     }
                 }
             }

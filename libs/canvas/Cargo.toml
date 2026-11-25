@@ -1,0 +1,12 @@
+[package]
+name = "makepad-canvas"
+version = "2.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_canvas"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-widgets-core = { path = "../../widgets/core" }

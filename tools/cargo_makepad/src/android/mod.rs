@@ -318,11 +318,12 @@ impl HostOs {
 fn android_help() -> &'static str {
     "Android commands:\n\
   cargo makepad android [options] install-toolchain\n\
+  cargo makepad android [options] toolchain-path\n\
   cargo makepad android [options] build <cargo args>\n\
   cargo makepad android [options] build-aab <cargo args>\n\
   cargo makepad android keystore-create <path> [keytool options]\n\
   cargo makepad android [options] run <cargo args>\n\
-  cargo makepad android [options] build-host|run-host [--privileged] [--devhub-name=<name>] [--debuggable] [--desk-link=on|off] [--cache-seed=<dir>] --app <package> [--font-set=Latin|International] [cargo flags]\n\
+  cargo makepad android [options] build-host|run-host [--privileged] [--devhub=on|off] [--devhub-name=<name>] [--debuggable] [--desk-link=on|off] [--cache-seed=<dir>] [--loader=<path>] --app <package> [--font-set=Latin|International] [cargo flags]\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
 \n\
@@ -544,18 +545,27 @@ fn resolve_devices_arg(
     Ok(devices)
 }
 
-/// `--app <package>` (or `--app=<package>`), `--font-set=<set>`; every other word is a cargo flag
-/// the app is packed and compiled with.
+fn parse_on_off(option: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("{option}=on|off, got {value:?}")),
+    }
+}
+
+/// Each `--app` starts a package. Arguments other than host options go to that package.
 fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     let mut apps: Vec<compile::HostApp> = Vec::new();
     let mut font_set = "Latin".to_string();
     let mut env = Vec::new();
     let mut privileged = false;
     let mut font_assets = Vec::new();
+    let mut devhub = true;
     let mut devhub_name = None;
     let mut debuggable = false;
     let mut desk_link = None;
     let mut cache_seed = None;
+    let mut loader = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -573,15 +583,18 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
         } else if a == "--debuggable" {
             debuggable = true;
         } else if let Some(v) = a.strip_prefix("--desk-link=") {
-            desk_link = Some(match v {
-                "on" => true,
-                "off" => false,
-                _ => return Err(format!("--desk-link=on|off, got {v:?}")),
-            });
+            desk_link = Some(parse_on_off("--desk-link", v)?);
+        } else if let Some(v) = a.strip_prefix("--devhub=") {
+            devhub = parse_on_off("--devhub", v)?;
         } else if let Some(n) = a.strip_prefix("--devhub-name=") {
             devhub_name = Some(n.to_string());
         } else if let Some(d) = a.strip_prefix("--cache-seed=") {
             cache_seed = Some(std::path::PathBuf::from(d));
+        } else if let Some(path) = a.strip_prefix("--loader=") {
+            if path.is_empty() {
+                return Err("--loader needs a path".to_string());
+            }
+            loader = Some(std::path::PathBuf::from(path));
         } else if let Some(f) = a.strip_prefix("--font-set=") {
             font_set = f.to_string();
         } else if let Some(app) = apps.last_mut() {
@@ -597,7 +610,53 @@ fn parse_host_args(args: &[String]) -> Result<compile::HostOpts, String> {
     }
     // the Desk Link endpoint is on in a debuggable APK unless asked otherwise
     let desk_link = desk_link.unwrap_or(debuggable);
-    Ok(compile::HostOpts { apps, env, font_set, privileged, font_assets, devhub_name, debuggable, desk_link, cache_seed })
+    Ok(compile::HostOpts {
+        apps, env, font_set, privileged, font_assets, devhub, devhub_name, debuggable, desk_link,
+        cache_seed, loader,
+    })
+}
+
+fn presence(found: bool) -> &'static str {
+    if found { "present" } else { "missing" }
+}
+
+fn sdk_part_lines(sdk_dir: &std::path::Path, urls: &sdk::AndroidSDKUrls, host_os: HostOs) -> Vec<String> {
+    let (adb, java) = if host_os == HostOs::WindowsX64 {
+        ("adb.exe", "java.exe")
+    } else {
+        ("adb", "java")
+    };
+    let parts = [
+        ("ndk", sdk_dir.join("ndk").join(urls.ndk_version_full).is_dir()),
+        ("build-tools", sdk_dir.join(sdk::BUILD_TOOLS_DIR).join(urls.build_tools_version).is_dir()),
+        ("platform", sdk_dir.join(sdk::PLATFORMS_DIR).join(urls.platform).is_dir()),
+        ("platform-tools", sdk_dir.join("platform-tools").join(adb).is_file()),
+        ("openjdk", sdk_dir.join("openjdk/bin").join(java).is_file()),
+    ];
+    let mut lines = vec![format!("path={}", sdk_dir.display())];
+    for (part, found) in parts {
+        lines.push(format!("{part}={}", presence(found)));
+    }
+    lines
+}
+
+fn android_rust_std_present() -> bool {
+    use std::process::Command;
+
+    let mut command = Command::new("rustup");
+    command.args(["run", "stable", "rustc", "--print", "sysroot"]);
+    let output = match command.env("RUSTUP_AUTO_INSTALL", "0").output() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .env("RUSTUP_AUTO_INSTALL", "0")
+            .output(),
+        other => other,
+    };
+    let Ok(output) = output else { return false };
+    let Ok(sysroot) = std::str::from_utf8(&output.stdout) else { return false };
+    let sysroot = sysroot.trim_end();
+    output.status.success() && !sysroot.is_empty()
+        && std::path::Path::new(sysroot).join("lib/rustlib/aarch64-linux-android/lib").is_dir()
 }
 
 pub fn handle_android(mut args: &[String]) -> Result<(), String> {
@@ -705,7 +764,10 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
             .filter(|home| !home.is_empty())
             .map(|home| std::path::PathBuf::from(home).join(".makepad").join(dir_name));
         match stable_dir {
-            Some(stable_dir) if !stable_dir.exists() && legacy_dir.exists() => {
+            Some(stable_dir) if stable_dir.exists() || !legacy_dir.exists() => stable_dir,
+            // A query reports the existing SDK in place. Only other commands migrate it.
+            Some(_) if args[0] == "toolchain-path" => legacy_dir,
+            Some(stable_dir) => {
                 if let Some(parent) = stable_dir.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
@@ -727,13 +789,19 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
                     }
                 }
             }
-            Some(stable_dir) => stable_dir,
             None => legacy_dir,
         }
     };
     crate::utils::set_no_icon_requested(no_icon);
 
     match args[0].as_ref() {
+        "toolchain-path" => {
+            for line in sdk_part_lines(&sdk_dir, &urls, host_os) {
+                println!("{line}");
+            }
+            println!("rust-std={}", presence(android_rust_std_present()));
+            Ok(())
+        }
         "adb" => compile::adb(&sdk_dir, host_os, &args[1..]),
         "adb-tcp" => {
             let devices = resolve_devices_arg(&sdk_dir, &devices)?;
@@ -899,6 +967,37 @@ mod tests {
             debuggable: true,
             extra_activities: "",
         }
+    }
+
+    #[test]
+    fn toolchain_path_reports_installed_versions_and_host_executables() {
+        use super::{sdk::ANDROID_SDK_URLS_33, sdk_part_lines, HostOs};
+        use std::fs;
+
+        let sdk = std::env::temp_dir().join(format!("cargo-makepad-toolchain-path-{}", std::process::id()));
+        fs::create_dir(&sdk).unwrap();
+        let urls = ANDROID_SDK_URLS_33;
+        fs::create_dir_all(sdk.join("ndk").join(urls.ndk_version_full)).unwrap();
+        fs::create_dir_all(sdk.join("build-tools/other-version")).unwrap();
+        fs::create_dir_all(sdk.join("platforms").join(urls.platform)).unwrap();
+        fs::create_dir(sdk.join("platform-tools")).unwrap();
+        fs::write(sdk.join("platform-tools/adb"), b"").unwrap();
+        fs::create_dir_all(sdk.join("openjdk/bin")).unwrap();
+        fs::write(sdk.join("openjdk/bin/java.exe"), b"").unwrap();
+
+        let unix = sdk_part_lines(&sdk, &urls, HostOs::LinuxX64);
+        let windows = sdk_part_lines(&sdk, &urls, HostOs::WindowsX64);
+        fs::remove_dir_all(&sdk).unwrap();
+
+        let path = format!("path={}", sdk.display());
+        assert_eq!(unix, [
+            path.as_str(), "ndk=present", "build-tools=missing", "platform=present",
+            "platform-tools=present", "openjdk=missing",
+        ]);
+        assert_eq!(windows, [
+            path.as_str(), "ndk=present", "build-tools=missing", "platform=present",
+            "platform-tools=missing", "openjdk=present",
+        ]);
     }
 
     #[test]

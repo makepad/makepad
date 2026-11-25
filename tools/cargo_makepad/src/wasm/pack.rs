@@ -101,7 +101,7 @@ pub fn collect(cwd: &Path, build_crate: &str, build_bin: &str, args: &[String], 
     report.line(format!("collect: cargo {}", build.join(" ")));
     shell_env(&[], cwd, "cargo", &build_refs)?;
 
-    let exe = cwd.join("target/release").join(if cfg!(windows) { format!("{build_bin}.exe") } else { build_bin.to_string() });
+    let exe = crate::utils::cargo_target_dir(cwd)?.join("release").join(if cfg!(windows) { format!("{build_bin}.exe") } else { build_bin.to_string() });
     let dir = collect_dir(cwd, build_crate);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

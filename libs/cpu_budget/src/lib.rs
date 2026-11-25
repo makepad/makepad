@@ -16,6 +16,16 @@
 //! JIT's builds, and the builds take the physical cores less the app's jobs that wait within it. No
 //! producer waits out the other's backlog, and waiters stay in ticket order. With the flag down
 //! Background is one part, as before.
+//! Idle tokens are not lent to Background work beyond its part: at 16 threads they are the SMT
+//! siblings of busy cores, and filling them slowed a cold app's world load by 59% (the JIT's tier-ups
+//! on the shared cores, 11-24). A gain there comes from less build work, not from scheduling.
+//! A run whose cores are a grant on a shared box (`MAKEPAD_CPU_GRANT`: devhub's runs that are not
+//! live sessions or timed) keeps the JIT's Background builds inside its grant: they take only the
+//! cores its other work leaves, that of its threads that hold no token included (a test's own
+//! threads), as the process's CPU time measures it (`Budget::observe_outside`). The person's work
+//! still never waits for them. A tests shard told 6 cores ran 6 test threads beside up to 6 tier-up
+//! builds, 12 cores on its box (11-23). The JIT's floor holds there too: the builds within it count
+//! only the table, as Visible work does.
 //! On a machine with two kinds of core (Apple silicon) the budget also places Background work on
 //! them, by what it is to the program (`set_thread_work`): a build of hot code takes a performance
 //! core only where the person's work leaves one (`fast_room`: the cores less the Interactive and
@@ -25,12 +35,17 @@
 //! is the class of the person's Visible work itself, and below it the kernel still runs a thread on
 //! a performance core the moment one is free for an instant, so a realtime pipeline that sleeps and
 //! wakes every round finds its core taken. Only QoS BACKGROUND keeps a thread off them.
+
+// thread-locals take no pthread key each on Android (libs/thread_local)
+#[macro_use(thread_local)]
+extern crate makepad_thread_local;
+
 use relax_api::relax_api;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, Thread};
 
 relax_api::option_layouts! {
@@ -143,6 +158,18 @@ struct State {
     window_area: u64,
     /// The last span's reading, in thousandths of a token.
     last_window: u64,
+    /// The rows that run, a token each or `above` (`above` counts these): what the process's CPU
+    /// time is measured against in a granted run (`Budget::observe_outside`). `rows_area` sums rows
+    /// times nanoseconds to `urgent_at`, `rows_window` is its value at `window_at`, and `cpu_window`
+    /// the process's CPU time then.
+    above: usize,
+    rows_area: u64,
+    rows_window: u64,
+    cpu_window: u64,
+    /// A granted run's cores in use outside the rows (`observe_outside`): the larger of the last two
+    /// spans', rounded; `last_outside` the last span's, in thousandths. 0 in a run with no grant.
+    outside: usize,
+    last_outside: u64,
 }
 /// The span the person's demand on the cores is averaged over (`Budget::roll`). A live run's packs
 /// start and end at its round rate (about 1.7 thousand rounds a second in a live audio simulation),
@@ -167,6 +194,9 @@ struct Budget {
     background_limit: usize,
     /// JIT_FLOOR, within a quarter of the limit: on a small machine it would leave Visible nothing.
     jit_floor: usize,
+    /// The cores are a grant on a shared box (`MAKEPAD_CPU_GRANT`): the JIT's Background builds count
+    /// the process's work outside the table too (`outside`).
+    granted: bool,
     /// The machine's physical cores within the budget's: the JIT's Background builds' ceiling while
     /// it comes first (`jit_part`). SMT siblings are left out, as for `background_limit`.
     physical: usize,
@@ -210,6 +240,7 @@ impl Budget {
             origin: monotonic_ns(), cores, limit,
             background_limit: limit.saturating_sub(2).min(physical.saturating_sub(1)).max(1),
             jit_floor: JIT_FLOOR.min(limit / 4),
+            granted: false,
             physical: physical.clamp(1, cores),
             jit_first: AtomicBool::new(false),
             jit_width: AtomicUsize::new(0),
@@ -226,6 +257,7 @@ impl Budget {
                 changes: 0,
                 watchers: 0,
                 urgent: 0, urgent_at: 0, urgent_area: 0, window_at: 0, window_area: 0, last_window: 0,
+                above: 0, rows_area: 0, rows_window: 0, cpu_window: 0, outside: 0, last_outside: 0,
             }),
             changed: Condvar::new(),
             classes: (0..ROWS).map(|_| AtomicU8::new(INTERACTIVE)).collect(),
@@ -242,11 +274,20 @@ impl Budget {
         self.fast = fast.min(self.cores);
         self
     }
+    /// The budget of a run whose cores are a grant on a shared box (`MAKEPAD_CPU_GRANT`).
+    fn with_grant(mut self, granted: bool) -> Self {
+        self.granted = granted;
+        if granted { self.state.get_mut().unwrap_or_else(|e| e.into_inner()).cpu_window = process_cpu_ns().unwrap_or(0); }
+        self
+    }
     fn now(&self) -> u64 { monotonic_ns().wrapping_sub(self.origin) }
-    /// The person's work's tokens counted up to `now`, and a new reading of `demand` once a span
-    /// passed. Two integer updates on most calls; under the lock, with the caller's clock.
+    /// The person's work's tokens and the rows that run counted up to `now`, and a new reading of
+    /// `demand` once a span passed (in a granted run also of `outside`: one read of the process's CPU
+    /// clock a span). A few integer updates on most calls; under the lock, with the caller's clock.
     fn roll(&self, s: &mut State, now: u64) {
-        s.urgent_area = s.urgent_area.saturating_add(s.urgent as u64 * now.saturating_sub(s.urgent_at));
+        let dt = now.saturating_sub(s.urgent_at);
+        s.urgent_area = s.urgent_area.saturating_add(s.urgent as u64 * dt);
+        s.rows_area = s.rows_area.saturating_add((s.running + s.above) as u64 * dt);
         s.urgent_at = s.urgent_at.max(now);
         let span = now.saturating_sub(s.window_at);
         if span < DEMAND_SPAN_NS { return; }
@@ -255,6 +296,45 @@ impl Budget {
         s.last_window = reading;
         s.window_at = now;
         s.window_area = s.urgent_area;
+        if self.granted {
+            if let Some(cpu) = process_cpu_ns() {
+                let reading = outside_reading(cpu.saturating_sub(s.cpu_window), s.rows_area - s.rows_window, span);
+                s.cpu_window = cpu;
+                self.observe_outside(s, reading);
+            }
+        }
+        s.rows_window = s.rows_area;
+    }
+    /// A granted run's span reading of its cores in use outside the rows, in thousandths: the work
+    /// of its threads that hold no token (a test's own), the JIT's waited compiles that run on them,
+    /// the process's other threads. The larger of the last two spans counts, as for `demand`: work
+    /// that starts counts within one span, work that ended leaves after two. A row that holds its
+    /// token blocked hides as much (the reading is then low: a build too many, never one too few).
+    fn observe_outside(&self, s: &mut State, reading: u64) {
+        let outside = (reading.max(s.last_outside) as usize + 500) / 1000;
+        s.last_outside = reading;
+        if outside != s.outside {
+            s.outside = outside;
+            self.refresh(s);
+        }
+    }
+    /// What `class`'s room is measured against: the tokens that run, and for the JIT's Background
+    /// builds in a granted run the cores in use outside the table too, except below the JIT's floor:
+    /// the tokens Visible work leaves the builds there (`jit_short`) are theirs, whatever runs
+    /// outside the table. Counted there, a token Visible work left the builds went to neither, and
+    /// with nothing that changed the table again (so no new reading either) a test's last Visible
+    /// job waited for it until its run was ended, twice (11-24, relax-compiler jit.rs
+    /// `a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it`).
+    fn load(&self, s: &State, class: u8, client: u8) -> usize {
+        s.running + if class == BACKGROUND && client == JIT && self.jit_short(s) == 0 { s.outside } else { 0 }
+    }
+    /// The JIT's Background builds give their tokens up at their next checkpoint: the process runs
+    /// over its cores, counting a granted run's work outside the table while the builds are above
+    /// their floor (one within it that gave its token up for that work would take it back at once:
+    /// `load`).
+    fn builds_over(&self, s: &State) -> bool {
+        let within_floor = self.floor_holds(s) && s.jit_background <= self.jit_floor;
+        s.running + if within_floor { 0 } else { s.outside } > self.cores
     }
     /// The performance cores the person's work leaves now: 0 on a machine with one kind of core.
     fn fast_room(&self) -> usize {
@@ -272,9 +352,13 @@ impl Budget {
             self.refresh(&mut s);
         }
     }
-    /// How far the JIT's Background jobs are below their floor: it holds only against Visible work.
+    /// The JIT's floor holds only against Visible work: some runs or waits.
+    fn floor_holds(&self, s: &State) -> bool {
+        s.visible > 0 || s.waiting & (1 << VISIBLE) != 0
+    }
+    /// How far the JIT's Background jobs are below their floor (`floor_holds`).
     fn jit_short(&self, s: &State) -> usize {
-        if s.visible == 0 && s.waiting & (1 << VISIBLE) == 0 { return 0; }
+        if !self.floor_holds(s) { return 0; }
         self.jit_floor.saturating_sub(s.jit_background)
     }
     fn class_limit(&self, s: &State, class: u8, client: u8) -> usize {
@@ -312,7 +396,7 @@ impl Budget {
     }
     fn room(&self, s: &State, class: u8, client: u8) -> bool {
         client == JIT && s.jit_running == 0
-            || s.running < self.class_limit(s, class, client)
+            || self.load(s, class, client) < self.class_limit(s, class, client)
     }
     fn first(&self, s: &State) -> Option<usize> {
         s.waiters.iter().enumerate().filter(|(_, w)| self.room(s, w.class, w.client)).min_by_key(|(_, w)| (w.class, w.ticket)).map(|(i, _)| i)
@@ -330,7 +414,7 @@ impl Budget {
             { contended |= 1 << class; }
         }
         if s.running >= self.limit && self.jit_short(s).min(s.jit_waiting) > 0 { bits |= 1 << VISIBLE; }
-        let over = self.over_cores(s, BACKGROUND);
+        let over = self.builds_over(s);
         if over { bits |= JIT_BUILDS; }
         if over || s.waiting & (1 << BACKGROUND) != 0 { contended |= JIT_BUILDS; }
         self.yield_classes.store(bits, Relaxed);
@@ -399,7 +483,7 @@ impl Budget {
         job.admitted_at = now;
         job.checkpoint_at = now;
         job.thread = me();
-        job.above = job.client == JIT && s.running >= self.class_limit(&s, job.class, job.client);
+        job.above = job.client == JIT && self.load(&s, job.class, job.client) >= self.class_limit(&s, job.class, job.client);
         ADMITTED.with(|admitted| admitted.set(true));
         s.slots[index] = Some(job);
         self.roll(&mut s, now);
@@ -417,6 +501,16 @@ impl Budget {
         let ticket = s.ticket;
         s.ticket = s.ticket.checked_add(1).expect("CPU budget ticket overflow");
         self.acquire(s, Job::new(class, client, label, ticket), None)
+    }
+    /// `admit` at the class `desired` holds, read again each time the waiting thread wakes: whoever
+    /// raises it unparks the thread.
+    fn admit_following(&self, desired: &AtomicU8, client: u8, label: &str) -> u32 {
+        let class = desired.load(Relaxed);
+        valid(class, client);
+        let mut s = self.lock();
+        let ticket = s.ticket;
+        s.ticket = s.ticket.checked_add(1).expect("CPU budget ticket overflow");
+        self.acquire(s, Job::new(class, client, label, ticket), Some(desired))
     }
     fn should_yield(&self, permit: u32) -> bool {
         let class = self.classes[permit as usize].load(Relaxed);
@@ -448,10 +542,9 @@ impl Budget {
     /// counted here it would push the JIT's own tier-ups off the performance cores at a start.
     fn urgent_row(job: &Job) -> bool { job.class != BACKGROUND && !job.above && job.client != JIT }
     fn start_counting(&self, s: &mut State, job: &Job, now: u64) {
-        if Self::urgent_row(job) {
-            self.roll(s, now);
-            s.urgent += 1;
-        }
+        self.roll(s, now);
+        s.urgent += usize::from(Self::urgent_row(job));
+        s.above += usize::from(job.above);
         s.running += usize::from(!job.above);
         s.jit_running += usize::from(job.client == JIT);
         s.background += usize::from(job.class == BACKGROUND && job.client != JIT);
@@ -460,10 +553,9 @@ impl Budget {
         s.jit_tokens += usize::from(job.class == BACKGROUND && job.client == JIT && !job.above);
     }
     fn stop_counting(&self, s: &mut State, job: &Job, now: u64) {
-        if Self::urgent_row(job) {
-            self.roll(s, now);
-            s.urgent -= 1;
-        }
+        self.roll(s, now);
+        s.urgent -= usize::from(Self::urgent_row(job));
+        s.above -= usize::from(job.above);
         s.running -= usize::from(!job.above);
         s.jit_running -= usize::from(job.client == JIT);
         s.background -= usize::from(job.class == BACKGROUND && job.client != JIT);
@@ -586,6 +678,10 @@ impl Budget {
     /// A run of the app ended in place (`makepad run`): the threads of the app's and the JIT's rows
     /// are gone and never release them. The HAL's stay, its threads with them.
     fn end_run(&self) {
+        for count in CLASS_REFUSALS.iter().flatten() { count.store(0, Relaxed); }
+        REFUSALS_MARKED.store(false, Relaxed);
+        REFUSAL_GEN.fetch_add(1, Relaxed);
+        REFUSED_THREADS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let mut s = self.lock();
         let now = self.now();
         for i in 0..s.slots.len() {
@@ -685,6 +781,7 @@ impl Budget {
         let worst = s.worst.iter().find(|w| now.saturating_sub(w.when) <= RECENT_NS).copied();
         let strand_worst = s.strand_worst.iter().find(|w| now.saturating_sub(w.when) <= RECENT_NS).copied();
         let parked = s.parked;
+        let outside = s.outside;
         let admitted = s.admitted;
         let runtime = s.runtime;
         let mut warnings: Vec<_> = s.warnings.iter().map(|(site, count)| (site.clone(), *count)).collect();
@@ -697,6 +794,7 @@ impl Budget {
         if above != 0 { let _ = write!(out, ", {above} JIT job above the budget"); }
         let _ = write!(out, ", jit settled: {}", if jit_settled() { "yes" } else { "no" });
         if self.jit_first.load(Relaxed) { out.push_str(", jit first"); }
+        if self.granted { let _ = write!(out, ", granted: {outside} cores in use outside the table"); }
         if self.fast > 0 {
             let _ = write!(out, ", fast room {} of {} (the person's work {:.1}, deadline threads {}, tier-ups on them {})", self.fast_room(), self.fast,
                 self.demand.load(Relaxed) as f64 / 1000.0, self.deadlines.load(Relaxed), self.fast_tier_ups.load(Relaxed));
@@ -776,6 +874,28 @@ fn monotonic_ns() -> u64 {
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     START.get_or_init(std::time::Instant::now).elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
+/// A granted run's reading of its cores in use outside the rows over a span of `span` ns, in
+/// thousandths: the process's CPU time `cpu_ns` less the rows' `rows_ns` (rows times ns).
+fn outside_reading(cpu_ns: u64, rows_ns: u64, span: u64) -> u64 {
+    cpu_ns.saturating_sub(rows_ns).saturating_mul(1000) / span.max(1)
+}
+/// The CPU time of the process, all its threads: one clock read (`observe_outside`). None where the
+/// platform gives none here: a granted run's builds then count the table alone.
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn process_cpu_ns() -> Option<u64> {
+    #[repr(C)]
+    struct Timespec { sec: std::ffi::c_long, nsec: std::ffi::c_long }
+    unsafe extern "C" { fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32; }
+    #[cfg(target_vendor = "apple")]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 12;
+    #[cfg(not(target_vendor = "apple"))]
+    const CLOCK_PROCESS_CPUTIME_ID: i32 = 2;
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    if unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut ts) } != 0 { return None; }
+    Some((ts.sec as u64).saturating_mul(1_000_000_000).saturating_add(ts.nsec as u64))
+}
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn process_cpu_ns() -> Option<u64> { None }
 #[cfg(target_arch = "wasm32")]
 fn monotonic_ns() -> u64 {
     #[link(wasm_import_module = "env")]
@@ -791,6 +911,7 @@ fn global() -> &'static Budget {
         let cores = granted_cores(thread::available_parallelism().map_or(1, usize::from), std::env::var("MAKEPAD_CPU_CORES").ok().as_deref());
         // (a machine whose topology is not known: every CPU a core)
         Budget::new(cores, match physical_cores() { 0 => cores, n => n.min(cores) }).with_fast(fast_cores())
+            .with_grant(std::env::var_os("MAKEPAD_CPU_GRANT").is_some_and(|v| v == "1"))
     })
 }
 
@@ -909,6 +1030,79 @@ pub fn jit_first() -> bool { global().jit_first.load(Relaxed) }
 #[relax_api]
 pub fn jit_floor() -> u32 { global().jit_floor as u32 }
 
+#[derive(Clone)]
+enum Which { Process, Own(Arc<Budget>) }
+impl Which {
+    fn get(&self) -> &Budget {
+        match self { Self::Process => global(), Self::Own(budget) => budget }
+    }
+}
+
+/// A CPU budget shared by its workers. Each permit belongs to the budget that issued it.
+#[relax_api(handle, clone)]
+#[derive(Clone)]
+pub struct BudgetHandle(Which);
+
+#[relax_api]
+impl BudgetHandle {
+    /// The budget shared by the process.
+    pub fn process() -> Self { Self(Which::Process) }
+    /// A separate budget with the given positive number of cores.
+    pub fn of_cores(cores: u32) -> Self {
+        let cores = cores as usize;
+        Self(Which::Own(Arc::new(Budget::new(cores, cores))))
+    }
+    /// Identifies a live budget. The process budget has ID zero.
+    pub fn id(&self) -> u64 {
+        match &self.0 { Which::Process => 0, Which::Own(budget) => Arc::as_ptr(budget) as u64 }
+    }
+    pub fn cores(&self) -> u32 { self.0.get().cores as u32 }
+    pub fn limit(&self) -> u32 { self.0.get().limit as u32 }
+    pub fn background_limit(&self) -> u32 { self.0.get().background_limit as u32 }
+    pub fn pool_cores(&self) -> u32 {
+        match &self.0 { Which::Process => pool_cores(), Which::Own(budget) => budget.cores as u32 }
+    }
+    pub fn admit(&self, class: u8, client: u8, label: &str) -> u32 { self.0.get().admit(class, client, label) }
+    /// `desired` must point to the job's live `AtomicU8` for the duration of the call.
+    pub fn admit_following(&self, desired: *const u8, client: u8, label: &str) -> u32 {
+        let desired = unsafe { &*(desired as *const AtomicU8) };
+        self.0.get().admit_following(desired, client, label)
+    }
+    pub fn checkpoint(&self, permit: u32, held_locks: u32, lock_site: &str) -> u32 {
+        self.0.get().checkpoint(permit, held_locks, lock_site)
+    }
+    /// `desired` must point to the job's live `AtomicU8` for the duration of the call.
+    pub fn checkpoint_following(&self, permit: u32, held_locks: u32, lock_site: &str, desired: *const u8) -> u32 {
+        let desired = unsafe { &*(desired as *const AtomicU8) };
+        self.0.get().checkpoint_following(permit, held_locks, lock_site, Some(desired))
+    }
+    pub fn should_yield(&self, permit: u32) -> bool { self.0.get().should_yield(permit) }
+    pub fn contended(&self, permit: u32) -> bool { self.0.get().contended(permit) }
+    pub fn release(&self, permit: u32) { self.0.get().release(permit); }
+    pub fn reclass(&self, permit: u32, class: u8) { self.0.get().reclass(permit, class); }
+    pub fn lend_permit(&self, permit: u32) { self.0.get().lend_permit(permit); }
+    pub fn take_back_permit(&self, permit: u32) { self.0.get().take_back_permit(permit); }
+    pub fn queued(&self, class: u8, client: u8, delta: i32) {
+        valid(class, client);
+        self.0.get().queued[class as usize][client as usize].fetch_add(delta as i64, Relaxed);
+    }
+    pub fn waited(&self, class: u8, client: u8, ns: u64, label: &str) { self.0.get().waited(class, client, ns, label); }
+    pub fn strand_waited(&self, class: u8, ns: u64, label: &str) { self.0.get().strand_waited(class, ns, label); }
+    pub fn changes(&self) -> u64 { self.0.get().lock().changes }
+    pub fn wait_for_change(&self, seen: u64) -> u64 {
+        match &self.0 { Which::Process => wait_for_change(seen), Which::Own(budget) => budget.wait_for_change(seen) }
+    }
+    pub fn tokens_text(&self, out: &mut [u8]) -> usize { write_tokens(self.0.get(), out) }
+    pub fn report(&self, out: &mut [u8]) -> usize { write_report(self.0.get(), out) }
+    /// A request for a permit from this budget.
+    pub fn admission(&self) -> Admission { Admission { budget: self.0.clone(), ticket: None } }
+}
+
+impl BudgetHandle {
+    pub fn tokens(&self) -> Tokens { read_tokens(|out| self.tokens_text(out)) }
+    pub fn report_string(&self) -> String { read_text(|out| self.report(out)) }
+}
+
 /// The budget's native park token. JIT and native std have different thread-local
 /// parkers; queue notifications and admission notifications must wake the same one.
 #[relax_api(handle, clone)]
@@ -941,22 +1135,14 @@ pub fn park_admission(class: u8) {
 /// `AtomicU8::as_ptr`, alive for the call: the byte crosses the Relax op boundary, std's type doesn't.
 #[relax_api]
 pub fn admit_following(desired: *const u8, client: u8, label: &str) -> u32 {
-    let desired = unsafe { &*(desired as *const AtomicU8) };
-    let b = global();
-    let class = desired.load(Relaxed);
-    valid(class, client);
-    let mut s = b.lock();
-    let ticket = s.ticket;
-    s.ticket = s.ticket.checked_add(1).expect("CPU budget ticket overflow");
-    b.acquire(s, Job::new(class, client, label, ticket), Some(desired))
+    BudgetHandle::process().admit_following(desired, client, label)
 }
 
 /// Native workers whose waiters may promote them while they are parked. Like
 /// `checkpoint`, with a live class and an unpark from the promoting waiter.
 #[relax_api]
 pub fn checkpoint_following(permit: u32, held_locks: u32, lock_site: &str, desired: *const u8) -> u32 {
-    let desired = unsafe { &*(desired as *const AtomicU8) };
-    global().checkpoint_following(permit, held_locks, lock_site, Some(desired))
+    BudgetHandle::process().checkpoint_following(permit, held_locks, lock_site, desired)
 }
 
 /// A native pool's admission request. The pool may change its head class while
@@ -964,16 +1150,16 @@ pub fn checkpoint_following(permit: u32, held_locks: u32, lock_site: &str, desir
 /// `poll` never parks: budget changes unpark the requesting thread.
 /// The request keeps its FIFO ticket across class changes and cancels on drop.
 #[relax_api(handle)]
-pub struct Admission { ticket: Option<u64> }
+pub struct Admission { budget: Which, ticket: Option<u64> }
 #[relax_api]
 impl Default for Admission {
-    fn default() -> Self { Self { ticket: None } }
+    fn default() -> Self { Self { budget: Which::Process, ticket: None } }
 }
 #[relax_api]
 impl Admission {
     pub fn poll(&mut self, class: u8, client: u8, label: &str) -> Option<u32> {
         valid(class, client);
-        let b = global();
+        let b = self.budget.get();
         let mut s = b.lock();
         let ticket = *self.ticket.get_or_insert_with(|| {
             let ticket = s.ticket;
@@ -1000,7 +1186,7 @@ impl Admission {
     /// jobs running, and one parked inside a checkpoint was counted as running).
     pub fn checkpoint(&mut self, permit: u32, held_locks: u32, lock_site: &str) -> Option<u32> {
         assert!(self.ticket.is_none(), "a checkpoint on an admission that waits already");
-        let b = global();
+        let b = self.budget.get();
         let mut s = b.lock();
         let Some(job) = b.yields(&mut s, permit, held_locks, lock_site) else {
             let class = s.slots[permit as usize].as_ref().expect("released CPU permit").class;
@@ -1017,7 +1203,7 @@ impl Admission {
 impl Drop for Admission {
     fn drop(&mut self) {
         if let Some(ticket) = self.ticket.take() {
-            let b = global();
+            let b = self.budget.get();
             let mut s = b.lock();
             s.waiters.retain(|w| w.ticket != ticket);
             b.refresh(&mut s);
@@ -1108,8 +1294,9 @@ pub struct Tokens {
 }
 /// `tokens`, one row a line: its strings and vectors do not cross the Relax op boundary.
 #[relax_api]
-pub fn tokens_text(out: &mut [u8]) -> usize {
-    let t = global().tokens();
+pub fn tokens_text(out: &mut [u8]) -> usize { write_tokens(global(), out) }
+fn write_tokens(budget: &Budget, out: &mut [u8]) -> usize {
+    let t = budget.tokens();
     let mut text = format!("{} {} {} {}\n", t.running, t.limits[0], t.limits[1], t.limits[2]);
     for h in &t.holders {
         text += &format!("h {} {} {} {} {} {} {}\n", h.thread, h.class, h.client, u8::from(h.lent), u8::from(h.above), h.held_ns, h.label.replace('\n', " "));
@@ -1119,8 +1306,9 @@ pub fn tokens_text(out: &mut [u8]) -> usize {
     }
     fill(out, &text)
 }
-pub fn tokens() -> Tokens {
-    let text = read_text(tokens_text);
+pub fn tokens() -> Tokens { read_tokens(tokens_text) }
+fn read_tokens(op: impl Fn(&mut [u8]) -> usize) -> Tokens {
+    let text = read_text(op);
     let mut lines = text.lines();
     let mut head = lines.next().unwrap().split(' ').map(|n| n.parse().unwrap());
     let mut next = || head.next().unwrap();
@@ -1143,14 +1331,19 @@ pub fn tokens() -> Tokens {
 /// the JIT's wait registry, which registers those waits through this.
 #[relax_api]
 pub fn set_wait_hook(hook: extern "C" fn(u8)) { let _ = WAIT_HOOK.set(hook); }
-/// The class `set_thread_class` last gave the calling thread (the UI thread: Interactive); None: it
-/// set none, or a promotion failed. A job the thread waits for runs at its class meanwhile.
+/// The logical class last requested on this thread (Interactive on the UI thread). A job the
+/// thread waits for inherits this class even if the thread's OS priority could not change.
 #[relax_api]
-pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(|class| match class { 3 => INTERACTIVE, IDLE | BACKGROUND_HOT | BACKGROUND_BEHIND => BACKGROUND, class => class }) }
+pub fn thread_class() -> Option<u8> { THREAD_CLASS.with(Cell::get).map(budget_class) }
+/// The class the OS was last set to on this thread, or None when a change failed or none was made.
+#[relax_api]
+pub fn applied_thread_class() -> Option<u8> { APPLIED_CLASS.with(Cell::get).map(budget_class) }
+fn budget_class(class: u8) -> u8 {
+    match class { 3 => INTERACTIVE, IDLE | BACKGROUND_HOT | BACKGROUND_BEHIND => BACKGROUND, class => class }
+}
 #[relax_api]
 pub fn queued(class: u8, client: u8, delta: i32) {
-    valid(class, client);
-    global().queued[class as usize][client as usize].fetch_add(delta as i64, Relaxed);
+    BudgetHandle::process().queued(class, client, delta);
 }
 #[relax_api]
 pub fn waited(class: u8, client: u8, ns: u64, label: &str) { global().waited(class, client, ns, label); }
@@ -1165,7 +1358,8 @@ pub fn jit_settled() -> bool { !JIT_UNSETTLED.load(Relaxed) }
 #[relax_api]
 pub fn set_jit_settled(settled: bool) { JIT_UNSETTLED.store(!settled, Relaxed); }
 #[relax_api]
-pub fn report(out: &mut [u8]) -> usize { fill(out, &global().report()) }
+pub fn report(out: &mut [u8]) -> usize { write_report(global(), out) }
+fn write_report(budget: &Budget, out: &mut [u8]) -> usize { fill(out, &budget.report()) }
 /// Native convenience wrapper; strings do not cross the Relax op boundary.
 pub fn report_string() -> String { read_text(report) }
 fn fill(out: &mut [u8], text: &str) -> usize {
@@ -1174,7 +1368,7 @@ fn fill(out: &mut [u8], text: &str) -> usize {
     out[..len].copy_from_slice(&text.as_bytes()[..len]);
     len
 }
-fn read_text(op: fn(&mut [u8]) -> usize) -> String {
+fn read_text(op: impl Fn(&mut [u8]) -> usize) -> String {
     let mut out = vec![0; 4096];
     loop {
         let len = op(&mut out);
@@ -1186,12 +1380,16 @@ fn read_text(op: fn(&mut [u8]) -> usize) -> String {
 
 thread_local! {
     static THREAD_CLASS: Cell<Option<u8>> = const { Cell::new(None) };
+    static APPLIED_CLASS: Cell<Option<u8>> = const { Cell::new(None) };
+    static THREAD_FLOOR: Cell<bool> = const { Cell::new(false) };
     /// this thread was admitted once: a thread that never was skips the budget's lock when it sleeps
     static ADMITTED: Cell<bool> = const { Cell::new(false) };
     /// the lends in progress on this thread: above 0 its tokens are lent
     static LENDS: Cell<u32> = const { Cell::new(0) };
     /// set_ui_thread's thread: its OS class stays the UI's
     static UI_THREAD: Cell<bool> = const { Cell::new(false) };
+    /// set_thread_keeps_priority: this thread's OS class stays what it is
+    static KEEPS_PRIORITY: Cell<bool> = const { Cell::new(false) };
     /// this thread runs at the OS's idle policy (Linux SCHED_IDLE): set_thread_idle
     static IDLE_NOW: Cell<bool> = const { Cell::new(false) };
     /// what the Background work this thread runs is to the program: set_thread_work
@@ -1217,9 +1415,18 @@ impl Drop for Marks {
 #[relax_api]
 pub fn set_thread_class(class: u8) -> bool {
     valid(class, APP);
-    if UI_THREAD.with(Cell::get) { return true; }
+    if UI_THREAD.with(Cell::get) || KEEPS_PRIORITY.with(Cell::get) { return true; }
     apply_thread_class(class)
 }
+
+/// While `on`, the calling thread keeps the OS priority it has: admission, checkpoints and
+/// `set_thread_class`, `set_thread_work` and `set_thread_idle` leave it, as on the UI thread.
+/// Returns the previous setting. A pool sets it on a thread it does not own for the time that
+/// thread takes part in its work (its share of a fan-out, a job it claimed), and restores it after:
+/// nothing would bring that thread's priority back (a Linux thread without CAP_SYS_NICE cannot climb
+/// back from Background).
+#[relax_api]
+pub fn set_thread_keeps_priority(on: bool) -> bool { KEEPS_PRIORITY.with(|keeps| keeps.replace(on)) }
 
 /// The UI thread, and the thread it waits on for its work (the JIT owner), are outside admission
 /// and keep the UI's OS priority, above pool jobs, for good: a job's class taken on later (a scope's
@@ -1233,11 +1440,17 @@ pub fn set_ui_thread() -> bool {
     applied
 }
 
+/// `true`: the calling thread's OS priority stays at Interactive or above on later requests (a
+/// Background or idle request changes only its logical class). `false`: it may go lower again, as a
+/// thread that goes back to a shared pool must.
+#[relax_api]
+pub fn set_thread_floor(on: bool) { THREAD_FLOOR.with(|floor| floor.set(on)); }
+
 /// The calling thread goes below every other thread: Linux SCHED_IDLE (a core runs it only when no
 /// other thread wants that core), elsewhere the Background class's priority. A thread without
 /// CAP_SYS_NICE (RLIMIT_NICE 0) cannot leave SCHED_IDLE again; Background work keeps it there.
 pub fn set_thread_idle() -> bool {
-    if UI_THREAD.with(Cell::get) { return false; }
+    if UI_THREAD.with(Cell::get) || THREAD_FLOOR.with(Cell::get) || KEEPS_PRIORITY.with(Cell::get) { return false; }
     apply_thread_class(IDLE)
 }
 /// The calling thread runs at the OS's idle policy (`set_thread_idle` took effect, and nothing
@@ -1287,6 +1500,7 @@ pub const WORK_BEHIND: u8 = 2;
 pub fn set_thread_work(kind: u8) -> bool {
     assert!(kind <= WORK_BEHIND, "invalid kind of Background work {kind}");
     WORK.with(|w| w.set(kind));
+    if KEEPS_PRIORITY.with(Cell::get) { return true; }
     match THREAD_CLASS.with(Cell::get) {
         Some(BACKGROUND | BACKGROUND_HOT | BACKGROUND_BEHIND) => apply_thread_class(BACKGROUND),
         _ => true,
@@ -1330,14 +1544,52 @@ fn background_class() -> u8 {
 #[cfg(not(target_os = "macos"))]
 fn background_class() -> u8 { BACKGROUND }
 
+static CLASS_REFUSALS: [[AtomicU64; 7]; 2] = [const { [const { AtomicU64::new(0) }; 7] }; 2];
+static REFUSALS_MARKED: AtomicBool = AtomicBool::new(false);
+/// Split this run's refused OS class changes at the calling event.
+pub fn mark_class_refusals() { REFUSALS_MARKED.store(true, Relaxed); }
+/// Counts by requested OS class, before and after the mark. Without a mark all are before.
+pub fn class_refusals() -> [[u64; 7]; 2] { CLASS_REFUSALS.each_ref().map(|row| row.each_ref().map(|n| n.load(Relaxed))) }
+/// The threads a refused change was counted on in this run, each once (at its first): the class
+/// asked, whether it came after the mark, the thread's id and name. A refused raise is not tried
+/// again, so the list stays as short as the threads that met one.
+static REFUSED_THREADS: Mutex<Vec<RefusedThread>> = Mutex::new(Vec::new());
+/// The run whose refusals a thread has named itself in (`end_run` starts the next).
+static REFUSAL_GEN: AtomicU64 = AtomicU64::new(1);
+thread_local! { static REFUSAL_NAMED: Cell<u64> = const { Cell::new(0) }; }
+/// A thread whose OS class change was refused ([`refused_threads`]).
+#[derive(Clone, Debug)]
+pub struct RefusedThread { pub class: u8, pub after_mark: bool, pub id: thread::ThreadId, pub name: String }
+fn count_refusal(class: u8) {
+    let after_mark = REFUSALS_MARKED.load(Relaxed);
+    CLASS_REFUSALS[after_mark as usize][class as usize].fetch_add(1, Relaxed);
+    let gen = REFUSAL_GEN.load(Relaxed);
+    if REFUSAL_NAMED.with(|named| named.replace(gen)) != gen {
+        let me = thread::current();
+        let name = me.name().unwrap_or("unnamed").to_owned();
+        REFUSED_THREADS.lock().unwrap_or_else(|e| e.into_inner()).push(RefusedThread { class, after_mark, id: me.id(), name });
+    }
+}
+/// This run's threads that met a refused OS class change, each once.
+pub fn refused_threads() -> Vec<RefusedThread> { REFUSED_THREADS.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
 fn apply_thread_class(class: u8) -> bool {
-    THREAD_CLASS.with(|current| {
+    apply_thread_class_with(class, os_class)
+}
+fn apply_thread_class_with(class: u8, set: impl FnOnce(u8) -> Option<bool>) -> bool {
+    THREAD_CLASS.with(|logical| logical.set(Some(class)));
+    let class = if THREAD_FLOOR.with(Cell::get) {
+        if class == BACKGROUND || class == IDLE { return true; }
+        if class == VISIBLE { INTERACTIVE } else { class }
+    } else { class };
+    APPLIED_CLASS.with(|current| {
         // Background work on a thread at the idle policy: it stays there, below Background (a
         // thread without CAP_SYS_NICE could not leave it anyway)
         if class == BACKGROUND && IDLE_NOW.with(Cell::get) { return true; }
         let class = if class == BACKGROUND { background_class() } else { class };
         if current.get() == Some(class) { return true; }
-        let applied = os_class(class);
+        let Some(applied) = set(class) else { return false };
+        if !applied { count_refusal(class); }
         // A failed call may have partially changed the OS state.
         current.set(if applied { Some(class) } else { None });
         // the tier-ups that hold a performance core: counted while this thread's class is theirs
@@ -1349,33 +1601,48 @@ fn apply_thread_class(class: u8) -> bool {
     })
 }
 #[cfg(target_os = "macos")]
-fn os_class(class: u8) -> bool {
+fn os_class(class: u8) -> Option<bool> {
     unsafe extern "C" { fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32; }
-    unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21, 0x11, 0x15, 0x09][class as usize], 0) == 0 }
+    Some(unsafe { pthread_set_qos_class_self_np([0x19, 0x15, 0x11, 0x21, 0x11, 0x15, 0x09][class as usize], 0) == 0 })
+}
+/// None means a previous refusal already ruled out this nice on the calling thread.
+#[cfg(any(test, target_os = "linux", target_os = "android"))]
+fn try_nice(nice: i32, set: impl FnOnce() -> (bool, bool)) -> Option<bool> {
+    thread_local! { static REFUSED: Cell<Option<i32>> = const { Cell::new(None) }; }
+    REFUSED.with(|refused| {
+        if refused.get().is_some_and(|limit| nice <= limit) { return None; }
+        let (applied, raise_refused) = set();
+        if raise_refused { refused.set(Some(nice)); }
+        Some(applied)
+    })
 }
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn os_class(class: u8) -> bool {
+fn os_class(class: u8) -> Option<bool> {
     #[repr(C)]
     struct SchedParam { priority: i32 }
     unsafe extern "C" {
         fn getpid() -> i32;
         fn getpriority(which: i32, who: u32) -> i32;
         fn setpriority(which: i32, who: u32, priority: i32) -> i32;
+        fn sched_getscheduler(pid: i32) -> i32;
         fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
     }
     static BASE: OnceLock<i32> = OnceLock::new();
     let base = *BASE.get_or_init(|| unsafe { getpriority(0, getpid() as u32) }.clamp(0, 19));
-    let nice = (base + [1, 3, 8, 0, 8, 8, 8][class as usize]).min(19);
-    unsafe {
+    // Visible must not lower an Interactive thread to nice 3 for good.
+    let nice = (base + [1, 1, 8, 0, 8, 8, 8][class as usize]).min(19);
+    try_nice(nice, || unsafe {
         let priority = setpriority(0, 0, nice) == 0;
         // SCHED_IDLE 5, SCHED_BATCH 3, SCHED_OTHER 0; a refused change leaves the policy as it was
         let policy = sched_setscheduler(0, match class { IDLE => 5, BACKGROUND | BACKGROUND_HOT | BACKGROUND_BEHIND => 3, _ => 0 }, &SchedParam { priority: 0 }) == 0;
-        if policy { IDLE_NOW.with(|idle| idle.set(class == IDLE)); }
-        priority && policy && getpriority(0, 0) == nice
-    }
+        let idle = if policy { class == IDLE } else { sched_getscheduler(0) == 5 };
+        IDLE_NOW.with(|state| state.set(idle));
+        let actual = getpriority(0, 0);
+        (priority && policy && actual == nice, actual > nice || (!policy && idle && class != IDLE))
+    })
 }
 #[cfg(windows)]
-fn os_class(class: u8) -> bool {
+fn os_class(class: u8) -> Option<bool> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentThread() -> *mut std::ffi::c_void;
@@ -1384,10 +1651,10 @@ fn os_class(class: u8) -> bool {
     // Background at Normal, not below: Windows priority is strict, so below another program's busy threads
     // it gets almost no time (tier-up all but stopped, the program stayed on its slow code); the budget
     // decides how much of the machine Background takes
-    unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2, 0, 0, 0][class as usize]) != 0 }
+    Some(unsafe { SetThreadPriority(GetCurrentThread(), [1, 0, 0, 2, 0, 0, 0][class as usize]) != 0 })
 }
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
-fn os_class(_class: u8) -> bool { false }
+fn os_class(_class: u8) -> Option<bool> { Some(false) }
 
 #[cfg(test)]
 mod tests;

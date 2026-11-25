@@ -32,6 +32,44 @@ fn finish(worker: (Sender<()>, thread::JoinHandle<()>)) {
 }
 
 #[test]
+fn permits_and_admissions_belong_to_the_budget_that_issued_them() {
+    let a = BudgetHandle::of_cores(2);
+    let b = BudgetHandle::of_cores(2);
+    assert_ne!(a.id(), b.id(), "separate live budgets have different IDs");
+    assert_eq!(a.clone().id(), a.id(), "a clone identifies the same budget");
+    assert_eq!(BudgetHandle::process().id(), 0, "zero identifies the process budget");
+
+    let a_first = a.admit(INTERACTIVE, APP, "first");
+    let b_first = b.admit(INTERACTIVE, APP, "first");
+    assert_eq!((a_first, b_first), (0, 0), "each budget issues row zero first");
+    a.release(a_first);
+    assert_eq!((a.tokens().running, b.tokens().running), (0, 1), "releasing a's row leaves b's held");
+    b.release(b_first);
+
+    // Each budget has issued one ticket. On two cores one Background job fills the Visible limit.
+    let a_held = a.admit(BACKGROUND, APP, "held");
+    let b_held = b.admit(BACKGROUND, APP, "held");
+    let mut a_wait = a.admission();
+    let mut b_wait = b.admission();
+    assert_eq!(a_wait.poll(VISIBLE, APP, "waiting"), None, "a's Visible job waits at its limit");
+    assert_eq!(b_wait.poll(VISIBLE, APP, "waiting"), None, "b's Visible job waits at its limit");
+    drop(a_wait);
+    assert!(a.tokens().waiting.is_empty(), "dropping a's admission removes its waiter");
+    assert_eq!(b.tokens().waiting.len(), 1, "b keeps its waiter with the same ticket");
+    assert!(b.should_yield(b_held), "b's Visible waiter needs its Background holder to yield");
+    assert!(!a.should_yield(a_held), "b's waiter leaves a's holder running");
+    assert_eq!(a.admission().checkpoint(a_held, 0, ""), Some(a_held), "a's admission checkpoint keeps its row");
+    let a_next = a.checkpoint(a_held, 0, "");
+    assert_eq!(a_next, a_held, "a keeps its row at a worker checkpoint");
+
+    b.release(b_held);
+    let b_next = b_wait.poll(VISIBLE, APP, "waiting").expect("b admits its waiter on the first poll after release");
+    b.release(b_next);
+    a.release(a_next);
+    assert_eq!((a.tokens().running, b.tokens().running), (0, 0), "both budgets finish with every token released");
+}
+
+#[test]
 fn highest_class_first_across_clients() {
     let b = budget(1);
     let p = b.admit(INTERACTIVE, APP, "blocker");
@@ -211,30 +249,32 @@ fn a_raised_build_counts_against_a_persons_work() {
     assert_eq!(b.state.lock().unwrap().jit_tokens, 0);
 }
 
+/// Background's part leaves Visible two of the limit's 3 tokens, and Visible's limit leaves
+/// Interactive the kept core. (Polled admissions: a broken rule fails an assertion, it does not hold
+/// the test.)
 #[test]
 fn background_reserves_two_visible_slots_and_visible_reserves_one() {
     let b = budget(4);
-    let held: Vec<_> = (0..1).map(|_| b.admit(BACKGROUND, APP, "held")).collect();
-    let (tx, rx) = mpsc::channel();
-    let bg = worker(&b, BACKGROUND, HAL, 2, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    let v1 = b.admit(VISIBLE, HAL, "visible one");
-    let v2 = b.admit(VISIBLE, HAL, "visible two");
-    let visible = worker(&b, VISIBLE, HAL, 1, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(rx.try_recv().is_err());
-    let interactive = b.admit(INTERACTIVE, APP, "interactive reserve");
-    assert_eq!(b.state.lock().unwrap().running, 4);
+    let handle = BudgetHandle(Which::Own(b.clone()));
+    let held = b.admit(BACKGROUND, APP, "held");
+    let mut background = handle.admission();
+    assert_eq!(background.poll(BACKGROUND, HAL, "waits"), None, "Background stops at its part of one");
+    let v1 = handle.admission().poll(VISIBLE, HAL, "visible one").expect("Visible has the two Background leaves");
+    let v2 = handle.admission().poll(VISIBLE, HAL, "visible two").expect("Visible has the two Background leaves");
+    let mut visible = handle.admission();
+    assert_eq!(visible.poll(VISIBLE, HAL, "visible three"), None, "Visible stops at its limit of 3");
+    let interactive = handle.admission().poll(INTERACTIVE, APP, "interactive reserve").expect("Interactive has the kept core");
+    assert_eq!(b.lock().running, 4);
     b.release(interactive);
-    assert!(rx.try_recv().is_err());
+    assert_eq!(visible.poll(VISIBLE, HAL, "visible three"), None, "the kept core is not Visible's");
     b.release(v2);
-    assert_eq!(rx.recv().unwrap(), 1);
-    finish(visible);
-    b.release(v1);
-    b.release(held[0]);
-    assert_eq!(rx.recv().unwrap(), 2);
-    finish(bg);
-    for p in &held[1..] { b.release(*p); }
+    let v3 = visible.poll(VISIBLE, HAL, "visible three").expect("a token within Visible's limit");
+    for p in [v1, v3] { b.release(p); }
+    assert_eq!(background.poll(BACKGROUND, HAL, "waits"), None, "idle tokens are not Background's beyond its part");
+    b.release(held);
+    let bg = background.poll(BACKGROUND, HAL, "waits").expect("its part has room");
+    b.release(bg);
+    assert_eq!(b.lock().running, 0);
 }
 
 #[test]
@@ -266,6 +306,36 @@ fn visible_leaves_waiting_jit_background_its_floor() {
     b.release(above);
     assert_eq!(rx.recv().unwrap(), 4);
     finish(fourth);
+
+    // A granted run (MAKEPAD_CPU_GRANT), as relax-compiler's
+    // a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it has it: the work outside
+    // the table counts against the builds above the floor only. With it counted below, the build
+    // gave its token up for that work, or its token went to neither the waiting build nor the last
+    // job, and that test held until its run was ended (11-24). (Polled admissions: a broken rule
+    // fails an assertion, it does not hold the test.)
+    let b = Arc::new(Budget::new(12, 12).with_grant(true));
+    assert_eq!((b.limit, b.jit_floor), (11, 2));
+    let handle = BudgetHandle(Which::Own(b.clone()));
+    let other = b.admit(BACKGROUND, JIT, "another compile job");
+    let build = b.admit(BACKGROUND, JIT, "the build");
+    let jobs: Vec<_> = (0..b.limit - b.jit_floor).map(|_| b.admit(VISIBLE, APP, "a pool job")).collect();
+    let mut tier_up = handle.admission();
+    assert_eq!(tier_up.poll(BACKGROUND, JIT, "a tier-up"), None, "the floor is met");
+    let mut last = handle.admission();
+    assert_eq!(last.poll(VISIBLE, APP, "a pool job"), None, "the jobs and the builds hold every token");
+    {
+        let mut s = b.lock();
+        b.observe_outside(&mut s, 2000);
+        assert_eq!(s.outside, 2);
+    }
+    assert!(!b.should_yield(build), "a build within the floor keeps its token through its checkpoints, whatever runs outside the table");
+    b.release(build);
+    let floor_build = tier_up.poll(BACKGROUND, JIT, "a tier-up").expect("the token the build gave back is the floor's: the waiting build has it, whatever runs outside the table");
+    assert_eq!(last.poll(VISIBLE, APP, "a pool job"), None, "the floor's token is not the person's");
+    b.release(floor_build);
+    let job = last.poll(VISIBLE, APP, "a pool job").expect("the last job runs once the builds are done");
+    for p in jobs.into_iter().chain([job, other]) { b.release(p); }
+    assert_eq!(b.lock().running, 0);
 }
 
 #[test]
@@ -626,6 +696,96 @@ fn a_second_jit_job_waits_for_a_token() {
     assert_eq!(rx.recv().unwrap(), 4);
     finish(third);
     assert_eq!(b.state.lock().unwrap().running, 0);
+
+    // A run whose cores are a grant on a shared box (MAKEPAD_CPU_GRANT): the builds take only the
+    // cores its other work leaves, that of its threads that hold no token too (a test's own: a shard
+    // told 6 cores ran 6 test threads beside up to 6 builds, 11-23).
+    assert_eq!(outside_reading(1_000_000_000, 400_000_000, 100_000_000), 6000, "a span's CPU time less its rows'");
+    assert_eq!(outside_reading(100_000_000, 400_000_000, 100_000_000), 0, "rows that hold their tokens blocked read as none outside");
+    let b = Arc::new(Budget::new(4, 4).with_grant(true));
+    b.set_jit_first(true);
+    let observe = |milli| { let mut s = b.lock(); b.observe_outside(&mut s, milli); };
+    observe(3000);
+    let first = b.admit(BACKGROUND, JIT, "tier-up");
+    assert_eq!(b.state.lock().unwrap().jit_tokens, 1, "one core is left beside the 3 in use outside the table");
+    let (tx, rx) = mpsc::channel();
+    let build = worker(&b, BACKGROUND, JIT, 5, &tx);
+    until(&b, |s| s.waiters.len() == 1 || s.jit_running == 2);
+    assert!(b.state.lock().unwrap().waiters.len() == 1 && rx.try_recv().is_err(), "the grant is full: a second build waits");
+    assert!(!b.should_yield(first), "the first build fits");
+    observe(4000);
+    assert!(b.should_yield(first), "the work outside grew to the grant: the build gives its token up at its next checkpoint");
+    assert!(b.report().contains("granted: 4 cores in use outside the table"), "{}", b.report());
+    observe(0);
+    assert!(rx.try_recv().is_err(), "work that ended leaves after two spans");
+    observe(0);
+    assert_eq!(rx.recv().unwrap(), 5, "the work outside ended: the waiting build takes the core");
+    finish(build);
+    b.release(first);
+    assert_eq!(b.state.lock().unwrap().running, 0);
+}
+
+/// A waiter whose job is raised while it waits (a strand job a person's work queued behind) waits
+/// from then on for a token of its new class, beside a JIT build that waits with no room: it takes
+/// the first token its new class may take, ahead of the build. The pool's own tests run on a budget
+/// of their own; this keeps the case the global budget has.
+#[test]
+fn a_waiter_raised_while_parked_takes_the_first_token_its_new_class_may_take() {
+    let b = budget(2);
+    let held = [b.admit(INTERACTIVE, APP, "held"), b.admit(INTERACTIVE, APP, "held")];
+    let above = b.admit(BACKGROUND, JIT, "tier-up");
+    let (tx, rx) = mpsc::channel();
+    let build = worker(&b, BACKGROUND, JIT, 1, &tx);
+    until(&b, |s| s.waiters.len() == 1);
+    let desired = Arc::new(AtomicU8::new(BACKGROUND));
+    let (go, done) = mpsc::channel::<()>();
+    let raised = {
+        let (b, desired, tx) = (b.clone(), desired.clone(), tx.clone());
+        thread::spawn(move || {
+            let permit = b.admit_following(&desired, APP, "raised");
+            tx.send(2).unwrap();
+            done.recv().unwrap();
+            b.release(permit);
+        })
+    };
+    until(&b, |s| s.waiters.len() == 2);
+    // as the pool's `Raised::raise`: the class, then the waiting thread woken
+    desired.fetch_min(INTERACTIVE, Relaxed);
+    raised.thread().unpark();
+    until(&b, |s| s.waiters.iter().any(|w| w.client == APP && w.class == INTERACTIVE));
+    assert!(rx.try_recv().is_err(), "every token Interactive may take is held");
+    b.release(held[0]);
+    let first = rx.recv_timeout(std::time::Duration::from_secs(30));
+    assert_eq!(first, Ok(2), "the raised waiter takes the token that came free, not the build");
+    finish((go, raised));
+    b.release(held[1]);
+    b.release(above);
+    assert_eq!(rx.recv().unwrap(), 1, "the build runs once the JIT's running job ends");
+    finish(build);
+    assert_eq!(b.state.lock().unwrap().running, 0);
+}
+
+#[test]
+fn a_thread_floor_preserves_priority_and_a_refused_raise_is_not_retried() {
+    thread::spawn(|| {
+        set_thread_floor(true);
+        assert!(apply_thread_class_with(INTERACTIVE, |_| Some(true)));
+        assert!(set_thread_class(BACKGROUND));
+        assert_eq!((thread_class(), applied_thread_class()), (Some(BACKGROUND), Some(INTERACTIVE)));
+        assert!(!set_thread_idle(), "a floored thread refuses idle work");
+        set_thread_floor(false);
+        assert!(apply_thread_class_with(BACKGROUND, |_| Some(true)));
+        assert_eq!(applied_thread_class(), Some(BACKGROUND), "a thread whose floor is cleared goes to Background again");
+    }).join().unwrap();
+    thread::spawn(|| {
+        let request = |class, nice| apply_thread_class_with(class, |_| try_nice(nice, || (false, true)));
+        assert!(!request(VISIBLE, 1));
+        assert_eq!((thread_class(), applied_thread_class()), (Some(VISIBLE), None));
+        for nice in [1, 0] {
+            assert_eq!(try_nice(nice, || panic!("retry at nice {nice}")), None);
+        }
+        assert_eq!(try_nice(8, || (true, false)), Some(true), "a reachable nice still applies");
+    }).join().unwrap();
 }
 
 /// set_thread_idle: the thread runs at SCHED_IDLE, Background work leaves it there (it reads as

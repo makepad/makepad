@@ -25,16 +25,15 @@ workspace.members = [
     "apps/photos",
     "apps/camera",
     "apps/clock",
+    "apps/robot",
     "apps/weather",
     "apps/translator",
-    "apps/fal",
     "apps/party",
     "apps/mail",
     "apps/notes",
     "apps/calendar",
     "apps/reminders",
     "apps/calculator",
-    "apps/synth",
     "libs/wayland_server",
     "libs/xkb_keymap",
     "libs/desk_link",
@@ -51,9 +50,11 @@ workspace.members = [
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",
     "libs/relax_api/phase",
+    "libs/thread_local",
     "libs/civil_time",
     "libs/wm_api",
     "libs/qr",
+    "libs/git_oid",
     "libs/webrtc",
     "libs/serial",
     "libs/usb",
@@ -68,6 +69,7 @@ workspace.members = [
     "apps/pdf",
     "apps/files",
     "libs/diskmap",
+    "libs/canvas",
     "libs/workspace",
     "libs/code_arch",
     "libs/code_language",
@@ -135,6 +137,7 @@ workspace.members = [
     "libs/text_mesh",
     "libs/typography",
     "libs/web_pack",
+    "libs/web_test",
     "libs/web_manifest",
     "libs/font_subset",
     "libs/pdf_write",
@@ -151,6 +154,7 @@ workspace.members = [
     # pictures decoded to RGBA with no platform (the app's and headless tools' one decoder)
     "libs/image_decode",
     "libs/strict_json",
+    "libs/stack_budget",
     "libs/cell_width",
     "libs/source_slice",
     "libs/change_report",
@@ -531,6 +535,7 @@ makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
 makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
 makepad-prof-view = { path = "libs/prof_view", version = "0.1.0" }
+makepad-thread-local = { path = "libs/thread_local", version = "1.0.0" }
 relax-api = { path = "libs/relax_api", version = "1.0.0" }
 relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
 makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }

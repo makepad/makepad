@@ -22,6 +22,12 @@
 # `define <name> <ERE>`: `@<name>@` in any of them stands for (<ERE>), so a tracked rule's shape
 # can take its private tokens from the untracked file. A rule that names one no file defines is off.
 # A real exception is a `<path or dir/> <rule> <reason>` line in tools/private_check/allow.
+# A commit message also breaks `fleet-name` with a fleet machine's name as a bare word ("then
+# avoided <name>" reached work, 11-24): the names of devhub's nodes.conf, the master's one list of
+# its machines (MAKEPAD_NODES_CONF names another file; missing means none), as it writes them. A
+# name that is a number is left to the node-number shapes (a bare number is a count), and the case
+# counts: a product's or a screw size's name written with a capital is none. Diffs and the tree
+# are not checked for them: a matrix's, a register's or a size's name is the same word in code.
 # local/ is never scanned. A hit prints `<file>:<line>: <rule>`, never the text, and a last line
 # `private: <N> hit(s): ...` sums them up. Exit 0 clean, 1 hits, 2 a usage or git error.
 set -u
@@ -33,6 +39,9 @@ rules="$here/rules"
 allow="$here/allow"
 private="${MAKEPAD_PRIVATE_PATTERNS:-${HOME:-}/.makepad/private_patterns}"
 [ -f "$private" ] || private=""
+# (devhub's home as devhub finds it: MAKEPAD_HOME, or ~/.makepad)
+fleet="${MAKEPAD_NODES_CONF:-${MAKEPAD_HOME:-${HOME:-}/.makepad}/devhub/nodes.conf}"
+[ -f "$fleet" ] || fleet=""
 mode="${1:-}"
 [ $# -gt 0 ] && shift
 
@@ -120,16 +129,32 @@ BEGIN {
         nal++; apath[nal] = w[1]; arule[nal] = w[2]
     }
     close(allow)
+    # for messages: the names of the fleet that hold a letter, as bare words, in their case
+    if (fleet != "") {
+        while ((getline line < fleet) > 0) {
+            sub(/\r$/, "", line); sub(/#.*$/, "", line); sub(/^[ \t]+/, "", line); sub(/[ \t].*$/, "", line)
+            if (line !~ /^[A-Za-z0-9._-]+$/ || line !~ /[A-Za-z]/) continue
+            name = ""
+            for (i = 1; i <= length(line); i++) name = name (substr(line, i, 1) == "." ? "[.]" : substr(line, i, 1))
+            names = (names == "") ? name : names "|" name
+        }
+        close(fleet)
+        if (names != "") names = "(^|[^A-Za-z0-9_])(" names ")([^A-Za-z0-9_]|$)"
+    }
 }
 {
     t = index($0, "\t"); path = substr($0, 1, t - 1); rest = substr($0, t + 1)
-    t = index(rest, "\t"); ln = substr(rest, 1, t - 1); text = tolower(substr(rest, t + 1))
+    t = index(rest, "\t"); ln = substr(rest, 1, t - 1); raw = substr(rest, t + 1); text = tolower(raw)
     split("", said)
     for (i = 1; i <= n; i++) {
         if (!live[i] || (rname[i] in said) || !match(text, rre[i]) || !also(i, text) || excused(i, text) || allowed(path, rname[i])) continue
         # a line breaks a rule once, whichever of its regexes match
         said[rname[i]] = 1
         printf "%s:%s: %s\n", path, ln, rname[i]
+        hits++
+    }
+    if (names != "" && match(raw, names) && !allowed(path, "fleet-name")) {
+        printf "%s:%s: fleet-name\n", path, ln
         hits++
     }
 }
@@ -140,7 +165,8 @@ END {
     }
 }'
 
-check() { awk -v rules="$rules" -v private="$private" -v allow="$allow" "$prog"; }
+# (with the fleet's list as its argument: a message's check)
+check() { awk -v rules="$rules" -v private="$private" -v allow="$allow" -v fleet="${1:-}" "$prog"; }
 
 # a unified diff on stdin -> one record per added line outside local/. A hunk is read by its
 # @@ counts, so a body line that looks like a header (`--- x` removed, `+++ x` added) stays a body line.
@@ -185,15 +211,15 @@ messages() {
 
 case "$mode" in
 diff) added | check ;;
-text) text "${1:-text}" | check ;;
-messages) messages | check ;;
+text) text "${1:-text}" | check "$fleet" ;;
+messages) messages | check "$fleet" ;;
 staged) git diff --cached -U0 --no-color --no-ext-diff --no-renames --diff-filter=d | added | check ;;
-msg) text "commit message" "#" < "$1" | check ;;
+msg) text "commit message" "#" < "$1" | check "$fleet" ;;
 commits)
     git log --no-color --no-ext-diff --no-renames --diff-merges=first-parent -U0 --format= -p "$@" \
         -- . ':(exclude)local/' | added | check
     s1=$?
-    git log --format='%x01message of %h%n%B' "$@" | messages | check
+    git log --format='%x01message of %h%n%B' "$@" | messages | check "$fleet"
     s2=$?
     [ $s1 -eq 0 ] && [ $s2 -eq 0 ]
     ;;

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-git-oid"
+version = "0.1.0"
+edition = "2021"
+description = "Git object ids: SHA-1 and blob/object hashing, std only"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

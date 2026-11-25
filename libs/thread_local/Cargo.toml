@@ -1,0 +1,9 @@
+[package]
+name = "makepad-thread-local"
+version = "1.0.0"
+edition = "2021"
+description = "Thread-local storage that shares a single pthread key on Android"
+license = "MIT OR Apache-2.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }

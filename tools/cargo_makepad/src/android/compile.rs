@@ -11,6 +11,7 @@ use std::{
     hash::{Hash, Hasher},
     io::Write,
     path::{Path, PathBuf},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -341,8 +342,24 @@ pub fn android_rustflags(
     prefer_dynamic: bool,
 ) -> String {
     let cfg_flag = format!("--cfg android_target=\"{}\"", android_target.to_str());
-    compose_android_rustflags(existing, &cfg_flag, prefer_dynamic)
+    match android_target {
+        // armeabi-v7a: every device of the ABI has NEON, and the NDK's C and C++ builds use it by
+        // default, but rustc's armv7-linux-androideabi target turns it off. It goes in front of the
+        // caller's flags, so a caller's own `-C target-feature=-neon` comes later and wins. (rustc
+        // may note that `neon` is not a stable target feature on 32-bit Arm; the flag applies.)
+        AndroidTarget::armv7 => {
+            let existing = existing.map(str::trim).filter(|flags| !flags.is_empty());
+            let with_neon = match existing {
+                Some(flags) => format!("{ARMV7_NEON_FLAG} {flags}"),
+                None => ARMV7_NEON_FLAG.to_string(),
+            };
+            compose_android_rustflags(Some(&with_neon), &cfg_flag, prefer_dynamic)
+        }
+        _ => compose_android_rustflags(existing, &cfg_flag, prefer_dynamic),
+    }
 }
+
+const ARMV7_NEON_FLAG: &str = "-C target-feature=+neon";
 
 fn main_java(url: &str, host: bool) -> String {
     // Restored activities must load the HAL before super.onCreate delivers native callbacks.
@@ -3062,6 +3079,8 @@ pub struct HostOpts {
     pub privileged: bool,
     /// font files beyond the set that the packed apps declare in their `app_main!` (`--font-asset=`)
     pub font_assets: Vec<String>,
+    /// Start the embedded devhub node (on by default).
+    pub devhub: bool,
     /// the embedded devhub node's machine name (`--devhub-name=`; default: the device's LAN octet)
     pub devhub_name: Option<String>,
     /// a debuggable APK (`--debuggable`: `adb shell run-as` reads the app's files, e.g. session logs)
@@ -3075,6 +3094,8 @@ pub struct HostOpts {
     /// keys stores by codegen identity, arch and atomics class: a seed of another build or CPU
     /// class is ignored)
     pub cache_seed: Option<PathBuf>,
+    /// The loader to run for `pack-src` when supplied by the caller.
+    pub loader: Option<PathBuf>,
 }
 
 /// `rev=<repo> <sha>` for the host conf: each repo's HEAD, the base the device's devhub store
@@ -3096,6 +3117,150 @@ fn host_store_revs(cwd: &Path) -> Vec<String> {
         out.push(format!("rev={repo} {sha}\n"));
     }
     out
+}
+
+/// The run host's lowest Android API: Relax keeps each thread's block pointer in bionic's
+/// TLS_SLOT_APP (libs/relax/compiler/src/os/tls.rs), which is the app's from API 29; below it
+/// that slot held bionic's errno pointer.
+const HOST_MIN_SDK: usize = 29;
+
+/// The run host's minSdk: the app's override when it has one, else `HOST_MIN_SDK`; an override
+/// below `HOST_MIN_SDK` is an error.
+fn host_min_sdk(min_sdk_version_override: Option<usize>) -> Result<usize, String> {
+    let min_sdk = min_sdk_version_override.unwrap_or(HOST_MIN_SDK);
+    if min_sdk < HOST_MIN_SDK {
+        return Err(format!("the run host needs Android API {HOST_MIN_SDK} or later (Relax uses bionic's TLS_SLOT_APP), but min_sdk_version is {min_sdk}"));
+    }
+    Ok(min_sdk)
+}
+
+/// The crate that declares a thread-local storage static, from its mangled symbol name.
+fn thread_local_owner(symbol: &str) -> Result<&str, String> {
+    fn skip_disambiguator(path: &str) -> Result<&str, String> {
+        let Some(rest) = path.strip_prefix('s') else { return Ok(path) };
+        let (digits, tail) = rest.split_once('_').ok_or("unterminated v0 disambiguator")?;
+        if !digits.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err("invalid v0 disambiguator".into());
+        }
+        Ok(tail)
+    }
+
+    let (root, v0) = if let Some(path) = symbol.strip_prefix("_R") {
+        let mut path = path.trim_start_matches(|c: char| c.is_ascii_digit());
+        loop {
+            path = match path.as_bytes() {
+                [b'N', ns, ..] if ns.is_ascii_alphabetic() => &path[2..],
+                [b'M' | b'X', ..] => skip_disambiguator(&path[1..])?,
+                [b'C', ..] => break (skip_disambiguator(&path[1..])?, true),
+                _ => return Err("missing or unsupported v0 crate path".into()),
+            };
+        }
+    } else if let Some(root) = symbol.strip_prefix("_ZN") {
+        (root, false)
+    } else {
+        return Err("unknown Rust symbol mangling".into());
+    };
+
+    let digits = root.bytes().take_while(u8::is_ascii_digit).count();
+    let (len, name) = root.split_at(digits);
+    let len: usize = len.parse().map_err(|_| "invalid crate name length")?;
+    let name = if v0 { name.strip_prefix('_').unwrap_or(name) } else { name };
+    let owner = name.get(..len).ok_or("truncated crate name")?;
+    // legacy writes an impl's segment as `_$LT$..$GT$`, which names no crate
+    if owner.is_empty() || owner.contains('$') {
+        return Err("missing or unattributable crate name".into());
+    }
+    if v0 && !owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err("invalid v0 crate name".into());
+    }
+    Ok(owner)
+}
+
+/// The key-based thread-local statics in a linked Android library: count std's, fail on any other.
+fn host_key_statics_check(elf: &[u8]) -> Result<usize, String> {
+    fn field<const N: usize>(data: &[u8], offset: usize) -> Result<[u8; N], String> {
+        data.get(offset..)
+            .and_then(|tail| tail.first_chunk())
+            .copied()
+            .ok_or_else(|| "truncated ELF field".into())
+    }
+
+    fn region(elf: &[u8], offset: u64, size: u64) -> Result<&[u8], String> {
+        let offset = usize::try_from(offset).map_err(|_| "ELF offset too large")?;
+        let size = usize::try_from(size).map_err(|_| "ELF size too large")?;
+        elf.get(offset..).and_then(|tail| tail.get(..size))
+            .ok_or_else(|| "ELF section outside the library".into())
+    }
+
+    fn section_data<'a>(elf: &'a [u8], header: &[u8]) -> Result<&'a [u8], String> {
+        let offset = u64::from_le_bytes(field(header, 0x18)?);
+        let size = u64::from_le_bytes(field(header, 0x20)?);
+        region(elf, offset, size)
+    }
+
+    if !elf.starts_with(b"\x7fELF\x02\x01") {
+        return Err("expected a little-endian ELF64 library".into());
+    }
+    const NO_SYMTAB: &str = "no SHT_SYMTAB (stripped? the guard needs the unstripped library)";
+    let section_offset = u64::from_le_bytes(field(elf, 0x28)?);
+    let stride = u16::from_le_bytes(field(elf, 0x3a)?);
+    let count = u16::from_le_bytes(field(elf, 0x3c)?);
+    if count == 0 {
+        return Err(NO_SYMTAB.into());
+    }
+    if stride < 64 {
+        return Err("short ELF64 section header".into());
+    }
+    let headers = region(elf, section_offset, u64::from(stride) * u64::from(count))?;
+    let mut sections = headers.chunks_exact(usize::from(stride));
+    let mut symtab = None;
+    for header in sections.clone() {
+        if u32::from_le_bytes(field(header, 4)?) == 2 {
+            if symtab.is_some() {
+                return Err("multiple SHT_SYMTAB sections".into());
+            }
+            symtab = Some(header);
+        }
+    }
+    let symtab = symtab.ok_or(NO_SYMTAB)?;
+    let link = u32::from_le_bytes(field(symtab, 0x28)?) as usize;
+    let strtab = sections.nth(link).ok_or("invalid SHT_SYMTAB string table index")?;
+    if u32::from_le_bytes(field(strtab, 4)?) != 3 {
+        return Err("SHT_SYMTAB link does not name a string table".into());
+    }
+    let strings = section_data(elf, strtab)?;
+    let symbols = section_data(elf, symtab)?;
+    if u64::from_le_bytes(field(symtab, 0x38)?) != 24 || symbols.len() % 24 != 0 {
+        return Err("invalid ELF64 symbol table entry size".into());
+    }
+
+    const MARKER: &[u8] = b"RUST_STD_INTERNAL_VAL";
+    let mut std_count = 0;
+    let mut errors = Vec::new();
+    for entry in symbols.chunks_exact(24) {
+        let offset = u32::from_le_bytes(field(entry, 0)?) as usize;
+        let tail = strings.get(offset..).ok_or("symbol name outside the string table")?;
+        let name = std::ffi::CStr::from_bytes_until_nul(tail).map_err(|_| "unterminated symbol name")?;
+        if !name.to_bytes().windows(MARKER.len()).any(|part| part == MARKER) {
+            continue;
+        }
+        let Ok(symbol) = name.to_str() else {
+            errors.push(format!("invalid UTF-8 in symbol {name:?}"));
+            continue;
+        };
+        match thread_local_owner(symbol) {
+            Ok("std" | "proc_macro" | "test") => std_count += 1,
+            Ok(owner) => errors.push(format!("{owner}: {symbol}")),
+            Err(e) => errors.push(format!("{symbol}: {e}")),
+        }
+    }
+    if std_count == 0 {
+        errors.push("no std key-based statics: std always links some; zero means the check cannot see them".into());
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    Ok(std_count)
 }
 
 /// The name of the packed source archive in the APK's assets (jni.rs ARCHIVE_ASSET).
@@ -3173,6 +3338,21 @@ fn add_host_payload(unaligned: &Path, out: &Path, archive: &Path, conf: &str, se
     Ok(())
 }
 
+fn host_pack_command(loader: Option<&Path>, archive: &Path, apps: &[HostApp]) -> Command {
+    let mut cmd = if let Some(loader) = loader {
+        Command::new(loader)
+    } else {
+        let mut cargo = Command::new("cargo");
+        cargo.args(["run", "--release", "--offline", "-p", "makepad-run", "--bin", "makepad", "--"]);
+        cargo
+    };
+    cmd.args(["pack-src", "--target", "aarch64-linux-android"]).arg(archive);
+    for app in apps {
+        cmd.arg(&app.package).args(&app.cargo_flags);
+    }
+    cmd
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_host(
     sdk_dir: &Path,
@@ -3202,10 +3382,9 @@ pub fn build_host(
         min_sdk_version,
         urls,
     )?;
+    // the manifest's minSdkVersion and the NDK clang both read `urls.sdk_version`
     let mut effective_urls = *urls;
-    if let Some(min) = resolved.min_sdk_version_override {
-        effective_urls.sdk_version = min;
-    }
+    effective_urls.sdk_version = host_min_sdk(resolved.min_sdk_version_override)?;
     let urls = &effective_urls;
     let cwd = std::env::current_dir().unwrap();
     let target_dir = cargo_target_dir(&cwd);
@@ -3215,6 +3394,7 @@ pub fn build_host(
     let abi = android_target.abi_identifier();
 
     // 1. libmakepad.so links the HAL shell and Vulkan device; the packed app uses its HAL ops.
+    println!("[cargo-makepad] stage compile");
     let env = android_cargo_env(sdk_dir, host_os, android_target, variant, urls, false)?;
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     shell_env(
@@ -3223,26 +3403,36 @@ pub fn build_host(
         "rustup",
         &["run", "stable", "cargo", "rustc", "--release", "--lib", "--crate-type=cdylib", "-p", "makepad-run-android", &target_opt, &target_dir_arg],
     )?;
+    let release_dir = target_dir.join(format!("{toolchain}/release"));
+    let std_count = {
+        let library = release_dir.join("libmakepad.so");
+        let elf = fs::read(&library).map_err(|e| format!("{}: {e}", library.display()))?;
+        host_key_statics_check(&elf).map_err(|e| format!(
+            "libmakepad.so takes pthread keys for thread-locals: {e}\nThe crate must use makepad_thread_local::thread_local! (libs/thread_local)."
+        ))?
+    };
+    println!("[cargo-makepad] host thread-locals: none key-based outside std (std's own: {std_count})");
     shell_env(
         &env_refs,
         &cwd,
         "rustup",
         &["run", "stable", "cargo", "build", "--release", "--bin", "makepad_exe", "-p", "makepad-run-android-exe", &target_opt, &target_dir_arg],
     )?;
-    let release_dir = target_dir.join(format!("{toolchain}/release"));
 
     // 2. the app's source as a packed store for the phone's target
+    println!("[cargo-makepad] stage pack {}", host.apps.len());
     let archive = target_dir.join("makepad-android-apk").join("relax-src.pack");
     fs::create_dir_all(archive.parent().unwrap()).map_err(|e| format!("{}: {e}", archive.display()))?;
     let _ = fs::remove_file(&archive);
-    let mut pack_args = vec!["run", "--release", "--offline", "-p", "makepad-run", "--", "pack-src", "--target", "aarch64-linux-android", archive.to_str().unwrap()];
-    for app in &host.apps {
-        pack_args.push(&app.package);
-        pack_args.extend(app.cargo_flags.iter().map(String::as_str));
+    let mut pack = host_pack_command(host.loader.as_deref(), &archive, &host.apps);
+    let status = pack.current_dir(&cwd).status()
+        .map_err(|e| format!("could not start {:?} for pack-src: {e}", pack.get_program()))?;
+    if !status.success() {
+        return Err(format!("{:?} pack-src failed: {status}", pack.get_program()));
     }
-    shell_env(&[], &cwd, "cargo", &pack_args)?;
 
     // 3. the APK of the host: RunActivity first, MakepadApp behind it
+    println!("[cargo-makepad] stage apk");
     let font_manifest = host_font_manifest(&host.font_set, &host.font_assets)?;
     let custom_template = get_crate_dir(build_crate)?.join("resources/android/AndroidManifest.xml.template");
     if custom_template.is_file() {
@@ -3322,6 +3512,9 @@ pub fn build_host(
     if host.privileged {
         conf.push_str("privileged=1\n");
     }
+    if !host.devhub {
+        conf.push_str("devhub=off\n");
+    }
     if let Some(name) = &host.devhub_name {
         conf.push_str(&format!("devhub_name={name}\n"));
     }
@@ -3339,6 +3532,7 @@ pub fn build_host(
     sign_apk_debug(sdk_dir, urls, &build_paths.dst_apk)?;
     let apk_size = fs::metadata(&build_paths.dst_apk).map(|m| m.len()).unwrap_or(0);
     println!("Host APK built: {} ({:.1} MB)", build_paths.dst_apk.display(), apk_size as f64 / 1e6);
+    println!("[cargo-makepad] built: {}", build_paths.dst_apk.display());
     Ok(BuildResult {
         dst_apk: build_paths.dst_apk,
         java_url: resolved.java_url,
@@ -3716,8 +3910,9 @@ pub fn adb_tcp(
 #[cfg(test)]
 mod tests {
     use super::{
-        compose_android_rustflags, parse_adb_devices, parse_ip_addr_show, parse_ip_route,
-        stage_makepad_assets_subdir, with_app_meta_data,
+        android_rustflags, compose_android_rustflags, host_key_statics_check, host_min_sdk,
+        parse_adb_devices, parse_ip_addr_show, parse_ip_route, stage_makepad_assets_subdir,
+        thread_local_owner, with_app_meta_data, AndroidTarget,
     };
     use crate::font_assets::{FontAssetManifest, FontPackage};
     use std::{fs, sync::atomic::{AtomicU64, Ordering}};
@@ -3733,6 +3928,36 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn host_pack_command_preserves_app_flags_with_either_loader() {
+        use crate::android::parse_host_args;
+        use std::path::Path;
+
+        let mut args = ["--app", "first-app", "--features", "one two", "--app=second-app", "--no-default-features"]
+            .map(String::from).to_vec();
+        let archive = Path::new("build output/relax-src.pack");
+        let host = parse_host_args(&args).unwrap();
+        assert!(host.devhub);
+        assert!(host.loader.is_none());
+        let cargo = super::host_pack_command(host.loader.as_deref(), archive, &host.apps);
+
+        args.extend(["--devhub=off", "--loader=local tools/makepad"].map(String::from));
+        let host = parse_host_args(&args).unwrap();
+        assert!(!host.devhub);
+        let direct = super::host_pack_command(host.loader.as_deref(), archive, &host.apps);
+        assert_eq!(direct.get_program(), "local tools/makepad");
+        let pack_args: Vec<_> = direct.get_args().collect();
+        assert_eq!(pack_args, [
+            "pack-src", "--target", "aarch64-linux-android", "build output/relax-src.pack",
+            "first-app", "--features", "one two", "second-app", "--no-default-features",
+        ]);
+        assert_eq!(cargo.get_program(), "cargo");
+        let mut cargo_args = cargo.get_args();
+        assert_eq!(cargo_args.by_ref().take(8).collect::<Vec<_>>(),
+            ["run", "--release", "--offline", "-p", "makepad-run", "--bin", "makepad", "--"]);
+        assert!(cargo_args.eq(pack_args));
     }
 
     #[test]
@@ -3816,6 +4041,118 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
     }
 
     #[test]
+    fn host_min_sdk_is_29_unless_raised() {
+        assert_eq!(host_min_sdk(None), Ok(29), "the host's default floor is API 29, not the general 26");
+        assert_eq!(host_min_sdk(Some(33)), Ok(33), "an app may raise the host's floor");
+        assert!(host_min_sdk(Some(26)).is_err(), "below API 29 TLS_SLOT_APP is bionic's errno slot");
+    }
+
+    const HOST_KEY_STATICS: [(&str, &str); 5] = [
+        ("_RNvNCNvNtCslnxfYGHF6KE_14relax_compiler3jit11PLAIN_LOWER023___RUST_STD_INTERNAL_VAL", "relax_compiler"),
+        ("_RNvNCNvNtNtCsbX3m80QBB6p_3std9panicking11panic_count17LOCAL_PANIC_COUNT023___RUST_STD_INTERNAL_VAL", "std"),
+        ("_RNvNCNvNtNtCs6iax8pVGwaq_10relax_base5query9dep_graph7CONTEXT023___RUST_STD_INTERNAL_VAL", "relax_base"),
+        ("_RNvNCNvNvMNtNtCsbX3m80QBB6p_3std4hash6randomNtB8_11RandomState3new4KEYS023___RUST_STD_INTERNAL_VAL", "std"),
+        ("_RNvNCNvCs4dv5PRju9nM_15relax_api_phase5PHASE023___RUST_STD_INTERNAL_VAL", "relax_api_phase"),
+    ];
+
+    #[test]
+    fn thread_local_owner_reads_v0_and_legacy() {
+        for (symbol, owner) in HOST_KEY_STATICS {
+            assert_eq!(thread_local_owner(symbol), Ok(owner), "{symbol}");
+        }
+        let legacy_suffix = "28_$u7b$$u7b$closure$u7d$$u7d$23__RUST_STD_INTERNAL_VAL17h0123456789abcdefE";
+        for (path, owner) in [
+            ("3std9panicking11panic_count17LOCAL_PANIC_COUNT", "std"),
+            ("14relax_compiler3jit11PLAIN_LOWER", "relax_compiler"),
+        ] {
+            let symbol = format!("_ZN{path}{legacy_suffix}");
+            assert_eq!(thread_local_owner(&symbol), Ok(owner), "{symbol}");
+        }
+        assert_eq!(thread_local_owner("_R0Xs7_NtC4__app3jitlC3std"), Ok("_app"));
+        for symbol in [
+            "_ZN$LT$...", "_ZN7$LT$foo", "_ZN10_$LT$foo$GT$4with", &HOST_KEY_STATICS[0].0[..20],
+            "_RYlC3std", "_RIC3std", "_RB_", "foo",
+        ] {
+            assert!(thread_local_owner(symbol).is_err(), "{symbol}");
+        }
+    }
+
+    fn key_statics_elf(names: &[&str]) -> Vec<u8> {
+        let symbols_start = 64 + 3 * 64;
+        let symbols_size = (names.len() + 1) * 24;
+        let strings_start = symbols_start + symbols_size;
+        let mut elf = vec![0; strings_start];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[0x10..0x12].copy_from_slice(&3u16.to_le_bytes()); // ET_DYN
+        elf[0x12..0x14].copy_from_slice(&183u16.to_le_bytes()); // AArch64
+        elf[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+        elf[0x28..0x30].copy_from_slice(&64u64.to_le_bytes());
+        elf[0x34..0x36].copy_from_slice(&64u16.to_le_bytes());
+        elf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        elf[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes());
+
+        let symtab = &mut elf[128..192];
+        symtab[4..8].copy_from_slice(&2u32.to_le_bytes());
+        symtab[0x18..0x20].copy_from_slice(&(symbols_start as u64).to_le_bytes());
+        symtab[0x20..0x28].copy_from_slice(&(symbols_size as u64).to_le_bytes());
+        symtab[0x28..0x2c].copy_from_slice(&2u32.to_le_bytes());
+        symtab[0x2c..0x30].copy_from_slice(&(1 + names.len() as u32).to_le_bytes());
+        symtab[0x30..0x38].copy_from_slice(&8u64.to_le_bytes());
+        symtab[0x38..0x40].copy_from_slice(&24u64.to_le_bytes());
+
+        elf.push(0); // the null symbol's empty string
+        for (i, name) in names.iter().enumerate() {
+            let offset = (elf.len() - strings_start) as u32;
+            let entry = &mut elf[symbols_start + (i + 1) * 24..][..24];
+            entry[..4].copy_from_slice(&offset.to_le_bytes());
+            entry[4] = 1; // STB_LOCAL, STT_OBJECT
+            entry[6..8].copy_from_slice(&0xfff1u16.to_le_bytes()); // SHN_ABS
+            elf.extend_from_slice(name.as_bytes());
+            elf.push(0);
+        }
+        let strings_size = elf.len() - strings_start;
+        let strtab = &mut elf[192..256];
+        strtab[4..8].copy_from_slice(&3u32.to_le_bytes());
+        strtab[0x18..0x20].copy_from_slice(&(strings_start as u64).to_le_bytes());
+        strtab[0x20..0x28].copy_from_slice(&(strings_size as u64).to_le_bytes());
+        strtab[0x30..0x38].copy_from_slice(&1u64.to_le_bytes());
+        elf
+    }
+
+    #[test]
+    fn host_key_statics_check_is_zero_or_fail() {
+        let std_only = key_statics_elf(&[
+            HOST_KEY_STATICS[1].0, HOST_KEY_STATICS[3].0, "ordinary_symbol",
+            "_RNvC10proc_macro23___RUST_STD_INTERNAL_VAL", "_RNvC4test23___RUST_STD_INTERNAL_VAL",
+        ]);
+        assert_eq!(host_key_statics_check(&std_only), Ok(4));
+        let mixed = key_statics_elf(&HOST_KEY_STATICS.map(|(symbol, _)| symbol));
+        let err = host_key_statics_check(&mixed).unwrap_err();
+        for (symbol, owner) in HOST_KEY_STATICS {
+            if owner != "std" {
+                assert!(err.contains(&format!("{owner}: {symbol}")), "{err}");
+            }
+        }
+
+        let mut stripped = std_only.clone();
+        stripped[128 + 4..128 + 8].copy_from_slice(&11u32.to_le_bytes()); // only SHT_DYNSYM
+        assert!(host_key_statics_check(&stripped).unwrap_err().contains("stripped?"));
+        let blind = key_statics_elf(&["ordinary_symbol"]);
+        assert!(host_key_statics_check(&blind).unwrap_err().contains("std always links some"));
+        let unknown = "unknown_RUST_STD_INTERNAL_VAL";
+        let unattributable = key_statics_elf(&[HOST_KEY_STATICS[1].0, unknown]);
+        assert!(host_key_statics_check(&unattributable).unwrap_err().contains(unknown));
+
+        let mut bad_link = std_only.clone();
+        bad_link[128 + 0x28..128 + 0x2c].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(host_key_statics_check(&bad_link).is_err(), "invalid string table index");
+        assert!(host_key_statics_check(&std_only[..std_only.len() - 1]).is_err(), "truncated string table");
+        let mut bad_offset = std_only;
+        bad_offset[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(host_key_statics_check(&bad_offset).is_err(), "invalid section table offset");
+    }
+
+    #[test]
     fn compose_android_rustflags_adds_prefer_dynamic() {
         assert_eq!(
             compose_android_rustflags(None, "--cfg android_target=\"aarch64\"", true),
@@ -3853,6 +4190,37 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
             ),
             "-C debuginfo=1 --cfg android_target=\"aarch64\" -Z allow-features="
         );
+    }
+
+    #[test]
+    fn android_rustflags_enable_neon_on_armv7_only_and_ahead_of_the_callers_flags() {
+        let cfg = |arch: &str| format!("--cfg android_target=\"{arch}\" -Z allow-features=");
+        // armv7: NEON first, so a caller's `-neon` later in the line wins
+        assert_eq!(
+            android_rustflags(None, &AndroidTarget::armv7, false),
+            format!("-C target-feature=+neon {}", cfg("armv7")),
+            "armv7 without caller flags"
+        );
+        assert_eq!(
+            android_rustflags(Some("  -C target-feature=-neon -C debuginfo=1 "), &AndroidTarget::armv7, true),
+            format!("-C target-feature=+neon -C target-feature=-neon -C debuginfo=1 -C prefer-dynamic {}", cfg("armv7")),
+            "armv7 keeps the caller's flags after its own"
+        );
+        // the other targets pass the caller's flags exactly as before
+        for target in [AndroidTarget::aarch64, AndroidTarget::x86_64, AndroidTarget::i686] {
+            let arch = target.to_str();
+            let cfg_flag = format!("--cfg android_target=\"{arch}\"");
+            for existing in [None, Some(""), Some("-C debuginfo=1")] {
+                for prefer_dynamic in [false, true] {
+                    assert_eq!(
+                        android_rustflags(existing, &target, prefer_dynamic),
+                        compose_android_rustflags(existing, &cfg_flag, prefer_dynamic),
+                        "{arch} with {existing:?}, prefer_dynamic {prefer_dynamic}"
+                    );
+                }
+            }
+            assert!(!android_rustflags(None, &target, false).contains("neon"), "{arch} gets no NEON flag");
+        }
     }
 
     #[test]

@@ -1,0 +1,20 @@
+# makepad-web-test -- JavaScript test pages in our own Chromium (libs/cef), no Node.js.
+#
+# A `harness = false` test target calls `makepad_web_test::main(root, dirs)`: every
+# `*.test.mjs` in those folders runs as a page in an off-screen CEF browser, served from the
+# package's folder on a loopback port, and reports each test back. The test files import
+# `test`, `assert` and `read_text` from "makepad-web-test" (src/harness.js). The pages run on
+# Linux (CEF elsewhere needs an app's HAL main loop; there the target holds no tests); they need
+# a CEF distribution (MAKEPAD_CEF_DIST_DIR or the checkout's local/cef-prebuilt) and fail without one.
+
+[package]
+name = "makepad-web-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+makepad-cef = { path = "../cef" }
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
+makepad-micro-serde = { path = "../micro_serde", version = "1.0.0" }

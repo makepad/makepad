@@ -9,11 +9,46 @@ person chooses; a report can also be a suggestion of changes nobody made
 yet. The person reads the report before it is sent; nothing leaves their
 machine without that.
 
-This document is the format and the rules. `AGENTS.md` ("Sending your
-changes to Makepad") tells an agent how to write one; `libs/change_report`
-checks one exactly as described here. The JSON schema of `report.json` is
+This document is the format, the rules and the steps (Writing one, below).
+`AGENTS.md` ("Sending your changes to Makepad") points an agent here;
+`libs/change_report` checks one exactly as described here. The JSON schema of `report.json` is
 [change-report.schema.json](change-report.schema.json); a complete example
 is [change-report-example/report.json](change-report-example/report.json).
+
+## Writing one
+
+When the person asks you to "send what I changed", "share my changes with
+Makepad" or similar:
+
+1. Collect the changes. In a Runner installation an app's edits are the files
+   in `runner/edits/<app>/` of its folder, and `runner/releases.tsv` names the
+   release its source came from. With git available, `git status` and
+   `git diff HEAD` in each repository give the same. Skip build output and
+   anything unrelated to the app.
+2. Write the list as concepts, not code: per change a one-line title, a
+   kind (fix, feature, tweak, ui, performance, refactor, docs, other), what
+   is different for someone using the app and why, and the screens or
+   components it touches. Add a tiny snippet only when a change cannot be
+   told without it. Changes nobody made yet (ideas) are a suggestion:
+   `"suggestion": true`, no diff.
+3. Anonymise everything that will be sent: replace names and usernames,
+   email addresses, host names and private IP addresses, absolute and home
+   folder paths (use repo-relative paths), keys, tokens and passwords,
+   private service URLs and personal data in strings or comments with
+   `[name]`, `[email]`, `[host]`, `[path]`, `[secret]`, `[private-url]` or
+   `[personal]`, and count what you took out, by kind.
+4. Write `report.json` (schema: `docs/agents/change-report.schema.json`),
+   `REPORT.md` (the same list for people) and, when code changed, a trimmed
+   `changes.diff`. In the Runner they go in `local/change-report/` of the
+   folder you edit (its agent context names it); elsewhere in `<app>-report/`,
+   outside the app's source. Run `makepad change-report check <folder>` and
+   fix what it names until it passes.
+5. Show the person the list and what was taken out, and take their edits.
+6. Sending is the person's, never yours: in the Runner they open Send my
+   changes to Makepad in the app's panel, choose there whether their code
+   goes along (default: no) and press Send; elsewhere they run
+   `makepad change-report send <folder>` at a terminal themselves. Never
+   send a report, and never answer its prompts.
 
 ## The zip
 

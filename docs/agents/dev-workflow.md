@@ -43,6 +43,12 @@ JIT. The numbers are one day of all lanes (medians / p90):
     too), and the timed run starts once the work there ends, live sessions parked;
   - the user's app box: a person's display. Lanes show apps there and never take it;
   - device: phones and headsets, through their own commands.
+- **A box's CEF**: a Linux box's checkout keeps a CEF distribution in `local/cef-prebuilt`
+  (`makepad-cef-fetch` lays it out, with its `current-<platform>.txt` pointer). A lease's tree
+  carries no `local/`, so the hub hands it to every lease and live app as
+  `MAKEPAD_CEF_DIST_DIR`; the browser apps and the web backend's JavaScript tests
+  (`makepad-platform --test web_js`) run on it. It belongs to the box like its toolchain, not
+  to a lane: a cleanup leaves it, and a checkout replaced by hand takes its `local/` along.
 - **Self-update**:
   - the master builds work's tip (one build at a time; landings during a build go into the
     next) and execs into each build as it ends: no uptime or settle holds it (that gate went
@@ -62,8 +68,9 @@ JIT. The numbers are one day of all lanes (medians / p90):
   `rc-<name>` from work, apps/commercial on `rc-<name>` from main) and the devhub record.
   `--no-commercial` for a makepad-only lane; `--with <repo>` (repeatable) adds a half in
   that nested repository, `apps/<repo>` on `rc-<name>` from the branch its checkout is on (Fab:
-  `--with apps`), merged, landed and cleaned up with the others. Never `git worktree add`;
-  `devhub lane adopt` registers one that exists.
+  `--with apps`), merged, landed and cleaned up with the others; `devhub lane add <name> --with
+  <repo>` adds such a half to a live lane. Never `git worktree add`; `devhub lane adopt`
+  registers one that exists.
 - Lane notes and scratch state go in `local/agent_state/<lane>/`, never in tracked files.
 - The merge bot keeps every lane merged with the tip, in the lane's own worktree. It waits
   while a job or a live session of the lane runs there, and while a `timed` lease of the
@@ -93,9 +100,14 @@ buckets ask for one, and the queue decides where and when.
     `devhub show <app> --on <node>`, with `--native` for the compiled app: the
     node's WM opens it, with no lease and no test instance, and its tile shows the build
     (`devhub show stop <app> --on <node>` closes it: left open, it holds that box's WM restart);
-  - timed: the box to itself, for timings;
+  - timed: the box to itself, for timings. A live session for timings is
+    `devhub live start <app> --timed`: it waits for a drained box and holds it
+    while it lives, and only other timed work parks it;
   - gate: a landing gate;
-  - gpu, long, inspect and ci;
+  - gpu: on Linux a GPU slot; on a Mac a GPU timing, which drains its box like timed.
+    Pictures and counters that read no timing take `gpu --untimed`: on a Mac a test that
+    shares its box;
+  - long, inspect and ci;
   - a live session holds a small lease on a hot box when one is free.
 - **Cost**: `--cost small|medium|large` or `--est-min N`. Small work goes to the hot boxes.
   Estimates come from the run class's measured times; devhub corrects a bad guess.
@@ -175,17 +187,24 @@ buckets ask for one, and the queue decides where and when.
   - `live wait <id> patched|verdict|settled|frame` waits for one of those; neither `frame` (the
     first frame drawn) nor `settled` (the JIT idle) says the app has loaded its document (a
     `--demo`) or registered its services yet, so check that the first call's answer has them;
-    `live act <id> <inspect cmd>` drives the app. A call goes on through a restart of the master or its
+    `live act <id> <inspect cmd>` drives the app; the frames of a `grab`, `gq` or `gseq` come back
+    to `local/screencap/<lane>/`, named as a look's, and the answer says where. A call goes on through a restart of the master or its
     box's hub when asking again does nothing twice (it reads, or only waited for room). A cut
     `session relaunch` is sent again only when devhub sees it did not apply; any other cut
     call says so, isn't sent twice and exits 75, and the session still runs;
   - `live release <id>` ends it. Idle sessions end on their own (apps 10 min, tests 30 min);
     `live again <id>` restarts one as it was.
+  - A session that holds three times its class's measured peak RAM has its JITs' `mem timeline`
+    and `memory` recorded once while it runs, in the master's `lease-logs/<lease>.memory.log`;
+    the warning to its lane names the file.
 - **Tests**: `devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]` keeps one warm
   process per lane, package, target and args.
   - Only the affected tests rerun.
   - The verdict says save → shipped → patched → tests.
   - The same command without `--live` is the lane's pre-land check: one JIT run.
+  - A session keeps the JIT binary it started with: an edit to the JIT's own crates (relax-*,
+    the HAL, the platform) reaches the runtime the tests run under only in a new session
+    (`live release <id>`, then run again).
 - **restart_waiting**: some edits cannot patch a running process: a type's layout or the
   dependency graph. The warm test process restarts itself. A live app keeps the old code, its
   status says `restart_waiting` and the verdict says "restart the app". Relaunch it with
@@ -225,6 +244,9 @@ buckets ask for one, and the queue decides where and when.
     merge's parents. A merge whose files outside its conflicts differ from that result is
     refused: a merge against a stale tip reverts other landings, and so does an amend onto
     a merge. A merge resolves its conflicts only. Commit any other change on its own.
+- Mark each line of a measurement hook or other code that must never land with
+  `scratch, never lands` (`// MEASURE (scratch, never lands): ...`): the train refuses a
+  landing that adds such a line in any half.
 - **Land = merge only.** Nothing builds or tests before the merge; checks run after it in
   buckets, and none of them blocks the train.
   - fast: right after each landing, pipelined: the checks and presents of the packages the
@@ -237,6 +259,15 @@ buckets ask for one, and the queue decides where and when.
     Mac's small background lease under its JIT. A package declares them in its Cargo.toml:
     `[package.metadata.makepad.macos-tests]`, `"test:<name>" = "<why>"` (or `lib`). The Linux
     buckets build such a target empty, or never reach what it guards;
+  - windows and windows-tests: after a quiet minute (at most 10 min), on the Windows box's
+    background lease, under plain cargo rather than the JIT (a Windows run is argv only, and
+    the lease has no path to the box's JIT or devhub). windows checks the packages whose
+    platform-gaps have a `windows` table; windows-tests runs the test targets a package
+    declares in `[package.metadata.makepad.windows-tests]`: `lib = "<why>"` (or
+    `"test:<name>"`), or a table with `why`, `known` (who fixes its reds) and `skip` (those
+    reds by their exact names). A red target runs once more, its failing tests alone, before
+    anyone is named. The skipped reds then run alone, judging nothing: one that passes is
+    said, and main hears it once, to take it off the list;
   - ci: nightly. full: every package's tests, no proofs reused, daily before the push
     review.
 - **Reds**:
@@ -287,8 +318,8 @@ buckets ask for one, and the queue decides where and when.
   - `devhub stream`: one line per event;
   - `devhub inbox`: what needs a look;
   - `devhub watch <kinds> --once`: block on one event;
-  - the devhub panel (`makepad run makepad-app-devhub-panel`): every box's leases and load
-    on one time axis, the queue, the needs and the landing strip.
+  - the devhub panel (Open panel in devhub's menu-bar item): every box's leases and load on
+    one time axis, the queue, the needs and the landing strip.
 - The health readout main's check-in reads, section by section:
   - machines and nodes: up or down, role, hub version, and the median handoff, setup, job
     and teardown times. A slow teardown points at a box's cleanup;
