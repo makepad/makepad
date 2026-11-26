@@ -151,7 +151,7 @@
   },
   {
     "id": "story", "label": "Makepad Story", "package": "makepad-story",
-    "dir": "apps/commercial/story/app", "bin": "makepad-story", "manifest": null, "args": [],
+    "dir": "apps/apps/story/app", "bin": "makepad-story", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {

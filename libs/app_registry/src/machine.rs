@@ -364,7 +364,7 @@ mod tests {
     fn a_launcher_reads_back_from_its_line_and_the_latest_line_counts() {
         for l in [Launcher::Person("at the WM".into()), Launcher::Agent("agent LANE7, pid 812 makepad".into()), Launcher::Pool] {
             assert_eq!(Launcher::parse(&l.env_value()), Some(l.clone()));
-            assert_eq!(Launcher::last_in(&format!("booting\n{}\nmakepad-remote: pid 1 app x socket /s\n", l.line())), Some(l));
+            assert_eq!(Launcher::last_in(&format!("booting\n{}\n[makepad-remote] pid=1 app=x socket=/s\n", l.line())), Some(l));
         }
         let log = format!("{}\nhello\n{}\n", Launcher::Pool.line(), Launcher::Agent("devhub show".into()).line());
         assert_eq!(Launcher::last_in(&log), Some(Launcher::Agent("devhub show".into())));

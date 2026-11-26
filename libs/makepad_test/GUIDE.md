@@ -32,9 +32,7 @@ That keeps the normal Rust workflow intact: add a dev-dependency, write `tests/*
 6. captures failure artifacts on returned errors or panics
 7. requests `gq`, falls back to `quit` if needed, and confirms the owned child exits
 
-Cargo's owning-workspace target is reused, including explicit `CARGO_TARGET_DIR`
-overrides. No build target is forced beneath each package. Tests keep their
-small artifact directories beneath the package directory.
+The build uses Cargo's workspace target directory and honors `CARGO_TARGET_DIR`.
 
 Supported signatures:
 
@@ -69,7 +67,7 @@ The runtime is synchronous and serial-first:
   closure, over the time outside it, so a wait that asks every poll still sees an app with
   nothing to do as idle, and a closure that sleeps hides none of the app's work
 - poll interval: `50ms`
-- artifacts: `<manifest_dir>/target/makepad_test/<package>/<test>/` (`$MAKEPAD_TEST_ARTIFACTS/<package>/<test>/` when set; devhub sets it per lease)
+- artifacts and app home: `<artifact root>/<package>/<test>/`. See [Failure Artifacts](#failure-artifacts) for the root.
 
 The runner serializes app sessions within each test executable. Use
 `--test-threads=1` for predictable suite order. `MAKEPAD_TEST_PARALLEL=1` opts out
@@ -211,11 +209,13 @@ remain available through `TestApp::forward` for input and hit-testing tests.
 
 ## Failure Artifacts
 
-Failed tests write to:
+Each test writes to `<artifact root>/<package>/<test>/`. The harness checks these
+roots in order, skipping empty environment variables.
 
-```text
-<manifest_dir>/target/makepad_test/<package>/<test>/
-```
+1. `$MAKEPAD_TEST_ARTIFACTS`. devhub sets this for each lease.
+2. `$CARGO_TARGET_DIR/makepad_test`. A relative target starts at the current directory.
+3. `<workspace root>/target/makepad_test`. Starting in the package directory, the harness walks up to the nearest `Cargo.toml` with a `[workspace]` line.
+4. `<system temp dir>/makepad_test/<tree>`. With no workspace, a stable hash of the absolute manifest directory gives each checkout a short directory name for its artifacts and app home.
 
 Builds retain stderr; launched sessions also retain app stdout/stderr and a
 `shutdown.txt` record with the owned PID and shutdown result. Test-body failures
@@ -260,7 +260,7 @@ runs after test panics. It never stops, replaces, or drives user-owned instances
 
 If a test times out or fails to resolve a widget:
 
-1. inspect `target/makepad_test/.../logs.txt`
+1. inspect `logs.txt` in the test's [artifact directory](#failure-artifacts)
 2. inspect `widget-snapshot.json` for text/value/checked/selected state
 3. inspect `widget-tree.txt` for the raw compact tree
 4. verify the selector is scoped tightly enough

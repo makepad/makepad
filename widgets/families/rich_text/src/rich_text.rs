@@ -1800,6 +1800,8 @@ impl RichTextEditor {
     fn handle_key(&mut self, cx: &mut Cx, ke: KeyEvent) {
         let shift = ke.modifiers.shift;
         let primary = ke.modifiers.is_primary();
+        // select all, undo and redo: also the Mac-style Logo key off Apple
+        let edit = ke.modifiers.is_edit_primary();
         // Word-wise movement is alt on one platform and control on the
         // others, and neither means anything else on an arrow key.
         let word = ke.modifiers.alt || ke.modifiers.control;
@@ -1833,12 +1835,12 @@ impl RichTextEditor {
             KeyCode::Escape => {
                 cx.set_key_focus(Area::Empty);
             }
-            KeyCode::KeyA if primary => {
+            KeyCode::KeyA if edit => {
                 self.select_all(cx);
                 cx.widget_action(self.widget_uid(), RichTextEditorAction::SelectionChanged);
             }
-            KeyCode::KeyZ if primary && shift => self.redo(cx),
-            KeyCode::KeyZ if primary => self.undo(cx),
+            KeyCode::KeyZ if edit && shift => self.redo(cx),
+            KeyCode::KeyZ if edit => self.undo(cx),
             KeyCode::KeyB if primary => self.toggle_mark(cx, Mark::Bold),
             KeyCode::KeyI if primary => self.toggle_mark(cx, Mark::Italic),
             KeyCode::KeyU if primary => self.toggle_mark(cx, Mark::Underline),

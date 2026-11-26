@@ -610,23 +610,29 @@ script_mod! {
 
         /** the state machine driving the face and label mixes */
         animator: Animator{
-            /** enabled/disabled track: drives the disabled mix on face and label */
+            /** enabled/disabled track: drives the disabled mix on face and label, and the
+             * theme's disabled content opacity on the icons */
             disabled: {
                 default: @off
-                /** enabled: face and label at full strength, cut instantly */
+                /** enabled: face, label and icons at full strength, cut instantly */
                 off: AnimatorState{
                     from: {all: Forward {duration: 0.}}
                     apply: {
                         draw_bg: {disabled: 0.0}
                         draw_text: {disabled: 0.0}
+                        draw_icon: {opacity: 1.0}
+                        draw_icon_end: {opacity: 1.0}
                     }
                 }
-                /** disabled: 0.2s fade of face and label to the disabled colors */
+                /** disabled: 0.2s fade of face and label to the disabled colors, and of the
+                 * icons to the disabled content opacity (an icon-only button has no label) */
                 on: AnimatorState{
                     from: {all: Forward {duration: 0.2}}
                     apply: {
                         draw_bg: {disabled: 1.0}
                         draw_text: {disabled: 1.0}
+                        draw_icon: {opacity: theme.state_disabled_content_opacity}
+                        draw_icon_end: {opacity: theme.state_disabled_content_opacity}
                     }
                 }
             }
@@ -1589,6 +1595,7 @@ impl ScriptHook for Button {
         vm.with_cx_mut(|cx| {
             self.sync_loading(cx, animate);
             self.sync_open(cx, animate);
+            self.sync_enabled(cx, animate);
         });
     }
 }
@@ -1604,7 +1611,7 @@ impl Widget for Button {
         if action.action != A::PRESS {
             return ActionResult::Unhandled;
         }
-        if !self.enabled || self.disabled(cx) || self.loading {
+        if !self.enabled || self.loading {
             return ActionResult::Disabled;
         }
         let uid = self.widget_uid();
@@ -1630,7 +1637,7 @@ impl Widget for Button {
         ActionResult::Handled
     }
 
-    fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
         node.role = a11y_tree::Role::Button;
         let name: &str = self.a11y_name.as_ref();
         makepad_platform::a11y::set_string(&mut node.name, if name.is_empty() { self.shown_label() } else { name });
@@ -1638,7 +1645,7 @@ impl Widget for Button {
         node.states = a11y_tree::States::FOCUSABLE;
         node.states.set(
             a11y_tree::States::DISABLED,
-            !self.enabled || self.disabled(cx) || self.loading,
+            !self.enabled || self.loading,
         );
         node.states.set(a11y_tree::States::BUSY, self.loading);
     }
@@ -1782,18 +1789,17 @@ impl Widget for Button {
         ScriptAsyncResult::MethodNotFound
     }
 
+    /// A button has one on/off state, `enabled`: this sets it, so a generic disable also refuses
+    /// input, as `set_enabled(false)` does.
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(
-            cx,
-            disabled,
-            Animate::Yes,
-            ids!(disabled.on),
-            ids!(disabled.off),
-        );
+        if self.enabled == disabled {
+            self.set_enabled_with(cx, !disabled, Animate::Yes);
+            self.redraw(cx);
+        }
     }
 
-    fn disabled(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, ids!(disabled.on))
+    fn disabled(&self, _cx: &Cx) -> bool {
+        !self.enabled
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
@@ -2155,6 +2161,20 @@ impl Button {
     /// Brings the loading and clock tracks in line with the `loading` prop.
     /// A button whose animator already agrees is left alone, so the common
     /// case costs nothing.
+    /// Turns the button on or off: off refuses input and shows the theme's disabled look (the
+    /// same track `set_disabled` plays), on brings the face back.
+    pub fn set_enabled_with(&mut self, cx: &mut Cx, enabled: bool, animate: Animate) {
+        self.enabled = enabled;
+        self.sync_enabled(cx, animate);
+    }
+
+    fn sync_enabled(&mut self, cx: &mut Cx, animate: Animate) {
+        if !self.enabled == self.animator_in_state(cx, ids!(disabled.on)) {
+            return;
+        }
+        self.animator_toggle(cx, !self.enabled, animate, ids!(disabled.on), ids!(disabled.off));
+    }
+
     fn sync_loading(&mut self, cx: &mut Cx, animate: Animate) {
         let loading = self.loading;
         if loading == self.animator_in_state(cx, ids!(loading.on)) {
@@ -2294,7 +2314,7 @@ impl ButtonRef {
     pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.enabled != enabled {
-                inner.enabled = enabled;
+                inner.set_enabled_with(cx, enabled, Animate::Yes);
                 inner.redraw(cx);
             }
         }
@@ -2388,6 +2408,34 @@ impl ButtonSet {
 #[cfg(test)]
 mod open_tests {
     use super::*;
+
+    /// `enabled: false` shows the disabled look as well as refusing input, from the script and
+    /// from `set_enabled`; turning it back on brings the face back.
+    #[test]
+    fn enabled_drives_the_disabled_look() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* ButtonFlat{enabled: false}});
+            let mut off = Button::script_from_value(vm, value);
+            let value = crate::script_eval!(vm, {use mod.widgets.* Button{}});
+            let mut on = Button::script_from_value(vm, value);
+            vm.with_cx_mut(|cx| {
+                assert!(off.animator_in_state(cx, ids!(disabled.on)), "a button made with enabled: false looks disabled");
+                assert!(off.draw_icon.opacity < 1.0, "its icon dims too: an icon-only button has no label to grey");
+                assert_eq!(on.draw_icon.opacity, 1.0, "an enabled button's icon is at full strength");
+                assert!(on.animator_in_state(cx, ids!(disabled.off)), "an enabled button keeps its face");
+                off.set_enabled_with(cx, true, Animate::No);
+                assert!(off.enabled() && off.animator_in_state(cx, ids!(disabled.off)), "enabling brings the face back");
+                on.set_enabled_with(cx, false, Animate::No);
+                assert!(!on.enabled() && on.animator_in_state(cx, ids!(disabled.on)), "set_enabled(false) shows the disabled look");
+                on.set_disabled(cx, false);
+                assert!(on.enabled() && !on.disabled(cx), "a generic enable sets the one state");
+                on.set_disabled(cx, true);
+                assert!(!on.enabled() && on.animator_in_state(cx, ids!(disabled.on)), "a generic disable refuses input too");
+            });
+        });
+    }
 
     /// The floating face carries the burger's open track. Without motion the
     /// turn is cut to its end state, so nothing is left animating; with it,

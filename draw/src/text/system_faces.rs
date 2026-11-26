@@ -75,22 +75,25 @@ impl SystemFaces {
     pub fn state(&mut self, pool: &TaskPool, key: &SystemFaceKey) -> SystemFaceState {
         let entry = match self.entries.get_mut(key) {
             Some(entry) => entry,
-            None => {
-                let name = key.name.clone();
-                let (weight, italic) = (key.weight, key.italic);
-                let entry = match pool.submit(Class::Visible, move || system_fonts::find_family(&name, weight, italic)) {
-                    Ok(task) => Entry::Pending(task),
-                    // No pool (a single-threaded web build): no OS fonts to find there either.
-                    Err(_) => Entry::Done(None),
-                };
-                self.entries.entry(key.clone()).or_insert(entry)
-            }
+            None => self.entries.entry(key.clone()).or_insert(submit(pool, key)),
         };
         land(key, entry);
         match entry {
             Entry::Done(Some(font)) => SystemFaceState::Found(font.clone()),
             Entry::Done(None) => SystemFaceState::Missing,
             Entry::Pending(_) => SystemFaceState::Pending,
+        }
+    }
+
+    /// Starts `key`'s lookup on the task pool the first time, as [`Self::state`]
+    /// does, and takes no answer in: a draw or the signal hook does, and until
+    /// then it is in flight ([`Self::in_flight`]). Taken in here, a lookup the
+    /// pool had answered before the family's definition returned was no load
+    /// any more, and a step that counted loads saw none in flight (one test
+    /// run in 500, 11-26).
+    pub fn start(&mut self, pool: &TaskPool, key: &SystemFaceKey) {
+        if !self.entries.contains_key(key) {
+            self.entries.insert(key.clone(), submit(pool, key));
         }
     }
 
@@ -140,6 +143,17 @@ impl SystemFaces {
     }
 }
 
+/// `key`'s lookup, submitted to the task pool.
+fn submit(pool: &TaskPool, key: &SystemFaceKey) -> Entry {
+    let name = key.name.clone();
+    let (weight, italic) = (key.weight, key.italic);
+    match pool.submit(Class::Visible, move || system_fonts::find_family(&name, weight, italic)) {
+        Ok(task) => Entry::Pending(task),
+        // No pool (a single-threaded web build): no OS fonts to find there either.
+        Err(_) => Entry::Done(None),
+    }
+}
+
 /// Takes a finished lookup's answer into `entry`: true when it did.
 fn land(key: &SystemFaceKey, entry: &mut Entry) -> bool {
     let Entry::Pending(task) = entry else { return false };
@@ -175,6 +189,12 @@ fn pending_font_loads(cx: &Cx) -> usize {
 pub(crate) fn lookup(cx: &mut Cx, key: &SystemFaceKey) -> SystemFaceState {
     let pool = cx.task_pool();
     faces(cx).state(&pool, key)
+}
+
+/// [`SystemFaces::start`] on the `Cx`'s global.
+pub(crate) fn start_lookup(cx: &mut Cx, key: &SystemFaceKey) {
+    let pool = cx.task_pool();
+    faces(cx).start(&pool, key);
 }
 
 /// [`SystemFaces::start_prewarm`] on the `Cx`'s global.

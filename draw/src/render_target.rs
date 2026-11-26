@@ -261,7 +261,8 @@ struct PictureSlot {
 impl PictureSlot {
     /// Its picture is recorded and not yet painted whole (a pipeline it draws with compiling).
     fn painting(&self, cx: &Cx) -> bool {
-        self.picture.is_some_and(|(_, repaint)| !self.pass.painted_whole_since(cx, repaint))
+        // Once is enough: a kept pass paints again every frame, and the picture is whole after one paint.
+        self.picture.is_some_and(|(_, repaint)| !self.pass.painted_whole_once_since(cx, repaint))
     }
 }
 

@@ -151,6 +151,14 @@ impl<'a> CxDraw<'a> {
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))
                 .unwrap_or(0)
         });
+        // natively the HAL's "glyph" probe counts the requests it sent; this draw's own requests
+        // reach it only at the draw's end, so it asks for those here
+        #[cfg(not(target_arch = "wasm32"))]
+        cx.hal_count_queued_glyph_requests(|cx| {
+            cx.get_global_ref::<Rc<RefCell<Fonts>>>()
+                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.queued_glyph_requests()))
+                .unwrap_or(0)
+        });
         true
     }
 

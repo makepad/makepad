@@ -50,7 +50,7 @@ release target. An inherited `CARGO_TARGET_DIR` or explicit
 create a separate build target per example.
 
 The runner starts only its own executable, reads its PID and socket path from
-the startup line (`[makepad-remote] pid=.. app=.. socket=..`), and closes it with `gq` (grab and quit; the PNG files are written by the test client), falling back to `quit`
+the startup line on stderr (`[makepad-remote] pid=.. app=.. socket=..`), and closes it with `gq` (grab and quit; the PNG files are written by the test client), falling back to `quit`
 when needed. It waits for the owned process to exit and kills that exact child
 only if graceful shutdown fails. Existing user instances are never reused.
 
@@ -92,11 +92,13 @@ Inspection helpers:
 
 ## Failure Artifacts
 
-Artifacts are package-local (separate from the shared Cargo build target):
+Each test keeps its artifacts and app home in `<artifact root>/<package>/<test>/`.
+The first applicable root wins. Empty environment variables are skipped.
 
-```text
-<manifest_dir>/target/makepad_test/<package>/<test>/
-```
+1. `$MAKEPAD_TEST_ARTIFACTS`, which devhub sets per lease.
+2. `$CARGO_TARGET_DIR/makepad_test`, with a relative target resolved from the current directory.
+3. `<workspace root>/target/makepad_test`, using the nearest `Cargo.toml` with a `[workspace]` line, starting in the package directory.
+4. `<system temp dir>/makepad_test/<tree>`, where a stable hash of the absolute manifest directory keeps standalone checkouts apart.
 
 Builds write `build-stderr.txt`. Launched sessions also write `app-stdout.txt`,
 `app-stderr.txt`, and `shutdown.txt`. Test-body failures additionally capture:

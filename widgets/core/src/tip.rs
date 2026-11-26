@@ -510,7 +510,7 @@ impl Tip {
             | KeyCode::NumpadEnter
             | KeyCode::Space => true,
             // Undo and redo.
-            KeyCode::KeyZ => key.modifiers.is_primary(),
+            KeyCode::KeyZ => key.modifiers.is_edit_primary(),
             _ => false,
         }
     }

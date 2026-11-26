@@ -900,6 +900,10 @@ pub struct TextInput {
     pub draw_text: DrawText,
     #[live]
     draw_selection: DrawQuad,
+    /// How far the selection band reaches past its first and last glyph, in
+    /// layout points, so its rounded ends never clip a letter's edge.
+    #[live(2.0)]
+    selection_pad: f64,
     #[live]
     draw_cursor: DrawQuad,
     #[live]
@@ -1648,12 +1652,13 @@ impl TextInput {
         for SelectionRect { rect_in_lpxs, .. } in
             laidout_text.selection_rects(self.selection_to_password_selection(self.selection))
         {
+            let pad = self.selection_pad;
             self.draw_selection.draw_abs(
                 cx,
                 rect(
-                    text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64,
+                    text_rect.pos.x + (rect_in_lpxs.origin.x * self.draw_text.font_scale) as f64 - pad,
                     text_rect.pos.y + (rect_in_lpxs.origin.y * self.draw_text.font_scale) as f64,
-                    (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64,
+                    (rect_in_lpxs.size.width * self.draw_text.font_scale) as f64 + 2.0 * pad,
                     (rect_in_lpxs.size.height * self.draw_text.font_scale) as f64,
                 ),
             );
@@ -3430,7 +3435,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..
-            }) if modifiers.is_primary() => {
+            }) if modifiers.is_edit_primary() => {
                 self.select_all(cx);
                 // On touch platforms, show clipboard actions after select all
                 // This handles the case where select_all is triggered from the clipboard menu
@@ -3793,7 +3798,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::KeyZ,
                 modifiers: modifiers @ KeyModifiers { shift: false, .. },
                 ..
-            }) if modifiers.is_primary() && !self.is_read_only => {
+            }) if modifiers.is_edit_primary() && !self.is_read_only => {
                 if !self.undo(cx) {
                     return;
                 }
@@ -3804,7 +3809,7 @@ impl Widget for TextInput {
                 key_code: KeyCode::KeyZ,
                 modifiers: modifiers @ KeyModifiers { shift: true, .. },
                 ..
-            }) if modifiers.is_primary() && !self.is_read_only => {
+            }) if modifiers.is_edit_primary() && !self.is_read_only => {
                 if !self.redo(cx) {
                     return;
                 }
@@ -5505,6 +5510,47 @@ mod takes_text_tests {
             assert!(!cx.key_focus_takes_text(), "the focused field turned read-only takes no text");
             field.borrow_mut::<TextInput>().unwrap().set_is_read_only(cx, false);
             assert!(cx.key_focus_takes_text(), "and editable again, it does");
+        });
+    }
+
+    /// Select all, undo and redo take the Logo key (a Mac's Cmd, as it reaches a Linux desktop
+    /// over Desk Link) everywhere, and Control too off Apple.
+    #[test]
+    fn the_editing_keys_take_the_logo_key() {
+        crate::on_test_cx(|| {
+            let mut cx_pool = crate::checkout_test_cx();
+            let cx: &mut Cx = &mut cx_pool;
+            let root = cx.with_vm(|vm| {
+                let root = vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        name := TextInput{width: 120 text: "hello"}
+                    }
+                });
+                WidgetRef::script_from_value(vm, root)
+            });
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut list = DrawList2d::new(cx);
+            draw(cx, &pass, &mut list, &root);
+            let prev = cx.key_focus();
+            cx.set_key_focus(root.widget(cx, &[id!(name)]).area());
+            settle(cx, &root, prev);
+            let field = |cx: &Cx| root.widget(cx, &[id!(name)]);
+            let key = |cx: &mut Cx, key_code, modifiers| root.handle_event(cx, &Event::KeyDown(KeyEvent { key_code, modifiers, ..Default::default() }), &mut Scope::empty());
+            let logo = KeyModifiers { logo: true, ..Default::default() };
+            key(cx, KeyCode::KeyA, logo);
+            assert_eq!(field(cx).borrow::<TextInput>().unwrap().selected_text(), "hello", "Logo+A selects all");
+            root.handle_event(cx, &Event::TextInput(TextInputEvent { input: "x".into(), ..Default::default() }), &mut Scope::empty());
+            assert_eq!(field(cx).text(), "x", "typing replaces the selection");
+            key(cx, KeyCode::KeyZ, logo);
+            assert_eq!(field(cx).text(), "hello", "Logo+Z undoes");
+            key(cx, KeyCode::KeyZ, KeyModifiers { shift: true, ..logo });
+            assert_eq!(field(cx).text(), "x", "Logo+Shift+Z redoes");
+            let control = KeyModifiers { control: true, ..Default::default() };
+            key(cx, KeyCode::KeyZ, control);
+            assert_eq!(field(cx).text() == "hello", !cfg!(target_vendor = "apple"), "Control+Z undoes off Apple only");
         });
     }
 }

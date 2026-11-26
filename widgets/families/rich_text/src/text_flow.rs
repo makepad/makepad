@@ -1837,7 +1837,7 @@ impl Widget for TextFlow {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..
-            }) if modifiers.is_primary() => {
+            }) if modifiers.is_edit_primary() => {
                 self.select_all();
                 self.redraw(cx);
             }

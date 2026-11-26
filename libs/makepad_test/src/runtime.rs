@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -37,6 +37,31 @@ const DRAG_HOLD: Duration = Duration::from_millis(300);
 const RECENT_LOG_LINES: usize = 200;
 
 static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn artifacts_root(manifest_dir: &Path) -> TestResult<PathBuf> {
+    // devhub gives each lease its own artifacts and app homes.
+    if let Some(root) = std::env::var_os("MAKEPAD_TEST_ARTIFACTS").filter(|s| !s.is_empty()) {
+        return Ok(PathBuf::from(root));
+    }
+    if let Some(target) = std::env::var_os("CARGO_TARGET_DIR").filter(|s| !s.is_empty()) {
+        return Ok(std::path::absolute(target)?.join("makepad_test"));
+    }
+    let manifest_dir = std::path::absolute(manifest_dir)?;
+    for dir in manifest_dir.ancestors() {
+        if fs::read_to_string(dir.join("Cargo.toml"))
+            .is_ok_and(|toml| toml.lines().any(|line| line.trim() == "[workspace]"))
+        {
+            return Ok(dir.join("target/makepad_test"));
+        }
+    }
+
+    // FNV-1a keeps the full path, including non-UTF-8 bytes, in a short, stable tree ID.
+    let mut tree = 0xcbf29ce484222325_u64;
+    for &byte in manifest_dir.as_os_str().as_encoded_bytes() {
+        tree = (tree ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
+    Ok(std::env::temp_dir().join("makepad_test").join(format!("{tree:016x}")))
+}
 
 #[derive(Clone, Debug)]
 pub struct TestConfig {
@@ -83,13 +108,7 @@ impl TestConfig {
         let manifest_dir = manifest_dir.into();
         let package_name = package_name.into();
         let test_name = test_name.into();
-        // `MAKEPAD_TEST_ARTIFACTS`: a run's own root (devhub sets one per lease, so two jobs in
-        // one tree never share a test's artifacts or app home)
-        let root = std::env::var_os("MAKEPAD_TEST_ARTIFACTS")
-            .filter(|root| !root.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| manifest_dir.join("target").join("makepad_test"));
-        let artifacts_dir = root
+        let artifacts_dir = artifacts_root(&manifest_dir)?
             .join(sanitize_path_component(&package_name))
             .join(sanitize_path_component(&test_name));
 
@@ -153,6 +172,9 @@ struct TestAppInner {
     /// Window that received the last pointer interaction; app-level key and
     /// text input follows it, as keyboard input follows a click on a desktop.
     focus_window: Option<usize>,
+    /// For each cursor [`TestApp::log_since`] was asked with, the newest line it answered with: a
+    /// wait that reads from one cursor on every poll has seen what the log drops afterwards.
+    log_reads: HashMap<u64, u64>,
 }
 
 #[derive(Clone)]
@@ -187,6 +209,7 @@ impl TestApp {
                 config,
                 app,
                 focus_window: None,
+                log_reads: HashMap::new(),
             })),
         })
     }
@@ -379,10 +402,41 @@ impl TestApp {
         elapsed
     }
 
-    /// Draw and worker diagnostics after a sequence number, without forcing a frame.
+    /// The app's log lines after line `since`, without forcing a frame. The app's log keeps only
+    /// its newest lines: when some after `since` are gone before a read from `since` saw them, a
+    /// line the caller looks for may be among them and the answer is unknown, so that is an error.
+    /// (A wait that reads from the same cursor on every poll saw the lines an earlier poll was
+    /// given.) `since` 0 asks for what the log keeps (a tail, the newest `last_seq`): never an
+    /// error, [`crate::LogTail::dropped`] counts the older lines. [`Self::log_since_tolerant`]
+    /// reads past a gap after a cursor.
     pub fn log_since(&self, since: u64) -> TestResult<crate::LogTail> {
+        let tail = self.log_since_tolerant(since)?;
+        if since == 0 {
+            return Ok(tail);
+        }
+        let seen = self.inner.borrow().log_reads.get(&since).copied();
+        if let Some((after, unseen)) = unseen_gap(since, tail.dropped, seen) {
+            return Err(self.log_gap(after, unseen, "this read"));
+        }
+        self.inner.borrow_mut().log_reads.insert(since, tail.last_seq);
+        Ok(tail)
+    }
+
+    /// As [`Self::log_since`], but a gap is no error: [`crate::LogTail::dropped`] counts the
+    /// lines it lost. For a caller that wants what is kept (a recent tail for a message), which
+    /// says why where it calls this.
+    pub fn log_since_tolerant(&self, since: u64) -> TestResult<crate::LogTail> {
         self.ensure_running()?;
         self.client().log_since(since)
+    }
+
+    /// The error for `dropped` lines after line `since` that the app's log no longer keeps.
+    fn log_gap(&self, since: u64, dropped: u64, before: &str) -> TestError {
+        let stderr = self.inner.borrow().app.stderr_path.display().to_string();
+        TestError::new(format!(
+            "the log dropped {dropped} lines after line {since} before {before}: the app's log keeps only its \
+             newest lines, and a line looked for may be among them. They are not lost: the app's full log is in {stderr}"
+        ))
     }
 
     pub fn wait_for_log_contains(&self, needle: &str) {
@@ -391,18 +445,32 @@ impl TestApp {
         }
     }
 
+    /// Waits until a line of the app's log, logged before the wait or during it, contains
+    /// `needle`. Lines the log no longer kept when the wait began are named when it times out;
+    /// lines it drops during the wait end the wait at once, since the needle may be among them.
     pub fn try_wait_for_log_contains(&self, needle: &str) -> TestResult<()> {
         let mut budget = Budget::start(self, self.action_timeout())?;
+        // What the log keeps from before the wait; a gap there is no error yet (the line may still come).
+        let first = self.log_since(0)?;
+        if first.lines.iter().any(|line| line.contains(needle)) {
+            return Ok(());
+        }
+        let mut cursor = first.last_seq;
         loop {
-            self.ensure_running()?;
-            let tail = self.client().log_since(0)?;
+            let tail = self.log_since(cursor).map_err(|err| TestError::new(format!("waiting for log containing `{needle}`: {err}")))?;
             if tail.lines.iter().any(|line| line.contains(needle)) {
                 return Ok(());
             }
+            cursor = tail.last_seq;
             if budget.look_due() {
                 if let Some(spent) = budget.spent(self)? {
+                    let gap = if first.dropped > 0 {
+                        format!("; {}", self.log_gap(0, first.dropped, "this wait"))
+                    } else {
+                        String::new()
+                    };
                     return Err(TestError::new(format!(
-                        "timed out waiting for log containing `{needle}`: {spent}"
+                        "timed out waiting for log containing `{needle}`: {spent}{gap}"
                     )));
                 }
             }
@@ -1931,11 +1999,20 @@ fn env_duration_ms(name: &str) -> Duration {
 }
 
 
+/// The lines a read after line `since` lost that no earlier read after `since` was given, as
+/// (the line they follow, how many): the read lost `dropped` lines, since+1 ..= since+dropped,
+/// and an earlier read from the same cursor was given every line up to `seen`.
+fn unseen_gap(since: u64, dropped: u64, seen: Option<u64>) -> Option<(u64, u64)> {
+    let after = seen.unwrap_or(since).max(since);
+    let unseen = since.saturating_add(dropped).saturating_sub(after);
+    (unseen > 0).then_some((after, unseen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         button_index, env_duration_ms, sanitize_path_component,
-        snapshot_is_visible, visible_mode_enabled, Budget, NodeMatch,
+        snapshot_is_visible, unseen_gap, visible_mode_enabled, Budget, NodeMatch,
     };
     use crate::remote::{AppCpu, AppSettled, BudgetSlot};
     use std::time::Instant;
@@ -2094,13 +2171,13 @@ mod tests {
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::MouseButton;
     use makepad_a11y::{Node, Role, Rect};
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn restore_env_var(name: &str, value: Option<String>) {
+    fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
         if let Some(value) = value {
             std::env::set_var(name, value);
         } else {
@@ -2111,6 +2188,15 @@ mod tests {
     fn snapshot(id: &str) -> NodeMatch {
         NodeMatch { window: 0, node: Node { path: id.into(), name: id.into(), role: Role::Button, bounds: Rect { x:10.0, y:20.0, w:30.0, h:40.0 }, ..Default::default() } }
     }
+    #[test]
+    fn a_log_read_fails_only_on_lines_no_read_from_its_cursor_saw() {
+        assert_eq!(unseen_gap(100, 0, None), None, "nothing dropped");
+        assert_eq!(unseen_gap(100, 40, None), Some((100, 40)), "a first read from 100 lost 101..=140");
+        assert_eq!(unseen_gap(100, 40, Some(150)), None, "a poll from 100 was given up to 150 before they went");
+        assert_eq!(unseen_gap(100, 40, Some(120)), Some((120, 20)), "121..=140 went between two polls");
+        assert_eq!(unseen_gap(u64::MAX, 0, None), None, "a cursor past the end asks for nothing");
+    }
+
     #[test]
     fn semantic_node_bounds_locate_widget_centres() {
         let node = snapshot("input_singleline");
@@ -2130,27 +2216,67 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // The default: neither variable set (a devhub lease sets its own artifact root).
-        let old_visible = std::env::var("MAKEPAD_TEST_VISIBLE").ok();
-        let old_artifacts = std::env::var("MAKEPAD_TEST_ARTIFACTS").ok();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let scratch = std::env::temp_dir().join(format!("makepad-test-config-{}-{}", std::process::id(), stamp.as_nanos()));
+        std::fs::create_dir(&scratch).unwrap();
+        let workspace = scratch.join("root");
+        let pkg = workspace.join("pkg");
+        let nested = pkg.join("nested");
+        let first_tree = scratch.join("tree a/pkg");
+        let second_tree = scratch.join("tree_a/pkg");
+        for dir in [&pkg, &nested, &first_tree, &second_tree] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"makepad-example\"\n").unwrap();
+        }
+        std::fs::write(workspace.join("Cargo.toml"), "  [workspace]  \n").unwrap();
+
+        let saved = ["MAKEPAD_TEST_VISIBLE", "MAKEPAD_TEST_ARTIFACTS", "CARGO_TARGET_DIR"]
+            .map(|name| (name, std::env::var_os(name)));
+        let config = |dir: &Path| TestConfig::current_package(dir, "makepad-example", "ui::test");
+        let cwd = std::env::current_dir().unwrap();
         std::env::remove_var("MAKEPAD_TEST_VISIBLE");
+        std::env::set_var("CARGO_TARGET_DIR", "custom-target");
+        std::env::set_var("MAKEPAD_TEST_ARTIFACTS", "lease-artifacts");
+        let lease = config(&pkg);
+        std::env::set_var("MAKEPAD_TEST_ARTIFACTS", "");
+        let cargo = config(&pkg);
         std::env::remove_var("MAKEPAD_TEST_ARTIFACTS");
-        let config =
-            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
-        restore_env_var("MAKEPAD_TEST_VISIBLE", old_visible);
-        restore_env_var("MAKEPAD_TEST_ARTIFACTS", old_artifacts);
-        assert_eq!(
-            config.artifacts_dir,
-            PathBuf::from("/tmp/example")
-                .join("target")
-                .join("makepad_test")
-                .join("makepad-example")
-                .join("ui__test")
-        );
-        assert!(!config.visible);
-        assert!(!config.env.contains_key("MAKEPAD"));
-        assert!(!config.env.contains_key("CARGO_TARGET_DIR"));
-        assert_eq!(config.requested_screenshot_dpi(), None);
+        std::env::remove_var("CARGO_TARGET_DIR");
+        let member = config(&pkg);
+        let nested_member = config(&nested);
+        std::env::set_var("CARGO_TARGET_DIR", "");
+        let first = config(&first_tree);
+        let second = config(&second_tree);
+        for (name, value) in saved {
+            restore_env_var(name, value);
+        }
+        let package_target_exists = pkg.join("target").exists();
+        std::fs::remove_dir_all(&scratch).unwrap();
+
+        let suffix = Path::new("makepad-example/ui__test");
+        assert_eq!(lease.unwrap().artifacts_dir, Path::new("lease-artifacts").join(suffix),
+            "the lease root takes precedence and stays as supplied");
+        assert_eq!(cargo.unwrap().artifacts_dir, cwd.join("custom-target/makepad_test").join(suffix),
+            "a relative Cargo target starts at the current directory");
+        let expected = workspace.join("target/makepad_test").join(suffix);
+        let member = member.unwrap();
+        assert_eq!(member.artifacts_dir, expected, "a workspace member uses the workspace target");
+        assert!(!package_target_exists, "the member has no package-local target directory");
+        assert_eq!(nested_member.unwrap().artifacts_dir, expected, "an intervening package is skipped");
+
+        let first = first.unwrap().artifacts_dir;
+        let second = second.unwrap().artifacts_dir;
+        for path in [&first, &second] {
+            let relative = path.strip_prefix(std::env::temp_dir().join("makepad_test"))
+                .expect("a standalone package uses the temporary artifact root");
+            assert_eq!(relative.components().count(), 3, "the tree has one directory above the package and test");
+            assert!(relative.ends_with(suffix), "the temporary path keeps the package and test names");
+        }
+        assert_ne!(first, second, "standalone checkouts have separate artifacts and app homes");
+        assert!(!member.visible, "the window is hidden by default");
+        assert!(!member.env.contains_key("MAKEPAD"), "the default app environment leaves MAKEPAD unset");
+        assert!(!member.env.contains_key("CARGO_TARGET_DIR"), "the default app environment inherits the Cargo target");
+        assert_eq!(member.requested_screenshot_dpi(), None, "screenshot DPI is unset by default");
     }
 
     #[test]
@@ -2159,7 +2285,7 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_visible = std::env::var("MAKEPAD_TEST_VISIBLE").ok();
+        let old_visible = std::env::var_os("MAKEPAD_TEST_VISIBLE");
         std::env::set_var("MAKEPAD_TEST_VISIBLE", "1");
         assert!(visible_mode_enabled());
         let config =
@@ -2184,7 +2310,7 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_value = std::env::var("MAKEPAD_TEST_ACTION_DELAY_MS").ok();
+        let old_value = std::env::var_os("MAKEPAD_TEST_ACTION_DELAY_MS");
         std::env::set_var("MAKEPAD_TEST_ACTION_DELAY_MS", "250");
         assert_eq!(
             env_duration_ms("MAKEPAD_TEST_ACTION_DELAY_MS"),

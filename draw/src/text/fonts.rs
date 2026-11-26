@@ -365,6 +365,13 @@ impl Fonts {
         self.slug_atlas.get_or_cache_glyph(font, glyph_id)
     }
 
+    /// Glyph requests this draw asked for and holds for its end (`prepare_textures`), when the
+    /// host hears of them (`Cx::hal_count_queued_glyph_requests`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn queued_glyph_requests(&self) -> usize {
+        self.layouter.rasterizer().try_borrow().map_or(0, |rasterizer| rasterizer.client().queued())
+    }
+
     /// Glyph rasters queued for or running on the MSDF worker: text that
     /// draws with a fallback until they land (`Cx::pending_async_loads`).
     #[cfg(target_arch = "wasm32")]

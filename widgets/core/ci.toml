@@ -7,10 +7,10 @@ main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
 work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
-date = "2026-11-24"
-digest = "367f5295636243004e133d035beee11d517bfd62e88ee73791a65cc859dec024"
-main = "1107161d14ec80325fcd5a51a62c447f2b3d7fc9"
-work = "4a13797c9fc87cadb1dfe30ea00772190a0ec68b"
+date = "2026-11-26"
+digest = "c58cefce394e64a9c5ba02b4c12f58c3c7bb00bff063afbd46bd8883881b39da"
+main = "f0a2ef91c7ae77fb351dad4870fecffc13ce6863"
+work = "c87cdfc86d6ff85dc54a9425ec4853867560b460"
 
 [tests.windows]
 date = "2026-11-02"

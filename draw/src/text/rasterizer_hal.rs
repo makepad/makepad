@@ -164,6 +164,15 @@ impl GlyphClient {
         self.requested.len()
     }
 
+    /// Requests held for the draw's end (`take_outbox`), not yet sent to the host; a font's
+    /// ASCII warm-up counts whole.
+    pub fn queued(&self) -> usize {
+        let requests: usize = self.out_requests.values().map(Vec::len).sum();
+        let background: usize = self.out_background_requests.values().map(Vec::len).sum();
+        let warmups: usize = self.out_prewarms.iter().map(|(_, _, glyphs)| glyphs.len()).sum();
+        requests + background + warmups
+    }
+
     /// Font instances opened with the host (each variable-axis value is one).
     pub fn fonts_open(&self) -> usize {
         self.locals.len()
@@ -908,8 +917,11 @@ mod tests {
         let kept = client.raster(&a, 44, 24.0, wire::kind::SDF, &settings).expect("planned");
         assert_eq!(kept.atlas_kind, AtlasKind::Unresolved);
         assert_ne!(kept.source.font, 0, "a lent-atlas glyph carries its key");
+        // a draw that asks before its end whether it waits on glyphs (a kept list) sees this one
+        assert_eq!(client.queued(), 1, "a glyph asked for in this draw is queued until the draw's end sends it");
         // still on its way: it stays the placeholder and holds this draw
         let _ = client.take_outbox();
+        assert_eq!(client.queued(), 0, "the draw's end sent it");
         assert_eq!(client.refresh(kept).atlas_kind, AtlasKind::Unresolved);
         assert!(!client.take_outbox().pending.is_empty(), "a kept pending glyph is reported pending");
         let local = kept.source.font;

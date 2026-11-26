@@ -2443,6 +2443,8 @@ impl MarkdownEditor {
     fn handle_key(&mut self, cx: &mut Cx, ke: &KeyEvent) {
         let shift = ke.modifiers.shift;
         let primary = ke.modifiers.is_primary();
+        // undo, redo, select all and paste: also the Mac-style Logo key off Apple
+        let edit = ke.modifiers.is_edit_primary();
         // By word: Alt on macOS, Control elsewhere. To the line's or the
         // document's edge: Cmd on macOS (elsewhere Home, End and
         // Control+Home or End).
@@ -2530,13 +2532,13 @@ impl MarkdownEditor {
                 };
                 self.delete(cx, forward, to);
             }
-            KeyCode::KeyZ if primary => self.undo(cx, shift),
+            KeyCode::KeyZ if edit => self.undo(cx, shift),
             KeyCode::KeyY if ke.modifiers.control && !ke.modifiers.logo => self.undo(cx, true),
-            KeyCode::KeyA if primary && !shift => self.select_all(cx),
+            KeyCode::KeyA if edit && !shift => self.select_all(cx),
             // A paste's text comes as input ahead of its key, and asked for
             // the read; a key alone (a picture on the clipboard, no text)
             // asks for it here.
-            KeyCode::KeyV if primary && !alt => {
+            KeyCode::KeyV if edit && !alt => {
                 if !std::mem::take(&mut self.paste_by_text) {
                     self.paste_reads.push((cx.read_clipboard(), None));
                 }

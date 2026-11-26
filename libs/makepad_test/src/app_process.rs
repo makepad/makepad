@@ -9,13 +9,12 @@ use crate::remote::RemoteClient;
 use makepad_micro_serde::JsonValue;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const LISTENING_PREFIX: &str = "[makepad-remote] pid=";
-const LISTEN_FAILED_PREFIX: &str = "[makepad-remote] cannot listen";
 const GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 const LOST_RESPONSE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 const TAIL_BYTES: usize = 4096;
@@ -336,6 +335,7 @@ fn launch_command(
     let stderr_path = spec.artifacts_dir.join("app-stderr.txt");
     let stdout_file = File::create(&stdout_path)?;
     let stderr_file = File::create(&stderr_path)?;
+    let mut stderr = BufReader::new(File::open(&stderr_path)?);
 
     command
         .current_dir(&spec.manifest_dir)
@@ -377,23 +377,16 @@ fn launch_command(
         .filter(|dir| dir.is_absolute())
         .unwrap_or_else(makepad_remote::discovery::registry_dir);
     let mut startup = jit.then(|| Startup::new(pid, spec.startup_idle));
+    let mut pending = Vec::new();
     let listening = loop {
-        let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
-        if let Some(line) = stdout.lines().find(|line| line.starts_with(LISTENING_PREFIX)) {
-            match parse_listening_line(line) {
-                Ok(listening) => break listening,
-                Err(err) => {
-                    // No valid owned endpoint is available for graceful quit.
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(err);
-                }
+        match listening_on_stderr(&mut stderr, &mut pending, pid, jit) {
+            Ok(Some(listening)) => break listening,
+            Ok(None) => {}
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
             }
-        }
-        if let Some(line) = stdout.lines().find(|line| line.starts_with(LISTEN_FAILED_PREFIX)) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(TestError::new(format!("app remote failed to start: {line}")));
         }
         if let Ok(Some(status)) = child.try_wait() {
             return Err(startup_exit(
@@ -407,9 +400,8 @@ fn launch_command(
                 ),
             ));
         }
-        // A JIT app registers with the loader's endpoint instead of
-        // printing the native listening line. Read only our child's record:
-        // its own, or that of the run it stands behind (macOS, Windows).
+        // A silent JIT run may only register its endpoint. The record also identifies
+        // the app behind a restart parent when its startup line names a different pid.
         if jit {
             if let Some(app) = announced(&registry, pid) {
                 break ListeningLine {
@@ -698,35 +690,31 @@ fn idle_over(span: Duration, before: &(Vec<u32>, u64), now: &(Vec<u32>, u64), he
     Window::Held(format!("the disk or a filesystem lock holds it: {ran}, its threads in uninterruptible kernel waits: {}", waits.join("; ")))
 }
 
+/// Read new stderr lines once. A file read can end in the middle of the socket path.
+fn listening_on_stderr(stderr: &mut impl BufRead, pending: &mut Vec<u8>, pid: u32, jit: bool) -> TestResult<Option<ListeningLine>> {
+    while stderr.read_until(b'\n', pending)? != 0 {
+        if !pending.ends_with(b"\n") { break; }
+        let line = String::from_utf8_lossy(pending);
+        let tag_and_fields = line.strip_prefix('[').and_then(|s| s.split_once("] "));
+        if let Some((_, fields)) = tag_and_fields.filter(|(tag, _)| tag.ends_with("-remote")) {
+            if fields.starts_with("cannot listen") || fields.starts_with("iOS has no local remote-control route") {
+                return Err(TestError::new(format!("app remote failed to start: {}", line.trim_end())));
+            }
+            if fields.starts_with("pid=") {
+                let listening = parse_listening_line(&line)?;
+                if !jit || listening.pid == pid { return Ok(Some(listening)); }
+            }
+        }
+        pending.clear();
+    }
+    Ok(None)
+}
+
 /// `[makepad-remote] pid=9931 app=NAME socket=/tmp/makepad-remote-9931.sock`
 pub fn parse_listening_line(line: &str) -> TestResult<ListeningLine> {
-    let rest = line
-        .strip_prefix("[makepad-remote] ")
-        .filter(|rest| rest.starts_with("pid="))
-        .ok_or_else(|| TestError::new(format!("not a remote listening line: {line}")))?;
-    // The socket path comes last and may hold spaces.
-    let (head, socket) = rest
-        .split_once(" socket=")
-        .ok_or_else(|| TestError::new(format!("no socket in listening line: {line}")))?;
-    let mut pid = None;
-    let mut app = String::new();
-    for token in head.split(' ') {
-        if let Some(value) = token.strip_prefix("pid=") {
-            pid = value.parse::<u32>().ok();
-        } else if let Some(value) = token.strip_prefix("app=") {
-            app = value.to_string();
-        }
-    }
-    let pid = pid.ok_or_else(|| TestError::new(format!("no pid in listening line: {line}")))?;
-    let socket = socket.trim();
-    if socket.is_empty() {
-        return Err(TestError::new(format!("empty socket in listening line: {line}")));
-    }
-    Ok(ListeningLine {
-        pid,
-        app,
-        socket: PathBuf::from(socket),
-    })
+    let (pid, app, socket) = makepad_remote::parse_startup_line(line)
+        .ok_or_else(|| TestError::new(format!("invalid remote listening line: {}", line.trim_end())))?;
+    Ok(ListeningLine { pid, app, socket })
 }
 
 /// An app that ended before it was up. An app on a JIT older than its tree in a crate linked
@@ -784,6 +772,10 @@ mod tests {
         assert!(parse_listening_line("[makepad-remote] cannot listen: denied").is_err());
         assert!(parse_listening_line("[makepad-remote] pid=1 app=x").is_err());
         assert!(parse_listening_line("[makepad-remote] pid=nope app=x socket=/s").is_err());
+        let (start, end) = line.split_at(line.find(" dir").unwrap());
+        let mut pending = Vec::new();
+        assert_eq!(listening_on_stderr(&mut start.as_bytes(), &mut pending, 9931, false).unwrap(), None, "a partial socket path waits");
+        assert_eq!(listening_on_stderr(&mut format!("{end}\n").as_bytes(), &mut pending, 9931, false).unwrap(), Some(parsed), "the next read completes the socket path");
     }
 
     #[test]
@@ -854,7 +846,7 @@ mod tests {
             dir,
             "fake-app.sh",
             &format!(
-                "#!/bin/sh\necho \"[makepad-remote] pid=$$ app=fake-app socket={}\"\n{script_tail}\n",
+                "#!/bin/sh\necho \"[makepad-remote] pid=$$ app=fake-app socket={}\" >&2\n{script_tail}\n",
                 socket.display()
             ),
         )
@@ -1037,9 +1029,8 @@ mod tests {
                 .join(format!("fake-app-{}", app.pid))
         );
         assert!(app.poll_exit().is_none());
-        assert!(fs::read_to_string(spec.artifacts_dir.join("app-stdout.txt"))
-            .unwrap()
-            .contains("socket="));
+        assert!(app.stderr_tail().contains("socket="), "stderr carries the startup line");
+        assert!(fs::read(spec.artifacts_dir.join("app-stdout.txt")).unwrap().is_empty(), "the silent fake app's stdout stays empty");
         assert!(server.requests().iter().any(|target| target == "help"));
         assert!(server.requests().iter().any(|target| target == "status"));
 
@@ -1143,7 +1134,7 @@ mod tests {
         let script = write_script(
             &dir,
             "fake-app.sh",
-            &format!("#!/bin/sh\necho \"[makepad-remote] pid=1 app=x socket={}\"\nexec sleep 60\n", server.socket().display()),
+            &format!("#!/bin/sh\necho \"[makepad-remote] pid=1 app=x socket={}\" >&2\nexec sleep 60\n", server.socket().display()),
         );
         let spec = fake_app_spec(dir.clone());
         let err = launch_error(launch(&spec, &script));

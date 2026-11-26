@@ -2693,8 +2693,8 @@ impl ScriptHook for FontFamily {
             } else if !member.system.trim().is_empty() {
                 let key = SystemFaceKey::new(&member.system, member.weight, member.italic);
                 // Looked up from now on, in the background: by the first
-                // frame the answer is usually in.
-                system_faces::lookup(vm.cx_mut(), &key);
+                // frame the answer is usually in (and taken in there).
+                system_faces::start_lookup(vm.cx_mut(), &key);
                 members.push(FontMemberDef {
                     handle: None,
                     resource_path: format!("system:{}", key.name),

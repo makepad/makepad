@@ -33,6 +33,9 @@ pub struct WindowInfo {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogTail {
     pub last_seq: u64,
+    /// Lines after the asked cursor that the app's log ring no longer keeps (the app's remote
+    /// `log` answer's `d`): the read has a gap of this many lines. They are on the app's stderr.
+    pub dropped: u64,
     pub lines: Vec<String>,
 }
 
@@ -750,8 +753,12 @@ pub fn parse_snapshot(json: &JsonValue) -> TestResult<UiSnapshot> {
 pub fn parse_log(json: &JsonValue) -> TestResult<LogTail> {
     let lines = json_array(json.key("l"))
         .ok_or_else(|| TestError::new(format!("log reply carries no lines: {json:?}")))?;
+    // A reply without the count could hide a gap, so it is refused like one without lines.
+    let dropped = json_f64(json.key("d"))
+        .ok_or_else(|| TestError::new(format!("log reply carries no dropped count: {json:?}")))?;
     Ok(LogTail {
         last_seq: json_f64(json.key("n")).unwrap_or(0.0) as u64,
+        dropped: dropped as u64,
         lines: lines
             .iter()
             .filter_map(|line| line.string().cloned())
@@ -871,10 +878,12 @@ mod tests {
                 pass_dpi: 0.0,
             }]
         );
-        let json = parse_json(r#"{"n":7,"pool":"","l":["a","b"]}"#).unwrap();
+        let json = parse_json(r#"{"n":7,"d":5,"pool":"","l":["a","b"]}"#).unwrap();
         let tail = parse_log(&json).unwrap();
         assert_eq!(tail.last_seq, 7);
+        assert_eq!(tail.dropped, 5, "the gap before the lines");
         assert_eq!(tail.lines, vec!["a".to_string(), "b".to_string()]);
+        assert!(parse_log(&parse_json(r#"{"n":7,"l":["a"]}"#).unwrap()).is_err(), "a reply that cannot say whether it has a gap is refused");
     }
 
     #[test]
@@ -902,7 +911,7 @@ mod tests {
         server.route("key", r#"{"ok":1,"f":13}"#);
         server.route("text", r#"{"ok":1,"f":14}"#);
         server.route("mouse", r#"{"ok":1}"#);
-        server.route("log", r#"{"n":3,"pool":"","l":["a","Count: 1"]}"#);
+        server.route("log", r#"{"n":3,"d":0,"pool":"","l":["a","Count: 1"]}"#);
         server.route("quit", r#"{"ok":1}"#);
 
         let client = RemoteClient::connect(server.socket()).unwrap();

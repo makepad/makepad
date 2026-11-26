@@ -341,6 +341,15 @@
     "menu": "other"
   },
   {
+    "id": "story",
+    "title": "Makepad Story",
+    "package": "makepad-story",
+    "binary": "makepad-story",
+    "workspace": "makepad/apps/apps/story/app",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "task",
     "title": "Task",
     "package": "makepad-app-task",

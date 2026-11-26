@@ -181,7 +181,7 @@ pub fn repo_root() -> Option<PathBuf> {
 
 /// The nearest directory at or above `start` that is a makepad checkout: the
 /// workspace `Cargo.toml` with the WM's crate in it. Every ancestor is
-/// checked (crates sit as deep as apps/commercial/story/libs/app_run).
+/// checked (crates sit as deep as apps/apps/story/libs/app_run).
 pub fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
     start.ancestors().find(|dir| dir.join("Cargo.toml").exists() && dir.join("apps/wm/Cargo.toml").exists()).map(Path::to_path_buf)
 }
@@ -703,9 +703,13 @@ mod tests {
         let amp = find("amp").unwrap();
         assert!(amp.menu_visible && amp.wm_launchable);
         assert_eq!(find_by_bin("makepad-app-amp").unwrap().id, "amp");
-        // The commercial repository's apps sit in its checkout inside Makepad.
-        for id in ["scope", "stage", "story", "sandbox"] {
+        // The commercial repository's apps sit in its checkout inside Makepad, the open apps
+        // repository's in its own.
+        for id in ["scope", "stage", "sandbox"] {
             assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
+        }
+        for id in ["synth", "fab", "story"] {
+            assert!(find(id).unwrap().target().dir.starts_with("apps/apps/"), "{id}");
         }
         // A row builds its binary with `--no-default-features` and its features: the features its
         // `[[bin]]` requires are among them, or no launcher can build it (Stage's `stage`).
