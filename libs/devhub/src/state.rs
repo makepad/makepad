@@ -773,6 +773,9 @@ impl Show {
 /// A live session's run silent this long says how long, in its status and its caller's (a hung
 /// one is seen as one: W11754 read "still running: tests" 52 min with no line since its 4th test).
 pub const QUIET_SAID_MS: u64 = 60_000;
+/// What a session's measured time is given past it before it is called stuck: a client's phase
+/// notice and a run that read no startup line wait the same.
+pub const STARTUP_MARGIN_MS: u64 = 120_000;
 
 /// `N min` (or `N s` under a minute).
 pub fn ago(ms: u64) -> String {
@@ -1004,6 +1007,9 @@ pub struct LivePatch {
     /// The first verdict after a live test session on an outdated JIT says what replaced it,
     /// even after the pending restart is cleared; includes its newline (11-15).
     pub jit_notice: String,
+    /// The pending outcome a run's missing startup line failed ([`crate::orch::live`]'s
+    /// `no_startup_said`): the line read late brings it back, and its run's verdict with it.
+    pub startup_outcome: Option<String>,
     /// why a restart or a refusal
     pub reason: String,
 }
@@ -1822,7 +1828,7 @@ pub fn live_value(x: &Live) -> Value {
 
 fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("patches_at_ship", p.patches_at_ship.map_or(Value::Null, int)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("patches_at_ship", p.patches_at_ship.map_or(Value::Null, int)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error)), ("jit_notice", s(&p.jit_notice)), ("startup_outcome", p.startup_outcome.as_ref().map_or(Value::Null, |o| s(o)))])
     });
     obj(vec![
         ("id", s(&x.id)),
@@ -1947,7 +1953,7 @@ fn live_state_from(v: &Value) -> Live {
         kept_by: text(o, "kept_by"),
         kept_ms: uint(o, "kept_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), reason: String::new() }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), patches_at_ship: p.get("patches_at_ship").and_then(Value::as_u64), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), jit_notice: text(Some(p), "jit_notice"), startup_outcome: p.get("startup_outcome").and_then(Value::as_str).map(str::to_string), reason: String::new() }),
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
@@ -2833,13 +2839,17 @@ mod tests {
 
     /// A session keeps what it asked through a master's restart, and `live again` reads it there:
     /// its cores and RAM, its home (the archive, and where its box holds the app's copy), whether
-    /// it is timed; and when its starter left, which ends it after a restart too.
+    /// it is timed; and when its starter left, which ends it after a restart too. A verdict its
+    /// missing startup line failed keeps what it was pending as, for the line read late.
     #[test]
     fn a_live_session_keeps_its_asks_and_its_home() {
         let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), left_ms: 1_794_836_017_627, held: "error: missing item".into(), timed: true, ..Default::default() };
         let back = live_from(&live_value(&x));
         assert_eq!(back.held, x.held, "the session view keeps the confirmed diagnostic");
         assert_eq!(live_state_from(&live_state_value(&x)).held, x.held, "the persisted session keeps it across restart");
+        let failed = Live { patch: Some(LivePatch { outcome: "failed".into(), startup_outcome: Some("initial".into()), ..Default::default() }), ..x.clone() };
+        assert_eq!(live_state_from(&live_state_value(&failed)).patch.and_then(|p| p.startup_outcome).as_deref(), Some("initial"), "the outcome a missing startup line failed");
+        assert_eq!(live_state_from(&live_state_value(&x)).patch.and_then(|p| p.startup_outcome), None);
         assert!(live_from(&obj(vec![])).held.is_empty(), "older records default to unheld");
         assert!(back.timed && !live_from(&live_value(&Live::default())).timed, "a timed session stays timed (`live again` asks it so)");
         assert_eq!(back.left_ms, 1_794_836_017_627, "when its starter left");

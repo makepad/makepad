@@ -302,6 +302,13 @@ pub fn run_class(lane: &str, kind: Kind, argv: &[String]) -> String {
 /// building for 6 min, to its warm runs' 0 s, and called it stalled (11-07).
 pub const JIT_BUILD_RUN: &str = " +jit-build";
 
+/// What a run's output says as cargo starts building its tree's JIT ([`JIT_BUILT`] once built): a
+/// live session's run is building between the two, not silent, whatever its log's quiet says
+/// (cargo's lines come with the notice that it built).
+pub const JIT_BUILD_PENDING: &str = "cargo builds this tree's JIT first; the command runs on it once built";
+/// What a run's output says once cargo built its tree's JIT, before the build's time in seconds.
+pub const JIT_BUILT: &str = "devhub: cargo built this tree's JIT in ";
+
 /// The class a lease is measured by: the one it asked, else its first run's ([`run_class`]); and
 /// when its box said cargo builds its JIT first ([`JIT_BUILD_RUN`]), that job.
 pub fn lease_class(asked: &str, run: &str) -> String {
@@ -622,6 +629,13 @@ pub struct Caps {
     /// the hub builds itself now ([`exec::build_hub`]): no timed lease starts beside it (its cores
     /// are the self-update's lease, [`sched::Req::hub_build`])
     pub hub_building: bool,
+    /// its background builds (its own, its deployment's) keep to its efficiency cores: a Mac a
+    /// person uses ([`crate::os::clamps_background`])
+    pub background_qos: bool,
+    /// whether its default audio output runs, as its hub's last probe found
+    /// ([`caps::probe_audio`]): what an `audio` need reads. None where no probe ran (a Mac a
+    /// person uses, a Linux or Windows box, an older hub)
+    pub audio_out: Option<bool>,
     /// the hub's pre-warm runs now (sync/prewarm.rs): a lease start stops it, and the RAM it holds
     /// among the residents passes
     pub prewarming: bool,
@@ -644,6 +658,12 @@ pub struct Caps {
     /// a Linux box's memory stall: PSI `full avg10` in percent; 0 elsewhere
     /// ([`caps::memory_stall`])
     pub mem_stall: f64,
+    /// its PSI `some avg10` (percent; 0 elsewhere): set against its leases' own stalls
+    /// ([`caps::own_stall`])
+    pub mem_some: f64,
+    /// its leases whose runs sit at their own memory cap (`MemoryHigh`): lease, its scope's stall
+    /// (PSI `some avg10`, percent) and the cap, GB ([`caps::scope_cap_of`])
+    pub capped_leases: Vec<(String, f64, f64)>,
     /// the outage of this hub its WM recorded before it ran ([`makepad_devhub_conf::Trouble`]):
     /// handed out in one caps answer, which the master says as a warning; empty: none
     pub trouble: String,
@@ -850,11 +870,13 @@ impl Caps {
             self.hub_rss_mb,
             self.hub_heap_mb,
             self.features.iter().map(|f| json_str(f)).collect::<Vec<_>>().join(","),
-            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}],\"lease_builds\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.prewarming,
+            format!(",\"rust_targets\":[{}],\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{},\"background_qos\":{},\"audio_out\":{},\"prewarming\":{},\"busy_leases\":[{}],\"busy_outside\":[{}],\"wait_leases\":[{}],\"lease_builds\":[{}],\"mem_some\":{:.1},\"capped_leases\":[{}]", self.rust_targets.iter().map(|t| json_str(t)).collect::<Vec<_>>().join(","), self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building, self.background_qos, self.audio_out.map_or("null".to_string(), |b| b.to_string()), self.prewarming,
                 self.busy_leases.iter().map(|(lease, cores)| format!("{{\"lease\":{},\"cores\":{cores:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
                 self.busy_outside.iter().map(|(what, pid, cores)| format!("{{\"what\":{},\"pid\":{pid},\"cores\":{cores:.2}}}", json_str(what))).collect::<Vec<_>>().join(","),
                 self.wait_leases.iter().map(|(lease, tasks)| format!("{{\"lease\":{},\"tasks\":{tasks:.2}}}", json_str(lease))).collect::<Vec<_>>().join(","),
-                self.lease_builds.iter().map(|(lease, cores, what)| format!("{{\"lease\":{},\"cores\":{cores:.2},\"what\":{}}}", json_str(lease), json_str(what))).collect::<Vec<_>>().join(",")),
+                self.lease_builds.iter().map(|(lease, cores, what)| format!("{{\"lease\":{},\"cores\":{cores:.2},\"what\":{}}}", json_str(lease), json_str(what))).collect::<Vec<_>>().join(","),
+                self.mem_some,
+                self.capped_leases.iter().map(|(lease, stall, high)| format!("{{\"lease\":{},\"stall\":{stall:.1},\"high_gb\":{high:.2}}}", json_str(lease))).collect::<Vec<_>>().join(",")),
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.services_stale.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","),
@@ -904,6 +926,8 @@ impl Caps {
             deploy: s("deploy"),
             applying: v.get("applying").and_then(|x| x.as_bool()).unwrap_or(false),
             hub_building: v.get("hub_building").and_then(|x| x.as_bool()).unwrap_or(false),
+            background_qos: v.get("background_qos").and_then(|x| x.as_bool()).unwrap_or(false),
+            audio_out: v.get("audio_out").and_then(|x| x.as_bool()),
             prewarming: v.get("prewarming").and_then(|x| x.as_bool()).unwrap_or(false),
             hub_rev: s("hub_rev"),
             hub_rss_mb: f("hub_rss_mb") as u64,
@@ -913,6 +937,7 @@ impl Caps {
             cef_dist: s("cef_dist"),
             mem_pressure: f("mem_pressure") as u32,
             mem_stall: f("mem_stall"),
+            mem_some: f("mem_some"),
             trouble: s("trouble"),
             stalls: v.get("stalls").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             wm_wire: s("wm_wire"),
@@ -952,6 +977,9 @@ impl Caps {
         }
         for b in v.get("wait_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
             c.wait_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("tasks").and_then(num).unwrap_or(0.0)));
+        }
+        for b in v.get("capped_leases").and_then(|x| x.as_arr()).unwrap_or(&[]) {
+            c.capped_leases.push((b.get("lease").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("stall").and_then(num).unwrap_or(0.0), b.get("high_gb").and_then(num).unwrap_or(0.0)));
         }
         let busy = |b: &makepad_strict_json::Value, unit: &str| (b.get("what").and_then(|x| x.as_str()).unwrap_or("").to_string(), b.get("pid").and_then(num).unwrap_or(0.0) as u32, b.get(unit).and_then(num).unwrap_or(0.0));
         c.busy_outside = v.get("busy_outside").and_then(|x| x.as_arr()).unwrap_or(&[]).iter().map(|b| busy(b, "cores")).collect();
@@ -1308,6 +1336,7 @@ mod tests {
             busy_outside: vec![("indexer --all".into(), 4_000_021, 2.25), ("dumper".into(), 4_000_020, 0.75)],
             lease_builds: vec![("L7".into(), 9.5, "makepad_widgets".into())],
             wait_leases: vec![("L7".into(), 2.75)],
+            capped_leases: vec![("L8".into(), 31.5, 18.0)],
             mac_gpu: Some((14.0, vec![("dumper".into(), 4_000_020, 14.0)])),
             display: Some("wm".into()),
             battery: None,
@@ -1327,6 +1356,8 @@ mod tests {
             deploy: format!("{},commercial={}", "b".repeat(40), "d".repeat(40)),
             applying: true,
             hub_building: true,
+            background_qos: true,
+            audio_out: Some(false),
             prewarming: true,
             rustc: "1.97.1".into(),
             rust_targets: vec!["aarch64-apple-darwin".into(), "x86_64-pc-windows-msvc".into()],
@@ -1338,6 +1369,7 @@ mod tests {
             cef_dist: "/srv/cef/dist".into(),
             mem_pressure: 2,
             mem_stall: 12.5,
+            mem_some: 20.5,
             trouble: "devhub on node-a could not run for 12 s (2 tries): exited (signal: 9 (SIGKILL))".into(),
             stalls: vec!["lease/exec.rs:1184 (makepad-remote-7) waits on lease start held by lease/exec.rs:1763 (makepad-remote-3) (for 12 s)".into()],
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),

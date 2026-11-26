@@ -762,14 +762,24 @@ impl Lease {
 
     /// Its runs' scope CPU weight: a live session's at interactive weight in a call, whatever it
     /// was asked as, and at background weight between calls; 0 is the idle CPU class when it rests.
-    fn cpu_weight(&self) -> u32 {
+    fn cpu_weight(&self) -> u32 { self.cpu_weight_for(self.cost.cores) }
+
+    /// [`Self::cpu_weight`] at `cores`: what a build of `cores` jobs it asks for weighs.
+    fn cpu_weight_for(&self, cores: f64) -> u32 {
         if self.live && self.idle && self.rest { return 0; }
         let priority = match (self.live, self.idle) {
             (true, false) => super::Priority::Interactive,
             (true, true) => super::Priority::Background,
             (false, _) => self.priority,
         };
-        priority.cpu_weight(self.cost.cores)
+        priority.cpu_weight(cores)
+    }
+
+    /// A store build's scope weighs as its asking lease would at the build's jobs.
+    /// A timed lease has the box to itself, so its build gets no weight.
+    #[cfg(any(feature = "checkout", test))]
+    fn store_build_weight(&self, jobs: u32) -> Option<u32> {
+        self.kind.shared().then(|| self.cpu_weight_for(jobs as f64))
     }
 
     /// Its directories, and whether each is its own: CI's tree and target and the overlays'
@@ -2736,6 +2746,14 @@ impl Exec {
         waits_by_lease(wait, &runnable, total.saturating_sub(1))
     }
 
+    /// The box's leases whose live runs sit at their own memory cap ([`os::scope_cap`]): each with its
+    /// scope's stall and the cap ([`super::Caps::capped_leases`]). A look at two files of each
+    /// scoped run, per caps answer.
+    fn capped_leases(&self) -> Vec<(String, f64, f64)> {
+        let runs: Vec<(String, Arc<Run>)> = self.leases.lock().unwrap().values().flat_map(|l| l.runs.iter().filter(|r| r.unit.is_some() && r.pid != 0 && r.ended() == 0).map(|r| (l.id.clone(), r.clone()))).collect();
+        runs.into_iter().filter_map(|(id, r)| os::scope_cap(r.pid, r.start, r.unit.as_deref(), &r.exit_file.with_extension("usage")).map(|(stall, high)| (id, stall, high))).collect()
+    }
+
     /// The process groups of the box's leases, each with its lease: their runs', and a store build's
     /// the lease's whose overlay started it ([`Self::overlay_build`]; it stops when that lease
     /// ends). A box prebuild charged a core built its dev JIT on all 16 at 7 cores, read as the
@@ -2979,6 +2997,7 @@ impl Exec {
                 let split = self.cpu_split();
                 (c.busy_leases, c.busy_outside, c.lease_builds) = (split.leases, split.outside, split.builds);
                 c.wait_leases = self.lease_waits(c.cpu_wait);
+                c.capped_leases = self.capped_leases();
                 static GPU_LAST: Mutex<Option<(Instant, Vec<(u32, u64)>)>> = Mutex::new(None);
                 c.mac_gpu = crate::top::gpu_since(&GPU_LAST).map(|rates| {
                     let rows = crate::top::named();
@@ -3567,6 +3586,7 @@ impl Exec {
                 let niced = cfg!(unix) && l.lane.starts_with(super::WARM_LANE_PREFIX);
                 // (but one its lease was admitted on fewer cores for takes those: `jit_jobs`)
                 let cores = l.jit_jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
+                let weight = l.store_build_weight(cores);
                 let Some(this) = self.this.upgrade() else { return err("overlay: hub stopped"); };
                 let cwd = cwd.to_string();
                 l.phases.begin("jit", crate::proto::wall_ms());
@@ -3587,7 +3607,7 @@ impl Exec {
                                 if r.pending != line { r.pending = line.to_string(); }
                             }
                         };
-                        let run = |id: &str, cmd: &std::process::Command, active: &dyn Fn() -> Result<(), String>| this.overlay_build(&lease, id, cmd, active);
+                        let run = |id: &str, cmd: &std::process::Command, active: &dyn Fn() -> Result<(), String>| this.overlay_build(&lease, id, cmd, weight, active);
                         let warn = |line: &str| this.emit("lease", Sev::Warn, line.to_string());
                         let build = super::loaders::OverlayBuild { jobs: cores, niced, run: &run, cancelled: &identity.cancelled, say: &say, pending: &pending, warn: &warn, active: &active, sandboxed: offline };
                         let selected = super::loaders::find_overlay(&work, &lane, &edits, &lease, &pin, requested.as_deref(), &build)?;
@@ -3746,6 +3766,12 @@ impl Exec {
 
     fn start_run(&self, l: &mut Lease, rel: &Path, command: RunCommand, found: Found, run_env: &[(String, String)], unset: &[String], request: &str) -> Result<(u32, u32), String> {
         let RunCommand { argv, detachable, offline, loader: overlay_loader, cache, notices } = command;
+        // a toolchain the box lacks is not installed for it: that needs the user's approval
+        // (rustup is told so too, [`caps::AUTO_INSTALL`])
+        let named_env: Vec<(String, String)> = l.env.iter().chain(run_env).cloned().collect();
+        if let Some(why) = caps::toolchain_refusal(&argv, &named_env) {
+            return Err(why);
+        }
         let Found { tree, loader, own, note } = found;
         let id = l.id.clone();
         let n = l.next_run();
@@ -3829,6 +3855,7 @@ impl Exec {
             let path = cmd.get_envs().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).and_then(|(_, v)| v.map(|v| v.to_os_string())).unwrap_or_default();
             if let Ok(path) = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path))) { cmd.env("PATH", path); }
             cmd.envs(plain_env.iter().map(|(k, v)| (k, v)));
+            cmd.env(caps::AUTO_INSTALL.0, caps::AUTO_INSTALL.1);
             // Enter before even the scope's client execs; every wrapper inherits it (11-15).
             #[cfg(target_os = "linux")]
             if offline {
@@ -3949,7 +3976,7 @@ impl Exec {
         // that build is the lease's job, not its command's warm run
         if n == 1 && !l.first_run.ends_with(super::JIT_BUILD_RUN) { l.first_run.push_str(super::JIT_BUILD_RUN); }
         l.phases.begin("jit", crate::proto::wall_ms());
-        resolution.pending = "cargo builds this tree's JIT first; the command runs on it once built".into();
+        resolution.pending = super::JIT_BUILD_PENDING.into();
         let request_id = resolution.request.clone();
         l.resolution = Some(resolution);
         self.save(l);
@@ -3974,7 +4001,7 @@ impl Exec {
                 Ok((status, log)) if !status.success() => Ok(this.failed_build_run(l, &log, os::exit_code(status), &request_id)),
                 Ok((_, log)) => {
                     let mut notices: Vec<String> = found.note.iter().cloned().chain(std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_string)).collect();
-                    notices.push(format!("devhub: cargo built this tree's JIT in {:.0} s", took.as_secs_f64()));
+                    notices.push(format!("{}{:.0} s", super::JIT_BUILT, took.as_secs_f64()));
                     if gate {
                         run_env.push(("MAKEPAD_LOADER_LOG".to_string(), log.display().to_string()));
                     }
@@ -4043,23 +4070,32 @@ impl Exec {
         if let Some(p) = super::caps::rust_path() {
             cmd.env("PATH", p).env_remove("CARGO").env_remove("RUSTC");
         }
+        // and rustup installs no toolchain a run names (last: no lease's environment turns it on)
+        cmd.env(caps::AUTO_INSTALL.0, caps::AUTO_INSTALL.1);
     }
 
-    /// Store-owned Cargo has no lease mark, run entry or lease scratch. The per-id lock
+    /// Store-owned Cargo takes the asking lease's weight at the build's job count.
+    /// It has no lease mark, run entry or lease scratch. The per-id lock
     /// and cache hold stay with the worker until it reaps Cargo and publishes the binary.
     /// A build an earlier hub started is joined through its recorded pid before starting Cargo.
     #[cfg(feature = "checkout")]
-    fn overlay_build(&self, lease: &str, id: &str, build: &std::process::Command, active: &dyn Fn() -> Result<(), String>) -> Result<(std::process::ExitStatus, PathBuf), String> {
+    fn overlay_build(&self, lease: &str, id: &str, build: &std::process::Command, weight: Option<u32>, active: &dyn Fn() -> Result<(), String>) -> Result<(std::process::ExitStatus, PathBuf), String> {
         active()?;
         let conf = self.conf();
         let tmp = conf.work.join("dev/jit/build").join(id);
         std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
         let pid_file = tmp.join("cargo.pid");
-        join_recorded_build(&pid_file, lease, active, &|pid| self.emit("lease", Sev::Info, format!("dev JIT {id}: joining the build pid {pid} an earlier hub started")))?;
+        let joined = join_recorded_build(&pid_file, lease, active, &|pid| {
+            self.emit("lease", Sev::Info, format!("dev JIT {id}: joining the build pid {pid} an earlier hub started"));
+            // (its kept entry is the joiner's now, as its record says, [`Self::stop_unowned_builds`])
+            for (owner, _) in self.store_builds.lock().unwrap().iter_mut().filter(|(_, r)| !r.ours && r.pid == pid) { *owner = lease.to_string(); }
+        });
+        self.store_builds.lock().unwrap().retain(|(_, r)| r.ours || os::same(r.pid, r.start));
+        joined?;
         let log = tmp.join("cargo.log");
         let unit = self.scopes.then(|| format!("devhub-jit-{}-{id}", self.units));
         let argv = std::iter::once(build.get_program()).chain(build.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
-        let full = os::lease_argv(argv, unit.as_deref(), Kind::Build.nice(), &conf.cpus_shared, None, None);
+        let full = os::lease_argv(argv, unit.as_deref(), Kind::Build.nice(), &conf.cpus_shared, weight, None);
         let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let mut cmd = std::process::Command::new(&full[0]);
         cmd.args(&full[1..]).current_dir(build.get_current_dir().ok_or("dev JIT build has no cwd")?)
@@ -4069,6 +4105,7 @@ impl Exec {
         for (k, v) in build.get_envs() {
             match v { Some(v) => { cmd.env(k, v); }, None => { cmd.env_remove(k); } }
         }
+        cmd.env(caps::AUTO_INSTALL.0, caps::AUTO_INSTALL.1);
         if let Some(unit) = &unit { os::reset_failed_units(&format!("{unit}.scope")); }
         active()?;
         let (child, hold) = os::lease_spawn(&mut cmd, Some(&tmp.join("cargo.exit"))).map_err(|e| format!("dev JIT build: {e}"))?;
@@ -4108,17 +4145,35 @@ impl Exec {
     /// it built on as no lease's, read "left by an ended JIT build", a pool box at load 28 of its
     /// 16 cores and a tests shard there at 20 times its run (11-16). At a lease's end and the hub's
     /// start, when leases are taken back.
+    ///
+    /// One whose lease this hub holds is that lease's until it ends, in the store build table as
+    /// an earlier hub's ([`Run::ours`] false): its scope is live in the box's CPU split and its CPU
+    /// its lease's, and the next sweep after its lease ends stops it. Kept out of the table, a
+    /// restarted hub's CPU split read a running build's rustc as "left by an ended JIT build",
+    /// outside every lease at 4.6 and 1.8 cores on a pool box at 17.8 of its 16 (11-26).
     #[cfg(feature = "checkout")]
     fn stop_unowned_builds(&self) {
         let root = self.conf().work.join("dev/jit/build");
-        let tracked: BTreeSet<u32> = self.store_builds.lock().unwrap().iter().map(|(_, r)| r.pid).collect();
+        // (the leases first: a lease's look at the store builds holds the leases' lock)
+        let held: BTreeSet<String> = self.leases.lock().unwrap().keys().cloned().collect();
+        let kept: BTreeSet<u32> = {
+            let mut builds = self.store_builds.lock().unwrap();
+            builds.retain(|(lease, r)| r.ours || os::same(r.pid, r.start) && held.contains(lease));
+            builds.iter().filter(|(_, r)| !r.ours).map(|(_, r)| r.pid).collect()
+        };
+        let tracked: BTreeSet<u32> = self.store_builds.lock().unwrap().iter().filter(|(_, r)| r.ours).map(|(_, r)| r.pid).collect();
         for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
             let path = e.path().join("cargo.pid");
             let Some((pid, start, lease)) = std::fs::read_to_string(&path).ok().and_then(|t| recorded_build(&t)) else { continue };
-            if tracked.contains(&pid) || !os::same(pid, start) || (!lease.is_empty() && self.leases.lock().unwrap().contains_key(&lease)) { continue; }
+            if tracked.contains(&pid) || !os::same(pid, start) { continue; }
             let id = e.file_name().to_string_lossy().into_owned();
             let unit = self.scopes.then(|| format!("devhub-jit-{}-{id}", self.units));
-            let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 0, pid, start, unit, log: e.path().join("cargo.log"), exit: Mutex::new(None), ours: true, detachable: false, hold: os::Hold::none(), exit_file: e.path().join("cargo.exit"), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false), native: None, build: OnceLock::new(), killed_why: OnceLock::new() });
+            let run = |ours: bool| Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 0, pid, start, unit: unit.clone(), log: e.path().join("cargo.log"), exit: Mutex::new(None), ours, detachable: false, hold: os::Hold::none(), exit_file: e.path().join("cargo.exit"), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false), native: None, build: OnceLock::new(), killed_why: OnceLock::new() });
+            if !lease.is_empty() && held.contains(&lease) {
+                if !kept.contains(&pid) { self.store_builds.lock().unwrap().push((lease, run(false))); }
+                continue;
+            }
+            let run = run(true);
             let (_, left) = stop_runs(std::slice::from_ref(&run), &makepad_remote::discovery::registry_dir(), true);
             let _ = std::fs::remove_file(&path);
             let owner = if lease.is_empty() { "no lease named".to_string() } else { format!("{lease}, which ended") };
@@ -4151,6 +4206,7 @@ impl Exec {
         for (k, v) in build.get_envs() {
             match v { Some(v) => { cmd.env(k, v); }, None => { cmd.env_remove(k); } }
         }
+        cmd.env(caps::AUTO_INSTALL.0, caps::AUTO_INSTALL.1);
         let (child, hold) = os::lease_spawn(&mut cmd, Some(&exit_file(&self.state, id, n))).map_err(|e| format!("lease worker process: {e}"))?;
         let pid = child.id();
         let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.clone(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit_file(&self.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false), native: None, build: OnceLock::new(), killed_why: OnceLock::new() });
@@ -4190,6 +4246,12 @@ impl Exec {
             return Err(format!("{id} is an {} lease: launches need a write lease", l.kind.as_str()));
         }
         if self.restarting.load(Ordering::Acquire) { return Err(format!("restarting: {}'s hub restarts for its self-update; try again", self.machine)); }
+        // (as a run's command: [`Exec::start_run`])
+        let named: Vec<String> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
+        let named_env: Vec<(String, String)> = l.env.iter().cloned().chain(cmd.get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))).collect();
+        if let Some(why) = caps::toolchain_refusal(&named, &named_env) {
+            return Err(why);
+        }
         let n = l.next_run();
         let exit = exit_file(&self.state, id, n);
         let unit = self.scopes.then(|| format!("devhub-lease-{}-{id}-{n}", self.units));
@@ -4214,6 +4276,7 @@ impl Exec {
         }
         // (the wrappers inside the first one find theirs on it too)
         if own_path.is_some() { run_cmd.env("PATH", &hub_path); }
+        run_cmd.env(caps::AUTO_INSTALL.0, caps::AUTO_INSTALL.1);
         // what it starts carries the lease's mark, as a run's processes do ([`Exec::run_env`])
         run_cmd.env(LEASE_ENV, lease_mark(&self.state, id));
         run_cmd.env("RELAX_RUN_OWNER", id);
@@ -4997,8 +5060,10 @@ impl Exec {
             let _ = std::fs::remove_file(r.exit_file.with_extension("warmup"));
             let _ = std::fs::remove_file(&r.exit_file);
         }
-        // (an empty one only: what a run kept there outlives its lease)
-        let _ = std::fs::remove_dir(test_artifacts(&l.target, &l.id));
+        // nodes hold no state: what its runs kept there went back to the master with its result
+        // before this end ([`super::master::LeaseMaster::keep_artifacts`]); 700 such folders of
+        // ended leases (1.2 GB) stood in one box's target (11-26)
+        let _ = std::fs::remove_dir_all(test_artifacts(&l.target, &l.id));
         let sev = if how == "released" { Sev::Info } else { Sev::Warn };
         self.emit("lease", sev, format!("lease: {} {} of {} ended on {} ({how}): {} process group(s) stopped", l.id, l.kind.as_str(), l.lane, self.machine, killed.len()));
         self.guard.touch();
@@ -5378,6 +5443,7 @@ impl Exec {
             l.first_run = "overlay-selftest".into();
             self.save(l);
             let (work, tmp, lease, case, identity, cores) = (self.conf().work, l.tmp.clone(), l.id.clone(), case.to_string(), l.identity.clone(), jobs(l.kind, l.cost));
+            let weight = l.store_build_weight(cores);
             let completion = summary.clone();
             match std::thread::Builder::new().name("devhub-overlay-selftest".into()).spawn(move || {
                 let active = || if identity.cancelled.load(Ordering::Acquire) { Err(format!("selftest: lease {lease} ended")) } else { Ok(()) };
@@ -5387,7 +5453,7 @@ impl Exec {
                     let _ = writeln!(output, "{line}");
                     let _ = output.flush();
                 };
-                let run = |id: &str, cmd: &std::process::Command, active: &dyn Fn() -> Result<(), String>| this.overlay_build(&lease, id, cmd, active);
+                let run = |id: &str, cmd: &std::process::Command, active: &dyn Fn() -> Result<(), String>| this.overlay_build(&lease, id, cmd, weight, active);
                 // the selftest's fixtures fail on purpose: their warnings go to its log
                 let build = super::loaders::OverlayBuild { jobs: cores, niced: false, run: &run, cancelled: &identity.cancelled, say: &say, pending: &say, warn: &say, active: &active, sandboxed: false };
                 let spawn = |cmd: &std::process::Command| this.worker_process(&lease, &identity, &tmp, cmd, &[], &[], false);
@@ -5834,6 +5900,9 @@ fn gone_runs(state: &Path, here: &dyn Fn() -> Vec<String>) -> Vec<(String, PathB
 
 /// How often a box proves it can link.
 const TOOLCHAIN_EVERY: Duration = Duration::from_secs(10 * 60);
+/// How often a hub plays its silent audio probe ([`caps::probe_audio`]): a box's output that
+/// stops stays stopped until someone looks at the box, and one that runs again is heard by this.
+const AUDIO_EVERY: Duration = Duration::from_secs(30 * 60);
 /// How often a box looks whether a store command failed for it, or whether git works its stores
 /// again.
 const GIT_TICK: Duration = Duration::from_secs(30);
@@ -5864,12 +5933,23 @@ fn probe_toolchain_now(x: &Exec) -> Option<String> {
     why
 }
 
+/// One audio probe ([`caps::probe_audio`]): said when the box's output stops running, and when
+/// it runs again.
+fn probe_audio_now(x: &Exec) {
+    match super::caps::probe_audio() {
+        (before, Some(false)) if before != Some(false) => x.emit("audio", Sev::Warn, format!("audio: {}'s output does not run: a silent half-second playback (afplay at volume 0) did not end in {} s, so an app's output callback never runs there; work that needs audio output (`--needs audio=1`, a package's audio-tests) goes to other boxes until it runs again (the box's own fix: another output device, or a restart of its coreaudiod)", x.machine, super::caps::AUDIO_PROBE_WAIT.as_secs())),
+        (Some(false), Some(true)) => x.emit("audio", Sev::Info, format!("audio: {}'s output runs again", x.machine)),
+        _ => {}
+    }
+}
+
 /// A box whose toolchain cannot link, or whose git fails on its stores, takes no leases until it
-/// works again (`Caps::sick`): each is said once.
+/// works again (`Caps::sick`): each is said once. Its audio output is probed here too.
 fn toolchain_loop(w: Weak<Exec>) {
     os::nice_this_thread();
     let _ = PROBE_THREAD.set(std::thread::current());
     let mut linked: Option<std::time::Instant> = None;
+    let mut heard: Option<std::time::Instant> = None;
     let mut git_said = String::new();
     loop {
         let Some(x) = w.upgrade() else { return };
@@ -5892,6 +5972,10 @@ fn toolchain_loop(w: Weak<Exec>) {
             if !linked.is_some_and(|t| t.elapsed() < TOOLCHAIN_EVERY) || PROBE_SOON.swap(false, Ordering::AcqRel) {
                 linked = Some(std::time::Instant::now());
                 probe_toolchain_now(&x);
+            }
+            if !heard.is_some_and(|t| t.elapsed() < AUDIO_EVERY) {
+                heard = Some(std::time::Instant::now());
+                probe_audio_now(&x);
             }
         }
         drop(x);
@@ -7086,6 +7170,16 @@ pub(crate) fn hub_building() -> bool {
 #[cfg(feature = "checkout")]
 const HUB_BUILD_LOOK: Duration = Duration::from_secs(5);
 
+/// The box's own builds weigh as background work of their room's cores. At systemd's default
+/// weight they took CPU from every background lease on the box (100 against 1 a core).
+#[cfg(feature = "checkout")]
+pub(crate) fn box_build_scope(kind: &str, cores: u32) -> Option<(String, u32)> {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    if !user_bus() { return None; }
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    Some((format!("devhub-{kind}-{}-{n}", std::process::id()), super::Priority::Background.cpu_weight(cores as f64)))
+}
+
 /// `cargo build --release -p makepad-app-devhub` in the deployment `root`: the build of what its
 /// keeper's `cargo run` starts (the Mac's and Windows' start scripts run exactly this; the WM's
 /// start the same package, profile and features), in this hub's environment, which is the
@@ -7094,7 +7188,9 @@ const HUB_BUILD_LOOK: Duration = Duration::from_secs(5);
 pub(crate) fn build_hub(root: &Path, jobs: Option<u32>) -> Result<(), String> {
     #[cfg(windows)]
     let aside = image_aside();
-    let mut cmd = os::background(makepad_app_registry::cargo_bin().as_os_str());
+    let cores = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get() as u32));
+    let scope = box_build_scope("hubbuild", cores);
+    let mut cmd = os::background_scoped(makepad_app_registry::cargo_bin().as_os_str(), scope.as_ref().map(|(unit, weight)| (unit.as_str(), *weight)));
     // (rustup counts nested proxies in RUST_RECURSION_COUNT and refuses past 20)
     cmd.args(["build", "--release", "-p", "makepad-app-devhub"]);
     // the cores its room was granted, when fewer than cargo would take
@@ -8585,6 +8681,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A build an earlier hub started for a lease this hub holds is that lease's while it runs, and
+    /// the sweep at that lease's end stops it: a restarted hub's CPU split read a running build's
+    /// rustc as "left by an ended JIT build", outside every lease on a box past its cores (11-26).
+    #[cfg(all(unix, feature = "checkout"))]
+    #[test]
+    fn an_earlier_hubs_build_is_its_leases_until_that_lease_ends() {
+        use std::os::unix::process::CommandExt;
+        let (x, base, _) = test_exec("keptbuild", Opts::default());
+        x.handle("lease-start", r#"{"id":"K1","lane":"kept","kind":"test","rev":null}"#);
+        let dir = x.conf().work.join("dev/jit/build/abc");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let pid = child.id();
+        std::fs::write(dir.join("cargo.pid"), format!("{pid} {} K1\n", os::proc_start(pid).unwrap())).unwrap();
+        // at the restarted hub's start, and at another lease's end
+        x.stop_unowned_builds();
+        x.stop_unowned_builds();
+        assert_eq!(x.store_groups(), vec![(pid, "K1".to_string())], "its held lease's, once");
+        assert!(child.try_wait().unwrap().is_none(), "it runs on for its lease");
+        x.handle("lease-end", "K1 released");
+        assert!(x.store_groups().is_empty(), "its lease ended: no lease's build");
+        let stopped = (0..100).any(|_| child.try_wait().unwrap().is_some() || { std::thread::sleep(Duration::from_millis(50)); false });
+        if !stopped { let _ = child.kill(); let _ = child.wait(); }
+        assert!(stopped, "and it is stopped");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A store build's CPU, reaped, goes into the receipt of the lease whose overlay started it:
     /// its class is measured by what its build used (a box prebuild's read 0.04 CPU seconds for a
     /// 69 s build on 7 cores, and its class was charged one core, 11-11).
@@ -8595,7 +8718,7 @@ mod tests {
         x.handle("lease-start", r#"{"id":"S1","lane":"store","kind":"test","rev":null}"#);
         let mut burn = std::process::Command::new("/bin/sh");
         burn.args(["-c", "i=0; while [ $i -lt 50000 ]; do i=$((i+1)); done"]).current_dir(&base);
-        let (status, _) = x.overlay_build("S1", "burn", &burn, &|| Ok(())).unwrap();
+        let (status, _) = x.overlay_build("S1", "burn", &burn, None, &|| Ok(())).unwrap();
         assert!(status.success());
         let cpu = x.leases.lock().unwrap()["S1"].store_cpu_s;
         assert!(cpu > 0.01, "its build's CPU, reaped: {cpu}");
@@ -8748,6 +8871,7 @@ mod tests {
 
     #[test]
     fn a_live_session_gets_a_cpu_weight_and_its_jit_sizes_its_own_threads() {
+        use std::ffi::OsStr;
         let (x, _base, _events) = test_exec("live", Opts::default());
         let live = x.handle("lease-start", r#"{"id":"L1","lane":"livex","kind":"test","rev":null,"live":true,"cost":{"cores":1}}"#);
         let plain = x.handle("lease-start", r#"{"id":"L2","lane":"plainx","kind":"test","rev":null,"cost":{"cores":1}}"#);
@@ -8792,6 +8916,27 @@ mod tests {
         assert_eq!(unit.iter().any(|a| a == "CPUWeight=1"), cfg!(target_os = "linux"), "a run that starts at rest starts at the least weight: {unit:?}");
         x.handle("lease-weight", "L1 call");
         assert_eq!(x.leases.lock().unwrap()["L1"].cpu_weight(), weight);
+        {
+            let leases = x.leases.lock().unwrap();
+            assert_eq!(leases["L2"].store_build_weight(9), Some(9), "a background store build weighs one per build job");
+            assert_eq!(leases["L1"].store_build_weight(9), Some(900), "a live call's store build weighs 100 per build job");
+            assert_eq!(leases["L6"].store_build_weight(9), None, "a timed lease has the box to itself and gives its store build no weight");
+        }
+        let cargo = OsStr::new("cargo");
+        if cfg!(target_os = "linux") {
+            let scoped = os::background_scoped(cargo, Some(("u", 9)));
+            assert_eq!(scoped.get_program(), OsStr::new("systemd-run"), "a scoped box build starts through systemd-run");
+            assert!(scoped.get_args().any(|a| a == "--scope"), "the box build runs in a scope");
+            assert!(scoped.get_args().any(|a| a == "--unit=u"), "the box build uses its own unit name");
+            assert!(scoped.get_args().any(|a| a == "CPUWeight=9"), "the box build's scope takes its room's background weight");
+            let nice = os::lease_argv(vec!["cargo".into()], None, 15, "", None, None);
+            let command = scoped.get_args().skip_while(|&a| a != "--").skip(1);
+            assert!(command.eq(nice.iter().map(OsStr::new)), "the scope executes cargo at target nice 15");
+        }
+        let unscoped = os::background_scoped(cargo, None);
+        let background = os::background(cargo);
+        assert_eq!(unscoped.get_program(), background.get_program(), "an unscoped box build uses the platform's background program");
+        assert!(unscoped.get_args().eq(background.get_args()), "an unscoped box build keeps the platform's background arguments");
     }
 
     /// A background lease's runs weigh a hundredth of an interactive one's or a live session's in

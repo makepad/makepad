@@ -72,10 +72,11 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           it, never another box (refused, saying why, when N can never take it);
                                           --series S says why: a series S compared on N (never asked to unpin);
                                           --keep <dir>: what the cmd put in $DEVHUB_KEEP (a failed step's logs) is
-                                          copied into <dir> before the lease ends. --ram-floor-gb N: the least RAM its
+                                          copied into <dir> before the lease ends (never into a checkout: the main
+                                          one's local/agent_state/<lane>/runs/ is the place). --ram-floor-gb N: the least RAM its
                                           unasked need is cut to on a box (a tests shard's largest unit). --run-since MS: a
-                                          tests bucket shard's run took its tip then (wall-clock ms): by day its shards hold
-                                          a box only once that is 2 h ago, at night always. --input NAME=<archive> (lease and
+                                          tests bucket shard's run took its tip then (wall-clock ms): by day a full run's shards
+                                          hold a box only once that is 2 h ago, at night always. --input NAME=<archive> (lease and
                                           run): a tar archive here (a test corpus) the cmd finds unpacked at $NAME; a
                                           box gets it once by its sha256 and keeps it for the next lease that names it
                                           (any box can take the job). --for <node> (lease and run): cargo builds
@@ -174,6 +175,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
                                           work, `target/..`, `tmp/..`). Once its lease ended, the lane's tree may go to
                                           another lane's lease at any time: a run's outputs come back with `run ...
                                           --keep <dir>`, which copies what the cmd put in $DEVHUB_KEEP before the lease ends.
+                                          <local-dir> and --keep's <dir> are refused in a checkout (a lane's worktree or a
+                                          repo's): the main checkout's local/agent_state/<lane>/runs/ takes kept files.
                                           A native build is for its box's CPU: a get from a target no `--for` built
                                           says so (`target/for-<cpu>/..`: one that did).
                                           `captures/<file>` (with --node, any lane, no lease): the box's JIT
@@ -618,7 +621,7 @@ struct Opts {
 #[cfg(test)]
 const LOCAL_FLAGS: &[(&str, &str)] = &[
     ("--watch-pid", "The holder watches the process and ends its lease when it exits."),
-    ("--keep", "The client copies the command's kept output after the run."),
+    ("--keep", "The client copies the command's kept output after the run, outside every checkout."),
     ("--exit-to", "The client writes its exit status for its watcher."),
     ("--tree", "The client selects how to ship the run's sources."),
     ("--native", "The client checks the reason for a native build."),
@@ -723,6 +726,9 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         if let Some(why) = laneless(&req.lane, named || in_lane, std::env::var("DEVHUB_AGENT").ok().as_deref()) {
             return Err(why);
         }
+    }
+    if let Some(why) = keep.as_deref().and_then(|k| kept_into_checkout(k, &cwd(), &req.lane)) {
+        return Err(format!("--keep: {why}"));
     }
     // the lane's repo: revisions are looked up and recovered work lands there
     if req.repo_dir.is_none() {
@@ -2034,6 +2040,9 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
     if let Some(miss) = &known { println!("{}", crate::jit_misses::notice(miss)); }
     else { eprintln!("devhub test: JIT compile/resolve failure on {pkg} {}; checking with cargo on a pool box", crate::jit_misses::target(args)); }
     let _ = std::io::stdout().flush();
+    // what cargo builds, read as its run ships ([`crate::jit_misses::other_sources`]): a miss is
+    // the JIT's only when cargo built what the JIT refused
+    let (shipped, unheld) = if known.is_none() { (Some(miss_inputs(&o, pkg)), crate::jit_misses::unheld_cited(Path::new(&miss_repo(&o)), errors)) } else { (None, None) };
     o.cmd = ["cargo", "test", "--release", "--message-format=json-render-diagnostics", "-p", pkg].iter().map(|s| s.to_string()).chain(args.iter().cloned()).collect();
     o.tree = true;
     on_cargo_boxes(&mut o.req);
@@ -2070,10 +2079,13 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
         eprintln!("devhub test: not a JIT miss: this lane's JIT is older than work's (work changed the JIT since the lane's base {}), and its code may use what landed since: merge work and run it again (cargo builds it; the JIT said {})", &base[..base.len().min(10)], errors.first().map_or("", String::as_str));
     } else if known.is_none() {
         let inputs = inputs.and_then(|h| h.join().ok().flatten());
-        match test_miss(&o, pkg, args, "record", errors, inputs.as_deref()) {
+        let shipped = shipped.and_then(|h| h.join().ok().flatten());
+        if let Some(why) = crate::jit_misses::other_sources(inputs.as_deref(), shipped.as_deref(), unheld.as_ref()) {
+            eprintln!("devhub test: not a JIT miss, none recorded: {why}; run it again (the JIT said {})", errors.first().map_or("", String::as_str));
+        } else { match test_miss(&o, pkg, args, "record", errors, inputs.as_deref()) {
             Ok(miss) => println!("{}", crate::jit_misses::notice(&miss)),
             Err(e) => eprintln!("devhub test: JIT miss on {pkg} {} (recording failed: {e}): the JIT said {}; cargo builds it", crate::jit_misses::target(args), errors.first().map_or("", String::as_str)),
-        }
+        } }
     }
     print!("{output}");
     (code, false)
@@ -2327,6 +2339,15 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             if p.opens_windows(&select) && !o.req.needs.iter().any(|(k, _)| k == "gui" || k == "display") {
                 o.req.needs.push(("gui".to_string(), "1".to_string()));
                 eprintln!("devhub test: {pkg}: its tests open the app's windows (it depends on makepad-test): a box that shows them runs it (gui=1)");
+            }
+            // its tests play to the output device, whose callback clocks them: a box whose audio
+            // output runs takes it (`audio=1`, measured by each Mac's hub); `--needs audio=0`
+            // says otherwise. On one Mac the output never ran under any app, and the synth
+            // app's transport tests failed there at any revision (11-26).
+            let audio: Vec<String> = crate::jit_misses::native_selected(&p.audio, &select).into_iter().map(|(t, why)| format!("{t}: {why}")).collect();
+            if !audio.is_empty() && !o.req.needs.iter().any(|(k, _)| k == "audio") {
+                o.req.needs.push(("audio".to_string(), "1".to_string()));
+                eprintln!("devhub test: {pkg}: its Cargo.toml's audio-tests play to the output device ({}): a box whose audio output runs takes it (audio=1)", audio.join("; "));
             }
             p.own
         };
@@ -3188,7 +3209,7 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
         v.as_arr()?.iter().map(|v| (crate::state::live_from(v), v.get("word").and_then(Value::as_str).map(str::to_string), v.get("quiet_ms").and_then(Value::as_u64))).find(|(x, _, _)| x.test && x.offline == offline && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
     };
     let measured_ms = status().and_then(|(x, _, _)| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
-    let mut notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
+    let mut notice_after = Duration::from_millis(measured_ms.saturating_add(crate::state::STARTUP_MARGIN_MS));
     let mut told = String::new();
     let v = live_retry(out, |out| {
         // Keep the request open without a deadline. A separate channel reads its phase
@@ -3210,9 +3231,15 @@ fn live_test(o: &Opts, pkg: &str, args: &[String], offline: bool, check: &str, o
             }
             if started.elapsed() > notice_after {
                 let (x, word, quiet) = status().map_or((None, None, None), |(x, w, q)| (Some(x), w, q));
+                // (a session whose run has not started for this call waits for its JIT: selected,
+                // built, or another lease's build of it, however long that takes, live.rs startup_due)
+                let jit_wait = x.as_ref().filter(|x| x.state == "running" && x.pid == 0 && x.run_n <= x.ask_after)
+                    .map(|x| format!("waiting for {}'s JIT build on {} ({} s)", x.lane, x.node, started.elapsed().as_secs()));
                 let phase = match x.as_ref() {
                     None => "waiting for a live job",
                     Some(x) if x.state != "running" => x.state.as_str(),
+                    Some(x) if x.pid == 0 && x.note.starts_with("no startup line read") => x.note.as_str(),
+                    Some(_) if jit_wait.is_some() => jit_wait.as_deref().unwrap_or_default(),
                     Some(x) if x.pid == 0 => "starting JIT",
                     Some(x) => match x.patch.as_ref() {
                         Some(p) if p.tests.is_some() => "finishing the current call",
@@ -3375,6 +3402,35 @@ fn keep_said(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, String>) -> S
     }
 }
 
+/// Why files kept for lane `lane` (`--keep <dir>`, `get .. <local-dir>`) may not go to `dst`
+/// (relative to `cwd`): it lies in a checkout, a lane's worktree or a repo's own, where a kept
+/// file can be committed or read as a build's input. Only the main checkout's `local/` takes them,
+/// and the refusal names the lane's `local/agent_state/<lane>/runs/` there. A lane's `run --keep
+/// apps/apps/fab/app/target/makepad_test/..`, relative in its worktree, left a `target/` in the
+/// app's folder (11-26).
+fn kept_into_checkout(dst: &Path, cwd: &Path, lane: &str) -> Option<String> {
+    // `..` and `.` lexically, then symlinks in the part that exists (the rest is made by the copy)
+    let mut abs = PathBuf::new();
+    for c in cwd.join(dst).components() {
+        match c {
+            std::path::Component::ParentDir => { abs.pop(); }
+            std::path::Component::CurDir => {}
+            c => abs.push(c),
+        }
+    }
+    let real = abs.ancestors().find_map(|a| Some((a.canonicalize().ok()?, abs.strip_prefix(a).ok()?))).map_or(abs.clone(), |(a, rest)| a.join(rest));
+    let root = real.ancestors().find(|a| a.join(".git").exists())?;
+    let dot = root.join(".git");
+    if dot.is_dir() && real.strip_prefix(root).ok()?.starts_with("local") { return None; }
+    // a linked worktree's main checkout: its gitdir's common dir's parent
+    let gitdir = if dot.is_dir() { dot } else { root.join(std::fs::read_to_string(&dot).ok()?.trim().strip_prefix("gitdir:")?.trim()) };
+    let common = std::fs::read_to_string(gitdir.join("commondir")).ok().map_or(gitdir.clone(), |c| gitdir.join(c.trim()));
+    let main = common.canonicalize().ok().and_then(|c| c.parent().map(Path::to_path_buf)).unwrap_or_else(|| root.to_path_buf());
+    // a nested repository's checkout (`apps/<name>`): the makepad checkout around it ([`lane_root_of`])
+    let main = main.parent().filter(|apps| apps.file_name().is_some_and(|a| a == "apps")).and_then(Path::parent).filter(|outer| outer.join(".git").is_dir()).map_or(main.clone(), Path::to_path_buf);
+    Some(format!("{} is in the checkout {}: a file kept there can be committed or read as a build's input; keep it under {}/local/agent_state/{lane}/runs/", dst.display(), root.display(), main.display()))
+}
+
 /// [`fetch`]'s copy, none an empty list; `inside`: `rel`'s own folder is left out of the paths
 /// written under `dst`.
 fn fetch_under(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool) -> Result<Vec<(PathBuf, u64)>, String> {
@@ -3446,6 +3502,10 @@ fn get(lane: &str, rel: &str, dst: &str, rest: &[&str]) -> i32 {
         Err(e) => return fail(e),
     };
     let dst = PathBuf::from(dst);
+    if let Some(why) = kept_into_checkout(&dst, &cwd(), lane) {
+        eprintln!("makepad devhub get: {why}");
+        return 2;
+    }
     let (count, bytes) = match fetch(&c, &node, lane, lease.as_deref().unwrap_or("-"), rel, &dst) {
         Ok(files) => (files.len(), files.iter().map(|(_, n)| n).sum::<u64>()),
         Err(e) => return fail(e),
@@ -3515,8 +3575,11 @@ fn queue_row(v: &Value, held: Option<&Value>) -> String {
         "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
         st => {
             let info = v.get("info").filter(|i| !i.is_null());
+            let progress = s(&v, "progress");
             let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
+            let run = if progress.is_empty() { run } else { format!("{run} ({progress})") };
             let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
+            let ram = format!("{ram}{}", s(&v, "ram_now"));
             let cores = s(&v, "cores_now");
             let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
             let agent = s(&v, "agent");
@@ -3602,6 +3665,11 @@ fn nodes(c: &Client) -> i32 {
                 let lat = s(&v, "latency");
                 if !lat.is_empty() {
                     println!("{:<8} {:<8} {lat}", "", "");
+                }
+                // its drops off the network and their pattern, once it dropped in the last day
+                let link = s(&v, "link");
+                if !link.is_empty() {
+                    println!("{:<8} {:<8} {link}", "", "");
                 }
             }
             0
@@ -4730,6 +4798,38 @@ mod tests {
         assert_eq!(keep_said("L7", dst, &Ok(Vec::new())), "L7: kept nothing in grabs: the run put no file in $DEVHUB_KEEP");
         assert_eq!(keep_said("L7", dst, &Ok(vec![(dst.join("a.png"), 1 << 20), (dst.join("b.png"), 1 << 19)])), "L7: kept 2 files (1.5 MB) in grabs");
         assert_eq!(keep_said("L7", dst, &Err("node-a: no lease L7".into())), "L7: --keep grabs: nothing kept: node-a: no lease L7");
+    }
+
+    /// Kept files go nowhere in a checkout, a lane's worktree or the main one, but the main one's
+    /// `local/`, which the refusal names: `--keep` relative in a worktree left a `target/` in an
+    /// app's folder (11-26).
+    #[test]
+    fn kept_files_go_to_the_main_checkouts_local_never_into_a_checkout() {
+        let dir = std::env::temp_dir().join(format!("devhub-keep-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (main, wt) = (dir.join("main"), dir.join("wt"));
+        for d in [main.join(".git/worktrees/wt"), main.join("local"), main.join("apps/app/src"), main.join("apps/nested/.git"), wt.join("apps/app")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let main = main.canonicalize().unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", main.join(".git/worktrees/wt").display())).unwrap();
+        std::fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        let wt = wt.canonicalize().unwrap();
+        let place = format!("keep it under {}/local/agent_state/lane-a/runs/", main.display());
+        let refused = |dst: &str, cwd: &Path, root: &Path| {
+            let why = kept_into_checkout(Path::new(dst), cwd, "lane-a").unwrap_or_else(|| panic!("{dst} from {} is kept into a checkout", cwd.display()));
+            assert_eq!(why, format!("{dst} is in the checkout {}: a file kept there can be committed or read as a build's input; {place}", root.display()));
+        };
+        refused("apps/app/target/makepad_test/L1", &wt, &wt);
+        refused(&wt.join("apps/app").display().to_string(), &dir, &wt);
+        refused("local/agent_state/lane-a/runs", &wt, &wt);
+        refused("apps/app/src", &main, &main);
+        refused("local/../apps/app", &main, &main);
+        refused("apps/nested/out", &main, &main.join("apps/nested"));
+        for (dst, cwd) in [("local/agent_state/lane-a/runs/L1", &main), ("../main/local/x", &wt), ("out", &dir)] {
+            assert_eq!(kept_into_checkout(Path::new(dst), cwd, "lane-a"), None, "{dst} from {}: the main checkout's local/ and outside every checkout take kept files", cwd.display());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

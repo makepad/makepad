@@ -296,6 +296,10 @@ pub struct Krate {
     /// `[package.metadata.makepad.native-tests]` (`lib`, `bin:<name>`, `test:<name>`); the tests
     /// bucket gives each a unit of its own and `devhub test` routes a run of one to cargo
     pub native_tests: BTreeMap<String, String>,
+    /// the test targets that play to the audio output device, each with why: its
+    /// `[package.metadata.makepad.audio-tests]` (`lib`, `bin:<name>`, `test:<name>`); `devhub
+    /// test` runs one on a box whose audio output runs (`audio=1`)
+    pub audio_tests: BTreeMap<String, String>,
     /// the platforms it was checked on, each with the targets that do not build or pass there and
     /// why: its `[package.metadata.makepad.platform-gaps]` (`windows = { "test:modules" = ".." }`;
     /// `build` for the whole package, `{}` for none). Only plain cargo work of a package checked
@@ -377,6 +381,8 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
     let test_tree = doc.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string);
     let native_tests = doc.get_path(&["package", "metadata", "makepad", "native-tests"]).and_then(Toml::as_table)
         .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
+    let audio_tests = doc.get_path(&["package", "metadata", "makepad", "audio-tests"]).and_then(Toml::as_table)
+        .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
     let platform_gaps = doc.get_path(&["package", "metadata", "makepad", "platform-gaps"]).and_then(Toml::as_table)
         .map(|t| t.iter().filter_map(|(os, gaps)| Some((os.clone(), gaps.as_table()?.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()))).collect()).unwrap_or_default();
     let lib_name = doc.get_path(&["lib", "name"]).and_then(Toml::as_str).map_or_else(|| package.replace('-', "_"), str::to_string);
@@ -392,7 +398,7 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
             };
             Some((target.clone(), tests))
         }).collect()).unwrap_or_default();
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests, platform_gaps, lib_name, windows_tests })
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests, audio_tests, platform_gaps, lib_name, windows_tests })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {

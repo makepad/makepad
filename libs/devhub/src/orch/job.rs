@@ -151,8 +151,9 @@ fn prune_logs(ctx: &Ctx) {
     if let Ok(rd) = std::fs::read_dir(ctx.logs(LEASE_LOGS)) {
         let mut logs: Vec<_> = rd.flatten().filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
         logs.sort_by(|a, b| b.0.cmp(&a.0));
+        // (a lease's test artifacts are a folder beside its log, [`crate::lease::master::artifacts_dir`])
         for (_, old) in logs.iter().skip(LEASE_LOGS_KEPT) {
-            let _ = std::fs::remove_file(old);
+            let _ = if old.is_dir() { std::fs::remove_dir_all(old) } else { std::fs::remove_file(old) };
         }
     }
     let snaps: Vec<String> = ctx.store.read(|d| d.jobs.iter().map(|j| j.snap.clone()).filter(|s| !s.is_empty()).collect());
@@ -1670,6 +1671,10 @@ pub fn render(j: &Job, tail: bool) -> String {
     if !j.log.is_empty() && !matches!(j.state.as_str(), "ok" | "queued" | "leasing" | "running") {
         out.push_str(&format!("  whole log: {}\n", j.log));
     }
+    // what its tests kept came back with it from its box (the job's log is `<home>/jobs/<id>.log`)
+    if let Some(dir) = std::path::Path::new(&j.log).parent().and_then(std::path::Path::parent).filter(|_| !j.lease.is_empty()).map(|home| crate::lease::master::artifacts_dir(home, &j.lease)) {
+        if std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some()) { out.push_str(&format!("  test artifacts: {}\n", dir.display())); }
+    }
     out
 }
 
@@ -2250,6 +2255,16 @@ mod tests {
         assert!(render(&j, false).contains("job resume J1 P1 retry|restart|unwind"));
         let j = Job { id: "J2".into(), state: "failed".into(), log: "/h/jobs/J2.log".into(), ..Default::default() };
         assert!(render(&j, false).contains("whole log: /h/jobs/J2.log"));
+        // what its lease's tests kept came back with it: its result names the folder, when it holds any
+        let home = std::env::temp_dir().join(format!("devhub-job-artifacts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = crate::lease::master::artifacts_dir(&home, "L5");
+        std::fs::create_dir_all(&dir).unwrap();
+        let j = Job { id: "J5".into(), state: "ok".into(), lease: "L5".into(), log: home.join("jobs/J5.log").display().to_string(), ..Default::default() };
+        assert!(!render(&j, false).contains("test artifacts"), "an empty folder is no artifacts");
+        std::fs::write(dir.join("grab.png"), b"PNG").unwrap();
+        assert!(render(&j, false).contains(&format!("  test artifacts: {}\n", dir.display())), "{}", render(&j, false));
+        std::fs::remove_dir_all(&home).unwrap();
         // its first line names its lane (`job list` has every lane's)
         let j = Job { id: "J3".into(), state: "running".into(), kind: "test".into(), node: "boxa".into(), lease: "L9".into(), lane: "lanea".into(), cmd: vec!["bash".into(), "x.sh".into()], ..Default::default() };
         assert_eq!(render(&j, false).lines().next(), Some("J3 running test@boxa L9 @lanea: bash x.sh"));

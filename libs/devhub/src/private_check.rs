@@ -283,17 +283,17 @@ mod tests {
             String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
         };
         let hit = |s: &str| scan(&root(), &defs, &["text", "t"], &format!("{s}\n")).contains("t:1: node-number");
-        for s in ["(a build's target and log, 901, 11-06)", "(903 sat as a bench box, 11-06)", "an override ended L515981, 905's lease", "(L515981, 905's, 11-06)", "the baseline: 901, 2026-11-06)", "(902, the bench box, 11-06)", "(11-06, 904)", "(11-06 on 901 and 902)", "906 crashed twice", "the build log 905's tail", "L5 gate: 1st in queue (901: waits)", "a landing gate held 902 at \"node busy\"", "gate held 902 behind four leases", "started on 903.", "on 903 and 904", "holds 905, the gate", "moved to 906)", "the box's prebuild-903 waited", "(warm-905)", "upkeep-901.", "kept by hash past them, 904 held", "905 holds the gate"] {
+        for s in ["L1796519 903: cargo builds this tree's JIT first", "  L42 905: granted", "(903 sat as a bench box, 11-06)", "an override ended L515981, 905's lease", "(L515981, 905's, 11-06)", "the baseline: 901, 2026-11-06)", "(902, the bench box, 11-06)", "(11-06, 904)", "(11-06 on 901 and 902)", "906 crashed twice", "the build log 905's tail", "L5 gate: 1st in queue (901: waits)", "a landing gate held 902 at \"node busy\"", "gate held 902 behind four leases", "started on 903.", "on 903 and 904", "holds 905, the gate", "moved to 906)", "the box's prebuild-903 waited", "(warm-905)", "upkeep-901.", "kept by hash past them, 904 held", "905 holds the gate"] {
             assert!(hit(s), "{s}");
         }
-        for s in ["exit 901", "took(\"L2\", 902, 8)", "(exit 901, 11-06)", "L901's lease", "W903 sat", "#905's", "a.rs:901, 11-06", "line 902 is short", "903 ms (11-06)", "(11-06, 905 ms)", "test result: ok. 905 passed; 0 failed", "exit code 901 was its panic", "(took 902 ms, 11-06)", "v1.903's", "(901 ms, 11-06)", "the 9015's", "height: 904 is_multiline", "// 901 is indivisible by 3", "field 901 has trailing bytes", "sun_path holds 904 bytes", "on 901 files", "(901:3)", "from 900 to 907 ms", "exit 901: a::b", "OSC 904: reset", "above 905: limits", "held 9021 at", "the centre (WR-903)", "baked field-901 hits", "rfc-9035", "prebuild-9031", "test-902 fails", "lease 904 held", "9041 held"] {
+        for s in ["L903: granted", "L12 9031: x", "col12 903: y", "exit 901", "took(\"L2\", 902, 8)", "(exit 901, 11-06)", "L901's lease", "W903 sat", "#905's", "a.rs:901, 11-06", "line 902 is short", "903 ms (11-06)", "(11-06, 905 ms)", "test result: ok. 905 passed; 0 failed", "exit code 901 was its panic", "(took 902 ms, 11-06)", "v1.903's", "(901 ms, 11-06)", "the 9015's", "height: 904 is_multiline", "// 901 is indivisible by 3", "field 901 has trailing bytes", "sun_path holds 904 bytes", "on 901 files", "(901:3)", "from 900 to 907 ms", "exit 901: a::b", "OSC 904: reset", "above 905: limits", "held 9021 at", "the centre (WR-903)", "baked field-901 hits", "rfc-9035", "prebuild-9031", "test-902 fails", "lease 904 held", "9041 held"] {
             assert!(!hit(s), "{s}");
         }
         let named = |s: &str| scan(&root(), &defs, &["text", "t"], &format!("{s}\n")).contains("t:1: node-name");
-        for s in ["(Node::new(\"qz9\", fake.clone(), clock, store), fake)", "n.open_session(\"qz9.0\", true)", "--host 'QZ9'", "the box `qz9` hung"] {
+        for s in ["L1796519 qz9: cargo builds", "(Node::new(\"qz9\", fake.clone(), clock, store), fake)", "n.open_session(\"qz9.0\", true)", "--host 'QZ9'", "the box `qz9` hung"] {
             assert!(named(s), "{s}");
         }
-        for s in ["HeatSet { name: \"QZ9\", diameter: 3.0 }", "g(\"qz9\", p)", "node(\"qz90\")", "node(\"aqz9\")", "\"qz9.x\"", "match n { -3 => \"qz9\" }"] {
+        for s in ["L12 qz90: x", "HeatSet { name: \"QZ9\", diameter: 3.0 }", "g(\"qz9\", p)", "node(\"qz90\")", "node(\"aqz9\")", "\"qz9.x\"", "match n { -3 => \"qz9\" }"] {
             assert!(!named(s), "{s}");
         }
         let fleet = |args: &[&str], s: &str| scan(&root(), &defs, args, &format!("{s}\n")).contains(": fleet-name");

@@ -196,6 +196,25 @@ fn builds(status: &[String]) -> Vec<AppBuild> {
         .collect()
 }
 
+/// What the Runner's `compile` answer says it does now, for its lease ([`crate::lease::master::LeaseMaster::note_progress`]):
+/// the app it builds and how far, how many wait, how many are current. None when it builds
+/// nothing and nothing waits (its queue is done), or the answer is no status yet.
+fn progress(status: &[String]) -> Option<String> {
+    let v = makepad_strict_json::parse(status.first()?.as_bytes()).ok()?;
+    let queued = v.get("queue")?.as_arr()?.len();
+    let building = v.get("building").and_then(Value::as_str);
+    if building.is_none() && queued == 0 { return None; }
+    let apps: Vec<Value> = status.iter().skip(1).filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+    let current = apps.iter().filter(|a| a.get("build").and_then(Value::as_str) == Some("current")).count();
+    let doing = building.map_or("the Runner builds nothing yet".to_string(), |app| {
+        let at = apps.iter().find(|a| a.get("app").and_then(Value::as_str) == Some(app));
+        let state = at.and_then(|a| a.get("state")?.as_str()).filter(|s| !s.is_empty()).map_or(String::new(), |s| format!(": {s}"));
+        let part = at.and_then(|a| crate::lease::num(a.get("fraction")?)).filter(|f| *f > 0.0).map_or(String::new(), |f| format!(" {:.0}%", f * 100.0));
+        format!("the Runner builds {app}{state}{part}")
+    });
+    Some(format!("{doing}, {queued} more queued, {current} of {} apps current", apps.len()))
+}
+
 fn run(ctx: &Ctx, node: &str, pair: String, why: &str) {
     let started = wall_ms();
     let _ = update(ctx, node, |r| {
@@ -331,6 +350,11 @@ fn compile_all(ctx: &Ctx, node: &str, lease: &str) -> (String, Vec<AppBuild>) {
         if !status[0].starts_with("{\"note\"") {
             last = status.clone();
         }
+        // its builds write nothing to the lease's log: what the Runner says it does is the lease's
+        // progress, or its stall check called a 34-app build silent at 30 min (L1797945, 11-26)
+        if let Some(line) = progress(&status) {
+            ctx.leases.note_progress(lease, &line);
+        }
         if idle(&status) == Some(true) {
             break "done".into();
         }
@@ -400,6 +424,13 @@ mod tests {
         assert_eq!(idle(&status), Some(true), "an empty queue with nothing building is done");
         assert_eq!(idle(&[r#"{"queue":["a"],"building":"b"}"#.to_string()]), Some(false));
         assert_eq!(idle(&[r#"{"note":"ask again"}"#.to_string()]), None, "the Runner's first answer is no status");
+        // what it does now, for its lease: nothing once done, else the app it builds and how far
+        assert_eq!(progress(&status), None, "a done queue is no progress");
+        assert_eq!(progress(&[r#"{"note":"ask again"}"#.to_string()]), None);
+        let mut busy = status.clone();
+        busy[0] = r#"{"queue":["fab","amp"],"building":"clock"}"#.into();
+        busy[2] = r#"{"app":"clock","locked":false,"pinned":true,"build":"stale","state":"Compiling","fraction":0.40,"error":""}"#.into();
+        assert_eq!(progress(&busy).as_deref(), Some("the Runner builds clock: Compiling 40%, 2 more queued, 0 of 3 apps current"));
         let apps = builds(&status);
         assert_eq!(apps.iter().map(|a| (a.app.as_str(), a.build.as_str())).collect::<Vec<_>>(), vec![("fab", "locked"), ("clock", "current"), ("amp", "stale")]);
         let n = NodeBuild { node: "m9".into(), on: true, asked: false, running: false, pair: "aaaa,bbbb".into(), at_ms: 5, secs: 61, verdict: "done".into(), apps };

@@ -15,8 +15,7 @@
 //! in the Dock does; `dock` lists them with the tree and arguments their launch records run, and
 //! whether the macOS Dock keeps them; `dock add [app ...]` puts those it does not keep in it (its
 //! `persistent-apps`, through `defaults`, then launchd restarts the Dock to show them). `dock own`
-//! points the Runner's own entry (`$RELAX_HOME/apps/runner.launch`, which its install script
-//! writes for the release) at the synced tree's Runner: the one whose builds and pins the dock's
+//! points the active loader folder's `runner.launch` at the synced tree's Runner: the one whose builds and pins the dock's
 //! entries are (the release's Runner would build each pinned app again from its own sources).
 //!
 //! A launch is a run of its lease ([`crate::lease::exec::launch`]): under the run wrapper, in its
@@ -538,7 +537,7 @@ pub fn show(app: &str, native: bool) -> Result<String, String> {
 }
 
 /// One of a Mac's dock entries (the Runner's pin.rs): its app id, its bundle, and what its launch
-/// record (`$RELAX_HOME/apps/<id>.launch`) runs: the tree (`cwd`) and the `makepad` arguments.
+/// record runs: the tree (`cwd`) and the `makepad` arguments.
 pub struct DockEntry {
     pub id: String,
     pub bundle: PathBuf,
@@ -561,7 +560,12 @@ pub fn dock_entries() -> Vec<DockEntry> {
         for bundle in rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "app")) {
             let Ok(plist) = std::fs::read_to_string(bundle.join("Contents/Info.plist")) else { continue };
             let Some(id) = plist_string(&plist, "CFBundleIdentifier").and_then(|b| b.strip_prefix("nl.makepad.").map(str::to_string)) else { continue };
-            let record = plist_string(&plist, "RELAX_HOME").and_then(|h| std::fs::read_to_string(PathBuf::from(h).join("apps").join(format!("{id}.launch"))).ok()).unwrap_or_default();
+            let record = plist_string(&plist, "RELAX_HOME").and_then(|h| {
+                let home = PathBuf::from(h);
+                let path = if id == "runner" { active_loader_dir(&home).join("runner.launch") }
+                    else { home.join("apps").join(format!("{id}.launch")) };
+                std::fs::read_to_string(path).ok()
+            }).unwrap_or_default();
             let (cwd, args) = launch_record(&record);
             let icon = plist_string(&plist, "CFBundleIconFile").and_then(|name| {
                 let res = bundle.join("Contents/Resources");
@@ -576,9 +580,23 @@ pub fn dock_entries() -> Vec<DockEntry> {
     out
 }
 
-/// The Runner's own launch record (`<home>/apps/runner.launch`, the home its entries name, else
-/// RELAX_HOME, else ~/.relax), written for the Runner of the tree `checkout`: what the Runner
-/// writes for an app of a checkout (its launch.rs `record`), from the registry's `runner` row.
+// Mirrors tools/run/launcher/main.rs: a valid selected loader in either target layout, else src.
+fn active_loader_dir(home: &std::path::Path) -> PathBuf {
+    let root = home.join("cache/loader");
+    let current = std::fs::read_to_string(root.join("current")).unwrap_or_default();
+    let name = current.trim();
+    let binary = if cfg!(windows) { "host/makepad.exe" } else { "host/makepad" };
+    if name.len() == 40 && name.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+        let folder = root.join(name);
+        if home.join("target/loader").join(name).join(binary).is_file() || folder.join("target").join(binary).is_file() {
+            return folder;
+        }
+    }
+    root.join("src")
+}
+
+/// Point the active loader's record at the Runner of the synced checkout. Use the home its
+/// dock entries name, else RELAX_HOME or the default home.
 fn own_record(checkout: &std::path::Path) -> Result<PathBuf, String> {
     let row = makepad_app_registry::find("runner").ok_or("dock own: the registry has no runner row")?;
     let home = dock_entries()
@@ -594,7 +612,7 @@ fn own_record(checkout: &std::path::Path) -> Result<PathBuf, String> {
     if !row.features.is_empty() {
         text.push_str(&format!("arg\t--features\narg\t{}\n", row.features.join(",")));
     }
-    let dir = home.join("apps");
+    let dir = active_loader_dir(&home);
     std::fs::create_dir_all(&dir).map_err(|e| format!("dock own: {}: {e}", dir.display()))?;
     let path = dir.join("runner.launch");
     let part = dir.join("runner.launch.part");

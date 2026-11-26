@@ -919,9 +919,13 @@ impl Sync {
 
     /// Receives one bundle (the `sync-push` channel).
     fn receive(&self, ch: &makepad_remote::Channel) -> Result<String, String> {
+        // (an opener that gave up on a late OK never sends its order: its autosync logged a lost
+        // link and tries again on its next round, while this side waited out CHUNK_WAIT, 11-26)
         let first = match ch.recv_timeout(CHUNK_WAIT) {
             Ok(Event::Data(d)) => d,
-            _ => return Err("no push order".into()),
+            Ok(Event::Closed(_, why)) => return Err(format!("no push order: its opener closed the channel first ({why})")),
+            Err(true) => return Err(format!("no push order in {} s: its opener gave up on this hub's answer to its OPEN, and pushes again on its next round", CHUNK_WAIT.as_secs())),
+            _ => return Err("no push order: the link went before it came".into()),
         };
         let o = self.seen.check(std::str::from_utf8(&first).map_err(|_| "the push order is not text")?.trim())?;
         let (repo, branch, sha, hash, size) = match o.words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -1633,6 +1637,7 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
     Arc::new(move |conn, open| {
         let hooks = conn.hooks();
         let sync = sync.clone();
+        let who = conn.peer().name.clone();
         std::thread::Builder::new()
             .name("devhub-sync-push".into())
             .spawn(move || {
@@ -1641,7 +1646,7 @@ fn push_factory(sync: Arc<Sync>) -> Factory {
                 let line = match sync.receive(&ch) {
                     Ok(l) => l,
                     Err(e) => {
-                        sync.event(Sev::Warn, format!("sync: push refused: {e}"), String::new());
+                        sync.event(Sev::Warn, format!("sync: push from {who} refused: {e}"), String::new());
                         err_line(&e)
                     }
                 };

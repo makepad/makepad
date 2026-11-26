@@ -1835,6 +1835,9 @@ pub const ORIGIN_UNKNOWN: &str = "origin unknown";
 /// What a test that fails off and on is laid to ([`test_blame`]): no landing.
 pub const INTERMITTENT: &str = "intermittent, origin unknown";
 
+/// What a red its bisect laid to one landing is laid to ([`bisected`]).
+pub const BISECTED: &str = "bisected to ";
+
 /// What a unit red only in test listings its bucket never had a result for is laid to: its
 /// target's owner ([`first_run_owner`]), not the landings under its first run.
 pub const FIRST_RUN: &str = "first run here, red at its first run";
@@ -2975,7 +2978,7 @@ fn file_blame(files: &[String], since: &[Entry], touched: &[Option<&[String]>], 
 
 /// `<unit> still failing since <who>`, for a `who` from [`origin`] or a row.
 pub fn still_since(who: &str) -> String {
-    if who.starts_with(ORIGIN_UNKNOWN) || who.starts_with(INTERMITTENT) || who.starts_with(BY_TEST) || who.starts_with(FIRST_RUN) || who.starts_with(COMPILE_RED) { who.to_string() } else { format!("since {who}") }
+    if who.starts_with(BISECTED) || who.starts_with(ORIGIN_UNKNOWN) || who.starts_with(INTERMITTENT) || who.starts_with(BY_TEST) || who.starts_with(FIRST_RUN) || who.starts_with(COMPILE_RED) { who.to_string() } else { format!("since {who}") }
 }
 
 /// A `, `-joined list cut to its first `n` items and how many more: a red laid to the dozens of
@@ -3229,6 +3232,28 @@ pub fn landed(store: &Store) -> Vec<Entry> {
 /// bucket's red of a unit the tests bucket passed hours later read as a current break, and a
 /// bucket's red a day old as today's (11-16); a red the full bucket's 08:51 run found still read
 /// as one at 17:00, though its fix landed at 09:06 (11-17).
+/// The landing a done bisect of bucket `name` laid red `key` to, as that red's origin, while the
+/// red is still the one it bisected: no run of the bucket passed the unit after the bisected run
+/// started. The run that saw a red writes who broke it from the landings since its last pass; its
+/// bisect answers later, in the ledger, the event log and the lanes' notes, and the STILL FAILING
+/// line went on laying the red to all 52 landings of its range for 13 h after its bisect had named
+/// one (the full bucket's text-atlas red, 11-26). `bisects`: [`bisect_rows`]; `rows`: the
+/// ledger's, newest first.
+fn bisected(bisects: &[Value], rows: &[Value], landed: &[Entry], name: &str, key: &str) -> Option<String> {
+    let b = bisects.iter().rev().find(|b| b.get("bucket").and_then(Value::as_str) == Some(name) && b.get("key").and_then(Value::as_str) == Some(key)
+        && b.get("state").and_then(Value::as_str) == Some("done") && b.get("landing").is_some())?;
+    let id = b.get("landing").and_then(Value::as_u64)?;
+    let red = log_started(Path::new(b.get("log").and_then(Value::as_str)?))?;
+    let passed = rows.iter().any(|r| r.get("bucket").and_then(Value::as_str) == Some(name) && r.get("started_ms").and_then(Value::as_u64).is_some_and(|at| at > red) && row_lists(r, "passed", key));
+    if passed { return None; }
+    let who = landed.iter().find(|e| e.id == id).map_or(format!("#{id}"), who_of);
+    let test = b.get("line").and_then(Value::as_str).filter(|l| !l.is_empty()).map_or(String::new(), |t| format!(" ({t})"));
+    let probes = b.get("probes").and_then(Value::as_arr).map_or(0, |p| p.len());
+    let log = b.get("probes").and_then(Value::as_arr).unwrap_or_default().iter().find(|p| p.get("id").and_then(Value::as_u64) == Some(id))
+        .and_then(|p| p.get("log")).and_then(Value::as_str).map_or(String::new(), |l| format!("; its red probe's log {l}"));
+    Some(format!("{BISECTED}{who}{test}: red there and green at the landing before it, in {probes} probes{log}"))
+}
+
 pub fn status(home: &Path, landed: &[Entry]) -> Vec<String> {
     let mut out: Vec<String> = BOARD.now_lines(home, wall_ms()).iter().map(|l| obj(vec![("now", s(l))]).to_json()).collect();
     // each running shard's unit far past its measure, with its box: an oversubscribed box beside it
@@ -3240,11 +3265,16 @@ pub fn status(home: &Path, landed: &[Entry]) -> Vec<String> {
     let rows: Vec<Value> = ledger(home, 2_000).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
     let bucket = |r: &Value| r.get("bucket").and_then(Value::as_str).unwrap_or("").to_string();
     let started = |r: &Value| r.get("started_ms").and_then(Value::as_u64).unwrap_or(0);
+    let bisects = { let _lock = BISECTS.lock().unwrap(); bisect_rows(home).unwrap_or_default() };
     for name in RERUNS.into_iter().chain([FULL, CI]) {
         // (a red a later run of another bucket passed is closed: [`open_reds`]; a leg a later
         // proof passed: [`ci_reds`])
-        let still = reds(crate::orch::ctx().map(|c| c.repo.as_path()), &rows, name);
+        let mut still = reds(crate::orch::ctx().map(|c| c.repo.as_path()), &rows, name);
         if still.is_empty() { continue; }
+        // its bisect's answer, when one named a landing: ahead of the landings of its range
+        for (key, (_, who, _)) in still.iter_mut() {
+            if let Some(b) = bisected(&bisects, &rows, landed, name, key) { *who = b; }
+        }
         // a red whose package changed after its run started: that run predates the change, and
         // the bucket's next run is the first to look again
         let changed: Vec<(String, Value)> = still.values().filter_map(|(unit, _, log)| {
@@ -4140,13 +4170,13 @@ fn test_run(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>, 
         let sharded = format!("GATE_SHARDS={shards} {cores}");
         // the run's one queue, dealt as the shards' slots free ([`Dealer`])
         let dealer = Mutex::new(Dealer::new(shards));
-        // when it took its tip: by day its shards hold a box only once it is old (`--run-since`)
+        // when it took its tip: by day a full run's shards hold a box only once it is old (`--run-since`)
         let since = log_started(log).unwrap_or_else(wall_ms).to_string();
         let ended: Vec<AtomicBool> = (0..shards).map(|_| AtomicBool::new(false)).collect();
         let sweep = sweeps(full, crate::orch::ci::Inputs::between(&repo, &bases, &tip.pair()).map(|i| i.jit_changed), gate_at(&repo, &tip.pair().work).as_deref());
         let (mut ran, unsaid, mut covered, swept) = std::thread::scope(|scope| {
             scope.spawn(|| deal(&dealer, &ended, log, &home));
-            let swept = sweep.then(|| scope.spawn(|| libs_sweep(&repo, log, &rev, &since, (base, tip))));
+            let swept = sweep.then(|| scope.spawn(|| libs_sweep(&repo, log, &rev, &since, (base, tip), full)));
             let shard = |i: usize| {
                 let (repo, home, first, say, retry, input, reach, ask, class, dealer, ended, rev, bases, nested, floor, sharded) = (&repo, &home, &first, &say, &retry, &input, &reach, &ask, &class, &dealer, &ended, &rev, &bases, &nested, &floor, &sharded);
                 let since = since.as_str();
@@ -4735,16 +4765,9 @@ const SHARD_CORES: u32 = 12;
 /// rounds, 40-60 min of wall.
 const SHARD_RAM_GB: f64 = 40.0;
 
-/// A tests shard's measured class, its shape (its cores) in it: a shard's wall and peaks come from
-/// what it runs at once, and another shape's are wrong data for it. An 8-core shard's 37.9 GB peak
-/// charged the 12-core shards 45.5 GB each, where they peaked at 27-29 GB, and one waited for RAM
-/// on a box that held it (11-07). The full bucket's shards ([`FULL`]: every package's tests, no
-/// proof reused) are a class of their own: theirs ran 26-39 min against the tests bucket's 9
-/// (L767799-801), and in one class the tests bucket's next shards asked large, measured 27 min,
-/// with 18-30 GB each, and waited 10 min for RAM (11-10).
-fn shard_class(cores: u32, full: bool) -> String {
-    format!("test bash land_gate.sh testrun{} {cores} cores @{}", if full { " full" } else { "" }, crate::lease::sched::TESTS_LANE)
-}
+// A tests shard's measured class, its shape (its cores) in it: the scheduler's, which tells a full
+// run's shards by it ([`crate::lease::sched::shard_class`]).
+pub(crate) use crate::lease::sched::shard_class;
 
 /// [`test_boxes`] of the master's `nodes` answer: how many shards, and the cores each asks: their
 /// boxes' least test cores (a box's shared CPUs when its lease.conf pins them, else its cores), at
@@ -4825,8 +4848,8 @@ fn libs_log(log: &Path) -> PathBuf {
 
 /// The libraries' sweep's class: measured apart from the shards' ([`shard_class`]), one for both
 /// buckets (the same checks).
-fn libs_class() -> String {
-    format!("test bash land_gate.sh libs @{}", crate::lease::sched::TESTS_LANE)
+pub(crate) fn libs_class(full: bool) -> String {
+    format!("test bash land_gate.sh libs{} @{}", if full { " full" } else { "" }, crate::lease::sched::TESTS_LANE)
 }
 
 /// The libraries' sweep of a tests or full run ([`sweeps`]; land_gate.sh libs): `makepad check` of
@@ -4838,8 +4861,8 @@ fn libs_class() -> String {
 /// took 368 s on 13, 11-16), and no pool slot: the shards hold them all, and one more would wait out
 /// a shard's run. A tests-lane lease at the run's rev: it passes holds as the run's shards do, and
 /// starts on what its box has free once it waited as long as a shard does.
-fn libs_sweep(repo: &Path, log: &Path, rev: &str, since: &str, pins: (&Pin, &Pin)) -> (PathBuf, (Result<Option<i32>, String>, String)) {
-    let (needs, cores, class) = (gate_needs(), SHARD_CORES.to_string(), libs_class());
+fn libs_sweep(repo: &Path, log: &Path, rev: &str, since: &str, pins: (&Pin, &Pin), full: bool) -> (PathBuf, (Result<Option<i32>, String>, String)) {
+    let (needs, cores, class) = (gate_needs(), SHARD_CORES.to_string(), libs_class(full));
     let lease = ["lease", "test", "--needs", needs.as_str(), "--cores", cores.as_str(), "--cost", "large", "--class", class.as_str(), "--priority", "background", "--lane", crate::lease::sched::TESTS_LANE, "--rev", rev, "--run-since", since];
     let gate = ["bash", "tools/run/fixture/land_gate.sh", "libs"];
     let at = libs_log(log);
@@ -8013,6 +8036,11 @@ mod tests {
         assert_eq!(shard_class(12, false), format!("test bash land_gate.sh testrun 12 cores @{}", crate::lease::sched::TESTS_LANE));
         assert_ne!(shard_class(8, false), shard_class(12, false), "another shape measures apart");
         assert_eq!(shard_class(12, true), format!("test bash land_gate.sh testrun full 12 cores @{}", crate::lease::sched::TESTS_LANE), "the full bucket's measure apart");
+        // the scheduler reads the full run's leases by their class: they wait their turn, where
+        // the tests run's go ahead of lane background work ([`crate::lease::sched::Req::full_run`])
+        let lease = |class: String| { let mut r = crate::lease::sched::Req::new(crate::lease::sched::TESTS_LANE, crate::lease::Kind::Test); r.class = class; r.full_run() };
+        assert!(lease(shard_class(12, true)) && lease(libs_class(true)), "the full run's shards and libraries' sweep");
+        assert!(!lease(shard_class(12, false)) && !lease(libs_class(false)), "the tests run's");
     }
 
     /// The tests bucket takes a shard per SHARD_CORES of test cores on each up Linux x64 pool box
@@ -9779,6 +9807,20 @@ mod tests {
         assert!(units.get("tests pkg-a").is_none(), "the tests runs after it passed it: closed");
         assert!(units.get("tests pkg-b").is_some(), "a pass before the red is no pass of it: open");
         assert!(still.get("stale").is_none());
+        // its bisect's answer, once one named a landing, ahead of the landings of its range; not
+        // once a later run of the bucket passed it (the full bucket's red laid to 52 landings for
+        // 13 h after its bisect named one, 11-26)
+        let probe = |id: u64, red: bool| obj(vec![("id", Value::Int(id as i64)), ("red", Value::Bool(red)), ("log", s(&format!("/b/full-pkg-b-{id}-100.log")))]);
+        let answer = obj(vec![("bucket", s(FULL)), ("key", s("tests pkg-b")), ("unit", s("tests pkg-b")), ("line", s("kept_words")), ("log", s("/l/full-100.log")), ("state", s("done")),
+            ("landing", Value::Int(3)), ("probes", Value::Arr(vec![probe(2, false), probe(3, true)]))]);
+        append_bisect(&home, answer.clone()).unwrap();
+        let lines: Vec<Value> = status(&home, &landed).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
+        let who = lines.iter().find(|v| v.get("still_failing").and_then(Value::as_str) == Some(FULL)).and_then(|v| v.get("units")?.get("tests pkg-b")?.as_str().map(str::to_string)).unwrap_or_default();
+        assert_eq!(who, format!("{BISECTED}{} (kept_words): red there and green at the landing before it, in 2 probes; its red probe's log /b/full-pkg-b-3-100.log", super::who_of(&landed[2])));
+        assert_eq!(still_since(&who), who, "said as it is");
+        let passed_later = [obj(vec![("bucket", s(FULL)), ("started_ms", Value::Int(500)), ("passed", Value::Arr(vec![s("tests pkg-b")]))])];
+        assert_eq!(super::bisected(&[answer.clone()], &passed_later, &landed, FULL, "tests pkg-b"), None, "a later run of the bucket passed it: another red's bisect");
+        assert_eq!(super::bisected(&[answer], &[], &landed, "tests", "tests pkg-b"), None, "another bucket's");
         let all: Vec<Value> = ledger(&home, 100).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).collect();
         assert_eq!(super::passed_after(&all, FULL, "tests pkg-a", 100).as_deref(), Some("tests"), "a later run of another bucket");
         assert_eq!(super::passed_after(&all, "tests", "tests pkg-a", 100), None, "never the bucket's own");

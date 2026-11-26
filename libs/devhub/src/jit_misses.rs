@@ -203,6 +203,53 @@ pub(crate) fn notice(v: &Value) -> String {
     format!("devhub test: JIT miss on {} {} (recorded {}): the JIT said {error}; cargo builds it", text(v, "pkg"), text(v, "target"), text(v, "id"))
 }
 
+/// The name a compile error's message says its line uses, by the messages that name one from the
+/// source at their span (`no method named `x``, `cannot find function `x``, `no field `x``):
+/// (its file as the error gives it, its line, that name). None for one that names none.
+fn cited(error: &str) -> Option<(&str, usize, &str)> {
+    let at = error.find(".rs:")? + 3;
+    let (line, message) = error[at + 1..].split_once(':')?;
+    let n = line.parse::<usize>().ok().filter(|n| *n > 0)?;
+    // (`cannot find <kind> `x``: its name is the next quoted one)
+    const NAMED: [&str; 4] = ["no method named `", "cannot find ", "no field `", "no function or associated item named `"];
+    let (p, i) = NAMED.iter().find_map(|p| message.find(p).map(|i| (p, i)))?;
+    let rest = &message[i + p.len()..];
+    let rest = if p.ends_with('`') { rest } else { &rest[rest.find('`')? + 1..] };
+    let name = &rest[..rest.find('`')?];
+    Some((&error[..at], n, name)).filter(|(_, _, name)| !name.is_empty())
+}
+
+/// The first of a JIT run's `errors` whose cited line ([`cited`]), in the sources at `repo` (the
+/// lane's worktree, as cargo ships it), does not hold the name its message says that line uses:
+/// (its repo path, its line, the name). The JIT compiled other sources than cargo then: an earlier
+/// save its session still held. Its file is the path under `repo` the error's ends in (a box names
+/// its own tree's root); one in no file of `repo` (a dependency, the JIT's std) says nothing.
+pub(crate) fn unheld_cited(repo: &Path, errors: &[String]) -> Option<(String, usize, String)> {
+    errors.iter().find_map(|e| {
+        let (file, n, name) = cited(e)?;
+        let parts: Vec<&str> = file.split('/').collect();
+        let rel = Path::new(file).strip_prefix(repo).ok().map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| (0..parts.len()).map(|i| parts[i..].join("/")).find(|rel| !rel.is_empty() && !rel.starts_with('/') && repo.join(rel).is_file()))?;
+        let text = std::fs::read_to_string(repo.join(&rel)).ok()?;
+        (!text.lines().nth(n - 1).is_some_and(|l| l.contains(name))).then(|| (rel, n, name.to_string()))
+    })
+}
+
+/// Why a JIT failure that cargo then built is no JIT miss: cargo built other sources than the JIT
+/// refused. `jit`: the package's inputs as the JIT run shipped ([`inputs_at`]); `cargo`: as cargo's
+/// run shipped; `unheld`: [`unheld_cited`] of the sources cargo built. None: the same sources, a
+/// miss (or nothing to tell them apart by). M132 recorded a lane's own E0599 as a JIT miss that
+/// "cargo builds": the line it named was gone from what cargo built (11-26).
+pub(crate) fn other_sources(jit: Option<&str>, cargo: Option<&str>, unheld: Option<&(String, usize, String)>) -> Option<String> {
+    if let Some((rel, n, name)) = unheld {
+        return Some(format!("the JIT's error names `{name}` at {rel}:{n}, and that line of the sources cargo built holds no `{name}`: the JIT compiled an earlier save than cargo"));
+    }
+    match (jit, cargo) {
+        (Some(jit), Some(cargo)) if jit != cargo => Some(format!("the package's sources changed between the JIT's run and cargo's (inputs {jit}, then {cargo}): cargo built other sources than the JIT refused")),
+        _ => None,
+    }
+}
+
 /// Whether a package is JIT-own; an empty repo uses the local checkout.
 pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Result<bool, String> {
     test_package(repo, pair, pkg).map(|p| p.own)
@@ -221,6 +268,9 @@ pub(crate) struct TestPackage {
     /// the test targets that run under cargo, never the JIT, each with why: its
     /// `[package.metadata.makepad.native-tests]` ([`native_selected`])
     pub native: std::collections::BTreeMap<String, String>,
+    /// the test targets that play to the audio output device, each with why: its
+    /// `[package.metadata.makepad.audio-tests]` ([`native_selected`] picks a run's)
+    pub audio: std::collections::BTreeMap<String, String>,
     /// it depends on makepad-test: its tests run apps side by side, as many as their cores hold
     /// (`devhub test` asks [`crate::lease::APP_TESTS_CORES`] for them by default)
     pub app_tests: bool,
@@ -355,9 +405,9 @@ fn package_of(tree: &crate::orch::ci::Tree, pkg: &str) -> TestPackage {
     let mut dirs = package_dirs(tree);
     let Some(dir) = dirs.remove(pkg) else { return TestPackage::default() };
     let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
-    let (tree_why, native, platform_gaps) = krate(tree, &manifest).map_or((None, Default::default(), Default::default()), |k| (k.test_tree, k.native_tests, k.platform_gaps));
+    let (tree_why, native, audio, platform_gaps) = krate(tree, &manifest).map_or((None, Default::default(), Default::default(), Default::default()), |k| (k.test_tree, k.native_tests, k.audio_tests, k.platform_gaps));
     let app_tests = dirs.get(crate::lease::APP_TESTS_PACKAGE).is_some_and(|test| path_deps(tree, &dir).contains(test));
-    TestPackage { own: jit_own_dirs(tree).contains(&dir), tree: tree_why, native, app_tests, platform_gaps }
+    TestPackage { own: jit_own_dirs(tree).contains(&dir), tree: tree_why, native, audio, app_tests, platform_gaps }
 }
 
 /// The packages the JIT binary is built from.
@@ -818,6 +868,29 @@ mod tests {
     }
 
     #[test]
+    fn a_miss_needs_cargo_to_build_the_sources_the_jit_refused() {
+        let repo = std::env::temp_dir().join(format!("devhub-miss-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("libs/a/src")).unwrap();
+        std::fs::write(repo.join("libs/a/src/lib.rs"), "fn f() {\n    let x = v.as_f64();\n    g(1);\n}\n").unwrap();
+        // a box names its own tree's root; the error's file is the worktree's path it ends in
+        let at = |line: usize, said: &str| vec![format!("/home/x/native/live-w1/libs/a/src/lib.rs:{line}:13: error[E0599]: {said}")];
+        let method = "no method named `as_f64` found for `&Value` in the current scope";
+        assert_eq!(cited(&at(2, method)[0]), Some(("/home/x/native/live-w1/libs/a/src/lib.rs", 2, "as_f64")));
+        assert_eq!(cited("src/lib.rs:3:5: error[E0425]: cannot find function `g` in this scope"), Some(("src/lib.rs", 3, "g")));
+        assert_eq!(cited("src/lib.rs:3:5: error[E0308]: mismatched types: expected `f64`, found `f32`"), None, "a message whose names are types, not the line's");
+        assert_eq!(unheld_cited(&repo, &at(2, method)), None, "the line holds it: the same sources");
+        assert_eq!(unheld_cited(&repo, &at(3, method)), Some(("libs/a/src/lib.rs".to_string(), 3, "as_f64".to_string())), "gone from that line: an earlier save");
+        assert_eq!(unheld_cited(&repo, &["/home/x/.cargo/registry/dep/src/lib.rs:2:1: error[E0599]: no method named `q`".to_string()]), None, "a file outside the worktree says nothing");
+        let unheld = unheld_cited(&repo, &at(3, method));
+        assert!(other_sources(Some("aa"), Some("aa"), unheld.as_ref()).is_some_and(|w| w.contains("libs/a/src/lib.rs:3") && w.contains("earlier save")));
+        assert!(other_sources(Some("aa"), Some("bb"), None).is_some_and(|w| w.contains("inputs aa, then bb")), "changed between the two runs");
+        assert_eq!(other_sources(Some("aa"), Some("aa"), None), None, "the same sources: a miss");
+        assert_eq!(other_sources(None, Some("bb"), None), None, "nothing to tell them apart by");
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn a_miss_filed_by_hand_is_listed_and_counted() {
         let home = std::env::temp_dir().join(format!("devhub-miss-add-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -888,7 +961,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
             ("apps/commercial/loose/Cargo.toml", "[package]\nname = \"loose\"\n"),
             ("libs/a/Cargo.toml", "[package]\nname = \"a\"\n[package.metadata.makepad]\ntest-tree = \"its tests read the history\"\n"),
             ("libs/a/inner/Cargo.toml", "[package]\nname = \"a-inner\"\n"),
-            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n[package.metadata.makepad.native-tests]\n\"test:spawns\" = \"its runner is its own binary\"\n[package.metadata.makepad.platform-gaps]\nwindows = { \"test:spawns\" = \"no fork there\" }\nmacos = {}\n[dev-dependencies]\nmakepad-test = { path = \"../makepad_test\" }\n"),
+            ("libs/b/Cargo.toml", "[package]\nname = \"b\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n[package.metadata.makepad.native-tests]\n\"test:spawns\" = \"its runner is its own binary\"\n[package.metadata.makepad.audio-tests]\n\"test:transport\" = \"its clock is the output's callback\"\n[package.metadata.makepad.platform-gaps]\nwindows = { \"test:spawns\" = \"no fork there\" }\nmacos = {}\n[dev-dependencies]\nmakepad-test = { path = \"../makepad_test\" }\n"),
             ("libs/makepad_test/Cargo.toml", "[package]\nname = \"makepad-test\"\n"),
             ("libs/own/Cargo.toml", "[package]\nname = \"own\"\n[workspace]\n"),
         ]);
@@ -903,6 +976,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
         assert!(a.platform_gaps.is_empty(), "never checked anywhere");
         // a package that depends on makepad-test runs apps in its tests (`devhub test` asks cores for them)
         assert_eq!((a.app_tests, super::package_of(&t, "b").app_tests), (false, true));
+        // the targets that play to the output device (`devhub test` asks audio=1 for a run of one)
+        assert_eq!((a.audio.len(), super::package_of(&t, "b").audio.into_iter().collect::<Vec<_>>()), (0, vec![("test:transport".to_string(), "its clock is the output's callback".to_string())]));
         // the package's default run, `--tests` and `--test spawns` run the declared target; `--lib`,
         // `--bins` and another test do not
         let native = std::collections::BTreeMap::from([("test:spawns".to_string(), "why".to_string())]);

@@ -8,8 +8,9 @@
 //! the save to the patch and to the first frame after it. `live act` runs any inspect command in
 //! the app (ui, key, click, grab, test hooks); `live wait patched|verdict|settled|frame` blocks on the
 //! JIT. A parked panic pauses the live job (act and resume through it). It ends on release, when
-//! its app exits, after 10 min with no edit or call (a `devhub inspect` of its app is a call; a
-//! visible one: nor a person's input at its box), when its lane landed, or to give a waiting
+//! its app exits, after 10 min with no edit, call or person's input in its app (a `devhub inspect`
+//! of its app is a call; never a visible one: it stays until its owner ends it), when its lane
+//! landed (not a visible one, nor one a person used in the last 30 min), or to give a waiting
 //! whole/timed lease its box once the current call answers. A lane's sessions are not counted:
 //! each asks for its box and waits in the queue for room. A call (a test session's tests) past
 //! three times its class's measured run is said, never ended: an inbox warning, a why-hung sample
@@ -33,7 +34,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// A live job with no edit or call this long ends (tests too: an idle session's box waits for it).
+/// A hidden live job with no edit or call this long ends (tests too: an idle session's box waits
+/// for it); a visible one stays until its owner ends it ([`idle_kept`]).
 pub const IDLE_MS: u64 = 10 * 60 * 1000;
 /// A test session whose starter left (its last call's client went before the answer: the lane's
 /// `devhub test --live` stopped) ends after this long with no call or save, one still queued for
@@ -85,10 +87,65 @@ fn left_long(x: &Live, now: u64) -> bool {
 /// How long a session has gone unused at `now`: since its last edit or call, and a visible one also
 /// since a person's last input at its box (`input_ms`, [`crate::lease::sched::Sched::user_input_ms`]):
 /// a visible session is the person's app, in use while they work at its box (the idle end closed
-/// a person's visible Fab, 11-09).
-fn unused_ms(x: &Live, input_ms: Option<u64>, now: u64) -> u64 {
+/// a person's visible Fab, 11-09); past its idle end it stays all the same ([`idle_kept`]).
+/// `app_input_ms`: when a person last gave its app input ([`person_input_at`]), visible or not
+/// (through Desk Link, which the box's idle time does not see).
+fn unused_ms(x: &Live, input_ms: Option<u64>, app_input_ms: Option<u64>, now: u64) -> u64 {
     let last = if x.visible { x.touched_ms.max(input_ms.unwrap_or(0)) } else { x.touched_ms };
-    now.saturating_sub(last)
+    now.saturating_sub(last.max(app_input_ms.unwrap_or(0)))
+}
+
+/// How long a person's input in a session's app keeps it from its landed lane's end
+/// ([`kept_from_landed`]).
+const PERSON_KEEPS_MS: u64 = 30 * 60 * 1000;
+/// How long an app's `activity` answer is waited for ([`person_input_at`]), and how long it is
+/// reused: the idle sweep looks every second.
+const ACTIVITY_LOOK: Duration = Duration::from_secs(2);
+const ACTIVITY_EVERY_MS: u64 = 30_000;
+/// Per session: when its app was asked for its activity, and its person's last input then.
+static PERSON_SEEN: Mutex<Option<HashMap<String, (u64, Option<u64>)>>> = Mutex::new(None);
+
+/// When a person last gave the session's app input, by its `activity` answer (`idle_ms`: input a
+/// lane drives through devhub is no person's), or None: none yet, no app, or no answer within
+/// [`ACTIVITY_LOOK`] (an app busy building or drawing is asked again at the next look). Asked at
+/// most once every [`ACTIVITY_EVERY_MS`] per session.
+fn person_input_at(x: &Live, now: u64) -> Option<u64> {
+    if x.pid == 0 { return None; }
+    if let Some(&(asked, at)) = PERSON_SEEN.lock().unwrap().as_ref().and_then(|m| m.get(&x.id)) {
+        if now.saturating_sub(asked) < ACTIVITY_EVERY_MS { return at; }
+    }
+    let t = Instant::now();
+    let at = inspect_until(&x.node, x.pid, "activity", &|| t.elapsed() > ACTIVITY_LOOK).ok().flatten()
+        .and_then(|lines| lines.iter().find_map(|l| num(l, "idle_ms")))
+        .map(|idle| now.saturating_sub(idle));
+    PERSON_SEEN.lock().unwrap().get_or_insert_with(HashMap::new).insert(x.id.clone(), (now, at));
+    at
+}
+
+/// Why a session whose lane landed and went quiet stays: it is visible (a person's window: a
+/// person looked at a two-machine demo through Desk Link as the landed lane's end closed it,
+/// W22615, 11-26), or a person gave its app input within [`PERSON_KEEPS_MS`]. Its owner ends it
+/// (`devhub live release`); a quiet hidden one goes.
+fn kept_from_landed(x: &Live, app_input_ms: Option<u64>, now: u64) -> Option<String> {
+    if x.visible {
+        return Some(format!("it is visible, a person's window: it stays until its owner ends it (`devhub live release {}`)", x.id));
+    }
+    let ago = now.saturating_sub(app_input_ms?);
+    (ago < PERSON_KEEPS_MS).then(|| format!("a person gave its app input {} ago: it stays while they use it (to {} min after their last input), or until its owner ends it (`devhub live release {}`)", crate::lease::sched::dur(ago), PERSON_KEEPS_MS / 60_000, x.id))
+}
+
+/// Why a visible session past its idle end ([`idle_now`]) stays: a person's window ends only by its
+/// owner's release, used or not (a person's demo on a box was ended twice so in a morning, 11-26).
+/// Only a hidden one ends by its idle time.
+fn idle_kept(x: &Live) -> Option<String> {
+    x.visible.then(|| format!("it is visible, a person's window: it stays until its owner ends it (`devhub live release {}`)", x.id))
+}
+
+/// A session's keep ([`kept_from_landed`], [`idle_kept`]) is said once per session and kind.
+static KEPT_SAID: Mutex<Option<std::collections::HashSet<(String, &'static str)>>> = Mutex::new(None);
+
+fn said_once(id: &str, kind: &'static str) -> bool {
+    KEPT_SAID.lock().unwrap().get_or_insert_with(Default::default).insert((id.to_string(), kind))
 }
 
 /// The sessions past their idle end at `now`: active, not held, placed, joined by none, and unused
@@ -99,7 +156,10 @@ fn unused_ms(x: &Live, input_ms: Option<u64>, now: u64) -> u64 {
 /// W19220, with no save or call, on its box through four restarts in most of an hour (11-25).
 fn idle_now(ctx: &Ctx, now: u64) -> Vec<Live> {
     let past: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.held.is_empty() && !x.lease.is_empty() && now.saturating_sub(x.touched_ms) >= IDLE_MS && !joined(&d.lives, &x.id)).cloned().collect());
-    past.into_iter().filter(|x| ctx.leases.caps_asked(&x.node) && unused_ms(x, ctx.leases.user_input_ms(&x.node), now) >= IDLE_MS).collect()
+    past.into_iter().filter(|x| ctx.leases.caps_asked(&x.node) && unused_ms(x, ctx.leases.user_input_ms(&x.node), None, now) >= IDLE_MS)
+        // (its app's own person's input, asked last: only of a session its other use left idle)
+        .filter(|x| unused_ms(x, ctx.leases.user_input_ms(&x.node), person_input_at(x, now), now) >= IDLE_MS)
+        .collect()
 }
 
 /// A test session's saves wait for its next call and keep it meanwhile, as a call does: the last
@@ -538,12 +598,43 @@ fn accepting(id: &str) -> bool {
     running(id).is_none_or(|r| r.calls.lock().unwrap().park.is_none())
 }
 
-/// The lane's other test sessions of `new`'s package, which `new` replaces: one live test session
-/// per lane and package. A whole-package `test --live` left a session per target up after its
-/// verdict, each holding a lease (35 of one package on one box, idle, 11-15); another target,
-/// filter or feature set of the package is a new session, and the old ones end.
+/// The lane's other test sessions of `new`'s package on its system, which `new` replaces: one live
+/// test session per lane, package and system. A whole-package `test --live` left a session per
+/// target up after its verdict, each holding a lease (35 of one package on one box, idle, 11-15);
+/// another target, filter or feature set of the package is a new session, and the old ones end.
+/// Another system's session stays: a lane's Windows `test --live` ended its Linux one while that
+/// one's JIT still built, and the lane lost two test rounds (11-26).
 fn replaced<'a>(lives: &'a [Live], new: &Live) -> Vec<&'a str> {
-    lives.iter().filter(|x| new.test && x.test && x.id != new.id && x.active() && x.lane == new.lane && x.app == new.app).map(|x| x.id.as_str()).collect()
+    lives.iter().filter(|x| new.test && x.test && x.id != new.id && x.active() && x.lane == new.lane && x.app == new.app && system(x) == system(new)).map(|x| x.id.as_str()).collect()
+}
+
+/// The system a test session asks for, which keys it with its lane and package ([`replaced`]):
+/// the OS its `--needs` names, and the box its `--node` names (that box's OS is not known here: a
+/// session pinned to a box is keyed by the box). A session that names neither runs where the
+/// fleet puts unnamed work, the Windows box never among them.
+fn system(x: &Live) -> (String, &str) {
+    let os = crate::lease::sched::parse_needs(&x.needs).into_iter().find(|(k, _)| k == "os").map(|(_, v)| v.to_ascii_lowercase()).unwrap_or_default();
+    (os, x.pin.as_str())
+}
+
+/// The lane's newest test session of `x`'s package and system asked after `x` and still active: `x` ends
+/// once its call does, as one [`replaced`] does. [`retire_replaced`] retires only what runs, and a
+/// session still waiting for its box is left to its call: several `test --live` calls of one
+/// package at once each started a session while the others waited for theirs, none was
+/// replaced, and six sessions of one lane held leases on three boxes for 25 min (W22126-W22157,
+/// 11-26).
+fn superseded_by<'a>(lives: &'a [Live], x: &Live) -> Option<&'a str> {
+    let seq = |id: &str| id.trim_start_matches('W').parse::<u64>().unwrap_or(0);
+    lives.iter().filter(|o| x.test && o.test && o.active() && o.lane == x.lane && o.app == x.app && system(o) == system(x) && seq(&o.id) > seq(&x.id)).max_by_key(|o| seq(&o.id)).map(|o| o.id.as_str())
+}
+
+/// A session that has its box ends after its first call when a newer one of its lane, package
+/// and system was asked meanwhile ([`superseded_by`]).
+fn retire_if_superseded(ctx: &Ctx, id: &str, r: &Running) {
+    let Some(newer) = ctx.store.read(|d| d.lives.iter().find(|x| x.id == id).and_then(|x| superseded_by(&d.lives, x)).map(str::to_string)) else { return };
+    let note = format!("replaced by {newer}, asked while this one waited for its box: one live test session per lane, package and system");
+    r.calls.lock().unwrap().park.get_or_insert_with(|| note);
+    park_ready(ctx, id, r);
 }
 
 /// Ends the sessions `new` replaces ([`replaced`]), as a park does: an idle one now, one in a call
@@ -551,7 +642,7 @@ fn replaced<'a>(lives: &'a [Live], new: &Live) -> Vec<&'a str> {
 /// in its first call, its caller waiting on it: it is left to that call.
 fn retire_replaced(ctx: &Ctx, new: &Live) {
     let ids: Vec<String> = ctx.store.read(|d| replaced(&d.lives, new).into_iter().map(str::to_string).collect());
-    let note = format!("replaced by {} ({}{}): one live test session per lane and package", new.id, new.app, new.test_args.iter().map(|a| format!(" {a}")).collect::<String>());
+    let note = format!("replaced by {} ({}{}): one live test session per lane, package and system", new.id, new.app, new.test_args.iter().map(|a| format!(" {a}")).collect::<String>());
     for id in ids {
         let Some(r) = running(&id) else { continue };
         r.calls.lock().unwrap().park.get_or_insert_with(|| note.clone());
@@ -1060,11 +1151,17 @@ pub fn start(ctx: Arc<Ctx>) {
             let Some(r) = running(&x.id) else { continue };
             // (a test session's saves wait for its next call: one within the timeout keeps it)
             if r.test && r.pending.lock().unwrap().2.is_some_and(|t| t.elapsed() < Duration::from_millis(IDLE_MS)) { continue; }
+            if let Some(kept) = idle_kept(&x) {
+                if said_once(&x.id, "idle") {
+                    event(&c, Sev::Info, format!("live {} ({}) of lane {}: kept past its idle end ({} min with no edit, call or person's input): {kept}", x.id, x.app, x.lane, IDLE_MS / 60_000), Some(&x));
+                }
+                continue;
+            }
             if let Some(what) = kept_by_build(&x, c.leases.built(&x.lease), now) {
                 keep_for_build(&c, &x, &r, &what, now);
                 continue;
             }
-            sweep_end(&c, &x, &r, now, || if x.visible { "ended after 10 min with no edit, call or person's input at its box" } else { "ended after 10 min with no edit or call" }.into());
+            sweep_end(&c, &x, &r, now, || "ended after 10 min with no edit, call or person's input in its app".into());
         }
         // a session whose starter left, with no call or save since for LEFT_MS (its verdict for
         // nobody counts from when it came): one queued for its box ends, one on its box parks
@@ -1203,7 +1300,13 @@ fn release_orphans(ctx: &Ctx) {
         } else if !x.held.is_empty() {
             continue;
         } else if let Some(head) = lane_landed(ctx, &x, &mut pass) {
-            format!("its lane landed ({} in work, its worktree clean) and the lane has been quiet for {} min (no call, lease, job or file change)", super::short(&head), DONE_IDLE_MS / 60_000)
+            let landed = format!("its lane landed ({} in work, its worktree clean) and the lane has been quiet for {} min (no call, lease, job or file change)", super::short(&head), DONE_IDLE_MS / 60_000);
+            let now = wall_ms();
+            if let Some(kept) = kept_from_landed(&x, person_input_at(&x, now), now) {
+                if said_once(&x.id, if x.visible { "landed" } else { "landed, used" }) { event(ctx, Sev::Info, format!("live {} ({}) of lane {}: kept, though {landed}: {kept}", x.id, x.app, x.lane), Some(&x)); }
+                continue;
+            }
+            landed
         } else {
             continue;
         };
@@ -2981,43 +3084,117 @@ fn unapplied(ctx: &Ctx, x: &Live, p: &LivePatch) {
 struct RunOut {
     file: std::fs::File,
     buf: Vec<u8>,
-    pid: Option<u32>,
-    /// the run's own pid, when an announce named it ([`announce`])
-    run_pid: Option<u32>,
+    /// The app pid and the pid that stays across its restarts.
+    pids: Option<(u32, u32)>,
     /// the package the job runs: whose announce names the program's pid
     app: String,
     r: Arc<Running>,
     scan: Scan,
+    /// the process wrote a line: it started, whatever it said
+    wrote: bool,
+    /// cargo builds the tree's JIT ([`jit_build_line`]): the run is busy, not silent
+    building: bool,
+    /// its lease's run started: its JIT was selected, built, or another lease's build of it waited
+    /// for ([`startup_due`])
+    started: bool,
 }
 
-/// The program's own announce (`makepad-remote: pid <n> app <package> [run <pid>] socket ..`): its
-/// pid and, behind a restart parent, the run's (`run`). The newest one counts: a process restart
-/// behind the parent announces the app's new pid, and the first one's process is gone (a live
-/// test session on a Mac restarts as a new process at each edit that needs a restart, 11-17).
-/// Any other package's announce never answers for the program (its verdicts and patches, its crash).
-fn announce(line: &str, app: &str) -> Option<(u32, Option<u32>)> {
-    let mut words = line.split("makepad-remote: pid ").nth(1)?.split_whitespace();
-    let pid = words.next()?.parse().ok()?;
-    if words.next() != Some("app") || words.next() != Some(app) { return None; }
-    let mut run = None;
-    while let Some(w) = words.next() {
-        if w == "run" { run = words.next().and_then(|n| n.parse().ok()); break; }
+/// Whether a run's silence can be its missing startup line ([`no_startup_said`]): it wrote output
+/// and announced no pid, its lease's run started, and no JIT build shows in its output. Until its
+/// run starts the session waits for its JIT, however long that takes, and its caller hears what it
+/// waits for; only a failed build (with its error) or a cancel ends that wait. A lane's Windows
+/// test session was failed at 2 min while its box built the dev JIT for 192 s, whose lines only
+/// come with the run, and its tests then passed (W22551, 11-26).
+fn startup_due(pids: Option<(u32, u32)>, wrote: bool, started: bool, building: bool) -> bool {
+    pids.is_none() && wrote && started && !building
+}
+
+/// What a session says while its process wrote output and none of it was a startup line.
+const NO_STARTUP_LINE: &str = "no startup line read from the JIT; if the lane's tree is older than the master's, merge the tip (`devhub lanes merge rc-";
+
+/// Why a run that wrote output has no pid: the session's reason, when its process has been quiet
+/// past `bound_ms` (the previous test's measured time plus [`crate::state::STARTUP_MARGIN_MS`], the
+/// margin the client's own phase notice waits) with no startup line read. A process still writing
+/// is compiling or booting: that is not a failure. Nor is a run whose box's cargo still builds its
+/// JIT (`building`): its bound starts once that build ends. A lane's live test waited out its
+/// 2m45s JIT build silent, was failed at 2 min, and its JIT then started and passed 36 of 36
+/// (W21875, 11-26).
+fn no_startup_line(pid: u32, wrote: bool, building: bool, quiet_ms: Option<u64>, bound_ms: u64, lane: &str) -> Option<String> {
+    (pid == 0 && wrote && !building && quiet_ms.is_some_and(|q| q >= bound_ms)).then(|| format!("{NO_STARTUP_LINE}{lane}`)"))
+}
+
+/// A run's output line as it says cargo starts and ends building its tree's JIT
+/// ([`crate::lease::JIT_BUILD_PENDING`], [`crate::lease::JIT_BUILT`]).
+fn jit_build_line(line: &str, building: &mut bool) {
+    if line.contains(crate::lease::JIT_BUILD_PENDING) { *building = true; }
+    else if line.contains(crate::lease::JIT_BUILT) { *building = false; }
+}
+
+/// A pending test verdict failed for a run's missing startup line ([`no_startup_said`]), keeping
+/// the outcome it replaces for a startup line read late ([`startup_read`]).
+fn no_startup_failed(p: &mut LivePatch, why: String) {
+    p.startup_outcome = Some(std::mem::take(&mut p.outcome));
+    (p.tests, p.outcome, p.reason, p.verdict_ms) = (None, "failed".into(), why, wall_ms());
+}
+
+/// The session's run announced its pid. A failure its missing startup line said goes: the note,
+/// and the verdict it failed, which is pending again, so its run's own verdict answers the call
+/// and a retry waits for it (W21875's retry was answered "no startup line" by the stored failure).
+/// Whether it withdrew such a failure.
+fn startup_read(s: &mut Live) -> bool {
+    if s.note.starts_with(NO_STARTUP_LINE) { s.note.clear(); }
+    let Some(p) = s.patch.as_mut().filter(|p| p.startup_outcome.is_some()) else { return false };
+    p.outcome = p.startup_outcome.take().unwrap_or_default();
+    (p.tests, p.verdict_ms, p.reason_ref) = (None, 0, Default::default());
+    p.reason.clear();
+    true
+}
+
+/// A run that wrote output and read no startup line, quiet past its bound, is said once: in its
+/// session's note (so every call and the client's phase say it), in the inbox, and, for a test
+/// session, as the failed answer of its call, which otherwise waits on a pid that never comes.
+fn no_startup_said(ctx: &Ctx, id: &str) {
+    let Some(x) = get(ctx, id).filter(|x| x.state == "running" && !x.note.starts_with(NO_STARTUP_LINE)) else { return };
+    let bound = x.patch.as_ref().and_then(|p| p.tests.as_ref()).map_or(0, |t| t.ms.max(0.0) as u64).saturating_add(crate::state::STARTUP_MARGIN_MS);
+    let Some(why) = no_startup_line(x.pid, true, false, quiet_ms(&x, wall_ms()), bound, &x.lane) else { return };
+    let x = set(ctx, id, |s| s.note = why.clone());
+    event(ctx, Sev::Warn, format!("live {id}: {why}"), x.as_ref());
+    if let Some(x) = x.filter(|x| x.test) {
+        let mut p = x.patch.clone().unwrap_or_default();
+        if p.outcome.is_empty() || matches!(p.outcome.as_str(), "initial" | "patched" | "restart") {
+            no_startup_failed(&mut p, why);
+            set_patch(ctx, id, &p);
+        }
     }
-    Some((pid, run))
+}
+
+/// Each startup of this package replaces both pids. Its parent may be named in a later
+/// write, interleaved with output from other processes in the same job.
+fn announce(line: &str, app: &str, pids: &mut Option<(u32, u32)>) {
+    if let Some((pid, name, _)) = makepad_remote::parse_startup_line(line) {
+        if name == app { *pids = Some((pid, pid)); }
+        return;
+    }
+    let Some((app_pid, run_pid)) = pids else { return };
+    let Some((tag, fields)) = line.strip_prefix('[').and_then(|s| s.split_once(']')) else { return };
+    if !tag.ends_with("-remote") { return; }
+    let Some((run, pid)) = fields.strip_prefix(" run=").and_then(|s| s.split_once(" pid=")) else { return };
+    if pid.trim_end_matches('\r').parse() == Ok(*app_pid) {
+        if let Ok(parent) = run.parse() { *run_pid = parent; }
+    }
 }
 
 impl std::io::Write for RunOut {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         self.file.write_all(b)?;
+        self.wrote |= !b.is_empty();
         self.buf.extend_from_slice(b);
         let mut consumed = 0;
         while let Some(end) = self.buf[consumed..].iter().position(|b| *b == b'\n') {
             let end = consumed + end;
             let line = String::from_utf8_lossy(&self.buf[consumed..end]);
-            if let Some((pid, run)) = announce(&line, &self.app) {
-                self.pid = Some(pid);
-                self.run_pid = run.or(self.run_pid);
-            }
+            announce(&line, &self.app, &mut self.pids);
+            jit_build_line(&line, &mut self.building);
             if fault_line(&self.app, &line, &mut self.scan) { *self.r.fault.lock().unwrap() = Some(line.into_owned()); }
             consumed = end + 1;
         }
@@ -3093,9 +3270,9 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
         Err(e) => return finished(ctx, &x.id, &r, Err(e)),
     };
     let found = lost_pid(x, follow).map(|(pid, run)| {
-        set(ctx, &x.id, |s| if s.pid == 0 { (s.pid, s.run_pid) = (pid, run.unwrap_or(0)); });
-        event(ctx, Sev::Info, format!("live {}: its app's pid {pid}, which the session had lost, is read back from its log", x.id), Some(x));
-        Live { pid, run_pid: run.unwrap_or(0), ..x.clone() }
+        set(ctx, &x.id, |s| if (s.pid, s.run_pid) == (x.pid, x.run_pid) { (s.pid, s.run_pid) = (pid, run); });
+        event(ctx, Sev::Info, format!("live {}: restored app pid {pid} and run pid {run} from its log", x.id), Some(x));
+        Live { pid, run_pid: run, ..x.clone() }
     });
     let x = found.as_ref().unwrap_or(x);
     if follow.is_some_and(|(n, _)| n > x.run_n) {
@@ -3145,19 +3322,41 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
 /// skips its announce. 11-17: a master that panicked mid-follow left W12160 "running" with pid 0;
 /// the next one followed its run from the log's end, never saw the pid, and refused every act and
 /// relaunch as "its JIT is not up yet", and `live again` as "still runs", until the lane released it.
-fn lost_pid(x: &Live, follow: Option<(u64, u64)>) -> Option<(u32, Option<u32>)> {
-    if x.pid != 0 || !follow.is_some_and(|(n, off)| n == x.run_n && off > 0) {
+fn lost_pid(x: &Live, follow: Option<(u64, u64)>) -> Option<(u32, u32)> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    if !follow.is_some_and(|(n, off)| n == x.run_n && off > 0) {
         return None;
     }
-    let log = std::fs::read(&x.log).ok()?;
-    let (mut pid, mut run) = (None, None);
-    for l in String::from_utf8_lossy(log.get(x.run_log_start as usize..)?).lines() {
-        if let Some((p, r)) = announce(l, &x.app) {
-            pid = Some(p);
-            run = r.or(run);
-        }
+    if x.pid != 0 && x.run_pid != 0 && x.run_pid != x.pid {
+        return None;
     }
-    pid.map(|p| (p, run))
+    let mut log = BufReader::new(std::fs::File::open(&x.log).ok()?);
+    log.seek(SeekFrom::Start(x.run_log_start)).ok()?;
+    let mut pids = None;
+    let mut line = Vec::new();
+    while log.read_until(b'\n', &mut line).ok()? != 0 {
+        announce(String::from_utf8_lossy(&line).trim_end_matches('\n'), &x.app, &mut pids);
+        line.clear();
+    }
+    // The old master may have saved the app pid just before the parent line reached the log.
+    pids.filter(|&(pid, run)| x.pid == 0 || (x.pid == pid && run != pid && x.run_pid != run))
+}
+
+/// Whether a run followed from where its log stands ([`lost_pid`]'s `follow`) is still in its
+/// box's JIT build, by its part of the log ([`jit_build_line`]): a master that restarted while
+/// cargo built it reads the build as silence otherwise ([`no_startup_line`]).
+fn building_in_log(x: &Live, follow: Option<(u64, u64)>) -> bool {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+    if !follow.is_some_and(|(n, off)| n == x.run_n && off > 0) { return false; }
+    let Ok(file) = std::fs::File::open(&x.log) else { return false };
+    let mut log = BufReader::new(file);
+    if log.seek(SeekFrom::Start(x.run_log_start)).is_err() { return false; }
+    let (mut building, mut line) = (false, Vec::new());
+    while log.read_until(b'\n', &mut line).is_ok_and(|n| n != 0) {
+        jit_build_line(&String::from_utf8_lossy(&line), &mut building);
+        line.clear();
+    }
+    building
 }
 
 /// How often a running session's process is looked at on its box ([`alive_look`]): a lease's beat.
@@ -3418,6 +3617,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         }
     });
     event(ctx, Sev::Info, format!("live {id}: {} starting on {} ({}, {})", x.as_ref().map_or("", |x| &x.app), r.node, r.lease, if x.as_ref().is_some_and(|x| x.visible) { "visible" } else { "headless" }), x.as_ref());
+    retire_if_superseded(ctx, id, &r);
     drop(file);
     let res = run_processes(ctx, id, &r, None, None);
     finished(ctx, id, &r, res);
@@ -3457,7 +3657,10 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         argv.extend(x.test_args.iter().cloned());
         let file = std::fs::OpenOptions::new().append(true).create(true).open(&x.log).map_err(|e| e.to_string())?;
         let log_start = file.metadata().map_err(|e| e.to_string())?.len();
-        let out = RunOut { file, buf: Vec::new(), pid: follow.map(|_| x.pid).filter(|p| *p > 0), run_pid: follow.map(|_| x.run_pid).filter(|p| *p > 0), app: x.app.clone(), r: r.clone(), scan: Scan::default() };
+        let pids = follow.filter(|_| x.pid > 0).map(|_| (x.pid, if x.run_pid > 0 { x.run_pid } else { x.pid }));
+        let building = pids.is_none() && building_in_log(&x, follow);
+        // (a run followed again has started)
+        let out = RunOut { file, buf: Vec::new(), pids, app: x.app.clone(), r: r.clone(), scan: Scan::default(), wrote: false, building, started: follow.is_some() };
         let shared = Arc::new(Mutex::new(out));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (c2, id2, s2, d2, r2) = (ctx.clone(), id.to_string(), shared.clone(), done.clone(), r.clone());
@@ -3465,14 +3668,17 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         // session's calls, and each later one (a process restart behind a restart parent) moves
         // the pid that inspect, verdicts and the alive look address
         let watcher = std::thread::Builder::new().name("devhub-live-pid".into()).spawn(move || {
-            let mut seen: Option<u32> = None;
+            let mut seen = None;
             while !d2.load(std::sync::atomic::Ordering::SeqCst) && running(&id2).is_some() {
-                let (pid, run_pid) = { let o = s2.lock().unwrap(); (o.pid, o.run_pid) };
-                if let Some(pid) = pid.filter(|p| seen != Some(*p)) {
+                let (pids, wrote, started, building) = { let o = s2.lock().unwrap(); (o.pids, o.wrote, o.started, o.building) };
+                if startup_due(pids, wrote, started, building) { no_startup_said(&c2, &id2); }
+                if let Some((pid, run_pid)) = pids.filter(|pair| Some(*pair) != seen) {
                     let first = seen.is_none();
-                    seen = Some(pid);
+                    seen = pids;
                     // a new process loads the sources as they are: no save waits for a restart
-                    let x = set(&c2, &id2, |s| { if !d2.load(std::sync::atomic::Ordering::SeqCst) { if s.pid != pid { restart_ran(s); } s.pid = pid; s.run_pid = run_pid.unwrap_or(0); } });
+                    let mut withdrew = false;
+                    let x = set(&c2, &id2, |s| { if !d2.load(std::sync::atomic::Ordering::SeqCst) { if s.pid != pid { restart_ran(s); } s.pid = pid; s.run_pid = run_pid; withdrew = startup_read(s); } });
+                    if withdrew { event(&c2, Sev::Info, format!("live {id2}: its startup line came after all (pid {pid}): the no-startup-line failure is withdrawn, and its run's verdict answers"), x.as_ref()); }
                     if d2.load(std::sync::atomic::Ordering::SeqCst) { return; }
                     if !first { continue; }
                     if x.as_ref().is_some_and(|x| x.test) { resume_tests(&c2, &id2, &r2); }
@@ -3512,6 +3718,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 }
             }
         }).map_err(|e| e.to_string())?;
+        let s4 = shared.clone();
         struct Shared(Arc<Mutex<RunOut>>);
         impl std::io::Write for Shared {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().write(b) }
@@ -3525,7 +3732,10 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                     set(ctx, id, |s| { s.ask = ask.clone(); s.ask_after = s.run_n; });
                     ask
                 });
-                r.held.run_live(&ask, &argv, x.offline, &mut Shared(shared), &mut |n| { set(ctx, id, |s| { s.run_n = n; s.run_log_start = log_start; }); })
+                r.held.run_live(&ask, &argv, x.offline, &mut Shared(shared), &mut |n| {
+                    set(ctx, id, |s| { s.run_n = n; s.run_log_start = log_start; });
+                    s4.lock().unwrap().started = true;
+                })
             }
         };
         done.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -3876,30 +4086,83 @@ mod announce_tests {
     #[test]
     fn the_newest_announce_of_the_sessions_app_names_its_pids() {
         let lines = [
-            "makepad-remote: pid 41 app makepad-fab socket /t/makepad-remote-41.sock (makepad inspect 41 help)",
-            "makepad-remote: pid 77 app makepad-scope socket /t/s (makepad inspect 77 help)",
-            "makepad-remote: pid 52 app makepad-fab run 40 socket /t/makepad-remote-52.sock (makepad inspect 52 help)",
-            "booting makepad-remote: pid nope app makepad-fab",
+            ("[makepad-remote] pid=41 app=makepad-fab socket=/t/a", (41, 41)),
+            ("[makepad-remote] run=40 pid=41", (41, 40)),
+            ("[makepad-remote] pid=77 app=makepad-scope socket=/t/s", (41, 40)),
+            ("[makepad-remote] run=76 pid=77", (41, 40)),
+            ("[makepad-remote] pid=52 app=makepad-fab socket=/t/b", (52, 52)),
+            ("[makepad-remote] run=40 pid=41", (52, 52)),
+            ("[makepad-remote] run=40 pid=52", (52, 40)),
         ];
-        let (mut pid, mut run) = (None, None);
-        for l in lines {
-            if let Some((p, r)) = super::announce(l, "makepad-fab") { pid = Some(p); run = r.or(run); }
+        let mut pids = None;
+        for (line, expected) in lines {
+            super::announce(line, "makepad-fab", &mut pids);
+            assert_eq!(pids, Some(expected), "the app and run pids after {line}");
         }
-        assert_eq!((pid, run), (Some(52), Some(40)), "the newest of its own announces, with the run's pid");
-        assert_eq!(super::announce(lines[0], "makepad-fab"), Some((41, None)), "an announce from before the restart parent names no run");
-        assert_eq!(super::announce(lines[1], "makepad-fab"), None, "another package's announce");
+        // a JIT of an older tree prints the old startup form: no pid is read from it, and the
+        // session says why once the process has been quiet past its bound
+        let mut old_form = None;
+        super::announce("makepad-remote: pid 41 app makepad-fab run 40 socket /t/a", "makepad-fab", &mut old_form);
+        assert_eq!(old_form, None, "the old startup line names no pid");
+        let why = super::no_startup_line(0, true, false, Some(200_000), 120_000, "fab").expect("quiet past its bound with output and no pid");
+        assert!(why.starts_with("no startup line read from the JIT") && why.contains("devhub lanes merge rc-fab"), "{why}");
+        for (pid, wrote, quiet, what) in [(7, true, Some(200_000), "a pid was read"), (0, false, Some(200_000), "no output yet"), (0, true, Some(1_000), "still writing: compiling or booting"), (0, true, None, "not running")] {
+            assert_eq!(super::no_startup_line(pid, wrote, false, quiet, 120_000, "fab"), None, "{what}");
+        }
+        // A run whose box's cargo builds its JIT is busy, not silent, past any bound; the bound
+        // starts as the build ends (W21875: its 2m45s build was failed at 2 min, then its JIT
+        // started and passed 36 of 36, 11-26). Its lines as the run wrote them:
+        let mut building = false;
+        for line in ["L1 n1: cargo builds this tree's JIT first; the command runs on it once built", "     Locking 58 packages to highest compatible versions"] {
+            super::jit_build_line(line, &mut building);
+            assert!(building, "cargo builds the JIT after {line:?}");
+        }
+        assert_eq!(super::no_startup_line(0, true, building, Some(165_000), 120_000, "lamgap"), None, "a JIT build that outlasts the margin fails nothing");
+        for line in ["    Finished `host` profile [optimized] target(s) in 2m 45s", "devhub: cargo built this tree's JIT in 166 s"] { super::jit_build_line(line, &mut building); }
+        assert!(!building, "the build ended");
+        assert!(super::no_startup_line(0, true, building, Some(120_000), 120_000, "lamgap").is_some(), "quiet past its bound after the build: said");
+        // Before its lease's run starts the session waits for its JIT, whatever that takes and
+        // whatever its pending lines say: a dev JIT's store build says itself only once the run
+        // starts, and W22551 was failed at 2 min of its 192 s build (11-26)
+        assert!(!super::startup_due(None, true, false, false), "its run not started: its JIT is still resolved or built");
+        assert!(super::startup_due(None, true, true, false), "started, with output and no pid: its silence counts");
+        assert!(!super::startup_due(Some((7, 7)), true, true, false) && !super::startup_due(None, false, true, false) && !super::startup_due(None, true, true, true), "a pid read, no output yet, or a JIT build in its output");
+        // Its startup line read late withdraws the failure: the verdict it failed is pending again
+        // as it was, so its run's verdict answers and a retry waits for that; a verdict failed for
+        // anything else stays failed
+        for pending in ["initial", "restart", ""] {
+            let mut p = crate::state::LivePatch { outcome: pending.into(), edit_ms: 5, ..Default::default() };
+            super::no_startup_failed(&mut p, why.clone());
+            assert!(p.outcome == "failed" && super::terminal(&p) && p.reason == why, "the missing line fails the call: {p:?}");
+            let mut s = crate::state::Live { note: why.clone(), patch: Some(p), ..Default::default() };
+            assert!(super::startup_read(&mut s), "{pending:?}: withdrawn");
+            let p = s.patch.as_ref().unwrap();
+            assert!(s.note.is_empty() && p.outcome == pending && !super::terminal(p) && p.reason.is_empty() && p.verdict_ms == 0 && p.startup_outcome.is_none(), "{pending:?} pending again: {s:?}");
+        }
+        let failed = crate::state::LivePatch { outcome: "failed".into(), reason: "a test failed".into(), ..Default::default() };
+        let mut s = crate::state::Live { patch: Some(failed.clone()), ..Default::default() };
+        assert!(!super::startup_read(&mut s) && s.patch == Some(failed), "another failure stays");
         // a run followed from where its log stands, its pid lost: read back from this run's part
         // of the log (W12160, 11-17), never from an earlier run's
         let log = std::env::temp_dir().join(format!("devhub-lost-pid-{}.log", std::process::id()));
-        let old = "makepad-remote: pid 11 app makepad-fab socket /t/a\n";
-        std::fs::write(&log, format!("{old}{}\n{}\nrelax live: restart the app\n", lines[0], lines[2])).unwrap();
+        let old = "[makepad-remote] pid=11 app=makepad-fab socket=/t/a\n";
+        let current = lines.map(|(line, _)| line).join("\n");
+        std::fs::write(&log, format!("{old}{current}\nrelax live: restart the app\n")).unwrap();
         let x = crate::state::Live { app: "makepad-fab".into(), log: log.to_string_lossy().into(), run_n: 2, run_log_start: old.len() as u64, ..Default::default() };
-        assert_eq!(super::lost_pid(&x, Some((2, 300))), Some((52, Some(40))), "the newest announce of the run it follows");
-        assert_eq!(super::lost_pid(&crate::state::Live { run_log_start: 0, ..x.clone() }, Some((2, 300))), Some((52, Some(40))));
+        assert_eq!(super::lost_pid(&x, Some((2, 300))), Some((52, 40)), "the newest announce of the run it follows");
+        assert_eq!(super::lost_pid(&crate::state::Live { pid: 52, run_pid: 52, ..x.clone() }, Some((2, 300))), Some((52, 40)), "a parent logged after the app pid was saved");
+        assert_eq!(super::lost_pid(&crate::state::Live { run_log_start: 0, ..x.clone() }, Some((2, 300))), Some((52, 40)));
         assert_eq!(super::lost_pid(&crate::state::Live { pid: 7, ..x.clone() }, Some((2, 300))), None, "a pid it has stays");
         assert_eq!(super::lost_pid(&x, Some((2, 0))), None, "followed from its start, the run says its announce again");
         assert_eq!(super::lost_pid(&x, Some((3, 0))), None, "a new run announces itself");
         assert_eq!(super::lost_pid(&x, None), None, "a run asked anew too");
+        // and whether cargo still builds its JIT there: a master restarted mid-build reads it on
+        let build = format!("{old}L1 n1: cargo builds this tree's JIT first; the command runs on it once built\n   Compiling relax-compiler v0.1.0\n");
+        std::fs::write(&log, &build).unwrap();
+        assert!(super::building_in_log(&x, Some((2, 300))), "a run followed mid-build is building");
+        assert!(!super::building_in_log(&x, None), "a run asked anew reads its own output");
+        std::fs::write(&log, format!("{build}devhub: cargo built this tree's JIT in 166 s\n")).unwrap();
+        assert!(!super::building_in_log(&x, Some((2, 300))), "built: its bound runs");
         let _ = std::fs::remove_file(&log);
     }
 }
@@ -4427,9 +4690,10 @@ mod owner_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// One live test session per lane and package: a new one replaces the lane's other sessions of
-    /// its package, whatever they select, and nothing of another lane or package, no app session
-    /// and no ended one (11-15).
+    /// One live test session per lane, package and system: a new one replaces the lane's other
+    /// sessions of its package on its system, whatever they select, and nothing of another lane,
+    /// package or system, no app session and no ended one (11-15). A Windows session ended the
+    /// lane's Linux one while its JIT still built (11-26).
     #[test]
     fn a_new_test_session_replaces_its_lanes_sessions_of_the_package() {
         let live = |id: &str, lane: &str, app: &str, test: bool, args: &[&str], state: &str| crate::state::Live { id: id.into(), lane: lane.into(), app: app.into(), test, test_args: args.iter().map(|a| a.to_string()).collect(), state: state.into(), ..Default::default() };
@@ -4441,9 +4705,18 @@ mod owner_tests {
             live("W5", "rc-a", "pkg", false, &[], "running"),
             live("W6", "rc-a", "pkg", true, &["--lib"], "ended"),
             live("W7", "rc-a", "pkg", true, &["--lib", "--", "filter"], "starting"),
+            crate::state::Live { needs: "gpu=1,os=Windows".into(), ..live("W8", "rc-a", "pkg", true, &["--lib"], "starting") },
+            crate::state::Live { pin: "box-w".into(), ..live("W9", "rc-a", "pkg", true, &["--lib"], "starting") },
+            crate::state::Live { needs: "os=windows".into(), ..live("W10", "rc-a", "pkg", true, &["--test", "t"], "starting") },
         ];
-        assert_eq!(super::replaced(&lives, &lives[6]), ["W1", "W2"], "another target or filter of the lane's package is replaced; another lane's, another package's, an app session and an ended one are not");
+        assert_eq!(super::replaced(&lives, &lives[6]), ["W1", "W2"], "another target or filter of the lane's package is replaced; another lane's, another package's, another system's, an app session and an ended one are not");
+        assert_eq!(super::replaced(&lives, &lives[9]), ["W8"], "a Windows session replaces only the lane's Windows session of the package");
+        assert!(super::replaced(&lives, &lives[8]).is_empty(), "nor does one pinned to a box replace another system's");
         assert!(super::replaced(&lives, &lives[4]).is_empty(), "an app session replaces no test session");
+        // one asked while another waited for its box: the older ends once it has its box and its
+        // call is done, the newest of them stays (several calls at once, W22126-W22157, 11-26)
+        let by = |i: usize| super::superseded_by(&lives, &lives[i]);
+        assert_eq!([by(0), by(1), by(2), by(3), by(4), by(6), by(7), by(8)], [Some("W7"), Some("W7"), None, None, None, None, Some("W10"), None]);
     }
 
     #[test]
@@ -5352,6 +5625,11 @@ fn serve_with(ctx: &Arc<Ctx>, line: &str, say: &dyn Fn(&str), launch: &dyn Fn(&A
                 (x, cold)
             })?;
             if let Some(line) = cold { say(&line); }
+            // (its caller hears which of its lane's sessions of the package it ends, and when)
+            let others: Vec<String> = ctx.store.read(|d| replaced(&d.lives, &x).into_iter().map(str::to_string).collect());
+            if !others.is_empty() {
+                say(&format!("live {}: lane {lane} has {} other live session{} of {app} ({}): each ends once its call does, one live test session per lane, package and system", x.id, others.len(), if others.len() == 1 { "" } else { "s" }, others.join(", ")));
+            }
             retire_replaced(ctx, &x);
             drop(starting);
             event(ctx, Sev::Info, format!("live {}: {app} for lane {lane} asks for a box", x.id), Some(&x));
@@ -5727,10 +6005,28 @@ mod person_tests {
         let live = |id: &str, visible: bool, touched_ms: u64| Live { id: id.into(), lane: "a-lane".into(), node: "box-a".into(), visible, touched_ms, state: "running".into(), ..Default::default() };
         let mine = [live("W1", true, t0), live("W2", false, t0 + min)];
         let now = t0 + 30 * min;
-        assert_eq!(super::unused_ms(&mine[0], Some(now - 2 * min), now), 2 * min, "idle: a person's input at its box uses a visible session");
-        assert_eq!(super::unused_ms(&mine[1], Some(now - 2 * min), now), 29 * min, "idle: a headless session on that box goes by its edits and calls");
-        assert_eq!(super::unused_ms(&mine[0], None, now), 30 * min, "idle: no input seen at its box");
-        assert!(super::unused_ms(&mine[0], Some(now - 12 * min), now) >= super::IDLE_MS, "idle: it ends 10 min after the person's last input");
+        assert_eq!(super::unused_ms(&mine[0], Some(now - 2 * min), None, now), 2 * min, "idle: a person's input at its box uses a visible session");
+        assert_eq!(super::unused_ms(&mine[1], Some(now - 2 * min), None, now), 29 * min, "idle: a headless session on that box goes by its edits and calls");
+        assert_eq!(super::unused_ms(&mine[0], None, None, now), 30 * min, "idle: no input seen at its box");
+        assert!(super::unused_ms(&mine[0], Some(now - 12 * min), None, now) >= super::IDLE_MS, "idle: it ends 10 min after the person's last input");
+        // a person's input in the app itself (through Desk Link: the box's idle time does not see
+        // it) uses any session, headless too
+        assert_eq!(super::unused_ms(&mine[1], None, Some(now - 3 * min), now), 3 * min, "idle: a person's input in its app");
+        // Its lane landed and went quiet: a visible session stays until its owner ends it, and a
+        // headless one while a person uses its app; a quiet headless one goes (W22615, a visible
+        // session a person watched through Desk Link, was ended so, 11-26)
+        let kept = super::kept_from_landed(&mine[0], None, now).expect("visible");
+        assert!(kept.starts_with("it is visible, a person's window") && kept.contains("devhub live release W1"), "{kept}");
+        let used = super::kept_from_landed(&mine[1], Some(now - 5 * min), now).expect("a person's input 5 min ago");
+        assert!(used.starts_with("a person gave its app input 5m00s ago"), "{used}");
+        assert_eq!(super::kept_from_landed(&mine[1], Some(now - 31 * min), now), None, "their last input past the keep");
+        assert_eq!(super::kept_from_landed(&mine[1], None, now), None, "no person's input: a quiet hidden session goes");
+        // Past its idle end a visible session stays too, used or not, until its owner ends it: a
+        // person's demo was ended twice so in a morning (11-26); a hidden one ends
+        let idle = super::idle_kept(&mine[0]).expect("visible");
+        assert!(idle.starts_with("it is visible, a person's window: it stays until its owner ends it") && idle.contains("devhub live release W1"), "{idle}");
+        assert_eq!(super::idle_kept(&mine[1]), None, "a hidden session ends by its idle time");
+        assert!(super::said_once("W1", "idle") && !super::said_once("W1", "idle") && super::said_once("W1", "landed"), "said once per session and kind");
         // its app's builds keep it past its idle end: a WM's cargo builds of the apps it hosts
         let wm = live("W3", false, t0);
         let built = |ago: u64| Some((now - ago, "makepad_widgets".to_string()));

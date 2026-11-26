@@ -131,7 +131,7 @@ pub const SERVICES: [(&str, &str, &str); 2] = [("devhub", "libs/devhub", ""), ("
 fn linked_dirs(repo: &Path, pkg: &str, features: &str) -> Result<BTreeSet<String>, String> {
     // (no --locked: the lockfile is not tracked; each checkout's own goes stale with a landing's new
     // crate, and cargo refreshes it here as any build in this checkout would)
-    let o = std::process::Command::new(cargo_bin()).current_dir(repo).args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "--target", "all", "--manifest-path"]).arg(format!("{pkg}/Cargo.toml")).args(if features.is_empty() { Vec::new() } else { vec!["--features", features] }).output().map_err(|e| format!("cargo: {e}"))?;
+    let o = std::process::Command::new(cargo_bin()).current_dir(repo).env(AUTO_INSTALL.0, AUTO_INSTALL.1).args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "--target", "all", "--manifest-path"]).arg(format!("{pkg}/Cargo.toml")).args(if features.is_empty() { Vec::new() } else { vec!["--features", features] }).output().map_err(|e| format!("cargo: {e}"))?;
     if !o.status.success() {
         return Err(crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 300));
     }
@@ -1416,6 +1416,8 @@ static BROKEN_SAID: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 /// Rustup counts its nested proxies here and refuses past 20 ("infinite recursion detected"): a
 /// master started through `cargo run` carries it into every build it runs.
 const RUSTUP_DEPTH: &str = "RUST_RECURSION_COUNT";
+/// (devhub's own builds install no toolchain either)
+use crate::lease::caps::AUTO_INSTALL;
 
 /// One master restart at a time: the self-update's and `devhub master restart`'s.
 pub(super) static RESTARTING: Mutex<()> = Mutex::new(());
@@ -1620,7 +1622,7 @@ pub fn build_devhub(repo: &Path, rev: Option<&str>, rule: bool, say: &dyn Fn(Str
         cmd.args(["-p", crate::gate::BIN, "--bin", crate::gate::BIN]);
     }
     let gate_at = gate_head(repo);
-    cmd.arg("--target-dir").arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    cmd.arg("--target-dir").arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).env(AUTO_INSTALL.0, AUTO_INSTALL.1).stdin(std::process::Stdio::null());
     // the commit it builds, which its CLI says beside a master's refusal (`caps::cli_build_rev`)
     match rev {
         Some(rev) => { cmd.env(crate::lease::caps::BUILD_REV, rev); }
@@ -1727,7 +1729,7 @@ fn build_gate(repo: &Path, head: &str, say: &dyn Fn(String)) -> Result<(), Strin
     {
         let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = crate::os::background(cargo_bin().as_os_str());
-        cmd.args(["build", "-j4", "--profile", "host", "-p", crate::gate::BIN, "--bin", crate::gate::BIN, "--target-dir"]).arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+        cmd.args(["build", "-j4", "--profile", "host", "-p", crate::gate::BIN, "--bin", crate::gate::BIN, "--target-dir"]).arg(&target).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).env(AUTO_INSTALL.0, AUTO_INSTALL.1).stdin(std::process::Stdio::null());
         match cmd.output() {
             Ok(o) if o.status.success() => {}
             Ok(o) => return Err(format!("does not build: {}", build_failure(&o))),
@@ -1855,7 +1857,7 @@ static BUILDING: Mutex<()> = Mutex::new(());
 pub fn build_master_app(repo: &Path, say: &dyn Fn(String)) -> Result<(), String> {
     let _one = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
     let mut cmd = crate::os::background(cargo_bin().as_os_str());
-    cmd.args(["build", "-j4", "--profile", "host", "-p", APP_NAME, "--bin", APP_NAME, "--target-dir"]).arg(repo.join(APP_TARGET)).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    cmd.args(["build", "-j4", "--profile", "host", "-p", APP_NAME, "--bin", APP_NAME, "--target-dir"]).arg(repo.join(APP_TARGET)).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).env(AUTO_INSTALL.0, AUTO_INSTALL.1).stdin(std::process::Stdio::null());
     match cmd.output() {
         Ok(o) if o.status.success() => {
             sign_stable(repo, &repo.join(APP_TARGET).join("host").join(APP_NAME), APP_SIGN_ID, say);

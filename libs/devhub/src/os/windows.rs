@@ -397,6 +397,7 @@ pub fn scope_now(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> 
 pub fn scope_procs(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> Vec<(u32, String)> { Vec::new() }
 
 pub fn scope_runnable(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> u32 { 0 }
+pub fn scope_cap(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> Option<(f64, f64)> { None }
 
 pub fn procs_running() -> Option<u32> { None }
 
@@ -533,6 +534,10 @@ pub fn background(program: &std::ffi::OsStr) -> Command {
     let mut cmd = Command::new(program);
     windows::process::no_window(&mut cmd, BELOW_NORMAL_PRIORITY_CLASS.0);
     cmd
+}
+
+pub fn background_scoped(program: &std::ffi::OsStr, _scope: Option<(&str, u32)>) -> Command {
+    background(program)
 }
 
 pub fn pid_alive(pid: u32) -> bool {

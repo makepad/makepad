@@ -217,17 +217,17 @@ fn jit_log(local: &Local, line: &str, out: &mut Vec<String>) {
 }
 
 /// The WM's log of the client process `pid` (`<dir>/wm-client-<id>.log`, the WM's temp dir): the
-/// one whose program announced that pid (`makepad-remote: pid <pid> ...`, near its start). None
+/// one whose program announced that pid near its start. None
 /// once the WM reused the client's id for another run.
 pub(crate) fn wm_client_log(dir: &std::path::Path, pid: u32) -> Option<PathBuf> {
     use std::io::Read;
-    let announce = format!("makepad-remote: pid {pid} ");
     std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| {
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         name.strip_prefix("wm-client-").and_then(|r| r.strip_suffix(".log")).is_some_and(|id| id.bytes().all(|b| b.is_ascii_digit()))
     }).find(|p| {
         let mut head = Vec::new();
-        std::fs::File::open(p).and_then(|f| f.take(256 << 10).read_to_end(&mut head)).is_ok() && String::from_utf8_lossy(&head).contains(&announce)
+        std::fs::File::open(p).and_then(|f| f.take(256 << 10).read_to_end(&mut head)).is_ok()
+            && String::from_utf8_lossy(&head).lines().filter_map(makepad_remote::parse_startup_line).any(|(app_pid, _, _)| app_pid == pid)
     })
 }
 
@@ -628,9 +628,9 @@ mod tests {
     fn a_wm_clients_log_is_found_by_the_pid_its_program_announced() {
         let dir = std::env::temp_dir().join(format!("devhub-wm-client-log-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("wm-client-3.log"), "booting\nmakepad-remote: pid 4242 app makepad-fab socket /x\nwindow 0: the app asks to close it at a.rs:1:1\n").unwrap();
-        std::fs::write(dir.join("wm-client-3-build.log"), "makepad-remote: pid 77 app makepad-fab socket /x\n").unwrap();
-        std::fs::write(dir.join("wm-client-4.log"), "makepad-remote: pid 424 app makepad-scope socket /y\n").unwrap();
+        std::fs::write(dir.join("wm-client-3.log"), "booting\n[makepad-remote] pid=4242 app=makepad-fab socket=/x\nwindow 0: the app asks to close it at a.rs:1:1\n").unwrap();
+        std::fs::write(dir.join("wm-client-3-build.log"), "[makepad-remote] pid=77 app=makepad-fab socket=/x\n").unwrap();
+        std::fs::write(dir.join("wm-client-4.log"), "[makepad-remote] pid=424 app=makepad-scope socket=/y\n").unwrap();
         assert_eq!(super::wm_client_log(&dir, 4242), Some(dir.join("wm-client-3.log")));
         assert_eq!(super::wm_client_log(&dir, 424), Some(dir.join("wm-client-4.log")), "a pid is a whole word");
         assert_eq!(super::wm_client_log(&dir, 77), None, "a build's log is no client's");

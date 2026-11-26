@@ -664,6 +664,15 @@ pub fn scope_runnable(pid: u32, start: u64, unit: Option<&str>, usage: &Path) ->
     }).count() as u32
 }
 
+/// A scoped run at its own memory cap (Linux, `MemoryHigh`): its scope's stall (PSI `some avg10`,
+/// percent) and the cap, GB ([`crate::lease::caps::scope_cap_of`]). None: no cap, under it, or no
+/// scope.
+pub fn scope_cap(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Option<(f64, f64)> {
+    let group = scope_dir(pid, start, unit, usage)?;
+    let read = |f: &str| std::fs::read_to_string(group.join(f)).unwrap_or_default();
+    crate::lease::caps::scope_cap_of(&read("memory.high"), &read("memory.current"), &read("memory.pressure"))
+}
+
 /// The box's tasks that run or wait to run now (`/proc/stat`'s `procs_running`).
 pub fn procs_running() -> Option<u32> {
     std::fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("procs_running ")?.trim().parse().ok())
@@ -939,15 +948,27 @@ fn first_on(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
     std::env::split_paths(path).filter(|d| d.is_absolute()).map(|d| d.join(name)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
 }
 
-/// `program` as a background build. On macOS at background QoS: efficiency cores and throttled
-/// I/O, a clamp cargo's rustc inherit and cannot lift, so a build never competes with the apps the
-/// person works in (nice only orders it behind them: after a landing a nice-10 build beside another
-/// took rustc to ~1000% of a core and the person's Mac to a load of 45, 11-05). It only takes
-/// longer. Elsewhere at nice 15.
+/// `program` as a background build. On a Mac a person uses ([`super::clamps_background`]) at
+/// background QoS: efficiency cores and throttled I/O, a clamp cargo's rustc inherit and cannot
+/// lift, so a build never competes with the apps the person works in (nice only orders it behind
+/// them: after a landing a nice-10 build beside another took rustc to ~1000% of a core and the
+/// person's Mac to a load of 45, 11-05). It only takes longer. Elsewhere, a pool Mac too, at nice 15: on a pool
+/// Mac nobody works at, the clamp kept every such build on its 4 efficiency cores while 12 others
+/// idled, at load 76-120 and 36-42% of its CPU for an hour (11-26).
 pub fn background(program: &std::ffi::OsStr) -> Command {
-    let (low, words): (&str, &[&str]) = if cfg!(target_os = "macos") { ("/usr/sbin/taskpolicy", &["-c", "background"]) } else { ("nice", &["-n", "15"]) };
+    let (low, words): (&str, &[&str]) = if super::clamps_background() { ("/usr/sbin/taskpolicy", &["-c", "background"]) } else { ("nice", &["-n", "15"]) };
     let mut cmd = Command::new(tool(low));
     cmd.args(words).arg(program);
+    cmd
+}
+
+/// A background build in its weighted scope when the box has a user bus.
+pub fn background_scoped(program: &std::ffi::OsStr, scope: Option<(&str, u32)>) -> Command {
+    let Some((unit, weight)) = scope else { return background(program); };
+    // lease_argv targets nice 15 from the hub's level. background adds 15.
+    let prefix = lease_argv(Vec::new(), Some(unit), 15, "", Some(weight), None);
+    let mut cmd = Command::new(&prefix[0]);
+    cmd.args(&prefix[1..]).arg(program);
     cmd
 }
 

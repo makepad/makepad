@@ -853,7 +853,7 @@ fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
         let r = h2.run(&argv, &mut Out { file, text: t2 });
         *d2.lock().unwrap() = Some(r);
     });
-    let pid_of = || String::from_utf8_lossy(&text.lock().unwrap()).split("makepad-remote: pid ").nth(1).and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse::<u32>().ok());
+    let pid_of = || String::from_utf8_lossy(&text.lock().unwrap()).lines().find_map(makepad_remote::parse_startup_line).map(|(pid, _, _)| pid);
     let ended = || done.lock().unwrap().clone();
     let t = std::time::Instant::now();
     let pid = loop {

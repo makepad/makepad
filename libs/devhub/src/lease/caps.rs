@@ -176,13 +176,84 @@ pub fn rust_path() -> Option<String> {
     std::env::join_paths(std::iter::once(bin).chain(rest)).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// `prog` (cargo, rustc) as a lease's run finds it ([`rust_path`]).
+/// `prog` (cargo, rustc) as a lease's run finds it ([`rust_path`]), with rustup installing nothing
+/// ([`AUTO_INSTALL`]).
 pub fn rust_command(prog: &str) -> std::process::Command {
     let mut c = std::process::Command::new(prog);
     if let Some(p) = rust_path() {
         c.env("PATH", p);
     }
+    c.env(AUTO_INSTALL.0, AUTO_INSTALL.1);
     c
+}
+
+/// rustup's switch for installing a toolchain that a command names and the box lacks: off for
+/// every run, build and probe a hub starts. Installing software needs the user's approval, and a
+/// job's `rustc +nightly` had rustup install a nightly on a node (11-26). [`toolchain_refusal`]
+/// refuses such a run first, in plain words.
+pub const AUTO_INSTALL: (&str, &str) = ("RUSTUP_AUTO_INSTALL", "0");
+
+/// The refusal of a run whose command or environment names a rustup toolchain this box does not
+/// hold: `cargo +X`, `rustc +X` (any rustup proxy), `rustup run X` and `rustup +X`,
+/// `RUSTUP_TOOLCHAIN=X` (in its command or its environment), a shell's `-c` script's words among
+/// them. None when it names none, when this box holds them all, or when it has no rustup.
+pub fn toolchain_refusal(argv: &[String], env: &[(String, String)]) -> Option<String> {
+    let named = toolchains_named(argv, env);
+    if named.is_empty() {
+        return None;
+    }
+    let home = env.iter().rev().find(|(k, _)| k == "RUSTUP_HOME").map(|(_, v)| PathBuf::from(v)).or_else(|| std::env::var_os("RUSTUP_HOME").filter(|h| !h.is_empty()).map(PathBuf::from))
+        .or_else(|| std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| PathBuf::from(h).join(".rustup")))?;
+    let held: Vec<String> = std::fs::read_dir(home.join("toolchains")).ok()?.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    let host = std::fs::read_to_string(home.join("settings.toml")).ok()
+        .and_then(|s| s.lines().find_map(|l| Some(l.trim().strip_prefix("default_host_triple")?.trim().strip_prefix('=')?.trim().trim_matches('"').to_string())))
+        .unwrap_or_else(|| match (std::env::consts::ARCH, std::env::consts::OS) {
+            (arch, "macos") => format!("{arch}-apple-darwin"),
+            (arch, "windows") => format!("{arch}-pc-windows-msvc"),
+            (arch, os) => format!("{arch}-unknown-{os}-gnu"),
+        });
+    named.into_iter().find(|t| !toolchain_held(t, &held, &host)).map(|t| format!("toolchain {t} is not installed on this node; installing needs the user's approval"))
+}
+
+/// The toolchains a run's command and environment name ([`toolchain_refusal`]). A command that
+/// names its own rustup (`RUSTUP_HOME=`) is left to it: its environment keeps that one from
+/// installing too.
+fn toolchains_named(argv: &[String], env: &[(String, String)]) -> Vec<String> {
+    const PROXIES: &[&str] = &["cargo", "rustc", "rustdoc", "rustfmt", "cargo-fmt", "cargo-clippy", "clippy-driver", "cargo-miri", "rust-analyzer", "rust-gdb", "rust-gdbgui", "rust-lldb", "rls", "rustup"];
+    let words: Vec<&str> = argv.iter().flat_map(|a| a.split(|c: char| c.is_whitespace() || ";|&()`'\"".contains(c))).filter(|w| !w.is_empty()).collect();
+    if words.iter().any(|w| w.starts_with("RUSTUP_HOME=")) {
+        return Vec::new();
+    }
+    let mut named: Vec<String> = env.iter().filter(|(k, _)| k == "RUSTUP_TOOLCHAIN").map(|(_, v)| v.clone()).collect();
+    for (i, w) in words.iter().enumerate() {
+        let prog = Path::new(w).file_name().and_then(|f| f.to_str()).unwrap_or(w).trim_end_matches(".exe");
+        let toolchain = if let Some(t) = w.strip_prefix("RUSTUP_TOOLCHAIN=") {
+            Some(t)
+        } else if prog == "rustup" && words.get(i + 1) == Some(&"run") {
+            words[i + 2..].iter().find(|w| !w.starts_with('-')).copied()
+        } else if PROXIES.contains(&prog) {
+            words.get(i + 1).and_then(|n| n.strip_prefix('+'))
+        } else {
+            None
+        };
+        // (a shell variable is the shell's to expand: rustup still installs nothing for it)
+        if let Some(t) = toolchain.filter(|t| !t.is_empty() && !t.contains('$')) {
+            named.push(t.to_string());
+        }
+    }
+    named.retain(|t| !t.is_empty());
+    named.dedup();
+    named
+}
+
+/// Whether rustup finds `toolchain` among the installed ones (`held`, its `toolchains` folder): by
+/// its whole name, or a channel's (`nightly`, `1.100`, `nightly-2026-11-01`) with this box's host
+/// triple; a path toolchain when that folder is there.
+fn toolchain_held(toolchain: &str, held: &[String], host: &str) -> bool {
+    if toolchain.contains('/') || toolchain.contains('\\') {
+        return Path::new(toolchain).is_dir();
+    }
+    held.iter().any(|h| h == toolchain || h.strip_prefix(toolchain).and_then(|r| r.strip_prefix('-')) == Some(host))
 }
 
 /// The toolchain a lease's run finds ([`rust_command`]): `rustc -vV`'s release (`1.100.0`) and
@@ -314,6 +385,8 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.features = super::FEATURES.iter().map(|f| f.to_string()).collect();
     c.services = services();
     c.hub_building = super::exec::hub_building();
+    c.background_qos = crate::os::clamps_background();
+    c.audio_out = audio_out();
     #[cfg(feature = "checkout")]
     { c.wm_drain = crate::sync::serve::wm_drain(); }
     #[cfg(feature = "checkout")]
@@ -404,7 +477,42 @@ pub fn memory_stall(pct: f64) -> Option<String> {
 /// The `full` line's `avg10` of `/proc/pressure/memory`: the share of the last 10 s, in percent,
 /// in which every task stalled on memory; 0 without PSI.
 pub fn parse_psi_full(text: &str) -> f64 {
-    text.lines().find(|l| l.starts_with("full ")).and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix("avg10="))).and_then(|v| v.parse().ok()).unwrap_or(0.0)
+    psi_avg10(text, "full ")
+}
+
+/// The `some` line's `avg10` of a PSI file (the box's, or a scope's `memory.pressure`): the share
+/// of the last 10 s, in percent, in which at least one of its tasks stalled; 0 without PSI.
+pub fn parse_psi_some(text: &str) -> f64 {
+    psi_avg10(text, "some ")
+}
+
+fn psi_avg10(text: &str, line: &str) -> f64 {
+    text.lines().find(|l| l.starts_with(line)).and_then(|l| l.split_whitespace().find_map(|w| w.strip_prefix("avg10="))).and_then(|v| v.parse().ok()).unwrap_or(0.0)
+}
+
+/// A scope at its own memory cap, from its `memory.high`, `memory.current` and `memory.pressure`:
+/// its stall (PSI `some avg10`, percent) and the cap (GB), once it holds 95% of the cap or more.
+/// None: no cap (`max`), or under it.
+pub fn scope_cap_of(high: &str, current: &str, pressure: &str) -> Option<(f64, f64)> {
+    let high: u64 = high.trim().parse().ok().filter(|h| *h > 0)?;
+    let current: u64 = current.trim().parse().ok()?;
+    (current as f64 >= high as f64 * 0.95).then(|| (parse_psi_some(pressure), high as f64 / (1u64 << 30) as f64))
+}
+
+/// A lease at its own memory cap whose stall is the whole of the box's ([`box_memory_stall`]):
+/// the box's tasks stall (PSI `some avg10`) no more than its, a point aside. The one that stalls
+/// most, if several.
+pub fn own_stall(c: &super::Caps) -> Option<&(String, f64, f64)> {
+    c.capped_leases.iter().filter(|(_, some, _)| some + 1.0 >= c.mem_some).max_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// [`memory_stall`] of the box, less a lease's own throttling: a session at its own memory cap
+/// (`MemoryHigh`, half again its asked RAM) stalls in its own scope while the box has room, and
+/// that is its problem, no box pressure ([`own_stall`]). Read as the box's, a session's 55 min at
+/// its 18 GB cap kept its box from new work for 17 min (11-26).
+pub fn box_memory_stall(c: &super::Caps) -> Option<String> {
+    let why = memory_stall(c.mem_stall)?;
+    own_stall(c).is_none().then_some(why)
 }
 
 /// The WM-supervised services that run on this node (`~/.makepad/wm/<name>.state`, written at
@@ -563,6 +671,60 @@ pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
     let changed = *s != now;
     *s = now;
     (why, changed)
+}
+
+/// A sound every Mac has: the audio probe plays it at volume 0 ([`probe_audio`]).
+const AUDIO_PROBE_SOUND: &str = "/System/Library/Sounds/Tink.aiff";
+/// How long the probe's half-second silent playback may take before the box's output counts as
+/// not running.
+pub const AUDIO_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Whether this box's default audio output runs: its last [`probe_audio`], None until one ran or
+/// where none runs ([`measures_audio`]).
+static AUDIO: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+/// Whether this box's default audio output runs, as its last probe found ([`probe_audio`]).
+pub fn audio_out() -> Option<bool> {
+    *AUDIO.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether this box measures its audio output ([`probe_audio`]): a Mac no person uses. A person's
+/// own Mac and the master's are left alone ([`crate::os::clamps_background`]): a playback, silent
+/// as it is, opens their output device. No Linux or Windows hub measures it yet.
+pub fn measures_audio() -> bool {
+    cfg!(target_os = "macos") && !crate::os::clamps_background()
+}
+
+/// Plays a half-second sound at volume 0 on the default output, the way a test's app plays to
+/// it, and notes whether it ended within [`AUDIO_PROBE_WAIT`]. On one Mac a lease's apps opened
+/// the output and started it with no error, and its callback never ran: the synth app's
+/// transport tests failed there at any revision and passed on another Mac (11-26); `afplay` hung
+/// there the same way. Returns (before, now).
+pub fn probe_audio() -> (Option<bool>, Option<bool>) {
+    let now = if measures_audio() {
+        match makepad_remote::group::command("/usr/bin/afplay").args(["-v", "0", AUDIO_PROBE_SOUND]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+            Err(_) => None,
+            Ok(mut child) => {
+                let t = std::time::Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status.success()),
+                        Ok(None) if t.elapsed() < AUDIO_PROBE_WAIT => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break Some(false);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let mut a = AUDIO.lock().unwrap_or_else(|e| e.into_inner());
+    let before = *a;
+    *a = now;
+    (before, now)
 }
 
 /// The commit this hub's checkout held when the hub started (its code; read once, from the files
@@ -852,6 +1014,7 @@ mod os {
         let (cpu, cores) = parse_cpuinfo(&read("/proc/cpuinfo"));
         let cpu_target = cpu_target(&cpu);
         let (ram, avail) = parse_meminfo(&read("/proc/meminfo"));
+        let psi = read("/proc/pressure/memory");
         let gpu = crate::top::gpu_use();
         let mut temps = hwmon_temps(Path::new("/sys/class/hwmon"));
         temps.extend(nvidia_temps(&gpu));
@@ -882,7 +1045,8 @@ mod os {
             load1: parse_loadavg(&read("/proc/loadavg")),
             ram_gb: ram,
             ram_avail_gb: avail,
-            mem_stall: parse_psi_full(&read("/proc/pressure/memory")),
+            mem_stall: parse_psi_full(&psi),
+            mem_some: parse_psi_some(&psi),
             gpus: gpu.iter().map(|g| (g.name.clone(), g.mem_total_gb)).collect(),
             display: display(),
             // read after display(): its probe leaves the answer of a WM on another wire
@@ -1265,6 +1429,40 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// A run that names a toolchain the box lacks is refused in plain words, in its command's
+    /// words or a shell script's, by a proxy's `+`, `rustup run` or `RUSTUP_TOOLCHAIN`; one it
+    /// holds runs, by its whole name or its channel's on this host (11-26: a job's `rustc
+    /// +nightly` had rustup install a nightly on a node).
+    #[test]
+    fn a_run_naming_a_toolchain_the_box_lacks_is_refused_before_rustup_installs_it() {
+        let v = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let named = |argv: &[&str]| super::toolchains_named(&v(argv), &[]);
+        assert_eq!(named(&["cargo", "+nightly", "test", "-p", "a"]), ["nightly"], "a proxy's +");
+        assert_eq!(named(&["sh", "-c", "cd x && /h/.cargo/bin/rustc +nightly-2026-11-01 -vV; echo ok"]), ["nightly-2026-11-01"], "a shell script's words, a proxy by its path");
+        assert_eq!(named(&["rustup", "run", "--install", "beta", "cargo", "build"]), ["beta"], "rustup run, past its flags");
+        assert_eq!(named(&["env", "RUSTUP_TOOLCHAIN=1.100", "cargo", "build"]), ["1.100"], "an environment the command sets");
+        assert_eq!(super::toolchains_named(&v(&["cargo", "build"]), &[("RUSTUP_TOOLCHAIN".into(), "stable".into())]), ["stable"], "the run's environment");
+        assert!(named(&["cargo", "build", "+x"]).is_empty() && named(&["echo", "a+b", "cargo", "+$TC"]).is_empty(), "only a proxy's next word, and no shell variable");
+        assert!(named(&["sh", "-c", "RUSTUP_HOME=$X/rustup cargo +nightly check"]).is_empty(), "a command's own rustup is its own");
+        let held = v(&["stable-aarch64-apple-darwin", "nightly-aarch64-apple-darwin", "1.100.0-aarch64-apple-darwin", "mine"]);
+        let host = "aarch64-apple-darwin";
+        for t in ["stable", "nightly", "nightly-aarch64-apple-darwin", "1.100.0", "mine"] {
+            assert!(super::toolchain_held(t, &held, host), "{t} is held");
+        }
+        for t in ["nightly-2026-11-01", "1.100", "beta", "nightly-x86_64-unknown-linux-gnu"] {
+            assert!(!super::toolchain_held(t, &held, host), "{t} is not");
+        }
+        // on this box: what it lacks is refused in the words the user's rule says, what it holds runs
+        let home = std::env::temp_dir().join(format!("devhub-rustup-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("toolchains/stable-x9-test-host")).unwrap();
+        std::fs::write(home.join("settings.toml"), "default_host_triple = \"x9-test-host\"\n").unwrap();
+        let env = [("RUSTUP_HOME".to_string(), home.display().to_string())];
+        assert_eq!(super::toolchain_refusal(&v(&["rustc", "+nightly", "-vV"]), &env).as_deref(), Some("toolchain nightly is not installed on this node; installing needs the user's approval"));
+        assert_eq!(super::toolchain_refusal(&v(&["cargo", "+stable", "build"]), &env), None);
+        assert_eq!(super::toolchain_refusal(&v(&["cargo", "build"]), &env), None, "a run that names none");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     /// A box says the targets its toolchain holds a std for: the target directories of its sysroot
     /// with a libcore, not the sources, tools or a directory left without one.
     #[test]
@@ -1515,6 +1713,20 @@ mod tests {
         assert_eq!(parse_psi_full(psi), 14.2, "the full line's avg10, not the some line's");
         assert_eq!(parse_psi_full(""), 0.0, "a kernel without PSI");
         assert!(memory_stall(14.2).is_some_and(|w| w.starts_with("memory stall 14% ")) && memory_stall(9.9).is_none());
+        assert_eq!(parse_psi_some(psi), 31.2, "the some line's avg10");
+        // a scope at its own cap: its stall and its cap (memory.high "max" is none)
+        let gib = 1u64 << 30;
+        assert_eq!(scope_cap_of(&format!("{}\n", 18 * gib), &format!("{}\n", 18 * gib - gib / 4), psi), Some((31.2, 18.0)), "at 98.6% of its cap");
+        assert_eq!(scope_cap_of(&(18 * gib).to_string(), &(12 * gib).to_string(), psi), None, "under its cap");
+        assert_eq!(scope_cap_of("max\n", &(12 * gib).to_string(), psi), None, "no cap");
+        // the box's stall less a lease's own: discounted only while that lease's stall is all of
+        // the box's
+        let mut c = crate::lease::Caps { mem_stall: 25.0, mem_some: 40.0, ..Default::default() };
+        assert!(box_memory_stall(&c).is_some(), "no lease at its cap: the box's stall");
+        c.capped_leases = vec![("L1".into(), 39.5, 18.0)];
+        assert_eq!((box_memory_stall(&c), own_stall(&c).map(|o| o.0.as_str())), (None, Some("L1")), "its own: the box's stall is no more than it");
+        c.mem_some = 60.0;
+        assert!(box_memory_stall(&c).is_some(), "other tasks stall too: the box's");
         let g = parse_nvidia("NVIDIA GeForce GPU-B, 33000\nNVIDIA GeForce GPU-A, 25000\n");
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].0, "NVIDIA GeForce GPU-B");

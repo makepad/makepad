@@ -77,9 +77,15 @@ impl CostRecords {
         // needs. A lane's script that ran away to 49.9 GB had every later run of it charged a pool
         // box's whole RAM budget, 1.7 GB of it held, and the box's drain head waited behind that
         // (L921313, L926707); a tests bucket's runaway test at 45 GB weighed every later shard at
-        // 54 GB, a whole box each (L924561, 11-13).
+        // 54 GB, a whole box each (L924561, 11-13). Nor a live session's (class `live:...`): an
+        // open session runs edit after edit, and the one that ran away grew in that session; a
+        // fresh session starts as its class's sessions that ended do. A lane's CAD test sessions
+        // peaked at 0.7 GB, three of them were ended for memory at 40-45 GB after many hot
+        // patches, and the next fresh one asked 47.8 GB, every Linux box's whole budget: it headed
+        // the queue 10 min draining a box, CI and a box's deployment build waiting behind it
+        // (L1796587, 11-26).
         if v.get("how").and_then(|h| h.as_str()) == Some("memory") {
-            if let Some(class) = v.get("class").and_then(|v| v.as_str()).filter(|c| !super::lane_script(c)) {
+            if let Some(class) = v.get("class").and_then(|v| v.as_str()).filter(|c| !super::lane_script(c) && !c.starts_with("live:")) {
                 let kind = v.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                 self.memory.push((class.to_string(), kind.to_string(), lane(&v), os(&v), v.get("peak_ram_gb").and_then(super::num)));
                 if let (Some(os), Some(warm)) = (os(&v), warm(&v)) { self.states.push((class.to_string(), kind.to_string(), lane(&v), os, warm, v.get("peak_ram_gb").and_then(super::num))); }
@@ -751,6 +757,11 @@ pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Where a lease's test artifacts are kept on the master ([`LeaseMaster::keep_artifacts`]).
+pub(crate) fn artifacts_dir(home: &Path, id: &str) -> PathBuf {
+    home.join("lease-logs").join(format!("{id}.artifacts"))
+}
+
 pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
@@ -1148,6 +1159,12 @@ impl LeaseMaster {
         self.sched.lock().unwrap().app_touched(node, spec, service, now);
     }
 
+    /// See [`Sched::note_progress`].
+    pub fn note_progress(&self, id: &str, line: &str) {
+        let now = self.now();
+        self.sched.lock().unwrap().note_progress(id, line, now);
+    }
+
     /// No other lease of this lane is queued, live, or recently ended.
     pub fn lane_quiet(&self, lane: &str, own: &[&str], now: u64, idle_ms: u64) -> bool {
         let s = self.sched.lock().unwrap();
@@ -1498,6 +1515,28 @@ impl LeaseMaster {
     /// The lease's kept log: its stalls' stacks, and its last lines when it ends abnormally.
     fn lease_log(&self, id: &str) -> PathBuf {
         self.home.join("lease-logs").join(format!("{id}.log"))
+    }
+
+    /// What a lease's tests kept (`MAKEPAD_TEST_ARTIFACTS`: its own folder in its target, a failed
+    /// test's grabs), copied into `lease-logs/<id>.artifacts` before its end removes them on its
+    /// box, with a line in its kept log that says where (`devhub job result <id>`; a job's result
+    /// names the folder). Nodes hold no state: kept on the box, 700 folders of ended leases
+    /// (1.2 GB) stood in one box's target (11-26). A lease that kept nothing costs one listing;
+    /// a box that does not answer keeps its copy until that lease's end there takes it.
+    fn keep_artifacts(&self, id: &str, node: &str, lane: &str) {
+        let dst = artifacts_dir(&self.home, id);
+        let rel = format!("target/makepad_test/{id}");
+        match super::client::fetch_from(&|service, line| (self.ask)(node, service, line), node, lane, id, &rel, &dst, true) {
+            Ok(files) if files.is_empty() => {}
+            Ok(files) => {
+                let mb = files.iter().map(|(_, n)| n).sum::<u64>() as f64 / 1048576.0;
+                let line = format!("== its test artifacts from {node}: {} ({mb:.1} MB) in {}\n", plural(files.len(), "file", "files"), dst.display());
+                if let Err(e) = self.keep_log(id, &line) { self.event(Sev::Warn, format!("{id}: {}: {e}", line.trim_end())); }
+            }
+            // (one with no folder to list kept none: a hub before the folder, or a lease set up elsewhere)
+            Err(_) if !dst.exists() => {}
+            Err(e) => self.event(Sev::Warn, format!("{id}: its test artifacts came back cut ({e}): what came is in {}", dst.display())),
+        }
     }
 
     /// Adds `text` to the lease's kept log, after what it holds.
@@ -1908,6 +1947,9 @@ impl LeaseMaster {
                 // a client's failed runs, each whole, before the end takes their logs (a job's are
                 // whole in its own log)
                 let whole = !l.req.master && self.keep_failed_runs(id, node);
+                // and what its tests kept, a job's too (a land queue's gate keeps its units' in its
+                // own keep), before the end removes it on its box
+                if !super::sched::land_queue_lane(&l.req.lane) { self.keep_artifacts(id, node, &l.req.lane); }
                 let end_line = format!("lease-end {id} {wire_how}{payload}");
                 let answer = self.ask1(node, "lease-end", &end_line);
                 teardown = t0.elapsed().as_millis() as u64;
@@ -3462,6 +3504,10 @@ mod tests {
         // script's name, what ran away in it one of the things it runs
         std::io::Write::write_all(&mut file, b"{\"class\":\"test bash run.sh @lane\",\"kind\":\"test\",\"node\":\"box-a\",\"os\":\"linux\",\"lane\":\"lane\",\"wall_ms\":1000,\"peak_ram_gb\":49.9,\"how\":\"memory\"}\n").unwrap();
         std::io::Write::write_all(&mut file, b"{\"class\":\"test bash land_gate.sh testrun @landq-tests\",\"kind\":\"test\",\"node\":\"box-a\",\"os\":\"linux\",\"lane\":\"landq-tests\",\"wall_ms\":1000,\"peak_ram_gb\":45.0,\"how\":\"memory\"}\n").unwrap();
+        // nor a live session's: it ran away in that session, after its edits; a fresh session is
+        // weighed as its class's sessions that ended were
+        std::io::Write::write_all(&mut file, b"{\"class\":\"live:test:cad:lib?a_case\",\"kind\":\"test\",\"node\":\"box-a\",\"os\":\"linux\",\"lane\":\"cad\",\"wall_ms\":600000,\"peak_ram_gb\":1.0,\"how\":\"released\"}\n").unwrap();
+        std::io::Write::write_all(&mut file, b"{\"class\":\"live:test:cad:lib?a_case\",\"kind\":\"test\",\"node\":\"box-a\",\"os\":\"linux\",\"lane\":\"cad\",\"wall_ms\":1325529,\"peak_ram_gb\":44.6,\"how\":\"memory\"}\n").unwrap();
         // and a released run whose last run did not end by itself measures nothing either
         std::io::Write::write_all(&mut file, b"{\"class\":\"crashed-run\",\"kind\":\"test\",\"node\":\"box-a\",\"wall_ms\":1000,\"run_ms\":900,\"cpu_seconds\":8,\"peak_ram_gb\":7.5,\"how\":\"released\",\"unmeasured\":\"L9 run 1 ended without its summary: killed by signal 9 (SIGKILL)\"}\n").unwrap();
         std::io::Write::write_all(&mut file, b"{\"class\":\"family-run\",\"kind\":\"test\",\"node\":\"box-b\",\"wall_ms\":1000,\"peak_ram_gb\":7.5,\"how\":\"released\"}\n").unwrap();
@@ -3526,6 +3572,9 @@ mod tests {
             req.class = class.into();
             assert_eq!(s.measured_ram(&req, Some("box-a"), None), None, "{class}: a script's memory end gives no peak");
         }
+        let mut session = Req::new("cad", Kind::Test);
+        (session.class, session.live) = ("live:test:cad:lib?a_case".into(), true);
+        assert_eq!(s.measured_ram(&session, Some("box-a"), None), Some(1.2), "a live session's memory end gives no peak: its ended session's 1.0 GB and a fifth");
         assert_eq!(s.class_median("crashed-run", "test"), None, "a crashed run's wall is no measure");
         assert_eq!(s.measured_cores(&req), None, "a crashed run's cores are no measure");
         drop(s);
@@ -3555,6 +3604,7 @@ mod tests {
             whole: None,
             past_grant: None,
             settling: None,
+            link: None,
             resting: None,
         };
         let nodes = [view("headset", "192.0.2.85:8788", true, Some((true, 8790))), view("phone", "192.0.2.50", true, Some((true, 0))), view("off", "192.0.2.51", true, Some((false, 8790))), view("gone", "192.0.2.52", false, Some((true, 8790))), view("node-a", "192.0.2.89", true, None)];
@@ -3591,6 +3641,9 @@ mod tests {
         /// a lease's failed run 1, its log: `lease-failed` names it and `lease-log` reads it in
         /// the hub's chunks; None: a hub from before `lease-failed`
         failed_run: Mutex<Option<Vec<u8>>>,
+        /// the files a lease's tests kept in its artifacts folder (`get-ls`/`get-read` of
+        /// `target/makepad_test/<id>`): its name there and its bytes
+        artifacts: Mutex<Vec<(String, Vec<u8>)>>,
         /// the cause its JITs' captures find (empty: a main thread that waits)
         capture_cause: Mutex<String>,
 }
@@ -3600,6 +3653,17 @@ mod tests {
             self.calls.lock().unwrap().push((node.to_string(), service.to_string(), line.to_string()));
             if self.gone.load(Ordering::SeqCst) {
                 return Err(format!("link lost: cannot reach fleet hub `{node}` at 192.0.2.89:8797: Connection refused (os error 111)"));
+            }
+            if let Some(rest) = line.strip_prefix("get-ls ").filter(|_| service == "get-ls") {
+                let id = rest.split_whitespace().nth(1).unwrap();
+                assert_eq!(rest.split_whitespace().nth(2), Some(format!("target/makepad_test/{id}").as_str()));
+                return Ok(self.artifacts.lock().unwrap().iter().map(|(p, b)| format!("{{\"p\":\"{id}/{p}\",\"n\":{},\"r\":\"target/makepad_test/{id}/{p}\"}}", b.len())).collect());
+            }
+            if service == "get-read" {
+                let (off, r) = line.splitn(5, ' ').skip(3).collect::<Vec<_>>().split_first().map(|(o, r)| (o.parse::<usize>().unwrap(), r[0].to_string())).unwrap();
+                let files = self.artifacts.lock().unwrap();
+                let (_, bytes) = files.iter().find(|(p, _)| r.ends_with(&format!("/{p}"))).unwrap();
+                return Ok(vec![format!("{{\"data\":\"{}\",\"eof\":true}}", makepad_network::digest::base64_encode(&bytes[off.min(bytes.len())..]))]);
             }
             let caps = super::super::Caps { features: super::super::FEATURES.iter().map(|f| f.to_string()).collect(), node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true, display: Some("wm:makepad-wm-0".into()), ..Default::default() };
             Ok(vec![match service {
@@ -3681,7 +3745,7 @@ mod tests {
 
     /// A master whose clock starts at `start`.
     fn master_at(dir: &Path, start: u64) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
-        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default(), failed_run: Default::default() });
+        let node = Arc::new(FakeNode { beat_end: Default::default(), calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default(), trouble: Default::default(), cpu: Default::default(), no_gui: Default::default(), apply: Default::default(), apply_seen: Default::default(), end_load: Default::default(), jits: Default::default(), call_answer: Default::default(), capture_cause: Default::default(), failed_run: Default::default(), artifacts: Default::default() });
         let clock = Arc::new(AtomicU64::new(start));
         let recs = Arc::new(Mutex::new(Vec::new()));
         let (n, c, r) = (node.clone(), clock.clone(), recs.clone());
@@ -4265,6 +4329,21 @@ mod tests {
         let calls = node.calls.lock().unwrap().iter().filter(|(_, _, l)| l.contains("L3")).map(|(_, s, _)| s.clone()).collect::<Vec<_>>();
         assert!(calls.iter().rposition(|s| s == "lease-log") < calls.iter().position(|s| s == "lease-end"), "read before its end: {calls:?}");
         assert_eq!(calls.iter().filter(|s| *s == "lease-log").count(), log.len().div_ceil(super::super::exec::LOG_CHUNK) + 1, "in the hub's chunks, to the empty one");
+        // what its tests kept comes back with its result, read before its end removes it on its
+        // box (nodes hold no state: 700 such folders stood in one box's target, 11-26), and its
+        // kept log says where; a lease that kept nothing keeps nothing here
+        assert!(!dir.join("lease-logs/L2.artifacts").exists() && !dir.join("lease-logs/L3.artifacts").exists());
+        *node.failed_run.lock().unwrap() = None;
+        *node.end_answer.lock().unwrap() = None;
+        *node.artifacts.lock().unwrap() = vec![("grab.png".into(), b"PNG".to_vec()), ("sub/diff.txt".into(), b"diff".to_vec())];
+        serve(&m, "lease", &Req::new("gapw", Kind::Test).to_json());
+        serve(&m, "release", "L4");
+        let kept = dir.join("lease-logs/L4.artifacts");
+        assert_eq!((std::fs::read(kept.join("grab.png")).unwrap(), std::fs::read(kept.join("sub/diff.txt")).unwrap()), (b"PNG".to_vec(), b"diff".to_vec()), "its files, under the folder's own name");
+        let said = std::fs::read_to_string(dir.join("lease-logs/L4.log")).unwrap();
+        assert!(said.contains(&format!("== its test artifacts from node-a: 2 files (0.0 MB) in {}", kept.display())), "{said}");
+        let calls = node.calls.lock().unwrap().iter().filter(|(_, _, l)| l.contains("L4")).map(|(_, s, _)| s.clone()).collect::<Vec<_>>();
+        assert!(calls.iter().rposition(|s| s == "get-read") < calls.iter().position(|s| s == "lease-end"), "read before its end: {calls:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

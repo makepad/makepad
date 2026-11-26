@@ -12,6 +12,17 @@ mod windows;
 #[cfg(windows)]
 pub use self::windows::*;
 
+/// Whether this box's background builds (`background`) keep to its efficiency cores: a Mac a
+/// person uses, where a master runs (the person's own Mac) or whose lease role is a person's.
+pub fn clamps_background() -> bool {
+    clamps_on(cfg!(target_os = "macos"), crate::master::runs_here(), crate::lease::caps::LeaseConf::load().role)
+}
+
+/// [`clamps_background`] on a box: a Mac, a master running there, its lease role.
+pub fn clamps_on(mac: bool, master_here: bool, role: crate::lease::Role) -> bool {
+    mac && (master_here || role.users())
+}
+
 /// What a run's processes have done so far: CPU time, µs (user and system, with the children
 /// they reaped), bytes read and written, and how long they waited for a CPU, µs (runnable while
 /// others ran: Linux only, else 0). Only a change means anything: the node's idle look compares
