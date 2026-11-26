@@ -410,6 +410,47 @@ pub(super) fn packed(items: &[(u32, String)]) -> Vec<u8> {
     )
 }
 
+/// The key an XKB keycode (evdev's + 8) names, as macOS names it (`appkit::keys`): the top row's
+/// digits by their place (AZERTY's types `&é"…` unshifted; Shift is the shortcut's own), any other
+/// key by the keysym its layout gives it, so a shortcut follows the letter a Dvorak, Colemak or
+/// AZERTY user presses, and by its place when that keysym names no key of the table (a letter of
+/// a Cyrillic, Greek or Hebrew layout; `ü`, `ç`, a dead key), so every shortcut stays reachable.
+pub(super) fn layout_keycode(keysym: u32, xkb: u32) -> KeyCode {
+    let place = position_keycode(xkb.saturating_sub(8));
+    if DIGITS.contains(&place) {
+        return place;
+    }
+    match keycode(keysym) {
+        KeyCode::Unknown => place,
+        key => key,
+    }
+}
+
+const DIGITS: [KeyCode; 10] = [
+    KeyCode::Key0, KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4,
+    KeyCode::Key5, KeyCode::Key6, KeyCode::Key7, KeyCode::Key8, KeyCode::Key9,
+];
+
+/// The key at an evdev code's place, by its name on a US layout (`KEY_*` of
+/// linux/input-event-codes.h); keys a layout never renames are the keysym table's.
+pub(super) fn position_keycode(evdev: u32) -> KeyCode {
+    match evdev {
+        2 => KeyCode::Key1, 3 => KeyCode::Key2, 4 => KeyCode::Key3, 5 => KeyCode::Key4,
+        6 => KeyCode::Key5, 7 => KeyCode::Key6, 8 => KeyCode::Key7, 9 => KeyCode::Key8,
+        10 => KeyCode::Key9, 11 => KeyCode::Key0, 12 => KeyCode::Minus, 13 => KeyCode::Equals,
+        16 => KeyCode::KeyQ, 17 => KeyCode::KeyW, 18 => KeyCode::KeyE, 19 => KeyCode::KeyR,
+        20 => KeyCode::KeyT, 21 => KeyCode::KeyY, 22 => KeyCode::KeyU, 23 => KeyCode::KeyI,
+        24 => KeyCode::KeyO, 25 => KeyCode::KeyP, 26 => KeyCode::LBracket, 27 => KeyCode::RBracket,
+        30 => KeyCode::KeyA, 31 => KeyCode::KeyS, 32 => KeyCode::KeyD, 33 => KeyCode::KeyF,
+        34 => KeyCode::KeyG, 35 => KeyCode::KeyH, 36 => KeyCode::KeyJ, 37 => KeyCode::KeyK,
+        38 => KeyCode::KeyL, 39 => KeyCode::Semicolon, 40 => KeyCode::Quote, 41 => KeyCode::Backtick,
+        43 => KeyCode::Backslash, 44 => KeyCode::KeyZ, 45 => KeyCode::KeyX, 46 => KeyCode::KeyC,
+        47 => KeyCode::KeyV, 48 => KeyCode::KeyB, 49 => KeyCode::KeyN, 50 => KeyCode::KeyM,
+        51 => KeyCode::Comma, 52 => KeyCode::Period, 53 => KeyCode::Slash,
+        _ => KeyCode::Unknown,
+    }
+}
+
 // Key table ported from xkb_sys.rs:473-586, shared by X11 and Wayland.
 pub(super) fn keycode(keysym: u32) -> KeyCode {
     match keysym {
@@ -520,5 +561,34 @@ pub(super) fn keycode(keysym: u32) -> KeyCode {
         0x0027 => KeyCode::Quote,
 
         _ => KeyCode::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// A press at evdev code `evdev` whose layout gives it keysym `sym`.
+    fn key(evdev: u32, sym: u32) -> KeyCode {
+        layout_keycode(sym, evdev + 8)
+    }
+
+    #[test]
+    fn keys_follow_the_layout_and_fall_back_to_their_place() {
+        // AZERTY: the top row types `&` and `é` unshifted, still its digits; its `q` sits where
+        // US has `a`, and names Q
+        assert_eq!(key(2, 0x26), KeyCode::Key1);
+        assert_eq!(key(3, 0xe9), KeyCode::Key2);
+        assert_eq!(key(7, 0x2d), KeyCode::Key6, "a digit key typing `-` stays its digit");
+        assert_eq!(key(30, 0x71), KeyCode::KeyQ);
+        // QWERTZ: Z and Y trade places; `ü` (no key of the table) is the `[` key by place
+        assert_eq!(key(21, 0x7a), KeyCode::KeyZ);
+        assert_eq!(key(26, 0xfc), KeyCode::LBracket);
+        // Dvorak: `.` sits where US has `e`
+        assert_eq!(key(18, 0x2e), KeyCode::Period);
+        // Cyrillic: `й` (0x6ca) names no key: the place's Q
+        assert_eq!(key(16, 0x6ca), KeyCode::KeyQ);
+        // keys no layout renames keep their keysym's name
+        assert_eq!(key(1, 0xff1b), KeyCode::Escape);
     }
 }

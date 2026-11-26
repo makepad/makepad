@@ -354,6 +354,10 @@ mod tests {
             ("Dvorak", KeyCode::Period, 'v', KeyCode::KeyV),
             ("AZERTY", KeyCode::KeyQ, 'a', KeyCode::KeyA),
             ("upper-case Dvorak", KeyCode::Period, 'V', KeyCode::KeyV),
+            // a character no key of the table names: the key keeps its place's name
+            ("QWERTZ ü", KeyCode::LBracket, 'ü', KeyCode::LBracket),
+            ("AZERTY :", KeyCode::Period, ':', KeyCode::Period),
+            ("Cyrillic й", KeyCode::KeyQ, 'й', KeyCode::KeyQ),
         ] {
             assert_eq!(layout_keycode(position, Some(typed)), expected, "{case} shortcut for {typed:?}");
         }

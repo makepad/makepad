@@ -139,7 +139,7 @@ impl State {
         };
         let recipient = w.recipient;
         let symbol = self.input.keyboard.sym(code);
-        let keycode = common::keycode(symbol);
+        let keycode = common::layout_keycode(symbol, code);
         let mods = self.input.keyboard.mods;
         self.shared.push(recipient, |q, id| {
             if down {
@@ -769,14 +769,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 if let Some(w) = s.input.focus.and_then(|k| s.windows.get(&k)) {
                     s.shared.push(w.recipient, |q, id| q.focus(id, true));
                     for k in keys.chunks_exact(4) {
-                        let symbol = s
-                            .input
-                            .keyboard
-                            .sym(u32::from_ne_bytes(k.try_into().unwrap()) + 8);
+                        let xkb = u32::from_ne_bytes(k.try_into().unwrap()) + 8;
+                        let symbol = s.input.keyboard.sym(xkb);
                         s.shared.push(w.recipient, |q, id| {
                             q.key_down(
                                 id,
-                                common::keycode(symbol).to_index(),
+                                common::layout_keycode(symbol, xkb).to_index(),
                                 false,
                                 s.input.keyboard.mods,
                             )

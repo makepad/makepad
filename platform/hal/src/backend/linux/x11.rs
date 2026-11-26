@@ -938,7 +938,7 @@ impl App {
                 0,
             )
         } as u32;
-        let code = input::keycode(sym);
+        let code = input::layout_keycode(sym, ev.keycode as u32);
         if ev.keycode != 0 {
             self.shared.push(key, |q, id| {
                 if down {
