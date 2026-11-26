@@ -84,7 +84,7 @@ fn attachment(value: &crate::Attachment) { match value { crate::Attachment::Root
 impl CanonicalZeros for crate::SceneState {
     fn canonicalize_zeros(&mut self) {
         use crate::*;
-        let Self { nodes, emitters, sockets, lods, colliders, modifiers, wheels } = self;
+        let Self { nodes, emitters, sockets, lods, colliders, modifiers, wheels, paint: _ } = self;
         for SceneNode { parent: _, linked_to: _, transform } in nodes.values_mut() { zeros!(transform); }
         for LightEmitter { name: _, attachment: at, transform, kind, color, intensity, range } in emitters.values_mut() {
             attachment(at);

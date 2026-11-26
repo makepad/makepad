@@ -40,7 +40,7 @@ impl Document {
         let yaw=if preview{None}else{vehicle_frame(self)?.and_then(|f|f.yaw)};
         let cached=self.scene().evaluated_meshes(&self.state,&mut ctx)?;
         let size=cached.values().map(|m|m.memory_bytes()).sum::<usize>();
-        let mut evaluated=self.render_copy(size.saturating_mul(3))?;
+        let mut evaluated=self.evaluation_copy(size.saturating_mul(3))?;
         // Source binding is validated above in authored object space. The
         // evaluation copy bakes those transforms for skin export; attach the
         // immutable original metadata after that derived product is complete.
@@ -117,6 +117,7 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],del
         ctx.checkpoint(1)?;let mut node=scene.nodes.get(name).cloned().unwrap_or_default();
         if node.parent.is_none(){node.transform=face(node.transform);}
         let mut extras=std::collections::HashMap::new();
+        if scene.paint.contains(name){extras.insert("MAKEPAD_paint".into(),JsonValue::Bool(true));}
         let collision_mesh=match crate::delivery::collision(doc,name,ctx)?{
             Some(crate::delivery::Collision::Shape(value))=>{extras.insert("MAKEPAD_collision".into(),value);None},
             Some(crate::delivery::Collision::Mesh(mesh))=>Some(mesh),None=>None,
@@ -158,6 +159,9 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],del
                     let target=export.objects.len();export.objects.push(node);target
                 },
             };
+            if scene.paint.contains(name) {
+                export.objects[target].extras=Some(JsonValue::Object([("MAKEPAD_paint".into(),JsonValue::Bool(true))].into()));
+            }
             export.objects[base].lods.push(target);export.objects[base].lod_distances.push(f32_value(options.distance)?);
         }
     }}

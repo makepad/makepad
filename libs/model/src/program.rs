@@ -276,6 +276,7 @@ pub fn describe_error(error: &Error) -> String {
     match error {
         Error::Invalid(s) | Error::Corrupt(s) => (*s).into(),
         Error::Budget(s) => format!("over budget: {s}"),
+        Error::WorkingBytes { .. } => format!("over budget: {error}"),
         Error::MissingObject(n) => format!("unknown object '{n}'"),
         Error::DuplicateObject(n) => format!("object '{n}' already exists"),
         Error::Mesh(e) => format!("{e:?}"),

@@ -161,6 +161,7 @@ impl RecBuffer {
         self.w_vec3(m.tangent_velocity);
         self.w_u64(m.user_material_id);
         self.w_u32(m.custom_color);
+        self.w_f32(m.yield_force);
     }
 }
 
@@ -300,7 +301,7 @@ pub struct Recording {
     /// Union of world bounds over every recorded step, written at stop.
     pub accumulated_bounds: AABB,
     pub have_bounds: bool,
-    saw_box_set: bool,
+    box_set_geometry_changed: bool,
 }
 
 /// Query tag from QueryFilter (C: b3RecTag). Stored once per key in the
@@ -321,9 +322,9 @@ impl Recording {
     }
 
     pub(crate) fn mark_box_set_unsupported(&mut self) {
-        if !self.saw_box_set {
-            self.saw_box_set = true;
-            crate::core::log("Recording unavailable: this capture contains a box set.");
+        if !self.box_set_geometry_changed {
+            self.box_set_geometry_changed = true;
+            crate::core::log("Recording unavailable: box set geometry changed during capture.");
         }
     }
 }
@@ -629,7 +630,7 @@ pub const SNAP_FNV_PRIME: u64 = 1099511628211;
 
 // Magic 'B3RC' in little-endian (C: B3_REC_MAGIC)
 pub const REC_MAGIC: u32 = 0x43523342;
-pub const REC_VERSION_MAJOR: u16 = 3;
+pub const REC_VERSION_MAJOR: u16 = 4;
 pub const REC_VERSION_MINOR: u16 = 0;
 
 /// Fixed header size (C: sizeof(b3RecHeader) == 48).
@@ -734,6 +735,8 @@ pub enum RecOp {
     ShapeSetSphere = 0x59,
     ShapeSetCapsule = 0x5A,
     ShapeApplyWind = 0x5B,
+    ShapeSetMeshMaterial = 0x5C,
+    ShapeAppendMeshMaterial = 0x5D,
 
     Step = 0x80,
 
@@ -1513,10 +1516,6 @@ pub fn world_start_recording(world: &mut World) {
 
     let mut rec = Recording::new();
 
-    if world.shapes.iter().any(|s| s.id != NULL_INDEX && s.shape_type() == crate::types::ShapeType::BoxSet) {
-        rec.mark_box_set_unsupported();
-    }
-
     // Every recording is snapshot-seeded. The seed blob follows the header so
     // replay restores in place and the world id stays stable across a restart
     // or backward scrub. An empty world still serializes a valid blob.
@@ -1540,11 +1539,12 @@ pub fn world_start_recording(world: &mut World) {
 }
 
 /// Stop recording and return the finished, self-contained recording.
-/// Returns None if no recording is active or the capture saw an unsupported box set.
+/// A snapshot-seeded box set can change materials during capture. Creating,
+/// replacing, editing or removing its geometry still invalidates the recording.
 pub fn world_stop_recording(world: &mut World) -> Option<Recording> {
     let cell = world.recording.take()?;
     let mut rec = cell.into_inner();
-    if rec.saw_box_set {
+    if rec.box_set_geometry_changed {
         return None;
     }
 

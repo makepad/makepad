@@ -3575,7 +3575,8 @@ impl RayTracer {
         }
         self.ensure_targets(cx.cx);
         if let Some(held) = &mut self.held_picture {
-            if held.recorded.is_some_and(|repaint| held.stage.pass.painted_whole_since(cx.cx, repaint)) {
+            if held.recorded.is_some_and(|repaint| held.stage.pass.painted_whole_once_since(cx.cx, repaint)) {
+                // Once is enough: the held stage is kept attached and paints again, into the same picture.
                 held.stage.pass.detach(cx.cx);
                 held.source = None;
             }

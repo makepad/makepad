@@ -20,7 +20,7 @@ use crate::recording::{geometry_kind_from_u8, GeometryKind};
 use crate::types::{
     CompoundCapsule, CompoundData, CompoundHull, CompoundMesh, CompoundSphere, DynamicTree,
     HeightFieldData, HullData, HullFace, HullHalfEdge, HullVertex, MeshData, MeshNode, MeshTriangle,
-    SurfaceMaterial, TreeNode, TreeNodeChildren, MAX_COMPOUND_MESH_MATERIALS,
+    ShapeType, SurfaceMaterial, TreeNode, TreeNodeChildren, MAX_COMPOUND_MESH_MATERIALS,
 };
 
 /// Bounds-checked read cursor over a byte image (C: the b3RecReader cursor
@@ -157,6 +157,7 @@ impl<'a> RecCursor<'a> {
             tangent_velocity: self.r_vec3(),
             user_material_id: self.r_u64(),
             custom_color: self.r_u32(),
+            yield_force: self.r_f32(),
         }
     }
 
@@ -1333,6 +1334,7 @@ fn rec_op_from_u8(v: u8) -> Option<RecOp> {
         CreateSphereShape, CreateCapsuleShape, CreateTubeShape, CreateHullShape, CreateMeshShape,
         CreateHeightFieldShape, CreateCompoundShape, DestroyShape,
         ShapeSetDensity, ShapeSetFriction, ShapeSetRestitution, ShapeSetSurfaceMaterial,
+        ShapeSetMeshMaterial, ShapeAppendMeshMaterial,
         ShapeSetFilter, ShapeEnableSensorEvents, ShapeEnableContactEvents, ShapeEnablePreSolveEvents,
         ShapeEnableHitEvents, ShapeSetSphere, ShapeSetCapsule, ShapeApplyWind,
         Step,
@@ -1946,6 +1948,36 @@ fn dispatch_one(
             let material = r.r_material();
             if r.ok {
                 crate::shape::shape_set_surface_material(world, id, material);
+            }
+        }
+        RecOp::ShapeSetMeshMaterial => {
+            let id = remap_shape_id(world, r.r_shapeid());
+            let index = r.r_i32();
+            let material = r.r_material();
+            if r.ok {
+                if crate::shape::is_valid_surface_material(material)
+                    && id.index1 > 0 && crate::physics_world::shape_is_valid(world, id)
+                    && crate::shape::shape_get_type(world, id) != ShapeType::Compound
+                    && (0..crate::shape::shape_get_mesh_material_count(world, id)).contains(&index)
+                {
+                    crate::shape::shape_set_mesh_material(world, id, material, index);
+                } else {
+                    *ok = false;
+                }
+            }
+        }
+        RecOp::ShapeAppendMeshMaterial => {
+            let id = remap_shape_id(world, r.r_shapeid());
+            let material = r.r_material();
+            if r.ok {
+                if crate::shape::is_valid_surface_material(material)
+                    && id.index1 > 0 && crate::physics_world::shape_is_valid(world, id)
+                    && matches!(crate::shape::shape_get_type(world, id), ShapeType::Mesh | ShapeType::BoxSet)
+                {
+                    crate::shape::shape_append_mesh_material(world, id, material);
+                } else {
+                    *ok = false;
+                }
             }
         }
         RecOp::ShapeSetFilter => {

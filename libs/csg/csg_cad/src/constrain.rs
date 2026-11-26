@@ -9,10 +9,14 @@
 //! The solve is a damped, weighted minimum-norm Newton iteration:
 //! `dx = -W⁻¹Jᵀ (J W⁻¹ Jᵀ + λI)⁻¹ r`. Minimum norm means an under-constrained
 //! sketch moves as little as possible from where it was drawn, which is what
-//! a person expects; the weights let a drag hold the dragged point near the
-//! pointer while everything else follows. The damping (raised when a step
-//! does not reduce the residual) makes it robust far from a solution and
-//! with redundant constraints.
+//! a person expects. The damping (raised when a step does not reduce the
+//! residual) makes it robust far from a solution and with redundant
+//! constraints.
+//!
+//! A drag ([`Drag`], or the one-call [`System::drag`]) has a solver of its
+//! own: a trust-region Newton method on the constraint surface that moves the
+//! dragged point toward the pointer and keeps the sketch on the side it had at
+//! the press.
 //!
 //! After a solve, [`Report`] gives the degrees of freedom (from the rank of
 //! the Jacobian), which unknowns are fully determined (zero in every
@@ -27,6 +31,8 @@
 
 use crate::region::P2;
 use std::f64::consts::PI;
+
+mod drag;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PointId(pub usize);
@@ -156,6 +162,31 @@ impl Report {
     }
 }
 
+/// How one drag move ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragOutcome {
+    /// The dragged point is within half the tolerance of the target, and the constraints hold.
+    Reached,
+    /// The move stopped at the nearest pose the constraints allow: no free direction brings the
+    /// point closer by more than the tolerance. A reachable target can also end here, when the
+    /// stop declines a last step of at most 2/3 of the tolerance. So a cue for a pointer past the
+    /// sketch's limit reads the remaining distance (more than the tolerance), not this outcome.
+    Nearest,
+    /// Neither: the move ended at its last accepted pose.
+    NotReached,
+}
+
+/// What one drag move did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DragReport {
+    /// The solve report at the pose the move ended on (`converged`: the constraints hold).
+    pub report: Report,
+    pub outcome: DragOutcome,
+    /// The drag keeps the sketch on the side (assembly mode) it had at the press. False where
+    /// nothing separates the two sides, so a flip is not prevented there.
+    pub side_enforced: bool,
+}
+
 /// Solver settings.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -167,6 +198,88 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options { tolerance: 1e-10, max_iterations: 100 }
+    }
+}
+
+/// A drag from a press to its release. It holds what is fixed at the press, so the moves
+/// of one drag agree with each other.
+#[derive(Clone, Debug)]
+pub struct Drag {
+    point: PointId,
+    opts: Options,
+    /// The pose at the press, for `cancel`.
+    press: Vec<f64>,
+    /// The press frame: σ_press, the branches and the spare class, held across the moves of one drag.
+    frame: drag::PressFrame,
+    layout: Layout,
+}
+
+/// The sketch a drag's frame was built on: a change (a constraint added, removed or edited)
+/// means the frame's row offsets no longer apply.
+#[derive(Clone, Debug)]
+struct Layout {
+    unknowns: usize,
+    points: Vec<usize>,
+    lines: Vec<Line>,
+    circles: Vec<Circle>,
+    arcs: Vec<Arc>,
+    constraints: Vec<Constraint>,
+}
+
+impl Layout {
+    fn of(s: &System) -> Layout {
+        Layout {
+            unknowns: s.x.len(), points: s.points.clone(), lines: s.lines.clone(),
+            circles: s.circles.clone(), arcs: s.arcs.clone(), constraints: s.constraints.clone(),
+        }
+    }
+
+    fn matches(&self, s: &System) -> bool {
+        self.unknowns == s.x.len() && self.points == s.points && self.lines == s.lines
+            && self.circles == s.circles && self.arcs == s.arcs && self.constraints == s.constraints
+    }
+}
+
+impl Drag {
+    /// Moves the dragged point toward `target` from the current pose.
+    pub fn to(&mut self, s: &mut System, target: P2) -> DragReport {
+        if self.point.0 >= s.points.len() {
+            let scale = s.scale();
+            let tol = self.opts.tolerance * scale;
+            // If the constraints also changed, their current branches replace the stale row mapping.
+            let current_branches;
+            let branches = if self.layout.constraints == s.constraints {
+                &self.frame.branches
+            } else {
+                current_branches = s.branches();
+                &current_branches
+            };
+            let (r, jac, rows) = s.evaluate(&s.x, scale, branches);
+            let report = s.report_from(r, jac, rows, 0, tol);
+            return DragReport { report, outcome: DragOutcome::NotReached, side_enforced: self.frame.side_enforced() };
+        }
+        if !self.layout.matches(s) {
+            eprintln!("constrain: the sketch changed during a drag; its press frame is rebuilt at the current pose");
+            self.frame = drag::PressFrame::new(s, self.point);
+            self.layout = Layout::of(s);
+        }
+        let scale = s.scale();
+        let tol = self.opts.tolerance * scale;
+        let end = if target.iter().all(|v| v.is_finite()) {
+            drag::drag_move(s, self.point, target, &self.opts, &mut self.frame)
+        } else {
+            drag::MoveEnd { rounds: 0, outcome: DragOutcome::NotReached }
+        };
+        let (r, jac, rows) = s.evaluate(&s.x, scale, &self.frame.branches);
+        let report = s.report_from(r, jac, rows, end.rounds, tol);
+        DragReport { report, outcome: end.outcome, side_enforced: self.frame.side_enforced() }
+    }
+
+    /// Restores the press pose if the number of unknowns is unchanged.
+    pub fn cancel(&mut self, s: &mut System) {
+        if s.x.len() == self.press.len() {
+            s.x.copy_from_slice(&self.press);
+        }
     }
 }
 
@@ -259,28 +372,15 @@ impl System {
         self.solve_weighted(&w, opts)
     }
 
-    /// Moves `p` to `target` and solves: first with `p` held exactly at the
-    /// target while the rest follows with the least movement; if the
-    /// constraints do not allow that, `p` is held only strongly (it slides
-    /// along what the constraints leave free, staying nearest the target);
-    /// if even that fails the sketch keeps its last solution.
-    pub fn drag(&mut self, p: PointId, target: P2, opts: &Options) -> Report {
-        let before = self.x.clone();
-        let i = self.points[p.0];
-        for hold in [f64::INFINITY, 1e8] {
-            self.x.copy_from_slice(&before);
-            self.x[i] = target[0];
-            self.x[i + 1] = target[1];
-            let mut w = vec![1.0; self.x.len()];
-            w[i] = hold;
-            w[i + 1] = hold;
-            let report = self.solve_weighted(&w, opts);
-            if report.converged {
-                return report;
-            }
-        }
-        self.x = before;
-        self.solve(opts)
+    /// Starts a drag of `p` at the current pose.
+    pub fn start_drag(&self, p: PointId, opts: &Options) -> Drag {
+        Drag { point: p, opts: *opts, press: self.x.clone(), frame: drag::PressFrame::new(self, p), layout: Layout::of(self) }
+    }
+
+    /// The one-call form of [`Self::start_drag`] and [`Drag::to`].
+    pub fn drag(&mut self, p: PointId, target: P2, opts: &Options) -> DragReport {
+        let mut drag = self.start_drag(p, opts);
+        drag.to(self, target)
     }
 
     /// Branch signs per constraint, from the current geometry.
@@ -307,11 +407,15 @@ impl System {
     }
 
     fn solve_weighted(&mut self, w: &[f64], opts: &Options) -> Report {
-        let n = self.x.len();
         let scale = self.scale();
         let tol = opts.tolerance * scale;
         let branches = self.branches();
         let (r, jac, rows, iterations) = self.iterate_weighted(w, scale, &branches, tol, opts.max_iterations);
+        self.report_from(r, jac, rows, iterations, tol)
+    }
+
+    fn report_from(&self, r: Vec<f64>, jac: Vec<f64>, rows: Vec<usize>, iterations: usize, tol: f64) -> Report {
+        let n = self.x.len();
         let residual = max_abs(&r);
         let converged = residual <= tol;
         let failing = if converged {
@@ -686,10 +790,15 @@ fn max_abs(a: &[f64]) -> f64 {
     a.iter().fold(0.0, |m, v| m.max(v.abs()))
 }
 
+/// Pivot cut of the drag's QR, relative to the first pivot (Q7).
+const RANK_CUT: f64 = 1e-9;
+
 /// Column-pivoted Householder QR of Jᵀ. The independent columns give the drag
 /// its constraint normals Y. Each stores R above the tail of its reflector.
 struct DragQr {
     columns: Vec<Vec<f64>>,
+    /// Original row index of each column, in pivot order.
+    order: Vec<usize>,
     tau: Vec<f64>,
     /// Columns of Z, the orthonormal directions in which the drag can move to first order.
     z: Vec<Vec<f64>>,
@@ -699,6 +808,8 @@ impl DragQr {
     /// Keep pivots larger than 1e-9 times the first pivot's magnitude.
     fn new(jac: &[f64], n: usize) -> Self {
         let mut columns: Vec<_> = jac.chunks_exact(n.max(1)).map(|row| row.to_vec()).collect();
+        let m = columns.len();
+        let mut order: Vec<usize> = (0..m).collect();
         let mut tau = Vec::new();
         for k in 0..n.min(columns.len()) {
             let (mut best, mut squared) = (k, 0.0);
@@ -709,10 +820,11 @@ impl DragQr {
                 }
             }
             let length = squared.sqrt();
-            if length == 0.0 || (k > 0 && length <= 1e-9 * columns[0][0].abs()) {
+            if length == 0.0 || (k > 0 && length <= RANK_CUT * columns[0][0].abs()) {
                 break;
             }
             columns.swap(k, best);
+            order.swap(k, best);
             let (done, trailing) = columns.split_at_mut(k + 1);
             let v = &mut done[k];
             let first = v[k];
@@ -728,7 +840,7 @@ impl DragQr {
             }
         }
         let rank = tau.len();
-        let mut qr = Self { columns, tau, z: Vec::with_capacity(n - rank) };
+        let mut qr = Self { columns, order, tau, z: Vec::with_capacity(n - rank) };
         for j in rank..n {
             let mut v = vec![0.0; n];
             v[j] = 1.0;
@@ -1013,15 +1125,588 @@ mod tests {
         s.constrain(Constraint::Fix(p[0], [0.0, 0.0]));
         s.solve(&Options::default());
         let r = s.drag(p[2], [55.0, 31.0], &Options::default());
-        assert!(r.converged);
+        assert!(r.report.converged);
+        assert_eq!(r.outcome, DragOutcome::Reached, "the free corner should reach the pointer");
         assert!(close(s.at(p[2]), [55.0, 31.0]), "{:?}", s.at(p[2]));
         assert!(close(s.at(p[1]), [55.0, 0.0]) && close(s.at(p[3]), [0.0, 31.0]));
         // A dimensioned side cannot follow: the drag settles nearest.
         s.constrain(Constraint::Length(l[0], 40.0));
         let r = s.drag(p[2], [60.0, 25.0], &Options::default());
-        assert!(r.converged);
+        assert!(r.report.converged);
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the dimensioned side holds the corner at its nearest pose");
         assert!(close(s.at(p[1]), [40.0, 0.0]));
         assert!((s.at(p[2])[1] - 25.0).abs() < 1e-6, "{:?}", s.at(p[2]));
+    }
+
+    #[test]
+    fn drag_session_moves_and_cancels() {
+        fn clone_send<T: Clone + Send>() {}
+        clone_send::<Drag>();
+
+        let mut s = System::new();
+        let (p, _) = rect(&mut s);
+        s.constrain(Constraint::Fix(p[0], [0.0, 0.0]));
+        let opts = Options::default();
+        assert!(s.solve(&opts).converged, "the rectangle must satisfy its constraints at the press");
+        let press = s.x.clone();
+        let mut drag = s.start_drag(p[2], &opts);
+        for target in [[55.0, 31.0], [48.0, 26.0]] {
+            let r = drag.to(&mut s, target);
+            assert_eq!(r.outcome, DragOutcome::Reached, "the move to {target:?} should report Reached");
+            assert!(close(s.at(p[2]), target), "the dragged corner should be at {target:?}");
+        }
+        drag.cancel(&mut s);
+        assert_eq!(s.x, press, "cancel should restore every unknown to its press value");
+    }
+
+    /// The chain, its last angle left out when `closed` is false: the end point swings on a circle
+    /// about the point before it (one degree of freedom).
+    fn chain_with(closed: bool) -> System {
+        let mut s = System::new();
+        let n = 50;
+        let mut pts = Vec::new();
+        let (mut at, mut a) = ([0.0f64, 0.0f64], 0.0f64);
+        pts.push(s.point(at));
+        for i in 0..n {
+            at = [at[0] + 4.0 * a.cos() + 0.3 * ((i * 7 % 5) as f64 - 2.0) * 0.1, at[1] + 4.0 * a.sin()];
+            pts.push(s.point(at));
+            a += 6f64.to_radians();
+        }
+        let lines: Vec<LineId> = (0..n).map(|i| s.line(pts[i], pts[i + 1])).collect();
+        s.constrain(Constraint::Fix(pts[0], [0.0, 0.0]));
+        s.constrain(Constraint::Horizontal(lines[0]));
+        for (i, l) in lines.iter().enumerate() {
+            s.constrain(Constraint::Length(*l, 4.0));
+            if i > 0 && (closed || i + 1 < lines.len()) {
+                s.constrain(Constraint::Angle(lines[i - 1], *l, 6f64.to_radians()));
+            }
+        }
+        s
+    }
+
+    fn two_link(opts: &Options) -> (System, PointId) {
+        let mut two = System::new();
+        let a = two.point([0.0, 0.0]);
+        let b = two.point([8.0, 6.0]);
+        let end = two.point([14.0, 2.0]);
+        let (ab, be) = (two.line(a, b), two.line(b, end));
+        two.constrain(Constraint::Fix(a, [0.0, 0.0]));
+        two.constrain(Constraint::Length(ab, 10.0));
+        two.constrain(Constraint::Length(be, 10.0));
+        assert!(two.solve(opts).converged, "the two-link press must satisfy both link lengths and the fixed pivot");
+        (two, end)
+    }
+
+    fn three_link() -> (System, PointId) {
+        let mut three = System::new();
+        let a = three.point([0.0, 0.0]);
+        let b = three.point([10.0, 0.0]);
+        let c = three.point([16.0, 8.0]);
+        let end = three.point([22.0, 0.0]);
+        three.constrain(Constraint::Fix(a, [0.0, 0.0]));
+        for (first, second) in [(a, b), (b, c), (c, end)] {
+            let l = three.line(first, second);
+            three.constrain(Constraint::Length(l, 10.0));
+        }
+        (three, end)
+    }
+
+    fn distance(a: P2, b: P2) -> f64 {
+        (a[0] - b[0]).hypot(a[1] - b[1])
+    }
+
+    fn rocker(degrees: f64) -> P2 {
+        [4.0 * degrees.to_radians().cos(), 4.0 * degrees.to_radians().sin()]
+    }
+
+    fn inside_toggle(d: f64) -> P2 {
+        let want = 61.0_f64.sqrt() - d;
+        let theta = ((41.0 - want * want) / 40.0).acos();
+        [4.0 * theta.cos(), 4.0 * theta.sin()]
+    }
+
+    // Rocker about the origin, radius 4. The two equal links from (5,0) reach
+    // the rocker pin while 41 - 40 cos(theta) <= 61, hence |theta| <= 120°.
+    fn four_bar(opts: &Options) -> (System, PointId) {
+        let press = rocker(10.0);
+        let root = [5.0, 0.0];
+        let len = 61.0_f64.sqrt() / 2.0;
+        let d = distance(root, press);
+        let h = (len * len - d * d / 4.0).sqrt();
+        let elbow = [(root[0] + press[0]) / 2.0 - h * (press[1] - root[1]) / d,
+                     (root[1] + press[1]) / 2.0 + h * (press[0] - root[0]) / d];
+        let mut base = System::new();
+        let a = base.point([0.0, 0.0]);
+        let b = base.point(root);
+        let e = base.point(elbow);
+        let end = base.point(press);
+        base.constrain(Constraint::Fix(a, [0.0, 0.0]));
+        base.constrain(Constraint::Fix(b, root));
+        for (p, q, l) in [(a, end, 4.0), (b, e, len), (e, end, len)] {
+            let bar = base.line(p, q);
+            base.constrain(Constraint::Length(bar, l));
+        }
+        assert!(base.solve(opts).converged, "four-bar press must satisfy the three bar lengths and ground pivots");
+        (base, end)
+    }
+
+    fn elbow_offset(x: &[f64], tip: usize) -> f64 {
+        let (root, elbow) = (tip - 4, tip - 2);
+        let dx = x[tip] - x[root];
+        let dy = x[tip + 1] - x[root + 1];
+        (dx * (x[elbow + 1] - x[root + 1]) - dy * (x[elbow] - x[root])) / dx.hypot(dy)
+    }
+
+    /// Puts the arm's last two links exactly in line, with the pin on the root-pin line
+    /// at the links' full length: an exact toggle.
+    fn set_collinear(s: &mut System, end: PointId) {
+        let tip = s.points[end.0];
+        let root = tip - 4;
+        let elbow = tip - 2;
+        let r0 = [s.x[root], s.x[root + 1]];
+        let e = [s.x[elbow], s.x[elbow + 1]];
+        let pin = [s.x[tip], s.x[tip + 1]];
+        let l1 = distance(e, r0);
+        let l2 = distance(pin, e);
+        let dx = pin[0] - r0[0];
+        let dy = pin[1] - r0[1];
+        let len = dx.hypot(dy);
+        let u = [dx / len, dy / len];
+        s.x[elbow] = r0[0] + l1 * u[0];
+        s.x[elbow + 1] = r0[1] + l1 * u[1];
+        s.x[tip] = r0[0] + (l1 + l2) * u[0];
+        s.x[tip + 1] = r0[1] + (l1 + l2) * u[1];
+    }
+
+    fn mirror_case(base: &System, end: PointId, opts: &Options) -> System {
+        let mut mirror = base.clone();
+        let tip = mirror.points[end.0];
+        let root = tip - 4;
+        let x = &mut mirror.x;
+        let side = elbow_offset(x, tip);
+        let dx = x[tip] - x[root];
+        let dy = x[tip + 1] - x[root + 1];
+        let length = dx.hypot(dy);
+        x[tip - 2] += 2.0 * side * dy / length;
+        x[tip - 1] -= 2.0 * side * dx / length;
+        assert!(mirror.solve(opts).converged, "mirrored fixture must solve");
+        assert!(side * elbow_offset(&mirror.x, tip) < 0.0, "mirrored fixture must reverse bend");
+        mirror
+    }
+
+    fn keeps_side(s: &System, end: PointId, press_bend: f64, tol: f64) -> bool {
+        let bend = elbow_offset(&s.x, s.points[end.0]);
+        bend.abs() <= tol || bend.signum() == press_bend.signum()
+    }
+
+    #[test]
+    fn drag_past_the_limit_ends_nearest() {
+        let opts = Options::default();
+        let (base, end) = four_bar(&opts);
+        let mirror = mirror_case(&base, end, &opts);
+        for mut s in [base, mirror] {
+            let press_bend = elbow_offset(&s.x, s.points[end.0]);
+            let mut drag = s.start_drag(end, &opts);
+            for k in (2..=11).chain(std::iter::once(13)).chain((1..=11).rev()) {
+                let degrees = 10.0 * k as f64;
+                let before = s.at(end);
+                let tol = opts.tolerance * s.scale();
+                let r = drag.to(&mut s, rocker(degrees));
+                assert!(r.report.converged, "four-bar constraints failed at {degrees}°");
+                assert!(keeps_side(&s, end, press_bend, tol), "four-bar changed side at {degrees}°");
+                if k == 13 {
+                    assert_eq!(r.outcome, DragOutcome::Nearest, "130° is beyond the four-bar limit");
+                    assert!(distance(s.at(end), before) > tol, "the pin froze at its 110° pose");
+                    assert!(distance(s.at(end), rocker(120.0)) <= tol, "the nearest pin should be at 120°");
+                } else {
+                    assert_eq!(r.outcome, DragOutcome::Reached, "the four-bar should reach {degrees}°");
+                    assert!(distance(s.at(end), rocker(degrees)) <= tol / 2.0, "the pin missed {degrees}°");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_approach_then_one_call_return_keeps_the_side() {
+        let opts = Options::default();
+        let (base, end) = four_bar(&opts);
+        let mirror = mirror_case(&base, end, &opts);
+        for press in [base, mirror] {
+            let press_bend = elbow_offset(&press.x, press.points[end.0]);
+            let mut s = press.clone();
+            let mut drag = s.start_drag(end, &opts);
+            for target in [rocker(119.999), press.at(end)] {
+                let tol = opts.tolerance * s.scale();
+                let r = drag.to(&mut s, target);
+                assert!(r.report.converged, "the near-toggle move to {target:?} lost a constraint");
+                // The pin rule may stop a reachable move up to 2/3 tol short, as the reference does.
+                assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                    "the near-toggle move to {target:?} should settle");
+                assert!(distance(s.at(end), target) <= tol, "the near-toggle move missed {target:?}");
+                assert!(keeps_side(&s, end, press_bend, tol), "the near-toggle move to {target:?} flipped the elbow");
+            }
+            // From the press the move to the exact toggle stops on the pin rule, within tol of it.
+            let mut s = press;
+            let mut drag = s.start_drag(end, &opts);
+            let tol = opts.tolerance * s.scale();
+            let r = drag.to(&mut s, rocker(120.0));
+            assert!(r.report.converged, "the exact toggle must satisfy all four-bar constraints");
+            assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                "the move to the exact toggle should settle");
+            assert!(distance(s.at(end), rocker(120.0)) <= tol, "the pin missed the exact toggle");
+            assert!(keeps_side(&s, end, press_bend, tol), "the move to the exact toggle flipped the elbow");
+        }
+    }
+
+    #[test]
+    fn return_beside_the_toggle_takes_rule_b() {
+        let opts = Options::default();
+        let (mut s, end) = four_bar(&opts);
+        let press_bend = elbow_offset(&s.x, s.points[end.0]);
+        let mut drag = s.start_drag(end, &opts);
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, rocker(130.0));
+        assert_eq!(r.outcome, DragOutcome::Nearest, "130° should stop at the four-bar limit");
+        assert!(r.report.converged, "the limit pose must satisfy the four-bar constraints");
+        assert!(distance(s.at(end), rocker(120.0)) <= tol, "the pin must stop at the 120° toggle");
+
+        let target = inside_toggle(1e-9);
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, target);
+        assert_eq!(r.outcome, DragOutcome::Reached, "the pin should reach the target just inside the toggle");
+        assert!(r.report.converged, "the return from the toggle must satisfy the constraints");
+        assert!(distance(s.at(end), target) <= tol / 2.0, "the returning pin missed its target");
+        assert!(keeps_side(&s, end, press_bend, tol), "the elbow flipped on the return from the toggle");
+        assert!(r.report.iterations <= 4,
+            "rule (b) should answer the return beside the toggle in about 2 rounds (14 without it)");
+    }
+
+    #[test]
+    fn offset_start_beside_the_toggle_takes_rule_b() {
+        let opts = Options::default();
+        let (mut s, end) = four_bar(&opts);
+        let tip = s.points[end.0];
+        let press_bend = elbow_offset(&s.x, tip);
+        let mut drag = s.start_drag(end, &opts);
+        let r = drag.to(&mut s, rocker(130.0));
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the offset fixture must first settle at the limit");
+        assert!(r.report.converged, "the limit pose must satisfy the constraints before shifting the elbow");
+
+        let (root, elbow) = (tip - 4, tip - 2);
+        let offset = 3e-5;
+        let mut got = elbow_offset(&s.x, tip);
+        let side = if got >= 0.0 { 1.0 } else { -1.0 };
+        for _ in 0..6 {
+            let (dx, dy) = (s.x[tip] - s.x[root], s.x[tip + 1] - s.x[root + 1]);
+            let len = dx.hypot(dy);
+            let shift = side * offset - got;
+            s.x[elbow] += shift * (-dy) / len;
+            s.x[elbow + 1] += shift * dx / len;
+            assert!(s.solve(&opts).converged, "the shifted elbow must project onto the four-bar constraints");
+            got = elbow_offset(&s.x, tip);
+            if (got - side * offset).abs() <= 1e-3 * offset { break; }
+        }
+        assert!((got - side * offset).abs() <= 1e-3 * offset, "the projected elbow missed its starting offset");
+
+        let target = inside_toggle(1e-9);
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, target);
+        // The reference ends this start on the pin rule, 0.59 tol short, in 2 rounds.
+        assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+            "the pin should settle at the target from the offset start");
+        assert!(r.report.converged, "the return from the offset start must satisfy the constraints");
+        assert!(distance(s.at(end), target) <= tol, "the pin missed its target from the offset start");
+        assert!(keeps_side(&s, end, press_bend, tol), "the elbow flipped on the return from the offset start");
+        assert!(r.report.iterations <= 4,
+            "rule (b) should answer the return from the offset start in about 2 rounds (the probe's start took 16 without it)");
+    }
+
+    #[test]
+    fn toggle_form_answers_a_return_from_the_exact_toggle() {
+        let opts = Options::default();
+        let (base, end) = four_bar(&opts);
+        let mut s = mirror_case(&base, end, &opts);
+        let press_bend = elbow_offset(&s.x, s.points[end.0]);
+        let mut drag = s.start_drag(end, &opts);
+        let r = drag.to(&mut s, rocker(130.0));
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the mirrored four-bar should settle at its limit at 130°");
+
+        set_collinear(&mut s, end);
+        let target = inside_toggle(1e-9);
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, target);
+        assert_eq!(r.outcome, DragOutcome::Reached, "the mirrored four-bar should reach the target inside the toggle");
+        assert!(r.report.converged, "the return must satisfy the mirrored four-bar constraints");
+        assert!(distance(s.at(end), target) <= tol / 2.0, "the mirrored pin missed its return target");
+        assert!(keeps_side(&s, end, press_bend, tol), "the mirrored elbow flipped on the return");
+        assert!(r.report.iterations <= 2,
+            "the toggle form of rule (b) answers the return from the exact toggle in 2 rounds (3 without it)");
+
+        let (mut s, end) = two_link(&opts);
+        let press_bend = elbow_offset(&s.x, s.points[end.0]);
+        let mut drag = s.start_drag(end, &opts);
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, [30.0, 0.0]);
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the two-link arm should settle at full stretch");
+        assert!(distance(s.at(end), [20.0, 0.0]) <= tol, "the two-link pin missed its full-stretch position");
+
+        set_collinear(&mut s, end);
+        let target = [19.9, 0.0];
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, target);
+        assert_eq!(r.outcome, DragOutcome::Reached, "the two-link arm should reach its return target");
+        assert!(r.report.converged, "the return must satisfy the two-link constraints");
+        assert!(distance(s.at(end), target) <= tol / 2.0, "the two-link pin missed its return target");
+        assert!(keeps_side(&s, end, press_bend, tol), "the two-link elbow flipped on the return");
+        assert!(r.report.iterations <= 4,
+            "the toggle form of rule (b) answers the return from the exact toggle in 4 rounds (5 without it)");
+    }
+
+    #[test]
+    fn k10_full_stretch_one_call_and_sixty_moves() {
+        let opts = Options::default();
+        let (base, end) = two_link(&opts);
+        let mirror = mirror_case(&base, end, &opts);
+        for press in [base, mirror] {
+            let elbow = PointId(end.0 - 1);
+            let root = press.at(PointId(end.0 - 2));
+            let p0 = press.at(end);
+            let l1 = distance(root, press.at(elbow));
+            let l2 = distance(press.at(elbow), p0);
+            let limit = l1 + l2;
+            let lh = l1 * l2 / limit;
+            let press_bend = elbow_offset(&press.x, press.points[end.0]);
+            let (dx, dy) = (30.0 - root[0], 0.0 - root[1]);
+            let unit = [dx / dx.hypot(dy), dy / dx.hypot(dy)];
+            let straight_elbow = [root[0] + l1 * unit[0], root[1] + l1 * unit[1]];
+            for d in [0.0, 1e-3] {
+                let target = [root[0] + (limit + d) * unit[0], root[1] + (limit + d) * unit[1]];
+                let mut final_pins = [[0.0; 2]; 2];
+                for (pin, moves) in final_pins.iter_mut().zip([60, 1]) {
+                    let mut s = press.clone();
+                    let mut drag = s.start_drag(end, &opts);
+                    for k in 1..=moves {
+                        let t = k as f64 / moves as f64;
+                        let pt = [p0[0] + (target[0] - p0[0]) * t, p0[1] + (target[1] - p0[1]) * t];
+                        let v = [pt[0] - root[0], pt[1] - root[1]];
+                        let r = v[0].hypot(v[1]);
+                        let foot = if r > limit { [root[0] + v[0] * limit / r, root[1] + v[1] * limit / r] } else { pt };
+                        let tol = opts.tolerance * s.scale();
+                        let result = drag.to(&mut s, pt);
+                        assert!(result.report.converged, "arm constraints failed at move {k}/{moves}, d={d}");
+                        assert!(distance(s.at(end), foot) <= tol, "pin missed its foot at move {k}/{moves}, d={d}");
+                        assert!(keeps_side(&s, end, press_bend, tol), "arm flipped at move {k}/{moves}, d={d}");
+                        if k == moves {
+                            if d > 0.0 {
+                                assert_eq!(result.outcome, DragOutcome::Nearest, "the arm should settle at full stretch");
+                            } else {
+                                assert!(matches!(result.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                                    "the move to the exact limit should settle");
+                            }
+                            let allowance = tol + 2.0 * (2.0 * tol * lh).sqrt();
+                            assert!(distance(s.at(elbow), straight_elbow) <= allowance,
+                                "elbow missed its straight pose after {moves} moves, d={d}");
+                        }
+                    }
+                    *pin = s.at(end);
+                }
+                let tol = opts.tolerance * press.scale();
+                assert!(distance(final_pins[0], final_pins[1]) <= 2.0 * tol,
+                    "one move and sixty moves disagree at full stretch, d={d}");
+            }
+        }
+    }
+
+    fn coupled_chain(opts: &Options) -> (System, PointId, f64) {
+        let mut s = chain_with(false);
+        let n = s.lines.len();
+        let end = PointId(s.points.len() - 1);
+        s.constraints.retain(|c| !matches!(c, Constraint::Angle(_, l, _) if l.0 == n - 2));
+        let y = s.at(end)[1];
+        s.constrain(Constraint::DistanceY(PointId(0), end, y));
+        assert!(s.solve(opts).converged, "the height-constrained chain must solve at the press");
+        (s, end, y)
+    }
+
+    #[test]
+    fn coupled_chain_at_its_limit() {
+        let opts = Options::default();
+        let (mut s, end, y) = coupled_chain(&opts);
+        let at = s.at(end);
+        let root = s.at(PointId(end.0 - 2));
+        let half_width = (8.0_f64.powi(2) - (y - root[1]).powi(2)).sqrt();
+        let press_bend = elbow_offset(&s.x, s.points[end.0]);
+        let mut drag = s.start_drag(end, &opts);
+        for k in 1..=30 {
+            let x = at[0] - 0.2 * k as f64;
+            let tol = opts.tolerance * s.scale();
+            let r = drag.to(&mut s, [x, at[1] + 3.0]);
+            assert!(r.report.converged, "the coupled chain lost a constraint at move {k}");
+            if k >= 28 {
+                let foot = [x.clamp(root[0] - half_width, root[0] + half_width), y];
+                assert_eq!(r.outcome, DragOutcome::Nearest, "the coupled pin should settle at move {k}");
+                assert!(distance(s.at(end), foot) <= tol, "the coupled pin missed its foot at move {k}");
+                assert!(keeps_side(&s, end, press_bend, tol), "the coupled chain flipped at move {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_loose_point_keeps_its_side() {
+        let opts = Options::default();
+        let (mut s, end, y) = coupled_chain(&opts);
+        let loose = s.point([0.0, 0.0]);
+        let at = s.at(end);
+        let root = s.at(PointId(end.0 - 2));
+        let half_width = (8.0_f64.powi(2) - (y - root[1]).powi(2)).sqrt();
+        let tip = s.points[end.0];
+        let press_bend = elbow_offset(&s.x, tip);
+        let mut drag = s.start_drag(end, &opts);
+        // Out to the limit and back: the return to k = 28 starts at the rank-0 limit pose, as move 32
+        // of the reference's 60-move series does, and ends at the same pose.
+        for k in [1, 30, 28] {
+            let x = at[0] - 0.2 * k as f64;
+            let target = [x, at[1] + 3.0];
+            let foot = [x.clamp(root[0] - half_width, root[0] + half_width), y];
+            let tol = opts.tolerance * s.scale();
+            let mut copy = s.clone();
+            let mut fresh = copy.start_drag(end, &opts);
+            let fresh_result = fresh.to(&mut copy, target);
+            let r = drag.to(&mut s, target);
+            assert!(r.report.converged, "the chain lost a constraint at k={k}");
+            assert_eq!(r.outcome, DragOutcome::Nearest, "the target lies above the height constraint at k={k}");
+            assert!(distance(s.at(end), foot) <= tol, "the pin missed its closest point at k={k}");
+            assert!(keeps_side(&s, end, press_bend, tol), "the elbow changed sides at k={k}");
+            // The class is judged once, at the press. A frame built at the limit pose itself (the start
+            // of the return to k = 28) judges the spare coupled, so only the regular starts compare.
+            assert!(r.side_enforced, "the press's spare class must hold at k={k} (a frame judged at the limit reads it coupled)");
+            if k != 28 {
+                assert_eq!(r.side_enforced, fresh_result.side_enforced, "the fresh and frozen spare classes differ at k={k}");
+            }
+            assert_eq!(s.at(loose), [0.0, 0.0], "the loose point moved at k={k}");
+            if k == 28 {
+                let bend = elbow_offset(&s.x, tip);
+                assert!((bend - (-0.45877)).abs() <= 1e-4, "the elbow missed its reference offset on the return to k=28: {bend}");
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_neg_answers_a_return_from_the_exact_limit() {
+        let opts = Options::default();
+        let (mut s, end, y) = coupled_chain(&opts);
+        let loose = s.point([0.0, 0.0]);
+        let at = s.at(end);
+        let root = s.at(PointId(end.0 - 2));
+        let half_width = (8.0_f64.powi(2) - (y - root[1]).powi(2)).sqrt();
+        let tip = s.points[end.0];
+        let press_bend = elbow_offset(&s.x, tip);
+        let mut drag = s.start_drag(end, &opts);
+        let r = drag.to(&mut s, [at[0] - 0.2 * 30.0, at[1] + 3.0]);
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the coupled chain should settle at its limit at k=30");
+
+        set_collinear(&mut s, end);
+        let x = at[0] - 0.2 * 28.0;
+        let target = [x, at[1] + 3.0];
+        let foot = [x.clamp(root[0] - half_width, root[0] + half_width), y];
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, target);
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the return should settle below the target at k=28");
+        assert!(r.report.converged, "the return must satisfy the coupled chain constraints");
+        assert!(distance(s.at(end), foot) <= tol, "the coupled pin missed its foot on the return");
+        assert!(keeps_side(&s, end, press_bend, tol), "the coupled elbow flipped on the return");
+        assert!(r.side_enforced, "the return must enforce the side chosen at the press");
+        assert_eq!(s.at(loose), [0.0, 0.0], "the loose point moved on the return");
+        let bend = elbow_offset(&s.x, tip);
+        assert!((bend - (-0.45877)).abs() <= 1e-4,
+            "MIRROR_NEG should carry the return from the exact limit to its foot (without it the drag stalls there, NotReached)");
+    }
+
+    #[test]
+    fn open_centre_stays_where_it_is() {
+        let opts = Options::default();
+        let mut s = chain_with(false);
+        assert!(s.solve(&opts).converged, "the open chain must satisfy its constraints at the press");
+        let end = PointId(s.points.len() - 1);
+        let centre = s.at(PointId(end.0 - 1));
+        let start = s.at(end);
+        let tol = opts.tolerance * s.scale();
+        let mut drag = s.start_drag(end, &opts);
+        let r = drag.to(&mut s, centre);
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the centre is equally far from every allowed pin pose");
+        assert!(r.report.converged, "the open chain must keep its constraints when dragged to the centre");
+        assert!((distance(s.at(end), centre) - 4.0).abs() <= tol, "the pin left its circle around the centre");
+        assert!(distance(s.at(end), start) <= tol, "the pin should stay where it started on a continuum of nearest poses");
+    }
+
+    #[test]
+    fn three_link_reaches_with_a_spare_freedom() {
+        let opts = Options::default();
+        let (mut s, end) = three_link();
+        let spare = s.point([30.0, 30.0]);
+        let mut drag = s.start_drag(end, &opts);
+        for k in 1..=60 {
+            let target = [22.0 - 10.0 * k as f64 / 60.0, 6.0 * k as f64 / 60.0];
+            let tol = opts.tolerance * s.scale();
+            let r = drag.to(&mut s, target);
+            assert!(r.report.converged, "the three-link arm lost a constraint at move {k}");
+            assert!(!r.side_enforced, "the three-link arm's spare freedom couples to its fold, so no sheet separates its sides");
+            // Some moves stop on the pin rule up to 2/3 tol short of the target, as the reference does.
+            assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                "the three-link arm should settle at target {k}");
+            assert!(distance(s.at(end), target) <= tol, "the three-link pin missed target {k}");
+            assert!(distance(s.at(spare), [30.0, 30.0]) <= 1e-12, "the unrelated point moved at target {k}");
+        }
+    }
+
+    #[test]
+    fn curved_drag_keeps_its_branch() {
+        let opts = Options::default();
+        let mut s = System::new();
+        let center = s.point([0.0, 0.0]);
+        let circle = s.circle(center, 10.0);
+        let fixed = [-20.0, -10.0];
+        let a = s.point(fixed);
+        let b = s.point([20.0, -10.0]);
+        let line = s.line(a, b);
+        s.constrain(Constraint::Fix(center, [0.0, 0.0]));
+        s.constrain(Constraint::Radius(circle, 10.0));
+        s.constrain(Constraint::Fix(a, fixed));
+        s.constrain(Constraint::Tangent(line, circle));
+        let side = |s: &System| {
+            let (a, b, c) = (s.at(a), s.at(b), s.at(center));
+            (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        };
+        let press_side = side(&s);
+        let mut drag = s.start_drag(b, &opts);
+        // At 90° the nearest point on the press tangent coincides with the fixed end.
+        for k in 1..=60 {
+            let angle = (k as f64).to_radians();
+            let target = [fixed[0] + 40.0 * angle.cos(), fixed[1] + 40.0 * angle.sin()];
+            let r = drag.to(&mut s, target);
+            assert!(r.report.converged, "the line lost tangency at move {k}");
+            assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                "the tangent endpoint failed to settle at move {k}");
+            assert!(side(&s) * press_side > 0.0, "the centre must stay on its press side of the tangent at move {k}");
+        }
+    }
+
+    #[test]
+    fn stale_drag_session_rebuilds() {
+        let opts = Options::default();
+        let (mut s, end) = four_bar(&opts);
+        let elbow = PointId(end.0 - 1);
+        let press = s.at(end);
+        let mut drag = s.start_drag(end, &opts);
+        s.constrain(Constraint::Fix(elbow, s.at(elbow)));
+        let tol = opts.tolerance * s.scale();
+        let r = drag.to(&mut s, rocker(20.0));
+        assert!(r.report.converged, "the rebuilt frame must satisfy the added elbow constraint");
+        assert_eq!(r.outcome, DragOutcome::Nearest, "the fixed elbow should hold the pin at its nearest pose");
+        assert!(distance(s.at(end), press) <= tol, "the newly constrained pin moved away from its press");
+        let r = drag.to(&mut s, press);
+        assert!(r.report.converged, "the rebuilt frame must keep its constraints on a second move");
+        assert_eq!(r.outcome, DragOutcome::Reached, "a second move to the fixed pin should reach it");
     }
 
     #[test]
@@ -1116,5 +1801,36 @@ mod tests {
         assert_eq!(&report.determined[..10], &[true; 10], "the first four links and their base are fixed");
         assert_eq!(&report.determined[10..], &[true, false, true, false, true, false, false, false],
             "the horizontal arm can swing vertically and the tip can also move sideways");
+    }
+    #[test]
+    fn trial_cap_ends_one_move_and_the_drag_goes_on() {
+        let opts = Options::default();
+        let (base, end) = four_bar(&opts);
+        let mirror = mirror_case(&base, end, &opts);
+        let (arm, arm_end) = two_link(&opts);
+        for (name, s0, end, target) in [("mirror four-bar", mirror, end, rocker(130.0)), ("two-link arm", arm, arm_end, [30.0, 0.0])] {
+            let tol = opts.tolerance * s0.scale();
+            let press_bend = elbow_offset(&s0.x, s0.points[end.0]);
+            let mut free = s0.clone();
+            let whole = free.start_drag(end, &opts).to(&mut free, target);
+            assert_eq!(whole.outcome, DragOutcome::Nearest, "{name}: the uncapped move should settle at the limit");
+
+            let mut s = s0.clone();
+            let mut drag = s.start_drag(end, &opts);
+            let cap = drag.frame.trial_cap;
+            drag.frame.trial_cap = 1;
+            let r = drag.to(&mut s, target);
+            assert_eq!(r.outcome, DragOutcome::NotReached, "{name}: a round at the trial cap ends only this move");
+            assert!(r.report.iterations < whole.report.iterations, "{name}: the capped move should end before the uncapped one");
+            assert!(r.report.converged, "{name}: the capped move must keep its last accepted pose, which holds the constraints");
+            assert!(keeps_side(&s, end, press_bend, tol), "{name}: the capped move flipped the elbow");
+
+            drag.frame.trial_cap = cap;
+            let r = drag.to(&mut s, target);
+            assert_eq!(r.outcome, whole.outcome, "{name}: the next move of the same drag should finish the work");
+            assert!(distance(s.at(end), free.at(end)) <= tol, "{name}: the drag after the cap should end where the uncapped move ends");
+            assert!(keeps_side(&s, end, press_bend, tol), "{name}: the elbow flipped after the cap");
+            assert_eq!(r.side_enforced, whole.side_enforced, "{name}: the cap must not change the press's side class");
+        }
     }
 }

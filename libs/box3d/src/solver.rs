@@ -223,6 +223,14 @@ pub struct SolverScratch {
     pub block_sync: Vec<crate::sync::AtomicIndex>,
     pub stage_completion: Vec<crate::sync::AtomicIndex>,
     set_ccd: Vec<SetCcdScratch>,
+    yield_groups: std::collections::HashMap<crate::contact::YieldKey, MaterialYield>,
+}
+
+#[derive(Default)]
+struct MaterialYield {
+    manifolds: usize,
+    force: f32,
+    share: f32,
 }
 
 impl SolverScratch {
@@ -414,6 +422,16 @@ pub struct SolverShared<'a> {
     pub contact_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraint>,
     pub task_contexts: crate::sync::SyncSlice<'a, crate::physics_world::TaskContext>,
     pub profile: crate::sync::SyncPtr<SolveProfile>,
+}
+
+impl SolverShared<'_> {
+    pub(crate) fn manifold_yield_cap(&self, contact: &crate::contact::Contact, manifold: usize) -> Option<f32> {
+        if !self.world.may_yield {
+            return None;
+        }
+        let (key, _) = contact.manifold_yield(&self.world.shapes, manifold, self.context.h)?;
+        Some(self.world.solver_scratch.yield_groups[&key].share)
+    }
 }
 
 /// C: UINT_MAX sync-bits sentinel — workers exit their spin loop.
@@ -1936,6 +1954,41 @@ fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
     }
 }
 
+/// The graph holds exactly the contacts about to be solved, including recycled and overflow
+/// rows. Count before dispatch. Only integer counts and a minimum are combined, and iteration
+/// over the scratch map never determines solver order.
+fn count_yielding_manifolds(world: &mut World, h: f32) {
+    let groups = &mut world.solver_scratch.yield_groups;
+    groups.clear();
+    // A world that never held a yielding material (most rigid-body worlds) pays nothing here.
+    if !world.may_yield {
+        return;
+    }
+    for color in &world.constraint_graph.colors {
+        for id in color.convex_contacts.iter().copied().chain(color.contacts.iter().map(|s| s.contact_id)) {
+            let contact = &world.contacts[id as usize];
+            let mut count = |manifold, n| {
+                if let Some((key, force)) = contact.manifold_yield(&world.shapes, manifold, h) {
+                    let group = groups.entry(key).or_default();
+                    group.force = crate::contact::mix_yield_force(group.force, force);
+                    group.manifolds += n;
+                }
+            };
+            if contact.set_contact.is_some() {
+                for m in 0..contact.manifolds.len() {
+                    count(m, 1);
+                }
+            } else {
+                // Ordinary contacts use the same mixed force for all their manifolds.
+                count(0, contact.manifolds.len());
+            }
+        }
+    }
+    for group in groups.values_mut() {
+        group.share = crate::contact::yield_impulse_share(group.force, h, group.manifolds);
+    }
+}
+
 // Solve with graph coloring
 pub fn solve(world: &mut World, step_context: &mut StepContext) {
     // Only count steps that advance the simulation
@@ -1950,6 +2003,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
     // Solve constraints using graph coloring
     {
         let mut setup_ticks = get_ticks();
+        count_yielding_manifolds(world, step_context.h);
 
         // Prepare buffers for continuous collision (fast bodies).
         // (C: atomic count + stack array; the port reuses the context Vec.)

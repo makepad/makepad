@@ -39,11 +39,14 @@ fn large_program_counts_survive_source_roundtrip() {
 
 #[test]
 fn hostile_document_object_count_is_bounded_by_source_bytes() {
+    // The magic and the version this build reads come from a real source, so the
+    // reader gets past the version check and meets the hostile count.
+    let valid = Document::new(Limits::default()).unwrap().to_bytes(None).unwrap();
     let mut source = [0u8; 64];
-    source[..8].copy_from_slice(b"MPMODEL\0");
-    source[8..12].copy_from_slice(&3u32.to_le_bytes());
+    source[..12].copy_from_slice(&valid[..12]);
     // After the 40-byte head and empty material table, claim 2^31 objects.
     // The count is rejected before allocating or reading any object records.
     source[56..60].copy_from_slice(&(1u32 << 31).to_le_bytes());
-    assert!(matches!(Document::from_bytes(&source, Limits::default(), None), Err(Error::Budget("source count"))));
+    let result = Document::from_bytes(&source, Limits::default(), None);
+    assert!(matches!(result, Err(Error::Budget("source count"))), "the object count must be bounded by the source bytes, got {result:?}");
 }

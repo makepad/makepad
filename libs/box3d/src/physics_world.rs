@@ -299,6 +299,9 @@ pub struct World {
     pub enable_speculative: bool,
     /// PORT EXTENSION: feature-recycling narrow-phase tier (see WorldDef).
     pub enable_feature_recycling: bool,
+    /// Some shape has held a material with a yield force since the world was created or its
+    /// snapshot restored. While false no contact can yield, so the solver skips the yield count.
+    pub(crate) may_yield: bool,
     /// PORT EXTENSION: adaptive broad-phase maintenance (see WorldDef).
     pub enable_broad_phase_hybrid: bool,
     pub in_use: bool,
@@ -791,8 +794,10 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
                         task_context.manifold_counts[bucket_index as usize - 1] += 1;
                     }
 
-                    // Contact is recycled. This also skips updating other aspects of the contact
-                    // such as material parameters.
+                    if contact_flags & crate::contact::SET_MATERIALS_DIRTY != 0 {
+                        crate::set_contact::remix_recycled_patches(world, contact, transform_a, transform_b);
+                        contact.flags &= !crate::contact::SET_MATERIALS_DIRTY;
+                    }
                     continue;
                 }
             }
@@ -803,6 +808,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
         contact.cached_rotation_b = transform_b.q;
         contact.cached_relative_pose = inv_mul_world_transforms(transform_a, transform_b);
         contact.flags |= RELATIVE_TRANSFORM_VALID;
+        contact.flags &= !crate::contact::SET_MATERIALS_DIRTY;
 
         // The pre-solve slot is only used on the serial fallback path (a
         // single worker), so the SyncPtr access is exclusive.

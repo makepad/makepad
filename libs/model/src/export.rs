@@ -32,6 +32,141 @@ struct CachedTexture {
     texture: Option<makepad_gltf::GlbPbrTexture>,
 }
 
+/// The SHA-256 of everything an export texture is made from: its channel, whether it is a
+/// distance (MSDF) plane, the limits and the channel's layers. Equal digests make equal
+/// textures, so [`shared_texture`] keeps only the digest. Every input struct is destructured
+/// without `..`: a field added later does not compile here until it is hashed, or skipped with
+/// the reason. Floats go in by their bits, so -0 and +0 are two inputs, as for the buffers.
+fn texture_key(channel: crate::SurfaceChannel, msdf: bool, limits: &crate::Limits, layers: &[crate::SurfaceLayer]) -> [u8; 32] {
+    use makepad_core_util::sha256::Sha256;
+    fn word(h: &mut Sha256, v: u64) { h.update(&v.to_le_bytes()); }
+    fn bytes(h: &mut Sha256, b: &[u8]) { word(h, b.len() as u64); h.update(b); }
+    fn image(h: &mut Sha256, image: &crate::RgbaImage) {
+        let crate::RgbaImage { width, height, pixels } = image;
+        word(h, *width as u64);
+        word(h, *height as u64);
+        bytes(h, pixels);
+    }
+    let mut h = Sha256::new();
+    bytes(&mut h, b"export texture 1");
+    word(&mut h, channel as u64);
+    word(&mut h, msdf as u64);
+    // Undo and receipt retention shape the document's history, never its export.
+    let crate::Limits { mesh: mesh::Limits { max_bytes }, max_history: _, max_receipts: _, max_texture_dimension } = limits;
+    word(&mut h, *max_bytes as u64);
+    word(&mut h, *max_texture_dimension as u64);
+    word(&mut h, layers.len() as u64);
+    for layer in layers {
+        let crate::SurfaceLayer { id, image: pixels, mask, opacity, blend, visible, pattern, derived, mips } = layer;
+        bytes(&mut h, id.as_bytes());
+        image(&mut h, pixels);
+        match mask {
+            None => word(&mut h, 0),
+            Some(mask) => { word(&mut h, 1); bytes(&mut h, mask); }
+        }
+        word(&mut h, opacity.to_bits());
+        word(&mut h, *blend as u64);
+        word(&mut h, *visible as u64);
+        match pattern {
+            None => word(&mut h, 0),
+            Some(crate::SurfacePattern { kind, color_a, color_b, scale, seed }) => {
+                word(&mut h, 1);
+                word(&mut h, *kind as u64);
+                for v in color_a.iter().chain(color_b).chain(scale) { word(&mut h, v.to_bits()); }
+                word(&mut h, *seed);
+            }
+        }
+        match derived {
+            None => word(&mut h, 0),
+            Some(crate::SurfaceDerivation { source_channel, source_layer, strength, roughness_min, roughness_max, metallic, wrap }) => {
+                word(&mut h, 1);
+                word(&mut h, *source_channel as u64);
+                match source_layer {
+                    None => word(&mut h, 0),
+                    Some(layer) => { word(&mut h, 1); bytes(&mut h, layer.as_bytes()); }
+                }
+                for v in [strength, roughness_min, roughness_max, metallic] { word(&mut h, v.to_bits()); }
+                word(&mut h, *wrap as u64);
+            }
+        }
+        word(&mut h, mips.len() as u64);
+        for mip in mips { image(&mut h, mip); }
+    }
+    h.finalize()
+}
+
+/// An export texture, built once per process for its inputs ([`texture_key`]). Models built
+/// from one recipe share their materials' layers, and each export flattened, mipped and
+/// PNG-encoded them again; a hit returns the bytes that work makes. The first ask of a key
+/// builds it; asks that come while it does wait for it off the CPU, their permits lent
+/// ([`ComputeOnce`]). A UI thread never waits for another thread's build: it takes a finished
+/// one, or builds on its own. A failed build (a budget, a cancel) is not remembered, and an ask
+/// that waited on one builds for itself. Only the digest and the PNGs are kept, never layers.
+/// Bounded: past 96 MiB of PNGs the memo starts over, which is logged once.
+///
+/// The step before libs/render's load-ready encode memo: this one skips the export work, and models
+/// that share a texture still embed equal PNGs, which the encode memo then encodes once.
+///
+/// [`ComputeOnce`]: makepad_core_util::once::ComputeOnce
+fn shared_texture(key: [u8; 32], build: &mut dyn FnMut() -> Result<Option<makepad_gltf::GlbPbrTexture>>) -> Result<Option<makepad_gltf::GlbPbrTexture>> {
+    use makepad_core_util::once::ComputeOnce;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    // `Err(())`: the build failed; its asker has the error, the others build for themselves.
+    type Entry = Arc<ComputeOnce<std::result::Result<Option<makepad_gltf::GlbPbrTexture>, ()>>>;
+    struct Memo { entries: std::collections::HashMap<[u8; 32], Entry>, bytes: usize }
+    static MEMO: Mutex<Option<Memo>> = Mutex::new(None);
+    static BOUND_LOGGED: AtomicBool = AtomicBool::new(false);
+    const BOUND: usize = 96 << 20;
+    #[cfg(test)]
+    let build = &mut || { tests::BUILDS.with(|b| b.set(b.get() + 1)); build() };
+    let ours = |memo: &Memo, entry: &Entry| memo.entries.get(&key).is_some_and(|e| Arc::ptr_eq(e, entry));
+    if makepad_core_util::ui_thread::is_ui_thread() {
+        let done = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+            .and_then(|memo| memo.entries.get(&key).and_then(|entry| entry.get().cloned()));
+        return match done { Some(Ok(texture)) => Ok(texture), _ => build() };
+    }
+    loop {
+        let entry = MEMO.lock().unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(|| Memo { entries: Default::default(), bytes: 0 })
+            .entries.entry(key).or_default().clone();
+        let mut built = None;
+        let shared = entry.get_or_init(|| {
+            let out = build();
+            let shared = out.as_ref().map(Clone::clone).map_err(|_| ());
+            built = Some(out);
+            shared
+        }).clone();
+        let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(memo) = memo.as_mut().filter(|memo| ours(memo, &entry)) else {
+            // (The memo started over meanwhile: the entry is no longer its own.)
+            match (built, shared) {
+                (Some(out), _) => return out,
+                (None, Ok(texture)) => return Ok(texture),
+                (None, Err(())) => continue,
+            }
+        };
+        match (built, shared) {
+            (Some(Err(error)), _) => { memo.entries.remove(&key); return Err(error); }
+            (Some(Ok(texture)), _) => {
+                let cost = texture.as_ref().map_or(0, |t| t.png.len() + t.mip_pngs.iter().map(Vec::len).sum::<usize>()) + key.len();
+                if memo.bytes + cost > BOUND {
+                    if !BOUND_LOGGED.swap(true, Ordering::Relaxed) {
+                        eprintln!("model export: the texture memo passed {} MiB and starts over (logged once)", BOUND >> 20);
+                    }
+                    memo.entries.retain(|_, e| Arc::ptr_eq(e, &entry));
+                    memo.bytes = 0;
+                }
+                memo.bytes += cost;
+                return Ok(texture);
+            }
+            (None, Ok(texture)) => return Ok(texture),
+            // Another ask's build failed: this one builds for itself.
+            (None, Err(())) => { memo.entries.remove(&key); }
+        }
+    }
+}
+
 // PartialEq alone identifies -0 and +0, but the exported f32 buffers retain
 // their bits. Check the floating-point mesh inputs as well as the topology.
 fn same_mesh(a: &mesh::Mesh, b: &mesh::Mesh) -> bool {
@@ -549,7 +684,10 @@ fn export_surface(
                 } else {
                     let started = crate::program::ProgramInstant::now();
                     let _texture_timer = CompileTimer::new(CompilePhase::Textures);
-                    let texture = (|| -> Result<Option<GlbPbrTexture>> {
+                    // Shared across the process's models by content ([`shared_texture`]). A hit, like a
+                    // CompileCache hit, skips the checks inside the work it saves (flatten's material
+                    // size budget, the work checkpoints); the image budget below holds every texture.
+                    let build = &mut || -> Result<Option<GlbPbrTexture>> {
                         let Some(image) = source.flatten(channel, doc.limits(), ctx)? else {
                             return Ok(None);
                         };
@@ -567,7 +705,13 @@ fn export_surface(
                         crate::build_detail::record_texture(Some(*id), channel, kind, image.width, image.height,
                             started.elapsed().saturating_sub(crate::build_detail::png_time() - png_before));
                         Ok(Some(GlbPbrTexture { png, mip_pngs }))
-                    })();
+                    };
+                    // A channel with no visible layer flattens to nothing at once: no work to share.
+                    let texture = if layers.iter().any(|l| l.visible && l.opacity > 0.) {
+                        shared_texture(texture_key(channel, msdf, doc.limits(), layers), build)
+                    } else {
+                        build()
+                    };
                     crate::program::record_texture_time(started.elapsed());
                     let texture = texture?;
                     if let Some(cache) = cache.as_deref_mut() {
@@ -691,4 +835,148 @@ fn part_tangents(part: &Part, ctx: &mut mesh::Context<'_>) -> Result<Vec<[f32; 4
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::*;
+    use makepad_gltf::GlbPbrTexture;
+    thread_local! {
+        /// Texture builds [`shared_texture`] ran on this thread.
+        pub(super) static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    fn bytes(t: &Option<GlbPbrTexture>) -> Option<(Vec<u8>, Vec<Vec<u8>>)> { t.as_ref().map(|t| (t.png.clone(), t.mip_pngs.clone())) }
+
+    #[test]
+    fn texture_key_covers_every_input() {
+        let limits = Limits::default();
+        let image = |w, h, v| RgbaImage::new(w, h, [v, 20, 30, 255], &limits).unwrap();
+        let mut layer = SurfaceLayer::new("paint", image(4, 4, 10));
+        layer.mask = Some(vec![200; 16]);
+        layer.pattern = Some(SurfacePattern { kind: PatternKind::Checker, color_a: [0.1, 0.2, 0.3, 1.], color_b: [0.4, 0.5, 0.6, 1.], scale: [2., 3.], seed: 7 });
+        layer.derived = Some(SurfaceDerivation { source_channel: SurfaceChannel::BaseColor, source_layer: Some("height".into()), strength: 1., roughness_min: 0.2, roughness_max: 0.8, metallic: 0.1, wrap: true });
+        layer.mips = vec![image(2, 2, 11)];
+        let base = (SurfaceChannel::BaseColor, false, limits.clone(), vec![layer, SurfaceLayer::new("top", image(4, 4, 40))]);
+        type Input = (SurfaceChannel, bool, Limits, Vec<SurfaceLayer>);
+        let edits: Vec<(&str, Box<dyn Fn(&mut Input)>)> = vec![
+            ("channel", Box::new(|i| i.0 = SurfaceChannel::Emissive)),
+            ("msdf", Box::new(|i| i.1 = true)),
+            ("texture dimension limit", Box::new(|i| i.2.max_texture_dimension -= 1)),
+            ("byte limit", Box::new(|i| i.2.mesh.max_bytes -= 1)),
+            ("layer order", Box::new(|i| i.3.swap(0, 1))),
+            ("layer count", Box::new(|i| { i.3.pop(); })),
+            ("id", Box::new(|i| i.3[0].id = "paint2".into())),
+            ("width", Box::new(|i| { let l = &mut i.3[0]; l.image.width = 8; l.image.height = 2; })),
+            ("height", Box::new(|i| { let l = &mut i.3[0]; l.image.height = 8; l.image.width = 2; })),
+            ("pixels", Box::new(|i| i.3[0].image.pixels[5] ^= 1)),
+            ("no mask", Box::new(|i| i.3[0].mask = None)),
+            ("mask", Box::new(|i| i.3[0].mask.as_mut().unwrap()[3] = 1)),
+            ("opacity", Box::new(|i| i.3[0].opacity = 0.5)),
+            ("blend", Box::new(|i| i.3[0].blend = SurfaceBlend::Multiply)),
+            ("visible", Box::new(|i| i.3[0].visible = false)),
+            ("no pattern", Box::new(|i| i.3[0].pattern = None)),
+            ("pattern kind", Box::new(|i| i.3[0].pattern.as_mut().unwrap().kind = PatternKind::Stripes)),
+            ("pattern colour a", Box::new(|i| i.3[0].pattern.as_mut().unwrap().color_a[3] = 0.5)),
+            ("pattern colour b", Box::new(|i| i.3[0].pattern.as_mut().unwrap().color_b[0] = -0.)),
+            ("pattern scale", Box::new(|i| i.3[0].pattern.as_mut().unwrap().scale[1] = 4.)),
+            ("pattern seed", Box::new(|i| i.3[0].pattern.as_mut().unwrap().seed = 8)),
+            ("no derivation", Box::new(|i| i.3[0].derived = None)),
+            ("derivation source", Box::new(|i| i.3[0].derived.as_mut().unwrap().source_channel = SurfaceChannel::Normal)),
+            ("derivation layer", Box::new(|i| i.3[0].derived.as_mut().unwrap().source_layer = None)),
+            ("derivation strength", Box::new(|i| i.3[0].derived.as_mut().unwrap().strength = 2.)),
+            ("derivation roughness min", Box::new(|i| i.3[0].derived.as_mut().unwrap().roughness_min = 0.3)),
+            ("derivation roughness max", Box::new(|i| i.3[0].derived.as_mut().unwrap().roughness_max = 0.9)),
+            ("derivation metallic", Box::new(|i| i.3[0].derived.as_mut().unwrap().metallic = 0.2)),
+            ("derivation wrap", Box::new(|i| i.3[0].derived.as_mut().unwrap().wrap = false)),
+            ("no mips", Box::new(|i| i.3[0].mips.clear())),
+            ("mip pixels", Box::new(|i| i.3[0].mips[0].pixels[0] ^= 1)),
+            ("second layer", Box::new(|i| i.3[1].image.pixels[0] ^= 1)),
+        ];
+        let key = |i: &Input| texture_key(i.0, i.1, &i.2, &i.3);
+        assert_eq!(key(&base), key(&base.clone()), "equal inputs give equal keys");
+        let mut seen = std::collections::HashMap::from([(key(&base), "the base")]);
+        for (name, edit) in &edits {
+            let mut input = base.clone();
+            edit(&mut input);
+            if let Some(other) = seen.insert(key(&input), name) {
+                panic!("changing the {name} leaves the key of {other}");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_texture_builds_once_shares_its_build_and_never_holds_a_ui_thread() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let texture = |v: u8| Some(GlbPbrTexture { png: vec![v; 4], mip_pngs: vec![vec![v; 2]] });
+        let key = |label: &str| makepad_core_util::sha256::sha256(format!("shared_texture test: {label}").as_bytes());
+        // A failure is not remembered: the next ask builds, and its result is.
+        let failed = key("failure");
+        assert!(shared_texture(failed, &mut || Err(Error::Budget("test"))).is_err());
+        assert_eq!(bytes(&shared_texture(failed, &mut || Ok(texture(1))).unwrap()), bytes(&texture(1)), "a failed build is built again");
+        assert_eq!(bytes(&shared_texture(failed, &mut || panic!("a remembered texture is not built")).unwrap()), bytes(&texture(1)));
+        // Asks while the first build runs share it; a UI thread builds for itself instead of waiting;
+        // an ask that waited on a build that failed builds for itself.
+        for (label, first_fails) in [("shared", false), ("failed while shared", true)] {
+            let key = key(label);
+            let (other_builds, ui_builds) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let gate = std::sync::Mutex::new(());
+            let (inside, first_inside) = std::sync::mpsc::channel();
+            let (ui_done, ui_result) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                let held = gate.lock().unwrap();
+                let first = scope.spawn(|| shared_texture(key, &mut || {
+                    inside.send(()).unwrap();
+                    drop(gate.lock().unwrap());
+                    if first_fails { Err(Error::Budget("test")) } else { Ok(texture(2)) }
+                }).map(|t| bytes(&t)));
+                first_inside.recv().unwrap();
+                let others: Vec<_> = (0..3).map(|_| scope.spawn(|| shared_texture(key, &mut || {
+                    other_builds.fetch_add(1, SeqCst);
+                    Ok(texture(2))
+                }).map(|t| bytes(&t)))).collect();
+                scope.spawn(|| {
+                    makepad_core_util::ui_thread::mark_ui_thread();
+                    ui_done.send(shared_texture(key, &mut || { ui_builds.fetch_add(1, SeqCst); Ok(texture(2)) }).map(|t| bytes(&t))).unwrap();
+                });
+                let ui = ui_result.recv_timeout(std::time::Duration::from_secs(60)).expect("a UI thread does not wait for another thread's build");
+                assert_eq!(ui.unwrap(), bytes(&texture(2)));
+                assert_eq!(ui_builds.load(SeqCst), 1, "with the first build still running, the UI thread builds it itself");
+                drop(held);
+                assert_eq!(first.join().unwrap().is_err(), first_fails, "the first ask gets its own build's result");
+                for other in others { assert_eq!(other.join().unwrap().unwrap(), bytes(&texture(2)), "an ask that waited gets a texture"); }
+            });
+            if first_fails {
+                assert!((1..=3).contains(&other_builds.load(SeqCst)), "asks that waited on a failed build build for themselves");
+            } else {
+                assert_eq!(other_builds.load(SeqCst), 0, "asks that came while the first built did not build it again");
+            }
+        }
+    }
+
+    #[test]
+    fn models_that_share_a_material_build_its_texture_once() {
+        let limits = Limits::default();
+        let build = |shape: Operation| {
+            let program = [
+                ProgramOp::Op(shape),
+                ProgramOp::Op(Operation::Surface(SurfaceOperation::Layer { material: 0, channel: SurfaceChannel::BaseColor,
+                    layer: SurfaceLayer::new("paint", RgbaImage::new(32, 32, [255; 4], &limits).unwrap()) })),
+                ProgramOp::Op(Operation::Surface(SurfaceOperation::Pattern { material: 0, channel: SurfaceChannel::BaseColor, layer: "paint".into(),
+                    pattern: SurfacePattern { kind: PatternKind::Checker, color_a: [0.2, 0.3, 0.4, 1.], color_b: [0.9, 0.8, 0.1, 1.], scale: [3., 5.], seed: 0x7e47_3e30 } })),
+                ProgramOp::Op(Operation::Surface(SurfaceOperation::Mips { material: 0, channel: SurfaceChannel::BaseColor, layer: "paint".into() })),
+            ];
+            let before = BUILDS.with(|b| b.get());
+            let built = build_program(&program, limits.clone(), &mut |_| Err("no inputs".into()), None).unwrap();
+            let loaded = makepad_gltf::load_gltf_from_bytes(&built.compiled.glb, None).unwrap();
+            let pbr = loaded.document.materials_slice()[0].pbr_metallic_roughness.as_ref().unwrap();
+            let image = loaded.document.textures_slice()[pbr.base_color_texture.as_ref().unwrap().index].source.unwrap();
+            (BUILDS.with(|b| b.get()) - before, makepad_gltf::load_image_bytes(&loaded, image).unwrap())
+        };
+        let (first_builds, first) = build(Operation::Plane { object: "plate".into(), size: [2., 2.] });
+        let (second_builds, second) = build(Operation::Cube { object: "block".into(), size: [1., 2., 3.] });
+        assert_eq!(first_builds, 1, "the first model builds its texture");
+        assert_eq!(second_builds, 0, "a model with another mesh and the same material takes the built texture");
+        assert_eq!(first, second, "and embeds the same bytes");
+    }
 }

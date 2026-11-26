@@ -158,6 +158,7 @@ pub fn update_tube_contact(
     let material_b = get_shape_materials(shape_b)[0];
     contact.friction = mix_friction(world, material_a.friction, material_a.user_material_id, material_b.friction, material_b.user_material_id);
     contact.restitution = mix_restitution(world, material_a.restitution, material_a.user_material_id, material_b.restitution, material_b.user_material_id);
+    contact.yield_force = crate::contact::mix_yield_force(material_a.yield_force, material_b.yield_force);
     contact.rolling_resistance = 0.0;
     contact.tangent_velocity = sub(rotate_vector(xf_a.q, material_a.tangent_velocity), rotate_vector(xf_b.q, material_b.tangent_velocity));
 

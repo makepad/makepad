@@ -307,9 +307,11 @@ script_mod! {
             return self.elem_map.sample_nearest(vec2((f32(i % ew) + 0.5) / f32(ew), (f32(i / ew) + 0.5) / eh))
         }
 
-        // Texel k of the element's entry in the table.
+        // Texel k of the element's entry in the table. `element` comes through a varying
+        // (`v_paint.w`): interpolation can bring a whole number in a hair below itself, and u32()
+        // truncates, so it is rounded to the element it stands for.
         paint_elem_at: fn(element: float, k: u32) -> vec4 {
-            return self.paint_texel(u32(element) * u32(self.elem_ctl.z) + k)
+            return self.paint_texel(u32(element + 0.5) * u32(self.elem_ctl.z) + k)
         }
         paint_elem: fn(k: u32) -> vec4 {
             return self.paint_elem_at(self.v_paint.w, k)

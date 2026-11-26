@@ -13,8 +13,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Mesh(mesh::MeshError),
     Budget(&'static str),
+    /// An edit or a compile needed more working memory than its limit (`mesh::Limits::max_bytes`)
+    /// allows: the step refused, what that step needed (the whole may need more), and the limit,
+    /// in bytes. A larger limit lets it through.
+    WorkingBytes { what: &'static str, needed: usize, limit: usize },
     Invalid(&'static str),
     Corrupt(&'static str),
+    UnsupportedVersion(u32),
     MissingObject(String),
     DuplicateObject(String),
     StaleHead { expected: Head, actual: Head },
@@ -27,7 +32,17 @@ impl From<mesh::MeshError> for Error {
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnsupportedVersion(version) => write!(
+                f,
+                "model source version {version} is not supported (this build reads version {SOURCE_VERSION})"
+            ),
+            Self::WorkingBytes { what, needed, limit } => {
+                let mib = |b: &usize| *b as f64 / 1048576.0;
+                write!(f, "{what}: needs {:.1} MiB, limit {:.1} MiB", mib(needed), mib(limit))
+            }
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -85,11 +100,16 @@ pub(crate) struct State {
 }
 impl State {
     fn memory_bytes(&self) -> usize {
-        let meshes = self.objects.iter().fold(0usize, |n, (name, m)| {
+        self.mesh_bytes().saturating_add(self.bytes_besides_meshes())
+    }
+    fn mesh_bytes(&self) -> usize {
+        self.objects.iter().fold(0usize, |n, (name, m)| {
             n.saturating_add(m.memory_bytes())
                 .saturating_add(name.len().saturating_mul(2))
                 .saturating_add(128)
-        });
+        })
+    }
+    fn bytes_besides_meshes(&self) -> usize {
         let materials = self.materials.values().fold(0usize, |n, m| {
             n.saturating_add(m.base_color_png.len().saturating_mul(2))
                 .saturating_add(128)
@@ -97,8 +117,7 @@ impl State {
         let clips = self.clips.values().fold(0usize, |n, c| {
             n.saturating_add(c.memory_bytes()).saturating_add(128)
         });
-        meshes
-            .saturating_add(self.scene.memory_bytes())
+        self.scene.memory_bytes()
             .saturating_add(self.selections.memory_bytes())
             .saturating_add(self.rig.memory_bytes())
             .saturating_add(self.surface.memory_bytes())
@@ -106,6 +125,20 @@ impl State {
             .saturating_add(materials)
             .saturating_add(clips)
             .saturating_add(self.skeleton.as_ref().map_or(0, Skeleton::memory_bytes))
+    }
+    /// Everything but the meshes.
+    fn clone_without_meshes(&self) -> Self {
+        Self {
+            objects: BTreeMap::new(),
+            materials: self.materials.clone(),
+            skeleton: self.skeleton.clone(),
+            clips: self.clips.clone(),
+            scene: self.scene.clone(),
+            selections: self.selections.clone(),
+            rig: self.rig.clone(),
+            surface: self.surface.clone(),
+            soft_body: self.soft_body.clone(),
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -126,14 +159,14 @@ impl Receipt {
         let resident_bytes = retained_bytes.saturating_add(128).saturating_add(id.len()).saturating_add(results.iter().map(|r|r.object.len()).sum::<usize>());
         let mut receipt = Self { id, fingerprint, head, results, source_bytes: 0, retained_bytes, resident_bytes, previous: None, next: None };
         let mut w = Writer::new();
-        write_receipt(&mut w, &receipt, SOURCE_VERSION)?;
+        write_receipt(&mut w, &receipt)?;
         receipt.source_bytes = w.bytes.len();
         Ok(receipt)
     }
 }
 /// Insertion-ordered receipts with constant-time identity lookup and removal.
-/// The links also handle v3's sorted identity order: an expiring identity can
-/// name a receipt in the middle, without scanning or shifting newer receipts.
+/// Each receipt links to its neighbors so removing it preserves the order
+/// of the remaining receipts without scanning or shifting them.
 #[derive(Clone, Debug, Default)]
 struct Receipts {
     entries: HashMap<[u8; 32], Receipt>,
@@ -179,7 +212,6 @@ impl Receipts {
     fn pop_front(&mut self) { if let Some(first) = self.first { self.remove(&first); } }
 }
 /// Version 4 persists request identities in acceptance order for oldest-first eviction.
-/// Version 3 used a sorted set; its encoded order initializes retention on migration.
 const SOURCE_VERSION: u32 = 4;
 const MAX_RECEIPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_IDENTITIES: usize = 65_536;
@@ -212,6 +244,24 @@ pub struct Document {
     receipts: Receipts,
     request_identities: HashSet<[u8; 32]>,
     request_order: VecDeque<[u8; 32]>,
+}
+/// A document at its last use ([`Document::into_last_use`]): it takes edits and compiles, with no
+/// undo history or checkpoint beside its state. It is never saved: a save writes what it dropped.
+#[derive(Debug)]
+pub struct LastUse(Document);
+impl LastUse {
+    /// Applies `operations` as one transaction: all of them, or none and an error.
+    pub fn apply(&mut self, request_id: &str, operations: Vec<Operation>, cancelled: Option<&dyn Fn() -> bool>) -> Result<()> {
+        let expected = self.0.head;
+        self.0.apply(Transaction { request_id: request_id.into(), expected, operations }, cancelled).map(|_| ())
+    }
+    /// Compiles the product. A refusal leaves it as it was, to compile again (under a larger
+    /// limit when it was refused for working memory).
+    pub fn compile_with_cache(&self, cache: &mut crate::CompileCache, cancelled: Option<&dyn Fn() -> bool>) -> Result<crate::CompiledModel> {
+        self.0.compile_with_cache(cache, cancelled)
+    }
+    /// The working memory its edits and compiles may hold, in bytes (`mesh::Limits::max_bytes`).
+    pub fn set_memory_limit(&mut self, bytes: usize) { self.0.limits.mesh.max_bytes = bytes; }
 }
 /// An unlogged model state, for callers that keep their own program and undo
 /// log and rebuild the model from it: operations execute in place, with none
@@ -253,13 +303,14 @@ impl Workspace {
             let mut encoded = Writer::new();
             write_head(&mut encoded, Head { generation: 0, content: [0; 32] }).map_err(|e| (0, e))?;
             write_ops(&mut encoded, ops, &self.limits).map_err(|e| (0, e))?;
-            if self.state.memory_bytes().saturating_add(resident).saturating_add(encoded.bytes.len()) > self.limits.mesh.max_bytes {
-                return Err((0, Error::Budget("program working bytes")));
+            let needed = self.state.memory_bytes().saturating_add(resident).saturating_add(encoded.bytes.len());
+            if needed > self.limits.mesh.max_bytes {
+                return Err((0, Error::WorkingBytes { what: "program working bytes", needed, limit: self.limits.mesh.max_bytes }));
             }
         }
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         ctx.limits.max_bytes = ctx.limits.max_bytes.checked_sub(resident)
-            .ok_or((0, Error::Budget("program working bytes")))?;
+            .ok_or((0, Error::WorkingBytes { what: "program working bytes", needed: resident, limit: self.limits.mesh.max_bytes }))?;
         let mut index = 0;
         execute_with(&mut self.state, ops, &self.limits, &mut ctx, false, &mut index)
             .map(|_| ()).map_err(|error| (index, error))
@@ -275,8 +326,9 @@ impl Workspace {
         self.state.canonicalize_zeros();
         // The returned checkpoint must remain serializable/reopenable too.
         // Admit its copies before measurement decodes any temporary state.
-        if self.state.memory_bytes().saturating_mul(3) > self.limits.mesh.max_bytes {
-            return Err(Error::Budget("program checkpoint bytes"));
+        let needed = self.state.memory_bytes().saturating_mul(3);
+        if needed > self.limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "program checkpoint bytes", needed, limit: self.limits.mesh.max_bytes });
         }
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         let content = state_hash(&self.state, &self.limits, &mut ctx)?;
@@ -294,10 +346,11 @@ impl Workspace {
         let envelope = encode_source(&SourceParts {
             head: document.head, checkpoint: CheckpointSource::Measured(checkpoint_source),
             cursor: 0, log: &[], receipts: &[], identities: &document.request_order, added_identity: None,
-        }, &document.limits, &mut source_ctx, SOURCE_VERSION)?;
+        }, &document.limits, &mut source_ctx)?;
         let source_bytes = checkpoint_source.bytes.saturating_add(envelope.len());
-        if document.state.memory_bytes().saturating_mul(3).saturating_add(source_bytes) > document.limits.mesh.max_bytes {
-            return Err(Error::Budget("program checkpoint bytes"));
+        let needed = document.state.memory_bytes().saturating_mul(3).saturating_add(source_bytes);
+        if needed > document.limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "program checkpoint bytes", needed, limit: document.limits.mesh.max_bytes });
         }
         Ok(document)
     }
@@ -385,10 +438,21 @@ impl Document {
     pub fn selections(&self) -> &crate::SelectionState { &self.state.selections }
     pub fn scene(&self) -> &crate::SceneState { &self.state.scene }
     pub fn soft_body(&self) -> Option<&makepad_gltf::SoftBodyMetadata> { self.state.soft_body.as_ref() }
-    pub(crate) fn render_copy(&self, working:usize) -> Result<Self> {
-        self.admit(working.saturating_add(self.state.memory_bytes()))?;
+    /// A working copy to compile from: no undo history, and none of the state's meshes, which
+    /// the caller replaces with the ones it evaluated. `working` is what the caller holds beside
+    /// it (those meshes and their working copies).
+    pub(crate) fn evaluation_copy(&self, working:usize) -> Result<Self> {
+        self.admit(working.saturating_add(self.state.bytes_besides_meshes()))?;
         Ok(Self { limits:self.limits.clone(), checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
-            cursor:0, state:self.state.clone(), head:self.head, receipts:Receipts::default(), request_identities:HashSet::new(), request_order:VecDeque::new() })
+            cursor:0, state:self.state.clone_without_meshes(), head:self.head, receipts:Receipts::default(), request_identities:HashSet::new(), request_order:VecDeque::new() })
+    }
+    /// The document for its last use, by a host that derives one more product from a document
+    /// whose source it has kept already (a model's distance levels, added after its full detail
+    /// was saved). Its undo history and checkpoint go, so an edit and a compile hold one copy of
+    /// the state where a document with its history holds two.
+    pub fn into_last_use(self) -> LastUse {
+        LastUse(Self { limits:self.limits, checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
+            cursor:0, state:self.state, head:self.head, receipts:Receipts::default(), request_identities:HashSet::new(), request_order:VecDeque::new() })
     }
     pub fn history_position(&self) -> (usize, usize) {
         (self.cursor, self.log.len())
@@ -408,8 +472,9 @@ impl Document {
         self.log_source_bytes -= self.log_source.drain(..count).sum::<usize>();
     }
     fn admit(&self, extra: usize) -> Result<()> {
-        if self.memory_bytes().saturating_add(extra) > self.limits.mesh.max_bytes {
-            Err(Error::Budget("document working bytes"))
+        let needed = self.memory_bytes().saturating_add(extra);
+        if needed > self.limits.mesh.max_bytes {
+            Err(Error::WorkingBytes { what: "document working bytes", needed, limit: self.limits.mesh.max_bytes })
         } else {
             Ok(())
         }
@@ -697,15 +762,12 @@ impl Document {
     /// checkpoint, so clients never replay floating-point modeling operations.
     /// Local undo history remains intact; identity receipts and Head persist.
     pub fn to_snapshot_bytes(&self, cancelled: Option<&dyn Fn() -> bool>) -> Result<Vec<u8>> {
-        self.encode_parts(&mut mesh::Context::new(self.limits.mesh.clone(), cancelled), SOURCE_VERSION, true)
+        self.encode_parts(&mut mesh::Context::new(self.limits.mesh.clone(), cancelled), true)
     }
     fn encode(&self, ctx: &mut mesh::Context) -> Result<Vec<u8>> {
-        self.encode_version(ctx, SOURCE_VERSION)
+        self.encode_parts(ctx, false)
     }
-    fn encode_version(&self, ctx: &mut mesh::Context, version:u32) -> Result<Vec<u8>> {
-        self.encode_parts(ctx, version, false)
-    }
-    fn encode_parts(&self, ctx: &mut mesh::Context, version:u32, snapshot:bool) -> Result<Vec<u8>> {
+    fn encode_parts(&self, ctx: &mut mesh::Context, snapshot: bool) -> Result<Vec<u8>> {
         self.admit(
             self.memory_bytes()
                 .saturating_sub(self.state.memory_bytes()),
@@ -728,7 +790,6 @@ impl Document {
             },
             &self.limits,
             ctx,
-            version,
         )
     }
     pub fn from_bytes(
@@ -743,16 +804,19 @@ impl Document {
             .limits
             .max_bytes
             .checked_sub(bytes.len())
-            .ok_or(Error::Budget("decode working bytes"))?;
+            .ok_or(Error::WorkingBytes { what: "decode working bytes", needed: bytes.len(), limit: ctx.limits.max_bytes })?;
         if r.raw(8)? != b"MPMODEL\0" {
-            return Err(Error::Corrupt("unsupported model source version"));
+            return Err(Error::Corrupt("not a model source"));
         }
         let version = r.u32()?;
-        if version != 3 && version != SOURCE_VERSION { return Err(Error::Corrupt("unsupported model source version")); }
+        if version != SOURCE_VERSION {
+            return Err(Error::UnsupportedVersion(version));
+        }
         let head = read_head(&mut r)?;
-        let checkpoint = read_state(&mut r, &limits, &mut ctx, version)?;
-        if checkpoint.memory_bytes().saturating_mul(3) > ctx.limits.max_bytes {
-            return Err(Error::Budget("decode checkpoint copies"));
+        let checkpoint = read_state(&mut r, &limits, &mut ctx)?;
+        let needed = checkpoint.memory_bytes().saturating_mul(3);
+        if needed > ctx.limits.max_bytes {
+            return Err(Error::WorkingBytes { what: "decode checkpoint copies", needed, limit: ctx.limits.max_bytes });
         }
         let checkpoint_source=checkpoint_source_measure(&checkpoint,&limits,&mut ctx)?.1;
         let cursor = r.u32()? as usize;
@@ -783,11 +847,12 @@ impl Document {
                 .saturating_add(log_bytes);
             ctx.limits.max_bytes = decode_budget
                 .checked_sub(pinned)
-                .ok_or(Error::Budget("decode history working bytes"))?;
+                .ok_or(Error::WorkingBytes { what: "decode history working bytes", needed: pinned, limit: decode_budget })?;
             execute(&mut state, &ops, &limits, &mut ctx)?;
             if i + 1 == cursor {
-                if pinned.saturating_add(state.memory_bytes().saturating_mul(2)) > decode_budget {
-                    return Err(Error::Budget("decode cursor copy"));
+                let needed = pinned.saturating_add(state.memory_bytes().saturating_mul(2));
+                if needed > decode_budget {
+                    return Err(Error::WorkingBytes { what: "decode cursor copy", needed, limit: decode_budget });
                 }
                 current = state.clone();
             }
@@ -821,12 +886,10 @@ impl Document {
                     vertices.push(mesh::VertexId(r.u64()?));
                 }
                 let mut metrics = BTreeMap::new();
-                if version >= 2 {
-                    for _ in 0..r.count(12)? {
-                        let name = r.string()?;
-                        let value = usize::try_from(r.u64()?).map_err(|_|Error::Budget("operation metric"))?;
-                        if metrics.insert(name, value).is_some() { return Err(Error::Corrupt("duplicate operation metric")); }
-                    }
+                for _ in 0..r.count(12)? {
+                    let name = r.string()?;
+                    let value = usize::try_from(r.u64()?).map_err(|_|Error::Budget("operation metric"))?;
+                    if metrics.insert(name, value).is_some() { return Err(Error::Corrupt("duplicate operation metric")); }
                 }
                 results.push(OperationResult {
                     object,
@@ -865,7 +928,7 @@ impl Document {
             request_identities, request_order,
         };
         // Exact re-encoding rejects ambiguous orderings and noncanonical inputs.
-        if out.encode_version(&mut ctx, version)? != bytes {
+        if out.encode(&mut ctx)? != bytes {
             return Err(Error::Corrupt("noncanonical document"));
         }
         // A source may have been saved with larger retention windows. Decode
@@ -973,7 +1036,7 @@ struct SourceParts<'a> {
     /// Appended in acceptance order, after eviction of the oldest identities.
     added_identity: Option<[u8; 32]>,
 }
-fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Context, version: u32) -> Result<Vec<u8>> {
+fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Context) -> Result<Vec<u8>> {
     let measured = match &parts.checkpoint {
         CheckpointSource::Measured(m) => m.bytes,
         CheckpointSource::State(_) => 0,
@@ -981,10 +1044,10 @@ fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Conte
     // Measured checkpoint bytes participate in work accounting without a copy.
     let mut w = Writer::new();
     w.raw(b"MPMODEL\0")?;
-    w.u32(version)?;
+    w.u32(SOURCE_VERSION)?;
     write_head(&mut w, parts.head)?;
     match &parts.checkpoint {
-        CheckpointSource::State(state) => write_state(&mut w, state, limits, ctx, version >= 2)?,
+        CheckpointSource::State(state) => write_state(&mut w, state, limits, ctx, true)?,
         CheckpointSource::Measured(m) => ctx.checkpoint(m.work)?,
     }
     w.count(parts.cursor)?;
@@ -995,25 +1058,19 @@ fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Conte
     }
     w.count(parts.receipts.len())?;
     for receipt in parts.receipts {
-        write_receipt(&mut w, receipt, version)?;
+        write_receipt(&mut w, receipt)?;
     }
     let identity_count = parts.identities.len().saturating_add(parts.added_identity.is_some() as usize);
     // Apply eviction in the candidate encoding too, without mutating the document.
     let evicted = if parts.added_identity.is_some() { identity_count.saturating_sub(MAX_REQUEST_IDENTITIES) } else { 0 };
     w.count(identity_count - evicted)?;
-    if version == 3 {
-        // Preserve the previous canonical representation while validating a v3 source.
-        let identities = parts.identities.iter().skip(evicted).copied().chain(parts.added_identity).collect::<BTreeSet<_>>();
-        for identity in identities { w.raw(&identity)?; }
-    } else {
-        for identity in parts.identities.iter().skip(evicted) { w.raw(identity)?; }
-        if let Some(identity) = parts.added_identity { w.raw(&identity)?; }
-    }
+    for identity in parts.identities.iter().skip(evicted) { w.raw(identity)?; }
+    if let Some(identity) = parts.added_identity { w.raw(&identity)?; }
     ctx.checkpoint(w.bytes.len().saturating_add(measured) as u64)?;
     Ok(w.bytes)
 }
 
-fn write_receipt(w: &mut Writer, receipt: &Receipt, version: u32) -> Result<()> {
+fn write_receipt(w: &mut Writer, receipt: &Receipt) -> Result<()> {
         w.string(&receipt.id)?;
         w.raw(&receipt.fingerprint)?;
         write_head(w, receipt.head)?;
@@ -1028,10 +1085,8 @@ fn write_receipt(w: &mut Writer, receipt: &Receipt, version: u32) -> Result<()> 
             for vertex in &result.vertices {
                 w.u64(vertex.0)?;
             }
-            if version >= 2 {
-                w.count(result.metrics.len())?;
-                for (name, value) in &result.metrics { w.string(name)?; w.u64(*value as u64)?; }
-            }
+            w.count(result.metrics.len())?;
+            for (name, value) in &result.metrics { w.string(name)?; w.u64(*value as u64)?; }
         }
     Ok(())
 }
@@ -1116,7 +1171,7 @@ fn execute_with(
         (changes_vertices || state.objects.get(name).is_some_and(|m| count < m.vertices().len())).then_some(name)
     ).collect::<BTreeSet<_>>();
     let color_source_bytes=state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|n.len()+m.memory_bytes()+128).sum::<usize>();
-    if accounted&&color_source_bytes.saturating_add(state.memory_bytes())>execution_budget{return Err(Error::Budget("vertex color provenance snapshot"));}
+    if accounted{let needed=color_source_bytes.saturating_add(state.memory_bytes());if needed>execution_budget{return Err(Error::WorkingBytes{what:"vertex color provenance snapshot",needed,limit:execution_budget});}}
     let color_sources = {
         let _clone = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Clone);
         if colored_objects.is_empty(){None}else{Some(state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())}
@@ -1134,7 +1189,7 @@ fn execute_with(
             let pinned = state.memory_bytes().saturating_sub(target).saturating_add(color_source_bytes);
             ctx.limits.max_bytes = execution_budget
                 .checked_sub(pinned)
-                .ok_or(Error::Budget("candidate working bytes"))?;
+                .ok_or(Error::WorkingBytes { what: "candidate working bytes", needed: pinned, limit: execution_budget })?;
         }
         ctx.checkpoint(1)?;
         match op {
@@ -1152,6 +1207,7 @@ fn execute_with(
             }
             Operation::Construction(op) => {
                 out.push(op.apply_cached_in_scene(&mut state.objects, &state.scene, limits, ctx, &mut construction_cache)?);
+                if matches!(op.kind, crate::Construction::Decal { .. }) { state.scene.paint.insert(op.object.clone()); }
                 continue;
             }
             Operation::Rig(op) => {
@@ -1342,6 +1398,7 @@ fn execute_with(
                 state.scene.modifiers.remove(object);
                 state.scene.lods.remove(object);
                 state.scene.colliders.remove(object);
+                state.scene.paint.remove(object);
                 state.surface.vertex_colors.retain(|(name,_),_| name != object);
                 // A replacement with the same name is a new object, even if
                 // its mesh allocator happens to reuse the old element IDs.
@@ -1458,8 +1515,9 @@ fn execute_with(
         out.push(result);
     }
     let _validate = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Validate);
-    if state.memory_bytes() > execution_budget {
-        return Err(Error::Budget("candidate bytes"));
+    let needed = state.memory_bytes();
+    if needed > execution_budget {
+        return Err(Error::WorkingBytes { what: "candidate bytes", needed, limit: execution_budget });
     }
     ctx.limits.max_bytes = execution_budget;
     if let Some(before) = color_sources { state.surface.reconcile(&before, &state.objects, limits, ctx)?; }
@@ -1497,7 +1555,7 @@ fn texture_admission(
         .saturating_mul(16)
         .saturating_add(encoded.saturating_mul(2));
     if working > ctx.limits.max_bytes {
-        Err(Error::Budget("texture working bytes"))
+        Err(Error::WorkingBytes { what: "texture working bytes", needed: working, limit: ctx.limits.max_bytes })
     } else {
         Ok(())
     }
@@ -1545,7 +1603,7 @@ fn read_head(r: &mut Reader) -> Result<Head> {
         content: r.raw(32)?.try_into().unwrap(),
     })
 }
-// Serialize the checkpoint exactly as a version 2 source does and measure it.
+// Measure the checkpoint using the model source encoding.
 // The measured section stands in for the checkpoint when a transaction bounds
 // the source it would produce, so this is the single source of that measure.
 fn checkpoint_source_measure(state:&State,limits:&Limits,ctx:&mut mesh::Context)->Result<(Vec<u8>,SourceMeasure)>{
@@ -1561,7 +1619,7 @@ fn checkpoint_load_work(state:&State,limits:&Limits,cancelled:Option<&dyn Fn()->
     let mut ctx=mesh::Context::new(limits.mesh.clone(),cancelled);
     let (bytes,source)=checkpoint_source_measure(state,limits,&mut ctx)?;
     let mut reader=Reader::new(&bytes);
-    read_state(&mut reader,limits,&mut ctx,2)?;reader.end()?;
+    read_state(&mut reader,limits,&mut ctx)?;reader.end()?;
     Ok((ctx.work_used(),source))
 }
 fn state_hash(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<[u8; 32]> {
@@ -1657,7 +1715,7 @@ fn write_state(
     }
     Ok(())
 }
-fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context, version:u32) -> Result<State> {
+fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context) -> Result<State> {
     let mut state = State::default();
     for _ in 0..r.count(32)? {
         let id = r.u32()?;
@@ -1696,23 +1754,21 @@ fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context, version:
             return Err(Error::Corrupt("duplicate animation clip"));
         }
     }
-    if version >= 2 {
-        if r.raw(6)? != b"MPEXT\0" { return Err(Error::Corrupt("state extension marker")); }
-        let mut seen = BTreeSet::new();
-        for _ in 0..r.count(8)? {
-            let name = r.string()?;
-            if !seen.insert(name.clone()) { return Err(Error::Corrupt("duplicate state extension")); }
-            let mut payload = Reader::new(r.blob()?);
-            match name.as_str() {
-                "selections" => state.selections=crate::SelectionState::read(&mut payload,limits)?,
-                "rig" => state.rig = crate::RigState::read(&mut payload, limits)?,
-                "scene" => state.scene = crate::SceneState::read(&mut payload, limits)?,
-                "surface" => state.surface = crate::surface::read_surface(&mut payload, limits)?,
-                "soft_body" => state.soft_body = Some(crate::soft_body::read(&mut payload, limits)?),
-                _ => return Err(Error::Corrupt("unsupported state extension")),
-            }
-            payload.end()?;
+    if r.raw(6)? != b"MPEXT\0" { return Err(Error::Corrupt("state extension marker")); }
+    let mut seen = BTreeSet::new();
+    for _ in 0..r.count(8)? {
+        let name = r.string()?;
+        if !seen.insert(name.clone()) { return Err(Error::Corrupt("duplicate state extension")); }
+        let mut payload = Reader::new(r.blob()?);
+        match name.as_str() {
+            "selections" => state.selections=crate::SelectionState::read(&mut payload,limits)?,
+            "rig" => state.rig = crate::RigState::read(&mut payload, limits)?,
+            "scene" => state.scene = crate::SceneState::read(&mut payload, limits)?,
+            "surface" => state.surface = crate::surface::read_surface(&mut payload, limits)?,
+            "soft_body" => state.soft_body = Some(crate::soft_body::read(&mut payload, limits)?),
+            _ => return Err(Error::Corrupt("unsupported state extension")),
         }
+        payload.end()?;
     }
     state.selections.validate(&state, limits)?;
     validate_surface_refs(&state)?;
@@ -2269,6 +2325,13 @@ mod history_budget_tests {
                 object: "body".into(), vertices: vec![vertices[i % vertices.len()]], color: [0.8, 0.6, 0.4, 1.], opacity: 0.125,
             }));
         }
+        operations.push(Operation::Construction(crate::ConstructionOperation {
+            object: "stripe".into(),
+            kind: crate::Construction::Decal { material: 0, decal: crate::Decal {
+                target: "body".into(), center: [0., 0., 0.5], normal: [0., 0., 1.],
+                up: [0., 1., 0.], size: [0.3, 0.2], depth: 0.1, offset: 0.0015,
+            } },
+        }));
         let mut reference = Document::new(limits.clone()).unwrap();
         for (i, batch) in operations.chunks(64).enumerate() {
             apply(&mut reference, &format!("program-{}", i + 1), batch.to_vec()).unwrap();
@@ -2279,7 +2342,16 @@ mod history_budget_tests {
         assert_eq!(built.document.state, reference.state, "unlogged batches preserve authored state");
         assert_eq!(built.document.head(), reference.head(), "content and generation remain stable");
         assert_eq!(built.compiled.glb, reference.compile(None).unwrap().glb, "render bytes remain identical");
+        let glb = makepad_gltf::parse_glb_bytes(&built.compiled.glb).unwrap();
+        let paint = |name: &str| glb.document.nodes_slice().iter().find(|n| n.name.as_deref() == Some(name))
+            .unwrap().extras.as_ref().and_then(|e| e.key("MAKEPAD_paint")).and_then(|v| v.as_bool());
+        assert_eq!(paint("stripe"), Some(true), "a decal construction exports paint even without a builder parent");
+        assert_eq!(paint("body"), None, "vertex colours alone do not mark a mesh as a decal");
         let source = built.document.to_bytes(None).unwrap();
+        // A reopen under too small a limit says what it needed: here, its source.
+        let tight = Limits { mesh: mesh::Limits { max_bytes: source.len() - 1 }, ..limits.clone() };
+        assert_eq!(Document::from_bytes(&source, tight, None).unwrap_err(),
+            Error::WorkingBytes { what: "decode working bytes", needed: source.len(), limit: source.len() - 1 }, "a refused reopen names its step and its numbers");
         let mut reopened = Document::from_bytes(&source, limits.clone(), None).unwrap();
         assert_eq!(reopened.head(), built.document.head());
         assert_eq!(reopened.state, built.document.state);
@@ -2288,6 +2360,14 @@ mod history_budget_tests {
         apply(&mut reopened, "after-build", vec![op]).unwrap();
         reopened.undo(reopened.head(), None).unwrap();
         assert_eq!(reopened.state, built.document.state, "the final checkpoint supports later editing");
+        apply(&mut reopened, "copy-paint", vec![
+            Operation::Scene(crate::SceneOperation::Instance { object: "linked".into(), source: "stripe".into(), transform: Default::default() }),
+            Operation::Scene(crate::SceneOperation::Duplicate { object: "copy".into(), source: "linked".into() }),
+            Operation::DeleteObject { object: "linked".into() },
+            Operation::DeleteObject { object: "stripe".into() },
+            Operation::Cube { object: "stripe".into(), size: [1.; 3] },
+        ]).unwrap();
+        assert_eq!(reopened.scene().paint, BTreeSet::from(["copy".into()]), "paint survives copying and clears on deletion and name reuse");
 
         let bad = vec![program[0].clone(), crate::ProgramOp::Op(Operation::Scene(crate::SceneOperation::Node {
             object: "body".into(), node: crate::SceneNode { parent: Some("missing".into()), ..Default::default() },
@@ -2320,6 +2400,62 @@ mod history_budget_tests {
             assert_eq!(actual, expected);
             let bits = |surface: &crate::SurfaceState| surface.vertex_colors.iter().map(|(key, color)| (key.clone(), color.map(f64::to_bits))).collect::<Vec<_>>();
             assert_eq!(bits(&actual), bits(&expected), "every vertex color bit is preserved");
+        }
+    }
+    #[test]
+    fn a_last_use_compiles_its_distance_levels_beside_one_copy_of_the_state_and_again_after_a_refusal() {
+        // A dense part whose undo history was compacted into its checkpoint (a full copy of the
+        // state, as a built program's document holds it), then distance levels and a compile, as
+        // a host derives them after saving the full detail.
+        let mut doc = Document::new(Limits::default()).unwrap();
+        let sphere = Operation::sphere("body", 1.0, 48, 32, true, doc.limits()).unwrap();
+        apply(&mut doc, "shape", vec![sphere]).unwrap();
+        doc.checkpoint(doc.head()).unwrap();
+        let levels = || vec![Operation::Scene(crate::SceneOperation::Lods { object: "body".into(), levels: vec![
+            crate::LodLevel { target_faces: 400, max_error: 0.01, distance: 10. },
+            crate::LodLevel { target_faces: 0, max_error: 0.1, distance: 40. },
+        ] })];
+        let state = doc.state.memory_bytes();
+        let mut edited = doc.clone();
+        apply(&mut edited, "levels", levels()).unwrap();
+        let product = edited.compile_with_cache(&mut crate::CompileCache::default(), None).unwrap();
+        // Under 4.5 x the state: the state, its evaluated meshes and their copies fit (4 x) ...
+        let limit = state * 9 / 2;
+        let mut capped = doc.clone();
+        capped.limits.mesh.max_bytes = limit;
+        let mut last = capped.clone().into_last_use();
+        last.set_memory_limit(state * 3);
+        last.apply("levels", levels(), None).expect("the last use's edit holds the state and one candidate (2 x)");
+        match last.compile_with_cache(&mut crate::CompileCache::default(), None) {
+            Err(Error::WorkingBytes { what, needed, limit: l }) => {
+                assert_eq!((what, l), ("document working bytes", state * 3), "the refusal names its step and the last use's limit");
+                assert!(needed > l && needed <= limit, "the last use's compile needs about 4 x the state: {needed} for {state}");
+            }
+            other => panic!("the last use's compile is over 3 x the state: {:?}", other.map(|p| p.glb.len())),
+        }
+        // The scene's evaluation refuses with its numbers too: three copies of the part's mesh.
+        last.set_memory_limit(state * 5 / 2);
+        match last.compile_with_cache(&mut crate::CompileCache::default(), None) {
+            Err(Error::WorkingBytes { what, needed, limit: l }) => {
+                assert_eq!((what, l), ("modifier source copies", state * 5 / 2), "the evaluation's refusal names its step and the limit");
+                assert!(needed > l && needed <= state * 3, "the evaluation needs three copies of the mesh: {needed} for {state}");
+            }
+            other => panic!("the evaluation is over 2.5 x the state: {:?}", other.map(|p| p.glb.len())),
+        }
+        last.set_memory_limit(limit);
+        let last = last.compile_with_cache(&mut crate::CompileCache::default(), None)
+            .expect("a refused last use compiles once its limit allows it, beside one copy of the state");
+        assert!(last.glb == product.glb, "the last use makes the product an edit and a compile make");
+        // ... and the same edit beside the checkpoint is refused at the compile (5 x), saying by
+        // how much: the compile's copy holds none of the meshes it replaces (6 x before).
+        let mut beside = capped.clone();
+        apply(&mut beside, "levels", levels()).unwrap();
+        match beside.compile_with_cache(&mut crate::CompileCache::default(), None) {
+            Err(Error::WorkingBytes { needed, limit: l, .. }) => {
+                assert_eq!(l, limit, "the refusal names the limit");
+                assert!(needed > limit && needed < state * 11 / 2, "the compile beside a checkpoint needs about 5 x the state, not 6 x: {needed} for {state}");
+            }
+            other => panic!("the compile beside the checkpoint is over 4.5 x the state: {:?}", other.map(|p| p.glb.len())),
         }
     }
     #[test]
@@ -2360,10 +2496,11 @@ mod history_budget_tests {
         assert_eq!(doc.log_source_bytes, doc.log_source.iter().sum::<usize>());
         assert_eq!(source.len(), 68 + doc.checkpoint_source.bytes + doc.log_source_bytes + doc.receipts.source_bytes + doc.request_order.len() * 32);
         let saved = doc.head().content;
-        let legacy = doc.encode_version(&mut mesh::Context::default(), 3).unwrap();
-        let migrated = Document::from_bytes(&legacy, limits.clone(), None).unwrap();
-        assert_eq!(migrated.head(), doc.head());
-        assert_eq!(&migrated.to_bytes(None).unwrap()[8..12], &SOURCE_VERSION.to_le_bytes());
+        let mut legacy = source.clone();
+        legacy[8..12].copy_from_slice(&3u32.to_le_bytes());
+        let error = Document::from_bytes(&legacy, limits.clone(), None).unwrap_err();
+        assert_eq!(error, Error::UnsupportedVersion(3));
+        assert!(error.to_string().contains("model source version 3 is not supported"), "{error}");
         let retained = doc.history_position().0;
         for _ in 0..retained {
             doc.undo(doc.head(), None).unwrap();

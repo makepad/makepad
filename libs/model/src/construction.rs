@@ -49,8 +49,11 @@ impl ConstructionKey {
     }
 }
 struct CachedConstruction { remaining: usize, generated: Option<(Mesh, u64)> }
-/// Repeated factories in one transaction, with no scene-dependent inputs.
-pub(crate) struct ConstructionCache { shapes: BTreeMap<ConstructionKey, CachedConstruction> }
+/// Used in operation order for exactly one transaction.
+pub(crate) struct ConstructionCache {
+    shapes: BTreeMap<ConstructionKey, CachedConstruction>,
+    decal_targets: BTreeMap<String, decal::DecalTarget>,
+}
 impl ConstructionCache {
     pub(crate) fn new(ops: &[crate::Operation]) -> Self {
         let mut shapes = BTreeMap::<ConstructionKey, CachedConstruction>::new();
@@ -62,7 +65,7 @@ impl ConstructionCache {
             }
         }
         shapes.retain(|_, cached| cached.remaining > 1);
-        Self { shapes }
+        Self { shapes, decal_targets: decal::DecalTarget::plan(ops) }
     }
     fn generate(&mut self, shape: &Shape, material: u32, ctx: &mut Context<'_>) -> Result<Mesh> {
         let Some(key) = ConstructionKey::new(shape, material) else { return shape.generate(material, ctx) };
@@ -112,7 +115,12 @@ impl ConstructionOperation {
             },
             Construction::Voxel{source,resolution}=>voxel_mesh(&world_source(objects,scene,source,ctx)?,*resolution,ctx)?,
             Construction::Shape{shape,material}=>match cache{Some(cache)=>cache.generate(shape,*material,ctx)?,None=>shape.generate(*material,ctx)?},
-            Construction::Decal{decal,material}=>decal.generate(&world_source(objects,scene,&decal.target,ctx)?,*material,ctx)?,
+            Construction::Decal { decal, material } => {
+                let (source, frame) = construction_source(objects, scene, &decal.target)?;
+                let mut single = decal::DecalTarget::default();
+                let target = cache.and_then(|c| c.decal_targets.get_mut(&decal.target)).unwrap_or(&mut single);
+                target.project(source, frame, decal, *material, limits, ctx)?
+            }
         };
         ctx.checkpoint(0)?;let mut result=OperationResult{object:self.object.clone(),faces:mesh.faces().iter().map(|f|f.id).collect(),vertices:mesh.vertices().iter().map(|v|v.id).collect(),..Default::default()};
         result.metrics.insert("faces".into(),mesh.faces().len());result.metrics.insert("vertices".into(),mesh.vertices().len());objects.insert(self.object.clone(),mesh);Ok(result)
@@ -122,14 +130,21 @@ impl ConstructionOperation {
 // are baked to world space. Direct mesh operations retain source topology;
 // linked instances and unapplied modifiers require explicit make_unique first.
 fn world_source(objects:&BTreeMap<String,Mesh>,scene:&crate::SceneState,name:&str,ctx:&mut Context<'_>)->Result<Mesh>{
+    let (source, frame) = construction_source(objects, scene, name)?;
+    bake_source(source, frame, ctx)
+}
+fn construction_source<'a>(objects:&'a BTreeMap<String,Mesh>,scene:&crate::SceneState,name:&str)->Result<(&'a Mesh,crate::transform::Matrix4)>{
     let source=objects.get(name).ok_or_else(||Error::MissingObject(name.into()))?;
     if scene.nodes.get(name).is_some_and(|n|n.linked_to.is_some())||scene.modifiers.get(name).is_some_and(|m|m.iter().any(|m|m.enabled)){
         return Err(Error::Invalid("make construction sources unique and apply modifiers first"));
     }
+    Ok((source, scene.world_matrix(name)?))
+}
+fn bake_source(source:&Mesh,frame:crate::transform::Matrix4,ctx:&mut Context<'_>)->Result<Mesh>{
     ctx.checkpoint(0)?;
     if source.memory_bytes().saturating_mul(3)>ctx.limits.max_bytes{return Err(Error::Budget("construction frame copy"));}
     let mut source=source.clone();let vertices=source.vertices().iter().map(|v|v.id).collect::<Vec<_>>();
-    source.transform(&vertices,scene.world_matrix(name)?,ctx)?;Ok(source)
+    source.transform(&vertices,frame,ctx)?;Ok(source)
 }
 fn name(v:&str,_l:&Limits)->Result<()>{if v.is_empty()||v.chars().any(char::is_control){Err(Error::Invalid("construction object name"))}else{Ok(())}}
 fn add(a:[f64;3],b:[f64;3])->[f64;3]{std::array::from_fn(|d|a[d]+b[d])}

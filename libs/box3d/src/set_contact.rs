@@ -4,7 +4,7 @@ use crate::box_set::{box_set_get, exterior_exit, exterior_normal, transform_box_
 use crate::aabb::perimeter;
 use crate::dynamic_tree::{dynamic_tree_get_height, is_leaf};
 use crate::constants::{linear_slop, max_aabb_margin, mesh_rest_offset, speculative_distance, MAX_MANIFOLD_POINTS};
-use crate::contact::{mix_friction, mix_restitution, Contact, ContactCache, Manifolds};
+use crate::contact::{mix_friction, mix_restitution, mix_yield_force, Contact, ContactCache, Manifolds};
 use crate::convex_manifold::{collide_hull_and_capsule, collide_hull_and_sphere, collide_hulls};
 use crate::core::NULL_INDEX;
 use crate::manifold::{make_feature_id, FeatureOwner};
@@ -16,7 +16,7 @@ use crate::recording::RecBuffer;
 use crate::recording_replay::RecCursor;
 use crate::shape::{get_shape_materials, Shape, ShapeGeometry};
 use crate::types::{
-    HullData, LocalManifold, LocalManifoldPoint, Manifold, SATCache, SeparatingFeature, TreeNode, TriangleFeature,
+    HullData, LocalManifold, LocalManifoldPoint, Manifold, SATCache, SeparatingFeature, SurfaceMaterial, TreeNode, TriangleFeature,
     ALL_FLAT_EDGES, DEFAULT_MASK_BITS, FLAT_EDGE1, FLAT_EDGE2, FLAT_EDGE3,
 };
 
@@ -52,6 +52,7 @@ struct Patch {
     materials: [usize; 2],
     friction: f32,
     restitution: f32,
+    yield_force: f32,
     rolling_resistance: f32,
     tangent_velocity: Vec3,
 }
@@ -145,6 +146,7 @@ impl SetContact {
             }
             buf.w_f32(p.friction);
             buf.w_f32(p.restitution);
+            buf.w_f32(p.yield_force);
             buf.w_f32(p.rolling_resistance);
             buf.w_vec3(p.tangent_velocity);
         }
@@ -219,6 +221,7 @@ impl SetContact {
                 materials: [r.r_u32() as usize, r.r_u32() as usize],
                 friction: r.r_f32(),
                 restitution: r.r_f32(),
+                yield_force: r.r_f32(),
                 rolling_resistance: r.r_f32(),
                 tangent_velocity: r.r_vec3(),
             });
@@ -231,8 +234,17 @@ impl SetContact {
         (patch.friction, patch.restitution, patch.rolling_resistance)
     }
 
+    pub(crate) fn material_indices(&self, manifold: usize) -> [usize; 2] {
+        self.patches[manifold].materials
+    }
+
     pub(crate) fn revisions_match(&self, a: &Shape, b: &Shape) -> bool {
         self.revisions == [revision(a), revision(b)]
+    }
+
+    pub(crate) fn invalidate_surface_query(&mut self) {
+        // Cached triangle indices were clamped to the mesh's previous material count.
+        self.query_bounds = None;
     }
 
     pub(crate) fn point_children(&self, a: &Shape, b: &Shape, manifold: usize, point: usize) -> Option<(i32, i32)> {
@@ -1200,21 +1212,14 @@ fn write_manifolds(
     let materials_a = get_shape_materials(a);
     let materials_b = get_shape_materials(b);
     let rest = if in_a { 0.0 } else { mesh_rest_offset() };
-    let mut friction = 0.0;
-    let mut restitution = 0.0;
     let mut rolling = 0.0;
-    let mut tangent = Vec3::ZERO;
-    let mut total = 0usize;
+    let mut mix = PatchMaterialMix::default();
 
     for (m, cluster) in scratch.clusters[..count].iter().enumerate() {
         let mut patch = cluster.patch;
         let ma = materials_a[patch.materials[0]];
         let mb = materials_b[patch.materials[1]];
-        patch.friction = mix_friction(world, ma.friction, ma.user_material_id, mb.friction, mb.user_material_id);
-        patch.restitution =
-            mix_restitution(world, ma.restitution, ma.user_material_id, mb.restitution, mb.user_material_id);
-        patch.tangent_velocity =
-            sub(rotate_vector(xf_a.q, ma.tangent_velocity), rotate_vector(xf_b.q, mb.tangent_velocity));
+        mix.add(world, &mut patch, ma, mb, xf_a.q, xf_b.q, cluster.points.len());
         let resistance =
             if in_a { max_float(ma.rolling_resistance, mb.rolling_resistance) } else { mb.rolling_resistance };
         let manifold = &mut contact.manifolds[m];
@@ -1260,18 +1265,63 @@ fn write_manifolds(
         // the same reduced points that carry this manifold's normal load.
         patch.rolling_resistance /= n;
         cache.patches.push(patch);
-        friction += patch.friction * n;
-        restitution += patch.restitution * n;
-        tangent = mul_add(tangent, n, patch.tangent_velocity);
-        total += cluster.points.len();
     }
-    if total > 0 {
-        let inv = 1.0 / total as f32;
-        contact.friction = friction * inv;
-        contact.restitution = restitution * inv;
-        contact.tangent_velocity = mul_sv(inv, tangent);
-        contact.rolling_resistance = rolling * inv;
+    if mix.points > 0 {
+        contact.rolling_resistance = rolling * (1.0 / mix.points as f32);
     }
+    mix.apply(contact);
+}
+
+// Keep the point-weighted contact coefficients and the individual patches in
+// sync, both at manifold creation and when either material changes at rest.
+#[derive(Default)]
+struct PatchMaterialMix {
+    points: usize,
+    friction: f32,
+    restitution: f32,
+    yield_force: f32,
+    tangent: Vec3,
+}
+
+impl PatchMaterialMix {
+    fn add(
+        &mut self, world: &World, patch: &mut Patch, a: SurfaceMaterial, b: SurfaceMaterial,
+        rotation_a: Quat, rotation_b: Quat, points: usize,
+    ) {
+        patch.friction = mix_friction(world, a.friction, a.user_material_id, b.friction, b.user_material_id);
+        patch.restitution = mix_restitution(world, a.restitution, a.user_material_id, b.restitution, b.user_material_id);
+        patch.yield_force = mix_yield_force(a.yield_force, b.yield_force);
+        patch.tangent_velocity =
+            sub(rotate_vector(rotation_a, a.tangent_velocity), rotate_vector(rotation_b, b.tangent_velocity));
+        let n = points as f32;
+        self.friction += patch.friction * n;
+        self.restitution += patch.restitution * n;
+        self.yield_force = mix_yield_force(self.yield_force, patch.yield_force);
+        self.tangent = mul_add(self.tangent, n, patch.tangent_velocity);
+        self.points += points;
+    }
+
+    fn apply(&self, contact: &mut Contact) {
+        if self.points > 0 {
+            let inv = 1.0 / self.points as f32;
+            contact.friction = self.friction * inv;
+            contact.restitution = self.restitution * inv;
+            contact.yield_force = self.yield_force;
+            contact.tangent_velocity = mul_sv(inv, self.tangent);
+        }
+    }
+}
+
+pub(crate) fn remix_recycled_patches(world: &World, contact: &mut Contact, xf_a: WorldTransform, xf_b: WorldTransform) {
+    let a = get_shape_materials(&world.shapes[contact.shape_id_a as usize]);
+    let b = get_shape_materials(&world.shapes[contact.shape_id_b as usize]);
+    let patches = &mut contact.set_contact.as_mut().unwrap().patches;
+    let mut mix = PatchMaterialMix::default();
+    for (patch, manifold) in patches.iter_mut().zip(&contact.manifolds) {
+        let [i, j] = patch.materials;
+        mix.add(world, patch, a[i], b[j], xf_a.q, xf_b.q, manifold.point_count as usize);
+    }
+    mix.apply(contact);
 }
 
 fn child_inner_radius(set: &BoxSetData, slot: i32) -> f32 {
@@ -1429,6 +1479,22 @@ pub(crate) fn compute_set_manifolds(
 mod tests {
     use super::*;
     use crate::box_set::{create_box_set, SetBox};
+    use crate::contact::{has_yield_force, yield_impulse_share};
+
+    #[test]
+    fn yield_budget_handles_rigid_and_unrepresentable_shares() {
+        let h = 1.0 / 256.0;
+        for force in [0.0, -0.0, -5.0, f32::NAN, f32::INFINITY] {
+            assert!(!has_yield_force(mix_yield_force(force, force), h), "force {force} must be rigid");
+        }
+        let tiny = f32::from_bits(1);
+        assert!(has_yield_force(tiny, h), "a finite yielding surface still participates");
+        assert_eq!(yield_impulse_share(tiny, h, 4).to_bits(), 0, "no representable impulse fits");
+        assert_eq!(mix_yield_force(f32::NAN, 2000.0), 2000.0, "a NaN side is rigid and defers to the other");
+        assert_eq!(mix_yield_force(-0.0, 2000.0), 2000.0, "a -0 side is rigid and defers to the other");
+        assert_eq!(mix_yield_force(3000.0, 2000.0), 2000.0, "two yielding sides give at the smaller force");
+        assert_eq!(yield_impulse_share(24_000.0, h, 1), 24_000.0 * h, "a finite force gives force times the substep");
+    }
 
     fn seeded_fractions(mut seed: u32) -> impl FnMut() -> f32 {
         move || {

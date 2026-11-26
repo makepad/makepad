@@ -64,7 +64,7 @@ impl Document {
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
         let meshes=self.scene().evaluated_meshes(&self.state,&mut ctx)?;
         let size=meshes.values().map(|m|m.memory_bytes()).sum::<usize>();
-        let mut draft=self.render_copy(size.saturating_mul(4))?;
+        let mut draft=self.evaluation_copy(size.saturating_mul(4))?;
         let mut palette=Vec::new();let mut joints=Vec::new();
         let mut movements=BTreeMap::<String,Matrix4>::new();
         match pose{

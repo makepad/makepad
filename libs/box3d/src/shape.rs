@@ -48,7 +48,7 @@ pub struct Shape {
     pub local_centroid: Vec3,
 
     pub material: SurfaceMaterial,
-    /// Multi material meshes and compounds own an array; empty means "use `material`".
+    /// Indexed material table. An empty vector uses `material` as slot zero.
     pub materials: Vec<SurfaceMaterial>,
 
     pub filter: Filter,
@@ -119,8 +119,7 @@ impl Shape {
     }
 }
 
-/// A single material shape keeps its material inline. Multi material meshes and
-/// compounds own an array. Reach the materials the same way for both.
+/// Access the material slots whether slot zero is inline or part of a table.
 #[inline]
 pub fn get_shape_materials(shape: &Shape) -> &[SurfaceMaterial] {
     if !shape.materials.is_empty() {
@@ -483,6 +482,7 @@ fn create_shape_internal(
             shape.materials = Vec::new();
         }
     }
+    world.may_yield |= get_shape_materials(&world.shapes[shape_id as usize]).iter().any(|m| m.yield_force > 0.0);
 
     if body_set_index != DISABLED_SET {
         let proxy_type = body_type;
@@ -541,6 +541,7 @@ fn create_shape(
     b3_assert!(is_valid_float(def.density) && def.density >= 0.0);
     b3_assert!(is_valid_float(def.base_material.friction) && def.base_material.friction >= 0.0);
     b3_assert!(is_valid_float(def.base_material.restitution) && def.base_material.restitution >= 0.0);
+    b3_assert!(is_valid_float(def.base_material.yield_force) && def.base_material.yield_force >= 0.0);
 
     // C: b3GetUnlockedWorld returns NULL when locked.
     if world.locked {
@@ -1418,7 +1419,10 @@ pub fn destroy_shape_proxy(world: &mut World, shape_id: i32) {
 fn destroy_shape_allocation_for_shape_change(world: &mut World, shape_id: i32) {
     let hull = match &world.shapes[shape_id as usize].geom {
         ShapeGeometry::Hull(hull) => Some(Arc::clone(hull)),
-        ShapeGeometry::BoxSet(_) => None,
+        ShapeGeometry::BoxSet(_) => {
+            crate::recording::with_recording(world, crate::recording::Recording::mark_box_set_unsupported);
+            None
+        }
         _ => None,
     };
 
@@ -1719,6 +1723,34 @@ pub fn shape_get_density(world: &World, shape_id: ShapeId) -> f32 {
     world.shapes[shape_idx as usize].density
 }
 
+/// A write visits only the owning body's contact list. Wake sleeping contacts
+/// too: a softer support can give under a body that was at rest.
+fn invalidate_material_contacts(world: &mut World, shape_id: i32, reuse_set_patches: bool) {
+    let body = world.shapes[shape_id as usize].body_id;
+    let mut key = world.bodies[body as usize].head_contact_key;
+    while key != NULL_INDEX {
+        let contact = &mut world.contacts[(key >> 1) as usize];
+        key = contact.edges[(key & 1) as usize].next_key;
+        if contact.shape_id_a != shape_id && contact.shape_id_b != shape_id {
+            continue;
+        }
+        if reuse_set_patches && contact.set_contact.is_some() {
+            contact.flags |= crate::contact::SET_MATERIALS_DIRTY;
+        } else {
+            contact.flags &= !crate::contact::RELATIVE_TRANSFORM_VALID;
+            if matches!(world.shapes[shape_id as usize].geom, ShapeGeometry::Mesh(_)) {
+                if let Some(set) = &mut contact.set_contact {
+                    set.invalidate_surface_query();
+                }
+            }
+        }
+        let set_index = contact.set_index;
+        if set_index >= FIRST_SLEEPING_SET {
+            crate::solver_set::wake_solver_set(world, set_index);
+        }
+    }
+}
+
 pub fn shape_set_friction(world: &mut World, shape_id: ShapeId, friction: f32) {
 
     crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetFriction, |b| {
@@ -1729,7 +1761,12 @@ pub fn shape_set_friction(world: &mut World, shape_id: ShapeId, friction: f32) {
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
     b3_assert!(shape.shape_type() != ShapeType::Compound);
-    get_shape_materials_mut(shape)[0].friction = friction;
+    let slot = &mut get_shape_materials_mut(shape)[0];
+    if slot.friction.to_bits() == friction.to_bits() {
+        return;
+    }
+    slot.friction = friction;
+    invalidate_material_contacts(world, shape_idx, true);
 }
 
 pub fn shape_get_friction(world: &World, shape_id: ShapeId) -> f32 {
@@ -1747,7 +1784,12 @@ pub fn shape_set_restitution(world: &mut World, shape_id: ShapeId, restitution: 
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
     b3_assert!(shape.shape_type() != ShapeType::Compound);
-    get_shape_materials_mut(shape)[0].restitution = restitution;
+    let slot = &mut get_shape_materials_mut(shape)[0];
+    if slot.restitution.to_bits() == restitution.to_bits() {
+        return;
+    }
+    slot.restitution = restitution;
+    invalidate_material_contacts(world, shape_idx, true);
 }
 
 pub fn shape_get_restitution(world: &World, shape_id: ShapeId) -> f32 {
@@ -1761,15 +1803,40 @@ pub fn shape_set_surface_material(world: &mut World, shape_id: ShapeId, surface_
         b.w_shapeid(shape_id);
         b.w_material(&surface_material);
     });
-    b3_assert!(is_valid_float(surface_material.friction) && surface_material.friction >= 0.0);
-    b3_assert!(is_valid_float(surface_material.restitution) && surface_material.restitution >= 0.0);
-    b3_assert!(is_valid_float(surface_material.rolling_resistance) && surface_material.rolling_resistance >= 0.0);
-    b3_assert!(is_valid_vec3(surface_material.tangent_velocity));
+    set_material(world, shape_id, surface_material, 0);
+}
 
+pub(crate) fn is_valid_surface_material(m: SurfaceMaterial) -> bool {
+    is_valid_float(m.friction) && m.friction >= 0.0
+        && is_valid_float(m.restitution) && m.restitution >= 0.0
+        && is_valid_float(m.yield_force) && m.yield_force >= 0.0
+        && is_valid_float(m.rolling_resistance) && m.rolling_resistance >= 0.0
+        && is_valid_vec3(m.tangent_velocity)
+}
+
+fn set_material(world: &mut World, shape_id: ShapeId, surface_material: SurfaceMaterial, index: i32) {
+    b3_assert!(is_valid_surface_material(surface_material));
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
     b3_assert!(shape.shape_type() != ShapeType::Compound);
-    get_shape_materials_mut(shape)[0] = surface_material;
+    let slot = &mut get_shape_materials_mut(shape)[index as usize];
+    // Rolling resistance is weighted with each reduced point's geometric radius.
+    let same_rolling = slot.rolling_resistance.to_bits() == surface_material.rolling_resistance.to_bits();
+    if same_rolling
+        && slot.yield_force.to_bits() == surface_material.yield_force.to_bits()
+        && slot.friction.to_bits() == surface_material.friction.to_bits()
+        && slot.restitution.to_bits() == surface_material.restitution.to_bits()
+        && slot.tangent_velocity.x.to_bits() == surface_material.tangent_velocity.x.to_bits()
+        && slot.tangent_velocity.y.to_bits() == surface_material.tangent_velocity.y.to_bits()
+        && slot.tangent_velocity.z.to_bits() == surface_material.tangent_velocity.z.to_bits()
+        && slot.user_material_id == surface_material.user_material_id
+        && slot.custom_color == surface_material.custom_color
+    {
+        return;
+    }
+    *slot = surface_material;
+    world.may_yield |= surface_material.yield_force > 0.0;
+    invalidate_material_contacts(world, shape_idx, same_rolling);
 }
 
 pub fn shape_get_surface_material(world: &World, shape_id: ShapeId) -> SurfaceMaterial {
@@ -1783,17 +1850,33 @@ pub fn shape_get_mesh_material_count(world: &World, shape_id: ShapeId) -> i32 {
 }
 
 pub fn shape_set_mesh_material(world: &mut World, shape_id: ShapeId, surface_material: SurfaceMaterial, index: i32) {
-    b3_assert!(is_valid_float(surface_material.friction) && surface_material.friction >= 0.0);
-    b3_assert!(is_valid_float(surface_material.restitution) && surface_material.restitution >= 0.0);
-    b3_assert!(is_valid_float(surface_material.rolling_resistance) && surface_material.rolling_resistance >= 0.0);
-    b3_assert!(is_valid_vec3(surface_material.tangent_velocity));
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeSetMeshMaterial, |b| {
+        b.w_shapeid(shape_id);
+        b.w_i32(index);
+        b.w_material(&surface_material);
+    });
+    set_material(world, shape_id, surface_material, index);
+}
 
+/// Append one slot to a mesh or box set and return its material index.
+/// Existing indices, including an inline material at index zero, stay valid.
+pub fn shape_append_mesh_material(world: &mut World, shape_id: ShapeId, surface_material: SurfaceMaterial) -> i32 {
+    b3_assert!(is_valid_surface_material(surface_material));
     let shape_idx = get_shape_full_id(world, shape_id);
     let shape = &mut world.shapes[shape_idx as usize];
-
-    b3_assert!(0 <= index && index < shape_material_count(shape));
-    b3_assert!(shape.shape_type() != ShapeType::Compound);
-    get_shape_materials_mut(shape)[index as usize] = surface_material;
+    assert!(matches!(shape.geom, ShapeGeometry::Mesh(_) | ShapeGeometry::BoxSet(_)));
+    let index = shape_material_count(shape);
+    if shape.materials.is_empty() {
+        shape.materials.push(shape.material);
+    }
+    shape.materials.push(surface_material);
+    world.may_yield |= surface_material.yield_force > 0.0;
+    invalidate_material_contacts(world, shape_idx, false);
+    crate::recording::rec_op(world, crate::recording::RecOp::ShapeAppendMeshMaterial, |b| {
+        b.w_shapeid(shape_id);
+        b.w_material(&surface_material);
+    });
+    index
 }
 
 pub fn shape_get_mesh_surface_material(world: &World, shape_id: ShapeId, index: i32) -> SurfaceMaterial {

@@ -2,6 +2,7 @@
 
 use crate::math_functions::{Quat, Transform, Vec3, AABB};
 use crate::types::{Manifold, SATCache, SimplexCache};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const FORCE_GHOST_COLLISIONS: bool = false;
 
@@ -49,6 +50,8 @@ pub const SIM_TUBE_CONTACT: u32 = 0x01000000;
 /// PORT EXTENSION: a sphere against a distance field, whose manifold is swept along the step's motion.
 pub const SIM_FIELD_CONTACT: u32 = 0x02000000;
 pub const SIM_SET_CONTACT: u32 = 0x04000000;
+/// The patch indices and rolling radii are reusable, but their materials must be mixed again.
+pub(crate) const SET_MATERIALS_DIRTY: u32 = 0x08000000;
 
 /// These contact types require the scalar solver in every graph color.
 #[inline]
@@ -223,6 +226,8 @@ pub struct Contact {
     pub mesh_contact: MeshContact,
 
     pub restitution: f32,
+    /// Mixed yield force in newtons, 0 is rigid.
+    pub yield_force: f32,
     pub rolling_resistance: f32,
     pub tangent_velocity: Vec3,
 
@@ -237,7 +242,42 @@ pub struct Contact {
     pub manifolds: Manifolds,
 }
 
+/// Manifolds against the same body share the allowance of one yielding material slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct YieldKey {
+    bodies: (i32, i32),
+    shape: i32,
+    material: usize,
+}
+
 impl Contact {
+    pub(crate) fn manifold_yield(&self, shapes: &[Shape], manifold: usize, h: f32) -> Option<(YieldKey, f32)> {
+        let indices = match &self.set_contact {
+            Some(set) => set.material_indices(manifold),
+            None if self.yield_force == 0.0 => return None,
+            None => [0, 0],
+        };
+        let a = get_shape_materials(&shapes[self.shape_id_a as usize])[indices[0]].yield_force;
+        let b = get_shape_materials(&shapes[self.shape_id_b as usize])[indices[1]].yield_force;
+        // A recycled patch still names its slots. The owner and its force must both come
+        // from the current table, including when a formerly rigid slot starts yielding.
+        let force = if self.set_contact.is_some() { mix_yield_force(a, b) } else { self.yield_force };
+        if !has_yield_force(force, h) {
+            return None;
+        }
+        let (shape, material) = match (a.to_bits() == force.to_bits(), b.to_bits() == force.to_bits()) {
+            (true, true) if self.shape_id_b < self.shape_id_a => (self.shape_id_b, indices[1]),
+            (true, _) => (self.shape_id_a, indices[0]),
+            (_, true) => (self.shape_id_b, indices[1]),
+            // Ordinary mesh, height-field and compound mesh contacts register the surface
+            // as A. A force mixed from its triangles need not match either material zero.
+            (false, false) => (self.shape_id_a, usize::MAX),
+        };
+        let a = self.edges[0].body_id;
+        let b = self.edges[1].body_id;
+        Some((YieldKey { bodies: (a.min(b), a.max(b)), shape, material }, force))
+    }
+
     #[inline]
     pub fn manifold_count(&self) -> i32 {
         self.manifolds.len() as i32
@@ -355,6 +395,44 @@ pub(crate) fn mix_restitution(
         Some(fcn) => fcn(restitution_a, material_a, restitution_b, material_b),
         None => max_float(restitution_a, restitution_b),
     }
+}
+
+static BAD_YIELD_FORCE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// The force at which a contact gives: the minimum over the two sides' non-zero values.
+/// Zero when both sides are rigid; an infinite force is rigid too. Comparisons only, never
+/// `f32::min`, so the result is the same on every instruction set. A NaN or negative value is an
+/// input that skipped its check: it counts as rigid and is logged once.
+#[inline]
+pub(crate) fn mix_yield_force(a: f32, b: f32) -> f32 {
+    if !(a >= 0.0 && b >= 0.0) && !BAD_YIELD_FORCE_LOGGED.swap(true, Ordering::Relaxed) {
+        crate::core::log(&format!(
+            "a surface material's yield_force is NaN or negative ({a}, {b}); the contact treats it as rigid"
+        ));
+    }
+    if a > 0.0 && b > 0.0 {
+        crate::math_functions::min_float(a, b)
+    } else if a > 0.0 {
+        a
+    } else if b > 0.0 {
+        b
+    } else {
+        0.0
+    }
+}
+
+/// An unbounded or invalid force is rigid, as is a force too large to bound in this step.
+#[inline]
+pub(crate) fn has_yield_force(force: f32, h: f32) -> bool {
+    force > 0.0 && (force * h).is_finite()
+}
+
+/// Round the manifold share down so even N fully loaded manifolds fit in Fh. A finite
+/// share below the smallest f32 impulse is a zero allowance, distinct from a rigid row.
+pub(crate) fn yield_impulse_share(force: f32, h: f32, count: usize) -> f32 {
+    let budget = f64::from(force) * f64::from(h);
+    let share = (budget / count as f64) as f32;
+    if f64::from(share).mul_add(count as f64, -budget) > 0.0 { share.next_down() } else { share }
 }
 
 // The C b3ContactRegister table: (supported, primary). Built from the
@@ -1041,6 +1119,7 @@ fn update_convex_contact(
     );
     contact.friction = friction;
     contact.restitution = restitution;
+    contact.yield_force = mix_yield_force(material_a.yield_force, material_b.yield_force);
 
     if material_a.rolling_resistance > 0.0 || material_b.rolling_resistance > 0.0 {
         let radius_a = match &shape_a.geom {

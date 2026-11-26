@@ -605,6 +605,25 @@ mod tests {
         assert!(json.contains("VENDOR_root"));
         assert!(json.contains("VENDOR_mesh"));
         assert!(json.contains("opaque"));
+
+        let part = |name: &str, primitive, extras| crate::GlbAuthoringObject {
+            name: name.into(), primitives: vec![primitive], extras, parent: None,
+            transform: Default::default(), collision_mesh: None, lods: Vec::new(), lod_distances: Vec::new(),
+        };
+        let stripe_extras = object([("MAKEPAD_paint", JsonValue::Bool(true)), ("label", string("stripe"))]);
+        let authoring = crate::GlbAuthoring {
+            objects: vec![part("panel", 0, None), part("stripe", 1, Some(stripe_extras.clone()))],
+            ..Default::default()
+        };
+        let authored = crate::augment_glb_authoring(&output, &authoring).unwrap();
+        let parsed = parse_glb_bytes(&authored).unwrap();
+        let node = |name: &str| parsed.document.nodes_slice().iter().find(|n| n.name.as_deref() == Some(name)).unwrap();
+        assert_eq!(node("stripe").extras.as_ref(), Some(&stripe_extras), "authored extras survive skin export");
+        let stripe = node("stripe__skin");
+        let panel = node("panel__skin");
+        assert!([stripe, panel].iter().all(|n| n.skin == Some(0) && n.mesh.is_some()));
+        assert_eq!(stripe.extras, Some(object([("MAKEPAD_paint", JsonValue::Bool(true))])), "only paint follows the geometry");
+        assert!(panel.extras.as_ref().and_then(|e| e.key("MAKEPAD_paint")).is_none(), "plain geometry has no paint flag");
     }
 
     #[test]

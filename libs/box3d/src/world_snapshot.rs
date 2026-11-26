@@ -63,7 +63,8 @@ pub const SNAP_MAGIC: u32 = 0x33534E42;
 // its occupied slots only.
 // 4: graph contact manifold counts are signed 32-bit integers.
 // 5: box set geometry registry references and set contact caches.
-pub const SNAP_VERSION: u32 = 5;
+// 6: surface materials, contacts and set contact patches carry a yield force.
+pub const SNAP_VERSION: u32 = 6;
 
 pub const SNAP_FLAG_VALIDATION: u32 = 0x1;
 pub const SNAP_FLAG_DOUBLE_PRECISION: u32 = 0x2;
@@ -1337,6 +1338,7 @@ fn ser_contacts(buf: &mut RecBuffer, world: &World) {
         ser_contact_cache(buf, &c.convex_contact.cache);
         buf.w_aabb(c.mesh_contact.query_bounds);
         buf.w_f32(c.restitution);
+        buf.w_f32(c.yield_force);
         buf.w_f32(c.rolling_resistance);
         buf.w_vec3(c.tangent_velocity);
         buf.w_u32(c.generation);
@@ -1412,6 +1414,7 @@ fn des_contacts(r: &mut RecCursor, world: &mut World) {
         c.convex_contact = ConvexContact { cache: des_contact_cache(r) };
         c.mesh_contact.query_bounds = r.r_aabb();
         c.restitution = r.r_f32();
+        c.yield_force = r.r_f32();
         c.rolling_resistance = r.r_f32();
         c.tangent_velocity = r.r_vec3();
         c.generation = r.r_u32();
@@ -1744,6 +1747,10 @@ fn des_shapes(r: &mut RecCursor, world: &mut World, rdr: &RecReader) {
     // hull database references taken above belong to the shapes committed
     // here, so destroy_world stays balanced after a rejected image.
     world.shapes = shapes;
+    world.may_yield = world
+        .shapes
+        .iter()
+        .any(|s| crate::shape::get_shape_materials(s).iter().any(|m| m.yield_force > 0.0));
 }
 
 // ---------------------------------------------------------------------------

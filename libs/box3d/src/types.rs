@@ -336,6 +336,11 @@ pub struct SurfaceMaterial {
 
     /// Custom debug draw color. Ignored if 0.
     pub custom_color: u32,
+
+    /// The normal force in newtons at which the surface gives. A contact can push no
+    /// harder than the softer of its two sides allows (the minimum of the non-zero
+    /// values). The force must be finite and nonnegative. Zero means rigid.
+    pub yield_force: f32,
 }
 
 /// Use this to initialize your surface material.
@@ -375,7 +380,8 @@ pub struct ShapeDef {
     /// Use this to store application specific shape data.
     pub user_data: u64,
 
-    /// Surface material used on mesh shapes per triangle. Ignored for convex/compound shapes.
+    /// Mesh triangles, height-field cells and box-set children select materials by index.
+    /// Convex shapes use slot zero. Compounds supply their own table.
     pub materials: Vec<SurfaceMaterial>,
 
     /// The base surface material. Ignored for compound shapes.

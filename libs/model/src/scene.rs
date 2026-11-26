@@ -58,6 +58,8 @@ pub struct SceneState {
     pub colliders:BTreeMap<String,CollisionProxy>,
     pub modifiers:BTreeMap<String,Vec<NamedModifier>>,
     pub wheels:BTreeMap<String,VehicleWheel>,
+    /// Objects whose surface geometry represents projected paint.
+    pub paint:BTreeSet<String>,
 }
 #[derive(Clone,Debug,PartialEq)]
 pub enum SceneOperation {
@@ -80,6 +82,10 @@ impl SceneState {
     pub fn is_empty(&self)->bool {self==&Self::default()}
     pub fn memory_bytes(&self)->usize {let mut w=Writer::new();if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
     pub(crate) fn validate(&self,state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {
+        for object in &self.paint {
+            ctx.checkpoint(1)?;name(object,limits)?;
+            if !state.objects.contains_key(object){return Err(Error::MissingObject(object.clone()));}
+        }
         for (object,node) in &self.nodes {
             ctx.checkpoint(1)?;name(object,limits)?;node.transform.validate()?;
             if !state.objects.contains_key(object) {return Err(Error::MissingObject(object.clone()));}
@@ -164,7 +170,7 @@ impl SceneState {
     }
     pub(crate) fn local_mesh(&self,state:&State,object:&str,ctx:&mut mesh::Context<'_>)->Result<mesh::Mesh> {
         let mut cache=BTreeMap::new();let mesh=self.evaluate_one(state,object,&mut cache,&mut BTreeSet::new(),ctx)?;
-        if cache_bytes(&cache).saturating_add(mesh.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("evaluated mesh copy"));}Ok((*mesh).clone())
+        let needed=cache_bytes(&cache).saturating_add(mesh.memory_bytes());if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"evaluated mesh copy",needed,limit:ctx.limits.max_bytes});}Ok((*mesh).clone())
     }
     /// One cache per evaluation; instances and shrinkwrap references share an
     /// immutable result. No cache survives a document revision.
@@ -175,18 +181,18 @@ impl SceneState {
         ctx.checkpoint(1)?;if let Some(mesh)=cache.get(object){return Ok(mesh.clone());}if !visiting.insert(object.into()){return Err(Error::Invalid("modifier/instance dependency cycle"));}
         let original=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;
         let base=if let Some(source)=self.nodes.get(object).and_then(|n|n.linked_to.as_deref()){self.evaluate_one(state,source,cache,visiting,ctx)?}else{
-            if cache_bytes(cache).saturating_add(original.memory_bytes().saturating_mul(3))>ctx.limits.max_bytes{return Err(Error::Budget("modifier source copies"));}Arc::new(original.clone())};
+            let needed=cache_bytes(cache).saturating_add(original.memory_bytes().saturating_mul(3));if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"modifier source copies",needed,limit:ctx.limits.max_bytes});}Arc::new(original.clone())};
         let mut result=base;for modifier in self.modifiers.get(object).into_iter().flatten().filter(|m|m.enabled){ctx.checkpoint(1)?;
             let mut dependencies=BTreeMap::new();for dependency in modifier.operation.dependencies(){let reference=self.evaluate_one(state,dependency,cache,visiting,ctx)?;dependencies.insert(dependency.to_owned(),reference);}
             let required=cache_bytes(cache).saturating_add(result.memory_bytes().saturating_mul(3)).saturating_add(dependencies.values().map(|m|m.memory_bytes().saturating_mul(3)).sum::<usize>());
-            if required>ctx.limits.max_bytes{return Err(Error::Budget("modifier evaluation working set"));}
+            if required>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"modifier evaluation working set",needed:required,limit:ctx.limits.max_bytes});}
             let operation=modifier.operation.for_modifier(object,&result)?;let mut objects=BTreeMap::new();
             let owner_inverse=inverse(self.world_matrix(object)?)?;
             for (name,reference) in dependencies {let mut reference=(*reference).clone();let transform=matrix_mul(owner_inverse,self.world_matrix(&name)?);let vertices=reference.vertices().iter().map(|v|v.id).collect::<Vec<_>>();reference.transform(&vertices,transform,ctx)?;objects.insert(name,reference);}
             objects.insert(object.into(),(*result).clone());
             let limits=Limits{mesh:ctx.limits.clone(),..Limits::default()};operation.apply(&mut objects,&limits,ctx)?;result=Arc::new(objects.remove(object).unwrap());
         }
-        visiting.remove(object);if cache_bytes(cache).saturating_add(result.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("modifier evaluation cache"));}cache.insert(object.into(),result.clone());Ok(result)
+        visiting.remove(object);let needed=cache_bytes(cache).saturating_add(result.memory_bytes());if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"modifier evaluation cache",needed,limit:ctx.limits.max_bytes});}cache.insert(object.into(),result.clone());Ok(result)
     }
     pub(crate) fn apply(op:&SceneOperation,state:&mut State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<OperationResult> {
         let mut result=OperationResult::default();
@@ -196,10 +202,12 @@ impl SceneState {
                 create_name(state,object,limits)?;if !state.objects.contains_key(source){return Err(Error::MissingObject(source.clone()));}
                 state.objects.insert(object.clone(),mesh::Mesh::new());
                 state.scene.nodes.insert(object.clone(),SceneNode{parent:None,linked_to:Some(source.clone()),transform:*transform});
+                if state.scene.paint.contains(source){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::Duplicate{object,source}=>{
                 create_name(state,object,limits)?;let mesh=state.scene.local_mesh(state,source,ctx)?;state.objects.insert(object.clone(),mesh);
                 let mut node=state.scene.nodes.get(source).cloned().unwrap_or_default();node.linked_to=None;state.scene.nodes.insert(object.clone(),node);
+                if state.scene.paint.contains(source){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::MakeUnique{object}=>{
                 let mesh=state.scene.local_mesh(state,object,ctx)?;state.objects.insert(object.clone(),mesh);
@@ -217,12 +225,14 @@ impl SceneState {
                     joined.append(&mesh,ctx)?;
                 }
                 state.objects.insert(object.clone(),joined);
+                if sources.iter().all(|source|state.scene.paint.contains(source)){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::Separate{object,name:target,faces}=>{
                 create_name(state,target,limits)?;
                 if state.scene.nodes.get(object).is_some_and(|n|n.linked_to.is_some())||state.scene.modifiers.get(object).is_some_and(|m|!m.is_empty()){return Err(Error::Invalid("make geometry unique and apply modifiers before separating faces"));}
                 let source=state.objects.get_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;let(separated,_)=source.separate_faces(faces,ctx)?;state.objects.insert(target.clone(),separated);
                 let mut node=state.scene.nodes.get(object).cloned().unwrap_or_default();node.linked_to=None;state.scene.nodes.insert(target.clone(),node);
+                if state.scene.paint.contains(object){state.scene.paint.insert(target.clone());}
             }
             SceneOperation::Pivot{object,position}=>{
                 if position.iter().any(|v|!v.is_finite()){return Err(Error::Invalid("pivot position"));}
@@ -498,6 +508,7 @@ impl SceneOperation {
 }
 impl SceneState {
     pub fn check(&self,limits:&Limits)->Result<()> {
+        for object in &self.paint{name(object,limits)?;}
         for (object,node) in &self.nodes{name(object,limits)?;node.transform.validate()?;}
         for light in self.emitters.values(){check_light(light)?;}
         for socket in self.sockets.values(){socket.transform.validate()?;}
@@ -517,7 +528,13 @@ impl SceneState {
         write_map(w,&self.lods,|w,levels|write_lods(w,levels))?;
         write_map(w,&self.colliders,write_proxy)?;
         write_map(w,&self.modifiers,|w,stack|{w.count(stack.len())?;for m in stack{write_modifier(w,m)?;}Ok(())})?;
-        write_map(w,&self.wheels,write_wheel)
+        write_map(w,&self.wheels,write_wheel)?;
+        // A scene without paint writes no paint section.
+        if !self.paint.is_empty(){
+            w.count(self.paint.len())?;
+            for object in &self.paint{w.string(object)?;}
+        }
+        Ok(())
     }
     pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{
         let value=Self{
@@ -528,6 +545,16 @@ impl SceneState {
             colliders:read_map(r,5,|r|read_proxy(r,limits))?,
             modifiers:read_map(r,8,|r|{let mut stack=Vec::new();for _ in 0..r.count(14)?{stack.push(read_modifier(r,limits)?);}Ok(stack)})?,
             wheels:read_map(r,49,|r|read_wheel(r,limits))?,
+            paint:{
+                let mut paint=BTreeSet::new();
+                if r.end().is_err(){
+                    for _ in 0..r.count(4)?{
+                        if !paint.insert(r.string()?){return Err(Error::Corrupt("duplicate paint object"));}
+                    }
+                    if paint.is_empty(){return Err(Error::Corrupt("empty paint section"));}
+                }
+                paint
+            },
         };value.check(limits)?;Ok(value)
     }
 }
@@ -737,6 +764,7 @@ mod typed_tests {
             colliders:BTreeMap::from([("body".into(),CollisionProxy::Hull)]),
             modifiers:BTreeMap::from([("body".into(),vec![modifier(),NamedModifier{name:"second".into(),..modifier()}])]),
             wheels:BTreeMap::from([("body".into(),wheel(None))]),
+            paint:BTreeSet::from(["body".into()]),
         };
         for state in [SceneState::default(),state]{
             state.check(&l).unwrap();let mut w=Writer::new();state.write(&mut w).unwrap();assert_eq!(state.memory_bytes(),w.bytes.len()*3);

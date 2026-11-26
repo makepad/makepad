@@ -2422,7 +2422,8 @@ impl GpuLightmapBaker {
                 // out while its pipeline compiled): the recording stays
                 // attached, so the platform paints it again when it can.
                 if let (Some((_, repaint)), Some(bp)) = (&self.csm_drawn, self.csm_pool.first()) {
-                    if !bp.pass.painted_whole_since(cx.cx, *repaint) {
+                    // Once is enough: the kept pass paints again every frame, the same cascades each time.
+                    if !bp.pass.painted_whole_once_since(cx.cx, *repaint) {
                         cx.make_child_pass(&bp.pass);
                     }
                 }

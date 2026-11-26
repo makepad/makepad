@@ -1076,6 +1076,7 @@ fn compute_mesh_manifolds_inner(
     if !shape_a.materials.is_empty() {
         let mut friction = 0.0;
         let mut restitution = 0.0;
+        let mut yield_force = 0.0;
         let mut sample_count = 0.0;
 
         for i in 0..cluster_count {
@@ -1114,6 +1115,12 @@ fn compute_mesh_manifolds_inner(
                     material_b.user_material_id,
                 );
 
+                // The weakest sample sets the force the contact gives at.
+                yield_force = crate::contact::mix_yield_force(
+                    yield_force,
+                    crate::contact::mix_yield_force(material.yield_force, material_b.yield_force),
+                );
+
                 tangent_velocity_a = add(tangent_velocity_a, material.tangent_velocity);
 
                 sample_count += 1.0;
@@ -1124,6 +1131,7 @@ fn compute_mesh_manifolds_inner(
             let inv_count = 1.0 / sample_count;
             contact.friction = inv_count * friction;
             contact.restitution = inv_count * restitution;
+            contact.yield_force = yield_force;
             tangent_velocity_a = mul_sv(inv_count, tangent_velocity_a);
         }
 
@@ -1147,6 +1155,7 @@ fn compute_mesh_manifolds_inner(
         );
         contact.friction = friction;
         contact.restitution = restitution;
+        contact.yield_force = crate::contact::mix_yield_force(materials_a[0].yield_force, material_b.yield_force);
         tangent_velocity_a = materials_a[0].tangent_velocity;
     }
 

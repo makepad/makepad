@@ -114,6 +114,9 @@ pub fn augment_glb_authoring(input:&[u8],authoring:&GlbAuthoring)->Result<Vec<u8
             // transform. Repeats share its mesh index, without new geometry.
             let mut node=object([("name",string(&format!("{}__skin",definition.name))),("skin",number(0))]);
             if let Some(mesh)=object_meshes[i]{fields(&mut node)?.insert("mesh".into(),number(mesh));}
+            if let Some(paint)=definition.extras.as_ref().and_then(|e|e.key("MAKEPAD_paint")){
+                fields(&mut node)?.insert("extras".into(),object([("MAKEPAD_paint",paint.clone())]));
+            }
             let n=nodes.len();nodes.push(node);geometry_nodes[i]=n;
         }
     }

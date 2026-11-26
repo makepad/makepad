@@ -261,24 +261,64 @@ pub fn load_ready_image(png: &[u8], semantic: PixelSemantic, quality: makepad_te
 /// each would be re-encoded to UASTC per model. The key is the whole PNG
 /// plus semantic and quality, and the encode is deterministic, so a hit
 /// returns exactly the bytes the encode would, regardless of executor order.
-/// Bounded: past 96 MiB of entries the memo starts over.
+/// The first ask of a key encodes it; asks that come while it does (a load
+/// starts a worker's worth of models at once) wait for that encode off the
+/// CPU, their permits lent ([`ComputeOnce`]), instead of each encoding it
+/// too. A UI thread never waits for another thread's encode: it takes a
+/// finished one, or encodes here without the memo. A failed encode is not
+/// remembered. Bounded: past 96 MiB of entries the memo starts over, which
+/// is logged once.
 fn load_ready_image_memo(png: &[u8], semantic: PixelSemantic, quality: makepad_texcomp::uastc::Quality, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<Option<Vec<u8>>, String> {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use makepad_core_util::once::ComputeOnce;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     type Key = (Vec<u8>, u8, u8);
-    static MEMO: Mutex<Option<(HashMap<Key, Option<Vec<u8>>>, usize)>> = Mutex::new(None);
+    type Entry = Arc<ComputeOnce<Result<Option<Vec<u8>>, String>>>;
+    struct Memo { entries: HashMap<Key, Entry>, bytes: usize }
+    static MEMO: Mutex<Option<Memo>> = Mutex::new(None);
+    static BOUND_LOGGED: AtomicBool = AtomicBool::new(false);
+    const BOUND: usize = 96 << 20;
     let key: Key = (png.to_vec(), semantic as u8, quality as u8);
-    if let Some((map, _)) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if let Some(hit) = map.get(&key) { return Ok(hit.clone()); }
+    let entry = {
+        let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        let memo = memo.get_or_insert_with(|| Memo { entries: HashMap::new(), bytes: 0 });
+        match memo.entries.get(&key) {
+            Some(entry) => entry.clone(),
+            None => memo.entries.entry(key.clone()).or_default().clone(),
+        }
+    };
+    if makepad_core_util::ui_thread::is_ui_thread() {
+        return match entry.get() {
+            Some(done) => done.clone(),
+            None => load_ready_image(png, semantic, quality, encode),
+        };
     }
-    let out = load_ready_image(png, semantic, quality, encode)?;
-    let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
-    let (map, bytes) = memo.get_or_insert_with(|| (HashMap::new(), 0));
-    let cost = key.0.len() + out.as_ref().map_or(0, |k| k.len());
-    if *bytes + cost > 96 << 20 { map.clear(); *bytes = 0; }
-    *bytes += cost;
-    map.insert(key, out.clone());
-    Ok(out)
+    let mut encoded_here = false;
+    let out = entry.get_or_init(|| {
+        encoded_here = true;
+        load_ready_image(png, semantic, quality, encode)
+    }).clone();
+    if encoded_here {
+        let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        // (The memo started over while this encoded: the entry is no longer its own.)
+        if let Some(memo) = memo.as_mut().filter(|memo| memo.entries.get(&key).is_some_and(|e| Arc::ptr_eq(e, &entry))) {
+            match &out {
+                Err(_) => { memo.entries.remove(&key); }
+                Ok(ktx) => {
+                    let cost = key.0.len() + ktx.as_ref().map_or(0, Vec::len);
+                    if memo.bytes + cost > BOUND {
+                        if !BOUND_LOGGED.swap(true, Ordering::Relaxed) {
+                            makepad_draw::log!("load-ready images: the encode memo passed {} MiB and starts over (logged once)", BOUND >> 20);
+                        }
+                        memo.entries.retain(|_, e| Arc::ptr_eq(e, &entry));
+                        memo.bytes = 0;
+                    }
+                    memo.bytes += cost;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One embedded image's load-ready preparation, including memo lookup,
@@ -306,9 +346,7 @@ pub fn embed_load_ready_images_with_timings(glb: &[u8], quality: makepad_texcomp
     let mut keep_png = nearest_images(&parsed.document);
     keep_png.extend(impostor_images(&parsed.document));
     keep_png.extend(splat_images(&parsed.document));
-    let authored_mips = authored_mip_images(glb, &parsed.document)?;
-    let has_authored_mips = !authored_mips.is_empty();
-    keep_png.extend(authored_mips);
+    keep_png.extend(authored_mip_images(glb, &parsed.document)?);
     drop(parsed);
     let mut failure = None;
     let mut changed = false;
@@ -316,10 +354,7 @@ pub fn embed_load_ready_images_with_timings(glb: &[u8], quality: makepad_texcomp
         let started = observe.as_ref().map(|_| makepad_draw::Cx::monotonic_now());
         let replacement = if failure.is_some() || !png.starts_with(b"\x89PNG") || keep_png.contains(&index) { None } else {
             let semantic = semantics.get(&index).copied().unwrap_or(PixelSemantic::Color);
-            // A fresh conversion of authored chains exposes the actual work
-            // each build performs, without depending on the process memo.
-            let result = if has_authored_mips { load_ready_image(png, semantic, quality, encode) }
-                else { load_ready_image_memo(png, semantic, quality, encode) };
+            let result = load_ready_image_memo(png, semantic, quality, encode);
             match result {
                 Ok(Some(ktx)) => { changed = true; Some(ktx) }
                 Ok(None) => None,
@@ -395,6 +430,47 @@ mod tests {
                 assert_eq!(load_ready_image_memo(&png, semantic, makepad_texcomp::uastc::Quality::Fast, &makepad_texcomp::run_inline).unwrap(), fresh);
             }
         }
+        // Asks of one image while its first encode runs share that encode, and a UI thread never
+        // waits for it. The first ask is held inside its encode until the others have asked.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let rgba: Vec<u8> = (0..128 * 128).flat_map(|i| [(i * 13 % 256) as u8, (i % 128 * 2) as u8, (i / 128 * 2) as u8, 255]).collect();
+        let png = Cx::encode_rgba_as_png(128, 128, &rgba).unwrap();
+        let quality = makepad_texcomp::uastc::Quality::Fast;
+        let fresh = load_ready_image(&png, PixelSemantic::Color, quality, &makepad_texcomp::run_inline).unwrap();
+        let (first_calls, other_calls, ui_calls) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+        let gate = std::sync::Mutex::new(());
+        let (inside, first_inside) = std::sync::mpsc::channel();
+        let (ui_done, ui_result) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let held = gate.lock().unwrap();
+            let first = scope.spawn(|| load_ready_image_memo(&png, PixelSemantic::Color, quality, &|n, work: &(dyn Fn(usize) + Sync)| {
+                if first_calls.fetch_add(1, SeqCst) == 0 {
+                    inside.send(()).unwrap();
+                    drop(gate.lock().unwrap());
+                }
+                makepad_texcomp::run_inline(n, work);
+            }));
+            first_inside.recv().unwrap();
+            let others: Vec<_> = (0..3).map(|_| scope.spawn(|| load_ready_image_memo(&png, PixelSemantic::Color, quality, &|n, work: &(dyn Fn(usize) + Sync)| {
+                other_calls.fetch_add(1, SeqCst);
+                makepad_texcomp::run_inline(n, work);
+            }))).collect();
+            scope.spawn(|| {
+                makepad_core_util::ui_thread::mark_ui_thread();
+                ui_done.send(load_ready_image_memo(&png, PixelSemantic::Color, quality, &|n, work: &(dyn Fn(usize) + Sync)| {
+                    ui_calls.fetch_add(1, SeqCst);
+                    makepad_texcomp::run_inline(n, work);
+                })).unwrap();
+            });
+            let ui = ui_result.recv_timeout(std::time::Duration::from_secs(60)).expect("a UI thread does not wait for another thread's encode");
+            assert_eq!(ui.unwrap(), fresh, "a UI thread's own encode is the fresh encode");
+            assert!(ui_calls.load(SeqCst) > 0, "with the first encode still running, the UI thread encodes it itself");
+            drop(held);
+            assert_eq!(first.join().unwrap().unwrap(), fresh, "the shared encode is the fresh encode");
+            for other in others { assert_eq!(other.join().unwrap().unwrap(), fresh, "a waiting ask gets the shared encode"); }
+        });
+        assert_eq!(other_calls.load(SeqCst), 0, "asks that came while the first encoded did not encode it again");
+        assert_eq!(load_ready_image_memo(&png, PixelSemantic::Color, quality, &|_, _: &(dyn Fn(usize) + Sync)| panic!("a remembered image is not encoded")).unwrap(), fresh);
     }
 
     #[test]
@@ -415,9 +491,8 @@ mod tests {
             base_color_texture: Some(makepad_gltf::GlbPbrTexture { png: pngs[0].clone(), mip_pngs: pngs[1..].to_vec() }),
             metallic_roughness_texture: None, normal_texture: None, occlusion_texture: None, emissive_texture: None,
         };
-        let authored = makepad_gltf::augment_glb_pbr(&mesh, &[material], &[makepad_gltf::GlbPbrPrimitive {
-            mesh: 0, primitive: 0, material: 0, colors: Vec::new(), tangents: Vec::new(),
-        }]).unwrap();
+        let primitives = [makepad_gltf::GlbPbrPrimitive { mesh: 0, primitive: 0, material: 0, colors: Vec::new(), tangents: Vec::new() }];
+        let authored = makepad_gltf::augment_glb_pbr(&mesh, &[material.clone()], &primitives).unwrap();
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let encode = |n, work: &(dyn Fn(usize) + Sync)| {
             calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -429,6 +504,19 @@ mod tests {
         // Each opaque base-chain level goes through the executor three times: its RGBA rows, its
         // alpha scan and its encode. The nine retained PNGs are not encoded.
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 27, "three executor dispatches per base-chain level");
+        // A second model from the same recipe (another mesh, the same authored chain) takes its
+        // base image from the memo: no executor dispatch, the bytes of the encode above.
+        let image_bytes = |glb: &[u8], index: usize| {
+            let parsed = makepad_gltf::parse_glb_bytes(glb).unwrap();
+            let view = &parsed.document.buffer_views.as_ref().unwrap()[parsed.document.images_slice()[index].buffer_view.unwrap()];
+            let offset = view.byte_offset.unwrap_or(0);
+            parsed.bin_chunk.as_ref().unwrap()[offset..offset + view.byte_length].to_vec()
+        };
+        let second = makepad_gltf::augment_glb_pbr(&makepad_gltf::write_glb_mesh(&[[0., 0., 0.], [2., 0., 0.], [0., 0., 2.]], &[0, 1, 2]), &[material], &primitives).unwrap();
+        assert_ne!(second, authored);
+        let second_ready = embed_load_ready_images(&second, makepad_texcomp::uastc::Quality::Fast, &encode).unwrap().unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 27, "an authored chain two models share is encoded once");
+        assert_eq!(image_bytes(&second_ready, 0), image_bytes(&ready, 0), "the shared chain's bytes are the encode's");
         assert_eq!(timings.len(), 9);
         assert_eq!((timings[0].width, timings[0].height, timings[0].mip_levels, timings[0].format), (256, 256, 9, "ktx2"));
         for (level, timing) in timings.iter().enumerate().skip(1) {

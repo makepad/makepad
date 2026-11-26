@@ -64,6 +64,8 @@ pub struct ManifoldConstraint {
     pub point_count: i32,
     pub friction: f32,
     pub restitution: f32,
+    /// Positive share of the yielding material slot's impulse budget. Zero bypasses the clamp.
+    pub yield_cap: f32,
     pub rolling_resistance: f32,
     pub normal: Vec3,
     pub tangent1: Vec3,
@@ -95,6 +97,7 @@ pub struct ContactConstraint {
     pub rolling_mass: Matrix3,
     pub friction: f32,
     pub restitution: f32,
+    pub yield_force: f32,
     pub rolling_resistance: f32,
     pub manifold_count: i32,
     pub has_restitution: bool,
@@ -103,6 +106,44 @@ pub struct ContactConstraint {
 // ---------------------------------------------------------------------------
 // contact_solver.c — scalar (mesh + overflow) stages
 // ---------------------------------------------------------------------------
+
+// Subtract an already assigned impulse, rounding the remaining allowance down. If subtraction
+// rounded up, `room - left` is exact (left is at least half of room) and exposes the lost bits.
+// When used exceeds half of room the original subtraction itself is exact (Sterbenz's lemma).
+#[inline]
+fn remaining_impulse(room: f32, used: f32) -> f32 {
+    let left = max_float(room - used, 0.0);
+    if left > 0.0 && used > room - left { left.next_down() } else { left }
+}
+
+fn point_limit(cm: &ManifoldConstraint, point: usize) -> f32 {
+    let mut room = cm.yield_cap;
+    for (index, other) in cm.points[..cm.point_count as usize].iter().enumerate() {
+        if index != point {
+            room = remaining_impulse(room, other.normal_impulse);
+        }
+    }
+    room
+}
+
+// If Fh/N is smaller than the least positive impulse, warm starting clips to zero and no
+// normal update can fit. Keep that row inert even though the packed zero cap bypasses clamping.
+#[inline]
+fn normal_mass(inverse_mass: f32, share: Option<f32>) -> f32 {
+    if inverse_mass > 0.0 && share != Some(0.0) { 1.0 / inverse_mass } else { 0.0 }
+}
+
+/// Consume the cache in solver point order before any impulse reaches the bodies.
+#[inline]
+fn warm_normal_impulse(cached: f32, room: &mut f32) -> f32 {
+    if room.is_finite() {
+        let impulse = if cached > *room { *room } else { cached };
+        *room = remaining_impulse(*room, impulse);
+        impulse
+    } else {
+        cached
+    }
+}
 
 // contact separation for sub-stepping
 // s = s0 + dot(cB + rB - cA - rA, normal)
@@ -241,6 +282,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 },
                 friction: contact.friction,
                 restitution: contact.restitution,
+                yield_force: contact.yield_force,
                 rolling_resistance: contact.rolling_resistance,
                 has_restitution: contact.restitution != 0.0,
             };
@@ -263,6 +305,8 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                     constraint.restitution = contact_constraint.restitution;
                     constraint.rolling_resistance = contact_constraint.rolling_resistance;
                 }
+                let share = shared.manifold_yield_cap(contact, manifold_index as usize);
+                constraint.yield_cap = share.unwrap_or(0.0);
                 constraint.point_count = point_count;
                 constraint.normal = normal;
                 constraint.tangent1 = tangent1;
@@ -271,6 +315,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 constraint.tangent_velocity1 = dot(contact.tangent_velocity, constraint.tangent1);
                 constraint.tangent_velocity2 = dot(contact.tangent_velocity, constraint.tangent2);
 
+                let mut warm_room = share.unwrap_or(f32::INFINITY);
                 let mut center_a = Vec3::ZERO;
                 let mut center_b = Vec3::ZERO;
 
@@ -282,7 +327,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                     cp.r_a = mp.anchor_a;
                     cp.r_b = mp.anchor_b;
                     cp.base_separation = mp.separation - dot(sub(cp.r_b, cp.r_a), normal);
-                    cp.normal_impulse = warm_start_scale * mp.normal_impulse;
+                    cp.normal_impulse = warm_normal_impulse(warm_start_scale * mp.normal_impulse, &mut warm_room);
                     cp.total_normal_impulse = 0.0;
 
                     let r_a = cp.r_a;
@@ -291,7 +336,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                     let rn_a = cross(r_a, normal);
                     let rn_b = cross(r_b, normal);
                     let k_normal = m_a + m_b + dot(rn_a, mul_mv(i_a, rn_a)) + dot(rn_b, mul_mv(i_b, rn_b));
-                    cp.normal_mass = if k_normal > 0.0 { 1.0 / k_normal } else { 0.0 };
+                    cp.normal_mass = normal_mass(k_normal, share);
 
                     // Save relative velocity for restitution
                     let vr_a = add(v_a, cross(w_a, r_a));
@@ -506,7 +551,7 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
             let mut total_twist_limit = 0.0;
 
             for point_index in 0..point_count {
-                let cp = &mut constraint.points[point_index as usize];
+                let cp = &constraint.points[point_index as usize];
 
                 // Fixed anchor points for applying impulses
                 let r_a = cp.r_a;
@@ -539,7 +584,14 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
                     (-cp.normal_mass).mul_add(mass_scale.mul_add(vn, velocity_bias), -(impulse_scale * cp.normal_impulse));
 
                 // clamp the accumulated impulse
-                let new_impulse = max_float(cp.normal_impulse + delta_impulse, 0.0);
+                let mut new_impulse = max_float(cp.normal_impulse + delta_impulse, 0.0);
+                if constraint.yield_cap > 0.0 && new_impulse > cp.normal_impulse {
+                    let limit = max_float(point_limit(constraint, point_index as usize), cp.normal_impulse);
+                    if new_impulse > limit {
+                        new_impulse = limit;
+                    }
+                }
+                let cp = &mut constraint.points[point_index as usize];
                 delta_impulse = new_impulse - cp.normal_impulse;
                 cp.normal_impulse = new_impulse;
                 cp.total_normal_impulse += new_impulse;
@@ -703,7 +755,7 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
             b3_assert!(0 < point_count && point_count <= MAX_MANIFOLD_POINTS as i32);
 
             for point_index in 0..point_count {
-                let cp = &mut cm.points[point_index as usize];
+                let cp = &cm.points[point_index as usize];
 
                 // If the total normal impulse is zero then there was no collision
                 // this skips speculative contact points that didn't generate an impulse
@@ -724,7 +776,17 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
                 let mut impulse = -cp.normal_mass * restitution.mul_add(cp.relative_velocity, vn);
 
                 // clamp the accumulated impulse
-                let new_impulse = max_float(cp.normal_impulse + impulse, 0.0);
+                let mut new_impulse = max_float(cp.normal_impulse + impulse, 0.0);
+                if cm.yield_cap > 0.0 {
+                    let limit = point_limit(cm, point_index as usize);
+                    if cp.normal_impulse >= limit {
+                        continue;
+                    }
+                    if new_impulse > limit {
+                        new_impulse = limit;
+                    }
+                }
+                let cp = &mut cm.points[point_index as usize];
                 impulse = new_impulse - cp.normal_impulse;
                 cp.normal_impulse = new_impulse;
                 cp.total_normal_impulse += impulse;
@@ -1006,6 +1068,11 @@ mod wide {
     }
 
     #[inline(always)]
+    pub(super) fn prev_positive_w(a: FloatW) -> FloatW {
+        unsafe { FloatW(vreinterpretq_f32_u32(vsubq_u32(vreinterpretq_u32_f32(a.0), vdupq_n_u32(1)))) }
+    }
+
+    #[inline(always)]
     pub fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
         unsafe { FloatW(vreinterpretq_f32_u32(vcgtq_f32(a.0, b.0))) }
     }
@@ -1166,6 +1233,11 @@ mod wide {
     }
 
     #[inline(always)]
+    pub(super) fn prev_positive_w(a: FloatW) -> FloatW {
+        unsafe { FloatW(_mm_castsi128_ps(_mm_sub_epi32(_mm_castps_si128(a.0), _mm_set1_epi32(1)))) }
+    }
+
+    #[inline(always)]
     pub fn greater_than_w(a: FloatW, b: FloatW) -> FloatW {
         unsafe { FloatW(_mm_cmpgt_ps(a.0, b.0)) }
     }
@@ -1321,6 +1393,11 @@ mod wide {
             z: if a.z != 0.0 || b.z != 0.0 { 1.0 } else { 0.0 },
             w: if a.w != 0.0 || b.w != 0.0 { 1.0 } else { 0.0 },
         }
+    }
+
+    #[inline(always)]
+    pub(super) fn prev_positive_w(a: FloatW) -> FloatW {
+        set_w(a.x.next_down(), a.y.next_down(), a.z.next_down(), a.w.next_down())
     }
 
     #[inline(always)]
@@ -1571,6 +1648,8 @@ pub struct ContactConstraintWide {
     pub mass_scale: FloatW,
     pub impulse_scale: FloatW,
     pub restitution: FloatW,
+    /// Positive manifold share per lane. Zero bypasses the clamp.
+    pub yield_caps: FloatW,
 
     /// C: b3Manifold* manifolds[4] — per lane contact id (the manifold is
     /// world.contacts[id].manifolds[0]); NULL_INDEX for empty lanes.
@@ -1609,10 +1688,29 @@ impl Default for ContactConstraintWide {
             mass_scale: FloatW::default(),
             impulse_scale: FloatW::default(),
             restitution: FloatW::default(),
+            yield_caps: FloatW::default(),
             contact_ids: [NULL_INDEX; SIMD_WIDTH],
             points: [ContactConstraintPointWide::default(); MAX_MANIFOLD_POINTS],
         }
     }
+}
+
+// Same directed subtraction as remaining_impulse. Only capped lanes take the resulting limit.
+fn point_limit_w(c: &ContactConstraintWide, point: usize, capped: FloatW) -> FloatW {
+    let zero = zero_w();
+    let mut room = c.yield_caps;
+    for (index, other) in c.points.iter().enumerate() {
+        if index != point {
+            let used = other.normal_impulses;
+            let left = max_w(sub_w(room, used), zero);
+            // A non-positive difference has no allowance left. In particular never select
+            // the predecessor of zero.
+            let rounded_up = greater_than_w(used, sub_w(room, left));
+            let down = blend_w(zero, prev_positive_w(left), greater_than_w(left, zero));
+            room = blend_w(left, down, rounded_up);
+        }
+    }
+    blend_w(splat_w(f32::INFINITY), room, capped)
 }
 
 pub fn get_wide_contact_constraint_byte_count() -> i32 {
@@ -1895,6 +1993,9 @@ pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
 
                 constraint.friction.set(lane, contact.friction);
                 constraint.restitution.set(lane, contact.restitution);
+                let share = shared.manifold_yield_cap(contact, 0);
+                constraint.yield_caps.set(lane, share.unwrap_or(0.0));
+                let mut warm_room = share.unwrap_or(f32::INFINITY);
                 constraint.rolling_resistance.set(lane, contact.rolling_resistance);
 
                 constraint.tangent_velocity1.set(lane, dot(contact.tangent_velocity, tangent1));
@@ -1928,13 +2029,13 @@ pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
                     let base_separation = mp.separation - dot(sub(r_b, r_a), normal);
                     cp.base_separations.set(lane, base_separation);
 
-                    cp.normal_impulses.set(lane, warm_start_scale * mp.normal_impulse);
+                    cp.normal_impulses.set(lane, warm_normal_impulse(warm_start_scale * mp.normal_impulse, &mut warm_room));
                     cp.total_normal_impulses.set(lane, 0.0);
 
                     let rn_a = cross(r_a, normal);
                     let rn_b = cross(r_b, normal);
                     let k_normal = m_a + m_b + dot(rn_a, mul_mv(i_a, rn_a)) + dot(rn_b, mul_mv(i_b, rn_b));
-                    cp.normal_masses.set(lane, if k_normal > 0.0 { 1.0 / k_normal } else { 0.0 });
+                    cp.normal_masses.set(lane, normal_mass(k_normal, share));
 
                     // Save relative velocity for restitution
                     let vr_a = add(v_a, cross(w_a, r_a));
@@ -2132,8 +2233,10 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
         let mut total_normal_impulse = zero_w();
         let mut total_twist_limit = zero_w();
 
+        let yielding = !all_zero_w(c.yield_caps);
+        let capped = greater_than_w(c.yield_caps, zero_w());
         for point_index in 0..MAX_MANIFOLD_POINTS {
-            let cp = &mut c.points[point_index];
+            let cp = &c.points[point_index];
 
             // Fixed anchor points for applying impulses
             let r_a = cp.anchor_as;
@@ -2169,7 +2272,14 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
             );
 
             // Clamp the accumulated impulse
-            let new_impulse = max_w(sub_w(cp.normal_impulses, neg_impulse), zero_w());
+            let mut new_impulse = max_w(sub_w(cp.normal_impulses, neg_impulse), zero_w());
+            if yielding {
+                // The old impulse already fits. Directed subtraction may round the newly
+                // computed limit below it by an ulp when other points hold small impulses.
+                let limit = max_w(point_limit_w(c, point_index, capped), cp.normal_impulses);
+                new_impulse = blend_w(new_impulse, limit, greater_than_w(new_impulse, limit));
+            }
+            let cp = &mut c.points[point_index];
             let delta_impulse = sub_w(new_impulse, cp.normal_impulses);
             cp.normal_impulses = new_impulse;
             cp.total_normal_impulses = add_w(cp.total_normal_impulses, new_impulse);
@@ -2319,9 +2429,11 @@ pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
         // Create a mask based on restitution so that lanes with no restitution are not
         // affected by the calculations below.
         let restitution_mask = equals_w(c.restitution, zero);
+        let yielding = !all_zero_w(c.yield_caps);
+        let capped = greater_than_w(c.yield_caps, zero_w());
 
         for point_index in 0..MAX_MANIFOLD_POINTS {
-            let cp = &mut c.points[point_index];
+            let cp = &c.points[point_index];
 
             // Set effective mass to zero if restitution should not be applied
             let mask1 = greater_than_w(add_w(cp.relative_velocities, threshold), zero);
@@ -2342,7 +2454,14 @@ pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
             let neg_impulse = mul_w(mass, add_w(vn, mul_w(c.restitution, cp.relative_velocities)));
 
             // Clamp the accumulated impulse
-            let new_impulse = max_w(sub_w(cp.normal_impulses, neg_impulse), zero_w());
+            let mut new_impulse = max_w(sub_w(cp.normal_impulses, neg_impulse), zero_w());
+            if yielding {
+                let limit = point_limit_w(c, point_index, capped);
+                new_impulse = blend_w(new_impulse, limit, greater_than_w(new_impulse, limit));
+                // Skip all restitution on saturated lanes, including a negative increment.
+                new_impulse = blend_w(cp.normal_impulses, new_impulse, greater_than_w(limit, cp.normal_impulses));
+            }
+            let cp = &mut c.points[point_index];
             let delta_impulse = sub_w(new_impulse, cp.normal_impulses);
             cp.normal_impulses = new_impulse;
             cp.total_normal_impulses = add_w(cp.total_normal_impulses, delta_impulse);

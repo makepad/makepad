@@ -9,7 +9,7 @@
 //! compute crate's own pool. Results never depend on which: chunks are
 //! fixed and combine in order.
 
-use makepad_platform::thread::{Class, TaskPool};
+use makepad_platform::thread::{current_class, Class, TaskPool};
 use makepad_platform::Cx;
 use makepad_script_compute_sched::admission::{JobBudget, Ledger, Origin};
 use makepad_script_compute::boundary::LayoutView;
@@ -28,15 +28,17 @@ pub struct KernelEngine {
 
 static ENGINE: OnceLock<KernelEngine> = OnceLock::new();
 
-/// An executor on the platform pool's Heavy lane. `ui` is the UI thread:
-/// the pool never fans out from it (that would block the UI on the pool's
-/// queue), so a job run there runs on it alone.
+/// An executor on the platform pool. `ui` is the UI thread: the pool never
+/// fans out from it (that would block the UI on the pool's queue), so a job
+/// run there runs on it alone. A task it starts (a scheduler's driver) runs
+/// at the class of the job that starts it, Background outside a job: never
+/// a fixed class below its caller's.
 pub fn task_pool_executor(pool: TaskPool, ui: std::thread::ThreadId) -> Arc<dyn Executor> {
     let workers = pool.worker_count();
     let (p1, p2) = (pool.clone(), pool);
     Arc::new(FnExecutor::new(
         workers,
-        move |task: Arc<dyn Fn() + Send + Sync>| p1.submit_internal(Class::Background, move || task()).is_ok(),
+        move |task: Arc<dyn Fn() + Send + Sync>| p1.submit_internal(current_class().unwrap_or(Class::Background), move || task()).is_ok(),
         move |n: usize, f: &(dyn Fn(usize) + Sync)| {
             if std::thread::current().id() == ui {
                 (0..n).for_each(f);
@@ -86,21 +88,19 @@ impl KernelEngine {
         self.task_pool
     }
 
-    /// Runs one trusted job to completion at `priority` and gives it back:
-    /// on the calling thread with the workers' help for MustComplete (load
-    /// gating: nothing queues in front of it), otherwise queued in its
-    /// class and waited for. Trusted work runs to its end (its counted ops
+    /// Runs one trusted job to completion on the calling thread, with the
+    /// workers' help, at the calling job's class, and gives it back. The
+    /// caller waits for it whatever its `priority`, so it never waits behind
+    /// the scheduler's queue or on work below its own class (a queued Near
+    /// or Far job once ran on a Background driver while a Visible caller
+    /// waited). `priority` orders only the queue of callers that do not wait
+    /// (`scheduler().submit`). Trusted work runs to its end (its counted ops
     /// are not limited). Never call this on the UI thread.
-    pub fn run(&self, mut job: Job, priority: Priority) -> Result<Job, (Job, JobError)> {
-        let budget = JobBudget::UNLIMITED;
-        if priority == Priority::MustComplete {
-            return match self.sched.run_sync(&mut job, Origin::Host, budget) {
-                Ok(()) => Ok(job),
-                Err(e) => Err((job, e)),
-            };
+    pub fn run(&self, mut job: Job, _priority: Priority) -> Result<Job, (Job, JobError)> {
+        match self.sched.run_sync(&mut job, Origin::Host, JobBudget::UNLIMITED) {
+            Ok(()) => Ok(job),
+            Err(e) => Err((job, e)),
         }
-        let handle = self.sched.submit(job, priority, Origin::Host, budget)?;
-        handle.wait()
     }
 }
 
