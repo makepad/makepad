@@ -37,12 +37,46 @@ const K0: u64 = 0x6174_732d_6469_7061;
 const K1: u64 = 0x0031_762d_656c_6261;
 
 /// Streams derived `Hash` impls into the 128-bit hash (`finish128`); `finish` is its low half.
+/// The fixed-width writes (most of a derived impl's) put their bytes into the tail at once: the
+/// same hash as `write` of their native-endian bytes, which is what the trait's defaults pass
+/// (so only on little-endian targets, where those are `put`'s order).
 impl std::hash::Hasher for Sip128 {
     fn write(&mut self, b: &[u8]) {
         Sip128::write(self, b);
     }
     fn finish(&self) -> u64 {
         self.finish128() as u64
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_u8(&mut self, x: u8) {
+        self.put(x as u64, 1);
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_u16(&mut self, x: u16) {
+        self.put(x as u64, 2);
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_u32(&mut self, x: u32) {
+        self.put(x as u64, 4);
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_u64(&mut self, x: u64) {
+        self.put(x, 8);
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_u128(&mut self, x: u128) {
+        self.put(x as u64, 8);
+        self.put((x >> 64) as u64, 8);
+    }
+    #[cfg(target_endian = "little")]
+    #[inline]
+    fn write_usize(&mut self, x: usize) {
+        self.put(x as u64, std::mem::size_of::<usize>());
     }
 }
 
@@ -69,6 +103,22 @@ impl Sip128 {
             round(&mut self.v);
         }
         self.v[0] ^= m;
+    }
+
+    /// `write` of the `n` (1 to 8) low bytes of `x`, little-endian; `x` has no bits above them.
+    #[inline(always)]
+    fn put(&mut self, x: u64, n: usize) {
+        self.len = self.len.wrapping_add(n as u64);
+        let t = self.ntail;
+        self.tail |= x << (8 * t);
+        if t + n < 8 {
+            self.ntail = t + n;
+            return;
+        }
+        let m = self.tail;
+        self.word(m);
+        self.tail = if t == 0 { 0 } else { x >> (8 * (8 - t)) };
+        self.ntail = t + n - 8;
     }
 
     pub fn write(&mut self, mut b: &[u8]) {
@@ -98,16 +148,17 @@ impl Sip128 {
     }
 
     pub fn u8(&mut self, x: u8) {
-        self.write(&[x]);
+        self.put(x as u64, 1);
     }
     pub fn u32(&mut self, x: u32) {
-        self.write(&x.to_le_bytes());
+        self.put(x as u64, 4);
     }
     pub fn u64(&mut self, x: u64) {
-        self.write(&x.to_le_bytes());
+        self.put(x, 8);
     }
     pub fn u128(&mut self, x: u128) {
-        self.write(&x.to_le_bytes());
+        self.put(x as u64, 8);
+        self.put((x >> 64) as u64, 8);
     }
     /// Length-prefixed, so consecutive strings never run together.
     pub fn str(&mut self, s: &str) {

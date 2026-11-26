@@ -229,8 +229,11 @@ impl Types {
             (self.len(), self.index.table())
         };
         let mut meta = Vec::new();
-        let kinds: Vec<RegionKind> = self.regions.kinds.iter().copied().collect();
+        // the region lists before the regions: a list names regions interned before it, so the
+        // regions taken after hold every one it names (taken the other way, a list another thread
+        // interned in between named a region past the image's, and the restore refused it)
         let args: Vec<std::sync::Arc<[RegionId]>> = self.regions.args.iter().cloned().collect();
+        let kinds: Vec<RegionKind> = self.regions.kinds.iter().copied().collect();
         kinds.put(&mut meta); args.put(&mut meta);
         self.consts.put(&mut meta);
         self.free_regions.load(Ordering::Relaxed).put(&mut meta);
@@ -452,12 +455,18 @@ mod tests {
 
     /// The intern tables double while other threads intern and look up: every thread gets one
     /// id per kind and list, and an image taken meanwhile restores to an interner that finds
-    /// every type and list it holds (none is interned again).
+    /// every type and list it holds (none is interned again). The threads intern a region and a
+    /// region list naming it with each type, as a body's check does: every image taken while
+    /// they run restores (its lists name only regions it holds).
     #[test]
     fn intern_tables_double_under_concurrent_interning_and_images() {
         const KINDS: u32 = 60_000;
         let tys = Types::new();
-        let id_of = |i: u32| tys.intern(TyKind::Tuple(tys.mk_list(&[tys.intern(TyKind::Infer(i)), tys.u8_])));
+        let id_of = |i: u32| {
+            let r = tys.intern_region(RegionKind::ReEarlyParam(i));
+            let _ = tys.intern_region_args(&[r, tys.intern_region(RegionKind::ReStatic)]);
+            tys.intern(TyKind::Tuple(tys.mk_list(&[tys.intern(TyKind::Infer(i)), tys.u8_])))
+        };
         let image = std::thread::scope(|s| {
             // every thread walks the same kinds from its own start, so most are raced
             let threads: Vec<_> = (0..8u32).map(|t| {
@@ -466,6 +475,12 @@ mod tests {
             }).collect();
             std::thread::sleep(std::time::Duration::from_millis(2));
             let image = tys.collected_image().unwrap();
+            for k in 0..8 {
+                if threads.iter().all(|t| t.is_finished()) { break; }
+                let more = tys.collected_image().unwrap();
+                assert!(Types::restore_collected(Box::leak(more.into_boxed_slice())).is_some(),
+                    "image {k} taken while the threads interned did not restore");
+            }
             let ids: Vec<Vec<(u32, TyId)>> = threads.into_iter().map(|t| t.join().unwrap()).collect();
             for thread in &ids[1..] {
                 let mut by_kind: Vec<(u32, TyId)> = thread.clone();
@@ -474,7 +489,7 @@ mod tests {
             }
             image
         });
-        let restored = Types::restore_collected(Box::leak(image.into_boxed_slice())).unwrap();
+        let restored = Types::restore_collected(Box::leak(image.into_boxed_slice())).expect("the first image taken while the threads interned did not restore");
         let n = restored.len();
         assert!(restored.list_const_counts().0 <= tys.list_const_counts().0);
         for i in 0..n {

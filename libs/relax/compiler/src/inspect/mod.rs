@@ -180,19 +180,21 @@ pub fn start(app: &str) {
         endpoint.register(name, *version, factory.clone());
     }
     *ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoint.clone());
+    let tool = crate::tool_name();
     let sock = match endpoint.listen_unix(&extra) {
         Ok(s) => s,
         Err(e) => {
             // (also when the run is silent: nothing else would say why inspect finds no socket)
-            eprintln!("{t}-remote: pid {} app {}: {t} inspect cannot reach this run: {}", pid, app, e, t = crate::tool_name());
+            eprintln!("[{tool}-remote] pid={pid} app={app}: {tool} inspect cannot reach this run: {e}");
             return;
         }
     };
     // (a `--silent` run's stderr is the program's: a test reading it sees only the program)
     if crate::harness::live::enabled() || !TEST_RUN.load(Relaxed) && !crate::run::silent() {
-        // `run`: the pid that stays across the run's restarts as new processes (its parent's, else
-        // this one's), for a reader that has only the output
-        eprintln!("{t}-remote: pid {} app {} run {} socket {} ({t} inspect {} help)", pid, app, run_pid.unwrap_or(pid), sock.display(), pid, t = crate::tool_name());
+        eprintln!("{}", makepad_remote::startup_line(tool, pid, app, &sock));
+        if let Some(run_pid) = run_pid {
+            eprintln!("[{tool}-remote] run={run_pid} pid={pid}");
+        }
     }
     events::start();
     timeline::hitch_init();

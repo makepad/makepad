@@ -14,11 +14,11 @@ rem 2. The loader's source: the release service's licence-free loader release, a
 rem    and SHA-256 the service names (checked before unpacking).
 rem 3. `cargo build --profile host --offline -p makepad-run --bin makepad --bin makepad-launcher` for this computer's
 rem    processor (the ZIP holds every crate). The loader ZIP's SHA-256 keys .version and, after a
-rem    successful build, .loader-sha256; .built also records Rust and the target triple. A matching
+rem    successful build, .loader-sha256; .built records the loader commit, Rust and the target triple. A matching
 rem    source marker reuses the source; matching SHA-256 and Rust stamps reuse the binary.
 rem    A changed ZIP replaces only changed files, so only their crates
 rem    compile again. Then `makepad` with no arguments: the runner,
-rem    from its launch record (apps\runner.launch, the release service's latest `runner` release),
+rem    from runner.launch in the active loader folder (the release service's latest `runner` release),
 rem    which downloads the rest. With open <id> (for example, makepad.bat open fab), it prepares
 rem    the same Runner launch record, then hands over to makepad open <id> for progress and the
 rem    app's ready line. Other arguments go straight to the loader.
@@ -28,13 +28,13 @@ rem (Rust, the loader's source, its build, the Runner) with a bar, sizes, speed 
 rem so far and what goes on now. Output that is no console (a file, a pipe) gets plain lines.
 rem The full output of curl and Cargo stays in cache\logs.
 rem
-rem In its folder it creates rust\, cache\, apps\ and runner\, the same folders as makepad.sh. That is
+rem In its folder it creates rust\, cache\, apps\, runner\ and target\, the same folders as makepad.sh. That is
 rem this file's own folder when it holds nothing else, like the folder Explorer's Extract All makes of
 rem makepad-runner.zip. Otherwise it is %USERPROFILE%\makepad-runner, saying so: for a download among
 rem other files, and for a temporary folder, where Windows runs a file opened inside a zip that was
 rem not extracted (and which it empties later).
 rem Under cache\loader, current selects src or a commit folder; pending rolls back to previous
-rem unless the new runner confirmed its first start. Each folder keeps its own source and binary.
+rem unless the new runner confirmed its first start. Each source has its build under target\loader.
 rem Run it again at any time: nothing is downloaded or compiled twice. It uses only Windows' own
 rem curl.exe, tar.exe, certutil.exe and PowerShell (for the console, release JSON, source updates).
 setlocal EnableExtensions DisableDelayedExpansion
@@ -96,6 +96,7 @@ set "SHA_rust-std=47bceabaceabc4de97e20f7470d9973fb20e844986da01b3a31cf28e245966
 set "SHA_rust-mingw=14fc86abb02d7d0575eb38a738161dcd87aa4032e091cce3424e78321b145e5e"
 set "SERVICE=https://makepad.nl/api/loader"
 if defined MAKEPAD_LOADER_SERVICE set "SERVICE=%MAKEPAD_LOADER_SERVICE%"
+if "!SERVICE:~-1!"=="/" set "SERVICE=!SERVICE:~0,-1!"
 rem https only, except a release service on this machine (tests, a local service)
 set "SVCPROTO==https"
 if /i "%SERVICE:~0,17%"=="http://127.0.0.1:" set "SVCPROTO==http,https"
@@ -154,6 +155,7 @@ set "HOLD="
 call :now
 set "T0=!NOW!"
 set "LOADER=!CACHE!\loader"
+set "LOADER_TARGETS=!ROOT!\target\loader"
 call :frame
 
 set "CURL_VERSION=" & set "CURL_AGE=0"
@@ -171,8 +173,14 @@ where tar.exe >nul 2>nul || (set "T=Makepad needs tar.exe: Windows 10 version 18
 for %%D in ("%DOWNLOADS%" "%LOGS%" "%CACHE%\loader" "%CACHE%\runner" "%ROOT%\apps") do if not exist "%%~D" mkdir "%%~D" || (set "T=Cannot create the folder %%~D." & goto :fail)
 set "RELAX_HOME=%ROOT%"
 
+for /f "delims=" %%I in ('powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:LOADER -Directory -Force | Where-Object { $_.Name -cmatch '\A(src|[0-9a-f]{40})\z' } | ForEach-Object { $_.Name }"') do (
+    call :migrate_loader %%I || goto :fail
+)
+
 rem Restore an unconfirmed switch before choosing the source folder or checking its build stamp.
 if exist "!LOADER!\pending" (
+    call :read_loader_pointer pending || (set "T=Cannot read the pending loader." & goto :fail)
+    set "PENDING_NAME=!LOADER_NAME!"
     call :loader_folder previous
     if "!LOADER_NAME!"=="src" (
         if exist "!LOADER!\current" del /q "!LOADER!\current"
@@ -180,6 +188,12 @@ if exist "!LOADER!\pending" (
     ) else (
         >"!LOADER!\current.part" echo !LOADER_NAME!|| exit /b 1
         move /y "!LOADER!\current.part" "!LOADER!\current" >nul || exit /b 1
+    )
+    if defined PENDING_NAME if exist "!LOADER!\!PENDING_NAME!\runner.launch.previous" (
+        set "PENDING_RECORD=!LOADER!\!PENDING_NAME!\runner.launch"
+        powershell -NoProfile -Command "$dir = Get-Item -Force -LiteralPath (Join-Path $env:LOADER $env:PENDING_NAME) -ErrorAction Stop; if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 1 }" || (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
+        if exist "!PENDING_RECORD!\" (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
+        move /y "!PENDING_RECORD!.previous" "!PENDING_RECORD!" >nul || (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
     )
     >"!LOADER!\rolled-back.part" echo the new runner did not confirm its first start|| exit /b 1
     move /y "!LOADER!\rolled-back.part" "!LOADER!\rolled-back" >nul || exit /b 1
@@ -190,6 +204,7 @@ if exist "!LOADER!\pending" (
 )
 call :loader_folder current
 set "SRC=!LOADER!\!LOADER_NAME!"
+set "NEW_TARGET=!LOADER_TARGETS!\!LOADER_NAME!"
 
 rem --- 1. Rust ------------------------------------------------------------------------------------
 set "NEED_RUST="
@@ -298,8 +313,7 @@ if not defined NEED_RUST (set "K=ok" & set "S=ready" & set "INFO=%D%in rust\%N%"
 rem --- 2. The runner release and its loader's source, cut from the same Makepad commit (so the two
 rem always fit). With other loader arguments a loader compiled before stays as it is (the runner and
 rem the apps it recorded were made for it); offline, the one built before.
-rem The loader ZIP's SHA-256 names its version, independent of the runner's commit.
-rem One source folder for every version (target\ inside it: makepad finds its std two levels up).
+rem The installer keys archive reuse by SHA-256. The Runner identifies the loader by commit.
 set "CURROW=2"
 if not exist "%CACHE%\runner" mkdir "%CACHE%\runner"
 set "RUNNER=%CACHE%\runner\latest.json"
@@ -312,9 +326,9 @@ if defined ASK (
     call :put 2
 )
 if defined ASK curl.exe -fsS --proto %SVCPROTO% -m 60 "%SERVICE%/public/app/runner/latest" -o "%RUNNER%" 2>>"%LOGS%\download.log"
-set "REL=" & set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
-if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; if ($j.release -cmatch '\A[A-Za-z0-9_-]+\z' -and $j.loader.name -cmatch '\A[A-Za-z0-9_-]([A-Za-z0-9_.-]*[A-Za-z0-9_-])?\z' -and $j.loader.bytes -cmatch '\A[0-9]+\z' -and $j.loader.sha256 -cmatch '\A[0-9a-f]{64}\z' -and -not ($j.repositories | Where-Object { $_.name -cnotmatch '\A[A-Za-z0-9_-]+\z' -or $_.path -cnotmatch '\A[A-Za-z0-9_/-]+\z' -or $_.commit -cnotmatch '\A([0-9a-f]{40})?\z' })) { '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256 }"') do (
-    set "REL=%%A" & set "VERSION=%%B" & set "ZIPNAME=%%C" & set "ZIPBYTES=%%D" & set "ZIPSHA=%%E"
+set "REL=" & set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA=" & set "LOADER_COMMIT="
+if exist "%RUNNER%" for /f "tokens=1-6" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; if ($j.release -cmatch '\A[A-Za-z0-9_-]+\z' -and $j.loader.name -cmatch '\A[A-Za-z0-9_-]([A-Za-z0-9_.-]*[A-Za-z0-9_-])?\z' -and $j.loader.bytes -cmatch '\A[0-9]+\z' -and $j.loader.sha256 -cmatch '\A[0-9a-f]{64}\z' -and -not ($j.repositories | Where-Object { $_.name -cnotmatch '\A[A-Za-z0-9_-]+\z' -or $_.path -cnotmatch '\A[A-Za-z0-9_/-]+\z' -or $_.commit -cnotmatch '\A([0-9a-f]{40})?\z' })) { $commit = if ($j.loader.commit -cmatch '\A[0-9a-f]{40}\z') { $j.loader.commit } else { 'unknown' }; '{0} {1} {2} {3} {4} {5}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256, $commit }"') do (
+    set "REL=%%A" & set "VERSION=%%B" & set "ZIPNAME=%%C" & set "ZIPBYTES=%%D" & set "ZIPSHA=%%E" & set "LOADER_COMMIT=%%F"
 )
 rem What a release names ends up in paths and URLs: anything makepad.sh would not take is no release.
 if not defined REL del "%RUNNER%" 2>nul
@@ -328,10 +342,15 @@ if not defined VERSION (
     set "LOGFILE=%LOGS%\download.log"
     goto :fail
 )
-set "MAKEPAD=%SRC%\target\host\makepad.exe"
-set "BUILT=%VERSION% %RUST_VERSION% %TRIPLE%"
+set "INSTALLED_COMMIT="
 set "HAVE_RUST="
-if exist "!SRC!\.built" for /f "usebackq tokens=2,3" %%A in ("!SRC!\.built") do set "HAVE_RUST=%%A %%B"
+if exist "!SRC!\.built" for /f "usebackq tokens=1-3" %%A in ("!SRC!\.built") do (
+    set "INSTALLED_COMMIT=%%A" & set "HAVE_RUST=%%B %%C"
+)
+if not defined PREPARE_RUNNER set "LOADER_COMMIT="
+if not defined LOADER_COMMIT set "LOADER_COMMIT=!INSTALLED_COMMIT!"
+if not defined LOADER_COMMIT set "LOADER_COMMIT=unknown"
+set "BUILT=!LOADER_COMMIT! !RUST_VERSION! !TRIPLE!"
 set "HAVE_VERSION="
 if exist "!SRC!\.version" set /p HAVE_VERSION=<"!SRC!\.version"
 set "K=ok" & set "S=up to date" & set "INFO=%D%!VERSION:~0,10!%N%"
@@ -351,13 +370,18 @@ if not "!HAVE_VERSION!"=="!VERSION!" if not "!HAVE_LOADER_SHA!"=="!VERSION!" (
     if exist "%CACHE%\loader\.unpack" rmdir /s /q "%CACHE%\loader\.unpack"
     mkdir "%CACHE%\loader\.unpack" || exit /b 1
     tar.exe -xf "%DOWNLOADS%\%ZIPNAME%" -C "%CACHE%\loader\.unpack" 2>"%LOGS%\unpack.log" || (set "T=Unpacking the loader's source failed. Run makepad.bat again." & set "LOGFILE=%LOGS%\unpack.log" & goto :fail)
-    if not exist "%SRC%\Cargo.toml" (
-        if exist "%SRC%" rmdir /s /q "%SRC%"
+    powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $dir = Join-Path (Join-Path $env:LOADER '.unpack') $env:REL; if (Get-ChildItem -Force -LiteralPath $dir | Where-Object { $_.Name -in 'runner.launch','runner.launch.previous' }) { exit 1 }" || (set "T=Cannot use the loader ZIP. Its release folder must contain no Runner launch record or backup." & goto :fail)
+    set "UPDATE_SOURCE="
+    if exist "!SRC!\Cargo.toml" set "UPDATE_SOURCE=1"
+    if exist "!SRC!\runner.launch" set "UPDATE_SOURCE=1"
+    if not defined UPDATE_SOURCE (
+        if exist "!SRC!" rmdir /s /q "!SRC!" || (set "T=Cannot remove !SRC!." & goto :fail)
+        if exist "!NEW_TARGET!" rmdir /s /q "!NEW_TARGET!" || (set "T=Cannot remove !NEW_TARGET!." & goto :fail)
         move "%CACHE%\loader\.unpack\%REL%" "%SRC%" >nul || exit /b 1
     ) else (
         rem an update: files and folders the new version no longer has removed first (deepest first),
         rem so a name that went from file to folder or back is free; then changed files replaced
-        rem (with the time of now, so cargo sees them as changed); the rest (and target\) left as they are
+        rem (with the time of now, so cargo sees them as changed); the rest left as they are
         set "K=doing" & set "S=updating" & set "INFO=%D%to !VERSION:~0,10!, only the files that changed%N%"
         set "FOOT=Updating the loader's source: only the files that changed are replaced."
         call :put 2
@@ -365,7 +389,7 @@ if not "!HAVE_VERSION!"=="!VERSION!" if not "!HAVE_LOADER_SHA!"=="!VERSION!" (
             "$ErrorActionPreference = 'Stop'; $new = Join-Path $env:CACHE ('loader\.unpack\' + $env:REL); $src = $env:SRC; $now = Get-Date; $keep = @{};" ^
             "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse) { $keep[$f.FullName.Substring($new.Length + 1)] = $f.PSIsContainer };" ^
             "$gone = Get-ChildItem -LiteralPath $src -Recurse | Where-Object { $rel = $_.FullName.Substring($src.Length + 1);" ^
-            "  $rel -ne 'target' -and -not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and $rel -ne '.loader-sha256' -and $keep[$rel] -ne $_.PSIsContainer };" ^
+            "  $rel -ne 'target' -and -not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and $rel -ne '.loader-sha256' -and $rel -ne 'runner.launch' -and $rel -ne 'runner.launch.previous' -and $keep[$rel] -ne $_.PSIsContainer };" ^
             "foreach ($f in $gone | Sort-Object { $_.FullName.Length } -Descending) { Remove-Item -Recurse -Force -LiteralPath $f.FullName };" ^
             "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $dst = Join-Path $src $f.FullName.Substring($new.Length + 1);" ^
             "  if (-not (Test-Path -LiteralPath $dst) -or (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $dst).Hash) {" ^
@@ -380,13 +404,23 @@ if not "!HAVE_VERSION!"=="!VERSION!" if not "!HAVE_LOADER_SHA!"=="!VERSION!" (
 )
 call :put 2
 set "CURROW=3"
-if exist "!MAKEPAD!" if exist "!SRC!\target\host\makepad-launcher.exe" if "!HAVE_LOADER_SHA!"=="!VERSION!" if "!HAVE_RUST!"=="!RUST_VERSION! !TRIPLE!" (
+if exist "!LOADER_TARGET!\host\makepad.exe" if exist "!LOADER_TARGET!\host\makepad-launcher.exe" if "!HAVE_LOADER_SHA!"=="!VERSION!" if "!HAVE_RUST!"=="!RUST_VERSION! !TRIPLE!" (
+    if defined PREPARE_RUNNER if defined REL if not "!LOADER_COMMIT!"=="unknown" if not "!INSTALLED_COMMIT!"=="!LOADER_COMMIT!" (
+        >"!SRC!\.built.part" echo !BUILT!|| exit /b 1
+        move /y "!SRC!\.built.part" "!SRC!\.built" >nul || exit /b 1
+    )
     set "K=ok" & set "S=up to date" & set "INFO=%D%for this processor%N%"
     call :put 3
     goto :have_loader
 )
 
-rem --- 3. Compile the loader: no Rust settings from elsewhere on this computer; output in cache\
+rem --- 3. Compile the loader: no Rust settings from elsewhere on this computer
+rem Reuse the existing Cargo tree even when its build is incomplete.
+set "LOADER_TARGET=!NEW_TARGET!"
+set "OLD_TARGET=!SRC!\target"
+if not exist "!NEW_TARGET!\" (
+    call :old_target_is_dir && set "LOADER_TARGET=!OLD_TARGET!"
+)
 rem rust-mingw keeps the dlltool that raw-dylib imports need beside its linker, where rustc does not
 rem look, and has no assembler for it: rustc assembles (assemble.rs).
 set "RUST_TOOLS=%RUST%\lib\rustlib\%TRIPLE%\bin\self-contained"
@@ -435,6 +469,7 @@ pushd "!SRC!" || goto :build_failed
 rem Expand the exit code in the child, after cargo. Publish the complete done-file by rename.
 rem Delayed expansion is off in the parent here; the child's variable values are not rescanned.
 setlocal DisableDelayedExpansion
+set "CARGO_TARGET_DIR=%LOADER_TARGET%"
 set "ERRORLEVEL="
 set JOB_ARGS=/d /v:on /c "cargo.exe build --profile host --offline -p makepad-run --bin makepad --bin makepad-launcher >"!LOG!" 2>&1 <nul & >"!BUILD_DONE!.code" echo !errorlevel!& move /y "!BUILD_DONE!.code" "!BUILD_DONE!" >nul"
 set "JOB_EACH="
@@ -455,6 +490,9 @@ del "!BUILD_DONE!" 2>nul
 set "RUSTFLAGS="
 if "!BUILD!"=="-1073741510" goto :build_stopped
 if not "!BUILD!"=="0" goto :build_failed
+if "!LOADER_TARGET!"=="!NEW_TARGET!" (
+    call :write_loader_source !LOADER_NAME! || goto :fail
+)
 >"!SRC!\.built.part" echo !BUILT!|| exit /b 1
 move /y "!SRC!\.built.part" "!SRC!\.built" >nul || exit /b 1
 >"!SRC!\.loader-sha256.part" echo !VERSION!|| exit /b 1
@@ -481,11 +519,14 @@ set "T2=The end of the build log is below."
 set "LOGFILE=!LOG!" & set "TAIL=1"
 goto :fail
 :have_loader
+set "MAKEPAD=!LOADER_TARGET!\host\makepad.exe"
 set "PATH=!RUST!\bin;!PATH!"
 set "MAKEPAD_LOADER_ROOT=!ROOT!"
 set "MAKEPAD_LOADER_SERVICE=!SERVICE!"
 set "CURROW=4"
 if defined PREPARE_RUNNER goto :prepare_runner
+rem A run with loader arguments can also move an older build. Refresh its installed entry too.
+if exist "!ROOT!\makepad.cmd" call :write_entry || (set "T=Cannot write !ROOT!\makepad.cmd." & goto :fail)
 set "K=wait" & set "S=not started" & set "INFO=%D%the loader runs with your arguments%N%"
 call :put 4
 call :ready "Running the loader with your arguments."
@@ -502,17 +543,22 @@ if exist "%RUNNER%" (
     powershell -NoProfile -Command ^
         "$ErrorActionPreference = 'Stop'; $j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; $g = $env:SERVICE + '/public/git/runner'; $r = $j.release;" ^
         "$l = @('title`tMakepad', 'arg`trun', 'arg`t--quiet', 'arg`t--cached'); $m = @();" ^
-        "foreach ($p in $j.repositories) { $u = '{0}/{1}.git#{2}@{3}' -f $g, $p.name, $r, $p.commit;" ^
+        "foreach ($p in $j.repositories) { $u = '{0}/{1}.git#{2}' -f $g, $p.name, $r; if ($p.commit) { $u += '@' + $p.commit };" ^
         "  if ($p.path -eq 'makepad') { $l += ('arg`t' + $u) } elseif ($p.path.StartsWith('makepad/')) { $m += 'arg`t--mount'; $m += ('arg`t' + $p.path.Substring(8) + '=' + $u) } };" ^
         "$l += $m; $l += 'arg`tmakepad-runner';" ^
-        "[IO.File]::WriteAllText((Join-Path $env:ROOT 'apps\runner.launch.part'), (($l | ForEach-Object { $_ -replace '`t', [char]9 }) -join [char]10) + [char]10)" ^
+        "[IO.File]::WriteAllText((Join-Path $env:SRC 'runner.launch.part'), (($l | ForEach-Object { $_ -replace '`t', [char]9 }) -join [char]10) + [char]10)" ^
         || (set "T=The runner release could not be read." & goto :fail)
-    move /y "%ROOT%\apps\runner.launch.part" "%ROOT%\apps\runner.launch" >nul || exit /b 1
+    move /y "%SRC%\runner.launch.part" "%SRC%\runner.launch" >nul || exit /b 1
 )
-if not exist "%ROOT%\apps\runner.launch" (
+if not exist "%SRC%\runner.launch" (
     set "T=No answer from %SVCHOST%, and the Runner was never set up here."
     set "T2=Check the connection, then run makepad.bat again."
     goto :fail
+)
+rem the pin files of installs from before the pin moved into the loader folder, once the folder has its own
+for %%F in ("!ROOT!\apps\runner.launch" "!CACHE!\runner\release") do if exist "%%~F" (
+    del /q "%%~F"
+    if exist "%%~F" (set "T=Cannot remove %%~F." & goto :fail)
 )
 set "K=doing" & set "S=starting" & set "INFO=%D%Makepad's loader opens its window%N%"
 call :put 4
@@ -530,6 +576,34 @@ rem name, so a short 8.3 one (JOHNSM~1) matches too; PowerShell reads them, cmd 
 :temporary
 for /f %%T in ('powershell -NoProfile -Command "$h = [IO.Path]::GetFullPath($env:ROOT + '\'); foreach ($t in $env:TEMP, $env:TMP) { if ($t -and $h.StartsWith([IO.Path]::GetFullPath($t.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { 'temporary'; break } }"') do set "NOT_HOME=%%T"
 exit /b 0
+
+:migrate_loader
+set "OLD_TARGET=!LOADER!\%~1\target"
+set "NEW_TARGET=!LOADER_TARGETS!\%~1"
+if exist "!NEW_TARGET!" (
+    rem Finish a move interrupted before the marker was written.
+    if not exist "!NEW_TARGET!\" exit /b 0
+    if exist "!NEW_TARGET!\source" exit /b 0
+) else (
+    call :old_target_is_dir || exit /b 0
+    if not exist "!LOADER_TARGETS!\" mkdir "!LOADER_TARGETS!" 2>nul || goto :skip_move
+    move "!OLD_TARGET!" "!NEW_TARGET!" >nul 2>&1 || goto :skip_move
+)
+:write_loader_source
+>"!LOADER_TARGETS!\%~1\source.part" echo ../../../cache/loader/%~1|| (set "T=Cannot write !LOADER_TARGETS!\%~1\source.part." & exit /b 1)
+move /y "!LOADER_TARGETS!\%~1\source.part" "!LOADER_TARGETS!\%~1\source" >nul || (set "T=Cannot write !LOADER_TARGETS!\%~1\source." & exit /b 1)
+exit /b 0
+
+:skip_move
+rem Windows may keep the tree in place while a Runner has a file open.
+set "NOTE3=Skipped moving !OLD_TARGET! to !NEW_TARGET!. Using the old build in place."
+if defined SCREEN (call :draw) else echo   !NOTE3!
+exit /b 0
+
+:old_target_is_dir
+if not exist "!OLD_TARGET!\" exit /b 1
+powershell -NoProfile -Command "try { if (-not ([IO.File]::GetAttributes($env:OLD_TARGET) -band [IO.FileAttributes]::ReparsePoint)) { exit 0 } } catch {}; exit 1"
+exit /b %errorlevel%
 
 :write_entry
 setlocal DisableDelayedExpansion
@@ -626,7 +700,7 @@ if defined SCREEN (
 echo   !WHERE!
 if not defined CONSOLE if defined OPEN_ID (
     if exist "!LOADER!\pending" (call :loader_folder previous) else call :loader_folder current
-    if not exist "!LOADER!\!LOADER_NAME!\target\host\makepad.exe" echo   First start: Rust, the loader, then !OPEN_ID! compiles for this computer: many minutes. If your shell stops waiting, run the same line again: it continues where it is.
+    if not exist "!LOADER_TARGET!\host\makepad.exe" echo   First start: Rust, the loader, then !OPEN_ID! compiles for this computer: many minutes. If your shell stops waiting, run the same line again: it continues where it is.
 )
 if defined NOTE echo   !NOTE!
 if defined NOTE2 echo   !NOTE2!
@@ -874,17 +948,34 @@ rem Installed environment
 if defined ENTRY_CODEPAGE chcp %ENTRY_CODEPAGE% >nul
 set "PATH=%RUST_BIN%;%PATH%"
 set "LOADER=%MAKEPAD_LOADER_ROOT%\cache\loader"
+set "LOADER_TARGETS=%MAKEPAD_LOADER_ROOT%\target\loader"
 call :loader_folder current
-"%LOADER%\%LOADER_NAME%\target\host\makepad.exe" %*
+"%LOADER_TARGET%\host\makepad.exe" %*
 exit /b
 
 rem :loader_folder POINTER returns only a valid folder with a binary, otherwise src.
 rem Read untrusted pointer text in PowerShell so cmd never expands it as commands or paths.
 :loader_folder
-set "LOADER_NAME=src"
+call :read_loader_pointer %~1
+if not defined LOADER_NAME set "LOADER_NAME=src"
+goto :select_loader_target
+
+:read_loader_pointer
+set "LOADER_NAME="
 set "LOADER_POINTER=%~1"
 setlocal DisableDelayedExpansion
-if not exist "%LOADER%\%LOADER_POINTER%" exit /b 0
-for /f "delims=" %%N in ('powershell -NoProfile -Command "try { $n = [IO.File]::ReadAllText((Join-Path $env:LOADER $env:LOADER_POINTER)).Trim(); if ($n -cmatch '\A(src|[0-9a-f]{40})\z' -and [IO.File]::Exists((Join-Path $env:LOADER ($n + '\target\host\makepad.exe')))) { $n } } catch {}"') do set "LOADER_NAME=%%N"
+if not exist "%LOADER%\%LOADER_POINTER%" (endlocal & exit /b 0)
+for /f "delims=" %%N in ('powershell -NoProfile -Command "$ErrorActionPreference = 'Stop'; $n = [IO.File]::ReadAllText((Join-Path $env:LOADER $env:LOADER_POINTER)).Trim(); if ($n -cmatch '\A(src|[0-9a-f]{40})\z') { $n } else { 'invalid' }"') do set "LOADER_NAME=%%N"
 endlocal & set "LOADER_NAME=%LOADER_NAME%"
+if not defined LOADER_NAME exit /b 1
+if "%LOADER_NAME%"=="invalid" set "LOADER_NAME="
 exit /b 0
+
+:select_loader_target
+set "LOADER_TARGET=%LOADER_TARGETS%\%LOADER_NAME%"
+if exist "%LOADER_TARGET%\host\makepad.exe" if not exist "%LOADER_TARGET%\host\makepad.exe\" exit /b 0
+set "LOADER_TARGET=%LOADER%\%LOADER_NAME%\target"
+if "%LOADER_NAME%"=="src" exit /b 0
+if exist "%LOADER_TARGET%\host\makepad.exe" if not exist "%LOADER_TARGET%\host\makepad.exe\" exit /b 0
+set "LOADER_NAME=src"
+goto :select_loader_target

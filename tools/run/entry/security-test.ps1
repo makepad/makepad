@@ -52,7 +52,7 @@ try {
         Require ($launch.Length -gt 0) 'launch writer missing'
         $code = Run-Fragment ($launch + "`nexit /b 0")
         Require ($code[-1] -eq 0) 'launch writer failed for a literal folder name'
-        Require ([IO.File]::Exists((Join-Path $base 'apps\runner.launch.part'))) 'launch record missing'
+        Require ([IO.File]::Exists((Join-Path $env:SRC 'runner.launch.part'))) 'launch record missing'
         foreach ($bad in @(
             $release.Replace('"fixture"', '"..\\evil"'),
             $release.Replace('"fixture"', '"fixture\n"'),
@@ -79,7 +79,7 @@ try {
         } finally { $lock.Dispose() }
         Require ([IO.File]::ReadAllText($target) -eq 'old') 'failed update changed the locked file'
         # A name that changes kind between versions, both ways; target\ and the stamps stay.
-        foreach ($old in 'was_folder\deep\old.rs', 'was_file', 'target\stays', '.version', 'gone\empty\old.rs') {
+        foreach ($old in 'was_folder\deep\old.rs', 'was_file', 'target\stays', '.version', 'runner.launch', 'gone\empty\old.rs') {
             $path = Join-Path $env:SRC $old
             [IO.Directory]::CreateDirectory((Split-Path $path)) | Out-Null
             [IO.File]::WriteAllText($path, 'old', $utf8)
@@ -95,6 +95,7 @@ try {
         Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'was_file\inner.rs')) -eq 'new') 'file not replaced by the folder'
         Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'target\stays')) -eq 'old') 'update touched target'
         Require ([IO.File]::ReadAllText((Join-Path $env:SRC '.version')) -eq 'old') 'update touched a stamp'
+        Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'runner.launch')) -eq 'old') 'update touched the Runner record'
         Require (-not (Test-Path -LiteralPath (Join-Path $env:SRC 'gone'))) 'a folder the new version has no more stayed'
     }
     if ($Case -eq 'Rust') {

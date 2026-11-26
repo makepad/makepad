@@ -20,16 +20,16 @@
 #    the ZIP holds every crate) the moment Rust and the source are in place, and started with no
 #    arguments: it runs the runner, which downloads the rest. With arguments, the loader runs with
 #    them instead. The loader ZIP's SHA-256 keys .version and, after a successful build,
-#    .loader-sha256; .built also records Rust and the target triple. An unchanged ZIP reuses the
+#    .loader-sha256; .built records the loader commit, Rust and the target triple. An unchanged ZIP reuses the
 #    source; matching SHA and Rust stamps reuse the binary. A changed ZIP replaces only the files
 #    that changed, so only their crates compile again. Under cache/loader, current selects src or
 #    a commit folder; pending rolls back to previous if the new runner did not confirm its boot.
 #
 # In its folder it creates rust/ (the toolchain), cache/ (downloads, the loader, its caches and
-# logs), apps/ (what `makepad` and `makepad app <id>` run: the runner's and each app's launch
-# record), runner/ (the runner's own state: licence, catalog, launch logs) and target/ (what makepad
-# run builds for the apps: build scripts, unit graphs, code cache). The folder is this
-# file's own when it holds nothing else (or is an installation already), else ~/makepad-runner
+# logs, and each loader's runner.launch), apps/ (the other apps' launch records),
+# runner/ (the runner's own state: licence, catalog, launch logs) and target/ (the
+# loader build and what makepad run builds for the apps: build scripts, unit graphs, code cache).
+# The folder is this file's own when it holds nothing else (or is an installation already), else ~/makepad-runner
 # (piped into sh, or saved among other downloads); $MAKEPAD_LOADER_ROOT overrides. Run it again to
 # update and start, reusing downloads and compiled crates. The system needs a C linker (Apple's command line tools; on
 # Linux cc) and, on Linux, OpenSSL 3's development files and the desktop/audio libraries;
@@ -189,13 +189,22 @@ rust_llvm_link() {
         [ -e "$rl_at" ] || ln -sf "../../../${rl_lib##*/}" "$rl_at" || return 1
     done
 }
-loader_folder_ready() {
+valid_loader_folder() {
     case "$1" in
-        src) ;;
+        src) return 0 ;;
         *[!0123456789abcdef]*) return 1 ;;
-        *) [ "${#1}" -eq 40 ] || return 1 ;;
+        *) [ "${#1}" -eq 40 ] ;;
     esac
-    [ -f "$loader_root/$1/target/host/makepad" ]
+}
+loader_target_of() {
+    if [ -f "$loader_targets/$1/host/makepad" ]; then printf '%s\n' "$loader_targets/$1"
+    else printf '%s\n' "$loader_root/$1/target"; fi
+}
+loader_folder_ready() {
+    valid_loader_folder "$1" && [ -f "$(loader_target_of "$1")/host/makepad" ]
+}
+write_loader_source() {
+    atomic_line "$loader_targets/$1/source" "../../../cache/loader/$1" || fail "Cannot write $loader_targets/$1/source"
 }
 # The loader selected by a pointer (current or previous), falling back to the bootstrap source.
 loader_folder() {
@@ -368,7 +377,8 @@ screen_start() {
         if [ -n "$open_id" ]; then
             pointer=current
             [ ! -e "$loader_root/pending" ] || pointer=previous
-            if [ ! -x "$loader_root/$(loader_folder "$pointer")/target/host/makepad" ]; then
+            folder=$(loader_folder "$pointer")
+            if [ ! -x "$(loader_target_of "$folder")/host/makepad" ]; then
                 say "First start: Rust, the loader, then $open_id compiles for this computer: many minutes. If your shell stops waiting, run the same line again: it continues where it is."
             fi
         fi
@@ -544,6 +554,7 @@ rust_own=$root/rust
 rust=$rust_own
 cache=$root/cache
 loader_root=$cache/loader
+loader_targets=$root/target/loader
 downloads=$cache/downloads
 logs_dir=$cache/logs
 jobs=$cache/jobs
@@ -613,13 +624,46 @@ logs=$logs_dir
 stamp start
 export RELAX_HOME="$root"
 
+# An open Runner still starts programs through the old path. Leave it a relative link after a move.
+for loader_dir in "$loader_root"/*; do
+    [ -d "$loader_dir" ] || continue
+    id=${loader_dir##*/}
+    valid_loader_folder "$id" || continue
+    old_target=$loader_dir/target
+    new_target=$loader_targets/$id
+    if [ -d "$new_target" ]; then
+        # Finish a move interrupted before its link and marker were written.
+        [ ! -f "$new_target/source" ] || continue
+    elif [ -d "$old_target" ] && [ ! -L "$old_target" ] && [ ! -e "$new_target" ] && [ ! -L "$new_target" ]; then
+        if ! { mkdir -p "$loader_targets" && mv "$old_target" "$new_target"; } 2>/dev/null; then
+            notice "Skipped moving $old_target to $new_target. Using the old build in place."
+            continue
+        fi
+    else
+        continue
+    fi
+    # the link before the marker: a marker says the move is done, link included
+    if [ ! -e "$old_target" ] && [ ! -L "$old_target" ]; then
+        ln -s "../../../target/loader/$id" "$old_target" 2>/dev/null || notice "Skipped linking $old_target to $new_target."
+    fi
+    write_loader_source "$id"
+done
+
 # Restore an unconfirmed switch before any decision about the loader already here.
 if [ -e "$loader_root/pending" ]; then
+    pending=$(cat "$loader_root/pending") || fail "Cannot read $loader_root/pending"
     previous=$(loader_folder previous)
     if [ "$previous" = src ]; then
         rm -f "$loader_root/current" || fail "Cannot remove $loader_root/current"
     else
         atomic_line "$loader_root/current" "$previous" || fail "Cannot write $loader_root/current"
+    fi
+    if valid_loader_folder "$pending"; then
+        pending_record=$loader_root/$pending/runner.launch
+        if [ -e "$pending_record.previous" ] || [ -L "$pending_record.previous" ]; then
+            [ ! -L "$loader_root/$pending" ] && [ ! -d "$pending_record" ] && mv -f "$pending_record.previous" "$pending_record" \
+                || fail "Cannot restore $pending_record"
+        fi
     fi
     atomic_line "$loader_root/rolled-back" 'the new runner did not confirm its first start' \
         || fail "Cannot write $loader_root/rolled-back"
@@ -627,8 +671,9 @@ if [ -e "$loader_root/pending" ]; then
     notice "Went back to $(printf '%s' "$previous" | cut -c1-10): the new runner did not confirm its first start."
 fi
 active=$(loader_folder current)
-src=$loader_root/$active
-makepad=$src/target/host/makepad
+src=$loader_root/${active:?}
+new_target=$loader_targets/$active
+loader_target=$(loader_target_of "$active")
 
 # --- The runner release, from the start ---------------------------------------------------------
 # The release service's latest licence-free `runner` release names the runner's git repositories
@@ -637,14 +682,15 @@ makepad=$src/target/host/makepad
 # $RELAX_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
 # takes it instead of downloading, and the loader is compiled for it. With other arguments a loader
 # compiled before stays as it is (the runner and the apps it recorded were made for it).
+record=$src/runner.launch
 runner_release=
-repos=
+next_record=
 release_json=
 # With a loader and a runner here already, the release service gets a few seconds: offline or
 # unreachable, the folder's stores and loader start at once (makepad run runs the stored commits).
 meta="--retry 2 -m 60"
-if [ -f "$src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
-mkdir -p "$cache/runner" "$cache/incoming"
+if [ -f "$src/.built" ] && [ -f "$record" ]; then meta="--connect-timeout 3 -m 6"; fi
+mkdir -p "$cache/incoming"
 if [ -n "$prepare_runner" ] || [ ! -f "$src/.built" ]; then
     cur_row=2
     row 2 doing asking "${c_dim}$svchost for the latest Runner release${c_r0}"
@@ -662,7 +708,20 @@ if [ -n "$prepare_runner" ] && [ -n "$runner_release" ]; then
         commit=$(printf '%s' "$line" | sed -n 's/.*"commit":"\([0-9a-f]\{40\}\)".*/\1/p')
         if [ -n "$name" ] && [ -n "$path" ]; then printf '%s %s %s\n' "$name" "$path" "$commit"; fi
     done)
-    if [ "$(sed -n 1p "$cache/runner/release" 2>/dev/null)" != "$runner_release" ]; then
+    [ -n "$repos" ] || fail "The runner release names no repositories."
+    # Mirrored by the Runner's jitupdate.rs. Build once, for prefetch and publication.
+    next_record=$(printf '%s\n' "$repos" | awk -v base="$service/public/git/runner/" -v release="$runner_release" '
+        {
+            url = base $1 ".git#" release ($3 == "" ? "" : "@" $3)
+            if ($2 == "makepad") { root = url; roots++ }
+            else if (index($2, "makepad/") == 1) mounts = mounts "arg\t--mount\narg\t" substr($2, 9) "=" url "\n"
+            else exit 1
+        }
+        END {
+            if (roots != 1) exit 1
+            printf "title\tMakepad\narg\trun\narg\t--quiet\narg\t--cached\narg\t%s\n%sarg\tmakepad-runner\n", root, mounts
+        }') || fail "The runner release must name one root at makepad and mounts inside it."
+    if [ ! -f "$record" ] || [ "$(cat "$record")" != "$next_record" ]; then
         for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
             name=${entry%%:*}
             commit=${entry##*:}
@@ -699,21 +758,26 @@ else
     for part in $part_names; do rust_mb=$((rust_mb + $(part_field $part 2) / 1048576)); done
     row 1 wait 'to download' "${c_dim}$rust_mb MB from static.rust-lang.org${c_r0}"
 fi
-# The loader ZIP's SHA-256 names the source version, independent of the runner's commit.
+# The installer keys archive reuse by SHA-256. The Runner identifies the loader by commit.
 # Offline, or with arguments, use the version recorded with the source already here.
 archive=$(printf '%s' "$release_json" | sed -n 's/.*"loader":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]\{64\}\)"[^}]*}.*/\1 \2 \3/p')
 loader_version=$(printf '%s' "$archive" | cut -s -d' ' -f3)
 # Update the active source folder in place, replacing only changed files so cargo recompiles
-# only their crates (target/ stays inside it: makepad finds its std two levels above itself).
+# only their crates.
 loader_built_sha256=$(cat "$src/.loader-sha256" 2>/dev/null)
 [ -n "$loader_version" ] || loader_version=$loader_built_sha256
 [ -n "$loader_version" ] || loader_version=$(cat "$src/.version" 2>/dev/null)
 cur_row=2
 [ -n "$loader_version" ] || fail "No answer from $svchost, and no loader is here yet. Check the connection, then run this again."
 loader_short=$(printf '%s' "$loader_version" | cut -c1-10)
-built="$loader_version $rust_release $triple"
+installed_commit=$(awk 'NR == 1 { print $1; exit }' "$src/.built" 2>/dev/null)
+loader_commit=$installed_commit
+if [ -n "$prepare_runner" ] && [ -n "$archive" ]; then
+    loader_commit=$(printf '%s' "$release_json" | sed -n 's/.*"loader":{[^}]*"commit":"\([0-9a-f]\{40\}\)"[^}]*}.*/\1/p')
+fi
+built="${loader_commit:-unknown} $rust_release $triple"
 need_build=
-[ -x "$makepad" ] && [ -x "$src/target/host/makepad-launcher" ] && [ "$loader_built_sha256" = "$loader_version" ] \
+[ -x "$loader_target/host/makepad" ] && [ -x "$loader_target/host/makepad-launcher" ] && [ "$loader_built_sha256" = "$loader_version" ] \
     && [ "$(awk 'NR == 1 { print $2, $3 }' "$src/.built" 2>/dev/null)" = "$rust_release $triple" ] || need_build=1
 need_zip=
 [ "$(cat "$src/.version" 2>/dev/null)" != "$loader_version" ] \
@@ -928,8 +992,10 @@ if [ -n "$need_zip" ]; then
     fi || fail "Unpacking the loader's source failed. Run this again." "$logs/download.log"
     new=$unpack/$runner_release
     [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $runner_release/Cargo.toml. Run this again later; the release service is being updated."
-    if [ ! -f "$src/Cargo.toml" ]; then
-        rm -rf "$src"
+    reserved=$(find "$new" -mindepth 1 -maxdepth 1 \( -iname runner.launch -o -iname runner.launch.previous \) -print) || fail "Cannot check the loader ZIP."
+    [ -z "$reserved" ] || fail "The loader ZIP contains a Runner launch record or its backup."
+    if [ ! -f "$src/Cargo.toml" ] && [ ! -f "$record" ]; then
+        rm -rf "${src:?}" "${new_target:?}" || fail "Cannot remove $src and its build in $new_target"
         mv "$new" "$src" || fail "Cannot move the loader's source into $src"
     else
         # an update: files that changed are replaced (with the time of now, so cargo sees them
@@ -938,7 +1004,7 @@ if [ -n "$need_zip" ]; then
         foot="Updating the loader's source: only the files that changed are replaced."
         draw
         # one `diff -rq` names what differs (one process, not one per file)
-        LC_ALL=C diff -rq -x target -x .version -x .built -x .loader-sha256 "$new" "$src" > "$unpack/changes" 2>&1
+        LC_ALL=C diff -rq -x target -x .version -x .built -x .loader-sha256 -x runner.launch -x runner.launch.previous "$new" "$src" > "$unpack/changes" 2>&1
         [ $? -le 1 ] || fail "Cannot compare the loader's source with $src - $(head -1 "$unpack/changes")"
         while IFS= read -r line; do
             case "$line" in
@@ -978,15 +1044,15 @@ if [ -n "$need_zip" ]; then
 fi
 
 # --- 3. Compile the loader --------------------------------------------------------------------
-# The compile sees no Rust settings from elsewhere on this computer and writes only into
-# cache/. Its flags are the runner's own (apps/commercial/runner build_work.rs RUSTFLAGS): this
+# The compile sees no Rust settings from elsewhere on this computer. Its flags are the
+# runner's own (apps/commercial/runner build_work.rs RUSTFLAGS): this
 # computer's CPU and rustc's parallel frontend, which stable rustc takes under RUSTC_BOOTSTRAP=1,
 # with an empty allow list so that no #![feature] builds. Cargo's plain output stays in the log; the
 # build's row counts its Compiling lines against the crates cargo tree lists.
 unset RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC
 export PATH="$rust/bin:$PATH" CARGO_HOME="$cache/cargo-home" RUSTC="$rust/bin/rustc" CARGO_INCREMENTAL=0
 build_loader() {
-    cd "$src" && CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS="-C target-cpu=native -Z threads=8 -Z allow-features=" RUSTC_BOOTSTRAP=1 \
+    cd "$src" && CARGO_TARGET_DIR="$loader_target" CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS="-C target-cpu=native -Z threads=8 -Z allow-features=" RUSTC_BOOTSTRAP=1 \
         exec "$rust/bin/cargo" build --profile host --offline --locked -p makepad-run --bin makepad --bin makepad-launcher
 }
 # build_progress: the build's row (its bar, N / M crates and the crate compiling now, cut to 16)
@@ -1022,6 +1088,10 @@ build_progress() {
 }
 if [ -n "$need_build" ]; then
     cur_row=3
+    # Reuse the existing Cargo tree even when its build is incomplete.
+    loader_target=$new_target
+    if [ ! -d "$new_target" ] && [ -d "$src/target" ] && [ ! -L "$src/target" ]; then loader_target=$src/target; fi
+    mkdir -p "$loader_target" || fail "Cannot create $loader_target"
     build_log=$logs/build.log
     rm -f "$build_log"
     row 3 doing counting "${c_dim}the crates to compile${c_r0}"
@@ -1037,7 +1107,7 @@ if [ -n "$need_build" ]; then
     crates=$(awk '!seen[$1 FS $2]++ { count++ } END { print count + 0 }' "$logs/crates.log")
     [ "$crates" -gt 0 ] || fail "The loader's source lists no crates." "$build_log"
     # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
-    free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
+    free_kb=$(df -Pk "$loader_target" | awk 'NR == 2 { print $4 }')
     [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. Free some space, then run this again."
     build_t0=$(now)
     crate_t0=$build_t0
@@ -1056,6 +1126,7 @@ if [ -n "$need_build" ]; then
         row 3 fail failed "${c_dim}$compiled of $crates crates${c_r0}"
         fail "The loader did not compile." "$build_log"
     fi
+    if [ "$loader_target" = "$new_target" ]; then write_loader_source "$active"; fi
     atomic_line "$src/.built" "$built" || fail "Cannot write $src/.built"
     atomic_line "$src/.loader-sha256" "$loader_version" || fail "Cannot write $src/.loader-sha256"
     mmss $(($(now) - build_t0))
@@ -1067,9 +1138,15 @@ if [ -n "$need_build" ]; then
     draw
     stamp built
 else
+    # The matching ZIP and toolchain also identify a build stamped by an older installer.
+    if [ -n "$loader_commit" ] && [ "$installed_commit" != "$loader_commit" ]; then
+        atomic_line "$src/.built" "$built" || fail "Cannot write $src/.built"
+    fi
     row 3 ok 'up to date' "${c_dim}for this processor${c_r0}"
     draw
 fi
+
+makepad=$loader_target/host/makepad
 
 # This script stays in the folder for the next start.
 if [ -n "$script_dir" ] && [ "$script_dir" != "$root" ]; then
@@ -1086,14 +1163,6 @@ fi
 # stores in $RELAX_HOME/cache and, with --cached, starts the last one at once while it
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
-if [ -z "$prepare_runner" ]; then
-    row 4 wait 'not started' "${c_dim}the loader runs with your arguments${c_r0}"
-    ready 'Running the loader with your arguments.'
-    screen_end
-    stamp start-loader
-    exec "$makepad" "$@"
-fi
-
 # Quote one value for the installed sh entry, including any apostrophes and trailing newlines.
 sh_quote() {
     printf "'"
@@ -1113,20 +1182,35 @@ write_entry() {
         "export PATH=$(sh_quote "$rust/bin"):\"\$PATH\"" || return 1
     cat <<'ENTRY'
 loader_root=$RELAX_HOME/cache/loader
+loader_targets=$RELAX_HOME/target/loader
+loader_target_of() {
+    if [ -f "$loader_targets/$1/host/makepad" ]; then printf '%s\n' "$loader_targets/$1"
+    else printf '%s\n' "$loader_root/$1/target"; fi
+}
 active=$(cat "$loader_root/current" 2>/dev/null)
 case "$active" in
     src|*[!0123456789abcdef]*) active=src ;;
-    *) [ "${#active}" -eq 40 ] && [ -f "$loader_root/$active/target/host/makepad" ] || active=src ;;
+    *) [ "${#active}" -eq 40 ] && [ -f "$(loader_target_of "$active")/host/makepad" ] || active=src ;;
 esac
-exec "$loader_root/$active/target/host/makepad" "$@"
+exec "$(loader_target_of "$active")/host/makepad" "$@"
 ENTRY
 }
-entry_tmp=$root/makepad.part.$$
-[ ! -d "$root/makepad" ] || fail "Cannot write $root/makepad: it is a folder."
-write_entry > "$entry_tmp" && chmod 755 "$entry_tmp" && mv -f "$entry_tmp" "$root/makepad" || {
-    rm -f "$entry_tmp"
-    fail "Cannot write $root/makepad"
-}
+# A run with loader arguments can also move an older build. Refresh its installed entry too.
+if [ -n "$prepare_runner" ] || [ -f "$root/makepad" ]; then
+    entry_tmp=$root/makepad.part.$$
+    [ ! -d "$root/makepad" ] || fail "Cannot write $root/makepad: it is a folder."
+    write_entry > "$entry_tmp" && chmod 755 "$entry_tmp" && mv -f "$entry_tmp" "$root/makepad" || {
+        rm -f "$entry_tmp"
+        fail "Cannot write $root/makepad"
+    }
+fi
+if [ -z "$prepare_runner" ]; then
+    row 4 wait 'not started' "${c_dim}the loader runs with your arguments${c_r0}"
+    ready 'Running the loader with your arguments.'
+    screen_end
+    stamp start-loader
+    exec "$makepad" "$@"
+fi
 
 cur_row=4
 # the runner's packs downloaded alongside the build are complete before makepad run looks for them
@@ -1145,44 +1229,15 @@ if [ -n "$prefetch_pids" ]; then
     done
     wait $prefetch_pids || :
 fi
-if [ -n "$runner_release" ]; then
-    [ -n "$repos" ] || fail "The runner release names no repositories."
-    { printf '%s\n' "$runner_release"; printf '%s\n' "$repos"; } > "$cache/runner/release.next" && mv -f "$cache/runner/release.next" "$cache/runner/release"
+mkdir -p "$root/apps" || fail "Cannot create $root/apps"
+if [ -n "$next_record" ]; then
+    printf '%s\n' "$next_record" > "$record.part" && mv -f "$record.part" "$record" || fail "Cannot write $record"
 else
-    [ -f "$cache/runner/release" ] || fail "No answer from $svchost, and the Runner was never set up here."
+    [ -f "$record" ] || fail "No answer from $svchost, and the Runner was never set up here."
     notice "No answer from $svchost: the Runner fetched before starts."
-    runner_release=$(sed -n 1p "$cache/runner/release")
-    repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
-git_base=$service/public/git/runner
-# The runner's launch record ($RELAX_HOME/apps/runner.launch, one `key<TAB>value` line each):
-# what `makepad` with no arguments runs, from here and from anywhere else (makepad launch.rs).
-launch_dir=$root/apps
-mkdir -p "$launch_dir" || fail "Cannot create $launch_dir"
-record=$launch_dir/runner.launch
-printf 'title\tMakepad\narg\trun\narg\t--quiet\narg\t--cached\n' > "$record.part" || fail "Cannot write $record"
-rm -f "$record.mounts"
-root_repo=
-for entry in $(printf '%s\n' "$repos" | tr ' ' ':'); do
-    name=${entry%%:*}
-    path=${entry#*:}
-    path=${path%%:*}
-    # the release's commit pinned: makepad run takes the pack downloaded above (or its store) as it is,
-    # without asking the service again
-    commit=${entry##*:}
-    pin=
-    [ ${#commit} -ne 40 ] || pin=@$commit
-    case "$path" in
-        makepad) root_repo="$git_base/$name.git#$runner_release$pin" ;;
-        makepad/*) printf 'arg\t--mount\narg\t%s\n' "${path#makepad/}=$git_base/$name.git#$runner_release$pin" >> "$record.mounts" ;;
-        *) rm -f "$record.mounts"; fail "The runner release has a repository outside its workspace: $path" ;;
-    esac
-done
-[ -n "$root_repo" ] || fail "The runner release has no repository at makepad."
-printf 'arg\t%s\n' "$root_repo" >> "$record.part"
-[ ! -f "$record.mounts" ] || { cat "$record.mounts" >> "$record.part"; rm -f "$record.mounts"; }
-printf 'arg\tmakepad-runner\n' >> "$record.part"
-mv -f "$record.part" "$record" || fail "Cannot write $record"
+# the pin files of installs from before the pin moved into the loader folder, once the folder has its own
+rm -f "$root/apps/runner.launch" "$cache/runner/release" || fail "Cannot remove the old Runner pin"
 row 4 doing starting "${c_dim}Makepad's loader opens its window${c_r0}"
 if [ -n "$open_id" ]; then
     ready "Handing over to makepad open $open_id."

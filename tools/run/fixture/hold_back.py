@@ -133,7 +133,7 @@ class Run:
         return False
 
     def inspect(self, *words):
-        m = next((re.search(r"makepad-remote: pid (\d+)", l) for l in self.err if "makepad-remote: pid " in l), None)
+        m = next((match for l in self.err if (match := re.match(r"\[\S+-remote\] pid=(\d+) app=", l))), None)
         pid = m.group(1) if m else str(self.p.pid)
         c = subprocess.run(self.jit + ["inspect", pid] + list(words), capture_output=True, text=True, errors="replace")
         return c.stdout + c.stderr

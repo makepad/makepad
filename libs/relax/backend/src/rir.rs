@@ -1561,8 +1561,32 @@ pub struct BodyDigest {
 /// Numbers by first occurrence (`Func::lowering_digest`).
 #[derive(Default)]
 struct FirstSeen {
-    ix: std::collections::HashMap<u32, u32>,
+    ix: std::collections::HashMap<u32, u32, std::hash::BuildHasherDefault<IdHash>>,
     order: Vec<u32>,
+}
+
+/// FirstSeen's hasher: its keys are slot and symbol ids, looked up at each occurrence in a body
+/// (a digest is taken of every body lowered); the multiply-rotate mix of rustc's FxHasher.
+#[derive(Default)]
+struct IdHash(u64);
+
+impl std::hash::Hasher for IdHash {
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.write_u64(x as u64);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, x: u32) {
+        self.write_u64(x as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 impl FirstSeen {

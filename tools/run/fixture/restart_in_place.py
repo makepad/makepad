@@ -198,10 +198,10 @@ def descendants(root):
     return out, procs
 
 def app_pid():
-    """The app's process: the pid its run says last on stderr ("<tool>-remote: pid N app ..."), while
+    """The app's process: the pid its run last announced on stderr, while
     it is `cargo run` itself (unix: exec) or a process under it. (Its command name does not say: on
     Linux a run takes its program's name, selfexe.rs name_process.)"""
-    said = [int(m.group(1)) for _, l in err for m in [re.match(r"\S+-remote: pid (\d+) app ", l)] if m]
+    said = [int(m.group(1)) for _, l in err if (m := re.match(r"\[\S+-remote\] pid=(\d+) app=", l))]
     if not said:
         return None
     kids, procs = descendants(p.pid)

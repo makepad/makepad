@@ -1082,19 +1082,10 @@ fn startup_gpu(socket: String, deadline: Instant) -> std::sync::mpsc::Receiver<R
     rx
 }
 
-/// The pid and remote endpoint a line announces: the platform's `[makepad-remote] pid=<pid>
-/// app=<app> socket=<path>`, or the JIT's `makepad-remote: pid <pid> app <app> socket <path> (...)`.
+/// The pid and socket the app announced in the combined child log.
 fn parse_startup(line: &str) -> Option<(u32, String)> {
-    if let Some(rest) = line.strip_prefix("makepad-remote: pid ") {
-        let (pid, rest) = rest.split_once(' ')?;
-        let socket = rest.split_once(" socket ")?.1;
-        let socket = socket.rsplit_once(" (").map_or(socket, |(s, _)| s).trim();
-        return if socket.is_empty() { None } else { Some((pid.parse().ok()?, socket.to_string())) };
-    }
-    let rest = line.strip_prefix("[makepad-remote] pid=")?;
-    let (pid, rest) = rest.split_once(' ')?;
-    let socket = rest.split_once(" socket=")?.1.trim();
-    if socket.is_empty() { None } else { Some((pid.parse().ok()?, socket.to_string())) }
+    let (pid, _, socket) = makepad_remote::parse_startup_line(line)?;
+    Some((pid, socket.into_os_string().into_string().ok()?))
 }
 
 /// `script errors`' answer (makepad inspect's): its error sites and the first ten as
@@ -1925,7 +1916,7 @@ mod tests {
     fn startup_lines_name_their_pid_and_logs_match_with_stars() {
         assert_eq!(parse_startup("[makepad-remote] pid=7 app=test socket=/tmp/a b/makepad-remote-7.sock"), Some((7, "/tmp/a b/makepad-remote-7.sock".to_string())));
         assert_eq!(parse_startup("[makepad-remote] cannot listen: nope"), None);
-        assert_eq!(parse_startup("makepad-remote: pid 7 app calc socket /h/t/L1/makepad-remote-7.sock (makepad inspect 7 help)"), Some((7, "/h/t/L1/makepad-remote-7.sock".to_string())));
+        assert_eq!(parse_startup("[makepad-remote] run=3 pid=7"), None, "the restart parent announces no socket");
         assert!(log_has("x\nterminal client 4 first frame\n", "terminal client * first frame"));
         assert!(!log_has("terminal client 4\n", "terminal client * first frame"));
         assert_eq!(end_seq("{\"end\":\"snap\",\"ms\":3,\"user_seq\":12,\"user_seq_start\":11}"), Some(12));

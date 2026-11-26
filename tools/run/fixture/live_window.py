@@ -72,7 +72,7 @@ class App:
         t = time.time()
         while time.time() - t < secs:
             text = self.text()
-            m = re.search(r"makepad-remote: pid (\d+)", text)
+            m = re.search(r"^\[\S+-remote\] pid=(\d+) app=", text, re.MULTILINE)
             if m:
                 self.pid = int(m.group(1))
             if self.pid and text.count("first frame") > seen:

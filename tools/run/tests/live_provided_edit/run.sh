@@ -50,7 +50,7 @@ EOF
         sleep 0.5
     done
     grep -q '^testverdict group=0' "$S/log" || fail "$1: no initial verdict in 300 s"
-    jit=$(sed -n 's/^makepad-remote: pid \([0-9]*\) .*/\1/p' "$S/log" | head -1)
+    jit=$(sed -n 's/^\[makepad-remote\] pid=\([0-9]*\) .*/\1/p' "$S/log" | head -1)
     [ -n "$jit" ] || fail "$1: no inspect socket line"
     lib="$S/ws/fixture/src/lib.rs"
 }

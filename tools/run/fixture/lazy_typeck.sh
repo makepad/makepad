@@ -190,7 +190,7 @@ pid=$!
 if wait_for "$log" $pid 'compile error parked' && wait_for "$log" $pid "$missing_at"; then
   # The parked call's own error is the impl's E0046. Each error prints once per process, so its
   # line may be the background item check's rather than the call's: the park record names it.
-  app_pid=$(sed -n 's/^makepad-remote: pid \([0-9]*\) .*/\1/p' "$log" | head -1)
+  app_pid=$(sed -n 's/^\[makepad-remote\] pid=\([0-9]*\) .*/\1/p' "$log" | head -1)
   TMPDIR="$dir/tmp" $J inspect "$app_pid" panics > "$dir/trait-park-panics.log" 2>&1
   grep -Fq "$missing_at" "$dir/trait-park-panics.log" || { fail="$fail trait-park-not-e0046"; tail -4 "$dir/trait-park-panics.log"; }
   lib="$dir/fx/libs/store/src/lib.rs"

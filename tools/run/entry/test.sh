@@ -56,6 +56,24 @@ LOCK
     printf 'pub fn text() -> &'"'"'static str { "%s" }\n' "$1" > "$base/zipfix/fx1/dep-a/lib.rs"
     printf '\n[lib]\npath = "lib.rs"\n' >> "$base/zipfix/fx1/dep-a/Cargo.toml"
     printf 'fn main() {}\n' > "$base/zipfix/fx1/launcher.rs"
+    if [ "$1" = six ]; then
+        # Keep the shell-error build running until the date stub supplies its bad clock value.
+        cat > "$base/zipfix/fx1/build.rs" <<RUST || exit 2
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+fn main() {
+    let marker = Path::new(r#"$base/stub2/once"#);
+    let start = Instant::now();
+    while !marker.is_file() {
+        if start.elapsed() >= Duration::from_secs(60) {
+            panic!("timed out waiting for the date stub to create {}", marker.display());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+RUST
+    fi
     # two paths that are a file in the first release and a folder in the next, and the other way round
     if [ "$1" = one ]; then first=flip second=flop; else first=flop second=flip; fi
     printf 'a file\n' > "$base/zipfix/fx1/$first"
@@ -64,14 +82,29 @@ LOCK
     if [ "${2:-}" = broken ]; then
         printf 'fn main() { this is not rust }\n' > "$base/zipfix/fx1/main.rs"
     else
-        printf 'fn main() {\n    let home = std::env::var("RELAX_HOME").unwrap_or_default();\n    let record = std::path::Path::new(&home).join("apps/runner.launch");\n    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());\n}\n' > "$base/zipfix/fx1/main.rs"
+        cat > "$base/zipfix/fx1/main.rs" <<'RUST'
+fn main() {
+    let home = std::fs::canonicalize(std::env::var_os("RELAX_HOME").unwrap()).unwrap();
+    let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let target = exe.parent().unwrap().parent().unwrap();
+    let loaders = home.join("cache/loader");
+    let folder = if target.parent() == Some(home.join("target/loader").as_path()) {
+        loaders.join(target.file_name().unwrap())
+    } else {
+        assert!(target.ends_with("target") && target.parent().unwrap().parent() == Some(loaders.as_path()));
+        target.parent().unwrap().to_path_buf()
+    };
+    let record = folder.join("runner.launch");
+    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());
+}
+RUST
     fi
     (cd "$base/zipfix" && python3 -I -m zipfile -c "$base/www/public/app/runner/fx1/loader.zip" fx1) || exit 2
     zip=$base/www/public/app/runner/fx1/loader.zip
     bytes=$(wc -c < "$zip" | tr -d ' ')
     if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$zip" | cut -d' ' -f1); else sum=$(shasum -a 256 "$zip" | cut -d' ' -f1); fi
     commit=0123456789abcdef0123456789abcdef01234567
-    printf '{"release":"fx1","repositories":[{"name":"makepad","path":"makepad","commit":"%s"}],"loader":{"name":"loader.zip","bytes":%s,"sha256":"%s","commit":"%s"}}' \
+    printf '{"release":"fx1","repositories":[{"name":"makepad","path":"makepad","commit":"%s"},{"name":"extra","path":"makepad/apps/extra","commit":""}],"loader":{"name":"loader.zip","bytes":%s,"sha256":"%s","commit":"%s"}}' \
         "$commit" "$bytes" "$sum" "$commit" > "$base/www/public/app/runner/latest"
 }
 # run OUTFILE: the script in a pty (the screen); plainrun OUTFILE: its output to a file (plain
@@ -190,43 +223,113 @@ else
     echo "PASS release build: no rust-objcopy warning"
 fi
 check "loader started" "$base/install/cache/logs/makepad.log" "fixture loader: one launch record present: true"
+service=$MAKEPAD_LOADER_SERVICE
+cat > "$base/expected.launch" <<RECORD
+title	Makepad
+arg	run
+arg	--quiet
+arg	--cached
+arg	$service/public/git/runner/makepad.git#fx1@0123456789abcdef0123456789abcdef01234567
+arg	--mount
+arg	apps/extra=$service/public/git/runner/extra.git#fx1
+arg	makepad-runner
+RECORD
+if cmp -s "$base/expected.launch" "$base/install/cache/loader/src/runner.launch"; then echo "PASS Runner record text"
+else echo "FAIL Runner record text"; failures=$((failures + 1)); fi
 echo "--- sizes (KB), first run"; du -sk "$base/install/rust" "$base/install/cache/downloads" "$base/install" 2>/dev/null
 
 # a folder whose Rust came before the LLVM link gets it on its next start
 if [ "$mode" = clean ]; then
     for link in "$base"/install/rust/lib/rustlib/*/lib/libLLVM*; do [ ! -L "$link" ] || rm -f "$link"; done
 fi
-plainrun "$base/run2.out"
-if [ "$mode" = clean ]; then
-    for objcopy in "$base"/install/rust/lib/rustlib/*/bin/rust-objcopy; do "$objcopy" --version > "$base/objcopy2.out" 2>&1; done
-    check "rust-objcopy runs after an older install" "$base/objcopy2.out" "llvm-objcopy"
+# Put the built loader where older installs kept it, with no source marker.
+loader=$base/install/cache/loader
+targets=$base/install/target/loader
+check "built loader: source commit" "$loader/src/.built" "^$commit "
+check "built loader: source marker" "$targets/src/source" '^\.\./\.\./\.\./cache/loader/src$'
+mv "$targets/src" "$loader/src/target" || exit 2
+rm -f "$loader/src/target/source" || exit 2
+# Block the move without changing permissions (the test also runs as root).
+rmdir "$targets" && : > "$targets" || exit 2
+: > "$base/install/cache/logs/makepad.log"
+# The installed folder's own record also starts offline, past obsolete install files.
+mkdir -p "$base/install/apps" "$base/install/cache/runner" || exit 2
+printf 'old record\n' > "$base/install/apps/runner.launch"
+printf 'old release\n' > "$base/install/cache/runner/release"
+mv "$base/www/public/app/runner/latest" "$base/offline-latest" || exit 2
+plainrun "$base/skipped.out"
+mv "$base/offline-latest" "$base/www/public/app/runner/latest" || exit 2
+if cmp -s "$base/expected.launch" "$loader/src/runner.launch" && [ ! -e "$base/install/apps/runner.launch" ] && [ ! -e "$base/install/cache/runner/release" ]; then
+    echo "PASS offline: folder record kept and old files removed"
+else echo "FAIL offline: Runner pin"; failures=$((failures + 1)); fi
+check "skipped move: notice" "$base/skipped.out" "Skipped moving .*src/target"
+check "skipped move: no rebuild" "$base/skipped.out" "^  Loader build: up to date"
+check "skipped move: old loader started" "$base/install/cache/logs/makepad.log" "fixture loader: one launch record present: true"
+if [ "$code" = 0 ] && [ -f "$targets" ] && [ -d "$loader/src/target" ] && [ ! -L "$loader/src/target" ] && [ ! -e "$loader/src/target/source" ]; then
+    echo "PASS skipped move: exit 0 with the old tree in place"
+else
+    echo "FAIL skipped move: exit $code or wrong build path"; failures=$((failures + 1))
 fi
-check "plain: no rebuild" "$base/run2.out" "^  Loader build: up to date · for this processor$"
-check "plain: the source" "$base/run2.out" "^  Loader source: up to date · "
-check "plain: ready" "$base/run2.out" "^  Ready in [0-9]*:[0-9][0-9]\. The Runner opens in a moment\.$"
-if grep -q "$(printf '\033')" "$base/run2.out"; then echo "FAIL plain: no escape codes"; failures=$((failures + 1)); else echo "PASS plain: no escape codes"; fi
 
+# A release change while the move is still blocked rebuilds in the old Cargo tree.
 publish two
 run "$base/run3.out"
 check "changed loader: rebuilt" "$base/run3.out" "compiled *[^ ]*in [0-9]*:[0-9][0-9] · "
 check "changed loader: new text" "$base/install/cache/logs/makepad.log" "fixture loader: two"
-source=$base/install/cache/loader/src
+if [ -e "$loader/src/target/source" ]; then echo "FAIL old build: unexpected source marker"; failures=$((failures + 1)); fi
+source=$loader/src
 if [ -f "$source/flip/inner" ] && [ -f "$source/flop" ] && [ "$(cat "$source/.version")" = "$sum" ]; then
     echo "PASS changed loader: a file became a folder, a folder a file"
 else
     echo "FAIL changed loader: flip and flop were not replaced"; failures=$((failures + 1))
 fi
 
-# a runner switch to a commit folder: the script runs on the folder `current` names
-loader=$base/install/cache/loader
+rm "$targets" || exit 2
+# A reused build from the older installer has the ZIP checksum in its first field.
+awk -v sha="$sum" '{print sha, $2, $3}' "$source/.built" > "$source/.built.part" && mv "$source/.built.part" "$source/.built" || exit 2
+plainrun "$base/run2.out"
+check "reused loader: source commit replaces old archive stamp" "$source/.built" "^$commit "
+if [ "$mode" = clean ]; then
+    for objcopy in "$base"/install/rust/lib/rustlib/*/bin/rust-objcopy; do "$objcopy" --version > "$base/objcopy2.out" 2>&1; done
+    check "rust-objcopy runs after an older install" "$base/objcopy2.out" "llvm-objcopy"
+fi
+check "migrated loader: no rebuild" "$base/run2.out" "^  Loader build: up to date · for this processor$"
+if [ "$code" = 0 ] && [ "$(readlink "$loader/src/target")" = "../../../target/loader/src" ] && [ -x "$loader/src/target/host/makepad" ] && [ -x "$targets/src/host/makepad-launcher" ]; then
+    echo "PASS migrated loader: build moved"
+else
+    echo "FAIL migrated loader: build paths"; failures=$((failures + 1))
+fi
+check "migrated loader: source marker" "$targets/src/source" '^\.\./\.\./\.\./cache/loader/src$'
+check "plain: the source" "$base/run2.out" "^  Loader source: up to date · "
+check "plain: ready" "$base/run2.out" "^  Ready in [0-9]*:[0-9][0-9]\. The Runner opens in a moment\.$"
+if grep -q "$(printf '\033')" "$base/run2.out"; then echo "FAIL plain: no escape codes"; failures=$((failures + 1)); else echo "PASS plain: no escape codes"; fi
+
+# An older Runner switches current before the bootstrap runs again. The stable entry follows it.
 hex=0123456789abcdef0123456789abcdef01234567
-cp -R "$loader/src" "$loader/$hex" || exit 2
+cp -RP "$loader/src" "$loader/$hex" && rm "$loader/$hex/target" || exit 2
+cp -R "$targets/src" "$loader/$hex/target" && rm "$loader/$hex/target/source" || exit 2
 printf '#!/bin/sh\necho hexfolder\n' > "$loader/$hex/target/host/makepad"; chmod 755 "$loader/$hex/target/host/makepad"
 printf '%s\n' src > "$loader/previous"; printf '%s\n' "$hex" > "$loader/current"
+"$base/install/makepad" > "$base/old-current.out"
+check "current folder: stable entry finds the old build" "$base/old-current.out" "^hexfolder$"
 run "$base/run5.out"
 check "current folder: up to date" "$base/run5.out" "Loader build   [^ ]* up to date"
 check "current folder: its binary runs" "$base/install/cache/logs/makepad.log" "hexfolder"
+# A code-only trial uses the selected folder. Keep the service offline so only recovery can restore the pin.
+record=$loader/$hex/runner.launch
+cp "$record" "$record.previous" || exit 2
+printf 'unconfirmed trial\n' > "$record"
+printf '%s\n' "$hex" > "$loader/previous"; printf '%s\n' "$hex" > "$loader/pending"
+mv "$base/www/public/app/runner/latest" "$base/offline-latest" || exit 2
+plainrun "$base/code-rollback.out"
+mv "$base/offline-latest" "$base/www/public/app/runner/latest" || exit 2
+if [ "$code" = 0 ] && cmp -s "$base/expected.launch" "$record" && [ "$(cat "$loader/current")" = "$hex" ] \
+    && [ ! -e "$record.previous" ] && [ ! -e "$loader/pending" ] && [ -s "$loader/rolled-back" ]; then
+    echo "PASS code rollback: old record restored on the same loader"
+else echo "FAIL code rollback: record or pointers"; failures=$((failures + 1)); fi
+rm -f "$loader/rolled-back" || exit 2
 # an unconfirmed switch rolls back to previous (src: current deleted) with a note
+printf '%s\n' src > "$loader/previous"
 printf '%s\n' "$hex" > "$loader/pending"
 run "$base/run6.out"
 check "rollback: line" "$base/run6.out" "Went back to src: the new runner did not confirm its first start"
@@ -296,6 +399,8 @@ path=$base/stub2:$path
 run "$base/run9.out"
 path=$unstubbed
 [ "$code" != 0 ] || { echo "FAIL shell error: exited 0"; failures=$((failures + 1)); }
+if cmp -s "$base/expected.launch" "$loader/src/runner.launch"; then echo "PASS source update kept the Runner record"
+else echo "FAIL source update lost the Runner record"; failures=$((failures + 1)); fi
 check "shell error: the screen says so" "$base/run9.out" "makepad.sh stopped on an error of its own"
 check "shell error: its row" "$base/run9.out" "Loader build   [^ ]* failed"
 check "shell error: the shell's message" "$base/run9.out" "12 34"

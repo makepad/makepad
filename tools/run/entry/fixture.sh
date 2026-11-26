@@ -10,7 +10,11 @@
 #                                         write the service's source settings
 #   fixture.sh BASE variant NAME          a newer snapshot: app (a licensed app's files change), tree (this tree again),
 #                                         loader (the JIT's source changes), broken (the JIT's source
-#                                         does not compile), rebase (the tree again, as a new commit)
+#                                         does not compile), linked (a JIT-linked source changes),
+#                                         runner-broken (a new loader with a Runner that does not compile),
+#                                         runner-only, runner-only-broken (new Runner code on the same loader,
+#                                         respectively runnable and unable to compile),
+#                                         rebase (the tree again, as a new commit)
 #   fixture.sh BASE up SERVER_BIN [ARGS]  start the service and the entry script, detached (PIDs in BASE/state);
 #                                         ARGS go to the entry script (`open fab`: its coding-agent form)
 #   fixture.sh BASE log [N [entry|server]]   the tail of a log;   down: stop both by their PIDs
@@ -117,9 +121,24 @@ variant)
         f=$base/src/commercial/scope/README.md
         { printf 'Upstream release 3 note.\n'; cat "$f"; } > "$f.new" && mv "$f.new" "$f"
         c=$(commit_all "$base/src/commercial" "release 3 (app)") || exit 2 ;;
-    loader)
-        printf '\n// fixture: a loader change (release marker %s)\n' "$(date +%s)" >> "$base/src/makepad/tools/run/src/main.rs"
-        m=$(commit_all "$base/src/makepad" "release (loader)") || exit 2 ;;
+    loader|runner-broken)
+        printf '\n// fixture: a loader change (release marker %s)\n' "$(date +%s)" >> "$base/src/makepad/tools/run/src/main.rs" || exit 2
+        m=$(commit_all "$base/src/makepad" "release (loader)") || exit 2
+        if [ "$name" = runner-broken ]; then
+            printf '\nthis is not rust at all\n' >> "$base/src/commercial/runner/src/main.rs" || exit 2
+            c=$(commit_all "$base/src/commercial" "release (broken runner)") || exit 2
+        fi ;;
+    runner-only|runner-only-broken)
+        f=$base/src/commercial/runner/src/main.rs
+        if [ "$name" = runner-only ]; then
+            printf '\n// fixture: a Runner change (release marker %s)\n' "$(date +%s)" >> "$f" || exit 2
+        else
+            printf '\nthis is not rust at all\n' >> "$f" || exit 2
+        fi
+        c=$(commit_all "$base/src/commercial" "release ($name)") || exit 2 ;;
+    linked)
+        printf '\n// fixture: a linked source change (release marker %s)\n' "$(date +%s)" >> "$base/src/makepad/platform/network/src/p2p/stream.rs" || exit 2
+        m=$(commit_all "$base/src/makepad" "release (linked source)") || exit 2 ;;
     broken)
         printf '\nthis is not rust at all\n' >> "$base/src/makepad/tools/run/src/main.rs"
         m=$(commit_all "$base/src/makepad" "release (broken loader)") || exit 2 ;;
@@ -170,13 +189,12 @@ up)
     echo $! > "$base/state/entry.pid"
     echo "entry script pid $(cat "$base/state/entry.pid")" ;;
 runner)
-    # start the installed loader directly (what the entry script ends with): the runner checks the
-    # service for a newer JIT at its start
+    # The installed entry selects the loader on each start, including one built by an older Runner.
     root=$base/install
     env RELAX_HOME="$root" MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$api" MAKEPAD_RUNNER_APPS_DIR="$base/apps" \
         MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
         PATH="$root/rust/bin:$PATH" CARGO_HOME="$root/cache/cargo-home" RUSTC="$root/rust/bin/rustc" CARGO_INCREMENTAL=0 \
-        nohup "$root/cache/loader/$(cat "$root/cache/loader/current" 2>/dev/null || echo src)/target/host/makepad" >> "$base/install/cache/logs/makepad.log" 2>&1 < /dev/null &
+        nohup "$root/makepad" >> "$base/install/cache/logs/makepad.log" 2>&1 < /dev/null &
     echo $! > "$base/state/runner.pid"
     echo "runner loader pid $!" ;;
 log)

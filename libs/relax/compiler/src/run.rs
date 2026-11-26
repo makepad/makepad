@@ -6038,13 +6038,15 @@ fn summary_inner(why: &str) {
                         let class = match (r.behind, r.behind_own) { (0, 1) => "own-rt", (0, 2) => "own-consts", (0, 3) => "own-leftout", (0, _) => "idle", (c, _) => crate::owner::CLASS_NAMES.get(c as usize - 1).copied().unwrap_or("?") };
                         let site = r.behind_site.map_or("-".to_string(), |s| format!("{}:{}", s.file().rsplit('/').next().unwrap_or(s.file()), s.line()));
                         let from = if r.behind_from == 0 { "-".to_string() } else { crate::os::thread::name(r.behind_from).replace(' ', "~") };
-                        format!(" front {:.3} {:.3} {:.3} {:.3} prep {} {} {} back {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} epoch {} {} born {:.3} lowered {:.3} by {} lins {} taken {:.3} take {:.3} {:.3} behind {:.3} {} {} {} gap {:.3} {:.3} {:.3} {:.3} {:.3} fin {:.3} {:.3} {:.3} {:.3}",
+                        format!(" front {:.3} {:.3} {:.3} {:.3} prep {} {} {} back {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} epoch {} {} born {:.3} lowered {:.3} by {} lins {} taken {:.3} take {:.3} {:.3} behind {:.3} {} {} {} gap {:.3} {:.3} {:.3} {:.3} {:.3} fin {:.3} {:.3} {:.3} {:.3} inst {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} prest {:.3} {:.3} aft {:.3} {:.3} {:.3}",
                             ms(r.front[0]), ms(r.front[1]), ms(r.front[2]), ms(r.front[3]), r.prep[0], r.prep[1], r.prep[2],
                             ms(r.back[0]), ms(r.back[1]), ms(r.back[2]), ms(r.back[3]), ms(r.back[4]), ms(r.back[5]), ms(r.back[6]), r.epoch[0], r.epoch[1],
                             at(born.get(r.slot as usize).copied().unwrap_or(0)), at(l.0), l.1, l.2, at(l.3),
                             ms(r.take[0]), ms(r.take[1]), ms(r.behind_ns), if r.behind_ns == 0 { "-" } else { class }, from, site,
                             ms(r.gap[0]), ms(r.gap[1]), ms(r.gap[2]), ms(r.gap[3]), ms(r.gap[4]),
-                            ms(r.fin[0]), ms(r.fin[1]), ms(r.fin[2]), ms(r.fin[3]))
+                            ms(r.fin[0]), ms(r.fin[1]), ms(r.fin[2]), ms(r.fin[3]),
+                            ms(r.inst[0]), ms(r.inst[1]), ms(r.inst[2]), ms(r.inst[3]), ms(r.inst[4]), ms(r.inst[5]), ms(r.inst[6]), ms(r.inst[7]),
+                            ms(r.prest[0]), ms(r.prest[1]), ms(r.aft[0]), ms(r.aft[1]), ms(r.aft[2]))
                     }
                 ));
             }

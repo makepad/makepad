@@ -1099,20 +1099,36 @@ pub fn std_dir() -> String {
 }
 
 /// Where std's sources may be, in order: the workspace's own or that of the makepad checkout it
-/// lies in (apps/commercial builds against the tree around it), beside the binary's target dir,
-/// under <dir>/src, and the tree the binary was built from. The workspace's tree comes first: a
-/// lease's binary matches the lease's tree, and the tree beside it may have moved on since.
+/// lies in (apps/commercial builds against the tree around it), the source tree named by the
+/// target dir, beside that dir, under <dir>/src, and the tree the binary was built from. The
+/// workspace's tree comes first: a lease's binary matches the lease's tree, and the tree beside
+/// it may have moved on since.
 pub fn std_candidates(workspace: Option<&str>) -> Vec<String> {
     // the loader's own path, not a run's link of it (selfexe.rs)
-    let mut d = crate::dirs::loader_exe().unwrap_or_default();
-    for _ in 0..3 {
-        d.pop();
-    }
+    std_candidates_for_exe(workspace, &crate::dirs::loader_exe().unwrap_or_default())
+}
+
+fn std_candidates_for_exe(workspace: Option<&str>, exe: &std::path::Path) -> Vec<String> {
+    use std::path::{Component, Path};
     let mut v: Vec<String> = Vec::new();
     if let Some(w) = workspace {
-        for dir in std::path::Path::new(w).ancestors() {
+        for dir in Path::new(w).ancestors() {
             v.push(format!("{}/libs/relax/compiler/std", dir.display()));
         }
+    }
+    // A target dir may name its source tree with a relative path on one line.
+    if let Some(target) = exe.parent().and_then(Path::parent) {
+        let source = std::fs::read_to_string(target.join("source")).unwrap_or_default();
+        let mut lines = source.lines();
+        let path = Path::new(lines.next().unwrap_or_default());
+        let relative = matches!(path.components().next(), Some(Component::Normal(_) | Component::CurDir | Component::ParentDir));
+        if relative && lines.next().is_none() {
+            v.push(target.join(path).join("libs/relax/compiler/std").display().to_string());
+        }
+    }
+    let mut d = exe.to_path_buf();
+    for _ in 0..3 {
+        d.pop();
     }
     v.push(format!("{}/libs/relax/compiler/std", d.display()));
     v.push(format!("{}/src/libs/relax/compiler/std", d.display()));
@@ -1123,16 +1139,18 @@ pub fn std_candidates(workspace: Option<&str>) -> Vec<String> {
 #[cfg(test)]
 #[test]
 fn a_workspace_inside_a_checkout_takes_that_checkouts_std_before_the_one_beside_the_binary() {
-    let v = std_candidates(Some("/t/lane/apps/commercial"));
+    let beside = std::env::temp_dir().join(format!("relax-std-candidates-{}", std::process::id()));
+    let target = beside.join("build");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("source"), "../checkout\r\n").unwrap();
+    let v = std_candidates_for_exe(Some("/t/lane/apps/commercial"), &target.join("host/makepad"));
+    std::fs::remove_dir_all(&beside).unwrap();
     let at = |c: &str| v.iter().position(|x| x == c);
-    // the binary is the loader, as std_candidates takes it: under the JIT this test's own
-    // executable (current_exe) is its run's link of the loader, in the run's folder
-    let mut beside = crate::dirs::loader_exe().unwrap();
-    for _ in 0..3 {
-        beside.pop();
-    }
+    let named = target.join("../checkout").join("libs/relax/compiler/std");
+    let named_at = at(&named.display().to_string()).unwrap();
     assert_eq!(at("/t/lane/apps/commercial/libs/relax/compiler/std"), Some(0));
-    assert!(at("/t/lane/libs/relax/compiler/std").unwrap() < at(&format!("{}/libs/relax/compiler/std", beside.display())).unwrap(), "{v:?}");
+    assert!(at("/t/lane/libs/relax/compiler/std").unwrap() < named_at, "{v:?}");
+    assert_eq!(at(&format!("{}/libs/relax/compiler/std", beside.display())), Some(named_at + 1));
 }
 
 /// Loads core, alloc (when present) and std; returns core and the dependency list user crates

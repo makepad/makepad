@@ -1,7 +1,8 @@
 //! Launch records: what `makepad app <id>` runs, and what `makepad` with no arguments runs.
 //!
 //! A launcher (the runner app) keeps one small text file per app it can start,
-//! `<home>/apps/<id>.launch`, one `key<TAB>value` line each:
+//! `<home>/apps/<id>.launch`. For `runner`, the running loader reads its own folder's
+//! `runner.launch`, so the loader selection also selects the Runner code. Each line is `key<TAB>value`:
 //!
 //! ```text
 //! title   Calculator              the app's name (the OS identity shows it)
@@ -21,7 +22,7 @@
 //! loader and its warm JIT cache.
 //!
 //! `makepad` with no arguments: the app RELAX_APP names, otherwise the launch record
-//! `runner` (the entry scripts write it), then the host's default (the `makepad` binary: the
+//! `runner` in the loader folder, then the host's default (the `makepad` binary: the
 //! runner of the checkout it was built from).
 //!
 //! A record grants nothing: an `arg` before `--` that is a grant (`--allow-*`: options.rs GRANTS)
@@ -53,8 +54,31 @@ pub fn dir(home: &Path) -> PathBuf {
     home.join("apps")
 }
 
-pub fn path(home: &Path, id: &str) -> PathBuf {
-    dir(home).join(format!("{id}.launch"))
+// Mirrors commercial runner/src/jit_work.rs loader_source and running_dir.
+fn loader_source(exe: &Path, home: &Path) -> Option<PathBuf> {
+    let exe = exe.canonicalize().ok()?;
+    let home = home.canonicalize().ok()?;
+    let root = home.join("cache/loader");
+    let host = if cfg!(windows) { "host/makepad.exe" } else { "host/makepad" };
+    let (relative, binary) = if let Ok(relative) = exe.strip_prefix(home.join("target/loader")) {
+        (relative, PathBuf::from(host))
+    } else {
+        (exe.strip_prefix(&root).ok()?, Path::new("target").join(host))
+    };
+    let mut parts = relative.components();
+    let name = parts.next()?.as_os_str().to_str()?;
+    let commit = name.len() == 40 && name.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+    if !(name == "src" || commit) || parts.as_path() != binary { return None; }
+    let source = root.join(name);
+    (source.is_dir() && source.canonicalize().ok()? == source).then_some(source)
+}
+
+pub fn path(home: &Path, id: &str) -> Option<PathBuf> {
+    if id == "runner" {
+        Some(loader_source(&relax_compiler::dirs::loader_exe().ok()?, home)?.join("runner.launch"))
+    } else {
+        Some(dir(home).join(format!("{id}.launch")))
+    }
 }
 
 /// Parses a launch record's text.
@@ -111,12 +135,12 @@ fn one_line(s: &str) -> String {
     s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
 }
 
-/// Reads `<home>/apps/<id>.launch`.
+/// Reads the record for this app and loader.
 pub fn read(home: &Path, id: &str) -> Result<Launch, String> {
     if !valid_id(id) {
         return Err(format!("`{id}` is not an app id"));
     }
-    let p = path(home, id);
+    let p = path(home, id).ok_or("The loader has no Runner launch record")?;
     let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
     parse(id, &text).map_err(|e| format!("{}: {e}", p.display()))
 }
@@ -126,9 +150,12 @@ pub fn write(home: &Path, l: &Launch) -> Result<(), String> {
     if !valid_id(&l.id) {
         return Err(format!("`{}` is not an app id", l.id));
     }
+    if l.id == "runner" {
+        return Err("The Runner launch record belongs to the loader release".into());
+    }
     let d = dir(home);
     std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-    let p = path(home, &l.id);
+    let p = d.join(format!("{}.launch", l.id));
     let part = d.join(format!("{}.launch.part", l.id));
     std::fs::write(&part, format(l)).and_then(|_| std::fs::rename(&part, &p)).map_err(|e| format!("{}: {e}", p.display()))
 }
@@ -164,7 +191,7 @@ pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Opti
                     return Some(Err(format!("RELAX_APP: not an app id: {id}")));
                 }
                 read(&crate::fetch::home(), &id)
-            } else if path(&crate::fetch::home(), "runner").is_file() {
+            } else if path(&crate::fetch::home(), "runner").is_some_and(|p| p.is_file()) {
                 read(&crate::fetch::home(), "runner")
             } else {
                 match default.and_then(|f| f()) {
@@ -246,6 +273,30 @@ mod tests {
             args: vec!["run".into(), "--quiet".into(), "makepad-app-calculator".into(), "--features".into(), "standalone".into()],
         };
         assert_eq!(parse("calculator", &format(&l)).unwrap(), l);
+        assert_eq!(path(Path::new("install"), &l.id), Some(PathBuf::from("install/apps/calculator.launch")));
+    }
+
+    #[test]
+    fn installed_loader_finds_its_own_folder() {
+        let temp = std::env::temp_dir().join(format!("runner-record-{}", std::process::id()));
+        let home = temp.join("install");
+        let host = if cfg!(windows) { "host/makepad.exe" } else { "host/makepad" };
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        for name in ["src", commit, "bad"] {
+            let source = home.join("cache/loader").join(name);
+            std::fs::create_dir_all(&source).unwrap();
+            for target in [home.join("target/loader").join(name), source.join("target")] {
+                let exe = target.join(host);
+                std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+                std::fs::write(&exe, []).unwrap();
+                assert_eq!(loader_source(&exe, &home), (name != "bad").then(|| source.canonicalize().unwrap()), "{}", exe.display());
+            }
+        }
+        let checkout = temp.join("checkout/target").join(host);
+        std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
+        std::fs::write(&checkout, []).unwrap();
+        assert_eq!(loader_source(&checkout, &home), None);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

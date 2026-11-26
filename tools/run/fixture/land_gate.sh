@@ -4,7 +4,7 @@
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
 #           present, boundary (provided_sweep.sh audits of the six smoke apps), warm_zero (Calculator: the warm launch shows no JIT spinner), warm_after_app_edit (Sandbox: a
-#           new item in an app file stays warm), warm_after_hal (a HAL body edit keeps the stored builds), inspect_cold
+#           new item in an app file stays warm: first compiles and main's lazy work after the present counted), warm_after_hal (a HAL body edit keeps the stored builds), inspect_cold
 #           (inspect during a cold start never stalls the app), relaunch (in-place relaunches keep the app alive,
 #           show new first frames with the window kept and state handed over, and have no faults), diff_fast, zone leg
 #   full-a/full-b/full-t: full in three (STEPS_A: cargo legs, checks, presents; STEPS_B: the other JIT runtime legs;
@@ -363,7 +363,8 @@ said() { # said <ok prefix> <cut> <lines>: a fixture's verdict lines, cut to <cu
   return 1
 }
 step_warm_app_edit() { # JITCOLD2: a new item in an app file recompiles what names it, not the app (Sandbox: cold,
-  # warm, then a new pub fn appended to one of its files; at most 480 first compiles, no JIT spinner).
+  # warm, then a new pub fn appended to one of its files; at most 480 first compiles, and after the present main's
+  # lazy work at most the script's bars: cache loads and first compiles, counts that do not grow with box load).
   # MAX 480 (the script's default 400): the warm first-compile count grew with the app (observed
   # 400-405 across unrelated branches on 2026-10-30)
   [ -d apps/commercial/sandbox ] || { echo "warm_after_app_edit: skipped (no apps/commercial)"; return 0; }
@@ -540,14 +541,37 @@ qcheck_one() {
 # a boundary audit (affected.py `boundary` lines): `makepad check --boundary all <app>` lowers every body a run of the
 # app compiles, from its main, and fails on each provided crate's static or rustc-laid field that JIT-compiled code
 # reaches, which the app would meet at its first call there. Its red shows each violation with the way in (its
-# `violation` and `reached` lines); 8-67 s an app on a pool box's lease (the jitlegs' step_boundary, 11-23)
+# `violation` and `reached` lines) and each failed option entry (an `Option<T>` of a provided crate whose T no
+# `option_layouts!` lists: its row says where to add it); 8-67 s an app on a pool box's lease (the jitlegs'
+# step_boundary, 11-23). Counted as violations alone, seven apps' audits said "exit 1, 0 violation(s)" over a
+# failed option entry and showed only their vm-struct table (11-26); the line says what failed
+# ([`boundary_why`]).
+BOUNDARY_ROWS='^(violation|option-entry)[[:space:]]+FAIL'
+# why a boundary audit exits non-zero, counted and named in one line, so a red always says why: an
+# audited crate's violations (crate, body) and its failed option entries (crate, `Option<T>`), the first
+# three of each (another provided crate's `violation other` rows are listed, never failed); with no such
+# row, how it ended (a signal, its first error line, else its last line). Its twins: mac_tests.sh audit, provided_sweep.sh.
+boundary_why() { # boundary_why <its exit> < its output
+  awk -F'\t' -v rc="$1" '
+    $1 == "violation" && $2 == "FAIL" { if (++v <= 3) vn = vn (v > 1 ? "; " : "") $3 " " substr($4, 1, 100) }
+    $1 == "option-entry" && $2 == "FAIL" { if (++o <= 3) on = on (o > 1 ? "; " : "") $3 " " $4 }
+    (/^(relax|error)(:|\[)/ || /panicked at/) && err == "" { err = substr($0, 1, 200) }
+    /[^ ]/ { last = substr($0, 1, 200) }
+    END {
+      if (v) s = v " violation(s) (" vn (v > 3 ? "; ..." : "") ")"
+      if (o) s = s (s ? ", " : "") o " failed option entr" (o == 1 ? "y" : "ies") " (" on (o > 3 ? "; ..." : "") ")"
+      if (s == "") s = "no failing row; " (rc > 128 ? "killed by signal " rc - 128 : "it ended") ": " (err != "" ? err : last)
+      print s
+    }'
+}
 qboundary_one() {
-  local unit=$(unit_of "$@") out rc
+  local unit=$(unit_of "$@") out rc why=""
   out=$(cd "$3" && ${CHECK_JOBS:+env RELAX_JOBS=$CHECK_JOBS MAKEPAD_CPU_CORES=$CHECK_JOBS} $B check --boundary all "$2" 2>&1); rc=$?
-  echo "boundary $2: exit $rc, $(echo "$out" | grep -c '^violation') violation(s), $(echo "$out" | grep -m1 '^# lowered' | cut -c3-)"
+  [ "$rc" = 0 ] || why=": $(printf '%s\n' "$out" | boundary_why "$rc")"
+  echo "boundary $2: exit $rc$why, $(echo "$out" | grep -m1 '^# lowered' | cut -c3-)"
   [ "$rc" = 0 ] && { unit_line ok "$unit"; return; }
   # an audit that stopped before its rows (a crash, a JIT's exit): its stream's end, where a run says why
-  if echo "$out" | grep -q '^violation'; then echo "$out" | grep -A1 '^violation' | cut -c1-600 | head -40
+  if echo "$out" | grep -qE "$BOUNDARY_ROWS"; then echo "$out" | grep -E -A1 "$BOUNDARY_ROWS" | cut -c1-600 | head -40
   else echo "$out" | grep -vE '^ *$' | tail -40; fi
   [ -z "${o:-}" ] || { printf '%s\n' "$out" > "$o.full"; echo "GATEOUT $unit :: ${o##*/}.full"; }
   echo "GATEREPRO $unit :: cd $3 && makepad check --boundary all $2"; fail="$fail $2-boundary"; unit_line fail "$unit"

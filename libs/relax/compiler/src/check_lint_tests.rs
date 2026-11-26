@@ -1,19 +1,106 @@
 //! `makepad check`'s warnings are rustc's, no more and no less: the gates fail on any warning, so
 //! a lint the JIT's check reports where rustc's does not turns them red. Each case checks a small
 //! package (its library is the check's root; each binary target is a crate of its own that uses
-//! it, as cargo builds it) in a child process (the lint sink is the process's) and compares the
-//! warnings with rustc's for the same package.
+//! it, as cargo builds it) in a child process (the lint sink is the process's; a child checks a
+//! few cases one after another) and compares the warnings with rustc's for the same package.
 
 const CHILD: &str = "RELAX_CHECK_LINT_CHILD";
 
-/// In the parent: runs the test `name` alone in a child and returns the warnings it printed, as
-/// "message [lint]" (no position), and its errors, as "error: message [lint]". In the child: None
-/// (the caller checks the package).
-fn warnings_in_child(name: &str) -> Option<Vec<String>> {
-    warnings_in_child_with(name, &[])
+/// Printed in a child before each plain check's lines, on both of its streams (`warnings_in_child`).
+const MARK: &str = "check_lint_tests: the check of ";
+
+/// Plain checks to a child: one child start (a whole JIT run of this binary) serves this many
+/// checks, run one after another, and each of the child's tests waits for all of them.
+const PER_CHILD: usize = 3;
+
+/// A plain check's result in its child: its warnings and errors, or why there are none to read.
+type Checked = Result<Vec<String>, String>;
+
+/// The plain checks: the names this file's tests give `warnings_in_child`, in source order.
+fn plain_checks() -> Vec<&'static str> {
+    include_str!("check_lint_tests.rs").split("warnings_in_child(\"").skip(1).filter_map(|r| r.split_once('"').map(|(name, _)| name)).collect()
 }
 
-/// `warnings_in_child`, the child's variables `env` set.
+/// In the parent: the warnings the test `name` printed in a child, as "message [lint]" (no
+/// position), and its errors, as "error: message [lint]". The child runs `name` with the plain
+/// checks beside it in the file ([`PER_CHILD`] to a child), each after its marker, and goes on past
+/// a check that fails: a failed check fails its own test with its own lines. In the child: None
+/// (the caller checks the package).
+fn warnings_in_child(name: &str) -> Option<Vec<String>> {
+    if std::env::var_os(CHILD).is_some() {
+        println!("{MARK}{name}");
+        eprintln!("{MARK}{name}");
+        return None;
+    }
+    static CHILDREN: std::sync::OnceLock<Vec<std::sync::OnceLock<std::collections::HashMap<String, Checked>>>> = std::sync::OnceLock::new();
+    let names = plain_checks();
+    let at = names.iter().position(|n| *n == name).unwrap_or_else(|| panic!("{name}: no test of this file gives warnings_in_child that name"));
+    let children = CHILDREN.get_or_init(|| (0..names.len().div_ceil(PER_CHILD)).map(|_| std::sync::OnceLock::new()).collect());
+    let k = at / PER_CHILD;
+    let group = &names[k * PER_CHILD..((k + 1) * PER_CHILD).min(names.len())];
+    match children[k].get_or_init(|| checks_in_child(group)).get(name) {
+        Some(Ok(warnings)) => Some(warnings.clone()),
+        Some(Err(why)) => panic!("{why}"),
+        None => unreachable!("{name} is in its child's group"),
+    }
+}
+
+/// The plain checks `group`, one after another in one child: each check's warnings and errors,
+/// read from its marker to the next one.
+fn checks_in_child(group: &[&str]) -> std::collections::HashMap<String, Checked> {
+    let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact").args(group).args(["--nocapture", "--test-threads=1", "--format=terse"])
+        .env(CHILD, "1")
+        .env_remove("RELAX_LINT_FLAGS"));
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // (the check prints its diagnostics on stderr; stdout has the test harness's lines)
+    let split = |text: &str| {
+        let mut lines: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut now: Option<String> = None;
+        for l in text.lines() {
+            if let Some((_, name)) = l.split_once(MARK) {
+                lines.entry(name.trim().to_string()).or_default();
+                now = Some(name.trim().to_string());
+            } else if let Some(v) = now.as_ref().and_then(|n| lines.get_mut(n)) {
+                v.push(l.to_string());
+            }
+        }
+        lines
+    };
+    let (outs, errs) = (split(&stdout), split(&stderr));
+    // libtest's list of the tests that failed, at its end
+    let failed: Vec<&str> = stdout.rsplit_once("\nfailures:\n").map_or(Vec::new(), |(_, list)| {
+        list.lines().take_while(|l| l.starts_with("    ")).map(str::trim).collect()
+    });
+    let ended = stdout.contains("test result: ");
+    group.iter().map(|&name| {
+        let own = || [errs.get(name), outs.get(name)].into_iter().flatten().flatten().cloned().collect::<Vec<_>>().join("\n");
+        let checked = if !errs.contains_key(name) {
+            Err(format!("{name}: its child ({}) ended before this check began\n{stdout}\n{stderr}", out.status))
+        } else if !ended {
+            Err(format!("{name}: its child ({}) ended before libtest's summary; this check's lines:\n{}", out.status, own()))
+        } else if failed.contains(&name) {
+            Err(format!("{name} failed in its child:\n{}", own()))
+        } else {
+            Ok(diagnostics(errs[name].iter().chain(outs.get(name).into_iter().flatten()).map(String::as_str)))
+        };
+        (name.to_string(), checked)
+    }).collect()
+}
+
+/// The warnings among `lines`, as "message [lint]" (no position), and the errors, as
+/// "error: message [lint]", sorted.
+fn diagnostics<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut v: Vec<String> = lines.filter_map(|l| match l.split_once(": warning: ") {
+        Some((_, w)) => Some(w.to_string()),
+        None => l.split_once(": error: ").map(|(_, e)| format!("error: {e}")),
+    }).collect();
+    v.sort();
+    v
+}
+
+/// The test `name` alone in a child, the child's variables `env` set: its warnings and errors, as
+/// `warnings_in_child` reads them. In the child: None.
 fn warnings_in_child_with(name: &str, env: &[(&str, &str)]) -> Option<Vec<String>> {
     if std::env::var_os(CHILD).is_some() {
         return None;
@@ -25,13 +112,7 @@ fn warnings_in_child_with(name: &str, env: &[(&str, &str)]) -> Option<Vec<String
         .envs(env.iter().copied()));
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
-    // (the check prints its diagnostics on stderr; stdout has the test harness's lines)
-    let mut v: Vec<String> = stderr.lines().chain(stdout.lines()).filter_map(|l| match l.split_once(": warning: ") {
-        Some((_, w)) => Some(w.to_string()),
-        None => l.split_once(": error: ").map(|(_, e)| format!("error: {e}")),
-    }).collect();
-    v.sort();
-    Some(v)
+    Some(diagnostics(stderr.lines().chain(stdout.lines())))
 }
 
 /// Checks the package of `lib` and the binary targets `bins` (crate `pkg` and `bin0`, `bin1`, ..),
@@ -84,7 +165,9 @@ fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono:
     relax_types::macros::uses::record(true);
     relax_front::program::set_record_import_uses(uses != Uses::Off);
     crate::borrowck::event::set_check_scope();
-    let dir = std::env::temp_dir().join(format!("relax-check-lints-{}", std::process::id()));
+    // (a folder of its own: a child runs several checks, and a failed one leaves its files)
+    static CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("relax-check-lints-{}-{}", std::process::id(), CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     std::fs::create_dir_all(&dir).unwrap();
     let mut prog = crate::program::Program::new(&sess);
     let (core, std_deps) = crate::load_std_crates(&sess, &mut prog).unwrap();

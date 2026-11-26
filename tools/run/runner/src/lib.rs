@@ -443,12 +443,11 @@ fn run(raw_args: Vec<Vec<u8>>) {
     }
     // a parent run's mount (relax-base progenv.rs MOUNT: its virtual workspace, mount table and
     // edits folder) serves this run only when this run's workspace lies in it; a launch record,
-    // a git URL or a --workspace-dir elsewhere name their own, before a record's environment applies
+    // a git URL or a --workspace-dir elsewhere name their own, before a record's environment
+    // applies. An export of a git URL keeps RELAX_EDITS: the edits folder its invoker gave it.
     let words: Vec<String> = raw_args.iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-    if !fetch::inherited_mount_serves(&words, &std::env::var("RELAX_VFS").unwrap_or_default()) {
-        for n in relax_compiler::progenv::MOUNT {
-            std::env::remove_var(std::str::from_utf8(n).unwrap());
-        }
+    for n in fetch::dropped_mount_names(&words, &std::env::var("RELAX_VFS").unwrap_or_default()) {
+        std::env::remove_var(std::str::from_utf8(n).unwrap());
     }
     // `makepad app <id>` and `makepad` alone: the launch record's command line (launch.rs), with
     // its folder and environment applied before anything reads them

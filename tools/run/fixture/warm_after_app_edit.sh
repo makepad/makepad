@@ -2,10 +2,12 @@
 # An app-only edit ships warm (JITCOLD2): after an edit of the app's own crate, a restart compiles
 # the edited fns and what depends on them, not the whole crate (and nothing below it).
 #   session cold : a fresh run home: launch hidden + muted to the first present and JIT idle, quit;
-#   session prime: the same launch again, not checked: the app's second start takes paths its first did not
+#   session prime: the same launch again: the app's second start takes paths its first did not
 #                  (Sandbox reads back the asset store its first start filled: ~570 instances the cold
 #                  session never ran, ~400 of them first compiled in one frame -- the JIT spinner when the
-#                  node is busy); it records them, so the steps below measure the cache, not the app's first rerun;
+#                  node is busy); it records them, so the steps below measure the cache, not the app's first rerun.
+#                  Its compiles are not checked; its boot is: it restores the collected front the cold
+#                  session recorded (a boot that parses every crate again starts seconds later);
 #   session warm : the same launch again, nothing edited (the baseline: every pack accepted);
 #   then one edit per step, each followed by the same launch on the same run home:
 #     body   : a statement into one fn body of the app crate
@@ -15,12 +17,21 @@
 #              start keeps the unchanged crates' collected prefix and collects the rest again) is checked
 #              against one rebuilt from the sources (RELAX_COLLECTED_VERIFY=1)
 #   every edited file is restored at the end (also on failure or interrupt).
-# A step passes when its session compiles at most MAX (default 400) fns first and the JIT spinner
-# never shows. Before the fix every non-body edit renamed the app crate's interface fingerprint, which
-# keys every fn of the crate: the whole app recompiled ("cache cold", ~15k first compiles on Sandbox).
+# A step passes when its session compiles at most MAX (default 400) fns first and its main thread's
+# lazy work in the window after the first present (postframe.rs: the burst sits in the first frame
+# after it) stays at most LOADS_MAX (default 1000) cache loads and FIRSTS_MAX (default 50) first
+# compiles it ran or waited for; the prime session passes when its boot restored the front. The
+# counts, not the UI's blocked ms: a busy box stretches the same work past the spinner's 100 ms (the
+# item step at 171 and 182 ms with an owner busy in its cache write and publishes), while more lazy
+# work is a regression on any box. On one node, 11-25 and 11-26, 36 sessions of the warm, item and
+# graph steps: 4-542 cache loads (the install-ahead races main for the manifest's tail) and 0-21
+# first compiles; the blocked ms and the spinner are still printed. Before the fix every non-body
+# edit renamed the app crate's interface fingerprint, which keys every fn of the crate: the whole
+# app recompiled ("cache cold", ~15k first compiles on Sandbox).
 # Run from the workspace root after the loader is built. PACKAGE (default makepad-sandbox; a
 # `makepad run` argument list with ',' for spaces), APPDIR (the app's source dir, default
-# apps/commercial/sandbox/src), BODY / ITEM / SPLASH (file:line-pattern of the three edits), WAIT
+# apps/commercial/sandbox/src), BODY / ITEM / SPLASH (file:line-pattern of the three edits), LOADS_MAX /
+# FIRSTS_MAX (the bars above), WAIT
 # (seconds, default 400), the JIT runs through `cargo run --profile host`, STEPS (default "body item splash";
 # another step name <s> takes its edits from STEP_<s>: ';;'-separated <after|before|replace|append>|<file>|<exact line>|<new line>).
 # OUT: where its run dir goes (default $TMPDIR); KEEP=1 keeps it; TRACE=1 writes each session's
@@ -34,6 +45,8 @@ PACKAGE=${PACKAGE:-makepad-sandbox}
 APPDIR=${APPDIR:-apps/commercial/sandbox/src}
 WAIT=${WAIT:-400}
 MAX=${MAX:-400}
+LOADS_MAX=${LOADS_MAX:-1000}
+FIRSTS_MAX=${FIRSTS_MAX:-50}
 STEPS=${STEPS:-body item splash}
 # the edits: <file>|<a line of it, exact>|<the line to put after it>
 [ -n "${BODY:-}" ] || BODY="$APPDIR/haptics.rs|    pub fn start_test(&mut self) {|        let _warm_after_app_edit = 1u32;"
@@ -53,7 +66,8 @@ restore() {
     done
 }
 trap 'restore; exit 1' INT TERM
-session() { # session <label>: one launch to idle and quit; prints its first-frame line and its `jit` session line
+session() { # session <label>: one launch to idle and quit; prints its first-frame line, its `jit` session
+    # line and its main thread's lazy work after the present
     label=$1
     trace=""; [ -n "${TRACE:-}" ] && trace="RELAX_CACHE_TRACE=$dir/trace.$label RELAX_DEPS_DUMP=$dir/deps.$label"
     [ "$label" = verify ] && trace="$trace RELAX_CACHE=verify"
@@ -78,6 +92,18 @@ session() { # session <label>: one launch to idle and quit; prints its first-fra
     grep -m1 ' first frame at ' "$dir/log.$label" | sed 's/^.* first frame at /first frame at /'
     echo "$last" | grep '^session:' || echo "no jit session line: $(echo "$last" | head -3 | tr '\n' ' ')"
     echo "$last" > "$dir/jit.$label"
+    # the window's sums (its first line: the one when it passed, else the run summary's): first
+    # compiles are the ones main ran (split, plain, memo) or waited for (inflight)
+    awk '/^relax post-present [0-9]+ s: main thread stalled / {
+        if (!match($0, /by how: [^)]*\)[^)]*\)[^)]*\)[^)]*\)[^)]*\)[^)]*\)[^)]*\)/)) exit
+        k = split(substr($0, RSTART + 8, RLENGTH - 8), part, ", ")
+        for (i = 1; i <= k; i++) { split(part[i], w, " "); v[w[1]] = w[2] }
+        if (v["cache"] == "" || v["split"] == "" || v["plain"] == "" || v["memo"] == "" || v["inflight"] == "") exit
+        split($0, a, "stalled "); split(a[2], b, " ")
+        printf "lazy after the present: cache loads %d, first compiles %d (split %d, plain %d, memo %d, inflight %d), %d lazy compiles in all, %s ms\n", v["cache"], v["split"] + v["plain"] + v["memo"] + v["inflight"], v["split"], v["plain"], v["memo"], v["inflight"], b[4], b[1]
+        found = 1; exit
+    }
+    END { if (!found) print "lazy after the present: no window line" }' "$dir/log.$label"
     [ "$label" = verify ] && grep -m1 'cache: verify:' "$dir/log.$label"
     [ "$label" = graph ] && { grep -m1 -e 'collected: verified restored graph' -e 'collected: verification requires' -e 'panicked' "$dir/log.$label" || echo "graph: no verification line"; }
     # the crates whose interface fingerprint moved since the session before
@@ -106,21 +132,31 @@ edit_replace() { # edit_replace <file> <line> <new line>: the first exact <line>
 fail=""; out=""
 check() { # check <label> <session output>
     n=$(echo "$2" | sed -n 's/^session: compiled \([0-9]*\) first.*/\1/p')
-    spin=$(echo "$2" | sed -n 's/.*spinner \([0-9]*\).*/\1/p')
+    loads=$(echo "$2" | sed -n 's/^lazy after the present: cache loads \([0-9]*\), .*/\1/p')
+    firsts=$(echo "$2" | sed -n 's/^lazy after the present: cache loads [0-9]*, first compiles \([0-9]*\) .*/\1/p')
     out="$out
 [$1] $(echo "$2" | tr '\n' ' ')"
     if [ "$1" = graph ]; then
         echo "$2" | grep -q 'collected: verified restored graph against rebuilt graph' || fail="$fail graph"
         return
     fi
-    if [ -z "$n" ] || [ "$n" -gt "$MAX" ] || [ "$spin" != 0 ]; then fail="$fail $1"; fi
+    if [ -z "$n" ] || [ "$n" -gt "$MAX" ] || [ -z "$loads" ] || [ "$loads" -gt "$LOADS_MAX" ] || [ -z "$firsts" ] || [ "$firsts" -gt "$FIRSTS_MAX" ]; then
+        fail="$fail $1"
+    fi
 }
 prev=""
 cold=$(session cold)
 prime=$(session prime)
+# the boot restored the collected front: its restore line comes before the load's (a later one is
+# the settle rebuild's)
+if awk '/relax: load\+parse/ { exit } /relax collected: restored [0-9]+ crates/ { found = 1 } END { exit !found }' "$dir/log.prime"; then
+    front="front restored"
+else
+    front="front NOT restored at boot"; fail="$fail prime"
+fi
 out="[cold] $(echo "$cold" | tr '\n' ' ')"
 out="$out
-[prime, not checked] $(echo "$prime" | tr '\n' ' ')"
+[prime, $front; compiles not checked] $(echo "$prime" | tr '\n' ' ')"
 s=$(session warm); check warm "$s"
 for step in $STEPS; do
     case $step in
@@ -149,5 +185,5 @@ if [ -z "$fail" ]; then
     [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
     exit 0
 fi
-echo "warm_after_app_edit: FAIL [$fail ] (MAX $MAX first compiles)$out" | tr '\n' ' '; echo " logs in $dir"
+echo "warm_after_app_edit: FAIL [$fail ] (MAX $MAX first compiles; after the present LOADS_MAX $LOADS_MAX cache loads, FIRSTS_MAX $FIRSTS_MAX first compiles)$out" | tr '\n' ' '; echo " logs in $dir"
 exit 1

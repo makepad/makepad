@@ -94,7 +94,7 @@ save(layout)
 offered = wait(lambda: any("a restart applies it; offered" in l for l in err[n_err:]))
 time.sleep(0.3)
 step("layout edit takes the restart rung: offered, the program keeps running the previous code", offered and last_value() == 2)
-pid = next((m[1] for m in (re.search(r"-remote: pid (\d+)", l) for l in err) if m), str(p.pid))
+pid = next((m[1] for l in err if (m := re.match(r"\[\S+-remote\] pid=(\d+) app=", l))), str(p.pid))
 asked = subprocess.run([relax, "inspect", pid, "session", "relaunch"], cwd=pkg, env=env, capture_output=True, text=True, timeout=60)
 ok = wait(lambda: last_value() == 6, 60)
 restored = [int(l.split()[2]) for l in out if l.startswith("out restored ")]

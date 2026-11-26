@@ -11,6 +11,23 @@ SECS=${SECS:-20}
 export RELAX_STD=$PWD/libs/relax/compiler/std
 nice cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j${CARGO_BUILD_JOBS:-8} > "${TMPDIR:-/tmp}/sweep-build.log" 2>&1 || { tail -20 "${TMPDIR:-/tmp}/sweep-build.log"; echo "BUILD FAILED"; exit 3; }
 M="$T/host/makepad"
+# why a boundary audit exits non-zero, counted and named in one line, so a red always says why: an
+# audited crate's violations (crate, body) and its failed option entries (crate, `Option<T>`), the first
+# three of each (another provided crate's `violation other` rows are listed, never failed); with no such
+# row, how it ended (a signal, its first error line, else its last line). Its twins: land_gate.sh, mac_tests.sh audit.
+boundary_why() { # boundary_why <its exit> < its output
+  awk -F'\t' -v rc="$1" '
+    $1 == "violation" && $2 == "FAIL" { if (++v <= 3) vn = vn (v > 1 ? "; " : "") $3 " " substr($4, 1, 100) }
+    $1 == "option-entry" && $2 == "FAIL" { if (++o <= 3) on = on (o > 1 ? "; " : "") $3 " " $4 }
+    (/^(relax|error)(:|\[)/ || /panicked at/) && err == "" { err = substr($0, 1, 200) }
+    /[^ ]/ { last = substr($0, 1, 200) }
+    END {
+      if (v) s = v " violation(s) (" vn (v > 3 ? "; ..." : "") ")"
+      if (o) s = s (s ? ", " : "") o " failed option entr" (o == 1 ? "y" : "ies") " (" on (o > 3 ? "; ..." : "") ")"
+      if (s == "") s = "no failing row; " (rc > 128 ? "killed by signal " rc - 128 : "it ended") ": " (err != "" ? err : last)
+      print s
+    }'
+}
 # the logs stay in the target (`devhub get <lane> target/provided_sweep.out <dir>`); each app's files are rewritten
 out=${SWEEP_OUT:-$T/provided_sweep.out}; mkdir -p "$out" || exit 1
 failed=""
@@ -25,7 +42,8 @@ for app in $APPS; do
         t0=$SECONDS
         nice "$M" check --boundary all "$app" > "$out/$app.audit" 2>&1
         rc=$?
-        echo "audit $app: rc=$rc $(grep -c '^violation' "$out/$app.audit") violation(s) in $((SECONDS - t0)) s"
+        why=""; [ $rc = 0 ] || why=": $(boundary_why "$rc" < "$out/$app.audit")"
+        echo "audit $app: rc=$rc$why in $((SECONDS - t0)) s"
         [ $rc = 0 ] || failed="$failed $app"
     fi
     if [ "${RUNS:-1}" != 0 ]; then
@@ -43,8 +61,8 @@ for app in $APPS; do
 done
 echo "--- distinct refusals:"
 cat "$out"/*.audit "$out"/*.run 2>/dev/null | grep -o "static \`[^\`]*\` is read from JIT-compiled code\|static \`[^\`]*\` (\`[^\`]*\`) is laid out and run by rustc's std\|static \`[^\`]*\` of provided crate \`[^\`]*\`[:a-z ]*\|\`[^\`]*\` calls \`[^\`]*\` in JIT-compiled code\|a field of \`[^\`]*\` is [a-z]*\|\`[^\`]*\` is built in JIT-compiled code\|\`[^\`]*\` is [a-z]* by variant" | sort | uniq -c | sort -rn
-echo "--- violation rows (audit) with the way in:"
-grep -h -A1 "^violation" "$out"/*.audit 2>/dev/null | cut -c1-400 | head -80
+echo "--- violation and failed option-entry rows (audit) with the way in:"
+grep -h -E -A1 "^(violation|option-entry)[[:space:]]+FAIL" "$out"/*.audit 2>/dev/null | cut -c1-400 | head -80
 echo "--- panics:"
 grep -h -i -A2 "panicked" "$out"/*.run 2>/dev/null | head -40
 if [ -z "$failed" ]; then echo "provided_sweep: ok"; else echo "provided_sweep: FAILED$failed"; echo "logs: $out"; exit 1; fi

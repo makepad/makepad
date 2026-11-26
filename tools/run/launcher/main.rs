@@ -12,14 +12,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Select the active installed loader, or the source loader when the selection is unavailable.
-fn loader_path(root: &Path, current: &str, is_file: impl Fn(&Path) -> bool) -> PathBuf {
-    let named = |name: &str| root.join(name).join("target/host").join(if cfg!(windows) { "makepad.exe" } else { "makepad" });
-    let name = current.trim();
-    if name == "src" || (name.len() == 40 && name.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))) {
-        let selected = named(name);
-        if is_file(&selected) { return selected; }
+fn loader_path(home: &Path, current: &str, is_file: impl Fn(&Path) -> bool) -> (PathBuf, String) {
+    let binary = if cfg!(windows) { "host/makepad.exe" } else { "host/makepad" };
+    let current = current.trim();
+    let commit = current.len() == 40 && current.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+    let mut name = if commit { current } else { "src" };
+    loop {
+        let new = home.join("target/loader").join(name).join(binary);
+        if is_file(&new) { return (new, name.to_string()); }
+        let old = home.join("cache/loader").join(name).join("target").join(binary);
+        if name == "src" || is_file(&old) { return (old, name.to_string()); }
+        name = "src";
     }
-    named("src")
 }
 
 /// The program `makepad app <id>` runs, named as the run names its own executable (relax-compiler
@@ -50,10 +54,16 @@ fn program(words: &[String]) -> Option<String> {
     (!name.is_empty() && !name.starts_with('.') && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))).then_some(name)
 }
 
-/// The program of the launch record `<home>/apps/<id>.launch` (its `arg` lines).
+#[cfg(any(unix, test))]
+fn record_path(home: &Path, id: &str, folder: &str) -> PathBuf {
+    if id == "runner" { home.join("cache/loader").join(folder).join("runner.launch") }
+    else { home.join("apps").join(format!("{id}.launch")) }
+}
+
+/// The program named by the selected record's `arg` lines.
 #[cfg(unix)]
-fn program_of(home: &Path, id: &str) -> Option<String> {
-    let text = std::fs::read_to_string(home.join("apps").join(format!("{id}.launch"))).ok()?;
+fn program_of(home: &Path, id: &str, folder: &str) -> Option<String> {
+    let text = std::fs::read_to_string(record_path(home, id, folder)).ok()?;
     let words: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("arg\t")).map(str::to_string).collect();
     program(&words)
 }
@@ -101,8 +111,8 @@ fn note(home: &Path, why: &str) {
 /// The start of `loader` named as the app's program in `dir` (the launch record's `run`): the
 /// link, else None, with why noted when a link was due but could not be made.
 #[cfg(unix)]
-fn named_start(home: &Path, id: &str, dir: &Path, loader: &Path, launcher: &Path) -> Option<PathBuf> {
-    let name = program_of(home, id)?;
+fn named_start(home: &Path, id: &str, folder: &str, dir: &Path, loader: &Path, launcher: &Path) -> Option<PathBuf> {
+    let name = program_of(home, id, folder)?;
     let at = dir.join(&name);
     let made = if at.as_path() == launcher || same_file(&at, launcher) {
         Err(format!("{}: is the launcher itself", at.display()))
@@ -112,10 +122,9 @@ fn named_start(home: &Path, id: &str, dir: &Path, loader: &Path, launcher: &Path
     made.map_err(|why| note(home, &format!("{why}; app {id} runs under the loader's name"))).ok()
 }
 
-fn active(home: &Path) -> PathBuf {
-    let root = home.join("cache/loader");
-    let current = std::fs::read_to_string(root.join("current")).unwrap_or_default();
-    loader_path(&root, &current, Path::is_file)
+fn active(home: &Path) -> (PathBuf, String) {
+    let current = std::fs::read_to_string(home.join("cache/loader/current")).unwrap_or_default();
+    loader_path(home, &current, Path::is_file)
 }
 
 // The same app-id rule as tools/run/runner/src/launch.rs valid_id().
@@ -142,10 +151,10 @@ fn launch(exe: &Path) -> Result<(), String> {
     let plist = std::fs::read_to_string(&plist_path).map_err(|e| format!("{}: {e}", plist_path.display()))?;
     let id = plist_string(&plist, "MakepadApp").filter(|id| valid_id(id)).ok_or("Info.plist has no valid MakepadApp")?;
     let home = plist_string(&plist, "MakepadRunHome").filter(|home| !home.is_empty()).map(PathBuf::from).ok_or("Info.plist has no MakepadRunHome")?;
-    let loader = active(&home);
+    let (loader, folder) = active(&home);
     // the app's program: a hard link in the bundle (never the launcher itself), else the
     // `makepad` symlink below
-    if let Some(named) = named_start(&home, &id, macos, &loader, exe) {
+    if let Some(named) = named_start(&home, &id, &folder, macos, &loader, exe) {
         let error = Command::new(&named).arg0(&named).arg("app").arg(&id).env("RELAX_HOME", &home).env("RELAX_LOADER", &loader).exec();
         return Err(format!("{}: {error}", named.display()));
     }
@@ -174,10 +183,10 @@ fn launch(exe: &Path) -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
     let id = args.next().and_then(|id| id.into_string().ok()).filter(|id| valid_id(id)).ok_or("usage: makepad-launcher <app-id>")?;
     if args.next().is_some() { return Err("usage: makepad-launcher <app-id>".into()); }
-    let loader = active(home);
+    let (loader, _folder) = active(home);
     // the app's program: a hard link in a folder of its own per app, `+launch` as the runner's
     #[cfg(unix)]
-    let start = named_start(home, &id, &home.join("cache/launch").join(&id).join("+launch"), &loader, exe).unwrap_or_else(|| loader.clone());
+    let start = named_start(home, &id, &_folder, &home.join("cache/launch").join(&id).join("+launch"), &loader, exe).unwrap_or_else(|| loader.clone());
     #[cfg(not(unix))]
     let start = loader.clone();
     let mut command = Command::new(&start);
@@ -215,21 +224,33 @@ mod tests {
 
     #[test]
     fn loader_selection() {
-        let root = Path::new("installation/cache/loader");
+        let root = Path::new("installation");
         let binary = if cfg!(windows) { "makepad.exe" } else { "makepad" };
-        let src = root.join("src/target/host").join(binary);
+        let src = root.join("target/loader/src/host").join(binary);
+        let old_src = root.join("cache/loader/src/target/host").join(binary);
         let commit = "0123456789abcdef0123456789abcdef01234567";
-        let selected = root.join(commit).join("target/host").join(binary);
-        assert_eq!(loader_path(root, &format!(" {commit}\n"), |p| p == selected), selected);
-        assert_eq!(loader_path(root, commit, |_| false), src);
-        assert_eq!(loader_path(root, "src\n", |p| p == src), src);
+        let selected = root.join("target/loader").join(commit).join("host").join(binary);
+        let old_selected = root.join("cache/loader").join(commit).join("target/host").join(binary);
+        assert_eq!(loader_path(root, &format!(" {commit}\n"), |_| true), (selected, commit.into()));
+        assert_eq!(loader_path(root, commit, |p| p == old_selected || p == src), (old_selected, commit.into()));
+        assert_eq!(loader_path(root, commit, |p| p == src || p == old_src), (src.clone(), "src".into()));
+        assert_eq!(loader_path(root, commit, |p| p == old_src), (old_src.clone(), "src".into()));
+        assert_eq!(loader_path(root, "src\n", |_| true), (src.clone(), "src".into()));
+        assert_eq!(loader_path(root, "src", |_| false), (old_src.clone(), "src".into()));
         for invalid in ["", "../outside", "/outside", "0123456789ABCDEF0123456789ABCDEF01234567", "abc", "src/../other"] {
-            assert_eq!(loader_path(root, invalid, |_| panic!("invalid pointer reached the filesystem")), src);
+            let fallback = loader_path(root, invalid, |p| {
+                assert_eq!(p, src, "invalid pointer reached the filesystem");
+                false
+            });
+            assert_eq!(fallback, (old_src.clone(), "src".into()));
         }
     }
 
     #[test]
     fn program_names() {
+        let root = Path::new("install");
+        assert_eq!(record_path(root, "runner", "selected"), root.join("cache/loader/selected/runner.launch"));
+        assert_eq!(record_path(root, "calculator", "selected"), root.join("apps/calculator.launch"));
         let program = |words: &[&str]| program(&words.iter().map(|w| w.to_string()).collect::<Vec<_>>());
         assert_eq!(program(&["run", "makepad-app-calculator"]).as_deref(), Some("makepad-app-calculator"));
         assert_eq!(program(&["run", "--report-to", "/r", "--no-live", "apps/demo", "--release", "--bin", "demo-bin", "--", "--bin", "x"]).as_deref(), Some("demo-bin"), "the loader's options and the app's arguments are no part");

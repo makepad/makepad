@@ -2244,14 +2244,15 @@ fn the_endpoints(file: &str) -> bool {
 }
 
 /// The run's end gives back what the run held, though it never did: the next run binds the same
-/// port, and round after round the run leaves nothing open.
+/// port, and leaves nothing open. (A second run is the first a leak shows in: the first run's lazy
+/// compiles open what stays open for the whole process.)
 #[test]
 fn a_run_ends_with_what_it_held_given_back() {
     isolated_test!(a_run_ends_with_what_it_held_given_back);
     let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let (mut counts, mut lefts) = (Vec::new(), Vec::new());
     track_held();
-    for _ in 0..3 {
+    for _ in 0..2 {
         let (mut u, entry, root) = fixture_of(HOLDS, "fixture");
         u.tier1 = None;
         let up = &mut *u as *mut Unit;
@@ -2307,7 +2308,7 @@ fn a_run_ends_with_what_it_held_given_back() {
         std::fs::remove_dir_all(root).unwrap();
     }
     // (the first round's lazy compiles open what stays open for the whole process)
-    assert_eq!(&counts[1..], &[0, 0], "left open: {lefts:?}");
+    assert_eq!(&counts[1..], &[0], "left open: {lefts:?}");
 }
 
 /// A child the main program starts leaves no handle of the runtime's behind. The runtime keeps

@@ -501,6 +501,29 @@ mod tests {
             h.write(&data[cut..]);
             assert_eq!(h.finish128(), one, "cut {}", cut);
         }
+        // the Hasher's fixed-width writes (a derived Hash's) hash as their bytes would, from
+        // every tail position
+        use std::hash::Hasher;
+        for lead in 0..8usize {
+            let mut by_bytes = Sip128::new();
+            let mut fixed = Sip128::new();
+            by_bytes.write(&data[..lead]);
+            fixed.write(&data[..lead]);
+            for (k, x) in (0..40u64).map(|k| (k, k.wrapping_mul(0x9e37_79b9_7f4a_7c15))) {
+                match k % 6 {
+                    0 => { by_bytes.write(&(x as u8).to_le_bytes()); fixed.write_u8(x as u8); }
+                    1 => { by_bytes.write(&(x as u16).to_le_bytes()); fixed.write_u16(x as u16); }
+                    2 => { by_bytes.write(&(x as u32).to_le_bytes()); fixed.write_u32(x as u32); }
+                    3 => { by_bytes.write(&x.to_le_bytes()); fixed.write_u64(x); }
+                    4 => { by_bytes.write(&((x as u128) << 64 | k as u128).to_le_bytes()); fixed.write_u128((x as u128) << 64 | k as u128); }
+                    _ => { by_bytes.write(&(x as usize).to_le_bytes()); fixed.write_usize(x as usize); }
+                }
+                assert_eq!(fixed.finish128(), by_bytes.finish128(), "a fixed-width write {k} after {lead} leading bytes");
+                by_bytes.write(&x.to_le_bytes());
+                fixed.u64(x);
+                assert_eq!(fixed.finish128(), by_bytes.finish128(), "Sip128::u64 after write {k}, {lead} leading bytes");
+            }
+        }
     }
 }
 

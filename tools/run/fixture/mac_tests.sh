@@ -85,6 +85,23 @@ counts() { awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i ~ /^(passed|f
 failing() { grep -E '^(FAILED |panicked at |error(\[E[0-9]+\])?: )' "$1" | head -60; }
 # keep <out>..: into the lease's keep dir, which the hub keeps before the lease ends; prints their names there
 keep() { local f; [ -n "${DEVHUB_KEEP:-}" ] && mkdir -p "$DEVHUB_KEEP" || return 0; for f in "$@"; do cp -p "$f" "$DEVHUB_KEEP/mac-$(basename "$f")" && printf ' mac-%s' "$(basename "$f")"; done; }
+# why a boundary audit exits non-zero, counted and named in one line, so a red always says why: an
+# audited crate's violations (crate, body) and its failed option entries (crate, `Option<T>`), the first
+# three of each (another provided crate's `violation other` rows are listed, never failed); with no such
+# row, how it ended (a signal, its first error line, else its last line). Its twins: land_gate.sh, provided_sweep.sh.
+boundary_why() { # boundary_why <its exit> < its output
+  awk -F'\t' -v rc="$1" '
+    $1 == "violation" && $2 == "FAIL" { if (++v <= 3) vn = vn (v > 1 ? "; " : "") $3 " " substr($4, 1, 100) }
+    $1 == "option-entry" && $2 == "FAIL" { if (++o <= 3) on = on (o > 1 ? "; " : "") $3 " " $4 }
+    (/^(relax|error)(:|\[)/ || /panicked at/) && err == "" { err = substr($0, 1, 200) }
+    /[^ ]/ { last = substr($0, 1, 200) }
+    END {
+      if (v) s = v " violation(s) (" vn (v > 3 ? "; ..." : "") ")"
+      if (o) s = s (s ? ", " : "") o " failed option entr" (o == 1 ? "y" : "ies") " (" on (o > 3 ? "; ..." : "") ")"
+      if (s == "") s = "no failing row; " (rc > 128 ? "killed by signal " rc - 128 : "it ended") ": " (err != "" ? err : last)
+      print s
+    }'
+}
 # audit <app> <dir>: its boundary audit as qboundary_one runs it (`check --boundary all` lowers every body a run of the
 # app compiles and fails on each provided crate's static or rustc-laid field JIT code reaches); one run, no rerun: an
 # audit reads code, not timing
@@ -95,10 +112,13 @@ audit() {
   (cd "$2" && MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$B" check --boundary all "$1") > "$out" 2>&1 < /dev/null; code=$?
   echo "GATEEND $unit"
   echo "GATETIME $unit $((SECONDS - t0))"
-  echo "boundary $1: exit $code, $(grep -c '^violation' "$out") violation(s), $(grep -m1 '^# lowered' "$out" | cut -c3-)"
+  # (what failed, counted and named: land_gate.sh qboundary_one)
+  local rows='^(violation|option-entry)[[:space:]]+FAIL' why=""
+  [ "$code" = 0 ] || why=": $(boundary_why "$code" < "$out")"
+  echo "boundary $1: exit $code$why, $(grep -m1 '^# lowered' "$out" | cut -c3-)"
   if [ "$code" = 0 ]; then echo "GATEUNIT ok $unit"; return; fi
   # an audit that stopped before its rows (a crash, a JIT's exit): its output's end, where a run says why
-  if grep -q '^violation' "$out"; then grep -A1 '^violation' "$out" | cut -c1-600 | head -40
+  if grep -qE "$rows" "$out"; then grep -E -A1 "$rows" "$out" | cut -c1-600 | head -40
   else grep -vE '^ *$' "$out" | tail -40 | cut -c1-300; fi
   kept=$(keep "$out"); [ -z "$kept" ] || echo "GATEOUT $unit ::$kept"
   echo "GATEREPRO $unit :: cd $2 && makepad check --boundary all $1"

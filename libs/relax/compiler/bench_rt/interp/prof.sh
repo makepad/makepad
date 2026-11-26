@@ -18,8 +18,8 @@ env "${env[@]}" MAKEPAD_HAL_SCRIPT="$work/quit.hal" perl -e 'alarm 900; exec @AR
 echo "cold run: rc $?"
 env "${env[@]}" MAKEPAD_HAL_SCRIPT="$work/stay.hal" perl -e 'alarm 900; exec @ARGV' "$M" run "$pkg" > "$work/warm.out" 2>&1 &
 pid=$!
-# the app is the makepad process itself (perl execs it): its remote socket comes up at its start
-for i in $(seq 1 200); do grep -q "makepad-remote: pid $pid" "$work/warm.out" 2>/dev/null && break; sleep 0.05; done
+# The pid we launched can be the app itself or its restart parent.
+for i in $(seq 1 200); do grep -Fq -e "[makepad-remote] pid=$pid app=" -e "[makepad-remote] run=$pid pid=" "$work/warm.out" 2>/dev/null && break; sleep 0.05; done
 # what every thread does a second in (a start that waits shows it here), then the profile
 sleep 1
 "$M" inspect "$pid" stacks 2>&1 | cut -c1-200 | head -150

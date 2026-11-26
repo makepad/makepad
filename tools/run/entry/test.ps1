@@ -28,7 +28,24 @@ function Publish($text, $broken) {
         'fx1/launcher.rs' = "fn main() {}`n"
         # makepad.bat compiles the assembler rust-mingw's dlltool needs from the loader's source
         'fx1/tools/run/entry/assemble.rs' = [IO.File]::ReadAllText("$here\assemble.rs")
-        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"RELAX_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {} args: {:?}`", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());`n}`n" })
+        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else {
+@'
+fn main() {
+    let home = std::fs::canonicalize(std::env::var_os("RELAX_HOME").unwrap()).unwrap();
+    let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let target = exe.parent().unwrap().parent().unwrap();
+    let loaders = home.join("cache/loader");
+    let folder = if target.parent() == Some(home.join("target/loader").as_path()) {
+        loaders.join(target.file_name().unwrap())
+    } else {
+        assert!(target.ends_with("target") && target.parent().unwrap().parent() == Some(loaders.as_path()));
+        target.parent().unwrap().to_path_buf()
+    };
+    let record = folder.join("runner.launch");
+    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());
+}
+'@
+        })
     }
     foreach ($k in $files.Keys) { [IO.File]::WriteAllText("$zipdir\$($k.Replace('/', '\'))", $files[$k], $utf8) }
     $zip = "$Base\www\public\app\runner\fx1\loader.zip"
@@ -38,7 +55,7 @@ function Publish($text, $broken) {
     Pop-Location
     $sum = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
     $commit = '0123456789abcdef0123456789abcdef01234567'
-    $json = '{"release":"fx1","repositories":[{"name":"makepad","path":"makepad","commit":"' + $commit + '"}],"loader":{"name":"loader.zip","bytes":' + (Get-Item $zip).Length + ',"sha256":"' + $sum + '","commit":"' + $commit + '"}}'
+    $json = '{"release":"fx1","repositories":[{"name":"makepad","path":"makepad","commit":"' + $commit + '"},{"name":"extra","path":"makepad/apps/extra","commit":""}],"loader":{"name":"loader.zip","bytes":' + (Get-Item $zip).Length + ',"sha256":"' + $sum + '","commit":"' + $commit + '"}}'
     [IO.File]::WriteAllText("$Base\www\public\app\runner\latest", $json, $utf8)
 }
 # the entry script as the server sends it: CRLF line ends
@@ -238,22 +255,95 @@ try {
     Check 'built: all crates' $r1 'Loader build: compiled .+in [0-9:]+ .+ 2 crates'
     Check 'rust downloaded' $r1 'Rust 1\.98\.0: ready .+downloaded and unpacked in'
     Check 'loader started' $r1 'fixture loader: one launch record present: true'
+    $service = $env:MAKEPAD_LOADER_SERVICE
+    $expected = @"
+title	Makepad
+arg	run
+arg	--quiet
+arg	--cached
+arg	$service/public/git/runner/makepad.git#fx1@0123456789abcdef0123456789abcdef01234567
+arg	--mount
+arg	apps/extra=$service/public/git/runner/extra.git#fx1
+arg	makepad-runner
+"@
+    $expected = $expected.Replace("`r`n", "`n") + "`n"
+    $record = "$Base\install\cache\loader\src\runner.launch"
+    Check 'Runner record text' ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($record)) -ceq $expected) '^True$'
     '--- sizes (KB), first run'
     foreach ($d in 'install\rust', 'install\cache\downloads', 'install') { '{0}  {1}' -f [int]((Get-ChildItem "$Base\$d" -Recurse -Force -File | Measure-Object Length -Sum).Sum / 1024), $d }
+    # Put the built loader where older installs kept it, with no source marker.
+    $loader = "$Base\install\cache\loader"
+    $targets = "$Base\install\target\loader"
+    Check 'built loader: source commit' (Get-Content -LiteralPath "$loader\src\.built") '^0123456789abcdef0123456789abcdef01234567 '
+    $srcMarker = '^\.\./\.\./\.\./cache/loader/src$'
+    Check 'built loader: source marker' (Get-Content -LiteralPath "$targets\src\source") $srcMarker
+    Move-Item -LiteralPath "$targets\src" -Destination "$loader\src\target"
+    Remove-Item -LiteralPath "$loader\src\target\source"
+    # An open handle in the tree prevents its move. Keep the loader itself free to run.
+    $held = [IO.File]::Open("$loader\src\target\host\makepad-launcher.exe", 'Open', 'Read', 'None')
+    try {
+        [IO.File]::WriteAllText("$Base\install\apps\runner.launch", 'old record', $utf8)
+        [IO.File]::WriteAllText("$Base\install\cache\runner\release", 'old release', $utf8)
+        Move-Item -LiteralPath "$Base\www\public\app\runner\latest" -Destination "$Base\offline-latest"
+        try { $skipped = Run 'skipped' }
+        finally { Move-Item -LiteralPath "$Base\offline-latest" -Destination "$Base\www\public\app\runner\latest" }
+        Check 'offline: folder record kept and old files removed' (([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($record)) -ceq $expected) -and
+            !(Test-Path "$Base\install\apps\runner.launch") -and !(Test-Path "$Base\install\cache\runner\release")) '^True$'
+        Check 'skipped move: exits 0' "$script:code" '^0$'
+        Check 'skipped move: notice' $skipped 'Skipped moving .+src\\target'
+        Check 'skipped move: no rebuild' $skipped 'Loader build: up to date'
+        Check 'skipped move: old loader started' $skipped 'fixture loader: one launch record present: true'
+        $inPlace = (Test-Path "$loader\src\target\host\makepad.exe") -and !(Test-Path "$targets\src") -and !(Test-Path "$loader\src\target\source")
+        Check 'skipped move: old tree in place' $inPlace '^True$'
+        $entry = & "$Base\install\makepad.cmd" 2>&1 | Out-String
+        Check 'skipped move: stable entry finds the old build' $entry 'fixture loader: one launch record present: true'
+    } finally {
+        $held.Dispose()
+    }
+    # Exercise an old installer stamp on the unchanged ZIP.
+    $stamp = "$loader\src\.built"
+    $archiveSha = (Get-Content -LiteralPath "$loader\src\.loader-sha256").Trim()
+    [IO.File]::WriteAllText($stamp, ([IO.File]::ReadAllText($stamp) -replace '^\S+', $archiveSha), $utf8)
     $r2 = Run 'run2'
-    Check 'unchanged loader: no rebuild' $r2 'Loader build: up to date'
+    Check 'reused loader: source commit replaces old archive stamp' (Get-Content -LiteralPath $stamp) '^0123456789abcdef0123456789abcdef01234567 '
+    Check 'migrated loader: exits 0 after the handle closes' "$script:code" '^0$'
+    Check 'migrated loader: no rebuild' $r2 'Loader build: up to date'
+    $moved = !(Test-Path "$loader\src\target") -and (Test-Path "$targets\src\host\makepad.exe") -and (Test-Path "$targets\src\host\makepad-launcher.exe")
+    Check 'migrated loader: build moved' $moved '^True$'
+    Check 'migrated loader: source marker' (Get-Content -LiteralPath "$targets\src\source") $srcMarker
     Publish 'two' $false
     $r3 = Run 'run3'
     Check 'changed loader: rebuilt' $r3 'Loader build: compiled .+in [0-9:]+'
     Check 'changed loader: new text' $r3 'fixture loader: two'
-    $loader = "$Base\install\cache\loader"
     $hex = '0123456789abcdef0123456789abcdef01234567'
     Copy-Item -Recurse "$loader\src" "$loader\$hex"
+    # The old Runner built this commit. Its new target exists but has no binary yet.
+    Copy-Item -Recurse "$targets\src" "$loader\$hex\target"
+    Remove-Item "$loader\$hex\target\source"
+    New-Item -ItemType Directory -Path "$targets\$hex" | Out-Null
     Remove-Item "$loader\$hex\.loader-sha256"
     [IO.File]::WriteAllText("$loader\previous", "src`n", $utf8); [IO.File]::WriteAllText("$loader\current", "$hex`n", $utf8)
     $r5 = Run 'run5'
     Check 'current folder: built in place' $r5 'Loader build: compiled .+in [0-9:]+'
     Check 'current folder: stamp written there' (Test-Path "$loader\$hex\.loader-sha256") 'True'
+    Check 'current folder: built in the existing new target' (Test-Path "$targets\$hex\host\makepad.exe" -PathType Leaf) 'True'
+    Check 'current folder: source marker' (Get-Content -LiteralPath "$targets\$hex\source") "^\.\./\.\./\.\./cache/loader/$hex$"
+    # With no release answer, only recovery can restore the active folder's record.
+    $trialRecord = "$loader\$hex\runner.launch"
+    Copy-Item -LiteralPath $trialRecord -Destination "$trialRecord.previous"
+    [IO.File]::WriteAllText($trialRecord, "unconfirmed trial`n", $utf8)
+    [IO.File]::WriteAllText("$loader\previous", "$hex`n", $utf8)
+    [IO.File]::WriteAllText("$loader\pending", "$hex`n", $utf8)
+    Move-Item -LiteralPath "$Base\www\public\app\runner\latest" -Destination "$Base\offline-latest"
+    try { $codeRollback = Run 'code-rollback' }
+    finally { Move-Item -LiteralPath "$Base\offline-latest" -Destination "$Base\www\public\app\runner\latest" }
+    Check 'code rollback: recovery notice' $codeRollback 'Went back to 0123456789: the new runner did not confirm'
+    Check 'code rollback: exits 0' "$script:code" '^0$'
+    Check 'code rollback: old record restored on the same loader' (([IO.File]::ReadAllText($trialRecord) -ceq $expected) -and
+        ((Get-Content -LiteralPath "$loader\current") -ceq $hex) -and !(Test-Path "$trialRecord.previous") -and
+        !(Test-Path "$loader\pending") -and (Get-Content -Raw -LiteralPath "$loader\rolled-back")) '^True$'
+    Remove-Item -LiteralPath "$loader\rolled-back"
+    [IO.File]::WriteAllText("$loader\previous", "src`n", $utf8)
     [IO.File]::WriteAllText("$loader\pending", "$hex`n", $utf8)
     $r6 = Run 'run6'
     Check 'rollback: line' $r6 'Went back to src: the new runner did not confirm'

@@ -55,6 +55,24 @@ fn parse<'a>(text: &'a str, id: &'a str) -> Status<'a> {
     status
 }
 
+#[derive(Debug, PartialEq)]
+enum Next {
+    Attach(u32),
+    Replace(u32),
+    Start,
+}
+
+fn next_step(status: &Status<'_>, alive: impl Fn(u32) -> bool) -> Next {
+    if status.runner == 0 || !alive(status.runner) {
+        return Next::Start;
+    }
+    match status.stage {
+        "failed" => Next::Replace(status.runner),
+        "ready" if !status.ready.is_some_and(|(pid, _)| alive(pid)) => Next::Replace(status.runner),
+        _ => Next::Attach(status.runner),
+    }
+}
+
 fn progress_line(status: &Status<'_>, elapsed: Duration) -> String {
     let title = status.title;
     let seconds = elapsed.as_secs();
@@ -140,15 +158,39 @@ fn open(id: &str) -> io::Result<i32> {
     let log = home.join("cache/logs/runner-focus.log");
     let previous = read_status(&path)?;
     let status = parse(previous.as_deref().unwrap_or(""), id);
-    // A run to attach to: its Runner alive, not failed, and when it says ready, its app still running.
-    let app_gone = status.stage == "ready" && !status.ready.is_some_and(|(pid, _)| is_alive(pid));
-    let mut runner = if status.runner != 0 && status.stage != "failed" && !app_gone && is_alive(status.runner) {
-        status.runner
-    } else {
-        if previous.is_some() {
-            fs::remove_file(&path)?;
+    let next = next_step(&status, is_alive);
+    if let Next::Replace(pid) = next {
+        say(&format!("  The Runner from the last run of {} is still open. Closing it.", status.title))?;
+        // A link lost after the request went out is the Runner quitting, not a refusal: wait for it.
+        let problem = match makepad_remote::Client::connect(&pid.to_string()) {
+            Err(_) => Some("could not be reached"),
+            Ok(client) => match makepad_remote::app::run_line(&client, "quit", &mut |_| true) {
+                Ok(true) => Some("refused to quit"),
+                Ok(false) | Err(_) => None,
+            },
+        };
+        let mut last_line = Instant::now();
+        while is_alive(pid) {
+            if let Some(problem) = problem {
+                say(&format!("  The Runner from the last run (pid {pid}) {problem}. Close its window, then run this again."))?;
+                say(&format!("  The Runner's log: {}", log.display()))?;
+                return Ok(1);
+            }
+            if last_line.elapsed() >= Duration::from_secs(5) {
+                say(&format!("  Waiting for the open Runner (pid {pid}) to close..."))?;
+                last_line = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
-        start_runner(id, &home, &log)?
+    }
+    let mut runner = match next {
+        Next::Attach(pid) => pid,
+        Next::Replace(_) | Next::Start => {
+            if previous.is_some() {
+                fs::remove_file(&path)?;
+            }
+            start_runner(id, &home, &log)?
+        }
     };
 
     let waiting = Instant::now();
@@ -247,5 +289,16 @@ mod tests {
         let failed = parse("runner\t7\ntitle\tFab\nstarted\t1000\nstage\tfailed\nfailed\tdid not compile at all\t/l/install.log\n", "fab");
         assert_eq!((failed.stage, failed.failed), ("failed", Some(("did not compile at all", "/l/install.log"))), "failed separates the reason and its log at the tab");
         assert_eq!(parse("title\t\nextra\tvalue\n", "fab").title, "fab", "an unnamed app uses its id and ignores unknown fields");
+
+        let both_alive = |pid| [7, 48213].contains(&pid);
+        let only_runner_alive = |pid| pid == 7;
+        let only_app_alive = |pid| pid == 48213;
+        assert_eq!(next_step(&compile, only_runner_alive), Next::Attach(7), "attach while the live Runner is compiling");
+        assert_eq!(next_step(&ready, both_alive), Next::Attach(7), "attach to the ready Runner while its app is alive");
+        assert_eq!(next_step(&ready, only_runner_alive), Next::Replace(7), "replace the ready Runner after its app exits");
+        assert_eq!(next_step(&failed, only_runner_alive), Next::Replace(7), "replace the live Runner after a failed build");
+        assert_eq!(next_step(&failed, only_app_alive), Next::Start, "start after the failed Runner exits");
+        assert_eq!(next_step(&ready, only_app_alive), Next::Start, "start after the ready Runner exits even if its app is alive");
+        assert_eq!(next_step(&parse("", "fab"), both_alive), Next::Start, "start when the status is empty");
     }
 }

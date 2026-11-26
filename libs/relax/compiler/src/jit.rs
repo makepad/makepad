@@ -9993,7 +9993,9 @@ impl Unit {
 
     #[track_caller]
     fn install_code(&mut self, id: u32, code: &[u8], relocs: &[relax_backend::rir::RelocAt], pc_map: Vec<(u32, u64)>, gen: u32) -> Result<u64, String> {
+        let t = if main_compile_log() { wall_ns() } else { 0 };
         let refs = CodeRefs::of_relocs(self, relocs);
+        if t != 0 { let e = wall_ns(); main_rec(|r| r.inst[0] += e - t); }
         self.install_code_refs(id, code, relocs, refs, pc_map, gen)
     }
 
@@ -10003,6 +10005,10 @@ impl Unit {
     #[track_caller]
     fn install_code_refs(&mut self, id: u32, code: &[u8], relocs: &[relax_backend::rir::RelocAt], refs: CodeRefs, pc_map: Vec<(u32, u64)>, gen: u32) -> Result<u64, String> {
         let _cost_install = relax_codegen::fncost::phase(6);
+        // (RELAX_MAIN_COMPILE_LOG: the install's parts)
+        let tm = main_compile_log();
+        let mut lt = if tm { wall_ns() } else { 0 };
+        macro_rules! lap { ($i:expr) => { if tm { let e = wall_ns(); main_rec(|r| r.inst[$i] += e - lt); lt = e; } } }
         note_code_guard_reads(self, relocs);
         // the slots its hot sites call through their body words, past their entry marks, are
         // reached with it (noted before it can run; the O3 install and the links note their own)
@@ -10035,6 +10041,7 @@ impl Unit {
             Some(t) => t,
             None => self.emit_grouped(group, code, relocs)?,
         };
+        lap!(1);
         if redirect.is_none() && !self.fns[id as usize].compiled {
             self.first_code.fetch_add(code.len() as u64, Ordering::Relaxed);
         }
@@ -10057,6 +10064,7 @@ impl Unit {
                 }
             }
         }
+        lap!(2);
         if redirect.is_none() {
             code_growth(if twin { GROW_MODULE } else if gen > 0 { GROW_PATCH } else { GROW_FIRST }, code.len());
         }
@@ -10072,11 +10080,13 @@ impl Unit {
         f.code = at;
         f.code_len = code.len() as u32;
         f.pc_map = PcMap::new(&pc_map);
+        lap!(3);
         if code_as_now().is_none_or(|k| k.tier != tier::STUB) { self.note_first_code(id); }
         crate::inspect::patches::code_installed(self, id);
         // real-time code: what the new code references was walked before this install (or is now)
         unsafe { realtime_installed(self, id, &refs, std::panic::Location::caller()) };
         self.code.write().unwrap_or_else(|e| e.into_inner()).note_refs(at, refs);
+        lap!(4);
         let f = &mut self.fns[id as usize];
         let first = !f.compiled;
         f.compiled = true;
@@ -10096,6 +10106,7 @@ impl Unit {
         if (first && gen == 0 || gen > 0) && crate::borrowck::lazy::gandalf_enabled(options) {
             self.note_first_borrowck(id, (gen > 0).then_some(crate::borrowck::lazy::RANK_EDIT));
         }
+        lap!(5);
         // (SPEC-V: a slot that ran its twin's code runs its own now)
         if std::mem::take(&mut self.fns[id as usize].borrowed) {
             SPECV_BORROWS_OWN.fetch_add(1, Ordering::Relaxed);
@@ -10116,6 +10127,7 @@ impl Unit {
                 crate::exec_profile::CALL
             } else { crate::exec_profile::AHEAD });
         }
+        if tm { main_rec(|r| r.inst[6] += wall_ns() - lt); }
         Ok(at)
     }
 
@@ -10959,6 +10971,17 @@ pub struct MainCompile {
     /// the finish's own work: the deferred candidates' RIR and the end of the flight, the slot's
     /// own optimised RIR, the install, and the cache record's deferral inside it (wall ns)
     pub fin: [u64; 4],
+    /// the install by part: its references, the emit and link, the code index and its notes, the
+    /// pc map and history, the real-time walk and references noted, the borrow check's note, the
+    /// rest of the install, and install_compiled's work after it (wall ns)
+    pub inst: [u64; 8],
+    /// the preparation's rest by part: the digest gate's digest, a baseline body's copy of its
+    /// lowering (wall ns)
+    pub prest: [u64; 2],
+    /// install_compiled's work after the install by part: up to the speculative builds' queueing
+    /// (the counter, the tier verdict, O2's queueing), that queueing, and the completed body's drop
+    /// (wall ns)
+    pub aft: [u64; 3],
     /// the owner's own work between requests when main's longest owner wait began and the owner
     /// served no request (owner::OWN_NOW; 0: none)
     pub behind_own: u8,
@@ -12178,6 +12201,7 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                 let _ph = rt_ph(5);
                 u.install_unchecked(id, code, relocs, map, 0)
             };
+            let ti = if main_compile_log() { wall_ns() } else { 0 };
             let a = match a {
                 Ok(a) => a,
                 Err(e) => return install_error(up, id, &format!("link: {}", e)),
@@ -12216,11 +12240,22 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
                 }
             }
             note_entered(&*up, id);
+            let ts = if ti != 0 { wall_ns() } else { 0 };
             if !INSTALLING_MANIFEST.with(|f| f.get()) {
                 let _ph = rt_ph(6);
                 spec_enqueue(up, id, 0);
             }
+            let td = if ti != 0 { wall_ns() } else { 0 };
             drop_completed_body(&mut *up, id);
+            if ti != 0 {
+                let e = wall_ns();
+                main_rec(|r| {
+                    r.inst[7] += e - ti;
+                    r.aft[0] += ts - ti;
+                    r.aft[1] += td - ts;
+                    r.aft[2] += e - td;
+                });
+            }
             a
         }
     }
@@ -15711,13 +15746,19 @@ unsafe fn prepare_rir_from(up: *mut Unit, id: u32, defer: bool, lowered: Option<
     }
     // the digest gate (gate.rs): the digest of the body as lowered, before the build's settings,
     // inlining and passes; it rides the body through them and into its callers' contexts
+    let td = if tm { wall_ns() } else { 0 };
     func.digest = Some(crate::gate::take(&func));
+    let tc = if tm { wall_ns() } else { 0 };
     let u = &mut *up;
     let baseline = baseline && !u.pairs_sincos(&func);
     // a baseline body keeps its lowering: its upgrade to normal RIR starts from that, not from the
     // baseline body (the start tier's inlining and passes are in it)
     if baseline {
         func.lowering = Some(std::sync::Arc::new(func.clone()));
+    }
+    if tm {
+        let e = wall_ns();
+        main_rec(|r| { r.prest[0] += tc - td; r.prest[1] += e - tc; });
     }
     func.baseline = baseline;
     if unverified {
@@ -33836,42 +33877,65 @@ mod allocator_swap_tests {
     /// the tests below pause the process's compile jobs: one at a time
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// The swap waits for a running compile job however long it runs. A job that outlives the
-    /// old 5 s cap (a slow machine, a big O3 build) must still be finished when the swap goes on;
-    /// a job that starts during the swap waits for its end, however long that takes.
+    /// The swap waits for a running compile job however long it runs, and a job that starts during
+    /// the swap waits for its end, however long that takes: no time lets either go on (a job that
+    /// outlived the old 5 s cap, on a slow machine or in a big O3 build, had to be finished when the
+    /// swap went on). Shown by the order of events: the job ends only once the swap has looked at it
+    /// and not gone on, and the late job is seen held at the gate before the swap ends.
     #[test]
-    fn the_swap_waits_for_a_job_longer_than_five_seconds() {
-        isolated_test!(the_swap_waits_for_a_job_longer_than_five_seconds);
+    fn the_swap_waits_for_a_running_job_and_holds_a_new_one_to_its_end() {
+        isolated_test!(the_swap_waits_for_a_running_job_and_holds_a_new_one_to_its_end);
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        *PAUSE_LOOKS.0.lock().unwrap_or_else(|e| e.into_inner()) = 0;
         let job_over = std::sync::Arc::new(AtomicBool::new(false));
+        let swapped = std::sync::Arc::new(AtomicBool::new(false));
         let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
         let flag = job_over.clone();
         let job = std::thread::spawn(move || {
             let guard = compile_job();
             running_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(5600));
+            end_rx.recv().unwrap();
             flag.store(true, Ordering::SeqCst);
             drop(guard);
         });
         running_rx.recv().unwrap();
-        let begun = std::time::Instant::now();
+        // the job ends once the swap has looked twice with it running (or once the swap went on)
+        let went_on = swapped.clone();
+        let ender = std::thread::spawn(move || {
+            let (looks, wake) = &PAUSE_LOOKS;
+            drop(wake.wait_while(looks.lock().unwrap_or_else(|e| e.into_inner()), |n| *n < 2 && !went_on.load(Ordering::SeqCst)).unwrap_or_else(|e| e.into_inner()));
+            let early = went_on.load(Ordering::SeqCst);
+            end_tx.send(()).unwrap();
+            early
+        });
         allocator_swap(0);
-        let waited = begun.elapsed();
-        assert!(job_over.load(Ordering::SeqCst), "the swap went ahead with a compile job still running ({waited:?})");
-        assert!(waited.as_millis() >= 5000, "it did not wait the job out ({waited:?})");
-        // a job that starts during the swap is held until the swap ends, however long
+        {
+            let _looks = PAUSE_LOOKS.0.lock().unwrap_or_else(|e| e.into_inner());
+            swapped.store(true, Ordering::SeqCst);
+            PAUSE_LOOKS.1.notify_all();
+        }
+        assert!(!ender.join().unwrap(), "the swap went on before the job it looked at ended");
+        assert!(job_over.load(Ordering::SeqCst), "the swap went on with a compile job still running");
+        job.join().unwrap();
+        // a job that starts during the swap is held at the gate until the swap ends
         let started = std::sync::Arc::new(AtomicBool::new(false));
         let s2 = started.clone();
+        let (id_tx, id_rx) = std::sync::mpsc::channel();
         let late = std::thread::spawn(move || {
+            id_tx.send(crate::waits::me()).unwrap();
             let _guard = compile_job();
             s2.store(true, Ordering::SeqCst);
         });
-        std::thread::sleep(std::time::Duration::from_millis(2600));
-        assert!(!started.load(Ordering::SeqCst), "a job started inside the swap after 2 s");
+        let late_id = id_rx.recv().unwrap();
+        while !crate::waits::of(late_id).is_some_and(|w| w.label == "job gate") {
+            assert!(!started.load(Ordering::SeqCst), "a job started inside the swap");
+            std::thread::yield_now();
+        }
+        assert!(!started.load(Ordering::SeqCst), "a job started inside the swap");
         allocator_swap(1);
         late.join().unwrap();
         assert!(started.load(Ordering::SeqCst));
-        job.join().unwrap();
     }
 
     /// Two pauses take turns: a unit retired (or a program's fork) while an allocator swap is in
