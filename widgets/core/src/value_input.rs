@@ -64,6 +64,10 @@ script_mod! {
         arrow_zone: theme.prop_arrow_zone
         pad: theme.prop_pad
         arrow_color: theme.prop_ink_dim
+        // a named field's value (its name in `draw_label`), and a value that stands for no value
+        // of its own (mixed, inherited, read-only, the placeholder)
+        labelled_value_color: theme.color_text
+        muted_color: theme.prop_ink_dim
         chip_error_color: theme.color_error
         draw_bg +: {
             color: uniform(theme.prop_field)
@@ -357,6 +361,10 @@ pub struct ValueInput {
     #[live] draw_chip_text: DrawText,
     #[live] chip_error_color: Vec4f,
     #[live] pub arrow_color: Vec4f,
+    /// The value's ink in a field with a name inside it (`draw_text`'s otherwise).
+    #[live] pub labelled_value_color: Vec4f,
+    /// The value's ink when it is not the field's own: mixed, inherited, read-only, the placeholder.
+    #[live] pub muted_color: Vec4f,
     #[live] draw_label: DrawText,
     #[live] text_input: TextInput,
     #[live(0.0)] pub min: f64,
@@ -950,7 +958,8 @@ impl Widget for ValueInput {
             }
         } else {
             let color = self.draw_text.color;
-            if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.draw_label.color; }
+            if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.muted_color; }
+            else if labelled { self.draw_text.color = self.labelled_value_color; }
             let x = if linked { face.pos.x + left }
                 else if labelled { face.pos.x + face.size.x - edge - width }
                 else { face.pos.x + (face.size.x - width) * 0.5 };
