@@ -195,6 +195,15 @@ extern "system" {
 extern "system" {
     fn BCryptOpenAlgorithmProvider(alg: *mut *mut c_void, id: *const u16, imp: *const u16, flags: u32) -> i32;
     fn BCryptCloseAlgorithmProvider(alg: *mut c_void, flags: u32) -> i32;
+    fn BCryptSetProperty(handle: *mut c_void, name: *const u16, value: *const u8, len: u32, flags: u32) -> i32;
+    fn BCryptGenerateSymmetricKey(
+        alg: *mut c_void, key: *mut *mut c_void, object: *mut u8, object_len: u32,
+        secret: *const u8, secret_len: u32, flags: u32,
+    ) -> i32;
+    fn BCryptEncrypt(
+        key: *mut c_void, input: *const u8, input_len: u32, padding: *mut c_void,
+        iv: *mut u8, iv_len: u32, output: *mut u8, output_len: u32, written: *mut u32, flags: u32,
+    ) -> i32;
     fn BCryptGenerateKeyPair(alg: *mut c_void, key: *mut *mut c_void, bits: u32, flags: u32) -> i32;
     fn BCryptFinalizeKeyPair(key: *mut c_void, flags: u32) -> i32;
     fn BCryptExportKey(
@@ -328,12 +337,14 @@ fn ecc_private_blob(key: &[u8; 97]) -> Vec<u8> {
 struct Alg(*mut c_void);
 impl Drop for Alg {
     fn drop(&mut self) {
+        // SAFETY: Alg owns the provider handle and closes it once.
         unsafe { BCryptCloseAlgorithmProvider(self.0, 0) };
     }
 }
 struct BKey(*mut c_void);
 impl Drop for BKey {
     fn drop(&mut self) {
+        // SAFETY: BKey owns the key handle and destroys it once.
         unsafe { BCryptDestroyKey(self.0) };
     }
 }
@@ -421,6 +432,63 @@ pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
     }
     out.reverse();
     Ok(out)
+}
+
+pub(super) struct NativeAes128Ecb {
+    key: BKey,
+    // Rust drops fields in declaration order, so the provider outlives its key.
+    _provider: Alg,
+}
+
+// SAFETY: the CNG handles have no thread affinity and are exclusively owned.
+unsafe impl Send for NativeAes128Ecb {}
+
+impl NativeAes128Ecb {
+    pub(super) fn new(key: &[u8; 16]) -> io::Result<Self> {
+        let mut handle = null_mut();
+        // SAFETY: the algorithm name is NUL-terminated and handle is a writable out parameter.
+        let st = unsafe { BCryptOpenAlgorithmProvider(&mut handle, wide("AES").as_ptr(), null(), 0) };
+        if st != 0 {
+            return Err(status_error("BCryptOpenAlgorithmProvider(AES)", st));
+        }
+        let provider = Alg(handle);
+        let mode = wide("ChainingModeECB");
+        // SAFETY: the property name and value are live UTF-16 strings including their terminators.
+        let st = unsafe {
+            BCryptSetProperty(provider.0, wide("ChainingMode").as_ptr(), mode.as_ptr().cast(),
+                (mode.len() * 2) as u32, 0)
+        };
+        if st != 0 {
+            return Err(status_error("BCryptSetProperty(ChainingMode)", st));
+        }
+        let mut handle = null_mut();
+        // SAFETY: CNG reads the 16-byte key and manages its own key-object storage with null/0.
+        let st = unsafe {
+            BCryptGenerateSymmetricKey(provider.0, &mut handle, null_mut(), 0, key.as_ptr(), 16, 0)
+        };
+        if st != 0 {
+            return Err(status_error("BCryptGenerateSymmetricKey", st));
+        }
+        Ok(Self { key: BKey(handle), _provider: provider })
+    }
+
+    pub(super) fn encrypt_blocks(&mut self, blocks: &mut [u8]) -> io::Result<()> {
+        let data = blocks.as_mut_ptr();
+        let len = blocks.len() as u32;
+        let mut written = 0;
+        // SAFETY: the caller bounds len to whole blocks that fit u32. BCrypt permits identical
+        // input and output buffers and ECB needs neither IV nor padding.
+        let st = unsafe {
+            BCryptEncrypt(self.key.0, data, len, null_mut(), null_mut(), 0, data, len, &mut written, 0)
+        };
+        if st != 0 {
+            return Err(status_error("BCryptEncrypt", st));
+        }
+        if written != len {
+            return Err(io::Error::other("BCryptEncrypt returned a partial block batch"));
+        }
+        Ok(())
+    }
 }
 
 pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {

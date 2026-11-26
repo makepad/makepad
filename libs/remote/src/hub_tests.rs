@@ -275,44 +275,60 @@ fn session_launch_and_kill_only_own_pids() {
 #[test]
 fn a_dropped_link_resumes_the_watch_feed_with_a_gap_marker() {
     let _turn = crate::tests::WATCH_TURN.lock().unwrap_or_else(|e| e.into_inner());
-    let (_, watch) = shared();
+    let (app, watch) = shared();
     let hub = Hub::new(&hosts());
     let relay_ep = relay_endpoint();
     let first = link(&hub, &relay_ep);
     let c = client(&hub);
     let me = std::process::id();
-    let w = c.open("route", &format!("d:{me} watch")).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    watch.emit("{\"hub\":1}");
-    let mut seen = Vec::new();
-    let next = |seen: &mut Vec<String>| match w.recv_timeout(WAIT) {
-        Ok(Event::Data(d)) => {
-            let l = String::from_utf8_lossy(&d[8..]).into_owned();
-            seen.push(l.clone());
-            l
+    // The watch's opened hook runs after it takes its live cursor.
+    app.register_watch_with(
+        || {
+            shared().1.emit("{\"hub\":1}");
+        },
+        || {},
+    );
+    let opened = c.open("route", &format!("d:{me} watch")).map(|w| {
+        let event = w.recv_timeout(WAIT);
+        (w, event)
+    });
+    // Restore the shared service before checking the result, including on timeout.
+    app.register_watch();
+    let (w, event) = opened.unwrap();
+    assert!(matches!(&event, Ok(Event::Data(d)) if d.get(8..) == Some(b"{\"hub\":1}")), "first watch event: {event:?}");
+
+    let status = c.open("hosts", "").unwrap();
+    let wait_for_link = |state: &str| {
+        let start = std::time::Instant::now();
+        loop {
+            let report = ask(&status, "hosts");
+            if field(&report[0], "state") == state {
+                break;
+            }
+            assert!(start.elapsed() < WAIT, "waiting for host d to be {state}: {report:?}");
         }
-        other => panic!("{other:?}"),
     };
-    while !next(&mut seen).contains("\"hub\":1") {}
-    // the link drops; an event happens while it is down; the relay comes back
     first.close("test drop");
-    first.wait_closed();
-    std::thread::sleep(Duration::from_millis(300));
+    wait_for_link("waiting");
     watch.emit("{\"hub\":2}");
-    let again = relay_ep.clone();
-    let h = hub.clone();
-    let t = std::thread::spawn(move || link(&h, &again));
+    let _again = link(&hub, &relay_ep);
+    wait_for_link("up");
+
     let mut tail = Vec::new();
     loop {
-        let l = next(&mut tail);
-        if l.contains("\"hub\":2") {
+        let line = match w.recv_timeout(WAIT) {
+            Ok(Event::Data(d)) => String::from_utf8_lossy(&d[8..]).into_owned(),
+            other => panic!("waiting for hub:2 after reconnect: {other:?}, received {tail:?}"),
+        };
+        let delivered = line.contains("\"hub\":2");
+        tail.push(line);
+        if delivered {
             break;
         }
     }
     let gap = tail.iter().position(|l| l.contains("\"event\":\"gap\"")).expect("gap marker");
     assert!(gap < tail.len() - 1, "the gap marker comes before the event that happened while down: {tail:?}");
     assert_eq!(tail.iter().filter(|l| l.contains("\"hub\":1")).count(), 0, "no replay of what was delivered: {tail:?}");
-    let _keep = t.join().unwrap();
 }
 
 fn dial_host(name: &str, key: &makepad_network::tunnel::Psk) -> Host {

@@ -99,22 +99,30 @@ pub(crate) struct ClipboardRequests {
 impl Cx {
     /// Enqueue a read, returning immediately. Match the id in `Event::Clipboard`;
     /// discard a late reply if its widget/document is no longer the paste destination.
+    /// The read goes out with the platform ops, after any copy asked before it: a read right
+    /// after a copy answers with the copied text.
     pub fn read_clipboard(&mut self) -> u64 {
         self.clipboard.next += 1;
         let request = self.clipboard.next;
-        // a hosted child reads its host's clipboard (the one every app of the host shares)
         #[cfg(not(target_arch = "wasm32"))]
-        if self.hal.hosted.is_some() {
-            Cx::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::ReadClipboard { request_id: request }));
-        } else {
-            self.hal.frames.w.clip_read(request, false);
-        }
+        self.platform_ops.push_back(crate::cx_api::CxOsOp::ReadClipboard(request));
         #[cfg(target_arch = "wasm32")]
         {
             self.clipboard.pending.push(request);
             self.new_next_frame();
         }
         request
+    }
+
+    /// A read as its platform op goes out: a hosted child reads its host's clipboard (the one
+    /// every app of the host shares).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn hal_clipboard_read(&mut self, request: u64) {
+        if self.hal.hosted.is_some() {
+            Cx::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::ReadClipboard { request_id: request }));
+        } else {
+            self.hal.frames.w.clip_read(request, false);
+        }
     }
 
     /// A hosted child's copy goes to its host's clipboard: the flavours first, then the text the

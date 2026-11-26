@@ -160,7 +160,7 @@ impl Cx {
             self.enable_pick_variants();
         }
         self.hal.frames.open(info.session, info);
-        self.register_async_load_probe("glyph", Cx::hal_glyph_requests_unanswered);
+        self.register_async_load_probe("glyph", Cx::hal_glyph_loads);
         self.hal.events = Some(EventStore::new(info.session, 512, self.hal.event_arena.room()));
         super::register_wake_session(info.session);
     }

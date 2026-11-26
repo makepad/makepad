@@ -23,6 +23,7 @@ pub mod natsim;
 pub mod portmap;
 pub mod punch;
 pub mod reflect;
+pub mod seal;
 pub mod stream;
 pub mod stun;
 pub mod words;

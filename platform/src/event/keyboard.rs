@@ -9,6 +9,30 @@ pub use makepad_studio_protocol::{
     CharOffset, FullTextState, ImeAction, ImeActionEvent, KeyCode, KeyEvent, TextInputEvent,
 };
 
+/// The modifier of the text-editing shortcuts (select all, copy, cut, paste, undo, redo).
+/// A trait of the platform's, not a method in the studio wire crate: an edit there changes the
+/// hosted wire.
+pub trait EditModifier {
+    /// Whether it is held: Cmd on Apple platforms, where Control in a text field means
+    /// something else; Control or the Logo key everywhere else. Logo is the Mac-style key (a
+    /// Mac's Cmd reaches a Linux desktop over Desk Link as Logo), and Control keeps working as
+    /// it always did. Every other shortcut follows `KeyModifiers::is_primary`.
+    fn is_edit_primary(&self) -> bool;
+}
+
+impl EditModifier for KeyModifiers {
+    fn is_edit_primary(&self) -> bool {
+        #[cfg(all(target_vendor = "apple", not(target_arch = "wasm32")))]
+        {
+            self.logo
+        }
+        #[cfg(not(all(target_vendor = "apple", not(target_arch = "wasm32"))))]
+        {
+            self.logo || self.control
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CxKeyboard {
     pub(crate) prev_key_focus: Area,
@@ -63,6 +87,22 @@ impl CxKeyboard {
         } else {
             Default::default()
         }
+    }
+
+    /// The modifier keys held down now, by their own key events (a copy chord's `TextCopy` and
+    /// a paste chord's text come before the chord's key, so its modifiers are known only so).
+    pub fn held_modifiers(&self) -> KeyModifiers {
+        let mut held = KeyModifiers::default();
+        for key in &self.keys_down {
+            match key.key_code {
+                KeyCode::Shift => held.shift = true,
+                KeyCode::Control => held.control = true,
+                KeyCode::Alt => held.alt = true,
+                KeyCode::Logo => held.logo = true,
+                _ => {}
+            }
+        }
+        held
     }
 
     pub fn set_key_focus(&mut self, focus_area: Area) {
@@ -334,5 +374,38 @@ mod takes_text_tests {
         assert!(!settle(&mut kb, field), "a restore to the button: no text");
         kb.restore_key_focus(field, true);
         assert!(settle(&mut kb, field), "a restore to the field: text");
+    }
+
+    #[test]
+    fn held_modifiers_come_from_the_modifier_keys_themselves() {
+        let key = |key_code| KeyEvent { key_code, ..Default::default() };
+        let mut kb = CxKeyboard::default();
+        kb.process_key_down(key(KeyCode::Control));
+        // the chord's own key reports Control in its modifiers; only the held keys count
+        kb.process_key_down(KeyEvent { key_code: KeyCode::KeyC, modifiers: KeyModifiers { control: true, logo: true, ..Default::default() }, ..Default::default() });
+        assert_eq!(kb.held_modifiers(), KeyModifiers { control: true, ..Default::default() }, "Control held, nothing else");
+        kb.process_key_down(key(KeyCode::Logo));
+        kb.process_key_up(key(KeyCode::Control));
+        assert_eq!(kb.held_modifiers(), KeyModifiers { logo: true, ..Default::default() }, "Control went up, Logo is held");
+        kb.process_key_up(key(KeyCode::Logo));
+        kb.process_key_up(key(KeyCode::KeyC));
+        assert_eq!(kb.held_modifiers(), KeyModifiers::default(), "nothing held");
+    }
+
+    #[test]
+    fn edit_shortcuts_take_logo_and_keep_control_off_apple() {
+        let logo = KeyModifiers { logo: true, ..Default::default() };
+        let control = KeyModifiers { control: true, ..Default::default() };
+        let shift_logo = KeyModifiers { shift: true, logo: true, ..Default::default() };
+        assert!(logo.is_edit_primary(), "Logo (a Mac's Cmd) is the editing key everywhere");
+        assert!(shift_logo.is_edit_primary(), "Shift does not take it away (redo is Shift+Z)");
+        assert!(!KeyModifiers::default().is_edit_primary() && !KeyModifiers { alt: true, shift: true, ..Default::default() }.is_edit_primary());
+        #[cfg(all(target_vendor = "apple", not(target_arch = "wasm32")))]
+        assert!(!control.is_edit_primary(), "on a Mac Control in a text field is not the editing key");
+        #[cfg(not(all(target_vendor = "apple", not(target_arch = "wasm32"))))]
+        {
+            assert!(control.is_edit_primary(), "Control keeps working off Apple");
+            assert_eq!(logo.is_primary(), cfg!(target_arch = "wasm32"), "the other shortcuts keep their primary key");
+        }
     }
 }

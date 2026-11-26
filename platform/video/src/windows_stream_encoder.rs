@@ -327,6 +327,11 @@ impl HardwareMft {
         }
         if options.keyint > 0 {
             codec(&CODECAPI_AVEncMPVGOPSize, options.keyint, "GOP size");
+        } else if windows_mft::set_codec_api_u32(&transform, &CODECAPI_AVEncMPVGOPSize, u32::MAX).is_err() {
+            // keyint 0 is no scheduled key frames: left unset, an MFT keeps an interval of its
+            // own (the NVIDIA one: a key frame about every second). One that refuses an
+            // unbounded GOP gets an hour of pictures.
+            codec(&CODECAPI_AVEncMPVGOPSize, options.fps.max(1).saturating_mul(3600), "GOP size (no scheduled key frames)");
         }
         set_types(&transform, options)?;
         let stream_info = transform.GetOutputStreamInfo(0).map_err(|e| hr_err("IMFTransform::GetOutputStreamInfo", e))?;
@@ -608,8 +613,9 @@ impl WindowsStreamEncoder {
                 hw.encode(&texture, key, pts_100ns)
             };
         }
-        let keyint = self.options.keyint.max(1);
-        if self.force_keyframe || self.frames_since_keyframe >= keyint {
+        // a fresh encoder starts with a key frame: made when asked, or every keyint pictures
+        // (keyint 0: never on a schedule)
+        if self.force_keyframe || (self.options.keyint > 0 && self.frames_since_keyframe >= self.options.keyint) {
             self.recreate()?;
         }
         self.force_keyframe = false;

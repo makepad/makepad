@@ -99,6 +99,8 @@ pub enum LookupSource {
 pub struct CxA11y {
     pub on: bool,
     consumers: u32,
+    /// A virtual-clock lookup keeps the builder on until the next draw finishes.
+    build_on_step: bool,
     frame: u64,
     windows: HashMap<WindowKey, WindowTree>,
     stack: Vec<Frame>,
@@ -196,7 +198,7 @@ impl CxA11y {
         }
     }
 
-    /// The consumer bits (`makepad_a11y::consumer`) that keep the builder on; zero when off.
+    /// The consumer bits (`makepad_a11y::consumer`) currently held.
     pub fn consumers(&self) -> u32 {
         self.consumers
     }
@@ -205,9 +207,9 @@ impl CxA11y {
     /// `action_owner`, `action_part_key` and `request_lookup` id terms and act; only building stops.
     pub fn set_consumers(&mut self, consumers: u32) -> bool {
         let activate = !self.on && consumers != 0;
-        if consumers == 0 {
-            self.on = false;
-            self.consumers = 0;
+        self.consumers = consumers;
+        self.on = consumers != 0 || self.build_on_step;
+        if !self.on {
             // Host waiters end through their own timeout or disconnect when building stops.
             self.lookups.clear();
             self.host_snapshots.clear();
@@ -220,8 +222,6 @@ impl CxA11y {
             self.announcements.clear();
             return false;
         }
-        self.consumers = consumers;
-        self.on = true;
         if activate {
             for w in self.windows.values_mut() {
                 w.full = true;
@@ -1065,6 +1065,10 @@ impl Cx {
         if a11y.frame_covers {
             a11y.built = Some((self.event_id, self.keyboard.key_focus()));
         }
+        if a11y.build_on_step {
+            a11y.build_on_step = false;
+            a11y.set_consumers(a11y.consumers);
+        }
         self.platform_ops = ops;
         self.a11y = a11y;
     }
@@ -1109,17 +1113,28 @@ impl Cx {
     /// between two steps the tree its last frame built is what it shows: a snapshot is
     /// acknowledged at once over it too. Waiting for a frame there waited out each read's
     /// timeout while the caller that steps waited for the read (an app run's 5 fps pass: every
-    /// layout read 5 s, its counter's clicks unseen, 11-19). After a partial frame that tree may
-    /// keep a node a widget that did not redraw left behind; under the virtual clock that is
-    /// accepted: a caller that wants a fresher tree steps a frame first.
+    /// layout read 5 s, its counter's clicks unseen, 11-19). The caller's hold ends with its
+    /// read, before it steps, so under the virtual clock a lookup also keeps the builder on
+    /// through the next frame that draws (`build_on_step`): that frame publishes what changed,
+    /// and the next snapshot shows it. Without it no stepped frame built a tree while no read
+    /// was running, and every later snapshot showed the first one's tree (11-26). The read asks
+    /// for no frame of its own: a read never makes the app unsettled. After a partial frame the
+    /// tree may keep a node a widget that did not redraw left behind; under the virtual clock
+    /// that is accepted: a caller that wants a fresher tree steps a frame first.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn a11y_lookup(&mut self, seq: u32, query: &str) {
-        let shown = self.a11y_tree_current() || (crate::remote::app_clock::enabled() && self.a11y.built.is_some());
+        self.a11y_lookup_with_clock(seq, query, crate::remote::app_clock::enabled());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a11y_lookup_with_clock(&mut self, seq: u32, query: &str, virtual_clock: bool) {
+        let shown = self.a11y_tree_current() || (virtual_clock && self.a11y.built.is_some());
         if seq != 0 && query.trim().is_empty() && self.a11y.on && shown {
             self.platform_ops.push_back(CxOsOp::A11yLookupDone { seq });
+            self.a11y.build_on_step = virtual_clock;
             return;
         }
         if self.a11y.request_lookup(LookupSource::Native(seq), query) {
+            self.a11y.build_on_step = virtual_clock;
             self.a11y_redraw_for_request();
         }
     }
@@ -2057,6 +2072,52 @@ mod tests {
         cx.a11y_lookup(10, "");
         assert!(!cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 10 })), "a redraw waiting is a change: the frame acknowledges the request, not the request itself");
         assert!(!cx.a11y_take_answer_frame(), "a frame the app owed already is the app's, not the request's");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_virtual_clock_snapshot_refreshes_on_the_next_draw_after_release() {
+        use crate::event::Event;
+        use makepad_a11y::consumer::REMOTE;
+        let mut title = "Welcome";
+        let mut cx = Cx::new(Box::new(move |cx, event| match event {
+            Event::Signal => title = "Ready",
+            Event::Draw(_) if cx.a11y.on => {
+                let root = cx.a11y.begin_node(1, None);
+                cx.a11y.begin_window(WindowId(0, 1));
+                cx.a11y.end_window();
+                cx.a11y.end_node(root, node(Role::Window, title), Area::Empty);
+            }
+            _ => {}
+        }));
+        let request = |cx: &mut Cx, seq| {
+            cx.a11y_consumers_changed(REMOTE);
+            cx.a11y_lookup_with_clock(seq, "", true);
+            let acked = cx.platform_ops.iter().any(|op|
+                matches!(op, CxOsOp::A11yLookupDone { seq: done } if *done == seq)
+            );
+            assert!(acked, "a virtual-clock snapshot with a built tree must be acknowledged before another step");
+            cx.a11y_consumers_changed(0);
+        };
+        cx.a11y_consumers_changed(REMOTE);
+        cx.call_draw_event(0.0);
+        cx.a11y_consumers_changed(0);
+        cx.redraw_all();
+        request(&mut cx, 1);
+
+        cx.platform_ops.clear();
+        cx.call_event_handler(&Event::Signal);
+        cx.call_draw_event(1.0);
+        let published = cx.platform_ops.iter().any(|op| match op {
+            CxOsOp::A11yUpdate { bytes, .. } => makepad_a11y::wire::decode_update(bytes).unwrap()
+                .nodes.iter().any(|n| n.name == "Ready"),
+            _ => false,
+        });
+        assert!(published, "the stepped frame must publish the changed window title after the request released its hold");
+        assert!(!cx.a11y.on, "one stepped draw must finish the outstanding tree build");
+        request(&mut cx, 2);
+        assert!(!cx.need_redrawing(), "reading the current tree must not ask for a frame: a read never makes the app unsettled");
+        assert!(cx.a11y.on, "the builder stays on after the read for the next stepped draw");
     }
 
     /// A frame that draws some lists keeps the other lists' nodes as they were built, so it makes

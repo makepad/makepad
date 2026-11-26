@@ -427,6 +427,74 @@ pub(crate) mod tests {
         }
     }
 
+    /// Every stack here runs with chain verification off, so the pin on the
+    /// captured leaf is only as good as the stack's check of the handshake
+    /// signature (TLS 1.2 ServerKeyExchange, TLS 1.3 CertificateVerify)
+    /// under that leaf's key. A relay that shows the peer's public certificate
+    /// but signs with a key of its own must not get a completed handshake.
+    /// SecureTransport has TLS 1.2 only; its 1.3 case runs as 1.2.
+    #[test]
+    fn a_relay_with_the_real_certificate_cannot_finish_the_handshake() {
+        let real = identity();
+        // The relay shows A's certificate and signs with a key A does not hold.
+        // OpenSSL refuses a key whose public half isn't the certificate's, so
+        // there the key keeps A's public half with another private scalar.
+        // CNG validates an imported pair, and Schannel finds the key through
+        // the container the certificate names, so there the relay keeps a
+        // whole key of its own behind A's certificate.
+        let other = generate_p256().unwrap();
+        let key = if cfg!(windows) {
+            other
+        } else {
+            let mut forged = real.key;
+            forged[65..].copy_from_slice(&other[65..]);
+            forged
+        };
+        assert_ne!(key[65..], real.key[65..]);
+        let relay = TlsIdentity { key, cert_der: real.cert_der.clone(), fingerprint: real.fingerprint, dir: real.dir.clone() };
+
+        for (version, tls12) in [("TLS 1.2", true), ("TLS 1.3", false)] {
+            let server = |id: &TlsIdentity| {
+                let native = if tls12 { NativeEngine::tls12_server(id) } else { NativeEngine::strict_server(id) }.unwrap();
+                TlsEngine::start(native, Some(id.cert_der.clone()), false, None).unwrap()
+            };
+
+            // Control: the certificate with its own key finishes and is captured.
+            let mut client = TlsEngine::client(identity(), None).unwrap();
+            let mut honest = server(&real);
+            handshake(&mut client, &mut honest);
+            assert_eq!(client.server_certificate_der(), Some(&real.cert_der[..]), "{version}: control did not capture the certificate");
+            let secure_transport = cfg!(any(target_os = "macos", target_os = "ios", target_os = "tvos"));
+            assert_eq!(client.tls12, tls12 || secure_transport, "{version}: control negotiated another version");
+
+            // The relay: the same certificate, another signer.
+            let mut client = TlsEngine::client(identity(), None).unwrap();
+            let mut relayed = server(&relay);
+            let mut failure = None;
+            for _ in 0..16 {
+                let step = deliver(&mut client, &mut relayed, 1).and_then(|a| deliver(&mut relayed, &mut client, 7).map(|b| a + b));
+                match step {
+                    Err(e) => { failure = Some(e); break; }
+                    Ok(0) => break,
+                    Ok(_) => {}
+                }
+            }
+            let failure = failure.unwrap_or_else(|| panic!("{version}: the handshake with a foreign signer ran out of bytes without an error"));
+            eprintln!("{version}: client refused the foreign signer: {failure}");
+            // The relay must have signed: a stack that can't sign with this key would fail here
+            // too, and prove nothing about the client.
+            assert!(client.error.is_some() && relayed.error.is_none(), "{version}: the relay signed and the client refused it ({failure})");
+            assert!(!client.handshake_done(), "{version}: client finished with a foreign signer");
+            assert!(client.server_certificate_der().is_none(), "{version}: client exposed the leaf before the signature checked");
+            assert!(!relayed.handshake_done() || client.error.is_some(), "{version}: relay finished while the client had no error");
+            let mut byte = [0; 8];
+            for (who, end) in [("client", &mut client), ("relay", &mut relayed)] {
+                assert!(!matches!(end.read_plaintext(&mut byte), Ok(n) if n > 0), "{version}: {who} read application bytes");
+            }
+            assert!(client.write_plaintext(b"x").is_err(), "{version}: client accepted application bytes after the failure");
+        }
+    }
+
     #[test]
     fn tls_fragmented_echo_and_record_authentication() {
         let server_identity = identity();

@@ -14,6 +14,9 @@
 //! but never received. A zero-window probe recovers missed credit, and TLS detects broken
 //! records or handshake transcripts. Missing bytes can stall or fail the handshake without
 //! allowing unauthenticated content through TLS.
+//!
+//! The layer above can cap the stream's send rate (`set_rate_cap`), so the stream leaves room
+//! on the path for other traffic (a call's media), and read what it has sent (`sent_bytes`).
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 
@@ -23,6 +26,11 @@ use send::{Sender, MAX_RTO, SLOTS};
 use wire::{expand, Packet, ACCEPT, ACK, CHALLENGE, DATA, FIN, MAX_PN, OPEN, PING, RESET, RESPONSE};
 
 const ACK_DELAY: u64 = 25;
+/// What a rate cap lets through at once: this many milliseconds of its rate, and at least two
+/// full datagrams.
+const PACE_BURST_MS: u64 = 10;
+/// The lowest rate cap: a lower one is taken as this.
+const MIN_CAP_BPS: u64 = 8_000;
 const KEEPALIVE: u64 = 15_000;
 const IDLE: u64 = 60_000;
 
@@ -70,6 +78,41 @@ impl Replay {
         }
         self.seen |= 1 << age;
         Some(false)
+    }
+}
+
+/// A send-rate cap as a token bucket. Credit is in milli-bits (a rate in bits per second times
+/// milliseconds), so refilling at whole milliseconds loses nothing. New data goes while the
+/// credit is not negative; each data datagram, new or resent, draws on it.
+#[cfg_attr(test, derive(Clone, PartialEq))]
+struct Pace {
+    bps: u64,
+    credit: i64,
+    at: u64,
+}
+
+impl Pace {
+    fn burst(&self) -> i64 {
+        self.bps.saturating_mul(PACE_BURST_MS).max(2 * 1200 * 8 * 1000).min(i64::MAX as u64) as i64
+    }
+
+    fn refill(&mut self, now: u64) {
+        let gained = self.bps.saturating_mul(now.saturating_sub(self.at)).min(i64::MAX as u64) as i64;
+        self.at = self.at.max(now);
+        self.credit = self.credit.saturating_add(gained).min(self.burst());
+    }
+
+    fn charge(&mut self, bytes: usize) {
+        self.credit = self.credit.saturating_sub(bytes as i64 * 8_000);
+    }
+
+    /// When new data may go again.
+    fn ready_at(&self) -> u64 {
+        if self.credit >= 0 {
+            self.at
+        } else {
+            self.at + self.credit.unsigned_abs().div_ceil(self.bps)
+        }
     }
 }
 
@@ -184,6 +227,8 @@ pub struct Stream {
     tx: Sender,
     rx: Receiver,
     linger_until: Option<u64>,
+    pace: Option<Pace>,
+    sent_bytes: u64,
 }
 
 impl Stream {
@@ -221,7 +266,40 @@ impl Stream {
                 unacked: 0,
             },
             linger_until: None,
+            pace: None,
+            sent_bytes: 0,
         }
+    }
+
+    /// Caps what this stream sends at `bits_per_second`; None (the default) lifts the cap.
+    /// Only new data waits for it: retransmissions, acknowledgements and probes go when due,
+    /// though every data datagram draws on it. Nothing is dropped: written bytes wait in the
+    /// send queue, and `write` accepts less while they do. A cap below 8 kbit/s counts as
+    /// 8 kbit/s. `next_timeout` includes when the cap next lets data go.
+    pub fn set_rate_cap(&mut self, bits_per_second: Option<u64>) {
+        let now = self.now;
+        self.pace = bits_per_second.map(|bps| {
+            let bps = bps.max(MIN_CAP_BPS);
+            match self.pace.take() {
+                Some(mut pace) => {
+                    pace.refill(now);
+                    pace.bps = bps;
+                    pace.credit = pace.credit.min(pace.burst());
+                    pace
+                }
+                None => {
+                    let mut pace = Pace { bps, credit: 0, at: now };
+                    pace.credit = pace.burst();
+                    pace
+                }
+            }
+        });
+    }
+
+    /// Bytes of every datagram this stream has handed out to send, of every kind, since it was
+    /// made.
+    pub fn sent_bytes(&self) -> u64 {
+        self.sent_bytes
     }
 
     pub fn state(&self) -> State {
@@ -409,6 +487,13 @@ impl Stream {
             self.candidate = None;
         }
         let probe_due = self.tx.blocked_on_credit() && self.probe_at <= now_ms;
+        let new_ok = match self.pace.as_mut() {
+            Some(pace) => {
+                pace.refill(now_ms);
+                pace.credit >= 0
+            }
+            None => true,
+        };
         let probe_interval = self.tx.rto;
         let pn = self.next_packet;
         let mut to = self.peer;
@@ -436,7 +521,7 @@ impl Stream {
             self.open_at = now_ms + self.open_interval;
             self.open_interval = (2 * self.open_interval).min(MAX_RTO);
             OPEN
-        } else if let Some((s, payload)) = self.tx.transmit(now_ms, pn) {
+        } else if let Some((s, payload)) = self.tx.transmit(now_ms, pn, new_ok) {
             seq = s as u32;
             body = payload;
             if body.is_empty() {
@@ -464,6 +549,10 @@ impl Stream {
         };
         let bytes = packet.encode(&self.id, self.keys.as_ref().map(|k| &k.0));
         self.next_packet += 1;
+        self.sent_bytes += bytes.len() as u64;
+        if let (Some(pace), DATA | FIN) = (self.pace.as_mut(), kind) {
+            pace.charge(bytes.len());
+        }
         if !matches!(kind, CHALLENGE | RESPONSE) {
             self.last_sent = now_ms;
             self.rx.ack_at = None;
@@ -494,7 +583,8 @@ impl Stream {
             if let Some(ack) = self.rx.ack_at {
                 at = at.min(ack);
             }
-            if let Some(tx) = self.tx.wake(self.now) {
+            let new_at = self.pace.as_ref().map_or(self.now, Pace::ready_at);
+            if let Some(tx) = self.tx.wake(self.now, new_at) {
                 at = at.min(tx);
             }
             if self.linger_until.is_none() {

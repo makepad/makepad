@@ -250,6 +250,27 @@ pub fn ecdh_p256(key: &[u8; X963_KEY_LEN], peer_point: &[u8]) -> io::Result<[u8;
     platform::ecdh_p256(key, peer_point)
 }
 
+/// The operating system's keyed AES-128 block cipher in ECB mode, used to build CTR.
+pub struct Aes128Ecb(platform::NativeAes128Ecb);
+
+impl Aes128Ecb {
+    pub fn new(key: &[u8; 16]) -> io::Result<Self> {
+        platform::NativeAes128Ecb::new(key).map(Self)
+    }
+
+    /// Encrypts whole 16-byte blocks in place. A partial block returns `InvalidInput`.
+    pub fn encrypt_blocks(&mut self, blocks: &mut [u8]) -> io::Result<()> {
+        if blocks.len() % 16 != 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        // All backends can represent this length, including EVP's signed int.
+        for chunk in blocks.chunks_mut(i32::MAX as usize / 16 * 16) {
+            self.0.encrypt_blocks(chunk)?;
+        }
+        Ok(())
+    }
+}
+
 /// DER ECDSA-SHA256 signature by an X9.63 P-256 key, made by the OS.
 pub fn sign_p256_sha256(key: &[u8; X963_KEY_LEN], msg: &[u8]) -> io::Result<Vec<u8>> {
     platform::sign_p256_sha256(key, msg)
@@ -850,9 +871,29 @@ pub(crate) mod platform;
 #[path = "backend/windows/tls_server.rs"]
 pub(crate) mod platform;
 
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows", target_os = "linux")))]
+mod unsupported_aes {
+    use std::{cell::Cell, io};
+
+    pub(super) struct NativeAes128Ecb {
+        _not_sync: Cell<()>,
+    }
+
+    impl NativeAes128Ecb {
+        pub(super) fn new(_: &[u8; 16]) -> io::Result<Self> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+
+        pub(super) fn encrypt_blocks(&mut self, _: &mut [u8]) -> io::Result<()> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 mod platform {
     //! The JIT host's registered provider (Java security on the device: backend/android.rs).
+    pub(super) use super::unsupported_aes::NativeAes128Ecb;
     use crate::backend::{platform_crypto, PlatformTlsServer, PlatformTlsSession};
     use std::io::{self, Read, Write};
     use std::net::TcpStream;
@@ -948,6 +989,7 @@ mod platform {
     target_os = "android"
 )))]
 mod platform {
+    pub(super) use super::unsupported_aes::NativeAes128Ecb;
     use std::io;
     use std::net::TcpStream;
 

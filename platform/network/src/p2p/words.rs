@@ -40,6 +40,7 @@ pub enum WordsError {
     Unknown { position: usize, heard: String, suggestions: Vec<&'static str> },
     Checksum,
     NewerVersion { version: u8 },
+    BadLan,
 }
 
 impl fmt::Display for WordsError {
@@ -57,6 +58,7 @@ impl fmt::Display for WordsError {
             }
             Self::Checksum => write!(f, "The words don't add up. One was probably misheard. Read them back to each other."),
             Self::NewerVersion { version } => write!(f, "Your peer runs a newer invite version ({version}). Update your app and try again."),
+            Self::BadLan => write!(f, "The local network address or port in these words is invalid."),
         }
     }
 }
@@ -67,16 +69,16 @@ fn word_count(bits: usize) -> usize {
     bits / BITS_PER_WORD + (bits % BITS_PER_WORD + MIN_CHECK_BITS).div_ceil(BITS_PER_WORD)
 }
 
-// Read or write up to 16 bits, starting at an arbitrary network-order bit offset.
-fn read_bits(bytes: &[u8], start: usize, width: usize) -> u16 {
+// Read or write up to 64 bits, starting at an arbitrary network-order bit offset.
+fn read_bits(bytes: &[u8], start: usize, width: usize) -> u64 {
     let mut value = 0;
     for bit in start..start + width {
-        value = (value << 1) | u16::from((bytes[bit / 8] >> (7 - bit % 8)) & 1);
+        value = (value << 1) | u64::from((bytes[bit / 8] >> (7 - bit % 8)) & 1);
     }
     value
 }
 
-fn write_bits(bytes: &mut [u8], start: usize, width: usize, value: u16) {
+fn write_bits(bytes: &mut [u8], start: usize, width: usize, value: u64) {
     for i in 0..width {
         let bit = start + i;
         let mask = 0x80 >> (bit % 8);
@@ -94,7 +96,7 @@ fn clear_padding(bytes: &mut [u8], bits: usize) {
     }
 }
 
-fn checksum(domain: &[u8], payload: &[u8], width: usize) -> u16 {
+fn checksum(domain: &[u8], payload: &[u8], width: usize) -> u64 {
     read_bits(&sha256_hash(&[domain, payload].concat()), 0, width)
 }
 
@@ -197,21 +199,30 @@ fn match_word(heard: &str, position: usize, corrected: &mut Vec<Correction>) -> 
     Err(WordsError::Unknown { position, heard: heard.into(), suggestions })
 }
 
+fn tokens(text: &str) -> impl Iterator<Item = &str> + Clone {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty())
+}
+
 /// Decode case-insensitive words separated by whitespace or punctuation. A unique four-letter
 /// (or longer) prefix is accepted as shorthand. A unique single edit is reported to the caller.
 pub fn decode(domain: &[u8], text: &str, bits: usize) -> Result<Decoded, WordsError> {
-    let tokens = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty());
+    let tokens = tokens(text);
     let expected = word_count(bits);
     let got = tokens.clone().count();
     if got != expected {
         return Err(WordsError::Count { expected, got });
     }
-    let wire_bits = expected * BITS_PER_WORD;
+    decode_tokens(domain, bits, tokens)
+}
+
+// The caller has checked the word count for this payload.
+fn decode_tokens<'a>(domain: &[u8], bits: usize, tokens: impl Iterator<Item = &'a str>) -> Result<Decoded, WordsError> {
+    let wire_bits = word_count(bits) * BITS_PER_WORD;
     let mut payload = vec![0; wire_bits.div_ceil(8)];
     let mut corrected = Vec::new();
     for (i, token) in tokens.enumerate() {
         let index = match_word(token, i + 1, &mut corrected)?;
-        write_bits(&mut payload, i * BITS_PER_WORD, BITS_PER_WORD, index as u16);
+        write_bits(&mut payload, i * BITS_PER_WORD, BITS_PER_WORD, index as u64);
     }
     let width = wire_bits - bits;
     let check = read_bits(&payload, bits, width);
@@ -236,19 +247,53 @@ pub fn group(words: &[&str]) -> String {
 }
 
 pub const INVITE_DOMAIN: &[u8] = b"makepad p2p invite v1";
+const LAN_INVITE_DOMAIN: &[u8] = b"makepad p2p invite v1 lan";
 const VERSION: u8 = 0;
 const COMMIT_DOMAIN: &[u8] = b"makepad p2p invite commitment v1\0";
+const LAN_COMMIT_DOMAIN: &[u8] = b"makepad p2p invite commitment v1 lan\0";
 pub const COMMIT_BITS: usize = 54;
 const COMMIT_MASK: u64 = (1 << COMMIT_BITS) - 1;
 
-// Field positions in the v1 payload, counting from its least significant bit.
-const PORT_SHIFT: usize = COMMIT_BITS;
-const IP_SHIFT: usize = PORT_SHIFT + 16;
-const HINT_SHIFT: usize = IP_SHIFT + 32;
-const VERSION_SHIFT: usize = HINT_SHIFT + 2;
-const INVITE_PAYLOAD_BITS: usize = VERSION_SHIFT + 1;
-const INVITE_BITS: usize = INVITE_PAYLOAD_BITS + 5;
-const _: () = assert!(INVITE_BITS == 10 * BITS_PER_WORD);
+// Field positions from the high bit of the first byte. Both forms share the first 105 bits.
+const HINT_START: usize = 1;
+const IP_START: usize = HINT_START + 2;
+const PORT_START: usize = IP_START + 32;
+const COMMIT_START: usize = PORT_START + 16;
+const INVITE_PAYLOAD_BITS: usize = COMMIT_START + COMMIT_BITS;
+const LAN_HOST_START: usize = INVITE_PAYLOAD_BITS + 2;
+const LAN_PORT_START: usize = LAN_HOST_START + 24;
+const LAN_PAYLOAD_BITS: usize = LAN_PORT_START + 16;
+const _: () = assert!(INVITE_PAYLOAD_BITS + 5 == 10 * BITS_PER_WORD);
+const _: () = assert!(LAN_PAYLOAD_BITS + 7 == 14 * BITS_PER_WORD);
+
+// RFC 1918 network bases and host masks, in the order used on the wire.
+const LAN_RANGES: [(u32, u32); 3] = [
+    (0x0a00_0000, 0x00ff_ffff),
+    (0xac10_0000, 0x000f_ffff),
+    (0xc0a8_0000, 0x0000_ffff),
+];
+
+fn lan_host_port_ok(host: u32, port: u16) -> bool {
+    !matches!(host as u8, 0 | 255) && port != 0
+}
+
+fn lan_fields(addr: SocketAddrV4) -> Option<(usize, u32)> {
+    let ip = u32::from(*addr.ip());
+    if lan_host_port_ok(ip, addr.port()) {
+        for (range, &(base, mask)) in LAN_RANGES.iter().enumerate() {
+            if ip & !mask == base {
+                return Some((range, ip - base));
+            }
+        }
+    }
+    None
+}
+
+/// Whether this private address and port can be shared in an invite. Leave the LAN address
+/// out if the port is zero, the last octet is zero or 255, or the address is outside RFC 1918.
+pub fn lan_candidate_ok(addr: SocketAddrV4) -> bool {
+    lan_fields(addr).is_some()
+}
 
 // Independently computed for the fixed test public key [0x11; 32] in an invite for 192.0.2.1:0
 // with an unknown NAT.
@@ -259,6 +304,10 @@ pub(super) const TEST_COMMITMENT: u64 = 0x33_8a4f_7910_99dd;
 pub struct Invite {
     pub nat: Hint,
     pub addr: SocketAddrV4,
+    /// A local address adds four words. If those words are lost, the five-bit short checksum
+    /// passes by chance about once in 32 tries. The short invite has a different punch tag
+    /// and checks the key with a different commitment, so it cannot link to the long invite.
+    pub lan: Option<SocketAddrV4>,
     /// The low 54 bits hold the inviter's key commitment.
     pub commit: u64,
 }
@@ -267,11 +316,19 @@ impl Invite {
     /// Hashes the commitment domain, the invite's own fields and the public key together, then
     /// applies SHA-256 another 2^20 times. The first 54 bits of the final hash form the invite's
     /// key commitment. The fields salt it: `version u8 | hint u8 | IPv4 [4] | port u16`, network
-    /// order, so work done ahead for one address and port serves no other.
+    /// order. A LAN invite uses its own domain and appends the local IPv4 and port in the same
+    /// order, so work done ahead for one candidate serves no other.
     /// Run this off the UI thread. Each candidate key requires the full stretch.
-    pub fn commitment(nat: Hint, addr: SocketAddrV4, public_key: &[u8]) -> u64 {
-        let salt = [&[VERSION, nat as u8][..], &addr.ip().octets(), &addr.port().to_be_bytes()].concat();
-        let mut hash = sha256_hash(&[COMMIT_DOMAIN, &salt, public_key].concat());
+    pub fn commitment(nat: Hint, addr: SocketAddrV4, lan: Option<SocketAddrV4>, public_key: &[u8]) -> u64 {
+        let mut salt = [&[VERSION, nat as u8][..], &addr.ip().octets(), &addr.port().to_be_bytes()].concat();
+        let domain = if let Some(lan) = lan {
+            salt.extend_from_slice(&lan.ip().octets());
+            salt.extend_from_slice(&lan.port().to_be_bytes());
+            LAN_COMMIT_DOMAIN
+        } else {
+            COMMIT_DOMAIN
+        };
+        let mut hash = sha256_hash(&[domain, &salt, public_key].concat());
         for _ in 0..(1 << 20) {
             hash = sha256_hash(&hash);
         }
@@ -280,37 +337,63 @@ impl Invite {
 
     /// Checks the peer's public key against the invite. Run this off the UI thread.
     pub fn matches(&self, public_key: &[u8]) -> bool {
-        Self::commitment(self.nat, self.addr, public_key) == (self.commit & COMMIT_MASK)
+        Self::commitment(self.nat, self.addr, self.lan, public_key) == (self.commit & COMMIT_MASK)
     }
 
+    /// Make ten words, or fourteen when sharing a LAN address. Panics if that address fails
+    /// [`lan_candidate_ok`].
     pub fn to_words(&self) -> Vec<&'static str> {
-        let payload = (u128::from(self.nat as u8) << HINT_SHIFT)
-            | (u128::from(u32::from(*self.addr.ip())) << IP_SHIFT)
-            | (u128::from(self.addr.port()) << PORT_SHIFT)
-            | u128::from(self.commit & COMMIT_MASK);
-        let bytes = (payload << (128 - INVITE_PAYLOAD_BITS)).to_be_bytes();
-        encode(INVITE_DOMAIN, &bytes, INVITE_PAYLOAD_BITS)
+        let mut payload = [0; LAN_PAYLOAD_BITS.div_ceil(8)];
+        write_bits(&mut payload, 0, 1, u64::from(VERSION));
+        write_bits(&mut payload, HINT_START, 2, self.nat as u64);
+        write_bits(&mut payload, IP_START, 32, u32::from(*self.addr.ip()).into());
+        write_bits(&mut payload, PORT_START, 16, self.addr.port().into());
+        write_bits(&mut payload, COMMIT_START, COMMIT_BITS, self.commit);
+        if let Some(lan) = self.lan {
+            let (range, host) = lan_fields(lan).expect("invalid LAN candidate in invite");
+            write_bits(&mut payload, INVITE_PAYLOAD_BITS, 2, range as u64);
+            write_bits(&mut payload, LAN_HOST_START, 24, host.into());
+            write_bits(&mut payload, LAN_PORT_START, 16, lan.port().into());
+            encode(LAN_INVITE_DOMAIN, &payload, LAN_PAYLOAD_BITS)
+        } else {
+            encode(INVITE_DOMAIN, &payload, INVITE_PAYLOAD_BITS)
+        }
     }
 
     pub fn from_words(text: &str) -> Result<(Invite, Vec<Correction>), WordsError> {
-        let Decoded { payload, corrected } = decode(INVITE_DOMAIN, text, INVITE_PAYLOAD_BITS)?;
-        let mut bytes = [0; 16];
-        bytes[..payload.len()].copy_from_slice(&payload);
-        let bits = u128::from_be_bytes(bytes) >> (128 - INVITE_PAYLOAD_BITS);
-        let version = (bits >> VERSION_SHIFT) as u8;
+        let tokens = tokens(text);
+        let (domain, bits) = match tokens.clone().count() {
+            10 => (INVITE_DOMAIN, INVITE_PAYLOAD_BITS),
+            14 => (LAN_INVITE_DOMAIN, LAN_PAYLOAD_BITS),
+            got => return Err(WordsError::Count { expected: 10, got }),
+        };
+        let Decoded { payload, corrected } = decode_tokens(domain, bits, tokens)?;
+        let version = read_bits(&payload, 0, 1) as u8;
         if version != VERSION {
             return Err(WordsError::NewerVersion { version });
         }
-        let nat = match (bits >> HINT_SHIFT) & 3 {
+        let nat = match read_bits(&payload, HINT_START, 2) {
             0 => Hint::Unknown,
             1 => Hint::Easy,
             2 => Hint::ConeUnknownFiltering,
             _ => Hint::Symmetric,
         };
-        let ip = Ipv4Addr::from((bits >> IP_SHIFT) as u32);
-        let addr = SocketAddrV4::new(ip, (bits >> PORT_SHIFT) as u16);
-        let commit = bits as u64 & COMMIT_MASK;
-        Ok((Self { nat, addr, commit }, corrected))
+        let ip = Ipv4Addr::from(read_bits(&payload, IP_START, 32) as u32);
+        let addr = SocketAddrV4::new(ip, read_bits(&payload, PORT_START, 16) as u16);
+        let commit = read_bits(&payload, COMMIT_START, COMMIT_BITS);
+        let lan = if bits == LAN_PAYLOAD_BITS {
+            let range = read_bits(&payload, INVITE_PAYLOAD_BITS, 2) as usize;
+            let &(base, mask) = LAN_RANGES.get(range).ok_or(WordsError::BadLan)?;
+            let host = read_bits(&payload, LAN_HOST_START, 24) as u32;
+            let port = read_bits(&payload, LAN_PORT_START, 16) as u16;
+            if host > mask || !lan_host_port_ok(host, port) {
+                return Err(WordsError::BadLan);
+            }
+            Some(SocketAddrV4::new(Ipv4Addr::from(base + host), port))
+        } else {
+            None
+        };
+        Ok((Self { nat, addr, lan, commit }, corrected))
     }
 }
 
@@ -378,7 +461,7 @@ mod tests {
             let addr = addr.parse().unwrap();
             for nat in [Hint::Unknown, Hint::Easy, Hint::ConeUnknownFiltering, Hint::Symmetric] {
                 for commit in [0, (1 << 54) - 1] {
-                    let invite = Invite { nat, addr, commit };
+                    let invite = Invite { nat, addr, lan: None, commit };
                     let words = invite.to_words();
                     assert_eq!(words.len(), 10, "spoken length for {invite:?}");
                     assert_eq!(Invite::from_words(&group(&words)), Ok((invite, Vec::new())), "{nat:?} at {addr}");
@@ -389,6 +472,7 @@ mod tests {
         let invite = Invite {
             addr: "198.51.100.23:41394".parse().unwrap(),
             nat: Hint::Symmetric,
+            lan: None,
             commit: 0x01_b180_b777_36fa,
         };
         let text = "kestrel damask catlike tundra · gulp huggable acoustic jumpers · opossum tuneful";
@@ -424,16 +508,82 @@ mod tests {
     }
 
     #[test]
+    fn lan_invites() {
+        let short = Invite {
+            addr: "192.0.2.1:0".parse().unwrap(),
+            nat: Hint::Unknown,
+            lan: None,
+            commit: TEST_COMMITMENT,
+        };
+        for (ip, port) in [
+            (0x0a00_0001u32, 1), (0x0aff_fffe, 65535),
+            (0xac10_0001, 1), (0xac1f_fffe, 65535),
+            (0xc0a8_0001, 1), (0xc0a8_fffe, 65535),
+        ] {
+            let lan = SocketAddrV4::new(Ipv4Addr::from(ip), port);
+            assert!(lan_candidate_ok(lan), "usable range edge {lan}");
+            let invite = Invite { lan: Some(lan), ..short };
+            let words = invite.to_words();
+            assert_eq!(words.len(), 14, "spoken length for {lan}");
+            assert_eq!(Invite::from_words(&group(&words)), Ok((invite, Vec::new())), "round trip at {lan}");
+        }
+
+        let lan = SocketAddrV4::new(Ipv4Addr::from(0xc0a8_4d2au32), 0x1234);
+        let words = Invite { lan: Some(lan), ..short }.to_words();
+        let text = group(&words);
+        assert_eq!(text, "bravely aardvark bazaar duties · acrobat tonnage painting mulberry · eyelet jewels adjust evolved · chisel eyesight",
+            "independently packed LAN wire vector");
+        // The first five suffix bits are 10000. The short checksum for this payload is 01000.
+        assert_eq!(Invite::from_words(&group(&words[..10])), Err(WordsError::Checksum), "cut LAN vector");
+        let mut padded = short.to_words();
+        padded.extend_from_slice(&words[10..]);
+        assert_eq!(Invite::from_words(&group(&padded)), Err(WordsError::Checksum), "padded short vector");
+        assert_eq!(Invite::from_words(&group(&words[..13])), Err(WordsError::Count { expected: 10, got: 13 }),
+            "thirteen words fit neither form");
+
+        // Give each malformed suffix a correct checksum so the decoder reaches the address check.
+        let mut payload = decode(LAN_INVITE_DOMAIN, &text, LAN_PAYLOAD_BITS).unwrap().payload;
+        for (range, host, port, reason) in [
+            (3, 1, 1, "reserved range"),
+            (1, 0x10_0001, 1, "host exceeds 20 bits"),
+            (2, 0x01_0001, 1, "host exceeds 16 bits"),
+            (0, 0x0100, 1, "last octet zero"),
+            (0, 0x01ff, 1, "last octet 255"),
+            (0, 1, 0, "zero port"),
+        ] {
+            write_bits(&mut payload, INVITE_PAYLOAD_BITS, 2, range);
+            write_bits(&mut payload, LAN_HOST_START, 24, host);
+            write_bits(&mut payload, LAN_PORT_START, 16, port);
+            let text = group(&encode(LAN_INVITE_DOMAIN, &payload, LAN_PAYLOAD_BITS));
+            assert_eq!(Invite::from_words(&text), Err(WordsError::BadLan), "refuse {reason}");
+        }
+        for (ip, port) in [(0xc000_0201u32, 1), (0xac20_0001, 1), (0xc0a8_0100, 1), (0x0a00_01ff, 1), (0xac10_0001, 0)] {
+            let lan = SocketAddrV4::new(Ipv4Addr::from(ip), port);
+            assert!(!lan_candidate_ok(lan), "leave {lan} out of the invite");
+            let invite = Invite { lan: Some(lan), ..short };
+            assert!(std::panic::catch_unwind(|| invite.to_words()).is_err(), "encoder must refuse {lan}");
+        }
+    }
+
+    #[test]
     fn stretched_key_commitment() {
         let invite = Invite {
             addr: "192.0.2.1:0".parse().unwrap(),
             nat: Hint::Unknown,
+            lan: None,
             commit: TEST_COMMITMENT,
         };
         assert!(invite.matches(&[0x11; 32]), "the key reproduces the independently stretched commitment");
         assert!(!invite.matches(&[0x22; 32]), "a different key has a different commitment");
         let other_port = Invite { addr: "192.0.2.1:1".parse().unwrap(), ..invite };
         assert!(!other_port.matches(&[0x11; 32]), "the invite's address and port salt the commitment");
+        let long = Invite {
+            lan: Some(SocketAddrV4::new(Ipv4Addr::from(0xc0a8_4d2au32), 0x1234)),
+            commit: 0x1e_f460_6e97_6cb7,
+            ..invite
+        };
+        assert_ne!(long.commit, invite.commit, "the same key has distinct short and LAN commitments");
+        assert!(long.matches(&[0x11; 32]), "the key reproduces the independently stretched LAN commitment");
     }
 
     #[test]
@@ -443,7 +593,7 @@ mod tests {
         let bits = spoken.len() * BITS_PER_WORD;
         let mut payload = vec![0; bits.div_ceil(8)];
         for (i, word) in spoken.iter().enumerate() {
-            write_bits(&mut payload, i * BITS_PER_WORD, BITS_PER_WORD, list().binary_search(word).unwrap() as u16);
+            write_bits(&mut payload, i * BITS_PER_WORD, BITS_PER_WORD, list().binary_search(word).unwrap() as u64);
         }
         let mut words = encode(domain, &payload, bits);
         let mixed = format!("DAB,LaNt.ORBIT-quiet\nTUNDRA · {}", words[5]);

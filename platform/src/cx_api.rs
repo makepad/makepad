@@ -384,6 +384,8 @@ pub enum CxOsOp {
     },
     HideClipboardActions,
     CopyToClipboard(ClipboardWrite),
+    /// `Cx::read_clipboard`'s request, in line with the copies asked before it.
+    ReadClipboard(u64),
     ShareText(String),
     SetPrimarySelection(String),
     ShowSelectionHandles {
@@ -556,6 +558,7 @@ impl CxOsOp {
             Self::ShowClipboardActions { .. } => "ShowClipboardActions",
             Self::HideClipboardActions => "HideClipboardActions",
             Self::CopyToClipboard(..) => "CopyToClipboard",
+            Self::ReadClipboard(..) => "ReadClipboard",
             Self::ShareText(..) => "ShareText",
             Self::SetPrimarySelection(..) => "SetPrimarySelection",
             Self::ShowSelectionHandles { .. } => "ShowSelectionHandles",
@@ -3888,6 +3891,18 @@ impl Cx {
 #[cfg(test)]
 mod host_io_tests {
     use super::*;
+
+    /// A read asked right after a copy goes out after it, so it answers with the copied text
+    /// (the read used to go straight to the platform, ahead of the turn's copy).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_clipboard_read_goes_out_after_the_copy_before_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.copy_to_clipboard("copied");
+        let request = cx.read_clipboard();
+        let ops: Vec<&CxOsOp> = cx.platform_ops.iter().filter(|op| matches!(op, CxOsOp::CopyToClipboard(_) | CxOsOp::ReadClipboard(_))).collect();
+        assert!(matches!(ops.as_slice(), [CxOsOp::CopyToClipboard(w), CxOsOp::ReadClipboard(r)] if w.text == "copied" && *r == request), "{:?}", ops.iter().map(|op| op.name()).collect::<Vec<_>>());
+    }
 
     #[test]
     fn host_io_native_widget_paths_do_not_enqueue_external_operations() {

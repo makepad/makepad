@@ -7,7 +7,7 @@ fn main() {
         // stderr (the parent's) through it
         makepad_platform::Cx::init_log();
         ui_hang::initialize();
-        let (mut cursor, _) = makepad_platform::log_ring::read_since(0, 0);
+        let mut cursor = makepad_platform::log_ring::read_since(0, 0).newest;
         {
             let _event = ui_phase(UiPhase::CodePageInstall);
             { let _nested = ui_phase(UiPhase::FontAtlas); }
@@ -22,8 +22,8 @@ fn main() {
         // Its report, however late the watchdog writes it; production event dispatch never
         // waits for it.
         'reported: loop {
-            let (next, lines) = makepad_platform::log_ring::read_since(cursor, 64);
-            cursor = next;
+            let makepad_platform::log_ring::LogRead { newest, lines, .. } = makepad_platform::log_ring::read_since(cursor, 64);
+            cursor = newest;
             if lines.iter().any(|l| l.text.contains("[ui-hang]")) {
                 break 'reported;
             }

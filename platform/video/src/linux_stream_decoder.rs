@@ -7,6 +7,7 @@
 //! come out with a later push: `push_packet` returns what is ready by then
 //! (a decoder with frame threads holds a few frames: tens of milliseconds of
 //! latency, fine for a camera view; not for a sub-frame realtime stream).
+//! The low-latency decoder waits in each push for that push's picture.
 //! Planes are read where the buffer's layout puts them and repacked tight.
 
 use crate::linux_decoder::{caps_field, colorimetry_to_color, sample_nv12, BUS_LOOK_NS};
@@ -24,13 +25,33 @@ pub(crate) struct LinuxStreamDecoder {
     appsrc: *mut GstElement,
     appsink: *mut GstElement,
     bus: *mut GstBus,
+    /// How long a push waits for a picture when none is out yet (0: it doesn't).
+    wait_ns: u64,
 }
 
 unsafe impl Send for LinuxStreamDecoder {}
 
+/// How long a low-latency decoder's push waits for its picture: decoding takes about a
+/// millisecond; this is room for a busy machine, and the picture comes with a later push if
+/// it misses.
+const PICTURE_WAIT_NS: u64 = 20_000_000;
+
 impl LinuxStreamDecoder {
     pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
         Self::with_decoder(codec, "decodebin")
+    }
+
+    /// A stream decoder that hands each picture out from the push that brought it. GStreamer's
+    /// hardware H.264 and HEVC decoders (NVDEC, VA: the codec base classes, 1.28) release a
+    /// picture of a stream without reordering only when the next one arrives (their output
+    /// check runs before a decoded picture enters the DPB): a picture late, 33 ms at 30 fps.
+    /// libav hands it out once decoded (about 1 ms for a 720p picture on a desktop CPU), so
+    /// it decodes here where installed; else the decoder `decodebin` plugs.
+    pub fn new_low_latency(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
+        let software = match codec { StreamVideoCodec::H264 => "avdec_h264", StreamVideoCodec::Hevc => "avdec_h265" };
+        let mut this = Self::with_decoder(codec, software).or_else(|_| Self::with_decoder(codec, "decodebin"))?;
+        this.wait_ns = PICTURE_WAIT_NS;
+        Ok(this)
     }
 
     /// A stream decoder through the `decoder` element (`decodebin`: the one it plugs).
@@ -52,9 +73,11 @@ impl LinuxStreamDecoder {
             let mut err: *mut GError = std::ptr::null_mut();
             let pipeline = (gst.gst_parse_launch)(launch_c.as_ptr(), &mut err);
             if !err.is_null() {
+                // a missing element leaves a pipeline that never decodes: refuse it too
                 let text = std::ffi::CStr::from_ptr((*err).message).to_string_lossy().into_owned();
                 (gst.g_error_free)(err);
-                if pipeline.is_null() { return Err(VideoFileError::new(format!("stream decoder pipeline: {text}"))); }
+                if !pipeline.is_null() { (gst.gst_object_unref)(pipeline as *mut c_void); }
+                return Err(VideoFileError::new(format!("stream decoder pipeline: {text}")));
             }
             if pipeline.is_null() { return Err(VideoFileError::new("stream decoder pipeline failed")); }
             let src_name = CString::new("src").unwrap();
@@ -63,7 +86,7 @@ impl LinuxStreamDecoder {
             let appsink = (gst.gst_bin_get_by_name)(pipeline, sink_name.as_ptr());
             let bus = (gst.gst_element_get_bus)(pipeline);
             gst.give_shared_contexts(pipeline);
-            let this = Self { gst, pipeline, appsrc, appsink, bus };
+            let this = Self { gst, pipeline, appsrc, appsink, bus, wait_ns: 0 };
             if appsrc.is_null() || appsink.is_null() { return Err(VideoFileError::new("stream decoder pipeline lacks its ends")); }
             if (gst.gst_element_set_state)(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE {
                 let text = gst.bus_error(bus).unwrap_or_else(|| "pipeline refused PLAYING".into());
@@ -90,7 +113,26 @@ impl LinuxStreamDecoder {
                 return Err(VideoFileError::new("stream decoder refused the packet"));
             }
         }
-        self.drain(0)
+        let mut frames = self.drain(0)?;
+        if self.wait_ns > 0 {
+            // Wait for this push's own picture, not just any: one that missed an earlier push's
+            // wait (a slow first picture after a rebuild) is ready now, and returning with only
+            // it would leave every later picture one push late.
+            let own = |frames: &[DecodedFrame]| frames.iter().any(|f| f.pts_100ns == pts_100ns.max(0));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_nanos(self.wait_ns);
+            while !own(&frames) {
+                let left = deadline.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64;
+                if left == 0 {
+                    break;
+                }
+                let more = self.drain(left)?;
+                if more.is_empty() {
+                    break;
+                }
+                frames.extend(more);
+            }
+        }
+        Ok(frames)
     }
 
     /// Frames ready now; `wait_ns` bounds the wait for the first one.
@@ -320,5 +362,21 @@ mod tests {
         // videotestsrc's first bar (white-ish) at the top left: bright luma.
         assert!(f.nv12[10] > 150, "luma {}", f.nv12[10]);
         eprintln!("linux stream decoder: {} of {} pictures", frames.len(), units.len());
+
+        // The low-latency decoder: each picture out of its own push (a busy box may make one
+        // late). The first push doesn't wait, so its picture is late on purpose, as a slow first
+        // picture after a decoder rebuild is: it comes out with the second push, and the later
+        // pictures still come out of their own pushes, not one push late.
+        let mut decoder = LinuxStreamDecoder::new_low_latency(StreamVideoCodec::H264).expect("low-latency stream decoder");
+        let (mut own, mut first_by_second) = (0, false);
+        for (i, unit) in units.iter().enumerate() {
+            let pts = i as i64 * 333_333;
+            decoder.wait_ns = if i == 0 { 0 } else { PICTURE_WAIT_NS };
+            let frames = decoder.push_packet(unit, pts).expect("push");
+            first_by_second |= i <= 1 && frames.iter().any(|f| f.pts_100ns == 0);
+            own += frames.iter().filter(|f| i > 0 && f.pts_100ns == pts).count();
+        }
+        assert!(first_by_second, "low latency: the late first picture didn't come out by the second push");
+        assert!(own >= units.len() - 4, "low latency: {own} of {} later pictures came out of their own push", units.len() - 1);
     }
 }

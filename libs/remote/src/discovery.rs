@@ -5,6 +5,29 @@
 //! works it would pick their app (one that drives a real printer, say) for whoever mistypes a
 //! command. So those reach only what the [`Caller`] started, and everything else is named by pid.
 
+use std::path::{Path, PathBuf};
+
+/// The startup line that tells a caller how to reach this app.
+pub fn startup_line(tool: &str, pid: u32, app: &str, socket: &Path) -> String {
+    format!("[{tool}-remote] pid={pid} app={app} socket={}", socket.display())
+}
+
+/// Reads a [`startup_line`], keeping the entire socket path, including spaces.
+pub fn parse_startup_line(line: &str) -> Option<(u32, String, PathBuf)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let (tag, fields) = line.strip_prefix('[')?.split_once(']')?;
+    let tool = tag.strip_suffix("-remote")?;
+    if tool.is_empty() || tool.contains(char::is_whitespace) {
+        return None;
+    }
+    let (pid, fields) = fields.strip_prefix(" pid=")?.split_once(" app=")?;
+    let (app, socket) = fields.split_once(" socket=")?;
+    if app.is_empty() || socket.is_empty() {
+        return None;
+    }
+    Some((pid.parse().ok()?, app.to_owned(), PathBuf::from(socket)))
+}
+
 /// Marks every process a lease's runs start: a process that moved to its own session is still
 /// stopped with the lease, a WM with it is a lane's test desktop, not its node's, and an app with
 /// it says so in its discovery file (`lease`), which makes it that lease's own.
@@ -457,6 +480,26 @@ fn published(path: &std::path::Path, list: &[App]) -> Result<App, String> {
 #[cfg(test)]
 mod published_tests {
     use super::*;
+
+    #[test]
+    fn startup_line_identifies_the_remote_endpoint() {
+        let socket = Path::new("/tmp/app logs/test.sock");
+        assert_eq!(
+            startup_line("makepad", 42, "test", socket),
+            "[makepad-remote] pid=42 app=test socket=/tmp/app logs/test.sock",
+            "Makepad prints the documented startup line"
+        );
+        assert_eq!(
+            parse_startup_line(&startup_line("relax", 42, "test", socket)),
+            Some((42, "test".into(), socket.to_owned())),
+            "another tool round-trips the full socket path with spaces"
+        );
+        assert_eq!(
+            parse_startup_line("[makepad-remote] run=40 pid=42"),
+            None,
+            "the restart parent's line is separate from the startup line"
+        );
+    }
 
     #[test]
     fn an_endpoint_file_reaches_its_own_instance_only() {

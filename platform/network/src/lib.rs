@@ -2,6 +2,8 @@
 #[macro_use(thread_local)]
 extern crate makepad_thread_local;
 
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod at_rest;
 pub mod backend;
 // The blocking client is a native socket API; wasm uses the async web backend.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -70,6 +72,7 @@ pub mod web_socket_parser;
 
 pub const HTTP_BODY_LIMIT_ERROR: &str = "response body exceeds configured limit";
 
+pub use crate::at_rest::{at_rest_protection, exclude_from_backups, protect_at_rest, unprotect_at_rest, Protection};
 pub use crate::backend::{EventSink, NetworkBackend, UnsupportedBackend};
 pub use crate::http_server::{
     start_http_server, HttpServer, HttpServerRequest, HttpServerResponse, HttpServerThread,

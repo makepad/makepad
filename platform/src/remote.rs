@@ -32,6 +32,9 @@
 #[path = "remote_core.rs"]
 mod bridge;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_remote::parse_startup_line;
+
 #[path = "app_clock.rs"]
 pub mod app_clock;
 #[path = "synthetic_cursor.rs"]
@@ -630,7 +633,7 @@ mod imp {
             {
                 let _ = (driven, pid, endpoint, pending);
                 static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| println!("[makepad-remote] iOS has no local remote-control route: no other process can reach the app's sandbox"));
+                SAID.call_once(|| eprintln!("[makepad-remote] iOS has no local remote-control route: no other process can reach the app's sandbox"));
                 // a recorded input replay needs no route
                 super::input_rec::replay_at_start();
             }
@@ -640,13 +643,13 @@ mod imp {
                     ACTIVE.store(true, Ordering::SeqCst);
                     *ENDPOINT.lock().unwrap() = Some(endpoint);
                     if driven {
-                        println!("[makepad-remote] pid={pid} app={app} socket={}", socket.display());
+                        eprintln!("{}", makepad_remote::startup_line("makepad", pid, &app, &socket));
                     }
                     super::input_rec::replay_at_start();
                 }
-                Err(err) => println!("[makepad-remote] cannot listen: {err}"),
+                Err(err) => eprintln!("[makepad-remote] cannot listen: {err}"),
             }
-            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
         }
     }
 
@@ -3191,11 +3194,13 @@ mod imp {
         // The ring already tails and already carries the newest sequence,
         // so the count is applied by the read rather than by trimming a
         // vector afterwards.
-        let (newest, lines) = match since {
+        // `d`: lines after the cursor (0 for a tail) that the ring no longer keeps. A reader
+        // that needs every line since its cursor has a gap, and the full log is on stderr.
+        let crate::log_ring::LogRead { newest, dropped, lines } = match since {
             Some(since) => crate::log_ring::read_since(since, usize::MAX),
             None => crate::log_ring::read_since(0, count),
         };
-        let mut out = format!("{{\"n\":{newest},\"l\":[");
+        let mut out = format!("{{\"n\":{newest},\"d\":{dropped},\"l\":[");
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
                 out.push(',');

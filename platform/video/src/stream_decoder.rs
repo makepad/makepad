@@ -80,6 +80,18 @@ impl VideoStreamDecoder {
         Self::with_output(codec, false)
     }
 
+    /// A decoder for a live stream where every picture of delay shows (a call): each picture
+    /// comes out of the push that brought it, as soon as it is decoded. On Linux that is a
+    /// software decoder where installed, since GStreamer's hardware H.264 and HEVC decoders
+    /// hold a picture until the next one arrives, and a push waits up to 20 ms for its picture;
+    /// elsewhere the same as [`Self::new`].
+    pub fn new_low_latency(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
+        #[cfg(target_os = "linux")]
+        return Ok(Self { os: OsStreamDecoder::new_low_latency(codec)? });
+        #[cfg(not(target_os = "linux"))]
+        return Self::new(codec);
+    }
+
     /// A decoder whose frames stay on the GPU (`DecodedFrame::gpu`) where the backend can
     /// (macOS); elsewhere its frames are CPU NV12 as from [`Self::new`].
     pub fn new_gpu(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {

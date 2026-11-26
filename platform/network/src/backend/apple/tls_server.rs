@@ -15,6 +15,19 @@ use makepad_apple_sys::{
 
 use crate::socket_stream::apple_impl::NativeEngine;
 
+// CommonCrypto is part of libSystem.
+extern "C" {
+    fn CCCryptorCreate(
+        operation: u32, algorithm: u32, options: u32, key: *const u8, key_len: usize,
+        iv: *const u8, cryptor: *mut *mut c_void,
+    ) -> i32;
+    fn CCCryptorUpdate(
+        cryptor: *mut c_void, input: *const u8, input_len: usize, output: *mut u8,
+        output_len: usize, written: *mut usize,
+    ) -> i32;
+    fn CCCryptorRelease(cryptor: *mut c_void) -> i32;
+}
+
 #[link(name = "Security", kind = "framework")]
 extern "C" {
     static kSecAttrKeyTypeECSECPrimeRandom: CFStringRef;
@@ -173,6 +186,55 @@ pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
         let bytes = cf_data_bytes(result);
         CFRelease(result);
         bytes.try_into().map_err(|_| io_other("unexpected P-256 shared secret length"))
+    }
+}
+
+pub(super) struct NativeAes128Ecb(*mut c_void);
+
+// SAFETY: CommonCrypto permits sequential use across threads. The handle is exclusively owned.
+unsafe impl Send for NativeAes128Ecb {}
+
+impl NativeAes128Ecb {
+    pub(super) fn new(key: &[u8; 16]) -> io::Result<Self> {
+        const CC_ENCRYPT: u32 = 0;
+        const CC_ALGORITHM_AES: u32 = 0;
+        const CC_OPTION_ECB_MODE: u32 = 2;
+        let mut handle = ptr::null_mut();
+        // SAFETY: CommonCrypto reads the 16-byte key and writes the new handle. ECB needs no IV.
+        let status = unsafe {
+            CCCryptorCreate(CC_ENCRYPT, CC_ALGORITHM_AES, CC_OPTION_ECB_MODE,
+                key.as_ptr(), key.len(), ptr::null(), &mut handle)
+        };
+        if status != 0 {
+            return Err(io_other(format!("CCCryptorCreate failed: {status}")));
+        }
+        Ok(Self(handle))
+    }
+
+    pub(super) fn encrypt_blocks(&mut self, blocks: &mut [u8]) -> io::Result<()> {
+        // CCCryptorUpdate requires disjoint input and output for ECB.
+        let mut output = [0u8; 64 * 16];
+        for chunk in blocks.chunks_mut(output.len()) {
+            let mut written = 0;
+            // SAFETY: the buffers are separate and live for the call. With no padding or
+            // pending partial block, the encrypted whole blocks fit in output.
+            let status = unsafe {
+                CCCryptorUpdate(self.0, chunk.as_ptr(), chunk.len(), output.as_mut_ptr(),
+                    output.len(), &mut written)
+            };
+            if status != 0 || written != chunk.len() {
+                return Err(io_other(format!("CCCryptorUpdate failed: {status}, wrote {written} bytes")));
+            }
+            chunk.copy_from_slice(&output[..written]);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NativeAes128Ecb {
+    fn drop(&mut self) {
+        // SAFETY: this value owns the handle from CCCryptorCreate and releases it once.
+        unsafe { CCCryptorRelease(self.0) };
     }
 }
 

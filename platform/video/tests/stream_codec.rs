@@ -21,11 +21,16 @@ const HNS_PER_FRAME: i64 = 10_000_000 / FPS as i64;
 /// A moving diagonal gradient — visually distinct frame to frame (encoder
 /// motion estimation actually has something to do) and cheap to generate.
 fn synthetic_frame_rgb8(frame_index: usize) -> Vec<u8> {
-    let mut out = vec![0u8; WIDTH as usize * HEIGHT as usize * 3];
+    sized_frame_rgb8(WIDTH as usize, HEIGHT as usize, frame_index)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn sized_frame_rgb8(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
+    let mut out = vec![0u8; width * height * 3];
     let shift = (frame_index * 4) as i32;
-    for y in 0..HEIGHT as usize {
-        for x in 0..WIDTH as usize {
-            let idx = (y * WIDTH as usize + x) * 3;
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) * 3;
             out[idx] = ((x as i32 + shift) % 256) as u8;
             out[idx + 1] = (y % 256) as u8;
             out[idx + 2] = (((x + y) as i32 + shift * 2) % 256) as u8;
@@ -54,22 +59,29 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[test]
-fn request_keyframe_forces_the_next_packet() {
+fn keyint_zero_keys_only_the_start_and_each_request() {
+    // 720p for 3 s: an encoder left to its own interval keys in that (the NVIDIA MFT: about
+    // every second at this size)
+    const UNASKED: usize = 90;
+    let (w, h) = (1280, 720);
     let mut encoder = VideoStreamEncoder::new(VideoStreamEncoderOptions {
         codec: StreamVideoCodec::H264,
-        width: WIDTH,
-        height: HEIGHT,
+        width: w as u32,
+        height: h as u32,
         fps: FPS,
-        bitrate_kbps: 4_000,
-        keyint: 300,
+        bitrate_kbps: 1_500,
+        keyint: 0,
         low_latency: true, full_chroma: false,
     })
     .expect("encoder creation");
-    for index in 0..4 {
-        encoder.push_frame_rgb8(&synthetic_frame_rgb8(index), index as i64 * HNS_PER_FRAME).expect("encode");
+    let mut keys = Vec::new();
+    for index in 0..UNASKED {
+        let packets = encoder.push_frame_rgb8(&sized_frame_rgb8(w, h, index), index as i64 * HNS_PER_FRAME).expect("encode");
+        keys.extend(packets.iter().filter(|p| p.is_key).map(|p| p.pts_100ns / HNS_PER_FRAME));
     }
+    assert_eq!(keys, [0], "keyint 0: a key frame at the start only, unasked ({})", encoder.description());
     encoder.request_keyframe();
-    let forced = encoder.push_frame_rgb8(&synthetic_frame_rgb8(4), 4 * HNS_PER_FRAME).expect("forced keyframe encode");
+    let forced = encoder.push_frame_rgb8(&sized_frame_rgb8(w, h, UNASKED), UNASKED as i64 * HNS_PER_FRAME).expect("forced keyframe encode");
     assert!(forced.iter().any(|p| p.is_key), "request_keyframe() did not force a keyframe");
 }
 

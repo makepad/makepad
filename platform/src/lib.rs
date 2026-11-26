@@ -342,6 +342,7 @@ pub use {
             ImeAction,
             ImeActionEvent,
             Inset,
+            EditModifier,
             KeyCode,
             KeyEvent,
             KeyFocusEvent,

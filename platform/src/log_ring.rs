@@ -19,6 +19,19 @@ pub struct LogLine {
     pub text: String,
 }
 
+/// What one read since a cursor found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogRead {
+    /// The newest line's sequence number, to carry back as the next cursor.
+    pub newest: u64,
+    /// Lines after the cursor that the ring no longer keeps: older than its oldest line. Their
+    /// text went to the process's terminal output (its stderr) like every line; only this view
+    /// of the log has lost them. A reader that needs every line after its cursor has a gap.
+    pub dropped: u64,
+    /// The lines after the cursor that are kept, oldest first (the newest `max` of them).
+    pub lines: Vec<LogLine>,
+}
+
 #[derive(Default)]
 struct Ring {
     next_seq: u64,
@@ -35,13 +48,16 @@ impl Ring {
         }
     }
 
-    fn read_since(&self, cursor: u64, max: usize) -> (u64, Vec<LogLine>) {
+    fn read_since(&self, cursor: u64, max: usize) -> LogRead {
         let mut lines: Vec<LogLine> =
             self.lines.iter().filter(|line| line.seq > cursor).cloned().collect();
         if lines.len() > max {
             lines = lines.split_off(lines.len() - max);
         }
-        (self.next_seq, lines)
+        // the lines numbered past the cursor and before the oldest one kept
+        let oldest = self.lines.front().map_or(self.next_seq + 1, |line| line.seq);
+        let dropped = oldest.saturating_sub(cursor.saturating_add(1));
+        LogRead { newest: self.next_seq, dropped, lines }
     }
 }
 
@@ -57,11 +73,11 @@ pub fn push(level: LogLevel, text: String) {
 }
 
 /// Lines newer than `cursor`, oldest first, at most `max` of them — the
-/// newest `max` when there are more. The returned sequence is the newest
-/// line's, to carry back as the next cursor.
-pub fn read_since(cursor: u64, max: usize) -> (u64, Vec<LogLine>) {
+/// newest `max` when there are more — with the newest line's sequence number
+/// and how many lines after `cursor` the ring no longer keeps ([`LogRead`]).
+pub fn read_since(cursor: u64, max: usize) -> LogRead {
     let Ok(ring) = ring().lock() else {
-        return (cursor, Vec::new());
+        return LogRead { newest: cursor, ..LogRead::default() };
     };
     ring.read_since(cursor, max)
 }
@@ -80,8 +96,9 @@ mod tests {
         let mut ring = Ring::default();
         ring.push(LogLevel::Log, "first".into());
         ring.push(LogLevel::Error, "second".into());
-        let (newest, lines) = ring.read_since(0, 10);
+        let LogRead { newest, dropped, lines } = ring.read_since(0, 10);
         assert_eq!(newest, 2);
+        assert_eq!(dropped, 0, "nothing forgotten yet");
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "first");
         assert_eq!(lines[0].seq, 1);
@@ -95,9 +112,9 @@ mod tests {
         let mut ring = Ring::default();
         ring.push(LogLevel::Log, "one".into());
         ring.push(LogLevel::Log, "two".into());
-        let (newest, _) = ring.read_since(0, 10);
+        let newest = ring.read_since(0, 10).newest;
         ring.push(LogLevel::Log, "three".into());
-        let (_, fresh) = ring.read_since(newest, 10);
+        let fresh = ring.read_since(newest, 10).lines;
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].text, "three");
     }
@@ -108,7 +125,9 @@ mod tests {
         for n in 0..10 {
             ring.push(LogLevel::Log, format!("line {n}"));
         }
-        let (_, tail) = ring.read_since(0, 3);
+        let read = ring.read_since(0, 3);
+        assert_eq!(read.dropped, 0, "a short answer the reader asked for is no gap");
+        let tail = read.lines;
         assert_eq!(tail.len(), 3);
         assert_eq!(tail[0].text, "line 7");
         assert_eq!(tail[2].text, "line 9", "newest last, the way a tail reads");
@@ -120,8 +139,9 @@ mod tests {
         for n in 0..(CAP + 50) {
             ring.push(LogLevel::Log, format!("ring-test {n}"));
         }
-        let (newest, all) = ring.read_since(0, CAP * 2);
+        let LogRead { newest, dropped, lines: all } = ring.read_since(0, CAP * 2);
         assert_eq!(newest as usize, CAP + 50);
+        assert_eq!(dropped, 50, "a reader from the start learns the fifty it can no longer see");
         assert_eq!(all.len(), CAP, "the ring holds its newest {CAP} lines");
         let ours: Vec<usize> = all.iter().filter_map(|l| l.text.strip_prefix("ring-test ")?.parse().ok()).collect();
         assert_eq!(ours.last(), Some(&(CAP + 49)));
@@ -146,8 +166,7 @@ mod tests {
         // otherwise empty process-wide ring.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let lines = loop {
-            let (_, lines) = read_since(0, CAP);
-            let lines: Vec<_> = lines
+            let lines: Vec<_> = read_since(0, CAP).lines
                 .into_iter()
                 .filter(|line| {
                     line.text.contains("widgets/src/thing.rs")
@@ -175,7 +194,12 @@ mod tests {
         for n in 0..(CAP + 10) {
             ring.push(LogLevel::Log, format!("line {n}"));
         }
-        let (_, lines) = ring.read_since(1, CAP * 2);
-        assert_eq!(lines.len(), CAP, "never a panic, never an empty answer");
+        let read = ring.read_since(1, CAP * 2);
+        assert_eq!(read.lines.len(), CAP, "never a panic, never an empty answer");
+        assert_eq!(read.dropped, 9, "lines 2..=10 were forgotten after the cursor");
+        assert_eq!(ring.read_since(10, 1).dropped, 0, "a cursor at the last forgotten line misses none");
+        assert_eq!(ring.read_since(CAP as u64 + 10, 5).dropped, 0, "a cursor at the newest line misses none");
+        assert_eq!(ring.read_since(u64::MAX, 0), LogRead { newest: CAP as u64 + 10, dropped: 0, lines: Vec::new() },
+            "a cursor past the newest line asks only for the next cursor");
     }
 }

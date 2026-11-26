@@ -18,6 +18,9 @@ pub(crate) struct GlyphWait {
     /// Requests still awaiting a host answer (font, glyph, kind, size bits), across draws.
     /// A session that reopens a font id with requests in flight may leave them counted, as its client would.
     unanswered: HashSet<(u32, u32, u32, u32)>,
+    /// The text client's count of requests it holds for its draw's end, not yet sent here
+    /// (`Cx::hal_count_queued_glyph_requests`).
+    client_queued: Option<fn(&Cx) -> usize>,
     answers_received: u64,
     /// Background requests the host hasn't answered yet (font, glyph, kind, size bits).
     pub(crate) background: HashSet<(u32, u32, u32, u32)>,
@@ -109,6 +112,21 @@ impl Cx {
     /// Glyph requests still awaiting a host answer. A draw can use any answer already queued.
     pub fn hal_glyph_requests_unanswered(&self) -> usize {
         self.hal.glyph_wait.unanswered.len()
+    }
+
+    /// The text client batches a draw's requests and sends them at the draw's end: `count` says
+    /// how many it holds now, so they are glyph loads in flight from their lookup on. A draw that
+    /// asks mid-draw whether what it recorded is complete (a list recorded once and kept, a
+    /// render target's frame) sees the glyphs it just asked for.
+    pub fn hal_count_queued_glyph_requests(&mut self, count: fn(&Cx) -> usize) {
+        self.hal.glyph_wait.client_queued = Some(count);
+    }
+
+    /// The "glyph" loads in flight: requests the text client holds for its draw's end, and those
+    /// sent and not yet answered. Between draws the client holds none.
+    pub fn hal_glyph_loads(&self) -> usize {
+        let queued = self.hal.glyph_wait.client_queued.map_or(0, |count| count(self));
+        queued + self.hal_glyph_requests_unanswered()
     }
 
     /// Glyph answers received by this session, including answers already taken and excluding upgrades.

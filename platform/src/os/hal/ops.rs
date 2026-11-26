@@ -664,6 +664,7 @@ impl Cx {
                     self.hal.frames.w.clipboard_actions(w, false, [0.0; 4], false)
                 }
                 CxOsOp::CopyToClipboard(write) => self.hal_clipboard_write(write),
+                CxOsOp::ReadClipboard(request) => self.hal_clipboard_read(request),
                 CxOsOp::ShareText(text) => self.hal.frames.w.share_text(text.as_bytes()),
                 // a hosted child's selection is its host's primary selection
                 CxOsOp::SetPrimarySelection(text) => {

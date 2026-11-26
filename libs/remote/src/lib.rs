@@ -73,6 +73,7 @@ mod hub_tests;
 
 pub use cmd::{json_str, now_ms, Out, Req};
 pub use conn::{Channel, ChannelTx, Conn, Event, Hooks};
+pub use discovery::{parse_startup_line, startup_line};
 pub use endpoint::Endpoint;
 pub use peer::{PeerEndpoint, PeerIdentity, PeerService};
 pub use link::Client;

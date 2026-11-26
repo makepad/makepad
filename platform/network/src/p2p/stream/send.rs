@@ -93,9 +93,13 @@ impl Sender {
         !self.queue.is_empty() && self.base == self.peer_edge
     }
 
-    pub fn wake(&self, now: u64) -> Option<u64> {
-        if self.can_send() || self.retry {
+    /// When the sender next has something to do. New data may go from `new_at` (now, unless
+    /// a rate cap holds it); a repair or a due timer goes at once.
+    pub fn wake(&self, now: u64, new_at: u64) -> Option<u64> {
+        if self.retry {
             Some(now)
+        } else if self.can_send() {
+            Some(self.timer.map_or(new_at, |t| t.min(new_at)).max(now))
         } else {
             self.timer
         }
@@ -173,7 +177,9 @@ impl Sender {
         }
     }
 
-    pub fn transmit(&mut self, now: u64, pn: u64) -> Option<(u64, &[u8])> {
+    /// The next segment to send: a timed-out or repaired one first, then new data when
+    /// `new_ok` (a rate cap can hold new data back, never a repair).
+    pub fn transmit(&mut self, now: u64, pn: u64, new_ok: bool) -> Option<(u64, &[u8])> {
         let seq = if self.timer.is_some_and(|at| at <= now) {
             self.threshold = (self.flight() / 2).max(2);
             self.cwnd = 1;
@@ -184,7 +190,7 @@ impl Sender {
             self.base
         } else if self.retry {
             self.base
-        } else if self.can_send() {
+        } else if new_ok && self.can_send() {
             self.sent += 1;
             self.sent - 1
         } else {

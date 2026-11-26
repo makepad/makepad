@@ -142,6 +142,18 @@ impl DrawPassId {
             && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
             && !cx.frames_partial(p.painted_frame, p.painted_frame)
     }
+
+    /// [`DrawPass::painted_whole_once_since`] for a pass handle: whether some whole paint of a
+    /// recording made at or after `repaint` completed on the GPU, even if the pass painted again
+    /// since. A pass that paints every frame keeps its latest paint in flight, so a confirmation
+    /// asked of the latest paint ([`Self::holds_whole_paint_since`]) can wait forever.
+    pub fn painted_whole_once_since(self, cx: &Cx, repaint: u64) -> bool {
+        let completed = cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire);
+        !cx.draw_shaders_pending()
+            && cx.passes[self].whole_paints.iter().any(|&(serial, frame)| {
+                serial >= repaint && frame != 0 && frame <= completed && !cx.frames_partial(frame, frame)
+            })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -679,11 +691,7 @@ impl DrawPass {
     /// again for a buffer the GPU evicted or a pipeline that became ready) has its latest paint
     /// on the GPU at every draw, so that answer never comes.
     pub fn painted_whole_once_since(&self, cx: &Cx, repaint: u64) -> bool {
-        let completed = cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire);
-        !cx.draw_shaders_pending()
-            && cx.passes[self.draw_pass_id()].whole_paints.iter().any(|&(serial, frame)| {
-                serial >= repaint && frame != 0 && frame <= completed && !cx.frames_partial(frame, frame)
-            })
+        self.draw_pass_id().painted_whole_once_since(cx, repaint)
     }
 
     pub fn take_gpu_times_ms(&self, cx: &Cx) -> Vec<f64> {

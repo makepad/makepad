@@ -1274,6 +1274,8 @@ impl Cx {
                         html: write.html.unwrap_or_default(),
                     });
                 }
+                // a page reads its clipboard in a paste event (`dispatch_clipboard_reads`)
+                CxOsOp::ReadClipboard(_) => {}
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { .. } => {}
                 CxOsOp::UpdateSelectionHandles { .. } => {}

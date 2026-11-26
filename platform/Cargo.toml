@@ -138,7 +138,7 @@ version = "0.1.0"
 
 [features]
 # The web backend's message types built for this machine (src/web_protocol.rs): the web trace
-# host (apps/commercial/tools/wasm-export/trace) plays the page's side of them.
+# host (apps/apps/tools/wasm-export/trace) plays the page's side of them.
 web-protocol = ["dep:makepad-wasm-bridge"]
 
 [package.metadata.relax]

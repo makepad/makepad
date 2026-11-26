@@ -16,6 +16,13 @@ use crate::tls::x509;
 #[link(name = "ssl")]
 #[link(name = "crypto")]
 extern "C" {
+    fn EVP_CIPHER_CTX_new() -> *mut c_void;
+    fn EVP_CIPHER_CTX_free(ctx: *mut c_void);
+    fn EVP_aes_128_ecb() -> *const c_void;
+    fn EVP_EncryptInit_ex(ctx: *mut c_void, cipher: *const c_void, engine: *mut c_void, key: *const u8, iv: *const u8) -> c_int;
+    fn EVP_CIPHER_CTX_set_padding(ctx: *mut c_void, padding: c_int) -> c_int;
+    fn EVP_EncryptUpdate(ctx: *mut c_void, out: *mut u8, written: *mut c_int, input: *const u8, len: c_int) -> c_int;
+
     fn TLS_server_method() -> *const SSL_METHOD;
     fn SSL_CTX_use_certificate_ASN1(ctx: *mut SSL_CTX, len: c_int, der: *const u8) -> c_int;
     fn SSL_CTX_use_PrivateKey_ASN1(kind: c_int, ctx: *mut SSL_CTX, der: *const u8, len: c_long) -> c_int;
@@ -142,6 +149,56 @@ pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
         EC_POINT_free(peer);
         EC_KEY_free(key);
         result
+    }
+}
+
+pub(super) struct NativeAes128Ecb(*mut c_void);
+
+// SAFETY: the EVP context is exclusively owned and has no thread affinity.
+unsafe impl Send for NativeAes128Ecb {}
+
+impl NativeAes128Ecb {
+    pub(super) fn new(key: &[u8; 16]) -> io::Result<Self> {
+        init_openssl()?;
+        // SAFETY: the returned context is checked before use and then owned by the wrapper.
+        let ctx = unsafe { EVP_CIPHER_CTX_new() };
+        if ctx.is_null() {
+            return Err(ssl_error("EVP_CIPHER_CTX_new"));
+        }
+        let aes = Self(ctx);
+        // SAFETY: ctx is fresh and the key has the AES-128 length. ECB needs no IV.
+        unsafe {
+            if EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), ptr::null_mut(), key.as_ptr(), ptr::null()) != 1 {
+                return Err(ssl_error("EVP_EncryptInit_ex"));
+            }
+            if EVP_CIPHER_CTX_set_padding(ctx, 0) != 1 {
+                return Err(ssl_error("EVP_CIPHER_CTX_set_padding"));
+            }
+        }
+        Ok(aes)
+    }
+
+    pub(super) fn encrypt_blocks(&mut self, blocks: &mut [u8]) -> io::Result<()> {
+        let data = blocks.as_mut_ptr();
+        let len = blocks.len() as c_int;
+        let mut written = 0;
+        // SAFETY: the caller bounds len to c_int and only supplies whole blocks, so EVP
+        // has no buffered input and supports in-place encryption into exactly len bytes.
+        let ok = unsafe { EVP_EncryptUpdate(self.0, data, &mut written, data, len) };
+        if ok != 1 {
+            return Err(ssl_error("EVP_EncryptUpdate"));
+        }
+        if written != len {
+            return Err(io::Error::other("EVP_EncryptUpdate returned a partial block batch"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NativeAes128Ecb {
+    fn drop(&mut self) {
+        // SAFETY: this value owns the context from EVP_CIPHER_CTX_new and frees it once.
+        unsafe { EVP_CIPHER_CTX_free(self.0) };
     }
 }
 

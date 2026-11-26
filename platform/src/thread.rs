@@ -1820,9 +1820,10 @@ struct PoolState {
     /// All-class workers with neither an admission request nor a job.
     free: usize,
     slots: Vec<WorkerCount>,
-    /// One report per exhaustion episode, reset when a worker next goes idle.
-    no_spare: bool,
-    pending_log: Option<SpareWait>,
+    /// Episodes with no spare worker for queued work, reported per stretch, not per episode.
+    no_spare: NoSpare,
+    /// The stretch reports a worker writes outside the lock.
+    pending_log: Vec<SpareReport>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkerCount {
@@ -1836,14 +1837,76 @@ impl WorkerCount {
         if class == makepad_cpu_budget::INTERACTIVE as usize { Self::Interactive } else { Self::Active }
     }
 }
-struct SpareWait {
-    queued: [usize; 3],
-    parked: usize,
+/// How far apart two no-spare episodes may be and still belong to one stretch. A stretch is
+/// reported as it begins, with the queues then, and once after this long without an episode, with
+/// its episodes counted; an app that runs out of spares many times a second logs two lines, not
+/// one per episode (13,703 of an app's 13,757 lines, 11-26).
+const NO_SPARE_QUIET_S: f64 = 1.0;
+
+/// The pool's stretch of no-spare episodes: an episode begins when queued lower-class work finds
+/// no free all-class worker and a parked one, and ends when a worker next goes idle. Times are
+/// monotonic seconds.
+#[derive(Default)]
+struct NoSpare {
+    /// When the stretch began, while one lasts.
+    since: Option<f64>,
+    /// When the running episode began.
+    episode: Option<f64>,
+    /// When the stretch's last episode ended, while none runs.
+    ended: Option<f64>,
+    episodes: u64,
+    longest: f64,
 }
-impl SpareWait {
+#[derive(Debug, PartialEq)]
+enum SpareReport {
+    Began { queued: [usize; 3], parked: usize },
+    Ended { lasted: f64, episodes: u64, longest: f64 },
+}
+impl SpareReport {
     fn log(self) {
-        let [i, v, b] = self.queued;
-        crate::log!("pool: no spare worker free, queued I{} V{} B{}, {} parked", i, v, b, self.parked);
+        match self {
+            Self::Began { queued: [i, v, b], parked } => crate::log!(
+                "pool: no spare worker free, queued I{i} V{v} B{b}, {parked} parked; further waits are counted until there is a spare for {NO_SPARE_QUIET_S} s"
+            ),
+            Self::Ended { lasted, episodes, longest } => crate::log!(
+                "pool: a spare worker again after {:.0} ms with {episodes} wait(s) for one, the longest {:.0} ms",
+                lasted * 1e3, longest * 1e3
+            ),
+        }
+    }
+}
+impl NoSpare {
+    /// An episode begins at `now` unless one runs; the first of a stretch is reported.
+    fn begin(&mut self, now: impl FnOnce() -> f64, queued: [usize; 3], parked: usize, reports: &mut Vec<SpareReport>) {
+        if self.episode.is_some() {
+            return;
+        }
+        let now = now();
+        self.episode = Some(now);
+        self.ended = None;
+        self.episodes += 1;
+        if self.since.is_none() {
+            self.since = Some(now);
+            reports.push(SpareReport::Began { queued, parked });
+        }
+    }
+    /// A worker went idle: the running episode, if any, ends at `now`.
+    fn end_episode(&mut self, now: impl FnOnce() -> f64) {
+        if let Some(began) = self.episode.take() {
+            let now = now();
+            self.longest = self.longest.max(now - began);
+            self.ended = Some(now);
+        }
+    }
+    /// The stretch ends once no episode has run for [`NO_SPARE_QUIET_S`] (or, `closing`, now).
+    fn end_stretch_if_quiet(&mut self, now: impl FnOnce() -> f64, closing: bool, reports: &mut Vec<SpareReport>) {
+        let (Some(since), None) = (self.since, self.episode) else { return };
+        let Some(ended) = self.ended else { return };
+        if !closing && now() - ended < NO_SPARE_QUIET_S {
+            return;
+        }
+        reports.push(SpareReport::Ended { lasted: ended - since, episodes: self.episodes, longest: self.longest });
+        *self = Self::default();
     }
 }
 /// Only the outermost park of the physical worker owns its return to the count.
@@ -1901,14 +1964,14 @@ impl PoolState {
         }
         *slot = next;
     }
-    /// Snapshot the first unclaimed lower-class job with no free all-class thread.
-    /// A worker writes it outside the lock, as soon as one is back in the pool.
+    /// An unclaimed lower-class job with no free all-class thread begins a no-spare episode
+    /// ([`NoSpare`]). A worker writes a stretch's report outside the lock.
     fn record_exhaustion(&mut self) {
-        if self.free == 0 && self.parked != 0 && !self.no_spare
+        if self.free == 0 && self.parked != 0 && self.no_spare.episode.is_none()
             && (1..3).any(|i| self.queues[i].len() > usize::from(self.waiting[i]))
         {
-            self.no_spare = true;
-            self.pending_log = Some(SpareWait { queued: self.queues.each_ref().map(VecDeque::len), parked: self.parked });
+            let queued = self.queues.each_ref().map(VecDeque::len);
+            self.no_spare.begin(Cx::monotonic_now, queued, self.parked, &mut self.pending_log);
         }
     }
 }
@@ -1966,11 +2029,13 @@ const POOL_CANCELLED: u8 = 2;
 impl PoolInner {
     /// Worker-side transitions also deliver any exhaustion report captured by a submitter.
     fn with_worker_state<T>(&self, f: impl FnOnce(&mut PoolState) -> T) -> T {
-        let mut state = self.state.lock().unwrap();
-        let result = f(&mut state);
-        let report = state.pending_log.take();
-        drop(state);
-        if let Some(report) = report {
+        let mut guard = self.state.lock().unwrap();
+        let result = f(&mut guard);
+        let state = &mut *guard;
+        state.no_spare.end_stretch_if_quiet(Cx::monotonic_now, false, &mut state.pending_log);
+        let reports = std::mem::take(&mut state.pending_log);
+        drop(guard);
+        for report in reports {
             report.log();
         }
         result
@@ -2351,6 +2416,9 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
     loop {
         let next = inner.with_worker_state(|state| {
             if state.closed != POOL_OPEN && state.queues[..takes].iter().all(VecDeque::is_empty) {
+                // a stretch still open is reported as the pool closes
+                state.no_spare.end_episode(Cx::monotonic_now);
+                state.no_spare.end_stretch_if_quiet(Cx::monotonic_now, true, &mut state.pending_log);
                 return Next::Stop;
             }
             let eligible = inner.eligible_classes(state, index);
@@ -2365,7 +2433,7 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
                 // A parked job may have reclaimed the last place since this worker was woken.
                 // Pass unclaimed Visible work to its reserve or a lower admission.
                 let wake = if eligible < takes { inner.idle_candidates(state) } else { None };
-                state.no_spare = false;
+                state.no_spare.end_episode(Cx::monotonic_now);
                 inner.workers[index].idle.store(true, Ordering::SeqCst);
                 Next::Idle(wake)
             }
@@ -4521,6 +4589,42 @@ mod tests {
         wait_for("C to finish when A gives back the last place", || c.is_finished());
         assert!(worker_join(c).unwrap(), "C must start after A is allowed to end");
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_stretch_of_no_spare_waits_is_reported_once_as_it_begins_and_once_after_it() {
+        let (mut spare, mut reports) = (NoSpare::default(), Vec::new());
+        let at = |t: f64| move || t;
+        spare.begin(at(10.0), [0, 2, 5], 2, &mut reports);
+        assert_eq!(reports, vec![SpareReport::Began { queued: [0, 2, 5], parked: 2 }], "the stretch's first wait, with its queues");
+        spare.begin(at(10.1), [0, 3, 5], 2, &mut reports);
+        assert_eq!(reports.len(), 1, "a wait already running is not a new one");
+        spare.end_episode(at(10.25));
+        // hundreds of short waits in a busy second: one stretch, nothing per wait
+        for k in 0..300 {
+            let t = 10.3 + k as f64 * 0.002;
+            spare.begin(at(t), [0, 1, 1], 2, &mut reports);
+            spare.end_episode(at(t + 0.001));
+            spare.end_stretch_if_quiet(at(t + 0.001), false, &mut reports);
+        }
+        assert_eq!(reports.len(), 1, "waits less than {NO_SPARE_QUIET_S} s apart add no lines");
+        let last = 10.3 + 299.0 * 0.002 + 0.001;
+        spare.end_stretch_if_quiet(at(last + NO_SPARE_QUIET_S * 0.5), false, &mut reports);
+        assert_eq!(reports.len(), 1, "not yet quiet for long enough");
+        spare.end_stretch_if_quiet(at(last + NO_SPARE_QUIET_S), false, &mut reports);
+        let Some(SpareReport::Ended { lasted, episodes, longest }) = reports.pop() else { panic!("the stretch's end: {reports:?}") };
+        assert_eq!(episodes, 301, "every wait counted");
+        assert!((longest - 0.25).abs() < 1e-9, "the longest wait: {longest}");
+        assert!((lasted - (last - 10.0)).abs() < 1e-9, "from the first wait to the last one's end: {lasted}");
+        assert_eq!(reports.len(), 1, "the stretch made two lines in all: its start and its end");
+        reports.clear();
+        spare.begin(at(20.0), [0, 1, 0], 1, &mut reports);
+        assert!(matches!(reports.pop(), Some(SpareReport::Began { .. })), "a later stretch is reported again");
+        spare.end_stretch_if_quiet(at(20.5), true, &mut reports);
+        assert!(reports.is_empty(), "a running wait is no stretch's end");
+        spare.end_episode(at(20.5));
+        spare.end_stretch_if_quiet(at(20.5), true, &mut reports);
+        assert_eq!(reports, vec![SpareReport::Ended { lasted: 0.5, episodes: 1, longest: 0.5 }], "a pool that closes reports its open stretch");
     }
 
     #[test]

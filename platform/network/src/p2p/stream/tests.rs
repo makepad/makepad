@@ -610,3 +610,57 @@ fn orderly_close_survives_lost_final_ack() {
         assert!(s.next_timeout().is_none(), "clean close has no pending wake");
     }
 }
+
+#[test]
+fn a_rate_cap_paces_new_data_and_loses_nothing() {
+    const CAP: u64 = 400_000;
+    let data = content(150_000);
+    let mut w = Pair::new(29);
+    w.net.set_link(LinkConfig { latency_ms: 10, jitter_ms: 3, loss_per_mille: 10 });
+    w.open();
+    w.keys();
+    w.streams[0].set_rate_cap(Some(CAP));
+    let before = w.streams[0].sent_bytes();
+    let start = w.net.now();
+    // every datagram the capped side sends: (ms, bytes)
+    let mut log: Vec<(u64, usize)> = Vec::new();
+    let (mut sent, mut received) = (0, Vec::new());
+    while received.len() < data.len() {
+        assert!(w.net.now() < start + 60_000, "the capped writer makes progress");
+        sent += w.streams[0].write(&data[sent..]);
+        let now = w.net.now();
+        w.step_with(|i, _, bytes| {
+            if i == 0 {
+                log.push((now, bytes.len()));
+            }
+            true
+        });
+        drain(&mut w.streams[1], &mut received);
+    }
+    assert!(received == data, "every byte arrives once, in order, under the cap");
+    assert!(w.net.stats().lost > 0, "the link lost datagrams, so repairs ran under the cap");
+    let total: usize = log.iter().map(|&(_, n)| n).sum();
+    assert_eq!(w.streams[0].sent_bytes() - before, total as u64, "sent_bytes counts every datagram handed out");
+
+    // no 250 ms holds more than the cap's share, its burst, one datagram of overdraft and a
+    // few repairs (they never wait)
+    let window = 250;
+    let allowance = (CAP * window / 1000 / 8) as usize + 2 * 1200 + 1200 + 3 * 1200;
+    for (i, &(t, _)) in log.iter().enumerate() {
+        let in_window: usize = log[i..].iter().take_while(|&&(u, _)| u < t + window).map(|&(_, n)| n).sum();
+        assert!(in_window <= allowance, "{in_window} bytes in the 250 ms from {t} ms, over the cap's {allowance}");
+    }
+    let elapsed = log.last().unwrap().0 - start;
+    let paced = total as u64 * 8 * 1000 / CAP;
+    assert!(elapsed * 10 >= paced * 9, "the cap holds: {total} bytes went in {elapsed} ms, {paced} ms at the cap");
+    assert!(elapsed * 10 <= paced * 13, "and the stream keeps up with it: {elapsed} ms against {paced} ms");
+
+    // lifting the cap sends at the stream's own pace again
+    w.streams[0].set_rate_cap(None);
+    let start = w.net.now();
+    let mut received = Vec::new();
+    w.transfer(&data, 0, &mut received);
+    assert!(received == data, "uncapped again, every byte arrives");
+    let uncapped = w.net.now() - start;
+    assert!(uncapped * 3 < elapsed, "without the cap the same bytes take {uncapped} ms, not {elapsed}");
+}
