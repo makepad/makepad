@@ -666,7 +666,7 @@ impl AssistantService {
                     // decides what the words meant.)
                     if active {
                         if let Some(speech) = &mut self.speech {
-                            if speech.is_speaking() {
+                            if speech.reply_in_progress() {
                                 speech.stop();
                             }
                         }

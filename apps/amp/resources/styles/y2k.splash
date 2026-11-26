@@ -1,10 +1,10 @@
-// title: Y2K Aqua
+// title: Y2K Translucent
 // order: 20
-// Y2K Aqua: a circa-2000 translucent candy-plastic machine. An iMac G3
-// "Snow" front with Aqua pinstripes and drifting soap bubbles, Bondi-blue
+// Y2K Translucent: a circa-2000 translucent candy-plastic machine. A snow-white
+// front with aqua pinstripes and drifting soap bubbles, sea-blue
 // translucent wings you can see into (ribs, a board, the thick glowing
 // edge of the moulding), lickable gel pill keys with a hard top highlight
-// and a caustic glow underneath, a Tangerine play key, a gel-dome knob,
+// and a caustic glow underneath, a tangerine play key, a gel-dome knob,
 // candy-gel level tubes and a spectrum that rises as bubbles.
 use mod.prelude.widgets_internal.*
 
@@ -27,7 +27,7 @@ mod.widgets.hw_palette.spill_knee = 1.3
 mod.widgets.hw_palette.caption_bg = #xdce9f0
 mod.widgets.hw_palette.caption_text = #x2c526b
 
-// ---- the front: Snow white plastic, Aqua pinstripes, bubbles ----
+// ---- the front: snow-white plastic, aqua pinstripes, bubbles ----
 mod.widgets.HwChassis.draw_bg.ground = #xe9f3f8
 mod.widgets.HwChassis.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.10, 0.25, 0.38, 1.0)
@@ -40,10 +40,10 @@ mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     let uv = p / max(self.rect_size, vec2(1.0, 1.0))
     // A sky wash: pale aqua at the top, snow at the foot.
     var col = mix(vec3(0.80, 0.92, 0.98), base, smoothstep(0.0, 0.8, uv.y))
-    // Aqua pinstripes: a light and a shaded line every 4 pt.
+    // Aqua-coloured pinstripes: a light and a shaded line every 4 pt.
     let s = fract(w.y / 4.0)
     col = col * (1.0 - 0.045 * smoothstep(0.35, 0.5, s) * (1.0 - smoothstep(0.75, 0.9, s)))
-    // Frutiger swooshes: two soft aqua ribbons sweeping across the front.
+    // Swooshes: two soft aqua ribbons sweeping across the front.
     let sw1 = w.y - (478.0 + 46.0 * sin(w.x * 0.0042 + 0.6))
     let sw2 = w.y - (492.0 + 38.0 * sin(w.x * 0.0036 + 1.9))
     let rib1 = exp(-(sw1 * sw1) / 1600.0)
@@ -73,7 +73,7 @@ mod.widgets.HwChassis.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     return col
 }
 
-// ---- wings: translucent Bondi-blue shells with visible insides ----
+// ---- wings: translucent sea-blue shells with visible insides ----
 mod.widgets.HwPlate.draw_bg.ground = #x5fd0ec
 mod.widgets.HwPlate.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.0, 0.22, 0.36, 1.0)
@@ -87,7 +87,7 @@ mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     let w = self.world.xy
     let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
     let uv = p / max(self.rect_size, vec2(1.0, 1.0))
-    // Thick plastic at the edge: deep saturated Bondi, clearing inward.
+    // Thick plastic at the edge: deep saturated sea blue, clearing inward.
     let deep = vec3(0.0, 0.50, 0.70)
     var col = mix(deep, base, smoothstep(0.0, 26.0, e))
     // The insides seen through the shell: an inner tray, blurred by the
@@ -109,7 +109,7 @@ mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     return col
 }
 
-// ---- recessed panels: frosted Snow ice ----
+// ---- recessed panels: frosted snow ice ----
 mod.widgets.HwPanel.draw_bg.ground = #xcfe8f3
 mod.widgets.HwPanel.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.05, 0.22, 0.36, 1.0)
@@ -126,7 +126,7 @@ mod.widgets.HwPanel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     return col * (0.97 + 0.05 * uv.y)
 }
 
-// ---- the screen's surround: a clear-over-Bondi gel frame ----
+// ---- the screen's surround: a clear-over-sea-blue gel frame ----
 mod.widgets.HwBezel.draw_bg.ground = #x0c6f95
 mod.widgets.HwBezel.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.08, 0.16, 1.0)
@@ -137,13 +137,13 @@ mod.widgets.HwBezel.radius = 20
 mod.widgets.HwBezel.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
     let v = p.y / max(self.rect_size.y, 1.0)
-    // Deep Bondi toward the glass, bright aqua gel at the lip.
+    // Deep sea blue toward the glass, bright aqua gel at the lip.
     var col = mix(vec3(0.35, 0.85, 0.98), base, smoothstep(0.0, 9.0, e))
     col = col + vec3(0.9, 0.95, 1.0) * (1.0 - smoothstep(0.5, 3.0, abs(e - 2.5))) * (1.0 - v) * 0.5
     return col
 }
 
-// ---- the glass: a big Aqua gloss dome over the picture ----
+// ---- the glass: a big aqua gloss dome over the picture ----
 mod.widgets.HwGlass.draw_bg.radius = 14.0
 mod.widgets.HwGlass.draw_bg.pixel = fn() {
     let p = self.pos * self.rect_size
@@ -167,7 +167,7 @@ mod.widgets.HwGlass.draw_bg.pixel = fn() {
     return vec4(rgb * cov, (a + foot) * cov)
 }
 
-// ---- keys: lickable Aqua gel pills ----
+// ---- keys: lickable aqua gel pills ----
 mod.widgets.HwKey.draw_bg.ground = #x1b8fe0
 mod.widgets.HwKey.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.16, 0.34, 1.0)
@@ -186,7 +186,7 @@ mod.widgets.HwKey.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
     let c = self.rect_size * 0.5
     let h = max(c - vec2(self.inset, self.inset), vec2(1.0, 1.0))
     let v = clamp((p.y - (c.y - h.y)) / (2.0 * h.y), 0.0, 1.0)
-    // Play and PRESETS are Tangerine gel, the rest Bondi Aqua.
+    // Play and PRESETS are tangerine gel, the rest sea-blue aqua.
     let top = mix(vec3(0.01, 0.30, 0.72), vec3(0.80, 0.26, 0.0), self.critical)
     let low = mix(vec3(0.10, 0.62, 0.98), vec3(1.0, 0.60, 0.08), self.critical)
     return mix(top, low, smoothstep(0.25, 1.0, v))
@@ -223,7 +223,7 @@ mod.widgets.HwKeyText.draw_text.color_down = #xd8f4ff
 mod.widgets.HwKeyButton.draw_text.text_style = theme.font_icons{font_size: 14.0}
 mod.widgets.HwKeyText.draw_text.text_style = theme.font_bold{font_size: 9.5}
 
-// ---- lights: Tangerine gel capsules ----
+// ---- lights: tangerine gel capsules ----
 mod.widgets.HwDash.radius = 6
 mod.widgets.HwDash.emissive = vec4(1.0, 0.55, 0.08, 8.0)
 mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.58, 0.10, 1.0)
@@ -231,7 +231,7 @@ mod.widgets.HwDash.draw_bg.ground = #x9fcfe0
 mod.widgets.HwLed.emissive = vec4(1.0, 0.55, 0.08, 3.5)
 mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.58, 0.10, 1.0)
 
-// ---- knob: a clear Bondi gel dome with an Aqua ring ----
+// ---- knob: a clear sea-blue gel dome with an aqua ring ----
 mod.widgets.HwKnobFace.draw_bg.ground = #x1a9fd6
 mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(1.0, 1.0, 1.0, 1.0)
 mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.18, 0.34, 1.0)
@@ -293,7 +293,7 @@ mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
     // The glass: clear and pale, darker at its walls.
     let v = clamp((p.y - cy) / tr, -1.0, 1.0)
     var g = mix(vec3(0.93, 0.98, 1.0), vec3(0.62, 0.80, 0.90), abs(v) * abs(v))
-    // The liquid: candy gel running Aqua, lime, Tangerine along the tube.
+    // The liquid: candy gel running aqua, lime, tangerine along the tube.
     let ux = clamp((p.x - x0) / span, 0.0, 1.0)
     let fill_x = x0 + lv * span
     let wet = (1.0 - smoothstep(fill_x - 1.0, fill_x + 1.0, p.x)) * step(0.004, lv)
@@ -417,7 +417,7 @@ mod.widgets.HwSpectrum.light = 6.0
 mod.widgets.HwMilk.light = 2.1
 mod.widgets.HwMilk.light_knee = 1.0
 
-// ---- the record in the empty art well: a Bondi vinyl ----
+// ---- the record in the empty art well: a sea-blue vinyl ----
 mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(1.0, 0.55, 0.08, 1.0)
 mod.widgets.HwArtBlank.draw_bg.ground = #x0b3a5c
 mod.widgets.HwArtBlank.draw_bg.vinyl = vec4(0.02, 0.36, 0.58, 1.0)
@@ -454,7 +454,7 @@ mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.2, 0.35, 0.30)
 mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 1.0, 1.0, 0.6)
 
 // (The nav plate shader halves its fill below the top 3 pt, so the fill is set at 2x.)
-// The switch: an Aqua gel pill in a frosted track.
+// The switch: an aqua gel pill in a frosted track.
 mod.widgets.HwSegmented.draw_bg.well = vec4(0.72, 0.86, 0.93, 1.0)
 mod.widgets.HwSegmented.draw_pill.cap = vec4(0.10, 0.55, 0.92, 1.0)
 mod.widgets.HwSegmented.draw_pill.glow = vec4(0.30, 0.90, 1.0, 1.0)

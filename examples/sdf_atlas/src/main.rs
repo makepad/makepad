@@ -465,7 +465,7 @@ impl AtlasView {
             for t in &self.targets {
                 cx.make_child_pass(&t.pass);
             }
-            let painted = self.recorded.iter().all(|i| self.targets[*i].pass.painted_whole_since(cx.cx, serial));
+            let painted = self.recorded.iter().all(|i| self.targets[*i].pass.painted_whole_once_since(cx.cx, serial)); // once is enough: the waiting passes are attached and paint every frame
             if self.frame % 300 == 0 {
                 let st: Vec<String> = self.recorded.iter().map(|i| {
                     let p = &cx.cx.passes[self.targets[*i].pass.draw_pass_id()];

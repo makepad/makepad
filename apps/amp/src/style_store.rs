@@ -102,7 +102,7 @@ pub fn valid_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// A title turned into a style name: `Braun Radio 1970` → `braun_radio_1970`.
+/// A title turned into a style name: `Radio 1970` → `radio_1970`.
 pub fn name_from_title(title: &str) -> String {
     let mut out = String::new();
     for c in title.chars().flat_map(|c| c.to_lowercase()) {

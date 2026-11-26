@@ -65,7 +65,7 @@ fn brief() -> String {
 }
 
 const NO_ARGS: &str = r#"{"type":"object","properties":{}}"#;
-const NAME_ARG: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"style name (file stem), e.g. brushed or braun_radio"}},"required":["name"]}"#;
+const NAME_ARG: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"style name (file stem), e.g. brushed or radio_1970"}},"required":["name"]}"#;
 
 pub fn manifest() -> ServiceManifest {
     let t = |name: &str, description: &str, parameters: &str, risk: Risk| ToolDef::new(name, description, parameters, risk);
@@ -275,21 +275,20 @@ pub struct ThemeAi {
 
 
 fn log_cursor() -> u64 {
-    log_ring::read_since(u64::MAX, 0).0
+    log_ring::read_since(u64::MAX, 0).newest
 }
 
 /// The distinct [E] texts the log holds now: errors other parts of the app
 /// already had before an apply are not the apply's.
 fn error_baseline() -> std::collections::HashSet<String> {
-    let (_, lines) = log_ring::read_since(0, log_ring::CAP);
-    lines.into_iter().filter(|l| l.level == LogLevel::Error).map(|l| l.text).collect()
+    log_ring::read_since(0, log_ring::CAP).lines.into_iter().filter(|l| l.level == LogLevel::Error).map(|l| l.text).collect()
 }
 
 /// [E] lines after `cursor` that are this apply's: new since the baseline,
 /// or naming the file being applied (`hint`).
 fn errors_since(cursor: u64, baseline: &std::collections::HashSet<String>, hint: Option<&str>) -> Vec<String> {
-    let (_, lines) = log_ring::read_since(cursor, 400);
-    let mut out: Vec<String> = lines
+    let read = log_ring::read_since(cursor, 400);
+    let mut out: Vec<String> = read.lines
         .into_iter()
         .filter(|l| l.level == LogLevel::Error)
         .map(|l| l.text)
@@ -298,6 +297,10 @@ fn errors_since(cursor: u64, baseline: &std::collections::HashSet<String>, hint:
     // An error repeated every frame is one error.
     out.dedup();
     out.truncate(40);
+    // The log keeps only its newest lines: errors among the ones it lost are not answered for.
+    if read.dropped > 0 {
+        log!("amp ai: the log dropped {} lines before this error check; any errors among them are on stderr", read.dropped);
+    }
     out
 }
 

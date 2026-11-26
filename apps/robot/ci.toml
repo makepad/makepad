@@ -1,0 +1,8 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[app.linux]
+capture = ""
+date = "2026-11-26"
+digest = "3d7a230a5c0894ce3248f8b21abcdffdb2f139beb9fe53910a64a42e8f190c38"
+main = "f0a2ef91c7ae77fb351dad4870fecffc13ce6863"
+work = "c87cdfc86d6ff85dc54a9425ec4853867560b460"

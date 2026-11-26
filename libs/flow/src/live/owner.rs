@@ -100,7 +100,7 @@ pub struct PrepareControl(Arc<PrepareState>);
 #[derive(Default)]
 struct PrepareState {
     cancelled: AtomicU32,
-    executions: AtomicUsize,
+    executions: Arc<AtomicUsize>,
 }
 
 /// Keeps a prepare marked as executing for the lifetime of this scope.
@@ -114,6 +114,14 @@ impl Drop for ExecutionGuard<'_> {
 }
 
 impl PrepareControl {
+    /// Start a separately cancellable prepare that shares this control's execution counter.
+    pub fn renewed(&self) -> PrepareControl {
+        PrepareControl(Arc::new(PrepareState {
+            cancelled: AtomicU32::new(0),
+            executions: self.0.executions.clone(),
+        }))
+    }
+
     pub fn cancel(&self) {
         self.word().store(1, Ordering::Relaxed);
     }
@@ -126,7 +134,12 @@ impl PrepareControl {
         &self.0.cancelled
     }
 
-    /// True while any worker holds an execution guard for this prepare.
+    /// Borrow the same counter for executors across a library boundary.
+    pub fn execution_counter(&self) -> &AtomicUsize {
+        &self.0.executions
+    }
+
+    /// True while any control sharing this counter holds an execution guard.
     pub fn executing(&self) -> bool {
         self.0.executions.load(Ordering::Relaxed) != 0
     }
@@ -299,5 +312,16 @@ mod tests {
         }), Err("cancelled"));
         assert!(!control.executing(), "execution ended on cancellation");
         assert!(worker.is_cancelled(), "leaving the scope preserves cancellation");
+
+        let next = control.renewed();
+        let sibling = control.renewed();
+        assert!(!next.is_cancelled(), "a renewal has its own cancellation word");
+        let a = next.enter_execution();
+        let b = sibling.enter_execution();
+        next.cancel();
+        drop(a);
+        assert!(!sibling.is_cancelled() && control.executing(), "the sibling is still executing");
+        drop(b);
+        assert!(!control.executing(), "the last worker released the shared counter");
     }
 }

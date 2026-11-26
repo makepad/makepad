@@ -14,6 +14,7 @@
 #[cfg(all(relax, target_os = "macos"))]
 #[test]
 fn the_status_item_works_again_after_a_restart_as_a_new_process() {
+    use makepad_widgets::makepad_platform::remote::parse_startup_line;
     use std::os::unix::process::ExitStatusExt;
     use std::time::{Duration, Instant};
     extern "C" {
@@ -55,28 +56,29 @@ fn the_status_item_works_again_after_a_restart_as_a_new_process() {
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    // `makepad-remote: pid <app pid> app <package> run <run pid> socket ..`
-    let announce = |line: &str| -> Option<(i32, i32)> {
-        let w: Vec<&str> = line.split("-remote: pid ").nth(1)?.split_whitespace().collect();
-        if w.get(1) != Some(&"app") || w.get(3) != Some(&"run") {
-            return None;
-        }
-        Some((w[0].parse().ok()?, w[4].parse().ok()?))
+    let startup = |run: &mut std::process::Child, from, previous, secs| {
+        let (at, line) = wait(run, from, "app startup", &|l| {
+            parse_startup_line(l).is_some_and(|(pid, app, _)| app == "makepad-example-tray" && Some(pid) != previous)
+        }, secs);
+        let (pid, _, _) = parse_startup_line(&line).unwrap();
+        // By the time the status item appears, the JIT has written the optional parent line.
+        let (ready, _) = wait(run, at, "status item", &|l| l.contains("tray selftest: status item button frame"), 120);
+        let (tag, _) = line.split_once(' ').unwrap();
+        let prefix = format!("{tag} run=");
+        let suffix = format!(" pid={pid}");
+        let parent = text()[at..ready].lines().find_map(|l| l.strip_prefix(prefix.as_str())?.strip_suffix(suffix.as_str())?.parse().ok());
+        (ready, pid, parent.unwrap_or(pid))
     };
-    let (at, line) = wait(&mut run, 0, "announce", &|l| announce(l).is_some(), 600);
-    let (first, run_pid) = announce(&line).unwrap();
-    assert_eq!(run_pid, run.id() as i32, "the run pid is the process the launcher started: {line}");
+    let (at, first, run_pid) = startup(&mut run, 0, None, 600);
+    assert_eq!(run_pid, run.id(), "the run pid is the process the launcher started");
     assert_ne!(first, run_pid, "the app is the run's child");
-    let (at, _) = wait(&mut run, at, "status item", &|l| l.contains("tray selftest: status item button frame"), 120);
     let (at, _) = wait(&mut run, at, "menu action", &|l| l.contains("tray selftest: TrayMenu") && l.contains("staying"), 120);
     let asked = std::process::Command::new(&loader).args(["inspect", &first.to_string(), "session", "relaunch", "process=1"]).output().unwrap();
     assert!(asked.status.success(), "relaunch: {}{}", String::from_utf8_lossy(&asked.stdout), String::from_utf8_lossy(&asked.stderr));
-    let (at, line) = wait(&mut run, at, "the restarted app's announce", &|l| announce(l).is_some_and(|(p, _)| p != first), 300);
-    let (second, again) = announce(&line).unwrap();
-    assert_eq!(again, run_pid, "the run pid stays: {line}");
-    let (at, _) = wait(&mut run, at, "the restarted app's status item", &|l| l.contains("tray selftest: status item button frame"), 120);
+    let (at, second, again) = startup(&mut run, at, Some(first), 300);
+    assert_eq!(again, run_pid, "the run pid stays after the app restarts");
     wait(&mut run, at, "the restarted app's menu action", &|l| l.contains("tray selftest: TrayMenu") && l.contains("staying"), 120);
-    assert_eq!(unsafe { kill(first, 0) }, -1, "the first app process is gone");
+    assert_eq!(unsafe { kill(first as i32, 0) }, -1, "the first app process is gone");
     // the system's view: the window server and the menu bar's agent on either pid
     let minutes = started.elapsed().as_secs() / 60 + 1;
     let scan = std::process::Command::new("/usr/bin/log")
@@ -87,7 +89,7 @@ fn the_status_item_works_again_after_a_restart_as_a_new_process() {
     let living = [second.to_string(), run_pid.to_string()];
     let named: Vec<&str> = scan.lines().filter(|l| l.split(|c: char| !c.is_ascii_digit()).any(|w| living.iter().any(|p| p == w))).collect();
     // the run ends: its parent passes the SIGTERM on, and ends as the app does
-    unsafe { kill(run_pid, 15) };
+    unsafe { kill(run_pid as i32, 15) };
     let ended = run.wait().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(named.is_empty(), "the system marked a living process of the run as exiting:\n{}", named.join("\n"));

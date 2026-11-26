@@ -172,7 +172,8 @@ impl Slot {
 
     fn release_painted_planes(&mut self, cx: &mut Cx) -> bool {
         let Some(at) = self.recording else { return false };
-        if !self.copy.pass.painted_whole_since(cx, at) || (self.has_depth && !self.depth.pass.painted_whole_since(cx, at)) {
+        // Once is enough: the copy passes stay attached and paint every frame until released.
+        if !self.copy.pass.painted_whole_once_since(cx, at) || (self.has_depth && !self.depth.pass.painted_whole_once_since(cx, at)) {
             return false;
         }
         // Retire just this copy's recorded texture bindings. The kept targets and their

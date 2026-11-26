@@ -21,7 +21,7 @@ use makepad_box3d::id::BodyId;
 use makepad_box3d::physics_world::{create_world, world_step, World};
 use makepad_box3d::shape::{create_hull_shape, create_sphere_shape};
 use makepad_box3d::types::{
-    default_body_def, default_shape_def, default_world_def, BodyType, HullData, Sphere,
+    default_body_def, default_shape_def, default_world_def, BodyType, HullData, SurfaceMaterial, Sphere,
 };
 
 use std::sync::Arc;
@@ -352,6 +352,37 @@ impl PhysicsSim {
                     });
                 }
             }
+        }
+
+        // Ground that gives: a raised pad whose surface pushes back with at most 20 kN, whatever
+        // lands on it. A light crate (7 kN of weight) is stopped and rests on the pad; a heavy
+        // crate (43 kN) is too much for it, sinks through at the force the pad gives and drops
+        // to the ground below.
+        let pad_def = makepad_box3d::types::ShapeDef {
+            base_material: SurfaceMaterial { yield_force: 20_000.0, ..default_shape_def().base_material },
+            ..default_shape_def()
+        };
+        let mut pad_body_def = default_body_def();
+        pad_body_def.position = makepad_box3d::math_functions::pos(10.0, 2.0, 0.0);
+        let pad_id = create_body(&mut world, &pad_body_def);
+        create_hull_shape(&mut world, pad_id, &pad_def, &make_box_hull(3.0, 0.25, 3.0));
+        bodies.push(PhysBody {
+            id: pad_id,
+            kind: ShapeKind::Box(vec3(3.0, 0.25, 3.0)),
+            color: vec4(0.55, 0.42, 0.28, 1.0),
+        });
+        let crate_hull: Arc<HullData> = make_box_hull(BOX_HALF, BOX_HALF, BOX_HALF);
+        for (x, density, color) in [
+            (8.6, 1000.0, vec4(0.40, 0.78, 0.45, 1.0)),
+            (11.4, 6000.0, vec4(0.85, 0.30, 0.30, 1.0)),
+        ] {
+            let mut body_def = default_body_def();
+            body_def.body_type = BodyType::Dynamic;
+            body_def.position = makepad_box3d::math_functions::pos(x, 4.0, 0.0);
+            let id = create_body(&mut world, &body_def);
+            let crate_def = makepad_box3d::types::ShapeDef { density, ..default_shape_def() };
+            create_hull_shape(&mut world, id, &crate_def, &crate_hull);
+            bodies.push(PhysBody { id, kind: ShapeKind::Box(vec3(BOX_HALF, BOX_HALF, BOX_HALF)), color });
         }
 
         // Heavy spheres dropped onto the pile.

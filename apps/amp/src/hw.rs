@@ -1256,7 +1256,7 @@ pub const STYLES: [(&str, &str); 8] = [
     ("walnut", "Walnut & Brass"),
     ("plastic", "Moulded Plastic"),
     ("piano", "Piano Black"),
-    ("nostromo", "Ship Console"),
+    ("ship_console", "Ship Console"),
     ("military", "Military"),
     ("orbital", "Orbital Lab"),
 ];

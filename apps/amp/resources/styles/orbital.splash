@@ -1,4 +1,4 @@
-// Orbital Lab — a 2001 / Moon station console: matte white moulded panels
+// Orbital Lab — a 1960s-vision space-station console: matte white moulded panels
 // with soft seams and generous radii, flush keys whose edges glow through a
 // light pipe, a black glass screen set deep into the white, and a single
 // red-orange status light. Clinical, bright, calm.
@@ -13,7 +13,7 @@ mod.widgets.hw_palette.screen_text = #xe9ecef
 mod.widgets.hw_palette.screen_muted = #x8a929c
 mod.widgets.hw_palette.accent = #xff4a22
 // The sound pictures: quiet to loud (the bars from the floor up), the peak
-// marks, the grid and scale: 2001 station: blue screen, white panel, HAL red.
+// marks, the grid and scale: the station's blue screen, white panel, warning red.
 mod.widgets.hw_palette.picture_low = #x2f6bff
 mod.widgets.hw_palette.picture_mid = #xdfe4ea
 mod.widgets.hw_palette.picture_high = #xff4a22
