@@ -33,7 +33,7 @@ pub mod local_model;
 pub mod models;
 
 pub use core::{
-    EngineCore, EngineEvent, DOCTRINE, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
+    EngineCore, EngineEvent, DOCTRINE, MAX_ASK_CHOICES, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
     WAKE_INTERVAL_SECS,
 };
 pub use no_model::{ClaudeDesktopModel, NoModel, NoModelWithReason};
@@ -140,6 +140,11 @@ pub trait Model {
     fn can_rebind_mid_turn(&self) -> bool {
         false
     }
+
+    /// Let the model research online with its provider's own web search and page fetch (an
+    /// app that needs facts from the web opts in: `EngineCore::set_web_research`). A model
+    /// that has no such tools ignores it.
+    fn set_web_research(&mut self, _on: bool) {}
 
     /// Images the model sees with its next input (a user line or the
     /// results of the tool round in flight). A model without vision says

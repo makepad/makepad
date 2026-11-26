@@ -36,8 +36,13 @@ pub const MAX_SUBSCRIPTIONS: usize = 16;
 pub const MAX_SUBSCRIPTION_QUEUE: usize = 64;
 /// Minimum time between model wakes for one conversation.
 pub const WAKE_INTERVAL_SECS: f64 = 2.0;
-/// The conversation's own service: the pictures the person sent ([`chat_tools`]).
+/// The conversation's own service: the pictures the person sent and questions to the person
+/// ([`chat_tools`]).
 pub const CHAT_SERVICE: &str = "chat";
+/// The most answers `chat.ask` proposes, and the longest question and answer it takes.
+pub const MAX_ASK_CHOICES: usize = 6;
+const MAX_ASK_QUESTION: usize = 600;
+const MAX_ASK_CHOICE: usize = 80;
 
 /// The tools every conversation has, whatever app it is about: a turn scoped to an app keeps them.
 fn chat_tools() -> Vec<ToolDefinition> {
@@ -52,7 +57,45 @@ fn chat_tools() -> Vec<ToolDefinition> {
             description: "Look at a picture the person sent in this conversation, by its name (chat.pictures lists them): it comes back with this result, scaled to fit. 'rect' [x0 y0 x1 y1] (fractions of its width and height from the top left) looks at that region only, at the whole picture budget: a face or a hand up close.".into(),
             parameters: r#"{"type":"object","properties":{"name":{"type":"string"},"rect":{"type":"array","items":{"type":"number","minimum":0,"maximum":1},"minItems":4,"maxItems":4}},"required":["name"]}"#.into(),
         },
+        ToolDefinition {
+            name: "chat.ask".into(),
+            description: "Ask the person one question that only they can answer and that changes what you do: which exact product, model or variant they mean, which of several sensible options they want. Propose the likely answers as 'choices' (2 to 6 short ones, the person clicks one); they can always type their own answer instead. The person's answer is this call's result. Ask before you research or build, not after; one question per call, and never what you can look up, measure from what they sent, or sensibly assume and say.".into(),
+            parameters: r#"{"type":"object","properties":{"question":{"type":"string","description":"The question, short and plain."},"choices":{"type":"array","items":{"type":"string"},"maxItems":6,"description":"Proposed answers, each a few words; leave out for an open question."}},"required":["question"]}"#.into(),
+        },
     ]
+}
+
+/// `chat.ask`'s arguments: the question and its proposed answers, bounded and trimmed.
+fn ask_args(fields: &[(String, Value)]) -> Result<Ask, String> {
+    let question = fields.iter().find(|(k, _)| k == "question").and_then(|(_, v)| v.as_str()).map(str::trim).unwrap_or("");
+    if question.is_empty() {
+        return Err("'question' is the question to the person, a non-empty string".into());
+    }
+    if question.chars().count() > MAX_ASK_QUESTION {
+        return Err(format!("'question' is at most {MAX_ASK_QUESTION} characters"));
+    }
+    let mut choices = Vec::new();
+    if let Some((_, v)) = fields.iter().find(|(k, _)| k == "choices") {
+        let Some(items) = v.as_arr() else { return Err("'choices' is a list of short answers".into()) };
+        for item in items {
+            let Some(c) = item.as_str().map(str::trim).filter(|c| !c.is_empty()) else {
+                return Err("each of 'choices' is a non-empty string".into());
+            };
+            if c.chars().count() > MAX_ASK_CHOICE {
+                return Err(format!("each of 'choices' is at most {MAX_ASK_CHOICE} characters"));
+            }
+            if !choices.iter().any(|have: &String| have == c) {
+                choices.push(c.to_string());
+            }
+        }
+        if choices.len() > MAX_ASK_CHOICES {
+            return Err(format!("at most {MAX_ASK_CHOICES} 'choices'"));
+        }
+    }
+    if let Some((k, _)) = fields.iter().find(|(k, _)| k != "question" && k != "choices") {
+        return Err(format!("chat.ask takes 'question' and 'choices', not '{k}'"));
+    }
+    Ok(Ask { question: question.to_string(), choices, answer: None })
 }
 
 /// `chat.picture`'s `rect`: four fractions [x0 y0 x1 y1] of the picture, x0 < x1 and y0 < y1.
@@ -249,6 +292,11 @@ pub struct EngineCore {
     turn_active: bool,
     /// Lines the person typed during the turn, for its end.
     waiting_lines: VecDeque<String>,
+    /// The `chat.ask` call waiting for the person's answer (and whether the console made it):
+    /// their next line, typed or clicked, is its result.
+    asking: Option<(String, bool)>,
+    /// The app wants the model to research online (`set_web_research`).
+    web_research: bool,
     /// When the model got the turn, while it has it without a word.
     model_since: Option<f64>,
     subscriptions: HashMap<String, Subscription>,
@@ -300,6 +348,8 @@ impl EngineCore {
             doctrine: doctrine.unwrap_or(DOCTRINE).to_string(),
             turn_active: false,
             waiting_lines: VecDeque::new(),
+            asking: None,
+            web_research: false,
             model_since: None,
             subscriptions: HashMap::new(),
             subscription_order: Vec::new(),
@@ -363,10 +413,18 @@ impl EngineCore {
         self.state.touch();
     }
 
+    /// Let the model research online, where its provider can (`Model::set_web_research`):
+    /// kept across provider changes.
+    pub fn set_web_research(&mut self, on: bool) {
+        self.web_research = on;
+        self.model.set_web_research(on);
+    }
+
     /// Swap the model (a provider change). The conversation restarts.
     pub fn set_model(&mut self, model: Box<dyn Model>) {
         self.model.cancel();
         self.model = model;
+        self.model.set_web_research(self.web_research);
         self.state.provider_label = self.model.label();
         self.seen_generation = None;
         self.end_turn();
@@ -439,6 +497,19 @@ impl EngineCore {
     /// A line of the person's in the transcript, and to the model now or at the turn's end.
     fn say(&mut self, text: &str, pictures: Vec<PictureRef>) {
         self.push_user(text, pictures);
+        // A question of the model's is waiting: this line is its answer, and the turn goes on.
+        if let Some((call_id, from_console)) = self.asking.take() {
+            if let Some(t) = self.state.tool_mut(&call_id) {
+                if let Some(ask) = &mut t.ask {
+                    ask.answer = Some(text.to_string());
+                }
+            }
+            let mut note = text.to_string();
+            truncate_to_char_boundary(&mut note, 60);
+            self.finish_call(&call_id, ToolResult::ok(&call_id, format!("The person answered: {text}"), note), from_console);
+            self.state.touch();
+            return;
+        }
         // A line typed during a turn waits for its end: it never throws away
         // what the model is working on. Stop is what ends a turn.
         if self.turn_active {
@@ -763,6 +834,9 @@ impl EngineCore {
         if let Some(a) = self.awaiting.take() {
             self.mark_done(&a.call_id, &ToolResult::cancelled(&a.call_id));
         }
+        if let Some((call_id, _)) = self.asking.take() {
+            self.mark_done(&call_id, &ToolResult::cancelled(&call_id));
+        }
         self.end_turn();
     }
 
@@ -772,6 +846,9 @@ impl EngineCore {
             self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.to_string() });
             self.finish_call(call_id, ToolResult::cancelled(call_id), p.from_console);
         } else if let Some((from_console, _, _)) = self.fitting.remove(call_id) {
+            self.finish_call(call_id, ToolResult::cancelled(call_id), from_console);
+        } else if self.asking.as_ref().is_some_and(|(id, _)| id == call_id) {
+            let (_, from_console) = self.asking.take().unwrap();
             self.finish_call(call_id, ToolResult::cancelled(call_id), from_console);
         }
     }
@@ -1136,7 +1213,7 @@ impl EngineCore {
             }
             ModelEvent::Rate(r) => self.state.rate = Some(r),
             ModelEvent::TurnDone { tool_calls } => {
-                if tool_calls == 0 && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() {
+                if tool_calls == 0 && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() && self.asking.is_none() {
                     self.end_turn();
                 }
             }
@@ -1190,6 +1267,7 @@ impl EngineCore {
             expanded: false,
             card: None,
             task: None,
+            ask: None,
         }
     }
 
@@ -1364,8 +1442,29 @@ impl EngineCore {
                     }
                 }
             }
+            "ask" => {
+                let ask = match ask_args(&fields) {
+                    Ok(ask) => ask,
+                    Err(why) => {
+                        self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
+                        return;
+                    }
+                };
+                if self.asking.is_some() {
+                    self.finish_call(&call_id, ToolResult::refused(&call_id, "a question is already waiting for the person: one at a time"), from_console);
+                    return;
+                }
+                if let Some(t) = self.state.tool_mut(&call_id) {
+                    t.title = format!("Chat · ask  {}", ask.question);
+                    truncate_to_char_boundary(&mut t.title, 80);
+                    t.status = ToolStatus::Running { note: "waiting for your answer".into(), permille: 0 };
+                    t.ask = Some(ask);
+                }
+                self.asking = Some((call_id, from_console));
+                self.state.touch();
+            }
             other => {
-                let why = format!("chat has no tool '{other}'; its tools are chat.pictures and chat.picture");
+                let why = format!("chat has no tool '{other}'; its tools are chat.pictures, chat.picture and chat.ask");
                 self.finish_call(&call_id, ToolResult::refused(&call_id, why), from_console);
             }
         }
@@ -1788,7 +1887,7 @@ impl EngineCore {
         }
         self.mark_done(call_id, &result);
         // The last call is over: from here on the turn waits for the model.
-        if self.state.status == Status::WaitingForTool && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() && self.awaiting.is_none() {
+        if self.state.status == Status::WaitingForTool && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() && self.awaiting.is_none() && self.asking.is_none() {
             self.state.status = Status::Thinking;
             self.model_since = None;
         }
@@ -1958,6 +2057,61 @@ mod tests {
         setup_with_lease(script, 1)
     }
 
+    /// A question of the model's waits for the person; their next line, typed or a clicked
+    /// choice, is the call's result and the turn goes on with it.
+    #[test]
+    fn a_question_waits_for_the_person_and_their_line_answers_it() {
+        let (mut core, model, _port, _e) = setup(vec![
+            vec![
+                call("chat.ask", r#"{"question":"Which shelf system?","choices":["IKEA Ivar","IKEA Kallax"]}"#),
+                ModelEvent::TurnDone { tool_calls: 1 },
+            ],
+            done("Ivar it is."),
+        ]);
+        core.send("a bracket for my shelf", 0.0);
+        core.pump(0.1);
+        core.pump(0.2);
+        assert_eq!(core.state().status, Status::WaitingForTool, "the turn waits for the answer");
+        let ask = core.state().tool("m1").and_then(|t| t.ask.clone()).expect("the question is on its row");
+        assert_eq!(ask.choices, vec!["IKEA Ivar".to_string(), "IKEA Kallax".to_string()]);
+        assert!(model.lock().unwrap().tool_results.is_empty());
+        core.send("IKEA Ivar", 0.3);
+        core.pump(0.4);
+        {
+            let m = model.lock().unwrap();
+            assert_eq!(m.sends.len(), 1, "the answer is no new turn");
+            assert_eq!(m.tool_results.len(), 1);
+            assert!(m.tool_results[0].1.contains("IKEA Ivar") && !m.tool_results[0].2);
+        }
+        assert_eq!(core.state().tool("m1").and_then(|t| t.ask.as_ref()).and_then(|a| a.answer.clone()).as_deref(), Some("IKEA Ivar"));
+        core.pump(0.5);
+        assert_eq!(core.state().status, Status::Idle);
+    }
+
+    #[test]
+    fn a_bad_question_is_refused_and_stop_cancels_a_waiting_one() {
+        let (mut core, model, _port, _e) = setup(vec![
+            vec![call("chat.ask", r#"{"question":"","choices":["a"]}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![call("chat.ask", r#"{"question":"Which?","choices":["a","b","c","d","e","f","g"]}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![call("chat.ask", r#"{"question":"Which size?"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+        ]);
+        core.send("make it", 0.0);
+        core.pump(0.1);
+        core.pump(0.2);
+        core.pump(0.3);
+        {
+            let m = model.lock().unwrap();
+            assert_eq!(m.tool_results.len(), 2);
+            assert!(m.tool_results.iter().all(|(_, _, is_error)| *is_error), "{:?}", m.tool_results);
+        }
+        assert_eq!(core.state().status, Status::WaitingForTool, "an open question waits too");
+        core.cancel(0.4);
+        assert_eq!(core.state().status, Status::Idle);
+        assert!(matches!(core.state().tool("m1").map(|t| &t.status), Some(ToolStatus::Done { .. })));
+        core.send("again", 0.5);
+        assert_eq!(model.lock().unwrap().sends.len(), 2, "after a stop a line is a new turn, no answer");
+    }
+
     /// Regression: a line typed mid-turn killed the turn, and the model
     /// started again on the same results.
     #[test]
@@ -2033,7 +2187,7 @@ mod tests {
             assert!(system.contains("Files"), "brief in the system prompt");
             assert_eq!(
                 tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-                vec!["files.list_dir", "files.trash", "files.export", "files.open", "bus.unsubscribe", "chat.pictures", "chat.picture"]
+                vec!["files.list_dir", "files.trash", "files.export", "files.open", "bus.unsubscribe", "chat.pictures", "chat.picture", "chat.ask"]
             );
         }
         core.pump(0.1);
@@ -2262,7 +2416,7 @@ mod tests {
         core.send("two", 1.0);
         core.pump(1.1);
         // The conversation's own tools stay with a target.
-        assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe", "chat.pictures", "chat.picture"]);
+        assert_eq!(names(&shared.lock().unwrap()), vec!["notes.add", "bus.unsubscribe", "chat.pictures", "chat.picture", "chat.ask"]);
         // A new context line for the same app does not rebind.
         let configs = shared.lock().unwrap().configured.len();
         core.set_target(Some(Target { label: "Notes".into(), app: "notes".into(), context: "page 2".into(), attachments: Vec::new() }));

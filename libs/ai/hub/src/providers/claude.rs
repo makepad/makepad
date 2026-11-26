@@ -96,6 +96,9 @@ pub struct ClaudeCodeChatProvider {
     live: bool,
     /// `--effort` (low … max), when set.
     effort: Option<String>,
+    /// The CLI's own web search and page fetch are on ([`Self::web`]); every other built-in
+    /// tool stays off.
+    web: bool,
     session: Option<LiveSession>,
 }
 
@@ -118,12 +121,19 @@ impl LiveSession {
 
 impl ClaudeCodeChatProvider {
     pub fn new(model: Option<String>) -> ClaudeCodeChatProvider {
-        ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new(), live: false, effort: None, session: None }
+        ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new(), live: false, effort: None, web: false, session: None }
     }
 
     /// The arguments used for a turn, without starting the CLI.
     pub fn arguments(&self, system: &str) -> Vec<String> {
-        build_args_with_mcp(&self.model, &self.resume, system, self.mcp.as_ref())
+        build_args_with_web(&self.model, &self.resume, system, self.mcp.as_ref(), self.web)
+    }
+
+    /// Let the model research online: the CLI's built-in WebSearch and WebFetch, allowed
+    /// without a prompt. Off by default; an app that wants facts from the web opts in.
+    pub fn web(mut self, on: bool) -> Self {
+        self.web = on;
+        self
     }
 
     /// One process for the whole conversation (see the module doc).
@@ -154,7 +164,7 @@ impl ClaudeCodeChatProvider {
         }
         let line = image_message(&prompt, &std::mem::take(&mut self.images));
         if self.session.is_none() {
-            let mut args = build_args_with_mcp(&self.model, &None, &input.system, self.mcp.as_ref());
+            let mut args = build_args_with_web(&self.model, &None, &input.system, self.mcp.as_ref(), self.web);
             args.insert(1, "--input-format".into());
             args.insert(2, "stream-json".into());
             if let Some(effort) = &self.effort {
@@ -254,6 +264,14 @@ pub fn build_args(model: &Option<String>, resume: &Option<String>, system: &str)
 /// [`build_args`] with an MCP server whose tools are allowed without a
 /// prompt (the built-in tools stay off).
 pub fn build_args_with_mcp(model: &Option<String>, resume: &Option<String>, system: &str, mcp: Option<&(String, String)>) -> Vec<String> {
+    build_args_with_web(model, resume, system, mcp, false)
+}
+
+/// The CLI's own web tools: on with [`ClaudeCodeChatProvider::web`], the only built-ins ever on.
+pub const WEB_TOOLS: [&str; 2] = ["WebSearch", "WebFetch"];
+
+/// [`build_args_with_mcp`], with the CLI's web search and fetch on and allowed when `web`.
+pub fn build_args_with_web(model: &Option<String>, resume: &Option<String>, system: &str, mcp: Option<&(String, String)>, web: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         "--verbose".into(),
@@ -264,12 +282,16 @@ pub fn build_args_with_mcp(model: &Option<String>, resume: &Option<String>, syst
         "--mcp-config".into(),
         mcp.map_or(r#"{"mcpServers":{}}"#.to_string(), |(config, _)| config.clone()),
     ];
-    if let Some((_, allowed)) = mcp {
+    let mut allowed: Vec<String> = mcp.map(|(_, allowed)| allowed.clone()).into_iter().collect();
+    if web {
+        allowed.extend(WEB_TOOLS.iter().map(|t| t.to_string()));
+    }
+    if !allowed.is_empty() {
         args.push("--allowedTools".into());
-        args.push(allowed.clone());
+        args.push(allowed.join(" "));
     }
     args.push("--tools".into());
-    args.push(String::new());
+    args.push(if web { WEB_TOOLS.join(",") } else { String::new() });
     if let Some(m) = model {
         args.push("--model".into());
         args.push(m.clone());
@@ -696,6 +718,21 @@ mod tests {
         assert!(!provider.arguments("sys").iter().any(|arg| arg == "--model"));
         assert!(!provider.tools_over_mcp());
         assert!(provider.with_mcp(mcp.0.clone(), mcp.1.clone()).tools_over_mcp());
+    }
+
+    /// Web research is the only built-in an app can turn on, and only when it asks.
+    #[test]
+    fn web_research_turns_on_only_search_and_fetch_and_only_when_asked() {
+        let off = ClaudeCodeChatProvider::new(None).arguments("sys");
+        assert!(off.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()));
+        assert!(!off.iter().any(|a| a == "--allowedTools"));
+        let on = ClaudeCodeChatProvider::new(None).web(true).arguments("sys");
+        assert!(on.windows(2).any(|w| w[0] == "--tools" && w[1] == "WebSearch,WebFetch"), "{on:?}");
+        assert!(on.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "WebSearch WebFetch"), "{on:?}");
+        assert!(on.windows(2).any(|w| w[0] == "--strict-mcp-config"), "no outside MCP servers either way");
+        let mcp = ("{}".to_string(), "mcp__sandbox".to_string());
+        let both = build_args_with_web(&None, &None, "sys", Some(&mcp), true);
+        assert!(both.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "mcp__sandbox WebSearch WebFetch"), "{both:?}");
     }
 
     #[test]

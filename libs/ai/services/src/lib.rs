@@ -36,7 +36,7 @@ pub use engine::{EngineCore, EngineEvent, Model, ModelEvent, ServiceRegistry, To
 pub use port::{AiServicePort, PortEvent, ServiceLink, ServiceLinkHost};
 pub use state::{
     EngineState, Entry, EventEntry, ProviderChoice, ProviderRow, ServiceInfo, Status, Suggestion,
-    Attachment, Target, ToolEntry, ToolStatus,
+    Ask, Attachment, Target, ToolEntry, ToolStatus,
 };
 pub use card::{Card, CardValues, Field};
 pub use wire::{

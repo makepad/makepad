@@ -47,6 +47,8 @@ const ATTACH_PICS: [LiveId; 4] = [live_id!(attach_pic0), live_id!(attach_pic1), 
 const USER_PICS: [LiveId; 4] = [live_id!(upic0), live_id!(upic1), live_id!(upic2), live_id!(upic3)];
 /// The buttons under a finished turn, in display order.
 const TURN_BUTTONS: [LiveId; 3] = [live_id!(turn_act0), live_id!(turn_act1), live_id!(turn_act2)];
+/// A question's answer buttons (`AskRow`), one per proposed answer (`MAX_ASK_CHOICES`).
+const ASK_BUTTONS: [LiveId; 6] = [live_id!(ask_c0), live_id!(ask_c1), live_id!(ask_c2), live_id!(ask_c3), live_id!(ask_c4), live_id!(ask_c5)];
 
 fn slot_id(slot: usize) -> LiveId {
     LiveId::from_str(&format!("f{slot}"))
@@ -687,6 +689,47 @@ script_mod! {
                     }
                 }
             }
+            // A question of the model's (`chat.ask`): the question, the answers it proposes as
+            // buttons (a click sends that answer as the person's line), and the hint that a line
+            // of their own answers it too. Once answered, only the question stays.
+            AskRow := Row{
+                padding: Inset{left: 12 right: 12 top: 6 bottom: 6}
+                RoundedView{
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 10 right: 10 top: 8 bottom: 8}
+                    draw_bg +: { color: theme.color_u_1 border_color: theme.color_outline_variant border_size: 1.0 border_radius: 6.0 }
+                    ask_question := Label{
+                        width: Fill
+                        selectable: true
+                        text: ""
+                        draw_text +: { text_style: theme.font_bold{font_size: 9.0} }
+                    }
+                    ask_choices := View{
+                        width: Fill
+                        height: Fit
+                        flow: Flow.Right{wrap: true}
+                        spacing: 6
+                        margin: Inset{top: 8}
+                        ask_c0 := Button{visible: false width: Fit height: 26}
+                        ask_c1 := Button{visible: false width: Fit height: 26}
+                        ask_c2 := Button{visible: false width: Fit height: 26}
+                        ask_c3 := Button{visible: false width: Fit height: 26}
+                        ask_c4 := Button{visible: false width: Fit height: 26}
+                        ask_c5 := Button{visible: false width: Fit height: 26}
+                    }
+                    ask_hint := Label{
+                        width: Fill
+                        margin: Inset{top: 6}
+                        text: ""
+                        draw_text +: {
+                            color: theme.color_text_meta
+                            text_style: theme.font_regular{font_size: 8.0}
+                        }
+                    }
+                }
+            }
             ConfirmRow := Row{
                 padding: Inset{left: 12 right: 12 top: 6 bottom: 6}
                 RoundedView{
@@ -1215,6 +1258,10 @@ pub struct AiChatPanel {
     /// The window's F10 overlay made this panel; any other is the app's own chat.
     #[live(false)]
     in_overlay: bool,
+    /// The model may research online, where its provider can (`EngineCore::set_web_research`):
+    /// an app whose answers depend on facts from the web turns it on.
+    #[live(false)]
+    web_research: bool,
     /// Pictures waiting for the next line.
     #[rust]
     attachments: Vec<Dropped>,
@@ -1579,6 +1626,7 @@ impl AiChatPanel {
             let (model, rows): (Box<dyn makepad_ai_services::Model>, Vec<ProviderRow>) =
                 (Box::new(NoModelWithReason::new("this build has no model runtime")), Vec::new());
             let mut core = EngineCore::new(self.registry.clone(), model, None, lease_id);
+            core.set_web_research(self.web_research);
             // The state is the panel's window into the core; the core owns
             // it, so provider facts go in through the core.
             self.provider_rows = rows.clone();
@@ -2818,6 +2866,34 @@ impl Widget for AiChatPanel {
                         self.draw_card(cx, &row, call_id, card, &values);
                         row
                     }
+                    Entry::Tool(t) if t.ask.is_some() => {
+                        let row = list.item(cx, index, id!(AskRow));
+                        let ask = t.ask.as_ref().unwrap();
+                        let waiting = ask.answer.is_none() && !t.status.is_done();
+                        row.label(cx, ids!(ask_question)).set_text(cx, &ask.question);
+                        for (k, id) in ASK_BUTTONS.iter().enumerate() {
+                            let button = row.button(cx, &[*id]);
+                            match ask.choices.get(k) {
+                                Some(choice) if waiting => {
+                                    button.set_text(cx, choice);
+                                    button.set_visible(cx, true);
+                                }
+                                _ => button.set_visible(cx, false),
+                            }
+                        }
+                        row.view(cx, ids!(ask_choices)).set_visible(cx, waiting && !ask.choices.is_empty());
+                        let hint = if waiting {
+                            if ask.choices.is_empty() { "Type your answer below." } else { "Or type your own answer below." }
+                        } else if ask.answer.is_some() {
+                            ""
+                        } else {
+                            "Not answered."
+                        };
+                        let hint_label = row.label(cx, ids!(ask_hint));
+                        hint_label.set_text(cx, hint);
+                        hint_label.set_visible(cx, !hint.is_empty());
+                        row
+                    }
                     Entry::Tool(t) if matches!(t.status, ToolStatus::Confirm) => {
                         let row = list.item(cx, index, id!(ConfirmRow));
                         row.label(cx, ids!(confirm_title)).set_text(cx, &format!("{} changes things outside the app. Run it?", Self::tool_line(t)));
@@ -3127,6 +3203,18 @@ impl WidgetMatchEvent for AiChatPanel {
                 }
             }
             for (item, call_id) in cards {
+                // a proposed answer: sent as the person's line, which answers the question
+                let picked = ASK_BUTTONS.iter().position(|id| item.button(cx, &[*id]).clicked(actions)).and_then(|k| {
+                    self.ensure_engine().state().tool(&call_id)
+                        .and_then(|t| t.ask.as_ref())
+                        .filter(|ask| ask.answer.is_none())
+                        .and_then(|ask| ask.choices.get(k).cloned())
+                });
+                if let Some(choice) = picked {
+                    self.send(cx, choice);
+                    self.view.redraw(cx);
+                    continue;
+                }
                 if self.card_actions(cx, item, actions, &call_id, now) {
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(tool_stop)).clicked(actions) || item.button(cx, ids!(task_stop)).clicked(actions) {

@@ -75,10 +75,17 @@ const CLOSE: &str = "</tool_call>";
 const MAX_CALLS_PER_REPLY: usize = 16;
 
 /// The protocol paragraph and the tool table, appended to the system.
-fn tool_protocol(tools: &[ToolDefinition]) -> String {
-    let mut out = String::from(
-        "\n# How to use the tools\n\
-         You act ONLY through the tools listed below; you have no file, shell or web access. \
+fn tool_protocol(tools: &[ToolDefinition], web: bool) -> String {
+    let access = if web {
+        "You act through the tools listed below; you have no file or shell access. \
+         For facts you do not know for sure (a product's exact dimensions, a standard's sizes, a datasheet), \
+         research online with your own WebSearch and WebFetch tools, and say where each number came from. "
+    } else {
+        "You act ONLY through the tools listed below; you have no file, shell or web access. "
+    };
+    let mut out = format!("\n# How to use the tools\n{access}");
+    out.push_str(
+        "\
          To call tools, end your reply with one or more blocks, each exactly:\n\
          <tool_call>{\"name\": \"<tool name>\", \"arguments\": {...}}</tool_call>\n\
          Write nothing after the last block, and never write a result yourself: the real results come in the next message. Several blocks in one reply run in order, and all their \
@@ -236,6 +243,11 @@ pub struct CliModel {
     images: Vec<ModelImage>,
     next_call: u64,
     queued: Vec<ModelEvent>,
+    /// The system and tool table as configured, kept to rebuild `system` when web research
+    /// turns on or off.
+    base: (String, Vec<ToolDefinition>),
+    /// The CLI's own web search and fetch are on (`Model::set_web_research`).
+    web: bool,
 }
 
 impl CliModel {
@@ -263,6 +275,8 @@ impl CliModel {
             images: Vec::new(),
             next_call: 0,
             queued: Vec::new(),
+            base: (String::new(), Vec::new()),
+            web: false,
         }
     }
 
@@ -450,8 +464,22 @@ impl Model for CliModel {
 
     fn configure(&mut self, system: &str, tools: &[ToolDefinition]) -> Result<(), String> {
         // Stateless per turn: the next turn carries the new table.
-        self.system = format!("{}\n{}", system.trim_end(), tool_protocol(tools));
+        self.base = (system.to_string(), tools.to_vec());
+        self.system = format!("{}\n{}", system.trim_end(), tool_protocol(tools, self.web));
         Ok(())
+    }
+
+    fn set_web_research(&mut self, on: bool) {
+        // Only Claude Code has web tools to turn on; the next turn starts with them.
+        if self.kind != CliKind::ClaudeCode || self.web == on {
+            return;
+        }
+        self.web = on;
+        self.provider.cancel();
+        self.provider = Box::new(CliModel::claude_provider(self.model.as_deref()).web(on));
+        if !self.base.0.is_empty() || !self.base.1.is_empty() {
+            self.system = format!("{}\n{}", self.base.0.trim_end(), tool_protocol(&self.base.1, on));
+        }
     }
 
     fn send_user(&mut self, text: &str, dynamic_context: &str) {
@@ -530,6 +558,21 @@ impl Model for CliModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_research_tells_the_model_it_may_look_things_up() {
+        let tools = vec![ToolDefinition { name: "fab.guide".into(), description: "The guide.".into(), parameters: r#"{"type":"object","properties":{}}"#.into() }];
+        let mut m = CliModel::new(CliKind::ClaudeCode);
+        m.configure("sys", &tools).unwrap();
+        assert!(m.system.contains("no file, shell or web access"));
+        m.set_web_research(true);
+        assert!(m.system.contains("WebSearch") && !m.system.contains("web access"), "{}", m.system);
+        assert!(m.system.contains("fab.guide"), "the tool table stays");
+        let mut codex = CliModel::new(CliKind::Codex);
+        codex.configure("sys", &tools).unwrap();
+        codex.set_web_research(true);
+        assert!(codex.system.contains("no file, shell or web access"), "only Claude Code has web tools here");
+    }
 
     #[test]
     fn safe_end_never_cuts_inside_a_character() {

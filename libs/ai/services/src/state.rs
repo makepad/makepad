@@ -171,6 +171,20 @@ pub struct ToolEntry {
     /// The call's task card (an AI hub job's picture, stage, host and, once done, what
     /// came of it): drawn in place of the one-line row. `None` for a plain call.
     pub task: Option<TaskCard>,
+    /// A question the model asked the person (`chat.ask`): drawn as the question with its
+    /// proposed answers to click. `None` for every other call.
+    pub ask: Option<Ask>,
+}
+
+/// A question of the model's to the person (`chat.ask`). The person answers with a click on
+/// one of `choices` or with a line of their own; either is the call's result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub question: String,
+    /// Proposed answers, at most [`crate::engine::MAX_ASK_CHOICES`]; empty for an open question.
+    pub choices: Vec<String>,
+    /// The person's answer once given.
+    pub answer: Option<String>,
 }
 
 /// A one-click starting point in the empty conversation: clicking it opens
@@ -376,6 +390,7 @@ mod tests {
                 expanded: false,
                 card: None,
                 task: None,
+                ask: None,
             })
         };
         s.push(card("a"));

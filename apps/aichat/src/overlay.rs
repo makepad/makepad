@@ -226,6 +226,7 @@ mod tests {
             expanded: false,
             card: None,
             task: None,
+            ask: None,
         }));
         state.generation = 7;
         let json = transcript_json(&state);
