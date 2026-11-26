@@ -11,10 +11,13 @@ use makepad_network::SignalToUI;
 use makepad_widgets::makepad_platform::video_file::{DecodedPicture, StreamVideoCodec, VideoColor, VideoStreamDecoder};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use crate::history::{HistPacket, History, CHANGE_BYTES, KEY_EVERY};
+use crate::clipboard::ClipboardLink;
+
+pub const NO_CLIPBOARD: &str = "no clipboard: update Desk Link on this desktop";
 
 /// This process's clock (ns): the viewer side of every latency figure.
 pub fn now_ns() -> u64 {
@@ -40,6 +43,7 @@ pub struct Welcome {
     pub input: bool,
     pub input_note: String,
     pub server: String,
+    pub clipboard: bool,
 }
 
 /// How far back the clock offset looks for its smallest round trip.
@@ -130,6 +134,10 @@ pub struct Shared {
     /// Counts the sessions (each `Welcome`): input held on an ended one was let go by the
     /// desktop.
     pub session: u64,
+    /// The newest complete clipboard text waiting for the UI, with its session.
+    pub clipboard: Option<(u64, String)>,
+    /// The UI reads the local clipboard when the focused window's session opens.
+    pub clipboard_opened: bool,
     /// Round trip of the last ping (ms).
     pub rtt_ms: Option<f64>,
     /// server clock - viewer clock (ns): the smallest-RTT ping of the last `OFFSET_WINDOW`.
@@ -155,6 +163,12 @@ pub struct Shared {
     /// Pictures decoded but never shown (see `Assembly::dropped`), counted up by the decoders;
     /// the view reads and resets it once a second.
     pub dropped: u32,
+}
+
+impl Shared {
+    pub fn clipboard_session(&self) -> Option<u64> {
+        self.welcome.as_ref().filter(|w| w.clipboard).map(|_| self.session)
+    }
 }
 
 /// A decoded part of a picture: its pixels from column `x0`, row `y0` on (all of it, or one
@@ -207,6 +221,7 @@ pub struct Connection {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub clipboard: ClipboardLink,
     pub shared: Arc<Mutex<Shared>>,
     pub latest: Arc<Mutex<Option<Picture>>>,
     /// The received bitstream of the last seconds (always recorded).
@@ -236,7 +251,7 @@ impl Drop for Connection {
 
 impl Connection {
     /// Opens (and keeps reopening) the connection; `paused` until [`Connection::show`].
-    pub fn open(name: String, host: String, port: u16, paused: bool, signal: SignalToUI) -> Connection {
+    pub fn open(name: String, host: String, port: u16, paused: bool, signal: SignalToUI, clipboard_signal: SignalToUI) -> Connection {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let latest = Arc::new(Mutex::new(None));
         let history = Arc::new(Mutex::new(History::default()));
@@ -247,7 +262,7 @@ impl Connection {
         let max_backoff = Duration::from_secs(30);
         let view = Arc::new(ViewWindow::default());
         let semantic = crate::a11y::register(&name, tx.clone());
-        let net = Net { semantic: semantic.clone(), host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, cmd: tx.clone(), max_backoff };
+        let net = Net { semantic: semantic.clone(), host: host.clone(), port, shared: shared.clone(), latest: latest.clone(), history: history.clone(), view: view.clone(), rx, paused: paused.clone(), stop: stop.clone(), reconnect: reconnect.clone(), signal, clipboard_signal, cmd: tx.clone(), max_backoff };
         let thread = match std::thread::Builder::new().name(format!("desklink-net-{host}")).spawn(move || net.run()) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -255,7 +270,7 @@ impl Connection {
                 None
             }
         };
-        Connection { name, host, port, shared, latest, history, view, tx, semantic, paused, stop, reconnect, thread }
+        Connection { name, host, port, clipboard: ClipboardLink::default(), shared, latest, history, view, tx, semantic, paused, stop, reconnect, thread }
     }
 
     /// A desktop played from an Annex-B dump (dev: `--dump-play`): its pictures decoded the way
@@ -272,7 +287,7 @@ impl Connection {
         let (s, l, h, st) = (shared.clone(), latest.clone(), history.clone(), stop.clone());
         let thread = std::thread::Builder::new().name("desklink-dump".into()).spawn(move || play_loop(path, gpu, still, s, l, h, st, signal)).ok();
         let semantic = crate::a11y::register("dump", tx.clone());
-        Connection { semantic, name: "dump".into(), host: "dump".into(), port: 0, shared, latest, history, view: Arc::new(ViewWindow::default()), tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
+        Connection { semantic, name: "dump".into(), host: "dump".into(), port: 0, clipboard: ClipboardLink::default(), shared, latest, history, view: Arc::new(ViewWindow::default()), tx, paused: Arc::new(AtomicBool::new(false)), stop, reconnect: Arc::new(AtomicBool::new(false)), thread }
     }
 
     pub fn send(&self, msg: ClientMsg) {
@@ -314,6 +329,7 @@ struct Net {
     stop: Arc<AtomicBool>,
     reconnect: Arc<AtomicBool>,
     signal: SignalToUI,
+    clipboard_signal: SignalToUI,
     cmd: Sender<ClientMsg>,
     max_backoff: Duration,
 }
@@ -378,6 +394,19 @@ impl Net {
         }
     }
 
+    fn write_pending(&self, stream: &mut dyn std::io::Write, clipboard: bool) -> Result<(), String> {
+        while let Ok(msg) = self.rx.try_recv() {
+            match &msg {
+                // A reconnect may have left some of the old session's text in the queue.
+                ClientMsg::ClipboardPart { .. } | ClientMsg::Clipboard { .. } if !clipboard => continue,
+                ClientMsg::A11yQuery { req, .. } if !self.semantic.pending(*req) => continue,
+                _ => {}
+            }
+            proto::write_all(stream, &msg.encode()).map_err(|e| format!("write: {e}"))?;
+        }
+        Ok(())
+    }
+
     fn session(&self) -> Result<String, String> {
         // the desktop proves itself with its fleet certificate (checked against the fleet root);
         // the hello carries this machine's proof bound to that certificate
@@ -389,7 +418,7 @@ impl Net {
             authorization,
             screen: -1,
             paused: self.paused.load(Ordering::Acquire),
-            caps: decoder_caps(),
+            caps: decoder_caps() | proto::caps::CLIPBOARD,
         };
         proto::write_all(&mut stream, &hello.encode()).map_err(|e| format!("hello: {e}"))?;
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
@@ -407,6 +436,9 @@ impl Net {
         let (mut read_gap, mut queue_max, mut last_read) = (Duration::ZERO, 0usize, Instant::now());
 
         let mut inbox = Inbox::default();
+        let mut desktop_caps = 0;
+        let mut clipboard = false;
+        let mut clipboard_parts = proto::ClipboardParts::default();
         let mut buf = vec![0u8; 512 << 10];
         let mut last_ping = Instant::now() - Duration::from_secs(10);
         let mut second = (Instant::now(), 0u32, 0usize);
@@ -422,11 +454,7 @@ impl Net {
         let result = loop {
             if self.stop.load(Ordering::Acquire) {
                 // what was sent before the close still goes out (the ups of held keys at quit)
-                while let Ok(msg) = self.rx.try_recv() {
-                    if proto::write_all(&mut stream, &msg.encode()).is_err() {
-                        break;
-                    }
-                }
+                let _ = self.write_pending(&mut stream, clipboard);
                 break Ok("closed".into());
             }
             if self.reconnect.load(Ordering::Acquire) {
@@ -481,22 +509,7 @@ impl Net {
             if last_heard.elapsed() > Duration::from_secs(6) {
                 break Err("the desktop stopped answering".into());
             }
-            let mut failed = None;
-            loop {
-                match self.rx.try_recv() {
-                    Ok(msg) => {
-                        if let ClientMsg::A11yQuery { req, .. } = &msg {
-                            if !self.semantic.pending(*req) { continue; }
-                        }
-                        if let Err(e) = proto::write_all(&mut stream, &msg.encode()) {
-                            failed = Some(format!("write: {e}"));
-                            break;
-                        }
-                    }
-                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-                }
-            }
-            if let Some(e) = failed {
+            if let Err(e) = self.write_pending(&mut stream, clipboard) {
                 break Err(e);
             }
             read_gap = read_gap.max(last_read.elapsed());
@@ -526,14 +539,25 @@ impl Net {
                 };
                 last_heard = Instant::now();
                 match msg {
+                    ServerMsg::DesktopCaps { caps } => desktop_caps |= caps,
                     ServerMsg::Welcome { screens, screen, stream: size, input, input_note, server, .. } => {
+                        clipboard = std::mem::take(&mut desktop_caps) & proto::desktop_caps::CLIPBOARD != 0;
+                        clipboard_parts = proto::ClipboardParts::default();
+                        if !clipboard {
+                            eprintln!("desklink: {server} · {NO_CLIPBOARD}");
+                        }
                         self.history.lock().unwrap().stream_size = size;
                         let mut s = self.shared.lock().unwrap();
-                        s.welcome = Some(Welcome { screens, screen, stream: size, input, input_note, server });
+                        s.welcome = Some(Welcome { screens, screen, stream: size, input, input_note, server, clipboard });
                         s.session += 1;
+                        s.clipboard_opened = clipboard;
+                        s.clipboard = None;
                         s.state = Some(State::Connected);
                         drop(s);
                         self.semantic.connected(true);
+                        if clipboard {
+                            self.clipboard_signal.set();
+                        }
                         self.signal.set();
                     }
                     ServerMsg::Refused { reason } => {
@@ -592,7 +616,20 @@ impl Net {
                     }
                     ServerMsg::A11yReplyPart { req, text } => self.semantic.reply_part(req, &text),
                     ServerMsg::A11yReply { req, text } => self.semantic.reply(req, text),
-                    ServerMsg::Clipboard { .. } => {}
+                    ServerMsg::ClipboardPart { text } => {
+                        if clipboard {
+                            clipboard_parts.part(&text);
+                        }
+                    }
+                    ServerMsg::Clipboard { text } => {
+                        if clipboard {
+                            let text = clipboard_parts.end(text);
+                            let mut s = self.shared.lock().unwrap();
+                            s.clipboard = Some((s.session, text));
+                            drop(s);
+                            self.clipboard_signal.set();
+                        }
+                    }
                 }
             }
             if let Some(end) = ended {
@@ -608,13 +645,15 @@ impl Net {
                 second = (Instant::now(), 0, 0);
             }
         };
-        drop(dec_tx);
-        let _ = decoder.join();
         {
             let mut s = self.shared.lock().unwrap();
             s.welcome = None;
+            s.clipboard = None;
+            s.clipboard_opened = false;
             s.pongs.clear();
         }
+        drop(dec_tx);
+        let _ = decoder.join();
         result
     }
 }

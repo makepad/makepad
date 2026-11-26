@@ -315,7 +315,7 @@ fn start(desktop: &mut dyn Desktop, settings: &dyn Fn() -> HostSettings, status:
         }
         let wake_tx = ctl.wake.clone();
         let started = now.listen.clone().and_then(|addr| {
-            let config = ServerConfig { addr, tls_name: now.tls_name.clone(), log: log.clone(), clock: clock_ns, input: desktop.input() };
+            let config = ServerConfig { addr, tls_name: now.tls_name.clone(), log: log.clone(), clock: clock_ns, input: desktop.input(), desktop_caps: 0 };
             Server::start(config, Arc::new(move || {
                 let _ = wake_tx.send(());
             }))

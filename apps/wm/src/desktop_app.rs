@@ -651,15 +651,10 @@ impl App {
             self.minimize_desktop(cx, client);
             return true;
         }
+        // Super+Z is the app's undo (the Mac-style editing keys): the snap
+        // picker opens from the maximise button.
         if style == DesktopStyle::Windows {
             match e.key_code {
-                KeyCode::KeyZ => {
-                    let area=crate::spacewarp::band_of(self.desk_area(cx));
-                    let anchor=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.chrome_button_rect(client,ChromeHit::Maximize));
-                    self.state_mut().snap.picker=Some(crate::snap::Picker::new(client,area,anchor));
-                    self.state_mut().snap.area=Some(area);
-                    self.redraw_all(cx);
-                }
                 KeyCode::ArrowUp => self.maximise_toggle(cx, client),
                 KeyCode::ArrowDown => {
                     if self

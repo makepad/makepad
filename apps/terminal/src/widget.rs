@@ -2198,7 +2198,7 @@ impl Widget for MpTerm {
                         KeyAction::Press
                     };
                     self.send_key(cx, key, &e.modifiers, action, "", 0);
-                } else if e.modifiers.control && !e.modifiers.logo {
+                } else if e.modifiers.control && !e.modifiers.logo && !clipboard_chord(&e.modifiers, e.key_code) {
                     if let Some(ch) = e.key_code.to_char(e.modifiers.shift) {
                         let key = letter_key(ch).unwrap_or(Key::Unidentified);
                         let action = if e.is_repeat {
@@ -2222,7 +2222,10 @@ impl Widget for MpTerm {
                     return;
                 }
                 if e.was_paste {
-                    self.paste(cx, &e.input);
+                    // Ctrl+V is ^V here (its key goes to the shell); Super+V pastes
+                    if !control_chord(&cx.keyboard.held_modifiers()) {
+                        self.paste(cx, &e.input);
+                    }
                 } else {
                     let filtered: String = e
                         .input
@@ -2240,7 +2243,8 @@ impl Widget for MpTerm {
                     }
                 }
             }
-            Hit::TextCopy(e) => {
+            // Ctrl+C is the interrupt (its key goes to the shell), never a copy; Super+C copies
+            Hit::TextCopy(e) if !control_chord(&cx.keyboard.held_modifiers()) => {
                 if let Some(text) = self.selected_text() {
                     *e.response.borrow_mut() = Some(text);
                 }
@@ -2248,6 +2252,19 @@ impl Widget for MpTerm {
             _ => {}
         }
     }
+}
+
+/// A Control chord as the shell takes it (Control without Logo or Shift: Ctrl-C is the
+/// interrupt, Ctrl-V the literal next): the platform's copy chord and paste text, which come for
+/// Control or Logo, are not the terminal's then. Super-C/V (the Mac-style keys, a Mac's Cmd over
+/// Desk Link) and Ctrl+Shift+C/V (the Linux terminal's) copy and paste.
+fn control_chord(held: &KeyModifiers) -> bool {
+    held.control && !held.logo && !held.shift
+}
+
+/// Ctrl+Shift+C / Ctrl+Shift+V: the terminal's copy and paste, not keys for the shell.
+fn clipboard_chord(modifiers: &KeyModifiers, key: KeyCode) -> bool {
+    modifiers.control && modifiers.shift && !modifiers.logo && matches!(key, KeyCode::KeyC | KeyCode::KeyV)
 }
 
 impl MpTerm {
@@ -2359,7 +2376,23 @@ fn letter_key(ch: char) -> Option<Key> {
 
 #[cfg(test)]
 mod tests {
-    use super::BellFlash;
+    use super::{clipboard_chord, control_chord, BellFlash};
+    use makepad_widgets::{KeyCode, KeyModifiers};
+
+    /// Ctrl-C and Ctrl-V are the shell's (interrupt, literal next); Super-C/V and
+    /// Ctrl+Shift+C/V are the terminal's copy and paste.
+    #[test]
+    fn control_chords_are_the_shells_and_super_chords_copy() {
+        let m = |control, shift, logo| KeyModifiers { control, shift, logo, alt: false };
+        assert!(control_chord(&m(true, false, false)), "Ctrl-C does not copy, Ctrl-V does not paste");
+        assert!(!control_chord(&m(false, false, true)), "Super-C copies, Super-V pastes");
+        assert!(!control_chord(&m(true, true, false)), "Ctrl+Shift+C copies, Ctrl+Shift+V pastes");
+        assert!(!control_chord(&m(true, false, true)), "Ctrl+Super: the Super chord's");
+        assert!(!control_chord(&m(false, false, false)), "a menu's copy (nothing held) copies");
+        assert!(clipboard_chord(&m(true, true, false), KeyCode::KeyC) && clipboard_chord(&m(true, true, false), KeyCode::KeyV));
+        assert!(!clipboard_chord(&m(true, false, false), KeyCode::KeyC), "Ctrl-C goes to the shell");
+        assert!(!clipboard_chord(&m(true, true, false), KeyCode::KeyD), "Ctrl+Shift+D goes to the shell");
+    }
 
     #[test]
     fn bell_ring_starts_rising() {

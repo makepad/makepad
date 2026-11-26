@@ -22,6 +22,7 @@ fn config(addr: SocketAddr) -> ServerConfig {
     ServerConfig {
         addr,
         tls_name: "makepad desk link test".into(),
+        desktop_caps: 0,
         log: Arc::new(|t: &str| eprintln!("{t}")),
         clock: || 0,
         input: Arc::new(|| Err("view only in this test".to_string())),

@@ -3939,6 +3939,7 @@ impl App {
                 // the flavours the client sent just ahead of its text
                 let flavours = self.clip_flavours.take().filter(|(from, _)| *from == client).map(|(_, f)| f);
                 cx.copy_to_clipboard_flavours(ClipboardWrite::with_hosted(text.clone(), flavours));
+                self.desk_link.clipboard_changed(&text);
                 // the Wayland clients (a browser) paste it too
                 wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text });
             }
@@ -7763,6 +7764,7 @@ impl AppMain for App {
         // app's copy arrives as SetClipboard; its tile leaves the response empty).
         if let Event::TextCopy(e) | Event::TextCut(e) = event {
             if let Some(text) = e.response.borrow().clone().filter(|t| !t.is_empty()) {
+                self.desk_link.clipboard_changed(&text);
                 wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text });
             }
         }

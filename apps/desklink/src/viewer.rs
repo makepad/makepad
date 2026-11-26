@@ -165,6 +165,14 @@ impl Viewer {
     pub fn widget(&self, cx: &mut Cx, path: &[LiveId]) -> WidgetRef {
         self.window.widget(cx, path)
     }
+
+    fn drives_keyboard(&self) -> bool {
+        self.keyboard && self.scrub.is_none()
+    }
+
+    fn menu_open(&self, cx: &mut Cx) -> bool {
+        self.widget(cx, ids!(menu)).borrow::<PopMenu>().is_some_and(|m| m.is_open())
+    }
 }
 
 impl App {
@@ -222,6 +230,7 @@ impl App {
         }
         self.claim_size(cx, vi);
         self.sync_shown();
+        self.read_local_clipboard(cx, vi);
         self.restore_dirty = true;
         self.refresh_viewer(cx, vi);
         selftest(&format!("window {vi} shows {}", self.conns[conn].name));
@@ -421,6 +430,99 @@ impl App {
         }
     }
 
+    fn clipboard_target(&self, vi: usize) -> Option<(WindowId, usize)> {
+        let v = self.viewers.get(vi)?;
+        let window = v.window_id()?;
+        if !v.visible || self.clipboard_window != Some(window) {
+            return None;
+        }
+        Some((window, v.selected?))
+    }
+
+    /// The programmatic read on focus, tab selection or session open.
+    pub fn read_local_clipboard(&mut self, cx: &mut Cx, vi: usize) {
+        let Some((window, ci)) = self.clipboard_target(vi) else { return };
+        let session = {
+            let mut s = self.conns[ci].shared.lock().unwrap();
+            s.clipboard_opened = false;
+            s.clipboard_session()
+        };
+        self.clipboard_read = session.map(|session| (window, ci, session, cx.read_clipboard()));
+    }
+
+    pub fn clipboard_reply(&mut self, request: u64, text: Option<&str>) {
+        let Some((window, ci, session, _)) = self.clipboard_read.filter(|r| r.3 == request) else { return };
+        self.clipboard_read = None;
+        if self.clipboard_target(self.focused) == Some((window, ci)) {
+            if let Some(text) = text {
+                self.offer_clipboard(ci, Some(session), text);
+            }
+        }
+    }
+
+    pub fn paste_clipboard(&mut self, cx: &mut Cx, text: &str) {
+        let vi = self.focused;
+        let Some((_, ci)) = self.clipboard_target(vi) else { return };
+        let v = &self.viewers[vi];
+        if v.drives_keyboard() && !v.menu_open(cx) {
+            // This paste is newer than a read still in flight.
+            self.clipboard_read = None;
+            self.offer_clipboard(ci, None, text);
+        }
+    }
+
+    fn offer_clipboard(&mut self, ci: usize, expected: Option<u64>, text: &str) {
+        // a paste with no text here (an image, a file) leaves the desktop's clipboard alone
+        if text.is_empty() {
+            return;
+        }
+        let c = &mut self.conns[ci];
+        let (session, clipboard) = {
+            let s = c.shared.lock().unwrap();
+            (s.session, s.clipboard_session().is_some())
+        };
+        if expected.is_some_and(|id| id != session) {
+            return;
+        }
+        let messages = c.clipboard.offer(session, clipboard, text);
+        if messages.is_empty() {
+            return;
+        }
+        // Cutting a long text can outlast its session. Queue it only while that session is up.
+        let s = c.shared.lock().unwrap();
+        if s.clipboard_session() == Some(session) {
+            for msg in messages {
+                c.send(msg);
+            }
+            drop(s);
+            selftest(&format!("clipboard: {} bytes to {}", text.len(), c.name));
+        }
+    }
+
+    pub fn refresh_clipboards(&mut self, cx: &mut Cx) {
+        if let Some(ci) = self.viewers.get(self.focused).and_then(|v| v.selected) {
+            let opened = std::mem::take(&mut self.conns[ci].shared.lock().unwrap().clipboard_opened);
+            if opened {
+                self.read_local_clipboard(cx, self.focused);
+            }
+        }
+        for (ci, c) in self.conns.iter_mut().enumerate() {
+            let incoming = {
+                let mut s = c.shared.lock().unwrap();
+                s.clipboard.take().filter(|(session, _)| s.clipboard_session() == Some(*session))
+            };
+            if let Some((session, text)) = incoming {
+                // A reply from before this copy would put the desktop's old text back.
+                if self.clipboard_read.is_some_and(|(_, c, id, _)| c == ci && id == session) {
+                    self.clipboard_read = None;
+                }
+                cx.copy_to_clipboard(&text);
+                c.clipboard.received(session, &text);
+                selftest(&format!("clipboard: {} bytes from {}", text.len(), c.name));
+            }
+        }
+    }
+
     fn tab_infos(&self, vi: usize) -> Vec<TabInfo> {
         // every machine the app knows, in every window; only the selection differs
         let v = &self.viewers[vi];
@@ -532,7 +634,15 @@ impl App {
                 let screen = w.screens.get(w.screen as usize).map(|s| s.name.clone()).unwrap_or_default();
                 // the desktop's own name, and the fleet machine its certificate proved
                 let machine = machine.as_ref().map(|m| format!(" (fleet: {m})")).unwrap_or_default();
-                lines.push(format!("{}{machine} · {screen} {}x{}{}", w.server, w.stream[0], w.stream[1], if w.input { String::new() } else { format!(" · {}", w.input_note) }));
+                let mut desktop = format!("{}{machine} · {screen} {}x{}", w.server, w.stream[0], w.stream[1]);
+                if !w.input {
+                    desktop.push_str(&format!(" · {}", w.input_note));
+                }
+                if !w.clipboard {
+                    desktop.push_str(" · ");
+                    desktop.push_str(crate::conn::NO_CLIPBOARD);
+                }
+                lines.push(desktop);
                 // how the picture is shown: the window in device pixels, the scale (whole: each
                 // remote pixel a whole block, nothing resampled)
                 lines.push(format!("window {}x{} px{} · scale {:.4}{}", v.window_px[0], v.window_px[1], if v.fullscreen { " (fullscreen)" } else { "" }, view.scale, if view.whole { " whole-pixel" } else { " resampled" }));
@@ -701,8 +811,7 @@ impl App {
             return;
         }
         // an open menu takes the keys (Escape closes it)
-        let menu_open = self.viewers[vi].widget(cx, ids!(menu)).borrow::<PopMenu>().is_some_and(|m| m.is_open());
-        if menu_open {
+        if self.viewers[vi].menu_open(cx) {
             return;
         }
         let v = &self.viewers[vi];
@@ -710,7 +819,7 @@ impl App {
         if down && (paused || (!v.keyboard && cx.key_focus().is_empty())) && self.scrub_key(cx, vi, e) {
             return;
         }
-        if down && self.viewers[vi].keyboard && !paused {
+        if down && self.viewers[vi].drives_keyboard() {
             if let Some(ci) = self.viewers[vi].selected.filter(|i| *i < self.conns.len()) {
                 self.input_on(vi, ci);
                 let keycode = e.key_code.to_index();

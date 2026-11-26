@@ -14,9 +14,12 @@
 //!    it keeps the SUPER and SUPER+CTRL laws untouched. macOS eats a couple
 //!    of these itself (Cmd+Alt+Space is Finder search, Cmd+Alt+D the dock),
 //!    which is what the second way is for.
-//! 2. **SUPER+A as a one-shot prefix**: press it and the *next* key is read
-//!    on the SUPER+ALT layer. SUPER+A is unbound in every Omarchy binding
-//!    file, so nothing is lost.
+//! 2. **SUPER+A as a one-shot prefix**, in the Ctrl+Alt spelling only
+//!    (Ctrl+Alt+A): press it and the *next* key is read on the SUPER+ALT
+//!    layer. SUPER+A is unbound in every Omarchy binding file, and with the
+//!    Logo key SUPER+ALT is typed directly, so Logo+A stays the app's: Super
+//!    is the Mac-style editing key on Linux (select all), and a Mac's Cmd
+//!    arrives as Super over Desk Link.
 //!
 //! The cheat sheet (SUPER+K) renders the real combos for the current OS.
 
@@ -282,7 +285,7 @@ pub fn keymap() -> Vec<Bind> {
         Bind { layer: SuperCtrl, key: Backtick, action: WmAction::SpacewarpCycle, help: "Bring the next parked window to the centre" },
         Bind { layer: SuperShiftCtrl, key: Space, action: WmAction::ThemeMenu, help: "Theme menu" },
         Bind { layer: SuperCtrl, key: KeyS, action: WmAction::NextSkin, help: "Window skin" },
-        // ---- nested-mode helper (see the module note).
+        // ---- nested-mode helper (see the module note): Ctrl+Alt+A only.
         Bind { layer: Super, key: KeyA, action: WmAction::ArmAltLayer, help: "Arm the SUPER+ALT layer for one key" },
     ];
     // SUPER+1..9 slide to space n (0 makes a new desktop); +SHIFT moves the
@@ -434,10 +437,20 @@ fn prefix_text(layer: Layer, spelling: Spelling) -> String {
     }
 }
 
+/// Whether a bind is read in this spelling: the SUPER+ALT prefix only in
+/// Ctrl+Alt's (with the Logo key SUPER+ALT is typed directly, and Logo+A is
+/// the app's select all).
+fn spelled(bind: &Bind, spelling: Spelling) -> bool {
+    bind.action != WmAction::ArmAltLayer || spelling == Spelling::CtrlAlt
+}
+
 /// Human-readable combo for the cheat sheet: the ⌘ spelling first, the
 /// Ctrl+Alt fallback in parentheses where they differ.
 pub fn combo_text(bind: &Bind) -> String {
     let key = key_text(bind.key);
+    if !spelled(bind, Spelling::Logo) {
+        return format!("{}+{}", prefix_text(bind.layer, Spelling::CtrlAlt), key);
+    }
     let first = format!("{}+{}", prefix_text(bind.layer, Spelling::Logo), key);
     if spellings().len() < 2 {
         return first;
@@ -465,6 +478,7 @@ pub fn match_bind_armed(
     for spelling in spellings() {
         for bind in &binds {
             if bind.key == key_code
+                && spelled(bind, *spelling)
                 && layer_matches(bind.layer, modifiers, alt_armed, *spelling)
             {
                 return Some(bind.action.clone());
@@ -594,6 +608,22 @@ mod tests {
             match_bind_armed(KeyCode::KeyS, &fallback_sup(), true),
             Some(WmAction::MoveToScratchpad)
         );
+    }
+
+    /// Super+A/C/V/X/Z and Super+Shift+Z are the focused app's editing keys
+    /// (select all, copy, paste, cut, undo, redo): no bind takes them. The
+    /// SUPER+ALT prefix stays on Ctrl+Alt+A.
+    #[test]
+    fn the_editing_keys_go_to_the_app() {
+        let logo = mods(false, false, false, true);
+        let shift_logo = mods(true, false, false, true);
+        for key in [KeyCode::KeyA, KeyCode::KeyC, KeyCode::KeyV, KeyCode::KeyX, KeyCode::KeyZ] {
+            assert_eq!(match_bind(key, &logo), None, "Logo+{key:?} is the app's");
+        }
+        assert_eq!(match_bind(KeyCode::KeyZ, &shift_logo), None, "Logo+Shift+Z is the app's redo");
+        assert_eq!(match_bind(KeyCode::KeyA, &fallback_sup()), Some(WmAction::ArmAltLayer));
+        let bind = keymap().into_iter().find(|b| b.action == WmAction::ArmAltLayer).unwrap();
+        assert_eq!(combo_text(&bind), "Ctrl+Alt+A", "the cheat sheet shows the one spelling");
     }
 
     #[test]

@@ -68,6 +68,7 @@ pub struct DeskLink;
 #[cfg(target_arch = "wasm32")]
 impl DeskLink {
     pub fn handle_event(&mut self, _cx: &mut makepad_widgets::Cx, _event: &makepad_widgets::Event) {}
+    pub fn clipboard_changed(&mut self, _text: &str) {}
     pub fn viewers(&self) -> Vec<DeskLinkViewer> {
         Vec::new()
     }
@@ -82,6 +83,7 @@ impl DeskLink {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use crate::wayland_host;
     use super::capture::{CaptureState, Want};
     use makepad_desk_link::server::{self, Control, Feed, Geometry, Input, Out, Server, ServerConfig, ToUi};
     use super::settings::DeskLinkSettings;
@@ -91,6 +93,7 @@ mod native {
     use makepad_widgets::makepad_platform::video_file::{StreamVideoCodec, VideoStreamEncoder};
     use makepad_desk_link::rate::effort;
     use makepad_widgets::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -109,6 +112,8 @@ mod native {
         refresh_hz: u16,
         since: std::time::Instant,
         out: std::sync::mpsc::Sender<Out>,
+        clipboard: proto::ClipboardPeer,
+        clipboard_acks: ClipboardAcks,
         /// Its pictures: backlog, pause, whether it follows the stream (`server::Feed`).
         feed: Arc<Feed>,
         /// From its last `Stats`: pictures it was behind the last one sent, its decode and
@@ -122,6 +127,30 @@ mod native {
         hevc: bool,
         /// Its `Encoding` choices.
         prefs: Prefs,
+    }
+
+    struct ClipboardRead {
+        request: u64,
+        bytes: usize,
+        answered: bool,
+    }
+
+    /// Each session needs its acks in write order, even if reads finish out of order.
+    #[derive(Default)]
+    struct ClipboardAcks(VecDeque<ClipboardRead>);
+
+    impl ClipboardAcks {
+        fn asked(&mut self, request: u64, bytes: usize) {
+            self.0.push_back(ClipboardRead { request, bytes, answered: false });
+        }
+
+        fn answered(&mut self, request: u64) -> impl Iterator<Item = usize> + '_ {
+            if let Some(read) = self.0.iter_mut().find(|read| read.request == request) {
+                read.answered = true;
+            }
+            let ready = self.0.iter().take_while(|read| read.answered).count();
+            self.0.drain(..ready).map(|read| read.bytes)
+        }
     }
 
     /// A viewer's `Encoding` (`proto::pref::*`; 0 = auto each).
@@ -252,6 +281,23 @@ mod native {
             }
         }
 
+        /// The WM's clipboard took a text: every viewer that has not got it gets it. An empty
+        /// text (a client cleared its selection) goes nowhere: it would wipe a viewer's clipboard.
+        pub fn clipboard_changed(&mut self, text: &str) {
+            if text.is_empty() {
+                return;
+            }
+            let mut sent = 0;
+            for v in self.viewers.iter_mut().filter(|v| v.session != 0) {
+                if v.clipboard.changed(text) && v.out.send(Out::Clipboard(text.to_string())).is_ok() {
+                    sent += 1;
+                }
+            }
+            if sent > 0 {
+                super::note(&format!("desk link: clipboard of {} bytes to {sent} viewers", text.len()));
+            }
+        }
+
         /// One try at the server (the settings enabled it): at the start, and again every
         /// `LAN_RETRY` while a later try can work (the LAN address not up yet at a boot, the
         /// port still held, no fleet identity yet), as the hub does for its address.
@@ -262,6 +308,7 @@ mod native {
                 Server::start(ServerConfig {
                     addr,
                     tls_name: format!("makepad desk link {host}"),
+                    desktop_caps: proto::desktop_caps::CLIPBOARD,
                     log: Arc::new(|t: &str| super::note(t)),
                     clock: makepad_hal::clock_ns,
                     input: Arc::new(|| -> Result<Box<dyn Input>, String> {
@@ -363,7 +410,7 @@ mod native {
             });
             if spawned.is_ok() {
                 self.dump_gone = Some(gone);
-                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, feed, shown: None, window: None, view_only: false, hevc: true, prefs: Prefs::default() });
+                self.viewers.push(Viewer { session: 0, name: "dump".into(), peer: String::new(), full_chroma: true, refresh_hz: 0, since: std::time::Instant::now(), out: tx, clipboard: proto::ClipboardPeer::default(), clipboard_acks: ClipboardAcks::default(), feed, shown: None, window: None, view_only: false, hevc: true, prefs: Prefs::default() });
                 self.sync_subscribers();
             }
         }
@@ -895,7 +942,7 @@ mod native {
                         };
                         let _ = out.send(Out::Msg(welcome.encode()));
                         let _ = out.send(Out::Msg(self.rate_msg(cx).encode()));
-                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, feed, shown: None, window: None, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
+                        self.viewers.push(Viewer { session, name, peer: ip, full_chroma: caps & proto::caps::FULL_CHROMA != 0, refresh_hz: 0, since: std::time::Instant::now(), out, clipboard: proto::ClipboardPeer::default(), clipboard_acks: ClipboardAcks::default(), feed, shown: None, window: None, view_only: caps & proto::caps::VIEW_ONLY != 0, hevc: caps & proto::caps::HEVC != 0, prefs: Prefs::default() });
                         self.generation = self.generation.wrapping_add(1);
                         self.sync_subscribers();
                         self.cursor = None;
@@ -936,7 +983,14 @@ mod native {
                                 super::note(&format!("desk link: {} window {width}x{height} at {:.2}x", self.viewers[i].name, scale as f64 / 100.0));
                                 self.viewers[i].window = Some((width, height, scale));
                             }
-                            Control::Clipboard(text) => cx.copy_to_clipboard(&text),
+                            Control::Clipboard(text) => {
+                                self.viewers[i].clipboard.received(&text);
+                                cx.copy_to_clipboard(&text);
+                                wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text: text.clone() });
+                                self.clipboard_changed(&text);
+                                self.viewers[i].clipboard_acks.asked(cx.read_clipboard(), text.len());
+                                continue;
+                            }
                             Control::Encoding { chroma, codec, preset, mbps, fps } => {
                                 let prefs = Prefs { chroma, codec, preset, mbps, fps };
                                 super::note(&format!("desk link: {} asks for {prefs:?}", self.viewers[i].name));
@@ -1009,6 +1063,15 @@ mod native {
         pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
             match event {
                 Event::Startup => self.start(cx),
+                Event::Clipboard(e) => {
+                    for v in &mut self.viewers {
+                        for bytes in v.clipboard_acks.answered(e.request) {
+                            if v.out.send(Out::ClipboardTaken).is_ok() {
+                                super::note(&format!("desk link: {} clipboard of {bytes} bytes taken", v.name));
+                            }
+                        }
+                    }
+                }
                 Event::Signal => {
                     if self.signal.check_and_clear() {
                         self.drain(cx);
@@ -1092,6 +1155,27 @@ mod native {
                 }
             }
             let _ = self.session_seq;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ClipboardAcks;
+
+        #[test]
+        fn clipboard_acks_follow_each_viewers_write_order() {
+            let mut first = ClipboardAcks::default();
+            let mut second = ClipboardAcks::default();
+            first.asked(1, 10);
+            second.asked(2, 0);
+            first.asked(3, 30);
+
+            assert!(first.answered(3).next().is_none(), "the earlier write is still pending");
+            assert!(first.answered(2).next().is_none(), "another viewer's reply cannot release a write");
+            assert_eq!(second.answered(2).collect::<Vec<_>>(), [0], "the second viewer can paste immediately");
+            assert!(first.answered(4).next().is_none(), "an unrelated clipboard read is ignored");
+            assert_eq!(first.answered(1).collect::<Vec<_>>(), [10, 30], "both writes are acked in order");
+            assert!(first.answered(3).next().is_none(), "each write is acked once");
         }
     }
 }

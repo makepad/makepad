@@ -22,6 +22,7 @@
 
 use crate::{self as proto, ClientMsg, GamepadState, Inbox, ServerMsg};
 use makepad_network::fleet::id::{self, now_secs, Need, Verifier};
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use makepad_network::tls::{TlsIdentity, TlsServer, TlsStream};
 use std::io::Read;
@@ -138,6 +139,53 @@ impl Drop for HeldInput {
 /// on a silent desktop after the same time.
 const SILENT: Duration = Duration::from_secs(6);
 
+/// How long a session holds a viewer's input behind a clipboard text the desktop has not taken:
+/// a desktop that never answers (a bug) costs a pause, never a dead keyboard.
+const CLIPBOARD_HOLD: Duration = Duration::from_secs(2);
+
+/// A paste chord waits for every preceding clipboard write to reach the desktop.
+#[derive(Default)]
+struct ClipboardHold {
+    waiting: VecDeque<(usize, Instant)>,
+    // A late ack belongs to an expired write before it belongs to any new write.
+    expired: usize,
+    input: Vec<ClientMsg>,
+}
+
+impl ClipboardHold {
+    fn sent(&mut self, bytes: usize, now: Instant) {
+        self.waiting.push_back((bytes, now));
+    }
+
+    fn hold(&mut self, msg: ClientMsg) -> Option<ClientMsg> {
+        if self.waiting.is_empty() {
+            return Some(msg);
+        }
+        self.input.push(msg);
+        None
+    }
+
+    fn taken(&mut self) -> Option<(usize, Instant, Vec<ClientMsg>)> {
+        if self.expired > 0 {
+            self.expired -= 1;
+            return None;
+        }
+        let (bytes, sent) = self.waiting.pop_front()?;
+        let input = if self.waiting.is_empty() { std::mem::take(&mut self.input) } else { Vec::new() };
+        Some((bytes, sent, input))
+    }
+
+    fn overdue(&mut self, now: Instant) -> Option<Vec<ClientMsg>> {
+        let &(_, oldest) = self.waiting.front()?;
+        if now.duration_since(oldest) < CLIPBOARD_HOLD {
+            return None;
+        }
+        self.expired += self.waiting.len();
+        self.waiting.clear();
+        Some(std::mem::take(&mut self.input))
+    }
+}
+
 /// Makes a session's input devices (`Err`: why the session is view-only).
 pub type InputFactory = Arc<dyn Fn() -> Result<Box<dyn Input>, String> + Send + Sync>;
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
@@ -151,6 +199,8 @@ pub struct ServerConfig {
     /// The desktop's clock (ns): `Pong`, `Video.sent_ns` (and the owner's `built_ns`).
     pub clock: fn() -> u64,
     pub input: InputFactory,
+    /// What this desktop offers a viewer that asks (`proto::desktop_caps`, zero for none).
+    pub desktop_caps: u32,
 }
 
 /// What the sessions tell the UI thread.
@@ -180,6 +230,10 @@ pub enum Out {
     Msg(Vec<u8>),
     /// An encoded `Video` message: its `sent_ns` is stamped as it is written.
     Video(Vec<u8>),
+    /// The desktop's text for a viewer that shares its clipboard.
+    Clipboard(String),
+    /// The owner read this viewer's next clipboard text back after applying it.
+    ClipboardTaken,
     Close(String),
 }
 
@@ -543,6 +597,7 @@ impl Server {
                                 log: log.clone(),
                                 clock,
                                 input: input.clone(),
+                                desktop_caps: config.desktop_caps,
                                 guard: guard.clone(),
                                 _slot: slot,
                             };
@@ -584,6 +639,7 @@ struct SessionCtx {
     log: Log,
     clock: fn() -> u64,
     input: InputFactory,
+    desktop_caps: u32,
     guard: Arc<Guard>,
     _slot: SessionSlot,
 }
@@ -660,6 +716,14 @@ impl SessionCtx {
         if let Err(why) = id::require(&peer, Need::Admin) {
             return refuse(&mut stream, format!("may not view this desktop: {why}"));
         }
+        let shares_clipboard = self.desktop_caps & proto::desktop_caps::CLIPBOARD != 0;
+        let clipboard = shares_clipboard && caps & proto::caps::CLIPBOARD != 0;
+        if clipboard {
+            let caps = ServerMsg::DesktopCaps { caps: proto::desktop_caps::CLIPBOARD };
+            proto::write_all(&mut stream, &caps.encode()).map_err(|e| format!("write: {e}"))?;
+        } else if shares_clipboard && caps & proto::caps::VIEW_ONLY == 0 {
+            (self.log)(&format!("desk link session {}: {name} shares no clipboard (an older Desk Link: update it)", self.session));
+        }
         // input as real local devices, for this session's life
         let mut injector = match (self.input)() {
             Ok(i) => {
@@ -694,6 +758,23 @@ impl SessionCtx {
         stream.set_read_timeout(Some(Duration::from_millis(1))).map_err(|e| e.to_string())?;
         stream.set_write_timeout(Some(Duration::from_millis(5))).map_err(|e| e.to_string())?;
         let mut last_heard = Instant::now();
+        let mut parts = proto::ClipboardParts::default();
+        let mut hold = ClipboardHold::default();
+        let mut inject = |msg| {
+            let Some(inj) = injector.as_mut() else { return };
+            match msg {
+                ClientMsg::Pointer { x, y } => {
+                    let (x, y) = self.geometry.lock().unwrap().to_desktop(x, y);
+                    inj.input.pointer(x, y);
+                }
+                ClientMsg::Button { down, button } => inj.button(down, button),
+                ClientMsg::Scroll { dx, dy } => inj.input.scroll(dx, dy),
+                ClientMsg::Key { down, keycode, .. } => inj.key(down, keycode),
+                ClientMsg::Gamepad { slot, state } => inj.input.gamepad(slot, &state),
+                ClientMsg::GamepadGone { slot } => inj.input.gamepad_gone(slot),
+                _ => {}
+            }
+        };
         loop {
             if last_heard.elapsed() > SILENT {
                 return Ok(format!("the viewer was silent for {} s", SILENT.as_secs()));
@@ -726,6 +807,22 @@ impl SessionCtx {
                         }
                         result.map_err(|e| format!("write: {e}"))?;
                     }
+                    Ok(Out::Clipboard(text)) => {
+                        if clipboard {
+                            for part in ServerMsg::clipboard(&text) {
+                                proto::write_all(&mut stream, &part.encode()).map_err(|e| format!("write: {e}"))?;
+                            }
+                        }
+                    }
+                    Ok(Out::ClipboardTaken) => {
+                        if let Some((bytes, sent, input)) = hold.taken() {
+                            let ms = sent.elapsed().as_millis();
+                            (self.log)(&format!("desk link session {}: clipboard of {bytes} bytes taken in {ms} ms", self.session));
+                            for msg in input {
+                                inject(msg);
+                            }
+                        }
+                    }
                     Ok(Out::Close(reason)) => {
                         let _ = proto::write_all(&mut stream, &ServerMsg::Bye { reason: reason.clone() }.encode());
                         stream.shutdown();
@@ -733,6 +830,12 @@ impl SessionCtx {
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok("the WM ended the session".into()),
+                }
+            }
+            if let Some(input) = hold.overdue(Instant::now()) {
+                (self.log)(&format!("desk link session {}: the desktop did not take the clipboard in 2 s; input goes on", self.session));
+                for msg in input {
+                    inject(msg);
                 }
             }
             while let Some((ty, payload)) = read_message(&mut stream, &mut inbox, &mut buf).map_err(|e| e.to_string())? {
@@ -754,25 +857,26 @@ impl SessionCtx {
                     ClientMsg::RequestKeyframe => Some(Control::Keyframe),
                     ClientMsg::Refresh { hz } => Some(Control::Refresh(hz)),
                     ClientMsg::Window { width, height, scale } => Some(Control::Window { width, height, scale }),
-                    ClientMsg::Clipboard { text } => Some(Control::Clipboard(text)),
+                    ClientMsg::ClipboardPart { text } => {
+                        if clipboard {
+                            parts.part(&text);
+                        }
+                        None
+                    }
+                    ClientMsg::Clipboard { text } => {
+                        if !clipboard {
+                            continue;
+                        }
+                        let whole = parts.end(text);
+                        hold.sent(whole.len(), Instant::now());
+                        Some(Control::Clipboard(whole))
+                    }
                     ClientMsg::Stats { frame, decode_us, present_us } => Some(Control::Stats { frame, decode_us, present_us }),
                     ClientMsg::Encoding { chroma, codec, preset, mbps, fps } => Some(Control::Encoding { chroma, codec, preset, mbps, fps }),
                     ClientMsg::Hello { .. } => return Err("a second hello".into()),
                     input => {
-                        if let Some(inj) = injector.as_mut() {
-                            let geometry = *self.geometry.lock().unwrap();
-                            match input {
-                                ClientMsg::Pointer { x, y } => {
-                                    let (x, y) = geometry.to_desktop(x, y);
-                                    inj.input.pointer(x, y);
-                                }
-                                ClientMsg::Button { down, button } => inj.button(down, button),
-                                ClientMsg::Scroll { dx, dy } => inj.input.scroll(dx, dy),
-                                ClientMsg::Key { down, keycode, .. } => inj.key(down, keycode),
-                                ClientMsg::Gamepad { slot, state } => inj.input.gamepad(slot, &state),
-                                ClientMsg::GamepadGone { slot } => inj.input.gamepad_gone(slot),
-                                _ => {}
-                            }
+                        if let Some(msg) = hold.hold(input) {
+                            inject(msg);
                         }
                         None
                     }
@@ -786,6 +890,50 @@ impl SessionCtx {
 }
 
 #[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_input_waits_in_order_for_the_last_ack() {
+        let mut hold = ClipboardHold::default();
+        let press = ClientMsg::Key { down: true, keycode: 7, mods: 0 };
+        let release = ClientMsg::Key { down: false, keycode: 7, mods: 0 };
+        let first = Instant::now();
+        let second = first + Duration::from_millis(1);
+        assert_eq!(hold.hold(press.clone()), Some(press.clone()));
+        assert!(hold.taken().is_none());
+        hold.sent(8, first);
+        assert!(hold.hold(press.clone()).is_none());
+        hold.sent(12, second);
+        assert_eq!(hold.taken(), Some((8, first, vec![])), "the second write is still pending");
+        assert!(hold.hold(release.clone()).is_none());
+        assert_eq!(hold.taken(), Some((12, second, vec![press.clone(), release])));
+        assert_eq!(hold.hold(press.clone()), Some(press));
+    }
+
+    #[test]
+    fn clipboard_timeout_releases_input_and_a_late_ack_belongs_to_its_write() {
+        let mut hold = ClipboardHold::default();
+        let first = Instant::now();
+        let deadline = first + CLIPBOARD_HOLD;
+        let press = ClientMsg::Button { down: true, button: 0 };
+        let release = ClientMsg::Button { down: false, button: 0 };
+        hold.sent(7, first);
+        assert!(hold.hold(press.clone()).is_none());
+        hold.sent(0, first + Duration::from_millis(1));
+        assert!(hold.hold(release.clone()).is_none());
+        assert!(hold.overdue(deadline - Duration::from_millis(1)).is_none());
+        assert_eq!(hold.overdue(deadline), Some(vec![press.clone(), release]));
+        assert!(hold.overdue(deadline).is_none());
+        assert_eq!(hold.hold(press.clone()), Some(press.clone()));
+        hold.sent(4, deadline);
+        assert!(hold.hold(press.clone()).is_none());
+        assert!(hold.taken().is_none() && hold.taken().is_none(), "expired acks cannot release new input");
+        assert_eq!(hold.taken(), Some((4, deadline, vec![press])));
+    }
+}
+
+#[cfg(test)]
 mod start_tests {
     use super::*;
 
@@ -793,6 +941,7 @@ mod start_tests {
         ServerConfig {
             addr,
             tls_name: "start test".into(),
+            desktop_caps: 0,
             log: Arc::new(|_: &str| {}),
             clock: || 0,
             input: Arc::new(|| Err("no input in this test".into())),

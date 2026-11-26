@@ -50,6 +50,7 @@
 
 mod caption;
 mod clip;
+mod clipboard;
 mod a11y;
 mod conn;
 mod held;
@@ -154,8 +155,16 @@ pub struct App {
     /// The viewer whose window has the keyboard.
     #[rust]
     focused: usize,
+    /// Only the window with platform focus may offer the local clipboard.
+    #[rust]
+    clipboard_window: Option<WindowId>,
+    /// A local read belongs to one window, connection, session and request.
+    #[rust]
+    clipboard_read: Option<(WindowId, usize, u64, u64)>,
     #[rust]
     signal: SignalToUI,
+    #[rust]
+    clipboard_signal: SignalToUI,
     #[rust]
     pads: Vec<Option<GamepadState>>,
     #[rust]
@@ -476,7 +485,7 @@ impl App {
     fn add_new_desktops(&mut self) {
         for (name, host, port) in hosts() {
             if !self.conns.iter().any(|c| c.host == host && c.port == port) {
-                self.conns.push(Connection::open(name, host, port, true, self.signal.clone()));
+                self.conns.push(Connection::open(name, host, port, true, self.signal.clone(), self.clipboard_signal.clone()));
             }
         }
     }
@@ -853,7 +862,7 @@ impl MatchEvent for App {
         self.measure_refresh(cx);
         for (name, host, port) in hosts() {
             let paused = !self.conns.is_empty();
-            self.conns.push(Connection::open(name, host, port, paused, self.signal.clone()));
+            self.conns.push(Connection::open(name, host, port, paused, self.signal.clone(), self.clipboard_signal.clone()));
         }
         // the last run's windows, each on its machine (`--select N`: the first window's)
         let first = args.windows(2).find(|w| w[0] == "--select").and_then(|w| w[1].parse::<usize>().ok()).filter(|n| *n < self.conns.len());
@@ -893,6 +902,9 @@ impl MatchEvent for App {
     }
 
     fn handle_signal(&mut self, cx: &mut Cx) {
+        if self.clipboard_signal.check_and_clear() {
+            self.refresh_clipboards(cx);
+        }
         if self.signal.check_and_clear() {
             self.refresh(cx);
         }
@@ -962,23 +974,33 @@ impl AppMain for App {
             }
             // the focused window drives its machine (its keys) and sizes a desktop that follows
             Event::WindowGotFocus(id) => {
+                self.clipboard_window = Some(*id);
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.focused = vi;
                     self.claim_size(cx, vi);
+                    self.read_local_clipboard(cx, vi);
                 }
             }
             // focus gone (Cmd-Tab, another window, a sheet): what this window holds down on its
             // desktop is let go, the modifiers too; the OS sends us no ups for it any more
             Event::WindowLostFocus(id) => {
+                if self.clipboard_window == Some(*id) {
+                    self.clipboard_window = None;
+                    self.clipboard_read = None;
+                }
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.release_held(vi, "window lost focus");
                 }
             }
             Event::Pause | Event::Background => {
+                self.clipboard_window = None;
+                self.clipboard_read = None;
                 for vi in 0..self.viewers.len() {
                     self.release_held(vi, "app inactive");
                 }
             }
+            Event::TextInput(e) if e.was_paste => self.paste_clipboard(cx, &e.input),
+            Event::Clipboard(e) => self.clipboard_reply(e.request, e.content.text.as_deref()),
             Event::KeyDown(_) | Event::KeyUp(_) => {
                 let vi = self.focused.min(self.viewers.len() - 1);
                 self.key_event(cx, vi, event);

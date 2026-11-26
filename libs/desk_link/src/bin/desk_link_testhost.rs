@@ -85,6 +85,7 @@ fn serve(port: u16, name: String, width: u32, height: u32, fps: u16, bytes: usiz
     let payload = vec![0u8; bytes];
     let server = Server::start(ServerConfig {
         addr: ([0, 0, 0, 0], port).into(), tls_name: name.clone(), log: Arc::new(log), clock,
+        desktop_caps: 0,
         input: Arc::new(|| {
             // Server names each session thread before invoking this factory.
             let thread = std::thread::current();

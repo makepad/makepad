@@ -72,7 +72,7 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 
 | type | name | payload |
 |---|---|---|
-| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes 4:4:4: H.264 High 4:4:4 Predictive, and with 4 H.265 Format range extensions 4:4:4; 2 = view-only: its `Window` never decides the size of a desktop that follows its viewer, e.g. a probe; 4 = it decodes H.265) |
+| 1 | Hello | `version u16, name str, authorization str, screen i32 (-1 = the desktop's default), paused bool, caps u32` (1 = the viewer's decoder takes 4:4:4: H.264 High 4:4:4 Predictive, and with 4 H.265 Format range extensions 4:4:4; 2 = view-only: its `Window` never decides the size of a desktop that follows its viewer, e.g. a probe; 4 = it decodes H.265; 8 = `caps::CLIPBOARD`, it shares clipboard text) |
 | 2 | Pause | — no pictures for this session; pings continue |
 | 3 | Resume | — pictures again, starting with a key frame |
 | 4 | SelectScreen | `index u32` (into `Welcome.screens`) |
@@ -87,7 +87,8 @@ Fixed-size fields are little-endian. `str` and `bytes` are `u32 LE length` + byt
 | 15 | GamepadGone | `slot u8` |
 | 20 | Ping | `client_ns u64` (the viewer's clock) |
 | 21 | Stats | `frame u32, decode_us u32, present_us u32`: about once a second; `frame` the last picture shown and `present_us` its decode-end to on screen; `decode_us` a picture's decode (its slowest stream's), the mean over the pictures since the last `Stats` (version 7 viewers before this rule sent the last picture's) |
-| 22 | Clipboard | `text str` (the desktop's clipboard takes it) |
+| 22 | Clipboard | `text str` (ends the text the desktop's clipboard takes) |
+| 23 | ClipboardPart | `text str` (a leading part of a clipboard text) |
 | 24 | Encoding | `chroma u8, codec u8, preset u8, mbps u16, fps u16`: how this viewer wants the stream encoded, 0 = auto each. `chroma` 1 4:4:4, 2 4:2:0; `codec` 1 H.264, 2 H.265; `preset` 1 sharp (the encoder's best pictures per bit), 2 fast (its fastest encode); `mbps` the most the stream may take (all tiles; 0 = no cap of its own: the desktop streams at most the lowest cap of its watching viewers); `fps` pictures a second (0 = its display's refresh). Sent after the Hello and on every change. The choices of the watching viewer that connected last decide the stream (view-only viewers last); the decoders of every watching viewer (`Hello.caps`) and the desktop's settings bound them. |
 
 Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 select, 7 start, 8 home,
@@ -104,12 +105,27 @@ Gamepad buttons: bit 0 A, 1 B, 2 X, 3 Y, 4 left shoulder, 5 right shoulder, 6 se
 | 103 | Cursor | `x u16, y u16 (over the stream picture), shape u8, visible bool` |
 | 104 | Pong | `client_ns u64 (echoed), server_ns u64` |
 | 105 | Stream | `screen u32, stream_w u32, stream_h u32` (the stream shows another screen now) |
-| 106 | Clipboard | `text str` |
+| 106 | Clipboard | `text str` (ends the text the viewer's clipboard takes) |
 | 107 | Bye | `reason str` (then the desktop closes) |
 | 108 | Rate | `fps u16, kbps u32, limit u8, full_chroma bool, codec u8, preset u8, streams u8, why str`: the pictures a second the desktop streams at now (the lowest of its settings' cap (`fps`, default 120), its streamed screen's refresh and every watching viewer's `Refresh`; a still desktop sends fewer), the stream's rate (kbit/s, all tiles; 0 = by picture size), what holds the rate (0 starting, 1 nothing: rising, 2 the link, 3 the encoder, 4 a cap, 5 a fixed setting), whether it is 4:4:4, its codec (1 H.264, 2 H.265), the encoder's preset (1 sharp, 2 fast), the encoder streams a picture is cut into, and `why`: what the stream is and why, in words (e.g. "fast: the encoder was behind at sharp"). Sent after Welcome and on every change. `fps=0` with nonempty `why` also carries a desktop preparation/status notice, including before Welcome while the host makes its screen available; viewers show it over the picture until a normal Rate clears it. |
+| 111 | DesktopCaps | `caps u32` (1 = `desktop_caps::CLIPBOARD`, the desktop shares clipboard text). Sent before `Welcome` to a viewer that asked for the capability. |
+| 112 | ClipboardPart | `text str` (a leading part of a clipboard text) |
 
 Screens are in desktop device pixels. `input = false` means viewer input is not injected (for
 example, no `/dev/uinput` access); `input_note` says why.
+
+## Clipboard
+
+The viewer asks to share text with `caps::CLIPBOARD` in its `Hello`. If the desktop answers with
+`desktop_caps::CLIPBOARD` in `DesktopCaps` before its `Welcome`, either side can send text for
+the rest of that session. An older peer can use the same protocol version and skip clipboard sharing.
+
+Each message carries at most 1 MiB of UTF-8 text. A longer text starts with `ClipboardPart`s
+cut on character boundaries. The final `Clipboard` carries the rest, or the whole text when it
+fits in one message. The receiver joins the parts in order before applying the text.
+
+On a paste chord the viewer sends the text ahead of the V key. After a `Clipboard` the desktop
+holds that viewer's subsequent input in order until its clipboard takes the text, for at most 2 s.
 
 ## Video
 

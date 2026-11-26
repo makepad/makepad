@@ -390,7 +390,10 @@ impl App {
             UiEvent::Selection { board, text } => {
                 log!("wm: a wayland client {} {} bytes; the makepad apps paste it", if board == Board::Primary { "selected" } else { "copied" }, text.len());
                 match board {
-                    Board::Clipboard => cx.copy_to_clipboard(&text),
+                    Board::Clipboard => {
+                        cx.copy_to_clipboard(&text);
+                        self.desk_link.clipboard_changed(&text);
+                    }
                     Board::Primary => cx.set_primary_selection(&text),
                 }
             }

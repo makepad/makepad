@@ -31,6 +31,9 @@ pub const MAX_MESSAGE: usize = 16 << 20;
 /// The text of one `ui` reply message at most: a longer reply crosses in parts
 /// ([`a11y_reply`]), so a reply of any size arrives whole.
 pub const A11Y_PART: usize = 1 << 20;
+/// The text of one clipboard message at most: a longer text crosses in `ClipboardPart`s
+/// ([`ClientMsg::clipboard`], [`ServerMsg::clipboard`]), so a text of any size arrives whole.
+pub const CLIPBOARD_PART: usize = 1 << 20;
 
 /// The cursor shapes, by index on the wire (`Cursor::shape`). Names are the makepad
 /// `MouseCursor` variants; an index past the table is the default arrow.
@@ -81,6 +84,16 @@ pub mod caps {
     pub const VIEW_ONLY: u32 = 2;
     /// Decodes H.265 (Main, and Format range extensions 4:4:4 when it has `FULL_CHROMA`).
     pub const HEVC: u32 = 4;
+    /// Shares its clipboard (text): it sends and takes `Clipboard` and its parts. A desktop that
+    /// does too says so with `DesktopCaps` before its `Welcome`; one that says nothing (an older
+    /// Desk Link) gets no clipboard, and the session goes on without it.
+    pub const CLIPBOARD: u32 = 8;
+}
+
+/// `ServerMsg::DesktopCaps`: what the desktop does that a viewer asked for in its `Hello.caps`.
+pub mod desktop_caps {
+    /// Shares its clipboard (text) with a viewer that has `caps::CLIPBOARD`.
+    pub const CLIPBOARD: u32 = 1;
 }
 
 /// `ClientMsg::Encoding` choices (0 = auto everywhere) and the codec of `Video` / `Rate`.
@@ -196,7 +209,11 @@ pub enum ClientMsg {
     /// time of a picture (its slowest stream's), the mean since the last `Stats` (the desktop
     /// cuts H.265 into more bands when it nears a picture's time).
     Stats { frame: u32, decode_us: u32, present_us: u32 },
+    /// The viewer's clipboard text (its last part, when `ClipboardPart`s came first): the
+    /// desktop's clipboard takes it. Sent only to a desktop that said `desktop_caps::CLIPBOARD`.
     Clipboard { text: String },
+    /// A leading part of a clipboard text too long for one message; the `Clipboard` ends it.
+    ClipboardPart { text: String },
     /// How this viewer wants the stream encoded ([`pref`]; 0 = auto each): `chroma`, `codec`,
     /// `preset`, the most it may take (`mbps`, all tiles; 0 = no cap of its own: the desktop
     /// streams at most the lowest of its watching viewers' caps) and pictures a second (`fps`;
@@ -242,7 +259,15 @@ pub enum ServerMsg {
     /// is cut into) and `why`: what the stream is and why, in words (e.g. "fast: the encoder is
     /// behind at sharp").
     Rate { fps: u16, kbps: u32, limit: u8, full_chroma: bool, codec: u8, preset: u8, streams: u8, why: String },
+    /// The desktop's clipboard text (its last part, when `ClipboardPart`s came first), sent
+    /// when it changes, to a viewer with `caps::CLIPBOARD`.
     Clipboard { text: String },
+    /// A leading part of a clipboard text too long for one message; the `Clipboard` ends it.
+    ClipboardPart { text: String },
+    /// What the desktop does that the viewer asked for (`desktop_caps::*`), sent before the
+    /// `Welcome` to a viewer whose `Hello.caps` asks for any of it; a viewer that gets no
+    /// `DesktopCaps` before the `Welcome` talks to a desktop that does none of it.
+    DesktopCaps { caps: u32 },
     Bye { reason: String },
 }
 
@@ -364,6 +389,7 @@ mod tag {
     pub const PING: u8 = 20;
     pub const STATS: u8 = 21;
     pub const CLIPBOARD_C: u8 = 22;
+    pub const CLIPBOARD_PART_C: u8 = 23;
     pub const ENCODING: u8 = 24;
 
     pub const WELCOME: u8 = 100;
@@ -378,6 +404,8 @@ mod tag {
     pub const A11Y_QUERY: u8 = 25;
     pub const A11Y_REPLY: u8 = 109;
     pub const A11Y_REPLY_PART: u8 = 110;
+    pub const DESKTOP_CAPS: u8 = 111;
+    pub const CLIPBOARD_PART_S: u8 = 112;
 }
 
 impl ClientMsg {
@@ -455,6 +483,11 @@ impl ClientMsg {
                 o.str(text);
                 o.done()
             }
+            ClientMsg::ClipboardPart { text } => {
+                let mut o = Out::new(CLIPBOARD_PART_C);
+                o.str(text);
+                o.done()
+            }
             ClientMsg::Encoding { chroma, codec, preset, mbps, fps } => {
                 let mut o = Out::new(ENCODING);
                 o.u8(*chroma).u8(*codec).u8(*preset).u16(*mbps).u16(*fps);
@@ -488,6 +521,7 @@ impl ClientMsg {
             STATS => ClientMsg::Stats { frame: r.u32()?, decode_us: r.u32()?, present_us: r.u32()? },
             ENCODING => ClientMsg::Encoding { chroma: r.u8()?, codec: r.u8()?, preset: r.u8()?, mbps: r.u16()?, fps: r.u16()? },
             CLIPBOARD_C => ClientMsg::Clipboard { text: r.str()? },
+            CLIPBOARD_PART_C => ClientMsg::ClipboardPart { text: r.str()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown viewer message {ty}"))),
         })
     }
@@ -538,6 +572,16 @@ impl ServerMsg {
                 o.str(text);
                 o.done()
             }
+            ServerMsg::ClipboardPart { text } => {
+                let mut o = Out::new(CLIPBOARD_PART_S);
+                o.str(text);
+                o.done()
+            }
+            ServerMsg::DesktopCaps { caps } => {
+                let mut o = Out::new(DESKTOP_CAPS);
+                o.u32(*caps);
+                o.done()
+            }
             ServerMsg::Bye { reason } => {
                 let mut o = Out::new(BYE);
                 o.str(reason);
@@ -576,6 +620,8 @@ impl ServerMsg {
             PONG => ServerMsg::Pong { client_ns: r.u64()?, server_ns: r.u64()? },
             STREAM => ServerMsg::Stream { screen: r.u32()?, stream: [r.u32()?, r.u32()?] },
             CLIPBOARD_S => ServerMsg::Clipboard { text: r.str()? },
+            CLIPBOARD_PART_S => ServerMsg::ClipboardPart { text: r.str()? },
+            DESKTOP_CAPS => ServerMsg::DesktopCaps { caps: r.u32()? },
             BYE => ServerMsg::Bye { reason: r.str()? },
             RATE => ServerMsg::Rate { fps: r.u16()?, kbps: r.u32()?, limit: r.u8()?, full_chroma: r.bool()?, codec: r.u8()?, preset: r.u8()?, streams: r.u8()?, why: r.str()? },
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown server message {ty}"))),
@@ -692,22 +738,109 @@ pub fn write_all(w: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// The messages of the `ui` reply `text` to `req`: parts of at most [`A11Y_PART`] bytes, each cut on
-/// a character boundary, the last an `A11yReply`.
-pub fn a11y_reply(req: u64, text: &str) -> Vec<ServerMsg> {
-    let mut msgs = Vec::new();
+/// `text` cut into parts of at most `part` bytes, each on a character boundary: the leading
+/// parts, then the last (the whole text when it fits one; empty for an empty text).
+fn split_text(text: &str, part: usize) -> (Vec<&str>, &str) {
+    let mut lead = Vec::new();
     let mut rest = text;
-    while rest.len() > A11Y_PART {
-        let mut cut = A11Y_PART;
+    while rest.len() > part {
+        let mut cut = part;
         while !rest.is_char_boundary(cut) {
             cut -= 1;
         }
-        let (part, tail) = rest.split_at(cut);
-        msgs.push(ServerMsg::A11yReplyPart { req, text: part.to_string() });
+        let (head, tail) = rest.split_at(cut);
+        lead.push(head);
         rest = tail;
     }
-    msgs.push(ServerMsg::A11yReply { req, text: rest.to_string() });
+    (lead, rest)
+}
+
+/// The messages of the `ui` reply `text` to `req`: parts of at most [`A11Y_PART`] bytes, each cut on
+/// a character boundary, the last an `A11yReply`.
+pub fn a11y_reply(req: u64, text: &str) -> Vec<ServerMsg> {
+    let (lead, last) = split_text(text, A11Y_PART);
+    let mut msgs: Vec<ServerMsg> = lead.into_iter().map(|t| ServerMsg::A11yReplyPart { req, text: t.to_string() }).collect();
+    msgs.push(ServerMsg::A11yReply { req, text: last.to_string() });
     msgs
+}
+
+impl ClientMsg {
+    /// The messages of the clipboard text `text`: parts of at most [`CLIPBOARD_PART`] bytes, each
+    /// cut on a character boundary, the last a `Clipboard`.
+    pub fn clipboard(text: &str) -> Vec<ClientMsg> {
+        let (lead, last) = split_text(text, CLIPBOARD_PART);
+        let mut msgs: Vec<ClientMsg> = lead.into_iter().map(|t| ClientMsg::ClipboardPart { text: t.to_string() }).collect();
+        msgs.push(ClientMsg::Clipboard { text: last.to_string() });
+        msgs
+    }
+}
+
+impl ServerMsg {
+    /// As [`ClientMsg::clipboard`], the desktop's way.
+    pub fn clipboard(text: &str) -> Vec<ServerMsg> {
+        let (lead, last) = split_text(text, CLIPBOARD_PART);
+        let mut msgs: Vec<ServerMsg> = lead.into_iter().map(|t| ServerMsg::ClipboardPart { text: t.to_string() }).collect();
+        msgs.push(ServerMsg::Clipboard { text: last.to_string() });
+        msgs
+    }
+}
+
+/// The taking side of a clipboard text in parts (one stream per session: the parts come in
+/// order, the `Clipboard` ends the text).
+#[derive(Default)]
+pub struct ClipboardParts(String);
+
+impl ClipboardParts {
+    pub fn part(&mut self, text: &str) {
+        self.0.push_str(text);
+    }
+    /// The whole text, given its last message's.
+    pub fn end(&mut self, text: String) -> String {
+        if self.0.is_empty() {
+            return text;
+        }
+        let mut whole = std::mem::take(&mut self.0);
+        whole.push_str(&text);
+        whole
+    }
+}
+
+/// One side's view of one peer's clipboard (a viewer keeps one per desktop, a desktop one per
+/// viewer): what was last exchanged, so a text never goes back to where it came from.
+/// - [`received`](Self::received): the peer sent this text (this side's clipboard takes it);
+/// - [`changed`](Self::changed): this side's clipboard changed (a copy): whether the text goes
+///   to the peer. The change that applying the peer's own text made does not, once;
+/// - [`offer`](Self::offer): this side's clipboard as read when the user turns to the peer (the
+///   viewer: its window gets the focus, the paste chord): whether it goes; not when the peer has
+///   it already.
+#[derive(Debug, Default)]
+pub struct ClipboardPeer {
+    last: Option<String>,
+    echo: Option<String>,
+}
+
+impl ClipboardPeer {
+    pub fn received(&mut self, text: &str) {
+        self.last = Some(text.to_string());
+        self.echo = Some(text.to_string());
+    }
+
+    pub fn changed(&mut self, text: &str) -> bool {
+        if self.echo.take().as_deref() == Some(text) {
+            return false;
+        }
+        self.last = Some(text.to_string());
+        true
+    }
+
+    pub fn offer(&mut self, text: &str) -> bool {
+        self.echo = None;
+        if self.last.as_deref() == Some(text) {
+            return false;
+        }
+        self.last = Some(text.to_string());
+        true
+    }
 }
 
 /// The viewer's side of [`a11y_reply`]: joins each request's parts.
@@ -785,6 +918,7 @@ mod tests {
         round_client(ClientMsg::Ping { client_ns: u64::MAX - 3 });
         round_client(ClientMsg::Stats { frame: 9, decode_us: 1200, present_us: 8000 });
         round_client(ClientMsg::Clipboard { text: "héllo".into() });
+        round_client(ClientMsg::ClipboardPart { text: "hé".into() });
     }
 
     #[test]
@@ -819,6 +953,8 @@ mod tests {
         round_server(ServerMsg::Pong { client_ns: 5, server_ns: 6 });
         round_server(ServerMsg::Stream { screen: 0, stream: [2560, 1440] });
         round_server(ServerMsg::Clipboard { text: String::new() });
+        round_server(ServerMsg::ClipboardPart { text: "llo".into() });
+        round_server(ServerMsg::DesktopCaps { caps: desktop_caps::CLIPBOARD });
         round_server(ServerMsg::Bye { reason: "the WM quits".into() });
         round_server(ServerMsg::Rate { fps: 120, kbps: 250_000, limit: limit::LINK, full_chroma: true, codec: pref::HEVC, preset: pref::SHARP, streams: 2, why: "fast: the encoder is behind".into() });
     }
@@ -846,6 +982,69 @@ mod tests {
         assert!(n == 4 && whole.as_deref() == Some(text.as_str()), "{n} messages");
         round_server(ServerMsg::A11yReply { req: 1, text: "{\"ok\":1}\n".into() });
         assert_eq!(a11y_reply(1, "").len(), 1);
+    }
+
+    /// A clipboard text of any size crosses whole, both ways: parts of at most one part's bytes,
+    /// cut inside no character, joined in order; a short or empty text is one message.
+    #[test]
+    fn a_clipboard_text_of_any_size_crosses_in_parts() {
+        let text: String = "a→é😀".repeat(CLIPBOARD_PART / 4); // 10 bytes a round: 2.5 parts
+        let mut inbox = Inbox::default();
+        for m in ClientMsg::clipboard(&text) {
+            inbox.feed(&m.encode());
+        }
+        for m in ServerMsg::clipboard(&text) {
+            inbox.feed(&m.encode());
+        }
+        let (mut from_viewer, mut from_desktop) = (ClipboardParts::default(), ClipboardParts::default());
+        let (mut whole, mut n) = (Vec::new(), 0);
+        while let Some((ty, payload)) = inbox.next().unwrap() {
+            assert!(payload.len() <= CLIPBOARD_PART + 4, "a part is one message");
+            n += 1;
+            if ty < 100 {
+                match ClientMsg::decode(ty, &payload).unwrap() {
+                    ClientMsg::ClipboardPart { text } => from_viewer.part(&text),
+                    ClientMsg::Clipboard { text } => whole.push(from_viewer.end(text)),
+                    other => panic!("{other:?}"),
+                }
+            } else {
+                match ServerMsg::decode(ty, &payload).unwrap() {
+                    ServerMsg::ClipboardPart { text } => from_desktop.part(&text),
+                    ServerMsg::Clipboard { text } => whole.push(from_desktop.end(text)),
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        assert_eq!(n, 6, "three messages each way");
+        assert!(whole.len() == 2 && whole.iter().all(|w| *w == text), "both arrive whole");
+        assert_eq!(ClientMsg::clipboard(""), vec![ClientMsg::Clipboard { text: String::new() }]);
+        assert_eq!(ServerMsg::clipboard("hi"), vec![ServerMsg::Clipboard { text: "hi".into() }]);
+        assert_eq!(ClipboardParts::default().end("solo".into()), "solo");
+    }
+
+    /// A text never goes back to the side it came from, and nothing the peer has is sent again.
+    #[test]
+    fn a_clipboard_text_never_echoes() {
+        // a desktop and one viewer: the viewer's text applied is not sent back, once
+        let mut viewer = ClipboardPeer::default();
+        viewer.received("from the mac");
+        assert!(!viewer.changed("from the mac"), "the change applying it made does not echo");
+        assert!(viewer.changed("from the mac"), "copied again on the desktop afterwards, it goes");
+        assert!(viewer.changed("copied here"), "a copy on the desktop goes");
+        // another viewer of the same desktop gets the first viewer's text
+        let mut other = ClipboardPeer::default();
+        assert!(other.changed("from the mac"));
+        // a copy that came before the apply's own change: it goes, and the echo is spent
+        let mut v = ClipboardPeer::default();
+        v.received("a");
+        assert!(v.changed("b") && v.changed("a"), "only the apply's own change is held back");
+        // the viewer's side: a read at focus or the paste chord goes unless the desktop has it
+        let mut desktop = ClipboardPeer::default();
+        assert!(desktop.offer("x"), "a new text goes");
+        assert!(!desktop.offer("x"), "the desktop has it");
+        desktop.received("from the desktop");
+        assert!(!desktop.offer("from the desktop"), "the desktop's own text is not sent back");
+        assert!(desktop.offer("copied on the mac"));
     }
 
     #[test]
