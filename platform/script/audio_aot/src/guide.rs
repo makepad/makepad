@@ -437,6 +437,10 @@ A static estimate above 4,000,000 worst-case ops per frame gives a source warnin
 The shader still compiles and plays. Reduce loop sizes or precompute spectra in
 `init()`. For a transform once per hop, use `effect_block()`. An FFT warning
 gives the size that fits the threshold when one fits.
+An audio shader’s `init()` or constant evaluation runs until it finishes. A newer edit
+cancels a slow one. Synth and Stage show “Still initialising…” while it runs. On a page
+without worker threads, an unfinished init or constant stops after 200,000,000 loop steps
+and reports a shader problem.
 At 48 kHz on the slowest backend (WebAssembly), `check` warns above 3,879 mean ops/frame (1/64 of realtime per instance) or 31,038 ops/frame in a single 64-frame block (1/16 of the 128-frame worklet callback).
 
 ## Testing a shader

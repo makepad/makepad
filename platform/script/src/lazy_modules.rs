@@ -10,6 +10,15 @@
 //!
 //! Errors: an expander that panics leaves its group lazy (re-registered), so the next touch
 //! retries and reports again.
+//!
+//! First uses: the `script.lazy` trace names each registration's group, the `mod` key that ran it
+//! (the key a read missed on, the one a host expanded or stepped by) and where the run was.
+//!
+//! One group per heap, or groups that never read each other: while a group registers it is out
+//! of the table, and a type its registration misses expands every other pending group
+//! ([`crate::traits::expand_on_type_miss`]), in the middle of it. A group whose registration reads
+//! another group's modules would then run while that one is half registered, and find them
+//! absent. Registrations that build on each other are steps of one group.
 use makepad_live_id::LiveId;
 use relax_api::relax_api;
 use crate::value::{ScriptObject, ScriptValue};
@@ -52,6 +61,8 @@ pub struct LazyModules {
     groups: Vec<(String, LazyRun)>,
     /// group index + 1 of the last lazy miss (0: none)
     pending: Cell<u16>,
+    /// the key the last lazy miss read (a `LiveId`'s value)
+    pending_key: Cell<u64>,
     /// the script domain the VM was made for (domain.rs)
     pub(crate) domain: Option<&'static crate::domain::ScriptDomain>,
 }
@@ -72,15 +83,16 @@ impl LazyModules {
         match self.keys.iter().find(|(k, _)| *k == id) {
             Some((_, group)) => {
                 self.pending.set(group + 1);
+                self.pending_key.set(id.0);
                 true
             }
             None => false,
         }
     }
 
-    pub(crate) fn take_pending(&self) -> Option<u16> {
+    pub(crate) fn take_pending(&self) -> Option<(u16, LiveId)> {
         let p = self.pending.replace(0);
-        (p != 0).then(|| p - 1)
+        (p != 0).then(|| (p - 1, LiveId(self.pending_key.get())))
     }
 
     /// Declares `keys` of `mod` as one lazy group registered by `run`.
@@ -133,7 +145,8 @@ impl LazyModules {
 #[relax_api(run)]
 impl ScriptVm<'_> {
     /// Declares `keys` of `mod` as one lazily expanded group: absent until a script reads one of
-    /// them, then `expander` (the modules' ordinary registration) runs once in this heap.
+    /// them, then `expander` (the modules' ordinary registration) runs once in this heap. A second
+    /// group in a heap must not read this one's modules, nor this one its (see the module docs).
     #[relax_api(run)]
     pub fn declare_lazy_modules(&mut self, name: &str, keys: &[LiveId], expander: LazyExpander) {
         self.bx.heap.lazy.declare(name, keys, LazyRun::Whole(expander));
@@ -151,22 +164,22 @@ impl ScriptVm<'_> {
     pub fn vm_lazy(&mut self, mode: u32, key: LiveId, name: &str) -> bool {
         match mode {
             LAZY_EXPAND_PENDING => match self.bx.heap.lazy.take_pending() {
-                Some(group) => self.expand_lazy_group(group),
+                Some((group, key)) => self.expand_lazy_group(group, key),
                 None => false,
             },
             LAZY_EXPAND_ALL => {
                 let mut any = false;
                 for group in self.bx.heap.lazy.pending_groups() {
-                    any |= self.expand_lazy_group(group);
+                    any |= self.expand_lazy_group(group, LiveId(0));
                 }
                 any
             }
             LAZY_EXPAND_KEY => match self.bx.heap.lazy.group_of(key) {
-                Some(group) => self.expand_lazy_group(group),
+                Some(group) => self.expand_lazy_group(group, key),
                 None => false,
             },
             LAZY_STEP_KEY => match self.bx.heap.lazy.group_of(key) {
-                Some(group) => self.run_lazy_group(group, true).unwrap_or(false),
+                Some(group) => self.run_lazy_group(group, true, key).unwrap_or(false),
                 None => false,
             },
             LAZY_HAS_PENDING => !self.bx.heap.lazy.pending_groups().is_empty(),
@@ -221,16 +234,17 @@ impl ScriptVm<'_> {
 
     #[cold]
     #[inline(never)]
-    fn expand_lazy_group(&mut self, group: u16) -> bool {
-        self.run_lazy_group(group, false).is_some()
+    fn expand_lazy_group(&mut self, group: u16, key: LiveId) -> bool {
+        self.run_lazy_group(group, false, key).is_some()
     }
 
     /// Runs group `group`'s registration: all of it, or with `one_step` a stepped group's next step.
     /// None when it is not lazy (any more); else whether steps remain, in which case its keys are
-    /// back in the table and the group is still pending.
+    /// back in the table and the group is still pending. `key` ran it (the `script.lazy` trace
+    /// names it).
     #[cold]
     #[inline(never)]
-    fn run_lazy_group(&mut self, group: u16, one_step: bool) -> Option<bool> {
+    fn run_lazy_group(&mut self, group: u16, one_step: bool, key: LiveId) -> Option<bool> {
         let (name, run, keys) = self.heap_mut().lazy.take_group(group)?;
         let start = crate::clock::monotonic_now();
         // The registration evaluates script while this thread is mid-instruction: pause it so the
@@ -284,7 +298,7 @@ impl ScriptVm<'_> {
             let ip = self.bx.threads.cur_ref().trap.ip;
             let at = self.ip_to_loc(ip).map(|l| l.to_string()).unwrap_or_default();
             let what = if remaining { "stepped" } else { "expanded" };
-            eprintln!("script.lazy: {what} `{name}` in {:.1} ms (touched at {at})", (crate::clock::monotonic_now() - start) * 1000.0);
+            eprintln!("script.lazy: {what} `{name}` in {:.1} ms (by mod.{key}, touched at {at})", (crate::clock::monotonic_now() - start) * 1000.0);
         }
         Some(remaining)
     }

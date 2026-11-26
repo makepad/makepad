@@ -3,7 +3,7 @@ use relax_api::relax_api;
 
 use crate::{AudioShader, AudioShaderBody, Backend, ParamCurve, ParamUnit, ShaderError};
 use makepad_script_compute::boundary::ErrorView;
-use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+use std::sync::{Arc, atomic::{AtomicU32, AtomicUsize, Ordering}};
 
 /// Extends a borrow of data its owner keeps (and never changes) to the
 /// owner's life: a plain view hands out `'static` slices of it, always
@@ -135,9 +135,24 @@ pub struct AudioBindings<'a> {
     pub oversample: crate::lower::RateOverride,
     /// Borrowed for this compile, including constant folding and table initialization.
     pub control: Option<&'a AtomicU32>,
+    /// Active compile-time executions belonging to the same prepare.
+    pub executions: Option<&'a AtomicUsize>,
 }
 
-impl AudioBindings<'_> {
+// A page with no worker cannot deliver a replacement while an initializer runs.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+const THREADLESS_INIT_POLLS: u64 = 200_000_000;
+
+impl<'a> AudioBindings<'a> {
+    pub(crate) fn compile_time(&self) -> crate::lower::CompileTime<'a> {
+        crate::lower::CompileTime {
+            word: self.control, executions: self.executions,
+            #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+            poll_limit: Some(THREADLESS_INIT_POLLS),
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0)
     }
@@ -190,7 +205,7 @@ impl ShaderCompilation {
         // SAFETY: the views borrow the messages of this data, which is not
         // changed once built and outlives them: a CompilationView borrows
         // the compilation.
-        let errors = data.views.get_or_init(|| data.errors.iter().map(|e| ErrorView { start: e.start, end: e.end, message: unsafe { forever(e.message.as_str()) } }).collect());
+        let errors = data.views.get_or_init(|| data.errors.iter().map(|e| ErrorView { kind: e.kind, start: e.start, end: e.end, message: unsafe { forever(e.message.as_str()) } }).collect());
         let warnings = data.shader.as_ref().map_or(&[][..], |s| s.warnings());
         CompilationView { warnings, shader: data.shader.as_ref(), cancelled: data.shader.is_none() && errors.is_empty(), errors, node: data.node.unwrap_or(NO_NODE) }
     }
@@ -234,7 +249,7 @@ impl ShaderCompilation {
         Err((0..self.error_count())
             .map(|index| {
                 let error = self.error(index);
-                ShaderError::new(error.start, error.end, error.message.to_string())
+                ShaderError { kind: error.kind, start: error.start, end: error.end, message: error.message.to_string() }
             })
             .collect())
     }
@@ -298,5 +313,63 @@ pub(crate) fn compile_fused_with_impl(nodes: &[FuseNodeView<'_>], outputs: &[cra
         Ok(shader) => ShaderCompilation::new(Ok(shader), None),
         Err(crate::fuse::FuseFailure::Cancelled) => ShaderCompilation::new(Err(Vec::new()), None),
         Err(crate::fuse::FuseFailure::Diagnostic(error)) => ShaderCompilation::new(Err(vec![error.error]), error.node),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ir, lower, parse};
+    use makepad_script_compute::ShaderErrorKind;
+
+    fn compile(source: &str, limit: Option<u64>) -> ShaderCompilation {
+        let word = AtomicU32::new(0);
+        let bindings = AudioBindings { control: Some(&word), ..Default::default() };
+        let (imports, items) = crate::AudioImports::source(source, &bindings).unwrap();
+        let control = lower::CompileTime { poll_limit: limit, ..bindings.compile_time() };
+        ShaderCompilation::new(crate::compile_items(items, imports, Backend::Interp, false, &bindings, control), None)
+    }
+
+    #[test]
+    fn poll_limit_stops_init_at_the_same_write_and_survives_lowering() {
+        let source = "let t=[0.0;2] fn init(){ for i in 0..1000000000 { for j in 0..1000000000 { t[0]+=1.0 } } t[1]=73.0 } fn voice(){t[0]}";
+        let tokens = parse::lex(source).unwrap();
+        let items = parse::Parser::new(&tokens).items().unwrap();
+        let word = AtomicU32::new(0);
+        let control = lower::CompileTime { word: Some(&word), poll_limit: Some(8), ..Default::default() };
+        let shader = lower::lower_with_rate(&items, source.len()+1, &|_| None, Default::default(), control).unwrap();
+        for _ in 0..2 {
+            let mut table = shader.shared_init.clone();
+            let result = crate::run_init_interp(shader.init.as_ref().unwrap(), &mut [], &mut [], &mut table, control);
+            assert_eq!(result, Err(ir::PollLimitReached(8)));
+            assert_eq!(table, [7.0f32.to_bits(), 0], "one outer head and seven increments, with no final write");
+        }
+
+        let slow = "fn slow(){ var x=0.0 for i in 0..1000000000 { x+=1.0 } x }";
+        for (source, what, at) in [
+            (source.to_string(), "init()", "fn init"),
+            (format!("{slow} let x=slow() fn voice(){{x}}"), "this constant", "slow()"),
+            (format!("{slow} rate(slow()) fn voice(){{0}}"), "this constant", "slow()"),
+        ] {
+            let compilation = compile(&source, Some(8));
+            let view = compilation.view();
+            assert!(!view.cancelled && view.shader.is_none(), "exhaustion publishes a problem and no partial program");
+            let [problem] = view.errors else { panic!("expected one shader problem") };
+            assert_eq!(problem.kind, ShaderErrorKind::PollLimit);
+            assert!(source[problem.start..problem.end].contains(at), "source span for {what}: {:?}", &source[problem.start..problem.end]);
+            assert_eq!(problem.message, format!("{what} stopped after 8 loop steps on a page without worker threads"));
+            assert_eq!(compilation.into_result().unwrap_err()[0].kind, ShaderErrorKind::PollLimit);
+        }
+    }
+
+    #[test]
+    fn unbounded_init_and_fold_keep_all_their_table_bits() {
+        let source = "fn value(){ var x=0.0 for i in 0..80 { x+=0.25 } x }
+            let c=value() let t=[0.0;1] fn init(){ for i in 0..80 { t[0]+=c } } fn voice(){t[0]}";
+        let unlimited = compile(source, None).into_result().unwrap();
+        // A rolled source range also visits its terminating head.
+        let exact = compile(source, Some(81)).into_result().unwrap();
+        assert_eq!(unlimited.shared_table(), exact.shared_table());
+        assert!(unlimited.shared_table().contains(&1600.0f32.to_bits()), "both complete executions reach the table");
     }
 }

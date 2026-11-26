@@ -3573,10 +3573,13 @@ fn nested_oversample_regions() {
 fn compile_control_preserves_tables_constants_and_render_code() {
     use makepad_script_audio_aot::ir;
     use std::sync::atomic::{AtomicU32, Ordering};
+    // Each static bound exceeds the old init limit; the actual fold and FFT
+    // finish quickly and must still publish exactly the same table and value.
     let source = r#"
         fn total() {
             var x = 0.0
-            for i in 0..32 {
+            for i in 0..1000000000 {
+                if i == 32 { break }
                 for j in 0..32 {
                     if j == 0 { continue }
                     x += 0.25
@@ -3587,7 +3590,7 @@ fn compile_control_preserves_tables_constants_and_render_code() {
         let folded = total()
         let re = [0.0; 16]
         let im = [0.0; 16]
-        fn init() { re[0] = folded fft(re,im) }
+        fn init() { for i in 0..1000000000 { re[0] = folded fft(re,im) break } }
         fn effect(l,r) { vec2(re[1], folded) }
     "#;
     for backend in [Backend::Interp, Backend::Native] {

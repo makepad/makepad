@@ -624,7 +624,11 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
         return err(entry.span, format!("`fn {}(i)` takes the element index", entry_name));
     }
     let init = match l.fns.get("init").cloned() {
-        Some(f) => Some(l.init_program(&f)?),
+        Some(f) => {
+            let program = l.init_program(&f)?;
+            check_init_cost(&program, f.span)?;
+            Some(program)
+        }
         None => None,
     };
     // The element loop.

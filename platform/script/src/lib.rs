@@ -12,6 +12,7 @@ relax_api::option_layouts! {
     ([u8; 4], u8),
     (mod_shader::ShaderIoType, value::ScriptPodType),
     (opcode::Opcode, opcode::OpcodeArgs),
+    (u16, makepad_live_id::LiveId),
     (u32, u32),
     (usize, usize),
     (value::ScriptObject, mod_shader::ShaderIoType),

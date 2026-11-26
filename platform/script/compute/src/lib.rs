@@ -109,10 +109,16 @@ pub mod native;
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub mod native_vec;
 
+/// Classification preserved by the compiler's diagnostic views.
+#[relax_api(plain)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderErrorKind { Problem, Cancelled, PollLimit }
+
 /// A compilation failure. Diagnostics carry a source span and message.
 #[derive(Debug)]
 pub struct ShaderError {
-    cancelled: bool,
+    pub kind: ShaderErrorKind,
     pub start: usize,
     pub end: usize,
     pub message: String,
@@ -121,15 +127,20 @@ pub struct ShaderError {
 impl ShaderError {
     #[inline(always)]
     pub fn new(start: usize, end: usize, message: String) -> Self {
-        Self { cancelled: false, start, end, message }
+        Self { kind: ShaderErrorKind::Problem, start, end, message }
     }
 
     pub(crate) fn cancelled() -> Self {
-        Self { cancelled: true, start: 0, end: 0, message: String::new() }
+        Self { kind: ShaderErrorKind::Cancelled, start: 0, end: 0, message: String::new() }
     }
 
     #[inline(always)]
-    pub fn is_cancelled(&self) -> bool { self.cancelled }
+    pub fn is_cancelled(&self) -> bool { self.kind == ShaderErrorKind::Cancelled }
+
+    pub fn poll_limit(span: parse::Span, what: &str, limit: ir::PollLimitReached) -> Self {
+        Self { kind: ShaderErrorKind::PollLimit, start: span.start, end: span.end,
+            message: format!("{what} stopped after {} loop steps on a page without worker threads", limit.0) }
+    }
 
     /// 1-based line and column of the error start in `src`.
     #[inline(always)]
@@ -147,14 +158,14 @@ impl ShaderError {
 impl Clone for ShaderError {
     #[inline(always)]
     fn clone(&self) -> Self {
-        Self { cancelled: self.cancelled, start: self.start, end: self.end, message: self.message.clone() }
+        Self { kind: self.kind, start: self.start, end: self.end, message: self.message.clone() }
     }
 }
 
 impl PartialEq for ShaderError {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        self.cancelled == other.cancelled && self.start == other.start && self.end == other.end && self.message == other.message
+        self.kind == other.kind && self.start == other.start && self.end == other.end && self.message == other.message
     }
 }
 

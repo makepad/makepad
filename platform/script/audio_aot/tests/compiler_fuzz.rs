@@ -1,6 +1,6 @@
 //! Compiler fuzz for the audio front end: truncated, spliced and mutated
 //! shaders (and the ones the fuzz once found panicking) never panic the
-//! compiler. Within the render budget, native, interpreter and wasm must
+//! compiler. Within the static work budget, native, interpreter and wasm must
 //! agree on every diagnostic or render the same bits on every output.
 
 use makepad_script_audio_aot::{compile_with, wasm, AudioShader, Backend, Kind, ShaderError, MAX_FRAMES};
@@ -140,11 +140,11 @@ fn render(shader: &AudioShader, module: Option<&[u8]>) -> Vec<u32> {
 enum Outcome { Skipped, Refused, Compiled }
 
 fn compiles_and_agrees(label: &str, src: &str) -> Outcome {
-    // Keep the differential render fast even when mutation creates a huge loop.
-    const RENDER_BUDGET: u64 = 4_000_000;
-    let cost = std::panic::catch_unwind(|| makepad_script_audio_aot::static_render_cost(src, &Default::default()))
+    // Keep the differential test fast when mutation creates a large fold, init or render loop.
+    const WORK_BUDGET: u64 = 4_000_000;
+    let cost = std::panic::catch_unwind(|| makepad_script_audio_aot::exceeds_static_cost(src, WORK_BUDGET))
         .unwrap_or_else(|_| panic!("{label}: static cost panicked on:\n{src}"));
-    if cost.is_ok_and(|cost| cost > RENDER_BUDGET) {
+    if matches!(cost, Ok(true)) {
         return Outcome::Skipped;
     }
     // Wasm takes the interpreter front end, then emits a module. Drive its
@@ -189,6 +189,16 @@ fn hostile_shaders_never_panic_and_render_bit_equal() {
     assert_eq!(compiles_and_agrees("found", &found("1..1-1e38")), Outcome::Compiled, "the empty range `1..1-1e38` compiles");
     assert_eq!(compiles_and_agrees("found", &found("-1e38..1")), Outcome::Refused, "the range `-1e38..1` is refused as too long");
 
+    // The early break makes these cheap even if preflight regresses. Their
+    // worst-case cost still exceeds the budget before the respective backend run.
+    let fold = "fn large() { var x=0.0 for i in 0..1000000000 { x += 1.0 break } x } let c=large() fn voice(){c}";
+    let init = "let t=[0.0;2] fn init(){ for i in 0..1000000000 { t[0]=1.0 break } } fn voice(){t[0]}";
+    assert_eq!(compiles_and_agrees("fold preflight", fold), Outcome::Skipped);
+    assert_eq!(compiles_and_agrees("init preflight", init), Outcome::Skipped);
+    let fft = "let re=[0.0;16] let im=[0.0;16] fn init(){ for i in 0..50000 { fft(re,im) break } } fn voice(){re[0]}";
+    assert_eq!(compiles_and_agrees("expanded FFT init preflight", fft), Outcome::Skipped);
+    assert_eq!(compiles_and_agrees("render preflight", &found("0..1000000000").replace("s + 1.0", "s + 1.0 break")), Outcome::Skipped);
+
     let dir = format!("{}/shaders", env!("CARGO_MANIFEST_DIR"));
     let mut corpus: Vec<String> = std::fs::read_dir(&dir).unwrap()
         .map(|entry| entry.unwrap().path())
@@ -209,6 +219,6 @@ fn hostile_shaders_never_panic_and_render_bit_equal() {
             Outcome::Skipped => skipped += 1,
         }
     }
-    eprintln!("{rounds} mutants: {compiled} compiled bit-equal, {refused} refused identically, {skipped} skipped over the render budget");
+    eprintln!("{rounds} mutants: {compiled} compiled bit-equal, {refused} refused identically, {skipped} skipped over the static work budget");
     assert!(compiled > rounds / 20);
 }

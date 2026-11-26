@@ -100,6 +100,21 @@ pub struct ScriptVmPolicy {
     pub(crate) total: EntryUsage,
     pub admission_table: AdmissionTable,
     admitted_object: Option<ScriptObject>,
+    /// The open host entries, innermost last (`ScriptVm::policy_entry_begin` and `_end`).
+    pub(crate) entries: Vec<EntryFrame>,
+}
+
+/// What one open host entry saved, to restore and charge when it ends.
+#[derive(Debug)]
+pub(crate) struct EntryFrame {
+    pub(crate) errors_before: usize,
+    pub(crate) total_before: EntryUsage,
+    pub(crate) thread: usize,
+    pub(crate) outer: Option<usize>,
+    pub(crate) prior_budget: Option<Option<crate::heap::ScriptAllocationBudget>>,
+    pub(crate) fuel_scope: (Option<u64>, u64),
+    pub(crate) old_frames: Option<usize>,
+    pub(crate) old_stack: usize,
 }
 
 impl Default for ScriptVmPolicy {
@@ -109,7 +124,7 @@ impl Default for ScriptVmPolicy {
             retained_heap_bytes: None, allocation_bytes: None, allow_debug_output: true,
             bail_on_uncaught_error: false, active: false, sealed: false, poisoned: None,
             last_entry: EntryUsage::default(), total: EntryUsage::default(),
-            admission_table: AdmissionTable::default(), admitted_object: None,
+            admission_table: AdmissionTable::default(), admitted_object: None, entries: Vec::new(),
         }
     }
 }

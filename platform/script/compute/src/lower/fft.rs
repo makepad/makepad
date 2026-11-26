@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) struct Site {
-    span: Span,
+    pub(super) span: Span,
     name: String,
     inverse: bool,
     init: bool,
@@ -308,7 +308,7 @@ fn worst_sites(block: &Block, in_loop: bool, ids: &mut Vec<usize>) {
     }
 }
 
-pub(super) fn finish(sites: &[Site], shared: &mut Vec<u32>, init: &mut Option<Program>, render: &mut Program, init_span: Option<Span>) -> LResult<Option<ShaderWarning>> {
+pub(super) fn finish(sites: &[Site], shared: &mut Vec<u32>, init: &mut Option<Program>, render: &mut Program) -> LResult<Option<ShaderWarning>> {
     let largest = sites.iter().max_by_key(|s| s.n).unwrap();
     let table = Table { base: shared.len() as u32, n: largest.n };
     let end = image_words(shared.len() as u64 + u64::from(table.n), largest.span)?;
@@ -318,7 +318,6 @@ pub(super) fn finish(sites: &[Site], shared: &mut Vec<u32>, init: &mut Option<Pr
     let warning = if cost > WARN_COST_PER_FRAME { frame_warning(&marked, sites, table, cost) } else { None };
     let mut p = init.take().unwrap_or_default();
     p = expand(p, sites, table, true, None, false);
-    check_init_cost(&p, init_span.unwrap_or(largest.span))?;
     reserve_words(shared, table.n, largest.span)?;
     shared.resize(end as usize, 0);
     *init = Some(p);

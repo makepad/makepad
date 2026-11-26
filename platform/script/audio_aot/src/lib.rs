@@ -50,7 +50,7 @@ pub use lower::{header, AudioPortInfo, Kind, ParamCurve, ParamInfo, ParamMeta, P
 
 use boundary::forever;
 use makepad_script_compute::boundary::ParamInfoView;
-use std::sync::{Arc, Weak, atomic::AtomicU32};
+use std::sync::{Arc, Weak};
 
 /// Combines two seed words. The constants and order define the render stream.
 /// Start with `a ^ (b * 0x9e3779b9)`. XOR with the word shifted right by 16,
@@ -287,11 +287,11 @@ impl AudioImports {
         all
     }
 
-    fn lower(&mut self, items: Vec<parse::Item>, bindings: &AudioBindings<'_>) -> Result<lower::Lowered, ShaderError> {
+    fn lower(&mut self, items: Vec<parse::Item>, bindings: &AudioBindings<'_>, control: lower::CompileTime<'_>) -> Result<lower::Lowered, ShaderError> {
         let all = self.with_prelude(items);
         lower::lower_with_rate(&all, self.user_len + 1, &|name| {
             bindings.samples.iter().find(|s| s.name == name).map(|s| (s.channels, s.frames, s.data))
-        }, bindings.oversample, bindings.control)
+        }, bindings.oversample, control)
     }
 }
 
@@ -319,7 +319,7 @@ impl AudioDeclarations {
     pub fn has_error(&self) -> bool { self.0.is_err() }
     pub fn error(&self) -> makepad_script_compute::boundary::ErrorView<'_> {
         let e = self.0.as_ref().as_ref().unwrap_err();
-        makepad_script_compute::boundary::ErrorView { start: e.start, end: e.end, message: &e.message }
+        makepad_script_compute::boundary::ErrorView { kind: e.kind, start: e.start, end: e.end, message: &e.message }
     }
 
     pub fn kind(&self) -> Kind { self.inventory().kind }
@@ -349,15 +349,27 @@ pub struct DeclaredPort<'a> {
     pub channels: u16,
 }
 
-/// Estimate the worst-case work of one render frame using the compiler's
-/// lowering, before running init or building either backend.
-pub fn static_render_cost(code: &str, bindings: &AudioBindings<'_>) -> Result<u64, ShaderError> {
-    let (mut imports, items) = AudioImports::source(code, bindings)?;
-    Ok(imports.lower(items, bindings)?.render.cost())
+/// Preflight a source for differential testing. Price each fold before executing
+/// it, then price the fully expanded init and one render frame before backend selection.
+pub fn exceeds_static_cost(code: &str, budget: u64) -> Result<bool, ShaderError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let bindings = AudioBindings::default();
+    let (mut imports, items) = AudioImports::source(code, &bindings)?;
+    let word = AtomicU32::new(0);
+    let observe_cost = |cost| {
+        if cost > budget { word.store(1, Ordering::Relaxed); }
+    };
+    let control = lower::CompileTime { word: Some(&word), observe_cost: Some(&observe_cost), ..bindings.compile_time() };
+    let lowered = imports.lower(items, &bindings, control);
+    if word.into_inner() != 0 { Ok(true) } else { lowered.map(|_| false) }
 }
 
-fn compile_items_with(items: Vec<parse::Item>, mut imports: AudioImports, backend: Backend, counting: bool, bindings: &AudioBindings<'_>) -> Result<Arc<AudioShaderBody>, Vec<ShaderError>> {
-    let mut lowered = imports.lower(items, bindings).map_err(|e| if e.is_cancelled() { Vec::new() } else { vec![e] })?;
+fn compile_items_with(items: Vec<parse::Item>, imports: AudioImports, backend: Backend, counting: bool, bindings: &AudioBindings<'_>) -> Result<Arc<AudioShaderBody>, Vec<ShaderError>> {
+    compile_items(items, imports, backend, counting, bindings, bindings.compile_time())
+}
+
+fn compile_items(items: Vec<parse::Item>, mut imports: AudioImports, backend: Backend, counting: bool, bindings: &AudioBindings<'_>, control: lower::CompileTime<'_>) -> Result<Arc<AudioShaderBody>, Vec<ShaderError>> {
+    let mut lowered = imports.lower(items, bindings, control).map_err(|e| if e.is_cancelled() { Vec::new() } else { vec![e] })?;
     let mut ctx_words = CTX_PARAMS as usize + lowered.params.len() + 3 * lowered.probes.len();
     let count_word = counting.then(|| {
         makepad_script_compute::work::count_runs(&mut lowered.render, ctx_words as u32);
@@ -400,20 +412,22 @@ fn compile_items_with(items: Vec<parse::Item>, mut imports: AudioImports, backen
             format!("could not allocate {} bytes for shader state", state_words.max(1) as u64 * 4))])?;
         state.resize(state_words.max(1), 0u32);
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        let native_init = native_ok.then(|| native::compile_with(init, 0)).flatten();
+        let native_init = (native_ok && control.poll_limit.is_none()).then(|| native::compile_with(init, 0)).flatten();
         if bindings.is_cancelled() { return Err(Vec::new()); }
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        if let Some(code) = native_init {
+        let run = if let Some(code) = native_init {
             let table = bindings.control.map_or([0, 0], |word| [std::ptr::from_ref(word) as u64, 1]);
             // SAFETY: init has no channel I/O. Only a controlled init can read
             // descriptor zero, which then borrows the caller's aligned word.
-            unsafe { code.run_kernel(ctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_mut_ptr(), table.as_ptr(), 1) };
+            lower::executing(bindings.executions, || unsafe { code.run_kernel(ctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_mut_ptr(), table.as_ptr(), 1) });
+            Ok(())
         } else {
-            run_init_interp(init, &mut ctx, &mut state, &mut shared, bindings.control);
-        }
+            run_init_interp(init, &mut ctx, &mut state, &mut shared, control)
+        };
         #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-        run_init_interp(init, &mut ctx, &mut state, &mut shared, bindings.control);
+        let run = run_init_interp(init, &mut ctx, &mut state, &mut shared, control);
         if bindings.is_cancelled() { return Err(Vec::new()); }
+        run.map_err(|limit| vec![ShaderError::poll_limit(lowered.init_span.expect("init has a declaration or FFT site"), "init()", limit)])?;
     }
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native = if native_ok { native::compile_with(&lowered.render, 0) } else { None };
@@ -535,11 +549,11 @@ fn write_channel_table<'a>(storage: &'a mut [u32], io: &mut ir::Io) -> &'a [usiz
     table
 }
 
-fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], shared: &mut [u32], control: Option<&AtomicU32>) {
+fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], shared: &mut [u32], control: lower::CompileTime<'_>) -> Result<(), ir::PollLimitReached> {
     let mut scratch = vec![0u32; init.scratch_words()];
-    let buf = control.map(|word| ir::RawBuf { ptr: std::ptr::from_ref(word).cast::<u32>().cast_mut(), len: 1, writable: false, elem: ir::Elem::Word });
+    let buf = control.word.map(|word| ir::RawBuf { ptr: std::ptr::from_ref(word).cast::<u32>().cast_mut(), len: 1, writable: false, elem: ir::Elem::Word });
     let mut mem = ir::Mem { ctx, state, shared: ir::Shared::Write(shared), bufs: buf.as_slice() };
-    ir::run(init, &mut scratch, &mut mem, &mut ir::Io::default(), 1);
+    lower::executing(control.executions, || ir::run_compile_time(init, &mut scratch, &mut mem, &mut ir::Io::default(), buf.is_some(), control.poll_limit)).map(|_| ())
 }
 
 impl std::fmt::Debug for AudioShader {

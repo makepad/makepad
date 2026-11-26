@@ -1014,7 +1014,17 @@ impl Ports for NoPorts {
     fn call(&mut self, _port: u16, _site: u32, _args: &[u32], _rets: &mut [u32]) {}
 }
 
+/// The interpreter admitted this many loop heads; the next one would exceed the budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PollLimitReached(pub u64);
+
+struct LoopPolls {
+    count: u64,
+    limit: Option<u64>,
+}
+
 enum Flow {
+    PollLimit,
     Next,
     Break(u32),
     Continue(u32),
@@ -1136,7 +1146,7 @@ impl<'a, 'm, 'i, 's, 'p> Interp<'a, 'm, 'i, 's, 'p> {
         }
     }
 
-    fn block(&mut self, b: &Block) -> Flow {
+    fn block<const COUNT: bool>(&mut self, b: &[Stmt], heads: &mut LoopPolls) -> Flow {
         for s in b {
             match s {
                 Stmt::Mark(_) => {}
@@ -1172,7 +1182,7 @@ impl<'a, 'm, 'i, 's, 'p> Interp<'a, 'm, 'i, 's, 'p> {
                     *out += x;
                 }
                 Stmt::If(c, t, e) => {
-                    let flow = if self.r(*c) != 0 { self.block(t) } else { self.block(e) };
+                    let flow = if self.r(*c) != 0 { self.block::<COUNT>(t, heads) } else { self.block::<COUNT>(e, heads) };
                     if !matches!(flow, Flow::Next) {
                         return flow;
                     }
@@ -1181,7 +1191,12 @@ impl<'a, 'm, 'i, 's, 'p> Interp<'a, 'm, 'i, 's, 'p> {
                     let mut k = 0;
                     while k < *cap {
                         k += 1;
-                        match self.block(body) {
+                        if COUNT {
+                            if heads.limit == Some(heads.count) { return Flow::PollLimit; }
+                            heads.count = heads.count.saturating_add(1);
+                        }
+                        match self.block::<COUNT>(body, heads) {
+                            Flow::PollLimit => return Flow::PollLimit,
                             Flow::Next | Flow::Continue(0) => {}
                             Flow::Break(0) => break,
                             Flow::Break(d) => return Flow::Break(d - 1),
@@ -1214,7 +1229,7 @@ impl<'a, 'm, 'i, 's, 'p> Interp<'a, 'm, 'i, 's, 'p> {
                     }
                     let out: Vec<u64> = {
                         let mut callee = Interp { regs: &mut regs, hi: &mut hi, nvals: g.vals.len(), frame: &mut *self.frame, mem: &mut *self.mem, io: &mut *self.io, n: self.n, funcs: self.funcs, func_regs: &mut *self.func_regs, ports: &mut *self.ports };
-                        callee.block(&g.body);
+                        if matches!(callee.block::<COUNT>(&g.body, heads), Flow::PollLimit) { return Flow::PollLimit; }
                         g.results.iter().map(|r| callee.r(*r)).collect()
                     };
                     self.func_regs[*f as usize] = (regs, hi);
@@ -1279,8 +1294,18 @@ pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32)
 
 /// [`run`] with the program's [`Stmt::Port`]s bound to `ports`.
 pub fn run_ports(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32, ports: &mut dyn Ports) {
+    let _ = run_inner::<false>(p, scratch, mem, io, n, ports, false, None);
+}
+
+/// Run a fold or init and return its executed loop heads. A controlled program
+/// has the outer escape loop installed by `poll_cancel_at_loops`.
+pub fn run_compile_time(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, wrapped: bool, limit: Option<u64>) -> Result<u64, PollLimitReached> {
+    run_inner::<true>(p, scratch, mem, io, 1, &mut NoPorts, wrapped, limit)
+}
+
+fn run_inner<const COUNT: bool>(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32, ports: &mut dyn Ports, wrapped: bool, limit: Option<u64>) -> Result<u64, PollLimitReached> {
     if n == 0 {
-        return;
+        return Ok(0);
     }
     assert_eq!(io.ins.len(), usize::from(p.input_channels));
     assert_eq!(io.outs.len(), usize::from(p.output_channels));
@@ -1291,7 +1316,21 @@ pub fn run_ports(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n
     let hi = if p.uses_f64() { hi } else { &mut [] };
     let mut func_regs = vec![(Vec::new(), Vec::new()); p.funcs.len()];
     let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n, funcs: &p.funcs, func_regs: &mut func_regs, ports };
-    interp.block(&p.body);
+    let mut heads = LoopPolls { count: 0, limit };
+    let flow = if COUNT && wrapped {
+        // Enter the generated escape scope directly. Its entry check still runs.
+        // Only loop heads inside it (including the target of continue) are counted.
+        let Some((Stmt::Loop { cap: 1, body }, prefix)) = p.body.split_last() else {
+            unreachable!("controlled compile-time program has an escape loop")
+        };
+        match interp.block::<COUNT>(prefix, &mut heads) {
+            Flow::Next => interp.block::<COUNT>(body, &mut heads),
+            other => other,
+        }
+    } else {
+        interp.block::<COUNT>(&p.body, &mut heads)
+    };
+    if matches!(flow, Flow::PollLimit) { Err(PollLimitReached(heads.count)) } else { Ok(heads.count) }
 }
 
 // =========================================================================
@@ -1824,13 +1863,31 @@ mod tests {
     }
 
     #[test]
+    fn compile_time_counts_executed_loop_heads() {
+        use super::{run_compile_time, Elem, Io, Mem, Program, RawBuf, Shared, Stmt};
+        let inner = Stmt::Loop { cap: 2, body: vec![Stmt::Continue(0), Stmt::Break(0)] };
+        let mut program = Program { body: vec![Stmt::Loop { cap: 3, body: vec![inner] }], ..Default::default() };
+        let word = std::sync::atomic::AtomicU32::new(0);
+        let buf = RawBuf { ptr: word.as_ptr(), len: 1, writable: false, elem: Elem::Word };
+        let run = |p: &Program, wrapped| {
+            let mut mem = Mem { ctx: &mut [], state: &mut [], shared: Shared::Write(&mut []), bufs: std::slice::from_ref(&buf) };
+            run_compile_time(p, &mut vec![0; p.scratch_words()], &mut mem, &mut Io::default(), wrapped, None).unwrap()
+        };
+        assert_eq!(run(&program, false), 9, "three outer heads and two inner heads per outer iteration");
+        program.poll_cancel_at_loops();
+        assert_eq!(run(&program, true), 9, "the wrapper and entry poll add no heads");
+        word.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(run(&program, true), 0, "entry cancellation reaches no loop head");
+    }
+
+    #[test]
     fn cancellation_discards_a_running_constant() {
         use crate::{lower, parse};
-        use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+        use std::sync::{Arc, atomic::{AtomicU32, AtomicUsize, Ordering}};
 
         let helper = "fn slow() {
             var x = 0.0
-            for i in 0..1024 {
+            for i in 0..1000000000 {
                 for j in 0..1024 {
                     if i > 0 && j % 2 == 1 { continue }
                     x += 0.25
@@ -1848,17 +1905,20 @@ mod tests {
             let items = parse::Parser::new(&tokens).items().unwrap();
             let control = Arc::new(AtomicU32::new(0));
             let worker_control = control.clone();
+            let executions = Arc::new(AtomicUsize::new(0));
+            let worker_count = executions.clone();
             let (entered, started) = mpsc::channel();
             let (resume, released) = mpsc::channel();
             let (done, result) = mpsc::channel();
             let worker = std::thread::spawn(move || {
                 CONTINUE.with(|gate| *gate.borrow_mut() = Some((entered, released)));
                 let compiled = lower::lower_with_rate(&items, src.len() + 1, &|_| None,
-                    lower::RateOverride::default(), Some(&worker_control));
+                    lower::RateOverride::default(), lower::CompileTime { word: Some(&worker_control), executions: Some(&worker_count), ..Default::default() });
                 done.send(compiled.err()).unwrap();
             });
             // The first continue is in the second outer iteration, after the inner loop has run in full.
             started.recv_timeout(Duration::from_secs(5)).expect("constant never entered its inner loop");
+            let inside = executions.load(Ordering::Relaxed);
             control.store(1, Ordering::Relaxed);
             resume.send(()).unwrap();
             drop(resume);
@@ -1866,6 +1926,8 @@ mod tests {
                 .expect("a partially folded value escaped into a compiled program");
             assert!(error.is_cancelled(), "{caller}: expected cancellation, got {error}");
             worker.join().unwrap();
+            assert_eq!(inside, 1, "{caller}: the running fold held the prepare counter");
+            assert_eq!(executions.load(Ordering::Relaxed), 0, "{caller}: the cancelled fold released it");
         }
     }
 

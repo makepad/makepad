@@ -84,7 +84,7 @@ pub fn fuse_with(nodes: &[FuseNode], outputs: &[Port], backend: Backend, binding
     }
     if compiled.is_cancelled() { return Err(FuseFailure::Cancelled); }
     let error = compiled.error(0);
-    Err(FuseFailure::Diagnostic(FuseError { node: compiled.node(), error: ShaderError::new(error.start, error.end, error.message.to_string()) }))
+    Err(FuseFailure::Diagnostic(FuseError { node: compiled.node(), error: ShaderError { kind: error.kind, start: error.start, end: error.end, message: error.message.to_string() } }))
 }
 
 pub(crate) fn fuse_impl(nodes: &[FuseNode], outputs: &[Port], backend: Backend, bindings: &crate::AudioBindings<'_>) -> Result<std::sync::Arc<crate::AudioShaderBody>, FuseFailure> {
@@ -94,9 +94,11 @@ pub(crate) fn fuse_impl(nodes: &[FuseNode], outputs: &[Port], backend: Backend, 
     let (items, bases) = fuse_items(nodes, outputs, &mut imports, bindings)?;
     imports.node_ranges.clone_from(&bases);
     crate::compile_items_with(items, imports, backend, false, bindings).map_err(|e| {
-        let Some(e) = e.into_iter().next() else { return FuseFailure::Cancelled };
+        let Some(mut e) = e.into_iter().next() else { return FuseFailure::Cancelled };
         let (node, span) = source_span(Span { start: e.start, end: e.end }, &bases);
-        FuseFailure::Diagnostic(FuseError { node, error: ShaderError::new(span.start, span.end, e.message) })
+        e.start = span.start;
+        e.end = span.end;
+        FuseFailure::Diagnostic(FuseError { node, error: e })
     })
 }
 
@@ -154,7 +156,7 @@ fn fuse_items(nodes: &[FuseNode], outputs: &[Port], imports: &mut crate::AudioIm
         let prefix = format!("{}_", node.name);
         if let Some(rate) = crate::lower::audio_rate(&items, &imports.prelude, &|name| {
             bindings.samples.iter().find(|s| s.name.strip_prefix(&prefix) == Some(name)).map(|s| (s.channels, s.frames, s.data))
-        }, bindings.control).map_err(|mut e| {
+        }, bindings.compile_time()).map_err(|mut e| {
             if e.is_cancelled() { return FuseFailure::Cancelled; }
             e.start = e.start.saturating_sub(base);
             e.end = e.end.saturating_sub(base);

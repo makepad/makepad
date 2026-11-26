@@ -16,6 +16,7 @@ use crate::object::*;
 use crate::opcode::*;
 use crate::parser::*;
 pub use crate::policy::{EntryUsage, Limit, Poison, ScriptVmPolicy};
+use crate::policy::EntryFrame;
 use crate::thread::*;
 use crate::tokenizer::*;
 use crate::trap::*;
@@ -2157,11 +2158,26 @@ impl<'a> ScriptVm<'a> {
     }
 
     fn run_policy_entry(&mut self, run: impl FnOnce(&mut Self) -> ScriptValue) -> ScriptValue {
+        // The accounting is in two ops: this generic part is compiled wherever a host calls
+        // `host_entry`, so it touches no VM state of its own.
+        if let Some(refused) = self.policy_entry_begin() { return refused; }
+        // A host native can unwind to a containment boundary outside the interpreter.
+        // Restore the selected thread and budgets before that boundary regains control.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        let value = self.policy_entry_end(result.as_ref().ok().copied());
+        match result { Ok(_) => value, Err(panic) => std::panic::resume_unwind(panic) }
+    }
+
+    /// The first half of a policy entry ([`Self::host_entry`]): applies the policy's limits to
+    /// the selected thread and opens the entry's accounting. `Some` refuses the entry at once
+    /// (a limit already reached), with the value to answer.
+    #[relax_api(run)]
+    pub fn policy_entry_begin(&mut self) -> Option<ScriptValue> {
         self.bx.apply_policy_limits();
         if let Some(limit) = self.bx.pending_policy_limit() {
             if self.bx.policy_thread.is_none() { self.bx.policy.last_entry = EntryUsage::default(); }
             self.bx.poison_limit(limit);
-            return self.bx.poisoned().unwrap().as_script_error();
+            return Some(self.bx.poisoned().unwrap().as_script_error());
         }
 
         let errors_before = self.bx.captured_errors.as_ref().map_or(0, Vec::len);
@@ -2185,10 +2201,17 @@ impl<'a> ScriptVm<'a> {
         selected.call_frame_limit = Some(frames.min(old_frames.unwrap_or(usize::MAX)));
         selected.stack_limit = stack.min(old_stack);
         self.bx.policy_thread = Some(thread);
+        self.bx.policy.entries.push(EntryFrame { errors_before, total_before, thread, outer, prior_budget, fuel_scope, old_frames, old_stack });
+        None
+    }
 
-        // A host native can unwind to a containment boundary outside the interpreter.
-        // Restore the selected thread and budgets before that boundary regains control.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+    /// The second half of a policy entry: restores the selected thread's limits and the
+    /// budgets, charges the entry, and stops the box on an uncaught error. `value` is `None`
+    /// when the entry's work unwound; the restore happens either way.
+    #[relax_api(run)]
+    pub fn policy_entry_end(&mut self, value: Option<ScriptValue>) -> ScriptValue {
+        let Some(frame) = self.bx.policy.entries.pop() else { return value.unwrap_or(NIL) };
+        let EntryFrame { errors_before, total_before, thread, outer, prior_budget, fuel_scope, old_frames, old_stack } = frame;
         if let Some(limit) = self.bx.pending_policy_limit() { self.bx.poison_limit(limit); }
         let used = self.bx.leave_instruction_limit(fuel_scope.0, fuel_scope.1);
         let selected = self.bx.threads.cur();
@@ -2207,7 +2230,7 @@ impl<'a> ScriptVm<'a> {
             policy.last_entry = EntryUsage { fuel: used, bytes: policy.total.bytes.saturating_sub(total_before.bytes) };
             policy.total.fuel = policy.total.fuel.saturating_add(used);
         }
-        let value = match result { Ok(value) => value, Err(panic) => std::panic::resume_unwind(panic) };
+        let Some(value) = value else { return NIL };
         if (value.is_err() || self.bx.threads.cur_ref().trap.has_err()) && self.bx.bail_on_uncaught_error && !self.bx.is_poisoned() {
             let message = self.bx.threads.cur_ref().trap.err_borrow().front().map(|e| e.message.clone())
                 .or_else(|| self.bx.captured_errors.as_ref()?.get(errors_before).map(|e| e.message.clone()))

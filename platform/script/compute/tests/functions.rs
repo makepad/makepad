@@ -67,7 +67,7 @@ fn compile_time_cancel_escapes_nested_continue() {
 
     let src = "let table = [0.0; 2]
         fn init() {
-            for i in 0..32 {
+            for i in 0..1000000000 {
                 for j in 0..32768 {
                     if j == 0 { continue }
                     table[0] = 1.0
@@ -78,8 +78,9 @@ fn compile_time_cancel_escapes_nested_continue() {
         fn voice() { table[0] }";
     let tokens = parse::lex(src).unwrap();
     let items = parse::Parser::new(&tokens).items().unwrap();
-    let lowered = lower::lower_with_rate(&items, src.len() + 1, &|_| None, lower::RateOverride::default(), Some(&AtomicU32::new(0))).unwrap();
+    let lowered = lower::lower_with_rate(&items, src.len() + 1, &|_| None, lower::RateOverride::default(), lower::CompileTime { word: Some(&AtomicU32::new(0)), ..Default::default() }).unwrap();
     let mut program = lowered.init.unwrap();
+    assert!(program.total_cost() > lower::MAX_INIT_COST, "audio init runs past the kernel's admission cost");
     // Interlock immediately before the source continue. This test-owned buffer
     // is bound only here, after the compiler has finished injecting its polls.
     // Reading the same cancel word acknowledges the sender. The break below
@@ -126,7 +127,7 @@ fn compile_time_cancel_escapes_nested_continue() {
                         RawBuf { ptr: signal_ptr, len: 1, writable: true, elem: Elem::Word },
                     ];
                     let mut mem = ir::Mem { ctx: &mut [], state: &mut [], shared: ir::Shared::Write(&mut shared), bufs: &bufs };
-                    ir::run(&p, &mut vec![0; p.scratch_words()], &mut mem, &mut ir::Io::default(), 1);
+                    ir::run_compile_time(&p, &mut vec![0; p.scratch_words()], &mut mem, &mut ir::Io::default(), true, None).unwrap();
                 }
                 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
                 Backend::Native => {

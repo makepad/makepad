@@ -38,7 +38,7 @@ pub enum Domain {
 use crate::parse::*;
 use crate::ShaderError;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// Words at the start of every state block (see `header`).
 pub const HEADER_WORDS: u32 = 15;
@@ -108,7 +108,7 @@ pub const INLINE_OPS: u64 = 48;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
 /// Largest program after inlining and unrolling (AIR values).
 pub const MAX_IR_VALS: usize = 1 << 20;
-/// Worst-case AIR ops of one `init()` run.
+/// Admission limit for kernel init and non-audio constant evaluation.
 pub const MAX_INIT_COST: u64 = 200_000_000;
 /// Warn above this worst-case AIR cost per frame.
 pub const WARN_COST_PER_FRAME: u64 = 4_000_000;
@@ -241,6 +241,7 @@ pub struct Lowered {
     pub kind: Kind,
     pub render: Program,
     pub init: Option<Program>,
+    pub init_span: Option<Span>,
     pub params: Vec<ParamInfo>,
     pub probes: Vec<String>,
     pub sample_names: Vec<String>,
@@ -414,7 +415,7 @@ type LResult<T> = Result<T, ShaderError>;
 fn speculative<T>(result: LResult<T>) -> LResult<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(e) if e.is_cancelled() => Err(e),
+        Err(e) if e.kind != crate::ShaderErrorKind::Problem => Err(e),
         Err(_) => Ok(None),
     }
 }
@@ -1107,8 +1108,45 @@ struct Glide {
     target: Val,
 }
 
+/// Borrowed state for compile-time execution. A preflight can cancel its own word
+/// after inspecting a static cost, before the corresponding work runs.
+#[derive(Clone, Copy, Default)]
+pub struct CompileTime<'a> {
+    pub word: Option<&'a AtomicU32>,
+    pub executions: Option<&'a AtomicUsize>,
+    pub poll_limit: Option<u64>,
+    pub observe_cost: Option<&'a dyn Fn(u64)>,
+}
+
+impl CompileTime<'_> {
+    fn cancelled(&self) -> bool {
+        self.word.is_some_and(|word| word.load(Ordering::Relaxed) != 0)
+    }
+
+    fn preflight(&self, estimate: impl FnOnce() -> u64) -> LResult<()> {
+        if let Some(observe) = self.observe_cost {
+            observe(estimate());
+            if self.cancelled() { return Err(ShaderError::cancelled()); }
+        }
+        Ok(())
+    }
+}
+
+/// Marks the actual execution, including nested runs on the same prepare.
+pub fn executing<T>(counter: Option<&AtomicUsize>, run: impl FnOnce() -> T) -> T {
+    struct Guard<'a>(&'a AtomicUsize);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) { self.0.fetch_sub(1, Ordering::Relaxed); }
+    }
+    let _guard = counter.map(|counter| {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Guard(counter)
+    });
+    run()
+}
+
 struct Lowerer<'control> {
-    control: Option<&'control AtomicU32>,
+    control: CompileTime<'control>,
     block_layout: Option<block::Layout>,
     fft_sites: Vec<fft::Site>,
     render_entries: Vec<(u64, Span)>,
@@ -1889,7 +1927,7 @@ impl Lowerer<'_> {
             }
             let c = match self.cinit(fe, None) {
                 Ok(c) => c,
-                Err(e) if e.is_cancelled() => return Err(e),
+                Err(e) if e.kind != crate::ShaderErrorKind::Problem => return Err(e),
                 Err(e) => match self.fold_const(fe)? {
                     Some(c) => c,
                     None if self.lenient_objects => {
@@ -2296,7 +2334,7 @@ impl Lowerer<'_> {
                             // else the expression run once at lowering.
                             let c = match self.cinit(value, ann.as_ref()) {
                                 Ok(c) => c,
-                                Err(e) if e.is_cancelled() => return Err(e),
+                                Err(e) if e.kind != crate::ShaderErrorKind::Problem => return Err(e),
                                 Err(e) => match self.fold_const(value)? {
                                     Some(c) => c,
                                     None if self.domain == Domain::Kernel => {
@@ -2876,7 +2914,6 @@ impl Lowerer<'_> {
         // FFT argument offsets remain live through their call markers until expansion.
         if self.fft_sites.is_empty() {
             dce(&mut prog);
-            check_init_cost(&prog, f.span)?;
         }
         Ok(prog)
     }
@@ -2981,7 +3018,7 @@ impl Lowerer<'_> {
         let v = match r {
             Ok(v) => v,
             // An error inside a prelude helper is reported at the user's call.
-            Err(e) if !e.is_cancelled() && e.start >= self.prelude_base && span.start < self.prelude_base => {
+            Err(e) if e.kind == crate::ShaderErrorKind::Problem && e.start >= self.prelude_base && span.start < self.prelude_base => {
                 return err(span, format!("in `{}`: {}", f.name, e.message));
             }
             Err(e) => return Err(e),
@@ -3665,7 +3702,7 @@ impl Lowerer<'_> {
         self.call_stack.pop();
         let v = match r {
             Ok(v) => v,
-            Err(e) if !e.is_cancelled() && e.start >= self.prelude_base && span.start < self.prelude_base => {
+            Err(e) if e.kind == crate::ShaderErrorKind::Problem && e.start >= self.prelude_base && span.start < self.prelude_base => {
                 return err(span, format!("in `{}`: {}", f.name, e.message));
             }
             Err(e) => return Err(e),
@@ -4640,7 +4677,7 @@ impl Lowerer<'_> {
     /// that reads anything else (params, inputs, state, the time) is not a
     /// constant (None). Its value as a constant initializer.
     fn fold_const(&mut self, e: &Expr) -> LResult<Option<CInit>> {
-        if self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) {
+        if self.control.cancelled() {
             return Err(ShaderError::cancelled());
         }
         let base = self.shared_init.len() as u32;
@@ -4677,11 +4714,12 @@ impl Lowerer<'_> {
         if ir::validate(&prog, &regions).is_err() {
             return Ok(None);
         }
-        if prog.total_cost() > MAX_INIT_COST {
+        if self.domain != Domain::Audio && prog.total_cost() > MAX_INIT_COST {
             return err(e.span, format!("this constant may take {} operations to compute; the limit is {}", prog.total_cost(), MAX_INIT_COST));
         }
+        self.control.preflight(|| prog.total_cost())?;
         // Validate and price source AIR before granting its generated polls buffer zero.
-        let buf = if let Some(control) = self.control {
+        let buf = if let Some(control) = self.control.word {
             prog.poll_cancel_at_loops();
             regions.bufs.push(false);
             ir::validate(&prog, &regions).map_err(|message| ShaderError::new(e.span.start, e.span.end,
@@ -4698,10 +4736,11 @@ impl Lowerer<'_> {
         let (mut ctx, mut state) = ([0u32; 0], [0u32; 0]);
         let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: buf.as_slice() };
         let mut io = ir::Io::default();
-        ir::run(&prog, &mut scratch, &mut mem, &mut io, 1);
-        if self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) {
+        let run = executing(self.control.executions, || ir::run_compile_time(&prog, &mut scratch, &mut mem, &mut io, buf.is_some(), self.control.poll_limit));
+        if self.control.cancelled() {
             return Err(ShaderError::cancelled());
         }
+        run.map_err(|limit| ShaderError::poll_limit(e.span, "this constant", limit))?;
         let w = |k: u32| shared[(base + k) as usize];
         Ok(Some(match ty {
             T::Vec(n) => {
@@ -6324,7 +6363,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
 /// Lowers a parsed shader into its render (and optional init) programs.
 fn new_lowerer<'control>(prelude_base: usize, domain: Domain) -> Lowerer<'control> {
     Lowerer {
-        control: None,
+        control: CompileTime::default(),
         block_layout: None,
         fft_sites: Vec::new(),
         render_entries: Vec::new(),
@@ -6453,7 +6492,7 @@ pub struct AudioRate {
 }
 
 /// Resolves the audio rate before sizing any tables or per-instance state.
-pub fn audio_rate<'a>(items: &[Item], prelude: &[Item], sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, control: Option<&AtomicU32>)
+pub fn audio_rate<'a>(items: &[Item], prelude: &[Item], sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, control: CompileTime<'_>)
     -> Result<Option<AudioRate>, ShaderError> {
     let mut decls = items.iter().filter(|i| matches!(i, Item::Decl { name, .. } if name == "rate"));
     let Some(Item::Decl { args, span, .. }) = decls.next() else { return Ok(None) };
@@ -6634,15 +6673,15 @@ pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError
 }
 
 pub fn lower_with_samples<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>) -> Result<Lowered, ShaderError> {
-    lower_with_rate(items, prelude_base, sample, RateOverride::default(), None)
+    lower_with_rate(items, prelude_base, sample, RateOverride::default(), CompileTime::default())
 }
 
-pub fn lower_with_rate<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, node: RateOverride, control: Option<&AtomicU32>) -> Result<Lowered, ShaderError> {
+pub fn lower_with_rate<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>, node: RateOverride, control: CompileTime<'_>) -> Result<Lowered, ShaderError> {
     lower_audio(items, prelude_base, sample, node, Vec::new(), control)
 }
 
 fn lower_audio<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) -> Option<(u32, u32, &'a [f32])>,
-    node: RateOverride, branches: Vec<bool>, control: Option<&AtomicU32>) -> Result<Lowered, ShaderError> {
+    node: RateOverride, branches: Vec<bool>, control: CompileTime<'_>) -> Result<Lowered, ShaderError> {
     let mut l = new_lowerer(prelude_base, Domain::Audio);
     l.control = control;
     let block_entry = items.iter().find_map(|item| match item {
@@ -6730,8 +6769,7 @@ fn lower_audio<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) ->
     let mut warnings = Vec::new();
     if l.fft_sites.is_empty() {
         dce(&mut render);
-    } else if let Some(warning) = fft::finish(&l.fft_sites, &mut l.shared_init, &mut init, &mut render,
-        l.fns.get("init").map(|f| f.span))? {
+    } else if let Some(warning) = fft::finish(&l.fft_sites, &mut l.shared_init, &mut init, &mut render)? {
         warnings.push(warning);
     }
     if warnings.is_empty() {
@@ -6741,8 +6779,12 @@ fn lower_audio<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) ->
             warnings.push(ShaderWarning { span, message: format!("too much work per sample (worst case {cost} ops); reduce loop sizes") });
         }
     }
-    // Price the source and any generated FFT loops before adding host control.
-    if let (Some(program), Some(_)) = (&mut init, control) {
+    // Price the expanded programs before adding the host's cancellation wrapper.
+    if let Some(program) = &init {
+        control.preflight(|| program.total_cost())?;
+    }
+    control.preflight(|| render.cost())?;
+    if let (Some(program), Some(_)) = (&mut init, control.word) {
         program.poll_cancel_at_loops();
     }
     Ok(Lowered {
@@ -6753,6 +6795,7 @@ fn lower_audio<'a>(items: &[Item], prelude_base: usize, sample: &dyn Fn(&str) ->
         kind,
         render,
         init,
+        init_span: l.fns.get("init").map(|f| f.span).or_else(|| l.fft_sites.first().map(|site| site.span)),
         params: l.params,
         probes: l.probes.into_iter().map(|(name, _)| name).collect(),
         param_meta: l.param_meta,

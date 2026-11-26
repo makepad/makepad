@@ -41,6 +41,7 @@ pub struct LayoutView<'a> {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ErrorView<'a> {
+    pub kind: crate::ShaderErrorKind,
     pub start: usize,
     pub end: usize,
     pub message: &'a str,
@@ -290,7 +291,7 @@ impl CompileData {
                 #[cfg(feature = "vm")]
                 let count_records: Vec<Vec<&'static str>> = self.object.iter().flat_map(|o| o.counts.iter()).map(|c| c.records.iter().map(|r| forever(r.as_str())).collect()).collect();
                 Views {
-                    errors: self.errors.iter().map(|e| ErrorView { start: e.start, end: e.end, message: forever(e.message.as_str()) }).collect(),
+                    errors: self.errors.iter().map(|e| ErrorView { kind: e.kind, start: e.start, end: e.end, message: forever(e.message.as_str()) }).collect(),
                     places: (0..self.errors.len())
                         .map(|k| match self.places.get(k) {
                             Some(Some((message, file, line, col))) => ErrorPlaceView { file: forever(file.as_str()), line: *line, col: *col, message: forever(message.as_str()) },
