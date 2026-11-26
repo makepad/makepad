@@ -2590,12 +2590,13 @@ impl Widget for AiChatPanel {
             }
         };
 
-        // Send turns into Stop while a turn runs; with nothing typed and no
-        // picture it is greyed.
+        // Send turns into Stop while a turn runs; with nothing typed, no
+        // picture and no marks it is greyed. A greyed Send takes no press, so
+        // this is the same test the press makes before sending.
         let busy = state.status.is_busy();
         self.view.button(cx, ids!(send_button)).set_visible(cx, !busy);
         self.view.button(cx, ids!(stop_button)).set_visible(cx, busy);
-        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty();
+        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0;
         self.view.widget(cx, ids!(send_button)).set_disabled(cx, !typed);
         self.view.widget(cx, ids!(mic_tip)).set_visible(cx, matches!(self.voice, VoiceUi::Idle | VoiceUi::Busy));
         self.view.widget(cx, ids!(mic_button)).set_disabled(cx, self.voice == VoiceUi::Busy);

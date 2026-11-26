@@ -45,6 +45,10 @@
 //! from real-time audio callbacks. The one syscall on the capture path is
 //! the UDP send itself.
 //!
+//! Callers with their own transport can feed device audio into a [`Framer`].
+//! Its callback receives gated mono frames at the configured rate and size,
+//! with sequence numbers and sample timestamps for both audio and silence.
+//!
 //! The UDP port is fixed at [`DEFAULT_PORT`] (41531) so LAN firewall rules
 //! can whitelist it once; co-located instances fall back to the next few
 //! ports and still find each other. The wire header carries a codec id so a
@@ -61,10 +65,12 @@ pub mod resample;
 pub mod wire;
 
 mod capture;
+mod framer;
 mod peers;
 mod playback;
 
 pub use capture::CaptureHandle;
+pub use framer::{Frame, Framer, FramerConfig};
 pub use jitter::PlayoutConfig;
 pub use link::{Delivery, LinkStats, PeerInfo, VoiceConfig, VoiceLink};
 pub use playback::{PeerVoice, PlaybackHandle};

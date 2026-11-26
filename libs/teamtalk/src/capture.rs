@@ -1,238 +1,154 @@
-//! The send side: called from the application's audio *input* callback.
+//! The link's UDP sender, called from the application's audio input callback.
 //!
-//! [`CaptureHandle::push_planar`] (or `push_mono` / `push_interleaved`) takes
-//! whatever the device delivers — any rate, any channel count, any block
-//! size — folds it to mono, resamples it to the wire rate, cuts it into
-//! frames, gates/limits them, and sends each finished frame as one UDP
-//! datagram straight from the calling thread. On a LAN a nonblocking UDP
-//! send is a ~10 µs syscall, which is cheaper and far lower-latency than
-//! waking a sender thread; there is no allocation and no lock anywhere on
-//! this path.
+//! [`Framer`] folds device channels to mono, applies input gain, resamples
+//! to [`INTERNAL_RATE`], and frames, gates, fades and limits the samples.
+//! [`CaptureHandle`] encodes each finished frame and sends it directly to
+//! the link's destinations as a single datagram.
 //!
-//! While the gate is closed (or the link is muted) a 24-byte silence header
-//! is sent per frame instead of audio, so receivers keep sequence continuity,
-//! presence, and exact silence timing for free. The gate has no lookahead —
-//! it can never delay or clip an onset: the frame speech starts in is sent
-//! whole, with only a 1 ms anti-click fade at its very start.
+//! A closed gate or muted link sends a header-only silence packet with the
+//! frame's sequence number, sample count and timestamp.
 
-use crate::codec::{VoiceCodec, VoiceEncoder};
-use crate::dsp::{fade_in, fade_out_tail, fold_interleaved_to_mono, Gate, GateState, Limiter};
+use crate::codec::{adpcm_encode_into, ogg_page_into, AdpcmState};
+use crate::framer::{interleaved_samples, planar_samples, Frame, Framer, FramerConfig};
 use crate::link::{Delivery, Shared};
 use crate::peers::unpack_addr;
-use crate::resample::Resampler;
 use crate::wire::{
-    encode_header_only, encode_raw_i16, flags, Codec, Header, HEADER_LEN, INTERNAL_RATE, MAX_FRAME,
-    MAX_PACKET,
+    encode_header_only, encode_raw_i16, flags, Codec, Header, HEADER_LEN, INTERNAL_RATE, MAX_PACKET,
 };
 use std::net::UdpSocket;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// Device samples folded/consumed per inner iteration.
-const CHUNK: usize = 512;
-/// Staging for resampled output of one chunk: covers device rates down to 6 kHz.
-const STAGING: usize = CHUNK * 8 + 8;
-/// Anti-click fade at gate edges, in samples (1 ms at 48 kHz).
-const EDGE_FADE: usize = 48;
-
 /// The capture half of a [`crate::VoiceLink`]. `Send` (move it into the audio
 /// input callback), not `Clone`: exactly one thread feeds it.
 pub struct CaptureHandle {
     shared: Arc<Shared>,
+    framer: Framer,
+    sender: PacketSender,
+}
+
+struct PacketSender {
     socket: UdpSocket,
-    resampler: Resampler,
-    staging: [f32; STAGING],
-    mono: [f32; CHUNK],
-    frame: [f32; MAX_FRAME],
-    frame_len: usize,
-    fill: usize,
-    seq: u32,
-    timestamp: u32,
-    gate: Gate,
-    limiter: Limiter,
     packet: [u8; MAX_PACKET],
-    encoder: VoiceEncoder,
-    /// Reused Ogg page buffer: no allocation per frame once grown.
+    ogg_serial: u32,
+    ogg_granule: u64,
+    adpcm_state: AdpcmState,
+    adpcm_buf: Vec<u8>,
     page_buf: Vec<u8>,
 }
 
 impl CaptureHandle {
     pub(crate) fn new(shared: Arc<Shared>, socket: UdpSocket) -> Self {
-        let frame_len = shared.frame_samples;
-        let hangover_frames =
-            (shared.gate_hangover_ms as f64 * INTERNAL_RATE / 1000.0 / frame_len as f64) as u32;
-        let serial = shared.sender_id.load(Ordering::Relaxed) as u32;
-        let bits = shared.adpcm_bits.load(Ordering::Relaxed);
-        Self {
-            gate: Gate::new(shared.gate_threshold_rms, hangover_frames.max(1)),
-            limiter: Limiter::new(0.95, 0.5, 60.0),
-            encoder: VoiceEncoder::new(VoiceCodec::Ogg, bits, serial),
-            page_buf: Vec::with_capacity(MAX_PACKET),
-            shared,
+        let framer = Framer::new(FramerConfig {
+            out_rate: INTERNAL_RATE,
+            frame_samples: shared.frame_samples,
+            gate_threshold_rms: shared.gate_threshold_rms,
+            gate_hangover_ms: shared.gate_hangover_ms,
+        })
+        .expect("VoiceLink::bind validates the frame size");
+        let ogg_serial = shared.sender_id.load(Ordering::Relaxed) as u32;
+        let mut page_buf = Vec::with_capacity(MAX_PACKET);
+        // Initialize the codec's shared CRC table before the audio callback.
+        ogg_page_into(ogg_serial, 0, 0, &[], &mut page_buf);
+        let sender = PacketSender {
             socket,
-            resampler: Resampler::new(),
-            staging: [0.0; STAGING],
-            mono: [0.0; CHUNK],
-            frame: [0.0; MAX_FRAME],
-            frame_len,
-            fill: 0,
-            seq: 0,
-            timestamp: 0,
             packet: [0; MAX_PACKET],
+            ogg_serial,
+            ogg_granule: 0,
+            adpcm_state: AdpcmState::default(),
+            // Eight bytes of state followed by at most four bits per sample.
+            adpcm_buf: Vec::with_capacity(8 + shared.frame_samples.div_ceil(2)),
+            page_buf,
+        };
+        Self {
+            shared,
+            framer,
+            sender,
         }
     }
 
     /// Feed a mono block at `rate` Hz.
     pub fn push_mono(&mut self, rate: f64, samples: &[f32]) {
-        for chunk in samples.chunks(CHUNK) {
-            self.mono[..chunk.len()].copy_from_slice(chunk);
-            self.push_chunk(rate, chunk.len());
-        }
+        self.push(rate, samples.iter().copied());
     }
 
     /// Feed a planar (channel-major) block, as
     /// `makepad_platform::audio::AudioBuffer` stores it: `data.len()` must be
     /// at least `frames * channels`. Channels are averaged to mono.
     pub fn push_planar(&mut self, rate: f64, frames: usize, channels: usize, data: &[f32]) {
-        let channels = channels.max(1);
-        if data.len() < frames * channels {
-            return;
-        }
-        let scale = 1.0 / channels as f32;
-        let mut off = 0;
-        while off < frames {
-            let n = (frames - off).min(CHUNK);
-            for f in 0..n {
-                let mut acc = 0.0;
-                for c in 0..channels {
-                    acc += data[c * frames + off + f];
-                }
-                self.mono[f] = acc * scale;
-            }
-            self.push_chunk(rate, n);
-            off += n;
-        }
+        self.push(rate, planar_samples(frames, channels, data));
     }
 
     /// Feed an interleaved block. Channels are averaged to mono.
     pub fn push_interleaved(&mut self, rate: f64, channels: usize, data: &[f32]) {
-        let channels = channels.max(1);
-        let frames = data.len() / channels;
-        let mut off = 0;
-        while off < frames {
-            let n = (frames - off).min(CHUNK);
-            fold_interleaved_to_mono(
-                channels,
-                &data[off * channels..(off + n) * channels],
-                &mut self.mono[..n],
-            );
-            self.push_chunk(rate, n);
-            off += n;
-        }
+        self.push(rate, interleaved_samples(channels, data));
     }
 
     /// Frames sent so far (audio and silence).
     pub fn frames_sent(&self) -> u32 {
-        self.seq
+        self.framer.frames_out()
     }
 
-    /// `self.mono[..n]` holds folded device-rate samples: resample + frame + send.
-    fn push_chunk(&mut self, rate: f64, n: usize) {
-        let gain = f32::from_bits(self.shared.input_gain.load(Ordering::Relaxed));
-        self.resampler.set_ratio(rate.max(1000.0), INTERNAL_RATE, 0.0);
-        // Split borrows: the resampler pushes into the staging area.
-        let resampler = &mut self.resampler;
-        let staging = &mut self.staging;
-        let mut staged = 0usize;
-        for i in 0..n {
-            let x = self.mono[i] * gain;
-            resampler.push(x, |y| {
-                if staged < STAGING {
-                    staging[staged] = y;
-                    staged += 1;
-                }
-            });
-        }
-        for i in 0..staged {
-            let y = self.staging[i];
-            self.frame[self.fill] = y;
-            self.fill += 1;
-            if self.fill == self.frame_len {
-                self.fill = 0;
-                self.finish_frame();
-            }
-        }
+    fn push(&mut self, rate: f64, samples: impl ExactSizeIterator<Item = f32>) {
+        let shared = &*self.shared;
+        self.framer.push_with_controls(
+            rate,
+            samples,
+            0,
+            || f32::from_bits(shared.input_gain.load(Ordering::Relaxed)),
+            || shared.muted.load(Ordering::Relaxed),
+            &mut |frame| self.sender.send_frame(shared, frame),
+        );
     }
+}
 
-    fn finish_frame(&mut self) {
-        let muted = self.shared.muted.load(Ordering::Relaxed);
-        let channel = self.shared.channel.load(Ordering::Relaxed);
-        let room = self.shared.room.load(Ordering::Relaxed);
-        let sender = self.shared.sender_id.load(Ordering::Relaxed);
-        let state = if muted {
-            GateState::Silent
-        } else {
-            self.gate.process(&self.frame[..self.frame_len])
-        };
+impl PacketSender {
+    fn send_frame(&mut self, shared: &Shared, frame: &Frame<'_>) {
         let mut header = Header {
             codec: Codec::RawI16,
-            channel,
-            flags: 0,
-            frames: self.frame_len as u16,
-            room,
-            sender,
-            seq: self.seq,
-            timestamp: self.timestamp,
+            channel: shared.channel.load(Ordering::Relaxed),
+            flags: if frame.talk_start {
+                flags::TALK_START
+            } else {
+                0
+            },
+            frames: shared.frame_samples as u16,
+            room: shared.room.load(Ordering::Relaxed),
+            sender: shared.sender_id.load(Ordering::Relaxed),
+            seq: frame.seq,
+            timestamp: frame.timestamp,
         };
-        let len = match state {
-            GateState::Silent => {
-                header.flags = flags::SILENCE;
-                encode_header_only(header, &mut self.packet)
-            }
-            audible => {
-                match audible {
-                    GateState::Opened => {
-                        header.flags = flags::TALK_START;
-                        fade_in(&mut self.frame[..self.frame_len], EDGE_FADE);
-                    }
-                    GateState::Closing => {
-                        fade_out_tail(&mut self.frame[..self.frame_len], EDGE_FADE);
-                    }
-                    _ => {}
-                }
-                self.limiter.process(&mut self.frame[..self.frame_len]);
-                match Codec::from_u8(self.shared.wire_codec.load(Ordering::Relaxed)) {
-                    Some(Codec::Ogg) => {
-                        // The vendored Ogg/ADPCM codec, fed at INTERNAL_RATE.
-                        // Every page is self-contained, so a lost datagram
-                        // cannot drift the decoder.
-                        self.encoder.codec = VoiceCodec::Ogg;
-                        self.encoder.bits = self.shared.adpcm_bits.load(Ordering::Relaxed);
-                        let page_buf = std::mem::take(&mut self.page_buf);
-                        let mut page = page_buf;
-                        self.encoder
-                            .encode_into(self.seq, &self.frame[..self.frame_len], &mut page);
-                        header.codec = Codec::Ogg;
-                        header.write(&mut self.packet[..HEADER_LEN]);
-                        // 960-sample 4-bit pages are ≤ 517 B; this cannot
-                        // exceed MAX_PACKET, but never trust that silently.
-                        let len = (HEADER_LEN + page.len()).min(MAX_PACKET);
-                        self.packet[HEADER_LEN..len]
-                            .copy_from_slice(&page[..len - HEADER_LEN]);
-                        self.page_buf = page;
-                        len
-                    }
-                    _ => encode_raw_i16(header, &self.frame[..self.frame_len], &mut self.packet),
-                }
-            }
+        let len = if frame.silent {
+            header.flags = flags::SILENCE;
+            encode_header_only(header, &mut self.packet)
+        } else if Codec::from_u8(shared.wire_codec.load(Ordering::Relaxed)) == Some(Codec::Ogg) {
+            let bits = shared.adpcm_bits.load(Ordering::Relaxed);
+            adpcm_encode_into(
+                &mut self.adpcm_state,
+                bits,
+                frame.samples,
+                &mut self.adpcm_buf,
+            );
+            self.ogg_granule += frame.samples.len() as u64;
+            ogg_page_into(
+                self.ogg_serial,
+                frame.seq,
+                self.ogg_granule,
+                &self.adpcm_buf,
+                &mut self.page_buf,
+            );
+            header.codec = Codec::Ogg;
+            header.write(&mut self.packet[..HEADER_LEN]);
+            let len = HEADER_LEN + self.page_buf.len();
+            self.packet[HEADER_LEN..len].copy_from_slice(&self.page_buf);
+            len
+        } else {
+            encode_raw_i16(header, frame.samples, &mut self.packet)
         };
-        self.seq = self.seq.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(self.frame_len as u32);
-        self.send(len);
+        self.send(shared, len);
     }
 
-    fn send(&self, len: usize) {
-        let shared = &self.shared;
+    fn send(&self, shared: &Shared, len: usize) {
         let packet = &self.packet[..len];
         let mut sent = 0u64;
         match shared.delivery() {
@@ -271,5 +187,106 @@ impl CaptureHandle {
                 .bytes_sent
                 .fetch_add(sent * len as u64, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::{VoiceCodec, VoiceEncoder};
+    use crate::{VoiceConfig, VoiceLink};
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    #[test]
+    fn framer_matches_capture_datagrams_at_the_link_rate() {
+        let config = VoiceConfig {
+            port: 0,
+            broadcast: false,
+            delivery: Delivery::Broadcast,
+            gate_hangover_ms: 5,
+            gate_threshold_rms: 0.03,
+            ..VoiceConfig::default()
+        };
+        let mut framer = Framer::new(FramerConfig {
+            out_rate: INTERNAL_RATE,
+            frame_samples: config.frame_samples,
+            gate_hangover_ms: config.gate_hangover_ms,
+            gate_threshold_rms: config.gate_threshold_rms,
+        })
+        .unwrap();
+        let mut link = VoiceLink::bind(config).unwrap();
+        let mut capture = link.take_capture().unwrap();
+        // Route just the audio datagrams to the reader, independently of discovery.
+        let reader = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        capture.shared.broadcast_targets[0].store(
+            crate::peers::pack_addr(reader.local_addr().unwrap()),
+            Ordering::Relaxed,
+        );
+        link.set_input_gain(2.0);
+        framer.set_input_gain(2.0);
+        let mut stereo = [0.0; 480];
+        let mut ogg = VoiceEncoder::new(VoiceCodec::Ogg, 4, link.sender_id() as u32);
+        let blocks = [
+            (0.0, false, Codec::RawI16),
+            (1.1, false, Codec::RawI16),
+            (1.1, false, Codec::Ogg),
+            (0.0, false, Codec::RawI16),
+            (0.0, false, Codec::RawI16),
+            (0.0, false, Codec::RawI16),
+            (0.0, false, Codec::Ogg),
+            (0.2, false, Codec::Ogg),
+            (0.2, true, Codec::Ogg),
+        ];
+        for (amplitude, muted, codec) in blocks {
+            link.set_codec(codec);
+            for (i, pair) in stereo.chunks_exact_mut(2).enumerate() {
+                pair[0] = amplitude * ((i as f32) * 0.07).cos();
+                pair[1] = 0.5 * pair[0];
+            }
+            link.set_muted(muted);
+            framer.set_muted(muted);
+            capture.push_interleaved(INTERNAL_RATE, 2, &stereo);
+            let block_us = 3_000_000 + u64::from(framer.frames_out()) * 5_000;
+            framer.push_interleaved(INTERNAL_RATE, 2, &stereo, block_us, &mut |frame| {
+                assert_eq!(frame.capture_us, block_us);
+                let header = Header {
+                    codec: if frame.silent { Codec::RawI16 } else { codec },
+                    channel: 0,
+                    flags: if frame.silent {
+                        flags::SILENCE
+                    } else if frame.talk_start {
+                        flags::TALK_START
+                    } else {
+                        0
+                    },
+                    frames: 240,
+                    room: 0,
+                    sender: link.sender_id(),
+                    seq: frame.seq,
+                    timestamp: frame.timestamp,
+                };
+                let mut expected = [0; MAX_PACKET];
+                let len = if frame.silent {
+                    encode_header_only(header, &mut expected)
+                } else if codec == Codec::Ogg {
+                    let page = ogg.encode(frame.seq, frame.samples);
+                    header.write(&mut expected[..HEADER_LEN]);
+                    let len = HEADER_LEN + page.len();
+                    expected[HEADER_LEN..len].copy_from_slice(&page);
+                    len
+                } else {
+                    encode_raw_i16(header, frame.samples, &mut expected)
+                };
+                let mut received = [0; MAX_PACKET];
+                let n = reader.recv(&mut received).unwrap();
+                assert_eq!(&received[..n], &expected[..len], "datagram {}", frame.seq);
+            });
+        }
+        assert_eq!(framer.frames_out() as usize, blocks.len());
+        assert_eq!(capture.frames_sent(), framer.frames_out());
     }
 }

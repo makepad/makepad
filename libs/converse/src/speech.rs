@@ -54,6 +54,22 @@ struct Shared {
     done: AtomicU64,
     /// Chunks the renderer leaked because the retire ring was full: a sizing bug, so it stays 0.
     retire_lost: AtomicU64,
+    /// The hub's utterance ids: the last one `enqueue` got from `say` (`asked`), the last one the
+    /// pump saw end (`answered`: its audio is counted in `sent`, or it failed), and the last one
+    /// `stop` cancelled (`floor`). Utterances at or below `floor` are not in progress, and the
+    /// pump drops their audio. A reply is in progress while `max(answered, floor) < asked`, the
+    /// pause while the next sentence is still being synthesized included.
+    asked: AtomicU64,
+    answered: AtomicU64,
+    floor: AtomicU64,
+}
+
+impl Shared {
+    #[cfg(any(feature = "tts", test))]
+    /// `utterance` was handed to the session. (`max`: its event may beat this call.)
+    fn ask(&self, utterance: u64) {
+        self.asked.fetch_max(utterance, Ordering::AcqRel);
+    }
 }
 
 /// The pump's ends: chunks to the renderer, and the played ones back for their drop.
@@ -69,8 +85,36 @@ impl Pump {
     /// Sends one sentence to the renderer, after dropping every chunk it handed back. A full ring
     /// (a device that does not run) makes the pump wait for room, a block at a time, and keep
     /// the sentence; a stop meanwhile ends the wait and drops it.
+    #[cfg(test)]
     fn send(&mut self, pcm: Arc<[f32]>, rate: f64) {
-        let mut chunk = Chunk { pcm, rate, epoch: self.shared.epoch.load(Ordering::Acquire) };
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        self.send_in(epoch, pcm, rate);
+    }
+
+    /// The hub's audio for `utterance`. A stop already cancelled it: nothing plays. The epoch is
+    /// read before the floor, and `stop` sets the floor before the epoch, so a chunk that
+    /// escapes the floor check carries an epoch the stop made stale.
+    fn audio(&mut self, utterance: u64, pcm: Arc<[f32]>, rate: f64) {
+        let epoch = self.shared.epoch.load(Ordering::Acquire);
+        if utterance > self.shared.floor.load(Ordering::Acquire) {
+            self.send_in(epoch, pcm, rate);
+        }
+        // after `send` counted the chunk in `sent`: never both "done" with audio unplayed
+        self.shared.answered.fetch_max(utterance, Ordering::AcqRel);
+    }
+
+    /// The hub could not speak `utterance`: it is over, with no audio.
+    fn errored(&self, utterance: u64) {
+        self.shared.answered.fetch_max(utterance, Ordering::AcqRel);
+    }
+
+    /// The session has no voice and ends: nothing will answer any utterance.
+    fn failed(&self) {
+        self.shared.answered.store(u64::MAX, Ordering::Release);
+    }
+
+    fn send_in(&mut self, epoch: u64, pcm: Arc<[f32]>, rate: f64) {
+        let mut chunk = Chunk { pcm, rate, epoch };
         self.shared.sent.fetch_add(1, Ordering::AcqRel);
         loop {
             self.drain();
@@ -267,6 +311,17 @@ impl SpeechOutput {
         self.shared.sent.load(Ordering::Acquire) != self.shared.done.load(Ordering::Acquire)
     }
 
+    /// True for the whole reply: text not yet spoken, a sentence still in synthesis, or audio
+    /// queued or playing. Unlike [`Self::is_speaking`] it stays true in the pause between
+    /// sentences, so an app deciding whether to stop the voice asks this.
+    pub fn reply_in_progress(&self) -> bool {
+        let shared = &self.shared;
+        // `answered` is read before `is_speaking`: the pump counts a chunk in `sent` first
+        !self.pending.is_empty()
+            || shared.answered.load(Ordering::Acquire).max(shared.floor.load(Ordering::Acquire)) < shared.asked.load(Ordering::Acquire)
+            || self.is_speaking()
+    }
+
     /// Convenience for apps with no other audio: install an audio-output
     /// callback that plays speech and nothing else.
     pub fn install_audio_output(&mut self, cx: &mut makepad_widgets_core::Cx, index: usize) {
@@ -338,7 +393,7 @@ impl SpeechOutput {
                 let pump = self.pump.lock().unwrap_or_else(|e| e.into_inner()).take();
                 Self::start_session(&self.voice, self.engine, pump.expect("the pump starts once, with the session"), self.spawner.clone())
             });
-            session.say(text);
+            self.shared.ask(session.say(text));
         }
         // Built without `tts`: the synthesis stack is ~10 MB of binary, so a
         // build that can never speak does not link it. Every other path (text,
@@ -380,13 +435,17 @@ impl SpeechOutput {
                         }
                         TtsEvent::Failed(why) => {
                             log!("tts: no voice available: {why}");
+                            pump.failed();
                             return;
                         }
                         // one chunk per sentence, queued behind the ones before it
-                        TtsEvent::Audio { audio, .. } => pump.send(Arc::from(audio.samples), audio.sample_rate as f64),
+                        TtsEvent::Audio { utterance, audio, .. } => pump.audio(utterance, Arc::from(audio.samples), audio.sample_rate as f64),
                         // converse does not ask for streaming (TtsConfig::stream is off)
                         TtsEvent::AudioChunk { .. } => {}
-                        TtsEvent::Error { message, .. } => log!("tts: {message}"),
+                        TtsEvent::Error { utterance, message } => {
+                            log!("tts: {message}");
+                            pump.errored(utterance);
+                        }
                     }
                 }
             },
@@ -405,6 +464,8 @@ impl SpeechOutput {
             session.cancel();
         }
         self.pending.clear();
+        // the floor first: the pump reads the epoch before it reads the floor (`Pump::audio`)
+        self.shared.floor.store(self.shared.asked.load(Ordering::Acquire), Ordering::Release);
         self.shared.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
@@ -645,7 +706,9 @@ mod tests {
         }
         assert!(speech.is_speaking() && !sender.is_finished(), "the ring is full and the pump waits");
         let mut heard: Vec<f32> = Vec::new();
-        while speech.is_speaking() {
+        // `is_speaking` reads false for a moment between one sentence's play and the next one's
+        // send: play on until the sender is done too.
+        while !sender.is_finished() || speech.is_speaking() {
             for s in block(&mut renderer, 256, 48_000.0) {
                 if s != 0.0 && heard.last() != Some(&s) {
                     heard.push(s);
@@ -656,6 +719,36 @@ mod tests {
         assert_eq!(heard, (1..=total).map(|i| i as f32).collect::<Vec<_>>(), "every sentence, in order");
         pump.drain();
         assert_eq!(speech.shared.retire_lost.load(Ordering::Relaxed), 0);
+    }
+
+    /// A reply is in progress through the pause between sentences, ends at a stop or an error, and
+    /// a cancelled sentence's late audio never plays. Driven through the pump, with no session.
+    #[test]
+    fn a_reply_stays_in_progress_between_sentences_and_a_stop_ends_it() {
+        let mut speech = output();
+        let (mut pump, mut renderer) = (pump(&speech), speech.renderer().unwrap());
+        assert!(!speech.reply_in_progress(), "nothing asked: no reply");
+        speech.shared.ask(1);
+        speech.shared.ask(2);
+        pump.audio(1, tone(440.0, 24_000.0, 0.05), 24_000.0);
+        while speech.is_speaking() {
+            block(&mut renderer, 256, 48_000.0);
+        }
+        assert!(!speech.is_speaking(), "sentence 1 is played out");
+        assert!(speech.reply_in_progress(), "sentence 2 is still in synthesis");
+        speech.stop();
+        assert!(!speech.reply_in_progress(), "a stop ends the reply");
+        pump.audio(2, tone(660.0, 24_000.0, 0.05), 24_000.0);
+        assert!(block(&mut renderer, 256, 48_000.0).iter().all(|s| *s == 0.0), "the cancelled sentence is not played");
+        assert!(!speech.is_speaking() && !speech.reply_in_progress(), "and nothing is left queued");
+        speech.shared.ask(3);
+        assert!(speech.reply_in_progress(), "a new sentence after the stop is in progress");
+        pump.errored(3);
+        assert!(!speech.reply_in_progress(), "an error ends its utterance");
+        speech.shared.ask(4);
+        pump.failed();
+        assert!(!speech.reply_in_progress(), "a session without a voice answers everything");
+        pump.drain();
     }
 
     #[cfg(feature = "tts")]

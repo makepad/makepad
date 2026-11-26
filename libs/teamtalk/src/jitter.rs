@@ -281,10 +281,10 @@ const MAX_NUDGE: f64 = 0.005;
 const NUDGE_GAIN: f64 = 0.002;
 /// Occupancy smoothing: about 50 frames.
 const OCCUPANCY_ALPHA: f32 = 0.02;
-/// Frames of stability before the target is lowered by one (10 s at 5 ms).
-const DECAY_FRAMES: u32 = 2000;
-/// Minimum frames between two target raises (0.5 s at 5 ms).
-const RAISE_COOLDOWN_FRAMES: u32 = 100;
+/// Milliseconds of stability before the target is lowered by one.
+const DECAY_MS: f32 = 10_000.0;
+/// Minimum time between two target raises.
+const RAISE_COOLDOWN_MS: f32 = 500.0;
 /// Milliseconds of dry buffer before a peer is considered idle.
 const IDLE_MS: f32 = 200.0;
 /// Milliseconds since the last audible frame before `talking` drops.
@@ -309,12 +309,12 @@ pub struct Playout {
     occupancy_ema: f32,
     nudge: f64,
     late_seen: u32,
-    stable_frames: u32,
-    raise_cooldown: u32,
+    stable_samples: u32,
+    raise_cooldown_samples: u32,
     /// Lowest queue depth seen since the last decay check.
     window_min: u32,
-    /// Frames played since the last underrun (decay cool-down).
-    frames_since_underrun: u32,
+    /// Interleaved samples played since the last underrun (decay cool-down).
+    samples_since_underrun: u32,
     quiet_samples: u32,
     dry_samples: u32,
     idle: bool,
@@ -342,10 +342,10 @@ impl Playout {
             occupancy_ema: 0.0,
             nudge: 0.0,
             late_seen: 0,
-            stable_frames: 0,
-            raise_cooldown: 0,
+            stable_samples: 0,
+            raise_cooldown_samples: 0,
             window_min: u32::MAX,
-            frames_since_underrun: 3 * DECAY_FRAMES,
+            samples_since_underrun: u32::MAX,
             quiet_samples: u32::MAX / 2,
             dry_samples: 0,
             idle: false,
@@ -372,10 +372,10 @@ impl Playout {
         self.occupancy_ema = self.target as f32;
         self.nudge = 0.0;
         self.late_seen = 0;
-        self.stable_frames = 0;
-        self.raise_cooldown = 0;
+        self.stable_samples = 0;
+        self.raise_cooldown_samples = 0;
         self.window_min = u32::MAX;
-        self.frames_since_underrun = 3 * DECAY_FRAMES;
+        self.samples_since_underrun = u32::MAX;
         self.quiet_samples = u32::MAX / 2;
         self.dry_samples = 0;
         self.idle = false;
@@ -456,12 +456,12 @@ impl Playout {
     }
 
     fn raise_target(&mut self) {
-        if self.raise_cooldown == 0 && self.target < self.cfg.max_target {
+        if self.raise_cooldown_samples == 0 && self.target < self.cfg.max_target {
             self.target += 1;
             self.stats.target_raises += 1;
-            self.raise_cooldown = RAISE_COOLDOWN_FRAMES;
+            self.raise_cooldown_samples = self.samples_in_ms(RAISE_COOLDOWN_MS) as u32;
         }
-        self.stable_frames = 0;
+        self.stable_samples = 0;
     }
 
     fn conceal(&mut self) {
@@ -561,8 +561,8 @@ impl Playout {
                 self.dry_samples = 0;
                 self.quiet_samples = 0;
                 self.read_seq = self.read_seq.wrapping_add(1);
-                self.stable_frames += 1;
-                self.frames_since_underrun = self.frames_since_underrun.saturating_add(1);
+                self.stable_samples += self.frame_len as u32;
+                self.samples_since_underrun = self.samples_since_underrun.saturating_add(self.frame_len as u32);
             }
             Take::Silence(len) => {
                 self.frame_len = len.max(1);
@@ -574,8 +574,8 @@ impl Playout {
                 self.need_fade_in = false;
                 self.quiet_samples = self.quiet_samples.saturating_add(self.frame_len as u32);
                 self.read_seq = self.read_seq.wrapping_add(1);
-                self.stable_frames += 1;
-                self.frames_since_underrun = self.frames_since_underrun.saturating_add(1);
+                self.stable_samples += self.frame_len as u32;
+                self.samples_since_underrun = self.samples_since_underrun.saturating_add(self.frame_len as u32);
             }
             Take::Missing => {
                 if queued > 0 {
@@ -590,7 +590,7 @@ impl Playout {
                     // added, which the target raise makes permanent.
                     if self.conceal_run == 0 {
                         self.stats.underruns += 1;
-                        self.frames_since_underrun = 0;
+                        self.samples_since_underrun = 0;
                         self.raise_target();
                     }
                     self.conceal();
@@ -610,20 +610,19 @@ impl Playout {
         let err = (self.occupancy_ema - self.target as f32) as f64;
         self.nudge = (err * NUDGE_GAIN).clamp(-MAX_NUDGE, MAX_NUDGE);
 
-        if self.raise_cooldown > 0 {
-            self.raise_cooldown -= 1;
-        }
-        if self.stable_frames >= DECAY_FRAMES {
-            self.stable_frames = 0;
+        self.raise_cooldown_samples = self.raise_cooldown_samples.saturating_sub(self.frame_len as u32);
+        let decay_samples = self.samples_in_ms(DECAY_MS) as u32;
+        if self.stable_samples >= decay_samples {
+            self.stable_samples = 0;
             let floor = self.window_min;
             self.window_min = u32::MAX;
             // Shave a frame of latency only when the observed queue floor
             // shows a spare frame would remain, and no underrun happened
             // recently — otherwise the decay/underrun cycle would put a
-            // 5 ms hiccup in every ten seconds.
+            // one-frame hiccup in every ten seconds.
             if self.target > self.cfg.min_target
                 && floor >= 2
-                && self.frames_since_underrun >= 3 * DECAY_FRAMES
+                && self.samples_since_underrun >= 3 * decay_samples
             {
                 self.target -= 1;
             }
@@ -947,6 +946,34 @@ mod tests {
         // Excess delay was bled off by speed, not by dropping frames: the
         // reader caught up so the queue sits at the target.
         assert!(ring.queued(p.read_seq) <= 3);
+    }
+
+    #[test]
+    fn target_decay_and_raise_cooldown_follow_received_audio_time() {
+        // The default assumes 240 samples. The sender delivers 960, which
+        // is 20 ms of mono or 10 ms of interleaved stereo at 48 kHz.
+        let frame = [0; 960];
+        for (channels, ten_seconds, half_second) in [(1, 500, 25), (2, 1000, 50)] {
+            let ring = JitterRing::new();
+            let mut p = Playout::new(PlayoutConfig { channels, ..cfg() });
+            ring.insert(0, &frame, true);
+            for n in 1..=ten_seconds {
+                // Keep one spare frame queued throughout the stability window.
+                ring.insert(n, &frame, n % 2 == 0);
+                p.fetch_frame(&ring);
+                let expected = if n < ten_seconds { 2 } else { 1 };
+                assert_eq!(p.target_frames(), expected, "decay after {n} frames, {channels} channels");
+            }
+            for n in 0..=half_second {
+                // A late arrival on every fetch can raise the target just
+                // twice: at the first arrival and half a second later.
+                assert_eq!(ring.insert(0, &frame, true), Insert::Late);
+                ring.insert(ten_seconds + n + 1, &frame, true);
+                p.fetch_frame(&ring);
+                let expected = if n < half_second { 2 } else { 3 };
+                assert_eq!(p.target_frames(), expected, "raise after {n} frames, {channels} channels");
+            }
+        }
     }
 
     /// Stereo frames: each channel plays its own samples in order, a lost
