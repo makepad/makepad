@@ -772,6 +772,12 @@ impl Label {
 }
 
 impl LabelRef {
+    /// Its last draw cut the text short (`text_overflow: Ellipsis`): a host can show it whole in
+    /// a tip.
+    pub fn is_truncated(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.laid.as_ref().is_some_and(|(_, laid)| laid.is_truncated))
+    }
+
     pub fn text(&self) -> String {
         if let Some(inner) = self.borrow() {
             inner.text()
