@@ -318,8 +318,8 @@ it used (this one and any build or bench node):
   or shim that stands in for one; such a pull request is closed, and a test
   that needs a built binary runs under cargo. See `libs/relax/CONTRIBUTING.md`.
   The Stage web export (Relax's wasm backend behind `RELAX_WASM_EXPORT`, used
-  by the commercial wasm-export tool) is the user's own product feature and
-  stays (user, 2026-11-23).
+  by the wasm-export tool, opened with Story (user, 2026-11-25)) is the user's
+  own product feature and stays (user, 2026-11-23).
 
 ## Commit content and Studio iteration history
 
@@ -361,10 +361,10 @@ it used (this one and any build or bench node):
   the property; unit tests well under 1 s, scenario/app tests a few seconds;
   no multi-minute tests; slow product code is a perf bug, not a reason for a
   slow test. Every test runs thousands of times (every lane, every land, CI),
-  so each one must be worth its cost: delete redundant or implementation-pinning
-  tests; keep the ones that guard real behaviour or past bugs. Prefer one test
-  that sets up once and checks several properties (each assertion saying which
-  property broke) over several tests that rebuild the same setup.
+  so each one must be worth its cost: keep the ones that guard real behaviour
+  or past bugs. Prefer one test that sets up once and checks several
+  properties (each assertion saying which property broke) over several tests
+  that rebuild the same setup.
 - The source hierarchy is `work` → `main`: lanes land into the local `work`,
   whose merge history stays local (`origin/work` takes collapsed per-area
   sets), and `main` holds validated milestones, one squashed commit per
@@ -378,13 +378,11 @@ it used (this one and any build or bench node):
   reaches origin only as a collapsed set, and `main` only through
   `devhub promote`. `main` is never rewritten; fetch incoming `work` and
   `main` changes without discarding unrelated work.
-- Agents may code, check, and build the next revision while its previous app
-  is running. When the replacement is ready, gracefully close and restart
-  that workflow's app without asking the user to close it. Verify the old
+- Agents may code, check and build the next revision while its previous app
+  runs; an open app is no reason to defer a build, ask permission or have the
+  user close it. When the replacement is ready (Studio flows and standalone
+  evaluations alike), gracefully close that workflow's app, verify the old
   process exits and launch the replacement with the same workspace and state.
-  This applies to Studio flows and standalone evaluations. An app being open
-  is not a reason to defer a build, ask for permission, or require the user
-  to close it.
 - A validated revision requires `cargo check` for its supported platforms with
   zero warnings/errors, its tests under the JIT (`devhub test`), and a runtime
   check under the JIT (`devhub live start` + `live look`) when applicable. Use the repository's actual
@@ -452,8 +450,7 @@ it used (this one and any build or bench node):
   owned `--remote` instance of the release build on the native backend
   (Metal here) and `grab` / `gseq` grabs, compared in RGB. Headless suites
   are for logic and data-structure tests only (layout, budgets, orderings,
-  parsers); they never stand in for a GPU proof and are never used to
-  diagnose a rendering bug.
+  parsers), never a GPU proof or a rendering diagnosis.
   The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
   on the native backend is the normal pixel-proof rig; `grab` forces a present
   (about 2 s per grab on a hidden window). Only rest/settle timing proofs

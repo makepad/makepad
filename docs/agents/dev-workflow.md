@@ -131,6 +131,15 @@ buckets ask for one, and the queue decides where and when.
     for calls. Its lease line says when that takes the box past its budget, and by how much.
     RAM, GPUs, timed work, gates, owed legs and other interactive work still count. Other
     systems keep room for one call of their largest idle session.
+  - On Linux every run sits in a scope whose CPU weight is its cores (1 a core in the background,
+    100 interactive). So do the box's shared JIT build, at its asking lease's weight for the
+    build's jobs, and the box's own builds (its hub's self-update, its deployment's prebuild), at
+    background weight for their room's cores.
+  - On Linux, an ask counts the background shared leases beside it at their grant: their use
+    past it, and the tasks they keep waiting, yield to the new lease's weight. Among the boxes
+    that fit, it takes one whose measured CPU has room for it first. Timed, whole and exclusive
+    asks, a box that runs or drains for timed or exclusive work, holds, interactive leases and
+    RAM count as before.
 - **Queue rules**:
   - Landing gates go first. A gate that waited a minute takes the cores its box has free
     (at least 4). From then on it drains the box: no newer work starts there unless it ends
@@ -161,6 +170,11 @@ buckets ask for one, and the queue decides where and when.
   Cargo.toml's `[package.metadata.makepad.platform-gaps]` has a `windows` table, which names each
   target that does not build or pass there with why (`build` for the whole package, `{}` for none).
   A run selecting a gap stays off it, and says so.
+- A test that plays to the audio output device (its clock is the output's callback) declares it
+  in its Cargo.toml: `[package.metadata.makepad.audio-tests]`, `"test:<name>" = "<why>"` (or
+  `lib`, `bin:<name>`). `devhub test` then asks `audio=1`: a Mac whose hub heard its output run
+  (a silent playback, every 30 min). A box whose output stopped says so in `devhub nodes`; a
+  person's Mac, Linux and Windows boxes are not measured, so they do not take it.
 
 ## 4. Jobs
 
@@ -171,7 +185,9 @@ buckets ask for one, and the queue decides where and when.
 - A plan of several jobs is one `job submit --batch <file>`, with `--after` for order.
 - Outputs (sheets, grabs, logs): the command writes them to `$DEVHUB_KEEP`, and `--keep <dir>`
   copies them back before the lease ends. The lane's tree on the box may go to another lane
-  right after.
+  right after. `--keep` and `get` refuse a folder inside a checkout (a kept file there can be
+  committed or read as build input): keep them in `local/agent_state/<lane>/runs/` of the main
+  checkout.
 - `job rerun <id>` runs the same snapshot and command again; `job cancel <id>` stops one.
 - Never poll: no `sleep` or `until` loops, no repeated `job list`, `tail` or `lanes`.
 

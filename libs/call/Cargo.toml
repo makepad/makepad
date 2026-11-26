@@ -1,0 +1,19 @@
+[package]
+name = "makepad-call"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A call of several people over encrypted datagram links: voice and video framing, loss recovery, feedback and playout, sans-IO, with a simulated network for tests"
+
+[dependencies]
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
+# The driver (src/driver): voice framing, the jitter buffer and playout; the platform's video codecs.
+makepad-teamtalk = { path = "../teamtalk" }
+makepad-platform-video = { path = "../../platform/video", version = "1.0.0" }
+
+[dev-dependencies]
+# The call probe (examples/call_probe.rs): PNG grabs.
+makepad-zune-png = { path = "../zune/zune-png" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+makepad-hal = { path = "../../platform/hal", version = "1.0.0" }

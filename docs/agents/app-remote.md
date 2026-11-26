@@ -19,12 +19,16 @@ cargo build --release -p makepad-example-splash -p makepad-remote
 MAKEPAD_HIDE_WINDOWS=1 ./target/release/makepad-example-splash --remote
 ```
 
-Capture the launch output using your process tool. The startup line contains
-everything needed to address and clean up that instance:
+Native apps and JIT runs (`makepad run`) print the same startup line on stderr.
+Capture it to address and clean up that instance.
 
 ```text
 [makepad-remote] pid=9931 app=makepad-example-splash socket=/tmp/makepad-501/makepad-remote-9931.sock
 ```
+
+A JIT run that restarts in place behind a parent follows this with
+`[makepad-remote] run=<pid> pid=<pid>` on stderr. The first PID names the parent
+and the second names the app.
 
 The socket is in the user's socket dir, `/tmp/makepad-<uid>` (0700), whatever the
 process's TMPDIR: a deep TMPDIR cannot hold a Unix socket's path.
@@ -48,9 +52,7 @@ P=9931   # the pid from your own launch's startup line
 <command>` speaks the same commands. The exit status is 1 when the answer has an
 error line and 2 when the app is unreachable.
 
-An app run under the JIT (`makepad run`) announces itself as `makepad-remote:
-pid <app pid> app <package> run <run pid> socket <path>`. On Windows and macOS
-the run pid is a thin parent process (the one your `$!` or launcher holds), and
+On Windows and macOS the run pid is the restart parent (the one your `$!` or launcher holds), and
 the app pid is its child. A restart as a new process (into a rebuilt runner)
 gives the app a new pid and a new announce line, while the run pid stays and
 still reaches the app (`makepad inspect <run pid> ...`). Sample, kill or check
@@ -104,7 +106,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `drag path=ABSOLUTE_PATH x=X y=Y` | Hold one file dragged over the window: the first call enters, repeats move it; it stays open for `drag_end` or `drop` |
 | `drag_end` | The open drag leaves the window without a drop (drag-end) |
 | `cpu` | Shared CPU budget and app pool: classes, queues, waits, running jobs and checkpoint warnings |
-| `log [n=50] [since=N]` | App log tail; `n` in the reply is the latest sequence |
+| `log [n=50] [since=N]` | App log tail; `n` in the reply is the latest sequence, `d` the lines after `since` (for a tail, before it) that the app's log no longer keeps (see below) |
 | `step [frames=K] [fps=60]` | Run K virtual-clock frames (needs `--virtual-clock`), see below |
 | `settled` | Whether anything is still pending: `{"settled":bool,"reasons":[...]}` |
 | `cap start path=ABS.mp4 [fps=60]`, `cap stop` | In-process mp4 capture of the window, see below |
@@ -194,6 +196,13 @@ window or an earlier layout.
 makepad-remote app $P log n=20
 makepad-remote app $P gq scale=0.5
 ```
+
+The app's log keeps only its newest lines (2000). A read with `since=N` whose
+answer has `d` above 0 has a gap: that many lines after line N were dropped
+before the read, and a line you are looking for may have been among them. They
+are not lost: every line also goes to the app's stderr (under `makepad_test`,
+`app-stderr.txt` in the test's artifacts folder). Carry each answer's `n` back
+as the next `since` so each read only asks for lines it has not seen.
 
 Read a returned PNG with the local image viewer when visual inspection is
 needed. Confirm the owned process exits after cleanup. Use `quit` if a

@@ -70,6 +70,9 @@ node-number (--node[ =]+|node=)@node-number@([^0-9.]|$)
 node-number usage *\(@node-number@\)
 node-number \(@node-number@, +(the|a|an|lane|user|node|when|after|before|on|with)([^a-z]|$)
 node-number (lane|trace|user|session|run|bench|measured)[a-z ]*, @node-number@\)
+# devhub's line prefix `L<lease> <N>: ...`, a lease's line its box's number leads: a test's copy of
+# a run's real line reached work as a fixture (11-26). A lease named by a number (`L<N>:`) is none.
+node-number (^|[^a-z0-9_])l[0-9]+ +@node-number@:
 
 # a Mac node's name, for the names the untracked patterns give as `define mac-name <ERE>` (none there:
 # this is off), quoted as a value: the untracked file's prose shapes ("on <name>", "--node <name>")
@@ -78,3 +81,5 @@ node-number (lane|trace|user|session|run|bench|measured)[a-z ]*, @node-number@\)
 # none, as the short names are sizes, measures and registers too (a screw's `name: "<name>"`).
 node-name (node|nodes|host|hosts|hostname|server|servers|box|boxes|machine|machines)[^"'`]?[^"'`]?[^"'`]?[^"'`]?[^"'`]?[^"'`]?["'`]@mac-name@(\.[0-9]+)?["'`]
 node-name ["'`]@mac-name@\.[0-9]+["'`]
+# ... and devhub's line prefix `L<lease> <name>: ...` (as node-number's)
+node-name (^|[^a-z0-9_])l[0-9]+ +@mac-name@:

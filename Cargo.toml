@@ -278,6 +278,8 @@ workspace.members = [
     # === own Ogg Vorbis encoder (stem side-channels) ===
     "libs/audio_encode",
     "libs/teamtalk",
+    # === calls of several people over encrypted datagram links (voice, video) ===
+    "libs/call",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
     "libs/milkdrop",

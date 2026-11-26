@@ -20,10 +20,21 @@ packages=(
 passed=()
 failed=()
 
+target_dir="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+if [[ "$target_dir" != /* ]]; then
+  # Cargo starts each test in its package directory. Pass the same absolute target to both.
+  target_dir="$ROOT_DIR/$target_dir"
+  export CARGO_TARGET_DIR="$target_dir"
+fi
+
 for entry in "${packages[@]}"; do
   package="${entry%%:*}"
   rel_dir="${entry#*:}"
-  artifact_dir="$ROOT_DIR/$rel_dir/target/makepad_test/$package"
+  artifact_root="${MAKEPAD_TEST_ARTIFACTS:-$target_dir/makepad_test}"
+  if [[ "$artifact_root" != /* ]]; then
+    artifact_root="$ROOT_DIR/$rel_dir/$artifact_root"
+  fi
+  artifact_dir="$artifact_root/$package"
 
   echo
   echo "==> $package"
@@ -32,30 +43,19 @@ for entry in "${packages[@]}"; do
   if cargo test -p "$package" --test ui -- --test-threads=1; then
     passed+=("$package")
   else
-    failed+=("$package")
+    failed+=("$package ($artifact_dir)")
   fi
 done
 
 echo
 echo "UI suite summary"
 echo "  passed: ${#passed[@]}"
-for package in "${passed[@]}"; do
-  echo "    - $package"
-done
+if ((${#passed[@]} > 0)); then
+  printf '    - %s\n' "${passed[@]}"
+fi
 
 echo "  failed: ${#failed[@]}"
-for package in "${failed[@]}"; do
-  case "$package" in
-    makepad-example-text-input) rel_dir="examples/text_input" ;;
-    makepad-example-counter) rel_dir="examples/counter" ;;
-    makepad-example-todo) rel_dir="examples/todo" ;;
-    makepad-example-floating-panel) rel_dir="examples/floating_panel" ;;
-    makepad-example-splash) rel_dir="examples/splash" ;;
-    *) rel_dir="." ;;
-  esac
-  echo "    - $package ($ROOT_DIR/$rel_dir/target/makepad_test/$package)"
-done
-
 if ((${#failed[@]} > 0)); then
+  printf '    - %s\n' "${failed[@]}"
   exit 1
 fi

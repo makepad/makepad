@@ -44,8 +44,10 @@
 //! audio_capture = "Routes another app's sound through the equalizer."
 //! ```
 //!
-//! `usage` takes `audio_capture`, `microphone` and `camera`, which become
-//! the matching `NS...UsageDescription` keys; anything else is an error.
+//! `usage` takes `audio_capture`, `microphone`, `camera` and `local_network`,
+//! which become the matching `NS...UsageDescription` keys; anything else is an
+//! error. macOS shows the `local_network` text when the app first sends to a
+//! device on the local network.
 //!
 //! Signing uses the one Apple Development identity in the keychain when
 //! there is exactly one (or `--cert=`): macOS keys privacy grants such as
@@ -94,10 +96,11 @@ struct BundleMeta {
 /// `[package.metadata.makepad.desktop.usage]`, by manifest name. Only an app
 /// that names one gets its prompt: a key macOS finds in the plist is a
 /// permission the app can ask for.
-const USAGE_KEYS: [(&str, &str); 3] = [
+const USAGE_KEYS: [(&str, &str); 4] = [
     ("audio_capture", "NSAudioCaptureUsageDescription"),
     ("microphone", "NSMicrophoneUsageDescription"),
     ("camera", "NSCameraUsageDescription"),
+    ("local_network", "NSLocalNetworkUsageDescription"),
 ];
 
 pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
@@ -773,8 +776,11 @@ mod tests {
 
     #[test]
     fn usage_prompts_are_opt_in_and_allowlisted() {
-        let meta = meta_of("[package]\nname = \"makepad-demo\"\n\n[package.metadata.makepad.desktop.usage]\naudio_capture = \"Routes <sound> & more\"\n");
-        assert_eq!(meta.usage, vec![("NSAudioCaptureUsageDescription", "Routes <sound> & more".to_string())]);
+        let meta = meta_of("[package]\nname = \"makepad-demo\"\n\n[package.metadata.makepad.desktop.usage]\nlocal_network = \"Links on this network\"\naudio_capture = \"Routes <sound> & more\"\n");
+        assert_eq!(meta.usage, vec![
+            ("NSAudioCaptureUsageDescription", "Routes <sound> & more".to_string()),
+            ("NSLocalNetworkUsageDescription", "Links on this network".to_string()),
+        ], "keys follow USAGE_KEYS order, whatever the manifest order");
         let plist = info_plist("demo", &meta);
         assert!(plist.contains("<key>NSAudioCaptureUsageDescription</key>\n    <string>Routes &lt;sound&gt; &amp; more</string>"));
         // No table, no prompt.
