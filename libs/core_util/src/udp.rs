@@ -1,6 +1,8 @@
-//! A UDP socket several processes on one machine can bind at once.
+//! UDP sockets: one several processes on one machine can bind at once, and one tied to a
+//! network interface.
 
-use std::net::UdpSocket;
+use std::io;
+use std::net::{Ipv4Addr, UdpSocket};
 
 /// Bind the discovery port so several clients on ONE host can listen at
 /// once (VJ + AI Content + a game all discover the same server / fleet).
@@ -114,6 +116,94 @@ pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
     UdpSocket::bind(("0.0.0.0", port))
 }
 
+/// How [`bind_udp_on_interface`] tied a socket to its interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterfaceBind {
+    /// The system sends and receives only through the interface, whatever the routes prefer
+    /// (`IP_BOUND_IF` on Apple systems, `SO_BINDTODEVICE` on Linux and Android).
+    Device,
+    /// Only the interface's IPv4 address is bound: datagrams carry it as their source, but the
+    /// routes still choose the way out (Linux without the privilege `SO_BINDTODEVICE` asks for,
+    /// and other systems).
+    Address(Ipv4Addr),
+}
+
+/// A UDP socket on `port` (0: any free one) tied to the network interface `name` (`en1`, `eth0`),
+/// so its datagrams leave through that interface even when another one comes first in the routes.
+/// It says how it was tied; an interface that doesn't exist is a `NotFound` error.
+pub fn bind_udp_on_interface(name: &str, port: u16) -> io::Result<(UdpSocket, InterfaceBind)> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        use std::os::unix::io::AsRawFd;
+        extern "C" {
+            fn if_nametoindex(name: *const std::ffi::c_char) -> std::ffi::c_uint;
+            fn setsockopt(fd: i32, level: i32, name: i32, value: *const core::ffi::c_void, len: u32) -> i32;
+        }
+        const IPPROTO_IP: i32 = 0;
+        const IP_BOUND_IF: i32 = 25;
+        let c_name = std::ffi::CString::new(name).map_err(|_| no_interface(name))?;
+        let index = unsafe { if_nametoindex(c_name.as_ptr()) };
+        if index == 0 {
+            return Err(no_interface(name));
+        }
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
+        let value: u32 = index;
+        let set = unsafe {
+            setsockopt(socket.as_raw_fd(), IPPROTO_IP, IP_BOUND_IF, &value as *const u32 as *const core::ffi::c_void, 4)
+        };
+        if set != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((socket, InterfaceBind::Device))
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::unix::io::AsRawFd;
+        extern "C" {
+            fn setsockopt(fd: i32, level: i32, name: i32, value: *const core::ffi::c_void, len: u32) -> i32;
+        }
+        const SOL_SOCKET: i32 = 1;
+        const SO_BINDTODEVICE: i32 = 25;
+        const EPERM: i32 = 1;
+        const ENODEV: i32 = 19;
+        // IFNAMSIZ is 16 with its NUL.
+        if name.is_empty() || name.len() >= 16 || name.contains('\0') {
+            return Err(no_interface(name));
+        }
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
+        let set = unsafe {
+            setsockopt(socket.as_raw_fd(), SOL_SOCKET, SO_BINDTODEVICE, name.as_ptr() as *const core::ffi::c_void, name.len() as u32)
+        };
+        if set == 0 {
+            return Ok((socket, InterfaceBind::Device));
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(ENODEV) => Err(no_interface(name)),
+            // Older kernels keep the option for privileged processes: bind the address instead.
+            Some(EPERM) => {
+                drop(socket);
+                bind_interface_address(name, port)
+            }
+            _ => Err(e),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android")))]
+    {
+        bind_interface_address(name, port)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn bind_interface_address(name: &str, port: u16) -> io::Result<(UdpSocket, InterfaceBind)> {
+    let addr = crate::netif::interfaces().into_iter().find(|i| i.name == name).map(|i| i.addr).ok_or_else(|| no_interface(name))?;
+    Ok((UdpSocket::bind((addr, port))?, InterfaceBind::Address(addr)))
+}
+
+fn no_interface(name: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, format!("no network interface named {name:?}"))
+}
+
 /// Waits, without a timeout, until `a` or `b` has a datagram to read: (a readable, b readable).
 /// What makes a blocking listener stoppable: `b` is a private loopback socket its stopper sends
 /// one datagram to.
@@ -157,6 +247,21 @@ mod tests {
 
     extern "C" {
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+
+    #[test]
+    fn a_socket_tied_to_an_interface_says_how_and_a_missing_interface_is_not_found() {
+        let missing = bind_udp_on_interface("no-such-if0", 0).map(|_| ()).unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound, "a name no interface has is NotFound: {missing}");
+        // Any up interface of this machine binds, by device where the system allows it.
+        if let Some(interface) = crate::netif::interfaces().first() {
+            let (socket, how) = bind_udp_on_interface(&interface.name, 0).expect("an up interface binds");
+            assert!(socket.local_addr().unwrap().port() != 0, "it has a port");
+            assert!(matches!(how, InterfaceBind::Device | InterfaceBind::Address(_)), "it says how it was tied: {how:?}");
+            if let InterfaceBind::Address(addr) = how {
+                assert_eq!(addr, interface.addr, "a bind by address uses that interface's own address");
+            }
+        }
     }
 
     #[test]
