@@ -239,7 +239,7 @@ mod tests {
         for note in 35..=81u8 {
             if let Some(name) = drum_name(note) {
                 let src = format!("use mod.score.*\nlet clock = Clock{{bpm: 120}}\nlet k = Instrument{{kind: @drums}}\nlet l = Loop{{play: k notes: [[0 @{name} 0.25 0.8]]}}\nScore{{clock k l}}");
-                let loaded = makepad_score_live::model::load(&src).unwrap_or_else(|d| panic!("{name}: {d:?}"));
+                let loaded = makepad_score_live::model::load_controlled(&src, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{name}: {d:?}"));
                 assert_eq!(loaded.doc.loops[0].notes.as_ref().unwrap()[0].note, note as f32, "{name}");
             }
         }

@@ -568,7 +568,7 @@ mod lists {
     #[test]
     fn hands_merge_and_pedal_reads() {
         let src = "use mod.score.*\nlet clock = Clock{bpm: 60}\nlet piano = Instrument{kind: @piano}\nlet rh = [\n    // bar 1\n    [0 @c4 1 0.5] [1 @e4 1 0.5]\n]\nlet lh = [[0 @c3 2 0.4]]\nlet pedal = [[0 @pedal 1] [1.5 @pedal 0.5]]\nlet p = Loop{play: piano amp: 1 beats: 4 notes: [rh lh pedal]}\nlet a = Section{bars: 1 + 1/2 loops: [p] tempo: [[0 60] [1 8]]}\nScore{arrange: [a] clock piano p a}";
-        let loaded = crate::model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+        let loaded = crate::model::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
         let notes = loaded.doc.loops[0].notes.clone().unwrap();
         assert_eq!(notes.len(), 5);
         assert_eq!(loaded.doc.sections[0].bars, 1.5);
@@ -578,7 +578,7 @@ mod lists {
     #[test]
     fn section_tempo_points_bend_time_and_code_moves_the_pedal() {
         let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet piano = Instrument{kind: @piano}\nlet p = Loop{play: piano beats: 4 code: fn(i) { play(@c4) pedal(1) sleep(1) play(@e4) pedal(0.5) sleep(1) pedal(0) play(@g4) sleep(2) }}\nlet a = Section{bars: 1 loops: [p] tempo: [[0 60] [1 30] [3 6]]}\nlet b = Section{bars: 1 loops: [p] next: @stop tempo: [[2 120]]}\nScore{arrange: [a b] clock piano p a b}";
-        let loaded = crate::model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+        let loaded = crate::model::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
         let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
         let mut events = Vec::new();
         composer.pump(16.0, &mut events);

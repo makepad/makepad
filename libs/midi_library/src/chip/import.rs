@@ -483,7 +483,7 @@ mod tests {
         assert!(notes.iter().any(|n| n.key == 72.0 && (n.vel - 0.5).abs() < 0.01));
         // The Score loads, its sampler names the sample, its notes keep
         // their options.
-        let doc = makepad_score_live::model::load(&imported.source).unwrap_or_else(|d| panic!("{d:?}\n{}", imported.source)).doc;
+        let doc = makepad_score_live::model::load_controlled(&imported.source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}\n{}", imported.source)).doc;
         assert_eq!(doc.samples().len(), 1);
         assert!(doc.loops.iter().map(|l| l.note_opts.len()).sum::<usize>() >= 2);
         // And it plays: the samples registered, the render is not silent.
@@ -539,7 +539,7 @@ mod tests {
             v => panic!("{v:?}"),
         };
         assert!(node.contains("osc: @pulse width: 0.5") && node.contains("sustain: 1"), "{node}");
-        let doc = makepad_score_live::model::load(&imported.source).unwrap_or_else(|d| panic!("{d:?}")).doc;
+        let doc = makepad_score_live::model::load_controlled(&imported.source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}")).doc;
         assert!(!doc.loops.is_empty());
     }
 }

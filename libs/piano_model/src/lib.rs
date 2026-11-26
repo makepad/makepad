@@ -349,6 +349,7 @@ pub(crate) struct EngineCore {
     tone_bass_db: f32,
     tone_treble_db: f32,
     pub(crate) global_sample: u64,
+    next_control_sample: u64,
     /// An AllSoundOff's fade.
     stop: StopFade,
     /// The size of the last output sample: whether anything still sounds.
@@ -552,6 +553,7 @@ impl Piano {
             tone_bass_db: 0.0,
             tone_treble_db: 0.0,
             global_sample: 0,
+            next_control_sample: 0,
             stop: StopFade::new(sample_rate),
             out_peak: 0.0,
             path: detect_path(),
@@ -749,6 +751,13 @@ impl Piano {
 
     // --- render ----------------------------------------------------------
 
+    /// Apply an event at the current sample without advancing the clock. A control
+    /// tick due at this sample precedes its first event, just as in `process`.
+    pub fn apply_event(&mut self, event: PianoEvent) {
+        self.core.tick_if_due(&self.keys, &mut self.voices);
+        self.core.apply_event(&self.keys, &mut self.voices, &event);
+    }
+
     /// See trait docs; the real-time entry point.
     pub fn process(&mut self, events: &[TimedEvent], out_l: &mut [f32], out_r: &mut [f32]) {
         let len = out_l.len().min(out_r.len());
@@ -760,9 +769,7 @@ impl Piano {
         let mut pos = 0usize;
         let mut ev = 0usize;
         while pos < len {
-            if core.global_sample % MAX_CHUNK as u64 == 0 {
-                core.control_tick(keys, voices);
-            }
+            core.tick_if_due(keys, voices);
             while ev < events.len() && (events[ev].offset as usize) <= pos {
                 core.apply_event(keys, voices, &events[ev].event);
                 ev += 1;
@@ -1007,6 +1014,7 @@ impl Piano {
         self.core.sustain = 0.0;
         self.core.soft = false;
         self.core.global_sample = 0;
+        self.core.next_control_sample = 0;
         self.core.stop.clear();
         self.core.out_peak = 0.0;
     }
@@ -1139,6 +1147,13 @@ impl EngineCore {
         }
         if let (Some(l), Some(r)) = (out_l.last(), out_r.last()) {
             self.out_peak = l.abs().max(r.abs());
+        }
+    }
+
+    fn tick_if_due(&mut self, keys: &[KeyDesign], voices: &mut [Voice]) {
+        if self.global_sample == self.next_control_sample {
+            self.control_tick(keys, voices);
+            self.next_control_sample = self.global_sample.wrapping_add(MAX_CHUNK as u64);
         }
     }
 

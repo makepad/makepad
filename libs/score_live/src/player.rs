@@ -483,7 +483,7 @@ pub fn prepare(doc: &ScoreDoc, slice: OwnerSlice, rate: f32, name: &str, clockin
         }
         NoteEdge { source: format!("{}.{}", source.from.node.node.0, source.from.port), node: node.node.node.0.clone(), port: field.to_owned(), entry: source.conn }
     };
-    let result = compile_with_note_labels_controlled::<NoExt, ()>(&slice, generation, 1, format, base, &Arc::new(AudioBudget::default()), Some(control.word()), &note_label);
+    let result = compile_with_note_labels_controlled::<NoExt, ()>(&slice, generation, 1, format, base, &Arc::new(AudioBudget::default()), Some(control), &note_label);
     if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
     let mut compiled = result.map_err(|e| fail(e.message))?;
     // A param bound to Clock automation in this plan; a hot swap that ends the

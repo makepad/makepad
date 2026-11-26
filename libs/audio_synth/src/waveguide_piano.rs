@@ -26,12 +26,15 @@ impl WaveguideInstrument {
     }
 
     fn push(&mut self, event: PianoEvent) {
-        // A full queue drops the newest event: 256 events inside one audio
-        // block is a stuck producer, not music.
-        if self.count < MAX_PENDING {
-            self.events[self.count] = TimedEvent { offset: 0, event };
-            self.count += 1;
+        if self.count == self.events.len() {
+            // All adapter events are due at the current sample.
+            for pending in &self.events {
+                self.piano.apply_event(pending.event);
+            }
+            self.count = 0;
         }
+        self.events[self.count] = TimedEvent { offset: 0, event };
+        self.count += 1;
     }
 }
 
@@ -64,9 +67,9 @@ impl Instrument for WaveguideInstrument {
     }
 
     fn all_notes_off(&mut self) {
-        // Released, not cut: the dampers fall and the board rings out.
         self.push(PianoEvent::Sustain { value: 0.0 });
-        for key in 21..=108u8 {
+        self.push(PianoEvent::Sostenuto { on: false });
+        for key in 21..=108 {
             self.push(PianoEvent::NoteOff { key });
         }
     }

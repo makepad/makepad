@@ -90,7 +90,7 @@ Score{label: "Techno" clock kit acid pad kick hats line chords echo verb}
 
 #[test]
 fn a_score_loads_with_its_graph_and_code() {
-    let doc = model::ScoreDoc::load(TECHNO).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(TECHNO).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.label, "Techno");
     assert_eq!(doc.clock.bpm, 126.0);
     assert_eq!(doc.loops.len(), 4);
@@ -110,15 +110,15 @@ fn a_score_loads_with_its_graph_and_code() {
 #[test]
 fn problems_are_reported_where_they_are() {
     let check = |bad: String, line: u32, needle: &str| {
-        let diags = model::ScoreDoc::load(&bad).unwrap_err();
+        let diags = model::ScoreDoc::test_load(&bad).unwrap_err();
         assert!(diags.iter().any(|d| d.line == line && d.to_string().contains(needle)), "wanted `{needle}` on line {line}: {diags:?}");
     };
     check(TECHNO.replace("hits: \"x...x...x...x...\"", "hits: 4"), 10, "pattern string");
     check(TECHNO.replace("room: 0.7", "rooom: 0.7"), 38, "`rooom` is not a Reverb field");
     check(TECHNO.replace("in: [line]", "in: [lien]"), 37, "lien");
-    assert!(model::ScoreDoc::load(&TECHNO.replace("seed: 7}", "seed: 7")).is_err());
+    assert!(model::ScoreDoc::test_load(&TECHNO.replace("seed: 7}", "seed: 7")).is_err());
     // A code error shows when the loop runs: the composer reports it.
-    let loaded = model::load(&TECHNO.replace("hit(@hat,", "hit(@hta,")).unwrap();
+    let loaded = model::test_load(&TECHNO.replace("hit(@hat,", "hit(@hta,")).unwrap();
     let mut composer = Composer::new(loaded.into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
@@ -142,7 +142,7 @@ fn widget_edits_are_source_preserving_and_reload() {
     // The pattern's third step: character 2 inside the quotes.
     let at = hits.start + 1 + 2;
     let s = format!("{}x{}", &s[..at], &s[at + 1..]);
-    let doc = model::ScoreDoc::load(&s).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(&s).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.clock.bpm, 128.0);
     assert!(doc.loop_def("hats").unwrap().mute);
     assert_eq!(doc.loop_def("kick").unwrap().hits.as_ref().unwrap().steps[2], Some(0.8));
@@ -170,7 +170,7 @@ fn a_seed_makes_a_render_repeat_and_another_seed_changes_it() {
 /// engine while the composer schedules ahead of the output by a lookahead,
 /// the way Stage's composer thread does.
 fn live(source: &str, total: usize, lookahead_beats: f64, swap: Option<(f64, &str)>) -> (Vec<f32>, Vec<(f64, f32, u64)>) {
-    let loaded = model::load(source).unwrap();
+    let loaded = model::test_load(source).unwrap();
     let mut instance = instantiate(&loaded.doc, 48_000.0, &crate::PrepareControl::default()).unwrap();
     let bpf = transport_bpm(&loaded.doc) / 60.0 / 48_000.0;
     let mut composer = Composer::new(loaded.into_evaluated());
@@ -181,7 +181,7 @@ fn live(source: &str, total: usize, lookahead_beats: f64, swap: Option<(f64, &st
         let now = out.len() as f64 * bpf;
         if let Some((at, next)) = swap {
             if now >= at {
-                composer.reload(model::load(next).unwrap().into_evaluated(), now + lookahead_beats);
+                composer.reload(model::test_load(next).unwrap().into_evaluated(), now + lookahead_beats);
                 swap = None;
             }
         }
@@ -275,7 +275,7 @@ fn an_editor_panel_loads_and_is_ignored() {
     // The panel a desk runs beside the code: a function the score never calls.
     let panel = "let editor_panel = fn() { View{flow: Down PanelKnob{path: \"acid.cutoff\" min: 200 max: 4000} SynthEnvelope{node: \"acid\"}} }\n";
     let src = TECHNO.replace("let echo =", &format!("{panel}let echo ="));
-    let doc = model::ScoreDoc::load(&src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(&src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.loops.len(), 4);
     assert!(!doc.order.iter().any(|(n, _)| n == "editor_panel"));
     let plain = render(TECHNO, &RenderOpts { seconds: Some(1.0), ..RenderOpts::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
@@ -296,13 +296,13 @@ fn ironfish_plays_a_loop_on_its_beats_and_repeats() {
     assert_eq!(a.left, b.left);
     // A setting out of range is reported on its line.
     let bad = src.replace("cutoff: 0.5", "cutoff: 5");
-    assert!(model::load(&bad).is_err());
+    assert!(model::test_load(&bad).is_err());
 }
 
 #[test]
 fn morph_plays_its_patch_and_reports_bad_fields() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet lead = Morph{preset: @wide_saw a_table: @formant a_pos: 0.3 lfo1_sync: @n8 mods: [[@lfo1 @a_pos 0.4] [@env2, @f1_cutoff, -0.3, @m1]] fx: [@delay @reverb] lfo2_shape: @drawn lfo2_points: [[0 0 0] [0.5 1 0.3] [1 0 0]] b_on: true b_table: @user b_frames: [[1 0 0.5] [1 0.3]]}\nlet line = Loop{play: lead beats: 2 code: fn(i) { play(@a2, {dur: 0.5}) sleep(1) play(@c3, {dur: 0.5}) sleep(1) }}\nScore{clock lead line}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let Some(model::InstKind::Morph { patch, .. }) = doc.insts.iter().find(|i| i.name == "lead").map(|i| &i.kind) else { panic!("not a Morph") };
     assert!(patch.contains("a_table=formant") && patch.contains("mod=lfo1,a_pos,0.4") && patch.contains("fx=delay,reverb"), "{patch}");
     let opts = RenderOpts { seconds: Some(2.0), ..RenderOpts::default() };
@@ -313,7 +313,7 @@ fn morph_plays_its_patch_and_reports_bad_fields() {
     assert_eq!(a.left, render(src, &opts, &NoSamples, &crate::PrepareControl::default()).unwrap().left);
     // A typo, a bad choice and a bad mod row each come back with the reason.
     for (bad, says) in [("a_pos: 0.3", "a_poss: 0.3"), ("a_table: @formant", "a_table: @nope"), ("[@lfo1 @a_pos 0.4]", "[@lfo9 @a_pos 0.4]")] {
-        let errs = model::load(&src.replace(bad, says)).err().unwrap_or_else(|| panic!("{says} loaded"));
+        let errs = model::test_load(&src.replace(bad, says)).err().unwrap_or_else(|| panic!("{says} loaded"));
         assert!(!errs.is_empty(), "{says}");
     }
     // The AI's tool lists the parameters.
@@ -326,7 +326,7 @@ fn morph_plays_its_patch_and_reports_bad_fields() {
 fn shader_instruments_and_effects_play_in_the_graph() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet bass = Shader{lib: \"acid\" cutoff: 600 mono: 1}\nlet keys = Shader{lib: \"epiano\"}\nlet line = Loop{play: bass beats: 2 code: fn(i) { play(@a1, {dur: 0.4}) sleep(0.5) play(@c2, {dur: 0.4}) sleep(1.5) }}\nlet chords = Loop{play: keys beats: 2 code: fn(i) { play(chord(@a3, @m7), {dur: 1.5}) sleep(2) }}\nlet space = ShaderFx{in: [chords] lib: \"echo\" wet: 0.4}\nScore{clock bass keys line chords space}\n";
     let started = std::time::Instant::now();
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     eprintln!("load with two shaders compiled: {:?}", started.elapsed());
     assert!(doc.fx[0].shader.is_some());
     let opts = RenderOpts { seconds: Some(2.0), ..RenderOpts::default() };
@@ -354,15 +354,15 @@ fn shader_instruments_and_effects_play_in_the_graph() {
     let two_peak = two.left.iter().copied().fold(0.0, f32::max);
     assert!(one_peak > 0.001 && (two_peak - one_peak * 2.0).abs() < 1e-5, "declared mono {one_peak}, explicit chord {two_peak}");
     for (field, setting) in [("steal", "steal: @newest"), ("legato", "legato: 2"), ("glide", "glide: -1")] {
-        let errors = model::ScoreDoc::load(&chords.replace("Shader{", &format!("Shader{{{setting} "))).unwrap_err();
+        let errors = model::ScoreDoc::test_load(&chords.replace("Shader{", &format!("Shader{{{setting} "))).unwrap_err();
         assert!(errors.iter().any(|e| e.node.as_deref() == Some("keys") && e.message.contains(field)), "diagnostic on {field}: {errors:?}");
     }
     // Problems show on their fields.
     let bad = src.replace("cutoff: 600", "cutof: 600");
-    let diags = model::load(&bad).err().expect("an unknown param is reported");
+    let diags = model::test_load(&bad).err().expect("an unknown param is reported");
     assert!(diags[0].message.contains("no param `cutof`"), "{diags:?}");
     let wrong = src.replace("lib: \"echo\"", "lib: \"acid\"");
-    assert!(model::load(&wrong).is_err());
+    assert!(model::test_load(&wrong).is_err());
 }
 
 #[test]
@@ -379,7 +379,7 @@ let tone = ShaderFx{code: "var k = int(0) fn effect(l,r) { k = (k + 1) % 13; vec
 let modulator = ShaderControl{audio: tone code: "let audio = param(0,0,1,{smooth: 0}) let out = output(1) var hz = 400.0 fn block() { hz += 71.0; out = hz + 512.0 * audio }"}
 let filter = ShaderFx{lib: "filter" in: tone cutoff: [Port{node: modulator name: @out} tone]}
 Score{clock tone modulator filter master: 1}"#;
-    let doc = model::ScoreDoc::load(src).unwrap();
+    let doc = model::ScoreDoc::test_load(src).unwrap();
     let filter = library("filter").unwrap();
     let shader = compile(filter).unwrap();
     let offline = render(src, &RenderOpts { seconds: Some(768.0 / 48000.0), ..Default::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
@@ -395,7 +395,7 @@ Score{clock tone modulator filter master: 1}"#;
         let mut at = 0usize;
         while at < total {
             if edits && (at == 195 || at == 401) {
-                let next = model::ScoreDoc::load(if at == 195 { &produced } else { &consumed }).unwrap();
+                let next = model::ScoreDoc::test_load(if at == 195 { &produced } else { &consumed }).unwrap();
                 let mut fresh = prepare_score(&next, 48000.0, "wired_reference", ClockMode::Own, Some(&player.layout), at as u64, &crate::PrepareControl::default()).unwrap();
                 fresh.schedule.take_over(&mut player.schedule);
                 player = fresh;
@@ -456,20 +456,20 @@ let clock = Clock{}
 let big = ShaderControl{code: "let out = output(1) fn block() { out = 3.0e38 }"}
 let reader = ShaderFx{code: "let gain = param(0,0,1) fn effect(l,r) { gain }" gain: Port{node: big name: @out}}
 Score{clock big reader}"#;
-    let mut p = prepare_score(&model::ScoreDoc::load(high).unwrap(), 48000.0, "wired_mean", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
+    let mut p = prepare_score(&model::ScoreDoc::test_load(high).unwrap(), 48000.0, "wired_mean", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
     p.run(1, &mut |_, _, _| {});
     assert_eq!(p.schedule.arena[p.layout.audio_probes["wired_mean/reader.audio"] as usize * SPAN], 1.0,
         "a finite mono target above half f32::MAX must reach the param clamp");
     makepad_audio_engine::feed::forget_instance("wired_mean");
 
     let cycle = src.replace("Score{clock", "modulator.audio = filter\nScore{clock");
-    assert!(model::ScoreDoc::load(&cycle).unwrap_err().iter().any(|d| d.message.contains("cycle") &&
+    assert!(model::ScoreDoc::test_load(&cycle).unwrap_err().iter().any(|d| d.message.contains("cycle") &&
         d.message.contains("modulator -> filter -> modulator")), "param wires must participate in cycle detection");
     let literal = src.replace("[Port{node: modulator name: @out} tone]", "700");
     let connected = crate::graph::connect_port(&literal, "modulator", "out", "filter", "cutoff", &crate::PrepareControl::default()).unwrap();
     assert!(connected.contains("cutoff: [Port{node: modulator name: @out}]"));
     let deleted = source::remove_node(&connected.replace("[Port{node: modulator name: @out}]", "Port{node: modulator name: @out}"), "modulator").unwrap();
-    assert!(model::ScoreDoc::load(&deleted).is_ok(), "{deleted}");
+    assert!(model::ScoreDoc::test_load(&deleted).is_ok(), "{deleted}");
     let graph = crate::graph::project(&doc);
     assert!(graph.edges.iter().any(|e| e.from == "modulator" && e.to_port == "cutoff"));
     assert!(!graph.edges.iter().any(|e| e.from == "modulator" && e.to == crate::graph::MASTER));
@@ -477,7 +477,7 @@ Score{clock big reader}"#;
         (src.replace("Port{node: modulator name: @out}", "modulator"), "filter", "cutoff", "Port{"),
         (src.replace("ShaderControl{", "ShaderControl{in: tone "), "modulator", "in", "no main audio"),
     ] {
-        let errors = model::ScoreDoc::load(&text).unwrap_err();
+        let errors = model::ScoreDoc::test_load(&text).unwrap_err();
         assert!(errors.iter().any(|e| e.node.as_deref() == Some(node) && e.message.contains(field) && e.message.contains(message)), "{errors:?}");
     }
 }
@@ -515,7 +515,7 @@ Score{clock tone cv lp echo master: 1}"#;
         source(old_hz, old_dt, cutoff, time),
         source(new_hz, new_dt, cutoff, time),
         source(new_hz, new_dt, "900", "0.09375"),
-    ].map(|src| model::ScoreDoc::load(&src).unwrap());
+    ].map(|src| model::ScoreDoc::test_load(&src).unwrap());
     // One uninterrupted offline score authors the equivalent target at each cut.
     // The extra 50 Hz comes from the bias output.
     let script = |first, old, new, last| format!(
@@ -693,7 +693,7 @@ Score{clock tone cv duck room cross sweep}"#;
                 ("POS", "pos", if changed { "0.875" } else { "0.125" }), ("Q", "q", "0.75")] {
                 source = source.replace(token, &if wired { format!("Port{{node: cv name: @{port}}}") } else { value.to_string() });
             }
-            model::ScoreDoc::load(&source).unwrap()
+            model::ScoreDoc::test_load(&source).unwrap()
         });
         for pass in [256, 97, 1] {
             let name = format!("effect_timing_{wired}_{pass}");
@@ -771,7 +771,7 @@ fn engine_levels_delay_and_rest_follow_the_sample_clock() {
     for (name, pcm) in [("slicing/audio", samples), ("slicing/constant", vec![1.0; 6 * RATE])] {
         feed::samples::register(name, Arc::new(Sample::new(pcm.into(), None, RATE as f32)));
     }
-    let doc = model::ScoreDoc::load(PULSE_A).unwrap();
+    let doc = model::ScoreDoc::test_load(PULSE_A).unwrap();
     let mut reference = Vec::new();
     let mut sleep_frame = None;
     for (pass, export) in [(256, true), (256, false), (97, true), (97, false), (1, true), (1, false)] {
@@ -887,7 +887,7 @@ Score{clock src pad line tap master: 1}"#;
         .replace("level + float", "(if tick >= 239 { level * 0.5 } else { level }) + float");
     let rate = 48000.0;
     let offline = render(&scripted, &RenderOpts { seconds: Some(512.0 / rate), ..Default::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
-    let docs = [src, &edit_source, &edit_voice].map(|s| model::ScoreDoc::load(s).unwrap());
+    let docs = [src, &edit_source, &edit_voice].map(|s| model::ScoreDoc::test_load(s).unwrap());
     let manual_code = docs[0].shader_def("pad").unwrap().code.replace("tick += 1; 0.0", "tick += 1; env");
     let manual_program = compile(&manual_code).unwrap();
     let next_program = compile(&manual_code.replace("level + float", "level * 0.5 + float")).unwrap();
@@ -895,7 +895,7 @@ Score{clock src pad line tap master: 1}"#;
         let name = format!("instrument_edits_{pass}");
         let mut host = prepare_score(&docs[0], rate as f32, &name, ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
         let mut events = Vec::new();
-        Composer::new(model::load(src).unwrap().into_evaluated()).pump(0.01, &mut events);
+        Composer::new(model::test_load(src).unwrap().into_evaluated()).pump(0.01, &mut events);
         for event in events { assert!(host.feeds.iter().find(|(k, _)| *k == event.loop_key).unwrap().1.send(event)); }
         let mut manual = ShaderInst::new(manual_program.clone(), rate as f32);
         manual.note_on(60.0, 1.0, 0, 0);
@@ -964,7 +964,7 @@ let tap = ShaderFx{in: Port{node: bass_loop name: @env} code: "fn effect(l,r) { 
 Score{clock duck_key pad bass_loop accent tap master: 1}"#;
     let dry = src.replace("latency(38)", "latency(0)");
     for (source, notes) in [(src, vec!["duck_key.audio -> bass_loop.key arrives 38 frames late"]), (&dry, vec![])] {
-        let doc = model::ScoreDoc::load(source).unwrap();
+        let doc = model::ScoreDoc::test_load(source).unwrap();
         let player = instantiate(&doc, 48000.0, &crate::PrepareControl::default()).unwrap();
         assert_eq!(player.layout.plan_notes.len(), notes.len(), "one note per authored edge across all instances");
         for (note, &message) in player.layout.plan_notes.iter().zip(&notes) {
@@ -979,7 +979,7 @@ Score{clock duck_key pad bass_loop accent tap master: 1}"#;
         assert_eq!(heard.get("plan_notes"), Some(&Value::Arr(notes.into_iter().map(json::s).collect())), "{}", heard.to_json());
         assert!(heard.get("notes").and_then(|music| music.get("bass_loop")).is_some(), "played notes still have their own field");
     }
-    let doc = model::ScoreDoc::load(src).unwrap();
+    let doc = model::ScoreDoc::test_load(src).unwrap();
     let g = graph(&doc);
     for name in ["bass_loop", "bass_loop_fx1_in", "accent"] { assert_eq!(g.wired(name, "key"), ["duck_key"]); }
     let opts = RenderOpts { seconds: Some(0.012), ..Default::default() };
@@ -991,7 +991,7 @@ Score{clock duck_key pad bass_loop accent tap master: 1}"#;
     for name in ["audio", "peak"] {
         let renamed = src.replace("env", name).replace("key: duck_key", "clock: duck_key")
             .replace("let key = input", "let clock = input").replace("= key * velocity", "= clock * velocity");
-        let doc = model::ScoreDoc::load(&renamed).unwrap();
+        let doc = model::ScoreDoc::test_load(&renamed).unwrap();
         let projected = project(&doc);
         let named = format!(":{name}");
         assert!(projected.edges.iter().any(|e| e.from == "bass_loop" && e.from_port == named && e.to == "tap"));
@@ -1005,8 +1005,8 @@ Score{clock duck_key pad bass_loop accent tap master: 1}"#;
     assert!(projected.nodes.iter().any(|n| n.id == "bass_loop" && n.outputs.iter().any(|p| p.name == "env")));
     let cleared = disconnect(src, "pad", "key", Some(0)).unwrap();
     let reconnected = connect_port(&cleared, "duck_key", "audio", "pad", "key", &crate::PrepareControl::default()).unwrap();
-    assert!(model::ScoreDoc::load(&reconnected).is_ok());
-    assert!(model::ScoreDoc::load(&source::remove_node(&reconnected, "duck_key").unwrap()).is_ok());
+    assert!(model::ScoreDoc::test_load(&reconnected).is_ok());
+    assert!(model::ScoreDoc::test_load(&source::remove_node(&reconnected, "duck_key").unwrap()).is_ok());
     for (source, node, message) in [
         (src.replace("node: bass_loop", "node: pad"), "tap", "read the loop that plays it"),
         (src.replace("key: duck_key code:", "key: Port{node: duck_key name: @missing} code:"), "pad", "unknown output port"),
@@ -1015,7 +1015,7 @@ Score{clock duck_key pad bass_loop accent tap master: 1}"#;
         (src.replace("let bass_loop = Loop{", "let bass_loop = Loop{key: duck_key "), "bass_loop", "wire `key` on the Shader definition"),
         (src.replace("Score{clock", "pad.key = tap\nScore{clock"), "tap", "cycle"),
     ] {
-        let ds = model::ScoreDoc::load(&source).unwrap_err();
+        let ds = model::ScoreDoc::test_load(&source).unwrap_err();
         assert!(ds.iter().any(|d| d.message.contains(message) && (d.node.as_deref()==Some(node) || d.message.contains(node))), "{ds:?}");
     }
 }
@@ -1035,7 +1035,7 @@ Score{clock pulse kick split comp}"#;
     let comp = authored.doc.fx.iter().find(|fx| fx.name == "comp").unwrap();
     assert!(comp.sides.iter().any(|(name, wire)| name == "key" && wire.ports().eq([("kick", "audio")])),
         "a bare name on an input port is an authored wire");
-    let doc = model::ScoreDoc::load(score).unwrap();
+    let doc = model::ScoreDoc::test_load(score).unwrap();
     let graph = project(&doc);
     assert!(graph.edges.iter().any(|e| e.from == "split" && e.from_port == "low" && e.to_port == "in"));
     let opts = RenderOpts { seconds: Some(0.02), ..RenderOpts::default() };
@@ -1066,10 +1066,10 @@ Score{clock tone bass kick copy silent comp master: 1}"#;
     assert_eq!((direct.left, direct.right), (late.left, late.right), "delaying only the kick must preserve the aligned stereo export");
 
     let deleted = source::remove_node(score, "split").unwrap();
-    assert!(model::ScoreDoc::load(&deleted).is_ok() && deleted.contains("ShaderFx{in: [] key: kick"));
+    assert!(model::ScoreDoc::test_load(&deleted).is_ok() && deleted.contains("ShaderFx{in: [] key: kick"));
     let added = connect_port(score, "split", "low", "comp", "key", &crate::PrepareControl::default()).unwrap();
     let removed = disconnect(&added, "comp", "key", Some(0)).unwrap();
-    let graph = project(&model::ScoreDoc::load(&removed).unwrap());
+    let graph = project(&model::ScoreDoc::test_load(&removed).unwrap());
     assert!(graph.edges.iter().any(|e| e.from_port == "low" && e.to_port == "key"));
     assert!(!graph.edges.iter().any(|e| e.from == "kick" && e.to == "comp"));
     let added = connect_port(score, "kick", "audio", "comp", "in", &crate::PrepareControl::default()).unwrap();
@@ -1086,13 +1086,13 @@ Score{clock tone bass kick copy silent comp master: 1}"#;
         ("let key = input(1)", "let lib = input(1) let key = input(1)", "lib", "rename"),
         ("clock pulse kick split comp}", "clock pulse kick comp split}", "split", "comes after"),
     ] {
-        let errors = model::ScoreDoc::load(&score.replace(old, new)).unwrap_err();
+        let errors = model::ScoreDoc::test_load(&score.replace(old, new)).unwrap_err();
         assert!(errors.iter().any(|e| e.message.contains(needle) && e.message.contains(reason)), "{new}: {errors:?}");
     }
     // Objects must be defined before Splash can evaluate them; a node may
     // reference itself by being edited after construction.
     let cycle = score.replace("Score{clock", "split.in = [comp]\nScore{clock");
-    let errors = model::ScoreDoc::load(&cycle).unwrap_err();
+    let errors = model::ScoreDoc::test_load(&cycle).unwrap_err();
     assert!(errors.iter().any(|e| ["cycle", "split", "comp"].iter().all(|s| e.message.contains(s))), "{errors:?}");
 }
 
@@ -1107,7 +1107,7 @@ let dry = ShaderFx{code: "var k = int(0) fn effect(l,r) { let a = TAU * float(k)
 let wet = ShaderFx{in: [dry] code: "rate(4) fn effect(l,r) { vec2(l,r) }" oversample: 2}
 let sum = ShaderFx{in: [dry wet] code: "fn effect(l,r) { vec2(l,r) }"}
 Score{clock dry wet sum}"#;
-    let load = |src: &str| model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let load = |src: &str| model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let doc = load(source);
     let name = "shader_rate_score";
     let mut player = prepare_score(&doc, 48_000.0, name, ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
@@ -1169,7 +1169,7 @@ fn shader_node_oversample_validates_modes_at_the_field() {
         ("ShaderFx", "var os = Oversample2{} fn effect(l,r) { oversample(os,l,fn(u) { u }) }", "8", "reaches 16×"),
     ] {
         let src = score(ty, code, value);
-        let errors = model::ScoreDoc::load(&src).unwrap_err();
+        let errors = model::ScoreDoc::test_load(&src).unwrap_err();
         let (line, col) = source::line_col(&src, src.find("oversample:").unwrap());
         assert!(errors.iter().any(|e| e.node.as_deref() == Some("tone") && (e.line, e.col) == (line as u32, col as u32)
             && e.message.contains(reason)), "expected {reason} on the oversample field: {errors:?}");
@@ -1177,7 +1177,7 @@ fn shader_node_oversample_validates_modes_at_the_field() {
 
     let src = score("Shader", "rate(4, hold) fn voice() { gate }", "[8 @filter]")
         .replace("Score{clock tone}", "let line = Loop{play: tone beats: 1 notes: [[0 @c4 0.5 1]]}\nScore{clock tone line}");
-    let doc = model::ScoreDoc::load(&src).unwrap();
+    let doc = model::ScoreDoc::test_load(&src).unwrap();
     let player = prepare_score(&doc, 48_000.0, "shader_rate_voice", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
     let instrument = player.layout.nodes.iter().find(|n| n.id == "shader_rate_voice/line").unwrap();
     assert_eq!(instrument.own_latency, 20, "the instrument uses the node's 8x down filter");
@@ -1198,7 +1198,7 @@ let curve = ShaderModule{code: "use tone\nfn gain(x) { tone.level(x) }"}
 let dry = ShaderFx{in: [fx] code: "fn effect(l,r) { vec2(l,r) }"}
 Score{clock voice line fx dry curve tone := ShaderModule{code: "fn level(x) { x * 0.5 }"}}"#;
     let edited = source.replace("x * 0.5", "x * 0.25");
-    let load = |src: &str| model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let load = |src: &str| model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let before_doc = load(source);
     let after_doc = load(&edited);
     let mut before = prepare_score(&before_doc, 48000.0, "module_score", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
@@ -1229,7 +1229,7 @@ Score{clock voice line fx dry curve tone := ShaderModule{code: "fn level(x) { x 
     let b = render(&edited, &options, &NoSamples, &crate::PrepareControl::default()).unwrap();
     assert!(peak(&a.left) > peak(&b.left) && peak(&b.left) > 0.001, "both versions play at their authored levels");
     let bad = source.replace("use tone.*", "use absent.*");
-    let errors = model::ScoreDoc::load(&bad).unwrap_err();
+    let errors = model::ScoreDoc::test_load(&bad).unwrap_err();
     assert!(errors.iter().any(|d| d.node.as_deref() == Some("voice") && d.message.contains("no module `absent`")), "{errors:?}");
 }
 
@@ -1261,7 +1261,7 @@ Score{clock dust west east fx}"#;
         assert!(actual.iter().map(|v| v.to_bits()).eq(authored.iter().map(|v| v.to_bits())),
             "a render seed override and the same authored clock seed produce identical sample bits");
     }
-    let invalid = model::load(&source.replace("seed: 0", "seed: 1.5")).err().expect("fractional seed rejected");
+    let invalid = model::test_load(&source.replace("seed: 0", "seed: 1.5")).err().expect("fractional seed rejected");
     assert!(invalid.iter().any(|d| d.message.contains("seed")), "diagnostic names the seed");
 }
 
@@ -1270,10 +1270,10 @@ fn shader_choices_and_steps_reach_the_render() {
     let code = "let wave = param(0, {choices: [square saw tri]})\nlet level = param(0, 0, 1, {step: 0.5})\nlet cutoff = param(1200, 20, 16000, {unit: hz})\nfn voice() { vec2(wave * level, 0) }";
     let score = |wave: &str| format!("use mod.score.*\nlet clock = Clock{{}}\nlet tone = Shader{{code: {code:?} wave: {wave} level: 0.7}}\nlet line = Loop{{play: tone beats: 1 notes: [[0 @c4 0.5 1]]}}\nScore{{clock tone line}}");
     let named = score("@saw");
-    let doc = model::ScoreDoc::load(&named).unwrap();
+    let doc = model::ScoreDoc::test_load(&named).unwrap();
     let shader = doc.shader("tone").expect("expected a shader");
     assert!(shader.params.contains(&("level".into(), 0.5)), "the score stores the snapped value");
-    assert_eq!(doc.insts, model::ScoreDoc::load(&score("\"saw\"")).unwrap().insts, "quoted choices resolve to the same index");
+    assert_eq!(doc.insts, model::ScoreDoc::test_load(&score("\"saw\"")).unwrap().insts, "quoted choices resolve to the same index");
 
     let computed = named.replace("let wave = ", "let half = 0.25 + 0.25; let wave = ")
         .replace("step: 0.5", "step: half");
@@ -1284,7 +1284,7 @@ fn shader_choices_and_steps_reach_the_render() {
         assert!(def.overrides.contains(&("level".into(), model::Override::Num(0.7))));
         assert!(def.overrides.contains(&("wave".into(), model::Override::Choice("saw".into()))));
         assert_eq!(model::SHADER_COMPILES.with(|n| n.get()), before, "reading declarations compiles no shader");
-        let checked = model::ScoreDoc::load(source).unwrap();
+        let checked = model::ScoreDoc::test_load(source).unwrap();
         assert_eq!(checked.shader("tone").unwrap().params, shader.params, "literal and computed steps snap identically");
     }
 
@@ -1304,9 +1304,9 @@ fn shader_choices_and_steps_reach_the_render() {
     assert_eq!(loop_error(&valid_loop), loop_error(&poisoned), "the unrelated shader cannot hide a loop error");
     let diag = |line, message: &str| model::Diag { line, col: 5, node: Some("ctl".into()), message: message.into() };
     let body = diag(4, "shader line 1: unknown name `undefined_body_value`");
-    assert_eq!(model::ScoreDoc::load(broken).unwrap_err(), [body.clone()]);
+    assert_eq!(model::ScoreDoc::test_load(broken).unwrap_err(), [body.clone()]);
     let both = broken.replace("\n}\n", "\n    in: []\n}\n");
-    assert_eq!(model::ScoreDoc::load(&both).unwrap_err(), [
+    assert_eq!(model::ScoreDoc::test_load(&both).unwrap_err(), [
         body, diag(5, "a ShaderControl has no main audio input for `in`; wire a param instead"),
     ], "a failed shader and a structural error keep their positions and order");
     let malformed = broken.replace("undefined_body_value", "0x");
@@ -1320,7 +1320,7 @@ fn shader_choices_and_steps_reach_the_render() {
     assert_eq!((a.left, a.right), (b.left, b.right), "a named wave renders as its index");
 
     let bad = score("@missing").replace("level: 0.7", "cutoff: @low");
-    let diags = model::ScoreDoc::load(&bad).unwrap_err();
+    let diags = model::ScoreDoc::test_load(&bad).unwrap_err();
     assert!(diags.iter().any(|d| d.message.contains("@square @saw @tri")), "{diags:?}");
     assert!(diags.iter().any(|d| d.message.contains("from 20 Hz to 16000 Hz")), "{diags:?}");
 }
@@ -1328,7 +1328,7 @@ fn shader_choices_and_steps_reach_the_render() {
 #[test]
 fn a_voice_sings_its_lyrics_on_the_notes() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 100}\nlet vox = Voice{profile: @alto vibrato: 0.2}\nlet choir = Voice{profile: @tenor choir: 4 parts: 2}\nlet line = Loop{play: vox beats: 4 code: fn(i) { sleep(sing([@e4 @g4 @a4 @g4], \"a-ma-zing grace\", {dur: 1})) }}\nlet pad = Loop{play: choir beats: 4 code: fn(i) { sing([[@c4 @e4]], \"ooh\", {dur: 4}) sleep(4) }}\nScore{clock vox choir line pad}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
     let sung: Vec<_> = events.iter().filter(|e| e.loop_key == key("line")).collect();
@@ -1344,7 +1344,7 @@ fn a_voice_sings_its_lyrics_on_the_notes() {
     assert!(peak > 0.01 && a.left.iter().all(|x| x.is_finite()), "the voices are silent (peak {peak})");
     assert_eq!(a.left, render(src, &opts, &NoSamples, &crate::PrepareControl::default()).unwrap().left);
     let bad = src.replace("@alto", "@diva");
-    assert!(model::load(&bad).is_err());
+    assert!(model::test_load(&bad).is_err());
 }
 
 #[cfg(feature = "neural")]
@@ -1357,7 +1357,7 @@ fn a_neural_voice_sings_its_phrases_rendered_ahead() {
     std::env::set_var("MAKEPAD_CANTOR_MODEL", &path);
     let line = "code: fn(i) { sleep(sing([@e4 @g4 @a4 @g4], \"a-ma-zing grace\", {dur: 1})) }";
     let src = format!("use mod.score.*\nlet clock = Clock{{bpm: 100}}\nlet vox = Voice{{engine: @neural}}\nlet alto = Voice{{profile: @alto}}\nlet line = Loop{{play: vox beats: 4 {line}}}\nlet dsp = Loop{{play: alto beats: 4 {line}}}\nScore{{clock vox alto line dsp}}\n");
-    let mut composer = Composer::new(model::load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(0.1, &mut events);
     let phrases: Vec<_> = events.iter().filter(|e| matches!(e.kind, EventKind::Phrase(_))).collect();
@@ -1380,7 +1380,7 @@ fn a_neural_voice_sings_its_phrases_rendered_ahead() {
     assert_eq!(a.left, render(&src, &opts, &NoSamples, &crate::PrepareControl::default()).unwrap().left);
     assert!(neural::shared().is_some());
     let _ = std::fs::remove_file(&path);
-    assert!(model::load(&src.replace("@neural", "@opera")).is_err());
+    assert!(model::test_load(&src.replace("@neural", "@opera")).is_err());
 }
 
 #[test]
@@ -1441,15 +1441,28 @@ fn game_music_headless_equals_the_offline_render_and_reports_its_beats() {
 fn game_music_takes_a_new_graph_without_stopping() {
     use crate::game::{music, Clocking};
     use makepad_audio_synth::Instrument;
-    let (mut handle, mut inst) = music(PULSE_A, 48_000.0, Clocking::Headless).unwrap();
+    let source = PULSE_A.replace("Synth{preset: @pluck}", r#"Shader{code: "fn voice() { gate * 0.1 }"}"#);
+    let count = || model::SHADER_COMPILES.with(|n| n.get());
+    let before = count();
+    let (mut handle, mut inst) = music(&source, 48_000.0, Clocking::Headless).unwrap();
+    assert_eq!(count(), before + 1, "the headless composer reuses the checked shader on start");
     let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
     for _ in 0..10 {
         handle.advance(4800);
         inst.render(&mut l, &mut r);
     }
     // A new instrument and loop: a new graph, the pulse carried over.
-    let next = PULSE_A.replace("Score{clock s pulse}", "let bell = Ironfish{program: \"glass\"}\nlet ring = Loop{play: bell beats: 4 code: fn(i) { play(@c5, {dur: 1}) sleep(4) }}\nScore{clock s bell pulse ring}");
+    let next = source.replace("Score{clock s pulse}", "let bell = Ironfish{program: \"glass\"}\nlet ring = Loop{play: bell beats: 4 code: fn(i) { play(@c5, {dur: 1}) sleep(4) }}\nScore{clock s bell pulse ring}");
+    let mut slot = crate::game::MusicSlot::default();
+    let stale = slot.begin();
+    let doc = model::ScoreDoc::load_controlled(&next, &stale).unwrap();
+    let mut first = handle.base().prepare(next.as_str().into(), &doc, &stale).unwrap();
+    let latest = slot.begin();
+    assert!(stale.is_cancelled() && !latest.is_cancelled(), "only the replaced prepare is cancelled");
+    assert_eq!(handle.post(&mut first), Err(crate::LoadError::Cancelled), "a completed obsolete graph cannot enter the swaps queue");
+    let before = count();
     handle.set_source(&next).unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(count(), before + 1, "the headless composer reuses the replacement shader on reload");
     let mut heard = 0.0f32;
     for _ in 0..20 {
         handle.advance(4800);
@@ -1504,7 +1517,7 @@ fn samplers_and_kit_slots_play_the_samples_the_host_gives() {
         }
     }
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet keys = Sampler{src: asset(\"tone\", \"1\") root: @a4}\nlet kit = Drums{kit: @analog_hybrid samples: {kick: asset(\"boom\", \"2\")}}\nlet line = Loop{play: keys beats: 2 code: fn(i) { play(@a4, {dur: 0.5}) sleep(2) }}\nlet beat = Loop{play: kit hits: \"x...\"}\nScore{clock keys kit line beat}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.dependencies().len(), 2);
     let opts = RenderOpts { seconds: Some(1.0), ..RenderOpts::default() };
     let silent = render(src.replace("\"tone\"", "\"missing\"").replace("\"boom\"", "\"gone\"").as_str(), &opts, &NoSamples, &crate::PrepareControl::default()).unwrap();
@@ -1532,21 +1545,21 @@ fn a_voice_sings_with_the_library_singer_the_host_gives() {
         }
     }
     let src = |id: &str| format!("use mod.score.*\nlet clock = Clock{{bpm: 100}}\nlet vox = Voice{{profile: asset(\"{id}\", \"r1\")}}\nlet line = Loop{{play: vox beats: 2 code: fn(i) {{ sleep(sing([@e3 @g3], \"la la\", {{dur: 1}})) }}}}\nScore{{clock vox line}}\n");
-    let doc = model::ScoreDoc::load(&src("singer_t1")).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(&src("singer_t1")).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.singers(), vec![AssetRef { id: "singer_t1".into(), rev: "r1".into() }]);
     assert_eq!(doc.dependencies().len(), 1);
     assert!(doc.samples().is_empty());
     let opts = RenderOpts { seconds: Some(2.0), ..RenderOpts::default() };
     // Not registered yet: the built-in alto sings in its place.
     let waiting = render(&src("singer_t2"), &opts, &NoSamples, &crate::PrepareControl::default()).unwrap();
-    assert_eq!(crate::render::missing_singers(&model::ScoreDoc::load(&src("singer_t2")).unwrap()).len(), 1);
+    assert_eq!(crate::render::missing_singers(&model::ScoreDoc::test_load(&src("singer_t2")).unwrap()).len(), 1);
     let sung = render(&src("singer_t1"), &opts, &Singers, &crate::PrepareControl::default()).unwrap();
     assert!(crate::render::missing_singers(&doc).is_empty());
     let peak = |v: &[f32]| v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
     assert!(peak(&waiting.left) > 0.01 && peak(&sung.left) > 0.01);
     assert_ne!(waiting.left, sung.left);
     // A name that is neither built in nor an asset is reported.
-    assert!(model::ScoreDoc::load(&src("x").replace("asset(\"x\", \"r1\")", "@choirboy")).is_err());
+    assert!(model::ScoreDoc::test_load(&src("x").replace("asset(\"x\", \"r1\")", "@choirboy")).is_err());
 }
 
 #[test]
@@ -1561,7 +1574,7 @@ fn timing_reads_the_sections_without_rendering() {
 fn a_loop_following_a_param_fades_with_it() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {intensity: 0.0}}\nlet s = Synth{preset: @pluck}\nlet layer = Loop{play: s beats: 1 follow: {param: @intensity from: 0.2 to: 0.6} code: fn(i) { play(60) sleep(1) }}\nScore{clock s layer}\n";
     let vels = |value: f32| {
-        let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+        let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
         composer.set_param("intensity", value);
         let mut events = Vec::new();
         composer.pump(2.0, &mut events);
@@ -1664,7 +1677,7 @@ fn native_instruments_play_in_a_score() {
     assert_eq!(peak(&silent.left), 0.0, "an unloaded SoundFont is silent, not an error");
     let s = render(sf, &RenderOpts { seconds: Some(1.0), ..RenderOpts::default() }, &Font, &crate::PrepareControl::default()).unwrap();
     assert!(peak(&s.left) > 0.01, "the SoundFont is silent");
-    assert!(model::load(&drums.replace("@drums", "@kazoo")).is_err());
+    assert!(model::test_load(&drums.replace("@drums", "@kazoo")).is_err());
 }
 
 #[test]
@@ -1678,7 +1691,7 @@ fn a_note_list_streams_with_program_changes() {
         notes.push_str(&format!("[{} {} 0.2 0.7] ", i as f64 * 0.25, 48 + (i * 7) % 24));
     }
     let src = format!("use mod.score.*\nlet clock = Clock{{bpm: 240}}\nlet gm = Instrument{{kind: @soundfont src: asset(\"font\", \"1\")}}\nlet song = Loop{{play: gm notes: [{notes}]}}\nScore{{clock gm song}}\n");
-    let mut composer = Composer::new(model::load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
     assert!(events.len() <= 20, "streamed up to the horizon, not the whole song: {}", events.len());
@@ -1782,25 +1795,25 @@ fn sections_change_the_tempo_sample_exactly() {
 #[test]
 fn a_param_moves_the_tempo_and_sections_repeat() {
     let src = TEMPO.replace("params: {mood: 0}}", "params: {mood: 0} tempo: {param: @mood from: 60 to: 180 ramp: 2}}");
-    let mut composer = Composer::new(model::load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(&src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(2.5, &mut events);
     composer.set_param("mood", 1.0);
     assert_eq!(composer.tempo_out.last().map(|e| (e.beat, e.bpm, e.ramp)), Some((3.0, 180.0, 2.0)));
     // A section repeats itself until a goto, forward references resolve.
     let looping = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet pulse = Loop{play: s beats: 1 code: fn(i) { play(60) sleep(1) }}\nlet intro = Section{bars: 1 loops: [pulse] next: @calm}\nlet calm = Section{bars: 1 loops: [pulse] repeat: true}\nlet storm = Section{bars: 1 loops: [pulse] next: @self}\nScore{clock s pulse intro calm storm arrange: [intro calm storm]}\n";
-    let mut c = Composer::new(model::load(looping).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut c = Composer::new(model::test_load(looping).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     assert_eq!(c.section_at(2.0).as_deref(), Some("intro"));
     assert_eq!(c.section_at(40.0).as_deref(), Some("calm"));
     c.goto_section("storm", 40.0, -1.0).unwrap();
     assert_eq!(c.section_at(100.0).as_deref(), Some("storm"));
-    assert!(model::load(&looping.replace("next: @calm", "next: @nowhere")).is_err());
+    assert!(model::test_load(&looping.replace("next: @calm", "next: @nowhere")).is_err());
 }
 
 #[test]
 fn an_id_in_arithmetic_is_an_error_not_silence() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet bad = Loop{play: s beats: 1 code: fn(i) { let c = [@c4 @e4] play(at(c, 0) + 12) sleep(1) }}\nlet good = Loop{play: s beats: 1 code: fn(i) { play(note(@c4) + floor(12.7) + max(0, -3) + abs(-0)) sleep(1) }}\nScore{clock s bad good}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(2.0, &mut events);
     let errors = composer.errors();
@@ -1814,7 +1827,7 @@ fn an_id_in_arithmetic_is_an_error_not_silence() {
 #[test]
 fn sends_bars_and_sections() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet a = Loop{play: s beats: 4 sends: {verb: 0.5} code: fn(i) { if section() == \"b\" { play(60 + section_bar()) } else { play(48 + bar()) } sleep(4) }}\nlet verb = Reverb{room: 0.9 mix: 1.0}\nlet one = Section{bars: 2 loops: [a]}\nlet b = Section{bars: 2 loops: [a]}\nScore{clock s a verb one b arrange: [one b]}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.loops[0].sends, vec![("verb".to_string(), 0.5)]);
     // The send is a Bus into the reverb; the loop still reaches the master.
     let g = graph(&doc);
@@ -1822,7 +1835,7 @@ fn sends_bars_and_sections() {
     assert_eq!(g.wired("verb", "audio"), ["a_send_verb"]);
     assert_eq!(g.wired("master", "audio"), ["a", "verb"]);
     // bar() counts from the piece's start; section_bar() within a section.
-    let mut composer = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap().into_evaluated());
     let mut events = Vec::new();
     composer.pump(16.0, &mut events);
     let notes: Vec<f32> = events.iter().map(|e| e.note).collect();
@@ -1833,13 +1846,13 @@ fn sends_bars_and_sections() {
     let broken = src.replace("play(48 + bar())", "play(48 + nope())");
     let r = render(&broken, &RenderOpts { seconds: Some(1.0), ..RenderOpts::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
     assert!(!r.errors.is_empty());
-    assert!(model::load(&src.replace("{verb: 0.5}", "{verbb: 0.5}")).err().unwrap()[0].message.contains("did you mean `verb`"));
+    assert!(model::test_load(&src.replace("{verb: 0.5}", "{verbb: 0.5}")).err().unwrap()[0].message.contains("did you mean `verb`"));
 }
 
 #[test]
 fn fx_settings_follow_params_and_sections_set_them() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {build: 0}}\nlet s = Synth{preset: @supersaw}\nlet a = Loop{play: s beats: 1 code: fn(i) { play(48, {dur: 1}) sleep(1) }}\nlet sweep = Lowpass{in: [a] cutoff: {param: @build from: 200 to: 8000 ramp: 4} res: 1}\nlet low = Section{bars: 1 loops: [a]}\nlet up = Section{bars: 2 loops: [a] set: {build: 1}}\nScore{clock s a sweep low up arrange: [low up]}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     // It starts where the param is, and the section moves it over 4 beats.
     assert_eq!(composer.automation_out.drain(..).map(|(fx, e)| (fx, e.beat, e.value, e.ramp)).collect::<Vec<_>>(), [("sweep".to_string(), 0.0, 200.0, 0.0)]);
     let mut events = Vec::new();
@@ -1849,13 +1862,13 @@ fn fx_settings_follow_params_and_sections_set_them() {
     let r = render(src, &RenderOpts { seconds: Some(6.0), ..RenderOpts::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
     let hf = |from: usize, to: usize| r.left[from..to].windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / (to - from) as f32;
     assert!(hf(4 * 24_000, 5 * 24_000) > hf(24_000, 2 * 24_000) * 2.0, "the sweep did not open: {} vs {}", hf(24_000, 48_000), hf(96_000, 120_000));
-    assert!(model::load(&src.replace("set: {build: 1}", "set: {buld: 1}")).is_err());
+    assert!(model::test_load(&src.replace("set: {build: 1}", "set: {buld: 1}")).is_err());
 }
 
 #[test]
 fn the_loop_code_toolkit() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet chords = Loop{play: s beats: 4 code: fn(i) { put(@chord, chord(@a3, @minor)) log(rev([1 2 3])) sleep(4) }}\nlet lead = Loop{play: s beats: 4 humanize: {time: 0.02 vel: 0.2} code: fn(i) { let c = get(@chord) sleep(phrase([c[0] c[1]], [0.5 0.5])) sleep(arp(c, @updown, 0.25)) strum(c, 0.05) log(deg(3, @c4, @major)) log(snap(61, @c4, @major)) log(rot([1 2 3], 1)) sleep(1) }}\nScore{clock s chords lead}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
     assert!(composer.errors().is_empty(), "{:?}", composer.errors());
@@ -1867,7 +1880,7 @@ fn the_loop_code_toolkit() {
     // Humanize moves notes off the grid, the same way every time.
     let beats: Vec<f64> = events.iter().filter(|e| e.loop_key == key("lead")).map(|e| e.beat).collect();
     assert!(beats.iter().any(|b| (b * 4.0 - (b * 4.0).round()).abs() > 1e-4));
-    let mut again = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut again = Composer::new(model::test_load(src).unwrap().into_evaluated());
     let mut events2 = Vec::new();
     again.pump(4.0, &mut events2);
     assert_eq!(events.iter().map(|e| e.beat).collect::<Vec<_>>(), events2.iter().map(|e| e.beat).collect::<Vec<_>>());
@@ -1877,7 +1890,7 @@ fn the_loop_code_toolkit() {
 fn a_playing_note_glides_its_pitch_level_and_cutoff() {
     // A fixed recipe (the presets' sound design may change; the glide may not).
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{recipe: \"saw freq=440 detune=12 a=0.01 d=0.4 s=0.8 r=0.3 gain=0.13 lp=5200; saw freq=440 detune=-12 a=0.01 d=0.4 s=0.8 r=0.3 gain=0.13 lp=5200; saw freq=440 detune=5 a=0.01 d=0.4 s=0.8 r=0.3 gain=0.13 lp=5200; saw freq=440 detune=-5 a=0.01 d=0.4 s=0.8 r=0.3 gain=0.13 lp=5200; saw freq=220 a=0.01 d=0.4 s=0.8 r=0.3 gain=0.1 lp=3000\"}\nlet a = Loop{play: s beats: 4 code: fn(i) { let h = play(@a2, {dur: 4}) sleep(1) glide(h, {by: 12 cutoff: 6000}, 1) sleep(3) }}\nScore{clock s a}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
     assert!(composer.errors().is_empty(), "{:?}", composer.errors());
@@ -1896,7 +1909,7 @@ fn a_playing_note_glides_its_pitch_level_and_cutoff() {
     assert!(after > before * 1.6, "no octave glide: {before} -> {after} crossings");
     // A second play gives a new handle; a glide on none is ignored.
     let other = src.replace("glide(h,", "glide(0,");
-    let mut composer = Composer::new(model::load(&other).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(&other).unwrap().into_evaluated());
     let mut events = Vec::new();
     composer.pump(4.0, &mut events);
     assert_eq!(events.len(), 1);
@@ -1964,7 +1977,7 @@ fn samples_slice_at_onsets_loop_reverse_fit_and_stretch() {
 fn a_loop_waits_for_another_loops_cue() {
     // The follower is written first; the loop that cues still runs first.
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet follow = Loop{play: s code: fn(i) { wait(@drop) play(60) sleep(1) }}\nlet lead = Loop{play: s beats: 4 code: fn(i) { sleep(1.5) cue(@drop) play(48) sleep(2.5) }}\nScore{clock s follow lead}\n";
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(12.0, &mut events);
     assert!(composer.errors().is_empty(), "{:?}", composer.errors());
@@ -1973,7 +1986,7 @@ fn a_loop_waits_for_another_loops_cue() {
     // Its cycle from 10.5 waits for the cue the lead gives next (at 13.5).
     assert_eq!(at(60.0), [1.5, 5.5, 9.5, 13.5]);
     // Waiting for a cue nothing gives says so.
-    let mut composer = Composer::new(model::load(&src.replace("wait(@drop)", "wait(@dorp)")).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(&src.replace("wait(@drop)", "wait(@dorp)")).unwrap().into_evaluated());
     composer.pump(4.0, &mut Vec::new());
     let errors = composer.errors();
     assert!(errors.iter().any(|e| e.message.contains("nothing cues @dorp") && e.message.contains("@drop")), "{errors:?}");
@@ -1982,7 +1995,7 @@ fn a_loop_waits_for_another_loops_cue() {
 #[test]
 fn fx_scopes_play_their_notes_through_their_own_effects() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet a = Loop{play: s beats: 8 code: fn(i) {\n    play(72, {dur: 0.1})\n    fx(@reverb, {room: 0.95 mix: 1.0}, fn() {\n        play(60, {dur: 0.1})\n        fx(@echo, {time: 0.5}, fn() { play(64, {dur: 0.1}) })\n    })\n    sleep(8)\n}}\nScore{clock s a}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     use makepad_score_player::FxKind;
     assert_eq!(doc.loops[0].scopes, vec![vec![FxKind::Reverb], vec![FxKind::Reverb, FxKind::Delay]]);
     assert_eq!(doc.feed_names(), ["a", "a_fx1_in", "a_fx2_in"]);
@@ -1993,7 +2006,7 @@ fn fx_scopes_play_their_notes_through_their_own_effects() {
     assert!(g.index("a_fx2") < g.index("a_fx1"));
     assert_eq!(g.wired("master", "audio"), ["a", "a_fx1"]);
     // Each note on its node; the settings to each effect from the beat.
-    let mut composer = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap().into_evaluated());
     let mut events = Vec::new();
     composer.pump(8.0, &mut events);
     assert!(composer.errors().is_empty(), "{:?}", composer.errors());
@@ -2009,7 +2022,7 @@ fn fx_scopes_play_their_notes_through_their_own_effects() {
     let dry = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet a = Loop{play: s beats: 8 code: fn(i) { play(72, {dur: 0.1}) play(60, {dur: 0.1}) play(64, {dur: 0.1}) sleep(8) }}\nScore{clock s a}\n";
     assert!(tail(src) > tail(dry) * 4.0 + 1e-4, "{} vs {}", tail(src), tail(dry));
     // An unknown effect is a load error.
-    assert!(model::load(&src.replace("@echo", "@wobble")).err().unwrap()[0].message.contains("fx(@wobble): no such effect"));
+    assert!(model::test_load(&src.replace("@echo", "@wobble")).err().unwrap()[0].message.contains("fx(@wobble): no such effect"));
 }
 
 #[test]
@@ -2041,7 +2054,7 @@ fn custom_envelopes_shape_a_notes_level_and_cutoff() {
 #[test]
 fn midi_keys_play_loops_move_params_and_reach_loop_code_and_outboard_gear() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {bright: 0} midi: {bright: 74}}\nlet s = Synth{preset: @pluck}\nlet gear = Instrument{kind: @midi channel: 2 port: \"IAC Bus 1\"}\nlet keys_in = MidiIn{device: \"any\" channel: 1}\nlet keys = Loop{play: s in: keys_in}\nlet arp = Loop{play: gear beats: 1 code: fn(i) { log(held()) log(cc(74)) sleep(arp(held(), @up, 0.25)) }}\nlet sweep = Lowpass{in: [keys] cutoff: {param: @bright from: 200 to: 8000}}\nScore{clock s gear keys_in keys arp sweep}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.loops[0].input.as_deref(), Some("keys_in"));
     assert_eq!(doc.clock.midi, vec![("bright".to_string(), 74)]);
     let g = graph(&doc);
@@ -2051,7 +2064,7 @@ fn midi_keys_play_loops_move_params_and_reach_loop_code_and_outboard_gear() {
     assert_eq!((g.param("keys", "midi_device"), g.param("keys", "midi_channel")), (Literal::Str("any".into()), Literal::Num(1.0)));
     assert!(matches!(g.param("keys", "stream"), Literal::Arr(words) if words.len() == 3));
     assert!(matches!(g.param("arp", "stream"), Literal::Arr(words) if words.is_empty()));
-    let mut composer = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap().into_evaluated());
     composer.automation_out.clear();
     // Keys: held for the loop code; the controller moves the param.
     composer.midi_in([0x90, 60, 100], 3.0);
@@ -2081,9 +2094,9 @@ fn midi_keys_play_loops_move_params_and_reach_loop_code_and_outboard_gear() {
 fn osc_moves_params_reaches_loop_code_and_goes_out_on_its_beat() {
     use crate::osc::{decode, OscArg};
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120 params: {wet: 0} osc_in: 9000 osc_out: \"127.0.0.1:57120\"}\nlet s = Synth{preset: @pluck}\nlet a = Loop{play: s beats: 2 code: fn(i) { log(osc(\"/fader1\")) sleep(1) osc_send(\"/beat\", [i \"one\"]) osc_send(\"/x\", [], \"127.0.0.1:9001\") sleep(1) }}\nlet verb = Reverb{in: [a] mix: {param: @wet from: 0 to: 1}}\nScore{clock s a verb}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!((doc.clock.osc_in, doc.clock.osc_out.as_deref()), (Some(9000), Some("127.0.0.1:57120")));
-    let mut composer = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap().into_evaluated());
     composer.automation_out.clear();
     composer.osc_in("/fader1", vec![OscArg::Float(0.25)], 0.0);
     composer.osc_in("/param/wet", vec![OscArg::Int(1)], 0.5);
@@ -2102,7 +2115,7 @@ fn osc_moves_params_reaches_loop_code_and_goes_out_on_its_beat() {
         (1.0, "127.0.0.1:9001", "/x".to_string(), vec![]),
     ]);
     // With nowhere to send, the loop says so.
-    let mut composer = Composer::new(model::load(&src.replace(" osc_out: \"127.0.0.1:57120\"", "")).unwrap().into_evaluated());
+    let mut composer = Composer::new(model::test_load(&src.replace(" osc_out: \"127.0.0.1:57120\"", "")).unwrap().into_evaluated());
     composer.pump(2.0, &mut Vec::new());
     assert!(composer.errors().iter().any(|e| e.message.contains("osc_send(\"/beat\"): where to?")), "{:?}", composer.errors());
 }
@@ -2111,7 +2124,7 @@ fn osc_moves_params_reaches_loop_code_and_goes_out_on_its_beat() {
 fn an_input_loop_passes_the_audio_input_through_its_fx() {
     use makepad_audio_engine::feed::audio_in;
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet mic = Instrument{kind: @input gain: 0.5}\nlet voice = Loop{play: mic}\nlet echo = Delay{in: [voice] time: 0.25 feedback: 0.3 mix: 0.3}\nScore{clock mic voice echo}\n";
-    let loaded = model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let loaded = model::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let g = graph(&loaded.doc);
     assert_eq!((g.param("voice", "inst"), g.param("voice", "gain")), (Literal::Str("input".into()), Literal::Num(0.5)));
     let mut instance = instantiate(&loaded.doc, 48_000.0, &crate::PrepareControl::default()).unwrap();
@@ -2149,29 +2162,29 @@ fn seek_and_loop_move_the_arrangement_on_the_bar_grid() {
         events.iter().map(|e| (e.beat, e.note)).collect::<Vec<_>>()
     };
     // As arranged: x x y y z z.
-    let mut c = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(src).unwrap().into_evaluated());
     assert_eq!(notes(&mut c, 24.0), [(0.0, 60.0), (4.0, 60.0), (8.0, 62.0), (12.0, 62.0), (16.0, 64.0), (20.0, 64.0)]);
     assert_eq!((c.song_beat(10.0), c.song_beat(30.0)), (Some(10.0), None));
     // A seek to z's start from bar 2: z plays from there, and the song
     // position follows.
-    let mut c = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(src).unwrap().into_evaluated());
     assert_eq!(notes(&mut c, 4.0), [(0.0, 60.0)]);
     assert_eq!(c.seek(16.0, 3.0, -1.0), 4.0);
     assert_eq!(notes(&mut c, 12.0), [(4.0, 64.0), (8.0, 64.0)]);
     assert_eq!(c.song_beat(5.0), Some(17.0));
     // Mid-section: from z's second bar.
-    let mut c = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(src).unwrap().into_evaluated());
     c.seek(20.0, 0.0, 0.0);
     assert_eq!(notes(&mut c, 8.0), [(0.0, 64.0), (4.0, 64.0)]);
     assert_eq!((c.song_beat(2.0), c.song_beat(6.0)), (Some(22.0), None));
     // Looping y: x x y y y y …
-    let mut c = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(src).unwrap().into_evaluated());
     c.set_loop(Some((8.0, 16.0)));
     assert_eq!(notes(&mut c, 32.0), [(0.0, 60.0), (4.0, 60.0), (8.0, 62.0), (12.0, 62.0), (16.0, 62.0), (20.0, 62.0), (24.0, 62.0), (28.0, 62.0)]);
     assert_eq!(c.song_beat(21.0), Some(13.0));
     // A cycle crossing the loop end is cut there (an 8-beat loop).
     let long = src.replace("beats: 4 code: fn(i) {", "beats: 8 code: fn(i) { play(50) sleep(4)");
-    let mut c = Composer::new(model::load(&long).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(&long).unwrap().into_evaluated());
     c.set_loop(Some((0.0, 4.0)));
     let got = notes(&mut c, 12.0);
     assert!(got.iter().all(|(b, _)| (b % 4.0).abs() < 1e-9) && got.iter().filter(|(_, n)| *n == 50.0).count() == 3, "{got:?}");
@@ -2181,7 +2194,7 @@ fn seek_and_loop_move_the_arrangement_on_the_bar_grid() {
 fn a_note_lists_voices_mute_and_solo() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet p = Synth{preset: @pluck}\nlet rh = [[0 @c5 1] [1 @e5 1]]\nlet lh = [[0 @c3 2]]\nlet piece = Loop{play: p beats: 2 notes: [rh lh]}\nScore{clock p piece}\n";
     let notes = |src: &str| {
-        let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+        let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
         doc.loops[0].notes.as_ref().unwrap().iter().map(|n| n.note).collect::<Vec<f32>>()
     };
     assert_eq!(notes(src), [72.0, 48.0, 76.0]);
@@ -2192,7 +2205,7 @@ fn a_note_lists_voices_mute_and_solo() {
 #[test]
 fn a_seek_without_an_arrangement_resumes_every_loop_mid_cycle() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet a = Loop{play: s beats: 8 code: fn(i) { for k in 0..8 { play(60 + k) sleep(1) } }}\nlet b = Loop{play: s beats: 4 code: fn(i) { play(40) sleep(4) }}\nScore{clock s a b}\n";
-    let mut c = Composer::new(model::load(src).unwrap().into_evaluated());
+    let mut c = Composer::new(model::test_load(src).unwrap().into_evaluated());
     let mut events = Vec::new();
     c.pump(4.0, &mut events);
     // From beat 4, jump to song beat 10: `a` is 2 beats into its cycle, `b` 2.
@@ -2209,7 +2222,7 @@ fn a_seek_without_an_arrangement_resumes_every_loop_mid_cycle() {
 #[test]
 fn a_limiter_node_and_the_masters_ceiling() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @supersaw}\nlet a = Loop{play: s beats: 1 code: fn(i) { play([@c3 @e3 @g3 @c4], {dur: 1}) sleep(1) }}\nlet glue = Bus{in: [a] gain: 2}\nlet lim = Limiter{in: [glue] ceiling: -6 gain: 2}\nScore{clock s a glue lim ceiling: -1.5}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.ceiling, -1.5);
     let g = graph(&doc);
     assert_eq!((g.node("lim").type_name.as_str(), g.wired("lim", "audio"), g.param("lim", "ceiling"), g.param("lim", "gain")), ("Limiter", vec!["glue".to_string()], Literal::Num(-6.0), Literal::Num(2.0)));
@@ -2267,14 +2280,14 @@ fn eq_width_and_a_keyed_comp_do_what_they_say() {
     assert!(c.reduction_db() < -6.0 && rms(&l[2400..]) < rms(&quiet[2400..]) * 0.5, "{}", c.reduction_db());
     // In a score: bands, width and a keyed comp load and lower.
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @warm_pad}\nlet kit = Drums{kit: @analog_hybrid}\nlet pad = Loop{play: s beats: 4 code: fn(i) { play([@c3 @g3], {dur: 4}) sleep(4) }}\nlet kick = Loop{play: kit hits: \"x...\"}\nlet tone = Eq{in: [pad] b1: [@highpass 80] b2: [@peak, 900, -3, 1.4] b4: [@highshelf 9000 2]}\nlet wide = Width{in: [tone] width: 1.4 bass_mono: 150}\nlet glue = Comp{in: [wide] key: kick threshold: -24 ratio: 6 attack: 2 release: 180 knee: 3}\nScore{clock s kit pad kick tone wide glue}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let eq = doc.fx.iter().find(|f| f.name == "tone").unwrap();
     assert_eq!(&eq.params[..8], &[4.0, 80.0, 0.0, 0.7, 1.0, 900.0, -3.0, 1.4]);
     let g = graph(&doc);
     assert_eq!((g.wired("glue", "audio"), g.wired("glue", "key")), (vec!["wide".to_string()], vec!["kick".to_string()]));
     let r = render(src, &RenderOpts { seconds: Some(2.0), ..RenderOpts::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
     assert!(peak(&r.left) > 0.01 && r.left.iter().all(|x| x.is_finite()));
-    assert!(model::load(&src.replace("@peak, 900", "@bump, 900")).is_err());
+    assert!(model::test_load(&src.replace("@peak, 900", "@bump, 900")).is_err());
 }
 
 /// A kit's per-slot gains and tunings reach its loop's node (a drum tuned
@@ -2282,7 +2295,7 @@ fn eq_width_and_a_keyed_comp_do_what_they_say() {
 #[test]
 fn kit_slots_keep_their_gains_and_tunings() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet kit = Drums{kit: @analog_hybrid tune: {kick: -12 snare: 7} gain: {kick: 0.5}}\nlet beat = Loop{play: kit hits: \"x...\"}\nScore{clock kit beat}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let g = graph(&doc);
     let list = |param: &str| match g.param("beat", param) {
         Literal::Arr(items) => items.iter().take(2).cloned().collect::<Vec<_>>(),
@@ -2316,7 +2329,7 @@ fn list_notes_bend_vibrate_arpeggiate_and_samples_hold_their_loop() {
     // The loop holds it: still sounding at 0.9 s.
     assert!(plain.left[43_000..43_500].iter().any(|x| x.abs() > 0.1));
     // bend: up an octave by beat 0.5 (0.25 s), held.
-    let doc = model::ScoreDoc::load(&score(", {bend: [[0 0] [0.5 12]]}")).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(&score(", {bend: [[0 0] [0.5 12]]}")).unwrap_or_else(|d| panic!("{d:?}"));
     let l = &doc.loops[0];
     assert_eq!(l.note_opts.len(), 1, "{:?}", l.notes);
     assert_eq!(l.note_opts[0].1.bend.n, 2);
@@ -2342,9 +2355,9 @@ fn list_notes_bend_vibrate_arpeggiate_and_samples_hold_their_loop() {
 #[test]
 fn at_in_a_loop_is_the_ring_lookup_and_a_position_is_a_record() {
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck at: {x: 120 y: 80}}\nlet a = Loop{play: s beats: 1 code: fn(i) { play(at([@c4, @e4], 1)) play(at([@c4, @e4], 2)) sleep(1) }}\nScore{clock s a}\n";
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     assert_eq!(doc.positions, vec![("s".to_string(), (120.0, 80.0))]);
-    let mut composer = Composer::new(model::load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
+    let mut composer = Composer::new(model::test_load(src).unwrap_or_else(|d| panic!("{d:?}")).into_evaluated());
     let mut events = Vec::new();
     composer.pump(2.0, &mut events);
     assert!(composer.errors().is_empty(), "{:?}", composer.errors());
@@ -2429,7 +2442,7 @@ fn a_slot_runner_defers_prepares_and_keeps_the_latest_doc() {
             source.push_str(&format!("let {name} = Loop{{play: s beats: 1 notes: [[0 @c4 0.5 1]]}}\n"));
         }
         source.push_str(&format!("Score{{clock s {} label: {label:?}}}\n", loops.join(" ")));
-        model::ScoreDoc::load(&source).unwrap()
+        model::ScoreDoc::test_load(&source).unwrap()
     };
     slot.set_doc(revision(&["first"], "")).expect("submitting the first prepare succeeds");
     assert_eq!(jobs.lock().unwrap().len(), 1, "the first prepare waits in the runner");
@@ -2553,6 +2566,46 @@ fn a_slot_runner_defers_prepares_and_keeps_the_latest_doc() {
     changed_rate.run(&ClockChunk::default(), &mut left, &mut right);
     assert!(slot.playing() > before_rewind, "the latest rewind posts normally");
     assert!(jobs.lock().unwrap().is_empty());
+
+    // Only the new device rate doubles the recording to two frames. A document
+    // load or the first device prepare therefore cannot enter the long loop.
+    let source = r#"use mod.score.*
+let clock = Clock{}
+let fx = ShaderFx{code: "let src = sample(1) let t = [0.0;2] fn init(){ if len(src) == 2 { for i in 0..1000000000 { for j in 0..1024 { t[0] += float(j) } } } } fn effect(l,r){ vec2(t[0]) }" src: asset("slot_init_rate", "1")}
+Score{clock fx}"#;
+    let doc = model::ScoreDoc::test_load(source).unwrap();
+    let asset = crate::player::sample_name(&doc.samples()[0]);
+    use makepad_audio_engine::feed::samples;
+    samples::register(&asset, Arc::new(makepad_score_player::Sample::new(vec![0.5].into(), None, 44_100.0)));
+    slot.set_doc(doc).unwrap();
+    run_next();
+    changed_rate.run(&ClockChunk::default(), &mut left, &mut right);
+    slot.pump().unwrap();
+    assert!(!slot.initialising(), "completed initialization released the counter");
+    let before = slot.playing();
+    let mut doubled = makepad_audio_engine::nested::factory(crate::node::TYPE).unwrap()(&score, 88_200, 3, None).unwrap();
+    let job = jobs.lock().unwrap().pop().unwrap();
+    assert!(!slot.initialising(), "queueing a rate change is not initialization");
+    let (done, finished) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || { job(); done.send(()).unwrap(); });
+    let timeout = std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + timeout;
+    while !slot.initialising() && !worker.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let executing = slot.initialising();
+    slot.set_doc(newest).unwrap();
+    finished.recv_timeout(timeout).expect("the replacement cancelled the device-rate init");
+    worker.join().unwrap();
+    samples::forget(&asset);
+    assert!(executing, "the slot observed initialization at the new device rate");
+    assert!(!slot.initialising(), "the cancelled init released the counter");
+    doubled.run(&ClockChunk::default(), &mut left, &mut right);
+    assert_eq!(slot.playing(), before, "the superseded prepare never posted");
+    run_next();
+    doubled.run(&ClockChunk::default(), &mut left, &mut right);
+    assert!(slot.playing() > before && slot.playing_layout().unwrap().rate == 88_200,
+        "the new prepare has its own cancellation word");
 }
 
 /// A root flow with a `Score` node on its transport plays its slot's score
@@ -2569,7 +2622,7 @@ fn a_score_node_in_a_root_flow_plays_as_the_player_does() {
     use makepad_flow::graph::FlowVm;
     use std::sync::Arc;
     let rate = 48_000.0f32;
-    let loaded = model::load(TECHNO).unwrap();
+    let loaded = model::test_load(TECHNO).unwrap();
     let doc = loaded.doc.clone();
     let mut registry = Registry::with_builtins();
     makepad_audio_engine::nodes::register_nodes(&mut registry).unwrap();
@@ -2676,7 +2729,7 @@ fn nested_latency_nulls_on_first_play_and_after_each_child_swap() {
 
     // The parent exports the mixer directly, so we observe the sum on the
     // first pass without a second master limiter between it and the test.
-    let doc = model::ScoreDoc::load(&format!("{source}Score{{clock dry}}")).unwrap();
+    let doc = model::ScoreDoc::test_load(&format!("{source}Score{{clock dry}}")).unwrap();
     let mut graph = slice(&doc, PARENT, ClockMode::Host);
     let master = graph.nodes.pop().unwrap();
     assert_eq!(master.id, format!("{PARENT}/master"), "the mixer must replace the exported master");
@@ -2775,7 +2828,7 @@ let notes = Loop{play: gear beats: 1 notes: [[0 60 0.5 1] [0.03125 62 0.5 1]]}"#
     assert!(messages.iter().all(|m| m.port != port), "offline renders must send no MIDI");
     messages.clear();
 
-    let loaded = model::load(&delayed).expect("load the same score for the host");
+    let loaded = model::test_load(&delayed).expect("load the same score for the host");
     let slot = crate::node::slot("latency_export");
     let mut registry = makepad_flow::document::Registry::with_builtins();
     makepad_audio_engine::nodes::register_nodes(&mut registry).unwrap();
@@ -2858,9 +2911,9 @@ fn midi_keys_through_an_arp_play_the_pattern_on_the_clock() {
     use makepad_audio_engine::feed::midi_in::{self, MidiMsg};
     // 120 bpm: a sixteenth is an eighth of a second, 6000 frames.
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet tone = Synth{osc: @sine attack: 0.001 decay: 0.1 sustain: 1 release: 0.002 cutoff: 16000}\nlet keys_in = MidiIn{device: \"Test Keys\" channel: 1 latency: 0}\nlet up = Transpose{in: keys_in semis: 12}\nlet arp = Arp{in: up pattern: @updown rate: 1/16 octaves: 1 gate: 0.5}\nlet lead = Loop{play: tone in: arp}\nScore{clock tone keys_in up arp lead}\n";
-    let loaded = model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let loaded = model::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     for (setting, master) in [("", Some(0)), ("master: 15", Some(15)), ("master: @none", None)] {
-        let doc = model::ScoreDoc::load(&src.replace("MidiIn{", &format!("MidiIn{{mpe: true {setting} "))).unwrap();
+        let doc = model::ScoreDoc::test_load(&src.replace("MidiIn{", &format!("MidiIn{{mpe: true {setting} "))).unwrap();
         assert_eq!(doc.resolve_stream(&doc.loops[0]).unwrap().unwrap().def.master, master, "{setting}");
     }
     let stream = loaded.doc.resolve_stream(&loaded.doc.loops[0]).unwrap().unwrap();
@@ -2907,7 +2960,7 @@ fn midi_keys_through_an_arp_play_the_pattern_on_the_clock() {
 fn a_keyboard_plays_its_loop_while_the_transport_is_stopped_and_the_pedal_holds() {
     use makepad_audio_engine::feed::midi_in::{self, MidiMsg};
     let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet tone = Synth{osc: @sine attack: 0.001 decay: 0.1 sustain: 1 release: 0.002 cutoff: 16000}\nlet keys_in = MidiIn{device: \"Pedal Keys\" latency: 0}\nlet keys = Loop{play: tone in: keys_in}\nScore{clock tone keys_in keys}\n";
-    let loaded = model::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let loaded = model::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let mut instance = live_instance(&loaded.doc);
     // A render (not live) takes no keys.
     let mut render = instantiate(&loaded.doc, 48_000.0, &crate::PrepareControl::default()).unwrap();
@@ -2982,6 +3035,39 @@ fn a_new_revision_cancels_a_load_already_reading_a_shader() {
         assert!(result.recv_timeout(timeout).expect("old load returned"), "an obsolete error is silent");
     });
     assert!(loads.applied.is_none() && loads.diags.is_empty());
+
+    // Both programs have an observable result and would run for trillions of
+    // iterations. Wait for the compile-time execution itself before replacing it.
+    for (entry, body) in [
+        ("constant", "let c=slow() fn voice(){c}"),
+        ("init", "let t=[0.0;2] fn init(){t[0]=slow()} fn voice(){t[0]}"),
+    ] {
+        let shader = format!("fn slow() {{ var x=0.0 for i in 0..1000000000 {{ for j in 0..1024 {{ x += float(j) }} }} x }} {body}");
+        let source = good.replace("fn voice() { gate * velocity }", &shader);
+        let mut revisions = RevisionLoads::<()>::default();
+        revisions.submit(1, &source, drop);
+        let mut started = None;
+        revisions.start(|request| {
+            let observer = request.clone();
+            let (tx, rx) = sync_channel(1);
+            let job = std::thread::spawn(move || tx.send(request.run()).unwrap());
+            started = Some((observer, rx, job));
+            Some(())
+        });
+        let (observer, rx, job) = started.unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        while !observer.executing() && !job.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let running = observer.executing();
+        revisions.submit(2, &good, drop);
+        let answer = rx.recv_timeout(timeout).expect("supersession stopped the obsolete shader");
+        job.join().unwrap();
+        assert!(running, "{entry}: the over-cap shader entered execution");
+        assert!(matches!(answer, LoadResult::Cancelled), "{entry}: replacement discarded the whole load");
+        assert!(!observer.executing(), "{entry}: the retired revision released its guard");
+    }
+
     loads.start(|request| {
         let (tx, rx) = sync_channel(1);
         tx.try_send(request.run()).unwrap();
@@ -3054,7 +3140,7 @@ fn a_rewind_sounds_as_the_first_start() {
     const SCORE: &str = "rewind_test_score";
     let source = crate::templates::template("techno").unwrap().replace("Synth{preset: @stab}", "Shader{code: \"fn voice() { gate * velocity * 0.1 }\"}");
     let before = model::SHADER_COMPILES.with(|count| count.get());
-    let doc = model::load(&source).unwrap().doc;
+    let doc = model::test_load(&source).unwrap().doc;
     let shaders = model::CompiledShaders::from_doc(&doc);
     let document_compiles = model::SHADER_COMPILES.with(|count| count.get());
     assert_eq!(document_compiles, before + 1, "the document contains one compiled shader");
@@ -3201,7 +3287,7 @@ fn every_instrument_type_loads_and_plays() {
             _ => A_NOTE,
         };
         let src = plays(ctor, code);
-        let doc = model::ScoreDoc::load(&src).unwrap_or_else(|d| panic!("{ty}: {d:?}"));
+        let doc = model::ScoreDoc::test_load(&src).unwrap_or_else(|d| panic!("{ty}: {d:?}"));
         assert_eq!(crate::graph::project(&doc).nodes.iter().find(|n| n.id == "inst").map(|n| n.role), Some("inst"), "{ty}");
         let opts = RenderOpts { seconds: Some(2.0), seed: Some(1), ..RenderOpts::default() };
         let rendered = render(&src, &opts, &Tone, &crate::PrepareControl::default()).unwrap_or_else(|d| panic!("{ty}: {d:?}"));
@@ -3212,7 +3298,7 @@ fn every_instrument_type_loads_and_plays() {
 #[test]
 fn a_library_patch_plays_or_says_the_library_is_missing() {
     let src = plays("Tandem{patch: \"FX/Rather Low\"}", A_NOTE);
-    let doc = model::ScoreDoc::load(&src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(&src).unwrap_or_else(|d| panic!("{d:?}"));
     let installed = crate::tandem_library::active().is_some();
     assert_eq!(doc.lacks_patch_library(), !installed, "the desk's install message follows the library");
     // The tools say so too, never a quiet substitute: a problem in
@@ -3303,9 +3389,9 @@ let clock = Clock{}
 let fx = ShaderFx{code: "let src = sample(2)\nvar age = int(0)\nfn effect(l,r) { age += 1\n if age > 8 && len(src) == 4 { src[0] } else { vec2(0.0) } }" src: asset("shader_table_arrival", "1")}
 Score{clock fx}"#;
     let bad = src.replace("asset(\"shader_table_arrival\", \"1\")", "2");
-    let errors = model::ScoreDoc::load(&bad).unwrap_err();
+    let errors = model::ScoreDoc::test_load(&bad).unwrap_err();
     assert!(errors.iter().any(|e| e.message.contains("src") && e.message.contains("asset")), "{errors:?}");
-    let doc = model::ScoreDoc::load(src).unwrap_or_else(|d| panic!("{d:?}"));
+    let doc = model::ScoreDoc::test_load(src).unwrap_or_else(|d| panic!("{d:?}"));
     let assets = doc.samples();
     assert_eq!(assets.len(), 1);
     let key = crate::player::sample_name(&assets[0]);
@@ -3330,13 +3416,14 @@ Score{clock fx}"#;
 fn only_request_owners_create_prepare_controls() {
     use std::path::Path;
 
-    const OWNERS: [(&str, &str); 3] = [
+    const OWNERS: [(&str, &str); 4] = [
         ("score_live/src/model.rs", "submit"),       // RevisionLoads owns the pending source revision.
+        ("score_live/src/node.rs", "new"),           // Slot owns the observer for its player generations.
         ("score_live/src/node.rs", "begin"),         // Host owns the pending player generation.
-        ("score_live/src/game.rs", "prepare_music"), // GameMusic owns its loads and prepares.
+        ("score_live/src/game.rs", "begin"),         // MusicSlot owns its music request.
     ];
 
-    fn scan(libs: &Path, dir: &Path, seen: &mut [bool; 3], violations: &mut Vec<String>) {
+    fn scan(libs: &Path, dir: &Path, seen: &mut [bool; OWNERS.len()], violations: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
@@ -3371,7 +3458,7 @@ fn only_request_owners_create_prepare_controls() {
                     function = declaration.split(['(', '<', ' ']).next().unwrap_or("");
                 }
                 let compact: String = code.split_whitespace().collect();
-                if !(compact.contains("PrepareControl::default(") || compact.contains("PrepareControl::new(")
+                if !(compact.contains(".renewed()") || compact.contains("PrepareControl::default(") || compact.contains("PrepareControl::new(")
                     || (compact.contains("PrepareControl=") && compact.contains("Default::default("))) { continue; }
                 if let Some(owner) = OWNERS.iter().position(|site| *site == (relative.as_str(), function)) {
                     seen[owner] = true;

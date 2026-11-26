@@ -953,7 +953,7 @@ mod tests {
         assert!(text.contains("= "), "repeated bars collapse:\n{text}");
         // The Score made from the text loads and plays every note it shows.
         let score = arrangement::to_score(&back);
-        let loaded = makepad_score_live::model::load(&score).unwrap_or_else(|d| panic!("{d:?}\n{score}"));
+        let loaded = makepad_score_live::model::load_controlled(&score, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}\n{score}"));
         let mut composer = makepad_score_live::compose::Composer::new(loaded.into_evaluated());
         let mut events = Vec::new();
         composer.pump(64.0, &mut events);

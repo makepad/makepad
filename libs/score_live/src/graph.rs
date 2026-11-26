@@ -238,13 +238,13 @@ mod tests {
 
     #[test]
     fn the_graph_is_the_document_and_wiring_writes_it() {
-        let doc = crate::model::ScoreDoc::load(SRC).unwrap();
+        let doc = crate::model::ScoreDoc::test_load(SRC).unwrap();
         let g = project(&doc);
         let edges: Vec<_> = g.edges.iter().map(|e| format!("{}.{}>{}.{}", e.from, e.from_port, e.to, e.to_port)).collect();
         assert_eq!(edges, ["s.inst>a.play", "a.audio>verb.in", "b.audio>master.in", "verb.audio>master.in"]);
         let s2 = connect(SRC, "b", "verb", "in", &crate::PrepareControl::default()).unwrap();
         assert!(s2.contains("Reverb{in: [a b] mix: 0.3}"), "{s2}");
-        let g2 = project(&crate::model::ScoreDoc::load(&s2).unwrap());
+        let g2 = project(&crate::model::ScoreDoc::test_load(&s2).unwrap());
         assert!(!g2.edges.iter().any(|e| e.from == "b" && e.to == MASTER));
         let s3 = disconnect(&s2, "verb", "in", Some(0)).unwrap();
         assert!(s3.contains("Reverb{in: [b] mix: 0.3}"), "{s3}");
@@ -256,7 +256,7 @@ mod tests {
             .replace("a b verb}", "a b cv verb}");
         let wired = connect_port(&src, "cv", "amount", "verb", "mix", &crate::PrepareControl::default()).unwrap();
         let wired = connect(&wired, "b", "verb", "mix", &crate::PrepareControl::default()).unwrap();
-        let doc = ScoreDoc::load(&wired).unwrap();
+        let doc = ScoreDoc::test_load(&wired).unwrap();
         let g = project(&doc);
         assert!(g.nodes.iter().find(|n| n.id == "verb").unwrap().inputs.contains(&port("mix", "audio", true)));
         let edges: Vec<_> = g.edges.iter().filter(|e| e.to_port == "mix").map(|e| (e.from.as_str(), e.from_port.as_str(), e.key)).collect();
@@ -271,17 +271,17 @@ mod tests {
         let with_comment = wired.replace("@amount} b]", "@amount} // keep\n b]");
         let removed = disconnect(&with_comment, "verb", "mix", Some(0)).unwrap();
         assert!(removed.contains("// keep\n"), "{removed}");
-        let remaining = ScoreDoc::load(&removed).unwrap();
+        let remaining = ScoreDoc::test_load(&removed).unwrap();
         let verb = remaining.fx.iter().find(|f| f.name == "verb").unwrap();
         assert!(verb.sides[0].1.ports().eq([("b", "audio")]));
         let deleted = source::remove_node(&wired, "cv").unwrap();
         assert!(deleted.contains("mix: [b]"), "{deleted}");
         let bare = deleted.replace("mix: [b]", "mix: b");
         let deleted = source::remove_node(&bare, "b").unwrap();
-        assert!(ScoreDoc::load(&deleted).unwrap().fx[0].sides.iter().all(|(_, sources)| sources.is_empty()));
+        assert!(ScoreDoc::test_load(&deleted).unwrap().fx[0].sides.iter().all(|(_, sources)| sources.is_empty()));
         for separator in [", ", " "] {
             let mixed = wired.replace("@amount} b]", &format!("@amount}}{separator}{{param: @level from: 0 to: 1}}]"));
-            assert!(ScoreDoc::load(&mixed).unwrap_err().iter().any(|d| d.message.contains("either automation or source wires")));
+            assert!(ScoreDoc::test_load(&mixed).unwrap_err().iter().any(|d| d.message.contains("either automation or source wires")));
         }
     }
 }

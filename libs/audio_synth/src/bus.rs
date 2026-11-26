@@ -340,6 +340,10 @@ pub enum Command {
     FadeTones { prefix: u64, shift: u32, secs: f32 },
     StopAllTones,
     AddInstrument { key: u64, inst: Box<dyn Instrument>, emitter: Emitter, gain: f32 },
+    /// Simultaneous one-to-one key changes. Equal pairs are unused. A mover
+    /// whose destination is occupied by a stationary voice fades over `secs`.
+    InstrumentRemap { pairs: [(u64, u64); INSTRUMENT_SLOTS], secs: f32 },
+    InstrumentNotesOff { key: u64 },
     RemoveInstrument { key: u64 },
     FadeInstrument { key: u64, secs: f32 },
     InstrumentEmitter { key: u64, emitter: Emitter, gain: Option<f32> },
@@ -415,6 +419,11 @@ struct InstrumentSlot {
 impl InstrumentSlot {
     fn live(&self) -> bool {
         self.fade_step == 0.0
+    }
+
+    fn fade(&mut self, secs: f32, rate: f32) {
+        self.inst.all_notes_off();
+        self.fade_step = 1.0 / (finite(secs, 0.25).max(0.005) * rate);
     }
 }
 
@@ -683,6 +692,10 @@ impl SynthBus {
             Command::StopAllTones => self.stop_all_tones(),
             Command::AddInstrument { key, inst, emitter, gain } => {
                 self.add_instrument(key, inst, emitter, gain, retire);
+            }
+            Command::InstrumentRemap { pairs, secs } => self.remap_instruments(&pairs, secs),
+            Command::InstrumentNotesOff { key } => {
+                if let Some(inst) = self.instrument_mut(key) { inst.all_notes_off(); }
             }
             Command::RemoveInstrument { key } => {
                 self.remove_instrument(key, retire);
@@ -1165,8 +1178,27 @@ impl SynthBus {
     pub fn fade_instrument(&mut self, key: u64, secs: f32) {
         let rate = self.rate;
         if let Some(s) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
-            s.inst.all_notes_off();
-            s.fade_step = 1.0 / (finite(secs, 0.25).max(0.005) * rate);
+            s.fade(secs, rate);
+        }
+    }
+
+    fn remap_instruments(&mut self, pairs: &[(u64, u64); INSTRUMENT_SLOTS], secs: f32) {
+        // Visit the live slots once, with every original key still intact.
+        let mut movers = [None; INSTRUMENT_SLOTS];
+        let mut blocked = [false; INSTRUMENT_SLOTS];
+        for (slot, inst) in self.instruments.iter().enumerate().filter(|(_, s)| s.live()) {
+            if let Some(i) = pairs.iter().position(|&(from, to)| from != to && from == inst.key) {
+                movers[i] = Some(slot);
+            } else if let Some(i) = pairs.iter().position(|&(from, to)| from != to && to == inst.key) {
+                blocked[i] = true;
+            }
+        }
+        for (i, slot) in movers.into_iter().enumerate() {
+            if let Some(slot) = slot {
+                let inst = &mut self.instruments[slot];
+                if blocked[i] { inst.fade(secs, self.rate); }
+                else { inst.key = pairs[i].1; }
+            }
         }
     }
 
@@ -1719,6 +1751,46 @@ mod tests {
         assert!(matches!(retired.pop(), Some(Retired::Instrument { key: 1, .. })));
         assert_eq!(bus.instruments.capacity(), capacity);
         assert_eq!(bus.view().instrument_count, 8);
+    }
+
+    #[test]
+    fn simultaneous_instrument_key_changes_preserve_the_voices() {
+        use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+        struct Witness(Arc<AtomicU32>);
+        impl Instrument for Witness {
+            fn name(&self) -> &str { "witness" }
+            fn sample_rate(&self) -> f32 { 48_000.0 }
+            fn render(&mut self, _: &mut [f32], _: &mut [f32]) {}
+            fn note_on(&mut self, note: u8, _: u8) { self.0.store(u32::from(note), Ordering::Relaxed); }
+            fn note_off(&mut self, _: u8) {}
+            fn all_notes_off(&mut self) { self.0.store(0, Ordering::Relaxed); }
+        }
+        let mut bus = SynthBus::new(48_000.0);
+        let notes: [Arc<AtomicU32>; 3] = std::array::from_fn(|_| Arc::new(AtomicU32::new(1)));
+        for (i, note) in notes.iter().enumerate() {
+            assert!(bus.add_instrument(i as u64 + 1, Box::new(Witness(note.clone())), Emitter::FLAT, 1.0, &mut |_| {}));
+        }
+        let heard = || notes.each_ref().map(|n| n.load(Ordering::Relaxed));
+        let remap = |bus: &mut SynthBus, changes: &[(u64, u64)]| {
+            let mut pairs = [(0, 0); INSTRUMENT_SLOTS];
+            pairs[..changes.len()].copy_from_slice(changes);
+            bus.apply(Command::InstrumentRemap { pairs, secs: 0.25 }, &mut |_| {});
+        };
+        let play = |bus: &mut SynthBus, key, note| bus.apply(Command::NoteOn { key, note, velocity: 100 }, &mut |_| {});
+        remap(&mut bus, &[(2, 4), (1, 2)]);
+        for (key, note) in [(1, 59), (2, 60), (4, 61)] { play(&mut bus, key, note); }
+        assert_eq!(heard(), [60, 61, 1], "a shift chain takes each original key once");
+        assert!(bus.instrument_mut(1).is_none(), "the vacated key is free");
+        remap(&mut bus, &[(2, 4), (4, 2)]);
+        play(&mut bus, 2, 62);
+        play(&mut bus, 4, 63);
+        assert_eq!(heard(), [63, 62, 1], "each new key plays the other voice after a swap");
+        remap(&mut bus, &[(4, 3)]);
+        play(&mut bus, 3, 64);
+        bus.apply(Command::InstrumentNotesOff { key: 2 }, &mut |_| {});
+        assert_eq!(heard(), [0, 0, 64], "the blocked mover releases; the stationary destination still plays");
+        assert!(bus.instrument_mut(4).is_none(), "the fading mover is no longer addressable");
+        assert_eq!(bus.live_counts().3, 3, "the mover is still on the bus for its fade");
     }
 
     #[test]

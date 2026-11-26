@@ -719,7 +719,9 @@ impl<const VOICES: usize> Sampler<VOICES> {
         report
     }
 
-    fn apply_event(&mut self, event: SamplerEvent) -> bool {
+    /// Apply an event at the current sample without advancing the frame clock.
+    /// Returns false if a note-on has no voice to play it.
+    pub fn apply_event(&mut self, event: SamplerEvent) -> bool {
         match event {
             SamplerEvent::NoteOn { note_id, parameters } => self.note_on(note_id, parameters),
             SamplerEvent::NoteOff { note_id } => {

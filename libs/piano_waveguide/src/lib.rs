@@ -660,7 +660,7 @@ impl WaveguidePiano {
         }
         if self.deferred_count == DEFERRED {
             self.end_fade();
-            return self.handle(event);
+            return self.apply_event(event);
         }
         self.deferred[self.deferred_count] = event;
         self.deferred_count += 1;
@@ -676,7 +676,7 @@ impl WaveguidePiano {
             if event == PianoEvent::AllSoundOff {
                 self.silence();
             } else {
-                self.handle(event);
+                self.apply_event(event);
             }
         }
     }
@@ -695,7 +695,8 @@ impl WaveguidePiano {
         }
     }
 
-    fn handle(&mut self, event: PianoEvent) {
+    /// Apply an event at the current sample without rendering or advancing time.
+    pub fn apply_event(&mut self, event: PianoEvent) {
         if self.fade > 0 {
             return self.defer(event);
         }
@@ -705,7 +706,7 @@ impl WaveguidePiano {
                     return;
                 }
                 if velocity == 0 {
-                    return self.handle(PianoEvent::NoteOff { key });
+                    return self.apply_event(PianoEvent::NoteOff { key });
                 }
                 let index = (key - FIRST_KEY) as usize;
                 let k = &mut self.keys[index];
@@ -876,7 +877,7 @@ impl WaveguidePiano {
         let (mut pos, mut next) = (0, 0);
         while pos < len {
             while next < events.len() && events[next].offset as usize <= pos {
-                self.handle(events[next].event);
+                self.apply_event(events[next].event);
                 next += 1;
             }
             let mut n = BLOCK.min(len - pos);
@@ -903,7 +904,7 @@ impl WaveguidePiano {
             pos += n;
         }
         for event in &events[next..] {
-            self.handle(event.event);
+            self.apply_event(event.event);
         }
     }
 }

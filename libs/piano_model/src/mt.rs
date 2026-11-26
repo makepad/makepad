@@ -94,9 +94,7 @@ impl Piano {
                     // SAFETY: workers are parked at the start barrier; the
                     // slice dies before we release them.
                     let voices = unsafe { std::slice::from_raw_parts_mut(voices_ptr.0, n_voices) };
-                    if core.global_sample % MAX_CHUNK as u64 == 0 {
-                        core.control_tick(keys, voices);
-                    }
+                    core.tick_if_due(keys, voices);
                     while ev < events.len() && (events[ev].offset as usize) <= pos {
                         core.apply_event(keys, voices, &events[ev].event);
                         ev += 1;

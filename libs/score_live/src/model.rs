@@ -9,7 +9,7 @@ use makepad_core_util::ui_thread::WorkerOnly;
 use makepad_audio_synth::recipe::{Layer, Recipe};
 use makepad_flow::Literal;
 use makepad_flow::live::owner::PrepareControl;
-use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+use std::sync::Arc;
 use makepad_score_player::{presets, shader::Steal, FxKind};
 
 static COMPILE: WorkerOnly = WorkerOnly::new("a score document compile");
@@ -759,7 +759,7 @@ impl From<Loaded> for EvaluatedDocument {
 
 pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
     if control.is_cancelled() { return Err(LoadError::Cancelled); }
-    let result = read_checked(source, Some(control.word()), None, &mut false);
+    let result = read_checked(source, Some(control), None, &mut false);
     if control.is_cancelled() { return Err(LoadError::Cancelled); }
     result.map_err(LoadError::Problems)
 }
@@ -767,11 +767,6 @@ pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Loaded,
 impl ScoreDoc {
     pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Self, LoadError> {
         load_controlled(source, control).map(|loaded| loaded.doc)
-    }
-
-    /// Load and check; the VM is dropped (see [`load`] to keep it).
-    pub fn load(source: &str) -> Result<ScoreDoc, Vec<Diag>> {
-        load(source).map(|loaded| loaded.doc)
     }
 }
 
@@ -878,6 +873,9 @@ pub enum LoadResult {
 }
 
 impl RevisionLoad {
+    /// True while this revision is executing shader constants or table initialization.
+    pub fn executing(&self) -> bool { self.control.executing() }
+
     pub fn run(&self) -> LoadResult {
         match load_controlled(&self.source, &self.control) {
             Ok(loaded) => {
@@ -955,19 +953,26 @@ impl<J> Drop for RevisionLoads<J> {
 }
 
 // Per test thread. The one-shot hook synchronizes a worker already reading a shader.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-compile-hook"))]
 thread_local! {
+    #[cfg(test)]
     pub(crate) static SHADER_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static ON_SHADER_COMPILE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "test-compile-hook")]
+#[doc(hidden)]
+pub fn on_next_shader_compile(hook: impl FnOnce() + 'static) {
+    ON_SHADER_COMPILE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 fn compile_shader(code: &str, bindings: &makepad_score_player::shader::AudioBindings<'_>)
     -> Result<makepad_score_player::shader::AudioShaderRef, Vec<makepad_score_player::shader::CompileError>>
 {
-    #[cfg(test)] {
-        SHADER_COMPILES.with(|count| count.set(count.get() + 1));
-        ON_SHADER_COMPILE.with(|hook| { if let Some(f) = hook.take() { f(); } });
-    }
+    #[cfg(test)]
+    SHADER_COMPILES.with(|count| count.set(count.get() + 1));
+    #[cfg(any(test, feature = "test-compile-hook"))]
+    ON_SHADER_COMPILE.with(|hook| { if let Some(f) = hook.take() { f(); } });
     makepad_score_player::shader::compile_with(code, bindings)
 }
 
@@ -985,7 +990,7 @@ struct ShaderFields<'a> {
 }
 
 struct Reader<'a> {
-    control: Option<&'a AtomicU32>,
+    control: Option<&'a PrepareControl>,
     reuse: Option<&'a CompiledShaders>,
     changed_shader: &'a mut bool,
     shader_index: usize,
@@ -996,7 +1001,7 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn cancelled(&self) -> bool { self.control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) }
+    fn cancelled(&self) -> bool { self.control.is_some_and(PrepareControl::is_cancelled) }
 
     fn shader_mismatch(&mut self, node: &str, why: &str) {
         *self.changed_shader = true;
@@ -1918,23 +1923,18 @@ fn param_list(value: Option<&V>) -> Vec<(String, f32)> {
     }
 }
 
-/// Load a score: evaluate it and read the typed document.
-pub fn load(source: &str) -> Result<Loaded, Vec<Diag>> {
-    read_checked(source, None, None, &mut false)
-}
-
 pub fn read_document(source: &str) -> Result<EvaluatedDocument, Vec<Diag>> {
     read(source, None, None, &mut false, false).map(|(document, _, _)| document)
 }
 
-fn read_checked(source: &str, control: Option<&AtomicU32>, reuse: Option<&CompiledShaders>, changed: &mut bool) -> Result<Loaded, Vec<Diag>> {
+fn read_checked(source: &str, control: Option<&PrepareControl>, reuse: Option<&CompiledShaders>, changed: &mut bool) -> Result<Loaded, Vec<Diag>> {
     let (EvaluatedDocument { doc: authored, vm }, checked, warnings) = read(source, control, reuse, changed, true)?;
     Ok(Loaded { doc: ScoreDoc { authored, checked: checked.into(), warnings: warnings.into() }, vm })
 }
 
 type ReadParts = (EvaluatedDocument, Vec<(String, CheckedShader)>, Vec<ShaderWarning>);
 
-fn read(source: &str, control: Option<&AtomicU32>, reuse: Option<&CompiledShaders>, changed_shader: &mut bool, resolve: bool) -> Result<ReadParts, Vec<Diag>> {
+fn read(source: &str, control: Option<&PrepareControl>, reuse: Option<&CompiledShaders>, changed_shader: &mut bool, resolve: bool) -> Result<ReadParts, Vec<Diag>> {
     let evaluated = vm::evaluate(source);
     if resolve && reuse.is_none() { COMPILE.check(); }
     let outline = source::outline(source);
@@ -2027,7 +2027,12 @@ fn read(source: &str, control: Option<&AtomicU32>, reuse: Option<&CompiledShader
     // Classify every shader against its declarations before resolving any program.
     // Keep each node's diagnostics with it until its turn in source order.
     let mut shaders = Vec::new();
-    let base = shader::AudioBindings { modules: &modules, control, ..Default::default() };
+    let base = shader::AudioBindings {
+        modules: &modules,
+        control: control.map(PrepareControl::word),
+        executions: control.map(PrepareControl::execution_counter),
+        ..Default::default()
+    };
     for (name, obj) in &members {
         let kind = match obj.proto.as_deref() {
             Some("Shader") => shader::Kind::Instrument,
@@ -2842,4 +2847,24 @@ fn list_note_opts(map: &Obj) -> (f32, makepad_score_player::NoteOpts) {
         n.arp_step = get("arp_step").unwrap_or(0.0625).max(1e-3);
     }
     (get("pan").unwrap_or(0.0).clamp(-1.0, 1.0), n)
+}
+
+#[cfg(test)]
+pub(crate) fn test_load(source: &str) -> Result<Loaded, Vec<Diag>> {
+    match load_controlled(source, &crate::PrepareControl::default()) {
+        Ok(loaded) => Ok(loaded),
+        Err(LoadError::Problems(diags)) => Err(diags),
+        Err(LoadError::Cancelled) => unreachable!("a default word is never cancelled"),
+    }
+}
+
+#[cfg(test)]
+impl ScoreDoc {
+    pub(crate) fn test_load(source: &str) -> Result<ScoreDoc, Vec<Diag>> {
+        match ScoreDoc::load_controlled(source, &crate::PrepareControl::default()) {
+            Ok(doc) => Ok(doc),
+            Err(LoadError::Problems(diags)) => Err(diags),
+            Err(LoadError::Cancelled) => unreachable!("a default word is never cancelled"),
+        }
+    }
 }

@@ -445,7 +445,7 @@ mod tests {
         for e in &all {
             assert!(!e.tags.is_empty() && !e.roles.is_empty(), "{}", e.id);
             let source = audition_score(e);
-            crate::model::ScoreDoc::load(&source).unwrap_or_else(|d| panic!("{}: {d:?}\n{source}", e.id));
+            crate::model::ScoreDoc::test_load(&source).unwrap_or_else(|d| panic!("{}: {d:?}\n{source}", e.id));
         }
     }
 

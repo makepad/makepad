@@ -9,6 +9,8 @@ description = "Scores: live-coded music as one Splash document that is a flow gr
 name = "makepad_score_live"
 
 [features]
+# Synchronize dependent editor tests inside a worker's shader compile pass.
+test-compile-hook = []
 # The neural voice (`Voice{engine: @neural}`): its model runs in this process, so an app turns it on
 # only under its own `localai` (AGENTS.md); a build without it refuses such a voice, saying so.
 neural = ["makepad-score-player/neural", "makepad-audio-engine/neural"]

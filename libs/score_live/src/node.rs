@@ -62,15 +62,49 @@ pub fn descriptor() -> TypeDescriptor {
 
 /// The slot `name` (made on first use; slots live as long as the process).
 pub fn slot(name: &str) -> Arc<Slot> {
-    static SLOTS: OnceLock<Mutex<HashMap<String, Arc<Slot>>>> = OnceLock::new();
-    let mut slots = SLOTS.get_or_init(Mutex::default).lock().unwrap_or_else(|e| e.into_inner());
+    let mut slots = slots().lock().unwrap_or_else(|e| e.into_inner());
     slots.entry(name.to_string()).or_insert_with(|| Arc::new(Slot::new(name))).clone()
+}
+
+fn slots() -> &'static Mutex<HashMap<String, Arc<Slot>>> {
+    static SLOTS: OnceLock<Mutex<HashMap<String, Arc<Slot>>>> = OnceLock::new();
+    SLOTS.get_or_init(Mutex::default)
+}
+
+/// A player remembers whether its MIDI loops were live at prepare time.
+/// Also repair an existing offline player if its composer starts afterwards.
+/// Invalidate before the composer publishes its settled MIDI registration.
+pub(crate) fn midi_registration_changed(name: &str) {
+    let slot = slots().lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned();
+    if let Some(slot) = slot {
+        let mut host = slot.lock();
+        if host.uses_midi && (host.posted.is_some() || host.in_flight) {
+            host.invalidate();
+        }
+    }
+}
+
+/// Ask the owner to dispatch work that was pending when the name settled.
+pub(crate) fn wake_pending_prepare(name: &str) {
+    let slot = slots().lock().unwrap_or_else(|e| e.into_inner()).get(name).cloned();
+    let Some(slot) = slot else { return };
+    let runner = {
+        let host = slot.lock();
+        if !slot.can_start_prepare(&host) { return; }
+        host.runner.clone()
+    };
+    if let Some(runner) = runner {
+        if let Err(error) = runner(Box::new(move || slot.kick())) {
+            eprintln!("score: prepare: {error}");
+        }
+    }
 }
 
 /// What the audio thread and the host share.
 struct Shared {
     /// Latency of the newest published player, shared with its parent layouts.
     latency: Arc<AtomicU32>,
+    observer: PrepareControl,
     /// The next player to play (the newest prepared), or null.
     next: AtomicPtr<Player>,
     /// Players the audio thread let go, for the host to free.
@@ -169,6 +203,7 @@ struct Host {
     /// same graph needs none: its composer changes what it plays).
     posted: Option<PreparedFrom>,
     resources: u64,
+    uses_midi: bool,
     rewinding: bool,
     /// The players prepared and not yet replaced twice: the playing one is
     /// among them.
@@ -209,11 +244,11 @@ impl Host {
         self.posted.as_ref().is_none_or(|posted| !self.matches(posted))
     }
 
-    fn begin(&mut self, rewind: bool) -> (u64, PrepareControl) {
+    fn begin(&mut self, rewind: bool, observer: &PrepareControl) -> (u64, PrepareControl) {
         self.supersede();
         self.rewinding = rewind;
         self.reserved += 1;
-        let control = PrepareControl::default();
+        let control = observer.renewed();
         self.control = Some(control.clone());
         self.pending = false;
         (self.reserved, control)
@@ -257,13 +292,19 @@ impl Slot {
             name: name.to_string(),
             shared: Arc::new(Shared {
                 latency: Arc::new(AtomicU32::new(0)),
+                observer: PrepareControl::default(),
                 next: AtomicPtr::new(std::ptr::null_mut()),
                 retired: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
                 playing: AtomicU64::new(0),
                 wanted: AtomicBool::new(false),
             }),
-            host: Mutex::new(Host { doc: None, rate: None, generation: 0, reserved: 0, base: None, pending: false, posted: None, resources: 0, rewinding: false, watches: Vec::new(), control: None, in_flight: false, runner: None, diags: Vec::new() }),
+            host: Mutex::new(Host { doc: None, rate: None, generation: 0, reserved: 0, base: None, pending: false, posted: None, resources: 0, uses_midi: false, rewinding: false, watches: Vec::new(), control: None, in_flight: false, runner: None, diags: Vec::new() }),
         }
+    }
+
+    /// True during shader initialization for any prepare of this slot.
+    pub fn initialising(&self) -> bool {
+        self.shared.observer.executing()
     }
 
     pub fn name(&self) -> &str {
@@ -275,8 +316,8 @@ impl Slot {
     }
 
     /// Submit prepares through `runner`, always outside the host lock.
-    /// Without a runner, tests, offline renders and hosts without a pool
-    /// use the same snapshot/prepare/post path on the calling thread.
+    /// A name settling wakes only slots with a runner. Without one, a prepare
+    /// deferred during retirement runs inline on the host's next [`Self::pump`].
     pub fn set_runner(&self, runner: Runner) {
         let old = self.lock().runner.replace(runner);
         drop(old);
@@ -298,11 +339,13 @@ impl Slot {
 
     /// Keep the submitted graph with its document so a refresh prepares the same graph.
     pub(crate) fn set_slice(&self, doc: ScoreDoc, slice: OwnerSlice) -> Result<(), Vec<Diag>> {
+        let uses_midi = !doc.streams.is_empty() || doc.insts.iter().any(|i| matches!(i.kind, crate::model::InstKind::Midi { .. }));
         let doc = Arc::new(doc);
         let slice = Arc::new(slice);
         let old = {
             let mut host = self.lock();
             host.edit();
+            host.uses_midi = uses_midi;
             let old = host.doc.replace((doc, slice));
             host.pending = host.rewinding || host.needs_prepare();
             old
@@ -363,7 +406,7 @@ impl Slot {
             let mut host = self.lock();
             let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return Ok(None) };
             let was_pending = host.pending || host.in_flight;
-            let (generation, control) = host.begin(true);
+            let (generation, control) = host.begin(true, &self.shared.observer);
             (PreparedFrom { doc, resources: host.resources }, rate, generation, control, was_pending)
         };
         let (doc, slice) = &from.doc;
@@ -420,28 +463,53 @@ impl Slot {
         self.kick();
     }
 
+    // A posted rewind must reach the node before an edit can build on it.
+    fn can_start_prepare(&self, host: &Host) -> bool {
+        host.pending && !host.in_flight && host.control.is_none()
+            && self.shared.next.load(Ordering::Acquire).is_null()
+    }
+
     /// Prepare the pending score when the mailbox is empty (so the base is
     /// the player the node plays).
     fn kick(&self) {
         let (from, rate, base, generation, control, runner) = {
             let mut host = self.lock();
-            if !host.pending || host.in_flight || host.control.is_some() || !self.shared.next.load(Ordering::Acquire).is_null() {
+            if !self.can_start_prepare(&host) {
                 return;
             }
             let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return };
-            let (generation, control) = host.begin(false);
+            if !crate::live::name_settled(&self.name) { return; }
+            let (generation, control) = host.begin(false, &self.shared.observer);
             host.in_flight = true;
             (PreparedFrom { doc, resources: host.resources }, rate, host.base.clone(), generation, control, host.runner.clone())
         };
         let name = self.name.clone();
         let worker_control = control.clone();
         let job: Box<dyn FnOnce() + Send> = Box::new(move || {
-            let (doc, slice) = &from.doc;
-            let result = prepare_hosted(doc, (**slice).clone(), rate, &name, base.as_deref(), generation, &worker_control);
             let slot = slot(&name);
+            let prepared = crate::live::try_prepare(&name).map(|turn| {
+                let (doc, slice) = &from.doc;
+                let result = prepare_hosted(doc, (**slice).clone(), rate, &name, base.as_deref(), generation, &worker_control);
+                (turn, result)
+            });
             let mut host = slot.lock();
             host.in_flight = false;
-            slot.finish(host, generation, &worker_control, from, result);
+            match prepared {
+                Some((turn, result)) if turn.still_current() => {
+                    slot.finish(host, generation, &worker_control, from, result);
+                }
+                stale => {
+                    if host.wants(generation, &worker_control) {
+                        host.control = None;
+                        host.pending = true;
+                    }
+                    drop(host);
+                    drop(stale);
+                    // If settle saw in_flight, we see the settled name here.
+                    // If it settles later, it sees pending with in_flight cleared.
+                    if crate::live::name_settled(&name) { slot.kick(); }
+                }
+            }
         });
         match runner {
             Some(runner) => {
@@ -678,6 +746,150 @@ impl Drop for ScoreNode {
         // player it holds goes with it. A slot's next node prepares anew.
         if self.player.is_some() {
             self.shared.playing.store(0, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use crate::live::{ClockSource, LiveConfig, LiveScore, LiveThread};
+    use makepad_audio_engine::feed::{midi_out, tempo_feed};
+    use makepad_audio_engine::schedule::NodeState;
+    use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+    use std::time::Duration;
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    struct Clock {
+        located: SyncSender<()>,
+        release: Mutex<Option<Receiver<()>>>,
+        retired: Sender<()>,
+    }
+
+    impl ClockSource for Clock {
+        fn now(&self) -> Option<(f64, f64, bool)> { Some((0.0, 120.0, false)) }
+        fn located(&self) -> u64 {
+            let _ = self.located.try_send(());
+            if let Some(release) = self.release.lock().unwrap().take() {
+                release.recv_timeout(TIMEOUT).expect("the dropping thread can release the old step");
+            }
+            0
+        }
+    }
+
+    impl Drop for Clock {
+        fn drop(&mut self) { let _ = self.retired.send(()); }
+    }
+
+    fn config(name: &str, release: Option<Receiver<()>>) -> (LiveConfig, Receiver<()>, Receiver<()>) {
+        let (located, step) = sync_channel(2);
+        let (retired, end) = channel();
+        let clock = Arc::new(Clock { located, release: Mutex::new(release), retired });
+        (LiveConfig { instance: name.into(), lookahead: 0.15, clock }, step, end)
+    }
+
+    #[test]
+    fn retiring_composers_order_feeds_and_hosted_midi_prepares() {
+        const RATE: u32 = 8_000;
+        let source = "use mod.score.*\nlet c = Clock{bpm: 120}\nlet m = Instrument{kind: @midi channel: 1}\nlet l = Loop{play: m beats: 1 notes: [[0 60 0.25 1]]}\nScore{c m l}";
+        let doc = ScoreDoc::test_load(source).expect("a checked MIDI loop");
+        for how in ["document", "attach", "rewind", "abandoned", "invalid", "runner"] {
+            let name = format!("retire_{how}");
+            let transport = crate::player::transport(&name);
+            let slot = slot(&name);
+            let (release, hold) = channel();
+            let (old_config, entered, retired) = config(&name, Some(hold));
+            let old = LiveScore::with_owned_feeds(old_config);
+            let old_feed = tempo_feed(&transport);
+            let mut old_ring = old_feed.fresh();
+            old.rewind(&transport);
+            entered.recv_timeout(TIMEOUT).expect("old composer is inside its final rewind");
+
+            let runner_jobs = (how == "runner").then(|| {
+                let (submit, jobs) = channel();
+                slot.set_runner(Arc::new(move |job| submit.send(job).map_err(|e| e.to_string())));
+                jobs
+            });
+            if how != "attach" { slot.attach(RATE); }
+            if matches!(how, "attach" | "rewind") { slot.set_doc(doc.clone()).unwrap(); }
+            let mut node = ScoreNode { shared: slot.shared.clone(), player: None, rate: RATE, key: crate::key(&name) };
+            node.take_next();
+            let before = slot.lock().reserved;
+            drop(old);
+            let (next_config, locates, next_retired) = config(&name, None);
+            let next_thread = LiveThread::new(next_config, &transport);
+            let next = if how == "abandoned" {
+                drop(next_thread); // the launch never gets claimed or registers a feed
+                None
+            } else {
+                let next = LiveScore::from_thread(next_thread);
+                if how == "rewind" { next.set_source(source, &crate::PrepareControl::default()); }
+                if how == "invalid" { next.set_source("let =", &crate::PrepareControl::default()); }
+                next.rewind(&transport);
+                Some(next)
+            };
+            match how {
+                "attach" => slot.attach(RATE),
+                "rewind" => {} // only the composer's rewind may post the fresh player
+                _ => slot.set_doc(doc.clone()).unwrap(),
+            }
+            slot.pump().unwrap();
+            assert_eq!(slot.lock().reserved, before, "{how}: no prepare began during retirement");
+            if let Some(jobs) = &runner_jobs {
+                assert!(matches!(jobs.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "the owner has no job while the old composer is held");
+            }
+            assert!(old_ring.pop().is_none(), "{how}: drop returned before the old step wrote");
+            if how == "document" {
+                let (other, steps, gone) = config("retire_independent", None);
+                let other = LiveScore::new(other);
+                other.rewind("retire_independent_clock");
+                steps.recv_timeout(TIMEOUT).expect("a different name can write during retirement");
+                drop(other);
+                gone.recv_timeout(TIMEOUT).expect("the independent composer finished");
+            }
+
+            release.send(()).expect("drop returned with the old composer still held inside its step");
+            retired.recv_timeout(TIMEOUT).expect("old worker cleaned up its feeds");
+            assert!(old_ring.pop().is_some_and(|e| e.locate), "{how}: the old worker finished its last write");
+            if next.is_some() {
+                // The first located() is before the new locate write. The next
+                // is the pump checking its acknowledgement, after post_fresh.
+                for _ in 0..2 { locates.recv_timeout(TIMEOUT).expect("replacement completed its rewind"); }
+                let new_feed = tempo_feed(&transport);
+                assert!(!Arc::ptr_eq(&old_feed, &new_feed), "{how}: old cleanup preceded new registration");
+                assert!(new_feed.fresh().pop().is_some_and(|e| e.locate), "{how}: the replacement wrote its own ring");
+                assert!(old_ring.pop().is_none(), "{how}: the old ring got only the old composer's locate");
+            } else {
+                next_retired.recv_timeout(TIMEOUT).expect("the unclaimed replacement also retired");
+            }
+            if let Some(jobs) = runner_jobs {
+                // Both composers have signalled above. Let the owner run its queue,
+                // including jobs enqueued by a wake, without another host pump.
+                assert!(slot.shared.next.load(Ordering::Acquire).is_null(), "the settling composer left the prepare to its owner");
+                let (done, finished) = channel();
+                let owner = std::thread::spawn(move || {
+                    for job in jobs.try_iter() {
+                        job();
+                        done.send(()).unwrap();
+                    }
+                });
+                finished.recv_timeout(TIMEOUT).expect("settle must wake the runner without a host pump");
+                owner.join().unwrap();
+                drop(slot.lock().runner.take());
+            } else if how != "rewind" { slot.pump().unwrap(); }
+            node.take_next();
+            let player = node.player.as_ref().expect("the pending slot published a player");
+            let live = !matches!(how, "abandoned" | "invalid");
+            assert!(player.schedule.generation > before, "{how}: a fresh generation reached the node");
+            assert_eq!(player.schedule.states.iter().find_map(|s| match s {
+                NodeState::Loop(l) => Some(l.midi_live), _ => None,
+            }), Some(live), "{how}: the player captured the settled MIDI registration");
+            assert_eq!(midi_out::is_live(&format!("{name}/l")), live, "{how}: final MIDI registration");
+            if let Some(next) = next {
+                drop(next);
+                next_retired.recv_timeout(TIMEOUT).expect("the replacement retired");
+            }
         }
     }
 }

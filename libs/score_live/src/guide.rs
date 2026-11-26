@@ -133,6 +133,10 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   or `code: "…"` (see the audio shader guide). A high worst-case render cost
   appears in `score_check.warnings` with the node and shader span. The score
   still writes and plays. Reduce loop sizes or precompute in shader `init()`.
+  An audio shader’s `init()` or constant evaluation runs until it finishes. A newer edit
+  cancels a slow one. Synth and Stage show “Still initialising…” while it runs. On a page
+  without worker threads, an unfinished init or constant stops after 200,000,000 loop steps
+  and reports a shader problem.
   Omit `mono` to follow the shader, or set `mono: 1` for one voice and `mono: 0` for chords.
   `steal: @oldest|@quietest` chooses which voice gives way, released voices
   first. `legato` (default 1) connects overlapping mono notes and `glide`
@@ -719,7 +723,7 @@ mod tests {
         for block in guide.split("```\n").skip(1).step_by(2) {
             let block = &block[..block.find("```").unwrap_or(block.len())];
             if block.starts_with("use mod.score") {
-                crate::model::ScoreDoc::load(block).unwrap_or_else(|d| panic!("{d:?}\n{block}"));
+                crate::model::ScoreDoc::test_load(block).unwrap_or_else(|d| panic!("{d:?}\n{block}"));
                 let opts = crate::render::RenderOpts { seconds: Some(3.0), ..Default::default() };
                 let out = crate::render::render(block, &opts, &crate::NoSamples, &crate::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}"));
                 assert!(out.left.iter().any(|v| v.abs() > 1e-3), "an example is silent:\n{block}");

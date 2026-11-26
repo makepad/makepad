@@ -14,10 +14,10 @@
 use crate::compose::{Composer, Played};
 use crate::model::{self, CompiledShaders, Diag};
 use makepad_audio_engine::feed::{loop_feed, LoopFeed};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// Where the music is: the beat playing at the output, the tempo and
@@ -64,9 +64,160 @@ struct PreparedSource {
     revision: u64,
 }
 
+// Reserve the name before spawning. Even a third composer started while the
+// second is still waiting must follow the first one's last write and cleanup.
+const STARTING: u8 = 0;
+const RUNNING: u8 = 1;
+const CLOSING: u8 = 2;
+
+struct Turn {
+    phase: AtomicU8,
+    settled: AtomicBool,
+    // One unread wake suffices: the receiver always rechecks the name and phase.
+    wake: SyncSender<()>,
+}
+
+#[derive(Default)]
+struct NamedComposers {
+    turns: VecDeque<Arc<Turn>>,
+    prepares: usize,
+}
+
+impl NamedComposers {
+    fn settled(&self) -> bool {
+        self.turns.is_empty() || self.turns.len() == 1 && {
+            let turn = &self.turns[0];
+            turn.settled.load(Ordering::Acquire) && turn.phase.load(Ordering::Acquire) == RUNNING
+        }
+    }
+
+    fn next_waiter(&self) -> Option<SyncSender<()>> {
+        let first = self.turns.front()?;
+        (self.prepares == 0 && first.phase.load(Ordering::Acquire) == STARTING).then(|| first.wake.clone())
+    }
+}
+
+// An entry lasts only while a composer or a graph prepare owns the name.
+static NAMES: Mutex<BTreeMap<String, NamedComposers>> = Mutex::new(BTreeMap::new());
+
+/// A prepare admitted under a settled name. The next composer cannot replace
+/// its rings while the prepare is building. A job already queued on a runner
+/// takes this at execution, so an idle runner never holds up retirement.
+pub(crate) struct PrepareTurn<'a> {
+    name: &'a str,
+    composer: Option<Arc<Turn>>,
+}
+
+pub(crate) fn name_settled(name: &str) -> bool {
+    NAMES.lock().unwrap().get(name).is_none_or(NamedComposers::settled)
+}
+
+pub(crate) fn try_prepare(name: &str) -> Option<PrepareTurn<'_>> {
+    let mut names = NAMES.lock().unwrap();
+    let state = names.entry(name.to_owned()).or_default();
+    if !state.settled() { return None; }
+    state.prepares += 1;
+    Some(PrepareTurn { name, composer: state.turns.front().cloned() })
+}
+
+impl PrepareTurn<'_> {
+    pub(crate) fn still_current(&self) -> bool {
+        let names = NAMES.lock().unwrap();
+        let state = &names[self.name];
+        state.settled() && match (&self.composer, state.turns.front()) {
+            (Some(old), Some(current)) => Arc::ptr_eq(old, current),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Drop for PrepareTurn<'_> {
+    fn drop(&mut self) {
+        let mut names = NAMES.lock().unwrap();
+        let state = names.get_mut(self.name).unwrap();
+        state.prepares -= 1;
+        let next = state.next_waiter();
+        if state.prepares == 0 && state.turns.is_empty() { names.remove(self.name); }
+        drop(names);
+        if let Some(wake) = next { let _ = wake.try_send(()); }
+        crate::node::wake_pending_prepare(self.name);
+    }
+}
+
+struct Session {
+    name: String,
+    midi_live: bool,
+    turn: Arc<Turn>,
+    forget_feeds: bool,
+}
+
+impl Session {
+    fn reserve(name: &str, forget_feeds: bool, wake: SyncSender<()>) -> Self {
+        let turn = Arc::new(Turn { wake, settled: AtomicBool::new(false), phase: AtomicU8::new(STARTING) });
+        NAMES.lock().unwrap().entry(name.into()).or_default().turns.push_back(turn.clone());
+        Self { name: name.into(), turn, midi_live: false, forget_feeds }
+    }
+
+    fn can_enter(&self) -> bool {
+        let names = NAMES.lock().unwrap();
+        let state = &names[&self.name];
+        state.prepares == 0 && Arc::ptr_eq(&state.turns[0], &self.turn)
+    }
+
+    fn set_midi(&mut self, on: bool) {
+        if self.midi_live != on {
+            self.turn.settled.store(false, Ordering::Release);
+            makepad_audio_engine::feed::midi_out::set_live(&self.name, on);
+            self.midi_live = on;
+            crate::node::midi_registration_changed(&self.name);
+        }
+        self.turn.settled.store(true, Ordering::Release);
+        crate::node::wake_pending_prepare(&self.name);
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Remain at the head until cleanup finishes. A skipped or unwinding
+        // successor must never clear another composer's live flag.
+        self.turn.settled.store(false, Ordering::Release);
+        if self.midi_live {
+            makepad_audio_engine::feed::midi_out::set_live(&self.name, false);
+            crate::node::midi_registration_changed(&self.name);
+        }
+        if self.forget_feeds {
+            // Games own their graph's unique name, including feeds created
+            // before a prepared thread was claimed.
+            makepad_audio_engine::feed::forget_instance(&self.name);
+        }
+        let mut names = NAMES.lock().unwrap();
+        let state = names.get_mut(&self.name).unwrap();
+        state.turns.retain(|t| !Arc::ptr_eq(t, &self.turn));
+        let next = state.next_waiter();
+        if state.turns.is_empty() && state.prepares == 0 { names.remove(&self.name); }
+        drop(names);
+        if let Some(wake) = next { let _ = wake.try_send(()); }
+        crate::node::wake_pending_prepare(&self.name);
+    }
+}
+
 struct CommandSender {
+    turn: Arc<Turn>,
     commands: Sender<WorkerCmd>,
     prepared: SyncSender<PreparedSource>,
+}
+
+impl Drop for CommandSender {
+    fn drop(&mut self) {
+        // Wake whichever receiver owns the worker. A launch abandoned behind
+        // a still-playing predecessor must be able to retire immediately.
+        if self.turn.phase.swap(CLOSING, Ordering::AcqRel) == STARTING {
+            let _ = self.turn.wake.try_send(());
+        } else {
+            let _ = self.commands.send(WorkerCmd::Command(Cmd::Quit));
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -144,17 +295,15 @@ pub struct LiveConfig {
 pub struct LiveScore {
     cmd: CommandSender,
     pub status: Arc<Mutex<Status>>,
-    thread: Option<JoinHandle<()>>,
     /// The composer when it has no thread: the host pumps it.
-    inline: Option<Mutex<Worker>>,
-    instance: String,
+    inline: Option<Mutex<Option<Worker>>>,
 }
 
 /// Whether this platform can start threads (it cannot on the web without
 /// shared memory): asked once, by starting one.
 pub fn threads_available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| std::thread::Builder::new().spawn(|| {}).map(|t| t.join().is_ok()).unwrap_or(false))
+    *AVAILABLE.get_or_init(|| std::thread::Builder::new().spawn(|| {}).is_ok())
 }
 
 /// The composer thread's step: about every 5 ms, its status every 25 ms.
@@ -172,28 +321,38 @@ impl LiveScore {
     /// A live score whose tempo changes (sections' `bpm`, a tempo that
     /// follows a param, `set_tempo`) go to the transport `transport`.
     pub fn new_on(config: LiveConfig, transport: &str) -> LiveScore {
-        LiveScore::start(config, transport, false)
+        LiveScore::start(config, transport, false, false)
     }
 
     /// One the host pumps ([`LiveScore::pump`]) even where threads exist.
     pub fn new_pumped(config: LiveConfig, transport: &str) -> LiveScore {
-        LiveScore::start(config, transport, true)
+        LiveScore::start(config, transport, true, false)
     }
 
-    fn start(config: LiveConfig, transport: &str, pumped: bool) -> LiveScore {
-        let instance = config.instance.clone();
-        let (cmd, status, worker) = worker(config, transport);
-        if !threads_available() || pumped {
-            return LiveScore { cmd, status, thread: None, inline: Some(Mutex::new(worker())), instance };
-        }
-        let thread = std::thread::Builder::new().name("score-composer".into()).spawn(move || worker().run()).expect("the composer thread");
-        LiveScore { cmd, status, thread: Some(thread), inline: None, instance }
+    pub(crate) fn with_owned_feeds(config: LiveConfig) -> LiveScore {
+        let transport = crate::player::transport(&config.instance);
+        Self::start(config, &transport, false, true)
     }
 
-    /// The score whose composer thread `thread` is (started elsewhere: [`LiveThread::new`]).
-    pub fn from_thread(mut live: LiveThread) -> LiveScore {
-        let (cmd, status, thread, instance) = live.parts.take().expect("a composer thread is owned once");
-        LiveScore { cmd, status, thread: Some(thread), inline: None, instance }
+    fn start(config: LiveConfig, transport: &str, pumped: bool, forget: bool) -> LiveScore {
+        let (cmd, status, build) = worker(config, transport, forget);
+        let inline = if pumped || !threads_available() {
+            let mut worker = build();
+            worker.activate(false);
+            Some(Mutex::new(Some(worker)))
+        } else {
+            std::thread::Builder::new().name("score-composer".into()).spawn(move || {
+                let mut worker = build();
+                if worker.activate(true) { worker.run(); }
+            }).expect("the composer thread");
+            None
+        };
+        LiveScore { cmd, status, inline }
+    }
+
+    /// The score whose composer thread `live` started elsewhere.
+    pub fn from_thread(live: LiveThread) -> LiveScore {
+        LiveScore { cmd: live.cmd, status: live.status, inline: None }
     }
 
     /// Without a composer thread: run what is due (commands, the loops'
@@ -201,9 +360,10 @@ impl LiveScore {
     /// (every audio block or frame, at least every lookahead / 2); with a
     /// thread it does nothing.
     pub fn pump(&self) {
-        if let Some(worker) = &self.inline {
-            if let Ok(mut worker) = worker.lock() {
-                worker.step(1);
+        if let Some(inline) = &self.inline {
+            let mut inline = inline.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(worker) = inline.as_mut() {
+                if worker.activate(false) && !worker.step(1) { *inline = None; }
             }
         }
     }
@@ -285,22 +445,13 @@ impl LiveScore {
     }
 }
 
-impl Drop for LiveScore {
-    fn drop(&mut self) {
-        let _ = self.cmd.commands.send(WorkerCmd::Command(Cmd::Quit));
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        makepad_audio_engine::feed::midi_out::set_live(&self.instance, false);
-    }
-}
-
 /// A live score's composer thread, started on any thread (a host's worker) and handed to the
 /// thread that drives the score ([`LiveScore::from_thread`]). Unlike [`LiveScore::new_on`]'s, it
 /// waits for its first command (the source) before it reads the clock, so it can start well
 /// before its music. Dropped unowned, it tells its thread to quit and does not wait for it.
 pub struct LiveThread {
-    parts: Option<(CommandSender, Arc<Mutex<Status>>, JoinHandle<()>, String)>,
+    cmd: CommandSender,
+    status: Arc<Mutex<Status>>,
 }
 
 // A composer thread must be able to leave the thread that started it.
@@ -310,39 +461,42 @@ impl LiveThread {
     /// The composer thread of a score whose tempo changes go to `transport`. Where threads
     /// exist only ([`threads_available`]).
     pub fn new(config: LiveConfig, transport: &str) -> LiveThread {
-        let instance = config.instance.clone();
-        let (cmd, status, worker) = worker(config, transport);
-        let thread = std::thread::Builder::new().name("score-composer".into()).spawn(move || worker().run_from_first_command()).expect("the composer thread");
-        LiveThread { parts: Some((cmd, status, thread, instance)) }
+        Self::start(config, transport, false)
     }
-}
 
-impl Drop for LiveThread {
-    fn drop(&mut self) {
-        if let Some((cmd, _, _, instance)) = self.parts.take() {
-            let _ = cmd.commands.send(WorkerCmd::Command(Cmd::Quit));
-            makepad_audio_engine::feed::midi_out::set_live(&instance, false);
-        }
+    pub(crate) fn with_owned_feeds(config: LiveConfig, transport: &str) -> LiveThread {
+        Self::start(config, transport, true)
+    }
+
+    fn start(config: LiveConfig, transport: &str, forget: bool) -> LiveThread {
+        let (cmd, status, build) = worker(config, transport, forget);
+        std::thread::Builder::new().name("score-composer".into()).spawn(move || {
+            let mut worker = build();
+            if worker.activate(true) { worker.run_from_first_command(); }
+        }).expect("the composer thread");
+        LiveThread { cmd, status }
     }
 }
 
 /// A composer's command line and status, and the worker to build where it runs: the
 /// composer's VM never moves between threads.
-fn worker(config: LiveConfig, transport: &str) -> (CommandSender, Arc<Mutex<Status>>, impl FnOnce() -> Worker + Send) {
-    // Its MIDI loops play to the MIDI outputs.
-    makepad_audio_engine::feed::midi_out::set_live(&config.instance, true);
-    let tempo = makepad_audio_engine::feed::tempo_feed(transport);
-    let status = Arc::new(Mutex::new(Status { bpm: 120.0, sig: (4, 4), ..Status::default() }));
+fn worker(config: LiveConfig, transport: &str, forget: bool) -> (CommandSender, Arc<Mutex<Status>>, impl FnOnce() -> Worker + Send) {
     let (commands, rx) = channel();
+    let (wake, admission) = sync_channel(1);
+    let session = Session::reserve(&config.instance, forget, wake);
+    let turn = session.turn.clone();
+    let transport = transport.to_string();
+    let status = Arc::new(Mutex::new(Status { bpm: 120.0, sig: (4, 4), ..Status::default() }));
     let (prepared, sources) = sync_channel(1);
     let shared = status.clone();
-    let worker = move || Worker { config, rx, sources, status: shared, composer: None, source: Arc::from(""), shaders: None, revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, tempo, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false };
-    (CommandSender { commands, prepared }, status, worker)
+    let worker = move || Worker { config, rx, admission, first: None, sources, status: shared, composer: None, source: Arc::from(""), shaders: None, revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, session, transport, tempo: None, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false };
+    (CommandSender { turn, commands, prepared }, status, worker)
 }
 
 struct Worker {
-    config: LiveConfig,
     rx: Receiver<WorkerCmd>,
+    admission: Receiver<()>,
+    first: Option<WorkerCmd>,
     sources: Receiver<PreparedSource>,
     status: Arc<Mutex<Status>>,
     composer: Option<Composer>,
@@ -352,7 +506,8 @@ struct Worker {
     feeds: HashMap<u64, Arc<LoopFeed>>,
     last_beat: Option<f64>,
     dropped: u32,
-    tempo: Arc<makepad_audio_engine::feed::TempoFeed>,
+    transport: String,
+    tempo: Option<Arc<makepad_audio_engine::feed::TempoFeed>>,
     /// Steps taken (the status goes out every few).
     steps: u32,
     /// A seek made while stopped (the next play starts there) and the loop
@@ -370,15 +525,38 @@ struct Worker {
     osc_in: Option<(u16, std::net::UdpSocket)>,
     osc_out: Option<std::net::UdpSocket>,
     osc_pending: Vec<(f64, String, Vec<u8>)>,
+    // Drop the VM and its feed handles before publishing retirement. The
+    // host clock is released last, after the name is available again.
+    session: Session,
+    config: LiveConfig,
 }
 
 impl Worker {
+    fn activate(&mut self, wait: bool) -> bool {
+        if self.tempo.is_some() { return true; }
+        while !self.session.can_enter() {
+            if !wait || self.session.turn.phase.load(Ordering::Acquire) == CLOSING { return false; }
+            if self.admission.recv().is_err() { return false; }
+        }
+        if self.session.turn.phase.compare_exchange(STARTING, RUNNING, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        // A source queued during retirement can fail. Resolve it before
+        // publishing any MIDI registration for its graphs to observe.
+        self.first = self.rx.try_recv().ok();
+        if !matches!(self.first, Some(WorkerCmd::Prepared | WorkerCmd::Command(Cmd::Source(..) | Cmd::Quit))) {
+            self.session.set_midi(true);
+        }
+        self.tempo = Some(makepad_audio_engine::feed::tempo_feed(&self.transport));
+        true
+    }
+
     /// [`Self::run`] once the first command came (a [`LiveThread`]'s source): until then
     /// nothing reads the clock.
     fn run_from_first_command(mut self) {
-        match self.rx.recv() {
-            Ok(WorkerCmd::Command(Cmd::Quit)) | Err(_) => return,
-            Ok(cmd) => self.command(cmd),
+        match self.first.take().or_else(|| self.rx.recv().ok()) {
+            Some(WorkerCmd::Command(Cmd::Quit)) | None => return,
+            Some(cmd) => self.command(cmd),
         }
         if self.step(PUBLISH_EVERY) {
             self.run();
@@ -389,7 +567,7 @@ impl Worker {
     /// [`STEP`].
     fn run(mut self) {
         loop {
-            match self.rx.recv_timeout(STEP) {
+            match self.first.take().map(Ok).unwrap_or_else(|| self.rx.recv_timeout(STEP)) {
                 Ok(WorkerCmd::Command(Cmd::Quit)) | Err(RecvTimeoutError::Disconnected) => break,
                 Ok(cmd) => self.command(cmd),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -403,7 +581,7 @@ impl Worker {
     /// The commands waiting, the loops' code up to the lookahead, OSC, and
     /// the status every `publish_every` steps. False once told to quit.
     fn step(&mut self, publish_every: u32) -> bool {
-        while let Ok(cmd) = self.rx.try_recv() {
+        while let Some(cmd) = self.first.take().or_else(|| self.rx.try_recv().ok()) {
             if let WorkerCmd::Command(Cmd::Quit) = cmd {
                 return false;
             }
@@ -555,7 +733,7 @@ impl Worker {
             slot.post_fresh(player);
         }
         for change in tempo {
-            self.tempo.send(change);
+            self.tempo.as_ref().unwrap().send(change);
         }
     }
 
@@ -585,7 +763,7 @@ impl Worker {
         if let Some(composer) = &mut self.composer {
             composer.pump(until, &mut events);
             for change in composer.tempo_out.drain(..) {
-                self.tempo.send(change);
+                self.tempo.as_ref().unwrap().send(change);
             }
             for (fx, event) in composer.automation_out.drain(..) {
                 makepad_audio_engine::feed::automation_feed(&format!("{}/{fx}", self.config.instance)).send(event);
@@ -616,7 +794,10 @@ impl Worker {
             Cmd::Source(source, control) => {
                 let loaded = match model::load_controlled(&source, &control) {
                     Ok(loaded) => Ok(loaded),
-                    Err(crate::LoadError::Cancelled) => return,
+                    Err(crate::LoadError::Cancelled) => {
+                        if self.composer.is_none() { self.session.set_midi(false); }
+                        return;
+                    }
                     Err(crate::LoadError::Problems(diags)) => Err(diags),
                 };
                 self.load(source.into(), None, None, now, loaded);
@@ -642,7 +823,7 @@ impl Worker {
                 }
             }
             Cmd::Transport(name) => {
-                self.tempo = makepad_audio_engine::feed::tempo_feed(&name);
+                self.tempo = Some(makepad_audio_engine::feed::tempo_feed(&name));
                 // The new transport starts from the tempo map as it stands.
                 if let Some(composer) = &self.composer {
                     let beat = now;
@@ -651,7 +832,7 @@ impl Worker {
                         current = Some(*change);
                     }
                     if let Some(change) = current {
-                        self.tempo.send(makepad_audio_engine::feed::TempoEvent { beat, bpm: change.bpm, ramp: 0.0, locate: false });
+                        self.tempo.as_ref().unwrap().send(makepad_audio_engine::feed::TempoEvent { beat, bpm: change.bpm, ramp: 0.0, locate: false });
                     }
                 }
             }
@@ -689,6 +870,7 @@ impl Worker {
         self.revision += 1;
         match loaded {
             Err(diags) => {
+                if self.composer.is_none() { self.session.set_midi(false); }
                 if let Ok(mut status) = self.status.lock() {
                     status.revision = self.revision;
                     status.document_revision = revision;
@@ -696,6 +878,7 @@ impl Worker {
                 }
             }
             Ok(loaded) => {
+                self.session.set_midi(true);
                 self.shaders = Some(shaders.unwrap_or_else(|| CompiledShaders::from_doc(&loaded.doc)));
                 match &mut self.composer {
                     Some(composer) => composer.reload(loaded.into_evaluated(), now),
@@ -768,5 +951,27 @@ mod tests {
         assert!(status.diags.is_empty(), "{:?}", status.diags);
         assert_eq!(status.playing_revision, 1);
         assert!(status.loops.iter().any(|l| l.name == "l" && !l.notes.is_empty()), "{:?}", status.loops);
+
+        if threads_available() {
+            struct Unclaimed { _alive: Sender<()> }
+            impl ClockSource for Unclaimed {
+                fn now(&self) -> Option<(f64, f64, bool)> { panic!("an unclaimed launch never reads its clock") }
+                fn located(&self) -> u64 { unreachable!() }
+            }
+            let (alive, gone) = channel();
+            let waiting = LiveThread::new(LiveConfig {
+                instance: "pumped_test".into(), lookahead: 0.15, clock: Arc::new(Unclaimed { _alive: alive }),
+            }, "pumped_test_clock");
+            std::thread::spawn(move || {
+                // The second send only fits once the worker is actually waiting for its name.
+                waiting.cmd.turn.wake.send(()).unwrap();
+                waiting.cmd.turn.wake.send(()).unwrap();
+                drop(waiting);
+            });
+            assert_eq!(gone.recv_timeout(Duration::from_secs(10)), Err(RecvTimeoutError::Disconnected),
+                "abandoning a waiting launch releases it while its predecessor is still playing");
+            assert!(name_settled("pumped_test") && makepad_audio_engine::feed::midi_out::is_live("pumped_test/l"),
+                "an abandoned launch leaves the existing composer live and its slot available");
+        }
     }
 }

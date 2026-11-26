@@ -240,7 +240,7 @@ mod tests {
         let about = About { title: "Test Song".into(), artist: "The Band".into(), year: Some(1985), id: "0000".into(), path: "clean_midi/The Band/Test Song.mid".into(), genre: "rock".into(), tags: vec![] };
         for gm_only in [false, true] {
             let out = import(&bytes, &about, &Options { gm_only, ..Options::default() }).unwrap();
-            let loaded = makepad_score_live::model::load(&out.source).unwrap_or_else(|d| panic!("{d:?}\n{}", out.source));
+            let loaded = makepad_score_live::model::load_controlled(&out.source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}\n{}", out.source));
             let names: Vec<&str> = loaded.doc.loops.iter().map(|l| l.name.as_str()).collect();
             assert_eq!(names, vec!["drums", "bass", "keys", "melody"], "{}", out.source);
             // Every note of the file plays, at its beat.
@@ -255,7 +255,7 @@ mod tests {
         }
         let excerpt = import(&bytes, &about, &Options { excerpt: Some((2, 4)), ..Options::default() }).unwrap();
         assert_eq!(excerpt.beats, 8.0);
-        let loaded = makepad_score_live::model::load(&excerpt.source).unwrap_or_else(|d| panic!("{d:?}\n{}", excerpt.source));
+        let loaded = makepad_score_live::model::load_controlled(&excerpt.source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}\n{}", excerpt.source));
         assert_eq!(loaded.doc.sections.len(), 1);
     }
 

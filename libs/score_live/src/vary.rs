@@ -485,7 +485,7 @@ let clock = Clock{}
 let lead = Shader{code: "fn voice() { gate * velocity }"}
 let line = Loop{play: lead beats: 2 code: fn(i) { play(@c4) sleep(1) play(@g4) sleep(1) }}
 Score{clock lead line}"#;
-    let loaded = model::load(source).unwrap();
+    let loaded = model::test_load(source).unwrap();
     let programs = CompiledShaders::from_doc(&loaded.doc);
     let compiles = model::SHADER_COMPILES.with(|n| n.get());
     assert!(compiles > 0);

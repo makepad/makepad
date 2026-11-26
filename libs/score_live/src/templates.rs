@@ -22,7 +22,7 @@ mod tests {
     #[test]
     fn every_template_loads_plays_and_raises_nothing() {
         for (name, source) in super::TEMPLATES {
-            let loaded = crate::model::load(source).unwrap_or_else(|d| panic!("{name}: {d:?}"));
+            let loaded = crate::model::test_load(source).unwrap_or_else(|d| panic!("{name}: {d:?}"));
             let mut composer = Composer::new(loaded.into_evaluated());
             let mut events = Vec::new();
             composer.pump(64.0, &mut events);

@@ -16,7 +16,7 @@ use pieces::{examples, pieces, read_midi};
 fn classics_round_trip() {
     for (stem, piece) in pieces() {
         let source = std::fs::read_to_string(examples().join(format!("{stem}.score.splash"))).unwrap_or_else(|e| panic!("{stem}: {e}"));
-        makepad_score_live::load(&source).unwrap_or_else(|d| panic!("{stem}: {d:?}"));
+        makepad_score_live::load_controlled(&source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|d| panic!("{stem}: {d:?}"));
         let bytes = read_midi(stem).expect("the performances are in apps/score/resources/performances");
         assert_eq!(midi::transcribe(&bytes, &piece).unwrap(), source, "{stem} is not what the transcriber writes: run transcribe_classics");
         let c = midi::check(&bytes, &piece, &source, &makepad_score_live::PrepareControl::default()).unwrap_or_else(|e| panic!("{stem}: {e}"));

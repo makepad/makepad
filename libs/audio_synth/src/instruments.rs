@@ -71,12 +71,15 @@ impl PianoInstrument {
     }
 
     fn push(&mut self, event: PianoEvent) {
-        // A full queue drops the newest event: 256 events inside one audio
-        // block is a stuck producer, not music.
-        if self.count < MAX_PENDING {
-            self.events[self.count] = PianoTimed { offset: 0, event };
-            self.count += 1;
+        if self.count == self.events.len() {
+            // All adapter events are due at the current sample.
+            for pending in &self.events {
+                self.piano.apply_event(pending.event);
+            }
+            self.count = 0;
         }
+        self.events[self.count] = PianoTimed { offset: 0, event };
+        self.count += 1;
     }
 }
 
@@ -109,9 +112,9 @@ impl Instrument for PianoInstrument {
     }
 
     fn all_notes_off(&mut self) {
-        // Released, not cut: the dampers fall and the room rings out.
         self.push(PianoEvent::Sustain { value: 0.0 });
-        for key in 21..=108u8 {
+        self.push(PianoEvent::Sostenuto { on: false });
+        for key in 21..=108 {
             self.push(PianoEvent::NoteOff { key });
         }
     }
@@ -343,10 +346,15 @@ impl SoundFontInstrument {
     }
 
     fn push(&mut self, event: SamplerEvent) {
-        if self.count < MAX_PENDING {
-            self.events[self.count] = SfTimed { offset: 0, event };
-            self.count += 1;
+        if self.count == self.events.len() {
+            // All adapter events are due at the current sample.
+            for pending in &self.events {
+                self.sampler.apply_event(pending.event);
+            }
+            self.count = 0;
         }
+        self.events[self.count] = SfTimed { offset: 0, event };
+        self.count += 1;
     }
 
     fn release(&mut self, note: u8) {
@@ -420,10 +428,10 @@ impl Instrument for SoundFontInstrument {
     }
 
     fn all_notes_off(&mut self) {
+        self.push(SamplerEvent::AllNotesOff);
         self.sustain = false;
         self.sustained = [false; 128];
         self.note_ids = [0; 128];
-        self.push(SamplerEvent::AllNotesOff);
     }
 
     fn render(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
@@ -631,6 +639,126 @@ mod tests {
         assert!(finite && peak > 0.005, "fallback piano {peak}");
         assert!(parse_kind("kazoo", None).is_none());
         assert!(build(&InstrumentKind::Ironfish { preset: Some("nope".into()) }, 48_000.0).is_err());
+    }
+
+    #[test]
+    fn all_notes_off_releases_latched_keys_even_with_a_full_event_queue() {
+        // A single sounding C4, held only by sostenuto. Compare to lifting
+        // the pedal by hand; an unreleased latch must produce different audio.
+        for (label, kind) in [("modal piano", None), ("waveguide piano", Some(WaveguideInstrument::PRESET))] {
+            let render = |full, lift, release| {
+                let mut inst = build(&parse_kind("piano", kind).unwrap(), 44_100.0).unwrap();
+                let (mut l, mut r) = ([0.0; 512], [0.0; 512]);
+                inst.note_on(60, 100);
+                inst.control(Control::Sostenuto, 1.0);
+                inst.note_off(60);
+                inst.render(&mut l, &mut r);
+                if full {
+                    for _ in 0..MAX_PENDING { inst.note_off(61); }
+                }
+                if lift { inst.control(Control::Sostenuto, 0.0); }
+                if release { inst.all_notes_off(); }
+                inst.render(&mut l, &mut r);
+                l
+            };
+            let expected = render(false, true, false);
+            assert_ne!(expected, render(false, false, false), "{label}: the latch must be audible");
+            assert_eq!(expected, render(true, false, true), "{label}: a full queue must release the latched note");
+
+            // Releasing notes with a full queue must preserve the soft pedal.
+            let soft = |press, full| {
+                let mut inst = build(&parse_kind("piano", kind).unwrap(), 44_100.0).unwrap();
+                let (mut l, mut r) = ([0.0; 512], [0.0; 512]);
+                if press { inst.control(Control::Soft, 1.0); }
+                if full {
+                    for _ in 0..MAX_PENDING { inst.note_off(61); }
+                }
+                inst.all_notes_off();
+                inst.note_on(64, 100);
+                inst.render(&mut l, &mut r);
+                l
+            };
+            assert_ne!(soft(true, false), soft(false, false), "{label}: the soft pedal must be audible");
+            assert_eq!(soft(true, false), soft(true, true), "{label}: releasing with a full queue keeps the soft pedal");
+        }
+
+        let render = |full, release| {
+            let mut inst = SoundFontInstrument::fallback_piano(44_100.0);
+            let (mut l, mut r) = ([0.0; 128], [0.0; 128]);
+            inst.note_on(69, 100);
+            inst.render(&mut l, &mut r);
+            if full {
+                for _ in 0..MAX_PENDING { inst.push(SamplerEvent::NoteOff { note_id: 0 }); }
+            }
+            if release { inst.all_notes_off(); }
+            inst.render(&mut l, &mut r);
+            l
+        };
+        let expected = render(false, true);
+        assert_ne!(expected, render(false, false), "the SoundFont release must be audible");
+        assert_eq!(expected, render(true, true), "the SoundFont release must survive a full queue");
+    }
+
+    #[test]
+    fn overflowing_note_events_match_an_unbounded_block() {
+        // Strike and release one key more than 256 times, then release the
+        // note already sounding on the other key. Each adapter flushes twice
+        // at the same sample, right on a modal control-tick boundary.
+        fn compare<E>(
+            label: &str, adapter: &mut dyn Instrument,
+            mut event: impl FnMut(u8, u8) -> E,
+            mut render: impl FnMut(&[E], &mut [f32], &mut [f32]),
+        ) {
+            let mut burst = Vec::new();
+            for i in 0..=MAX_PENDING {
+                burst.push((64, 64 + (i % 64) as u8));
+                burst.push((64, 0));
+            }
+            burst.push((60, 0));
+            for commands in [&[(60, 100)][..], &burst[..]] {
+                let mut unbounded = Vec::new();
+                for &(key, velocity) in commands {
+                    if velocity == 0 { adapter.note_off(key); } else { adapter.note_on(key, velocity); }
+                    unbounded.push(event(key, velocity));
+                }
+                let (mut l, mut r) = ([0.0; 512], [0.0; 512]);
+                let (mut expected_l, mut expected_r) = ([0.0; 512], [0.0; 512]);
+                adapter.render(&mut l, &mut r);
+                render(&unbounded, &mut expected_l, &mut expected_r);
+                assert!(expected_l.iter().any(|x| *x != 0.0), "{label}: the sounding note and its release must be audible");
+                assert!(l.iter().chain(&r).zip(expected_l.iter().chain(&expected_r))
+                    .all(|(a, b)| a.to_bits() == b.to_bits()), "{label}: every attack and final release must match the unbounded render");
+            }
+        }
+
+        let rate = 44_100.0;
+        let mut reference = PianoInstrument::new(rate, None).piano;
+        compare("modelled piano", &mut PianoInstrument::new(rate, None),
+            |key, velocity| PianoTimed { offset: 0, event: if velocity == 0 { PianoEvent::NoteOff { key } } else { PianoEvent::NoteOn { key, velocity } } },
+            |events, l, r| reference.process(events, l, r));
+
+        use makepad_piano_waveguide::{PianoEvent as WgEvent, TimedEvent as WgTimed, WaveguidePiano};
+        let mut reference = WaveguidePiano::new(rate);
+        compare("waveguide piano", &mut WaveguideInstrument::new(rate),
+            |key, velocity| WgTimed { offset: 0, event: if velocity == 0 { WgEvent::NoteOff { key } } else { WgEvent::NoteOn { key, velocity } } },
+            |events, l, r| reference.process(events, l, r));
+
+        let mut reference = Sampler::<SF_VOICES>::new(rate);
+        let mut ids = [0; 128];
+        let mut next_id = 1;
+        compare("SoundFont", &mut SoundFontInstrument::fallback_piano(rate),
+            |key, velocity| {
+                let id = &mut ids[key as usize];
+                let event = if velocity == 0 {
+                    SamplerEvent::NoteOff { note_id: *id }
+                } else {
+                    *id = next_id;
+                    next_id += 1;
+                    SamplerEvent::NoteOn { note_id: *id, parameters: piano_fallback(key, velocity) }
+                };
+                SfTimed { offset: 0, event }
+            },
+            |events, l, r| { reference.render(&NoSamples, events, l, r); });
     }
 
     #[test]

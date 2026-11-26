@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(current_key(&neural, "vox"), Some("Voice:engine=@neural".into()));
         // a build with the neural voice loads it; one without says plainly how to get it, so
         // nothing goes silent unsaid (main, 11-24)
-        match crate::model::ScoreDoc::load(&neural) {
+        match crate::model::ScoreDoc::test_load(&neural) {
             Ok(_) => assert!(cfg!(feature = "neural"), "a build without the neural voice takes it unsaid"),
             Err(diags) => assert!(!cfg!(feature = "neural") && diags.iter().any(|d| d.message == makepad_score_player::NEURAL_NEEDS_LOCALAI && d.node.as_deref() == Some("vox")), "{diags:?}"),
         }
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn switching_rewrites_one_node_and_keeps_the_loop() {
-        let doc = crate::model::ScoreDoc::load(SRC).unwrap();
+        let doc = crate::model::ScoreDoc::test_load(SRC).unwrap();
         let all = catalog(Some(&doc), &Available::default());
         for group in GROUPS.iter().filter(|g| !["My instruments", "SoundFonts", "Samplers", "Neural singers", "Library singers"].contains(g)) {
             assert!(all.iter().any(|c| c.group == *group), "no {group}");
@@ -346,7 +346,7 @@ mod tests {
         let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", piano).unwrap()]).unwrap();
         assert!(next.contains("let bass = Instrument{kind: @piano preset: \"Concert Grand\" at: {x: 10 y: 20}}"), "{next}");
         assert_eq!(next.replace(&next[next.find("Instrument{").unwrap()..next.find("}\nlet line").unwrap() + 1], "X"), SRC.replace(&SRC[SRC.find("Synth{").unwrap()..SRC.find("}\nlet line").unwrap() + 1], "X"));
-        assert!(crate::model::ScoreDoc::load(&next).is_ok());
+        assert!(crate::model::ScoreDoc::test_load(&next).is_ok());
         // Synth to synth keeps the envelope, drops the old preset's filter.
         let pad = all.iter().find(|c| c.label == "warm pad").unwrap();
         let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", pad).unwrap()]).unwrap();
@@ -354,7 +354,7 @@ mod tests {
         // Every choice makes a score that loads (the SoundFonts need a file).
         for c in all.iter() {
             let next = makepad_edit_values::apply_splices(SRC, 0, &[switch(SRC, "bass", c).unwrap()]).unwrap();
-            if let Err(d) = crate::model::ScoreDoc::load(&next) {
+            if let Err(d) = crate::model::ScoreDoc::test_load(&next) {
                 panic!("{}: {d:?}\n{next}", c.label);
             }
         }

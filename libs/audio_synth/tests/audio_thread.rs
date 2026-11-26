@@ -6,7 +6,7 @@
 //! are built by nothing else here first, so a part that builds one on its render path is caught
 //! however the tests run.
 
-use makepad_audio_synth::bus::{Command, Emitter, Group, Priority, Retired, SynthBus};
+use makepad_audio_synth::bus::{Command, Emitter, Group, Priority, Retired, SynthBus, INSTRUMENT_SLOTS};
 use makepad_audio_synth::dsp::Wave;
 use makepad_audio_synth::engine::{preset, EngineInput};
 use makepad_audio_synth::instrument::Control;
@@ -249,22 +249,46 @@ fn the_audio_thread_never_allocates() {
         Command::Control { key: 3, control: Control::Modulation, value: 0.3 },
         Command::EndFrame,
     ];
+    let mut pairs = [(0, 0); INSTRUMENT_SLOTS];
+    pairs[0] = (3, 4);
     let batch_b = [
         Command::VehicleLoops { key: 7, loops: loops_b, mix: 0.7 },
         Command::AddInstrument { key: 3, inst: inst_b, emitter: Emitter::FLAT, gain: 0.8 },
-        Command::NoteOff { key: 3, note: 60 },
+        Command::InstrumentRemap { pairs, secs: 0.01 },
+        Command::InstrumentNotesOff { key: 4 },
+        Command::NoteOff { key: 4, note: 60 },
         Command::StopVoice { id: 1 },
         Command::ToneStop { id: 2 },
         Command::FadeTones { prefix: 2, shift: 0, secs: 0.05 },
         Command::VehicleStopEngine { key: 7 },
         Command::VehicleRelease { key: 7 },
-        Command::FadeInstrument { key: 3, secs: 0.01 },
+        Command::FadeInstrument { key: 4, secs: 0.01 },
         Command::RemoveInstrument { key: 99 },
         Command::StopAllTones,
         Command::Silence,
         Command::Clear,
     ];
     let (mut l, mut r) = ([0.0; 256], [0.0; 256]);
+    #[cfg(feature = "instruments")]
+    {
+        use makepad_audio_synth::instruments::{PianoInstrument, SoundFontInstrument};
+        use makepad_audio_synth::waveguide_piano::WaveguideInstrument;
+        use makepad_audio_synth::Instrument;
+
+        let mut modal = PianoInstrument::new(RATE, None);
+        let mut waveguide = WaveguideInstrument::new(RATE);
+        let mut soundfont = SoundFontInstrument::fallback_piano(RATE);
+        for inst in [&mut modal as &mut dyn Instrument, &mut waveguide, &mut soundfont] {
+            let calls = heap_calls(|| {
+                for _ in 0..257 {
+                    inst.note_on(60, 100);
+                    inst.note_off(60);
+                }
+                inst.render(&mut l, &mut r);
+            });
+            assert_eq!(calls, (0, 0), "{}: flushing pending events allocated or freed", inst.name());
+        }
+    }
     let (allocs, frees) = heap_calls(|| {
         for cmd in batch_a {
             bus.apply(cmd, &mut |r| retired.push(r));
@@ -289,7 +313,7 @@ fn the_audio_thread_never_allocates() {
     assert_eq!(retired.len(), 4, "two replaced loop sets and two instruments");
     assert_eq!(retired.iter().filter(|r| match r {
         Retired::Loops(loops) => loops.iter().any(Option::is_some),
-        Retired::Instrument { key: 3, .. } => true,
+        Retired::Instrument { key: 3 | 4, .. } => true,
         _ => false,
     }).count(), 3, "the first loop set, replaced instrument and faded instrument own payloads");
     drop(retired);

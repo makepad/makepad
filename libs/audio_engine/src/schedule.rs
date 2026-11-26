@@ -18,6 +18,7 @@
 use crate::nodes::{AUDIO, CLOCK, LEVEL};
 use crate::CHUNK;
 use makepad_flow::document::ident::DPort;
+use makepad_flow::live::owner::PrepareControl;
 use makepad_flow::live::plan::{qualified, EndpointKind, LiveNode, OwnerSlice, PlanError};
 use makepad_flow::Literal;
 use makepad_audio_dsp::svf::Svf;
@@ -922,7 +923,7 @@ pub fn compile<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnat
 }
 
 /// Prepare with the owner's optional cancellation word, including shader initialization.
-pub fn compile_controlled<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnation: u64, format: u64, base: Option<&Layout>, budget: &Arc<AudioBudget>, control: Option<&AtomicU32>) -> Result<Compiled<E::State, E::Op, B>, PlanError> {
+pub fn compile_controlled<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnation: u64, format: u64, base: Option<&Layout>, budget: &Arc<AudioBudget>, control: Option<&PrepareControl>) -> Result<Compiled<E::State, E::Op, B>, PlanError> {
     compile_with_note_labels_controlled::<E, B>(slice, generation, incarnation, format, base, budget, control, &|node, port, source| NoteEdge {
         source: format!("{}.{}", qualified(&source.from.node), source.from.port),
         node: node.id.clone(), port: port.to_owned(), entry: source.conn,
@@ -937,13 +938,17 @@ pub fn compile_with_note_labels<E: Ext, B: Default>(slice: &OwnerSlice, generati
 }
 
 /// Prepare with authored edge labels and the same control used by the owner.
-pub fn compile_with_note_labels_controlled<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnation: u64, format: u64, base: Option<&Layout>, budget: &Arc<AudioBudget>, control: Option<&AtomicU32>,
+pub fn compile_with_note_labels_controlled<E: Ext, B: Default>(slice: &OwnerSlice, generation: u64, incarnation: u64, format: u64, base: Option<&Layout>, budget: &Arc<AudioBudget>, control: Option<&PrepareControl>,
     label: &dyn Fn(&LiveNode, &str, &makepad_flow::live::plan::LiveSource) -> NoteEdge) -> Result<Compiled<E::State, E::Op, B>, PlanError> {
     let check_control = || {
-        if control.is_some_and(|word| word.load(Ordering::Relaxed) != 0) { Err(PlanError::general("prepare cancelled")) } else { Ok(()) }
+        if control.is_some_and(PrepareControl::is_cancelled) { Err(PlanError::general("prepare cancelled")) } else { Ok(()) }
     };
     check_control()?;
-    let bindings = AudioBindings { control, ..AudioBindings::default() };
+    let bindings = AudioBindings {
+        control: control.map(PrepareControl::word),
+        executions: control.map(PrepareControl::execution_counter),
+        ..AudioBindings::default()
+    };
     let rate = format as u32;
     if !(8_000..=384_000).contains(&rate) {
         return Err(PlanError::general(format!("the device rate {rate} Hz is outside what the DSP was built for")));
@@ -2159,11 +2164,37 @@ fn parallel_paths_keep_sample_time_across_passes_and_edits() {
     ] };
     let budget = Arc::new(AudioBudget::default());
     let prepare = |slice: &OwnerSlice, generation, base: Option<&Layout>| compile::<NoExt, ()>(slice, generation, 1, RATE, base, &budget).unwrap();
-    let cancelled = AtomicU32::new(0);
-    cancelled.store(1, Ordering::Relaxed);
+    let cancelled = PrepareControl::default();
+    cancelled.cancel();
     assert!(compile_controlled::<NoExt, ()>(&slice, 1, 1, RATE, None, &budget, Some(&cancelled)).is_err());
     assert_eq!(budget.prepared_bytes(), 0, "a cancelled graph publishes no prepared state");
-    let control = AtomicU32::new(0);
+
+    // A layout miss compiles at the device rate using the host prepare's counter.
+    let mut rebuilding = slice.clone();
+    let runaway = "let t=[0.0;2] fn init(){ for i in 0..1000000000 { for j in 0..1024 { t[0] += float(j) } } } fn effect(l,r){vec2(l+t[0],r)}";
+    rebuilding.nodes[1] = node("invert", "ShaderFx", &[("shader", Literal::Str(runaway.into()))], "audio", &[PAD]);
+    let rate_request = PrepareControl::default();
+    let worker_control = rate_request.clone();
+    let worker_budget = budget.clone();
+    let (finished, result) = std::sync::mpsc::channel();
+    let job = std::thread::spawn(move || {
+        let compiled = compile_controlled::<NoExt, ()>(&rebuilding, 1, 1, RATE, None, &worker_budget, Some(&worker_control));
+        finished.send(compiled.err()).unwrap();
+    });
+    let timeout = std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + timeout;
+    while !rate_request.executing() && !job.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let running = rate_request.executing();
+    rate_request.cancel();
+    let error = result.recv_timeout(timeout).expect("device-rate init stopped on its request's word");
+    job.join().unwrap();
+    assert!(running, "the device-rate prepare reported the running init");
+    assert_eq!(error.unwrap().message, "prepare cancelled");
+    assert!(!rate_request.executing(), "device-rate init released the execution guard");
+    assert_eq!(budget.prepared_bytes(), 0, "a cancelled init leaves no prepared graph");
+    let control = PrepareControl::default();
     let mut playing = compile_controlled::<NoExt, ()>(&slice, 1, 1, RATE, None, &budget, Some(&control)).unwrap();
     assert_eq!((playing.layout.latency, playing.schedule.latency), (37, 37), "layout and schedule must report the device latency");
 

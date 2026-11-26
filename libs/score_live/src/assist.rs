@@ -691,7 +691,7 @@ mod tests {
 
         let tone = "let cutoff = param(1200, 20, 16000, {unit: hz curve: log label: Cutoff group: filter})\nlet wave = param(saw, {choices: [saw square tri]})\nfn voice() { vec2(wave, cutoff) }";
         let src = format!("use mod.score.*\nlet clock = Clock{{}}\nlet lead = Shader{{code: {tone:?} cutoff: 300 wave: @tri}}\nlet space = ShaderFx{{lib: \"echo\" wet: 0.3}}\nScore{{clock lead space}}");
-        let doc = ScoreDoc::load(&src).unwrap();
+        let doc = ScoreDoc::test_load(&src).unwrap();
         for (marker, field, detail) in [
             (" cutoff: 300", "cutoff", "Cutoff (filter): 20 Hz to 16000 Hz, log, default 1200 Hz"),
             (" wave: @tri", "wave", "Wave: @saw @square @tri, default @saw"),
