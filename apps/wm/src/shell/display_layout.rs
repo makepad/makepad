@@ -333,6 +333,30 @@ pub fn viewer_desktop(saved: Option<SavedVirtual>, viewer_up: bool, snap: &Linux
     }
 }
 
+/// The desktop the WM starts by itself where no output shows one, none is saved and none is up
+/// (every monitor off or unplugged, no Desk Link viewer yet): the last real output's mode this
+/// session (`last`, [`shown_mode`]), else 1920x1080 at 60 Hz, following a viewer once one
+/// reports. Never saved, and it gives way as the viewer's own does ([`viewer_desktop_gives_way`]).
+/// Without it the WM's window was 0x0 until a viewer came: apps under it could not draw, and
+/// devhub kept screen and gui work off the box (a box whose monitor came off, its WM restarted
+/// four times in an hour, 11-27).
+pub fn no_output_desktop(saved: Option<SavedVirtual>, snap: &LinuxDisplaySnapshot, last: Option<(u32, u32, u32)>) -> Option<SavedVirtual> {
+    if saved.is_some() || !snap.direct || !snap.screens.is_empty() || snap.virtual_display.is_some() {
+        return None;
+    }
+    let (width, height, refresh_mhz) = last.unwrap_or((1920, 1080, 60_000));
+    Some(SavedVirtual { mode: VirtualDisplay { width, height, refresh_mhz, panels: VirtualPanels::Mirror }, follow: true, ..SavedVirtual::first_pick() })
+}
+
+/// The mode of the output that shows the main screen now, in the virtual display's limits: what
+/// [`no_output_desktop`] starts at once the monitors go.
+pub fn shown_mode(snap: &LinuxDisplaySnapshot) -> Option<(u32, u32, u32)> {
+    let name = snap.main_screen().and_then(|s| s.outputs.first())?;
+    let o = snap.outputs.iter().find(|o| &o.name == name && o.name != VIRTUAL_OUTPUT && o.active && o.width > 0 && o.height > 0)?;
+    let refresh_mhz = (o.refresh_hz * 1000.0).round() as u32;
+    (refresh_mhz > 0).then(|| (clamp_even(o.width), clamp_even(o.height), refresh_mhz))
+}
+
 /// The viewer's own desktop gives way once a monitor shows a picture again.
 pub fn viewer_desktop_gives_way(snap: &LinuxDisplaySnapshot) -> bool {
     snap.outputs.iter().any(|output| output.name != VIRTUAL_OUTPUT && output.active)
@@ -555,6 +579,18 @@ mod tests {
         assert!(!viewer_desktop_gives_way(&LinuxDisplaySnapshot { outputs: vec![virtual_row.clone(), waking.clone()], ..with_virtual.clone() }), "not before it presents");
         let showing = LinuxDisplayOutput { active: true, ..waking };
         assert!(viewer_desktop_gives_way(&LinuxDisplaySnapshot { outputs: vec![virtual_row, showing], ..with_virtual }));
+        // With no viewer either, the WM starts one itself: the last shown mode, else 1080p60
+        let fallback = no_output_desktop(None, &dark, None).expect("no screen, none saved: a desktop all the same");
+        assert_eq!((fallback.mode.width, fallback.mode.height, fallback.mode.refresh_mhz, fallback.follow), (1920, 1080, 60_000, true), "1080p60, following a viewer");
+        assert_eq!(no_output_desktop(None, &dark, Some((3840, 2160, 60_000))).map(|v| (v.mode.width, v.mode.height)), Some((3840, 2160)), "the last real output's mode");
+        assert_eq!(no_output_desktop(None, &shown, None), None, "a monitor shows the desktop");
+        assert_eq!(no_output_desktop(None, &LinuxDisplaySnapshot::default(), None), None, "before the renderer's first scan");
+        assert_eq!(no_output_desktop(Some(saved_virtual()), &dark, None), None, "a saved one decides");
+        assert_eq!(no_output_desktop(None, &up, None), None, "one is up");
+        let mut main = users();
+        for o in &mut main.outputs { (o.width, o.height, o.refresh_hz, o.active) = (2561, 1440, 143.856, true); }
+        assert_eq!(shown_mode(&main), Some((2560, 1440, 143_856)), "the main screen's output, even-sized");
+        assert_eq!(shown_mode(&dark), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Client processes and the app-launching model, behavior read from
-//! omarchy's source (local/agent_state/wm/omarchy-launch-model.md):
+//! omarchy's source:
 //!
 //! - the terminal is ALWAYS a fresh instance, opened in the cwd of the
 //!   focused terminal (omarchy-launch-terminal + omarchy-cmd-terminal-cwd;
@@ -1004,7 +1004,17 @@ fn launcher_of(id: ClientId) -> Option<Launcher> {
 
 /// The nice level of every client process and build the WM starts.
 #[cfg(unix)]
-const CHILD_NICE: i32 = 10;
+const CHILD_NICE: i32 = 5;
+
+#[cfg(any(target_os = "linux", test))]
+fn wm_app_cpu_weight_for(cores: u32) -> u32 {
+    cores.max(1).saturating_mul(100).clamp(100, 10_000)
+}
+
+#[cfg(target_os = "linux")]
+fn wm_app_cpu_weight() -> u32 {
+    wm_app_cpu_weight_for(std::thread::available_parallelism().map_or(1, |n| n.get() as u32))
+}
 
 #[cfg(target_os = "linux")]
 fn app_scope(epoch: &str, id: ClientId) -> String {
@@ -1014,7 +1024,7 @@ fn app_scope(epoch: &str, id: ClientId) -> String {
 #[cfg(target_os = "linux")]
 fn scoped_command(command: Command, unit: &str) -> Command {
     let mut scoped = Command::new(crate::hub_app::SYSTEMD_RUN);
-    scoped.args(["--user", "--scope", "--quiet", "--collect"])
+    scoped.args(["--user", "--scope", "--quiet", "--collect", "-p"]).arg(format!("CPUWeight={}", wm_app_cpu_weight()))
         .arg(format!("--unit={unit}")).arg(command.get_program()).args(command.get_args());
     for (key, value) in command.get_envs() {
         match value {
@@ -1355,6 +1365,23 @@ mod tests {
     }
 
     #[test]
+    fn wm_child_nice_and_scope_weight_stay_above_background_tests() {
+        #[cfg(unix)]
+        {
+            assert_eq!(CHILD_NICE, 5);
+            assert!(CHILD_NICE > 0 && CHILD_NICE < 10);
+        }
+        assert_eq!(wm_app_cpu_weight_for(16), 1600);
+        assert_eq!(wm_app_cpu_weight_for(128), 10_000);
+        #[cfg(target_os = "linux")]
+        {
+            let cmd = scoped_command(Command::new("app"), "u");
+            let weight = format!("CPUWeight={}", wm_app_cpu_weight());
+            assert!(cmd.get_args().collect::<Vec<_>>().windows(2).any(|w| w == ["-p", weight.as_str()]));
+        }
+    }
+
+    #[test]
     fn children_are_always_release_never_debug() {
         // USER LAW: a hosted app is a release build, always.
         let app = curated().into_iter().find(|a| a.id == "terminal").unwrap();
@@ -1417,7 +1444,8 @@ mod tests {
             let scoped = scoped_command(cmd, &unit);
             assert_eq!(scoped.get_program(), "/usr/bin/systemd-run", "the user manager starts the scoped app");
             assert_eq!(scoped.get_args().collect::<Vec<_>>(), [
-                "--user", "--scope", "--quiet", "--collect", "--unit=makepad-wm-app-0123456789abcdef-17", &app.bin, "two words", "--extra"
+                "--user", "--scope", "--quiet", "--collect", "-p", &format!("CPUWeight={}", wm_app_cpu_weight()),
+                "--unit=makepad-wm-app-0123456789abcdef-17", &app.bin, "two words", "--extra"
             ], "the app runs in its epoch and client scope with its original program and argument boundaries");
             assert_eq!(scoped.get_current_dir(), Some(checkout.as_path()), "the scoped app keeps its working directory");
             assert!(keys.iter().all(|key| scoped.get_envs().any(|(k, v)| k == *key && v.is_none())),

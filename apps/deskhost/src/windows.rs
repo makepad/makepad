@@ -266,6 +266,10 @@ unsafe fn make_slot(device: &ID3D11Device, key: u64, w: u32, h: u32) -> Result<S
 }
 
 impl Desktop for WinDesktop {
+    fn clipboard_seq(&mut self) -> u64 {
+        unsafe { u64::from(windows::Win32::System::DataExchange::GetClipboardSequenceNumber()) }
+    }
+
     fn screens(&mut self) -> Vec<ScreenInfo> {
         outputs()
             .into_iter()

@@ -123,7 +123,7 @@ use std::collections::{HashMap, HashSet};
 
 use binds::{match_bind_armed, WmAction};
 use desk::{WmDesk, WmDeskAction, WmState};
-use clients::{closes_at_shutdown, spawn_client, ClientLine, LaunchPolicy, WarmPool, WarmStatus};
+use clients::{closes_at_shutdown, spawn_client, ClientLine, ClientSlot, LaunchPolicy, WarmPool, WarmStatus};
 use makepad_app_registry::{BuildPolicy, LaunchEvent};
 use makepad_app_registry::machine::Launcher;
 use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
@@ -2541,6 +2541,9 @@ impl App {
             state.layout_mut().workspaces[ws].focus = Some(client);
             state.layout_mut().note_focus(client);
             if state.layout().desktop.enabled {state.layout_mut().raise_float(client);}
+            if let Some(registry) = self.ai_bus.registry() {
+                registry.focus(&AiBus::endpoint_of(client));
+            }
         }
         // The tile widget only exists once the desk has drawn it, and its
         // Area only after its first draw — a focus at launch time lands on
@@ -3008,6 +3011,7 @@ impl App {
                 let result = self.answer_os_call(cx, &call);
                 self.send_to_pane(AiBus::os_reply(result));
             }
+            Route::Confirm(to, msg) => self.ai_bus.handle_pane_confirm(cx, to, msg),
             Route::Local(client, msg) => self.on_local_frame(cx, client, msg),
             Route::Drop => {}
         }
@@ -3047,19 +3051,42 @@ impl App {
         }
     }
 
+    /// The hosted app's PID, which can differ from its launch wrapper's PID.
+    pub(crate) fn client_pid(id: ClientId, slot: &ClientSlot) -> Option<u32> {
+        #[cfg(target_os = "linux")]
+        let adopted = adopt::pid_of(id);
+        #[cfg(not(target_os = "linux"))]
+        let adopted = {
+            let _ = id;
+            None
+        };
+        resolve_client_pid(slot.external, adopted, slot.child.as_ref().map(|child| child.id()))
+    }
+
     /// The bus's traffic with the process registry: the calls it sent
     /// down to clients, the `Registered` answers the bus made, and the pid
     /// of each client that joined (so a caller can reach its own endpoint).
+    /// A client may already have focus when its endpoint joins.
     fn drain_bus_registry(&mut self) {
         let mut frames = self.ai_bus.drain_registry();
         frames.extend(self.ai_bus.take_client_frames());
         for (client, json) in frames {
             self.send_custom(client, json);
         }
-        for client in self.ai_bus.take_joined() {
-            let pid = self.state_mut().clients.get(&client).and_then(|s| s.child.as_ref()).map(|c| c.id());
-            if let (Some(pid), Some(registry)) = (pid, self.ai_bus.registry()) {
-                registry.set_pid(&AiBus::endpoint_of(client), pid);
+        let joined = self.ai_bus.take_joined();
+        if !joined.is_empty() {
+            let focused = self.state_mut().screens.focused_client();
+            for client in joined {
+                let pid = self.state_mut().clients.get(&client).and_then(|slot| Self::client_pid(client, slot));
+                if let Some(registry) = self.ai_bus.registry() {
+                    let endpoint = AiBus::endpoint_of(client);
+                    if let Some(pid) = pid {
+                        registry.set_pid(&endpoint, pid);
+                    }
+                    if focused == Some(client) {
+                        registry.focus(&endpoint);
+                    }
+                }
             }
         }
     }
@@ -3167,7 +3194,7 @@ impl App {
             }
             ServiceDown::Unsubscribe { sub_id } => self.module_host.unsubscribe(cx, client, &sub_id),
             // The pane state reaches instances through `broadcast_chat_open`.
-            ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
+            ServiceDown::Confirm { .. } | ServiceDown::ChatOpen { .. } | ServiceDown::Registered { .. } => {}
         }
     }
 
@@ -3215,7 +3242,8 @@ impl App {
     /// What the in-process assistant asked through its links: the `os`
     /// calls are the WM's, the rest go to the instances' executors.
     fn drain_pane_links(&mut self, cx: &mut Cx) {
-        for call in self.pane_links.drain() {
+        for answer in self.ai_bus.pane_confirm_answers(cx) { self.send_to_pane(answer); }
+        for call in self.pane_links.drain(cx) {
             match call {
                 PaneCall::Os(call) => {
                     let result = self.answer_os_call(cx, &call);
@@ -3623,6 +3651,12 @@ impl App {
             self.apply_requested_size(cx, tile, window.x, window.y);
             return;
         }
+        // A later window resized by its app while shown (the first asks with `HostedResize`).
+        if window.op == op::RESIZE {
+            let tile = self.client_windows.route(client, window.window_id);
+            self.apply_requested_resize(cx, tile, window.x, window.y);
+            return;
+        }
         // Any window's word on its window buttons: none of its own shown, the WM gives it its
         // plain caption in full screen.
         if window.op == op::HOST_BUTTONS {
@@ -3946,7 +3980,7 @@ impl App {
             AppToStudio::Relay(relay) => {
                 // Only a client the WM launched and still holds a channel to
                 // is served (the hub listens on 127.0.0.1 with no per-launch
-                // token yet; see local/agent_state/wm-protocol/report.md).
+                // token yet).
                 let known = self.state.as_ref().is_some_and(|state| {
                     state.clients.get(&client).is_some_and(|slot| slot.sender.is_some())
                 });
@@ -4677,6 +4711,7 @@ impl App {
     fn hub_poll(&mut self, cx: &mut Cx) {
         let processes = self.processes();
         let pool = cx.task_pool();
+        self.hub_link.set_ui_reserve_mb(gpu_yield::ui_reserve_mb());
         self.hub_link.tick(processes, host::now(), &pool);
         self.devhub_link.tick(processes, host::now());
         #[cfg(target_os = "linux")]
@@ -6432,6 +6467,10 @@ fn bare_key(m: &KeyModifiers) -> bool {
     !m.shift && !m.control && !m.alt && !m.logo
 }
 
+fn resolve_client_pid(external: Option<u32>, adopted: Option<u32>, child: Option<u32>) -> Option<u32> {
+    external.or(adopted).or(child)
+}
+
 /// The `os.launch` answer: an app that was already running is in front
 /// now and its tools are ready this turn; one that is starting connects
 /// in a moment (the engine holds this result until it does).
@@ -6525,6 +6564,30 @@ fn launch_request(args: &[String]) -> (Option<std::path::PathBuf>, Vec<String>) 
 #[cfg(test)]
 mod os_service_tests {
     use super::*;
+
+    #[test]
+    fn client_pid_prefers_external_then_adopted_then_child() {
+        assert_eq!(resolve_client_pid(Some(42), Some(77), Some(99)), Some(42));
+        assert_eq!(resolve_client_pid(None, Some(77), Some(99)), Some(77));
+        assert_eq!(resolve_client_pid(None, None, Some(99)), Some(99));
+        assert_eq!(resolve_client_pid(None, None, None), None);
+
+        let id = u64::MAX - 1;
+        let external = ClientSlot::adopted(id, "town", 42);
+        let module = ClientSlot::module(id, "town", "Town");
+        assert_eq!(App::client_pid(id, &external), Some(42));
+        assert_eq!(App::client_pid(id, &module), None);
+
+        #[cfg(target_os = "linux")]
+        {
+            adopt::expect(77, id);
+            let module_pid = App::client_pid(id, &module);
+            let external_pid = App::client_pid(id, &external);
+            adopt::forget(id);
+            assert_eq!(module_pid, Some(77));
+            assert_eq!(external_pid, Some(42));
+        }
+    }
 
     #[test]
     fn os_list_reads_as_text_and_as_data() {

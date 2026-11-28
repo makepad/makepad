@@ -11,8 +11,9 @@ use makepad_ai_hub_panel::hub_control::{ComputeMode, FleetHub, HubCommand};
 pub struct HubLink {
     /// Decided at first use: `Some(None)` when this WM runs no hub.
     link: Option<Option<Link>>,
-    /// Whether a game is being played (`local_use`): what the hub was last told.
-    gaming: Option<bool>,
+    ui_reserve_mb: Option<u64>,
+    /// Game state and reserve last reported to the hub.
+    local_use: Option<(bool, Option<u64>)>,
     /// The settings turn the WM's hub off: an app an earlier WM left running is stopped.
     stop_leftover: bool,
     /// No LAN address yet (a boot before the DHCP lease): when it was last looked for. The
@@ -42,6 +43,14 @@ struct Link {
 }
 
 impl HubLink {
+    pub fn set_ui_reserve_mb(&mut self, mb: Option<u64>) {
+        self.ui_reserve_mb = mb;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(Some(link)) = self.link.as_mut() {
+            link.app.set_ui_reserve_mb(mb);
+        }
+    }
+
     /// `processes`: this build can start child processes (`App::processes`). Decided at first
     /// use.
     fn link(&mut self, processes: bool) -> Option<&mut Link> {
@@ -79,7 +88,9 @@ impl HubLink {
             if !conf.model.is_empty() {
                 crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&conf.model));
             }
-            Made::Link(Link { hub: FleetHub::start(base), app: crate::hub_app::HubApp::new(&crate::hub_app::AI_HUB, path, conf) })
+            let mut app = crate::hub_app::HubApp::new(&crate::hub_app::AI_HUB, path, conf);
+            app.set_ui_reserve_mb(self.ui_reserve_mb);
+            Made::Link(Link { hub: FleetHub::start(base), app })
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -207,16 +218,17 @@ impl HubLink {
     /// Once a second: whether a game is being played (`local_use`). The hub hears of a change
     /// (and of the state at the start; the control client tells a restarted hub again).
     pub fn set_gaming(&mut self, processes: bool, gaming: bool) {
-        let was = self.gaming;
-        if was == Some(gaming) {
+        let was = self.local_use;
+        let ui_reserve_mb = self.ui_reserve_mb;
+        if was == Some((gaming, ui_reserve_mb)) {
             return;
         }
         let Some(link) = self.link(processes) else { return };
-        if was.is_some() {
+        if was.is_some_and(|(prev, _)| prev != gaming) {
             makepad_widgets::log!("wm: {}: telling the AI hub", if gaming { "a game is being played" } else { "play ended" });
         }
-        link.hub.send(HubCommand::LocalUse { gaming });
-        self.gaming = Some(gaming);
+        link.hub.send(HubCommand::LocalUse { gaming, ui_reserve_mb });
+        self.local_use = Some((gaming, ui_reserve_mb));
     }
 
     /// Give GPU memory back to the UI (`gpu_yield`).

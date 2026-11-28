@@ -417,7 +417,7 @@ mod tests {
         let host_bar = host.child(live_id!(bar)).widget_uid();
         assert_ne!(host_bar, WidgetUid(0), "the host has its own bar");
         // The app's root, minted in its own isolate, with a `bar` of its own.
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm();
         let root = with_isolate(&mut cx, vm_id, |cx| {
             cx.with_vm(|vm| {
                 let ui = vm.eval(script! {

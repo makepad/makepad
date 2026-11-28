@@ -6,7 +6,7 @@ Example:
 
 Repeat without contacting the clone using --cached-clone. Cached OS/driver/CEF
 assets are reused; no software is downloaded or installed on either host.
-Use --assets and --output to override the checkout-local cache/output paths.
+--assets names the offline cache (required); --output overrides the checkout-local output path.
 
 Select --device with `diskutil list external physical`. An attached USB is
 required for identity and size. After reconnect or reboot, rebuild the prepared
@@ -401,7 +401,7 @@ def main():
     if sys.flags.optimize:
         raise RuntimeError('Python optimization is not allowed; safety assertions must remain enabled')
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--assets', type=Path, default=REPO/'local/agent_state/arch-usb', help='Offline OS/package assets cache')
+    parser.add_argument('--assets', type=Path, required=True, help='Offline OS/package assets cache (arch-base.raw, resolved-packages.json, seed/); required, there is no default location')
     parser.add_argument('--output', type=Path, default=REPO/'local/arch-usb-image', help='Prepared image and writer output')
     parser.add_argument('--base-image', type=Path)
     parser.add_argument('--disk-bytes', type=int, help='Optional size assertion; must match the attached USB')

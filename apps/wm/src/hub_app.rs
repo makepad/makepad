@@ -320,6 +320,28 @@ enum Verb {
     Build,
 }
 
+const UI_RESERVE_ENV: &str = "MAKEPAD_AI_UI_RESERVE_MB";
+
+fn apply_ui_reserve_env(
+    cmd: &mut Command,
+    kind: &Kind,
+    verb: Verb,
+    conf_env: &[(String, String)],
+    inherited_ui_reserve: Option<&str>,
+    ui_reserve_mb: Option<u64>,
+) {
+    if verb != Verb::Run || kind.file != AI_HUB.file {
+        return;
+    }
+    let Some(hal_mb) = ui_reserve_mb.filter(|mb| *mb > 0) else { return };
+    let explicit = conf_env.iter().rev().find(|(key, _)| key == UI_RESERVE_ENV)
+        .map(|(_, value)| value.as_str()).or(inherited_ui_reserve);
+    let operator_mb = explicit.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+    if operator_mb < hal_mb {
+        cmd.env(UI_RESERVE_ENV, hal_mb.to_string());
+    }
+}
+
 /// The deploy's build of this node's AI Hub (`makepad-wm-build -- hub`) or devhub
 /// (`-- devhub`), run in the WM session's environment in the checkout the WM runs from: `cargo
 /// build` of the very command the WM's start runs, from the same settings (`ai-hub.conf` /
@@ -566,6 +588,7 @@ pub struct Supervised<C: ServiceConf> {
     pub kind: &'static Kind,
     pub conf: C,
     conf_path: PathBuf,
+    ui_reserve_mb: Option<u64>,
     running: Option<Running>,
     /// The replacement's build and the kept app's pid: it serves until the build succeeds.
     building: Option<(Child, u32)>,
@@ -636,6 +659,7 @@ impl<C: ServiceConf> Supervised<C> {
             kind,
             conf,
             conf_path,
+            ui_reserve_mb: None,
             running: None,
             building: None,
             build_failures: 0,
@@ -670,6 +694,11 @@ impl<C: ServiceConf> Supervised<C> {
             #[cfg(target_os = "linux")]
             waiting: None,
         }
+    }
+
+    /// The HAL reserve to pass to the next AI Hub process.
+    pub fn set_ui_reserve_mb(&mut self, mb: Option<u64>) {
+        self.ui_reserve_mb = mb;
     }
 
     /// The session restart its start needs: the user's service manager is down.
@@ -718,9 +747,12 @@ impl<C: ServiceConf> Supervised<C> {
         // Its output is a log file (the deploy's: its log), not a terminal: plain lines.
         cmd.env("CARGO_TERM_PROGRESS_WHEN", "never");
         registry::child_env::scrub(&mut cmd);
-        for (k, v) in self.conf.env() {
+        let conf_env = self.conf.env();
+        for (k, v) in &conf_env {
             cmd.env(k, v);
         }
+        let inherited_ui_reserve = std::env::var(UI_RESERVE_ENV).ok();
+        apply_ui_reserve_env(&mut cmd, self.kind, verb, &conf_env, inherited_ui_reserve.as_deref(), self.ui_reserve_mb);
         // The app serves as this node's service: from this file, not its own settings.
         cmd.env(self.kind.conf_env, &self.conf_path);
         Ok(cmd)
@@ -1385,6 +1417,32 @@ const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(7);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_ui_reserve_env_applies_hal_floor_only_to_ai_hub_run() {
+        let check = |kind: &Kind, verb, configured: &[&str], inherited, hal, expected: Option<&str>| {
+            let mut cmd = Command::new("unused");
+            let env: Vec<_> = configured.iter().map(|v| (UI_RESERVE_ENV.to_string(), v.to_string())).collect();
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+            apply_ui_reserve_env(&mut cmd, kind, verb, &env, inherited, hal);
+            let written = cmd.get_envs().find(|(k, _)| k == &UI_RESERVE_ENV)
+                .and_then(|(_, v)| v).and_then(|v| v.to_str());
+            assert_eq!(written, expected);
+        };
+        check(&AI_HUB, Verb::Run, &[], None, Some(1536), Some("1536"));
+        check(&AI_HUB, Verb::Build, &[], None, Some(1536), None);
+        check(&DEVHUB, Verb::Run, &[], None, Some(1536), None);
+        check(&AI_HUB, Verb::Run, &["2048"], None, Some(1536), Some("2048"));
+        check(&AI_HUB, Verb::Run, &["1024"], None, Some(1536), Some("1536"));
+        check(&AI_HUB, Verb::Run, &[], Some("2048"), Some(1536), None);
+        check(&AI_HUB, Verb::Run, &[], Some("1024"), Some(1536), Some("1536"));
+        check(&AI_HUB, Verb::Run, &["1024"], Some("2048"), Some(1536), Some("1536"));
+        check(&AI_HUB, Verb::Run, &["2048", "1024"], None, Some(1536), Some("1536"));
+        check(&AI_HUB, Verb::Run, &[], None, Some(0), None);
+        check(&AI_HUB, Verb::Run, &[], None, None, None);
+    }
 
     #[test]
     fn restarts_back_off_and_cap() {

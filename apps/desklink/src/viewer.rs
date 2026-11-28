@@ -230,7 +230,6 @@ impl App {
         }
         self.claim_size(cx, vi);
         self.sync_shown();
-        self.read_local_clipboard(cx, vi);
         self.restore_dirty = true;
         self.refresh_viewer(cx, vi);
         selftest(&format!("window {vi} shows {}", self.conns[conn].name));
@@ -439,39 +438,18 @@ impl App {
         Some((window, v.selected?))
     }
 
-    /// The programmatic read on focus, tab selection or session open.
-    pub fn read_local_clipboard(&mut self, cx: &mut Cx, vi: usize) {
-        let Some((window, ci)) = self.clipboard_target(vi) else { return };
-        let session = {
-            let mut s = self.conns[ci].shared.lock().unwrap();
-            s.clipboard_opened = false;
-            s.clipboard_session()
-        };
-        self.clipboard_read = session.map(|session| (window, ci, session, cx.read_clipboard()));
-    }
-
-    pub fn clipboard_reply(&mut self, request: u64, text: Option<&str>) {
-        let Some((window, ci, session, _)) = self.clipboard_read.filter(|r| r.3 == request) else { return };
-        self.clipboard_read = None;
-        if self.clipboard_target(self.focused) == Some((window, ci)) {
-            if let Some(text) = text {
-                self.offer_clipboard(ci, Some(session), text);
-            }
-        }
-    }
-
     pub fn paste_clipboard(&mut self, cx: &mut Cx, text: &str) {
         let vi = self.focused;
         let Some((_, ci)) = self.clipboard_target(vi) else { return };
         let v = &self.viewers[vi];
         if v.drives_keyboard() && !v.menu_open(cx) {
-            // This paste is newer than a read still in flight.
-            self.clipboard_read = None;
-            self.offer_clipboard(ci, None, text);
+            self.offer_clipboard(ci, text);
         }
     }
 
-    fn offer_clipboard(&mut self, ci: usize, expected: Option<u64>, text: &str) {
+    /// The local clipboard goes to a desktop only on a paste into its focused window: never on
+    /// focus, tab selection or session open, and never to the other desktops.
+    fn offer_clipboard(&mut self, ci: usize, text: &str) {
         // a paste with no text here (an image, a file) leaves the desktop's clipboard alone
         if text.is_empty() {
             return;
@@ -481,9 +459,6 @@ impl App {
             let s = c.shared.lock().unwrap();
             (s.session, s.clipboard_session().is_some())
         };
-        if expected.is_some_and(|id| id != session) {
-            return;
-        }
         let messages = c.clipboard.offer(session, clipboard, text);
         if messages.is_empty() {
             return;
@@ -500,22 +475,15 @@ impl App {
     }
 
     pub fn refresh_clipboards(&mut self, cx: &mut Cx) {
-        if let Some(ci) = self.viewers.get(self.focused).and_then(|v| v.selected) {
-            let opened = std::mem::take(&mut self.conns[ci].shared.lock().unwrap().clipboard_opened);
-            if opened {
-                self.read_local_clipboard(cx, self.focused);
-            }
-        }
+        // Only the desktop in the focused window may set the local clipboard: a copy on a desktop
+        // in the background (an agent's session, a test) never overwrites what is copied here.
+        let focused = self.clipboard_target(self.focused).map(|(_, ci)| ci);
         for (ci, c) in self.conns.iter_mut().enumerate() {
             let incoming = {
                 let mut s = c.shared.lock().unwrap();
                 s.clipboard.take().filter(|(session, _)| s.clipboard_session() == Some(*session))
             };
-            if let Some((session, text)) = incoming {
-                // A reply from before this copy would put the desktop's old text back.
-                if self.clipboard_read.is_some_and(|(_, c, id, _)| c == ci && id == session) {
-                    self.clipboard_read = None;
-                }
+            if let Some((session, text)) = incoming.filter(|_| focused == Some(ci)) {
                 cx.copy_to_clipboard(&text);
                 c.clipboard.received(session, &text);
                 selftest(&format!("clipboard: {} bytes from {}", text.len(), c.name));

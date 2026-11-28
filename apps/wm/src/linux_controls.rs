@@ -32,7 +32,7 @@ use makepad_widgets::makepad_platform::linux_input::{
 };
 use makepad_widgets::makepad_platform::linux_display::display_profiles::ProfileSettings;
 use makepad_widgets::makepad_platform::linux_display::{DisplayPacing, LinuxDisplayCommand, LinuxDisplaySnapshot, VirtualPanels};
-use shell::display_layout::{viewer_desktop, viewer_desktop_gives_way, virtual_env_pinned, virtual_restore, DisplayLayout, SavedVirtual, VirtualSize};
+use shell::display_layout::{no_output_desktop, shown_mode, viewer_desktop, viewer_desktop_gives_way, virtual_env_pinned, virtual_restore, DisplayLayout, SavedVirtual, VirtualSize};
 use shell::display_menu::{DisplayConfig, DisplayTrials, TrialOut};
 use shell::panels::{PanelKind, ShellPanel};
 use shell::system_linux::{
@@ -146,8 +146,15 @@ pub struct LinuxControls {
     /// skipped) once.
     virtual_restore_done: bool,
     /// The Desk Link viewer's own desktop is up, unsaved: no output showed
-    /// one when its window reported (`display_layout::viewer_desktop`).
+    /// one when its window reported (`display_layout::viewer_desktop`), or
+    /// none at all (`display_layout::no_output_desktop`).
     viewer_desktop: bool,
+    /// The mode of the output that last showed the main screen this session
+    /// (`display_layout::shown_mode`).
+    last_shown: Option<(u32, u32, u32)>,
+    /// Why the renderer refused the desktop `no_output_desktop` asked for,
+    /// as last said.
+    no_output_refused: Option<String>,
     /// Newest unsent pointer speed per device (0 mouse, 1 touchpad).
     pointer_save: [Option<u32>; 2],
     /// The person set that device's speed this session; a start-up read
@@ -364,6 +371,39 @@ impl App {
             self.apply_dpi_scale(cx, scale);
         }
         self.redraw_all(cx);
+    }
+
+    /// No output shows the desktop and none is saved or up, with no Desk Link
+    /// viewer either: the WM starts its own (`display_layout::no_output_desktop`),
+    /// once its saved layout is read and unless the person chose the desktop
+    /// this session. Logged as it starts; it gives way as the viewer's does.
+    fn no_output_desktop(&mut self, cx: &mut Cx) {
+        let snap = cx.linux_display_snapshot();
+        if let Some(mode) = shown_mode(&snap) {
+            self.linux_controls.last_shown = Some(mode);
+        }
+        let state = &self.linux_controls;
+        if state.viewer_desktop || !state.layout_loaded || state.virtual_user_set {
+            return;
+        }
+        let Some(saved) = no_output_desktop(state.virtual_saved(), &snap, state.last_shown) else { return };
+        let viewer = state.viewer.map(|(w, h, mhz, _)| (w, h, mhz));
+        if self.linux_controls.panel_scale.is_none() {
+            self.linux_controls.panel_scale = self.main_window_dpi(cx).map(|dpi| (dpi * 100.0).round() as u32);
+        }
+        match self.send_virtual(cx, &saved) {
+            Ok(()) => {
+                self.linux_controls.viewer_desktop = true;
+                self.linux_controls.no_output_refused = None;
+                log!("wm: no output shows the desktop: a virtual display of {} is the desktop until a monitor shows one (not saved)", saved.target(viewer).mode_string());
+            }
+            // (asked again at the next poll; said once per refusal)
+            Err(message) if self.linux_controls.no_output_refused.as_deref() != Some(message.as_str()) => {
+                log!("wm: no output shows the desktop, and a virtual display for it was refused: {message}");
+                self.linux_controls.no_output_refused = Some(message);
+            }
+            Err(_) => {}
+        }
     }
 
     /// A monitor shows a picture again: the viewer's own desktop gives way
@@ -696,6 +736,7 @@ impl App {
         if self.linux_controls.viewer_desktop && self.linux_controls.virtual_saved().is_none() && viewer_desktop_gives_way(&cx.linux_display_snapshot()) {
             self.viewer_desktop_give_way(cx);
         }
+        self.no_output_desktop(cx);
         let state = &mut self.linux_controls;
         if !state.attempted {
             state.attempted = true;

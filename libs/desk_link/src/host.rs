@@ -12,6 +12,7 @@
 use crate::server::{self, Control, Feed, Geometry, InputFactory, Log, Out, Server, ServerConfig, ToUi};
 use crate::{self as proto, ScreenInfo, ServerMsg};
 use makepad_video::{VideoStreamEncoder, VideoStreamEncoderOptions};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -58,6 +59,10 @@ pub trait Desktop {
     /// The input devices for the server (`Err`: why viewers can only watch): a desktop's
     /// session, a JIT host's injection into the app it shows.
     fn input(&self) -> InputFactory;
+    /// The OS clipboard's change counter (0 if unknown).
+    fn clipboard_seq(&mut self) -> u64 {
+        0
+    }
     /// Screen `index`'s refresh rate (Hz; 0 = not known).
     fn refresh(&mut self, _index: usize) -> u32 {
         0
@@ -182,7 +187,21 @@ pub enum Cmd {
     /// The settings changed (a switch): read them again.
     Settings,
     Disconnect(u32),
+    ClipboardChanged { request: u64, text: String },
+    ClipboardTaken { request: u64, session: u32 },
     Quit,
+}
+
+/// Work for the thread that owns the OS clipboard. Each read has one reply.
+pub enum ClipboardWork {
+    Read,
+    Apply { session: u32, text: String },
+}
+
+#[derive(Default)]
+struct ClipboardMailbox {
+    next: u64,
+    work: Vec<(u64, ClipboardWork)>,
 }
 
 /// The owner and the host thread: the report one way, commands the other, `wake` to make the
@@ -191,13 +210,40 @@ pub struct HostControl {
     pub report: Mutex<Report>,
     pub cmds: Mutex<Vec<Cmd>>,
     pub wake: Sender<()>,
+    clipboard: Mutex<ClipboardMailbox>,
+    wake_ui: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl HostControl {
     /// A control and the receiver [`host_main`] waits on.
     pub fn new() -> (HostControl, Receiver<()>) {
         let (wake, wake_rx) = std::sync::mpsc::channel();
-        (HostControl { report: Default::default(), cmds: Default::default(), wake }, wake_rx)
+        (HostControl { report: Default::default(), cmds: Default::default(), wake, clipboard: Default::default(), wake_ui: None }, wake_rx)
+    }
+
+    /// A host that shares its clipboard wakes the owner as soon as it has work for it.
+    pub fn with_clipboard(wake_ui: Arc<dyn Fn() + Send + Sync>) -> (HostControl, Receiver<()>) {
+        let (mut ctl, rx) = Self::new();
+        ctl.wake_ui = Some(wake_ui);
+        (ctl, rx)
+    }
+
+    pub fn take_clipboard(&self) -> Vec<(u64, ClipboardWork)> {
+        std::mem::take(&mut self.clipboard.lock().unwrap().work)
+    }
+
+    fn post_clipboard(&self, work: ClipboardWork) -> u64 {
+        let request = {
+            let mut mailbox = self.clipboard.lock().unwrap();
+            mailbox.next += 1;
+            let request = mailbox.next;
+            mailbox.work.push((request, work));
+            request
+        };
+        if let Some(wake) = &self.wake_ui {
+            wake();
+        }
+        request
     }
 
     pub fn send(&self, cmd: Cmd) {
@@ -249,6 +295,7 @@ struct Viewer {
     feed: Arc<Feed>,
     /// What it decodes (`proto::caps`).
     caps: u32,
+    clipboard: proto::ClipboardPeer,
     /// The viewer's display refresh (Hz, 0 = not known) and whether it was told the stream's rate.
     refresh: u16,
     told_rate: bool,
@@ -260,6 +307,97 @@ struct Viewer {
     /// Pictures and bytes sent this second, and over the last one (the owner's stream line).
     sent: (u32, u64),
     sent_rate: (u32, u64),
+}
+
+/// A viewer that asked for the clipboard (this host shares it whenever the owner takes the work).
+fn shares_clipboard(v: &Viewer) -> bool {
+    v.caps & proto::caps::CLIPBOARD != 0
+}
+
+/// Run one clipboard operation at a time. A later write must not replace a viewer's echo
+/// while the UI is reading an earlier change.
+#[derive(Default)]
+struct HostClipboard {
+    pending: VecDeque<ClipboardWork>,
+    reading: Option<(u64, Option<u32>)>,
+    read_seq: u64,
+}
+
+impl HostClipboard {
+    fn received(&mut self, viewer: &Viewer, text: String, log: &Log) {
+        log(&format!("desk host: clipboard of {} bytes from {}", text.len(), viewer.name));
+        self.pending.push_back(ClipboardWork::Apply { session: viewer.session, text });
+    }
+
+    fn os_changed(&mut self) {
+        if !matches!(self.pending.back(), Some(ClipboardWork::Read)) {
+            self.pending.push_back(ClipboardWork::Read);
+        }
+    }
+
+    fn dispatch(&mut self, ctl: &HostControl, viewers: &mut [Viewer], mut sequence: impl FnMut() -> u64) {
+        while self.reading.is_none() {
+            let Some(work) = self.pending.pop_front() else { break };
+            let session = match &work {
+                ClipboardWork::Read => {
+                    if !viewers.iter().any(shares_clipboard) {
+                        continue;
+                    }
+                    // A queued read can see several writes. Read that revision only once.
+                    let seq = sequence();
+                    if seq == 0 || seq == self.read_seq {
+                        continue;
+                    }
+                    self.read_seq = seq;
+                    None
+                }
+                ClipboardWork::Apply { session, text } => {
+                    if let Some(v) = viewers.iter_mut().find(|v| v.session == *session) {
+                        v.clipboard.received(text);
+                    }
+                    Some(*session)
+                }
+            };
+            self.reading = Some((ctl.post_clipboard(work), session));
+        }
+    }
+
+    fn reply(&mut self, request: u64, session: Option<u32>) -> bool {
+        // A late UI reply from before serving restarted belongs to the old sessions.
+        if self.reading != Some((request, session)) {
+            return false;
+        }
+        self.reading = None;
+        true
+    }
+
+    fn changed(&mut self, request: u64, text: String, viewers: &mut [Viewer], log: &Log) {
+        if !self.reply(request, None) {
+            return;
+        }
+        if text.is_empty() {
+            // An intervening clear or image spends the echo too.
+            for v in viewers {
+                v.clipboard = Default::default();
+            }
+            return;
+        }
+        let mut sent = 0;
+        for v in viewers {
+            if shares_clipboard(v) && v.clipboard.changed(&text) && v.out.send(Out::Clipboard(text.clone())).is_ok() {
+                sent += 1;
+            }
+        }
+        log(&format!("desk host: clipboard of {} bytes to {sent} viewers", text.len()));
+    }
+
+    fn taken(&mut self, request: u64, session: u32, viewers: &[Viewer]) {
+        if self.reply(request, Some(session)) {
+            if let Some(v) = viewers.iter().find(|v| v.session == session) {
+                let _ = v.out.send(Out::ClipboardTaken);
+            }
+        }
+    }
 }
 
 /// The host thread: serves while the settings say `enabled`, waits while they say off, until
@@ -315,7 +453,8 @@ fn start(desktop: &mut dyn Desktop, settings: &dyn Fn() -> HostSettings, status:
         }
         let wake_tx = ctl.wake.clone();
         let started = now.listen.clone().and_then(|addr| {
-            let config = ServerConfig { addr, tls_name: now.tls_name.clone(), log: log.clone(), clock: clock_ns, input: desktop.input(), desktop_caps: 0 };
+            let desktop_caps = if ctl.wake_ui.is_some() { proto::desktop_caps::CLIPBOARD } else { 0 };
+            let config = ServerConfig { addr, tls_name: now.tls_name.clone(), log: log.clone(), clock: clock_ns, input: desktop.input(), desktop_caps };
             Server::start(config, Arc::new(move || {
                 let _ = wake_tx.send(());
             }))
@@ -396,6 +535,9 @@ fn wire_codec(codec: StreamVideoCodec) -> u8 {
 fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, status: &mut Status, ctl: &HostControl, settings: HostSettings, server: Server, wake_rx: &Receiver<()>, log: &Log) -> bool {
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<Frame>();
     let mut viewers: Vec<Viewer> = Vec::new();
+    let mut clipboard = HostClipboard::default();
+    let mut clipboard_seq = 0;
+    let mut clipboard_at = Instant::now();
     let mut screen = 0usize;
     let mut screens = desktop.screens();
     let mut screens_at = Instant::now();
@@ -431,7 +573,7 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
     loop {
         let _turn = desktop.turn();
         // the owner's commands: off, quit, a viewer to disconnect
-        let cmds: Vec<Cmd> = ctl.cmds.lock().unwrap().drain(..).collect();
+        let cmds = std::mem::take(&mut *ctl.cmds.lock().unwrap());
         for cmd in cmds {
             match cmd {
                 Cmd::Quit => {
@@ -455,6 +597,8 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                         let _ = v.out.send(Out::Close("the desktop disconnected you".into()));
                     }
                 }
+                Cmd::ClipboardChanged { request, text } => clipboard.changed(request, text, &mut viewers, log),
+                Cmd::ClipboardTaken { request, session } => clipboard.taken(request, session, &viewers),
             }
         }
         // the owner's view of the viewers, once a second (and when one comes or goes)
@@ -535,7 +679,16 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                         server: settings.host_name.clone(),
                     };
                     let _ = out.send(Out::Msg(welcome.encode()));
-                    viewers.push(Viewer { session, name, out, feed, caps, refresh: 0, told_rate: false, synced: false, peer, since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) });
+                    viewers.push(Viewer { session, name, out, feed, caps, clipboard: Default::default(), refresh: 0, told_rate: false, synced: false, peer, since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) });
+                    if viewers.len() == 1 && ctl.wake_ui.is_some() {
+                        // Start from what is there. Only copies made while connected go out.
+                        clipboard_seq = desktop.clipboard_seq();
+                        clipboard.read_seq = clipboard_seq;
+                        if matches!(clipboard.reading, Some((_, None))) {
+                            clipboard.reading = None;
+                        }
+                        clipboard_at = Instant::now();
+                    }
                     report_viewers(ctl, &viewers, fps, codec);
                     key_wanted = true;
                     cursor = None;
@@ -573,7 +726,8 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                         // a source streams its real size: the viewer's window size (v5, for
                         // desktops that follow their viewer) and who drives last change nothing
                         Control::Window { .. } => {}
-                        Control::Clipboard(_) | Control::Stats { .. } | Control::Encoding { .. } => {}
+                        Control::Clipboard(text) => clipboard.received(v, text, log),
+                        Control::Stats { .. } | Control::Encoding { .. } => {}
                     }
                 }
                 ToUi::Closed { session, reason } => {
@@ -585,6 +739,18 @@ fn run(desktop: &mut dyn Desktop, settings_now: &dyn Fn() -> HostSettings, statu
                 }
             }
         }
+        let mut sampled_seq = None;
+        // only while a viewer shares the clipboard: with none, nothing would read it
+        if ctl.wake_ui.is_some() && viewers.iter().any(shares_clipboard) && clipboard_at.elapsed() >= Duration::from_millis(100) {
+            clipboard_at = Instant::now();
+            let seq = desktop.clipboard_seq();
+            sampled_seq = Some(seq);
+            if seq != 0 && seq != clipboard_seq {
+                clipboard_seq = seq;
+                clipboard.os_changed();
+            }
+        }
+        clipboard.dispatch(ctl, &mut viewers, || sampled_seq.unwrap_or_else(|| desktop.clipboard_seq()));
         if let Some(s) = screens.get(screen) {
             *server.geometry.lock().unwrap() = Geometry { desktop: [s.width, s.height], screen: [0, 0, s.width, s.height] };
             // the screen changed its size (a mode change, the session moved to another display):
@@ -895,6 +1061,11 @@ pub fn default_kbps(size: [u32; 2], fps: u32) -> u32 {
 mod tests {
     use super::*;
 
+    fn viewer(session: u32, caps: u32) -> (Viewer, Receiver<Out>) {
+        let (out, rx) = std::sync::mpsc::channel();
+        (Viewer { session, name: String::new(), out, feed: Arc::new(Feed::new(false)), caps, clipboard: Default::default(), refresh: 0, told_rate: false, synced: false, peer: String::new(), since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) }, rx)
+    }
+
     #[test]
     fn rate_is_the_lowest_limit() {
         // 4K: H.264 level 5.2 on macOS and Android (64 a second), 6.2 on Windows and Linux;
@@ -910,11 +1081,63 @@ mod tests {
 
     #[test]
     fn hevc_only_while_every_viewer_decodes_it() {
-        let (out, _rx) = std::sync::mpsc::channel();
-        let viewer = |caps: u32| Viewer { session: 1, name: String::new(), out: out.clone(), feed: Arc::new(Feed::new(false)), caps, refresh: 0, told_rate: false, synced: false, peer: String::new(), since: Instant::now(), sent: (0, 0), sent_rate: (0, 0) };
-        assert_eq!(stream_codec(StreamVideoCodec::H264, &[viewer(proto::caps::HEVC)]), StreamVideoCodec::H264);
-        assert_eq!(stream_codec(StreamVideoCodec::Hevc, &[viewer(proto::caps::HEVC)]), StreamVideoCodec::Hevc);
-        assert_eq!(stream_codec(StreamVideoCodec::Hevc, &[viewer(proto::caps::HEVC), viewer(0)]), StreamVideoCodec::H264);
+        assert_eq!(stream_codec(StreamVideoCodec::H264, &[viewer(1, proto::caps::HEVC).0]), StreamVideoCodec::H264);
+        assert_eq!(stream_codec(StreamVideoCodec::Hevc, &[viewer(1, proto::caps::HEVC).0]), StreamVideoCodec::Hevc);
+        assert_eq!(stream_codec(StreamVideoCodec::Hevc, &[viewer(1, proto::caps::HEVC).0, viewer(2, 0).0]), StreamVideoCodec::H264);
+    }
+
+    #[test]
+    fn clipboard_ack_and_changes_reach_their_viewers_in_order() {
+        let (wake, woke) = std::sync::mpsc::channel();
+        let (ctl, _) = HostControl::with_clipboard(Arc::new(move || wake.send(()).unwrap()));
+        let log: Log = Arc::new(|_| {});
+        let (a, a_out) = viewer(1, proto::caps::CLIPBOARD);
+        let (b, b_out) = viewer(2, proto::caps::CLIPBOARD);
+        let (old, old_out) = viewer(3, 0);
+        let mut viewers = [a, b, old];
+        let mut clipboard = HostClipboard::default();
+        let next = |clipboard: &mut HostClipboard, viewers: &mut [Viewer], seq| {
+            clipboard.dispatch(&ctl, viewers, || seq);
+            assert!(woke.try_recv().is_ok(), "the UI wakes for clipboard work");
+            let mut work = ctl.take_clipboard();
+            assert_eq!(work.len(), 1, "one request at a time");
+            work.pop().unwrap()
+        };
+
+        clipboard.received(&viewers[1], "first".into(), &log);
+        let (first, work) = next(&mut clipboard, &mut viewers, 1);
+        assert!(matches!(work, ClipboardWork::Apply { session: 2, text } if text == "first"));
+        clipboard.os_changed();
+        clipboard.received(&viewers[0], "second".into(), &log);
+        clipboard.taken(first, 1, &viewers);
+        clipboard.dispatch(&ctl, &mut viewers, || 2);
+        assert!(ctl.take_clipboard().is_empty() && a_out.try_recv().is_err(), "a different session cannot take the write");
+        clipboard.taken(first, 2, &viewers);
+        assert!(matches!(b_out.try_recv(), Ok(Out::ClipboardTaken)), "the sender gets its ack");
+
+        let (read, work) = next(&mut clipboard, &mut viewers, 2);
+        assert!(matches!(work, ClipboardWork::Read));
+        clipboard.changed(read, "first".into(), &mut viewers, &log);
+        assert!(matches!(a_out.try_recv(), Ok(Out::Clipboard(t)) if t == "first"));
+        assert!(b_out.try_recv().is_err(), "applying the sender's text does not echo it");
+        let (second, work) = next(&mut clipboard, &mut viewers, 2);
+        assert!(matches!(work, ClipboardWork::Apply { session: 1, text } if text == "second"));
+        clipboard.taken(first, 2, &viewers);
+        assert!(b_out.try_recv().is_err(), "a late reply cannot ack another write");
+        clipboard.taken(second, 1, &viewers);
+        assert!(matches!(a_out.try_recv(), Ok(Out::ClipboardTaken)));
+
+        clipboard.os_changed();
+        let (read, _) = next(&mut clipboard, &mut viewers, 3);
+        clipboard.changed(read, String::new(), &mut viewers, &log);
+        assert!(a_out.try_recv().is_err() && b_out.try_recv().is_err(), "a clear sends nothing");
+        clipboard.os_changed();
+        let (read, _) = next(&mut clipboard, &mut viewers, 4);
+        clipboard.changed(read, "second".into(), &mut viewers, &log);
+        for out in [a_out, b_out] {
+            assert!(matches!(out.try_recv(), Ok(Out::Clipboard(t)) if t == "second"), "both viewers get a fresh local copy");
+        }
+        assert!(old_out.try_recv().is_err(), "a viewer without the capability gets no clipboard");
     }
 
     #[test]

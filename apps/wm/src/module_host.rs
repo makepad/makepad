@@ -53,6 +53,22 @@ pub struct ModuleHost {
     style: Option<desktop_style::StyleSheet>,
 }
 
+pub(crate) fn module_grants(module: &dyn AppModule) -> HostGrants {
+    let mut grants = HostGrants::LOCAL_RESOURCES
+        .union(HostGrants::CLIPBOARD)
+        .union(HostGrants::OPEN_URL)
+        .union(HostGrants::DRAG)
+        .union(HostGrants::FILE_DIALOGS);
+    let capabilities = module.capabilities();
+    if capabilities.contains(&"net") {
+        grants = grants.union(HostGrants::NETWORK);
+    }
+    if capabilities.contains(&"location") {
+        grants = grants.union(HostGrants::DEVICE_IO);
+    }
+    grants
+}
+
 impl ModuleHost {
     /// Build one instance of `module` for the client id the WM gave it.
     /// `viewport` is the tile size the layout will give it.
@@ -81,8 +97,9 @@ impl ModuleHost {
         let handles = InstanceHandles { scope, storage, viewport: Viewport { size: viewport }, replies };
         // With the WM's system theme sheet the isolate registers its library once, styled, as for
         // a child process (not the stock library first and the sheet's over it).
+        // Linked native modules are trusted host code and load their own resources.
         let vm_id = match self.style.clone() {
-            Some(sheet) => cx.alloc_splash_vm_with_ui(false, std::rc::Rc::new(move |vm: &mut ScriptVm| {
+            Some(sheet) => cx.alloc_splash_vm_with_grants(module_grants(module), Some(std::rc::Rc::new(move |vm: &mut ScriptVm| {
                 // A live edit's reload pass keeps the sheet the isolate wears now
                 // (`apply_style` may have restyled it since).
                 if !vm.is_reload() {
@@ -91,16 +108,10 @@ impl ModuleHost {
                 makepad_widgets::theme_mod(vm);
                 makepad_widgets::isolate_widgets_mod(vm);
                 desktop_style::apply_widgets(vm);
-            })),
-            None => cx.alloc_splash_vm_with_network(false),
+            }))),
+            None => cx.alloc_splash_vm_with_grants(module_grants(module), None),
         };
         let parts = cx.with_script_vm_id(vm_id, |vm| {
-            // The isolate allocation strips `mod.res` — right for an
-            // untrusted mini-app, wrong for a trusted native module whose
-            // own widget families, and the desktop styles' fonts and icons
-            // (`crate_resource("self:...")` in the iOS and Android
-            // themes), load through it. Back in before anything evaluates.
-            makepad_widgets::makepad_platform::script::res::script_mod(vm);
             module.register(vm);
             // Registered after the isolate's UI: its reload passes register it again after theirs.
             vm.keep_for_reload(id!(wm_module), move |vm| module.register(vm));
@@ -261,6 +272,38 @@ impl ModuleHost {
 mod tests {
     use makepad_widgets::*;
 
+    #[test]
+    fn module_grants_follow_declared_capabilities_and_exclude_shell_nav_layers() {
+        use makepad_app_module::*;
+
+        struct Stub(&'static [&'static str]);
+        impl AppModule for Stub {
+            fn id(&self) -> &'static str { "stub" }
+            fn label(&self) -> &'static str { "Stub" }
+            fn register(&self, _: &mut ScriptVm) {}
+            fn open_schema(&self) -> OpenSchema { OpenSchema::new(1) }
+            fn create(&self, _: &mut ScriptVm, _: ValidatedOpen, _: InstanceHandles) -> InstanceParts {
+                unreachable!("checking declarations never creates an instance")
+            }
+            fn capabilities(&self) -> &'static [&'static str] { self.0 }
+        }
+
+        let base = HostGrants::LOCAL_RESOURCES.union(HostGrants::CLIPBOARD)
+            .union(HostGrants::OPEN_URL).union(HostGrants::DRAG).union(HostGrants::FILE_DIALOGS);
+        let forbidden = HostGrants::DESKTOP_SHELL.union(HostGrants::BROWSER_NAV).union(HostGrants::NATIVE_LAYERS);
+        for (module, extra) in [
+            (Stub(&[]), HostGrants::NONE),
+            (Stub(&["storage"]), HostGrants::NONE),
+            (Stub(&["net"]), HostGrants::NETWORK),
+            (Stub(&["location"]), HostGrants::DEVICE_IO),
+            (Stub(&["storage", "location", "net"]), HostGrants::NETWORK.union(HostGrants::DEVICE_IO)),
+        ] {
+            let grants = super::module_grants(&module);
+            assert!(grants.intersection(forbidden).is_empty(), "WM-only powers escaped to {:?}", module.0);
+            assert_eq!(grants, base.union(extra), "exact grants for {:?}", module.0);
+        }
+    }
+
     /// `self:` inside a script module names the crate that module was
     /// written in, wherever it evaluates: the shell's icons stay the WM's
     /// in the main heap, and a widgets theme evaluated in a fresh isolate
@@ -285,9 +328,8 @@ mod tests {
         assert_eq!(cx.get_resource_abs_path(main, handle).as_deref(), Some(path.as_str()));
         // A fresh isolate: the widgets' iOS theme registers the widgets
         // crate's own fonts and icons, none of them under apps/wm.
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let isolate = cx.with_script_vm_id(vm_id, |vm| {
-            makepad_widgets::makepad_platform::script::res::script_mod(vm);
             desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(false)));
             vm.with_reload(makepad_widgets::widgets_mod);
             vm.heap_key()

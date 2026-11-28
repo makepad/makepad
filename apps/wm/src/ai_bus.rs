@@ -18,19 +18,17 @@
 //! open — a file in its associated app, through the same typed
 //! `OpenRequest` a file browser's double-click takes.
 //!
-//! The WM is the one bus owner of its process tree: every hosted client's
-//! service is also in the WM's process registry
-//! ([`ServiceRegistry::process`]), under the client's `w<id>` endpoint, so
-//! the WM's makepad-remote `app` service lists and calls it (a hosted child
-//! serves no `app` of its own). The registry's calls go down to the client
-//! like the pane's; the client's answers to them go back to the registry,
-//! everything else to the pane. The WM also answers a client's `Register`
-//! itself (the endpoint is the WM's to issue), so a port has its address
-//! without a pane.
+//! Each hosted client serves its own process `app` endpoint. The WM also
+//! aggregates these services in its process registry ([`ServiceRegistry::process`])
+//! under each client's `w<id>` endpoint. Desktop-wide callers use those endpoints
+//! through the WM's `app` service, and the WM's AI pane uses them on the bus.
+//! The WM routes calls from either source to the client and returns replies
+//! to the caller. It answers each client's `Register` itself so the client
+//! receives its endpoint even when the pane is closed.
 
 use makepad_app_host::ClientId;
 use makepad_ai_services::engine::ServiceRegistry;
-use makepad_ai_services::port::{ServiceLink, ServiceLinkHost};
+use makepad_ai_services::port::{ServiceConfirmations, ServiceLink, ServiceLinkHost};
 use makepad_ai_services::wire::*;
 use makepad_strict_json as json;
 use std::collections::{HashMap, HashSet};
@@ -47,6 +45,8 @@ pub enum Route {
     ToPane(String),
     /// A call for the WM itself; answer with `os_reply`.
     Os(ServiceCall),
+    /// A prompt for a service executed in the WM, sent by its hosted pane.
+    Confirm(EndpointId, ServiceDown),
     /// A frame for an IN-PROCESS instance (a module the WM hosts itself):
     /// the host runs its executor and answers with `local_reply`.
     Local(ClientId, ServiceDown),
@@ -70,12 +70,16 @@ pub struct AiBus {
     /// Per process client: the host half of its link in the registry.
     links: HashMap<ClientId, ServiceLinkHost>,
     /// Calls the registry sent down: their answers go back to it.
-    registry_calls: HashSet<String>,
+    registry_calls: HashMap<String, (ClientId, RegistryReply)>,
+    pane_confirms: HashMap<EndpointId, ServiceConfirmations>,
     /// Frames for clients made by the bus itself (`Registered` answers).
     outbox: Vec<(ClientId, String)>,
     /// Clients that registered since the last look (the WM adds their pid).
     joined: Vec<ClientId>,
 }
+
+#[derive(PartialEq)]
+enum RegistryReply { Confirmation, Execution }
 
 impl AiBus {
     /// A bus that also serves its clients through `registry`.
@@ -108,7 +112,10 @@ impl AiBus {
                     Ok(HostedDown { msg, .. }) => {
                         match &msg {
                             ServiceDown::Call(call) => {
-                                self.registry_calls.insert(call.call_id.clone());
+                                self.registry_calls.insert(call.call_id.clone(), (*client, RegistryReply::Execution));
+                            }
+                            ServiceDown::Confirm { call_id, .. } => {
+                                self.registry_calls.insert(call_id.clone(), (*client, RegistryReply::Confirmation));
                             }
                             ServiceDown::Cancel { call_id } => {
                                 self.registry_calls.remove(call_id);
@@ -130,6 +137,33 @@ impl AiBus {
             self.links.remove(&client);
         }
         out
+    }
+
+    pub fn handle_pane_confirm(&mut self, cx: &mut makepad_widgets::Cx, to: EndpointId, msg: ServiceDown) {
+        match msg {
+            ServiceDown::Confirm { call_id, tool, args } => {
+                let label = if to.as_str() == OS_ENDPOINT {
+                    Self::os_manifest(&[]).label
+                } else {
+                    let Some(manifest) = Self::client_of(&to).and_then(|(_, c)| self.manifests.get(&c)) else { return };
+                    manifest.label.clone()
+                };
+                self.pane_confirms.entry(to).or_default().ask(cx, &label, call_id, tool, args);
+            }
+            ServiceDown::Cancel { call_id } => {
+                if let Some(prompts) = self.pane_confirms.get_mut(&to) { prompts.withdraw(cx, &call_id); }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn pane_confirm_answers(&mut self, cx: &mut makepad_widgets::Cx) -> Vec<String> {
+        let mut frames = Vec::new();
+        self.pane_confirms.retain(|from, prompts| {
+            prompts.answers(cx, |msg| frames.push(HostedUp { from: Some(from.clone()), msg }.to_json()));
+            !prompts.is_empty()
+        });
+        frames
     }
 
     /// A client's frame into its registry link: a registration opens the
@@ -163,10 +197,14 @@ impl AiBus {
                 false
             }
             ServiceUp::Unregister => {
+                self.registry_calls.retain(|_, (owner, _)| *owner != client);
                 if self.links.remove(&client).is_some() {
                     registry.unregister(&endpoint);
                 }
                 false
+            }
+            ServiceUp::ConfirmAnswer { call_id, .. } => {
+                self.forward_registry_answer(client, call_id, true, up)
             }
             ServiceUp::Result(r) => self.forward_registry_answer(client, &r.call_id.clone(), true, up),
             ServiceUp::Progress { call_id, .. } => self.forward_registry_answer(client, &call_id.clone(), false, up),
@@ -181,8 +219,10 @@ impl AiBus {
     }
 
     fn forward_registry_answer(&mut self, client: ClientId, call_id: &str, last: bool, up: &HostedUp) -> bool {
-        if !self.registry_calls.contains(call_id) {
-            return false;
+        let Some((owner, expected)) = self.registry_calls.get(call_id) else { return false };
+        if *owner != client { return false }
+        if (*expected == RegistryReply::Confirmation) != matches!(up.msg, ServiceUp::ConfirmAnswer { .. }) {
+            return true; // Out of order: keep the route for the expected reply.
         }
         if last {
             self.registry_calls.remove(call_id);
@@ -367,6 +407,11 @@ impl AiBus {
                 None => return Route::Drop,
             };
             let Some(to) = down.to.clone() else { return Route::Drop };
+            let local = to.as_str() == OS_ENDPOINT || Self::client_of(&to).is_some_and(|(local, id)| local && self.locals.contains(&id));
+            if local && (matches!(&down.msg, ServiceDown::Confirm { .. }) ||
+                matches!(&down.msg, ServiceDown::Cancel { call_id } if self.pane_confirms.get(&to).is_some_and(|p| p.contains(call_id)))) {
+                return Route::Confirm(to, down.msg);
+            }
             if to.as_str() == OS_ENDPOINT {
                 return match down.msg {
                     ServiceDown::Call(call) => Route::Os(call),
@@ -411,15 +456,38 @@ impl AiBus {
         if self.logged_rejections.insert(client) {
             makepad_widgets::error!("wm rejected an AI service frame from client {client}: {}", rejected.error);
         }
-        let (true, Some(call_id)) = (rejected.mismatch, rejected.call_id) else { return Route::Drop };
+        let terminal = if self.is_pane(client) {
+            rejected.kind == RejectedKind::Call
+        } else {
+            rejected.kind == RejectedKind::Result
+        };
+        if !rejected.mismatch && !terminal {
+            return Route::Drop;
+        }
+        let Some(call_id) = rejected.call_id.filter(|id| is_opaque_id(id)) else {
+            return Route::Drop;
+        };
         let from = if self.is_pane(client) {
-            let Some(to) = rejected.endpoint else { return Route::Drop };
+            let Some(to) = rejected.endpoint.filter(|ep| is_opaque_id(ep)) else {
+                return Route::Drop;
+            };
             EndpointId(to)
         } else {
             Self::endpoint_of(client)
         };
-        let result = ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH);
-        Route::ToPane(HostedUp { from: Some(from), msg: ServiceUp::Result(result) }.to_json())
+        let mut result = if rejected.mismatch {
+            ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH)
+        } else if rejected.kind == RejectedKind::Result {
+            ToolResult::failed(call_id, format!("tool reply rejected: {}", rejected.error))
+        } else {
+            ToolResult::failed(call_id, rejected.error)
+        };
+        result.bound();
+        let up = HostedUp { from: Some(from), msg: ServiceUp::Result(result) };
+        if !self.is_pane(client) && self.to_registry(client, &up) {
+            return Route::Drop;
+        }
+        Route::ToPane(up.to_json())
     }
 
     /// A client died: the pane hears an `Unregister` on its behalf.
@@ -427,15 +495,19 @@ impl AiBus {
         self.logged_rejections.remove(&client);
         if self.is_pane(client) {
             self.pane_client = None;
+            self.pane_confirms.clear();
             return None;
         }
+        self.registry_calls.retain(|_, (owner, _)| *owner != client);
         if self.links.remove(&client).is_some() {
             if let Some(registry) = &self.registry {
                 registry.unregister(&Self::endpoint_of(client));
             }
         }
         self.manifests.remove(&client)?;
-        let from = Some(self.endpoint_for(client));
+        let endpoint = self.endpoint_for(client);
+        self.pane_confirms.remove(&endpoint);
+        let from = Some(endpoint);
         self.locals.remove(&client);
         Some(HostedUp { from, msg: ServiceUp::Unregister }.to_json())
     }
@@ -534,6 +606,98 @@ mod tests {
     }
 
     #[test]
+    fn rejected_terminal_frames_answer_pane_and_registry_without_failing_progress() {
+        let registry = ServiceRegistry::new();
+        let mut bus = AiBus::with_registry(registry.clone());
+        bus.pane_client = Some(9);
+        let w4 = AiBus::endpoint_of(4);
+        let register = HostedUp { from: None, msg: ServiceUp::Register { manifest: files(), port_tag: 3 } };
+        assert!(matches!(bus.on_custom(4, &register.to_json()), Route::ToPane(_)), "the client registration reaches the pane");
+        let oversized_result = |id: &str| HostedUp {
+            from: None,
+            msg: ServiceUp::Result(ToolResult::ok(id, "x".repeat(MAX_RESULT_WIRE_BYTES + 1), "")),
+        }.to_json();
+        let failed = |id| ToolResult::failed(id, "tool reply rejected: result: payload over wire cap");
+
+        let Route::ToPane(reply) = bus.on_custom(4, &oversized_result("p1")) else {
+            panic!("the pane must receive a failure for its call");
+        };
+        assert_eq!(HostedUp::parse(&reply), Some(HostedUp {
+            from: Some(w4.clone()), msg: ServiceUp::Result(failed("p1")),
+        }), "the pane receives the client's endpoint, call id and refusal reason");
+
+        let rx = registry.call_remote(&w4, call("stat", "{}")).expect("the registered client accepts a call");
+        assert!(matches!(bus.drain_registry().as_slice(), [(4, _)]), "the WM sends the registry call to client 4");
+        assert!(matches!(bus.on_custom(4, &oversized_result("c")), Route::Drop), "registry failures stay off the pane");
+        registry.pump_remote();
+        assert!(matches!(rx.try_recv(), Ok(RegistryUp::Result(from, r)) if from == w4 && r == failed("c")),
+            "the registry caller receives the matching terminal failure");
+
+        let progress = HostedUp {
+            from: None,
+            msg: ServiceUp::Progress { call_id: "p2".into(), note: String::new(), permille: 1001, task: None },
+        };
+        assert!(matches!(bus.on_custom(4, &progress.to_json()), Route::Drop), "bad progress leaves a pane call pending");
+        assert!(matches!(bus.on_custom(4, &oversized_result("bad id")), Route::Drop), "an invalid call id cannot receive a reply");
+
+        let down = HostedDown {
+            to: Some(w4.clone()),
+            msg: ServiceDown::Call(ServiceCall {
+                call_id: "p3".into(), args: "x".repeat(MAX_ARGS_BYTES + 1), ..call("stat", "{}")
+            }),
+        };
+        let Route::ToPane(reply) = bus.on_custom(9, &down.to_json()) else {
+            panic!("the pane must receive a failure for its oversized call");
+        };
+        assert_eq!(HostedUp::parse(&reply), Some(HostedUp {
+            from: Some(w4), msg: ServiceUp::Result(ToolResult::failed("p3", arguments_too_large(MAX_ARGS_BYTES + 1))),
+        }), "the pane receives the argument limit and its original call id");
+    }
+
+    #[test]
+    fn focus_updates_registry_pick_instance_order() {
+        let mut bus = AiBus::with_registry(ServiceRegistry::new());
+        let register = HostedUp {
+            from: None,
+            msg: ServiceUp::Register { manifest: ServiceManifest::new("town", "Town", "A shared town."), port_tag: 0 },
+        }.to_json();
+        for client in [2, 1] {
+            bus.on_custom(client, &register);
+        }
+
+        let registry = bus.registry().unwrap();
+        for client in [1, 2] {
+            let endpoint = AiBus::endpoint_of(client);
+            registry.focus(&endpoint);
+            assert_eq!(registry.pick_instance("town", None), Some(endpoint));
+        }
+    }
+
+    #[test]
+    fn focus_on_join_restores_a_focus_received_before_registration() {
+        let registry = ServiceRegistry::new();
+        let mut bus = AiBus::with_registry(registry.clone());
+        let register = HostedUp {
+            from: None,
+            msg: ServiceUp::Register { manifest: ServiceManifest::new("town", "Town", "A shared town."), port_tag: 0 },
+        }.to_json();
+        let w1 = AiBus::endpoint_of(1);
+        let w2 = AiBus::endpoint_of(2);
+
+        bus.on_custom(1, &register);
+        assert_eq!(bus.take_joined(), vec![1]);
+        registry.focus(&w1);
+
+        registry.focus(&w2);
+        bus.on_custom(2, &register);
+        assert_eq!(bus.take_joined(), vec![2]);
+        assert_eq!(registry.pick_instance("town", None), Some(w1), "focus before registration is dropped");
+
+        registry.focus(&w2);
+        assert_eq!(registry.pick_instance("town", None), Some(w2), "focus on join selects the second Town");
+    }
+
+    #[test]
     fn hosted_services_are_served_through_the_process_registry() {
         let registry = ServiceRegistry::new();
         let mut bus = AiBus::with_registry(registry.clone());
@@ -558,6 +722,20 @@ mod tests {
         assert!(matches!(bus.on_custom(4, &answer.to_json()), Route::Drop));
         registry.pump_remote();
         assert!(matches!(rx.try_recv(), Ok(RegistryUp::Result(e, r)) if e == w4 && r.call_id == "c"));
+        // External confirmations reach the same hosted process as its calls. An answer
+        // from a different client cannot consume this client's outstanding request.
+        assert!(registry.send(&w4, ServiceDown::Confirm {
+            call_id: "held".into(), tool: "stat".into(), args: "{}".into(),
+        }));
+        let frames = bus.drain_registry();
+        assert_eq!(frames.len(), 1);
+        let prompt = HostedDown::parse(&frames[0].1).unwrap();
+        assert_eq!(prompt.to, Some(w4.clone()));
+        assert!(matches!(prompt.msg, ServiceDown::Confirm { call_id, .. } if call_id == "held"));
+        let answer = HostedUp { from: None, msg: ServiceUp::ConfirmAnswer { call_id: "held".into(), allow: false } };
+        assert!(!bus.to_registry(5, &answer));
+        assert!(bus.to_registry(4, &answer));
+        assert!(!bus.to_registry(4, &answer), "a decline consumes the confirm route");
         // The pane's own calls are answered to the pane as before.
         let pane_answer = HostedUp { from: None, msg: ServiceUp::Result(ToolResult::ok("p1", "x", "")) };
         assert!(matches!(bus.on_custom(4, &pane_answer.to_json()), Route::ToPane(_)));

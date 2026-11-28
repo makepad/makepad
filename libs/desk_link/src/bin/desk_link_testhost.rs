@@ -85,7 +85,7 @@ fn serve(port: u16, name: String, width: u32, height: u32, fps: u16, bytes: usiz
     let payload = vec![0u8; bytes];
     let server = Server::start(ServerConfig {
         addr: ([0, 0, 0, 0], port).into(), tls_name: name.clone(), log: Arc::new(log), clock,
-        desktop_caps: 0,
+        desktop_caps: proto::desktop_caps::CLIPBOARD,
         input: Arc::new(|| {
             // Server names each session thread before invoking this factory.
             let thread = std::thread::current();
@@ -134,7 +134,10 @@ fn serve(port: u16, name: String, width: u32, height: u32, fps: u16, bytes: usiz
                             Control::Keyframe => { key_due = true; log(&format!("KEYFRAME session={session}")); }
                             Control::SelectScreen(screen) => log(&format!("SELECT session={session} screen={screen}")),
                             Control::Refresh(hz) => log(&format!("REFRESH session={session} hz={hz}")),
-                            Control::Clipboard(text) => log(&format!("CLIPBOARD session={session} bytes={}", text.len())),
+                            Control::Clipboard(text) => {
+                                log(&format!("CLIPBOARD session={session} bytes={}", text.len()));
+                                let _ = v.out.send(Out::ClipboardTaken);
+                            }
                             Control::Stats { frame, decode_us, present_us } => log(&format!("STATS session={session} frame={frame} decode_us={decode_us} present_us={present_us}")),
                             Control::Encoding { chroma, codec, preset, mbps, fps } => log(&format!("ENCODING session={session} chroma={chroma} codec={codec} preset={preset} mbps={mbps} fps={fps}")),
                         }

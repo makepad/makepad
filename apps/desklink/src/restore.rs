@@ -15,7 +15,7 @@ pub struct SavedWindow {
 }
 
 fn path() -> std::path::PathBuf {
-    makepad_network::fleet::makepad_home().join("desklink/windows")
+    makepad_widgets::makepad_platform::home::app_state_home().join("desklink/windows")
 }
 
 pub fn parse(text: &str) -> Vec<SavedWindow> {

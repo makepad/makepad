@@ -10,13 +10,17 @@
 //! line says how its PNG maps onto them.
 //!
 //! Steps (one line of output each):
-//! - `info`: the desktop, its stream size and screens, whether input is injected
+//! - `info`: the desktop, its stream size and screens, whether it takes input and shares the clipboard
 //! - `shot PATH [X,Y,W,H] [/N]`: the current picture as a PNG, optionally a crop of the stream
 //!   picture and scaled down N times (default: N so the PNG is at most 1920 wide/high)
 //! - `cursor`: where the desktop's pointer is and its shape (what hovering there asks for)
 //! - `move X Y`, `click X Y [left|right|middle] [double]`, `drag X1 Y1 X2 Y2 [left|right]`
 //! - `scroll NOTCHES [X Y]`: + scrolls the content up (wheel away from the user)
 //! - `type TEXT`: US-layout keys, Shift where needed (`\n` Enter, `\t` Tab)
+//! - `clip TEXT`: send text to the desktop's clipboard (`\n` newline, `\t` tab)
+//! - `clip-big MIB`: send MIB MiB of repeatable mixed-width UTF-8 text
+//! - `clip-wait [TIMEOUT_MS] [expect TEXT | expect-big MIB]`: wait for the next desktop copy
+//!   (default 5000 ms). Prints its byte count, time and optional comparison.
 //! - `key COMBO`: `ctrl+s`, `enter`, `tab`, `win+r`, `alt+f4`, `ctrl+shift+e`, `esc`
 //! - `wait MS`
 //! - `wait-change [TIMEOUT_MS] [QUIET_MS]`: from the current picture, until it changes and then
@@ -37,11 +41,12 @@
 use makepad_desk_link::{self as proto, ClientMsg, Inbox, ServerMsg};
 use makepad_key_code::{KeyCode, KEYCODE_VARIANTS};
 use makepad_video::{StreamVideoCodec, VideoStreamDecoder};
+use std::borrow::Cow;
 use std::io::Read;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "usage: desk-link-drive <host[:port]> <step> [, <step>]...\n  steps: info | shot PATH [X,Y,W,H] [/N] | move X Y | click X Y [left|right|middle] [double] | drag X1 Y1 X2 Y2 [button] | scroll N [X Y] | type TEXT | key COMBO | wait MS | wait-change [TIMEOUT_MS] [QUIET_MS] | record DIR MS";
+const USAGE: &str = "usage: desk-link-drive <host[:port]> <step> [, <step>]...\n  steps: info | shot PATH [X,Y,W,H] [/N] | move X Y | click X Y [left|right|middle] [double] | drag X1 Y1 X2 Y2 [button] | scroll N [X Y] | type TEXT | clip TEXT | clip-big MIB | clip-wait [TIMEOUT_MS] [expect TEXT | expect-big MIB] | key COMBO | wait MS | wait-change [TIMEOUT_MS] [QUIET_MS] | record DIR MS";
 
 /// How many already-queued messages `pump` still handles once its time is up (the rest wait for the next pump).
 const PUMP_DRAIN_MAX: usize = 64;
@@ -105,10 +110,56 @@ enum Step {
     Drag { from: [u32; 2], to: [u32; 2], button: u8 },
     Scroll { notches: i32, at: Option<[u32; 2]> },
     Type { keys: Vec<(KeyCode, bool)>, text: String },
+    Clip(ClipText),
+    ClipWait { timeout: u64, expect: Option<ClipText> },
     Key { combo: Vec<KeyCode>, text: String },
     Wait { ms: u64 },
     WaitChange { timeout: u64, quiet: u64 },
     Record { dir: String, ms: u64 },
+}
+
+enum ClipText {
+    Text(String),
+    Big { bytes: usize },
+}
+
+impl ClipText {
+    fn literal(args: &[String]) -> Result<Self, String> {
+        if args.is_empty() {
+            return Err("clipboard step needs TEXT".into());
+        }
+        Ok(Self::Text(unescape_text(&args.join(" "))))
+    }
+
+    fn big(args: &[String]) -> Result<Self, String> {
+        let [mib] = args else { return Err("clipboard size needs one MIB argument".into()) };
+        let bytes = mib.parse::<usize>().ok().and_then(|n| n.checked_mul(1 << 20))
+            .filter(|&n| n > 0 && n <= isize::MAX as usize)
+            .ok_or("MIB must be a positive whole number that fits in memory")?;
+        Ok(Self::Big { bytes })
+    }
+
+    fn text(&self) -> Result<Cow<'_, str>, String> {
+        match self {
+            Self::Text(text) => Ok(Cow::Borrowed(text)),
+            Self::Big { bytes } => {
+                const SAMPLE: &str = "aé😀界";
+                let mut text = String::new();
+                text.try_reserve_exact(*bytes).map_err(|_| "cannot allocate the requested clipboard text")?;
+                for _ in 0..bytes / SAMPLE.len() {
+                    text.push_str(SAMPLE);
+                }
+                for _ in 0..bytes % SAMPLE.len() {
+                    text.push('a');
+                }
+                Ok(Cow::Owned(text))
+            }
+        }
+    }
+}
+
+fn unescape_text(text: &str) -> String {
+    text.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 fn num<T: std::str::FromStr>(args: &[String], i: usize, what: &str) -> Result<T, String> {
@@ -166,6 +217,9 @@ impl Step {
             Step::Drag { .. } => "drag",
             Step::Scroll { .. } => "scroll",
             Step::Type { .. } => "type",
+            Step::Clip(ClipText::Text(_)) => "clip",
+            Step::Clip(ClipText::Big { .. }) => "clip-big",
+            Step::ClipWait { .. } => "clip-wait",
             Step::Key { .. } => "key",
             Step::Wait { .. } => "wait",
             Step::WaitChange { .. } => "wait-change",
@@ -221,12 +275,29 @@ impl Step {
                 if text.is_empty() {
                     return Err("type needs TEXT".into());
                 }
-                let text = text.replace("\\n", "\n").replace("\\t", "\t");
+                let text = unescape_text(&text);
                 let missing: String = text.chars().filter(|c| key_for_char(*c).is_none()).collect();
                 if !missing.is_empty() {
                     return Err(format!("type: no US key for {missing:?}"));
                 }
                 Step::Type { keys: text.chars().filter_map(key_for_char).collect(), text }
+            }
+            "clip" => Step::Clip(ClipText::literal(&a[1..])?),
+            "clip-big" => Step::Clip(ClipText::big(&a[1..])?),
+            "clip-wait" => {
+                let (timeout, args) = match &a[1..] {
+                    [ms, rest @ ..] if ms != "expect" && ms != "expect-big" => {
+                        (ms.parse().map_err(|_| "clip-wait needs TIMEOUT_MS, expect or expect-big")?, rest)
+                    }
+                    rest => (5000, rest),
+                };
+                let expect = match args {
+                    [] => None,
+                    [kind, rest @ ..] if kind == "expect" => Some(ClipText::literal(rest)?),
+                    [kind, rest @ ..] if kind == "expect-big" => Some(ClipText::big(rest)?),
+                    _ => return Err("clip-wait needs expect TEXT or expect-big MIB after TIMEOUT_MS".into()),
+                };
+                Step::ClipWait { timeout, expect }
             }
             "key" => {
                 let text = a.get(1).ok_or("key needs a COMBO")?.clone();
@@ -257,12 +328,16 @@ struct Link {
     /// To the network thread (it owns the socket and reads all the time, as a viewer's does: a
     /// desktop drops a viewer whose socket stays full, and decoding here takes its time).
     out: Sender<ClientMsg>,
-    /// From it: the desktop's messages, or why the session ended.
-    inbox: Receiver<Result<ServerMsg, String>>,
+    /// From it: when each message arrived, and the message, or why the session ended.
+    inbox: Receiver<Result<(Instant, ServerMsg), String>>,
     thread: Option<std::thread::JoinHandle<()>>,
     server: String,
     host_status: String,
     welcome: Option<(Vec<proto::ScreenInfo>, u32, [u32; 2], bool, String)>,
+    clipboard_shared: bool,
+    clipboard_parts: proto::ClipboardParts,
+    clipboard_text: String,
+    clipboard_count: u64,
     cursor: Option<(u16, u16)>,
     cursor_shape: u8,
     /// The encoder streams a picture is cut into (`Rate`).
@@ -334,7 +409,7 @@ impl Recording {
 impl Link {
     fn connect(host: &str, port: &str) -> Result<Link, String> {
         let (mut stream, peer, authorization) = makepad_network::fleet::id::connect(host, port).map_err(|e| format!("connect: {e}"))?;
-        let caps = proto::caps::FULL_CHROMA | proto::caps::HEVC | proto::caps::VIEW_ONLY;
+        let caps = proto::caps::FULL_CHROMA | proto::caps::HEVC | proto::caps::VIEW_ONLY | proto::caps::CLIPBOARD;
         let hello = ClientMsg::Hello { version: proto::VERSION, name: "agent".into(), authorization, screen: -1, paused: true, caps };
         proto::write_all(&mut stream, &hello.encode()).map_err(|e| e.to_string())?;
         stream.set_read_timeout(Some(Duration::from_millis(2))).map_err(|e| e.to_string())?;
@@ -352,6 +427,10 @@ impl Link {
             server: peer.name,
             host_status: String::new(),
             welcome: None,
+            clipboard_shared: false,
+            clipboard_parts: proto::ClipboardParts::default(),
+            clipboard_text: String::new(),
+            clipboard_count: 0,
             cursor: None,
             cursor_shape: 1,
             streams: 0,
@@ -393,21 +472,32 @@ impl Link {
         self.welcome.as_ref().map_or([0, 0], |w| w.2)
     }
 
+    /// Handles one message and returns when the network thread received it.
+    fn pump_one(&mut self, for_: Duration) -> Result<Option<Instant>, String> {
+        match self.inbox.recv_timeout(for_) {
+            Ok(msg) => {
+                let (at, msg) = msg?;
+                self.handle(msg)?;
+                Ok(Some(at))
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err("the session ended".into()),
+        }
+    }
+
     /// Reads and handles what arrives for `for_`.
     fn pump(&mut self, for_: Duration) -> Result<(), String> {
         let until = Instant::now() + for_;
         loop {
-            match self.inbox.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                Ok(msg) => self.handle(msg?)?,
-                Err(RecvTimeoutError::Timeout) => return Ok(()),
-                Err(RecvTimeoutError::Disconnected) => return Err("the session ended".into()),
+            if self.pump_one(until.saturating_duration_since(Instant::now()))?.is_none() {
+                return Ok(());
             }
             if Instant::now() >= until {
                 // what already came is handled too, but only a bounded batch: a 4K desktop's video can
                 // arrive faster than it decodes, and draining until the inbox is empty never ended
                 for _ in 0..PUMP_DRAIN_MAX {
                     let Ok(msg) = self.inbox.try_recv() else { break };
-                    self.handle(msg?)?;
+                    self.handle(msg?.1)?;
                 }
                 return Ok(());
             }
@@ -416,6 +506,14 @@ impl Link {
 
     fn handle(&mut self, msg: ServerMsg) -> Result<(), String> {
         match msg {
+            ServerMsg::DesktopCaps { caps } if self.welcome.is_none() => {
+                self.clipboard_shared = caps & proto::desktop_caps::CLIPBOARD != 0;
+            }
+            ServerMsg::ClipboardPart { text } if self.clipboard_shared => self.clipboard_parts.part(&text),
+            ServerMsg::Clipboard { text } if self.clipboard_shared => {
+                self.clipboard_text = self.clipboard_parts.end(text);
+                self.clipboard_count += 1;
+            }
             ServerMsg::Welcome { screens, screen, stream, input, input_note, server, .. } => {
                 self.server = server;
                 self.welcome = Some((screens, screen, stream, input, input_note));
@@ -605,8 +703,42 @@ impl Link {
         self.cursor.map_or("-".into(), |(x, y)| format!("{},{}", (x as u64 * w as u64 / 65536), (y as u64 * h as u64 / 65536)))
     }
 
+    fn clipboard_ok(&self) -> Result<(), String> {
+        if self.clipboard_shared { Ok(()) } else { Err("the desktop does not share its clipboard".into()) }
+    }
+
+    fn clip_wait(&mut self, timeout: u64, expect: Option<&ClipText>) -> Result<String, String> {
+        self.clipboard_ok()?;
+        let start = Instant::now();
+        let limit = Duration::from_millis(timeout);
+        loop {
+            let remaining = limit.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            let before = self.clipboard_count;
+            let Some(at) = self.pump_one(remaining)? else { break };
+            // An older copy can still be queued behind video when the step starts.
+            if at < start || self.clipboard_count == before {
+                continue;
+            }
+            let elapsed = at.duration_since(start);
+            if elapsed > limit {
+                break;
+            }
+            let mut line = format!("clip: got {} bytes after {} ms", self.clipboard_text.len(), elapsed.as_millis());
+            if let Some(expect) = expect {
+                let text = expect.text()?;
+                let result = if self.clipboard_text.as_str() == text.as_ref() { "matches" } else { "differs" };
+                line.push_str(&format!(", {result} (expected {} bytes)", text.len()));
+            }
+            return Ok(line);
+        }
+        Err(format!("no new clipboard text in {timeout} ms"))
+    }
+
     fn run(&mut self, step: &Step) -> Result<String, String> {
-        let input = !matches!(step, Step::Info | Step::Cursor | Step::Shot { .. } | Step::Wait { .. } | Step::WaitChange { .. } | Step::Record { .. });
+        let input = matches!(step, Step::Move { .. } | Step::Click { .. } | Step::Drag { .. } | Step::Scroll { .. } | Step::Type { .. } | Step::Key { .. });
         if input && self.before.is_none() && !self.paused && self.composed > 0 {
             self.before = Some(self.canvas.clone());
         }
@@ -619,7 +751,7 @@ impl Link {
                 let (screens, screen, stream, input, note) = self.welcome.clone().unwrap();
                 let list: Vec<String> = screens.iter().enumerate().map(|(i, s)| format!("{i}:{}x{}@{},{}", s.width, s.height, s.x, s.y)).collect();
                 Ok(format!(
-                    "info {} stream {}x{} screen {screen} of [{}] input {}{} cursor {}{}",
+                    "info {} stream {}x{} screen {screen} of [{}] input {}{} cursor {} clipboard {}{}",
                     self.server,
                     stream[0],
                     stream[1],
@@ -627,6 +759,7 @@ impl Link {
                     if input { "ok" } else { "off" },
                     if input { String::new() } else { format!(" ({note})") },
                     self.cursor_px(),
+                    if self.clipboard_shared { "yes" } else { "no" },
                     if self.host_status.is_empty() { String::new() } else { format!("; {}", self.host_status) }
                 ))
             }
@@ -723,6 +856,17 @@ impl Link {
                 }
                 Ok(format!("type {} chars ok", text.chars().count()))
             }
+            Step::Clip(clip) => {
+                self.clipboard_ok()?;
+                let text = clip.text()?;
+                let messages = ClientMsg::clipboard(&text);
+                let count = messages.len();
+                for msg in messages {
+                    self.send(msg)?;
+                }
+                Ok(format!("clip: sent {} bytes in {count} messages", text.len()))
+            }
+            Step::ClipWait { timeout, expect } => self.clip_wait(*timeout, expect.as_ref()),
             Step::Key { combo, text } => {
                 self.input_ok()?;
                 for k in combo {
@@ -819,7 +963,7 @@ impl Link {
 
 /// The session's socket: reads all the time, writes what `out` brings, pings once a second.
 /// Returns why it ended.
-fn network(mut stream: makepad_network::SocketStream, out: Receiver<ClientMsg>, to: &Sender<Result<ServerMsg, String>>) -> String {
+fn network(mut stream: makepad_network::SocketStream, out: Receiver<ClientMsg>, to: &Sender<Result<(Instant, ServerMsg), String>>) -> String {
     let mut inbox = Inbox::default();
     let mut buf = vec![0u8; 1 << 20];
     let epoch = Instant::now();
@@ -844,12 +988,16 @@ fn network(mut stream: makepad_network::SocketStream, out: Receiver<ClientMsg>, 
                 return format!("write: {e}");
             }
         }
-        match stream.read(&mut buf) {
+        let received_at = match stream.read(&mut buf) {
             Ok(0) => return "the desktop closed the session".into(),
-            Ok(n) => inbox.feed(&buf[..n]),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Ok(n) => {
+                let at = Instant::now();
+                inbox.feed(&buf[..n]);
+                at
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
             Err(e) => return format!("read: {e}"),
-        }
+        };
         loop {
             let msg = match inbox.next() {
                 Ok(Some((ty, payload))) => ServerMsg::decode(ty, &payload).map_err(|e| e.to_string()),
@@ -857,7 +1005,7 @@ fn network(mut stream: makepad_network::SocketStream, out: Receiver<ClientMsg>, 
                 Err(e) => Err(e.to_string()),
             };
             let failed = msg.is_err();
-            if to.send(msg).is_err() || failed {
+            if to.send(msg.map(|m| (received_at, m))).is_err() || failed {
                 return "done".into();
             }
         }
@@ -897,4 +1045,59 @@ fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     PngEncoder::new(rgb, options).encode(&mut out).map_err(|e| format!("png: {e:?}"))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Step, String> {
+        Step::parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn clipboard_steps_parse() {
+        let clip = parse(&["clip", "one\\n", "二\\t"]).unwrap();
+        assert_eq!(clip.name(), "clip");
+        assert!(matches!(clip, Step::Clip(ClipText::Text(t)) if t == "one\n 二\t"));
+        assert!(matches!(parse(&["clip", ""]).unwrap(), Step::Clip(ClipText::Text(t)) if t.is_empty()));
+        let big = parse(&["clip-big", "2"]).unwrap();
+        assert_eq!(big.name(), "clip-big");
+        assert!(matches!(big, Step::Clip(ClipText::Big { bytes }) if bytes == 2 << 20));
+
+        let wait = parse(&["clip-wait"]).unwrap();
+        assert_eq!(wait.name(), "clip-wait");
+        assert!(matches!(wait, Step::ClipWait { timeout: 5000, expect: None }));
+        assert!(matches!(parse(&["clip-wait", "30"]).unwrap(), Step::ClipWait { timeout: 30, expect: None }));
+        assert!(matches!(parse(&["clip-wait", "expect", "a\\t", "b"]).unwrap(),
+            Step::ClipWait { timeout: 5000, expect: Some(ClipText::Text(t)) } if t == "a\t b"));
+        assert!(matches!(parse(&["clip-wait", "30", "expect-big", "2"]).unwrap(),
+            Step::ClipWait { timeout: 30, expect: Some(ClipText::Big { bytes }) } if bytes == 2 << 20));
+
+        for (args, field) in [
+            (&["clip"][..], "TEXT"),
+            (&["clip-big"][..], "MIB"),
+            (&["clip-big", "-1"][..], "MIB"),
+            (&["clip-big", "18446744073709551615"][..], "MIB"),
+            (&["clip-big", "1", "2"][..], "MIB"),
+            (&["clip-wait", "later"][..], "TIMEOUT_MS"),
+            (&["clip-wait", "30", "other"][..], "expect"),
+            (&["clip-wait", "expect"][..], "TEXT"),
+            (&["clip-wait", "expect-big", "many"][..], "MIB"),
+        ] {
+            assert!(parse(args).is_err_and(|e| e.contains(field)), "bad {} arguments should name {field}", args[0]);
+        }
+    }
+
+    #[test]
+    fn big_clipboard_text_is_repeatable_mixed_width_utf8() {
+        let Step::Clip(big) = parse(&["clip-big", "1"]).unwrap() else { panic!("expected a clipboard step") };
+        let text = big.text().unwrap();
+        assert_eq!(text.len(), 1 << 20);
+        for width in 1..=4 {
+            assert!(text.chars().any(|c| c.len_utf8() == width), "missing a {width}-byte character");
+        }
+        let again = big.text().unwrap();
+        assert!(text == again, "the same size must generate the same text");
+    }
 }

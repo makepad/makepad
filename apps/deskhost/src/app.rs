@@ -11,10 +11,12 @@
 
 use crate::settings::Settings;
 use crate::view::{DeskHostAction, DeskHostView, ViewState};
-use makepad_desk_link::host::{Cmd, HostControl, HostState, Report, ViewerRow};
+use makepad_desk_link::host::{ClipboardWork, Cmd, HostControl, HostState, Report, ViewerRow};
 use makepad_desk_link_panel::tray_glyph::{image, Glyph};
+use makepad_network::SignalToUI;
 use makepad_shell_kit::tray_app::{selftest_note, DropdownChange, LoginItem, TrayDropdown};
 use makepad_widgets::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 app_main!(App);
@@ -62,6 +64,36 @@ pub struct App {
 struct Host {
     ctl: Arc<HostControl>,
     thread: Option<std::thread::JoinHandle<()>>,
+    clipboard_signal: SignalToUI,
+    /// The host request each OS read answers, including reads still returning after a restart.
+    clipboard_reads: HashMap<u64, (u64, ClipboardWork)>,
+}
+
+impl Host {
+    fn read_clipboard(&mut self, cx: &mut Cx) {
+        if self.clipboard_signal.check_and_clear() {
+            for (request, work) in self.ctl.take_clipboard() {
+                if let ClipboardWork::Apply { text, .. } = &work {
+                    cx.copy_to_clipboard(text);
+                }
+                self.clipboard_reads.insert(cx.read_clipboard(), (request, work));
+            }
+        }
+    }
+
+    fn clipboard_reply(&mut self, read: u64, text: Option<&str>) {
+        let Some((request, work)) = self.clipboard_reads.remove(&read) else { return };
+        let text = text.unwrap_or_default();
+        match work {
+            ClipboardWork::Read => self.ctl.send(Cmd::ClipboardChanged { request, text: text.to_owned() }),
+            ClipboardWork::Apply { session, text: expected } => {
+                self.ctl.send(Cmd::ClipboardTaken { request, session });
+                if text != expected {
+                    crate::log(&format!("desk host: clipboard read-back differs: wrote {} bytes, read {} bytes", expected.len(), text.len()));
+                }
+            }
+        }
+    }
 }
 
 /// "Open at login" (macOS): the LaunchAgent `apps/deskhost/macos/install.sh` writes, naming the
@@ -163,7 +195,9 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // the host's thread: its desktop (capture, cursor, input) lives there
-        let (ctl, wake_rx) = HostControl::new();
+        let clipboard_signal = SignalToUI::new();
+        let wake_ui = clipboard_signal.clone();
+        let (ctl, wake_rx) = HostControl::with_clipboard(Arc::new(move || wake_ui.set()));
         let ctl = Arc::new(ctl);
         let ctl2 = ctl.clone();
         let thread = std::thread::Builder::new()
@@ -179,7 +213,7 @@ impl MatchEvent for App {
                 let _ = (ctl2, wake_rx);
             })
             .ok();
-        self.host = Some(Host { ctl, thread });
+        self.host = Some(Host { ctl, thread, clipboard_signal, clipboard_reads: HashMap::new() });
         cx.show_in_dock(false);
         self.refresh(cx);
         self.timer = cx.start_interval(0.5);
@@ -228,6 +262,16 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::Timer(t) if self.timer.is_timer(t).is_some() => self.refresh(cx),
+            Event::Signal => {
+                if let Some(h) = &mut self.host {
+                    h.read_clipboard(cx);
+                }
+            }
+            Event::Clipboard(reply) => {
+                if let Some(h) = &mut self.host {
+                    h.clipboard_reply(reply.request, reply.content.text.as_deref());
+                }
+            }
             Event::TrayMenu(e) if e.tray == TRAY => match e.item {
                 id if id == SERVING => {
                     let on = !Settings::load().enabled;

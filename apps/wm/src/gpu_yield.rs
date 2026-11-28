@@ -12,6 +12,18 @@
 //! its chat model grows back to its configured context when the budget allows. Plain state over event times, so it
 //! is tested without a hub or a GPU.
 
+/// Convert the active pressure reserve to whole MiB as in a HAL pressure event.
+pub fn ui_reserve_mb_from_bytes(bytes: u64) -> Option<u64> {
+    (bytes > 0).then(|| bytes.div_ceil(1 << 20))
+}
+
+pub fn ui_reserve_mb() -> Option<u64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    { ui_reserve_mb_from_bytes(makepad_hal::gpu_limits::gpu_ui_reserve_bytes()) }
+    #[cfg(target_arch = "wasm32")]
+    { None }
+}
+
 /// Seconds a step is given to show in the device's free memory before the next one: the
 /// hub rebuilding a 27B model at a smaller window takes a few seconds, and the HAL only
 /// repeats a shortage that lasted 4 s.
@@ -86,6 +98,24 @@ pub fn notice_for(report: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ui_reserve_mb_converts_hal_reserve_bytes_to_mib() {
+        assert_eq!(ui_reserve_mb_from_bytes(0), None);
+        assert_eq!(ui_reserve_mb_from_bytes(1536 << 20), Some(1536));
+        assert_eq!(ui_reserve_mb_from_bytes((4 << 30) / 10), Some(410));
+        assert_eq!(ui_reserve_mb_from_bytes((8 << 30) / 10), Some(820));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use makepad_hal::gpu_limits::{gpu_ui_reserve_bytes, set_gpu_ui_reserve_bytes};
+            let prev = gpu_ui_reserve_bytes();
+            set_gpu_ui_reserve_bytes(1536 << 20);
+            assert_eq!(ui_reserve_mb(), Some(1536));
+            set_gpu_ui_reserve_bytes(0);
+            assert_eq!(ui_reserve_mb(), None);
+            set_gpu_ui_reserve_bytes(prev);
+        }
+    }
 
     #[test]
     fn the_steps_go_caches_then_unload_then_stop() {

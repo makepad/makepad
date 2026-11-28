@@ -136,8 +136,6 @@ pub struct Shared {
     pub session: u64,
     /// The newest complete clipboard text waiting for the UI, with its session.
     pub clipboard: Option<(u64, String)>,
-    /// The UI reads the local clipboard when the focused window's session opens.
-    pub clipboard_opened: bool,
     /// Round trip of the last ping (ms).
     pub rtt_ms: Option<f64>,
     /// server clock - viewer clock (ns): the smallest-RTT ping of the last `OFFSET_WINDOW`.
@@ -550,7 +548,6 @@ impl Net {
                         let mut s = self.shared.lock().unwrap();
                         s.welcome = Some(Welcome { screens, screen, stream: size, input, input_note, server, clipboard });
                         s.session += 1;
-                        s.clipboard_opened = clipboard;
                         s.clipboard = None;
                         s.state = Some(State::Connected);
                         drop(s);
@@ -649,7 +646,6 @@ impl Net {
             let mut s = self.shared.lock().unwrap();
             s.welcome = None;
             s.clipboard = None;
-            s.clipboard_opened = false;
             s.pongs.clear();
         }
         drop(dec_tx);

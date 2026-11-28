@@ -257,6 +257,14 @@ impl MacDesktop {
 }
 
 impl Desktop for MacDesktop {
+    fn clipboard_seq(&mut self) -> u64 {
+        unsafe {
+            let pasteboard: ObjcId = msg_send![class!(NSPasteboard), generalPasteboard];
+            let count: isize = msg_send![pasteboard, changeCount];
+            count as u64
+        }
+    }
+
     fn screens(&mut self) -> Vec<ScreenInfo> {
         displays()
             .into_iter()

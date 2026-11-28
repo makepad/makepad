@@ -127,6 +127,10 @@ fits in one message. The receiver joins the parts in order before applying the t
 On a paste chord the viewer sends the text ahead of the V key. After a `Clipboard` the desktop
 holds that viewer's subsequent input in order until its clipboard takes the text, for at most 2 s.
 
+The viewer sends local text only on a paste chord into the focused window, to that window's
+desktop: never on focus, tab selection or session open, and never to other desktops. It takes a
+desktop's `Clipboard` into the local clipboard only from the desktop in the focused window.
+
 ## Video
 
 - **Codec.** H.265 when the desktop's settings allow it (`codec = auto`, the default), its GPU

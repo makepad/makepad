@@ -155,12 +155,9 @@ pub struct App {
     /// The viewer whose window has the keyboard.
     #[rust]
     focused: usize,
-    /// Only the window with platform focus may offer the local clipboard.
+    /// Only the window with platform focus pastes to its desktop or takes its desktop's copies.
     #[rust]
     clipboard_window: Option<WindowId>,
-    /// A local read belongs to one window, connection, session and request.
-    #[rust]
-    clipboard_read: Option<(WindowId, usize, u64, u64)>,
     #[rust]
     signal: SignalToUI,
     #[rust]
@@ -297,7 +294,7 @@ fn hosts() -> Vec<(String, String, u16)> {
         return out;
     }
     let own: Vec<std::net::IpAddr> = makepad_core_util::netif::interfaces().iter().map(|i| std::net::IpAddr::V4(i.addr)).collect();
-    let home = makepad_network::fleet::makepad_home();
+    let home = makepad_widgets::makepad_platform::home::app_state_home();
     if let Ok(text) = std::fs::read_to_string(home.join("desklink/hosts")) {
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let mut parts = line.split_whitespace();
@@ -978,7 +975,6 @@ impl AppMain for App {
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.focused = vi;
                     self.claim_size(cx, vi);
-                    self.read_local_clipboard(cx, vi);
                 }
             }
             // focus gone (Cmd-Tab, another window, a sheet): what this window holds down on its
@@ -986,7 +982,6 @@ impl AppMain for App {
             Event::WindowLostFocus(id) => {
                 if self.clipboard_window == Some(*id) {
                     self.clipboard_window = None;
-                    self.clipboard_read = None;
                 }
                 if let Some(vi) = self.viewer_of_window(*id) {
                     self.release_held(vi, "window lost focus");
@@ -994,13 +989,11 @@ impl AppMain for App {
             }
             Event::Pause | Event::Background => {
                 self.clipboard_window = None;
-                self.clipboard_read = None;
                 for vi in 0..self.viewers.len() {
                     self.release_held(vi, "app inactive");
                 }
             }
             Event::TextInput(e) if e.was_paste => self.paste_clipboard(cx, &e.input),
-            Event::Clipboard(e) => self.clipboard_reply(e.request, e.content.text.as_deref()),
             Event::KeyDown(_) | Event::KeyUp(_) => {
                 let vi = self.focused.min(self.viewers.len() - 1);
                 self.key_event(cx, vi, event);

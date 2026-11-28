@@ -65,11 +65,7 @@ impl App {
         let Some(state) = self.state.as_mut() else { return };
         let mut lines = Vec::new();
         for (id, slot) in state.clients.iter_mut() {
-            #[cfg(target_os = "linux")]
-            let adopted = adopt::pid_of(*id);
-            #[cfg(not(target_os = "linux"))]
-            let adopted: Option<u32> = None;
-            let pid = slot.external.or(adopted).or_else(|| slot.child.as_ref().map(|c| c.id()));
+            let pid = Self::client_pid(*id, slot);
             let alive = pid.is_some_and(makepad_app_host::launch::process_alive);
             let connected = slot.socket.is_some();
             let line = format!(
