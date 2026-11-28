@@ -83,7 +83,7 @@ fn show_help() {
         "       --wasm-opt                                Run Binaryen wasm-opt -Oz when a compatible version is on PATH"
     );
     println!(
-        "       --no-location-detail                      Omit panic file/line/column detail (nightly production diagnostic tradeoff)"
+        "       --no-location-detail                      Omit panic file/line/column detail (an unstable rustc flag; a production diagnostic tradeoff)"
     );
     println!(
         "       --size-report                             Print exact wasm section and split-artifact sizes"

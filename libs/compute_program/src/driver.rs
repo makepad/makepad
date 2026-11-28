@@ -264,6 +264,9 @@ fn run_program(vm: &mut ScriptVm, program: &Program, config: &SessionConfig) -> 
         .filter(|f| vm.is_fn(*f))
         .ok_or_else(|| ProgramError::Load(format!("{}: the document's last value is {{run: fn(s, p) {{..}}}}", program.name)))?;
     let params = to_script(vm, &config.params);
+    if vm.heap_mut().take_heap_limit_exceeded() {
+        return Err(ProgramError::OverBudget("heap"));
+    }
     let result = limited(vm, &limits, &mut fuel, |vm| vm.call(run.into(), &[s.into(), params]));
     let result = outcome(vm, result)?;
     // The value, read before the end's boundary: nothing in the VM holds it once `run`
@@ -571,8 +574,10 @@ fn handle(vm: &mut ScriptVm, slot: usize, gen: u32, ty: ElemTy, len: usize) -> S
 
 fn object(vm: &mut ScriptVm, fields: &[(&str, ScriptValue)]) -> ScriptValue {
     let o = vm.new_object();
+    if vm.heap().allocation_error_pending() { return NIL; }
     for (k, v) in fields {
         vm.set_value_def(o, key_id(k), *v);
+        if vm.heap().allocation_error_pending() { return NIL; }
     }
     o.into()
 }
@@ -1400,9 +1405,11 @@ fn boundary(vm: &mut ScriptVm, d: &mut Driver) -> Res<bool> {
 
 fn words_to_array(vm: &mut ScriptVm, ty: ElemTy, words: &[u32]) -> ScriptValue {
     let a = vm.heap_mut().new_array();
+    if vm.heap().allocation_error_pending() { return NIL; }
     if ty == ElemTy::F64 {
         for w in words.chunks_exact(2) {
             vm.array_push_trap(a, num(f64::from_bits(w[0] as u64 | (w[1] as u64) << 32)));
+            if vm.heap().allocation_error_pending() { return NIL; }
         }
     } else {
         for w in words {
@@ -1412,6 +1419,7 @@ fn words_to_array(vm: &mut ScriptVm, ty: ElemTy, words: &[u32]) -> ScriptValue {
                 _ => f32::from_bits(*w) as f64,
             };
             vm.array_push_trap(a, num(x));
+            if vm.heap().allocation_error_pending() { return NIL; }
         }
     }
     a.into()
@@ -1523,12 +1531,16 @@ fn inbox_value(vm: &mut ScriptVm, d: &mut Driver, defaults: ScriptValue) -> Res<
     };
     d.rev = rev;
     let m = vm.new_object();
+    if vm.heap().allocation_error_pending() { return Ok(NIL); }
     for (key, value) in defaults {
         vm.set_value_def(m, key, value);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
     }
     for (key, value) in &msgs {
         let v = to_script(vm, value);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
         vm.set_value_def(m, key_id(key), v);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
     }
     Ok(object(vm, &[("rev", num(rev as f64)), ("msgs", m.into()), ("interrupted", ScriptValue::from_bool(interrupted))]))
 }
@@ -1745,8 +1757,10 @@ fn op_device(vm: &mut ScriptVm, d: &mut Driver) -> Res<ScriptValue> {
 
 fn op_stats(vm: &mut ScriptVm, d: &mut Driver) -> Res<ScriptValue> {
     let a = vm.heap_mut().new_array();
-    for (label, s) in d.stats.clone() {
-        let l = vm.new_string(&label);
+    if vm.heap().allocation_error_pending() { return Ok(NIL); }
+    for (label, s) in &d.stats {
+        let l = vm.new_string(label);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
         let o = object(vm, &[
             ("label", l),
             ("calls", num(s.calls as f64)),
@@ -1754,8 +1768,62 @@ fn op_stats(vm: &mut ScriptVm, d: &mut Driver) -> Res<ScriptValue> {
             ("work", num(s.work as f64)),
             ("elements", num(s.elements as f64)),
         ]);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
         vm.array_push_trap(a, o);
+        if vm.heap().allocation_error_pending() { return Ok(NIL); }
     }
     let work = num(d.work as f64);
     Ok(object(vm, &[("work", work), ("kernels", a.into())]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_to_array_and_op_stats_stop_on_refusal() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        vm.capture_errors();
+        while !vm.with_heap_allocation_limit(0, |vm| vm.heap_mut().new_array()).1.exceeded {}
+        vm.take_errors();
+        vm.capture_errors();
+        let one_word = size_of::<ScriptArrayData>() + size_of::<ScriptValue>();
+        let reads = [0, one_word].map(|budget| {
+            let (result, report) = vm.with_heap_allocation_limit(budget, |vm| {
+                words_to_array(vm, ElemTy::F32, &[0; 8])
+            });
+            assert!(report.exceeded, "converting eight words must exhaust the {budget}-byte budget");
+            result.is_nil()
+        });
+
+        let mut driver = Driver {
+            shared: Arc::default(),
+            device: CpuDevice::new(None, 1, crate::Backend::Interp, 0),
+            limits: Limits::default(),
+            inputs: Vec::new(),
+            pending: Vec::new(),
+            kernels: Vec::new(),
+            shaders: Vec::new(),
+            gpu: None,
+            seed: 0,
+            work: 0,
+            buffer_bytes: 0,
+            rev: 0,
+            versions: Vec::new(),
+            fatal: None,
+            stats: ["too_long", "ok1", "ok2"].map(|label| (label.to_owned(), Stat::default())).into(),
+            fetches: HashMap::new(),
+            next_fetch: 0,
+            keep: None,
+            input_hashes: Vec::new(),
+        };
+        vm.heap_mut().set_max_string_bytes(Some(4));
+        let before = vm.heap().gc_live_counts().objects;
+        let stats = op_stats(&mut vm, &mut driver);
+        let allocated = vm.heap().gc_live_counts().objects - before;
+        assert!(vm.heap_mut().take_string_limit_exceeded(), "the first stat label must hit the string limit");
+        assert_eq!((reads, matches!(stats, Ok(v) if v.is_nil()), allocated), ([true, true], true, 0),
+            "refused reads must return NIL, and a refused stat label must return Ok(NIL) before allocating any objects");
+    }
 }

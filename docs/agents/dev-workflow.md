@@ -102,7 +102,10 @@ buckets ask for one, and the queue decides where and when.
     (`devhub show stop <app> --on <node>` closes it: left open, it holds that box's WM restart);
   - timed: the box to itself, for timings. A live session for timings is
     `devhub live start <app> --timed`: it waits for a drained box and holds it
-    while it lives, and only other timed work parks it;
+    while it lives, and only other timed work parks it. A timed run that opens
+    windows (a GUI measurement, such as start-up to the first frame) adds
+    `--needs gui=1`: it gets its box's WM display, on a bench or a pool box,
+    and its `--native` release build passes. A screen lease is no timed series;
   - gate: a landing gate;
   - gpu: on Linux a GPU slot; on a Mac a GPU timing, which drains its box like timed.
     Pictures and counters that read no timing take `gpu --untimed`: on a Mac a test that
@@ -172,9 +175,10 @@ buckets ask for one, and the queue decides where and when.
   A run selecting a gap stays off it, and says so.
 - A test that plays to the audio output device (its clock is the output's callback) declares it
   in its Cargo.toml: `[package.metadata.makepad.audio-tests]`, `"test:<name>" = "<why>"` (or
-  `lib`, `bin:<name>`). `devhub test` then asks `audio=1`: a Mac whose hub heard its output run
-  (a silent playback, every 30 min). A box whose output stopped says so in `devhub nodes`; a
-  person's Mac, Linux and Windows boxes are not measured, so they do not take it.
+  `lib`, `bin:<name>`). `devhub test` then asks `audio=1`: a Mac or Linux box whose hub heard its
+  output run (a silent playback every 30 min: `afplay` on a Mac, `aplay` to ALSA's `default` on
+  Linux). A box whose output stopped says so in `devhub nodes`; a person's box and the Windows
+  boxes are not measured, so they do not take it.
 
 ## 4. Jobs
 
@@ -254,6 +258,13 @@ buckets ask for one, and the queue decides where and when.
   fast-forwards the user's checkout.
   - Check on it with `devhub land status <branch>`, or `devhub land wait <branch>` in a
     background shell.
+  - A hand-in that reaches the calculator first audits that app's provided-crate boundary at its
+    merge (`makepad check --boundary all makepad-app-calculator`), beside its dependents' check:
+    JIT-compiled code that reaches a provided crate's rustc-laid field or static breaks every app's
+    start, and a green `devhub test --live` does not prove it while the JIT's test harness builds
+    the provided crates from source. A failing row the tips do not already show refuses the
+    hand-in, with its rows and the line that reruns it; an audit that cannot start within its
+    start bound runs after the landing, in the post-land buckets.
   - A conflict or a failure is final: fix it, then hand in again (`land retry` resends the
     same pins).
   - The hand-in checks each merge it brings against `git merge-tree --write-tree` of the

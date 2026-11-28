@@ -686,13 +686,10 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
     let target_spec_path = target_spec_dir.join(format!("{WASM_TARGET_TRIPLE}.json"));
 
     let mut target_spec = shell_env_cap(
-        &[],
+        &[("RUSTC_BOOTSTRAP", "1")],
         cwd,
-        "rustup",
+        "rustc",
         &[
-            "run",
-            "nightly",
-            "rustc",
             "-Z",
             "unstable-options",
             "--print",
@@ -728,17 +725,30 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
     Ok(target_spec_path)
 }
 
+/// A wasm build compiles std for its own target spec (`-Z build-std`) with the active toolchain,
+/// whose unstable flags `RUSTC_BOOTSTRAP=1` enables, as the workspace does for its host builds.
+/// That needs the toolchain's rust-src; cargo-makepad says so and installs nothing itself.
+fn require_rust_src(cwd: &PathBuf) -> Result<(), String> {
+    let sysroot = shell_env_cap(&[], cwd, "rustc", &["--print", "sysroot"])?;
+    let std_src = PathBuf::from(sysroot.trim()).join("lib/rustlib/src/rust/library/std");
+    if std_src.is_dir() {
+        return Ok(());
+    }
+    Err(format!(
+        "a wasm build compiles std from source, and the active toolchain has no rust-src ({} is missing): run `rustup component add rust-src`",
+        std_src.display()
+    ))
+}
+
 pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let cwd = std::env::current_dir().unwrap();
     let build_bin = get_wasm_binary_name(build_crate, args)?;
+    require_rust_src(&cwd)?;
     let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
 
     let base_args = vec![
-        "run".to_string(),
-        "nightly".to_string(),
-        "cargo".to_string(),
         "build".to_string(),
         target_arg,
         "-Z".to_string(),
@@ -790,7 +800,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     if let Some((_, _, flags, _)) = &collected {
         rustflags.push_str(flags);
     }
-    let mut env = vec![("RUSTFLAGS", rustflags.as_str())];
+    // RUSTFLAGS replaces the workspace's `[build]` flags, so its empty `-Z allow-features=`
+    // stays off this build: std's own crates need their features.
+    let mut env = vec![("RUSTFLAGS", rustflags.as_str()), ("RUSTC_BOOTSTRAP", "1")];
     if let Some((_, _, _, pack_env)) = &collected {
         for (k, v) in pack_env {
             env.push((k.as_str(), v.as_str()));
@@ -808,7 +820,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
 
-    shell_env(&env, &cwd, "rustup", &args_out_refs)?;
+    shell_env(&env, &cwd, "cargo", &args_out_refs)?;
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     // (where cargo put it: `CARGO_TARGET_DIR` under devhub, a config's `build.target-dir`)

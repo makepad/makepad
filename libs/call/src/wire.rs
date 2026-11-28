@@ -43,7 +43,10 @@ pub const MAX_PLAINTEXT: usize = MAX_DATAGRAM - HEADER - TAG;
 /// The opener's replay window per stream kind, in sequences: video's is wide because resends
 /// of lost fragments come late.
 pub const VOICE_WINDOW: usize = 128;
-pub const VIDEO_WINDOW: usize = 2048;
+/// A video resend reuses its sequence, so the window spans the sender's [`crate::video::CACHE_US`]
+/// of full-size fragments up to about 151 Mbit/s. Above that rate a late resend can be refused
+/// as a replay, and a key frame restores the picture.
+pub const VIDEO_WINDOW: usize = 16_384;
 /// Where the seal's associated data sits in the clear header.
 pub const AAD: std::ops::Range<usize> = 3..7;
 
@@ -53,7 +56,13 @@ pub mod stream {
     pub const CAMERA_LOW: u8 = 1;
     pub const CAMERA_HIGH: u8 = 2;
     pub const SHARE: u8 = 3;
+    /// A shared app's own audio output.
+    pub const APP_AUDIO: u8 = 4;
     pub const FEEDBACK: u8 = 15;
+
+    pub fn is_audio(id: u8) -> bool {
+        matches!(id, VOICE | APP_AUDIO)
+    }
 
     pub fn is_video(id: u8) -> bool {
         matches!(id, CAMERA_LOW | CAMERA_HIGH | SHARE)
@@ -267,6 +276,8 @@ pub enum Section {
     Nack(Vec<NackRange>),
     /// Streams the receiver can't go on without a key frame of.
     Key(Vec<(u16, u8)>),
+    /// The newest picture fully emitted on a stream and the first sequence beyond it.
+    Head { stream: u8, key_id: u8, frame: u32, next: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,7 +293,19 @@ mod section_type {
     pub const ARRIVALS: u8 = 1;
     pub const NACK: u8 = 2;
     pub const KEY: u8 = 3;
+    pub const HEAD: u8 = 4;
+    pub const PADDING: u8 = 5;
 }
+
+/// A full feedback datagram with one length-delimited section and no receiver action.
+pub(crate) const PADDING_PLAINTEXT: [u8; MAX_PLAINTEXT] = {
+    let mut bytes = [0; MAX_PLAINTEXT];
+    bytes[1] = section_type::PADDING;
+    let len = ((MAX_PLAINTEXT - 4) as u16).to_be_bytes();
+    bytes[2] = len[0];
+    bytes[3] = len[1];
+    bytes
+};
 
 /// Writes sections into one feedback plaintext (cleared first). The caller keeps it under
 /// [`MAX_PLAINTEXT`] by what it puts in (ARRIVALS of at most [`MAX_ARRIVALS`] hops).
@@ -295,6 +318,7 @@ pub fn write_feedback(sections: &[Section], out: &mut Vec<u8>) {
                 Section::Arrivals { .. } => section_type::ARRIVALS,
                 Section::Nack(_) => section_type::NACK,
                 Section::Key(_) => section_type::KEY,
+                Section::Head { .. } => section_type::HEAD,
             },
             out.len(),
         );
@@ -317,6 +341,11 @@ pub fn write_feedback(sections: &[Section], out: &mut Vec<u8>) {
                     out.extend_from_slice(&n.first.to_be_bytes()[2..]);
                     out.push(n.count);
                 }
+            }
+            Section::Head { stream, key_id, frame, next } => {
+                out.extend_from_slice(&[*stream, *key_id]);
+                out.extend_from_slice(&frame.to_be_bytes());
+                out.extend_from_slice(&next.to_be_bytes());
             }
             Section::Key(keys) => {
                 for (src, stream) in keys {
@@ -360,6 +389,14 @@ pub fn read_feedback(bytes: &[u8]) -> Option<Vec<Section>> {
                     ranges.push(NackRange { src: b.u16()?, stream: b.u8()?, key_id: b.u8()?, first: b.u48()?, count: b.u8()? });
                 }
                 Section::Nack(ranges)
+            }
+            section_type::HEAD => {
+                let stream = b.u8()?;
+                let key_id = b.u8()?;
+                let frame = b.u32()?;
+                let next = b.u64()?;
+                if next == 0 || next > 1 << 48 { return None; }
+                Section::Head { stream, key_id, frame, next }
             }
             section_type::KEY => {
                 let mut keys = Vec::new();
@@ -439,6 +476,7 @@ mod tests {
                 NackRange { src: 2, stream: stream::SHARE, key_id: 200, first: 0, count: 255 },
             ]),
             Section::Key(vec![(1, stream::CAMERA_HIGH), (2, stream::SHARE)]),
+            Section::Head { stream: stream::SHARE, key_id: 3, frame: u32::MAX, next: 1 << 48 },
         ];
         let mut out = Vec::new();
         write_feedback(&sections, &mut out);
@@ -456,6 +494,7 @@ mod tests {
         let mut d = vec![0, 200, 0, 2, 1, 2];
         d.extend_from_slice(&[section_type::KEY, 0, 3, 0, 9, 2]);
         assert_eq!(read_feedback(&d), Some(vec![Section::Key(vec![(9, 2)])]), "an unknown section is skipped");
+        assert_eq!(read_feedback(&PADDING_PLAINTEXT), Some(vec![]), "padding opens as feedback with no receiver action");
         assert_eq!(read_feedback(&[0, section_type::KEY, 0, 2, 0, 9]), None, "a KEY body of two bytes is malformed");
         assert_eq!(read_feedback(&[0, section_type::NACK, 0, 50, 1]), None, "a section running past the end is malformed");
         assert_eq!(read_feedback(&[0, section_type::ARRIVALS, 0, 8, 0, 0, 0, 0, 0, 0, 0, 5]), None, "five ages promised, none there");

@@ -10,11 +10,13 @@ pub struct Rung {
     pub fps: u32,
     /// Encoder budget at which this rung can be selected on startup or a climb.
     pub min_ask_bps: u64,
+    /// Encoder rate in bit/s at which this rung's picture quality saturates.
+    pub full_bps: u64,
 }
 
 impl Rung {
-    const fn new(width: u32, height: u32, fps: u32, min_ask_bps: u64) -> Self {
-        Self { width, height, fps, min_ask_bps }
+    const fn new(width: u32, height: u32, fps: u32, min_ask_bps: u64, full_bps: u64) -> Self {
+        Self { width, height, fps, min_ask_bps, full_bps }
     }
 }
 
@@ -25,15 +27,52 @@ impl fmt::Display for Rung {
 }
 
 /// Decrease resolution first, then frame rate.
+/// Full rates start at 2.5 × the climb rate, as in §2.2 of the ladder design. The floor
+/// has a zero climb rate, so its value comes from the pixel-rate curve. L1 will measure these rates.
 pub const LADDER: [Rung; 7] = [
-    Rung::new(1280, 720, 30, 900_000),
-    Rung::new(960, 540, 30, 550_000),
-    Rung::new(640, 360, 30, 280_000),
-    Rung::new(320, 180, 30, 120_000),
-    Rung::new(320, 180, 15, 70_000),
-    Rung::new(320, 180, 8, 40_000),
-    Rung::new(320, 180, 4, 0),
+    Rung::new(1280, 720, 30, 900_000, 2_250_000),
+    Rung::new(960, 540, 30, 550_000, 1_375_000),
+    Rung::new(640, 360, 30, 280_000, 700_000),
+    Rung::new(320, 180, 30, 120_000, 300_000),
+    Rung::new(320, 180, 15, 70_000, 175_000),
+    Rung::new(320, 180, 8, 40_000, 100_000),
+    Rung::new(320, 180, 4, 0, 30_000),
 ];
+
+// 2,250,000 bit/s at 1280 × 720 × 30 fps is about 0.08138 bit per pixel per frame.
+const SHARE_BITS_PER_PIXEL: f64 = LADDER[0].full_bps as f64
+    / (LADDER[0].width as f64 * LADDER[0].height as f64 * LADDER[0].fps as f64);
+
+pub(crate) fn share_frame_bits(width: u32, height: u32) -> u64 {
+    (f64::from(width) * f64::from(height) * SHARE_BITS_PER_PIXEL).ceil() as u64
+}
+
+/// Kind of video carried by a stream. Both use the same ladder today.
+/// L2 will use this to order the stream's chain of sizes and frame rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Content {
+    Camera,
+    Share,
+}
+
+/// Capture limits that select a stream's highest video rung (`top_for`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoCaps {
+    /// Maximum picture width in pixels.
+    pub width: u32,
+    /// Maximum picture height in pixels.
+    pub height: u32,
+    /// Captures per second. The capture clock treats zero as one.
+    pub fps: u32,
+    pub content: Content,
+}
+
+/// The first rung that fits all three capture limits, or the floor if none fits.
+pub fn top_for(caps: &VideoCaps) -> usize {
+    LADDER.iter()
+        .position(|r| r.width <= caps.width && r.height <= caps.height && r.fps <= caps.fps)
+        .unwrap_or(LADDER.len() - 1)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Why {
@@ -75,7 +114,27 @@ const MAX_UP_WAIT_US: u64 = 60_000_000;
 
 /// Leave 80 kbit/s for voice and ten percent of the remainder as headroom.
 pub fn video_ask(estimate_bps: u64) -> u64 {
-    ((u128::from(estimate_bps.saturating_sub(80_000)) * 9 / 10) as u64).max(1)
+    video_ask_for(estimate_bps, 1)
+}
+
+/// Every call carries voice, so keep its room even before the first microphone frame arrives.
+pub(crate) fn video_ask_for(estimate_bps: u64, active_audio: usize) -> u64 {
+    ((u128::from(estimate_bps.saturating_sub(voice_reserve_bps(active_audio))) * 9 / 10) as u64).max(1)
+}
+
+fn voice_reserve_bps(active_audio: usize) -> u64 {
+    80_000u64.saturating_mul(active_audio.max(1) as u64)
+}
+
+/// Path estimate needed to carry this video ask after voice and headroom.
+pub(crate) fn estimate_for(ask_bps: u64, active_audio: usize) -> u64 {
+    if ask_bps == 0 { return 0; }
+    let media = (u128::from(ask_bps) * 10).div_ceil(9);
+    (media + u128::from(voice_reserve_bps(active_audio))).min(u128::from(u64::MAX)) as u64
+}
+
+pub(crate) fn encoder_kbps(ask_bps: u64, rung: Rung) -> u32 {
+    (ask_bps / 1_000).clamp(1, rung.full_bps / 1_000) as u32
 }
 
 #[derive(Default)]
@@ -245,6 +304,10 @@ impl Guard {
 
     /// Call once per capture. An unknown loss level holds video growth while the path seeds. Times are in µs.
     pub fn tick(&mut self, now_us: u64, estimate_bps: u64, pacer_delay_us: u64, loss_level: Option<f64>) -> Tick {
+        self.tick_with_audio(1, now_us, estimate_bps, pacer_delay_us, loss_level)
+    }
+
+    pub(crate) fn tick_with_audio(&mut self, active_audio: usize, now_us: u64, estimate_bps: u64, pacer_delay_us: u64, loss_level: Option<f64>) -> Tick {
         let now_us = self.advance(now_us);
         // Encoder output can advance the debt clock between captures.
         let elapsed_us = now_us - self.last_tick_us;
@@ -266,7 +329,7 @@ impl Guard {
             self.video_estimate_bps = self.video_estimate_bps.min(estimate_bps as f64);
             self.video_estimate_bps as u64
         };
-        self.ask_bps = video_ask(video_bps);
+        self.ask_bps = video_ask_for(video_bps, active_audio);
         self.adapt(now_us);
         let fps = u128::from(self.rung().fps);
         let now = u128::from(now_us) * fps;
@@ -334,6 +397,54 @@ mod tests {
     /// Arrival time of a 30 fps capture on the virtual microsecond clock.
     fn capture(n: u64) -> u64 {
         n * 1_000_000 / 30
+    }
+
+    #[test]
+    fn the_encoder_ask_stops_at_each_rungs_full_rate() {
+        for (width, height) in [(562, 351), (696, 435), (455, 285), (1600, 1000)] {
+            let ask = share_frame_bits(width, height) * 30;
+            for voices in 0..=2 {
+                let estimate = estimate_for(ask, voices);
+                assert!(video_ask_for(estimate, voices) >= ask, "{width}x{height}@30, {voices} audio streams");
+                assert!(video_ask_for(estimate - 1, voices) < ask, "{estimate} should be the least sufficient estimate");
+            }
+        }
+        let top = LADDER[0];
+        for (ask, expected) in [(800_000_000, 2_250), (100_000, 100), (0, 1)] {
+            assert_eq!(encoder_kbps(ask, top), expected,
+                "{top} with a {ask} bit/s ask should send {expected} kbit/s to the encoder");
+        }
+        for rung in LADDER {
+            assert!(rung.full_bps > 0 && rung.full_bps >= rung.min_ask_bps,
+                "{rung} needs a positive full rate at or above its climb rate, got {} and {} bit/s",
+                rung.full_bps, rung.min_ask_bps);
+            assert_eq!(u64::from(encoder_kbps(u64::MAX, rung)), rung.full_bps / 1_000,
+                "a high ask on {rung} should reach its own full rate of {} bit/s", rung.full_bps);
+        }
+        for pair in LADDER.windows(2) {
+            let (higher, lower) = (pair[0], pair[1]);
+            assert!(higher.full_bps > lower.full_bps,
+                "full rates must fall from {higher} to {lower}, got {} then {} bit/s", higher.full_bps, lower.full_bps);
+        }
+    }
+
+    #[test]
+    fn video_caps_choose_the_first_rung_that_fits() {
+        for (width, height, fps, expected) in [
+            (3840, 2160, 60, 0),
+            (640, 360, 30, 2),
+            (1280, 360, 30, 2),
+            (640, 720, 30, 2),
+            // Today's LADDER first offers 15 fps at 320×180. L2 will change this choice.
+            (1280, 720, 15, 4),
+            (160, 90, 30, LADDER.len() - 1),
+            (1280, 720, 3, LADDER.len() - 1),
+        ] {
+            for content in [Content::Camera, Content::Share] {
+                let caps = VideoCaps { width, height, fps, content };
+                assert_eq!(top_for(&caps), expected, "{content:?} at {width}×{height}@{fps} should select {}", LADDER[expected]);
+            }
+        }
     }
 
     #[test]
@@ -447,6 +558,18 @@ mod tests {
         assert_eq!(guard.ask_bps(), 1, "the video ask must remain positive below the voice reserve");
         assert_eq!(guard.tick(8_000_001, ESTIMATE, 0, Some(0.0)), Tick::Skip, "missed periods cannot be replayed back to back");
         assert_eq!(guard.tick(8_066_666, ESTIMATE, SKIP_DELAY_US, Some(0.0)), Tick::Encode, "100 ms of pacer delay still allows a due capture");
+
+        let mut guard = Guard::with_top(2, 2); // 640×360 at 30 fps
+        let mut encoded = 0;
+        for (n, now) in (0..2_000_000).step_by(16_667).enumerate() {
+            let tick = guard.tick(now, ESTIMATE, 0, Some(0.0));
+            assert_eq!(tick == Tick::Encode, n % 2 == 0, "30 fps schedule drifted at 60 Hz tick {n} ({now} µs)");
+            if tick == Tick::Encode {
+                guard.encoded(now, 100, n == 0);
+                encoded += 1;
+            }
+        }
+        assert_eq!(encoded, 60, "a 30 fps rung must encode 60 pictures in two seconds of 60 Hz capture");
     }
 
     #[test]

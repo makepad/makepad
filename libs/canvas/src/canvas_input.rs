@@ -153,14 +153,17 @@ mod tests {
     use std::cell::Cell;
 
     fn camera(scale: f64) -> Camera {
-        let mut camera = Camera::default();
-        camera.view = Rect {
-            pos: dvec2(100.0, 60.0),
-            size: dvec2(900.0, 600.0),
-        };
-        camera.pan = dvec2(40.0, -20.0);
-        camera.scale = scale;
-        camera
+        Camera::new(
+            Rect {
+                pos: dvec2(100.0, 60.0),
+                size: dvec2(900.0, 600.0),
+            },
+            crate::CameraState {
+                pan_x: 40.0,
+                pan_y: -20.0,
+                zoom: scale,
+            },
+        )
     }
 
     fn claimed_areas() -> (Area, Area) {
@@ -194,7 +197,7 @@ mod tests {
             };
             assert_eq!(
                 mapped.abs,
-                dvec2(32768.0 + 200.0 / scale, 32768.0 + 200.0 / scale)
+                camera.world_to_local(dvec2(200.0 / scale, 200.0 / scale))
             );
             assert_eq!(mapped.window_id, WindowId(7, 1));
             let release = Event::MouseUp(MouseUpEvent {
@@ -209,7 +212,7 @@ mod tests {
             };
             assert_eq!(
                 mapped.abs,
-                dvec2(32768.0 + 210.0 / scale, 32768.0 + 220.0 / scale)
+                camera.world_to_local(dvec2(210.0 / scale, 220.0 / scale))
             );
             assert_eq!(mapped.time, 4.0);
         }
@@ -233,7 +236,7 @@ mod tests {
         let Event::Scroll(scroll) = &mapped else {
             panic!("wrong event");
         };
-        assert_eq!(scroll.abs, dvec2(33168.0, 33168.0));
+        assert_eq!(scroll.abs, camera.world_to_local(dvec2(400.0, 400.0)));
         assert_eq!(scroll.scroll, dvec2(20.0, -40.0));
         assert_eq!(scroll.phase, ScrollPhase::Changed);
         scroll.handled_x.set(false);
@@ -303,7 +306,7 @@ mod tests {
         let Event::TouchUpdate(touch) = &mapped else {
             panic!("wrong event");
         };
-        assert_eq!(touch.touches[0].abs, dvec2(32868.0, 32868.0));
+        assert_eq!(touch.touches[0].abs, camera.world_to_local(dvec2(100.0, 100.0)));
         assert_eq!(touch.touches[0].radius, dvec2(5.0, 7.0));
         touch.touches[0].handled.set(child);
         touch.touches[0].sweep_lock.set(sweep);

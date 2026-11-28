@@ -12,6 +12,7 @@
 //! - [`guard`]: capture decisions and encoder settings for the sender's video budget.
 //! - [`sim`]: a simulated network path on a virtual clock, for tests.
 
+pub mod aec;
 pub mod driver;
 pub mod guard;
 pub mod mesh;

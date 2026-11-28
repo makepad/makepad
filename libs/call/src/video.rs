@@ -14,6 +14,9 @@ pub const CACHE_US: u64 = 1_000_000;
 pub const KEY_INTERVAL_US: u64 = 1_000_000;
 // Sender key repair relies on the newest key staying cached while the gate holds the next one.
 const _: () = assert!(CACHE_US >= KEY_INTERVAL_US);
+// A resend reuses its sequence: the replay window holds CACHE_US of full fragments at
+// 150 Mbit/s (150 bits a µs), so no cached resend is refused below that rate.
+const _: () = assert!(VIDEO_WINDOW as u64 > 150 * CACHE_US / (MAX_FRAGMENT as u64 * 8));
 /// A gap younger than this may still be reordering, not loss.
 pub const REORDER_US: u64 = 10_000;
 /// Give a lost fragment three chances before asking for a key. Resends can still win the race.
@@ -22,7 +25,11 @@ const RESEND_CHANCES: u8 = 3;
 /// Cuts an access unit into fragments whose sizes differ by at most a byte, none over
 /// [`MAX_FRAGMENT`].
 pub fn fragments<'a>(au: &'a [u8], frame: u32, base: u16, key: bool, capture_us: u64) -> impl Iterator<Item = Fragment<'a>> {
-    let count = au.len().div_ceil(MAX_FRAGMENT).max(1);
+    fragments_at(au, frame, base, key, capture_us, MAX_FRAGMENT)
+}
+
+pub(super) fn fragments_at<'a>(au: &'a [u8], frame: u32, base: u16, key: bool, capture_us: u64, payload_bytes: usize) -> impl Iterator<Item = Fragment<'a>> {
+    let count = au.len().div_ceil(payload_bytes).max(1);
     let (size, extra) = (au.len() / count, au.len() % count);
     let flags = if key { crate::wire::video_flags::KEY } else { 0 };
     (0..count).map(move |index| {
@@ -143,7 +150,11 @@ impl KeyGate {
 
     /// Called before each encode: true when this picture should be a key frame.
     pub fn take(&mut self, now: u64) -> bool {
-        let due = self.pending && self.last_key.is_none_or(|at| now.saturating_sub(at) >= KEY_INTERVAL_US);
+        self.take_after(now, KEY_INTERVAL_US)
+    }
+
+    pub(crate) fn take_after(&mut self, now: u64, interval: u64) -> bool {
+        let due = self.pending && self.last_key.is_none_or(|at| now.saturating_sub(at) >= interval);
         if due {
             self.pending = false;
         }
@@ -171,18 +182,72 @@ struct Partial {
     first_seq: u64,
     base: u16,
     capture_us: u64,
-    arrived: u64,
-    parts: Vec<Option<Vec<u8>>>,
-    got: usize,
+    expiry_from: u64,
+    count: u16,
+    buffers: FragmentBuffers,
 }
 
 impl Partial {
     fn last_seq(&self) -> u64 {
-        self.first_seq + self.parts.len() as u64 - 1
+        self.first_seq + u64::from(self.count) - 1
     }
 
     fn complete(&self) -> bool {
-        self.got == self.parts.len()
+        self.buffers.arrivals.len() == usize::from(self.count)
+    }
+}
+
+struct Arrival {
+    index: u16,
+    len: u16,
+    // A frame holds at most u16::MAX fragments of MAX_FRAGMENT bytes.
+    offset: u32,
+}
+
+/// Only the duplicate bitmap is sized from the advertised count. Payload and offsets
+/// grow with the fragments that actually arrive, even when the last one arrives first.
+#[derive(Default)]
+struct FragmentBuffers {
+    data: Vec<u8>,
+    arrivals: Vec<Arrival>,
+    seen: Vec<u64>,
+}
+
+impl FragmentBuffers {
+    fn reset(&mut self, count: u16) {
+        self.data.clear();
+        self.arrivals.clear();
+        self.seen.clear();
+        let words = usize::from(count).div_ceil(64);
+        self.seen.reserve_exact(words); // keep even a reused bitmap within 1,024 words
+        self.seen.resize(words, 0);
+    }
+
+    fn insert(&mut self, frag: &Fragment) -> bool {
+        let index = usize::from(frag.index);
+        let word = &mut self.seen[index / 64];
+        let mask = 1u64 << (index % 64);
+        if *word & mask != 0 {
+            return false;
+        }
+        *word |= mask;
+        self.arrivals.push(Arrival {
+            index: frag.index,
+            offset: self.data.len() as u32,
+            len: frag.payload.len() as u16,
+        });
+        self.data.extend_from_slice(frag.payload);
+        true
+    }
+
+    fn assemble(&mut self, out: &mut Vec<u8>) {
+        out.clear();
+        out.reserve(self.data.len());
+        self.arrivals.sort_unstable_by_key(|a| a.index);
+        for arrival in &self.arrivals {
+            let start = arrival.offset as usize;
+            out.extend_from_slice(&self.data[start..start + usize::from(arrival.len)]);
+        }
     }
 }
 
@@ -252,6 +317,8 @@ pub struct Receiver {
     seqs: BTreeMap<u8, Sequences>,
     /// Frames not yet handed on, whole or in part.
     frames: BTreeMap<u32, Partial>,
+    spare_data: Vec<Vec<u8>>,
+    spare_fragments: Vec<FragmentBuffers>,
     /// The newest frame handed on; the next must predict from it, or be a key frame.
     delivered: Option<u32>,
     /// Only a key frame lets decoding go on (at the start, or after the chain broke).
@@ -260,6 +327,8 @@ pub struct Receiver {
     key_fragments: Option<usize>,
     /// Until this key's capture interval ends, the sender's gate cannot offer a cheaper new key.
     key_capture_us: u64,
+    // First evidence of an undelivered share head. Repeating it must not restart the wait.
+    advertised: Option<(u32, u64)>,
     pub stats: ReceiverStats,
 }
 
@@ -284,11 +353,43 @@ impl Receiver {
             stream,
             seqs: BTreeMap::new(),
             frames: BTreeMap::new(),
+            spare_data: Vec::new(),
+            spare_fragments: Vec::new(),
             delivered: None,
             need_key: true,
             key_fragments: None,
             key_capture_us: 0,
+            advertised: None,
             stats: ReceiverStats::default(),
+        }
+    }
+
+    pub(super) fn head(&mut self, now: u64, key_id: u8, frame: u32, next: u64) {
+        if self.delivered.is_some_and(|d| !newer(frame, d)) { return; }
+        if self.advertised.is_some_and(|(head, _)| newer(head, frame)) { return; }
+        // On resubscribing mid-stream there is no trustworthy lower bound for an entirely
+        // unseen epoch's gap. The held key is cheaper than requesting historical sequences.
+        if self.delivered.is_none() && frame != 0 && !self.seqs.contains_key(&key_id) {
+            self.need_key = true;
+            return;
+        }
+        let head = self.advertised.get_or_insert((frame, now));
+        if newer(frame, head.0) { head.0 = frame; }
+        let seqs = self.seqs.entry(key_id).or_insert_with(|| Sequences {
+            next: 0, missing: BTreeMap::new(), cleared: None,
+        });
+        if next > seqs.next {
+            for seq in seqs.next.max(next.saturating_sub(VIDEO_WINDOW as u64))..next {
+                seqs.missing.insert(seq, Missing::new(now, now));
+            }
+            seqs.next = next;
+        }
+    }
+
+    /// Return a whole frame's storage for a later access unit on this stream.
+    pub fn recycle(&mut self, data: Vec<u8>) {
+        if data.capacity() != 0 {
+            self.spare_data.push(data);
         }
     }
 
@@ -304,7 +405,7 @@ impl Receiver {
         seqs.expire_cleared(now);
         if seq >= seqs.next {
             let gap = seq - seqs.next;
-            if frag.capture_us.saturating_sub(self.key_capture_us) >= KEY_INTERVAL_US
+            if self.stream != crate::wire::stream::SHARE && frag.capture_us.saturating_sub(self.key_capture_us) >= KEY_INTERVAL_US
                 && self.key_fragments.is_some_and(|count| gap > count as u64)
             {
                 self.need_key = true;
@@ -335,26 +436,27 @@ impl Receiver {
             self.stats.late += 1;
             return;
         }
-        let partial = self.frames.entry(frag.frame).or_insert_with(|| Partial {
-            key: frag.is_key(),
-            key_id,
-            first_seq,
-            base: frag.base,
-            capture_us: frag.capture_us,
-            arrived: now,
-            parts: vec![None; frag.count as usize],
-            got: 0,
+        if frag.index >= frag.count || frag.payload.len() > MAX_FRAGMENT {
+            return;
+        }
+        let partial = self.frames.entry(frag.frame).or_insert_with(|| {
+            let mut buffers = self.spare_fragments.pop().unwrap_or_default();
+            buffers.reset(frag.count);
+            Partial {
+                key: frag.is_key(), key_id, first_seq, base: frag.base,
+                capture_us: frag.capture_us, expiry_from: now, count: frag.count, buffers,
+            }
         });
-        if partial.parts.len() != frag.count as usize {
+        if partial.count != frag.count {
             return; // disagrees with its frame's count: not this frame's
         }
-        let slot = &mut partial.parts[frag.index as usize];
-        if slot.is_some() {
+        if !partial.buffers.insert(frag) {
             self.stats.late += 1;
             return;
         }
-        *slot = Some(frag.payload.to_vec());
-        partial.got += 1;
+        // A paced share key can take longer than the resend cache to cross a healthy link.
+        // Only a new fragment extends its life. Replays cannot keep a dead frame alive.
+        if self.stream == crate::wire::stream::SHARE { partial.expiry_from = now; }
         if partial.complete() {
             self.deliver(now, out);
         }
@@ -366,10 +468,10 @@ impl Receiver {
         self.drain(now, out);
         let newest_key = self.frames.iter().rev().find(|(_, p)| p.key && p.complete()).map(|(f, _)| *f);
         if let Some(key) = newest_key {
-            let passed: Vec<u32> = self.frames.range(..key).map(|(f, _)| *f).collect();
-            self.stats.skipped += passed.len() as u64;
-            for f in passed {
-                self.frames.remove(&f);
+            while self.frames.first_key_value().is_some_and(|(&f, _)| f < key) {
+                let (_, p) = self.frames.pop_first().unwrap();
+                self.spare_fragments.push(p.buffers);
+                self.stats.skipped += 1;
             }
             self.drain(now, out);
         }
@@ -381,27 +483,33 @@ impl Receiver {
             if !(p.complete() && follows) {
                 break;
             }
-            let p = self.frames.remove(&frame).unwrap();
+            let mut p = self.frames.remove(&frame).unwrap();
             if p.key {
-                self.key_fragments = Some(p.parts.len());
+                self.key_fragments = Some(usize::from(p.count));
                 self.key_capture_us = p.capture_us;
                 self.seqs.get_mut(&p.key_id).unwrap().delivered_key(&p, now);
             }
-            let mut data = Vec::with_capacity(p.parts.iter().flatten().map(Vec::len).sum());
-            for part in p.parts.into_iter().flatten() {
-                data.extend_from_slice(&part);
-            }
+            let mut data = self.spare_data.pop().unwrap_or_default();
+            p.buffers.assemble(&mut data);
+            self.spare_fragments.push(p.buffers);
             self.stats.frames += 1;
             if p.key {
                 self.stats.key_frames += 1;
                 self.need_key = false;
             }
             self.delivered = Some(frame);
+            if self.advertised.is_some_and(|(head, _)| !newer(head, frame)) { self.advertised = None; }
             out.push(Frame { frame, key: p.key, capture_us: p.capture_us, data });
         }
         if self.frames.is_empty() && self.delivered.is_some() {
             self.need_key = false; // a resend let the chain catch up after all
         }
+    }
+
+    /// A key frame is arriving and resends can still complete it: asking for another would
+    /// only start a second one behind it.
+    pub(crate) fn key_arriving(&self, now: u64, rtt_us: u64) -> bool {
+        self.frames.values().any(|p| p.key && !self.should_request_key(p, now, rtt_us))
     }
 
     /// Only a key frame lets this stream's decoding go on.
@@ -415,7 +523,11 @@ impl Receiver {
         let first = if p.key { p.first_seq } else { 0 };
         let seqs = &self.seqs[&p.key_id];
         let oldest = seqs.missing.range(first..=p.last_seq()).next();
-        now.saturating_sub(p.arrived) > CACHE_US ||
+        if self.stream == crate::wire::stream::SHARE {
+            return now.saturating_sub(p.expiry_from) > CACHE_US ||
+                oldest.is_some_and(|(_, m)| now.saturating_sub(m.noticed) >= share_wait(rtt_us));
+        }
+        now.saturating_sub(p.expiry_from) > CACHE_US ||
             // An incomplete key at or before a cleared gap cannot replace the lost chain yet.
             (p.key && seqs.cleared.as_ref().is_some_and(|g| p.first_seq <= g.through)) ||
             oldest.is_some_and(|(_, m)| now.saturating_sub(m.noticed) > CACHE_US ||
@@ -459,11 +571,21 @@ impl Receiver {
             }
             wants.nacks.extend(run);
         }
+        if let Some((_, since)) = self.advertised {
+            if now.saturating_sub(since) < share_wait(rtt_us) && self.delivered.is_none() { return; }
+            self.need_key |= now.saturating_sub(since) >= share_wait(rtt_us);
+        }
         if self.need_key {
             // frames older than the sender's cache can't be completed; the key frame passes over
             // the rest
             let before = self.frames.len();
-            self.frames.retain(|_, p| now.saturating_sub(p.arrived) <= CACHE_US);
+            self.frames.retain(|_, p| {
+                if now.saturating_sub(p.expiry_from) <= CACHE_US {
+                    return true;
+                }
+                self.spare_fragments.push(std::mem::take(&mut p.buffers));
+                false
+            });
             self.stats.skipped += (before - self.frames.len()) as u64;
             // A key frame still arriving (the stream's first, say) is not asked for again, unless
             // it is stuck past what resends can fix.
@@ -481,6 +603,10 @@ fn resend_interval(rtt_us: u64) -> u64 {
 }
 
 /// `a` is after `b` in frame order (frame numbers wrap).
+fn share_wait(rtt_us: u64) -> u64 {
+    (2 * rtt_us + 100_000).max(250_000)
+}
+
 fn newer(a: u32, b: u32) -> bool {
     a != b && a.wrapping_sub(b) < u32::MAX / 2
 }
@@ -534,6 +660,28 @@ mod tests {
         feed(&mut r, &packets[..3], 0, &mut out);
         assert_eq!(out.len(), 4, "repeats of handed-on frames change nothing");
         assert_eq!(r.stats.late, 3, "and are counted as late");
+
+        let data = out.remove(0).data;
+        let ptr = data.as_ptr();
+        r.recycle(data);
+        for part in fragments(&au, 4, 1, false, 132_000) {
+            r.take(0, packets.len() as u64 + u64::from(part.index), &part, 132_000, &mut out);
+        }
+        assert_eq!(out.last().unwrap().data.as_ptr(), ptr, "a later frame must reuse the returned access-unit buffer");
+
+        for count in [3, u16::MAX] {
+            let mut fresh = Receiver::new(1, 2);
+            let tail = Fragment {
+                flags: 0, frame: 0, base: 1, index: count - 1, count, capture_us: 0,
+                payload: &[0; MAX_FRAGMENT],
+            };
+            fresh.take(0, u64::from(tail.index), &tail, 0, &mut out);
+            let p = &fresh.frames[&tail.frame];
+            let bytes = p.buffers.data.capacity();
+            let words = p.buffers.seen.capacity();
+            assert!(bytes < 2 * MAX_FRAGMENT && words <= 1024,
+                "one fragment of {count} reserved {bytes} payload bytes and {words} words for duplicate tracking");
+        }
     }
 
     #[test]
@@ -834,5 +982,20 @@ mod tests {
         assert!(g.take(1_000_000), "and share the next key frame");
         g.made_key(1_000_000);
         assert!(!g.take(3_000_000), "both were answered by it");
+    }
+
+    #[test]
+    fn a_paced_share_key_keeps_its_received_fragments_while_making_progress() {
+        let bytes = vec![91; MAX_FRAGMENT * 4];
+        let mut receiver = Receiver::new(2, crate::wire::stream::SHARE);
+        let mut complete = Vec::new();
+        for (index, part) in fragments(&bytes, 0, 0, true, 0).enumerate() {
+            let now = index as u64 * 400_000;
+            receiver.poll(now, 20_000, &mut Wants::default());
+            receiver.take(0, index as u64, &part, now, &mut complete);
+        }
+        assert_eq!(complete.len(), 1, "all fragments arrived in order over 1.2 s, without loss");
+        assert_eq!(complete[0].data, bytes);
+        assert_eq!(receiver.stats.skipped, 0);
     }
 }

@@ -1,0 +1,13 @@
+# makepad-loader-switch: the protocol of an installation's loader folders (cache/loader), shared
+# by the loader, its launcher and the Runner. std only.
+
+[package]
+name = "makepad-loader-switch"
+version = "0.1.0"
+edition = "2021"
+description = "The loader folders' switch protocol: the lock a switch's watcher holds, the pointers, confirm and rollback"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_loader_switch"
+path = "src/lib.rs"

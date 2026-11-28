@@ -42,16 +42,52 @@ Treat every agent you brief, review or relay as a respected colleague:
 
 ## Current agent workflow
 
-- Fable 5.2 is the architect Opus 5.5 consults on its hardest calls: before
-  a lane commits to a new architecture or a redesign, when a diagnosis has
-  failed twice, to review a lane's design or direction, and for optimisation
-  strategy (where the time or memory goes, what to change first). The ask
-  carries its evidence: files, logs, measurements, what was ruled out. Fable
-  answers with a design, a verdict or a ranked plan, and neither implements
-  nor lands: Opus decides, briefs the work down the chain and reviews what
-  comes back. A lane writes its question to
-  `local/agent_state/<topic>/fable-questions.md` and asks main, which runs
-  the consult; the answer goes to `fable-answers.md` beside it.
+- Gemini 4 Neon (the Antigravity CLI, `agy`) is the architect. It does the
+  plan and the architecture on everything (user, 2026-11-27: "from now on
+  neon does the plan and the architecture ... on everything"), and its
+  thinking reaches the implementation intact ("make sure neon has enough
+  influence on the design that its intelligence trickles down to the
+  implementation ... so not vague handwaving"). Neon neither implements
+  nor lands.
+  - **The plan.** Neon writes each lane's plan, `local/plans/<topic>.md`,
+    at implementation level:
+    - type definitions and signatures;
+    - the files each slice touches;
+    - algorithms with their invariants and cost;
+    - named test cases with expected results;
+    - a gate per slice.
+  - **Other consults.** Neon is also consulted:
+    - before a lane commits to a new architecture or a redesign;
+    - when a diagnosis has failed twice;
+    - to review a lane's design or direction;
+    - for optimisation strategy.
+
+    The ask carries its evidence: files, logs, measurements, and what was
+    ruled out.
+  - **Briefs.** A lead briefs each slice from the plan's own words, quoted
+    rather than paraphrased. Neon checks the brief against the plan before
+    the implementer starts.
+  - **Disagreements.** A lead or an implementer who finds the plan wrong
+    against the code sends the finding back to Neon for a ruling. The lead
+    does not redesign around it.
+  - **Review.** After a slice lands, Neon reviews its diff against the plan,
+    and a deviation is fixed forward. Landing never waits for this review.
+  - **Running it.** Main and the lane leads run Neon themselves: read-only,
+    in the background, with stdin closed.
+    ```
+    agy -p "<brief>" --model gemini-4-neon-xhigh --sandbox \
+      --dangerously-skip-permissions --output-format text \
+      --print-timeout 0s < /dev/null > <answer.md>
+    ```
+    - The brief quotes the user's note and opens with the bigger picture.
+    - It says the consult is read-only: no edits, builds, runs, git changes
+      or network.
+    - Afterwards the caller checks `git status` in each checkout.
+    - Plan mode has no listing or search tools, so it is not used.
+    - Answers go to `neon-*.md` beside the question in
+      `local/agent_state/<topic>/`.
+  - **Fable.** Fable 5.2, the earlier architect, is no longer consulted by
+    default.
 - Below the architect, work goes down a chain of three tiers:
   1. Opus 5.5 is on top: the main session and the lane leads. It decides
      who gets each task. It keeps design, research and hard diagnosis, and
@@ -65,29 +101,69 @@ Treat every agent you brief, review or relay as a respected colleague:
      steps, each with a stop condition and `HAND BACK`; every diff is read
      and its `git diff --stat` checked against that file list before a
      commit. It lands nothing and makes no design calls, but it may review
-     a design and give feedback on it, a second opinion beside Fable's; the
-     call stays with the Opus lead or Fable.
+     a design and give feedback on it, a second opinion beside Neon's; the
+     call stays with Neon.
   3. Haiku or Codex `gpt-6.1-sol` does mechanical work: renames, deletions,
      call swaps to existing APIs, test updates, runs and reruns, log sweeps
      and summaries. Sol writes no new logic.
 - Each lane keeps some Codex work going, one or two jobs at a time. A lane
-  starts no agents itself. The main session spawns the Fable consults and
-  the Sonnet and Haiku helpers, and it picks each lane's model by that
-  lane's hardest work.
+  starts no agents itself beyond its Codex jobs, its agy Opus jobs and its
+  Neon consults. The main session spawns the Sonnet and Haiku helpers, and
+  it picks each lane's model by that lane's hardest work.
+- Claude Opus 5.5 also runs through agy (`--model claude-opus-5-5-high`), on
+  a limit separate from Claude Code's (user, 2026-11-27: "use that one too",
+  "its a separate limit"). Use it to move work off the Claude Code budget:
+  - it takes what astra takes at xhigh, on the same leash: the brief names
+    the files it may touch and gives small steps, each with a stop condition
+    and `HAND BACK`; the lead reads every diff and checks its `git diff
+    --stat` against that file list; it lands nothing and makes no design
+    calls;
+  - it also takes diagnosis with the evidence in its brief, and diff or
+    design reviews as a second opinion beside Neon's (the call stays with
+    Neon);
+  - each lane may keep one or two such jobs going beside its Codex jobs.
+  Run it from the lane worktree, in the background, with stdin closed:
+  ```
+  agy -p "<brief>" --model claude-opus-5-5-high --sandbox \
+    --dangerously-skip-permissions --output-format text \
+    --print-timeout 0s < /dev/null > <log.md>
+  ```
+  agy's sandbox blocks the devhub socket, and with auto-approval the job
+  steps outside the sandbox for those calls. So the brief names the only
+  commands it may run outside it (`makepad check`, `devhub test`, `devhub
+  job`), and the lead checks `git status` in every checkout afterwards. Its
+  commits carry the usual `Co-Authored-By: Claude Opus 5.5` line.
 - Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
   transcription, log sweeps) under precise briefs.
-- Codex works under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it).
+- Codex works under precise briefs, from the normal user environment (its real HOME; a changed
+  HOME or CODEX_HOME fails with 401, an open stdin hangs it), in a sandbox that lets it run
+  `makepad check` and `devhub test <lane> <pkg> --live` on its own steps (`codex exec resume`
+  takes the same flags):
+  ```
+  codex exec -C <worktree root> -m <model> --enable network_proxy \
+    -c 'default_permissions="lane"' -c 'permissions.lane.extends=":workspace"' \
+    -c 'permissions.lane.network.enabled=true' -c 'permissions.lane.network.mode="limited"' \
+    -c "permissions.lane.network.unix_sockets={\"$HOME/.makepad/devhub/devhub.sock\"=\"allow\",\"/tmp/makepad-$(id -u)\"=\"allow\"}" \
+    "<brief>" < /dev/null
+  ```
+  This is the workspace-write sandbox plus two Unix sockets: the devhub master's, and the folder
+  where the apps its tests open put their remote sockets. The network proxy lists no domains, so
+  direct TCP and the web stay closed. `-C` is the worktree's root, also for work in a nested half:
+  `makepad check` writes the root's `target/relax`, and a nested `-C` cannot write it. A job that
+  must start in a nested half also passes
+  `-c 'permissions.lane.filesystem={"<worktree root>/target/relax"="write"}'`.
 - A commit with code Codex wrote credits it next to Claude, so GitHub links both:
   `Co-Authored-By: Codex <267193182+codex@users.noreply.github.com>` (the address of GitHub's
   `codex` account; `noreply@openai.com` links to no account). A relax carry copies every co-author
   line of the work commits it carries.
 - An agent does the task it was given itself. It never starts another agent
-  CLI (claude, codex, grok) as a subprocess. If a task is too hard or the
+  CLI (claude, codex, grok, agy) as a subprocess; a lane lead's own Codex
+  jobs, agy Opus jobs and Neon consults are the exception. If a task is too hard or the
   brief is not enough, it stops and ends with `HAND BACK: <reason>` plus what
   it found and changed; the Opus lead then takes the task over.
 - Resume a finished lane with its context for follow-ups instead of starting
   a fresh one that repays the same input.
-- This is the user's current workflow (2026-11-10) and supersedes older role
+- This is the user's current workflow (2026-11-27) and supersedes older role
   assignments in local skills or memories.
 
 ## Token cost of a turn
@@ -503,6 +579,14 @@ it used (this one and any build or bench node):
   Otherwise, no process you launch may outlive the task.
 
 ## Remote control quick start
+
+Makepad apps open no remote endpoint by default. One rule decides it, for a native build and
+`makepad run` alike: `--remote` (or `MAKEPAD_REMOTE=1`) always opens it for an agent;
+`MAKEPAD_REMOTE=local`, or the per-user setting (the one word `local` in `~/.makepad/remote`),
+opens it as an ordinary launch; `MAKEPAD_REMOTE=0` closes it. Developer computers (this one and
+every devhub box) turn it on with that setting or `MAKEPAD_REMOTE=local`, and devhub keeps it on
+across the fleet: each box's hub sets it again at its start. devhub's own work never relies on
+it: every live session and lease run asks with `MAKEPAD_REMOTE=1` unless it names its own value.
 
 1. Build the release binary and the client (`cargo build --release -p makepad-remote`), launch
    your own instance with `--remote` (a Unix socket, no TCP port) and read its startup line

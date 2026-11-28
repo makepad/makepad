@@ -1,4 +1,4 @@
-use crate::{Camera, ORIGIN};
+use crate::Camera;
 use makepad_widgets_core::*;
 
 /// A retained draw list for content laid out in camera-local units.
@@ -23,7 +23,7 @@ impl CanvasLayer {
         self.list.begin_always(cx);
         // The align pass clips before the GPU applies the view transform.
         // Start a fresh clip context and give it the visible rect in local units.
-        let side = ORIGIN * 2.0;
+        let side = camera.origin() * 2.0;
         cx.begin_unclipped_root_turtle(dvec2(side, side), Layout::flow_overlay());
         cx.push_clip_rect(Rect {
             pos: camera.screen_to_local(screen_clip.pos),

@@ -4,7 +4,9 @@
 use makepad_widgets_core::makepad_micro_serde::*;
 
 pub const MIN_ZOOM: f64 = 0.00001;
-pub const MAX_ZOOM: f64 = 8.0;
+/// The top zoom: placement is in 1/64 unit, so at 64x one placement step is one
+/// pixel, and the zoom-relative rebase keeps drawing exact up to here.
+pub const MAX_ZOOM: f64 = 64.0;
 const MAX_COORD: f64 = 10_000_000.0;
 
 /// Pan is in viewport pixels; world coordinates are in points.

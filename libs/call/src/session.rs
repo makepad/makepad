@@ -33,6 +33,9 @@ pub const IDLE_FEEDBACK_US: u64 = 100_000;
 pub const DEFAULT_RTT_US: u64 = 100_000;
 /// The path's rate assumed before the first measurement.
 pub const START_BPS: u64 = 300_000;
+const PAD_GAIN: f64 = 1.25;
+// Once delivery is confirmed, keep a silent path sampling at about three probes per 500 ms.
+const MIN_PROBE_BPS: u64 = 64_000;
 const PACE_FACTOR: f64 = 2.5;
 const PACE_BURST_US: i128 = 5_000;
 /// A late wake (a coarse system timer, a busy thread) still releases the credit that video
@@ -41,7 +44,7 @@ const PACE_CATCH_UP_US: u64 = 30_000;
 /// How long this side remembers when it sent each hop (a report comes within a round trip).
 const SENT_MEMORY_US: u64 = 2_000_000;
 /// The streams a secret gives keys for.
-const STREAMS: [u8; 5] = [stream::VOICE, stream::CAMERA_LOW, stream::CAMERA_HIGH, stream::SHARE, stream::FEEDBACK];
+const STREAMS: [u8; 6] = [stream::VOICE, stream::CAMERA_LOW, stream::CAMERA_HIGH, stream::SHARE, stream::APP_AUDIO, stream::FEEDBACK];
 
 /// Wire cost in bit-microseconds, the same units as bit/s times elapsed µs.
 fn pace_cost(bytes: usize) -> i128 {
@@ -67,9 +70,18 @@ pub fn stream_keys(secret: &[u8], call_id: &[u8], sender_pub: &[u8], stream: u8)
 #[derive(Debug)]
 pub enum Event {
     /// One voice frame, as sent (the caller decodes it and puts it in the jitter buffer).
-    Voice { seq: u32, flags: u8, talking: bool, capture_us: u64, payload: Vec<u8> },
+    Voice { stream: u8, seq: u32, flags: u8, talking: bool, capture_us: u64, payload: Vec<u8> },
     /// One whole access unit that can be decoded now, in order.
     Video { stream: u8, frame: video::Frame },
+}
+
+/// Result of trying one link's keys on an incoming datagram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiveOutcome {
+    Opened,
+    Replayed,
+    Refused,
+    BadTag,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -80,6 +92,8 @@ pub struct PeerStats {
     /// Of the resends, those sent on arrival-report evidence.
     pub repairs: u64,
     pub feedback_sent: u64,
+    /// Full-sized padding datagrams accepted by the outgoing link (included in feedback_sent).
+    pub padding_sent: u64,
     pub received: u64,
     pub received_bytes: u64,
     /// Not a media datagram of this call: malformed, another sender's, or under no key we hold.
@@ -90,7 +104,34 @@ pub struct PeerStats {
     /// the second report decides).
     pub hops_delivered: u64,
     pub hops_lost: u64,
+    /// Complete share frames (and keys) released by the pacer, including the last fragment.
+    pub share_frames_sent: u64,
+    pub share_keys_sent: u64,
+    /// Time between queueing the most recent share key and releasing its last fragment.
+    pub last_share_key_pacing_us: u64,
+    pub share_requests_sent: u64,
+    pub share_requests_received: u64,
+    /// Why each share request was sent.
+    pub share_request_causes: ShareRequestCauses,
 }
+
+/// What made the viewer ask for a share key. A request for a picture already asked for and
+/// not yet shown counts as a retry, whatever first asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShareRequestCauses {
+    /// Watch opened: the first picture.
+    pub opening: u64,
+    /// The receiver's chain broke, or an advertised frame never came.
+    pub gap: u64,
+    /// The newest assembled frame didn't come out of the decoder in time.
+    pub decode_late: u64,
+    /// The decoder reported an error.
+    pub decode_error: u64,
+    pub retry: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCause { Opening, Gap, DecodeLate, DecodeError }
 
 struct SentHop {
     at: u64,
@@ -108,6 +149,9 @@ struct PacedDatagram {
     bytes: Vec<u8>,
     /// Stream whose key frame ends with this datagram.
     key_end: Option<u8>,
+    share_end: Option<(u8, u32, u64)>,
+    // For a paced share resend: whether the sender's loss evidence triggered it.
+    resend: Option<bool>,
 }
 
 #[derive(Default)]
@@ -206,6 +250,75 @@ impl Arrivals {
     }
 }
 
+// Retry a single outstanding KEY on the media clock. On a slow path allow a round trip
+// and the feedback interval for a key already on its way.
+pub(crate) const SHARE_RETRY_US: u64 = 250_000;
+
+/// The viewer's side of a watched share. A still window has no new frames and costs no keys:
+/// the sharer repeats its HEAD, which is what reveals a last picture lost whole.
+struct WatchedShare {
+    pending: bool,
+    /// What made `pending`, and whether a request for it has gone out.
+    cause: RequestCause,
+    asked: bool,
+    last_request: Option<u64>,
+    // Latest assembled frame and the last decoder progress toward it. A delayed codec
+    // can return an older picture while retaining the final update to a still window.
+    awaiting_decode: Option<(u32, u64)>,
+    decoded: u64,
+    errors: u64,
+}
+
+struct DeliveryInterval {
+    start_us: u64,
+    end_us: u64,
+    bps: f64,
+}
+
+#[derive(Default)]
+struct Padding {
+    wanted: u64,
+    // Receiver clock. After a stalled read, use complete fresh feedback intervals
+    // for this attempt so that the accumulated burst cannot set the probe rate.
+    last_report: Option<u32>,
+    recovery: Option<DeliveryInterval>,
+    credit: i128,
+    hold_until: u64,
+    hold_us: u64,
+    // An estimate fall ends an attempt only after padding actually went on the link.
+    sent_in_attempt: bool,
+    blocked: bool,
+}
+
+impl Padding {
+    fn observe_report(&mut self, report_time: u32, rate: &RateEstimator) {
+        let last = self.last_report.get_or_insert(report_time);
+        let end_us = u64::from(report_time) * 100;
+        // Late sections can add arrivals to the current interval. Only a newer
+        // receiver timestamp can advance it or start recovery.
+        if report_time.wrapping_sub(*last) as i32 > 0 {
+            let start_us = u64::from(*last) * 100;
+            *last = report_time;
+            if start_us > end_us {
+                self.recovery = None; // The wire clock wrapped.
+            } else if self.wanted > rate.estimate_bps() && end_us - start_us > IDLE_FEEDBACK_US
+                && rate.has_delivery_gap(start_us, end_us, FEEDBACK_US) {
+                // Even the idle heartbeat was late and arrivals stopped. Charge the
+                // catch-up batch to the whole interval it could have taken to arrive.
+                self.recovery = Some(DeliveryInterval { start_us, end_us, bps: 0.0 });
+            } else if let Some(sample) = &mut self.recovery {
+                if end_us - sample.end_us >= FEEDBACK_US {
+                    sample.start_us = sample.end_us;
+                    sample.end_us = end_us;
+                }
+            }
+        }
+        if let Some(sample) = &mut self.recovery {
+            sample.bps = rate.reported_bps(sample.start_us, sample.end_us);
+        }
+    }
+}
+
 /// This side of a call with one other participant.
 pub struct Peer {
     call_id: Vec<u8>,
@@ -221,9 +334,13 @@ pub struct Peer {
     out: BTreeMap<u8, OutStream>,
     in_video: BTreeMap<u8, video::Receiver>,
     arrivals: Arrivals,
-    resends: Vec<Vec<u8>>,
-    queued_repairs: u64,
+    resends: Vec<(Vec<u8>, bool)>,
     next_feedback: u64,
+    share_head: Option<(u8, u32, u64)>,
+    last_voice: Option<(u64, usize)>,
+    next_head: u64,
+    receive_share: bool,
+    watch: Option<WatchedShare>,
     rtt_us: Option<u64>,
     /// The other side's clock minus this side's, from the report sample with the least round
     /// trip (half of it taken as the way there), and that round trip.
@@ -232,10 +349,14 @@ pub struct Peer {
     rate: RateEstimator,
     /// Sealed video in send order, with the time it entered the queue.
     paced: VecDeque<PacedDatagram>,
+    share_paced: VecDeque<PacedDatagram>,
+    // Repeated NACKs for a fragment still in the pacer need just one transmission.
+    share_resends: std::collections::BTreeSet<(u8, u64)>,
     paced_bytes: usize,
     /// Voice, feedback and resends may spend credit below zero.
     pace_credit: i128,
     pace_at: u64,
+    padding: Padding,
     plain: Vec<u8>,
     pub stats: PeerStats,
 }
@@ -257,15 +378,22 @@ impl Peer {
             in_video: BTreeMap::new(),
             arrivals: Arrivals::default(),
             resends: Vec::new(),
-            queued_repairs: 0,
             next_feedback: 0,
+            share_head: None,
+            last_voice: None,
+            next_head: 0,
+            receive_share: true,
+            watch: None,
             rtt_us: None,
             clock: None,
             rate: RateEstimator::new(START_BPS),
             paced: VecDeque::new(),
+            share_paced: VecDeque::new(),
+            share_resends: Default::default(),
             paced_bytes: 0,
             pace_credit: pace_cost(2 * wire::MAX_DATAGRAM),
             pace_at: 0,
+            padding: Padding::default(),
             plain: Vec::new(),
             stats: PeerStats::default(),
         }
@@ -314,6 +442,22 @@ impl Peer {
         self.rate.estimate_bps()
     }
 
+    /// Fill unused capacity up to the current estimate until this target is reached.
+    /// Zero closes the subscription and forgets its retry interval.
+    pub fn set_wanted(&mut self, bps: u64) {
+        if self.padding.wanted != bps {
+            if bps <= self.estimate_bps() {
+                self.padding = Padding::default();
+            }
+            self.padding.wanted = bps;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wanted_bps(&self) -> u64 {
+        self.padding.wanted
+    }
+
     /// The random-loss fraction learned on this side's outgoing path.
     pub fn random_loss(&self) -> f64 {
         self.rate.random_loss()
@@ -335,20 +479,36 @@ impl Peer {
     }
 
     fn pace_bps(&self) -> u64 {
-        (self.rate.estimate_bps() as f64 * PACE_FACTOR) as u64
+        if self.share_paced.is_empty() { (self.rate.estimate_bps() as f64 * PACE_FACTOR) as u64 }
+        else { self.rate.estimate_bps() }
     }
 
     fn pace_burst(&self) -> i128 {
         (i128::from(self.pace_bps()) * PACE_BURST_US).max(pace_cost(2 * wire::MAX_DATAGRAM))
     }
 
+    /// Total wire rate for an open padding attempt. Media gets first use of this credit.
+    fn padding_bps(&self) -> u64 {
+        let estimate = self.estimate_bps();
+        if self.padding.wanted <= estimate || self.rate.delivered_bps() == 0.0 { return 0; }
+        let delivered = self.padding.recovery.as_ref().map_or_else(|| self.rate.delivered_bps(), |sample| sample.bps);
+        let paced = ((PAD_GAIN * delivered) as u64).max(MIN_PROBE_BPS);
+        estimate.min(paced)
+    }
+
     /// Credit earned while nothing waited is capped at the burst. While video waits, a wake
     /// later than its deadline keeps what the wait earned (up to `PACE_CATCH_UP_US`), so the
     /// pace holds whatever the caller's wake granularity.
     fn refill_pacer(&mut self, now: u64) {
+        let padding_bps = self.padding_bps();
+        if padding_bps > 0 {
+            let elapsed = now.saturating_sub(self.pace_at.max(self.padding.hold_until));
+            let earned = i128::from(padding_bps).saturating_mul(i128::from(elapsed));
+            self.padding.credit = self.padding.credit.saturating_add(earned).min(pace_cost(2 * wire::MAX_DATAGRAM));
+        }
         let pace = i128::from(self.pace_bps());
         let elapsed = i128::from(now.saturating_sub(self.pace_at));
-        let cap = match self.paced.front() {
+        let cap = match self.next_paced() {
             None => self.pace_burst(),
             Some(head) => {
                 let waited = now.saturating_sub(head.queued_at.max(self.pace_at)).min(PACE_CATCH_UP_US);
@@ -356,20 +516,30 @@ impl Peer {
             }
         };
         self.pace_credit = self.pace_credit.saturating_add(pace.saturating_mul(elapsed)).min(cap);
+        if let Some(head) = self.share_paced.front() {
+            // A static window earns no burst against the next microphone frame.
+            self.pace_credit = self.pace_credit.min(pace_cost(head.bytes.len()));
+        }
         self.pace_at = self.pace_at.max(now);
     }
 
-    /// The local time in µs when the first queued video datagram has enough credit.
+    /// The local time in µs when the next video or padding datagram has credit.
     pub fn next_send_us(&self) -> Option<u64> {
-        let head = self.paced.front()?;
-        let missing = (pace_cost(head.bytes.len()) - self.pace_credit).max(0) as u128;
-        let wait = missing.div_ceil(u128::from(self.pace_bps()));
-        Some(self.pace_at.saturating_add(u64::try_from(wait).unwrap_or(u64::MAX)))
+        let (missing, bps, at) = if let Some(head) = self.next_paced() {
+            (pace_cost(head.bytes.len()) - self.pace_credit, self.pace_bps(), self.pace_at)
+        } else {
+            let bps = self.padding_bps();
+            if bps == 0 || self.padding.blocked || self.send_key.is_none() { return None; }
+            (pace_cost(wire::MAX_DATAGRAM) - self.padding.credit, bps, self.pace_at.max(self.padding.hold_until))
+        };
+        let wait = (missing.max(0) as u128).div_ceil(u128::from(bps));
+        let due = at.saturating_add(u64::try_from(wait).unwrap_or(u64::MAX));
+        Some(self.share_send_at(due))
     }
 
     /// How long the oldest queued video datagram has waited, in µs (zero if empty).
     pub fn pacer_delay_us(&self, now: u64) -> u64 {
-        self.paced.front().map_or(0, |d| now.saturating_sub(d.queued_at))
+        self.paced.front().into_iter().chain(self.share_paced.front()).map(|d| now.saturating_sub(d.queued_at)).max().unwrap_or(0)
     }
 
     /// Sealed bytes waiting for pacing credit.
@@ -377,19 +547,53 @@ impl Peer {
         self.paced_bytes
     }
 
+    // Both stream queues spend the same credit. Voice is immediate, then share, then camera.
+    fn next_paced(&self) -> Option<&PacedDatagram> {
+        self.share_paced.front().or_else(|| self.paced.front())
+    }
+
+    /// Let an in-flight microphone frame finish, and leave the next 20 ms voice slot free.
+    /// If the microphone stops, the reservation expires with that slot.
+    fn share_send_at(&self, now: u64) -> u64 {
+        let (Some(head), Some((voice_at, bytes))) = (self.share_paced.front(), self.last_voice) else { return now };
+        let cost_us = |bytes: usize| (bytes as u64 * 8_000_000).div_ceil(self.rate.estimate_bps());
+        let next_voice = voice_at.saturating_add(20_000);
+        if now >= next_voice || cost_us(bytes) + cost_us(head.bytes.len()) > 20_000 {
+            // At very low estimates there may be no whole slot. Ordinary credit still makes progress.
+            return now;
+        }
+        let start = now.max(voice_at.saturating_add(cost_us(bytes)));
+        if start.saturating_add(cost_us(head.bytes.len())) > next_voice { next_voice } else { start }
+    }
+
     fn release_paced(&mut self, now: u64, out: &mut Vec<Vec<u8>>) {
-        while self.paced.front().is_some_and(|d| pace_cost(d.bytes.len()) <= self.pace_credit) {
-            let mut d = self.paced.pop_front().unwrap();
+        while self.next_paced().is_some_and(|d| pace_cost(d.bytes.len()) <= self.pace_credit) && self.share_send_at(now) <= now {
+            let mut d = self.share_paced.pop_front().or_else(|| self.paced.pop_front()).unwrap();
             if let Some(stream) = d.key_end {
                 let s = self.out.get_mut(&stream).unwrap();
                 s.queued_keys -= 1;
                 s.last_key_sent = Some(now);
             }
+            if let Some(head) = d.share_end {
+                // Publishing earlier would NACK fragments still waiting for pacing credit.
+                self.share_head = Some(head);
+                self.stats.share_frames_sent += 1;
+                if d.key_end.is_some() {
+                    self.stats.share_keys_sent += 1;
+                    self.stats.last_share_key_pacing_us = now.saturating_sub(d.queued_at);
+                }
+            }
+            if let Some(repair) = d.resend {
+                let (h, _) = Header::parse(&d.bytes).unwrap();
+                self.share_resends.remove(&(h.key_id, h.seq));
+                self.stats.resent += 1;
+                self.stats.repairs += u64::from(repair);
+            }
             self.paced_bytes -= d.bytes.len();
             self.stamp(&mut d.bytes, now);
             out.push(d.bytes);
         }
-        if self.paced.is_empty() {
+        if self.next_paced().is_none() {
             // a catch-up left over once the queue drained is idle credit
             self.pace_credit = self.pace_credit.min(self.pace_burst());
         }
@@ -407,7 +611,6 @@ impl Peer {
 
     /// After refilling for this send time, charge each datagram and record its hop.
     fn stamp(&mut self, d: &mut [u8], now: u64) {
-        self.pace_credit -= pace_cost(d.len());
         let hop = self.hops;
         Header::set_hop(d, hop as u16);
         let video = Header::parse(d).and_then(|(h, _)| {
@@ -419,23 +622,35 @@ impl Peer {
                 cache.stamped(seq, hop);
             }
         }
+        self.record_sent(now, d.len(), video);
+    }
+
+    fn record_sent(&mut self, now: u64, len: usize, video: Option<(NonZeroU8, u8, u64)>) {
+        self.pace_credit -= pace_cost(len);
+        if self.padding_bps() > 0 && now >= self.padding.hold_until {
+            self.padding.credit -= pace_cost(len);
+        }
         self.hops += 1;
-        self.sent.push_back(SentHop { at: now, len: d.len(), reports: 0, seen: false, repair_queued: false, video });
+        self.sent.push_back(SentHop { at: now, len, reports: 0, seen: false, repair_queued: false, video });
         while self.sent.front().is_some_and(|s| now.saturating_sub(s.at) > SENT_MEMORY_US) {
             self.sent.pop_front();
         }
         self.stats.sent += 1;
-        self.stats.sent_bytes += d.len() as u64;
+        self.stats.sent_bytes += len as u64;
     }
 
     /// One voice frame to send now.
-    pub fn send_voice(&mut self, now: u64, voice: &Voice, talking: bool) -> io::Result<Vec<u8>> {
+    pub fn send_voice(&mut self, now: u64, stream_id: u8, voice: &Voice, talking: bool) -> io::Result<Vec<u8>> {
+        if !stream::is_audio(stream_id) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not an audio stream"));
+        }
         let mut plain = std::mem::take(&mut self.plain);
         voice.write(&mut plain);
         let flags = if talking { stream_flags::TALKING } else { 0 };
-        let sealed = self.seal(stream::VOICE, flags, &plain);
+        let sealed = self.seal(stream_id, flags, &plain);
         self.plain = plain;
         let (_, _, mut d) = sealed?;
+        if stream_id == stream::VOICE { self.last_voice = Some((now, d.len())); }
         self.refill_pacer(now);
         self.stamp(&mut d, now);
         Ok(d)
@@ -449,10 +664,49 @@ impl Peer {
         seq
     }
 
-    /// True when the next picture of `stream_id` should be a key frame (asked for, and at
-    /// most one a second).
+    /// A coalesced key request, due on this stream's recovery interval.
     pub fn key_frame_due(&mut self, stream_id: u8, now: u64) -> bool {
-        self.out.entry(stream_id).or_default().key_gate.take(now)
+        let gate = &mut self.out.entry(stream_id).or_default().key_gate;
+        if stream_id == stream::SHARE { gate.take_after(now, SHARE_RETRY_US) } else { gate.take(now) }
+    }
+
+    pub(crate) fn receive_share(&mut self, watching: bool) {
+        self.receive_share = watching;
+        if watching {
+            self.watch.get_or_insert(WatchedShare { pending: true, cause: RequestCause::Opening, asked: false,
+                last_request: None, awaiting_decode: None, decoded: 0, errors: 0 });
+        } else {
+            self.watch = None;
+            self.in_video.remove(&stream::SHARE);
+        }
+    }
+
+    pub(crate) fn share_queued(&self) -> bool { !self.share_paced.is_empty() }
+
+    pub(crate) fn decoded_share(&mut self, now: u64, decoded: u64, frame: u32, errors: u64) {
+        let Some(watch) = &mut self.watch else { return };
+        if decoded != watch.decoded {
+            watch.decoded = decoded;
+            watch.awaiting_decode = watch.awaiting_decode.and_then(|(latest, _)| (latest != frame).then_some((latest, now)));
+            watch.pending = false;
+        }
+        if errors != watch.errors {
+            watch.errors = errors;
+            watch.pending = true;
+            (watch.cause, watch.asked) = (RequestCause::DecodeError, false);
+        }
+    }
+
+    /// Close just this subscription. Frame numbers and the sealer's sequence continue on reopen.
+    pub(crate) fn stop_share(&mut self) {
+        self.set_wanted(0);
+        self.share_head = None;
+        self.share_resends.clear();
+        self.paced_bytes -= self.share_paced.drain(..).map(|p| p.bytes.len()).sum::<usize>();
+        self.resends.retain(|(d, _)| d[5] & 15 != stream::SHARE);
+        if let Some(s) = self.out.get_mut(&stream::SHARE) {
+            *s = OutStream { frame: s.frame, ..Default::default() };
+        }
     }
 
     /// Queues one encoded access unit and puts the datagrams already due in `out`.
@@ -472,7 +726,15 @@ impl Peer {
         }
         let mut plain = std::mem::take(&mut self.plain);
         let mut result = Ok(());
-        let parts: Vec<_> = video::fragments(au, frame, if key { 0 } else { 1 }, key, capture_us).collect();
+        // On a thin path a full datagram can occupy the wire for longer than a voice frame.
+        // Interleave share fragments at half the 20 ms voice period. Large frames still fit
+        // the wire's fragment count; camera packetisation is unchanged.
+        let size = if stream_id == stream::SHARE {
+            let wire_bytes = self.rate.estimate_bps() / 800; // ten milliseconds
+            (wire_bytes as usize).saturating_sub(wire::MAX_DATAGRAM - wire::MAX_FRAGMENT)
+                .clamp(1, wire::MAX_FRAGMENT).max(au.len().div_ceil(u16::MAX as usize).min(wire::MAX_FRAGMENT))
+        } else { wire::MAX_FRAGMENT };
+        let parts: Vec<_> = video::fragments_at(au, frame, if key { 0 } else { 1 }, key, capture_us, size).collect();
         let last = parts.len() - 1;
         for (i, f) in parts.iter().enumerate() {
             f.write(&mut plain);
@@ -494,7 +756,9 @@ impl Peer {
                         s.newest_key = Some((key_id, seq - i as u64..=seq));
                     }
                     s.queued_keys += usize::from(key_end);
-                    self.paced.push_back(PacedDatagram { queued_at: now, bytes: d, key_end: key_end.then_some(stream_id) });
+                    let share_end = (stream_id == stream::SHARE && i == last).then_some((key_id, frame, seq + 1));
+                    let queue = if stream_id == stream::SHARE { &mut self.share_paced } else { &mut self.paced };
+                    queue.push_back(PacedDatagram { queued_at: now, bytes: d, key_end: key_end.then_some(stream_id), share_end, resend: None });
                 }
                 Err(e) => {
                     result = Err(e);
@@ -510,33 +774,50 @@ impl Peer {
 
     /// One datagram from the other side.
     pub fn receive(&mut self, now: u64, datagram: &[u8], events: &mut Vec<Event>) {
+        match self.try_receive(now, datagram, events) {
+            ReceiveOutcome::Opened | ReceiveOutcome::Replayed => {}
+            ReceiveOutcome::Refused => self.note_refused(),
+            ReceiveOutcome::BadTag => self.note_bad_tag(),
+        }
+    }
+
+    pub fn note_bad_tag(&mut self) { self.stats.bad_tag += 1; }
+
+    pub fn note_refused(&mut self) { self.stats.refused += 1; }
+
+    /// Only authenticated datagrams affect this peer while routing is undecided.
+    pub fn try_receive(&mut self, now: u64, datagram: &[u8], events: &mut Vec<Event>) -> ReceiveOutcome {
         let Some((h, sealed)) = Header::parse(datagram) else {
-            self.stats.refused += 1;
-            return;
+            return ReceiveOutcome::Refused;
         };
         let Some(opener) = (h.src == self.their_src).then(|| self.recv_keys.get_mut(&h.key_id).and_then(|o| o.get_mut(&h.stream))).flatten() else {
-            self.stats.refused += 1;
-            return;
+            return ReceiveOutcome::Refused;
         };
         let mut plain = std::mem::take(&mut self.plain);
-        match opener.open(&datagram[wire::AAD], sealed, &mut plain) {
+        let outcome = match opener.open(&datagram[wire::AAD], sealed, &mut plain) {
             Ok(seq) => {
                 self.stats.received += 1;
                 self.stats.received_bytes += datagram.len() as u64;
                 self.arrivals.record(h.hop, now);
                 self.take(now, &h, seq, &plain, events);
+                ReceiveOutcome::Opened
             }
-            Err(OpenError::Replayed) => self.stats.replayed += 1,
-            Err(_) => self.stats.bad_tag += 1,
-        }
+            Err(OpenError::Replayed) => {
+                self.stats.replayed += 1;
+                ReceiveOutcome::Replayed
+            }
+            Err(OpenError::BadTag | OpenError::Short) => ReceiveOutcome::BadTag,
+        };
         self.plain = plain;
+        outcome
     }
 
     fn take(&mut self, now: u64, h: &Header, seq: u64, plain: &[u8], events: &mut Vec<Event>) {
         match h.stream {
-            stream::VOICE => {
+            s if stream::is_audio(s) => {
                 if let Some(v) = Voice::read(plain) {
                     events.push(Event::Voice {
+                        stream: s,
                         seq: v.seq,
                         flags: v.flags,
                         talking: h.flags & stream_flags::TALKING != 0,
@@ -545,11 +826,17 @@ impl Peer {
                     });
                 }
             }
-            s if stream::is_video(s) => {
+            s if stream::is_video(s) && (s != stream::SHARE || self.receive_share) => {
                 if let Some(f) = wire::Fragment::read(plain) {
                     let mut frames = Vec::new();
                     let src = self.their_src;
                     self.in_video.entry(s).or_insert_with(|| video::Receiver::new(src, s)).take(h.key_id, seq, &f, now, &mut frames);
+                    if s == stream::SHARE {
+                        if let (Some(last), Some(watch)) = (frames.last(), &mut self.watch) {
+                            let since = watch.awaiting_decode.map_or(now, |(_, at)| at);
+                            watch.awaiting_decode = Some((last.frame, since));
+                        }
+                    }
                     events.extend(frames.into_iter().map(|frame| Event::Video { stream: s, frame }));
                 }
             }
@@ -570,6 +857,8 @@ impl Peer {
                 // the report's base, extended against the hops this side has sent
                 let behind = (self.hops as u16).wrapping_sub(base) as u64;
                 let Some(base) = self.hops.checked_sub(behind) else { return };
+                // Credit up to this report was earned at the previous delivery rate and estimate.
+                self.refill_pacer(now);
                 let first = self.hops - self.sent.len() as u64;
                 let mut rtt: Option<u64> = None;
                 let mut best: Option<(u64, i64)> = None;
@@ -621,8 +910,7 @@ impl Peer {
                         let Some((s, id, seq)) = rec.video else { continue };
                         let Some(stream) = self.out.get_mut(&s.get()) else { continue };
                         if let Some(bytes) = stream.repair(id, seq, hop, now) {
-                            self.resends.push(bytes);
-                            self.queued_repairs += 1;
+                            self.resends.push((bytes, true));
                             rec.repair_queued = true;
                         }
                     }
@@ -632,9 +920,24 @@ impl Peer {
                 self.rate.on_settled(lost, delivered);
                 let (_, sent_bytes) = self.sent_since(now, 1_000_000);
                 let rtt_now = rtt.or(self.rtt_us).unwrap_or(DEFAULT_RTT_US);
-                // Accrue time through the report at the rate in effect before it.
-                self.refill_pacer(now);
-                self.rate.update(now, rtt_now, sent_bytes as u64 * 8);
+                let before = self.estimate_bps();
+                let after = self.rate.update(now, rtt_now, sent_bytes as u64 * 8);
+                if self.padding.wanted != 0 {
+                    self.padding.observe_report(report_time, &self.rate);
+                    if after >= self.padding.wanted {
+                        self.padding.recovery = None;
+                        self.padding.hold_us = 0;
+                        self.padding.hold_until = 0;
+                        self.padding.sent_in_attempt = false;
+                        self.padding.credit = 0;
+                    } else if after < before && self.padding.sent_in_attempt && !self.rate.in_startup() {
+                        self.padding.recovery = None;
+                        self.padding.hold_us = (2 * self.padding.hold_us).clamp(10_000_000, 60_000_000);
+                        self.padding.hold_until = now.saturating_add(self.padding.hold_us);
+                        self.padding.sent_in_attempt = false;
+                        self.padding.credit = 0;
+                    }
+                }
                 if let Some(sample) = rtt {
                     self.rtt_us = Some(self.rtt_us.map_or(sample, |r| (7 * r + sample) / 8));
                 }
@@ -667,20 +970,26 @@ impl Peer {
                             stream.last_key_sent = Some(now);
                             stream.key_gate.withdraw();
                         }
-                        self.resends.push(d.to_vec());
+                        self.resends.push((d.to_vec(), false));
                     }
+                }
+            }
+            Section::Head { stream: s, key_id, frame, next } => {
+                if s == stream::SHARE && self.receive_share && self.recv_keys.contains_key(&key_id) {
+                    self.in_video.entry(s).or_insert_with(|| video::Receiver::new(self.their_src, s)).head(now, key_id, frame, next);
                 }
             }
             Section::Key(keys) => {
                 let grace = self.rtt_us.unwrap_or(DEFAULT_RTT_US).saturating_add(FEEDBACK_US);
                 for (src, s) in keys {
                     if src == self.my_src {
+                        if s == stream::SHARE { self.stats.share_requests_received += 1; }
                         let stream = self.out.entry(s).or_default();
                         if stream.queued_keys == 0 && stream.last_key_sent.is_none_or(|at| now.saturating_sub(at) >= grace) {
                             let repairing_key = stream.newest_key.as_ref().is_some_and(|(id, key)| {
                                 stream.cache.get(id).is_some_and(|cache| cache.key_awaiting_receipt(key, now))
                             });
-                            if !repairing_key {
+                            if s == stream::SHARE || !repairing_key {
                                 stream.key_gate.request();
                             }
                         }
@@ -693,24 +1002,50 @@ impl Peer {
     /// Releases requested resends, due video, then feedback when due or a receiver has gaps.
     pub fn poll(&mut self, now: u64, out: &mut Vec<Vec<u8>>) {
         self.refill_pacer(now);
-        let first_resend = out.len();
-        out.append(&mut self.resends);
-        self.stats.repairs += std::mem::take(&mut self.queued_repairs);
-        for d in &mut out[first_resend..] {
-            self.stamp(d, now);
-            self.stats.resent += 1;
+        let mut resends = std::mem::take(&mut self.resends);
+        for (mut bytes, repair) in resends.drain(..) {
+            if bytes[5] & 15 == stream::SHARE {
+                let (h, _) = Header::parse(&bytes).unwrap();
+                if !self.share_resends.insert((h.key_id, h.seq)) { continue; }
+                // A burst of NACKs for a lost key has the same cost to voice as the original.
+                self.paced_bytes += bytes.len();
+                self.share_paced.push_back(PacedDatagram { queued_at: now, bytes, key_end: None, share_end: None, resend: Some(repair) });
+            } else {
+                self.stamp(&mut bytes, now);
+                out.push(bytes);
+                self.stats.resent += 1;
+                self.stats.repairs += u64::from(repair);
+            }
         }
+        self.resends = resends;
         self.release_paced(now, out);
         let rtt = self.rtt_us.unwrap_or(DEFAULT_RTT_US);
         let mut wants = video::Wants::default();
-        for r in self.in_video.values_mut() {
-            r.poll(now, rtt, &mut wants);
+        let (mut share_gap, mut key_arriving) = (false, false);
+        for (&s, r) in &mut self.in_video {
+            if s == stream::SHARE && self.watch.is_some() {
+                let mut repair = video::Wants::default();
+                r.poll(now, rtt, &mut repair);
+                share_gap = repair.key;
+                key_arriving = r.key_arriving(now, rtt);
+                wants.nacks.extend(repair.nacks);
+            } else {
+                r.poll(now, rtt, &mut wants);
+            }
         }
+        let retry = SHARE_RETRY_US.max(rtt.saturating_add(FEEDBACK_US));
+        let request_share = self.watch.as_mut().is_some_and(|w| {
+            let late = w.awaiting_decode.is_some_and(|(_, at)| now.saturating_sub(at) >= retry);
+            if !w.pending && (share_gap || late) {
+                w.pending = true;
+                w.asked = false;
+                w.cause = if share_gap { RequestCause::Gap } else { RequestCause::DecodeLate };
+            }
+            // A retry waits while the key asked for is still arriving.
+            w.pending && !(w.asked && key_arriving) && w.last_request.is_none_or(|at| now.saturating_sub(at) >= retry)
+        });
         let due = now >= self.next_feedback;
-        if !due && wants.nacks.is_empty() {
-            return;
-        }
-        if self.send_key.is_none() {
+        if (!due && wants.nacks.is_empty() && !request_share) || self.send_key.is_none() {
             return;
         }
         let mut sections = Vec::new();
@@ -720,12 +1055,32 @@ impl Peer {
             sections.push(Section::Nack(wants.nacks));
         }
         if due {
-            if wants.key {
-                let src = self.their_src;
-                let keys = self.in_video.iter().filter(|(_, r)| r.wants_key()).map(|(&s, _)| (src, s)).collect();
-                sections.push(Section::Key(keys));
+            if let Some((key_id, frame, next)) = self.share_head.filter(|_| now >= self.next_head) {
+                sections.push(Section::Head { stream: stream::SHARE, key_id, frame, next });
+                self.next_head = now + IDLE_FEEDBACK_US;
             }
             self.next_feedback = now + if active { FEEDBACK_US } else { IDLE_FEEDBACK_US };
+        }
+        if request_share || (due && wants.key) {
+            let mut keys: Vec<_> = self.in_video.iter().filter(|(s, r)|
+                due && wants.key && (**s != stream::SHARE || self.watch.is_none()) && r.wants_key())
+                .map(|(&s, _)| (self.their_src, s)).collect();
+            if request_share {
+                let watch = self.watch.as_mut().unwrap();
+                watch.last_request = Some(now);
+                self.stats.share_requests_sent += 1;
+                let causes = &mut self.stats.share_request_causes;
+                *match (watch.asked, watch.cause) {
+                    (true, _) => &mut causes.retry,
+                    (false, RequestCause::Opening) => &mut causes.opening,
+                    (false, RequestCause::Gap) => &mut causes.gap,
+                    (false, RequestCause::DecodeLate) => &mut causes.decode_late,
+                    (false, RequestCause::DecodeError) => &mut causes.decode_error,
+                } += 1;
+                watch.asked = true;
+                keys.push((self.their_src, stream::SHARE));
+            }
+            sections.push(Section::Key(keys));
         }
         // the first section carries NACKs and KEYs with the first arrivals; more arrivals
         // than one datagram holds go in datagrams of their own
@@ -739,13 +1094,68 @@ impl Peer {
         let mut plain = std::mem::take(&mut self.plain);
         for group in std::iter::once(first).chain(rest.into_iter().map(|s| vec![s])) {
             wire::write_feedback(&group, &mut plain);
-            if let Ok((_, _, mut d)) = self.seal(stream::FEEDBACK, 0, &plain) {
-                self.stamp(&mut d, now);
-                self.stats.feedback_sent += 1;
-                out.push(d);
+            if plain.len() <= wire::MAX_PLAINTEXT {
+                self.send_report(now, &plain, out);
+            } else {
+                // HEAD and long NACK lists can exceed the room beside a full arrival report.
+                // Split on section/range boundaries; each datagram parses on its own.
+                for section in group {
+                    if let Section::Nack(ranges) = section {
+                        for chunk in ranges.chunks((wire::MAX_PLAINTEXT - 4) / 11) {
+                            wire::write_feedback(&[Section::Nack(chunk.to_vec())], &mut plain);
+                            self.send_report(now, &plain, out);
+                        }
+                    } else {
+                        wire::write_feedback(&[section], &mut plain);
+                        self.send_report(now, &plain, out);
+                    }
+                }
             }
         }
         self.plain = plain;
+    }
+
+    fn send_report(&mut self, now: u64, plain: &[u8], out: &mut Vec<Vec<u8>>) {
+        if let Ok((_, _, mut d)) = self.seal(stream::FEEDBACK, 0, plain) {
+            self.stamp(&mut d, now);
+            self.stats.feedback_sent += 1;
+            out.push(d);
+        }
+    }
+
+    /// Report whether the link accepted its pending media and feedback. A full link
+    /// wakes for normal traffic again before it tries optional padding.
+    pub fn set_padding_blocked(&mut self, blocked: bool) {
+        self.padding.blocked = blocked;
+    }
+
+    /// After poll and after draining the link's backlog, spend any remaining wire
+    /// credit directly on the link. A refused datagram never consumes a hop.
+    pub fn send_padding(&mut self, now: u64, mut try_send: impl FnMut(Vec<u8>) -> bool) {
+        if self.padding_bps() == 0 || self.padding.blocked
+            || now < self.padding.hold_until || self.next_paced().is_some() || self.send_key.is_none() {
+            return;
+        }
+        self.refill_pacer(now);
+        while self.padding.credit >= pace_cost(wire::MAX_DATAGRAM) {
+            let Ok((_, _, mut d)) = self.seal(stream::FEEDBACK, 0, &wire::PADDING_PLAINTEXT) else { break };
+            Header::set_hop(&mut d, self.hops as u16);
+            if !try_send(d) {
+                self.padding.blocked = true;
+                break;
+            }
+            self.record_sent(now, wire::MAX_DATAGRAM, None);
+            self.stats.feedback_sent += 1;
+            self.stats.padding_sent += 1;
+            self.padding.sent_in_attempt = true;
+        }
+    }
+
+    /// Return a decoded access unit's storage to the receiver that assembled it.
+    pub(crate) fn recycle_video(&mut self, stream: u8, data: Vec<u8>) {
+        if let Some(receiver) = self.in_video.get_mut(&stream) {
+            receiver.recycle(data);
+        }
     }
 
     /// The video receivers' statistics, by stream.
@@ -775,15 +1185,28 @@ mod tests {
         k
     }
 
+    struct VideoAttempts {
+        original_dropped: bool,
+        resent: bool,
+    }
+
     struct Rig {
         a: Peer,
         b: Peer,
         ab: Path,
         ba: Path,
         now: u64,
+        voice: bool,
         voice_sent: u32,
         video_sent: u32,
         voice_got: Vec<u32>,
+        last_voice_at: Option<u64>,
+        max_voice_gap: u64,
+        expected_share: Option<Vec<u8>>,
+        receiver_paused: bool,
+        // Drain time of the bytes the forward bottleneck accepted and its peak wire backlog.
+        router_empty_at: u64,
+        peak_router_us: u64,
         video_got: Vec<(u32, bool)>,
         shown_at: Vec<u64>,
         keys_made: Vec<(u32, u64)>,
@@ -791,6 +1214,7 @@ mod tests {
         outage: bool,
         reverse_outage: bool,
         trace_resends: bool,
+        video_attempts: Option<BTreeMap<(u8, u8, u64), VideoAttempts>>,
         drop_once: std::collections::BTreeSet<(u8, u64)>,
         last_drop_us: Option<u64>,
         /// a sizes its pictures from its rate estimate, as an encoder following it would.
@@ -822,15 +1246,23 @@ mod tests {
                 ab: Path::new(path, seed),
                 ba: Path::new(path, 2 * seed + 1),
                 now: 0,
+                voice: true,
                 voice_sent: 0,
                 video_sent: 0,
                 voice_got: Vec::new(),
+                last_voice_at: None,
+                max_voice_gap: 0,
+                expected_share: None,
+                receiver_paused: false,
+                router_empty_at: 0,
+                peak_router_us: 0,
                 video_got: Vec::new(),
                 shown_at: Vec::new(),
                 keys_made: Vec::new(),
                 outage: false,
                 reverse_outage: false,
                 trace_resends: false,
+                video_attempts: None,
                 drop_once: Default::default(),
                 last_drop_us: None,
                 adaptive: false,
@@ -886,10 +1318,10 @@ mod tests {
         fn step(&mut self, dt: u64, out: &mut Vec<Vec<u8>>, events: &mut Vec<Event>, capture: impl FnOnce(&mut Rig, &mut Vec<Vec<u8>>)) {
             self.now += dt;
             let now = self.now;
-            if now % VOICE_INTERVAL_US == 0 {
+            if self.voice && now % VOICE_INTERVAL_US == 0 {
                 let seq = self.a.next_voice_seq();
                 let v = Voice { flags: 0, seq, capture_us: now, payload: &[seq as u8; 100] };
-                out.push(self.a.send_voice(now, &v, true).unwrap());
+                out.push(self.a.send_voice(now, stream::VOICE, &v, true).unwrap());
                 self.voice_sent += 1;
             }
             capture(self, out);
@@ -901,16 +1333,19 @@ mod tests {
                 let bytes: usize = out[first..first + resends].iter().map(Vec::len).sum();
                 eprintln!("burst at {now} µs, {} bit/s, {resends} resends ({} sender repairs), {bytes} bytes", self.a.estimate_bps(), self.a.stats.repairs - before.repairs);
             }
+            self.a.send_padding(now, |d| { out.push(d); true });
             self.send_forward(out);
-            self.b.poll(now, out);
-            for d in out.drain(..) {
-                if !self.reverse_outage {
-                    self.ba.send(now, d);
+            if !self.receiver_paused {
+                self.b.poll(now, out);
+                for d in out.drain(..) {
+                    if !self.reverse_outage {
+                        self.ba.send(now, d);
+                    }
                 }
-            }
-            self.ab.poll(now, out);
-            for d in out.drain(..) {
-                self.b.receive(now, &d, events);
+                self.ab.poll(now, out);
+                for d in out.drain(..) {
+                    self.b.receive(now, &d, events);
+                }
             }
             self.ba.poll(now, out);
             for d in out.drain(..) {
@@ -920,7 +1355,13 @@ mod tests {
                 match e {
                     Event::Voice { seq, payload, talking, .. } => {
                         assert!(talking && payload == [seq as u8; 100], "voice frame {seq} intact");
+                        if let Some(last) = self.last_voice_at.replace(now) {
+                            self.max_voice_gap = self.max_voice_gap.max(now - last);
+                        }
                         self.voice_got.push(seq);
+                    }
+                    Event::Video { stream: stream::SHARE, frame } if self.expected_share.is_some() => {
+                        assert_eq!(frame.data, self.expected_share.take().unwrap(), "the complete share picture must arrive");
                     }
                     Event::Video { stream: s, frame } => {
                         assert_eq!(s, stream::CAMERA_HIGH);
@@ -945,7 +1386,22 @@ mod tests {
                     }
                 }
                 if !self.outage {
+                    let video = self.video_attempts.as_mut().and_then(|attempts| {
+                        let h = Header::parse(&d)?.0;
+                        stream::is_video(h.stream).then(|| attempts.entry((h.stream, h.key_id, h.seq)))
+                    });
+                    let before = self.ab.stats;
+                    let bytes = d.len();
                     self.ab.send(self.now, d);
+                    if self.ab.config.rate_bps > 0 && self.ab.stats.lost == before.lost && self.ab.stats.queue_drops == before.queue_drops {
+                        let service = bytes as u64 * 8_000_000 / self.ab.config.rate_bps;
+                        self.router_empty_at = self.router_empty_at.max(self.now) + service;
+                        self.peak_router_us = self.peak_router_us.max(self.router_empty_at - self.now);
+                    }
+                    if let Some(entry) = video {
+                        let dropped = self.ab.stats.lost > before.lost || self.ab.stats.queue_drops > before.queue_drops;
+                        entry.and_modify(|v| v.resent = true).or_insert(VideoAttempts { original_dropped: dropped, resent: false });
+                    }
                 }
             }
         }
@@ -954,11 +1410,508 @@ mod tests {
             self.video_got.iter().position(|&(id, _)| id == frame).map(|i| self.shown_at[i])
         }
 
+        fn start_still_share(&mut self, out: &mut Vec<Vec<u8>>, events: &mut Vec<Event>) {
+            let still = au(0, 1_200);
+            self.a.send_video(0, stream::SHARE, &still, true, 0, out).unwrap();
+            self.expected_share = Some(still);
+            while self.now < 1_000_000 {
+                self.step(1_000, out, events, |_, _| {});
+            }
+            assert!(self.expected_share.is_none(), "the initial still picture should reach the viewer");
+        }
+
         fn report_repair(&self, case: &str, since: u64, shown: Option<u64>, bound: u64) {
             let received = self.b.video_stats().next().unwrap().1;
             eprintln!("{case}: picture {shown:?} µs, delay {:?} µs, bound {bound} µs, {} NACK resends, {} sender repairs, {} NACKed, {} key-request polls, keys made (frame, µs) {:?}",
                 shown.map(|at| at - since), self.a.stats.resent - self.a.stats.repairs, self.a.stats.repairs, received.nacked, received.key_requests, self.keys_made);
         }
+    }
+
+    #[test]
+    fn padding_waits_for_credit_and_only_an_accepted_send_consumes_a_hop() {
+        let mut r = Rig::new(PathConfig::default());
+        r.a.set_wanted(4_500_000);
+        assert_eq!(r.a.next_send_us(), None, "no padding wake before the receiver reports delivery");
+        r.a.send_padding(0, |_| panic!("padding before a delivery sample"));
+        r.a.rate.on_arrival(0, 0, wire::MAX_DATAGRAM);
+        let delivered = wire::MAX_DATAGRAM as u64 * 8 * 2; // One datagram in half a second.
+        let paced = ((PAD_GAIN * delivered as f64) as u64).max(MIN_PROBE_BPS);
+        let due = (wire::MAX_DATAGRAM as u64 * 8_000_000).div_ceil(paced);
+        assert_eq!(r.a.next_send_us(), Some(due));
+        r.a.send_padding(due - 1, |_| panic!("padding sent before it had a datagram of credit"));
+        let mut refused = 0;
+        r.a.send_padding(due, |d| { assert_eq!(d.len(), wire::MAX_DATAGRAM); refused += 1; false });
+        assert_eq!((refused, r.a.hops, r.a.stats.sent, r.a.next_send_us()), (1, 0, 0, None));
+        r.a.set_padding_blocked(false);
+        assert_eq!(r.a.next_send_us(), Some(due));
+        r.a.send_padding(due * 10, |d| {
+            r.b.receive(due * 10, &d, &mut Vec::new());
+            true
+        });
+        assert_eq!((r.a.hops, r.a.stats.padding_sent, r.b.arrivals.since_report), (2, 2, 2),
+            "idle credit buys two reported hops, including after a blocked send");
+        assert_eq!(r.a.next_send_us(), Some(due * 11));
+        r.a.stop_share();
+        assert_eq!(r.a.next_send_us(), None, "closing the subscription cancels its padding wake");
+    }
+
+    #[test]
+    fn split_and_reordered_feedback_keep_the_same_padding_interval() {
+        let mut rate = RateEstimator::new(START_BPS);
+        let mut padding = Padding { wanted: 4_500_000, ..Default::default() };
+        padding.observe_report(0, &rate);
+        rate.on_arrival(100_000, 300_000, 1_200);
+        padding.observe_report(3_000, &rate);
+        assert_eq!(padding.recovery.as_ref().unwrap().bps, 32_000.0, "the stalled read covers all 300 ms");
+        rate.on_arrival(301_000, 303_000, 1_200);
+        padding.observe_report(3_030, &rate);
+        assert_eq!(padding.recovery.as_ref().unwrap().bps, 32_000.0, "an early report cannot compress the sample to 3 ms");
+        padding.observe_report(3_500, &rate);
+        assert_eq!(padding.recovery.as_ref().unwrap().bps, 192_000.0, "only the fresh packet counts");
+        rate.on_arrival(320_000, 323_000, 1_200);
+        padding.observe_report(3_500, &rate);
+        padding.observe_report(3_030, &rate);
+        assert_eq!(padding.recovery.as_ref().unwrap().bps, 384_000.0, "split and late sections must use the same 50 ms");
+    }
+
+    #[test]
+    fn a_still_share_fills_the_lan_then_sends_its_large_key() {
+        let wanted = 4_500_000;
+        let mut r = Rig::new(PathConfig { latency_us: 3_000, ..Default::default() });
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        r.start_still_share(&mut out, &mut events);
+        assert_eq!(r.a.stats.padding_sent, 0, "an untargeted still share must send zero padding");
+        let start = r.now;
+        r.a.set_wanted(wanted);
+        assert!(r.a.next_send_us().is_some(), "padding must wake the idle video pacer");
+        // Keep observing a late crossing for the key and stall measurements. The
+        // six-second assertion below uses the actual first crossing.
+        let climb_bound = 6_000_000;
+        while r.a.estimate_bps() < wanted && r.now < start + 2 * climb_bound {
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+            let e = r.a.loss_events();
+            assert_eq!(e.tested_cuts + e.untested_cuts, 0, "clean LAN backoff at {} µs, {} bit/s, queue {} µs, {e:?}",
+                r.now - start, r.a.estimate_bps(), r.a.queue_delay_us());
+        }
+        let padding = r.a.stats.padding_sent * wire::MAX_DATAGRAM as u64;
+        let climb_us = r.now - start;
+        eprintln!("LAN climb: {climb_us} µs to {} bit/s, {padding} bytes of padding", r.a.estimate_bps());
+        assert!(r.a.estimate_bps() >= wanted, "the still share never reached {wanted} bit/s in {climb_us} µs");
+        assert!(padding > 0 && padding as f64 * 8.0 <= 1.5 * wanted as f64 / std::f64::consts::LN_2,
+            "LAN climb spent {padding} padding bytes");
+        assert_eq!(r.a.next_send_us(), None, "target reached: no padding deadline");
+        let reached = r.now;
+        while r.now < reached + 1_000_000 {
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+        }
+        let key = au(1, 150_000);
+        let at = r.now;
+        r.a.send_video(at, stream::SHARE, &key, true, at, &mut out).unwrap();
+        r.expected_share = Some(key);
+        while r.expected_share.is_some() && r.now < at + 500_000 {
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+        }
+        assert!(r.expected_share.is_none(), "the 150 KB key must reach the viewer within 0.5 s");
+        assert_eq!(r.a.stats.padding_sent * wire::MAX_DATAGRAM as u64, padding, "no padding after reaching the panel's rate");
+        assert!(r.max_voice_gap <= VOICE_INTERVAL_US, "voice arrival gap {} µs during padding and the key", r.max_voice_gap);
+        eprintln!("LAN key arrived after {} µs, max voice gap {} µs", r.now - at, r.max_voice_gap);
+
+        // With only voice and HEADs in the delivery window, pause the receiver, then
+        // read the waiting datagrams together before its overdue feedback (as the driver does).
+        while r.now < at + 2_000_000 { r.step(1_000, &mut out, &mut events, |_, _| {}); }
+        let before = r.a.estimate_bps();
+        assert!(before >= wanted);
+        let mut low = before;
+        r.receiver_paused = true;
+        let resume = r.now + 300_000;
+        while r.now < resume {
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+            low = low.min(r.a.estimate_bps());
+        }
+        r.receiver_paused = false;
+        r.ab.poll(resume, &mut out);
+        assert!(out.len() >= 300_000 / VOICE_INTERVAL_US as usize, "the receiver must observe the stalled burst");
+        for d in out.drain(..) { r.b.receive(resume, &d, &mut events); }
+        r.b.poll(resume, &mut out);
+        for d in out.drain(..) { r.ba.send(resume, d); }
+        let mut recovered_at = None;
+        let mut wakes = BTreeMap::new();
+        while r.now < resume + 3_000_000 {
+            let a = &r.a;
+            let pads = a.stats.padding_sent;
+            let gate = if a.estimate_bps() >= wanted { "wanted reached" }
+                else if a.padding.hold_until > r.now + 1_000 { "hold" }
+                else if a.padding.blocked || a.next_paced().is_some() { "backlog" }
+                else if a.padding_bps() == 0 { "no delivery" }
+                else { "pacing credit" };
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+            let bps = r.a.estimate_bps();
+            let gate = if r.a.stats.padding_sent > pads { "sent padding" } else { gate };
+            *wakes.entry(gate).or_insert(0u32) += 1;
+            if (low >= wanted && bps < wanted) || (r.now - resume).is_multiple_of(500_000) {
+                let delivered = r.a.rate.delivered_bps() as u64;
+                let target = r.a.padding_bps();
+                let sent_bps = r.a.sent_since(r.now, 1_000_000).1 * 8;
+                let exercised = sent_bps + sent_bps / 2;
+                eprintln!("stall +{} µs: estimate {bps}, 500 ms delivered {delivered}, pad target {target}, 1.5 × sent {exercised} bit/s, hold remaining {} µs, wakes {wakes:?}",
+                    r.now - resume, r.a.padding.hold_until.saturating_sub(r.now));
+                wakes.clear();
+            }
+            low = low.min(bps);
+            if bps < wanted { recovered_at = None; }
+            else { recovered_at.get_or_insert(r.now - resume); }
+        }
+        eprintln!("300 ms receiver stall: before {before}, minimum {low}, final {}, at wanted after {recovered_at:?} µs", r.a.estimate_bps());
+        assert!(climb_us <= climb_bound, "the still share took {climb_us} µs to reach {wanted} bit/s, limit {climb_bound}");
+        assert!(low * 10 >= before * 7, "stall sank {before} bit/s to {low}");
+        assert!(recovered_at.is_some(), "still below {wanted} bit/s three seconds after the receiver resumed");
+    }
+
+    #[test]
+    fn a_voice_free_still_share_climbs_lan_estimate_via_probe_floor() {
+        let wanted = 4_500_000;
+        let lan = PathConfig { latency_us: 3_000, ..Default::default() };
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        let mut r = Rig::new(lan);
+        r.voice = false;
+        r.start_still_share(&mut out, &mut events);
+        let start = r.now;
+        r.a.set_wanted(wanted);
+        while r.now < start + 8_000_000 && r.a.estimate_bps() < wanted {
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+        }
+        let climb_us = r.now - start;
+        let cuts = r.a.loss_events();
+        eprintln!("voice-free LAN climb: {climb_us} µs to {} bit/s", r.a.estimate_bps());
+        assert!(r.a.estimate_bps() >= wanted, "below {wanted} bit/s after {climb_us} µs");
+        assert_eq!(cuts.tested_cuts + cuts.untested_cuts, 0, "clean LAN cut during climb");
+        assert!(r.a.stats.padding_sent > 0);
+        assert_eq!(r.voice_sent, 0);
+
+        let mut r = Rig::new(PathConfig { rate_bps: 150_000, ..lan });
+        r.voice = false;
+        r.start_still_share(&mut out, &mut events);
+        r.a.set_wanted(wanted);
+        let end = r.now + 160_000_000;
+        let mut holds = Vec::new();
+        while r.now < end {
+            let until = r.a.padding.hold_until;
+            let sent = r.a.stats.padding_sent;
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+            if r.now < until {
+                assert_eq!(r.a.stats.padding_sent, sent, "padded during hold at {} µs", r.now);
+            }
+            if r.a.padding.hold_until > until {
+                holds.push(r.a.padding.hold_us);
+            }
+        }
+        assert!(holds.starts_with(&[10_000_000, 20_000_000, 40_000_000, 60_000_000]),
+            "voice-free 150 kbit/s backoff: {holds:?}");
+        assert!(holds.iter().skip(4).all(|&hold| hold == 60_000_000));
+        assert_eq!(r.voice_sent, 0);
+    }
+
+    #[test]
+    fn a_still_share_backs_off_padding_on_a_slow_link() {
+        let path = PathConfig { latency_us: 3_000, rate_bps: 150_000, ..Default::default() };
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        let mut camera = Rig::new(path);
+        while camera.now < 1_000_000 { camera.step(1_000, &mut out, &mut events, |_, _| {}); }
+        camera.adaptive = true;
+        camera.run(6_000);
+        let camera_peak = camera.peak_router_us;
+
+        let mut r = Rig::new(path);
+        r.start_still_share(&mut out, &mut events);
+        let start = r.now;
+        r.a.set_wanted(4_500_000);
+        let mut holds = Vec::new();
+        let mut after_ten = (0, 0);
+        while r.now < start + 120_000_000 {
+            let held_until = r.a.padding.hold_until;
+            let sent = r.a.stats.padding_sent;
+            r.step(1_000, &mut out, &mut events, |_, _| {});
+            if r.now < held_until {
+                assert_eq!(r.a.stats.padding_sent, sent, "padded during hold at {} µs", r.now);
+            }
+            if r.a.padding.hold_until > held_until {
+                holds.push((r.now - start, r.a.padding.hold_us));
+            }
+            if r.now == start + 10_000_000 {
+                after_ten = (r.a.stats.padding_sent, r.a.stats.sent_bytes);
+            }
+        }
+        let padding = (r.a.stats.padding_sent - after_ten.0) * wire::MAX_DATAGRAM as u64;
+        let total = r.a.stats.sent_bytes - after_ten.1;
+        let peak = r.peak_router_us;
+        let sent = r.voice_sent;
+        let drain_by = r.router_empty_at + path.latency_us + 1_000;
+        while r.now < drain_by { r.step(1_000, &mut out, &mut events, |_, _| {}); }
+        let missing: Vec<_> = (0..sent).filter(|seq| r.voice_got.binary_search(seq).is_err()).collect();
+        eprintln!("150 kbit/s: peak router {peak} µs vs camera {camera_peak} µs, after 10 s {padding}/{total} padding bytes, holds {holds:?}, missing voice {missing:?}");
+        assert!(peak <= camera_peak, "padding queued {peak} µs against the camera start's {camera_peak} µs");
+        assert!(padding * 10 < total, "after 10 s padding spent {padding} of {total} bytes");
+        assert_eq!(holds.iter().map(|&(_, duration)| duration).take(4).collect::<Vec<_>>(),
+            vec![10_000_000, 20_000_000, 40_000_000, 60_000_000], "failed attempts must reach the one-minute hold");
+        assert!(holds.iter().skip(4).all(|&(_, duration)| duration == 60_000_000));
+        assert!(missing.is_empty(), "lost voice frames {missing:?} in the 120 s run");
+    }
+
+    #[test]
+    fn a_share_key_on_a_thin_link_preserves_voice_playout() {
+        use crate::driver::codec::{Codecs, TestCodecs};
+        use makepad_teamtalk::jitter::{JitterRing, Playout, PlayoutConfig};
+        let path = PathConfig { rate_bps: 300_000, ..Default::default() };
+        let rung = crate::guard::LADDER[3];
+        let mut encoder = TestCodecs.encoder(rung, (crate::guard::video_ask(START_BPS) / 1000) as u32).unwrap();
+        let picture = encoder.push(&vec![128; (rung.width*rung.height*3/2) as usize], 0).unwrap().remove(0);
+        assert!(picture.key && picture.data.len() > wire::MAX_FRAGMENT, "exercise a fragmented share key");
+        let run = |with_key: bool| {
+            let mut r = Rig::new(path);
+            let ring = JitterRing::new();
+            let mut audio = crate::driver::voice::VoiceDecoder::default();
+            let mut payload = Vec::new();
+            makepad_teamtalk::codec::adpcm_encode_into(&mut Default::default(), 4, &[0.25; 320], &mut payload);
+            let mut player = Playout::new(PlayoutConfig { default_frame: 960, ..Default::default() });
+            let (mut out, mut events) = (Vec::new(), Vec::new());
+            let (mut last, mut wire_gap, mut audible_gap, mut quiet, mut voices, mut keys) = (0, 0, 0, 0, 0, 0);
+            for now in (0..2_000_000).step_by(1_000) {
+                if now % VOICE_INTERVAL_US == 0 {
+                    let seq = r.a.next_voice_seq();
+                    let voice = Voice { flags: 0, seq, capture_us: now, payload: &payload };
+                    out.push(r.a.send_voice(now, stream::VOICE, &voice, true).unwrap());
+                }
+                if with_key && now == 1_000_000 {
+                    r.a.send_video(now, stream::SHARE, &picture.data, true, now, &mut out).unwrap();
+                }
+                r.a.poll(now, &mut out);
+                for d in out.drain(..) { r.ab.send(now, d); }
+                r.b.poll(now, &mut out);
+                for d in out.drain(..) { r.ba.send(now, d); }
+                r.ba.poll(now, &mut out);
+                for d in out.drain(..) { r.a.receive(now, &d, &mut events); }
+                r.ab.poll(now, &mut out);
+                for d in out.drain(..) { r.b.receive(now, &d, &mut events); }
+                for event in events.drain(..) {
+                    match event {
+                        Event::Voice { seq, flags, payload, .. } => {
+                            assert_eq!(seq, voices, "voice sequence continuity with share={with_key}");
+                            voices += 1;
+                            if now > 500_000 { wire_gap = wire_gap.max(now - last); }
+                            last = now;
+                            audio.insert(&ring, seq, flags, &payload);
+                        }
+                        Event::Video { stream: stream::SHARE, frame } if frame.key => { keys += 1; }
+                        _ => {}
+                    }
+                }
+                let mut samples = [0.0; 48];
+                player.render(&ring, 48_000., &mut samples);
+                if now > 500_000 {
+                    for sample in samples {
+                        quiet = if sample == 0. { quiet + 1 } else { 0 };
+                        audible_gap = audible_gap.max(quiet);
+                    }
+                }
+            }
+            assert_eq!(keys, usize::from(with_key), "the key must actually traverse the constrained path");
+            (audible_gap, wire_gap, player.stats.concealed, voices)
+        };
+        let control = run(false);
+        let share = run(true);
+        eprintln!("300 kbit/s, {}-byte key: (silent samples, max arrival gap us, concealed frames, received voice) control {control:?}, share {share:?}", picture.data.len());
+        assert_eq!(share.0, control.0, "share key lengthened audible voice gap, samples: {share:?} vs {control:?}");
+        assert_eq!(share.1, control.1, "share key lengthened the voice arrival gap: {share:?} vs {control:?}");
+        assert_eq!(share.2, control.2, "share key forced voice concealment: {share:?} vs {control:?}");
+        assert_eq!(share.3, control.3, "share key prevented a voice frame arriving: {share:?} vs {control:?}");
+    }
+
+    #[test]
+    fn a_still_shares_head_repairs_its_entire_missing_last_picture() {
+        let mut r = Rig::new(PathConfig::default());
+        let (mut packets, mut events, mut shown) = (Vec::new(), Vec::new(), Vec::new());
+        r.drop_once.insert((stream::SHARE, 1));
+        let last_capture = 200_000;
+        for now in (0..=last_capture + 250_000).step_by(1_000) {
+            r.now = now;
+            if now == 0 || now == last_capture {
+                r.a.send_video(now, stream::SHARE, &[if now == 0 { 10 } else { 20 }], now == 0, now, &mut packets).unwrap();
+            }
+            r.a.poll(now, &mut packets);
+            r.send_forward(&mut packets);
+            r.b.poll(now, &mut packets);
+            for d in packets.drain(..) { r.ba.send(now, d); }
+            r.ab.poll(now, &mut packets);
+            for d in packets.drain(..) { r.b.receive(now, &d, &mut events); }
+            r.ba.poll(now, &mut packets);
+            for d in packets.drain(..) { r.a.receive(now, &d, &mut events); }
+            for event in events.drain(..) {
+                if let Event::Video { stream: stream::SHARE, frame } = event { shown.push((now, frame.data)); }
+            }
+        }
+        let receiver = r.b.in_video[&stream::SHARE].stats;
+        assert_eq!(r.last_drop_us, Some(last_capture), "the last AU must be lost whole, with no later media");
+        assert!(receiver.nacked > 0, "HEAD should expose the missing tail for NACK, stats {receiver:?}");
+        assert_eq!(shown.iter().map(|(_, data)| data.as_slice()).collect::<Vec<_>>(), [&[10][..], &[20][..]], "both original pictures must be shown before give-up: {shown:?}");
+        eprintln!("still share: last frame repaired in {} ms, {} NACKs, {} keys shown", (shown[1].0-last_capture)/1000, receiver.nacked, receiver.key_frames);
+    }
+
+    #[test]
+    fn watching_a_still_share_gets_a_key_in_one_trip_and_recovers_after_loss() {
+        use crate::driver::codec::{Codecs, TestCodecs};
+        use crate::guard::Rung;
+
+        const LEG: u64 = 20_000;
+        const LOSS_AT: u64 = 100_000;
+        let mut r = Rig::new(PathConfig { latency_us: LEG, ..Default::default() });
+        let rung = Rung { width: 8, height: 8, fps: 30, min_ask_bps: 0, full_bps: 1000 };
+        let mut encoder = TestCodecs.encoder(rung, 1).unwrap();
+        let mut decoder = TestCodecs.decoder().unwrap();
+        let mut pictures = Vec::new();
+        let mut packets = Vec::new();
+        let mut events = Vec::new();
+        let mut decoded = 0;
+        let mut displayed = Vec::new();
+        let mut originals_lost = std::collections::BTreeSet::new();
+        let mut lost_request = false;
+        r.b.receive_share(true);
+        // No periodic encoder or repaint. Only the initial Watch and recovery KEYs can
+        // produce a new key of this held image. Drop three consecutive deltas AND all repairs
+        // of them. The fourth delta exposes the hole; also lose the first repair KEY request.
+        for now in (0..=LOSS_AT + 1_000_000).step_by(1_000) {
+            r.ba.poll(now, &mut packets);
+            for packet in packets.drain(..) { r.a.receive(now, &packet, &mut events); }
+            r.ab.poll(now, &mut packets);
+            for packet in packets.drain(..) { r.b.receive(now, &packet, &mut events); }
+            for event in events.drain(..) {
+                if let Event::Video { stream: stream::SHARE, frame } = event {
+                    decoder.push_into(&frame.data, i64::from(frame.frame), &mut pictures).unwrap();
+                    assert_eq!(pictures.len(), 1, "a recovered picture must actually decode");
+                    pictures.clear();
+                    decoded += 1;
+                    r.b.decoded_share(now, decoded, frame.frame, 0);
+                    displayed.push((now, frame.key));
+                }
+            }
+            let key = r.a.key_frame_due(stream::SHARE, now);
+            let update = [LOSS_AT, LOSS_AT + 33_000, LOSS_AT + 66_000, LOSS_AT + 99_000].contains(&now);
+            if key || update {
+                if key { encoder.request_key(); }
+                let packet = encoder.push(&[90; 96], now as i64 * 10).unwrap().pop().unwrap();
+                r.a.send_video(now, stream::SHARE, &packet.data, packet.key, now, &mut packets).unwrap();
+            }
+            r.a.poll(now, &mut packets);
+            for packet in packets.drain(..) {
+                let h = Header::parse(&packet).unwrap().0;
+                if h.stream == stream::SHARE && (1..=3).contains(&h.seq) {
+                    originals_lost.insert(h.seq);
+                } else { r.ab.send(now, packet); }
+            }
+            let before = r.b.stats.share_requests_sent;
+            r.b.poll(now, &mut packets);
+            if now >= LOSS_AT && !lost_request && before != r.b.stats.share_requests_sent {
+                lost_request = true;
+                packets.clear();
+            }
+            for packet in packets.drain(..) { r.ba.send(now, packet); }
+        }
+        assert_eq!(originals_lost.len(), 3);
+        assert!(lost_request, "the first recovery request must be lost");
+        assert_eq!(displayed.len(), 2, "only the initial key and the replacement key should decode: {displayed:?}");
+        assert_eq!(displayed[0], (2 * LEG, true), "Watch must get its first picture in one RTT");
+        let (at, key) = displayed[1];
+        assert!(key && at - LOSS_AT < 1_000_000, "the missing run requires a fresh key within one second");
+        assert_eq!(r.b.stats.share_requests_sent, 3, "one opening KEY and one lost recovery KEY with a single retry");
+        eprintln!("share virtual clock: first picture {} ms (one RTT), three lost frames and a lost request repaired in {} ms",
+            displayed[0].0 / 1000, (at - LOSS_AT) / 1000);
+    }
+
+    /// A still window, on a fast path and on a thin one where a key of a few kilobytes takes
+    /// seconds to cross: Watch asks once, gets one key, and holding the picture costs nothing.
+    #[test]
+    fn a_still_share_costs_one_key() {
+        const KEY_BYTES: usize = 5_000;
+        let fast = PathConfig { latency_us: 1_000, ..Default::default() };
+        let thin = PathConfig { latency_us: 2_000, rate_bps: 48_000, queue_us: 5_000_000, ..Default::default() };
+        for (name, path) in [("fast", fast), ("thin", thin)] {
+            let mut r = Rig::new(path);
+            let (mut packets, mut events) = (Vec::new(), Vec::new());
+            let (mut decoded, mut frame, mut keys_made, mut first_picture) = (0, 0u32, 0, None);
+            let mut source_key = false;
+            r.b.receive_share(true);
+            for now in (0..=20_000_000u64).step_by(1_000) {
+                r.ba.poll(now, &mut packets);
+                for packet in packets.drain(..) { r.a.receive(now, &packet, &mut events); }
+                r.ab.poll(now, &mut packets);
+                for packet in packets.drain(..) { r.b.receive(now, &packet, &mut events); }
+                for event in events.drain(..) {
+                    if let Event::Video { stream: stream::SHARE, frame: f } = event {
+                        decoded += 1;
+                        first_picture.get_or_insert(now);
+                        r.b.decoded_share(now, decoded, f.frame, 0);
+                    }
+                }
+                // The app's source: a still window makes a picture only when asked for a key, and
+                // the share takes it only while nothing of the last one waits for pacing.
+                source_key |= r.a.key_frame_due(stream::SHARE, now);
+                if source_key && !r.a.share_queued() {
+                    source_key = false;
+                    keys_made += 1;
+                    r.a.send_video(now, stream::SHARE, &au(frame, KEY_BYTES), true, now, &mut packets).unwrap();
+                    frame += 1;
+                }
+                r.a.poll(now, &mut packets);
+                for packet in packets.drain(..) { r.ab.send(now, packet); }
+                r.b.poll(now, &mut packets);
+                for packet in packets.drain(..) { r.ba.send(now, packet); }
+            }
+            let counts = format!("{name}: first picture at {:?} ms, {} requests sent ({:?}), {} keys made, {} decoded",
+                first_picture.map(|t| t / 1000), r.b.stats.share_requests_sent, r.b.stats.share_request_causes, keys_made, decoded);
+            assert!(first_picture.is_some(), "Watch shows a picture: {counts}");
+            assert_eq!((r.b.stats.share_requests_sent, keys_made, decoded), (1, 1, 1),
+                "Watch asks once and a still window costs one key: {counts}");
+        }
+    }
+
+    #[test]
+    fn a_still_share_retries_until_the_decoder_publishes_a_picture() {
+        let mut r = Rig::new(PathConfig::default());
+        let mut packets = Vec::new();
+        let mut events = Vec::new();
+        r.b.receive_share(true);
+        r.b.poll(0, &mut packets);
+        packets.clear();
+        // The codec accepts a complete key without returning a picture on this push.
+        r.a.send_video(20_000, stream::SHARE, &[42], true, 20_000, &mut packets).unwrap();
+        for packet in packets.drain(..) { r.b.receive(40_000, &packet, &mut events); }
+        assert!(events.iter().any(|e| matches!(e, Event::Video { .. })));
+        r.b.decoded_share(40_000, 0, 0, 0);
+        r.b.poll(SHARE_RETRY_US - 1, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 1);
+        r.b.poll(SHARE_RETRY_US, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 2, "accepting a key without pixels must retry on a still window");
+        packets.clear();
+        r.a.send_video(270_000, stream::SHARE, &[43], true, 270_000, &mut packets).unwrap();
+        for packet in packets.drain(..) { r.b.receive(290_000, &packet, &mut events); }
+        r.b.decoded_share(300_000, 1, 0, 0);
+        r.b.poll(550_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 3, "an older picture cannot acknowledge the most recent update");
+        r.b.decoded_share(560_000, 2, 1, 0);
+        r.b.poll(810_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 3, "publishing the current picture settles the request");
+        r.b.decoded_share(820_000, 2, 1, 1);
+        r.b.poll(820_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 4, "a decoder failure asks again even with no transport gap");
+        r.b.decoded_share(900_000, 3, 2, 1);
+        r.b.poll(5_900_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 4,
+            "a still window costs nothing: the sharer's repeated HEAD is what reveals a lost last picture");
+        r.b.decoded_share(5_900_000, 3, 2, 2);
+        r.b.poll(5_900_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 5, "a second decoder failure asks again");
+        r.b.receive_share(false);
+        r.b.poll(7_000_000, &mut packets);
+        assert_eq!(r.b.stats.share_requests_sent, 5, "Close cancels outstanding retries");
     }
 
     #[test]
@@ -979,7 +1932,7 @@ mod tests {
                         if now % 20_000 == 0 {
                             let seq = r.a.next_voice_seq();
                             let v = Voice { flags: 0, seq, capture_us: now, payload: &[seq as u8; 100] };
-                            out.push(r.a.send_voice(now, &v, true).unwrap());
+                            out.push(r.a.send_voice(now, stream::VOICE, &v, true).unwrap());
                         }
                         if now * fps >= u64::from(r.video_sent) * 1_000_000 {
                             let key = r.a.key_frame_due(stream::CAMERA_HIGH, now) || u64::from(r.video_sent) % (2 * fps) == 0;
@@ -1049,7 +2002,7 @@ mod tests {
         // the same bytes move the head video's deadline back.
         let due = r.a.next_send_us().expect("the large picture must leave a paced tail");
         let v = Voice { flags: 0, seq: 0, capture_us: 0, payload: &[0; 300] };
-        let voice = r.a.send_voice(0, &v, true).unwrap();
+        let voice = r.a.send_voice(0, stream::VOICE, &v, true).unwrap();
         let voice_wait = (voice.len() as u64 * 8_000_000).div_ceil(pace);
         let after_voice = r.a.next_send_us().expect("voice must leave the video queued");
         assert!(after_voice.abs_diff(due + voice_wait) <= 1, "voice wire time must postpone video by {voice_wait} µs");
@@ -1181,21 +2134,39 @@ mod tests {
 
     #[test]
     fn loss_is_measured_and_video_recovers_by_resends() {
-        let mut r = Rig::new(PathConfig { latency_us: 20_000, jitter_us: 4_000, loss_ppm: 50_000, ..Default::default() });
-        // Two fragments per delta, six per key, about 70% of the initial pace on the wire.
-        r.fixed_picture_bytes = Some(2_000);
-        r.run(3_000);
-        eprintln!("5% loss: {}/{} pictures, {}/{} voice frames, {} resends, {} lost and {} delivered hops",
-            r.video_got.len(), r.video_sent, r.voice_got.len(), r.voice_sent, r.a.stats.resent, r.a.stats.hops_lost, r.a.stats.hops_delivered);
-        let voice = r.voice_got.len() as f64 / r.voice_sent as f64;
-        assert!((0.90..0.99).contains(&voice), "voice is not resent: {:.3} arrived", voice);
-        let video = r.video_got.len() as f64 / r.video_sent as f64;
-        assert!(video >= 0.95, "pictures recovered by resends: {:.3} handed on, {} resends", video, r.a.stats.resent);
-        assert!(r.a.stats.resent > 10, "resends happened: {}", r.a.stats.resent);
-        let (lost, delivered) = (r.a.stats.hops_lost as f64, r.a.stats.hops_delivered as f64);
-        let loss = lost / (lost + delivered);
-        assert!((0.03..0.08).contains(&loss), "a's loss estimate {loss:.3} on a 5% path");
-        assert!(r.a.rtt_us().is_some_and(|t| (40_000..50_000).contains(&t)), "round trip under jitter: {:?}", r.a.rtt_us());
+        let path = PathConfig { latency_us: 20_000, jitter_us: 4_000, loss_ppm: 50_000, ..Default::default() };
+        for seed in [1, 3, 5, 7, 9, 11, 13, 15] {
+            let mut r = Rig::with_seed(path, seed);
+            r.video_attempts = Some(BTreeMap::new());
+            // Two fragments per delta, six per key, about 70% of the initial pace on the wire.
+            r.fixed_picture_bytes = Some(2_000);
+            r.run(3_000);
+            eprintln!("5% loss seed {seed}: {}/{} pictures, {}/{} voice frames, {} resends, {} lost and {} delivered hops",
+                r.video_got.len(), r.video_sent, r.voice_got.len(), r.voice_sent, r.a.stats.resent, r.a.stats.hops_lost, r.a.stats.hops_delivered);
+            let voice = r.voice_got.len() as f64 / r.voice_sent as f64;
+            assert!((0.90..0.99).contains(&voice), "seed {seed}: voice is not resent: {voice:.3} arrived");
+            let video = r.video_got.len() as f64 / r.video_sent as f64;
+            assert!(video >= 0.95, "seed {seed}: {video:.3} pictures handed on by 3 s, {} resends", r.a.stats.resent);
+            let (lost, delivered) = (r.a.stats.hops_lost as f64, r.a.stats.hops_delivered as f64);
+            let loss = lost / (lost + delivered);
+            assert!((0.03..0.08).contains(&loss), "seed {seed}: a's loss estimate {loss:.3} on a 5% path");
+            assert!(r.a.rtt_us().is_some_and(|t| (40_000..50_000).contains(&t)), "seed {seed}: round trip under jitter: {:?} µs", r.a.rtt_us());
+
+            // The final picture is captured at 2.970 s. Let its cached resends reach the receiver.
+            let deadline = r.now + video::CACHE_US + path.latency_us + path.jitter_us;
+            let (mut out, mut events) = (Vec::new(), Vec::new());
+            while r.video_got.len() < r.video_sent as usize && r.now < deadline {
+                r.step(1_000, &mut out, &mut events, |_, _| {});
+            }
+            // The draw decides how many originals were lost, so check a resend for each one.
+            let attempts = r.video_attempts.as_ref().unwrap();
+            let dropped = attempts.values().filter(|v| v.original_dropped).count();
+            let missing: Vec<_> = attempts.iter().filter(|(_, v)| v.original_dropped && !v.resent).map(|(id, _)| id).collect();
+            eprintln!("seed {seed}: {}/{dropped} lost video originals resent, {} total resends, {}/{} pictures shown by {} µs",
+                dropped - missing.len(), r.a.stats.resent, r.video_got.len(), r.video_sent, r.now);
+            assert!(missing.is_empty(), "seed {seed}: {dropped} video originals dropped, never resent (stream, key, seq): {missing:?}");
+            assert_eq!((r.video_sent, r.video_got.len()), (90, 90), "seed {seed}: all 90 encoded pictures should be shown in order");
+        }
     }
 
     #[test]
@@ -1738,14 +2709,14 @@ mod tests {
     fn foreign_replayed_and_forged_datagrams_are_refused() {
         let mut r = Rig::new(PathConfig::default());
         let v = Voice { flags: 0, seq: 0, capture_us: 0, payload: b"hi" };
-        let d = r.a.send_voice(0, &v, false).unwrap();
+        let d = r.a.send_voice(0, stream::VOICE, &v, false).unwrap();
         let mut events = Vec::new();
         r.b.receive(0, &d, &mut events);
         assert_eq!(events.len(), 1, "the true datagram opens");
         r.b.receive(0, &d, &mut events);
         assert_eq!((events.len(), r.b.stats.replayed), (1, 1), "a replay is refused");
 
-        let d = r.a.send_voice(0, &v, false).unwrap();
+        let d = r.a.send_voice(0, stream::VOICE, &v, false).unwrap();
         for byte in 3..d.len() {
             let mut forged = d.clone();
             forged[byte] ^= 0x04;
@@ -1758,10 +2729,34 @@ mod tests {
         r.b.receive(0, &hop, &mut events);
         assert_eq!(events.len(), 2, "the hop is outside the tag: a forwarder may rewrite it");
 
-        let own = r.b.send_voice(0, &v, false).unwrap();
+        let own = r.b.send_voice(0, stream::VOICE, &v, false).unwrap();
         r.b.receive(0, &own, &mut events);
         assert_eq!(events.len(), 2, "a datagram of one's own is not the other side's");
         let other = sender_tag(b"another call", &device(1));
         assert_ne!(other, r.a.my_src, "the source tag depends on the call");
+
+        // One second at 150 Mbit/s advances 150,000,000 / (1,152 × 8) = 16,276 full fragments.
+        let cache_distance = 150_000_000 / (wire::MAX_FRAGMENT as u64 * 8);
+        let window = wire::VIDEO_WINDOW as u64;
+        let newest_seq = cache_distance.max(window);
+        let mut early = Vec::new();
+        let mut expired = Vec::new();
+        for _ in 0..newest_seq {
+            let (_, seq, packet) = r.a.seal(stream::CAMERA_HIGH, 0, &[]).unwrap();
+            if newest_seq - seq == cache_distance {
+                early = packet;
+            } else if newest_seq - seq == window {
+                expired = packet;
+            }
+        }
+        let (_, _, newest) = r.a.seal(stream::CAMERA_HIGH, 0, &[]).unwrap();
+        let received = r.b.stats.received;
+        r.b.receive(video::CACHE_US, &newest, &mut events);
+        assert_eq!(r.b.stats.received, received + 1, "the newest video datagram must open at sequence {newest_seq}");
+        r.b.receive(video::CACHE_US, &early, &mut events);
+        assert_eq!(r.b.stats.received, received + 2, "a cached video datagram {cache_distance} sequences behind the newest must open");
+        let replayed = r.b.stats.replayed;
+        r.b.receive(video::CACHE_US, &expired, &mut events);
+        assert_eq!(r.b.stats.replayed, replayed + 1, "an unseen video datagram {window} sequences behind the newest must be refused as a replay");
     }
 }

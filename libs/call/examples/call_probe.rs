@@ -1,4 +1,4 @@
-//! A two-party call between two processes over UDP, on a test link that never ships in Work: a
+//! A two-party call between two processes over UDP, on a test link that never ships in Town: a
 //! synthetic picture (H.264) and a synthetic voice (a tone in talk spurts, ADPCM at 16 kHz)
 //! go each way, sealed, with feedback, resends and key frame requests. What arrives is decoded,
 //! played into a simulated speaker and measured; a few decoded pictures are saved as PNG.
@@ -448,7 +448,7 @@ mod probe {
                             flags |= voice_flags::TALK_START;
                         }
                         let v = Voice { flags, seq, capture_us, payload: &payload };
-                        if let Ok(d) = peer.send_voice(now, &v, !silent) {
+                        if let Ok(d) = peer.send_voice(now, stream::VOICE, &v, !silent) {
                             out.push(d);
                         }
                     }

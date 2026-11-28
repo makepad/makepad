@@ -257,6 +257,21 @@ use mod.pod.*
 }
 
 #[test]
+fn compute_read_and_params_heap_cap_end_with_over_budget_heap() {
+    let limits = Limits { heap_bytes: 8 << 20, ..Limits::default() };
+    let with = |params| SessionConfig { limits, ..config(params) };
+    let constant = "{run: fn(s, p) { return 1 }}";
+    assert_eq!(run(constant, with(Value::Nil)), Ok(n(1.0)), "the 8 MiB heap must admit the baseline session");
+
+    let read = run("use mod.pod.*\n{run: fn(s, p) { let buf = s.buffer(f32, 1 << 20)\n return s.read(buf) }}", with(Value::Nil));
+    let payload = "x".repeat(4096);
+    let params = Value::Array((0..4096).map(|i| Value::String(format!("p{i:04}-{payload}"))).collect());
+    let converted = run(constant, with(params));
+    assert_eq!((read, converted), (Err(ProgramError::OverBudget("heap")), Err(ProgramError::OverBudget("heap"))),
+        "both the oversized buffer read and parameter conversion must end on the heap budget");
+}
+
+#[test]
 fn hostile_programs_end_on_their_budgets() {
     let small = Limits { fuel: 2_000_000, heap_bytes: 16 << 20, work: 50_000_000, ..Limits::default() };
     let with = |limits: Limits| SessionConfig { limits, ..config(Value::Nil) };

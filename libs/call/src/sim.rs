@@ -2,8 +2,9 @@
 //! reorders), random loss, and a bottleneck of a given rate whose queue drops from its tail
 //! once it holds more than a given delay, as a router's does.
 
+use crate::wire::Header;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 #[derive(Clone, Copy, Debug)]
 pub struct PathConfig {
@@ -39,9 +40,14 @@ pub struct PathStats {
     pub delivered: u64,
 }
 
+/// A test simulator. Pairing loss and jitter across runs costs one transmission-count entry
+/// per distinct parsed packet for the life of the path. Unparsed sends share a single counter.
 pub struct Path {
     pub config: PathConfig,
-    rng: u64,
+    seed: u64,
+    transmissions: BTreeMap<(u16, u8, u8, u64), u64>,
+    unparsed: u64,
+    period_rng: u64,
     // Whether the current period is bad and when it ends on the virtual clock.
     loss_period: Option<(bool, u128)>,
     busy_until: u64,
@@ -50,22 +56,41 @@ pub struct Path {
     pub stats: PathStats,
 }
 
+// SplitMix64's finalizer. Separate salts give loss and jitter their own draw from the same identity.
+fn mix(mut x: u64) -> u64 {
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
+const LOSS_SALT: u64 = 0x243f_6a88_85a3_08d3;
+const JITTER_SALT: u64 = 0x1319_8a2e_0370_7344;
+
 impl Path {
     pub fn new(config: PathConfig, seed: u64) -> Path {
-        Path { config, rng: seed | 1, loss_period: None, busy_until: 0, order: 0, flight: BinaryHeap::new(), stats: PathStats::default() }
+        Path { config, seed: mix(seed), transmissions: BTreeMap::new(), unparsed: 0, period_rng: seed,
+            loss_period: None, busy_until: 0, order: 0, flight: BinaryHeap::new(), stats: PathStats::default() }
     }
 
-    fn random(&mut self) -> u64 {
-        // xorshift64*
-        self.rng ^= self.rng >> 12;
-        self.rng ^= self.rng << 25;
-        self.rng ^= self.rng >> 27;
-        self.rng.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    fn packet_key(&mut self, datagram: &[u8]) -> u64 {
+        let Some((h, _)) = Header::parse(datagram) else {
+            let index = self.unparsed;
+            self.unparsed += 1;
+            // The extra bit separates the unparsed stream from every packed header prefix.
+            return mix(mix(self.seed ^ (1 << 32)) ^ index);
+        };
+        let prefix = (u64::from(h.src) << 16) | (u64::from(h.stream) << 8) | u64::from(h.key_id);
+        let packet = mix(mix(self.seed ^ prefix) ^ h.seq);
+        let count = self.transmissions.entry((h.src, h.stream, h.key_id, h.seq)).or_default();
+        let key = mix(packet ^ *count);
+        *count += 1;
+        key
     }
 
     fn period_us(&mut self, mean: u64) -> u128 {
         // Inverse exponential CDF using a uniform survival probability in (0, 1].
-        let survival = ((self.random() >> 11) + 1) as f64 / (1u64 << 53) as f64;
+        self.period_rng = self.period_rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let survival = ((mix(self.period_rng) >> 11) + 1) as f64 / (1u64 << 53) as f64;
         (-(mean as f64) * survival.ln()).ceil().max(1.0) as u128
     }
 
@@ -76,8 +101,8 @@ impl Path {
             return if bad_mean_us == 0 { loss_ppm } else { burst_loss_ppm };
         }
         let now = u128::from(now);
-        // Start good on the first send. Advance from each deadline, including across idle gaps.
-        let (mut bad, mut end) = self.loss_period.unwrap_or_else(|| (false, now + self.period_us(good_mean_us)));
+        // The first good period starts at virtual time zero, even if neither end sends yet.
+        let (mut bad, mut end) = self.loss_period.unwrap_or_else(|| (false, self.period_us(good_mean_us)));
         while now >= end {
             bad = !bad;
             end += self.period_us(if bad { bad_mean_us } else { good_mean_us });
@@ -89,7 +114,8 @@ impl Path {
     pub fn send(&mut self, now: u64, datagram: Vec<u8>) {
         self.stats.sent += 1;
         let loss_ppm = self.loss_at(now);
-        if (self.random() % 1_000_000) < u64::from(loss_ppm) {
+        let key = self.packet_key(&datagram);
+        if mix(key ^ LOSS_SALT) % 1_000_000 < u64::from(loss_ppm) {
             self.stats.lost += 1;
             return;
         }
@@ -105,7 +131,7 @@ impl Path {
         }
         at += self.config.latency_us;
         if self.config.jitter_us > 0 {
-            at += self.random() % self.config.jitter_us;
+            at += mix(key ^ JITTER_SALT) % self.config.jitter_us;
         }
         self.order += 1;
         self.flight.push(Reverse((at, self.order, datagram)));
@@ -124,6 +150,21 @@ impl Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire;
+
+    fn datagram(src: u16, stream: u8, key_id: u8, seq: u64, hop: u16) -> Vec<u8> {
+        let mut d = Vec::new();
+        Header::begin(&mut d, hop, &Header::aad(src, stream, 0, key_id));
+        d.extend_from_slice(&seq.to_be_bytes()[2..]);
+        d.resize(wire::HEADER + wire::TAG, 0);
+        d
+    }
+
+    // Take the only packet in flight so we can compare the exact arrival time, including jitter.
+    fn arrival(path: &mut Path, now: u64, d: Vec<u8>) -> Option<u64> {
+        path.send(now, d);
+        path.flight.pop().map(|Reverse((at, _, _))| at)
+    }
 
     #[test]
     fn a_path_delays_loses_and_queues_as_configured() {
@@ -159,5 +200,42 @@ mod tests {
         let mut out = Vec::new();
         q.poll(30_000, &mut out);
         assert_eq!(out.len(), 3, "the bottleneck's rate paces what comes out");
+
+        let config = PathConfig { jitter_us: 800, loss_ppm: 100_000, good_mean_us: 1_000,
+            bad_mean_us: 500, burst_loss_ppm: 900_000, ..Default::default() };
+        let (mut quiet, mut busy) = (Path::new(config, 7), Path::new(config, 7));
+        let mut paired_arrivals = 0;
+        for seq in 0..256 {
+            let now = seq * 1_000 + 750;
+            for noise in [datagram(2, 1, 0, seq, 0), datagram(1, 2, 0, seq, 0),
+                          datagram(1, 1, 1, seq, 0), Vec::new()] {
+                arrival(&mut busy, now - 750, noise);
+            }
+            for attempt in 0..2 {
+                let alone = arrival(&mut quiet, now, datagram(1, 1, 0, seq, 0));
+                let interleaved = arrival(&mut busy, now, datagram(1, 1, 0, seq, 99));
+                assert_eq!(alone, interleaved, "traffic changed loss or jitter for sequence {seq}, transmission {attempt} at {now} µs");
+                paired_arrivals += usize::from(alone.is_some());
+            }
+        }
+
+        let mut p = Path::new(PathConfig { loss_ppm: 100_000, ..Default::default() }, 7);
+        let total = 10_000;
+        let (mut first_lost, mut both_lost) = (0, 0);
+        for seq in 0..total {
+            let d = datagram(1, 1, 0, seq, 0);
+            let first = arrival(&mut p, seq, d.clone());
+            let second = arrival(&mut p, seq, d);
+            first_lost += u64::from(first.is_none());
+            both_lost += u64::from(first.is_none() && second.is_none());
+        }
+        let probability = f64::from(p.config.loss_ppm) / 1_000_000.0;
+        let within_five_sigma = |lost: u64, n: u64| {
+            let expected = n as f64 * probability;
+            (lost as f64 - expected).abs() <= 5.0 * (expected * (1.0 - probability)).sqrt()
+        };
+        assert!(within_five_sigma(first_lost, total), "{first_lost}/{total} first sends lost, outside the 5σ binomial bound for {probability}");
+        assert!(within_five_sigma(both_lost, first_lost), "{both_lost}/{first_lost} retries of lost packets also lost, outside the independent 5σ bound for {probability}");
+        eprintln!("paired paths: {paired_arrivals}/512 arrived at identical times; first sends lost {first_lost}/{total}, retries of lost packets lost {both_lost}/{first_lost}");
     }
 }

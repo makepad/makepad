@@ -24,11 +24,21 @@ pub trait Encoder: Send {
     fn push(&mut self, nv12: &[u8], pts_100ns: i64) -> Result<Vec<Packet>, String>;
     fn request_key(&mut self);
     fn set_kbps(&mut self, kbps: u32);
+    /// The highest QP from the next picture on (0: the encoder's own range): a quality floor the
+    /// rate control keeps, at the cost of pictures or rate. Where the encoder takes one.
+    fn set_max_qp(&mut self, _qp: u32) {}
     fn name(&self) -> String;
 }
 
 pub trait Decoder: Send {
-    fn push(&mut self, au: &[u8], pts_100ns: i64) -> Result<Vec<Picture>, String>;
+    /// Append decoded pictures to the caller's reusable output.
+    fn push_into(&mut self, au: &[u8], pts_100ns: i64, out: &mut Vec<Picture>) -> Result<(), String>;
+    /// Append pictures finished since the last push, without waiting.
+    fn ready_into(&mut self, _out: &mut Vec<Picture>) -> Result<(), String> { Ok(()) }
+    /// Return a CPU picture buffer to use on a later decode.
+    fn recycle(&mut self, nv12: Vec<u8>);
+    /// Picture buffers allocated because no returned buffer was available.
+    fn allocated(&self) -> u64;
     fn name(&self) -> String;
     /// A key frame arrived: false when it starts a stream this decoder can't continue (a new
     /// size), so the caller opens a new one. The first call records the stream.
@@ -49,7 +59,7 @@ pub fn platform_codecs() -> Arc<dyn Codecs> {
 
 struct PlatformCodecs;
 
-#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
 mod platform {
     use super::*;
     use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
@@ -57,6 +67,7 @@ mod platform {
     pub(super) struct PlatformEncoder(pub VideoStreamEncoder);
     pub(super) struct PlatformDecoder {
         pub decoder: VideoStreamDecoder,
+        pub frames: Vec<makepad_video::DecodedFrame>,
         /// The stream's sequence parameters, from its first key frame.
         pub sps: Vec<u8>,
     }
@@ -72,27 +83,64 @@ mod platform {
         fn set_kbps(&mut self, kbps: u32) {
             self.0.set_bitrate_kbps(kbps);
         }
+        fn set_max_qp(&mut self, qp: u32) {
+            self.0.set_max_qp(qp);
+        }
         fn name(&self) -> String {
             self.0.description()
         }
     }
 
+    impl PlatformDecoder {
+        fn take_pictures(&mut self, out: &mut Vec<Picture>) {
+            out.extend(self.frames.drain(..).map(|p| Picture { width: p.width, height: p.height, nv12: p.nv12, pts_100ns: p.pts_100ns }));
+        }
+    }
+
     impl Decoder for PlatformDecoder {
-        fn push(&mut self, au: &[u8], pts_100ns: i64) -> Result<Vec<Picture>, String> {
-            let pictures = self.decoder.push_packet(au, pts_100ns).map_err(|e| format!("{e:?}"))?;
-            Ok(pictures.into_iter().map(|p| Picture { width: p.width, height: p.height, nv12: p.nv12, pts_100ns: p.pts_100ns }).collect())
+        fn push_into(&mut self, au: &[u8], pts_100ns: i64, out: &mut Vec<Picture>) -> Result<(), String> {
+            self.frames.clear();
+            self.decoder.push_packet_into(au, pts_100ns, &mut self.frames).map_err(|e| e.to_string())?;
+            self.take_pictures(out);
+            Ok(())
+        }
+        fn ready_into(&mut self, out: &mut Vec<Picture>) -> Result<(), String> {
+            self.frames.clear();
+            self.decoder.ready_into(&mut self.frames).map_err(|e| e.to_string())?;
+            self.take_pictures(out);
+            Ok(())
+        }
+        fn recycle(&mut self, nv12: Vec<u8>) {
+            self.decoder.recycle(nv12);
+        }
+        fn allocated(&self) -> u64 {
+            self.decoder.allocated_buffers()
         }
         fn name(&self) -> String {
             self.decoder.name().unwrap_or_default()
         }
         fn accepts(&mut self, key_au: &[u8]) -> bool {
-            use makepad_video::annex_b::{nal_unit_type, split_annex_b, NAL_TYPE_SPS};
-            let Some(sps) = split_annex_b(key_au).into_iter().find(|nal| nal_unit_type(nal) == NAL_TYPE_SPS) else { return true };
-            if self.sps.is_empty() {
-                self.sps.extend_from_slice(sps);
-                return true;
+            use makepad_video::annex_b::{nal_unit_type, NAL_TYPE_SPS};
+            // Walk Annex-B boundaries without building a list of NALs for every key.
+            let mut starts = key_au.windows(3).enumerate()
+                .filter_map(|(at, bytes)| (bytes == [0, 0, 1]).then_some(at))
+                .peekable();
+            while let Some(at) = starts.next() {
+                let start = at + 3;
+                if nal_unit_type(&key_au[start..]) != NAL_TYPE_SPS {
+                    continue;
+                }
+                let end = starts.peek().map_or(key_au.len(), |&next| {
+                    // The next start code can have a fourth, leading zero.
+                    next - usize::from(next > start && key_au[next - 1] == 0)
+                });
+                let sps = &key_au[start..end];
+                if self.sps.is_empty() {
+                    self.sps.extend_from_slice(sps);
+                }
+                return self.sps.as_slice() == sps;
             }
-            self.sps.as_slice() == sps
+            true
         }
     }
 
@@ -112,23 +160,23 @@ mod platform {
 
     pub(super) fn decoder() -> Result<Box<dyn Decoder>, String> {
         VideoStreamDecoder::new_low_latency(StreamVideoCodec::H264)
-            .map(|decoder| Box::new(PlatformDecoder { decoder, sps: Vec::new() }) as Box<dyn Decoder>)
-            .map_err(|e| format!("{e:?}"))
+            .map(|decoder| Box::new(PlatformDecoder { decoder, frames: Vec::new(), sps: Vec::new() }) as Box<dyn Decoder>)
+            .map_err(|e| e.to_string())
     }
 }
 
 impl Codecs for PlatformCodecs {
     fn encoder(&self, rung: Rung, kbps: u32) -> Result<Box<dyn Encoder>, String> {
-        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
         return platform::encoder(rung, kbps);
-        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
         return Err(format!("no video encoder on this platform for {rung} at {kbps} kbit/s"));
     }
 
     fn decoder(&self) -> Result<Box<dyn Decoder>, String> {
-        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
         return platform::decoder();
-        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
         return Err("no video decoder on this platform".into());
     }
 }
@@ -136,26 +184,31 @@ impl Codecs for PlatformCodecs {
 /// A codec for tests: no device, any box. Its access unit is a 24-byte header (a marker, key,
 /// width, height, frame number, pts) padded to the rung's per-picture budget at the asked rate
 /// (key frames four times that), and it decodes to a picture of the right size whose first eight
-/// bytes are the frame number. A test can check order, keys and sizes.
+/// bytes are the frame number. Numbers increase across encoders so picture order stays
+/// checkable when a rung change reopens a sender's encoder.
 pub struct TestCodecs;
 
 const TEST_MARK: u8 = b'T';
+static NEXT_TEST_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 struct TestEncoder {
     rung: Rung,
     kbps: u32,
-    frame: u32,
     key_due: bool,
 }
 
-struct TestDecoder;
+#[derive(Default)]
+struct TestDecoder {
+    spares: Vec<Vec<u8>>,
+    allocated: u64,
+}
 
 impl Codecs for TestCodecs {
     fn encoder(&self, rung: Rung, kbps: u32) -> Result<Box<dyn Encoder>, String> {
-        Ok(Box::new(TestEncoder { rung, kbps, frame: 0, key_due: true }))
+        Ok(Box::new(TestEncoder { rung, kbps, key_due: true }))
     }
     fn decoder(&self) -> Result<Box<dyn Decoder>, String> {
-        Ok(Box::new(TestDecoder))
+        Ok(Box::new(TestDecoder::default()))
     }
 }
 
@@ -172,11 +225,11 @@ impl Encoder for TestEncoder {
         data.push(key as u8);
         data.extend_from_slice(&(self.rung.width as u16).to_be_bytes());
         data.extend_from_slice(&(self.rung.height as u16).to_be_bytes());
-        data.extend_from_slice(&self.frame.to_be_bytes());
+        let frame = NEXT_TEST_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        data.extend_from_slice(&frame.to_be_bytes());
         data.extend_from_slice(&[0; 6]);
         data.extend_from_slice(&pts_100ns.to_be_bytes());
         data.resize(budget.max(24), 0x5a);
-        self.frame += 1;
         Ok(vec![Packet { data, key, pts_100ns }])
     }
     fn request_key(&mut self) {
@@ -191,14 +244,28 @@ impl Encoder for TestEncoder {
 }
 
 impl Decoder for TestDecoder {
-    fn push(&mut self, au: &[u8], pts_100ns: i64) -> Result<Vec<Picture>, String> {
+    fn push_into(&mut self, au: &[u8], pts_100ns: i64, out: &mut Vec<Picture>) -> Result<(), String> {
         if au.len() < 24 || au[0] != TEST_MARK {
             return Err("not a test codec access unit".into());
         }
         let (w, h) = (u16::from_be_bytes([au[2], au[3]]) as u32, u16::from_be_bytes([au[4], au[5]]) as u32);
-        let mut nv12 = vec![128u8; (w * h * 3 / 2) as usize];
+        let mut nv12 = self.spares.pop().unwrap_or_else(|| {
+            self.allocated += 1;
+            Vec::new()
+        });
+        nv12.clear();
+        nv12.resize((w * h * 3 / 2) as usize, 128);
         nv12[..8].copy_from_slice(&u64::from(u32::from_be_bytes(au[6..10].try_into().unwrap())).to_be_bytes());
-        Ok(vec![Picture { width: w, height: h, nv12, pts_100ns }])
+        out.push(Picture { width: w, height: h, nv12, pts_100ns });
+        Ok(())
+    }
+    fn recycle(&mut self, nv12: Vec<u8>) {
+        if nv12.capacity() != 0 {
+            self.spares.push(nv12);
+        }
+    }
+    fn allocated(&self) -> u64 {
+        self.allocated
     }
     fn name(&self) -> String {
         "test codec".into()

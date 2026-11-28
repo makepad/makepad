@@ -33,8 +33,12 @@ and the second names the app.
 The socket is in the user's socket dir, `/tmp/makepad-<uid>` (0700), whatever the
 process's TMPDIR: a deep TMPDIR cannot hold a Unix socket's path.
 
-`--remote` (no value) or `MAKEPAD_REMOTE=1` opens a Unix-socket endpoint. No
-TCP port exists and nothing listens on the network. `--remote=PORT`,
+`--remote` (no value) or `MAKEPAD_REMOTE=1` opens a Unix-socket endpoint. With
+neither, an app opens one only on a developer computer: `MAKEPAD_REMOTE=local`
+or the per-user setting (the one word `local` in `~/.makepad/remote`), as an
+ordinary launch; `MAKEPAD_REMOTE=0` closes it (`makepad_remote::ask` has the one
+rule, for native builds and `makepad run` alike). No TCP port exists and
+nothing listens on the network. `--remote=PORT`,
 `--remote HOST:PORT` and `MAKEPAD_REMOTE=<port>` are refused (exit 2); other
 machines are reached through the hub. Prefer the explicit launch flag for
 agent inspection. On macOS `--focus` brings the app to the front as its

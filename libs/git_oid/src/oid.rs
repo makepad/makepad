@@ -36,16 +36,28 @@ impl ObjectId {
     }
 
     pub fn from_hex(hex: &str) -> Result<Self, OidError> {
-        if hex.len() != 40 {
+        let raw = hex.as_bytes();
+        if raw.len() != 40 {
             return Err(OidError(format!(
                 "expected 40 hex chars, got {}",
-                hex.len()
+                raw.len()
             )));
         }
+        let hex_val = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        };
         let mut bytes = [0u8; 20];
         for i in 0..20 {
-            bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-                .map_err(|_| OidError(format!("invalid hex: {}", hex)))?;
+            let Some(hi) = hex_val(raw[i * 2]) else {
+                return Err(OidError(format!("invalid hex: {}", hex)));
+            };
+            let Some(lo) = hex_val(raw[i * 2 + 1]) else {
+                return Err(OidError(format!("invalid hex: {}", hex)));
+            };
+            bytes[i] = (hi << 4) | lo;
         }
         Ok(ObjectId(bytes))
     }
@@ -131,6 +143,17 @@ mod tests {
         let hex = "552e2a0e14dd313f5f572118a18fba67ad99699c";
         let oid = ObjectId::from_hex(hex).unwrap();
         assert_eq!(oid.to_hex(), hex);
+    }
+
+    #[test]
+    fn from_hex_rejects_multibyte_utf8_and_signed_ascii_without_panicking() {
+        for invalid in [format!("aé{}", "0".repeat(37)), format!("€{}", "0".repeat(37)), "é".repeat(20), "+0".repeat(20)] {
+            assert_eq!(ObjectId::from_hex(&invalid), Err(OidError(format!("invalid hex: {invalid}"))));
+        }
+        let hex = "0123456789abcdef0123456789abcdef01234567";
+        for valid in [hex.to_owned(), hex.to_ascii_uppercase()] {
+            assert_eq!(ObjectId::from_hex(&valid).unwrap().to_hex(), hex);
+        }
     }
 
     #[test]

@@ -136,17 +136,23 @@ pub(crate) fn to_script(vm: &mut ScriptVm, v: &Value) -> ScriptValue {
         Value::String(s) => vm.new_string(s),
         Value::Array(items) => {
             let a = vm.heap_mut().new_array();
+            if vm.heap().allocation_error_pending() { return NIL; }
             for item in items {
                 let x = to_script(vm, item);
+                if vm.heap().allocation_error_pending() { return NIL; }
                 vm.array_push_trap(a, x);
+                if vm.heap().allocation_error_pending() { return NIL; }
             }
             a.into()
         }
         Value::Object(fields) => {
             let o = vm.new_object();
+            if vm.heap().allocation_error_pending() { return NIL; }
             for (k, item) in fields {
                 let x = to_script(vm, item);
+                if vm.heap().allocation_error_pending() { return NIL; }
                 vm.set_value_def(o, key_id(k), x);
+                if vm.heap().allocation_error_pending() { return NIL; }
             }
             o.into()
         }
@@ -156,4 +162,38 @@ pub(crate) fn to_script(vm: &mut ScriptVm, v: &Value) -> ScriptValue {
 /// A field name as the VM's id, readable back by name.
 pub(crate) fn key_id(name: &str) -> LiveId {
     LiveId::from_str_with_lut(name).unwrap_or_else(|_| LiveId::from_str(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_script_stops_on_first_refusal() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        vm.capture_errors();
+        let inputs = [
+            Value::Array(vec![Value::from("too_long"), Value::Array(vec![]), Value::Object(vec![])]),
+            Value::object(&[("a", Value::from("too_long")), ("b", Value::Array(vec![]))]),
+        ];
+        let observed = inputs.map(|input| {
+            for _ in 0..2 {
+                vm.heap_mut().new_array();
+                vm.new_object();
+            }
+            vm.gc();
+            vm.heap_mut().set_max_string_bytes(Some(4));
+            assert!(!vm.heap().allocation_error_pending(), "each conversion must start with a clean heap");
+            let before = vm.heap().gc_live_counts();
+            // Closing the scope delivers the refusal before the next case reuses the VM.
+            let (result, _) = vm.with_heap_allocation_limit(usize::MAX, |vm| to_script(vm, &input));
+            let after = vm.heap().gc_live_counts();
+            assert!(vm.heap_mut().take_string_limit_exceeded(), "the first string must hit the limit");
+            vm.heap_mut().set_max_string_bytes(None);
+            (result.is_nil(), after.arrays - before.arrays, after.objects - before.objects)
+        });
+        assert_eq!(observed, [(true, 1, 0), (true, 0, 1)],
+            "refused array and object conversions must return NIL and allocate only their root");
+    }
 }

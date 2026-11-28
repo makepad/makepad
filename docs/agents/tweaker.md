@@ -46,6 +46,21 @@ Sidebar edits emit `TWEAK sidebar <path> <prop> <old> -> <new>` in the app
 log. Listen through `log since=N`; do not poll `tweak state` for changes.
 Read state when inspecting a selection or verifying an applied value.
 
+## Live design data
+
+Every app with a registered widget root serves these commands over its existing remote.
+Use the readable `ref` from a pick as the path on subsequent requests.
+
+| Command | Result |
+|---|---|
+| `design pick at=x,y` or `design pick path=P` | Widget id, type, readable path, window-local rect and spacing bands. Insets are ordered left, top, right, bottom. |
+| `design props path=P` | Current property values, their origin and the indexed source cascade. |
+| `design apply path=P prop=padding 'value=Inset{left: 20}'` or `design apply path=P 'splash={...}'` | Applies to one instance, relayouts, and returns the old and new reflected values. |
+| `design typed path=P prop=width 'value=Size.Fixed(200)'` | The same edit and answer as `design apply prop=`, but the value is read as data and built against the property's declared type: scalars, vector literals (`vec2f(..)`, `vec3f(..)`, `vec4f(..)` with comma-separated numbers), `theme.*` values, variants of the declared enum, fields of the declared struct, and a draw layer's inputs declared in script (`draw_bg.color`), which take a value of the kind they hold. A field of a struct the source holds as a shorthand (`padding.left` under `padding: 0`) sets the struct whole, from its current rows. It evaluates nothing and calls nothing, so it is the op for edits from outside the app (Town uses it for every peer's edit). Anything else is refused with the reason. |
+| `design locate path=P` | File, half-open byte range and hexadecimal FNV-1a hash of the literal. A changed Splash token reports its byte range and both texts. A literal containing a Rust interpolation is unverifiable because the running module retains only its slot. |
+| `design theme get [name=N]`, `design theme set name=N value=V`, `design theme install` | Reads theme tokens, sets one token, or requests a rebuild with the installed edits. |
+| `design states path=P`, `design pose path=P layer=L state=group.state` | Lists states and tracks by draw layer, or applies one pose to the named layer. |
+
 ## Structural edits: the designer
 
 The Build tab's design session edits the Splash source of the file that

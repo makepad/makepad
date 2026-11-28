@@ -96,9 +96,10 @@ struct BundleMeta {
 /// `[package.metadata.makepad.desktop.usage]`, by manifest name. Only an app
 /// that names one gets its prompt: a key macOS finds in the plist is a
 /// permission the app can ask for.
-const USAGE_KEYS: [(&str, &str); 4] = [
+const USAGE_KEYS: [(&str, &str); 5] = [
     ("audio_capture", "NSAudioCaptureUsageDescription"),
     ("microphone", "NSMicrophoneUsageDescription"),
+    ("speech_recognition", "NSSpeechRecognitionUsageDescription"),
     ("camera", "NSCameraUsageDescription"),
     ("local_network", "NSLocalNetworkUsageDescription"),
 ];

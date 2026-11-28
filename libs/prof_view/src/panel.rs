@@ -58,7 +58,7 @@ script_mod! {
                 View{width: Fill height: 1}
                 live_refresh := Bar{text: "Refresh"}
             }
-            live_apps := mod.widgets.ProfList{empty_text: "No makepad app is running (makepad run, or a native build with MAKEPAD_REMOTE=1)"}
+            live_apps := mod.widgets.ProfList{empty_text: "No makepad app with its remote endpoint is running (--remote, or `local` in ~/.makepad/remote)"}
             SideTitle{text: "RECORDINGS"}
             live_recordings := mod.widgets.ProfList{max_rows: 14.0 empty_text: "Record a range of a live app to keep it here"}
             View{width: Fill height: Fit flow: Right{wrap: true} padding: Inset{left: 6 top: 4}

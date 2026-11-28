@@ -93,12 +93,10 @@ fn highest_class_first_across_clients() {
 fn fifo_within_class_across_clients() {
     let b = budget(1);
     let p = b.admit(INTERACTIVE, APP, "blocker");
-    // (with a JIT job running the JIT's next waits for a token as the others do)
-    let jit = b.admit(BACKGROUND, JIT, "running");
     let (tx, rx) = mpsc::channel();
-    let workers: Vec<_> = (0..3).map(|i| {
-        let w = worker(&b, VISIBLE, 2 - i as u8, i, &tx);
-        until(&b, |s| s.waiters.len() == i as usize + 1);
+    let workers: Vec<_> = [HAL, APP].into_iter().enumerate().map(|(i, client)| {
+        let w = worker(&b, VISIBLE, client, i as u32, &tx);
+        until(&b, |s| s.waiters.len() == i + 1);
         w
     }).collect();
     b.release(p);
@@ -106,7 +104,6 @@ fn fifo_within_class_across_clients() {
         assert_eq!(rx.recv().unwrap(), i as u32);
         finish(w);
     }
-    b.release(jit);
 }
 
 #[test]
@@ -123,130 +120,6 @@ fn interactive_stops_at_cores() {
     assert_eq!(rx.recv().unwrap(), 1);
     finish(w);
     for p in held { b.release(p); }
-}
-
-/// Why (user): clicking through plates under the JIT sat at "waiting for a free worker": the JIT's
-/// builds held the tokens Interactive had left, with no checkpoint in their optimiser for seconds.
-/// And on a machine with two kinds of core the builds leave the performance cores the person's
-/// work takes (`fast_room`): a live run's sound gapped while hot builds shared a base M4's 4 (11-22).
-#[test]
-fn a_persons_work_never_waits_for_the_jits_background_builds() {
-    let b = Arc::new(Budget::new(16, 16).with_fast(4));
-    // a span of the person's work from its last change: `tokens` of it, read exactly
-    let span = |b: &Budget| {
-        let mut s = b.lock();
-        let at = s.urgent_at;
-        (s.window_at, s.window_area) = (at, s.urgent_area);
-        b.roll(&mut s, at + DEMAND_SPAN_NS);
-    };
-    assert_eq!((b.fast_room(), b.urgent()), (4, false), "nobody's work: every performance core");
-    let jit: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, JIT, "O3")).collect();
-    let tiles: Vec<_> = (0..2).map(|_| b.admit(VISIBLE, APP, "tiles")).collect();
-    let mut load = vec![b.admit(INTERACTIVE, APP, "a load")];
-    assert_eq!(b.state.lock().unwrap().running, 16, "every core has a token");
-    assert_eq!(b.state.lock().unwrap().urgent, 3, "the tiles and the load are the person's work, the builds are not");
-    span(&b);
-    assert_eq!((b.fast_room(), b.urgent()), (1, true), "4 performance cores less the 3 the person's work takes");
-    b.deadlines.fetch_add(1, Relaxed);
-    assert_eq!(b.fast_room(), 0, "a thread that holds a core against a deadline takes the last");
-    b.deadlines.fetch_sub(1, Relaxed);
-    let (tx, rx) = mpsc::channel();
-    let helper = worker(&b, INTERACTIVE, APP, 1, &tx);
-    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(300)), Ok(1), "the load waited for the builds' tokens");
-    load.extend((0..12).map(|_| b.admit(INTERACTIVE, APP, "a load")));
-    assert_eq!(b.state.lock().unwrap().running, 13 + 2 + 14);
-    span(&b);
-    assert_eq!(b.fast_room(), 0, "the person's work takes every performance core: the builds run on the others");
-    assert!(!Budget::urgent_row(&Job::new(INTERACTIVE, JIT, "a waited compile", 0)), "the JIT's own Interactive work is not the person's");
-    assert!(b.should_yield(jit[0]), "the builds leave at their next checkpoint");
-    assert!(b.should_yield(tiles[0]), "and what ranks below the load");
-    assert!(load.iter().all(|p| !b.should_yield(*p)), "the load keeps its helpers: it is within the cores");
-    assert!(load.iter().all(|p| !b.contended(*p)));
-    // Interactive's own limit stands: the cores, whatever else has them
-    let last = worker(&b, INTERACTIVE, APP, 2, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err());
-    b.release(load.pop().unwrap());
-    assert_eq!(rx.recv().unwrap(), 2);
-    finish(last);
-    finish(helper);
-    for p in load.into_iter().chain(tiles).chain(jit) { b.release(p); }
-    span(&b);
-    assert_eq!((b.fast_room(), b.urgent()), (0, true), "work that ended leaves the reading after two spans, not one");
-    span(&b);
-    assert_eq!((b.fast_room(), b.urgent()), (4, false), "and then every performance core is free again");
-    assert_eq!(Budget::new(16, 16).fast_room(), 0, "one kind of core: no performance cores to place on");
-    let s = b.state.lock().unwrap();
-    assert_eq!((s.running, s.jit_tokens, s.urgent), (0, 0, 0));
-}
-
-/// Why (user): what a plate load builds is Visible, and it sat behind the same builds. The builds
-/// over the JIT's floor don't count against it; once they left, Visible is back at its old limit.
-#[test]
-fn a_plate_loads_visible_work_passes_the_builds_above_the_jits_floor() {
-    let b = budget(16);
-    let floor = b.jit_floor;
-    let mut jit: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, JIT, "O3")).collect();
-    let mut load: Vec<_> = (0..12).map(|_| b.admit(VISIBLE, APP, "a load")).collect();
-    assert_eq!(b.state.lock().unwrap().running, 25, "the machine has 16: the builds are over it");
-    assert!(jit.iter().all(|p| b.should_yield(*p)), "the builds leave at their next checkpoint");
-    assert!(load.iter().all(|p| !b.should_yield(*p)), "the load is within its limit");
-    let (tx, rx) = mpsc::channel();
-    let waits = worker(&b, VISIBLE, APP, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err(), "the floor's tokens count: Visible's limit is the old one less those");
-    // the builds leave down to the cores, and no further: the token of one past the floor would not
-    // let the waiter in (Visible does not count it), nor would one of the floor's
-    while jit.len() > floor {
-        b.release(jit.pop().unwrap());
-        let over = b.state.lock().unwrap().running > 16;
-        assert!(jit.iter().all(|p| b.should_yield(*p) == over), "{} builds: they leave only over the cores", jit.len());
-    }
-    assert!(rx.try_recv().is_err(), "the load holds what it may next to the JIT's floor");
-    load.push(b.admit(INTERACTIVE, APP, "a click"));
-    assert!(jit.iter().all(|p| !b.should_yield(*p) && !b.contended(*p)), "the floor's builds keep their tokens: no waiter could have them");
-    b.release(load.pop().unwrap());
-    b.release(load.pop().unwrap());
-    assert_eq!(rx.recv().unwrap(), 1, "a token below the limit goes to the load");
-    finish(waits);
-    for p in load.into_iter().chain(jit) { b.release(p); }
-    let s = b.state.lock().unwrap();
-    assert_eq!((s.running, s.jit_tokens), (0, 0));
-}
-
-/// A build that does reach its checkpoint under a person's work leaves its token, and the JIT keeps
-/// one build going (above the budget) however many tokens the person's work wants.
-#[test]
-fn the_jit_keeps_one_build_going_under_a_persons_work() {
-    let b = budget(4);
-    let job = b.admit(BACKGROUND, JIT, "O3");
-    let load: Vec<_> = (0..4).map(|_| b.admit(INTERACTIVE, APP, "a load")).collect();
-    assert_eq!(b.state.lock().unwrap().running, 5, "the load has all the cores, over the build's token");
-    assert!(b.should_yield(job));
-    let job = b.checkpoint(job, 0, "");
-    assert!(b.tokens().holders.iter().any(|h| h.above && h.label == "O3"), "the JIT's one job goes on");
-    {
-        let s = b.state.lock().unwrap();
-        assert_eq!((s.running, s.jit_tokens), (4, 0));
-    }
-    assert!(!b.should_yield(job) && load.iter().all(|p| !b.should_yield(*p)));
-    b.release(job);
-    for p in load { b.release(p); }
-}
-
-/// A build's token that changes class is counted by the class it has now: a build a waiting thread
-/// raised is that thread's work, and a person's work counts it.
-#[test]
-fn a_raised_build_counts_against_a_persons_work() {
-    let b = budget(2);
-    let job = b.admit(BACKGROUND, JIT, "O3");
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 1);
-    b.reclass(job, INTERACTIVE);
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 0);
-    b.reclass(job, BACKGROUND);
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 1);
-    b.release(job);
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 0);
 }
 
 /// Background's part leaves Visible two of the limit's 3 tokens, and Visible's limit leaves
@@ -275,112 +148,6 @@ fn background_reserves_two_visible_slots_and_visible_reserves_one() {
     let bg = background.poll(BACKGROUND, HAL, "waits").expect("its part has room");
     b.release(bg);
     assert_eq!(b.lock().running, 0);
-}
-
-#[test]
-fn visible_leaves_waiting_jit_background_its_floor() {
-    let b = budget(16);
-    let held: Vec<_> = (0..15).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
-    assert!(!b.should_yield(held[0]), "nobody waits");
-    let above = b.admit(BACKGROUND, JIT, "tier-up");
-    assert!(!b.should_yield(held[0]), "the JIT's first job needs no token");
-    let (tx, rx) = mpsc::channel();
-    let visible = worker(&b, VISIBLE, APP, 9, &tx);
-    let second = worker(&b, BACKGROUND, JIT, 2, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(b.should_yield(held[0]), "Visible gives way at its next checkpoint");
-    b.release(held[0]);
-    assert_eq!(rx.recv().unwrap(), 2, "ahead of the Visible job that came first");
-    let third = worker(&b, BACKGROUND, JIT, 3, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(b.should_yield(held[1]), "one permit left to give");
-    b.release(held[1]);
-    assert_eq!(rx.recv().unwrap(), 3);
-    let fourth = worker(&b, BACKGROUND, JIT, 4, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(!b.should_yield(held[2]), "the floor is met");
-    b.release(held[2]);
-    assert_eq!(rx.recv().unwrap(), 9, "past the floor Visible comes first again");
-    for w in [visible, second, third] { finish(w); }
-    for p in &held[3..] { b.release(*p); }
-    b.release(above);
-    assert_eq!(rx.recv().unwrap(), 4);
-    finish(fourth);
-
-    // A granted run (MAKEPAD_CPU_GRANT), as relax-compiler's
-    // a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it has it: the work outside
-    // the table counts against the builds above the floor only. With it counted below, the build
-    // gave its token up for that work, or its token went to neither the waiting build nor the last
-    // job, and that test held until its run was ended (11-24). (Polled admissions: a broken rule
-    // fails an assertion, it does not hold the test.)
-    let b = Arc::new(Budget::new(12, 12).with_grant(true));
-    assert_eq!((b.limit, b.jit_floor), (11, 2));
-    let handle = BudgetHandle(Which::Own(b.clone()));
-    let other = b.admit(BACKGROUND, JIT, "another compile job");
-    let build = b.admit(BACKGROUND, JIT, "the build");
-    let jobs: Vec<_> = (0..b.limit - b.jit_floor).map(|_| b.admit(VISIBLE, APP, "a pool job")).collect();
-    let mut tier_up = handle.admission();
-    assert_eq!(tier_up.poll(BACKGROUND, JIT, "a tier-up"), None, "the floor is met");
-    let mut last = handle.admission();
-    assert_eq!(last.poll(VISIBLE, APP, "a pool job"), None, "the jobs and the builds hold every token");
-    {
-        let mut s = b.lock();
-        b.observe_outside(&mut s, 2000);
-        assert_eq!(s.outside, 2);
-    }
-    assert!(!b.should_yield(build), "a build within the floor keeps its token through its checkpoints, whatever runs outside the table");
-    b.release(build);
-    let floor_build = tier_up.poll(BACKGROUND, JIT, "a tier-up").expect("the token the build gave back is the floor's: the waiting build has it, whatever runs outside the table");
-    assert_eq!(last.poll(VISIBLE, APP, "a pool job"), None, "the floor's token is not the person's");
-    b.release(floor_build);
-    let job = last.poll(VISIBLE, APP, "a pool job").expect("the last job runs once the builds are done");
-    for p in jobs.into_iter().chain([job, other]) { b.release(p); }
-    assert_eq!(b.lock().running, 0);
-}
-
-#[test]
-fn visible_is_asked_to_leave_only_when_the_jit_found_no_permit() {
-    let b = budget(16);
-    let held: Vec<_> = (0..12).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
-    let jit: Vec<_> = (0..3).map(|_| b.admit(BACKGROUND, JIT, "tier-up")).collect();
-    for p in held.iter().chain(&jit) { assert!(!b.should_yield(*p), "the JIT found its permits free: nobody leaves"); }
-    for p in held.into_iter().chain(jit) { b.release(p); }
-}
-
-#[test]
-fn the_jit_floor_holds_only_against_visible_work() {
-    let b = budget(16);
-    let held: Vec<_> = (0..13).map(|_| b.admit(BACKGROUND, APP, "estimate")).collect();
-    let above = b.admit(BACKGROUND, JIT, "tier-up");
-    let (tx, rx) = mpsc::channel();
-    let jit = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err(), "Background's ceiling holds");
-    let v = b.admit(VISIBLE, APP, "first of the slice");
-    assert_eq!(rx.recv().unwrap(), 1);
-    b.release(v);
-    finish(jit);
-    b.release(above);
-    for p in held { b.release(p); }
-}
-
-#[test]
-fn a_small_machine_keeps_visible_ahead_of_the_jit() {
-    let b = budget(4);
-    let held: Vec<_> = (0..3).map(|_| b.admit(VISIBLE, APP, "slice")).collect();
-    let above = b.admit(BACKGROUND, JIT, "tier-up");
-    let (tx, rx) = mpsc::channel();
-    let jit = worker(&b, BACKGROUND, JIT, 1, &tx);
-    let visible = worker(&b, VISIBLE, APP, 2, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(!b.should_yield(held[0]));
-    b.release(held[0]);
-    assert_eq!(rx.recv().unwrap(), 2);
-    finish(visible);
-    for p in &held[1..] { b.release(*p); }
-    b.release(above);
-    assert_eq!(rx.recv().unwrap(), 1);
-    finish(jit);
 }
 
 #[test]
@@ -461,6 +228,42 @@ fn checkpoint_under_lock_keeps_permit_and_reports_frequent_sites() {
     finish(higher);
 }
 
+/// On a machine with two kinds of core the person's work takes the performance cores and
+/// Background work is placed on the others (`fast_room`): a live run's sound gapped while hot
+/// builds shared a base M-series Mac's 4 performance cores (11-22).
+#[test]
+fn the_persons_work_takes_the_performance_cores() {
+    let b = Budget::new(16, 16).with_fast(4);
+    // a span of the person's work from its last change: `tokens` of it, read exactly
+    let span = |b: &Budget| {
+        let mut s = b.lock();
+        let at = s.urgent_at;
+        (s.window_at, s.window_area) = (at, s.urgent_area);
+        b.roll(&mut s, at + DEMAND_SPAN_NS);
+    };
+    assert_eq!((b.fast_room(), b.urgent()), (4, false), "nobody's work: every performance core");
+    let background: Vec<_> = (0..2).map(|_| b.admit(BACKGROUND, APP, "background")).collect();
+    let tiles: Vec<_> = (0..2).map(|_| b.admit(VISIBLE, APP, "tiles")).collect();
+    let mut load = vec![b.admit(INTERACTIVE, APP, "a load")];
+    assert_eq!(b.state.lock().unwrap().urgent, 3, "the tiles and the load are the person's work, Background is not");
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (1, true), "4 performance cores less the 3 the person's work takes");
+    b.deadlines.fetch_add(1, Relaxed);
+    assert_eq!(b.fast_room(), 0, "a thread that holds a core against a deadline takes the last");
+    b.deadlines.fetch_sub(1, Relaxed);
+    load.push(b.admit(INTERACTIVE, APP, "a load"));
+    span(&b);
+    assert_eq!(b.fast_room(), 0, "the person's work takes every performance core: Background runs on the others");
+    for p in load.into_iter().chain(tiles).chain(background) { b.release(p); }
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (0, true), "work that ended leaves the reading after two spans, not one");
+    span(&b);
+    assert_eq!((b.fast_room(), b.urgent()), (4, false), "and then every performance core is free again");
+    assert_eq!(Budget::new(16, 16).fast_room(), 0, "one kind of core: no performance cores to place on");
+    let s = b.state.lock().unwrap();
+    assert_eq!((s.running, s.urgent), (0, 0));
+}
+
 #[test]
 fn reclass_updates_yield_and_background_accounting() {
     let b = budget(1);
@@ -471,7 +274,8 @@ fn reclass_updates_yield_and_background_accounting() {
     assert!(b.should_yield(p));
     b.reclass(p, INTERACTIVE);
     assert!(!b.should_yield(p));
-    assert_eq!(b.state.lock().unwrap().background, 0);
+    assert!(matches!(b.tokens().holders.as_slice(), [Holder { class: INTERACTIVE, client: APP, .. }]),
+        "the reclassed job's row carries its new class");
     assert_eq!(b.state.lock().unwrap().urgent, 1, "the promoted job counts as the person's work");
     assert_eq!(b.checkpoint(p, 0, ""), p);
     b.release(p);
@@ -505,7 +309,7 @@ fn diagnostics_track_waits_culprit_recent_worst_and_utf8_labels() {
         let mut s = b.state.lock().unwrap();
         s.slots[vis as usize].as_mut().unwrap().checkpoint_at = 0;
     }
-    b.waited(INTERACTIVE, JIT, 200_000_000, "requested");
+    b.waited(INTERACTIVE, HAL, 200_000_000, "requested");
     b.waited(INTERACTIVE, APP, 2_000, "short");
     let text = b.report();
     assert!(text.contains("worst: interactive \"requested\" waited 200.0 ms -- background \"background culprit\""));
@@ -604,138 +408,15 @@ fn a_panic_under_the_budgets_lock_stays_that_threads_panic() {
     assert_eq!(b.tokens().running, 0);
 }
 
-/// The owner waits for a build for a compile job it serves: that job's token goes to the build, on
-/// a one-token machine too, and comes back on the same permit without waiting.
-#[test]
-fn a_job_served_on_the_owner_lends_its_token_by_permit() {
-    let b = budget(1);
-    let served = b.admit(BACKGROUND, JIT, "served");
-    let (tx, rx) = mpsc::channel();
-    let build = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    b.lend_permit(served);
-    assert_eq!(rx.recv().unwrap(), 1, "the build runs on the job's token");
-    b.take_back_permit(served);
-    assert_eq!(b.state.lock().unwrap().running, 2, "the job does not wait for a token");
-    finish(build);
-    b.release(served);
-    assert_eq!(b.state.lock().unwrap().running, 0);
-}
-
-/// The app's jobs fill the budget and run on: one JIT job runs beside them, holding no token, and
-/// keeps running whoever waits; a second waits for it. Nothing is held back while none runs.
-#[test]
-fn one_jit_job_runs_above_a_full_budget() {
-    let b = budget(4);
-    let app: Vec<_> = (0..3).map(|_| b.admit(VISIBLE, APP, "busy")).collect();
-    let above = b.admit(BACKGROUND, JIT, "tier-up");
-    assert_eq!(b.state.lock().unwrap().running, 3, "the job takes no token from the app");
-    assert!(b.report().contains("1 JIT job above"), "{}", b.report());
-    assert!(b.tokens().holders.iter().any(|h| h.above && h.label == "tier-up"));
-    let (tx, rx) = mpsc::channel();
-    let second = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    let more_app = worker(&b, VISIBLE, APP, 2, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(!b.should_yield(above), "it holds no token anyone could want");
-    assert_eq!(b.checkpoint(above, 0, ""), above);
-    b.release(above);
-    assert_eq!(rx.recv().unwrap(), 1, "the next takes its place, not the app's waiter's");
-    assert_eq!(b.state.lock().unwrap().running, 3);
-    finish(second);
-    b.release(app[0]);
-    assert_eq!(rx.recv().unwrap(), 2, "the app's own token goes to the app's waiter");
-    finish(more_app);
-    for p in &app[1..] { b.release(*p); }
-    assert_eq!(b.state.lock().unwrap().running, 0);
-}
-
-/// One JIT job running keeps the others to the budget's limits. While the JIT comes first
-/// Background is two parts: the builds take the cores the app's own Background work leaves, and the
-/// app's work never waits out the builds' backlog. (A game's loading-screen model builds once
-/// waited behind a row of builds that only the JIT could join.)
-#[test]
-fn a_second_jit_job_waits_for_a_token() {
-    let b = budget(3);
-    let running = b.admit(BACKGROUND, JIT, "running");
-    let (tx, rx) = mpsc::channel();
-    let second = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err(), "Background is at its limit and the JIT has a job running");
-    b.release(running);
-    assert_eq!(rx.recv().unwrap(), 1);
-    finish(second);
-
-    let b = budget(4);
-    b.set_jit_first(true);
-    let builds: Vec<_> = (0..4).map(|_| b.admit(BACKGROUND, JIT, "tier-up")).collect();
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 4, "no app Background work: the builds take every core");
-    let (tx, rx) = mpsc::channel();
-    let build = worker(&b, BACKGROUND, JIT, 1, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    let model = worker(&b, BACKGROUND, APP, 2, &tx);
-    until(&b, |s| s.waiters.len() == 2);
-    assert!(b.contended(builds[0]), "a build's token goes back at its job's end");
-    b.release(builds[0]);
-    assert_eq!(rx.recv().unwrap(), 2, "the app's job, not the build that waited longer");
-    b.release(builds[1]);
-    assert_eq!(rx.recv().unwrap(), 1, "the app's part is full: the builds take the rest");
-    b.release(builds[2]);
-    let second = worker(&b, BACKGROUND, APP, 3, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err(), "a token is free, but the app's part is background_limit jobs");
-    finish(model);
-    assert_eq!(rx.recv().unwrap(), 3);
-    b.set_jit_first(false);
-    finish(second);
-    let third = worker(&b, BACKGROUND, APP, 4, &tx);
-    until(&b, |s| s.waiters.len() == 1);
-    assert!(rx.try_recv().is_err(), "flag down: one part again, and the builds count against it");
-    finish(build);
-    b.release(builds[3]);
-    assert_eq!(rx.recv().unwrap(), 4);
-    finish(third);
-    assert_eq!(b.state.lock().unwrap().running, 0);
-
-    // A run whose cores are a grant on a shared box (MAKEPAD_CPU_GRANT): the builds take only the
-    // cores its other work leaves, that of its threads that hold no token too (a test's own: a shard
-    // told 6 cores ran 6 test threads beside up to 6 builds, 11-23).
-    assert_eq!(outside_reading(1_000_000_000, 400_000_000, 100_000_000), 6000, "a span's CPU time less its rows'");
-    assert_eq!(outside_reading(100_000_000, 400_000_000, 100_000_000), 0, "rows that hold their tokens blocked read as none outside");
-    let b = Arc::new(Budget::new(4, 4).with_grant(true));
-    b.set_jit_first(true);
-    let observe = |milli| { let mut s = b.lock(); b.observe_outside(&mut s, milli); };
-    observe(3000);
-    let first = b.admit(BACKGROUND, JIT, "tier-up");
-    assert_eq!(b.state.lock().unwrap().jit_tokens, 1, "one core is left beside the 3 in use outside the table");
-    let (tx, rx) = mpsc::channel();
-    let build = worker(&b, BACKGROUND, JIT, 5, &tx);
-    until(&b, |s| s.waiters.len() == 1 || s.jit_running == 2);
-    assert!(b.state.lock().unwrap().waiters.len() == 1 && rx.try_recv().is_err(), "the grant is full: a second build waits");
-    assert!(!b.should_yield(first), "the first build fits");
-    observe(4000);
-    assert!(b.should_yield(first), "the work outside grew to the grant: the build gives its token up at its next checkpoint");
-    assert!(b.report().contains("granted: 4 cores in use outside the table"), "{}", b.report());
-    observe(0);
-    assert!(rx.try_recv().is_err(), "work that ended leaves after two spans");
-    observe(0);
-    assert_eq!(rx.recv().unwrap(), 5, "the work outside ended: the waiting build takes the core");
-    finish(build);
-    b.release(first);
-    assert_eq!(b.state.lock().unwrap().running, 0);
-}
-
 /// A waiter whose job is raised while it waits (a strand job a person's work queued behind) waits
-/// from then on for a token of its new class, beside a JIT build that waits with no room: it takes
-/// the first token its new class may take, ahead of the build. The pool's own tests run on a budget
-/// of their own; this keeps the case the global budget has.
+/// from then on for a token of its new class, beside a Background waiter of another client that
+/// waits with no room. The raised job takes the first token its new class may take.
 #[test]
 fn a_waiter_raised_while_parked_takes_the_first_token_its_new_class_may_take() {
     let b = budget(2);
     let held = [b.admit(INTERACTIVE, APP, "held"), b.admit(INTERACTIVE, APP, "held")];
-    let above = b.admit(BACKGROUND, JIT, "tier-up");
     let (tx, rx) = mpsc::channel();
-    let build = worker(&b, BACKGROUND, JIT, 1, &tx);
+    let build = worker(&b, BACKGROUND, HAL, 1, &tx);
     until(&b, |s| s.waiters.len() == 1);
     let desired = Arc::new(AtomicU8::new(BACKGROUND));
     let (go, done) = mpsc::channel::<()>();
@@ -756,11 +437,10 @@ fn a_waiter_raised_while_parked_takes_the_first_token_its_new_class_may_take() {
     assert!(rx.try_recv().is_err(), "every token Interactive may take is held");
     b.release(held[0]);
     let first = rx.recv_timeout(std::time::Duration::from_secs(30));
-    assert_eq!(first, Ok(2), "the raised waiter takes the token that came free, not the build");
+    assert_eq!(first, Ok(2), "the raised waiter takes the token that came free, not the Background waiter");
     finish((go, raised));
     b.release(held[1]);
-    b.release(above);
-    assert_eq!(rx.recv().unwrap(), 1, "the build runs once the JIT's running job ends");
+    assert_eq!(rx.recv().unwrap(), 1, "the Background waiter runs once the last held token is released");
     finish(build);
     assert_eq!(b.state.lock().unwrap().running, 0);
 }
@@ -824,4 +504,9 @@ fn a_granted_run_sizes_the_budget_from_its_grant() {
     assert_eq!(granted_cores(16, None), 16);
     assert_eq!(granted_cores(16, Some("0")), 16);
     assert_eq!(granted_cores(16, Some("four")), 16);
+    // the machine a run was told (`MAKEPAD_MACHINE_CORES`) stands for the one it sees, which a CPU
+    // quota at its start narrows; an unset or unreadable count is the one it sees
+    assert_eq!(machine_from(Some("16"), || 10), 16, "a run under a 10-core quota sizes from its 16-core machine");
+    assert_eq!(machine_from(None, || 10), 10, "unset: the cores it sees");
+    assert_eq!((machine_from(Some("0"), || 10), machine_from(Some("all"), || 10)), (10, 10), "unreadable: the cores it sees");
 }

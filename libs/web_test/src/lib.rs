@@ -13,12 +13,39 @@
 //! It drives CEF on Linux only (elsewhere CEF needs the HAL main loop of an app): on another
 //! platform the target holds no tests, as a `#[cfg(target_os = "linux")]` test would.
 
+//!
+//! With `--app DIR --out DIR [--size WxH] --steps "step; step; ..."`, the same target
+//! opens a built Makepad wasm app on a real Linux GPU in headless CEF. Its private server
+//! injects a WebGL2 observer before the app starts and enables cross-origin isolation.
+//! Input coordinates are viewport pixels (scale 1). The default size is 800x600.
+//!
+//! - `info` prints the unmasked renderer and vendor. Software rendering fails the run.
+//! - `frames N` waits for animation frames. `settle` waits for 500 ms of unchanged GPU
+//!   frame count and reports a still-drawing app after 10 s.
+//! - `grab NAME` saves a top-down PNG. `stats NAME` saves GPU stats and inventory as JSON.
+//! - `lose` and `restore` request and await the corresponding WebGL context events.
+//! - `click X Y`, `wheel X Y DX DY`, and `key NAME` send browser input.
+//! - `same A B [TOLERANCE]` compares two grabs in RGB (default tolerance 0).
+//!   `differ A B` requires at least one changed RGB pixel.
+//!
+//! From the lane worktree, with the workspace's cargo-makepad on PATH:
+//! ```sh
+//! makepad devhub run "$lane" build --needs os=linux,gui=1 --cost medium \
+//!   --native "wasm app and CEF web_js subprocesses" --keep "$keep" -- sh -ec '
+//!   export CARGO_NET_OFFLINE=true RUSTUP_AUTO_INSTALL=0
+//!   cargo makepad wasm build --release -p makepad-example-counter
+//!   cargo test --release -p makepad-platform --test web_js -- \
+//!     --app target/makepad-wasm-app/release/makepad-example-counter --out "$DEVHUB_KEEP" \
+//!     --steps "info; settle; grab a; lose; frames 10; restore; settle; grab b; same a b"'
+//! ```
+
+mod app;
+
 use makepad_micro_serde::{DeJson, JsonValue};
 use makepad_network::{start_http_server, HttpServer, HttpServerRequest, HttpServerResponse};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const HARNESS: &str = include_str!("harness.js");
@@ -155,20 +182,25 @@ fn resolve(root: &Path, path: &str) -> Option<PathBuf> {
     if rel.is_empty() || rel.split('/').any(|seg| seg.is_empty() || seg == ".." || seg.starts_with('.')) || rel.contains('\\') || rel.contains(':') {
         return None;
     }
-    let file = root.join(rel);
-    file.is_file().then_some(file)
+    let file = root.join(rel).canonicalize().ok()?;
+    (file.starts_with(root) && file.is_file()).then_some(file)
 }
 
-fn response(status: &str, content_type: &str, body: Vec<u8>) -> HttpServerResponse {
+fn response(status: &str, content_type: &str, body: Vec<u8>, extra_headers: &str) -> HttpServerResponse {
     HttpServerResponse::new(
-        format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len()),
+        format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{extra_headers}Connection: close\r\n\r\n", body.len()),
         body,
     )
 }
 
+enum Site {
+    Pages(Vec<String>),
+    App { index: String },
+}
+
 /// Serves `root`, the harness and the pages on a loopback port; reports go to `reports` as
 /// (page, body). Returns the port.
-fn serve(root: PathBuf, pages: Arc<Vec<String>>, reports: mpsc::Sender<(usize, Vec<u8>)>) -> Result<u16, String> {
+fn serve(root: PathBuf, site: Site, reports: mpsc::Sender<(usize, Vec<u8>)>) -> Result<u16, String> {
     // A free port first: the server binds by address.
     let probe = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback port: {e}"))?;
     let addr = probe.local_addr().map_err(|e| e.to_string())?;
@@ -189,19 +221,28 @@ fn serve(root: PathBuf, pages: Arc<Vec<String>>, reports: mpsc::Sender<(usize, V
     std::thread::Builder::new()
         .name("web-test-server".into())
         .spawn(move || {
+            let extra_headers = match site {
+                Site::Pages(_) => "",
+                Site::App { .. } => "Cross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\n",
+            };
+            let response = |status: &str, mime: &str, body| response(status, mime, body, extra_headers);
             while let Ok(request) = rx.recv() {
                 match request {
                     HttpServerRequest::Get { headers, response_sender } => {
                         let path = headers.path.split(['?', '#']).next().unwrap_or("");
-                        let answer = if path == HARNESS_PATH {
-                            response("200 OK", mime(path), HARNESS.as_bytes().to_vec())
-                        } else if let Some(page) = path.strip_prefix(PAGE_PATH).and_then(|n| n.parse::<usize>().ok()).and_then(|n| pages.get(n)) {
-                            response("200 OK", "text/html; charset=utf-8", page.as_bytes().to_vec())
-                        } else {
-                            match resolve(&root, path).and_then(|file| std::fs::read(file).ok()) {
-                                Some(body) => response("200 OK", mime(path), body),
-                                None => response("404 Not Found", "text/plain", b"Not Found".to_vec()),
-                            }
+                        let content = match &site {
+                            Site::Pages(_) if path == HARNESS_PATH => Some((mime(path), HARNESS.as_bytes().to_vec())),
+                            Site::Pages(pages) if path.starts_with(PAGE_PATH) => path[PAGE_PATH.len()..].parse::<usize>().ok()
+                                .and_then(|n| pages.get(n)).map(|page| (mime("index.html"), page.as_bytes().to_vec())),
+                            Site::App { index } if path == "/" || path == "/index.html" => Some((mime("index.html"), index.as_bytes().to_vec())),
+                            Site::App { .. } if path == app::RIG_PATH => Some((mime(path), app::RIG.as_bytes().to_vec())),
+                            _ => resolve(&root, path).and_then(|file| std::fs::read(file).ok()).map(|body| (mime(path), body)),
+                        };
+                        let answer = match content {
+                            Some((mime, body)) => response("200 OK", mime, body),
+                            // Chromium requests this on its own even if index.html names no icon.
+                            None if matches!(site, Site::App { .. }) && path == "/favicon.ico" => response("204 No Content", "image/x-icon", Vec::new()),
+                            None => response("404 Not Found", "text/plain", b"Not Found".to_vec()),
                         };
                         let _ = response_sender.send(answer);
                     }
@@ -338,7 +379,18 @@ pub fn main(root: &Path, dirs: &[&str]) -> ExitCode {
     if let Some(code) = makepad_cef::run_helper_if_subprocess() {
         std::process::exit(code);
     }
-    let args = Args::parse(std::env::args().skip(1));
+    let argv: Vec<_> = std::env::args().skip(1).collect();
+    if argv.iter().any(|arg| arg == "--app") {
+        if !cfg!(target_os = "linux") {
+            println!("web app test: skipped (real GPU app mode runs on Linux only)");
+            return ExitCode::SUCCESS;
+        }
+        return match app::run(&argv) {
+            Ok(()) => { println!("web app test: ok"); ExitCode::SUCCESS }
+            Err(error) => { eprintln!("web app test: FAILED: {error}"); ExitCode::FAILURE }
+        };
+    }
+    let args = Args::parse(argv.into_iter());
     if args.list {
         // a harness of its own: listed as no tests, so a run takes the target whole
         return ExitCode::SUCCESS;
@@ -363,18 +415,7 @@ fn run(root: &Path, dirs: &[&str], args: Args) -> Result<Totals, String> {
     let started = Instant::now();
     let root = root.canonicalize().map_err(|e| format!("{}: {e}", root.display()))?;
     let pages = discover(&root, dirs)?;
-    // A profile of its own, never a person's: made here, removed at the end.
-    let profile = std::env::temp_dir().join(format!("makepad-web-test-{}", std::process::id()));
-    std::fs::create_dir_all(&profile).map_err(|e| format!("{}: {e}", profile.display()))?;
-    std::env::set_var("MAKEPAD_CEF_PROFILE_DIR", &profile);
-    // off-screen pages need no display server
-    if std::env::var_os("MAKEPAD_CEF_OZONE").is_none() {
-        std::env::set_var("MAKEPAD_CEF_OZONE", "headless");
-    }
-    let result = run_pages(&root, &pages, &args);
-    makepad_cef::shutdown();
-    let _ = std::fs::remove_dir_all(&profile);
-    let totals = result?;
+    let totals = with_cef_profile(|| run_pages(&root, &pages, &args))?;
     if !totals.failures.is_empty() {
         println!("failures:\n");
         for (name, error) in &totals.failures {
@@ -390,21 +431,41 @@ fn run(root: &Path, dirs: &[&str], args: Args) -> Result<Totals, String> {
     Ok(totals)
 }
 
+fn with_cef_profile<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    // A profile of its own, never a person's: made here, removed at the end.
+    let profile = std::env::temp_dir().join(format!("makepad-web-test-{}", std::process::id()));
+    std::fs::create_dir_all(&profile).map_err(|e| format!("{}: {e}", profile.display()))?;
+    std::env::set_var("MAKEPAD_CEF_PROFILE_DIR", &profile);
+    // off-screen pages need no display server
+    if std::env::var_os("MAKEPAD_CEF_OZONE").is_none() {
+        std::env::set_var("MAKEPAD_CEF_OZONE", "headless");
+    }
+    let result = run();
+    makepad_cef::shutdown();
+    let _ = std::fs::remove_dir_all(&profile);
+    result
+}
+
 fn run_pages(root: &Path, pages: &[Page], args: &Args) -> Result<Totals, String> {
     let html: Vec<String> = pages.iter().enumerate().map(|(i, page)| page_html(i, page, args)).collect();
     let (tx, reports) = mpsc::channel();
-    let port = serve(root.to_path_buf(), Arc::new(html), tx)?;
-    match makepad_cef::bootstrap().map_err(|e| format!("CEF: {e}"))? {
-        makepad_cef::BootstrapResult::Continue => {}
-        makepad_cef::BootstrapResult::Exit(code) => std::process::exit(code),
-    }
-    makepad_cef::prepare().map_err(|e| format!("CEF: {e}"))?;
+    let port = serve(root.to_path_buf(), Site::Pages(html), tx)?;
+    start_cef()?;
     let mut totals = Totals::default();
     for (index, page) in pages.iter().enumerate() {
         let url = format!("http://127.0.0.1:{port}{PAGE_PATH}{index}");
         totals.add(run_page(&url, page, &reports, index)?);
     }
     Ok(totals)
+}
+
+fn start_cef() -> Result<(), String> {
+    match makepad_cef::bootstrap().map_err(|e| format!("CEF: {e}"))? {
+        makepad_cef::BootstrapResult::Continue => {}
+        makepad_cef::BootstrapResult::Exit(code) => std::process::exit(code),
+    }
+    makepad_cef::prepare().map_err(|e| format!("CEF: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

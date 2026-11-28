@@ -19,9 +19,6 @@ path = "src/lib.rs"
 # A phone browser's end of a call (`browser`), for other crates' tests.
 browser = []
 
-[dependencies]
-crc32fast = { path = "../crc32fast" }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 # The DTLS certificate: made with the network layer's P-256 and X.509 code.
 makepad-network = { path = "../../platform/network" }
