@@ -41,7 +41,7 @@ script_mod! {
         depth_write: false
         // Projected Gaussian billboards have no back face: their ellipse
         // basis can reverse winding, including in an offscreen scene pass.
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

@@ -18,7 +18,7 @@ script_mod! {
 
     mod.draw.DrawIcoSolid = mod.std.set_type_default() do #(DrawIcoSolid::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -110,7 +110,7 @@ script_mod! {
         diffuse: vec4(0.63, 0.65, 0.69, 1.0)
         color: vec4(0.95, 0.62, 0.28, 1.0)
         draw_ico: mod.draw.DrawIcoSolid{
-            backface_culling: true
+            cull_mode: @Back
             ambient: 0.16
             key_strength: 0.78
             fill_strength: 0.30

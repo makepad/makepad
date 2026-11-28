@@ -93,7 +93,7 @@ script_mod! {
 
     mod.draw.DrawTreeBranches = mod.std.set_type_default() do #(DrawTreeBranches::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -172,7 +172,7 @@ script_mod! {
 
     mod.draw.DrawTreeLeaves = mod.std.set_type_default() do #(DrawTreeLeaves::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

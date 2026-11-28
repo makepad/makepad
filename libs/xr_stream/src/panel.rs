@@ -229,7 +229,7 @@ script_mod! {
         show_bg: true
         draw_bg +: { color: theme.color_inset border_radius: 6.0 border_size: 0.0 }
         value := Label{ padding: 0 text: "-" draw_text +: { color: theme.color_text text_style: theme.font_bold{font_size: 12} } }
-        caption := Label{ padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} } }
+        legend := Label{ padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 7.5} } }
     }
 
     mod.widgets.XrPairedDevicesBase = #(XrPairedDevices::register_widget(vm))
@@ -356,11 +356,11 @@ script_mod! {
                             hint := Label{ width: Fill padding: 0 text: "" draw_text +: { color: theme.color_text_meta text_style: theme.font_regular{font_size: 8} } }
                             tiles := View{
                                 width: Fill height: Fit flow: Right spacing: 6
-                                tile_fps := XrTile{ caption +: { text: "fps shown" } }
-                                tile_m2p := XrTile{ caption +: { text: "latency ms" } }
-                                tile_rate := XrTile{ caption +: { text: "Mbit/s" } }
-                                tile_encode := XrTile{ caption +: { text: "ms encode" } }
-                                tile_late := XrTile{ caption +: { text: "late, lost" } }
+                                tile_fps := XrTile{ legend +: { text: "fps shown" } }
+                                tile_m2p := XrTile{ legend +: { text: "latency ms" } }
+                                tile_rate := XrTile{ legend +: { text: "Mbit/s" } }
+                                tile_encode := XrTile{ legend +: { text: "ms encode" } }
+                                tile_late := XrTile{ legend +: { text: "late, lost" } }
                             }
                             stages := mod.widgets.XrStageBars{}
                             XrSwitchRow{

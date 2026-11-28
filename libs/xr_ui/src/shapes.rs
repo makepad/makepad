@@ -18,7 +18,7 @@ script_mod! {
     mod.draw.DrawXrShape = mod.std.set_type_default() do #(DrawXrShape::script_shader(vm)){
         ..mod.draw.DrawQuad
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         depth_write: true
         depth_out: fragment_depth(@any)
         shape: instance(XrShapeKind.Sphere)
