@@ -30,7 +30,7 @@
 //! is silent for a bar has no line; `7-8 = 5-6` says bars 7-8 repeat 5-6.
 //!
 //! [`to_text`] writes an [`Arrangement`] (an imported MIDI file, or a Score
-//! played back by [`from_score`]); [`from_text`] reads one back, so a song
+//! played back by [`from_score_controlled`]); [`from_text`] reads one back, so a song
 //! written in this form becomes a Score ([`crate::arrangement::to_score`]).
 //! Velocities read as three levels, times as sixteenths, pitches as
 //! semitones, and pedal and program changes are left out: a transcription,
@@ -749,14 +749,16 @@ pub fn from_text(text: &str) -> Result<Arrangement, String> {
 /// from its instrument and register. For reading a score in the same form
 /// as an imported song (`score_text`); its instruments and code stay in
 /// the Score.
-pub fn from_score(source: &str) -> Result<Arrangement, String> {
-    let loaded = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?;
-    from_loaded(loaded)
+pub fn from_score_controlled(source: &str, control: &makepad_score_live::PrepareControl) -> Result<Arrangement, makepad_score_live::LoadError> {
+    makepad_score_live::model::read_document_controlled(source, control).map(transcribe)
 }
 
 pub fn from_loaded(loaded: impl Into<makepad_score_live::model::EvaluatedDocument>) -> Result<Arrangement, String> {
+    Ok(transcribe(loaded.into()))
+}
+
+fn transcribe(loaded: makepad_score_live::model::EvaluatedDocument) -> Arrangement {
     use makepad_score_live::model::InstKind;
-    let loaded = loaded.into();
     let doc = loaded.doc.clone();
     let per_bar = doc.beats_per_bar();
     let beats = if doc.arrangement_beats() > 0.0 { doc.arrangement_beats() } else { 16.0 * per_bar };
@@ -843,7 +845,7 @@ pub fn from_loaded(loaded: impl Into<makepad_score_live::model::EvaluatedDocumen
         excerpt: false,
     };
     a.key = key_of(&a);
-    Ok(a)
+    a
 }
 
 /// The key of an arrangement's notes (Krumhansl-Schmuckler).
@@ -961,10 +963,11 @@ mod tests {
         assert_eq!(played, back.parts.iter().map(|p| p.notes.len()).sum::<usize>());
         assert_eq!(played, imported.arrangement.parts.iter().map(|p| p.notes.len()).sum::<usize>(), "the test band sits on the grid: nothing merges");
         // And the Score read back by playing it says the same.
-        let read = from_score(&score).unwrap();
+        let word = makepad_score_live::PrepareControl::default();
+        let read = from_score_controlled(&score, &word).unwrap();
         let bad_shader = score.replacen("Score{", "let unused = ShaderControl{code: \"let out = output(1) fn block() { out = unknown_name }\"}\nScore{unused ", 1);
         assert!(matches!(makepad_score_live::ScoreDoc::load_controlled(&bad_shader, &makepad_score_live::PrepareControl::default()), Err(makepad_score_live::LoadError::Problems(_))));
-        assert_eq!(to_text(&from_score(&bad_shader).unwrap(), &Detail::default()), to_text(&read, &Detail::default()),
+        assert_eq!(to_text(&from_score_controlled(&bad_shader, &word).unwrap(), &Detail::default()), to_text(&read, &Detail::default()),
             "transcription preserves the same notes, meter and sections without compiling the unused shader");
         let only_notes = |t: &str| t.lines().filter(|l| l.starts_with("  ") || l.contains(" = ")).map(str::to_string).collect::<Vec<_>>();
         assert_eq!(only_notes(&to_text(&read, &Detail { chords: false, ..Detail::default() })), only_notes(&to_text(&back, &Detail { chords: false, ..Detail::default() })));

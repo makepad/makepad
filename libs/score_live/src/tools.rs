@@ -11,7 +11,7 @@
 //! one refuses.
 
 use crate::listen::{self, Heard, Level};
-use crate::model::Diag;
+use crate::model::{load_controlled, Diag, Loaded, LoadError};
 use crate::palette::Features;
 use crate::NoSamples;
 use makepad_strict_json::{self as json, Value};
@@ -55,6 +55,21 @@ pub fn metadata_only(name: &str, args: &Value) -> Result<Value, String> {
 /// draws it), or its problems as the answer when the score does not load.
 pub fn listen_args(args: &Value, open: Option<&str>, control: &crate::PrepareControl) -> Result<(Value, Option<Heard>), String> {
     let source = source_of(args, open)?;
+    listen_args_after_load(args, &source, load_controlled(&source, control), control)
+}
+
+/// Finish a listen tool call with its load outcome, including a structured reply for an invalid score.
+pub fn listen_args_after_load(args: &Value, source: &str, load: Result<Loaded, LoadError>, control: &crate::PrepareControl) -> Result<(Value, Option<Heard>), String> {
+    match load.and_then(|loaded| hear_args(args, loaded, control)) {
+        Ok((answer, heard)) => Ok((answer, Some(heard))),
+        Err(error @ (LoadError::Unfinished { .. } | LoadError::Memory { .. })) => Err(error.to_string()),
+        Err(LoadError::Cancelled) => Err("the listen was cancelled".into()),
+        Err(LoadError::Problems(diags)) => Ok((json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, source))]), None)),
+    }
+}
+
+fn hear_args(args: &Value, loaded: Loaded, control: &crate::PrepareControl) -> Result<(Value, Heard), LoadError> {
+    let doc = loaded.doc.clone();
     let int = |key: &str| match args.get(key) {
         Some(Value::Int(n)) => Some(*n as f64),
         Some(Value::F64(n)) => Some(*n),
@@ -72,9 +87,7 @@ pub fn listen_args(args: &Value, open: Option<&str>, control: &crate::PrepareCon
     };
     // Fields held live from a bar on (a control moved mid-render): on the
     // one prepared graph, as the editor panel's knobs land.
-    if control.is_cancelled() { return Err("the listen was cancelled".into()); }
-    let doc = crate::model::read_document(&source).ok().map(|read| read.doc);
-    let bar_seconds = doc.as_ref().map(|d| d.beats_per_bar() * 60.0 / d.clock.bpm.max(1.0)).unwrap_or(2.0);
+    let bar_seconds = doc.beats_per_bar() * 60.0 / doc.clock.bpm.max(1.0);
     let held: Vec<crate::held::Held> = match args.get("held") {
         Some(Value::Arr(items)) => items.iter().filter_map(|item| {
             let (node, field) = crate::held::node_field(item.get("path")?.as_str()?)?;
@@ -92,7 +105,7 @@ pub fn listen_args(args: &Value, open: Option<&str>, control: &crate::PrepareCon
     };
     // What each held field lands on (none: it is only heard once written).
     let landed: Vec<Value> = held.iter().map(|h| {
-        let n = doc.as_ref().map_or(0, |d| crate::held::targets(d, &h.node, &h.field).len());
+        let n = crate::held::targets(&doc, &h.node, &h.field).len();
         json::obj(vec![
             ("path", json::s(format!("{}.{}", h.node, h.field))),
             ("value", Value::F64(h.value as f64)),
@@ -100,20 +113,13 @@ pub fn listen_args(args: &Value, open: Option<&str>, control: &crate::PrepareCon
             ("lands", json::s(if n > 0 { format!("live on {n} loop(s) or control(s)") } else { "nowhere live: write it to hear it".to_string() })),
         ])
     }).collect();
-    match listen::listen(&source, from_bar, bars, params, held, &NoSamples, control) {
-        Ok(mut heard) => {
-            if let Some(doc) = &doc {
-                heard.warnings.extend(doc.missing_library_patches().map(|(_, patch)| crate::tandem_library::missing_patch_message(patch)));
-            }
-            let mut answer = heard_json(&heard);
-            if let Value::Obj(fields) = &mut answer {
-                fields.push(("held".into(), Value::Arr(landed)));
-            }
-            Ok((answer, Some(heard)))
-        }
-        Err(crate::LoadError::Cancelled) => Err("the listen was cancelled".into()),
-        Err(crate::LoadError::Problems(diags)) => Ok((json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, &source))]), None)),
+    let mut heard = listen::listen_loaded(loaded, from_bar, bars, params, held, &NoSamples, control)?;
+    heard.warnings.extend(doc.missing_library_patches().map(|(_, patch)| crate::tandem_library::missing_patch_message(patch)));
+    let mut answer = heard_json(&heard);
+    if let Value::Obj(fields) = &mut answer {
+        fields.push(("held".into(), Value::Arr(landed)));
     }
+    Ok((answer, heard))
 }
 
 /// `morph_params`: Morph's schema as the AI reads it (some groups or all).
@@ -261,7 +267,7 @@ pub fn instrument_search(args: &Value) -> Value {
 
 /// The source a call names, else the open score; with its last newline
 /// (a trailing number without one is dropped by the parser).
-fn source_of(args: &Value, open: Option<&str>) -> Result<String, String> {
+pub fn source_of(args: &Value, open: Option<&str>) -> Result<String, String> {
     let source = match (args.get("source").and_then(Value::as_str), open) {
         (Some(given), _) => given,
         (None, Some(open)) => open,
@@ -297,33 +303,55 @@ fn shader_warnings(doc: &crate::model::ScoreDoc) -> Value {
 /// Load `source` and run its loop code for 8 bars: the document's
 /// problems, or the loops' runtime errors with what the score declares.
 pub fn check_diags(source: &str, control: &crate::PrepareControl) -> Result<Vec<Diag>, crate::LoadError> {
-    match crate::model::load_controlled(source, control) {
-        Err(crate::LoadError::Problems(diags)) => Ok(diags),
+    crate::drive(check_diags_async(source, control))
+}
+
+pub async fn check_diags_async(source: &str, control: &crate::PrepareControl) -> Result<Vec<Diag>, LoadError> {
+    match crate::load(source, control).await {
+        Err(LoadError::Problems(diags)) => Ok(diags),
         Err(cancelled) => Err(cancelled),
-        Ok(loaded) => {
-            let bar = loaded.doc.beats_per_bar();
-            let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
-            let mut events = Vec::new();
-            composer.pump(bar * 8.0, &mut events);
-            if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
-            Ok(composer.errors())
-        }
+        Ok(loaded) => check_diags_loaded(loaded, control),
     }
+}
+
+/// Run the completed score's loops and return their diagnostics.
+pub fn check_diags_loaded(loaded: Loaded, control: &crate::PrepareControl) -> Result<Vec<Diag>, LoadError> {
+    check_loops(loaded, control).map(|(errors, _)| errors)
+}
+
+fn check_loops(loaded: Loaded, control: &crate::PrepareControl) -> Result<(Vec<Diag>, usize), LoadError> {
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    let bar = loaded.doc.beats_per_bar();
+    let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
+    let mut events = Vec::new();
+    composer.pump(bar * 8.0, &mut events);
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    Ok((composer.errors(), events.len()))
 }
 
 /// `score_check`'s answer.
 pub fn check(source: &str, control: &crate::PrepareControl) -> Result<Value, crate::LoadError> {
-    let loaded = match crate::model::load_controlled(source, control) {
-        Ok(loaded) => loaded,
-        Err(crate::LoadError::Cancelled) => return Err(crate::LoadError::Cancelled),
-        Err(crate::LoadError::Problems(diags)) => return Ok(json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, source)), ("warnings", Value::Arr(Vec::new()))])),
-    };
+    crate::drive(check_async(source, control))
+}
+
+pub async fn check_async(source: &str, control: &crate::PrepareControl) -> Result<Value, LoadError> {
+    check_after_load(source, crate::load(source, control).await, control)
+}
+
+/// Finish a check tool call from the same load outcome a stepped caller receives.
+pub fn check_after_load(source: &str, load: Result<Loaded, LoadError>, control: &crate::PrepareControl) -> Result<Value, LoadError> {
+    match load {
+        Ok(loaded) => check_loaded(loaded, control),
+        Err(LoadError::Problems(diags)) => Ok(json::obj(vec![("ok", Value::Bool(false)), ("problems", problems(&diags, source)), ("warnings", Value::Arr(Vec::new()))])),
+        Err(error) => Err(error),
+    }
+}
+
+/// Check the loops, library patches and shader warnings of a completed load.
+pub fn check_loaded(loaded: Loaded, control: &crate::PrepareControl) -> Result<Value, LoadError> {
     let doc = loaded.doc.clone();
-    let bar = doc.beats_per_bar();
-    let mut composer = crate::compose::Composer::new(loaded.into_evaluated());
-    let mut events = Vec::new();
-    composer.pump(bar * 8.0, &mut events);
-    let mut errors = composer.errors();
+    let (mut errors, notes) = check_loops(loaded, control)?;
+    let source = &doc.source;
     // A patch of the opt-in library this machine lacks plays something else:
     // a problem with the score as written, though it loads and plays.
     for (inst, patch) in doc.missing_library_patches() {
@@ -346,7 +374,7 @@ pub fn check(source: &str, control: &crate::PrepareControl) -> Result<Value, cra
             let follow = l.follow.as_ref().map(|(p, a, b)| format!(" follows {p} {a}..{b}")).unwrap_or_default();
             format!("{}{follow}", l.name)
         }).collect())),
-        ("notes_in_8_bars", Value::Int(events.len() as i64)),
+        ("notes_in_8_bars", Value::Int(notes as i64)),
     ]))
 }
 
@@ -411,6 +439,9 @@ mod tests {
 
     #[test]
     fn guide_check_and_listen_answer() {
+        use crate::{load_begin, LoadStep};
+        use std::time::Duration;
+
         let guide = call("score_guide", &Value::Obj(Vec::new()), None, &crate::PrepareControl::default()).unwrap();
         let text = guide.get("guide").and_then(Value::as_str).unwrap();
         assert!(text.starts_with("# Writing a score"));
@@ -419,7 +450,9 @@ mod tests {
         let checked = call("score_check", &args, None, &crate::PrepareControl::default()).unwrap();
         assert_eq!(checked.get("ok").and_then(Value::as_bool), Some(true), "{}", checked.to_json());
         let entry = "fn voice() { var x = gate if note > 120 { for i in 0..1000000 { x = fract(x + 0.125) } } x }";
-        let costly = format!("use mod.score.*\nlet clock = Clock{{}}\nlet lead = Shader{{code: {entry:?}}}\nlet line = Loop{{play: lead beats: 1 notes: [[0 @c4 0.5 1]]}}\nScore{{clock lead line}}");
+        let costly = format!("use mod.score.*\nlet clock = Clock{{}}\nlet lead = Shader{{code: {entry:?}}}\n\
+            let pitches = [60 62 64].filter(fn(p) {{ return p != 62 }})\n\
+            let line = Loop{{play: lead beats: 1 notes: pitches.map(fn(p) {{ return [0 p 0.5 1] }})}}\nScore{{clock lead line}}");
         let report = check(&costly, &crate::PrepareControl::default()).unwrap();
         assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true), "{}", report.to_json());
         assert!(report.get("problems").unwrap().as_arr().unwrap().is_empty());
@@ -431,6 +464,37 @@ mod tests {
         assert_eq!(warnings[0].get("shader_end"), Some(&Value::Int(entry.len() as i64)));
         assert!(warnings[0].get("message").unwrap().as_str().unwrap().contains("reduce loop sizes"));
         assert!(check_diags(&costly, &crate::PrepareControl::default()).unwrap().is_empty(), "a warning permits writing the score");
+
+        let word = crate::PrepareControl::default();
+        let whole = load_controlled(&costly, &word).unwrap();
+        let LoadStep::Pending(mut pending) = load_begin(&costly, &word, Duration::ZERO) else {
+            panic!("the checked score must exercise resume");
+        };
+        let stepped = loop {
+            match pending.step(Duration::ZERO) {
+                LoadStep::Pending(next) => pending = next,
+                LoadStep::Done(result) => break result.unwrap(),
+            }
+        };
+        assert_eq!(stepped.doc, whole.doc, "slicing preserves the checked document");
+        assert_eq!(stepped.doc.warnings(), whole.doc.warnings(), "slicing preserves the shader warning and its source range");
+        let notes = stepped.doc.loops[0].notes.as_ref().unwrap();
+        assert_eq!(notes.iter().map(|n| n.note).collect::<Vec<_>>(), [60.0, 64.0], "the checked loop has the filtered and mapped pitches");
+        assert_eq!(check_loaded(stepped, &word).unwrap(), report, "the loaded tool answer matches score_check, including diagnostics");
+
+        let LoadStep::Pending(mut pending) = load_begin("loop {}", &word, Duration::ZERO) else {
+            panic!("the runaway score must yield its first slice");
+        };
+        for slice in 1..=20 {
+            let LoadStep::Pending(next) = pending.step(Duration::ZERO) else {
+                panic!("the runaway score must stay pending at slice {slice}");
+            };
+            pending = next;
+        }
+        word.cancel();
+        assert!(matches!(pending.step(Duration::ZERO), LoadStep::Done(Err(LoadError::Cancelled))),
+            "the first slice after cancellation ends the load without a document or problems");
+        assert!(!word.script_running(), "cancelling the pending load releases the script registration");
         // The open score stands in for a missing source.
         let open = call("score_check", &Value::Obj(Vec::new()), Some(source), &crate::PrepareControl::default()).unwrap();
         assert_eq!(open.to_json(), checked.to_json());
@@ -442,5 +506,9 @@ mod tests {
         assert_eq!(heard.get("ok").and_then(Value::as_bool), Some(true), "{}", heard.to_json());
         assert_eq!(heard.get("latency_frames"), Some(&Value::Int(128)), "score_listen reports the master limiter's latency in frames");
         assert!(heard.get("master").is_some() && heard.get("bands_db").is_some());
+        let stopped = crate::PrepareControl::default();
+        stopped.cancel();
+        assert_eq!(call("score_listen", &args, None, &stopped).unwrap_err(), "the listen was cancelled",
+            "a stopped load ends the listen request");
     }
 }

@@ -8,7 +8,10 @@
 use crate::index::{self, Entry};
 use crate::import::{self, About, Options};
 use crate::roll::{self, Detail};
+use makepad_score_live::{model::CompiledShaders, PrepareControl};
 use makepad_strict_json::{self as json, Value};
+use std::collections::VecDeque;
+use std::sync::{mpsc, Arc, Mutex};
 
 /// One tool: name, description, JSON Schema of its arguments.
 pub struct ToolDef {
@@ -111,14 +114,8 @@ fn library() -> Result<Vec<Entry>, String> {
     index::load(&index::index_path()).map_err(|e| format!("the MIDI library is not set up on this machine ({e}): run `midi_library install --accept` and `midi_library index`"))
 }
 
-/// Run a tool; `open` is the app's open score (for `score_text` without a
-/// source). `Err` is a refusal to show the model.
-pub fn call(name: &str, args: &Value, open: Option<&str>) -> Result<Value, String> {
-    call_with_shaders(name, args, open, None)
-}
-
-/// The open revision may supply its already compiled programs for transcription.
-pub fn call_with_shaders(name: &str, args: &Value, open: Option<&str>, programs: Option<&makepad_score_live::model::CompiledShaders>) -> Result<Value, String> {
+/// Song-library tools that do not evaluate score code.
+pub fn call_library(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "midi_lookup" => {
             let entries = library()?;
@@ -133,17 +130,6 @@ pub fn call_with_shaders(name: &str, args: &Value, open: Option<&str>, programs:
             let entry = index::find(&entries, name).ok_or_else(|| format!("no song `{name}` in the library (an id from midi_lookup, or Artist - Title)"))?.clone();
             let (arrangement, _) = arrangement(&entry)?;
             Ok(json::obj(vec![("song", json::s(entry.label())), ("text", json::s(roll::to_text(&arrangement, &detail_of(args))))]))
-        }
-        "score_text" => {
-            let source = args.get("source").and_then(Value::as_str).or(open).ok_or("give the score's `source` (no score is open)")?;
-            let a = match programs.filter(|_| open == Some(source)) {
-                Some(programs) => {
-                    let loaded = programs.evaluate(source).map_err(|d| d.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))?;
-                    roll::from_loaded(loaded)?
-                }
-                None => roll::from_score(source)?,
-            };
-            Ok(json::obj(vec![("text", json::s(roll::to_text(&a, &detail_of(args))))]))
         }
         "song_find_online" => {
             let source = crate::chip::web::SOURCES.iter().find(|s| Some(s.id) == args.get("source").and_then(Value::as_str).or(Some("modarchive"))).ok_or("no such source (modarchive)")?;
@@ -167,62 +153,223 @@ pub fn call_with_shaders(name: &str, args: &Value, open: Option<&str>, programs:
     }
 }
 
-/// The MCP server on stdio (JSON-RPC 2.0, a message per line): these tools
-/// for an MCP client such as the Batch director's CLI.
+/// Transcribe supplied source or reuse the open revision's programs under the request's word.
+pub fn score_text_controlled(args: &Value, open: Option<&str>, programs: Option<&CompiledShaders>, control: &PrepareControl) -> Result<Value, String> {
+    makepad_score_live::drive(score_text(args, open, programs, control))
+}
+
+pub async fn score_text(args: &Value, open: Option<&str>, programs: Option<&CompiledShaders>, control: &PrepareControl) -> Result<Value, String> {
+    let source = args.get("source").and_then(Value::as_str).or(open).ok_or("give the score's `source` (no score is open)")?;
+    let document = match programs.filter(|_| open == Some(source)) {
+        Some(programs) => programs.evaluate(source, control).await.map(Into::into),
+        None => makepad_score_live::model::read_document(source, control).await,
+    }.map_err(|e| e.to_string())?;
+    let arrangement = roll::from_loaded(document)?;
+    Ok(json::obj(vec![("text", json::s(roll::to_text(&arrangement, &detail_of(args))))]))
+}
+
+/// The reader owns the outstanding calls. Their order matches the worker's
+/// inbox, so each reply retires the oldest word even if the input is idle.
+struct McpInput {
+    pending: Arc<Mutex<VecDeque<(Value, PrepareControl)>>>,
+    worker: mpsc::Sender<(Value, PrepareControl)>,
+}
+
+impl McpInput {
+    fn receive(&self, msg: Value) -> bool {
+        let Some(id) = msg.get("id") else {
+            if msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled") {
+                if let Some(id) = msg.get("params").and_then(|params| params.get("requestId")) {
+                    let pending = self.pending.lock().unwrap();
+                    if let Some((_, control)) = pending.iter().find(|(request, _)| request == id) {
+                        control.cancel();
+                    }
+                }
+            }
+            return true;
+        };
+        let control = PrepareControl::default();
+        self.pending.lock().unwrap().push_back((id.clone(), control.clone()));
+        self.worker.send((msg, control)).is_ok()
+    }
+}
+
+impl Drop for McpInput {
+    fn drop(&mut self) {
+        for (_, control) in self.pending.lock().unwrap().drain(..) {
+            control.cancel();
+        }
+    }
+}
+
+fn with_mcp_worker(read: impl FnOnce(McpInput), mut write: impl FnMut(Value) -> std::io::Result<()> + Send) {
+    let (worker, requests) = mpsc::channel();
+    let input = McpInput { worker, pending: Default::default() };
+    let pending = input.pending.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for (msg, control) in requests {
+                let reply = mcp_reply(&msg, &control);
+                pending.lock().unwrap().pop_front();
+                if write(reply).is_err() { break; }
+            }
+        });
+        read(input); // EOF cancels the words and closes the inbox before joining.
+    });
+}
+
+/// The MCP server on stdio (JSON-RPC 2.0, a message per line).
 pub fn serve_mcp() {
     use std::io::{BufRead, Write};
-    let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
-        let Ok(msg) = makepad_strict_json::parse(line.trim().as_bytes()) else { continue };
-        let Some(id) = msg.get("id").cloned() else { continue };
-        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(Value::Obj(Vec::new()));
-        let result = match method {
-            "initialize" => Ok(json::obj(vec![
-                ("protocolVersion", json::s(params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"))),
-                ("capabilities", json::obj(vec![("tools", json::obj(vec![("listChanged", Value::Bool(false))]))])),
-                ("serverInfo", json::obj(vec![("name", json::s("makepad-midi-library")), ("version", json::s("0.1.0"))])),
-                ("instructions", json::s("Real songs as text: midi_lookup finds them, midi_transcribe reads one (chords, drums, parts on a sixteenth grid). For learning arrangement and style; never copy a melody.")),
-            ])),
-            "ping" => Ok(json::obj(vec![])),
-            "tools/list" => Ok(json::obj(vec![("tools", Value::Arr(TOOLS.iter().map(|t| json::obj(vec![
-                ("name", json::s(t.name)),
-                ("description", json::s(t.description)),
-                ("inputSchema", makepad_strict_json::parse(t.input.as_bytes()).unwrap_or(Value::Obj(Vec::new()))),
-            ])).collect()))])),
-            "tools/call" => {
-                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(Value::Obj(Vec::new()));
-                let (text, error) = match call(name, &args, None) {
-                    Ok(v) => (v.get("text").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| v.to_json()), false),
-                    Err(e) => (e, true),
-                };
-                Ok(json::obj(vec![("content", Value::Arr(vec![json::obj(vec![("type", json::s("text")), ("text", json::s(text))])])), ("isError", Value::Bool(error))]))
+    with_mcp_worker(|input| {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if let Ok(msg) = json::parse(line.trim().as_bytes()) {
+                if !input.receive(msg) { break; }
             }
-            _ => Err(format!("no method `{method}`")),
-        };
-        let reply = match result {
-            Ok(result) => json::obj(vec![("jsonrpc", json::s("2.0")), ("id", id), ("result", result)]),
-            Err(message) => json::obj(vec![("jsonrpc", json::s("2.0")), ("id", id), ("error", json::obj(vec![("code", Value::Int(-32601)), ("message", json::s(message))]))]),
-        };
-        if writeln!(stdout, "{}", reply.to_json()).is_err() || stdout.flush().is_err() {
-            break;
         }
+    }, |reply| {
+        writeln!(stdout, "{}", reply.to_json())?;
+        stdout.flush()
+    });
+}
+
+fn mcp_reply(msg: &Value, control: &PrepareControl) -> Value {
+    let id = msg.get("id").expect("only requests enter the worker").clone();
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = msg.get("params").unwrap_or(&Value::Null);
+    let result = match method {
+        "initialize" => Ok(json::obj(vec![
+            ("protocolVersion", json::s(params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"))),
+            ("capabilities", json::obj(vec![("tools", json::obj(vec![("listChanged", Value::Bool(false))]))])),
+            ("serverInfo", json::obj(vec![("name", json::s("makepad-midi-library")), ("version", json::s("0.1.0"))])),
+            ("instructions", json::s("Real songs as text: midi_lookup finds them, midi_transcribe reads one (chords, drums, parts on a sixteenth grid). For learning arrangement and style; never copy a melody.")),
+        ])),
+        "ping" => Ok(json::obj(vec![])),
+        "tools/list" => Ok(json::obj(vec![("tools", Value::Arr(TOOLS.iter().map(|t| json::obj(vec![
+            ("name", json::s(t.name)),
+            ("description", json::s(t.description)),
+            ("inputSchema", makepad_strict_json::parse(t.input.as_bytes()).unwrap_or(Value::Obj(Vec::new()))),
+        ])).collect()))])),
+        "tools/call" => {
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = params.get("arguments").unwrap_or(&Value::Null);
+            let answer = if control.is_cancelled() {
+                Err("the request was cancelled".into())
+            } else if name == SCORE_TEXT.name {
+                score_text_controlled(args, None, None, control)
+            } else {
+                call_library(name, args)
+            };
+            let (text, error) = match answer {
+                Ok(v) => (v.get("text").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| v.to_json()), false),
+                Err(e) => (e, true),
+            };
+            Ok(json::obj(vec![("content", Value::Arr(vec![json::obj(vec![("type", json::s("text")), ("text", json::s(text))])])), ("isError", Value::Bool(error))]))
+        }
+        _ => Err(format!("no method `{method}`")),
+    };
+    match result {
+        Ok(result) => json::obj(vec![("jsonrpc", json::s("2.0")), ("id", id), ("result", result)]),
+        Err(message) => json::obj(vec![("jsonrpc", json::s("2.0")), ("id", id), ("error", json::obj(vec![("code", Value::Int(-32601)), ("message", json::s(message))]))]),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // Every test in this binary that installs the process-wide tap takes this lock.
+    static TEST_LOG_TAP: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn mcp_cancels_running_and_queued_score_calls_in_reply_order() {
+        use makepad_script::makepad_error_log::{set_log_tap, LogLevel};
+        const WAIT: Duration = Duration::from_secs(5);
+        const SCORE: &str = "use mod.score.*\nlet c = Clock{}\nScore{c}";
+        const HELD: &str = "mod.std.log(\"midi_mcp_enter\")\nlet n = 0\nfor i in 0..2048 { n += 1 }\nmod.std.log(\"midi_mcp_finished\")\n";
+        static EVENTS: Mutex<Option<mpsc::Sender<Option<mpsc::Sender<()>>>>> = Mutex::new(None);
+
+        fn tap(message: &str, _: LogLevel) {
+            let enter = message.contains("midi_mcp_enter");
+            if !enter && !message.contains("midi_mcp_finished") { return; }
+            let (release, held) = mpsc::channel();
+            let events = EVENTS.lock().unwrap().clone();
+            if let Some(events) = events {
+                let _ = events.send(enter.then_some(release));
+                if enter { let _ = held.recv_timeout(WAIT); }
+            }
+        }
+        struct Tap;
+        impl Drop for Tap {
+            fn drop(&mut self) { set_log_tap(None); EVENTS.lock().unwrap().take(); }
+        }
+
+        let _owner = TEST_LOG_TAP.lock().unwrap_or_else(|e| e.into_inner());
+        let (events, at_log) = mpsc::channel();
+        *EVENTS.lock().unwrap() = Some(events);
+        set_log_tap(Some(tap));
+        let _tap = Tap;
+        let (out, replies) = mpsc::channel::<Value>();
+        let score_call = |id, source: &str| json::obj(vec![
+            ("jsonrpc", json::s("2.0")), ("id", id), ("method", json::s("tools/call")),
+            ("params", json::obj(vec![("name", json::s("score_text")), ("arguments", json::obj(vec![("source", json::s(source))]))])),
+        ]);
+        let held = format!("{HELD}{SCORE}");
+        let cancelled = |id| {
+            let reply = replies.recv_timeout(WAIT).expect("a cancelled call still replies");
+            assert_eq!(reply.get("id"), Some(&id), "each reply keeps its ID and arrival order");
+            let result = reply.get("result").unwrap();
+            assert_eq!(result.get("isError"), Some(&Value::Bool(true)), "{reply:?}");
+            let content = result.get("content").and_then(Value::as_arr).unwrap();
+            assert_eq!(content[0].get("text").and_then(Value::as_str), Some("the request was cancelled"));
+        };
+
+        with_mcp_worker(|input| {
+            assert!(input.receive(score_call(Value::Int(7), &held)));
+            let release = at_log.recv_timeout(WAIT).expect("score evaluation entered the VM").unwrap();
+            assert!(input.receive(score_call(json::s("7"), SCORE)));
+            assert!(input.receive(json::parse(br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#).unwrap()));
+            release.send(()).unwrap();
+            cancelled(Value::Int(7));
+            let next = replies.recv_timeout(WAIT).expect("the worker replies while stdin stays open");
+            assert_eq!(next.get("id"), Some(&json::s("7")), "a notification has no reply");
+            assert_eq!(next.get("result").unwrap().get("isError"), Some(&Value::Bool(false)), "the string ID kept its independent word: {next:?}");
+
+            assert!(input.receive(score_call(Value::Int(7), &held)));
+            let release = at_log.recv_timeout(WAIT).expect("the reused ID can start a new evaluation")
+                .expect("the previous evaluation stopped before its final log");
+            assert!(input.receive(score_call(Value::Int(8), &held)));
+            drop(input); // Same shutdown as EOF, with one active and one queued.
+            release.send(()).unwrap();
+            cancelled(Value::Int(7));
+            cancelled(Value::Int(8));
+        }, |reply| { out.send(reply).unwrap(); Ok(()) });
+        assert!(at_log.try_recv().is_err(), "EOF interrupted the active VM and the queued call never entered it");
+    }
+
     #[test]
     fn schemas_parse_and_score_text_reads_a_score() {
         for t in super::TOOLS {
             makepad_strict_json::parse(t.input.as_bytes()).unwrap_or_else(|e| panic!("{}: {e}", t.name));
         }
         let src = "use mod.score.*\nlet clock = Clock{bpm: 120}\nlet kit = Drums{kit: @analog_hybrid}\nlet bass = Synth{preset: @sub}\nlet kick = Loop{play: kit hits: \"x...x...x...x...\"}\nlet line = Loop{play: bass beats: 4 code: fn(i) { play(@a1, {dur: 0.5}) sleep(1) play(@c2, {dur: 0.5}) sleep(3) }}\nlet a = Section{bars: 2 loops: [kick line]}\nScore{label: \"Test\" arrange: [a] clock kit bass kick line a}";
-        let out = super::call("score_text", &makepad_strict_json::Value::Obj(Vec::new()), Some(src)).unwrap();
+        let args = makepad_strict_json::Value::Obj(Vec::new());
+        assert!(super::call_library("score_text", &args).is_err(), "library-only dispatch cannot evaluate a score");
+        let out = super::score_text_controlled(&args, Some(src), None, &PrepareControl::default()).unwrap();
         let text = out.get("text").and_then(makepad_strict_json::Value::as_str).unwrap();
         assert!(text.contains("K X... X... X... X...") && text.contains("A1! ~ . . C2! ~ .") && text.contains("2 = 1"), "{text}");
+        let mut revision = makepad_score_live::model::RevisionLoads::default();
+        revision.submit(1, src, drop);
+        revision.start(|request| Some(Some(request.run())));
+        revision.take(Option::take).expect("the open revision loads");
+        let programs = revision.shaders.as_deref().unwrap();
+        for cache in [None, Some(programs)] {
+            let word = makepad_score_live::PrepareControl::default();
+            assert_eq!(super::score_text_controlled(&args, Some(src), cache, &word).unwrap(), out, "both readers transcribe the same notes");
+            word.cancel();
+            assert_eq!(super::score_text_controlled(&args, Some(src), cache, &word).unwrap_err(), "the request was cancelled");
+        }
     }
 }

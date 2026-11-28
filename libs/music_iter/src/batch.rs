@@ -136,9 +136,13 @@ fn next_id(root: &Path) -> u32 {
     std::fs::read_dir(root.join("batches")).map_or(0, |dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.strip_prefix('b')?.parse::<u32>().ok()).max().unwrap_or(0)) + 1
 }
 
+/// Instructions per document read while reviewing history or composing a batch song.
+const SONG_INSTRUCTION_BUDGET: u64 = 4_000_000;
+
 /// One composer: write song `k` from its card, render, score and keep it.
 #[allow(clippy::too_many_arguments)]
 fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::Writer, system: &str, request: &Request, recent: &str, cancel: &makepad_score_live::PrepareControl, dir: &Path, tx: &std::sync::mpsc::Sender<Update>) {
+    let cancel = &cancel.with_instruction_budget(SONG_INSTRUCTION_BUDGET);
     let progress = |p: Progress| {
         let _ = tx.send(Update::State(k, match p {
             Progress::Writing { turn } => State::Writing { turn },
@@ -169,7 +173,10 @@ fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::
                                 (w, card.clone(), format!("revision kept out: card {:.0} -> {:.0}", card.total(), rc.total()))
                             }
                         }
-                        Err(e) => (w, card, format!("revision failed: {e}")),
+                        Err(e) => {
+                            eprintln!("song {} revision: {e}", k + 1);
+                            (w, card, format!("revision failed: {e}"))
+                        }
                     }
                 }
                 _ => (w, card, "no revision needed".to_string()),
@@ -186,6 +193,7 @@ fn compose(k: usize, n: usize, concept: Option<gen::Concept>, writer: &dyn gen::
             let _ = tx.send(Update::Ready { index: k, title: w.title, idea: w.idea, source: w.source, card, seconds: w.song.mix.seconds() });
         }
         Err(e) => {
+            eprintln!("song {}: {e}", k + 1);
             let _ = std::fs::write(dir.join(format!("s{}.failed", k + 1)), &e);
             let _ = tx.send(Update::State(k, State::Failed(e)));
         }
@@ -223,13 +231,19 @@ impl Batch {
         let composers = dispatch.clone();
         dispatch(Box::new(move || {
             let (tx, writer, cancel, request, dir) = director;
-            if cancel.is_cancelled() {
-                for k in 0..n { let _ = tx.send(Update::State(k, State::Failed("stopped".into()))); }
-                return;
-            }
+            let history = match history(&root, 3, &cancel) {
+                Ok(history) => history,
+                Err(error) => {
+                    let reason = match error {
+                        makepad_score_live::LoadError::Cancelled => "stopped".into(),
+                        other => other.to_string(),
+                    };
+                    for k in 0..n { let _ = tx.send(Update::State(k, State::Failed(reason.clone()))); }
+                    return;
+                }
+            };
             let system = Arc::new(gen::system());
             let recent = Arc::new(recent_verdicts(&root));
-            let history = history(&root, 3);
             let planned = match cards {
                 Some(cards) => Ok(cards),
                 // a director that panics is a plan that failed: the composers still write
@@ -533,7 +547,32 @@ mod tests {
         assert_eq!(crate::context::learned(&std::fs::read_to_string(&guide).unwrap()), learned.after);
         assert!(std::fs::read_to_string(dir.join("log.md")).unwrap().contains("drums up"));
         assert!(recent_verdicts(&dir).contains("too busy"));
-        let h = history(&dir, 3);
+        let word = makepad_score_live::PrepareControl::default();
+        let h = history(&dir, 3, &word).unwrap();
+        let iterations = 512;
+        let budgeted = word.with_instruction_budget(iterations);
+        let slow = format!("use mod.score.*\nlet n = 0\nfor i in 0..{iterations} {{ n += i }}\nScore{{}}");
+        let slow_path = batch.dir.join("s1.splash");
+        std::fs::write(&slow_path, &slow).unwrap();
+        let short_history = history(&dir, 3, &budgeted).unwrap();
+        let reason = makepad_score_live::model::evaluated_palette_controlled(&slow, &budgeted).unwrap_err();
+        assert!(matches!(reason, makepad_score_live::LoadError::Unfinished { .. }), "the history fixture exceeds the caller's budget");
+        let (_, after) = short_history.split_once(&reason.to_string()).expect("history records the unfinished read");
+        assert!(after.contains("too busy"), "history still includes the following song's feedback");
+        std::fs::write(slow_path, &reopened.songs[0].source).unwrap();
+
+        let writer = Scripted(|_: &str, turns: &[String]| {
+            assert_eq!(turns.len(), 1, "an unfinished song must not be sent back for repair");
+            Ok(format!("TITLE: Long\n```splash\n{slow}\n```"))
+        });
+        let (updates, _receiver) = channel();
+        let index = reopened.songs.len();
+        compose(index, index + 1, None, &writer, "", &reopened.request, "", &budgeted, &batch.dir, &updates);
+        let recorded = std::fs::read_to_string(batch.dir.join(format!("s{}.failed", index + 1))).unwrap();
+        assert_eq!(recorded, reason.to_string(), "the generated song records the same unfinished outcome");
+
+        word.cancel();
+        assert!(matches!(history(&dir, 3, &word), Err(makepad_score_live::LoadError::Cancelled)), "stopping the batch stops its history read");
         assert!(h.contains("(techno)") && h.contains("120 bpm") && h.contains("drums liked"), "{h}");
         assert!(std::fs::read_to_string(dir.join("log.md")).unwrap().contains("concept: techno"));
         // A director and composers that panic: each song fails with its panic's text and the
@@ -564,16 +603,28 @@ mod tests {
 /// What the last `batches` batches made, for the director: per song its
 /// title, sub-genre, key (the scorecard's reading), tempo, palette (the
 /// instruments it played) and the person's ratings.
-pub fn history(root: &Path, batches: u32) -> String {
+pub fn history(root: &Path, batches: u32, control: &makepad_score_live::PrepareControl) -> Result<String, makepad_score_live::LoadError> {
+    let control = &control.with_instruction_budget(SONG_INSTRUCTION_BUDGET);
+    if control.is_cancelled() { return Err(makepad_score_live::LoadError::Cancelled); }
     let last = next_id(root) - 1;
     let mut out = String::new();
     for id in last.saturating_sub(batches - 1).max(1)..=last {
         let Some(b) = Batch::open(&root.join("batches").join(format!("b{id:03}"))) else { continue };
         out.push_str(&format!("b{id:03} ({}):\n", b.request.text().lines().collect::<Vec<_>>().join("; ")));
-        for e in b.songs.iter().filter(|e| e.state == State::Ready) {
+        for (index, e) in b.songs.iter().enumerate().filter(|(_, e)| e.state == State::Ready) {
             let key = e.card.as_ref().and_then(|c| c.get("harmony")).and_then(|m| m.value.split(':').next()).unwrap_or("?").to_string();
             let genre = e.concept.lines().find_map(|l| l.strip_prefix("SUBGENRE:")).unwrap_or("").trim().to_string();
-            let (bpm, instruments) = makepad_score_live::model::evaluated_palette(&e.source).unwrap_or_default();
+            let (bpm, instruments) = match makepad_score_live::model::evaluated_palette_controlled(&e.source, control) {
+                Ok(palette) => palette.unwrap_or_default(),
+                Err(makepad_score_live::LoadError::Problems(_)) => Default::default(),
+                Err(error @ (makepad_score_live::LoadError::Unfinished { .. } | makepad_score_live::LoadError::Memory { .. })) => {
+                    let item = format!("b{id:03}/s{} \"{}\": {error}", index + 1, e.title);
+                    eprintln!("{item}");
+                    out.push_str(&format!("- {item}\n"));
+                    continue;
+                }
+                Err(cancelled) => return Err(cancelled),
+            };
             let palette = instruments.join(", ");
             let ratings: Vec<String> = ASPECTS.iter().zip(e.ratings).filter_map(|(a, r)| r.map(|r| format!("{a} {}", if r { "liked" } else { "disliked" }))).collect();
             out.push_str(&format!(
@@ -585,5 +636,5 @@ pub fn history(root: &Path, batches: u32) -> String {
             ));
         }
     }
-    out
+    Ok(out)
 }

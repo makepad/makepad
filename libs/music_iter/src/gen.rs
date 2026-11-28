@@ -8,7 +8,7 @@
 //! `STAGE_MUSIC_MODEL` names another). Each song runs on its own thread, so
 //! a batch's songs are written and rendered in parallel.
 
-use crate::render::{render_song, Song};
+use crate::render::{render_song_checked, RenderError, Song};
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole};
 use makepad_ai_hub::providers::claude::ClaudeCodeChatProvider;
 use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
@@ -322,9 +322,14 @@ pub fn write_from(writer: &dyn Writer, system: &str, req: &Request, mut turns: V
             Some((title, idea, source)) => {
                 progress(Progress::Rendering);
                 let cap = req.seconds as f64 * 1.6 + 12.0;
-                let length = makepad_score_live::model::read_document(&source).ok().map(|l| makepad_score_live::render::natural_length(&l.doc));
+                let length = match makepad_score_live::model::read_document_controlled(&source, cancel) {
+                    Ok(read) => Some(makepad_score_live::render::natural_length(&read.doc)),
+                    Err(error @ (makepad_score_live::LoadError::Unfinished { .. } | makepad_score_live::LoadError::Memory { .. })) => return Err(error.to_string()),
+                    Err(makepad_score_live::LoadError::Cancelled) => return Err("the song was cancelled".into()),
+                    Err(makepad_score_live::LoadError::Problems(_)) => None,
+                };
                 let opts = RenderOpts { seconds: length.map(|s| s.min(cap)), ..RenderOpts::default() };
-                match render_song(&source, &opts, true, cancel) {
+                match render_song_checked(&source, &opts, true, cancel) {
                     _ if cancel.is_cancelled() => return Err("the song was cancelled".into()),
                     Ok(song) if song.mix.errors.is_empty() && song.mix.left.iter().any(|v| v.abs() > 1e-3) => {
                         return Ok(Written { title, idea, source, song, turns: turn, history: turns });
@@ -334,7 +339,8 @@ pub fn write_from(writer: &dyn Writer, system: &str, req: &Request, mut turns: V
                         song.mix.errors.iter().take(12).map(|d| format!("{d:?}")).collect::<Vec<_>>().join("\n")
                     ),
                     Ok(_) => "The score renders silence. Fix it and send the whole song again in the same format.".to_string(),
-                    Err(e) => format!("The score does not load:\n{e}\nFix it and send the whole song again in the same format."),
+                    Err(RenderError::Load(error @ (makepad_score_live::LoadError::Unfinished { .. } | makepad_score_live::LoadError::Memory { .. }))) => return Err(error.to_string()),
+                    Err(error) => format!("The score does not load:\n{}\nFix it and send the whole song again in the same format.", error.into_message()),
                 }
             }
         };

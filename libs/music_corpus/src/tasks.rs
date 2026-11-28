@@ -20,6 +20,7 @@ use crate::tokens::{chat_text, Tokenizer};
 use makepad_midi_library::arrangement::{self, Arrangement};
 use makepad_midi_library::gm::Role;
 use makepad_midi_library::roll::{self, Detail};
+use makepad_score_live::{LoadError, PrepareControl};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Task {
@@ -122,6 +123,7 @@ pub type Drop = (&'static str, Task);
 pub struct Built {
     pub examples: Vec<Example>,
     pub dropped: Vec<Drop>,
+    pub unfinished: Vec<String>,
 }
 
 /// The song without who it is: the model learns music, not names.
@@ -196,14 +198,19 @@ fn grid_notes(a: &Arrangement) -> Vec<(String, i64, i32, i64)> {
 
 /// A Score that loads, and plays the notes of `roll_text` at their steps
 /// and lengths (played back by the engine's composer).
-pub fn score_survives(score: &str, roll_text: &str) -> bool {
-    let (Ok(read), Ok(want)) = (roll::from_score(score), roll::from_text(roll_text)) else { return false };
+pub fn score_survives(score: &str, roll_text: &str, control: &PrepareControl) -> Result<bool, LoadError> {
+    let read = match roll::from_score_controlled(score, control) {
+        Ok(read) => read,
+        Err(LoadError::Problems(_)) => return Ok(false),
+        Err(cancelled) => return Err(cancelled),
+    };
+    let Ok(want) = roll::from_text(roll_text) else { return Ok(false) };
     let (a, b) = (grid_notes(&read), grid_notes(&want));
     if a != b && std::env::var_os("MUSIC_CORPUS_DEBUG").is_some() {
         let i = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
         eprintln!("score differs at note {i} ({} vs {} notes): played {:?}, roll {:?}", a.len(), b.len(), a.get(i), b.get(i));
     }
-    a == b
+    Ok(a == b)
 }
 
 fn meter(a: &Arrangement) -> String {
@@ -308,17 +315,31 @@ fn infill_part(w: &Arrangement, role: &str) -> Option<usize> {
 
 const INFILL_ROLES: [&str; 4] = ["bass", "drums", "melody", "chords"];
 
+// A rejected window is counted in the dataset. An interrupted build has no such verdict.
+enum WindowError {
+    Reject(&'static str),
+    Stop(LoadError),
+}
+
+impl From<&'static str> for WindowError {
+    fn from(reason: &'static str) -> Self { Self::Reject(reason) }
+}
+
+type Window = Result<Option<(String, String, Want, usize)>, WindowError>;
+
 /// Every example of a song (`a` as imported).
-pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &Tokenizer, overhead: usize) -> Built {
+pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &Tokenizer, overhead: usize, control: &PrepareControl) -> Result<Built, LoadError> {
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
     let a = anonymise(a, song);
     let cx = Ctx { song, tok, lim, overhead };
-    let mut out = Built { examples: Vec::new(), dropped: Vec::new() };
+    let mut out = Built { examples: Vec::new(), dropped: Vec::new(), unfinished: Vec::new() };
     let copies = if split == Split::Train { lim.augment } else { 0 };
     // Each base window (task, from, len, extra) is written plain and as its
     // augmented copies.
-    let mut emit = |task: Task, from: usize, make: &dyn Fn(&Arrangement, u64) -> Result<Option<(String, String, Want, usize)>, &'static str>| {
+    let mut emit = |task: Task, from: usize, make: &dyn Fn(&Arrangement, u64) -> Window| {
         let salt = prep::hash_str(&[&song.id, task.name(), &from.to_string()]);
         for copy in 0..=copies {
+            if control.is_cancelled() { return Err(LoadError::Cancelled); }
             let (w, shift, scale) = if copy == 0 {
                 (a.clone(), 0, 1.0)
             } else {
@@ -328,7 +349,13 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
                 }
             };
             match make(&w, salt.wrapping_add(copy as u64)) {
-                Err(reason) => {
+                Err(WindowError::Stop(error @ (LoadError::Unfinished { .. } | LoadError::Memory { .. }))) => {
+                    out.unfinished.push(format!("{} {} window {from} copy {copy}: {error}", song.id, task.name()));
+                    out.dropped.push(("unfinished", task));
+                    continue;
+                }
+                Err(WindowError::Stop(error)) => return Err(error),
+                Err(WindowError::Reject(reason)) => {
                     out.dropped.push((reason, task));
                     break;
                 }
@@ -347,6 +374,7 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
                 }
             }
         }
+        Ok(())
     };
 
     // describe -> write.
@@ -356,13 +384,13 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
             continue;
         }
         for from in starts {
-            let make = |full: &Arrangement, salt: u64| -> Result<Option<(String, String, Want, usize)>, &'static str> {
+            let make = |full: &Arrangement, salt: u64| -> Window {
                 // The largest size that fits, from this start.
                 for &n in lim.describe_bars.iter().filter(|n| **n <= len) {
                     let w = canon(&prep::slice(full, from, from + n))?;
                     let text = roll_text(&w);
                     if !roll_survives(&text, &Detail::default()) {
-                        return Err("roundtrip_roll");
+                        return Err("roundtrip_roll".into());
                     }
                     let form = if salt % 2 == 0 { format!(" Form: {}.", form_text(&w)) } else { String::new() };
                     let user = format!(
@@ -379,7 +407,7 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
                 }
                 Ok(None)
             };
-            emit(Task::Describe, from, &make);
+            emit(Task::Describe, from, &make)?;
         }
         break;
     }
@@ -391,19 +419,19 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
             continue;
         }
         for from in starts {
-            let make = |full: &Arrangement, _salt: u64| -> Result<Option<(String, String, Want, usize)>, &'static str> {
+            let make = |full: &Arrangement, _salt: u64| -> Window {
                 for &(k, m) in lim.cont_bars.iter().filter(|(kk, mm)| kk + mm <= k + m) {
                     let w = canon(&prep::slice(full, from, from + k + m))?;
                     let given = roll::to_text(&w, &Detail { bars: Some((1, k)), ..Detail::default() });
                     let (_, next) = split_header(&roll::to_text(&w, &Detail { bars: Some((k + 1, k + m)), ..Detail::default() }));
                     if next.trim().is_empty() {
-                        return Err("empty_target");
+                        return Err("empty_target".into());
                     }
                     // The given bars and the answer read back as the window.
                     let back = roll::from_text(&format!("{given}{next}")).map_err(|_| "roundtrip_roll")?;
                     let (_, again) = split_header(&roll::to_text(&back, &Detail { bars: Some((k + 1, k + m)), ..Detail::default() }));
                     if again != next {
-                        return Err("roundtrip_roll");
+                        return Err("roundtrip_roll".into());
                     }
                     let user = format!("Continue this song with bars {}-{} ({m} bars) in the same style. Answer with those bars only, numbered on.\n\n{given}", k + 1, k + m);
                     if cx.fit(&user, &next).is_some() {
@@ -412,7 +440,7 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
                 }
                 Ok(None)
             };
-            emit(Task::Continue, from, &make);
+            emit(Task::Continue, from, &make)?;
         }
         break;
     }
@@ -438,22 +466,22 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
         });
         let Some(from) = from else { continue };
         infilled += 1;
-        let make = |full: &Arrangement, _salt: u64| -> Result<Option<(String, String, Want, usize)>, &'static str> {
+        let make = |full: &Arrangement, _salt: u64| -> Window {
             for &n in lim.infill_bars.iter().filter(|n| **n <= len) {
                 let w = canon(&prep::slice(full, from, from + n))?;
-                let Some(pi) = infill_part(&w, role) else { return Err("empty_target") };
+                let Some(pi) = infill_part(&w, role) else { return Err("empty_target".into()) };
                 let p = &w.parts[pi];
                 let mut only = w.clone();
                 only.parts = vec![p.clone()];
                 let mut rest = w.clone();
                 rest.parts.remove(pi);
                 if rest.parts.is_empty() {
-                    return Err("empty_target");
+                    return Err("empty_target".into());
                 }
                 let d = Detail { chords: false, ..Detail::default() };
                 let target = roll::to_text(&only, &d);
                 if !roll_survives(&target, &d) {
-                    return Err("roundtrip_roll");
+                    return Err("roundtrip_roll".into());
                 }
                 let given = roll_text(&rest);
                 let voice = target.lines().find(|l| l.starts_with("part ")).and_then(|l| l.split_whitespace().nth(3)).unwrap_or("").to_string();
@@ -464,7 +492,7 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
             }
             Ok(None)
         };
-        emit(Task::Infill, from, &make);
+        emit(Task::Infill, from, &make)?;
     }
 
     // The Score tasks: two different windows.
@@ -473,17 +501,17 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
         let starts = prep::windows(&a, len, lim.score * 2, "score");
         for (i, from) in starts.into_iter().enumerate() {
             let task = if i % 2 == 0 { Task::RollToScore } else { Task::ScoreToRoll };
-            let make = |full: &Arrangement, _salt: u64| -> Result<Option<(String, String, Want, usize)>, &'static str> {
+            let make = |full: &Arrangement, _salt: u64| -> Window {
                 for &n in lim.score_bars.iter().filter(|n| **n <= len) {
                     let w = canon(&prep::slice(full, from, from + n))?;
                     let text = roll_text(&w);
                     let back = roll::from_text(&text).map_err(|_| "roundtrip_roll")?;
                     if roll::to_text(&back, &Detail::default()) != text {
-                        return Err("roundtrip_roll");
+                        return Err("roundtrip_roll".into());
                     }
                     let score = arrangement::to_score(&back);
-                    if !score_survives(&score, &text) {
-                        return Err("roundtrip_score");
+                    if !score_survives(&score, &text, control).map_err(WindowError::Stop)? {
+                        return Err("roundtrip_score".into());
                     }
                     let want = Want { key: w.key.clone(), meter: meter(&w), bars: n, ..Want::default() };
                     let (user, answer) = match task {
@@ -496,8 +524,8 @@ pub fn build(a: &Arrangement, song: &SongRef, split: Split, lim: &Limits, tok: &
                 }
                 Ok(None)
             };
-            emit(task, from, &make);
+            emit(task, from, &make)?;
         }
     }
-    out
+    Ok(out)
 }

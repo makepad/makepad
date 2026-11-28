@@ -177,16 +177,7 @@ impl BedPlayer {
             self.bed.seek((secs - PRELUDE_SECS).max(0.0));
         }
         self.bed.render_to(secs, &mut self.buf);
-        if self.buf.is_empty() {
-            self.bus.pump(cx, &[], BED_RATE);
-        } else {
-            // Bounded pushes: the bus keeps at most a few hops pending.
-            let cut = self.buf.len().saturating_sub(4096);
-            for chunk in self.buf[..cut].chunks(4096) {
-                self.bus.push_samples(chunk, BED_RATE);
-            }
-            self.bus.pump(cx, &self.buf[cut..], BED_RATE);
-        }
+        self.bus.pump(cx, &self.buf, BED_RATE);
         self.last = Some(secs);
         self.bus.binding()
     }
@@ -244,9 +235,14 @@ mod tests {
         let mut bed = AudioBed::default();
         let mut buf = Vec::new();
         bed.render_to(3.0, &mut buf);
-        for chunk in buf.chunks(4096) {
-            bus.push_samples(chunk, BED_RATE);
-        }
+        bus.push_samples(&buf, BED_RATE);
         assert!(bus.has_audio(), "nothing analysed");
+
+        let mut cx = makepad_draw::Cx::new(Box::new(|_, _| {}));
+        let mut player = BedPlayer::new();
+        let frame = player.pump(&mut cx, PRELUDE_SECS).expect("bed frame");
+        let expected_hops = (PRELUDE_SECS * BED_RATE as f64) as usize / crate::analysis::HOP;
+        assert_eq!(frame.dim.z, (expected_hops - 1) as f32, "prelude dropped hops");
+        assert!(frame.env.w > 0.1, "silent bed rms: {}", frame.env.w);
     }
 }

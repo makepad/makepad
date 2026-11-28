@@ -10,6 +10,8 @@ use makepad_audio_synth::recipe::{Layer, Recipe};
 use makepad_flow::Literal;
 use makepad_flow::live::owner::PrepareControl;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 use makepad_score_player::{presets, shader::Steal, FxKind};
 
 static COMPILE: WorkerOnly = WorkerOnly::new("a score document compile");
@@ -721,14 +723,28 @@ impl Loaded {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoadError {
     Problems(Vec<Diag>),
+    /// The caller's instruction budget ended this evaluation.
+    Unfinished { line: Option<u32> },
+    /// The script heap could not grow during document evaluation.
+    Memory { line: Option<u32> },
     Cancelled,
 }
 
 impl LoadError {
+    /// Surface a refusal in hosts whose status only carries diagnostics.
+    pub(crate) fn into_diagnostics(self) -> Vec<Diag> {
+        match self {
+            Self::Problems(diags) => diags,
+            Self::Unfinished { line } | Self::Memory { line } => vec![Diag { line: line.unwrap_or(0), col: 0, node: None, message: self.to_string() }],
+            Self::Cancelled => Vec::new(),
+        }
+    }
+
     /// Format problems for the caller's diagnostic view, preserving cancellation as an answer.
     pub fn describe(self, problems: impl FnOnce(Vec<Diag>) -> String) -> String {
         match self {
             Self::Problems(diags) => problems(diags),
+            Self::Unfinished { .. } | Self::Memory { .. } => self.to_string(),
             Self::Cancelled => "the request was cancelled".into(),
         }
     }
@@ -741,6 +757,15 @@ impl From<Vec<Diag>> for LoadError {
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::Unfinished { line } | Self::Memory { line } => {
+                f.write_str(if matches!(self, Self::Memory { .. }) {
+                    "Evaluation ran out of memory"
+                } else {
+                    "evaluation unfinished (instruction budget reached)"
+                })?;
+                if let Some(line) = line { write!(f, " at line {line}")?; }
+                Ok(())
+            }
             Self::Cancelled => f.write_str("the request was cancelled"),
             Self::Problems(problems) => {
                 for (i, problem) in problems.iter().enumerate() {
@@ -757,16 +782,82 @@ impl From<Loaded> for EvaluatedDocument {
     fn from(loaded: Loaded) -> Self { loaded.into_evaluated() }
 }
 
+/// One slice of a checked score load.
+pub enum LoadStep {
+    Done(Result<Loaded, LoadError>),
+    Pending(PendingLoad),
+}
+
+/// The suspended VM and the source its document will be read against.
+pub struct PendingLoad {
+    evaluation: vm::PendingEvaluation,
+    source: String,
+    control: PrepareControl,
+}
+
+impl PendingLoad {
+    pub fn step(self, slice: Duration) -> LoadStep {
+        match self.evaluation.step(slice) {
+            vm::EvalStep::Pending(evaluation) => LoadStep::Pending(Self { evaluation, ..self }),
+            vm::EvalStep::Done(result) => LoadStep::Done(finish_load(&self.source, &self.control, result)),
+        }
+    }
+}
+
+/// Start the document's evaluation. Read and check it in the slice that finishes it.
+pub fn load_begin(source: &str, control: &PrepareControl, slice: Duration) -> LoadStep {
+    match vm::evaluate_begin(source, control, slice) {
+        vm::EvalStep::Done(result) => LoadStep::Done(finish_load(source, control, result)),
+        vm::EvalStep::Pending(evaluation) => LoadStep::Pending(PendingLoad {
+            evaluation, source: source.to_owned(), control: control.clone(),
+        }),
+    }
+}
+
+/// A frame job's load: start on the first poll, resume once per poll, and
+/// consume the completed document on the thread that evaluated it.
+pub fn load_steps<T>(
+    source: impl AsRef<str>, control: PrepareControl, slice: Duration,
+    mut finish: impl FnMut(&str, Result<Loaded, LoadError>, &PrepareControl) -> T,
+) -> impl FnMut() -> Poll<T> {
+    let mut pending: Option<PendingLoad> = None;
+    move || {
+        let step = match pending.take() {
+            Some(load) => load.step(slice),
+            None => load_begin(source.as_ref(), &control, slice),
+        };
+        match step {
+            LoadStep::Done(result) => Poll::Ready(finish(source.as_ref(), result, &control)),
+            LoadStep::Pending(load) => { pending = Some(load); Poll::Pending }
+        }
+    }
+}
+
+fn finish_load(source: &str, control: &PrepareControl, result: Result<Evaluated, LoadError>) -> Result<Loaded, LoadError> {
+    read_evaluated(source, result?, control, None, &mut false, true).map(checked_document)
+}
+
 pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
-    if control.is_cancelled() { return Err(LoadError::Cancelled); }
-    let result = read_checked(source, Some(control), None, &mut false);
-    if control.is_cancelled() { return Err(LoadError::Cancelled); }
-    result.map_err(LoadError::Problems)
+    vm::drive(load(source, control))
+}
+
+/// Evaluate the document in slices, then read it and check its programs.
+pub async fn load(source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
+    load_with_slice(source, control, vm::EVAL_SLICE).await
+}
+
+pub(crate) async fn load_with_slice(source: &str, control: &PrepareControl, slice: Duration) -> Result<Loaded, LoadError> {
+    let evaluated = vm::evaluate_with_slice(source, control, slice).await;
+    finish_load(source, control, evaluated)
 }
 
 impl ScoreDoc {
     pub fn load_controlled(source: &str, control: &PrepareControl) -> Result<Self, LoadError> {
-        load_controlled(source, control).map(|loaded| loaded.doc)
+        vm::drive(Self::load(source, control))
+    }
+
+    pub async fn load(source: &str, control: &PrepareControl) -> Result<Self, LoadError> {
+        load(source, control).await.map(|loaded| loaded.doc)
     }
 }
 
@@ -777,16 +868,32 @@ pub struct CompiledShaders {
     entries: Vec<(String, ShaderDef, CheckedShader)>,
 }
 
-fn evaluated_score(source: &str) -> Option<Obj> {
-    let mut evaluated = vm::evaluate(source);
-    if !evaluated.errors.is_empty() { return None; }
-    let V::Obj(root) = std::mem::replace(&mut evaluated.root, V::Nil) else { return None };
-    (root.proto.as_deref() == Some("Score")).then_some(root)
+fn score_root(evaluated: &Evaluated) -> Result<&Obj, Vec<Diag>> {
+    if !evaluated.errors.is_empty() {
+        let diags = evaluated.errors.iter().map(|e| {
+            let (line, col, message) = vm::split_error(e);
+            Diag { line, col, node: None, message }
+        }).collect();
+        return Err(diags);
+    }
+    match &evaluated.root {
+        V::Obj(root) if root.proto.as_deref() == Some("Score") => Ok(root),
+        _ => Err(vec![Diag { line: 1, col: 1, node: None, message: "a score ends with `Score{…}` listing its nodes".into() }]),
+    }
+}
+
+fn score_label(root: &Obj) -> Option<String> {
+    root.get("label").and_then(V::text).filter(|s| !s.trim().is_empty()).map(str::to_owned)
 }
 
 /// Evaluate the score's label without compiling its instruments.
-pub fn evaluated_label(source: &str) -> Option<String> {
-    evaluated_score(source)?.get("label").and_then(V::text).filter(|s| !s.trim().is_empty()).map(str::to_owned)
+pub fn evaluated_label_controlled(source: &str, control: &PrepareControl) -> Result<Option<String>, LoadError> {
+    vm::drive(evaluated_label(source, control))
+}
+
+pub async fn evaluated_label(source: &str, control: &PrepareControl) -> Result<Option<String>, LoadError> {
+    let evaluated = vm::evaluate(source, control).await?;
+    Ok(score_label(score_root(&evaluated)?))
 }
 
 fn object_name(source: &str, outline: &Outline, obj: &Obj) -> Option<String> {
@@ -798,8 +905,16 @@ fn object_name(source: &str, outline: &Outline, obj: &Obj) -> Option<String> {
 
 /// Read the tempo and instrument descriptions of an already-written score.
 /// Its VM resolves computed field values. No program or player is needed.
-pub fn evaluated_palette(source: &str) -> Option<(f64, Vec<String>)> {
-    let root = evaluated_score(source)?;
+pub fn evaluated_palette_controlled(source: &str, control: &PrepareControl) -> Result<Option<(f64, Vec<String>)>, LoadError> {
+    vm::drive(evaluated_palette(source, control))
+}
+
+pub async fn evaluated_palette(source: &str, control: &PrepareControl) -> Result<Option<(f64, Vec<String>)>, LoadError> {
+    let evaluated = vm::evaluate(source, control).await?;
+    Ok(score_palette(source, score_root(&evaluated)?))
+}
+
+fn score_palette(source: &str, root: &Obj) -> Option<(f64, Vec<String>)> {
     let outline = source::outline(source);
     let mut bpm = 120.0;
     let mut palette = Vec::new();
@@ -845,16 +960,31 @@ impl CompiledShaders {
     }
 
     /// Re-evaluate functions and captures in the calling VM, using this revision's programs.
-    pub fn evaluate(&self, source: &str) -> Result<Loaded, Vec<Diag>> {
-        read_checked(source, None, Some(self), &mut false)
+    pub fn evaluate_controlled(&self, source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
+        vm::drive(self.evaluate(source, control))
+    }
+
+    pub async fn evaluate(&self, source: &str, control: &PrepareControl) -> Result<Loaded, LoadError> {
+        read_parts(source, control, Some(self), &mut false, true, vm::EVAL_SLICE).await.map(checked_document)
     }
 
     /// Read a rewritten score without compiling. A changed shader definition
     /// needs a new program. Ordinary score diagnostics keep their meaning.
-    pub(crate) fn evaluate_rewrite(&self, source: &str) -> Result<Option<Loaded>, Vec<Diag>> {
+    #[cfg(test)]
+    pub(crate) fn evaluate_rewrite(&self, source: &str, control: &PrepareControl) -> Result<Option<Loaded>, LoadError> {
+        vm::drive(self.evaluate_rewrite_async(source, control))
+    }
+
+    pub(crate) async fn evaluate_rewrite_async(&self, source: &str, control: &PrepareControl) -> Result<Option<Loaded>, LoadError> {
+        self.evaluate_rewrite_with_slice(source, control, vm::EVAL_SLICE).await
+    }
+
+    pub(crate) async fn evaluate_rewrite_with_slice(&self, source: &str, control: &PrepareControl, slice: Duration) -> Result<Option<Loaded>, LoadError> {
         let mut changed = false;
-        let loaded = read_checked(source, None, Some(self), &mut changed);
-        if changed { Ok(None) } else { loaded.map(Some) }
+        match read_parts(source, control, Some(self), &mut changed, true, slice).await {
+            Err(LoadError::Problems(_)) if changed => Ok(None),
+            result => result.map(|parts| Some(checked_document(parts))),
+        }
     }
 }
 
@@ -873,18 +1003,66 @@ pub enum LoadResult {
 }
 
 impl RevisionLoad {
+    /// True while this revision is running its document code.
+    pub fn evaluating(&self) -> bool { self.control.script_running() }
+
     /// True while this revision is executing shader constants or table initialization.
     pub fn executing(&self) -> bool { self.control.executing() }
 
-    pub fn run(&self) -> LoadResult {
-        match load_controlled(&self.source, &self.control) {
+    /// Start and finish a revision on the thread driving its slices.
+    pub fn steps(self, slice: Duration) -> impl FnMut() -> Poll<LoadResult> {
+        load_steps(self.source, self.control, slice, |_, result, _| Self::finish(result))
+    }
+
+    fn finish(result: Result<Loaded, LoadError>) -> LoadResult {
+        match result {
             Ok(loaded) => {
                 let shaders = CompiledShaders::from_doc(&loaded.doc);
                 LoadResult::Ready(loaded.doc, shaders)
             }
-            Err(LoadError::Problems(diags)) => LoadResult::Invalid(diags),
             Err(LoadError::Cancelled) => LoadResult::Cancelled,
+            Err(error) => LoadResult::Invalid(error.into_diagnostics()),
         }
+    }
+
+    pub fn run(&self) -> LoadResult {
+        Self::finish(load_controlled(&self.source, &self.control))
+    }
+}
+
+/// Work an editor has observed for long enough to display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadActivity {
+    Evaluating,
+    Initialising,
+}
+
+#[derive(Default)]
+pub struct LoadProgress {
+    evaluating_since: Option<(u64, f64)>,
+    initialising_since: Option<f64>,
+}
+
+impl LoadProgress {
+    /// Sample the pending document and the player's independent device-rate prepare.
+    pub fn sample(&mut self, load: Option<&RevisionLoad>, slot_initialising: bool, now: f64, delay: f64) -> Option<LoadActivity> {
+        let initialising = slot_initialising || load.is_some_and(RevisionLoad::executing);
+        if initialising {
+            self.initialising_since.get_or_insert(now);
+        } else {
+            self.initialising_since = None;
+        }
+
+        if let Some(load) = load.filter(|load| load.evaluating()) {
+            let (revision, since) = self.evaluating_since.get_or_insert((load.revision, now));
+            if *revision != load.revision {
+                (*revision, *since) = (load.revision, now);
+            }
+            if now - *since >= delay { return Some(LoadActivity::Evaluating); }
+        } else {
+            self.evaluating_since = None;
+        }
+        self.initialising_since.filter(|since| now - since >= delay).map(|_| LoadActivity::Initialising)
     }
 }
 
@@ -892,6 +1070,7 @@ impl RevisionLoad {
 pub struct RevisionLoads<J> {
     wanted: Option<RevisionLoad>,
     job: Option<J>,
+    stopped: Option<u64>,
     pub applied: Option<RevisionLoad>,
     pub diags: Vec<Diag>,
     pub warnings: Arc<[ShaderWarning]>,
@@ -900,18 +1079,29 @@ pub struct RevisionLoads<J> {
 
 impl<J> Default for RevisionLoads<J> {
     fn default() -> Self {
-        Self { wanted: None, job: None, applied: None, diags: Vec::new(), warnings: Arc::default(), shaders: None }
+        Self { wanted: None, job: None, stopped: None, applied: None, diags: Vec::new(), warnings: Arc::default(), shaders: None }
     }
 }
 
 impl<J> RevisionLoads<J> {
     pub fn submit(&mut self, revision: u64, source: &str, cancel: impl FnOnce(J)) -> bool {
-        if self.wanted.as_ref().or(self.applied.as_ref()).is_some_and(|r| r.revision == revision) { return false; }
-        if let Some(old) = self.wanted.take() { old.control.cancel(); }
-        if let Some(job) = self.job.take() { cancel(job); }
+        if self.stopped(revision) || self.wanted.as_ref().or(self.applied.as_ref()).is_some_and(|r| r.revision == revision) { return false; }
+        self.stop(cancel);
+        self.stopped = None;
         self.wanted = Some(RevisionLoad { revision, source: Arc::from(source), control: PrepareControl::default() });
         true
     }
+
+    /// Stop the wanted revision, even while it is waiting for a submission slot.
+    pub fn stop(&mut self, cancel: impl FnOnce(J)) {
+        if let Some(request) = self.wanted.take() {
+            request.control.cancel();
+            self.stopped = Some(request.revision);
+        }
+        if let Some(job) = self.job.take() { cancel(job); }
+    }
+
+    pub fn stopped(&self, revision: u64) -> bool { self.stopped == Some(revision) }
 
     /// A refused pool submission stays pending for the next frame.
     pub fn start(&mut self, start: impl FnOnce(RevisionLoad) -> Option<J>) {
@@ -990,7 +1180,7 @@ struct ShaderFields<'a> {
 }
 
 struct Reader<'a> {
-    control: Option<&'a PrepareControl>,
+    control: &'a PrepareControl,
     reuse: Option<&'a CompiledShaders>,
     changed_shader: &'a mut bool,
     shader_index: usize,
@@ -1001,7 +1191,7 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn cancelled(&self) -> bool { self.control.is_some_and(PrepareControl::is_cancelled) }
+    fn cancelled(&self) -> bool { self.control.is_cancelled() }
 
     fn shader_mismatch(&mut self, node: &str, why: &str) {
         *self.changed_shader = true;
@@ -1923,35 +2113,36 @@ fn param_list(value: Option<&V>) -> Vec<(String, f32)> {
     }
 }
 
-pub fn read_document(source: &str) -> Result<EvaluatedDocument, Vec<Diag>> {
-    read(source, None, None, &mut false, false).map(|(document, _, _)| document)
+pub fn read_document_controlled(source: &str, control: &PrepareControl) -> Result<EvaluatedDocument, LoadError> {
+    vm::drive(read_document(source, control))
 }
 
-fn read_checked(source: &str, control: Option<&PrepareControl>, reuse: Option<&CompiledShaders>, changed: &mut bool) -> Result<Loaded, Vec<Diag>> {
-    let (EvaluatedDocument { doc: authored, vm }, checked, warnings) = read(source, control, reuse, changed, true)?;
-    Ok(Loaded { doc: ScoreDoc { authored, checked: checked.into(), warnings: warnings.into() }, vm })
+pub async fn read_document(source: &str, control: &PrepareControl) -> Result<EvaluatedDocument, LoadError> {
+    read_parts(source, control, None, &mut false, false, vm::EVAL_SLICE).await.map(|(document, _, _)| document)
 }
 
 type ReadParts = (EvaluatedDocument, Vec<(String, CheckedShader)>, Vec<ShaderWarning>);
 
-fn read(source: &str, control: Option<&PrepareControl>, reuse: Option<&CompiledShaders>, changed_shader: &mut bool, resolve: bool) -> Result<ReadParts, Vec<Diag>> {
-    let evaluated = vm::evaluate(source);
+fn checked_document((EvaluatedDocument { doc: authored, vm }, checked, warnings): ReadParts) -> Loaded {
+    Loaded { doc: ScoreDoc { authored, checked: checked.into(), warnings: warnings.into() }, vm }
+}
+
+async fn read_parts(source: &str, control: &PrepareControl, reuse: Option<&CompiledShaders>, changed: &mut bool, resolve: bool, slice: Duration) -> Result<ReadParts, LoadError> {
+    let evaluated = vm::evaluate_with_slice(source, control, slice).await?;
+    read_evaluated(source, evaluated, control, reuse, changed, resolve)
+}
+
+fn read_evaluated(source: &str, evaluated: Evaluated, control: &PrepareControl, reuse: Option<&CompiledShaders>, changed: &mut bool, resolve: bool) -> Result<ReadParts, LoadError> {
+    let result = read(source, evaluated, control, reuse, changed, resolve);
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    result.map_err(LoadError::Problems)
+}
+
+fn read(source: &str, evaluated: Evaluated, control: &PrepareControl, reuse: Option<&CompiledShaders>, changed_shader: &mut bool, resolve: bool) -> Result<ReadParts, Vec<Diag>> {
     if resolve && reuse.is_none() { COMPILE.check(); }
     let outline = source::outline(source);
     let mut r = Reader { src: source, outline: &outline, diags: Vec::new(), warnings: Vec::new(), control, reuse, changed_shader, shader_index: 0 };
-    if !evaluated.errors.is_empty() {
-        let diags = evaluated.errors.iter().map(|e| {
-            let (line, col, message) = vm::split_error(e);
-            Diag { line, col, node: None, message }
-        }).collect();
-        return Err(diags);
-    }
-    let V::Obj(root) = &evaluated.root else {
-        return Err(vec![Diag { line: 1, col: 1, node: None, message: "a score ends with `Score{…}` listing its nodes".into() }]);
-    };
-    if root.proto.as_deref() != Some("Score") {
-        return Err(vec![Diag { line: 1, col: 1, node: None, message: "a score ends with `Score{…}` listing its nodes".into() }]);
-    }
+    let root = score_root(&evaluated)?;
     // The nodes: the root's members, named by their `let`.
     // `Score{clock kick}` names each member; its value is the node.
     let mut members = Vec::new();
@@ -2029,8 +2220,8 @@ fn read(source: &str, control: Option<&PrepareControl>, reuse: Option<&CompiledS
     let mut shaders = Vec::new();
     let base = shader::AudioBindings {
         modules: &modules,
-        control: control.map(PrepareControl::word),
-        executions: control.map(PrepareControl::execution_counter),
+        control: Some(control.word()),
+        executions: Some(control.execution_counter()),
         ..Default::default()
     };
     for (name, obj) in &members {
@@ -2854,7 +3045,7 @@ pub(crate) fn test_load(source: &str) -> Result<Loaded, Vec<Diag>> {
     match load_controlled(source, &crate::PrepareControl::default()) {
         Ok(loaded) => Ok(loaded),
         Err(LoadError::Problems(diags)) => Err(diags),
-        Err(LoadError::Cancelled) => unreachable!("a default word is never cancelled"),
+        Err(error) => unreachable!("a fresh unbudgeted word cannot stop the load: {error}"),
     }
 }
 
@@ -2864,7 +3055,7 @@ impl ScoreDoc {
         match ScoreDoc::load_controlled(source, &crate::PrepareControl::default()) {
             Ok(doc) => Ok(doc),
             Err(LoadError::Problems(diags)) => Err(diags),
-            Err(LoadError::Cancelled) => unreachable!("a default word is never cancelled"),
+            Err(error) => unreachable!("a fresh unbudgeted word cannot stop the load: {error}"),
         }
     }
 }

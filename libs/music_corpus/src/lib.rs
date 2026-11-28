@@ -15,6 +15,9 @@
 //! The data it writes is the person's and stays on their machine: it is
 //! never shipped and never committed.
 
+/// Instructions per score evaluation when building an example or evaluating a prediction.
+const EXAMPLE_INSTRUCTION_BUDGET: u64 = 4_000_000;
+
 pub mod corpus;
 pub mod eval;
 pub mod prep;

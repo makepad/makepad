@@ -1493,8 +1493,16 @@ impl ShaderFx {
         std::mem::swap(&mut self.probes, &mut other.probes);
     }
 
+    /// Also sets the parameter of that name on a program still fading out, as
+    /// a wired parameter does, so a control moved during an edit's fade moves
+    /// both sides of it.
     pub fn set_param(&mut self, index: usize, value: f32) {
         self.shader.set_param(&mut self.ctx, index, value);
+        if let Some(f) = self.fade.as_mut().filter(|f| f.left > 0) {
+            if let Some(i) = param_index(&f.shader, self.shader.param_view(index).name) {
+                f.shader.set_param(&mut f.ctx, i, value);
+            }
+        }
     }
 
     pub fn set_param_by_name(&mut self, name: &str, value: f32) -> bool {
@@ -1653,8 +1661,11 @@ impl ShaderFx {
     }
 
     /// Hot swap: carries the delay lines and filters that match by name and
-    /// type; crossfades from the old program when anything could not carry.
-    /// No allocation: the old state moves into this instance's fade slot.
+    /// type, and crossfades from the old program over [`FADE`] frames. When the
+    /// whole state carries, the old program fades out on a copy of it, so a
+    /// changed program (a new response, a new formula) never switches unfaded.
+    /// No allocation: the old state moves into this instance's fade slot, and
+    /// `old` is spent (retire it; it is never the target of another swap).
     pub fn swap_from(&mut self, old: &mut ShaderFx) {
         self.delayed.take_from(&mut old.delayed, old.frame);
         self.frame = old.frame;
@@ -1663,15 +1674,19 @@ impl ShaderFx {
         self.next_anchor = old.next_anchor;
         let cc = CTX_TEMPO as usize..(CTX_CC + CC_WORDS) as usize;
         self.ctx[cc.clone()].copy_from_slice(&old.ctx[cc]);
-        let carried = self.state.take_from(&self.shader, &mut old.state, &old.shader);
+        let same_layout = self.shader.same_state_layout(&old.shader);
+        self.state.take_from(&self.shader, &mut old.state, &old.shader);
+        if same_layout {
+            // The carry swapped boxes, handing `old` this instance's fresh one (same
+            // layout, same size): the old program fades out on a copy of the state.
+            // Any other carry copied words over and left `old` its own state.
+            old.state.words.copy_from_slice(&self.state.words);
+        }
         if let Some(seed) = self.seed {
             self.shader.set_instance(&mut self.ctx, seed);
             if self.seed != old.seed {
                 self.shader.seed_state(&mut self.state.words, seed);
             }
-        }
-        if carried {
-            return;
         }
         let fade = self.fade.get_or_insert_with(|| FxFade {
             shader: old.shader.clone(), ports: PortBuffers::default(), probes: None, ctx: Box::default(), state: ShaderState::default(), scratch: Box::default(), left: 0,

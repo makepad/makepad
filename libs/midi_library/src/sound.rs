@@ -148,19 +148,31 @@ pub fn mix_problems(mix: &Measure, stems: &[(String, Measure)]) -> Vec<String> {
 /// Render `source` for `seconds` from beat `start`, every loop alone and
 /// the mix: (loop, measure) per loop that sounds, and the mix's measure.
 pub fn stems(source: &str, start: f64, seconds: f64, control: &makepad_score_live::PrepareControl) -> Result<(Vec<(String, Measure)>, Measure), String> {
-    let doc = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
+    makepad_score_live::drive(stems_async(source, start, seconds, control))
+}
+
+pub async fn stems_async(source: &str, start: f64, seconds: f64, control: &makepad_score_live::PrepareControl) -> Result<(Vec<(String, Measure)>, Measure), String> {
+    let doc = makepad_score_live::model::read_document(source, control).await.map_err(|e| e.to_string())?.doc;
     let opts = RenderOpts { seconds: Some(seconds), start: Some(start), ..RenderOpts::default() };
-    let mix = makepad_music_iter::render::render_mix(source, &opts, control)?;
-    let mix_measure = measure(&mix.left, &mix.right, mix.rate);
+    let mix_measure = {
+        let mix = render_mix(source, &opts, control).await?;
+        measure(&mix.left, &mix.right, mix.rate)
+    };
     let mut out = Vec::new();
     for l in &doc.loops {
         let solo = makepad_music_iter::render::only(source, &doc, std::slice::from_ref(&l.name))?;
-        let r = makepad_music_iter::render::render_mix(&solo, &opts, control)?;
+        let r = render_mix(&solo, &opts, control).await?;
         if r.left.iter().any(|v| v.abs() > 1e-4) {
             out.push((l.name.clone(), measure(&r.left, &r.right, r.rate)));
         }
     }
     Ok((out, mix_measure))
+}
+
+async fn render_mix(source: &str, opts: &RenderOpts, control: &makepad_score_live::PrepareControl) -> Result<makepad_score_live::Rendered, String> {
+    let describe = |e: makepad_score_live::LoadError| e.describe(|diags| diags.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("; "));
+    let loaded = makepad_score_live::load(source, control).await.map_err(describe)?;
+    makepad_score_live::render::render_loaded(loaded, opts, &makepad_score_live::NoSamples, control, &mut |_, _| {}).map_err(describe)
 }
 
 #[cfg(test)]

@@ -4,7 +4,8 @@
 
 use crate::build::Samples;
 use crate::compose::{Composer, Played};
-use crate::model::{self, Diag, ScoreDoc};
+use crate::model::{self, Diag, LoadError, ScoreDoc};
+use crate::PrepareControl;
 use crate::player::{sample_name, ClockMode, Player};
 use makepad_audio_engine::feed::{forget_instance, tempo_feed, tempo_seconds, TempoEvent};
 use makepad_audio_engine::CHUNK;
@@ -388,22 +389,24 @@ impl Timing {
     }
 }
 
+pub type CycleNotes = (String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>);
+
 /// Each loop's notes in its first cycle that plays (the arrangement's
 /// sections gating it), computed without playing: (loop, cycle start,
 /// cycle length, notes as (offset beat, note, velocity, hit), lengths).
 /// What a stopped score shows of its generated loops.
-pub fn cycle_notes(source: &str) -> Vec<(String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>)> {
-    let Ok(loaded) = model::read_document(source) else { return Vec::new() };
-    cycle_notes_of(loaded)
+pub fn cycle_notes_controlled(source: &str, control: &PrepareControl) -> Result<Vec<CycleNotes>, LoadError> {
+    let loaded = model::read_document_controlled(source, control)?;
+    Ok(cycle_notes_of(loaded))
 }
 
 /// Read the already evaluated score in its owning VM.
-pub fn cycle_notes_of(loaded: impl Into<model::EvaluatedDocument>) -> Vec<(String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>)> {
+pub fn cycle_notes_of(loaded: impl Into<model::EvaluatedDocument>) -> Vec<CycleNotes> {
     let loaded = loaded.into();
     let bar = loaded.doc.beats_per_bar();
     let end = loaded.doc.arrangement_beats().max(16.0 * bar).min(512.0);
     let mut composer = Composer::new(loaded);
-    let mut out: Vec<(String, f64, f64, Vec<(f64, f32, f32, bool)>, Vec<f32>)> = Vec::new();
+    let mut out: Vec<CycleNotes> = Vec::new();
     let mut events = Vec::new();
     let mut until = 0.0;
     while until < end && out.len() < composer.loops.len() {
@@ -421,9 +424,9 @@ pub fn cycle_notes_of(loaded: impl Into<model::EvaluatedDocument>) -> Vec<(Strin
 
 /// The first error loop `node`'s code meets over the arrangement (1024
 /// beats at most), if any.
-pub fn loop_error(source: &str, node: &str) -> Option<String> {
-    let loaded = model::read_document(source).ok()?;
-    loop_error_of(loaded, node)
+pub fn loop_error_controlled(source: &str, node: &str, control: &PrepareControl) -> Result<Option<String>, LoadError> {
+    let loaded = model::read_document_controlled(source, control)?;
+    Ok(loop_error_of(loaded, node))
 }
 
 /// Read the already evaluated score in its owning VM.
@@ -446,7 +449,7 @@ pub fn loop_error_of(loaded: impl Into<model::EvaluatedDocument>, node: &str) ->
     None
 }
 
-/// A loop's phrase ([`phrase_notes`]).
+/// A loop's phrase ([`phrase_notes_controlled`]).
 pub struct Phrase {
     /// The phrase's length in beats, and its cycles' length.
     pub beats: f64,
@@ -455,7 +458,7 @@ pub struct Phrase {
     pub first: u32,
     /// It comes round again (it was found repeating within what was read).
     pub repeats: bool,
-    /// As [`cycle_notes`] gives them, beats from the phrase's start.
+    /// As [`cycle_notes_controlled`] gives them, beats from the phrase's start.
     pub notes: Vec<(f64, f32, f32, bool)>,
     pub durs: Vec<f32>,
 }
@@ -464,9 +467,9 @@ pub struct Phrase {
 /// until they come round to the first again (a loop playing the same cycle
 /// each time: that cycle; one walking a melody bar by bar: the melody), at
 /// most `max_beats`.
-pub fn phrase_notes(source: &str, node: &str, max_beats: f64) -> Option<Phrase> {
-    let loaded = model::read_document(source).ok()?;
-    phrase_notes_of(loaded, node, max_beats)
+pub fn phrase_notes_controlled(source: &str, node: &str, max_beats: f64, control: &PrepareControl) -> Result<Option<Phrase>, LoadError> {
+    let loaded = model::read_document_controlled(source, control)?;
+    Ok(phrase_notes_of(loaded, node, max_beats))
 }
 
 /// Read the already evaluated score in its owning VM.
@@ -538,8 +541,11 @@ pub fn phrase_notes_of(loaded: impl Into<model::EvaluatedDocument>, node: &str, 
     Some(Phrase { beats: cycles.iter().map(|c| c.1).sum(), cycle, first: (first / cycle).round().max(0.0) as u32, repeats, notes, durs })
 }
 
-pub fn timing(source: &str, seconds: Option<f64>) -> Result<Timing, Vec<Diag>> {
-    let loaded = model::read_document(source)?;
+pub fn timing_controlled(source: &str, seconds: Option<f64>, control: &PrepareControl) -> Result<Timing, LoadError> {
+    Ok(timing_of(model::read_document_controlled(source, control)?, seconds))
+}
+
+fn timing_of(loaded: model::EvaluatedDocument, seconds: Option<f64>) -> Timing {
     let bpm = transport_bpm(&loaded.doc);
     let beats_per_bar = loaded.doc.beats_per_bar();
     let seconds = seconds.unwrap_or_else(|| natural_length(&loaded.doc)).clamp(0.0, 3600.0);
@@ -562,6 +568,6 @@ pub fn timing(source: &str, seconds: Option<f64>) -> Result<Timing, Vec<Diag>> {
         let stop = starts.get(i + 1).map_or(seconds, |(next, _)| at(*next));
         (name.clone(), at(*beat), stop)
     }).collect();
-    Ok(Timing { bpm, beats_per_bar, seconds, sections, tempo })
+    Timing { bpm, beats_per_bar, seconds, sections, tempo }
 }
 

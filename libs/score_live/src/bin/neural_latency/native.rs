@@ -2,6 +2,7 @@
 
 use makepad_audio_synth::Instrument;
 use makepad_score_live::game::{music, Clocking};
+use makepad_score_live::PrepareControl;
 use makepad_score_player::sung::neural;
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,7 @@ fn pitch(x: &[f32]) -> Option<f32> {
 }
 
 pub fn run() {
+    let control = PrepareControl::default();
     let edits: usize = std::env::args().skip(1).find_map(|v| v.parse().ok()).unwrap_or(4);
     let path = neural::model_path();
     let t = Instant::now();
@@ -45,7 +47,7 @@ pub fn run() {
     };
     println!("voice {} loaded in {:.0} ms", path.display(), t.elapsed().as_secs_f64() * 1e3);
     let lines = ["a-ma-zing grace", "how sweet the sound", "we are young", "bring me home"];
-    let (mut handle, mut inst) = music(&source(false, lines[0]), RATE, Clocking::Realtime).unwrap_or_else(|d| panic!("{d:?}"));
+    let (mut handle, mut inst) = music(&source(false, lines[0]), RATE, Clocking::Realtime, &control).unwrap_or_else(|d| panic!("{d:?}"));
     let chunk = 256usize;
     let first_edit = 7.0;
     // Edits at uneven places in the loop (4.8 s at 100 bpm).
@@ -63,7 +65,7 @@ pub fn run() {
         let at = out.len() as f64 / RATE as f64;
         if edit_times.len() < edits && at >= next_edit {
             high = !high;
-            handle.set_source(&source(high, lines[(edit_times.len() + 1) % lines.len()])).unwrap_or_else(|d| panic!("{d:?}"));
+            handle.set_source(&source(high, lines[(edit_times.len() + 1) % lines.len()]), &control).unwrap_or_else(|d| panic!("{d:?}"));
             edit_times.push((at, high));
             next_edit += gaps[edit_times.len() - 1];
         }

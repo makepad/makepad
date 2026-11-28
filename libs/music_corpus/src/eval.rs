@@ -32,6 +32,7 @@ use makepad_midi_library::arrangement::{self, Arrangement, Note, Part};
 use makepad_midi_library::form;
 use makepad_midi_library::gm::{Role, Voice};
 use makepad_midi_library::roll::{self, Detail, STEPS};
+use makepad_score_live::{LoadError, PrepareControl};
 use makepad_strict_json::{obj, s, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -93,17 +94,22 @@ pub fn given(user: &str) -> &str {
 // ------------------------------------------------------------------ reading answers
 
 /// The answer as an arrangement of just what it wrote.
-fn read_answer(c: &Case, text: &str) -> Result<Arrangement, String> {
+fn read_answer(c: &Case, text: &str, control: &PrepareControl) -> Result<Option<Arrangement>, LoadError> {
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
     match c.task {
         // Not a Score at all: no need to run the engine on it.
-        Task::RollToScore if !(text.contains("use mod.score") && text.contains("Score{")) => Err("not a Score".into()),
-        Task::RollToScore => roll::from_score(text),
+        Task::RollToScore if !(text.contains("use mod.score") && text.contains("Score{")) => Ok(None),
+        Task::RollToScore => match roll::from_score_controlled(text, control) {
+            Ok(score) => Ok(Some(score)),
+            Err(LoadError::Problems(_)) => Ok(None),
+            Err(cancelled) => Err(cancelled),
+        },
         Task::Continue => {
-            let a = roll::from_text(&format!("{}{}{}", given(&c.user), if given(&c.user).ends_with('\n') { "" } else { "\n" }, text))?;
+            let Ok(a) = roll::from_text(&format!("{}{}{}", given(&c.user), if given(&c.user).ends_with('\n') { "" } else { "\n" }, text)) else { return Ok(None) };
             let from = c.from_bar.saturating_sub(1);
-            Ok(prep::slice(&a, from, a.bar_count().max(from)))
+            Ok(Some(prep::slice(&a, from, a.bar_count().max(from))))
         }
-        _ => roll::from_text(text),
+        _ => Ok(roll::from_text(text).ok()),
     }
 }
 
@@ -250,9 +256,9 @@ fn ratio(a: f64, b: f64) -> f64 {
 }
 
 /// The metrics of one answer.
-pub fn score(c: &Case, output: &str) -> [f64; 10] {
-    let Ok(p) = read_answer(c, output) else { return [0.0; 10] };
-    let Ok(r) = read_answer(c, &c.reference) else { return [0.0; 10] };
+pub fn score(c: &Case, output: &str, control: &PrepareControl) -> Result<[f64; 10], LoadError> {
+    let Some(p) = read_answer(c, output, control)? else { return Ok([0.0; 10]) };
+    let Some(r) = read_answer(c, &c.reference, control)? else { return Ok([0.0; 10]) };
     // The key of the music the answer completes (an infilled part with the
     // others).
     let key_of = |a: &Arrangement| {
@@ -280,7 +286,7 @@ pub fn score(c: &Case, output: &str) -> [f64; 10] {
     let f1 = if po.is_empty() && ro.is_empty() { 1.0 } else { 2.0 * hit / (po.len() + ro.len()).max(1) as f64 };
     let repeat = 1.0 - (repeat_share(&p) - repeat_share(&r)).abs();
     let form = edit_similarity(&form_letters(&p), &form_letters(&r));
-    [1.0, key, meter_ok as u8 as f64, bars, density, pitch, rhythm, f1, repeat, form]
+    Ok([1.0, key, meter_ok as u8 as f64, bars, density, pitch, rhythm, f1, repeat, form])
 }
 
 // ------------------------------------------------------------------ baselines
@@ -456,13 +462,37 @@ pub fn baseline(cases: &[Case], kind: &str, limit: usize) -> String {
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub per_task: BTreeMap<Task, (usize, [f64; 10])>,
+    /// Predictions whose scoring or requested WAV could not finish.
+    pub unfinished: Vec<UnfinishedPrediction>,
     pub missing: usize,
     pub unknown: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnfinishedPrediction {
+    pub id: String,
+    pub line: Option<u32>,
+    pub reason: String,
+}
+
+fn render_answer(case: &Case, output: String, control: &PrepareControl) -> Result<Option<makepad_midi_library::cover::Rendered>, LoadError> {
+    let source = if case.task == Task::RollToScore {
+        output
+    } else {
+        let Some(arrangement) = read_answer(case, &output, control)? else { return Ok(None) };
+        arrangement::to_score(&arrangement)
+    };
+    match makepad_midi_library::cover::render_checked(&source, -14.0, control) {
+        Ok(rendered) => Ok(Some(rendered)),
+        Err(makepad_midi_library::cover::RenderError::Load(error @ (LoadError::Unfinished { .. } | LoadError::Memory { .. } | LoadError::Cancelled))) => Err(error),
+        Err(_) => Ok(None), // An ordinary unrenderable prediction keeps its metrics.
+    }
 }
 
 /// Score the predictions in `pred` (JSONL) against `cases`; with `render`,
 /// write the first `n` parsed answers as WAV through the Score engine.
 pub fn evaluate(cases: &[Case], pred: &str, threads: usize, render: Option<(usize, &Path)>, control: &makepad_score_live::PrepareControl) -> Result<Report, String> {
+    let control = &control.with_instruction_budget(crate::EXAMPLE_INSTRUCTION_BUDGET);
     let by_id: BTreeMap<&str, &Case> = cases.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut pairs: Vec<(&Case, String)> = Vec::new();
     let mut rep = Report::default();
@@ -475,61 +505,48 @@ pub fn evaluate(cases: &[Case], pred: &str, threads: usize, render: Option<(usiz
             None => rep.unknown += 1,
         }
     }
-    let scores = std::sync::Mutex::new(vec![[0f64; 10]; pairs.len()]);
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|sc| {
-        for _ in 0..threads.max(1) {
-            sc.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= pairs.len() {
-                    break;
-                }
-                let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| score(pairs[i].0, &pairs[i].1))).unwrap_or([0.0; 10]);
-                scores.lock().unwrap()[i] = m;
-            });
-        }
-    });
-    let scores = scores.into_inner().unwrap();
-    for ((c, _), m) in pairs.iter().zip(&scores) {
-        let e = rep.per_task.entry(c.task).or_insert((0, [0.0; 10]));
-        e.0 += 1;
-        for k in 0..10 {
-            e.1[k] += m[k];
-        }
-    }
-    for e in rep.per_task.values_mut() {
-        for k in 0..10 {
-            e.1[k] /= e.0.max(1) as f64;
-        }
-    }
+    let scores = crate::corpus::par_map(pairs.len(), threads, control, |i| score(pairs[i].0, &pairs[i].1, control))
+        .map_err(|error| error.to_string())?;
+    if let Some((_, dir)) = render { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; }
+    let mut rendered = 0;
     let answered: HashSet<&str> = pairs.iter().map(|p| p.0.id.as_str()).collect();
     rep.missing = cases.iter().filter(|c| !answered.contains(c.id.as_str())).count();
-    if let Some((n, dir)) = render {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let mut done = 0;
-        for ((c, out), m) in pairs.iter().zip(&scores) {
-            if done >= n {
-                break;
-            }
-            if m[0] < 1.0 {
+    for ((case, output), metrics) in pairs.into_iter().zip(scores) {
+        let record_unfinished = |rep: &mut Report, error: LoadError, line| {
+            eprintln!("{}: {error}", case.id);
+            rep.unfinished.push(UnfinishedPrediction { id: case.id.clone(), line, reason: error.to_string() });
+        };
+        let metrics = match metrics.unwrap_or(Ok([0.0; 10])) {
+            Ok(metrics) => metrics,
+            Err(error @ (LoadError::Unfinished { line } | LoadError::Memory { line })) => {
+                record_unfinished(&mut rep, error, line);
                 continue;
             }
-            let score_text = if c.task == Task::RollToScore {
-                out.clone()
-            } else {
-                match read_answer(c, out) {
-                    Ok(a) => arrangement::to_score(&a),
-                    Err(_) => continue,
-                }
-            };
-            let rendered = makepad_midi_library::cover::render(&score_text, -14.0, control);
+            Err(error) => return Err(error.to_string()),
+        };
+        if let Some((_, dir)) = render.filter(|(n, _)| rendered < *n && metrics[0] >= 1.0) {
+            let result = render_answer(case, output, control);
             if control.is_cancelled() { return Err("the evaluation was cancelled".into()); }
-            if let Ok(r) = rendered {
-                let name: String = c.id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
-                std::fs::write(dir.join(format!("{name}.wav")), makepad_midi_library::cover::wav(&r.song)).map_err(|e| e.to_string())?;
-                done += 1;
+            match result {
+                Ok(Some(r)) => {
+                    let name: String = case.id.chars().map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' }).collect();
+                    std::fs::write(dir.join(format!("{name}.wav")), makepad_midi_library::cover::wav(&r.song)).map_err(|e| e.to_string())?;
+                    rendered += 1;
+                }
+                Ok(None) => {}
+                Err(error @ (LoadError::Unfinished { line } | LoadError::Memory { line })) => {
+                    record_unfinished(&mut rep, error, line);
+                    continue;
+                }
+                Err(error) => return Err(error.to_string()),
             }
         }
+        let (count, sums) = rep.per_task.entry(case.task).or_default();
+        *count += 1;
+        for (sum, value) in sums.iter_mut().zip(metrics) { *sum += value; }
+    }
+    for (count, sums) in rep.per_task.values_mut() {
+        for sum in sums { *sum /= *count as f64; }
     }
     Ok(rep)
 }
@@ -547,6 +564,9 @@ pub fn report_text(rep: &Report) -> String {
         }
         w.push('\n');
     }
+    for item in &rep.unfinished {
+        w.push_str(&format!("{}: {}\n", item.id, item.reason));
+    }
     if rep.missing + rep.unknown > 0 {
         w.push_str(&format!("({} cases without an answer, {} answers to no case)\n", rep.missing, rep.unknown));
     }
@@ -554,7 +574,15 @@ pub fn report_text(rep: &Report) -> String {
 }
 
 pub fn report_json(rep: &Report) -> Value {
-    Value::Obj(rep.per_task.iter().map(|(t, (n, m))| (t.name().to_string(), obj(std::iter::once(("n", Value::Int(*n as i64))).chain(METRICS.iter().zip(m).map(|(k, v)| (*k, Value::F64((v * 1000.0).round() / 1000.0)))).collect()))).collect())
+    let mut tasks: Vec<_> = rep.per_task.iter().map(|(t, (n, m))| (t.name().to_string(), obj(std::iter::once(("n", Value::Int(*n as i64))).chain(METRICS.iter().zip(m).map(|(k, v)| (*k, Value::F64((v * 1000.0).round() / 1000.0)))).collect()))).collect();
+    if !rep.unfinished.is_empty() {
+        let rows = rep.unfinished.iter().map(|item| obj(vec![
+            ("id", s(item.id.clone())), ("line", item.line.map_or(Value::Null, |n| Value::Int(i64::from(n)))),
+            ("reason", s(item.reason.clone())),
+        ])).collect();
+        tasks.push(("unfinished".into(), Value::Arr(rows)));
+    }
+    Value::Obj(tasks)
 }
 
 #[cfg(test)]
@@ -570,5 +598,78 @@ mod tests {
         assert_eq!(chord_root("Bbm7"), Some((10, true)));
         assert_eq!(chord_root("Cmaj7"), Some((0, false)));
         assert!((edit_similarity(&['A', 'B', 'A'], &['A', 'B', 'B']) - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn interrupted_scores_are_neither_bad_predictions_nor_rejected_examples() {
+        let src = "use mod.score.*\nlet c = Clock{}\nlet s = Synth{preset: @sub}\nlet l = Loop{play: s beats: 4 notes: [[0 @a1 1 1]]}\nlet a = Section{bars: 1 loops: [l]}\nScore{arrange: [a] c s l a}";
+        let case = Case {
+            id: "one".into(), task: Task::RollToScore, user: String::new(), reference: src.into(),
+            key: String::new(), meter: "4/4".into(), bars: 1, from_bar: 1, part: String::new(), role: String::new(),
+        };
+        let control = PrepareControl::default();
+        let roll = tasks::roll_text(&roll::from_score_controlled(src, &control).unwrap());
+        assert!(tasks::score_survives(src, &roll, &control).unwrap(), "a valid example survives its round trip");
+        let bad = "use mod.score.*\n// Score{ is absent\n42";
+        assert!(!tasks::score_survives(bad, &roll, &control).unwrap(), "an invalid score rejects the example");
+        assert_eq!(score(&case, bad, &control).unwrap(), [0.0; 10], "an invalid prediction still scores zero");
+        let cases = [case];
+        let predictions = baseline(&cases, "oracle", 1);
+        let report = evaluate(&cases, &predictions, 1, None, &control).unwrap();
+        assert_eq!(report.per_task[&Task::RollToScore].1[0], 1.0, "the worker parses the oracle prediction");
+        // Even one instruction per iteration would exhaust this budget before the score.
+        let iterations = 512;
+        let budgeted = control.with_instruction_budget(iterations);
+        let slow = src.replace("let c =", &format!("let total = 0\nfor i in 0..{iterations} {{ total += i }}\nlet c ="));
+        let slow_case = Case { id: "slow".into(), reference: slow.clone(), ..cases[0].clone() };
+        // The index is exactly representable, but its ScriptValue array cannot have a valid layout.
+        // This exercises the worker's physical refusal without exhausting the test machine.
+        let index = isize::MAX as usize / std::mem::size_of::<u64>() + 1;
+        let memory = src.replace("let c =", &format!("let xs = []\nxs[{index}] = 1\nlet c ="));
+        let memory_line = memory.lines().position(|line| line.starts_with("xs[")).unwrap() as u32 + 1;
+        let memory_case = Case { id: "memory".into(), reference: memory, ..cases[0].clone() };
+        let batch = [slow_case, memory_case, cases[0].clone()];
+        let answers = baseline(&batch, "oracle", batch.len());
+        let first = evaluate(&batch, &answers, 1, None, &budgeted).unwrap();
+        let second = evaluate(&batch, &answers, 1, None, &budgeted).unwrap();
+        let loop_line = slow.lines().position(|line| line.starts_with("for ")).unwrap() as u32 + 1;
+        let expected = [
+            (loop_line, LoadError::Unfinished { line: Some(loop_line) }),
+            (memory_line, LoadError::Memory { line: Some(memory_line) }),
+        ];
+        assert_eq!(first.unfinished.len(), expected.len(), "only the two refused predictions are recorded");
+        let json = report_json(&first);
+        let rows = json.get("unfinished").unwrap().as_arr().unwrap();
+        let text = report_text(&first);
+        for (i, (line, cause)) in expected.iter().enumerate() {
+            let item = &first.unfinished[i];
+            assert_eq!((&item.id, item.line, &item.reason), (&batch[i].id, Some(*line), &cause.to_string()),
+                "each unfinished prediction keeps its own reason and line");
+            assert_eq!(rows[i].get("reason").and_then(Value::as_str), Some(item.reason.as_str()), "JSON preserves the refusal");
+            assert!(text.contains(&format!("{}: {}", item.id, item.reason)), "text names the refused prediction and its cause");
+        }
+        assert_eq!(first.per_task, report.per_task, "the following prediction gets its full budget and the same metrics as alone");
+        assert_eq!((first.unfinished, first.per_task), (second.unfinished, second.per_task), "repeating the batch gives the same split");
+        assert!(matches!(makepad_score_live::load_controlled(bad, &budgeted), Err(LoadError::Problems(_))), "an invalid document still reports problems");
+
+        // Roll metrics need no script instructions. Only the requested WAV evaluates a score.
+        let roll_case = Case { task: Task::Describe, reference: roll.clone(), ..cases[0].clone() };
+        let roll_cases = [roll_case];
+        let answer = baseline(&roll_cases, "oracle", 1);
+        let render_budget = control.with_instruction_budget(0);
+        let metrics = evaluate(&roll_cases, &answer, 1, None, &render_budget).unwrap();
+        assert_eq!(metrics.per_task[&Task::Describe].0, roll_cases.len(), "scoring the roll alone finishes");
+        let dir = std::env::temp_dir().join(format!("music_corpus_unfinished_render_{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let with_wav = evaluate(&roll_cases, &answer, 1, Some((1, &dir)), &render_budget).unwrap();
+        assert!(matches!(with_wav.unfinished.as_slice(), [item] if item.id == roll_cases[0].id), "a budget hit during the cover records the item");
+        assert!(with_wav.per_task.is_empty() && std::fs::read_dir(&dir).unwrap().next().is_none(), "an unfinished render publishes neither a completed row nor a WAV");
+        std::fs::remove_dir(dir).unwrap();
+
+        control.cancel();
+        assert!(matches!(makepad_score_live::load_controlled(&slow, &budgeted), Err(LoadError::Cancelled)), "the budgeted view shares Stop and cancellation takes precedence");
+        assert!(matches!(tasks::score_survives(src, &roll, &control), Err(LoadError::Cancelled)), "an interrupted example has no verdict");
+        assert!(matches!(score(&cases[0], src, &control), Err(LoadError::Cancelled)), "an interrupted prediction has no metrics");
+        assert_eq!(evaluate(&cases, &predictions, 1, None, &control).err().as_deref(), Some("the request was cancelled"));
     }
 }

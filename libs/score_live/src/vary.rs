@@ -59,8 +59,13 @@ impl Part {
 }
 
 /// What a loop plays in its first cycle, frozen (generated loops included).
-pub fn part_of(src: &str, node: &str) -> Result<Part, String> {
-    part_from(model::read_document(src).map_err(diagnostic)?, node)
+pub fn part_of_controlled(src: &str, node: &str, control: &crate::PrepareControl) -> Result<Part, crate::LoadError> {
+    let loaded = model::read_document_controlled(src, control)?;
+    let at = loaded.doc.outline.node(node).map_or(0, |entry| entry.span.start);
+    part_from(loaded, node).map_err(|message| {
+        let (line, col) = source::line_col(src, at);
+        crate::LoadError::Problems(vec![model::Diag { line: line as u32, col: col as u32, node: Some(node.into()), message }])
+    })
 }
 
 fn diagnostic(errors: Vec<model::Diag>) -> String {
@@ -104,11 +109,19 @@ fn code_of(src: &str, node: &str) -> Option<(String, String)> {
 /// `src` with loop `node` playing `part` (as a `notes:` list; its code,
 /// pattern and note go), checked to load.
 pub fn apply(src: &str, node: &str, part: &Part, control: &crate::PrepareControl) -> Result<String, String> {
-    apply_prepared(src, node, part, None, control).map(|(source, _)| source)
+    crate::drive(apply_async(src, node, part, control))
+}
+
+pub async fn apply_async(src: &str, node: &str, part: &Part, control: &crate::PrepareControl) -> Result<String, String> {
+    apply_prepared_async(src, node, part, None, control).await.map(|(source, _)| source)
 }
 
 /// Fully validate the rewrite and keep the exact programs its composer will use.
 pub fn apply_prepared(src: &str, node: &str, part: &Part, programs: Option<&Arc<CompiledShaders>>, control: &crate::PrepareControl) -> Result<(String, Arc<CompiledShaders>), String> {
+    crate::drive(apply_prepared_async(src, node, part, programs, control))
+}
+
+pub async fn apply_prepared_async(src: &str, node: &str, part: &Part, programs: Option<&Arc<CompiledShaders>>, control: &crate::PrepareControl) -> Result<(String, Arc<CompiledShaders>), String> {
     if control.is_cancelled() { return Err("the variation was cancelled".into()); }
     let code = code_of(src, node);
     let next = if let Some((param, body)) = &code {
@@ -117,14 +130,14 @@ pub fn apply_prepared(src: &str, node: &str, part: &Part, programs: Option<&Arc<
         rewrite_notes(src, node, part)?
     };
     let reused = if let Some(set) = programs {
-        set.evaluate_rewrite(&next).map_err(diagnostic)?.map(|loaded| (loaded, set.clone()))
+        set.evaluate_rewrite_async(&next, control).await.map_err(|e| e.describe(diagnostic))?.map(|loaded| (loaded, set.clone()))
     } else {
         None
     };
     let (loaded, shaders) = match reused {
         Some(pair) => pair,
         None => {
-            let loaded = model::load_controlled(&next, control).map_err(|e| e.describe(diagnostic))?;
+            let loaded = model::load(&next, control).await.map_err(|e| e.describe(diagnostic))?;
             let shaders = CompiledShaders::from_doc(&loaded.doc);
             (loaded, shaders)
         }
@@ -489,7 +502,8 @@ Score{clock lead line}"#;
     let programs = CompiledShaders::from_doc(&loaded.doc);
     let compiles = model::SHADER_COMPILES.with(|n| n.get());
     assert!(compiles > 0);
-    let part = part_from(programs.evaluate(source).unwrap(), "line").unwrap();
+    let word = crate::PrepareControl::default();
+    let part = part_from(programs.evaluate_controlled(source, &word).unwrap(), "line").unwrap();
     assert_eq!(part.notes.len(), 2);
     assert_eq!(crate::render::cycle_notes_of(loaded).len(), 1);
     let (_, reused) = apply_prepared(source, "line", &part, Some(&programs), &crate::PrepareControl::default()).unwrap();
@@ -499,5 +513,5 @@ Score{clock lead line}"#;
     let (rewritten, fresh) = apply_prepared(&changed, "line", &part, Some(&programs), &crate::PrepareControl::default()).unwrap();
     assert!(!Arc::ptr_eq(&programs, &fresh));
     assert_eq!(model::SHADER_COMPILES.with(|n| n.get()), compiles + 1);
-    assert_eq!(part_from(fresh.evaluate(&rewritten).unwrap(), "line").unwrap().notes, part.notes);
+    assert_eq!(part_from(fresh.evaluate_controlled(&rewritten, &word).unwrap(), "line").unwrap().notes, part.notes);
 }

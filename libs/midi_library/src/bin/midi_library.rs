@@ -40,6 +40,9 @@ fn main() {
 
 /// The commands (`midi-text` runs `text`).
 pub fn run(args: Vec<String>) {
+    if args.first().map(String::as_str) == Some("mcp") {
+        return makepad_midi_library::tools::serve_mcp();
+    }
     let control = makepad_score_live::PrepareControl::default();
     let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let has = |name: &str| args.iter().any(|a| a == name);
@@ -67,11 +70,7 @@ pub fn run(args: Vec<String>) {
         Some("covers") => pick(&words.join(" "), flag("--n").and_then(|n| n.parse().ok()).unwrap_or(5)).and_then(|ids| covers(&ids, &out_dir(&flag), &options(&flag, has("--gm"), has("--presets")), lufs(&flag), !has("--mechanical"), &control)),
         Some("refs") if !words.is_empty() => references(&words),
         Some("chip") => makepad_midi_library::chip::cli::run(&args[1..], &control),
-        Some("mcp") => {
-            makepad_midi_library::tools::serve_mcp();
-            Ok(())
-        }
-        Some("text") if !words.is_empty() => text(&words.join(" "), &flag, has("--all")),
+        Some("text") if !words.is_empty() => text(&words.join(" "), &flag, has("--all"), &control),
         Some("score") if words.len() == 2 => text_to_score(Path::new(&words[0]), Path::new(&words[1]), &control),
         _ => {
             eprintln!("midi_library status | install --accept | index | search <words> | import <id> <out.splash> | cover <id>... | covers <words> [--n 5] | refs <id>...");
@@ -373,10 +372,11 @@ pub fn detail(flag: &dyn Fn(&str) -> Option<String>, all: bool) -> roll::Detail 
 
 /// The arrangement of a library song (by id, "Artist - Title" or the best
 /// match of search words), a MIDI file or a Score file.
-fn arrangement_of(name: &str) -> Result<makepad_midi_library::arrangement::Arrangement, String> {
+fn arrangement_of(name: &str, control: &makepad_score_live::PrepareControl) -> Result<makepad_midi_library::arrangement::Arrangement, String> {
     let path = Path::new(name);
     if path.is_file() && name.ends_with(".splash") {
-        return roll::from_score(&std::fs::read_to_string(path).map_err(|e| e.to_string())?);
+        let source = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        return roll::from_score_controlled(&source, control).map_err(|e| e.to_string());
     }
     let (entry, bytes) = match resolve_one(name) {
         Ok(found) => found,
@@ -389,8 +389,8 @@ fn arrangement_of(name: &str) -> Result<makepad_midi_library::arrangement::Arran
     Ok(import::import(&bytes, &about(&entry), &Options::default())?.arrangement)
 }
 
-fn text(name: &str, flag: &dyn Fn(&str) -> Option<String>, all: bool) -> Result<(), String> {
-    let a = arrangement_of(name)?;
+fn text(name: &str, flag: &dyn Fn(&str) -> Option<String>, all: bool, control: &makepad_score_live::PrepareControl) -> Result<(), String> {
+    let a = arrangement_of(name, control)?;
     print!("{}", roll::to_text(&a, &detail(flag, all)));
     Ok(())
 }

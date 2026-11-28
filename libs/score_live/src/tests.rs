@@ -8,6 +8,7 @@ use crate::source;
 use crate::{key, model};
 use makepad_audio_engine::run::{run, NoExt};
 use makepad_audio_engine::CHUNK;
+use makepad_score_player::shader::FADE;
 use makepad_score_player::EventKind;
 use makepad_flow::Literal;
 
@@ -127,6 +128,31 @@ fn problems_are_reported_where_they_are() {
     assert_eq!(errors[0].node.as_deref(), Some("hats"));
     assert!(errors[0].message.contains("no drum `hta`"), "{errors:?}");
     assert_eq!(errors[0].line, 15);
+
+    let control = crate::PrepareControl::default();
+    for sliced in [false, true] {
+        with_refused_score_concat(|source, line| {
+            let result = if sliced {
+                let slice = std::time::Duration::ZERO;
+                let crate::LoadStep::Pending(mut pending) = crate::load_begin(source, &control, slice) else {
+                    panic!("the score must suspend before its refused grow");
+                };
+                loop {
+                    match pending.step(slice) {
+                        crate::LoadStep::Pending(next) => pending = next,
+                        crate::LoadStep::Done(result) => break result,
+                    }
+                }
+            } else {
+                crate::load_controlled(source, &control)
+            };
+            assert_eq!(result.err(), Some(crate::LoadError::Memory { line: Some(line) }),
+                "the refused concat is attributed to its document line (sliced={sliced})");
+        });
+    }
+    let unknown = crate::LoadError::Memory { line: None };
+    assert_eq!(unknown.describe(|_| unreachable!()), "Evaluation ran out of memory",
+        "a refusal with no document location does not invent a line");
 }
 
 #[test]
@@ -365,6 +391,12 @@ fn shader_instruments_and_effects_play_in_the_graph() {
     assert!(model::test_load(&wrong).is_err());
 }
 
+// Named outputs write the new side first, then add the fading old side.
+fn faded_output(frame: usize, edit: usize, old: f32, new: f32) -> f32 {
+    let gain = frame.saturating_sub(edit).min(FADE as usize) as f32 / FADE as f32;
+    new * gain + old * (1.0 - gain)
+}
+
 #[test]
 fn wired_cutoff_matches_manual_block_targets_across_passes_and_edits() {
     use crate::player::ClockMode;
@@ -383,19 +415,20 @@ Score{clock tone modulator filter master: 1}"#;
     let filter = library("filter").unwrap();
     let shader = compile(filter).unwrap();
     let offline = render(src, &RenderOpts { seconds: Some(768.0 / 48000.0), ..Default::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
-    for (pass, edits) in [(256, false), (97, false), (1, false), (97, true)] {
+    const MOD_EDIT: usize = 195;
+    for (pass, edits) in [(256, false), (97, false), (1, false), (256, true), (97, true), (1, true)] {
         let mut player = prepare_score(&doc, 48000.0, "wired_reference", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
         let mut manual = ShaderFx::new(shader.clone(), 48000.0);
         let produced = src.replace("71.0", "109.0");
         // A change of program with the same filter state and parameter names.
         let consumed = produced.replace("lib: \"filter\"", &format!("code: {:?}", filter.replace("let k = 1.0 / resonance", "let k = 1.25 / resonance")));
         let total = offline.left.len() + offline.latency as usize;
-        let mut hz = 400.0;
+        let (mut old_hz, mut hz) = (400.0, 400.0);
         let (mut live_l, mut live_r) = (Vec::new(), Vec::new());
         let mut at = 0usize;
         while at < total {
-            if edits && (at == 195 || at == 401) {
-                let next = model::ScoreDoc::test_load(if at == 195 { &produced } else { &consumed }).unwrap();
+            if edits && (at == MOD_EDIT || at == 401) {
+                let next = model::ScoreDoc::test_load(if at == MOD_EDIT { &produced } else { &consumed }).unwrap();
                 let mut fresh = prepare_score(&next, 48000.0, "wired_reference", ClockMode::Own, Some(&player.layout), at as u64, &crate::PrepareControl::default()).unwrap();
                 fresh.schedule.take_over(&mut player.schedule);
                 player = fresh;
@@ -407,7 +440,7 @@ Score{clock tone modulator filter master: 1}"#;
             }
             let mut n = pass.min(total - at);
             if edits {
-                for edge in [195, 401] { if at < edge { n = n.min(edge - at); } }
+                for edge in [MOD_EDIT, 401] { if at < edge { n = n.min(edge - at); } }
             }
             player.run(n, &mut |cue, l, r| {
                 if !cue { live_l.extend_from_slice(&l[..n]); live_r.extend_from_slice(&r[..n]); }
@@ -425,9 +458,14 @@ Score{clock tone modulator filter master: 1}"#;
                     r[j] = k / -64.0;
                 }
                 if frame % 64 == 0 {
-                    hz += if edits && frame >= 195 { 109.0 } else { 71.0 };
+                    old_hz += 71.0;
                     let mean = (l[0] + r[0]) * 0.5;
-                    assert!(manual.set_param_by_name("cutoff", (hz + 512.0 * mean) + mean));
+                    let old_out = old_hz + 512.0 * mean;
+                    let out = if edits {
+                        hz += if frame >= MOD_EDIT { 109.0 } else { 71.0 };
+                        faded_output(frame, MOD_EDIT, old_out, hz + 512.0 * mean)
+                    } else { old_out };
+                    assert!(manual.set_param_by_name("cutoff", out + mean));
                 }
                 manual.render(&l[..len], &r[..len], &mut left[i..i+len], &mut right[i..i+len]);
                 i += len;
@@ -519,14 +557,24 @@ Score{clock tone cv lp echo master: 1}"#;
     // One uninterrupted offline score authors the equivalent target at each cut.
     // The extra 50 Hz comes from the bias output.
     let script = |first, old, new, last| format!(
-        "if t < {ADD} {{ {first} }} else if t < {SWAP} {{ {old} }} else if t < {REMOVE} {{ {new} }} else {{ {last} }}");
-    let offline = render(&source(&script("700.0", old_hz, new_hz, "850.0"),
-        &script("0.125", old_dt, new_dt, "0.09375"), cutoff, time),
+        "if t < {ADD} {{ {first} }} else if t < {REMOVE} {{ ({new}) * g + ({old}) * (1.0 - g) }} else {{ {last} }}");
+    let scripted = source(&script("700.0", old_hz, new_hz, "850.0"),
+        &script("0.125", old_dt, new_dt, "0.09375"), cutoff, time)
+        .replace("let h =", &format!("let g = clamp(float(t - {SWAP}) / {FADE}.0, 0.0, 1.0); let h ="));
+    let offline = render(&scripted,
         &RenderOpts { rate: RATE, seconds: Some(1024.0 / f64::from(RATE)), ..Default::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
     let trim = offline.latency as usize;
     let total = trim + offline.left.len();
     // The reference calls process once per absolute block, independently of
     // host slicing. Only an authored edit inside a block makes an earlier cut.
+    let wired_targets = |at: usize| {
+        let x = (at % 11) as f32;
+        // cv writes hz on the right and dt on the left. Each stereo pair is
+        // mixed before the wire takes its mean, sums the bias and clamps.
+        let hz_right = faded_output(at, SWAP, 2.0 * (100.0 + 81.0 * x), 2.0 * 24000.0);
+        let dt_left = faded_output(at, SWAP, 2.0 * (x / 64.0), 2.0 * ((12.0 + x) / 64.0));
+        ((0.5 * hz_right + 50.0).min(20000.0), (0.5 * dt_left).max(0.0625))
+    };
     let reference = |remove| {
         let (lp, delay) = (FxKind::Lowpass, FxKind::Delay);
         let (mut filter, mut echo) = (FxState::new(lp, RATE), FxState::new(delay, RATE));
@@ -537,15 +585,12 @@ Score{clock tone cv lp echo master: 1}"#;
         while at < total {
             let mut len = (64 - at % 64).min(total - at);
             if at < remove { len = len.min(remove - at); }
-            let x = (at % 11) as f32;
             (fp[0], dp[0]) = if at >= remove {
                 (900.0, 0.09375)
             } else if at < ADD {
                 (750.0, 0.125)
-            } else if at < SWAP {
-                (150.0 + 81.0 * x, (x / 64.0).max(0.0625))
             } else {
-                (20000.0, (12.0 + x) / 64.0)
+                wired_targets(at)
             };
             let (mut l, mut r) = ([0.0; 64], [0.0; 64]);
             for j in 0..len {
@@ -620,7 +665,8 @@ Score{clock tone cv lp echo master: 1}"#;
             }
             if frame >= SWAP && end > 384 && end <= remove {
                 let index = player.control("lp", "cutoff").unwrap();
-                assert_eq!(player.schedule.controls.get(index), 20000.0, "upper cutoff clamp, including above Nyquist");
+                let block = (end - 1) / 64 * 64;
+                assert_eq!(player.schedule.controls.get(index), wired_targets(block).0, "held cutoff including upper clamp at {block}");
             }
             frame = end;
         }
@@ -847,9 +893,14 @@ mod render_allocations {
     use std::cell::Cell;
 
     thread_local! { static COUNT: Cell<Option<usize>> = const { Cell::new(None) }; }
+    thread_local! { pub(super) static REFUSE_SIZE: Cell<Option<usize>> = const { Cell::new(None) }; }
     struct Counting;
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if REFUSE_SIZE.get() == Some(layout.size()) {
+                REFUSE_SIZE.set(None);
+                return std::ptr::null_mut();
+            }
             COUNT.with(|n| { if let Some(v) = n.get() { n.set(Some(v + 1)); } });
             System.alloc(layout)
         }
@@ -867,12 +918,28 @@ mod render_allocations {
     }
 }
 
+/// Fail the exact-size reserve for the last concat, on this test's thread only.
+pub(super) fn with_refused_score_concat(run: impl FnOnce(&str, u32)) {
+    const DOUBLINGS: u32 = 13;
+    let source = format!("use mod.score.*\nlet n = 0\nfor i in 0..256 {{ n += i }}\nlet text = \"x\"\nfor i in 0..{DOUBLINGS} {{ text = text + text }}\nlet end = text + \"!\"\nScore{{}}");
+    let line = source.lines().position(|s| s.starts_with("let end")).unwrap() as u32 + 1;
+    struct Disarm;
+    impl Drop for Disarm {
+        fn drop(&mut self) { render_allocations::REFUSE_SIZE.set(None); }
+    }
+    let _disarm = Disarm;
+    render_allocations::REFUSE_SIZE.set(Some((1 << DOUBLINGS) + 1));
+    run(&source, line);
+    assert!(render_allocations::REFUSE_SIZE.get().is_none(), "the script reached the selected physical grow");
+}
+
 #[test]
 fn instrument_wires_follow_the_block_through_live_edits_and_export() {
     use crate::player::ClockMode;
     use makepad_audio_engine::schedule::SPAN;
     use makepad_score_player::shader::{compile, ShaderInst};
 
+    const SOURCE_EDIT: usize = 101;
     let src = r#"use mod.score.*
 let clock = Clock{bpm: 120}
 let src = ShaderControl{code: "let out = output(1) var blocks = int(0) var target = 0.0 fn block() { blocks += 1; target += 0.03125; out = target }"}
@@ -883,7 +950,11 @@ Score{clock src pad line tap master: 1}"#;
     let edit_source = src.replace("+= 0.03125", "+= 0.0625");
     let edit_voice = edit_source.replace("level + float", "level * 0.5 + float");
     // An offline score with both edits authored at their corresponding samples.
-    let scripted = src.replace("+= 0.03125", "+= if blocks > 2 { 0.0625 } else { 0.03125 }")
+    // The instrument samples src.out at each absolute block start.
+    let scripted = src.replace("target += 0.03125; out = target", &format!(
+        "target += if blocks > 2 {{ 0.0625 }} else {{ 0.03125 }}; \
+         let g = clamp(float((blocks - 1) * 64 - {SOURCE_EDIT}) / {FADE}.0, 0.0, 1.0); \
+         out = target * g + (float(blocks) * 0.03125) * (1.0 - g)"))
         .replace("level + float", "(if tick >= 239 { level * 0.5 } else { level }) + float");
     let rate = 48000.0;
     let offline = render(&scripted, &RenderOpts { seconds: Some(512.0 / rate), ..Default::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
@@ -899,13 +970,13 @@ Score{clock src pad line tap master: 1}"#;
         for event in events { assert!(host.feeds.iter().find(|(k, _)| *k == event.loop_key).unwrap().1.send(event)); }
         let mut manual = ShaderInst::new(manual_program.clone(), rate as f32);
         manual.note_on(60.0, 1.0, 0, 0);
-        let mut target = 0.0;
+        let (mut old_target, mut target) = (0.0, 0.0);
         let mut frame = 0;
         let trim = offline.latency as usize;
         let total = trim + offline.left.len();
         while frame < total {
-            if frame == 101 || frame == 239 {
-                let rev = if frame == 101 { 1 } else { 2 };
+            if frame == SOURCE_EDIT || frame == 239 {
+                let rev = if frame == SOURCE_EDIT { 1 } else { 2 };
                 let mut next = prepare_score(&docs[rev], rate as f32, &name, ClockMode::Own, Some(&host.layout), rev as u64 + 1, &crate::PrepareControl::default()).unwrap();
                 next.schedule.take_over(&mut host.schedule);
                 host = next;
@@ -915,7 +986,7 @@ Score{clock src pad line tap master: 1}"#;
                     manual = changed;
                 }
             }
-            let end = [101, 239, total].into_iter().find(|&i| i > frame).unwrap().min(frame + pass);
+            let end = [SOURCE_EDIT, 239, total].into_iter().find(|&i| i > frame).unwrap().min(frame + pass);
             let n = end - frame;
             let (mut l, mut r) = ([0.0; CHUNK], [0.0; CHUNK]);
             // Compare at the same device output, including its startup gate.
@@ -928,8 +999,9 @@ Score{clock src pad line tap master: 1}"#;
             while i < n {
                 let at = frame + i;
                 if at % 64 == 0 {
-                    target += if at >= 101 { 0.0625 } else { 0.03125 };
-                    assert!(manual.set_param_by_name("level", target));
+                    old_target += 0.03125;
+                    target += if at >= SOURCE_EDIT { 0.0625 } else { 0.03125 };
+                    assert!(manual.set_param_by_name("level", faded_output(at, SOURCE_EDIT, old_target, target)));
                 }
                 let stop = n.min(i + 64 - at % 64);
                 manual.render(&mut want_l[i..stop], &mut want_r[i..stop]);
@@ -1031,7 +1103,7 @@ let kick = Loop{play: pulse beats: 1 notes: [[0 @c4 0.5 1]]}
 let split = ShaderFx{in: [kick] code: "let low = output(2) fn effect(l,r) { low = vec2(l,r); 0.0 }"}
 let comp = ShaderFx{in: [Port{node: split name: @low}] key: kick code: "let key = input(1) fn effect(l,r) { vec2(l,r) * key }"}
 Score{clock pulse kick split comp}"#;
-    let authored = model::read_document(score).unwrap();
+    let authored = model::read_document_controlled(score, &crate::PrepareControl::default()).unwrap();
     let comp = authored.doc.fx.iter().find(|fx| fx.name == "comp").unwrap();
     assert!(comp.sides.iter().any(|(name, wire)| name == "key" && wire.ports().eq([("kick", "audio")])),
         "a bare name on an input port is an authored wire");
@@ -1267,6 +1339,7 @@ Score{clock dust west east fx}"#;
 
 #[test]
 fn shader_choices_and_steps_reach_the_render() {
+    let word = crate::PrepareControl::default();
     let code = "let wave = param(0, {choices: [square saw tri]})\nlet level = param(0, 0, 1, {step: 0.5})\nlet cutoff = param(1200, 20, 16000, {unit: hz})\nfn voice() { vec2(wave * level, 0) }";
     let score = |wave: &str| format!("use mod.score.*\nlet clock = Clock{{}}\nlet tone = Shader{{code: {code:?} wave: {wave} level: 0.7}}\nlet line = Loop{{play: tone beats: 1 notes: [[0 @c4 0.5 1]]}}\nScore{{clock tone line}}");
     let named = score("@saw");
@@ -1279,7 +1352,7 @@ fn shader_choices_and_steps_reach_the_render() {
         .replace("step: 0.5", "step: half");
     for source in [&named, &computed] {
         let before = model::SHADER_COMPILES.with(|n| n.get());
-        let authored = model::read_document(source).unwrap();
+        let authored = model::read_document_controlled(source, &word).unwrap();
         let def = authored.doc.shader_def("tone").unwrap();
         assert!(def.overrides.contains(&("level".into(), model::Override::Num(0.7))));
         assert!(def.overrides.contains(&("wave".into(), model::Override::Choice("saw".into()))));
@@ -1289,16 +1362,16 @@ fn shader_choices_and_steps_reach_the_render() {
     }
 
     let broken = "use mod.score.*\nlet clock = Clock{}\nlet ctl = ShaderControl{\n    code: \"let out = output(1) fn block() { out = undefined_body_value }\"\n}\nScore{clock ctl}";
-    assert!(model::read_document(broken).is_ok(), "a body type error is resolved only at load");
+    assert!(model::read_document_controlled(broken, &word).is_ok(), "a body type error is resolved only at load");
     let valid_loop = plays("Synth{preset: @pluck}", A_NOTE);
     let poisoned = valid_loop.replacen("Score{", "let unused = ShaderControl{code: \"let out = output(1) fn block() { out = unknown_name }\"}\nScore{unused ", 1);
     assert!(matches!(model::ScoreDoc::load_controlled(&poisoned, &crate::PrepareControl::default()), Err(crate::LoadError::Problems(_))));
-    assert_eq!(crate::render::cycle_notes(&valid_loop), crate::render::cycle_notes(&poisoned));
-    let loop_name = model::read_document(&valid_loop).unwrap().doc.loops[0].name.clone();
-    assert_eq!(crate::vary::part_of(&valid_loop, &loop_name).unwrap(), crate::vary::part_of(&poisoned, &loop_name).unwrap());
-    assert_eq!(crate::render::timing(&valid_loop, None).unwrap(), crate::render::timing(&poisoned, None).unwrap());
+    assert_eq!(crate::render::cycle_notes_controlled(&valid_loop, &word).unwrap(), crate::render::cycle_notes_controlled(&poisoned, &word).unwrap());
+    let loop_name = model::read_document_controlled(&valid_loop, &word).unwrap().doc.loops[0].name.clone();
+    assert_eq!(crate::vary::part_of_controlled(&valid_loop, &loop_name, &word).unwrap(), crate::vary::part_of_controlled(&poisoned, &loop_name, &word).unwrap());
+    assert_eq!(crate::render::timing_controlled(&valid_loop, None, &word).unwrap(), crate::render::timing_controlled(&poisoned, None, &word).unwrap());
     let loop_error = |source: &str| {
-        crate::render::loop_error(&source.replace("play(@c4,", "play(nope(),"), &loop_name)
+        crate::render::loop_error_controlled(&source.replace("play(@c4,", "play(nope(),"), &loop_name, &word).unwrap()
             .expect("the loop itself fails when pumped")
     };
     assert_eq!(loop_error(&valid_loop), loop_error(&poisoned), "the unrelated shader cannot hide a loop error");
@@ -1310,8 +1383,13 @@ fn shader_choices_and_steps_reach_the_render() {
         body, diag(5, "a ShaderControl has no main audio input for `in`; wire a param instead"),
     ], "a failed shader and a structural error keep their positions and order");
     let malformed = broken.replace("undefined_body_value", "0x");
-    assert_eq!(model::read_document(&malformed).err().expect("a malformed shader has no inventory"),
-        [diag(4, "shader line 1: bad hex number `0x`")]);
+    assert_eq!(model::read_document_controlled(&malformed, &word).err(),
+        Some(crate::LoadError::Problems(vec![diag(4, "shader line 1: bad hex number `0x`")])),
+        "a malformed shader has no inventory and keeps its authored diagnostic and location");
+
+    let labelled = valid_loop.replace("Score{", "Score{label: \"Live\" ");
+    assert_eq!(model::evaluated_label_controlled(&labelled, &word).unwrap().as_deref(), Some("Live"));
+    assert_eq!(model::evaluated_palette_controlled(&valid_loop, &word).unwrap(), Some((120.0, vec!["inst (synth)".into()])));
 
     let opts = RenderOpts { seconds: Some(0.05), ..Default::default() };
     let a = render(&named, &opts, &NoSamples, &crate::PrepareControl::default()).unwrap();
@@ -1390,7 +1468,7 @@ fn game_music_headless_equals_the_offline_render_and_reports_its_beats() {
     let src = PULSE_A.replace("Score{clock s pulse}", "let hat = Loop{hits: \"x.x.\" step: 0.5}\nlet a = Section{bars: 1 loops: [pulse]}\nlet b = Section{bars: 1 loops: [hat]}\nScore{clock s pulse hat a b arrange: [a b]}");
     let seconds = 3.0;
     let offline = render(&src, &RenderOpts { seconds: Some(seconds), ..RenderOpts::default() }, &NoSamples, &crate::PrepareControl::default()).unwrap();
-    let (mut handle, mut inst) = music(&src, 48_000.0, Clocking::Headless).unwrap_or_else(|d| panic!("{d:?}"));
+    let (mut handle, mut inst) = music(&src, 48_000.0, Clocking::Headless, &crate::PrepareControl::default()).unwrap_or_else(|d| panic!("{d:?}"));
     let total = (seconds * 48_000.0) as usize;
     let mut out = Vec::new();
     let mut events = Vec::new();
@@ -1440,17 +1518,65 @@ fn game_music_headless_equals_the_offline_render_and_reports_its_beats() {
 #[test]
 fn game_music_takes_a_new_graph_without_stopping() {
     use crate::game::{music, Clocking};
+    use crate::{LoadError, PrepareControl};
     use makepad_audio_synth::Instrument;
+    use makepad_script::makepad_error_log::{set_log_tap, LogLevel};
+    use std::sync::Mutex;
+
     let source = PULSE_A.replace("Synth{preset: @pluck}", r#"Shader{code: "fn voice() { gate * 0.1 }"}"#);
     let count = || model::SHADER_COMPILES.with(|n| n.get());
     let before = count();
-    let (mut handle, mut inst) = music(&source, 48_000.0, Clocking::Headless).unwrap();
+    let start = |source: &str, control: &PrepareControl| music(source, 48_000.0, Clocking::Headless, control);
+    let cancelled = PrepareControl::default();
+    cancelled.cancel();
+    assert!(matches!(start(&source, &cancelled), Err(LoadError::Cancelled)),
+        "a pre-cancelled start returns neither music nor diagnostics");
+    assert_eq!(count(), before, "a pre-cancelled start skips shader preparation");
+
+    let (mut handle, mut inst) = start(&source, &PrepareControl::default()).expect("a finite score starts");
     assert_eq!(count(), before + 1, "the headless composer reuses the checked shader on start");
+    let silent = "use mod.score.*\nlet clock = Clock{}\nScore{clock}";
+    assert_eq!(handle.set_source(silent, &cancelled), Err(LoadError::Cancelled),
+        "a pre-cancelled replacement returns no diagnostic");
+
+    // Stop from a second thread once the document itself reports entry.
+    {
+        const MARK: &str = "game_music_document_entered";
+        static REQUEST: Mutex<Option<PrepareControl>> = Mutex::new(None);
+        fn tap(message: &str, _: LogLevel) {
+            if message.contains(MARK) {
+                let control = REQUEST.lock().unwrap().take().expect("one marker per request");
+                assert!(control.script_running(), "the game document is registered on its caller's control");
+                std::thread::spawn(move || control.cancel()).join().unwrap();
+            }
+        }
+        struct ResetTap;
+        impl Drop for ResetTap {
+            fn drop(&mut self) {
+                set_log_tap(None);
+                REQUEST.lock().unwrap().take();
+            }
+        }
+        let _lock = crate::live::TEST_LOG_TAP.lock().unwrap_or_else(|e| e.into_inner());
+        set_log_tap(Some(tap));
+        let _reset = ResetTap;
+        let runaway = format!("mod.std.log({MARK:?})\nloop {{}}");
+        for starting in [true, false] {
+            let control = PrepareControl::default();
+            *REQUEST.lock().unwrap() = Some(control.clone());
+            let result = if starting { start(&runaway, &control).map(drop) } else { handle.set_source(&runaway, &control) };
+            assert!(control.is_cancelled(), "the other thread stopped the running document (start={starting})");
+            assert_eq!(result, Err(LoadError::Cancelled), "the runaway ends without diagnostics (start={starting})");
+        }
+    }
     let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+    let mut original_peak = 0.0f32;
     for _ in 0..10 {
         handle.advance(4800);
         inst.render(&mut l, &mut r);
+        original_peak = original_peak.max(peak(&l));
     }
+    assert!(original_peak > 0.0, "the original graph still plays after the cancelled replacements");
     // A new instrument and loop: a new graph, the pulse carried over.
     let next = source.replace("Score{clock s pulse}", "let bell = Ironfish{program: \"glass\"}\nlet ring = Loop{play: bell beats: 4 code: fn(i) { play(@c5, {dur: 1}) sleep(4) }}\nScore{clock s bell pulse ring}");
     let mut slot = crate::game::MusicSlot::default();
@@ -1461,7 +1587,7 @@ fn game_music_takes_a_new_graph_without_stopping() {
     assert!(stale.is_cancelled() && !latest.is_cancelled(), "only the replaced prepare is cancelled");
     assert_eq!(handle.post(&mut first), Err(crate::LoadError::Cancelled), "a completed obsolete graph cannot enter the swaps queue");
     let before = count();
-    handle.set_source(&next).unwrap_or_else(|d| panic!("{d:?}"));
+    handle.set_source(&next, &latest).expect("a finite replacement loads");
     assert_eq!(count(), before + 1, "the headless composer reuses the replacement shader on reload");
     let mut heard = 0.0f32;
     for _ in 0..20 {
@@ -1471,14 +1597,15 @@ fn game_music_takes_a_new_graph_without_stopping() {
         handle.poll();
     }
     assert!(heard > 0.01);
-    assert!(handle.set_source("let broken = ").is_err());
+    assert!(matches!(handle.set_source("let broken = ", &slot.begin()), Err(LoadError::Problems(_))),
+        "an invalid replacement still reports diagnostics");
 }
 
 #[test]
 fn game_music_plays_on_a_synth_bus_in_real_time() {
     use crate::game::{music, Clocking, MusicEvent};
     use makepad_audio_synth::bus::{Emitter, Group, SynthBus};
-    let (mut handle, inst) = music(PULSE_A, 48_000.0, Clocking::Realtime).unwrap();
+    let (mut handle, inst) = music(PULSE_A, 48_000.0, Clocking::Realtime, &crate::PrepareControl::default()).unwrap();
     let mut bus = SynthBus::new(48_000.0);
     assert!(bus.add_instrument(7, Box::new(inst), Emitter::FLAT, 1.0, &mut |_| {}));
     bus.set_instrument_group(7, Group::Music);
@@ -1565,7 +1692,7 @@ fn a_voice_sings_with_the_library_singer_the_host_gives() {
 #[test]
 fn timing_reads_the_sections_without_rendering() {
     let src = PULSE_A.replace("Score{clock s pulse}", "let hat = Loop{hits: \"x.x.\" step: 0.5}\nlet a = Section{bars: 1 loops: [pulse]}\nlet b = Section{bars: 1 loops: [hat]}\nScore{clock s pulse hat a b arrange: [a b]}");
-    let t = crate::render::timing(&src, None).unwrap();
+    let t = crate::render::timing_controlled(&src, None, &crate::PrepareControl::default()).unwrap();
     assert_eq!((t.bpm, t.beats_per_bar, t.seconds), (120.0, 4.0, 6.0));
     assert_eq!(t.sections, vec![("a".to_string(), 0.0, 2.0), ("b".to_string(), 2.0, 6.0)]);
 }
@@ -1709,7 +1836,7 @@ fn feeds_are_freed_with_their_music() {
     use crate::game::{music, Clocking};
     use makepad_audio_engine::feed::registry_len;
     let make = |clocking| {
-        let (handle, inst) = music(PULSE_A, 48_000.0, clocking).unwrap();
+        let (handle, inst) = music(PULSE_A, 48_000.0, clocking, &crate::PrepareControl::default()).unwrap();
         drop(inst);
         drop(handle);
     };
@@ -1761,14 +1888,14 @@ fn sections_change_the_tempo_sample_exactly() {
     // 4 beats at 100, 4 at 150, then down to 60.
     assert!((r.seconds_at(4.0) - 2.4).abs() < 1e-9);
     assert!((r.seconds_at(8.0) - 4.0).abs() < 1e-9);
-    let t = crate::render::timing(TEMPO, Some(9.0)).unwrap();
+    let t = crate::render::timing_controlled(TEMPO, Some(9.0), &crate::PrepareControl::default()).unwrap();
     assert_eq!(t.sections[1].0, "fast");
     assert!((t.sections[1].1 - 2.4).abs() < 1e-9 && (t.sections[2].1 - 4.0).abs() < 1e-9);
     // A game's headless music in odd blocks plays the same samples, and
     // its beat events follow the map.
     use crate::game::{music, Clocking, MusicEvent};
     use makepad_audio_synth::Instrument;
-    let (mut handle, mut inst) = music(TEMPO, 48_000.0, Clocking::Headless).unwrap();
+    let (mut handle, mut inst) = music(TEMPO, 48_000.0, Clocking::Headless, &crate::PrepareControl::default()).unwrap();
     let latency = r.latency as usize;
     let total = r.left.len() + latency;
     let (mut out, mut beats) = (Vec::new(), Vec::new());
@@ -2991,7 +3118,63 @@ fn a_keyboard_plays_its_loop_while_the_transport_is_stopped_and_the_pedal_holds(
 }
 
 #[test]
+fn a_held_document_evaluation_takes_precedence_in_the_desk_overlay() {
+    use model::{LoadActivity::*, LoadProgress, LoadResult, RevisionLoads};
+    use makepad_script::makepad_error_log::{set_log_tap, LogLevel};
+    use std::sync::{mpsc::{channel, Sender}, Mutex};
+    use std::time::Duration;
+
+    const MARK: &str = "desk_overlay_document_entered";
+    static ENTERED: Mutex<Option<Sender<Sender<()>>>> = Mutex::new(None);
+    fn tap(message: &str, _: LogLevel) {
+        if message.contains(MARK) {
+            let notify = ENTERED.lock().unwrap().take();
+            if let Some(notify) = notify {
+                let (release, held) = channel();
+                if notify.send(release).is_ok() { let _ = held.recv(); }
+            }
+        }
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) { set_log_tap(None); ENTERED.lock().unwrap().take(); }
+    }
+    let _lock = crate::live::TEST_LOG_TAP.lock().unwrap_or_else(|e| e.into_inner());
+    let (notify, entered) = channel();
+    *ENTERED.lock().unwrap() = Some(notify);
+    set_log_tap(Some(tap));
+    let _reset = Reset;
+
+    let mut loads = RevisionLoads::default();
+    loads.submit(1, &format!("use mod.score.*\nmod.std.log({MARK:?})\nlet c = Clock{{}}\nScore{{c}}"), drop);
+    let mut progress = LoadProgress::default();
+    let mut sample = |load: Option<&model::RevisionLoad>, slot, now| progress.sample(load, slot, now, 0.2);
+    assert_eq!(sample(None, true, 0.0), None, "a short device-rate init stays hidden");
+    assert_eq!(sample(None, true, 0.2), Some(Initialising), "a sustained init is visible at the delay");
+    loads.start(|request| {
+        assert!(!request.evaluating(), "queuing the revision does not mark its VM as running");
+        std::thread::scope(|scope| {
+            let entered = entered; // Disconnect the tap on unwind before the scoped worker is joined.
+            let worker = scope.spawn(|| request.run());
+            let release = entered.recv_timeout(Duration::from_secs(5)).expect("the revision is inside its document VM");
+            assert!(request.evaluating(), "the held evaluation is visible through its revision");
+            assert_eq!(sample(Some(&request), true, 0.5), Some(Initialising));
+            assert_eq!(sample(Some(&request), true, 0.69), Some(Initialising), "a short evaluation cannot flash over an init");
+            assert_eq!(sample(Some(&request), true, 0.71), Some(Evaluating), "the sustained evaluation takes precedence");
+            drop(release);
+            let result = worker.join().unwrap();
+            assert!(matches!(result, LoadResult::Ready(..)), "the held revision finishes normally");
+            assert!(!request.evaluating(), "the VM unregisters before the revision returns");
+            assert_eq!(sample(Some(&request), true, 0.72), Some(Initialising), "the ongoing init is immediately visible again");
+            assert_eq!(sample(None, false, 0.73), None, "the ordinary desk status returns");
+        });
+        Some(())
+    });
+}
+
+#[test]
 fn a_new_revision_cancels_a_load_already_reading_a_shader() {
+    use std::cell::Cell;
     use crate::model::{LoadResult, RevisionLoads};
     use std::sync::mpsc::{sync_channel, Receiver};
     use std::time::Duration;
@@ -3004,6 +3187,14 @@ fn a_new_revision_cancels_a_load_already_reading_a_shader() {
     cancelled.cancel();
     assert!(matches!(model::load_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)),
         "cancellation takes precedence even over a broken shader");
+    assert!(matches!(model::read_document_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(model::evaluated_label_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(model::evaluated_palette_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(crate::render::cycle_notes_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(crate::render::loop_error_controlled(&bad, "line", &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(crate::render::phrase_notes_controlled(&bad, "line", 1.0, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(crate::render::timing_controlled(&bad, None, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(crate::vary::part_of_controlled(&bad, "line", &cancelled), Err(crate::LoadError::Cancelled)));
     let during = crate::PrepareControl::default();
     let worker = during.clone();
     model::ON_SHADER_COMPILE.with(|hook| hook.replace(Some(Box::new(move || worker.cancel()))));
@@ -3099,12 +3290,121 @@ fn a_new_revision_cancels_a_load_already_reading_a_shader() {
     assert_eq!(passes, 1, "the next pass never executes");
     assert!(matches!(result, Err(crate::LoadError::Cancelled)), "no partial render escapes");
     let set = loads.shaders.as_ref().unwrap();
-    let evaluated = set.evaluate(&good).unwrap();
+    assert!(matches!(set.evaluate_controlled(&bad, &cancelled), Err(crate::LoadError::Cancelled)));
+    assert!(matches!(set.evaluate_rewrite(&bad, &cancelled), Err(crate::LoadError::Cancelled)),
+        "cancellation does not request a fallback compile");
+    let evaluated = set.evaluate_controlled(&good, &crate::PrepareControl::default()).unwrap();
     assert!(doc.shader("inst").unwrap().shader.ptr_eq(&evaluated.doc.shader("inst").unwrap().shader));
     let count = model::SHADER_COMPILES.with(|count| count.get());
-    let diags = set.evaluate(&bad).err().expect("a changed definition cannot use the compiled set");
+    let Some(crate::LoadError::Problems(diags)) = set.evaluate_controlled(&bad, &crate::PrepareControl::default()).err() else {
+        panic!("a changed definition cannot use the compiled set");
+    };
     assert!(diags.iter().any(|d| d.message.contains("internal error")));
     assert_eq!(model::SHADER_COMPILES.with(|count| count.get()), count, "a mismatch never falls back to compilation");
+
+    async fn rewrite_then_load(
+        set: &model::CompiledShaders, source: &str, word: &crate::PrepareControl, loading: &Cell<bool>,
+    ) -> Result<(crate::Loaded, crate::Loaded), crate::LoadError> {
+        let rewrite = set.evaluate_rewrite_with_slice(source, word, Duration::ZERO).await?
+            .expect("the rewrite preserves the shader definition");
+        loading.set(true);
+        let loaded = model::load_with_slice(&rewrite.doc.source, word, Duration::ZERO).await?;
+        Ok((rewrite, loaded))
+    }
+
+    let rewritten = good.replace("let clock = Clock{bpm: 120}",
+        "let n = 0\nfor i in 0..512 { n += 1 }\nlet clock = Clock{bpm: n / 4}");
+    let word = crate::PrepareControl::default();
+    let whole_rewrite = set.evaluate_rewrite(&rewritten, &word).unwrap().unwrap();
+    let whole_load = crate::load_controlled(&whole_rewrite.doc.source, &word).unwrap();
+    let loading = Cell::new(false);
+    let mut reads = std::pin::pin!(rewrite_then_load(set, &rewritten, &word, &loading));
+    assert!(poll_once(reads.as_mut()).is_pending() && !loading.get(), "read one yields before the load starts");
+    let mut load_yielded = false;
+    let (rewrite, loaded) = loop {
+        if let std::task::Poll::Ready(done) = poll_once(reads.as_mut()) { break done.unwrap(); }
+        load_yielded |= loading.get();
+    };
+    assert!(load_yielded, "the dependent load also yields");
+    assert_eq!(rewrite.doc, whole_rewrite.doc, "the sliced rewrite matches the blocking rewrite");
+    assert_eq!(rewrite.vm.root, whole_rewrite.vm.root, "the rewrite preserves the evaluated score");
+    assert!(rewrite.doc.shader("inst").unwrap().shader.ptr_eq(&doc.shader("inst").unwrap().shader),
+        "the sliced rewrite keeps the original compiled program");
+    assert_eq!(loaded.doc, whole_load.doc, "the dependent load matches the blocking load");
+    assert_eq!(loaded.vm.objects, whole_load.vm.objects, "the load preserves the evaluated nodes and their locations");
+    assert_eq!(loaded.doc.warnings(), whole_load.doc.warnings(), "both loads return the same diagnostics");
+
+    for cancel in [true, false] {
+        let word = crate::PrepareControl::default();
+        let loading = Cell::new(false);
+        let mut reads = Box::pin(rewrite_then_load(set, "loop {}", &word, &loading));
+        assert!(poll_once(reads.as_mut()).is_pending() && word.script_running(), "read one is suspended and registered");
+        if cancel {
+            word.cancel();
+            assert!(matches!(poll_once(reads.as_mut()), std::task::Poll::Ready(Err(crate::LoadError::Cancelled))),
+                "Stop in read one ends the chain without diagnostics");
+            assert!(!word.script_running(), "the cancelled read unregisters before its future is dropped");
+        }
+        drop(reads);
+        assert!(!word.script_running(), "dropping the suspended read releases the registration");
+        assert!(!loading.get(), "read two never started");
+    }
+}
+
+fn poll_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+    future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+}
+
+#[test]
+fn interleaved_evaluations_keep_their_vm_and_only_blocking_reads_hit_the_ui_guard() {
+    use crate::vm::evaluate_with_slice;
+    use makepad_core_util::ui_thread::{mark_ui_thread, violations};
+    use std::{task::Poll, time::Duration};
+
+    // The UI mark belongs to this thread for its lifetime.
+    std::thread::spawn(|| {
+        mark_ui_thread();
+        let hits = || violations().into_iter().find(|(name, _)| *name == "a score evaluation").map_or(0, |(_, n)| n);
+        let before = hits();
+        let sources = ["let n = 0\nfor i in 0..512 { n += i }\nn", "let n = 1\nfor i in 0..512 { n += 2 }\nn"];
+        let words = [crate::PrepareControl::default(), crate::PrepareControl::default()];
+        let eval = |i: usize| evaluate_with_slice(sources[i], &words[i], Duration::ZERO);
+        let whole = crate::drive(async {
+            let first = crate::drive(eval(0)).unwrap();
+            let second = eval(1).await.unwrap();
+            [first, second]
+        });
+        assert_ne!(whole[0].root, whole[1].root, "the scripts have distinguishable results");
+        assert_eq!(hits() - before, whole.len(), "nested blocking drivers count each evaluation once across all its polls");
+
+        let after_drive = hits();
+        let mut futures = [Box::pin(eval(0)), Box::pin(eval(1))];
+        for future in &mut futures {
+            assert!(poll_once(future.as_mut()).is_pending(), "each VM yields its first slice");
+        }
+        assert!(words.iter().all(|w| w.script_running()), "both VMs are suspended on this thread");
+        let mut results = [None, None];
+        while results.iter().any(Option::is_none) {
+            for (future, result) in futures.iter_mut().zip(&mut results) {
+                if result.is_none() {
+                    if let Poll::Ready(done) = poll_once(future.as_mut()) { *result = Some(done.unwrap()); }
+                }
+            }
+        }
+        for (result, whole) in results.into_iter().zip(whole) {
+            let sliced = result.unwrap();
+            assert_eq!(sliced.root, whole.root, "each interleaved VM produces its own whole-run value");
+            assert_eq!(sliced.errors, whole.errors, "interleaving preserves each VM's diagnostics");
+        }
+        assert_eq!(hits(), after_drive, "polling the same futures outside drive records no UI evaluation");
+        words[0].cancel();
+        assert!(matches!(crate::drive(eval(0)), Err(crate::LoadError::Cancelled)), "a pre-cancelled read stays cancelled");
+        assert_eq!(hits(), after_drive, "a pre-cancelled blocking read records no UI evaluation");
+
+        let mut page_job = std::pin::pin!(async { crate::vm::evaluate_controlled(sources[1], &words[1]) });
+        assert!(matches!(poll_once(page_job.as_mut()), Poll::Ready(Ok(_))), "the sync reader finishes within the page poll");
+        assert_eq!(hits(), after_drive + 1, "a sync reader inside a directly polled job is visible by name");
+    }).join().expect("UI evaluation checks complete");
 }
 
 /// A rewind is a first start: through a host root like the apps', with the
@@ -3397,16 +3697,23 @@ Score{clock fx}"#;
     let key = crate::player::sample_name(&assets[0]);
     samples::forget(&key);
     let mut before = prepare_score(&doc, 48000.0, "table_score", ClockMode::Own, None, 1, &crate::PrepareControl::default()).unwrap();
-    let pass = |player: &mut Player| {
-        player.run(8, &mut |_, _, _| {});
+    const PASS: usize = 8;
+    let pass = |player: &mut Player| -> [[f32; 2]; PASS] {
+        player.run(PASS, &mut |_, _, _| {});
         let out = player.schedule.ops.iter().find_map(|op| if let Op::ShaderFx { out, .. } = op { Some(*out as usize) } else { None }).unwrap();
-        (player.schedule.arena[out * SPAN], player.schedule.arena[out * SPAN + CHUNK])
+        std::array::from_fn(|i| [player.schedule.arena[out * SPAN + i], player.schedule.arena[out * SPAN + CHUNK + i]])
     };
-    assert_eq!(pass(&mut before), (0.0, 0.0), "waiting for the recording");
+    assert_eq!(pass(&mut before), [[0.0; 2]; PASS], "waiting for the recording");
     samples::register(&key, Arc::new(Sample::new(vec![0.5, 0.0].into(), Some(vec![-0.25, 0.0].into()), 24000.0)));
     let mut after = prepare_score(&doc, 48000.0, "table_score", ClockMode::Own, Some(&before.layout), 2, &crate::PrepareControl::default()).unwrap();
     after.schedule.take_over(&mut before.schedule);
-    assert_eq!(pass(&mut after), (0.5, -0.25), "resampled stereo data and carried age");
+    for at in (0..FADE as usize + PASS).step_by(PASS) {
+        for (i, stereo) in pass(&mut after).into_iter().enumerate() {
+            let k = at + i;
+            let gain = k.min(FADE as usize) as f32 / FADE as f32;
+            assert_eq!(stereo, [0.5 * gain, -0.25 * gain], "resampled stereo data and carried age at frame {k}");
+        }
+    }
     samples::forget(&key);
 }
 
@@ -3416,65 +3723,111 @@ Score{clock fx}"#;
 fn only_request_owners_create_prepare_controls() {
     use std::path::Path;
 
-    const OWNERS: [(&str, &str); 4] = [
+    const OWNERS: [(&str, &str); 13] = [
+        ("score_live/src/palette/sounds.rs", "load"), // The trusted shipped palette is read once on first use from bundled sources.
+        ("score_live/src/bin/score_palette.rs", "main"), // The palette CLI owns the audition.
+        ("score_live/src/bin/neural_latency/native.rs", "run"), // The neural latency CLI owns its music request.
+        ("midi_library/src/bin/midi_library.rs", "run"), // The MIDI CLI (also midi-text) owns the text or cover request.
+        ("midi_library/src/tools.rs", "receive"), // The MCP reader owns the word until that call replies or the input closes.
+        ("music_iter/src/bin/music_iter.rs", "main"), // The Music Iter CLI owns its song or batch.
+        ("music_corpus/src/bin/music_corpus.rs", "build"), // The build command owns all its generated examples.
+        ("music_corpus/src/bin/music_corpus.rs", "run_eval"), // The eval command owns all predictions and reference reads.
+        ("score_live/src/live.rs", "try_set_prepared"), // The sender owns each accepted playing source, including an audition.
         ("score_live/src/model.rs", "submit"),       // RevisionLoads owns the pending source revision.
         ("score_live/src/node.rs", "new"),           // Slot owns the observer for its player generations.
         ("score_live/src/node.rs", "begin"),         // Host owns the pending player generation.
         ("score_live/src/game.rs", "begin"),         // MusicSlot owns its music request.
     ];
 
-    fn scan(libs: &Path, dir: &Path, seen: &mut [bool; OWNERS.len()], violations: &mut Vec<String>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if !matches!(path.file_name().and_then(|s| s.to_str()), Some("bin" | "tests" | "examples")) {
-                    scan(libs, &path, seen, violations);
-                }
-                continue;
-            }
-            let file = path.file_name().unwrap().to_str().unwrap();
-            if !file.ends_with(".rs") || file == "tests.rs" || file.ends_with("_tests.rs") { continue; }
-            let source = std::fs::read_to_string(&path).unwrap();
-            let relative = path.strip_prefix(libs).unwrap().to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-            let mut function = "";
-            let mut test_item = None;
-            let mut test_body = false;
-            for (line_number, line) in source.lines().enumerate() {
-                let trimmed = line.trim_start();
-                let indent = line.len() - trimmed.len();
-                if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]") {
-                    test_item.get_or_insert(indent);
-                }
-                if let Some(start) = test_item {
-                    if !test_body && trimmed.contains('{') { test_body = true; }
-                    if indent == start && (matches!(trimmed, "}" | "};") || (!test_body && trimmed.ends_with(';'))) {
-                        test_item = None;
-                        test_body = false;
-                    }
-                    continue;
-                }
-                let code = trimmed.split("//").next().unwrap();
-                if let Some((_, declaration)) = code.split_once("fn ") {
-                    function = declaration.split(['(', '<', ' ']).next().unwrap_or("");
-                }
-                let compact: String = code.split_whitespace().collect();
-                if !(compact.contains(".renewed()") || compact.contains("PrepareControl::default(") || compact.contains("PrepareControl::new(")
-                    || (compact.contains("PrepareControl=") && compact.contains("Default::default("))) { continue; }
-                if let Some(owner) = OWNERS.iter().position(|site| *site == (relative.as_str(), function)) {
-                    seen[owner] = true;
-                } else {
-                    violations.push(format!("{relative}:{} ({function})", line_number + 1));
-                }
-            }
-        }
-    }
-
     let libs = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut seen = [false; OWNERS.len()];
     let mut violations = Vec::new();
     for name in ["score_live", "midi_library", "music_iter", "music_corpus"] {
-        scan(libs, &libs.join(name).join("src"), &mut seen, &mut violations);
+        scan_control_sites(libs, &libs.join(name).join("src"), &OWNERS, &mut seen, &mut violations, "", |compact| {
+            compact.contains(".renewed()") || compact.contains("PrepareControl::default(") || compact.contains("PrepareControl::new(")
+                || (compact.contains("PrepareControl=") && compact.contains("Default::default("))
+        });
     }
     for (owner, found) in OWNERS.iter().zip(seen) { assert!(found, "missing request owner {owner:?}"); }
     assert!(violations.is_empty(), "helper created a prepare control: {}", violations.join(", "));
+}
+
+fn scan_control_sites(root: &std::path::Path, dir: &std::path::Path, owners: &[(&str, &str)], seen: &mut [bool],
+    violations: &mut Vec<String>, needle: &str, is_call: fn(&str) -> bool) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        if kind.is_symlink() { continue; }
+        let path = entry.path();
+        if kind.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') && !matches!(name.as_ref(), "tests" | "target" | "node_modules" | "local") {
+                scan_control_sites(root, &path, owners, seen, violations, needle, is_call);
+            }
+            continue;
+        }
+        let file = path.file_name().unwrap().to_str().unwrap();
+        if !file.ends_with(".rs") || file == "tests.rs" || file.ends_with("_tests.rs") { continue; }
+        let source = std::fs::read_to_string(&path).unwrap();
+        if !source.contains(needle) { continue; }
+        let relative = path.strip_prefix(root).unwrap().to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+        let mut function = "";
+        let mut test_item = None;
+        let mut test_body = false;
+        for (line_number, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let indent = line.len() - trimmed.len();
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]") {
+                test_item.get_or_insert(indent);
+            }
+            if let Some(start) = test_item {
+                if !test_body && trimmed.contains('{') { test_body = true; }
+                if indent == start && (matches!(trimmed, "}" | "};") || (!test_body && trimmed.ends_with(';'))) {
+                    test_item = None;
+                    test_body = false;
+                }
+                continue;
+            }
+            let code = trimmed.split("//").next().unwrap();
+            if let Some((_, declaration)) = code.split_once("fn ") {
+                function = declaration.split(['(', '<', ' ']).next().unwrap_or("");
+            }
+            let compact: String = code.split_whitespace().collect();
+            if !is_call(&compact) { continue; }
+            if let Some(owner) = owners.iter().position(|site| *site == (relative.as_str(), function)) {
+                seen[owner] = true;
+            } else {
+                violations.push(format!("{relative}:{} ({function})", line_number + 1));
+            }
+        }
+    }
+}
+
+#[test]
+fn only_batch_owners_set_instruction_budgets() {
+    use std::path::Path;
+    const OWNERS: &[(&str, &str)] = &[
+        ("libs/music_corpus/src/corpus.rs", "build"), // One read per generated example.
+        ("libs/music_corpus/src/eval.rs", "evaluate"), // Each prediction, reference and cover.
+        ("libs/music_iter/src/batch.rs", "history"), // The director scans saved songs.
+        ("libs/music_iter/src/batch.rs", "compose"), // One generated song and its revision.
+        ("apps/apps/synth/src/library.rs", "titles"), // Titles for the library, open and instrument lists.
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+    let mut seen = vec![false; OWNERS.len()];
+    let mut violations = Vec::new();
+    // The crates that evaluate scores on a caller's control; the rest of the tree has no reason to.
+    for dir in ["libs/score_live", "libs/midi_library", "libs/music_iter", "libs/music_corpus", "libs/flow", "apps/apps/synth"] {
+        let dir = root.join(dir).join("src");
+        if !dir.is_dir() { continue; }
+        scan_control_sites(root, &dir, OWNERS, &mut seen, &mut violations, "with_instruction_budget", |code| {
+            code.contains("with_instruction_budget") && !code.contains("fnwith_instruction_budget(")
+        });
+    }
+    for ((file, function), found) in OWNERS.iter().zip(seen) {
+        if file.starts_with("apps/apps/") && !root.join("apps/apps/synth").is_dir() { continue; }
+        assert!(found, "budget owner missing: {file} ({function})");
+    }
+    assert!(violations.is_empty(), "instruction budget outside a batch owner: {}", violations.join(", "));
 }

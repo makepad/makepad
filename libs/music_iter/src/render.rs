@@ -5,7 +5,7 @@
 
 use makepad_score_live::compose::Played;
 use makepad_score_live::model::{InstKind, ScoreDoc};
-use makepad_score_live::{render, source, NoSamples, RenderOpts, Rendered};
+use makepad_score_live::{render, source, LoadError, NoSamples, RenderOpts, Rendered};
 use makepad_score_player::FxKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,19 +96,50 @@ pub fn only(src: &str, doc: &makepad_score_live::model::AuthoredDoc, keep: &[Str
     Ok(out)
 }
 
-fn render_error(error: makepad_score_live::LoadError) -> String {
+#[derive(Debug)]
+pub enum RenderError {
+    Load(LoadError),
+    Edit(String),
+}
+
+impl From<LoadError> for RenderError {
+    fn from(error: LoadError) -> Self { Self::Load(error) }
+}
+
+impl From<String> for RenderError {
+    fn from(error: String) -> Self { Self::Edit(error) }
+}
+
+impl RenderError {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::Load(error) => render_error(error),
+            Self::Edit(message) => message,
+        }
+    }
+}
+
+fn render_error(error: LoadError) -> String {
     error.describe(|diags| diags.iter().map(|diag| format!("{diag:?}")).collect::<Vec<_>>().join("; "))
 }
 
 pub fn render_mix(src: &str, opts: &RenderOpts, control: &makepad_score_live::PrepareControl) -> Result<Rendered, String> {
-    render(src, opts, &NoSamples, control).map_err(render_error)
+    render_mix_checked(src, opts, control).map_err(render_error)
+}
+
+pub fn render_mix_checked(src: &str, opts: &RenderOpts, control: &makepad_score_live::PrepareControl) -> Result<Rendered, LoadError> {
+    render(src, opts, &NoSamples, control)
 }
 
 /// Render the mix, then each role's stem and a sung lead.
 pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool, control: &makepad_score_live::PrepareControl) -> Result<Song, String> {
-    let loaded = makepad_score_live::load_controlled(src, control).map_err(render_error)?;
+    render_song_checked(src, opts, with_stems, control).map_err(RenderError::into_message)
+}
+
+pub fn render_song_checked(src: &str, opts: &RenderOpts, with_stems: bool, control: &makepad_score_live::PrepareControl) -> Result<Song, RenderError> {
+    let loaded = makepad_score_live::load_controlled(src, control)?;
     let doc = loaded.doc.clone();
-    let mix = makepad_score_live::render::render_loaded(loaded, opts, &NoSamples, control, &mut |_, _| {}).map_err(render_error)?;
+    let mix = makepad_score_live::render::render_loaded(loaded, opts, &NoSamples, control, &mut |_, _| {})?;
     let roles = roles(&doc, &mix.played);
     let seconds = Some(mix.seconds());
     let opts = RenderOpts { seconds, ..opts.clone() };
@@ -119,7 +150,7 @@ pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool, control: &mak
             if loops.is_empty() || !mix.played.iter().any(|p| loops.contains(&p.loop_name)) {
                 continue;
             }
-            let r = render_mix(&only(src, &doc, &loops)?, &opts, control)?;
+            let r = render_mix_checked(&only(src, &doc, &loops)?, &opts, control)?;
             stems.push(Stem { role, loops, left: r.left, right: r.right });
         }
     }
@@ -138,7 +169,7 @@ pub fn render_song(src: &str, opts: &RenderOpts, with_stems: bool, control: &mak
                     dry = makepad_edit_values::apply_splices(&dry, 0, &[s])?;
                 }
             }
-            let r = render_mix(&dry, &opts, control)?;
+            let r = render_mix_checked(&dry, &opts, control)?;
             Some((name, r.left.iter().zip(&r.right).map(|(l, r)| 0.5 * (l + r)).collect()))
         }
         None => None,

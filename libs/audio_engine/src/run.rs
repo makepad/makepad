@@ -374,7 +374,7 @@ pub fn run_awake<X, Y, B>(schedule: &mut Schedule<X, Y, B>, frames: usize, sink:
             }
         }
     }
-    for (_, _, active) in &mut schedule.outputs { *active = false; }
+    for out in &mut schedule.outputs { out.active = false; }
     for (id, input) in &mut schedule.clock_inputs { *input = schedule.clocks[*id as usize]; }
     let mut offset = 0;
     while offset < frames {
@@ -388,16 +388,23 @@ pub fn run_awake<X, Y, B>(schedule: &mut Schedule<X, Y, B>, frames: usize, sink:
         render_ops(schedule, count, ext);
         schedule.clock_frames = count;
         if monitor_rest {
-            // The threshold applies to the sum of each bus before the device
-            // dip. In particular, two opposite signals on one bus cancel.
+            // Also meter each bus before its output gates so a muted tail keeps
+            // running. Opposite signals on one bus cancel in each sum.
             for i in 0..count {
                 let mut buses = [[0.0f32; 2]; 2];
-                for &(span, cue, _) in &schedule.outputs {
-                    let j = span as usize * SPAN + i;
-                    buses[cue as usize][0] += schedule.arena[j];
-                    buses[cue as usize][1] += schedule.arena[j + CHUNK];
+                let mut pre = [[0.0f32; 2]; 2];
+                for out in &schedule.outputs {
+                    let bus = out.cue as usize;
+                    let j = out.out as usize * SPAN + i;
+                    buses[bus][0] += schedule.arena[j];
+                    buses[bus][1] += schedule.arena[j + CHUNK];
+                    if let Some(input) = out.input {
+                        let k = input as usize * SPAN + i;
+                        pre[bus][0] += schedule.arena[k];
+                        pre[bus][1] += schedule.arena[k + CHUNK];
+                    }
                 }
-                let peak = buses.into_iter().flatten().fold(0.0f32, |p, v| p.max(v.abs()));
+                let peak = buses.into_iter().chain(pre).flatten().fold(0.0f32, |p, v| p.max(v.abs()));
                 schedule.rest.observe(peak);
             }
             if check_rest { settle_rest(schedule, ext); }
@@ -414,11 +421,11 @@ pub fn run_awake<X, Y, B>(schedule: &mut Schedule<X, Y, B>, frames: usize, sink:
     if frames != 0 && schedule.clock_frames != frames {
         std::mem::swap(&mut schedule.arena, &mut schedule.assembled);
     }
-    for &(span, cue, active) in &schedule.outputs {
-        if active {
-            let out = &schedule.arena[span as usize * SPAN..][..SPAN];
-            let (left, right) = out.split_at(CHUNK);
-            sink(cue, left, right);
+    for out in &schedule.outputs {
+        if out.active {
+            let span = &schedule.arena[out.out as usize * SPAN..][..SPAN];
+            let (left, right) = span.split_at(CHUNK);
+            sink(out.cue, left, right);
         }
     }
 }
@@ -920,7 +927,7 @@ fn render_ops<X, Y, B>(schedule: &mut Schedule<X, Y, B>, frames: usize, ext: &mu
                 }
             }
             Op::Output { state, input, out, enabled, probes: (probe_l, probe_r), .. } => {
-                let active = &mut schedule.outputs[output].2;
+                let active = &mut schedule.outputs[output].active;
                 output += 1;
                 let NodeState::Output { peak_l, peak_r, gate, hold } = &mut states[*state as usize] else { continue };
                 let skip = (*hold).min(frames as u64);

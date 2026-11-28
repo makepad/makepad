@@ -528,6 +528,13 @@ pub enum Op<Y> {
     Ext(Y),
 }
 
+pub(crate) struct OutputSlot {
+    pub(crate) input: Option<u16>,
+    pub(crate) out: u16,
+    pub(crate) cue: bool,
+    pub(crate) active: bool,
+}
+
 /// `B`: what an extension publishes from the schedule (its telemetry
 /// board, sized when the schedule is prepared); nothing by default.
 pub struct Schedule<X, Y, B = ()> {
@@ -550,7 +557,7 @@ pub struct Schedule<X, Y, B = ()> {
     pub(crate) assembled: Box<[f32]>,
     pub(crate) transport_ops: Box<[usize]>,
     pub(crate) clock_inputs: Box<[(u16, ClockChunk)]>,
-    pub(crate) outputs: Box<[(u16, bool, bool)]>,
+    pub(crate) outputs: Box<[OutputSlot]>,
     pub(crate) rest_hold: u64,
     /// Length of the final internal pass described by the published clocks.
     pub clock_frames: usize,
@@ -887,6 +894,19 @@ impl<X, Y, B> Schedule<X, Y, B> {
     /// Set clock slot `clock` (a [`CLOCK_IN`] node's) for the next pass.
     pub fn drive_clock(&mut self, clock: u16, chunk: ClockChunk) {
         self.clocks[clock as usize] = chunk;
+    }
+
+    /// Lend the pre-gate stereo input of each wired output from the last pass.
+    /// The first argument identifies a cue output. Pass the rendered frame count.
+    pub fn for_each_pre_gate_output(&self, frames: usize, mut f: impl FnMut(bool, &[f32], &[f32])) {
+        let frames = frames.min(CHUNK);
+        for out in &self.outputs {
+            if let Some(input) = out.input {
+                let span = &self.arena[input as usize * SPAN..][..SPAN];
+                let (left, right) = span.split_at(CHUNK);
+                f(out.cue, &left[..frames], &right[..frames]);
+            }
+        }
     }
 }
 
@@ -1715,7 +1735,7 @@ pub fn compile_with_note_labels_controlled<E: Ext, B: Default>(slice: &OwnerSlic
         (!layout.transports.contains_key(node)).then_some((slot, ClockChunk::default()))
     }).collect();
     let outputs = ops.iter().filter_map(|op| match op {
-        Op::Output { out, cue, .. } => Some((*out, *cue, false)),
+        Op::Output { input, out, cue, .. } => Some(OutputSlot { input: *input, out: *out, cue: *cue, active: false }),
         _ => None,
     }).collect();
     let schedule = Box::new(Schedule {
@@ -2105,6 +2125,69 @@ mod budget_tests {
         drop(permits);
         assert_eq!(budget.prepared_bytes(), 0);
     }
+}
+
+#[test]
+fn pre_gate_output_hears_signal_and_delays_rest_while_gate_closed() {
+    use crate::feed::{pad_feed, samples, PadHit};
+    use crate::run::{rests, run, run_awake, NoExt};
+    use makepad_flow::document::types::TypeKey;
+    use makepad_flow::live::plan::{dnode, LiveInput, LiveSource};
+    use makepad_score_player::Sample;
+
+    const RATE: usize = 8000;
+    const FRAMES: usize = 12_000;
+    const PAD: &str = "pre_gate_rest/pad";
+    const SAMPLE: &str = "pre_gate_rest/sample";
+    // The interpolator reads one frame ahead.
+    let left: Vec<_> = (0..=FRAMES).map(|i| (1 + i % 31) as f32 / 32.0).collect();
+    let right: Vec<_> = left.iter().map(|x| -0.5 * x).collect();
+    let sample = Arc::new(Sample::new(left.into(), Some(right.into()), RATE as f32));
+    samples::register(SAMPLE, sample.clone());
+    let pad = LiveNode {
+        id: PAD.into(), node: dnode(PAD), type_name: "Pads".into(),
+        params: vec![("samples".into(), Literal::Arr(vec![Literal::Str(SAMPLE.into())])),
+            ("amp".into(), Literal::Num(1.0)), ("mute".into(), Literal::Num(0.0))],
+        inputs: vec![], outputs: vec![],
+    };
+    let out = LiveNode {
+        id: "out".into(), node: dnode("out"), type_name: "AudioOutput".into(),
+        params: vec![("enabled".into(), Literal::Num(0.0))],
+        inputs: vec![LiveInput {
+            port: "audio".into(), ty: TypeKey::new(AUDIO), many: None, control: None,
+            sources: vec![LiveSource {
+                from: DPort { node: dnode(PAD), port: "audio".into() },
+                conn: None, via: vec![], lineage: vec![],
+            }],
+        }], outputs: vec![],
+    };
+    let slice = OwnerSlice { owner: crate::OWNER.into(), nodes: vec![pad, out] };
+    let mut schedule = compile::<NoExt, ()>(&slice, 1, 1, RATE as u64, None, &Arc::new(AudioBudget::default())).unwrap().schedule;
+    let mut closed_sink = |_: bool, _: &[f32], _: &[f32]| panic!("closed output reached the device");
+    run(&mut schedule, CHUNK, &mut closed_sink, &mut NoExt); // Bring the pad gain to unity.
+    assert!(pad_feed(PAD).send(PadHit { pad: 0, gain: 1.0, stop: false }));
+    for start in (0..FRAMES).step_by(CHUNK) {
+        let count = CHUNK.min(FRAMES - start);
+        run_awake(&mut schedule, count, &mut closed_sink, &mut NoExt, true);
+        let mut tapped = 0;
+        schedule.for_each_pre_gate_output(count, |cue, left, right| {
+            assert!(!cue, "pad feeds the program output");
+            assert_eq!(left, &sample.left[start..start + count], "left pad signal at {start}");
+            assert_eq!(right, &sample.right.as_ref().unwrap()[start..start + count], "right pad signal at {start}");
+            tapped += 1;
+        });
+        assert_eq!(tapped, 1, "one wired program output per pass");
+        assert!(!schedule.rest.asleep(), "rest cut off the muted pad at {start}");
+    }
+    let silence = (crate::rest::HOLD_SECONDS * RATE as f64) as usize + CHUNK;
+    for start in (0..silence).step_by(CHUNK) {
+        if !rests(&mut schedule, &NoExt) {
+            run_awake(&mut schedule, CHUNK.min(silence - start), &mut closed_sink, &mut NoExt, true);
+        }
+    }
+    assert!(schedule.rest.asleep(), "pad should rest after a full hold of silence");
+    samples::forget(SAMPLE);
+    crate::feed::forget_instance("pre_gate_rest");
 }
 
 #[test]

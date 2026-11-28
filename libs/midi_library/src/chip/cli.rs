@@ -151,7 +151,7 @@ pub fn run(args: &[String], control: &makepad_score_live::PrepareControl) -> Res
             println!("  tempo changes: {}", a.tempo.len());
         }
         "timing" => {
-            let doc = makepad_score_live::model::read_document(&imported.source).map_err(|d| format!("{d:?}"))?.doc;
+            let doc = makepad_score_live::model::read_document_controlled(&imported.source, control).map_err(|e| e.describe(|d| format!("{d:?}")))?.doc;
             println!("arrangement: {} beats; score: {} beats, natural length {:.1} s", a.beats(), doc.arrangement_beats(), makepad_score_live::render::natural_length(&doc));
             let mut t = 0.0;
             let mut beat = 0.0;

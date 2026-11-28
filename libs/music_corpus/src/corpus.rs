@@ -15,6 +15,7 @@ use crate::prep::{self, Signature, Split};
 use crate::source::{Dataset, SongRef, Source};
 use crate::tasks::{self, Example, Limits, Task};
 use crate::tokens::{self, Tally, Tokenizer};
+use makepad_score_live::{LoadError, PrepareControl};
 use makepad_strict_json::{obj, s, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -66,6 +67,7 @@ pub struct Summary {
     pub kept: usize,
     pub dropped: BTreeMap<String, usize>,
     pub songs_per_split: BTreeMap<Split, usize>,
+    pub unfinished: Vec<String>,
     pub example_drops: BTreeMap<(Task, String), usize>,
     pub tally: BTreeMap<(Split, Task), Tally>,
     pub seconds: f64,
@@ -88,12 +90,12 @@ struct Song {
 
 /// Run `f` on every index on `threads` threads, a panic counted as an
 /// error.
-fn par_map<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, f: F) -> Vec<Option<T>> {
+pub(crate) fn par_map<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, control: &PrepareControl, f: F) -> Result<Vec<Option<T>>, LoadError> {
     let next = AtomicUsize::new(0);
     let results: Vec<Mutex<Option<T>>> = (0..n).map(|_| Mutex::new(None)).collect();
     std::thread::scope(|sc| {
         for _ in 0..threads.max(1) {
-            sc.spawn(|| loop {
+            sc.spawn(|| while !control.is_cancelled() {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
                     break;
@@ -103,7 +105,8 @@ fn par_map<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, f: F) ->
             });
         }
     });
-    results.into_iter().map(|m| m.into_inner().unwrap()).collect()
+    if control.is_cancelled() { return Err(LoadError::Cancelled); }
+    Ok(results.into_iter().map(|m| m.into_inner().unwrap()).collect())
 }
 
 struct Shards {
@@ -181,7 +184,9 @@ fn record(ex: &Example, song: &SongRef, split: Split, ds: &Dataset, roles: &str)
 }
 
 /// Build the corpus into `opts.out`.
-pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, log: &dyn Fn(&str)) -> Result<Summary, String> {
+pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, control: &PrepareControl, log: &dyn Fn(&str)) -> Result<Summary, String> {
+    let control = &control.with_instruction_budget(crate::EXAMPLE_INSTRUCTION_BUDGET);
+    if control.is_cancelled() { return Err(LoadError::Cancelled.to_string()); }
     let t0 = std::time::Instant::now();
     let mut sum = Summary::default();
     std::fs::create_dir_all(&opts.out).map_err(|e| format!("{}: {e}", opts.out.display()))?;
@@ -229,7 +234,7 @@ pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, log: &dy
     log(&format!("importing {} songs on {} threads", live.len(), opts.threads));
     let refs: Vec<&SongRef> = live.iter().map(|&i| &songs[i].r).collect();
     let min_bars = opts.min_bars;
-    let read = par_map(refs.len(), opts.threads, |k| -> Result<(usize, Signature), String> {
+    let read = par_map(refs.len(), opts.threads, control, |k| -> Result<(usize, Signature), String> {
         let r = refs[k];
         let a = sources[r.source].arrangement(r).map_err(|_| "import_failed".to_string())?;
         if a.parts.iter().all(|p| p.notes.is_empty()) {
@@ -239,7 +244,7 @@ pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, log: &dy
             return Err("too_short".into());
         }
         Ok((a.bar_count(), prep::signature(&a)))
-    });
+    }).map_err(|e| e.to_string())?;
     for (k, r) in read.into_iter().enumerate() {
         let s = &mut songs[live[k]];
         match r {
@@ -292,23 +297,27 @@ pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, log: &dy
     let batch = 256;
     let mut done = 0;
     for chunk in kept.chunks(batch) {
-        let made = par_map(chunk.len(), opts.threads, |k| -> Result<(Vec<String>, Vec<(Task, usize, usize)>, Vec<tasks::Drop>), String> {
+        let made = par_map(chunk.len(), opts.threads, control, |k| {
             let (i, split) = chunk[k];
             let r = &songs[i].r;
-            let a = sources[r.source].arrangement(r)?;
-            let built = tasks::build(&a, r, split, &opts.limits, tok, overhead);
+            let Ok(a) = sources[r.source].arrangement(r) else { return Ok(None) };
+            let built = tasks::build(&a, r, split, &opts.limits, tok, overhead, control)?;
             let mut roles: Vec<&str> = a.parts.iter().map(|p| p.role.name()).collect();
             roles.sort();
             roles.dedup();
             let roles = roles.join(",");
-            let lines = built.examples.iter().map(|ex| record(ex, r, split, &datasets[r.source], &roles)).collect();
-            let counts = built.examples.iter().map(|ex| (ex.task, ex.tokens, ex.target_tokens)).collect();
-            Ok((lines, counts, built.dropped))
-        });
+            let lines: Vec<_> = built.examples.iter().map(|ex| record(ex, r, split, &datasets[r.source], &roles)).collect();
+            let counts: Vec<_> = built.examples.iter().map(|ex| (ex.task, ex.tokens, ex.target_tokens)).collect();
+            Ok::<_, LoadError>(Some((lines, counts, built.dropped, built.unfinished)))
+        }).map_err(|e| e.to_string())?;
         for (k, m) in made.into_iter().enumerate() {
             let (_, split) = chunk[k];
-            match m {
-                Some(Ok((lines, counts, drops))) => {
+            match m.transpose().map_err(|e| e.to_string())? {
+                Some(Some((lines, counts, drops, unfinished))) => {
+                    for item in unfinished {
+                        log(&item);
+                        sum.unfinished.push(item);
+                    }
                     for (line, (task, total, target)) in lines.iter().zip(counts) {
                         shards.write(split, task, line)?;
                         sum.tally.entry((split, task)).or_default().add(total, target);
@@ -317,7 +326,7 @@ pub fn build(sources: &[Box<dyn Source>], tok: &Tokenizer, opts: &Opts, log: &dy
                         *sum.example_drops.entry((task, why.to_string())).or_default() += 1;
                     }
                 }
-                Some(Err(_)) => *sum.example_drops.entry((Task::Describe, "import_failed".into())).or_default() += 1,
+                Some(None) => *sum.example_drops.entry((Task::Describe, "import_failed".into())).or_default() += 1,
                 None => *sum.example_drops.entry((Task::Describe, "panic".into())).or_default() += 1,
             }
         }
@@ -410,6 +419,7 @@ fn stats_json(sum: &Summary) -> Value {
         ("songs_kept", Value::Int(sum.kept as i64)),
         ("songs_dropped", Value::Obj(sum.dropped.iter().map(|(k, v)| (k.clone(), Value::Int(*v as i64))).collect())),
         ("songs_per_split", Value::Obj(sum.songs_per_split.iter().map(|(k, v)| (k.name().to_string(), Value::Int(*v as i64))).collect())),
+        ("unfinished", Value::Arr(sum.unfinished.iter().map(|item| s(item.as_str())).collect())),
         ("examples_dropped", Value::Obj(drops.into_iter().map(|(k, v)| (k, Value::Obj(v))).collect())),
         ("histogram_edges", Value::Arr(tokens::EDGES.iter().map(|e| Value::Int(*e as i64)).collect())),
         ("tasks", Value::Obj(tasks_v)),

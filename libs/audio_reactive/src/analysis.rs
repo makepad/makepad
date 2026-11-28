@@ -83,6 +83,9 @@ pub const AUDIO_TEX_W: usize = AUDIO_BINS;
 const FFT_SIZE: usize = 2048;
 /// Samples between rows. One hop = one spectrogram row + one waveform row.
 pub(crate) const HOP: usize = 1024;
+/// Samples pushed per consume pass. With less than a hop left over, both
+/// pending buffers stay within their initial capacity of four hops.
+const PUSH_SLICE: usize = HOP * 3;
 /// Waveform decimation: `HOP / AUDIO_BINS` samples per stored point, kept
 /// as the peak of the group so a transient never disappears between rows.
 const WAVE_DECIM: usize = HOP / AUDIO_BINS;
@@ -386,13 +389,19 @@ impl AudioReactive {
             self.pending_side.resize(self.pending.len(), 0.0);
         }
         let fin = |v: f32| if v.is_finite() { v } else { 0.0 };
-        for pair in interleaved.chunks_exact(2) {
-            let (l, r) = (fin(pair[0]), fin(pair[1]));
-            self.pending.push((l + r) * 0.5);
-            self.pending_side.push((l - r) * 0.5);
-        }
         self.stereo_hops = 64;
-        self.consume(rate);
+        if interleaved.len() < 2 {
+            self.consume(rate);
+            return;
+        }
+        for chunk in interleaved.chunks(PUSH_SLICE * 2) {
+            for pair in chunk.chunks_exact(2) {
+                let (l, r) = (fin(pair[0]), fin(pair[1]));
+                self.pending.push((l + r) * 0.5);
+                self.pending_side.push((l - r) * 0.5);
+            }
+            self.consume(rate);
+        }
     }
 
     /// The caller-owned tap cursor into whatever ring it reads (monotonic,
@@ -424,14 +433,18 @@ impl AudioReactive {
         if !(rate.is_finite() && rate >= 8_000.0) {
             return;
         }
-        // (rate changes and the stalled-consumer guard live in `consume`:
-        // bounded work per frame is the law here.)
-        for s in samples {
-            self.pending.push(if s.is_finite() { *s } else { 0.0 });
-        }
         // A mono source: the side stays silent.
         self.pending_side.clear();
-        self.consume(rate);
+        if samples.is_empty() {
+            self.consume(rate);
+            return;
+        }
+        for chunk in samples.chunks(PUSH_SLICE) {
+            for s in chunk {
+                self.pending.push(if s.is_finite() { *s } else { 0.0 });
+            }
+            self.consume(rate);
+        }
     }
 
     fn consume(&mut self, rate: f32) {
@@ -439,23 +452,28 @@ impl AudioReactive {
             self.rate = rate;
             self.rebuild_bins();
         }
-        if self.pending.len() > HOP * 16 {
-            let keep = self.pending.len() - HOP * 4;
-            self.pending.drain(..keep);
-            if self.pending_side.len() >= keep {
-                self.pending_side.drain(..keep);
-            }
+        let hops = self.pending.len() / HOP;
+        if hops == 0 {
+            return;
         }
-        while self.pending.len() >= HOP {
-            let hop: Vec<f32> = self.pending.drain(..HOP).collect();
-            let side: Option<Vec<f32>> = if self.pending_side.len() >= HOP {
-                Some(self.pending_side.drain(..HOP).collect())
-            } else {
-                self.pending_side.clear();
-                None
-            };
-            self.analyse_hop(&hop, side.as_deref());
+        let consumed = hops * HOP;
+        let mut pending = std::mem::take(&mut self.pending);
+        let mut pending_side = std::mem::take(&mut self.pending_side);
+        let has_side = pending_side.len() >= consumed;
+        if !has_side {
+            pending_side.clear();
         }
+        for h in 0..hops {
+            let off = h * HOP;
+            let side = has_side.then(|| &pending_side[off..off + HOP]);
+            self.analyse_hop(&pending[off..off + HOP], side);
+        }
+        pending.drain(..consumed);
+        if has_side {
+            pending_side.drain(..consumed);
+        }
+        self.pending = pending;
+        self.pending_side = pending_side;
     }
 
     /// This frame's analysis. `None` before the texture exists (nothing has
@@ -815,5 +833,56 @@ mod tests {
         // what a shader reads when no audio texture is bound at all.
         let idle = AudioReactive::new();
         assert!(idle.data.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn large_push_analyses_every_hop_without_discarding() {
+        let rate = 48_000.0f32;
+        let total = 512 + 24_000; // 23 * HOP + 960; exceeds the old HOP * 16 guard.
+        let mono: Vec<f32> = (0..total)
+            .map(|i| {
+                let hz = if i < HOP * 12 { 1000.0 } else { 400.0 };
+                let amp = if i < HOP * 12 { 0.8 } else { 0.5 };
+                amp * (std::f32::consts::TAU * hz * i as f32 / rate).sin()
+            })
+            .collect();
+
+        let mut ref_mono = AudioReactive::new();
+        for chunk in mono.chunks(HOP) {
+            ref_mono.push_samples(chunk, rate);
+        }
+        let mut bulk_mono = AudioReactive::new();
+        let mono_cap = bulk_mono.pending.capacity();
+        bulk_mono.push_samples(&mono[..512], rate);
+        bulk_mono.push_samples(&mono[512..], rate);
+        assert_eq!(bulk_mono.rows_written, 23);
+        assert_eq!(bulk_mono.pending.len(), 960);
+        assert_eq!(bulk_mono.data, ref_mono.data);
+        assert_eq!(bulk_mono.levels(), ref_mono.levels());
+        assert_eq!(bulk_mono.pending.capacity(), mono_cap);
+
+        let mut stereo = Vec::with_capacity(total * 2);
+        for (i, &m) in mono.iter().enumerate() {
+            let side = 0.25 * (std::f32::consts::TAU * 250.0 * i as f32 / rate).sin();
+            stereo.push(m + side);
+            stereo.push(m - side);
+        }
+        let mut ref_stereo = AudioReactive::new();
+        for chunk in stereo.chunks(HOP * 2) {
+            ref_stereo.push_samples_stereo(chunk, rate);
+        }
+        let mut bulk_stereo = AudioReactive::new();
+        let mid_cap = bulk_stereo.pending.capacity();
+        let side_cap = bulk_stereo.pending_side.capacity();
+        bulk_stereo.push_samples_stereo(&stereo[..512 * 2], rate);
+        bulk_stereo.push_samples_stereo(&stereo[512 * 2..], rate);
+        assert_eq!(bulk_stereo.rows_written, 23);
+        assert_eq!(bulk_stereo.pending.len(), 960);
+        assert_eq!(bulk_stereo.pending_side.len(), 960);
+        assert!(bulk_stereo.is_stereo());
+        assert_eq!(bulk_stereo.data, ref_stereo.data);
+        assert_eq!(bulk_stereo.levels(), ref_stereo.levels());
+        assert_eq!(bulk_stereo.pending.capacity(), mid_cap);
+        assert_eq!(bulk_stereo.pending_side.capacity(), side_cap);
     }
 }

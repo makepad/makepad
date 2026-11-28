@@ -63,7 +63,8 @@ pub use makepad_audio_engine::feed::tempo_seconds;
 pub use build::{NoSamples, Samples};
 pub use live::{ClockSource, LiveConfig, LiveScore, LiveThread, Status};
 pub use makepad_flow::live::owner::PrepareControl;
-pub use model::{load_controlled, LoadError, AssetRef, Diag, ScoreDoc};
+pub use model::{load, load_begin, load_controlled, LoadError, LoadStep, Loaded, PendingLoad, AssetRef, Diag, ScoreDoc};
+pub use vm::{drive, EVAL_SLICE};
 pub use render::{render, RenderOpts, Rendered};
 
 /// The stable key of a node name: what the player, the meters and the

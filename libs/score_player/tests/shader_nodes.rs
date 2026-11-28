@@ -1,7 +1,7 @@
 //! Audio shader nodes in the player: hot swaps without clicks, no
 //! allocation while rendering, slicing-independent output.
 
-use makepad_score_player::shader::{compile, Expression, ProbeRecord, ProbeTap, ShaderFx, ShaderInst, SongTime, MAX_RENDER};
+use makepad_score_player::shader::{compile, Expression, ProbeRecord, ProbeTap, ShaderFx, ShaderInst, SongTime, FADE, MAX_RENDER};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::Ordering;
 
@@ -158,6 +158,8 @@ fn ported_nodes_match_explicit_silence_and_carry_the_held_output() {
             let changed = compile("let held = output(1) fn effect(l,r) { held }").unwrap();
             let mut next = ShaderFx::new(changed, RATE);
             next.swap_from(&mut fx);
+            let quiet = [0.0; FADE as usize];
+            next.render(&quiet, &quiet, &mut [0.0; FADE as usize], &mut [0.0; FADE as usize]);
             let (mut l, mut r) = ([0.0; N], [0.0; N]);
             next.render(&silence, &silence, &mut l, &mut r);
             assert_eq!((l,r), ([-0.25; N],[-0.25; N]), "held output carried by name");
@@ -205,6 +207,61 @@ fn effect_hot_swap_carries_delay_lines() {
 }
 
 #[test]
+fn convolver_response_edits_while_playing() {
+    use makepad_score_player::shader::{compile_with, library, AudioBindings, SampleView, FADE};
+    // A polarity change at constant input makes even a one-frame jump
+    // unambiguous. The delayed tap also needs the pre-edit input history.
+    let effect = |len: usize, sign: f32| {
+        let mut ir = vec![0.0; len];
+        ir[0] = 0.75 * sign;
+        ir[80] = 0.25 * sign;
+        let samples = [SampleView { name: "ir", channels: 1, frames: len as u32, data: &ir }];
+        let shader = compile_with(library("convolver").unwrap(), &AudioBindings { samples: &samples, ..Default::default() }).unwrap();
+        ShaderFx::new(shader, RATE)
+    };
+    let input = [0.25; MAX_RENDER];
+    let mut results = Vec::new();
+    for (length, same_layout) in [(600, false), (100, true)] {
+        let mut playing = effect(100, 1.0);
+        let mut reference = effect(100, 1.0);
+        let mut next = effect(length, -1.0);
+        let render = |fx: &mut ShaderFx| {
+            let (mut l, mut r) = ([0.0; MAX_RENDER], [0.0; MAX_RENDER]);
+            fx.render(&input, &input, &mut l, &mut r);
+            l
+        };
+        for _ in 0..3 { render(&mut playing); render(&mut reference); }
+        let last = render(&mut playing)[MAX_RENDER-1];
+        let baseline = max_step(&render(&mut reference));
+        let old_box = playing.state().as_ptr();
+        let mut output = [0.0; 2*MAX_RENDER+1];
+        output[0] = last;
+        let allocations = counting(|| {
+            next.swap_from(&mut playing);
+            for chunk in output[1..].chunks_exact_mut(MAX_RENDER) { chunk.copy_from_slice(&render(&mut next)); }
+        });
+        assert_eq!(allocations, 0, "swap or render allocated or freed at length {length}");
+        assert_eq!(next.state().as_ptr() == old_box, same_layout);
+        // The new response at its settled level: the convolver scales by the response's energy.
+        let mut fresh = effect(length, -1.0);
+        for _ in 0..3 { render(&mut fresh); }
+        let settled = render(&mut fresh)[MAX_RENDER-1];
+        assert!(settled < 0.0 && last > 0.0, "the edit inverts the polarity: {last} -> {settled}");
+        assert!((output[2*MAX_RENDER] - settled).abs() < 1e-6, "new response must sound");
+        // The new program's share grows by 1/FADE a frame, so frame t after the edit moves by at
+        // most t/FADE of the swing (its own settling included); an unfaded switch jumps at once.
+        let swing = (last - settled).abs();
+        let unfaded = output.windows(2).enumerate().find_map(|(i, w)| {
+            let (step, bound) = ((w[1] - w[0]).abs(), baseline + swing * (i + 1) as f32 / FADE as f32 + 1e-6);
+            (step > bound).then_some((i + 1, step, bound))
+        });
+        results.push((length, unfaded));
+    }
+    assert!(results.iter().all(|(_, unfaded)| unfaded.is_none()),
+        "response length, first unfaded frame after the edit (frame, step, bound): {results:?}");
+}
+
+#[test]
 fn large_effect_edits_keep_the_playing_state() {
     const SOURCE: &str = "var history = [0.0; 1572864] var ticks = int(0)
         fn effect(l,r) { ticks += 1; history[1572863] += 0.125; vec2(history[1572863], float(ticks)) }";
@@ -219,10 +276,17 @@ fn large_effect_edits_keep_the_playing_state() {
     assert_eq!(render(&mut playing), render(&mut reference));
     let edit = SOURCE.replace("float(ticks)", "float(ticks) + 0.0");
     let mut same = ShaderFx::new(compile(&edit).unwrap(), RATE);
-    let buffers = (playing.state().as_ptr(), same.state().as_ptr());
+    let playing_box = playing.state().as_ptr();
     assert_eq!(counting(|| same.swap_from(&mut playing)), 0, "same-layout takeover allocated or freed");
-    assert_eq!((same.state().as_ptr(), playing.state().as_ptr()), buffers, "the state boxes changed owners");
-    assert_eq!(render(&mut same), render(&mut reference), "the next callback continues both channels bit for bit");
+    assert_eq!(same.state().as_ptr(), playing_box, "the edit takes over the playing box");
+    assert!(playing.state().is_empty(), "the old program's state copy now belongs to the fade");
+    let (left, right) = render(&mut same);
+    let (want_l, want_r) = render(&mut reference);
+    for (channel, actual, expected) in [("left", left, want_l), ("right", right, want_r)] {
+        for (i, (sample, want)) in actual.into_iter().zip(expected).enumerate() {
+            assert!(sample.abs_diff(want) <= 1, "{channel} at frame {i} must continue within one ulp");
+        }
+    }
 
     let edit = SOURCE.replace("fn effect", "var added = 0.5 fn effect").replace("ticks += 1", "added += 1.0; ticks += 1");
     let structural = compile(&edit).unwrap();
@@ -261,7 +325,7 @@ fn effect_streams_are_decorrelated_and_repeat_after_reset() {
         (noise, identity)
     }
     let mut first = ShaderFx::new(shader.clone(), RATE);
-    let mut second = ShaderFx::new(shader, RATE);
+    let mut second = ShaderFx::new(shader.clone(), RATE);
     first.set_seed(1);
     second.set_seed(2);
     let (a, id_a) = render::<1024>(&mut first);
@@ -288,13 +352,24 @@ fn effect_streams_are_decorrelated_and_repeat_after_reset() {
     second.swap_from(&mut first);
     let (start, id) = render::<512>(&mut second);
     assert_ne!(start, a[512..], "the edit leaves the old stream");
-    assert_eq!(start, b[..512], "the edit starts the new stream");
-    assert_eq!(id, id_b[..512], "the edit takes the new instance");
+    let fade = FADE as usize;
+    for i in 0..fade {
+        let gain = i as f32 / FADE as f32;
+        let blend = |new, old| new * gain + old * (1.0 - gain);
+        assert_eq!(start[i].to_bits(), blend(b[i], a[512 + i]).to_bits(), "noise during fade at {i}");
+        assert_eq!(id[i].to_bits(), blend(id_b[i], id_a[512 + i]).to_bits(), "identity during fade at {i}");
+    }
+    assert_eq!(start[fade..], b[fade..512], "the new stream is fully in after the fade");
+    assert_eq!(id[fade..], id_b[fade..512], "the edit takes the new instance");
 
-    first.set_seed(2);
-    first.swap_from(&mut second);
-    let (end, id) = render::<512>(&mut first);
-    assert_eq!(end, b[512..], "the same seed continues from sample 512");
+    let mut next = ShaderFx::new(shader, RATE);
+    next.set_seed(2);
+    next.swap_from(&mut second);
+    let (end, id) = render::<512>(&mut next);
+    for i in 0..fade {
+        assert!(end[i].to_bits().abs_diff(b[512 + i].to_bits()) <= 1, "same seed at sample {}", 512 + i);
+    }
+    assert_eq!(end[fade..], b[512 + fade..], "the same seed continues exactly after the fade");
     assert_eq!(id, id_b[512..], "the instance holds across the swap");
 }
 

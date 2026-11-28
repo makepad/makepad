@@ -421,7 +421,8 @@ impl Slot {
         match result {
             Ok((player, watch)) => Ok(Some(FreshPlayer { from, player, watch, control })),
             Err(crate::LoadError::Cancelled) => Ok(None),
-            Err(crate::LoadError::Problems(diags)) => {
+            Err(error) => {
+                let diags = error.into_diagnostics();
                 host.control = None;
                 host.rewinding = false;
                 if !host.matches(&from) {
@@ -451,8 +452,8 @@ impl Slot {
             host.rewinding = false;
             let retired = match result {
                 Ok((player, watch)) => Some(self.post(&mut host, player, watch, from)),
-                Err(crate::LoadError::Problems(diags)) => { host.diags = diags; None }
                 Err(crate::LoadError::Cancelled) => None,
+                Err(error) => { host.diags = error.into_diagnostics(); None }
             };
             drop(host);
             drop(retired);

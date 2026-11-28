@@ -50,8 +50,9 @@ A score is one Splash document. It is a graph of nodes (instruments, loops,
 FX, sections) and the code of its loops. It plays live in the app that
 hosts it (Makepad Synth, Stage's SYNTH page), renders to audio, and runs
 inside games. Every change you
-make plays at once: a changed loop switches at its next cycle, a changed
-knob now. A source that does not load changes nothing; the problems come
+make plays as soon as it loads: a changed loop switches at its next cycle,
+a changed knob now. While an edit evaluates, the last good score keeps
+playing. A source that does not load changes nothing; the problems come
 back with their lines.
 
 Work in small steps. Write a piece a part at a time with a tool call for each

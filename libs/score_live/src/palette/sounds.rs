@@ -78,7 +78,9 @@ pub fn sounds() -> &'static Sounds {
 
 fn load() -> Sounds {
     let source = format!("use mod.score.*\n{DRUMS}\n{SYNTHS}\n{KITS}\n{PATCHES}\n{{kits: kits patches: patches}}\n");
-    let evaluated = vm::evaluate(&source);
+    // This first-use read owns its word. Its sources are bundled with the palette.
+    let word = crate::PrepareControl::default();
+    let evaluated = vm::evaluate_controlled(&source, &word).expect("the palette owns its uncancelled word");
     let mut out = Sounds { errors: evaluated.errors.clone(), ..Sounds::default() };
     let V::Obj(root) = &evaluated.root else {
         out.errors.push("the sound library did not evaluate to {kits patches}".into());

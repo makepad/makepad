@@ -4,18 +4,28 @@
 //! written. The VM stays alive with the loaded revision: the composer calls
 //! the loops' functions in it, once per cycle.
 
-use crate::theory;
+use crate::{theory, LoadError, PrepareControl};
 use makepad_core_util::ui_thread::WorkerOnly;
+use makepad_flow::live::owner::ScriptRunGuard;
 use makepad_script::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::future::{poll_fn, Future};
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 static EVALUATE: WorkerOnly = WorkerOnly::new("a score evaluation");
+thread_local! {
+    static BLOCKING: Cell<bool> = const { Cell::new(false) };
+}
 
 pub const DOC_FILE: &str = "score.splash";
 const PRELUDE_FILE: &str = "score_prelude.splash";
 /// Instructions one document evaluation may run.
 const EVAL_LIMIT: usize = 4_000_000;
+/// The default time slice for document execution.
+pub const EVAL_SLICE: Duration = Duration::from_millis(4);
+const SLICE_SAMPLE_INSTRUCTIONS: u32 = 1024;
 /// Instructions one loop cycle may run.
 pub const CYCLE_LIMIT: usize = 1_000_000;
 
@@ -253,6 +263,8 @@ impl Evaluated {
     /// it raised.
     pub fn call(&mut self, index: usize, args: &[f64]) -> Result<ScriptValue, String> {
         let Some(function) = self.fns.get(index).copied() else { return Err("no such function".into()) };
+        // A previous host call can bail out of an fx body before its callback pops the scope.
+        self.ctx.borrow_mut().scope_stack.clear();
         self.with_vm(|vm| {
             vm.capture_errors();
             let args: Vec<ScriptValue> = args.iter().map(|a| (*a).into()).collect();
@@ -286,44 +298,328 @@ fn id_string(id: LiveId) -> String {
     id.as_string(|s| s.map(str::to_string)).unwrap_or_else(|| format!("{id}"))
 }
 
-/// Evaluate a document in a fresh VM with `mod.score`.
-pub fn evaluate(source: &str) -> Evaluated {
-    EVALUATE.check();
+/// The result of one slice of document execution.
+pub enum EvalStep {
+    Done(Result<Evaluated, LoadError>),
+    Pending(PendingEvaluation),
+}
+
+/// A suspended document. Dropping it releases the VM and its Stop registration.
+pub struct PendingEvaluation {
+    host: Box<ScriptVmHost<(), ()>>,
+    bx: Box<ScriptVmBase>,
+    ctx: Shared,
+    thread: usize,
+    control: PrepareControl,
+    run: ScriptRunGuard,
+    since: usize,
+}
+
+impl PendingEvaluation {
+    /// Continue the suspended document for another soft time slice.
+    pub fn step(self, slice: Duration) -> EvalStep {
+        if self.control.is_cancelled() { return EvalStep::Done(Err(LoadError::Cancelled)); }
+        let Self { mut host, bx, ctx, thread, control, run, since } = self;
+        let mut vm = ScriptVm { host: host.host_context(), bx };
+        vm.set_current_thread(thread);
+        vm.set_run_budget(Some(ScriptRunBudget::slice(slice, SLICE_SAMPLE_INSTRUCTIONS)));
+        let value = vm.resume();
+        let bx = vm.bx;
+        finish_slice(host, bx, ctx, control, run, since, value)
+    }
+}
+
+fn check_blocking_evaluation(control: &PrepareControl) {
+    if !control.is_cancelled() { EVALUATE.check(); }
+}
+
+/// Poll a score future to completion on the calling thread. These futures
+/// yield between slices and make progress on the next poll without a wake.
+pub fn drive<F: Future>(future: F) -> F::Output {
+    struct RestoreBlocking(bool);
+    impl Drop for RestoreBlocking {
+        fn drop(&mut self) { BLOCKING.set(self.0); }
+    }
+    let _restore = RestoreBlocking(BLOCKING.replace(true));
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) { return value; }
+    }
+}
+
+/// Drive document code to completion under its request. Later calls into the VM are independent.
+pub fn evaluate_controlled(source: &str, control: &PrepareControl) -> Result<Evaluated, LoadError> {
+    drive(evaluate(source, control))
+}
+
+/// Evaluate at most one document slice per poll. Dropping a suspended
+/// evaluation releases the VM and unregisters it from the caller's control.
+pub async fn evaluate(source: &str, control: &PrepareControl) -> Result<Evaluated, LoadError> {
+    evaluate_with_slice(source, control, EVAL_SLICE).await
+}
+
+pub(crate) async fn evaluate_with_slice(source: &str, control: &PrepareControl, slice: Duration) -> Result<Evaluated, LoadError> {
+    if BLOCKING.get() { check_blocking_evaluation(control); }
+    let mut pending: Option<PendingEvaluation> = None;
+    poll_fn(move |_| {
+        let step = match pending.take() {
+            None => evaluate_begin(source, control, slice),
+            Some(evaluation) => evaluation.step(slice),
+        };
+        match step {
+            EvalStep::Pending(evaluation) => { pending = Some(evaluation); Poll::Pending }
+            EvalStep::Done(result) => Poll::Ready(result),
+        }
+    }).await
+}
+
+/// Start evaluating a document. The soft deadline paces script execution.
+/// VM setup, parsing and reading the completed result run synchronously.
+pub fn evaluate_begin(source: &str, control: &PrepareControl, slice: Duration) -> EvalStep {
+    if control.is_cancelled() { return EvalStep::Done(Err(LoadError::Cancelled)); }
+    let since = makepad_alloc_guard::low_memory_epoch();
+    if !makepad_alloc_guard::arm() { return EvalStep::Done(Err(LoadError::Memory { line: None })); }
     let mut host = Box::new(ScriptVmHost::new((), ()));
     let bx = Box::new(ScriptVmBase::new());
     let ctx: Shared = Rc::new(RefCell::new(Ctx::default()));
-    let (errors, fns, keep, root, objects, bx) = {
-        let mut vm = ScriptVm {
-            host: host.host_context(),
-            bx,
-        };
-        vm.set_script_domain("score");
-        let module = vm.new_module(id!(score));
-        for name in NODE_TYPES.iter() {
-            let proto = vm.bx.heap_mut().new_object();
-            let tag = lut_id(name);
-            vm.bx.heap_mut().set_value_def(proto, id_lut!(__proto).into(), ScriptValue::from_id(tag));
-            vm.bx.heap_mut().set_value_def(module, tag.into(), proto.into());
-        }
-        install(&mut vm, module, ctx.clone());
-        install_toolkit(&mut vm, module, ctx.clone());
-        vm.capture_errors();
-        vm.eval(ScriptMod::new("", "", &(PRELUDE_FILE), 0, 0, &(PRELUDE), &[]));
-        let prelude_errors = vm.take_errors();
-        debug_assert!(prelude_errors.is_empty(), "mod.score prelude: {prelude_errors:?}");
-        vm.capture_errors();
-        let value = vm.with_instruction_limit(EVAL_LIMIT as u64, |vm| {
+    let mut vm = ScriptVm { host: host.host_context(), bx };
+    vm.bx.watch_low_memory(makepad_alloc_guard::epoch_counter(), since);
+    vm.set_script_domain("score");
+    let module = vm.new_module(id!(score));
+    for name in NODE_TYPES.iter() {
+        let proto = vm.bx.heap_mut().new_object();
+        let tag = lut_id(name);
+        vm.bx.heap_mut().set_value_def(proto, id_lut!(__proto).into(), ScriptValue::from_id(tag));
+        vm.bx.heap_mut().set_value_def(module, tag.into(), proto.into());
+    }
+    install(&mut vm, module, ctx.clone());
+    install_toolkit(&mut vm, module, ctx.clone());
+    vm.capture_errors();
+    vm.eval(ScriptMod::new("", "", &(PRELUDE_FILE), 0, 0, &(PRELUDE), &[]));
+    let prelude_errors = vm.take_errors();
+    debug_assert!(prelude_errors.is_empty(), "mod.score prelude: {prelude_errors:?}");
+    vm.capture_errors();
+    vm.set_run_budget(Some(ScriptRunBudget::slice(slice, SLICE_SAMPLE_INSTRUCTIONS)));
+    let (value, run) = run_document(&mut vm, source, control);
+    let bx = vm.bx;
+    finish_slice(host, bx, ctx, control.clone(), run, since, value)
+}
+
+fn run_document(vm: &mut ScriptVm, source: &str, control: &PrepareControl) -> (ScriptValue, ScriptRunGuard) {
+    let run = control.stop_script_on_cancel(vm.bx.interrupt_handle());
+    let limit = control.instruction_budget().unwrap_or(u64::MAX).min(EVAL_LIMIT as u64);
+    let _ = vm.bx.heap_mut().take_memory_refusal();
+    let _ = vm.bx.take_limit_hit();
+    let value = vm.with_interrupt_sampling(|vm| {
+        vm.with_instruction_limit(limit, |vm| {
             // Rows count from 1 like an editor's lines; columns from 0.
             vm.eval(ScriptMod::new("", "", &(DOC_FILE), 1, 0, &(source), &[]))
-        });
-        let errors = vm.take_errors();
-        let mut reader = Reader { vm: &vm, fns: Vec::new(), objects: Vec::new() };
-        let root = reader.read(value, 0);
-        let (fns, objects) = (reader.fns, reader.objects);
-        let keep = fns.iter().filter_map(|f| f.as_object()).map(|o| vm.bx.heap_mut().new_object_ref(o)).collect();
-        (errors, fns, keep, root, objects, vm.bx)
+        })
+    });
+    (value, run)
+}
+
+fn finish_slice(
+    mut host: Box<ScriptVmHost<(), ()>>,
+    bx: Box<ScriptVmBase>,
+    ctx: Shared,
+    control: PrepareControl,
+    run: ScriptRunGuard,
+    since: usize,
+    value: ScriptValue,
+) -> EvalStep {
+    let mut vm = ScriptVm { host: host.host_context(), bx };
+    if control.is_cancelled() { return EvalStep::Done(Err(LoadError::Cancelled)); }
+    let document_line = |vm: &ScriptVm, ip: ScriptIp| {
+        vm.bx.code_ref().ip_to_loc(ip).filter(|loc| loc.file().ends_with(DOC_FILE)).map(|loc| loc.line())
     };
-    Evaluated { host, bx: Some(bx), errors, fns, keep, root, objects, ctx }
+    if makepad_alloc_guard::low_memory_epoch() != since {
+        let line = vm.bx.heap_mut().take_memory_refusal().and_then(|refusal| document_line(&vm, refusal.ip));
+        return EvalStep::Done(Err(LoadError::Memory { line }));
+    }
+    if vm.run_yielded() {
+        let thread = vm.current_thread();
+        let bx = vm.bx;
+        return EvalStep::Pending(PendingEvaluation { host, bx, ctx, thread, control, run, since });
+    }
+    drop(run);
+    vm.set_run_budget(None);
+    vm.bx.unwatch_low_memory();
+    // A physical refusal also poisons the run with a heap limit reason.
+    if let Some(refusal) = vm.bx.heap_mut().take_memory_refusal() {
+        return EvalStep::Done(Err(LoadError::Memory { line: document_line(&vm, refusal.ip) }));
+    }
+    // At an exact tie the request spent its whole budget. A smaller engine cap keeps its diagnostic.
+    if control.instruction_budget().is_some_and(|budget| budget <= EVAL_LIMIT as u64) {
+        if let Some((Limit::Fuel, ip)) = vm.bx.take_limit_hit() {
+            if control.is_cancelled() { return EvalStep::Done(Err(LoadError::Cancelled)); }
+            let line = document_line(&vm, ip);
+            return EvalStep::Done(Err(LoadError::Unfinished { line }));
+        }
+    }
+    let errors = vm.take_errors();
+    let mut reader = Reader { vm: &vm, fns: Vec::new(), objects: Vec::new() };
+    let root = reader.read(value, 0);
+    let (fns, objects) = (reader.fns, reader.objects);
+    let keep = fns.iter().filter_map(|f| f.as_object()).map(|o| vm.bx.heap_mut().new_object_ref(o)).collect();
+    if control.is_cancelled() { return EvalStep::Done(Err(LoadError::Cancelled)); }
+    if makepad_alloc_guard::low_memory_epoch() != since {
+        return EvalStep::Done(Err(LoadError::Memory { line: None }));
+    }
+    let bx = vm.bx;
+    EvalStep::Done(Ok(Evaluated { host, bx: Some(bx), errors, fns, keep, root, objects, ctx }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_current_document_run_stops() {
+        let source_word = PrepareControl::default();
+        let mut evaluated = evaluate_controlled("fn answer() { return 42 }\nanswer", &source_word).unwrap();
+        source_word.cancel();
+        assert_eq!(evaluated.call(0, &[]).unwrap().as_number(), Some(42.0),
+            "a function on the returned VM still plays after its document request is cancelled");
+
+        evaluated.with_vm(|vm| {
+            assert!(!vm.bx.interrupt_handle().is_interrupted(), "the completed evaluation unregistered");
+            let word = PrepareControl::default();
+            let request = word.clone();
+            let probe = vm.new_module(id!(probe));
+            vm.add_method(probe, id_lut!(cancel), script_args!(), move |_, _| {
+                request.cancel();
+                NIL
+            });
+            let count = "let n = 0\nfor i in 0..2048 { n += 1 }\nn";
+            vm.capture_errors();
+            assert_eq!(run_document(vm, count, &word).0.as_number(), Some(2048.0),
+                "the same document completes under the existing instruction limit");
+            let (stopped, _) = run_document(vm, &format!("mod.probe.cancel(); {count}"), &word);
+            assert!(word.is_cancelled() && stopped.is_nil(), "a cancel inside score code bails at an interrupt sample");
+
+            vm.bx.interrupt_handle().clear();
+            let _run = word.stop_script_on_cancel(vm.bx.interrupt_handle());
+            let uncapped = vm.with_interrupt_sampling(|vm| vm.eval(ScriptMod::new("", "", DOC_FILE, 1, 0, count, &[])));
+            assert!(uncapped.is_nil(), "the cancelled request stops the document without EVAL_LIMIT");
+            assert!(vm.take_errors().is_empty(), "the host's stop produces no script diagnostic");
+        });
+    }
+
+    #[test]
+    fn pending_document_keeps_its_stop_and_resumes_its_callbacks() {
+        let word = PrepareControl::default();
+        let runaway = "use mod.score.*\nlet xs = [1].map(fn(v) { loop {} })\nScore{}";
+        let EvalStep::Pending(mut pending) = evaluate_begin(runaway, &word, Duration::ZERO) else {
+            panic!("the document with the runaway callback must yield on its first slice");
+        };
+        assert!(word.script_running(), "the first yield keeps the document registered");
+        for slice in 1..=20 {
+            let EvalStep::Pending(next) = pending.step(Duration::ZERO) else {
+                panic!("the runaway callback must still be pending after slice {slice}");
+            };
+            pending = next;
+            assert!(word.script_running(), "the registration survives slice {slice}");
+        }
+        word.cancel();
+        assert!(matches!(pending.step(Duration::ZERO), EvalStep::Done(Err(LoadError::Cancelled))),
+            "the first step after Stop ends the document silently");
+        assert!(!word.script_running(), "the cancelled document releases its registration");
+
+        let source = r#"use mod.score.*
+let pitches = [@c4 @d4 @e4].filter(fn(p) { return p != @d4 })
+let line = Loop{notes: pitches.map(fn(p) { return [0 note(p) 1] })}
+Score{line}"#;
+        let word = PrepareControl::default();
+        let whole = evaluate_controlled(source, &word).expect("the finite document completes");
+        let mut step = evaluate_begin(source, &word, Duration::ZERO);
+        assert!(matches!(step, EvalStep::Pending(_)), "the finite document exercises resume");
+        let mut stepped = loop {
+            match step {
+                EvalStep::Pending(pending) => step = pending.step(Duration::ZERO),
+                EvalStep::Done(result) => break result.expect("the sliced document completes"),
+            }
+        };
+        assert!(!word.script_running(), "the completed document releases its registration");
+        assert_eq!(stepped.root, whole.root, "the slices preserve the score root");
+        assert_eq!(stepped.objects, whole.objects, "the slices preserve the node values and locations");
+        assert_eq!(stepped.errors, whole.errors, "the slices preserve document diagnostics");
+        assert!(stepped.errors.is_empty(), "the finite document is valid: {:?}", stepped.errors);
+        let notes = stepped.objects.iter().find(|o| o.proto.as_deref() == Some("Loop")).and_then(|o| o.get("notes"));
+        let row = |pitch| V::Arr(vec![V::Num(0.0), V::Num(pitch), V::Num(1.0)]);
+        assert_eq!(notes, Some(&V::Arr(vec![row(60.0), row(64.0)])), "filter and map build the two expected notes");
+        stepped.with_vm(|vm| {
+            let nested = vm.bx.vm_stat(&mut vm_ctl::ScriptCtlReq::new(vm_ctl::STAT_NESTED_SCRIPT_RUNS));
+            assert_eq!(nested, 0, "the document callbacks stay on the outer interpreter run");
+            assert!(vm.run_budget().is_none(), "the document's deadline is cleared before later cycle calls");
+        });
+    }
+
+    #[test]
+    fn fx_yields_and_the_next_cycle_call_routes_after_a_bail() {
+        use makepad_score_player::FxKind;
+        use std::time::Duration;
+
+        let source = r#"use mod.score.*
+            fn play_cycle(mode) {
+                return fx(@reverb, fn() {
+                    if mode > 0 {
+                        [1].map(fn(v) {
+                            play(60)
+                            loop {}
+                        })
+                    }
+                    play(64)
+                    if mode < 0 { mod.std.assert(false, "fx callback failed") }
+                    return 42
+                })
+            }
+            play_cycle"#;
+        let mut evaluated = evaluate_controlled(source, &PrepareControl::default()).unwrap();
+        assert!(evaluated.errors.is_empty(), "the cycle function compiles: {:?}", evaluated.errors);
+        let ctx = evaluated.ctx.clone();
+        {
+            let mut ctx = ctx.borrow_mut();
+            ctx.active = true;
+            ctx.scopes.push(vec![FxKind::Reverb]);
+        }
+
+        evaluated.with_vm(|vm| { vm.set_run_budget(Some(ScriptRunBudget::slice(Duration::ZERO, 1))); });
+        evaluated.call(0, &[1.0]).expect("the cycle starts under the slice budget");
+        evaluated.with_vm(|vm| {
+            vm.capture_errors();
+            // play(60) witnesses entry into map's callback inside the open fx scope.
+            while ctx.borrow().emits.is_empty() && vm.run_yielded() {
+                vm.resume();
+            }
+            assert!(vm.run_yielded(), "the runaway callback yields after playing its note");
+            assert_eq!(ctx.borrow().scope_stack, [FxKind::Reverb], "fx stays open while its body is suspended");
+            let nested = vm.bx.vm_stat(&mut vm_ctl::ScriptCtlReq::new(vm_ctl::STAT_NESTED_SCRIPT_RUNS));
+            assert_eq!(nested, 0, "fx and map both use the cycle's interpreter");
+            vm.bx.interrupt_handle().stop();
+            vm.set_run_budget(None);
+            assert!(vm.resume().is_nil() && !vm.is_paused(), "Stop ends the suspended cycle at its next sample");
+            assert!(vm.take_errors().is_empty(), "Stop produces no script diagnostic");
+            vm.bx.interrupt_handle().clear();
+        });
+
+        assert_eq!(evaluated.call(0, &[0.0]).unwrap().as_number(), Some(42.0), "fx returns its body's value after Stop");
+        assert_eq!(ctx.borrow().routed, [(1, 2, 1)], "the new call routes only its own note through scope 1");
+        let error = evaluated.call(0, &[1.0]).expect_err("the runaway cycle must exhaust its instruction limit");
+        assert!(error.contains("instruction limit exceeded"), "the fx body reached the cycle limit: {error}");
+        assert_eq!(evaluated.call(0, &[0.0]).unwrap().as_number(), Some(42.0), "a second call in the same cycle can open fx");
+        assert_eq!(ctx.borrow().routed, [(1, 2, 1), (3, 4, 1)], "the next call preserves earlier routing and covers only its own emits");
+
+        evaluated.with_vm(|vm| vm.bx.bail_on_uncaught_error = true);
+        let error = evaluated.call(0, &[-1.0]).expect_err("the fx callback's uncaught error is reported");
+        assert!(error.contains("fx callback failed"), "the callback diagnostic reaches the host: {error}");
+        let ctx = ctx.borrow();
+        assert_eq!(ctx.routed.last(), Some(&(4, 5, 1)), "fx finishes its route when its callback returns an error");
+        let notes: Vec<_> = ctx.emits.iter().map(|emit| emit.what.clone()).collect();
+        assert_eq!(notes, [60.0, 64.0, 60.0, 64.0, 64.0].map(EmitKind::Note), "each body emitted its note once, including the abandoned bodies");
+        assert!(ctx.scope_stack.is_empty(), "fx popped its scope on the callback error");
+    }
 }
 
 /// `file:line:col: message (origin)` as a location in the document and the
@@ -362,7 +658,7 @@ struct Reader<'a, 'b> {
 
 impl Reader<'_, '_> {
     fn loc_of(&self, obj: ScriptObject) -> Option<(u32, u32)> {
-        // The document's rows count from 1 (see `evaluate`); columns from 0.
+        // The document's rows count from 1 (see `run_document`); columns from 0.
         let loc = self.vm.bx.code_ref().ip_to_loc(self.vm.bx.heap_ref().made_at(obj))?;
         (loc.file().ends_with(DOC_FILE)).then_some((loc.line(), loc.col() + 1))
     }
@@ -1004,6 +1300,16 @@ fn install(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
     // where the loop goes. The settings apply from this beat.
     let c = ctx.clone();
     vm.add_method(module, id_lut!(fx), script_args!(kind = NIL, opts = NIL, body = NIL), move |vm, args| {
+        let finish = |route, from, value| {
+            let mut ctx = c.borrow_mut();
+            let to = ctx.emits.len();
+            ctx.routed.push((from, to, route));
+            ctx.scope_stack.pop();
+            value
+        };
+        if let Some(([route, from, _, _], value)) = vm.take_call_back() {
+            return finish(usize::from(route), usize::from(from), value);
+        }
         let name = text_of(vm, arg(vm, args, id!(kind))).unwrap_or_default();
         let (mut opts, mut body) = (arg(vm, args, id!(opts)), arg(vm, args, id!(body)));
         let is_fn = |vm: &ScriptVm, v: ScriptValue| v.as_object().is_some_and(|o| vm.bx.heap_ref().is_fn(o));
@@ -1035,12 +1341,9 @@ fn install(vm: &mut ScriptVm, module: ScriptObject, ctx: Shared) {
             }
             (k + 1, ctx.emits.len())
         };
-        let value = vm.call(body, &[]);
-        let mut ctx = c.borrow_mut();
-        let to = ctx.emits.len();
-        ctx.routed.push((from, to, route));
-        ctx.scope_stack.pop();
-        value
+        let keep = [route.into(), from.into(), NIL, NIL];
+        let Some(value) = vm.call_back(body, &[], keep) else { return NIL };
+        finish(route, from, value)
     });
     // held(): the keys held on the MIDI input, lowest first (arp them).
     let c = ctx.clone();

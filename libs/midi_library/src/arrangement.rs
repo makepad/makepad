@@ -3,7 +3,7 @@
 //! the bars, the sections and the tempo. A MIDI file is imported into one
 //! ([`crate::import`]), the text transcription reads and writes one
 //! ([`crate::roll`]), a Score is read back into one by playing it
-//! ([`crate::roll::from_score`]), and [`to_score`] writes one as a readable
+//! ([`crate::roll::from_score_controlled`]), and [`to_score`] writes one as a readable
 //! Score with its mix and master chain.
 
 use crate::gm::{self, Role, Voice};

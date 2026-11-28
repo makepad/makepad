@@ -72,6 +72,12 @@ fn round1(x: f32) -> f32 {
 /// fields `held` live from their moments ([`crate::held`]).
 pub fn listen(source: &str, from_bar: u32, bars: u32, params: Vec<(String, f32)>, held: Vec<crate::held::Held>, samples: &dyn Samples, control: &crate::PrepareControl) -> Result<Heard, crate::LoadError> {
     let loaded = model::load_controlled(source, control)?;
+    listen_loaded(loaded, from_bar, bars, params, held, samples, control)
+}
+
+/// Hear the requested bars using the completed load's document, programs and VM.
+pub fn listen_loaded(loaded: model::Loaded, from_bar: u32, bars: u32, params: Vec<(String, f32)>, held: Vec<crate::held::Held>, samples: &dyn Samples, control: &crate::PrepareControl) -> Result<Heard, crate::LoadError> {
+    if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
     let doc = loaded.doc.clone();
     let beats_per_bar = doc.beats_per_bar();
     let bpm = doc.clock.bpm;

@@ -115,7 +115,6 @@ enum Swap {
 
 /// The game's handle on its music.
 pub struct GameMusic {
-    slot: MusicSlot,
     shared: Arc<Shared>,
     live: Option<LiveScore>,
     /// Headless: the composer, run by `advance`.
@@ -262,9 +261,6 @@ pub fn prepare_document(source: &str, doc: ScoreDoc, rate: f32, control: &crate:
 }
 
 impl PreparedMusic {
-    /// The source request's word. A headless session keeps it until the game drops the score.
-    pub fn control(&self) -> &crate::PrepareControl { &self.control }
-
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -295,6 +291,13 @@ impl PreparedMusic {
         PreparedMusic { control, source, rate, doc, name, stage }
     }
 
+    /// Hand a prepared graph to its headless sender. From here its evaluation belongs to
+    /// the playing source, even when several graphs were staged under the same word.
+    pub fn start_headless(mut self, playing: &crate::PrepareControl) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
+        self.control = playing.clone();
+        self.start(Clocking::Headless)
+    }
+
     /// The handle and the instrument (what [`music`] returns). Headless clocking evaluates with the
     /// checked programs on the thread that will own its composer.
     pub fn start(self, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
@@ -322,8 +325,7 @@ impl PreparedMusic {
                 (Some(live), None)
             }
             Some(feeds) => {
-                let loaded = model::CompiledShaders::from_doc(&doc).evaluate(&source)?;
-                if control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+                let loaded = model::CompiledShaders::from_doc(&doc).evaluate_controlled(&source, &control)?;
                 let tempo = makepad_audio_engine::feed::tempo_feed(&transport(&name));
                 (None, Some(Box::new(Inline { composer: Composer::new(loaded.into_evaluated()), feeds, tempo })))
             }
@@ -369,15 +371,19 @@ impl Parts {
 
     fn finish(self, name: String, rate: f32, live: Option<LiveScore>, inline: Option<Box<Inline>>) -> (GameMusic, MusicInstrument) {
         let Parts { shared, events, swaps, retired, slice, layout, instrument } = self;
-        let handle = GameMusic { slot: MusicSlot::default(), shared, live, inline, events, swaps, retired, name, slice, layout, generation: 1, revision: 1, rate, section: None, cued: f64::NEG_INFINITY };
+        let handle = GameMusic { shared, live, inline, events, swaps, retired, name, slice, layout, generation: 1, revision: 1, rate, section: None, cued: f64::NEG_INFINITY };
         (handle, instrument)
     }
 }
 
-/// Prepare `source` as a game's music at the bus's `rate`.
-pub fn music(source: &str, rate: f32, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
-    let mut slot = MusicSlot::default();
-    prepare_music(source, rate, &slot.begin())?.start(clocking)
+/// Prepare and start `source` at the bus's `rate`. The caller can cancel the load through `control`.
+pub fn music(
+    source: &str,
+    rate: f32,
+    clocking: Clocking,
+    control: &crate::PrepareControl,
+) -> Result<(GameMusic, MusicInstrument), crate::LoadError> {
+    prepare_music(source, rate, control)?.start(clocking)
 }
 
 /// The last admitted graph, captured on the host before a worker prepares a replacement.
@@ -396,6 +402,11 @@ pub struct MusicChange {
     shaders: Arc<model::CompiledShaders>,
     bar: f64,
     next: Option<Box<Player>>,
+}
+
+impl MusicChange {
+    /// The source word retained by the sender while its session installs the change.
+    pub fn control(&self) -> &crate::PrepareControl { &self.control }
 }
 
 impl MusicBase {
@@ -487,12 +498,11 @@ impl GameMusic {
 
     /// Change the score. Loops change at their next cycle; when its
     /// instruments or effects changed, a new graph takes over at the next
-    /// block, staying loops keeping their voices. A problem leaves the
-    /// music playing as it was.
-    pub fn set_source(&mut self, source: &str) -> Result<(), crate::LoadError> {
-        let control = self.slot.begin();
-        let doc = ScoreDoc::load_controlled(source, &control)?;
-        let mut change = self.base().prepare(Arc::from(source), &doc, &control)?;
+    /// block, staying loops keeping their voices. A problem or cancellation
+    /// through `control` leaves the current music playing.
+    pub fn set_source(&mut self, source: &str, control: &crate::PrepareControl) -> Result<(), crate::LoadError> {
+        let doc = ScoreDoc::load_controlled(source, control)?;
+        let mut change = self.base().prepare(Arc::from(source), &doc, control)?;
         if !self.post(&mut change)? {
             return Err(vec![Diag { line: 1, col: 1, node: None, message: "the music is still taking the last change".into() }].into());
         }
@@ -512,8 +522,7 @@ impl GameMusic {
             if !live.try_set_prepared(change.source.clone(), change.shaders.clone(), self.revision + 1) { return Ok(false); }
         } else {
             let inline = self.inline.as_mut().expect("headless music owns its composer");
-            let loaded = change.shaders.evaluate(&change.source)?;
-            if change.control.is_cancelled() { return Err(crate::LoadError::Cancelled); }
+            let loaded = change.shaders.evaluate_controlled(&change.source, &change.control)?;
             inline.composer.reload(loaded.into_evaluated(), self.shared.beat());
             for name in inline.composer.doc.feed_names() {
                 let key = crate::key(&name);
@@ -620,7 +629,6 @@ impl Drop for GameMusic {
     /// The inline composer is done here. A realtime composer forgets its
     /// feeds on retirement. The bus instrument keeps its own rings.
     fn drop(&mut self) {
-        self.slot.cancel();
         if self.inline.is_some() {
             makepad_audio_engine::feed::forget_instance(&self.name);
         }

@@ -10,7 +10,7 @@
 //! role, the mix chain, short comments.
 //!
 //! Then the check: the arranged Score is played back into an arrangement
-//! ([`crate::roll::from_score`]) and compared with the mechanical import on
+//! ([`crate::roll::from_score_controlled`]) and compared with the mechanical import on
 //! the sixteenth grid ([`compare`]): the tune, the bass, the drums and the
 //! harmony. A Score that does not load, fails while playing or drifts from
 //! the song goes back to the model with what is wrong, bar by bar, up to
@@ -223,6 +223,10 @@ pub struct Arranged {
 /// Run the arranger on `song` (the mechanical import, `mechanical` its
 /// Score): up to [`TURNS`] turns; the best Score that loads and plays.
 pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel: &makepad_score_live::PrepareControl, progress: &dyn Fn(&str)) -> Result<Arranged, String> {
+    makepad_score_live::drive(arrange_async(writer, song, mechanical, cancel, progress))
+}
+
+pub async fn arrange_async(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel: &makepad_score_live::PrepareControl, progress: &dyn Fn(&str)) -> Result<Arranged, String> {
     let system = system();
     let mut turns = vec![prompt(song, mechanical)];
     let mut best: Option<Arranged> = None;
@@ -234,7 +238,8 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
             turns.push("Your reply had no ```splash block with a whole Score. Send the whole Score in the format asked.".into());
             continue;
         };
-        let problem = match makepad_score_live::load_controlled(&source, cancel) {
+        let problem = match makepad_score_live::load(&source, cancel).await {
+            Err(error @ (makepad_score_live::LoadError::Unfinished { .. } | makepad_score_live::LoadError::Memory { .. })) => return Err(error.to_string()),
             Err(makepad_score_live::LoadError::Cancelled) => return Err("the arrangement was cancelled".into()),
             Err(makepad_score_live::LoadError::Problems(d)) => format!("The Score does not load:\n{}\nFix it and send the whole Score again.", d.iter().take(20).map(|d| d.to_string()).collect::<Vec<_>>().join("\n")),
             Ok(loaded) => match roll::from_loaded(loaded) {
@@ -260,7 +265,7 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
     // The sound: each part alone and the mix, measured, against the briefs.
     for turn in 1..=SOUND_TURNS {
         progress(&format!("listening to the parts (sound turn {turn})"));
-        let report = match sound_report(&best.source, cancel) {
+        let report = match sound_report_async(&best.source, cancel).await {
             Ok(report) => report,
             Err(_) if cancel.is_cancelled() => return Err("the arrangement was cancelled".into()),
             Err(e) => {
@@ -277,7 +282,7 @@ pub fn arrange(writer: &dyn Writer, song: &Arrangement, mechanical: &str, cancel
             break;
         }
         let Some(source) = splash_block(&reply) else { break };
-        let checked = makepad_score_live::load_controlled(&source, cancel);
+        let checked = makepad_score_live::load(&source, cancel).await;
         if cancel.is_cancelled() { return Err("the arrangement was cancelled".into()); }
         let Some(arranged) = checked.ok().and_then(|loaded| roll::from_loaded(loaded).ok()) else {
             progress("the sound revision does not load; kept the one before");
@@ -302,7 +307,11 @@ pub const SOUND_TURNS: usize = 2;
 /// Each part alone and the mix, measured over 40 s from the first chorus
 /// (else the start), with the mix's problems: the text the model judges.
 pub fn sound_report(source: &str, control: &makepad_score_live::PrepareControl) -> Result<String, String> {
-    let doc = makepad_score_live::model::read_document(source).map_err(|d| d.iter().map(|d| d.to_string()).collect::<Vec<_>>().join("\n"))?.doc;
+    makepad_score_live::drive(sound_report_async(source, control))
+}
+
+pub async fn sound_report_async(source: &str, control: &makepad_score_live::PrepareControl) -> Result<String, String> {
+    let doc = makepad_score_live::model::read_document(source, control).await.map_err(|e| e.to_string())?.doc;
     let per_bar = doc.beats_per_bar();
     let mut beat = 0.0;
     let mut start = 0.0;
@@ -314,7 +323,8 @@ pub fn sound_report(source: &str, control: &makepad_score_live::PrepareControl) 
         }
         beat += s.bars * per_bar;
     }
-    let (stems, mix) = crate::sound::stems(source, start, 40.0, control)?;
+    drop(doc);
+    let (stems, mix) = crate::sound::stems_async(source, start, 40.0, control).await?;
     let mut out = format!("Measured over 40 s from beat {start}:\n");
     for (name, m) in &stems {
         out.push_str(&format!("- {name}: {}\n", m.line()));

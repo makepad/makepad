@@ -3,7 +3,7 @@
 //! played on a small preview bus ([`bus`]) the host adds to its output.
 
 use crate::instruments::Choice;
-use crate::render::{render, RenderOpts};
+use crate::render::{render_loaded, RenderOpts};
 
 /// How long a phrase plays, in seconds (with its tail).
 pub const SECONDS: f64 = 2.0;
@@ -35,11 +35,16 @@ pub fn phrase(choice: &Choice) -> Option<String> {
 /// section they play in. None when the switch does not apply or the
 /// choice makes no sound here.
 pub fn in_place(source: &str, node: &str, choice: &Choice, song_beat: Option<f64>, control: &crate::PrepareControl) -> Result<Option<(String, Option<f64>)>, String> {
+    crate::drive(in_place_async(source, node, choice, song_beat, control))
+}
+
+pub async fn in_place_async(source: &str, node: &str, choice: &Choice, song_beat: Option<f64>, control: &crate::PrepareControl) -> Result<Option<(String, Option<f64>)>, String> {
     let Some(mut next) = phrase(choice).and_then(|_| crate::instruments::switch(source, node, choice).ok())
         .and_then(|splice| makepad_edit_values::apply_splices(source, 0, &[splice]).ok()) else { return Ok(None); };
-    let doc = match crate::model::ScoreDoc::load_controlled(&next, control) {
+    let doc = match crate::model::ScoreDoc::load(&next, control).await {
         Ok(doc) => doc,
         Err(crate::LoadError::Problems(_)) => return Ok(None),
+        Err(error @ (crate::LoadError::Unfinished { .. } | crate::LoadError::Memory { .. })) => return Err(error.to_string()),
         Err(crate::LoadError::Cancelled) => return Err("the audition was cancelled".into()),
     };
     let players: Vec<String> = doc.loops.iter().filter(|l| l.play.as_deref() == Some(node)).map(|l| l.name.clone()).collect();
@@ -71,17 +76,21 @@ pub fn first_beat(doc: &crate::model::ScoreDoc, loops: &[String]) -> Option<f64>
 
 /// Render an in-place audition: `seconds` from `start` (song beats).
 pub fn render_in_place(source: &str, start: Option<f64>, seconds: f64, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
-    let r = render(source, &RenderOpts { rate, seconds: Some(seconds.clamp(0.5, 8.0)), seed: None, params: Vec::new(), start, held: Vec::new() }, &crate::NoSamples, control)
-        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
-    Ok((r.left, r.right, r.rate))
+    crate::drive(render_in_place_async(source, start, seconds, rate, control))
+}
+
+pub async fn render_in_place_async(source: &str, start: Option<f64>, seconds: f64, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    render_clip(source, RenderOpts { rate, seconds: Some(seconds.clamp(0.5, 8.0)), seed: None, params: Vec::new(), start, held: Vec::new() }, control).await
 }
 
 /// The phrase on `choice`, rendered: (left, right, rate).
 pub fn render_phrase(choice: &Choice, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    crate::drive(render_phrase_async(choice, rate, control))
+}
+
+pub async fn render_phrase_async(choice: &Choice, rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
     let source = phrase(choice).ok_or_else(|| format!("{} makes no sound to audition", choice.label))?;
-    let r = render(&source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: Vec::new() }, &crate::NoSamples, control)
-        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
-    Ok((r.left, r.right, r.rate))
+    render_clip(&source, RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: Vec::new() }, control).await
 }
 
 /// A tiny score playing `node` of `source` as it is (its own fields) on
@@ -115,8 +124,17 @@ pub fn pad(source: &str, node: &str, drum: &str) -> Option<String> {
 
 /// Render a [`key`] score with the fields an editor holds: (left, right, rate).
 pub fn render_key(source: &str, held: &[crate::held::Held], rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
-    let r = render(source, &RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: held.to_vec() }, &crate::NoSamples, control)
-        .map_err(|e| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; ")))?;
+    crate::drive(render_key_async(source, held, rate, control))
+}
+
+pub async fn render_key_async(source: &str, held: &[crate::held::Held], rate: f32, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    render_clip(source, RenderOpts { rate, seconds: Some(SECONDS), seed: Some(1), params: Vec::new(), start: None, held: held.to_vec() }, control).await
+}
+
+async fn render_clip(source: &str, opts: RenderOpts, control: &crate::PrepareControl) -> Result<(Vec<f32>, Vec<f32>, f32), String> {
+    let describe = |e: crate::LoadError| e.describe(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; "));
+    let loaded = crate::load(source, control).await.map_err(describe)?;
+    let r = render_loaded(loaded, &opts, &crate::NoSamples, control, &mut |_, _| {}).map_err(describe)?;
     Ok((r.left, r.right, r.rate))
 }
 

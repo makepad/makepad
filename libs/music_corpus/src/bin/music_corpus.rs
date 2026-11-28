@@ -45,6 +45,7 @@ type Flag<'a> = dyn Fn(&str) -> Option<String> + 'a;
 type Num<'a> = dyn Fn(&str, usize) -> usize + 'a;
 
 fn build(flag: &Flag, num: &Num) -> Result<(), String> {
+    let control = makepad_score_live::PrepareControl::default();
     let out = PathBuf::from(flag("--out").ok_or("--out <dir>")?);
     let mut opts = Opts { out, ..Opts::default() };
     opts.limits.context = num("--context", opts.limits.context);
@@ -72,7 +73,7 @@ fn build(flag: &Flag, num: &Num) -> Result<(), String> {
             return Err(format!("unknown source `{s}` (lmd, folder:<dir>)"));
         }
     }
-    let sum = corpus::build(&sources, &tok, &opts, &|m| eprintln!("{m}"))?;
+    let sum = corpus::build(&sources, &tok, &opts, &control, &|m| eprintln!("{m}"))?;
     eprintln!("built in {:.0} s", sum.seconds);
     print!("{}", corpus::print_stats(&opts.out)?);
     Ok(())
@@ -89,13 +90,14 @@ fn baseline(flag: &Flag, num: &Num) -> Result<(), String> {
 }
 
 fn run_eval(flag: &Flag, num: &Num) -> Result<(), String> {
+    let control = makepad_score_live::PrepareControl::default();
     let data = PathBuf::from(flag("--data").ok_or("--data <dir>")?);
     let pred_path = flag("--pred").ok_or("--pred <pred.jsonl>")?;
     let cases = eval::load_cases(&data, &flag("--split").unwrap_or_else(|| "test".into()))?;
     let pred = std::fs::read_to_string(&pred_path).map_err(|e| format!("{pred_path}: {e}"))?;
     let wav = flag("--wav").map(PathBuf::from);
     let render = flag("--render").and_then(|n| n.parse().ok()).zip(wav.as_deref());
-    let rep = eval::evaluate(&cases, &pred, num("--threads", 8), render, &makepad_score_live::PrepareControl::default())?;
+    let rep = eval::evaluate(&cases, &pred, num("--threads", 8), render, &control)?;
     print!("{}", eval::report_text(&rep));
     if let Some(path) = flag("--json") {
         std::fs::write(&path, eval::report_json(&rep).to_json()).map_err(|e| format!("{path}: {e}"))?;

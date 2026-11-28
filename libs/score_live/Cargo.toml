@@ -25,6 +25,7 @@ required-features = ["neural"]
 test-variants = ["neural"]
 
 [dependencies]
+makepad-alloc-guard = { path = "../alloc_guard" }
 makepad-core-util = { path = "../core_util" }
 makepad-edit-values = { path = "../edit_values" }
 makepad-score-player = { path = "../score_player" }
