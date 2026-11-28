@@ -116,6 +116,9 @@ pub struct SttConfig {
     pub partial_interval_ms: u32,
     /// Prefer on-device recognition when the OS engine offers the choice.
     pub prefer_offline: bool,
+    /// Require an installed on-device recognizer. Reach extends at most to a machine
+    /// node over loopback. Named hubs are incompatible with this setting.
+    pub on_device_only: bool,
     /// Ask for per-segment timing.
     pub timestamps: bool,
     /// Whisper: decode the whole buffer as one segment (live dictation).
@@ -142,6 +145,7 @@ impl Default for SttConfig {
             partial_results: true,
             partial_interval_ms: 1000,
             prefer_offline: true,
+            on_device_only: false,
             timestamps: true,
             single_segment: false,
             max_tokens: 0,
@@ -153,6 +157,10 @@ impl Default for SttConfig {
 }
 
 impl SttConfig {
+    fn effective_reach(&self) -> SpeechReach {
+        if self.on_device_only { self.reach.min(SpeechReach::Machine) } else { self.reach }
+    }
+
     /// The settings the Window voice input has always used for short,
     /// VAD-gated utterances: one segment, few tokens, a stricter silence gate.
     pub fn live_dictation() -> Self {
@@ -367,7 +375,7 @@ impl SttSession {
         let worker_generation = generation.clone();
         thread::Builder::new()
             .name("ai-hub-stt".into())
-            .spawn(move || stt_worker::run(config, msg_rx, event_tx, worker_generation))
+            .spawn(move || stt_worker::run(config, msg_rx, event_tx, worker_generation, &Default::default()))
             .expect("spawn stt worker");
         Self {
             handle: SttHandle { to_worker, next_utterance: AtomicU64::new(1), generation },
@@ -642,6 +650,114 @@ mod tests {
         drop(handle);
         assert_eq!(events.from_worker.recv_timeout(std::time::Duration::from_secs(2)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected), "the speech worker must exit");
+    }
+
+    #[test]
+    fn on_device_sessions_use_only_installed_engines_and_never_follow_a_redirect() {
+        use std::cell::Cell;
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::{TcpListener, TcpStream};
+
+        let strict = SttConfig { on_device_only: true, reach: SpeechReach::Lan, ..Default::default() };
+        assert_eq!(strict.effective_reach(), SpeechReach::Machine, "on-device LAN reach ends at this machine");
+        assert_eq!(SttConfig { reach: SpeechReach::Local, ..strict.clone() }.effective_reach(),
+            SpeechReach::Local, "process-only recognition must keep its narrower reach");
+
+        let port = Cell::new(None);
+        let network_lookups = Cell::new(0);
+        let pin = "http://192.0.2.1:8765";
+        let sources = stt_worker::Sources {
+            #[cfg(feature = "stt")]
+            weights: || None,
+            nodes: remote::Nodes {
+                machine_ports: &|| port.get().into_iter().collect(),
+                add_and_order_network: &|_, urls| {
+                    network_lookups.set(network_lookups.get() + 1);
+                    urls.push(pin.into());
+                },
+                tier: &|_| panic!("on-device discovery must skip interface-based tier lookup"),
+            },
+            os_on_device: |_| false,
+        };
+        use crate::client::RequestPolicy;
+        assert_eq!(sources.nodes.candidates(SpeechReach::Machine, &RequestPolicy::default()), [pin],
+            "the control must include the globally pinned non-loopback hub");
+        network_lookups.set(0);
+        assert!(sources.nodes.candidates(SpeechReach::Machine, &RequestPolicy::on_device()).is_empty(),
+            "a global pin cannot become an on-device candidate");
+        let failure = |config, expect_ready| {
+            let (commands, input) = channel();
+            commands.send(SttMsg::Transcribe { utterance: 1, generation: 0, samples: vec![0.25; 16] }).unwrap();
+            drop(commands);
+            let (send, events) = channel();
+            stt_worker::run(config, input, send, Arc::default(), &sources);
+            let events: Vec<_> = events.into_iter().collect();
+            assert_eq!(events.iter().any(|e| matches!(e, SttEvent::Ready(_))), expect_ready,
+                "only a local node serving Whisper may become ready");
+            events.into_iter().find_map(|e| match e {
+                SttEvent::Failed(why) if !expect_ready => Some(why),
+                SttEvent::Error { message, .. } if expect_ready => Some(message),
+                _ => None,
+            }).expect("the worker must explain the failed discovery or utterance")
+        };
+        let named = failure(SttConfig { hubs: vec![pin.into()], ..strict.clone() }, false);
+        assert!(named.contains("named hubs"), "a named hub must fail before discovery: {named}");
+        let absent = failure(strict.clone(), false);
+        assert!(absent.contains("Install a speech model in AI Hub"), "an empty machine needs an actionable reason: {absent}");
+
+        let target = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let target_requests = std::thread::spawn(move || {
+            let mut requests = 0;
+            for incoming in target.incoming() {
+                let mut stream = incoming.unwrap();
+                // An empty connection ends the fixture after all sessions have finished.
+                if stream.read(&mut [0]).unwrap() == 0 { break; }
+                requests += 1;
+                let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+            }
+            requests
+        });
+
+        let models = r#"{"models":[{"id":"recognizer","domain":"stt","backend":"whisper","available":true,"gated":false,"state":"ready"}]}"#;
+        let admitted = r#"{"job_id":"one"}"#;
+        let done = r#"{"job_id":"one","state":"done","artifacts":[{"id":"text","url":"/artifact/text","content_type":"application/json"}]}"#;
+        let routes = [("/models", models), ("/generate", admitted), ("/job/one", done), ("/artifact/text", "")];
+        for (last, (redirect_path, _)) in routes.iter().enumerate() {
+            let source = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            port.set(Some(source.local_addr().unwrap().port()));
+            let server = std::thread::spawn(move || {
+                for (index, (path, body)) in routes[..=last].iter().enumerate() {
+                    let (mut stream, _) = source.accept().unwrap();
+                    let mut reader = BufReader::new(&stream);
+                    let mut request = String::new();
+                    reader.read_line(&mut request).unwrap();
+                    assert_eq!(request.split_whitespace().nth(1), Some(*path), "unexpected speech request");
+                    let mut length = 0;
+                    for header in reader.by_ref().lines() {
+                        let header = header.unwrap();
+                        if header.is_empty() { break; }
+                        if let Some((name, value)) = header.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") { length = value.trim().parse().unwrap(); }
+                        }
+                    }
+                    reader.read_exact(&mut vec![0; length]).unwrap();
+                    // Even a redirect carrying a plausible job id must fail admission.
+                    let (status, location, body) = if index == last {
+                        ("307 Temporary Redirect", format!("Location: http://{target_addr}/elsewhere\r\n"), admitted)
+                    } else {
+                        ("200 OK", String::new(), *body)
+                    };
+                    write!(stream, "HTTP/1.1 {status}\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            let why = failure(strict.clone(), last > 0);
+            assert!(why.contains("307 redirect"), "the redirect at {redirect_path} must fail explicitly: {why}");
+            server.join().unwrap();
+        }
+        drop(TcpStream::connect(target_addr).unwrap());
+        assert_eq!(target_requests.join().unwrap(), 0, "the other origin must receive no request");
+        assert_eq!(network_lookups.get(), 0, "private discovery must skip pins, LAN and interface lookup");
     }
 
     #[test]

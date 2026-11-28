@@ -146,6 +146,11 @@ pub struct H3TierPlan {
 const GGUF_Q4_MAX_PIXEL_FRAMES: u64 = 960 * 544 * 124;
 const NVFP4_MAX_PIXEL_FRAMES: u64 = 1344 * 768 * 124;
 
+/// The tier's measured canvas ceiling, shared by the fleet and the backend.
+pub fn video_max_pixel_frames(spec: &ModelSpec) -> Option<u64> {
+    tier_plan_for_spec(spec).ok()?.max_pixel_frames
+}
+
 /// Derives the tier plan from a registry entry's file roles. Fails closed on
 /// contradictory or incomplete quantized manifests.
 pub fn tier_plan_for_spec(spec: &ModelSpec) -> Result<H3TierPlan, AssetAiError> {

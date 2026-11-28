@@ -2030,8 +2030,8 @@ mod tests {
         assert!((f512 - 436.476_803_5).abs() < 1e-6);
     }
 
-    /// Deterministic RGB pattern shared with the Python OpenCV replicas in
-    /// local/agent_state/da3-native-files/ that generated the FNV vectors.
+    /// Deterministic RGB pattern shared with the Python OpenCV replicas that
+    /// generated the FNV vectors.
     fn resize_test_pattern(width: usize, height: usize) -> Vec<u8> {
         let mut image = vec![0u8; width * height * 3];
         for y in 0..height {

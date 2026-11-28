@@ -13,9 +13,9 @@ use crate::providers::claude::build_prompt_only;
 use crate::providers::cli::{
     categorize_cli_error, cli_command, find_cli, toml_basic_string, turn_dir, CliTurn,
 };
-use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput, ToolImage, tool_image_media_type, validate_tool_images};
+use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput, ToolImage, tool_image_media_type, validate_tool_image_payloads};
 use makepad_strict_json::{self as json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 pub struct ParseState {
@@ -35,6 +35,26 @@ pub struct CodexCliChatProvider {
 impl CodexCliChatProvider {
     pub fn new(model: Option<String>) -> CodexCliChatProvider {
         CodexCliChatProvider { cli: find_codex(), model, resume: None, turn: None, images: Vec::new() }
+    }
+
+    fn stage_images(&mut self, cwd: &Path, args: &mut Vec<String>, prompt: &mut String) -> Result<(), String> {
+        if self.images.is_empty() {
+            return Ok(());
+        }
+        for (index, image) in std::mem::take(&mut self.images).into_iter().enumerate() {
+            let ext = match tool_image_media_type(&image.png) { Some("image/jpeg") => "jpg", _ => "png" };
+            let path = cwd.join(format!("tool-image-{index}.{ext}"));
+            if let Err(error) = std::fs::write(&path, &image.png) {
+                let _ = std::fs::remove_dir_all(cwd);
+                return Err(format!("tool image staging failed: {error}"));
+            }
+            args.push("--image".into());
+            args.push(path.to_string_lossy().into_owned());
+            prompt.push_str(&format!("\nAttached reference image {}: {}. Inspect the image before judging the model.\n", index + 1, image.label));
+        }
+        // --image is variadic; terminate its values before the stdin sentinel.
+        args.push("--".into());
+        Ok(())
     }
 }
 
@@ -141,7 +161,7 @@ pub fn parse_line(v: &Value, state: &mut ParseState) -> (Vec<ProviderEvent>, boo
 
 impl ChatProvider for CodexCliChatProvider {
     fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
-        validate_tool_images(&images)?;
+        validate_tool_image_payloads(&images)?;
         if self.turn.is_some(){return Err("image continuation requested while provider is active".into());}
         self.images=images;Ok(())
     }
@@ -156,7 +176,7 @@ impl ChatProvider for CodexCliChatProvider {
                 detail: p.display().to_string(),
             },
             None => ProviderAvailability::Unavailable {
-                reason: "codex CLI not found on this host (set CODEX_CLI_PATH or install codex)".to_string(),
+                reason: super::unavailable_reason("codex CLI not found on this host (set CODEX_CLI_PATH or install codex)"),
             },
         }
     }
@@ -166,23 +186,13 @@ impl ChatProvider for CodexCliChatProvider {
             return Err("a turn is already in flight".to_string());
         }
         let Some(cli) = self.cli.clone() else {
-            return Err("codex CLI not found".to_string());
+            return Err(super::unavailable_reason("codex CLI not found"));
         };
         let mut prompt = build_prompt_only(input, self.resume.is_some());
         let cwd = turn_dir("codex");
         let mut args = build_args(&self.model, &self.resume, &input.system_with_dynamic(), &cwd.to_string_lossy());
         args.pop(); // Image flags apply to exec or exec resume before stdin '-'.
-        let with_images = !self.images.is_empty();
-        for (index,image) in std::mem::take(&mut self.images).into_iter().enumerate(){
-            let ext = match tool_image_media_type(&image.png) { Some("image/jpeg") => "jpg", _ => "png" };
-            let path=cwd.join(format!("tool-image-{index}.{ext}"));
-            if let Err(error)=std::fs::write(&path,&image.png){let _=std::fs::remove_dir_all(&cwd);return Err(format!("tool image staging failed: {error}"));}
-            args.push("--image".into());args.push(path.to_string_lossy().into_owned());
-            prompt.push_str(&format!("\nAttached reference image {}: {}. Inspect the image before judging the model.\n",index+1,image.label));
-        }
-        // --image is variadic; terminate its values so the stdin sentinel
-        // cannot be parsed as another image filename (observed in chat logs).
-        if with_images { args.push("--".into()); }
+        self.stage_images(&cwd, &mut args, &mut prompt)?;
         args.push("-".into());
         let mut command = cli_command(&cli, &cwd);
         command.args(&args);
@@ -249,6 +259,27 @@ impl Drop for CodexCliChatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_six_picture_line_reaches_codex_image_arguments_in_order() {
+        let pictures = super::super::provider::six_cli_pictures();
+        let mut provider = CodexCliChatProvider::new(None);
+        provider.attach_tool_images(pictures.clone()).expect("Codex must accept all six pictures");
+        let dir = turn_dir("codex-pictures-test");
+        let mut args = Vec::new();
+        let mut prompt = String::new();
+        provider.stage_images(&dir, &mut args, &mut prompt).expect("Codex must stage the six picture files");
+        let received: Vec<_> = args.windows(2).filter(|pair| pair[0] == "--image")
+            .map(|pair| std::fs::read(&pair[1]).expect("each Codex --image must name a readable file")).collect();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(received.len(), pictures.len(), "Codex must receive one --image path per picture");
+        let mut labels = prompt.lines().filter(|l| !l.is_empty());
+        for (i, (bytes, picture)) in received.iter().zip(&pictures).enumerate() {
+            assert_eq!(bytes.as_slice(), &*picture.png, "Codex must receive the staged picture bytes in selection order");
+            assert!(labels.next().is_some_and(|line| line.contains(&format!("image {}: {}.", i + 1, picture.label))),
+                "the Codex prompt must label each file in the same order as the --image arguments");
+        }
+    }
 
     #[test]
     fn policy_flags_precede_resume_and_the_prompt_is_never_in_argv() {

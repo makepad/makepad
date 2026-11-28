@@ -5,7 +5,7 @@ use crate::metal_compiled::{
     execute_compiled_graph, execute_compiled_graph_in_active_batch,
     execute_compiled_graph_with_buffer_inputs, prepare_graph,
     MetalCompiledGraph, MetalContextBuffers, MetalGraphSession, MetalGraphTensorBufferCopy,
-    MetalGraphTensorWrite, MetalPreparedGraph,
+    MetalGraphTensorWrite, MetalPreparedGraph, MetalSharedTail,
 };
 use crate::{
     ggml_row_size_for_type, BufferUsage, Context, GluOp, Graph, InitParams, Op, Prec, SortOrder,
@@ -398,7 +398,7 @@ fn window_relative_rows(rows: &[i32], base: usize) -> Result<Vec<i32>> {
         .collect()
 }
 
-fn attention_mask_tensor_type(head_dim: u32, n_tokens: usize) -> TensorType {
+pub(crate) fn attention_mask_tensor_type(head_dim: u32, n_tokens: usize) -> TensorType {
     if should_use_flash_attention(head_dim, n_tokens) {
         TensorType::F16
     } else {
@@ -7067,12 +7067,66 @@ pub(crate) fn reserve_hybrid_decode_main_buffer_size(
     Ok(prepared.main_buffer_size)
 }
 
+/// Build the selector's graph from tensor metadata alone. Native scratch geometry can
+/// exceed the small row sample used to measure the caller's KV bytes per token.
+pub(crate) fn plan_hybrid_decode_metal_tail_bytes(
+    weight_tensors: &[crate::gguf::GgufTensorInfo],
+    spec: &HybridDecodeSpec,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_count: usize,
+    features: MetalDeviceFeatures,
+) -> Result<usize> {
+    let mut ctx = Context::new(InitParams { mem_size: 0, mem_buffer: None, no_alloc: true });
+    let mut tensor_ids = BTreeMap::new();
+    for weight in weight_tensors {
+        let dims = weight.dimensions.iter().copied().map(i64::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| LlamaError::format(format!("weight '{}' extent exceeds i64", weight.name)))?;
+        let id = ctx.new_named_tensor(&weight.name, weight.tensor_type, dims.len(), &dims, BufferUsage::Weights)
+            .map_err(LlamaError::format)?;
+        tensor_ids.insert(weight.name.clone(), id);
+    }
+
+    let mut add_state = |name: &str, width: u32| -> Result<()> {
+        if !tensor_ids.contains_key(name) {
+            let id = ctx.new_named_tensor(name, TensorType::F32, 2, &[i64::from(width), 1], BufferUsage::State)
+                .map_err(LlamaError::format)?;
+            tensor_ids.insert(name.to_owned(), id);
+        }
+        Ok(())
+    };
+    if let Some(carry) = &spec.hidden_carry {
+        add_state(&carry.tensor_name, carry.hidden_size)?;
+    }
+    if let Some(prologue) = &spec.mtp_prologue {
+        add_state(&prologue.hidden_carry_name, prologue.hidden_size)?;
+        if spec.output_name == crate::qwen35_runtime::MTP_DRAFT_HEAD_TENSOR {
+            add_state(&spec.output_name, prologue.hidden_size)?;
+        }
+    }
+    let planned_max_context = u32::try_from(attention_key_count)
+        .map_err(|_| LlamaError::format("planned attention key count exceeds u32"))?;
+    let mut planned_spec = spec.clone();
+    for layer in &mut planned_spec.layers {
+        if let HybridLayerSpec::Attention { decode, .. } = layer {
+            decode.cache.max_context = decode.cache.max_context.max(planned_max_context);
+        }
+    }
+    let decode = build_hybrid_decode_graph_with_attention_key_count(
+        &mut ctx, &tensor_ids, &planned_spec, None, n_tokens, n_outputs, 0, attention_key_count,
+    )?;
+    crate::metal_compiled::planned_tail_buffer_size(&ctx, &decode.graph, features)
+        .map_err(LlamaError::format)
+}
+
 fn compile_hybrid_decode_metal_impl(
     weights: &mut LoadedGgufWeights,
     spec: &HybridDecodeSpec,
     shared_runtime: Option<&MetalRuntime>,
     shared_cache: Option<&HybridSharedCacheTensorIds>,
     shared_buffers: Option<&MetalContextBuffers>,
+    shared_tail: Option<&MetalSharedTail>,
     n_tokens: usize,
     n_outputs: usize,
     attention_key_base: usize,
@@ -7130,7 +7184,11 @@ fn compile_hybrid_decode_metal_impl(
             runtime.features(),
         )?
     };
-    let session = if let Some(buffers) = shared_buffers {
+    let session = if let (Some(buffers), Some(tail)) = (shared_buffers, shared_tail) {
+        MetalGraphSession::from_runtime_with_context_buffers_and_shared_tail(
+            runtime, &prepared, buffers, tail, BufferStorageMode::Private,
+        )
+    } else if let Some(buffers) = shared_buffers {
         MetalGraphSession::from_runtime_with_context_buffers(
             runtime,
             &prepared,
@@ -7161,7 +7219,7 @@ pub fn compile_hybrid_decode_metal(
     spec: &HybridDecodeSpec,
     n_tokens: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_tokens, 0, None, 1)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, None, n_tokens, n_tokens, 0, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_outputs(
@@ -7170,7 +7228,7 @@ pub fn compile_hybrid_decode_metal_with_outputs(
     n_tokens: usize,
     n_outputs: usize,
 ) -> Result<CompiledHybridDecodeMetal> {
-    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, n_tokens, n_outputs, 0, None, 1)
+    compile_hybrid_decode_metal_impl(weights, spec, None, None, None, None, n_tokens, n_outputs, 0, None, 1)
 }
 
 pub fn compile_hybrid_decode_metal_with_shared_state(
@@ -7186,6 +7244,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state(
         None,
         Some(shared_cache),
         Some(shared_buffers),
+        None,
         n_tokens,
         n_tokens,
         0,
@@ -7208,6 +7267,7 @@ pub fn compile_hybrid_decode_metal_with_shared_state_and_outputs(
         None,
         Some(shared_cache),
         Some(shared_buffers),
+        None,
         n_tokens,
         n_outputs,
         0,
@@ -7230,6 +7290,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state(
         Some(shared_runtime),
         Some(shared_cache),
         Some(shared_buffers),
+        None,
         n_tokens,
         n_tokens,
         0,
@@ -7253,6 +7314,7 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs(
         Some(shared_runtime),
         Some(shared_cache),
         Some(shared_buffers),
+        None,
         n_tokens,
         n_outputs,
         0,
@@ -7279,6 +7341,36 @@ pub fn compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and
         Some(shared_runtime),
         Some(shared_cache),
         Some(shared_buffers),
+        None,
+        n_tokens,
+        n_outputs,
+        attention_key_base,
+        Some(attention_key_count),
+        n_seqs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_hybrid_decode_metal_with_shared_tail(
+    weights: &mut LoadedGgufWeights,
+    spec: &HybridDecodeSpec,
+    shared_runtime: &MetalRuntime,
+    shared_cache: &HybridSharedCacheTensorIds,
+    shared_buffers: &MetalContextBuffers,
+    shared_tail: &MetalSharedTail,
+    n_tokens: usize,
+    n_outputs: usize,
+    attention_key_base: usize,
+    attention_key_count: usize,
+    n_seqs: usize,
+) -> Result<CompiledHybridDecodeMetal> {
+    compile_hybrid_decode_metal_impl(
+        weights,
+        spec,
+        Some(shared_runtime),
+        Some(shared_cache),
+        Some(shared_buffers),
+        Some(shared_tail),
         n_tokens,
         n_outputs,
         attention_key_base,

@@ -27,6 +27,7 @@ pub struct ToolImage {
 /// The most pixels a tool picture may have a side: a tool fits its pictures within it (and
 /// within its byte budget) before they come here.
 pub const MAX_TOOL_IMAGE_SIDE: u32 = 1024;
+pub const MAX_TOOL_IMAGES: usize = 4;
 
 /// Sniff the encoded picture without decoding its pixels.
 pub fn tool_image_media_type(bytes: &[u8]) -> Option<&'static str> {
@@ -74,16 +75,31 @@ fn tool_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-pub fn validate_tool_images(images:&[ToolImage])->Result<(),String>{
-    if images.len()>4{return Err("too many tool images".into());}
-    let mut bytes=0usize;
-    for image in images {
-        bytes=bytes.saturating_add(image.png.len());
-        if image.label.len()>128 {return Err("invalid tool image".into());}
-        let (w,h) = tool_image_dimensions(&image.png).ok_or("invalid tool image: expected PNG or JPEG dimensions")?;
-        if w==0 || h==0 || w>MAX_TOOL_IMAGE_SIDE || h>MAX_TOOL_IMAGE_SIDE {return Err(format!("tool image dimensions exceed {MAX_TOOL_IMAGE_SIDE}"));}
+pub fn validate_tool_images(images: &[ToolImage]) -> Result<(), String> {
+    if images.len() > MAX_TOOL_IMAGES {
+        return Err("too many tool images".into());
     }
-    if bytes>8*1024*1024{return Err("tool image byte budget exceeded".into());}Ok(())
+    validate_tool_image_payloads(images)?;
+    let bytes = images.iter().fold(0usize, |total, image| total.saturating_add(image.png.len()));
+    if bytes > 8 * 1024 * 1024 {
+        return Err("The pictures together must be 8 MiB or smaller.".into());
+    }
+    Ok(())
+}
+
+/// Checks shared by every route. The CLIs take each picture separately and report their own request limits.
+pub fn validate_tool_image_payloads(images: &[ToolImage]) -> Result<(), String> {
+    for image in images {
+        if image.label.len() > 128 {
+            return Err("Each picture label must be 128 bytes or shorter.".into());
+        }
+        let (width, height) = tool_image_dimensions(&image.png)
+            .ok_or("Each picture must be a PNG or JPEG with readable dimensions.")?;
+        if !(1..=MAX_TOOL_IMAGE_SIDE).contains(&width) || !(1..=MAX_TOOL_IMAGE_SIDE).contains(&height) {
+            return Err(format!("Each side of a picture must be between 1 and {MAX_TOOL_IMAGE_SIDE} pixels."));
+        }
+    }
+    Ok(())
 }
 
 /// Everything a provider needs for one turn. `system` carries the tool
@@ -417,6 +433,14 @@ impl ChatProvider for ThreadedProvider {
 }
 
 #[cfg(test)]
+pub(super) fn six_cli_pictures() -> Vec<ToolImage> {
+    (1..=6).map(|n| ToolImage {
+        label: format!("view {n}"),
+        png: crate::testpattern::encode_png_rgb8(&[n, 0, 0], 1, 1).unwrap().into(),
+    }).collect()
+}
+
+#[cfg(test)]
 mod threaded_tests {
     use super::*;
     use crate::chat_wire::ProviderAvailability;
@@ -454,9 +478,44 @@ mod threaded_tests {
         for (width, height) in [(1025, 1), (1, 1025)] {
             let image = ToolImage { label: "oversize".into(), png: encode(width, height, false).into() };
             let error = validate_tool_images(&[image]).unwrap_err();
-            assert!(error.contains("dimensions"), "either side over the limit is rejected");
+            assert!(error.contains("1024 pixels"), "either oversized side must name the pixel limit");
         }
         assert_eq!(tool_image_media_type(b"not a picture"), None, "unknown formats are rejected");
+    }
+
+    #[test]
+    fn cli_payloads_check_each_picture_and_only_the_bounded_routes_check_combined_bytes() {
+        let png = crate::testpattern::encode_png_rgb8(&[0, 1, 2], 1, 1).unwrap();
+        let mut image = ToolImage { label: "é".repeat(64), png: png.clone().into() };
+        assert!(validate_tool_image_payloads(std::slice::from_ref(&image)).is_ok(),
+            "a 128-byte label must fit");
+        image.label.push('x');
+        assert!(validate_tool_image_payloads(std::slice::from_ref(&image)).is_err_and(|e| e.contains("128 bytes")),
+            "a label over the byte limit must say how long it may be");
+        image.label.clear();
+        image.png = b"not a picture".as_slice().into();
+        assert!(validate_tool_image_payloads(std::slice::from_ref(&image)).is_err_and(|e| e.contains("PNG or JPEG")),
+            "an unreadable header must name the supported formats");
+        let mut zero = png.clone();
+        zero[16..20].copy_from_slice(&0u32.to_be_bytes());
+        image.png = zero.into();
+        assert!(validate_tool_image_payloads(&[image]).is_err_and(|e| e.contains("between 1 and 1024 pixels")),
+            "a zero-width picture must explain the allowed side length");
+
+        // JPEG permits 0xff fill bytes before a marker. Pad before the end
+        // marker to make an exactly 2 MiB valid picture shared by the batch.
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 85).encode(&[0, 1, 2], 1, 1, jpeg_encoder::ColorType::Rgb).unwrap();
+        assert_eq!(jpeg.pop(), Some(0xd9), "the JPEG fixture must end with an end-of-image marker");
+        jpeg.resize(2 * 1024 * 1024 - 1, 0xff);
+        jpeg.push(0xd9);
+        let mut batch = vec![ToolImage { label: String::new(), png: jpeg.clone().into() }; 4];
+        assert!(validate_tool_images(&batch).is_ok(), "pictures totalling exactly 8 MiB must fit even on the bounded routes");
+        jpeg.insert(jpeg.len() - 1, 0xff);
+        batch[0].png = jpeg.into();
+        assert!(validate_tool_image_payloads(&batch).is_ok(), "the CLI payload checks must allow a batch over 8 MiB");
+        assert!(validate_tool_images(&batch).is_err_and(|e| e.contains("together must be 8 MiB or smaller")),
+            "the bounded routes must still refuse four pictures one byte over 8 MiB");
     }
 
     /// A provider whose begin_turn BLOCKS like the fleet's flaky-LAN

@@ -13,8 +13,6 @@
 //! * which slots run in the next step and how wide that step is
 //!   ([`SlotTable::plan_step`]),
 //! * how much speculation the step can afford ([`draft_depth_for`]).
-//!
-//! Design of record: `local/agent_state/qwen-parallel/batched-session-design.md`.
 
 use crate::error::{LlamaError, Result};
 use crate::runtime::HybridDecodeBatchLayout;

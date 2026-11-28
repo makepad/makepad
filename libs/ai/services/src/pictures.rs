@@ -42,17 +42,21 @@ pub fn base64_len(bytes: usize) -> usize {
 
 /// A PNG of the picture: RGB when it is opaque (the alpha would only cost bytes), else RGBA.
 pub fn encode_png(picture: &RgbaPicture) -> Result<Vec<u8>, String> {
-    let (width, height) = (picture.width as usize, picture.height as usize);
-    if width == 0 || height == 0 || picture.rgba.len() != width * height * 4 {
-        return Err(format!("a {width} x {height} picture needs {} bytes of pixels, not {}", width * height * 4, picture.rgba.len()));
+    encode_rgba_png(picture.width as usize, picture.height as usize, &picture.rgba)
+}
+
+/// A PNG of tightly packed RGBA8 pixels: RGB when opaque, else RGBA.
+pub fn encode_rgba_png(width: usize, height: usize, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    if width == 0 || height == 0 || rgba.len() != width * height * 4 {
+        return Err(format!("a {width} x {height} picture needs {} bytes of pixels, not {}", width * height * 4, rgba.len()));
     }
-    let opaque = picture.rgba.chunks_exact(4).all(|p| p[3] == 255);
+    let opaque = rgba.chunks_exact(4).all(|p| p[3] == 255);
     let rgb: Vec<u8>;
     let (pixels, space) = if opaque {
-        rgb = picture.rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+        rgb = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
         (&rgb[..], ColorSpace::RGB)
     } else {
-        (&picture.rgba[..], ColorSpace::RGBA)
+        (rgba, ColorSpace::RGBA)
     };
     let mut out = Vec::new();
     PngEncoder::new(pixels, EncoderOptions::new(width, height, space, BitDepth::Eight))

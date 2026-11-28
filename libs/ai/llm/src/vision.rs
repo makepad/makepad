@@ -145,6 +145,24 @@ impl VisionConfig {
     pub fn align_size(&self) -> usize {
         self.patch_size * self.n_merge
     }
+
+    fn patch_grid(&self, width: usize, height: usize) -> (usize, usize) {
+        let (w, h) = calc_size_preserved_ratio(
+            width, height, self.align_size(), self.min_pixels, self.max_pixels,
+        );
+        (w / self.patch_size, h / self.patch_size)
+    }
+
+    /// The grid the tower will append for an RGB image of this size, without its pixels.
+    pub fn token_grid(&self, width: usize, height: usize) -> (usize, usize) {
+        let (w, h) = self.patch_grid(width, height);
+        (merged_edge(w), merged_edge(h))
+    }
+}
+
+// The qwen3vl tower groups patches in 2x2 blocks.
+fn merged_edge(patches: usize) -> usize {
+    patches / 2
 }
 
 /// A preprocessed image ready for the vision tower.
@@ -175,11 +193,11 @@ impl PreparedImage {
     }
 
     pub fn tokens_w(&self) -> usize {
-        self.grid_w / 2
+        merged_edge(self.grid_w)
     }
 
     pub fn tokens_h(&self) -> usize {
-        self.grid_h / 2
+        merged_edge(self.grid_h)
     }
 }
 
@@ -323,14 +341,9 @@ pub fn preprocess_rgb8(
             height
         )));
     }
-    let align = config.align_size();
-    let (tw, th) = calc_size_preserved_ratio(
-        width,
-        height,
-        align,
-        config.min_pixels,
-        config.max_pixels,
-    );
+    let patch = config.patch_size;
+    let (grid_w, grid_h) = config.patch_grid(width, height);
+    let (tw, th) = (grid_w * patch, grid_h * patch);
     let resized = resize_pad_u8(rgb, width, height, tw, th);
 
     // normalize: (v/255 - mean) / std, interleaved layout kept for parity checks
@@ -342,9 +355,6 @@ pub fn preprocess_rgb8(
         }
     }
 
-    let patch = config.patch_size;
-    let grid_w = tw / patch;
-    let grid_h = th / patch;
     let patch_len = 3 * patch * patch;
     let n_patches = grid_w * grid_h;
     let mut patches = vec![0f32; n_patches * patch_len];

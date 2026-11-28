@@ -15,11 +15,11 @@
 //! gets them as image blocks of a stream-json user message, Codex as
 //! `--image` files.
 
-use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
+use crate::engine::{Model, ModelEvent, ModelImage, PictureRoom, ToolDefinition};
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderAvailability};
 use makepad_ai_hub::providers::claude::ClaudeCodeChatProvider;
 use makepad_ai_hub::providers::codex_cli::CodexCliChatProvider;
-use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, ToolImage, TurnInput};
+use makepad_ai_hub::providers::provider::{validate_tool_image_payloads, validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_strict_json as json;
 
 /// Which CLI answers.
@@ -213,8 +213,13 @@ pub struct CliModel {
     kind: CliKind,
     model: Option<String>,
     provider: Box<dyn ChatProvider + Send>,
+    #[cfg(test)]
+    provider_factory: Option<Box<dyn Fn() -> Box<dyn ChatProvider + Send>>>,
     system: String,
     history: Vec<ChatMessage>,
+    turn_start: Option<usize>,
+    history_images: Vec<(usize, ToolImage)>,
+    replay_after: Option<&'static str>,
     dynamic: String,
     in_turn: bool,
     /// This turn's reply as the CLI wrote it, reasoning removed.
@@ -232,8 +237,8 @@ pub struct CliModel {
     /// Results the engine owes for the round: (call id, tool name).
     awaiting: Vec<(String, String)>,
     /// Results in, by call id; refusals of unparsable blocks are here too.
-    results: Vec<(String, String, String)>,
-    images: Vec<ModelImage>,
+    results: Vec<(String, String, String, Vec<ModelImage>)>,
+    input_images: Vec<ModelImage>,
     next_call: u64,
     queued: Vec<ModelEvent>,
 }
@@ -248,8 +253,13 @@ impl CliModel {
             kind,
             model: model.map(str::to_string),
             provider: kind.provider(model),
+            #[cfg(test)]
+            provider_factory: None,
             system: String::new(),
             history: Vec::new(),
+            turn_start: None,
+            history_images: Vec::new(),
+            replay_after: None,
             dynamic: String::new(),
             in_turn: false,
             raw: String::new(),
@@ -260,7 +270,7 @@ impl CliModel {
             thinking: false,
             awaiting: Vec::new(),
             results: Vec::new(),
-            images: Vec::new(),
+            input_images: Vec::new(),
             next_call: 0,
             queued: Vec::new(),
         }
@@ -270,26 +280,72 @@ impl CliModel {
         ClaudeCodeChatProvider::new(model.map(str::to_string)).effort("low")
     }
 
-    fn begin(&mut self) {
+    fn fresh_provider(&mut self) {
+        #[cfg(test)]
+        if let Some(factory) = &self.provider_factory {
+            self.provider = factory();
+            return;
+        }
+        self.provider = self.kind.provider(self.model.as_deref());
+    }
+
+    fn rollback(&mut self, reason: &'static str) {
+        self.provider.cancel();
+        if let Some(mark) = self.turn_start.take() {
+            self.history.truncate(mark);
+            self.history_images.truncate(self.history_images.partition_point(|(row, _)| *row < mark));
+            self.fresh_provider();
+            self.replay_after = Some(reason);
+        }
+        self.in_turn = false;
+        self.input_images.clear();
+        self.awaiting.clear();
+        self.results.clear();
+    }
+
+    fn begin(&mut self, pictures: Vec<ModelImage>) {
         self.raw.clear();
         self.shown = 0;
         self.thinking = false;
         self.cut = false;
         self.made = 0;
         self.writing_kb = None;
-        let images: Vec<ToolImage> = std::mem::take(&mut self.images)
-            .into_iter()
-            .map(|i| ToolImage { label: i.label, png: i.png })
-            .collect();
+        let mut images: Vec<_> = pictures.into_iter().map(tool_image).collect();
+        let own = images.len();
+        let mut omitted = 0;
+        if self.replay_after.is_some() {
+            for (_, image) in self.history_images.iter().rev() {
+                images.push(ToolImage { label: format!("earlier: {}", image.label), png: image.png.clone() });
+                if validate_tool_images(&images).is_err() {
+                    images.pop();
+                    omitted += 1;
+                }
+            }
+            images[own..].reverse();
+        }
+        let row = self.history.len() - 1;
+        let own_images = images[..own].to_vec();
         if let Err(e) = self.provider.attach_tool_images(images) {
+            self.rollback("the failed turn");
             self.queued.push(ModelEvent::Error(format!("{}: {e}", self.kind.label())));
             return;
         }
         let mut input = TurnInput::new(self.system.clone(), self.history.clone());
         input.dynamic_context = self.dynamic.clone();
         match self.provider.begin_turn(&input) {
-            Ok(()) => self.in_turn = true,
-            Err(e) => self.queued.push(ModelEvent::Error(format!("{}: {e}", self.kind.label()))),
+            Ok(()) => {
+                self.history_images.extend(own_images.into_iter().map(|image| (row, image)));
+                self.in_turn = true;
+                let replay = self.replay_after.take();
+                if omitted > 0 {
+                    let noun = if omitted == 1 { "picture is" } else { "pictures are" };
+                    self.queued.push(ModelEvent::Note(format!("After {} the model starts over from this chat: {omitted} earlier {noun} no longer in its view.", replay.unwrap())));
+                }
+            }
+            Err(e) => {
+                self.rollback("the failed turn");
+                self.queued.push(ModelEvent::Error(format!("{}: {e}", self.kind.label())));
+            }
         }
     }
 
@@ -398,10 +454,10 @@ impl CliModel {
                 out.push(ModelEvent::ToolCall { call_id, name, args });
                 self.made += 1;
             }
-            Ok((name, _)) => self.results.push((call_id, name, format!("[refused] more than {MAX_CALLS_PER_REPLY} calls in one reply"))),
+            Ok((name, _)) => self.results.push((call_id, name, format!("[refused] more than {MAX_CALLS_PER_REPLY} calls in one reply"), Vec::new())),
             Err(e) => {
                 makepad_platform::log!("{}: a <tool_call> block could not be read: {e}", self.kind.label());
-                self.results.push((call_id, "?".into(), format!("[refused] a <tool_call> block could not be read: {e}")))
+                self.results.push((call_id, "?".into(), format!("[refused] a <tool_call> block could not be read: {e}"), Vec::new()))
             }
         }
     }
@@ -423,21 +479,27 @@ impl CliModel {
         }
         if self.awaiting.is_empty() && !self.results.is_empty() {
             // Every call already answered (or only broken blocks): go on.
-            let batch = self.render_results();
-            self.history.push(ChatMessage::new(ChatRole::Tool, batch));
-            self.begin();
+            self.begin_results();
         } else if made == 0 {
+            self.turn_start = None;
             out.push(ModelEvent::TurnDone { tool_calls: 0 });
         }
     }
 
-    fn render_results(&mut self) -> String {
+    fn begin_results(&mut self) {
         let mut text = String::new();
-        for (call_id, name, body) in self.results.drain(..) {
+        let mut images = Vec::new();
+        for (call_id, name, body, pictures) in self.results.drain(..) {
+            images.extend(pictures);
             text.push_str(&format!("[tool result] {name} ({call_id})\n{body}\n\n"));
         }
-        text
+        self.history.push(ChatMessage::new(ChatRole::Tool, text));
+        self.begin(images);
     }
+}
+
+fn tool_image(image: ModelImage) -> ToolImage {
+    ToolImage { label: image.label, png: image.png }
 }
 
 impl Model for CliModel {
@@ -459,37 +521,36 @@ impl Model for CliModel {
         self.awaiting.clear();
         self.results.clear();
         self.provider.cancel();
+        self.turn_start = Some(self.history.len());
         self.history.push(ChatMessage::new(ChatRole::User, text));
-        self.begin();
+        let images = std::mem::take(&mut self.input_images);
+        self.begin(images);
     }
 
     fn send_tool_result(&mut self, call_id: &str, text: &str, is_error: bool) {
+        let images = std::mem::take(&mut self.input_images);
         let Some(at) = self.awaiting.iter().position(|(id, _)| id == call_id) else { return };
         let (_, name) = self.awaiting.remove(at);
         let body = if is_error && !text.starts_with('[') { format!("[error] {text}") } else { text.to_string() };
-        self.results.push((call_id.to_string(), name, body));
+        self.results.push((call_id.to_string(), name, body, images));
         // The next CLI turn starts once the reply is over and every call
         // it made has its answer.
         if self.awaiting.is_empty() && !self.in_turn {
-            let batch = self.render_results();
-            self.history.push(ChatMessage::new(ChatRole::Tool, batch));
-            self.begin();
+            self.begin_results();
         }
     }
 
     fn cancel(&mut self) {
-        self.provider.cancel();
-        self.in_turn = false;
-        self.awaiting.clear();
-        self.results.clear();
+        self.rollback("the stop");
     }
 
     fn reset(&mut self) {
+        self.turn_start = None;
         self.cancel();
-        // A fresh CLI conversation: a new provider forgets the resume id.
-        self.provider = self.kind.provider(self.model.as_deref());
+        self.fresh_provider();
         self.history.clear();
-        self.images.clear();
+        self.history_images.clear();
+        self.replay_after = None;
     }
 
     fn poll(&mut self) -> Vec<ModelEvent> {
@@ -504,8 +565,9 @@ impl Model for CliModel {
                 ProviderEvent::FunctionCall { .. } | ProviderEvent::FunctionCallPartial { .. } => {}
                 ProviderEvent::Done { text } => self.finish(text, &mut out),
                 ProviderEvent::Error(e) => {
-                    self.in_turn = false;
+                    self.rollback("the failed turn");
                     out.push(ModelEvent::Error(format!("{}: {e}", self.kind.label())));
+                    break;
                 }
             }
         }
@@ -517,12 +579,17 @@ impl Model for CliModel {
         true
     }
 
+    fn picture_room(&self) -> PictureRoom {
+        PictureRoom::Unknown
+    }
+
+    fn admit_images(&self, images: &[ModelImage]) -> Result<(), String> {
+        // Both CLI providers use this check. Return its refusal while the draft still owns the pictures.
+        validate_tool_image_payloads(&images.iter().cloned().map(tool_image).collect::<Vec<_>>())
+    }
+
     fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
-        self.images.extend(images);
-        if self.images.len() > 4 {
-            let cut = self.images.len() - 4;
-            self.images.drain(..cut);
-        }
+        self.input_images = images;
         Ok(())
     }
 }
@@ -530,6 +597,254 @@ impl Model for CliModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use makepad_ai_hub::{chat_wire::ProviderKind, providers::claude::render_prompt};
+
+    #[derive(Default)]
+    struct Sessions {
+        prompts: Vec<Vec<String>>,
+        turns: Vec<Received>,
+        finish: Option<String>,
+        error: Option<String>,
+    }
+
+    struct Received {
+        session: usize,
+        resume: Option<usize>,
+        prompt: String,
+        labels: Vec<String>,
+        pictures: Vec<Arc<[u8]>>,
+    }
+
+    struct FakeCli {
+        // Take attachments through the selected CLI's real provider. Only
+        // the conversation itself runs in-process.
+        provider: Box<dyn ChatProvider + Send>,
+        sessions: Arc<Mutex<Sessions>>,
+        resume: Option<usize>,
+        active: Option<usize>,
+        images: Vec<ToolImage>,
+    }
+
+    impl ChatProvider for FakeCli {
+        fn kind(&self) -> ProviderKind { self.provider.kind() }
+        fn availability(&mut self) -> ProviderAvailability { unreachable!() }
+        fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
+            let mut store = self.sessions.lock().unwrap();
+            let session = self.resume.unwrap_or_else(|| {
+                store.prompts.push(Vec::new());
+                store.prompts.len() - 1
+            });
+            let prompt = render_prompt(input, self.resume.is_some());
+            store.prompts[session].push(prompt.clone());
+            store.turns.push(Received {
+                session, resume: self.resume, prompt,
+                labels: self.images.iter().map(|i| i.label.clone()).collect(),
+                pictures: std::mem::take(&mut self.images).into_iter().map(|i| i.png).collect(),
+            });
+            self.active = Some(session);
+            Ok(())
+        }
+        fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
+            self.provider.attach_tool_images(images.clone())?;
+            self.images = images;
+            Ok(())
+        }
+        fn poll(&mut self) -> Vec<ProviderEvent> {
+            let mut store = self.sessions.lock().unwrap();
+            if let Some(error) = store.error.take() {
+                return vec![ProviderEvent::Error(error)];
+            }
+            if let Some(text) = store.finish.take() {
+                self.resume = Some(self.active.take().expect("only a running fake turn can finish"));
+                vec![ProviderEvent::Done { text }]
+            } else {
+                Vec::new()
+            }
+        }
+        fn cancel(&mut self) { self.active = None; }
+    }
+
+    fn fake_model() -> (CliModel, Arc<Mutex<Sessions>>) {
+        fake_model_for(CliKind::ClaudeCode)
+    }
+
+    fn fake_model_for(kind: CliKind) -> (CliModel, Arc<Mutex<Sessions>>) {
+        let sessions = Arc::new(Mutex::new(Sessions::default()));
+        let shared = sessions.clone();
+        let mut model = CliModel::new(kind);
+        model.provider_factory = Some(Box::new(move || Box::new(FakeCli {
+            provider: kind.provider(None), sessions: shared.clone(),
+            resume: None, active: None, images: Vec::new(),
+        })));
+        model.fresh_provider();
+        (model, sessions)
+    }
+
+    fn picture(label: &str) -> ModelImage {
+        let png = makepad_ai_hub::testpattern::encode_png_rgb8(&[1, 2, 3], 1, 1).unwrap();
+        ModelImage { label: label.into(), png: png.into() }
+    }
+
+    #[test]
+    fn stop_restarts_the_cli_from_before_the_user_line() {
+        let (mut model, sessions) = fake_model();
+        let japan = "What is the capital of Japan?";
+        let italy = "What is the capital of Italy?";
+        model.attach_images(vec![picture("Japan")]).unwrap();
+        model.send_user(japan, "");
+        sessions.lock().unwrap().finish = Some("Tokyo".into());
+        model.poll();
+        model.send_user("Count from 1 to 300", "");
+        model.cancel();
+        model.send_user(italy, "");
+        model.cancel();
+        model.send_user(italy, "");
+        let store = sessions.lock().unwrap();
+        let last = store.turns.last().unwrap();
+        assert_eq!(store.turns[1].resume, Some(store.turns[0].session), "the count contaminated the previously completed CLI session");
+        assert_eq!(last.resume, None, "a stop must abandon the CLI resume id");
+        assert!(last.prompt.contains(japan) && last.prompt.contains("Tokyo"), "both sides of the completed turn must be replayed");
+        assert!(!last.prompt.contains("Count"), "the stopped line leaked into the rendered prompt");
+        assert_eq!(last.prompt.matches(italy).count(), 1, "the retyped line must appear exactly once");
+        assert!(store.prompts[last.session].iter().all(|p| !p.contains("Count")), "the CLI's own session must be clean");
+        assert_eq!(last.labels, ["earlier: Japan"], "the completed turn's picture must be visible again");
+        drop(store);
+
+        sessions.lock().unwrap().finish = Some("Rome".into());
+        model.poll();
+        model.attach_images(vec![picture("failed picture")]).unwrap();
+        model.send_user("refused CLI line", "");
+        assert!(sessions.lock().unwrap().turns.last().unwrap().resume.is_some(),
+            "the refusal must exercise a CLI session already containing committed conversation");
+        sessions.lock().unwrap().error = Some("CLI disconnected".into());
+        assert!(matches!(model.poll().as_slice(), [ModelEvent::Error(e)] if e.contains("CLI disconnected")),
+            "the CLI failure must reach the engine");
+        model.send_user("retry after failure", "");
+        let store = sessions.lock().unwrap();
+        let retry = store.turns.last().unwrap();
+        assert_eq!(retry.resume, None, "a failed CLI session must never be resumed");
+        assert!(retry.prompt.contains(japan) && retry.prompt.contains("Tokyo") && retry.prompt.contains(italy) && retry.prompt.contains("Rome") && !retry.prompt.contains("refused CLI line"),
+            "the failed user line must be rolled back while the completed conversation survives");
+        assert_eq!(retry.labels, ["earlier: Japan"], "the failed turn must preserve earlier pictures");
+        assert!(store.prompts[retry.session].iter().all(|p| !p.contains("refused CLI line")), "the CLI's own next session must exclude the refused prompt");
+    }
+
+    #[test]
+    fn stop_during_a_tool_continuation_rewinds_the_whole_cli_turn() {
+        let (mut model, sessions) = fake_model();
+        model.send_user("inspect the view", "");
+        sessions.lock().unwrap().finish = Some(r#"<tool_call>{"name":"look","arguments":{}}</tool_call>"#.into());
+        let call = model.poll().into_iter().find_map(|e| match e {
+            ModelEvent::ToolCall { call_id, .. } => Some(call_id),
+            _ => None,
+        }).expect("the scripted reply must start a tool round");
+        model.attach_images(vec![picture("view")]).unwrap();
+        model.send_tool_result(&call, "view result", false);
+        model.cancel();
+        model.send_user("next line", "");
+        let store = sessions.lock().unwrap();
+        assert!(store.turns[1].prompt.contains("view result"), "the result must have started a CLI continuation before Stop");
+        assert_eq!(store.turns[2].prompt, "[user]\nnext line\n", "the stopped user, tool call and result must all leave the prompt");
+        assert!(store.turns[2].labels.is_empty(), "pictures from a stopped tool round must leave as well");
+        assert_eq!(store.turns[2].resume, None, "the tool continuation's session must be abandoned");
+    }
+
+    #[test]
+    fn picture_replay_keeps_the_newest_that_fit_and_reports_the_loss_once() {
+        let (mut model, sessions) = fake_model();
+        model.attach_images(["a", "b", "c", "d"].map(picture).to_vec()).unwrap();
+        model.send_user("keep these", "");
+        sessions.lock().unwrap().finish = Some("saved".into());
+        model.poll();
+        model.send_user("discard this", "");
+        model.cancel();
+        model.attach_images(vec![picture("new")]).unwrap();
+        model.send_user("compare", "");
+        assert_eq!(sessions.lock().unwrap().turns.last().unwrap().labels,
+            ["new", "earlier: b", "earlier: c", "earlier: d"], "the new picture has priority, then the newest earlier pictures in chronological order");
+        assert_eq!(model.poll(), [ModelEvent::Note("After the stop the model starts over from this chat: 1 earlier picture is no longer in its view.".into())], "the chat must explain the omitted picture on this line");
+        assert!(model.poll().is_empty(), "the picture notice must be shown only once");
+    }
+
+    #[test]
+    fn cli_offers_every_picture_to_the_provider_in_order() {
+        use crate::engine::local_model::LocalModel;
+        use makepad_ai_hub::providers::qwen::{FleetQwenChatProvider, HttpFleetTransport};
+        use makepad_ai_hub::testpattern::encode_png_rgb8;
+
+        let six: Vec<_> = (1..=6).map(|n| ModelImage {
+            label: n.to_string(), png: encode_png_rgb8(&[n, 0, 0], 1, 1).unwrap().into(),
+        }).collect();
+        let expected: Vec<_> = six.iter().map(|image| image.png.clone()).collect();
+        let wide = ModelImage {
+            label: "wide".into(), png: encode_png_rgb8(&[0; 1025 * 3], 1025, 1).unwrap().into(),
+        };
+        // Four independently admissible PNGs, above the old byte limit without
+        // crossing the fleet count limit. Share one encoded buffer.
+        let mut noise = 1u32;
+        let rgb: Vec<_> = (0..1024 * 700 * 3).map(|_| {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            noise as u8
+        }).collect();
+        let png: Arc<[u8]> = encode_png_rgb8(&rgb, 1024, 700).unwrap().into();
+        let large_line: Vec<_> = (1..=4).map(|i| ModelImage { label: i.to_string(), png: png.clone() }).collect();
+        assert!(png.len() * large_line.len() > 8 * 1024 * 1024, "the four-picture fixture must cross the old combined budget");
+        for kind in [CliKind::ClaudeCode, CliKind::Codex] {
+            let (mut model, sessions) = fake_model_for(kind);
+            assert_eq!(model.picture_room(), PictureRoom::Unknown, "{kind:?} must report unknown picture room");
+            assert_eq!(model.admit_images(&six), Ok(()), "{kind:?} composer must admit all six valid pictures");
+            model.attach_images(six.clone()).unwrap();
+            model.send_user("compare these six", "");
+            {
+                let store = sessions.lock().unwrap();
+                let sent = store.turns.first().expect("the provider must start the six-picture turn");
+                assert_eq!(sent.labels, ["1", "2", "3", "4", "5", "6"], "{kind:?} must receive every label in order");
+                assert_eq!(sent.pictures, expected, "{kind:?} must receive the corresponding encoded pictures in order");
+            }
+            sessions.lock().unwrap().finish = Some("done".into());
+            model.poll();
+            model.send_user("discard this", "");
+            model.cancel();
+            model.send_user("look again", "");
+            assert_eq!(sessions.lock().unwrap().turns.last().unwrap().labels,
+                ["earlier: 3", "earlier: 4", "earlier: 5", "earlier: 6"],
+                "{kind:?} replay must take only the four newest kept pictures, in chronological order");
+            assert_eq!(model.poll(), [ModelEvent::Note("After the stop the model starts over from this chat: 2 earlier pictures are no longer in its view.".into())],
+                "{kind:?} must explain both omitted pictures on the replayed turn");
+            sessions.lock().unwrap().finish = Some("done".into());
+            model.poll();
+
+            assert_eq!(model.admit_images(&large_line), Ok(()), "{kind:?} must admit a valid line larger than 8 MiB");
+            model.attach_images(large_line.clone()).unwrap();
+            model.send_user("compare all four", "");
+            assert_eq!(sessions.lock().unwrap().turns.last().unwrap().pictures, vec![png.clone(); 4],
+                "{kind:?} must deliver every byte above the former limit");
+            sessions.lock().unwrap().finish = Some("done".into());
+            model.poll();
+
+            assert!(model.admit_images(std::slice::from_ref(&wide)).is_err_and(|e| e.contains("1024 pixels")),
+                "{kind:?} composer must explain the side limit while the draft still owns the picture");
+            model.attach_images(vec![wide.clone()]).unwrap();
+            model.send_user("inspect", "");
+            assert!(matches!(model.poll().as_slice(), [ModelEvent::Error(e)] if e.contains("1024 pixels")),
+                "{kind:?} provider's refusal at send must reach the engine with the pixel limit");
+        }
+
+        let local = LocalModel::new(None);
+        let mut fleet = FleetQwenChatProvider::new(HttpFleetTransport, Vec::new());
+        assert!(local.admit_images(&large_line).is_err_and(|e| e.contains("8 MiB")), "local admission must still enforce its combined byte budget");
+        assert!(fleet.attach_tool_images(large_line.into_iter().map(tool_image).collect()).is_err_and(|e| e.contains("8 MiB")),
+            "fleet admission must still enforce its combined byte budget");
+        for n in [4, 5] {
+            let pictures = &six[..n];
+            assert_eq!(local.admit_images(pictures).is_ok(), n == 4, "local admission must still accept four and refuse five");
+            assert_eq!(fleet.attach_tool_images(pictures.iter().cloned().map(tool_image).collect()).is_ok(), n == 4,
+                "fleet admission must still accept four and refuse five");
+        }
+    }
 
     #[test]
     fn safe_end_never_cuts_inside_a_character() {

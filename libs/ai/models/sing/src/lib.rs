@@ -6,8 +6,6 @@
 //! filtered in the STFT domain, so the pitch is exactly the f0 curve) -> 48 kHz
 //! audio. [`nn`] is the one model definition's tensor library: inference runs
 //! the same forward code the trainer differentiates.
-//!
-//! Design: local/agent_state/edits/design/NEURAL-VOICE.md.
 
 pub mod data;
 #[cfg(feature = "dit")]

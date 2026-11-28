@@ -17,9 +17,20 @@
 
 use makepad_strict_json::{self as json, Value};
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-/// 0 = never set: the environment / built-in default decides.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static SETTINGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
+}
+
+pub fn bump_generation() {
+    GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// 0 selects the configured override or automatic sizing.
 static REQUESTED: AtomicU32 = AtomicU32::new(0);
 /// The window of the session that is loaded now; 0 when none.
 static LOADED: AtomicU32 = AtomicU32::new(0);
@@ -71,15 +82,6 @@ impl KvPrecision {
     }
 }
 
-/// The largest window the node accepts (`MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX`, default 65536).
-pub fn max_context() -> u32 {
-    std::env::var("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|v| *v >= MIN_CONTEXT)
-        .unwrap_or(65_536)
-}
-
 pub fn requested() -> Option<u32> {
     match REQUESTED.load(Ordering::Relaxed) {
         0 => None,
@@ -124,12 +126,14 @@ pub fn kv_wanted() -> KvPrecision {
         .unwrap_or(KvPrecision::Q8)
 }
 
-/// Clamp into `MIN_CONTEXT..=max_context()`.
-pub fn clamp(context: u32) -> u32 {
-    context.clamp(MIN_CONTEXT, max_context())
+pub fn clamp(context: u32, model_max: Option<u32>) -> u32 {
+    context.clamp(MIN_CONTEXT, model_max.unwrap_or(u32::MAX).max(MIN_CONTEXT))
 }
 
 fn persist(cache_dir: &Path) {
+    crate::gpu_yield::clear_pending_hold();
+    crate::gpu_yield::reset_relief_state();
+    bump_generation();
     crate::control::changed();
     let mut fields = Vec::new();
     if let Some(context) = requested() {
@@ -138,22 +142,40 @@ fn persist(cache_dir: &Path) {
     if let Some(kv) = kv_requested() {
         fields.push(("kv", json::s(kv.slug())));
     }
+    let path = cache_dir.join("llm-context.json");
+    if fields.is_empty() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("clear {}: {e}", path.display());
+            }
+        }
+        return;
+    }
     let _ = std::fs::write(
-        cache_dir.join("llm-context.json"),
+        path,
         format!("{}\n", json::obj(fields).to_json()),
     );
 }
 
 /// Set (and persist) the window; returns the value in force after clamping.
-pub fn set(cache_dir: &Path, context: u32) -> u32 {
-    let context = clamp(context);
+pub fn set(cache_dir: &Path, context: u32, model_max: Option<u32>) -> u32 {
+    let _guard = SETTINGS.lock().unwrap();
+    let context = clamp(context, model_max);
     REQUESTED.store(context, Ordering::Relaxed);
     persist(cache_dir);
     context
 }
 
+pub fn clear(cache_dir: &Path) {
+    let _guard = SETTINGS.lock().unwrap();
+    REQUESTED.store(0, Ordering::Relaxed);
+    crate::gpu_yield::set_context_ceiling(None);
+    persist(cache_dir);
+}
+
 /// Set (and persist) the KV precision.
 pub fn set_kv(cache_dir: &Path, kv: KvPrecision) {
+    let _guard = SETTINGS.lock().unwrap();
     KV_REQUESTED.store(kv.code(), Ordering::Relaxed);
     persist(cache_dir);
 }
@@ -163,7 +185,7 @@ pub fn load_persisted(cache_dir: &Path) {
     let Ok(text) = std::fs::read(cache_dir.join("llm-context.json")) else { return };
     let Ok(value) = json::parse(&text) else { return };
     if let Some(n) = value.get("context").and_then(Value::as_u64) {
-        REQUESTED.store(clamp(n.min(u32::MAX as u64) as u32), Ordering::Relaxed);
+        REQUESTED.store(clamp(n.min(u32::MAX as u64) as u32, None), Ordering::Relaxed);
     }
     if let Some(kv) = value.get("kv").and_then(Value::as_str).and_then(KvPrecision::parse) {
         KV_REQUESTED.store(kv.code(), Ordering::Relaxed);
@@ -171,16 +193,35 @@ pub fn load_persisted(cache_dir: &Path) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_settings() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(all(test, feature = "llm"))]
+pub(crate) fn restore_kv_for_test(kv: Option<KvPrecision>) {
+    KV_REQUESTED.store(kv.map_or(0, KvPrecision::code), Ordering::Relaxed);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_settings_are_clamped_persisted_and_read_back() {
+    fn override_sets_clears_and_bumps_generation_without_64k_cap() {
+        let _guard = test_settings();
         let dir = std::env::temp_dir().join(format!("llm-context-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(set(&dir, 100), MIN_CONTEXT);
-        assert_eq!(set(&dir, 1 << 30), max_context());
-        assert_eq!(set(&dir, 32768), 32768);
+        let max = Some(262_144);
+        let rev = generation();
+        assert_eq!(set(&dir, 262_144, max), 262_144);
+        assert_eq!(set(&dir, 1 << 30, max), 262_144);
+        assert_eq!(set(&dir, 500, max), MIN_CONTEXT);
+        clear(&dir);
+        assert_eq!(generation(), rev + 4);
+        assert_eq!(requested(), None);
+        assert!(!dir.join("llm-context.json").exists());
+        assert_eq!(set(&dir, 32768, max), 32768);
         set_kv(&dir, KvPrecision::F16);
         REQUESTED.store(0, Ordering::Relaxed);
         KV_REQUESTED.store(0, Ordering::Relaxed);
@@ -192,7 +233,11 @@ mod tests {
         KV_REQUESTED.store(0, Ordering::Relaxed);
         load_persisted(&dir);
         assert_eq!(kv_requested(), Some(KvPrecision::Q8));
-        std::fs::remove_file(dir.join("llm-context.json")).unwrap();
+        clear(&dir);
+        let persisted = std::fs::read(dir.join("llm-context.json")).unwrap();
+        assert_eq!(json::parse(&persisted).unwrap(), json::obj(vec![("kv", json::s("q8"))]));
+        KV_REQUESTED.store(0, Ordering::Relaxed);
+        clear(&dir);
         std::fs::remove_dir(&dir).unwrap();
     }
 

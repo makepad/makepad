@@ -115,7 +115,7 @@ impl HttpClientResponse {
             let n = self
                 .body
                 .read(&mut buf)
-                .map_err(|e| AssetAiError::Http(format!("body read: {e}")))?;
+                .map_err(|e| AssetAiError::HttpTransport(format!("body read: {e}")))?;
             if n == 0 {
                 return Ok(out);
             }
@@ -253,7 +253,11 @@ fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
         // them had stopped answering with a reset. Each resolved address
         // gets CONNECT_TIMEOUT; the last error is the one reported.
         let stream = makepad_network::lan::hub_connect_host("ai-hub http", &url.host, url.port, Some(CONNECT_TIMEOUT))
-            .map_err(|e| AssetAiError::Http(format!("connect {}:{}: {e}", url.host, url.port)))?;
+            .map_err(|e| {
+                let message = format!("connect {}:{}: {e}", url.host, url.port);
+                if e.kind() == std::io::ErrorKind::PermissionDenied { AssetAiError::Http(message) }
+                else { AssetAiError::HttpTransport(message) }
+            })?;
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         Ok(Transport::Plain(stream))
@@ -307,10 +311,12 @@ fn wide_null(value: &str) -> Vec<u16> {
 #[cfg(target_os = "windows")]
 fn winhttp_last_error(operation: &str) -> AssetAiError {
     let code = unsafe { GetLastError_raw().0 };
-    AssetAiError::Http(format!(
-        "{operation}: {} (code {code})",
-        std::io::Error::from_raw_os_error(code as i32)
-    ))
+    let message = format!("{operation}: {} (code {code})", std::io::Error::from_raw_os_error(code as i32));
+    // WinHTTP timeout, name resolution, cannot connect, or connection lost.
+    match code {
+        12002 | 12007 | 12029 | 12030 => AssetAiError::HttpTransport(message),
+        _ => AssetAiError::Http(message),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -891,9 +897,9 @@ fn read_response_head(mut transport: Transport) -> Result<HttpClientResponse, As
         }
         let n = transport
             .read(&mut chunk)
-            .map_err(|e| AssetAiError::Http(format!("response read: {e}")))?;
+            .map_err(|e| AssetAiError::HttpTransport(format!("response read: {e}")))?;
         if n == 0 {
-            return Err(AssetAiError::Http("connection closed in headers".into()));
+            return Err(AssetAiError::HttpTransport("connection closed in headers".into()));
         }
         buf.extend_from_slice(&chunk[..n]);
     };

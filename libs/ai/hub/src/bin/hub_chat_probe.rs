@@ -9,7 +9,7 @@
 //!
 //! Exit code 0 when every turn ended with an answer, 1 otherwise.
 
-use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
+use makepad_ai_hub::hub_chat::{ChatReach, HubChatConfig, HubChatSession};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig};
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ fn main() {
     let turns: usize = args.get(1).and_then(|n| n.parse().ok()).unwrap_or(3);
     let gap = Duration::from_millis(args.get(2).and_then(|n| n.parse().ok()).unwrap_or(1000));
     let chat = HubChatSession::start(HubChatConfig {
+        reach: ChatReach::Lan,
         llm: LocalLlmConfig::new(std::path::PathBuf::new()),
         preferred_model: Some(model),
         max_tokens: Some(16),

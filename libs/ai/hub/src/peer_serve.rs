@@ -18,7 +18,7 @@
 //! file is complete. `Content-Length` is always exact, `ETag` is the strong
 //! content address (`"sha256:<digest>"`), `Accept-Ranges: bytes`.
 //!
-//! Bounds: concurrent serves are capped (excess answers `503 Retry-After`),
+//! Bounds: up to `max_serves` workers read chunks; excess requests queue,
 //! the digest path segment must be exactly 64 hex chars (no other addressing
 //! exists — path traversal has no surface), query strings are refused,
 //! per-response memory is `chunk_max`, and an optional fleet-wide MB/s
@@ -28,7 +28,7 @@
 
 use crate::peer::{find_verified_blob, ServeLeases, TransferSecret};
 use crate::protocol::ErrorJson;
-use crate::server::ServiceShared;
+use crate::server::{RouteWorker, ServiceShared};
 use makepad_micro_serde::SerJson;
 use makepad_network::{HttpServerHeaders, HttpServerResponse};
 use std::io::{Read, Seek, SeekFrom};
@@ -59,7 +59,7 @@ pub struct PeerOptions {
     pub serve: Option<bool>,
     /// Max bytes per blob response (else `MAKEPAD_AI_PEER_CHUNK_MB`).
     pub chunk_max_bytes: Option<u64>,
-    /// Max concurrent blob serves (else `MAKEPAD_AI_PEER_MAX_SERVES`).
+    /// Blob worker count (else `MAKEPAD_AI_PEER_MAX_SERVES`); excess serves queue.
     pub max_serves: Option<usize>,
     /// Serve-side bandwidth pacing in MB/s (else `MAKEPAD_AI_PEER_MBPS`;
     /// absent/0 = unpaced).
@@ -91,8 +91,11 @@ pub struct PeerRuntime {
     pub serve: bool,
     pub leases: ServeLeases,
     pub chunk_max: u64,
+    /// Bounds concurrent chunk buffers; additional requests wait for a worker.
     pub max_serves: usize,
-    pub active_serves: Arc<AtomicUsize>,
+    serves_in_flight: AtomicUsize,
+    #[cfg(test)]
+    read_gate: Option<mpsc::Sender<(std::thread::ThreadId, mpsc::Sender<()>)>>,
     pub throttle: Option<Throttle>,
     /// Operator-injected peer sources this box may download from.
     pub env_sources: Vec<String>,
@@ -107,16 +110,23 @@ impl PeerRuntime {
                 Ok("off") | Ok("0") | Ok("false")
             )
         });
-        let chunk_max = options
+        // A setting outside the supported range is clamped, and said so once at startup.
+        let wanted_chunk = options
             .chunk_max_bytes
-            .or_else(|| env_parse::<u64>("MAKEPAD_AI_PEER_CHUNK_MB").map(|mb| mb * 1024 * 1024))
-            .unwrap_or(DEFAULT_CHUNK_MAX)
-            .clamp(64 * 1024, 256 * 1024 * 1024);
-        let max_serves = options
+            .or_else(|| env_parse::<u64>("MAKEPAD_AI_PEER_CHUNK_MB").map(|mb| mb.saturating_mul(1024 * 1024)))
+            .unwrap_or(DEFAULT_CHUNK_MAX);
+        let chunk_max = wanted_chunk.clamp(64 * 1024, 256 * 1024 * 1024);
+        if chunk_max != wanted_chunk {
+            eprintln!("peer-cache: chunk size {wanted_chunk} B clamped to {chunk_max} B (supported: 64 KiB to 256 MiB)");
+        }
+        let wanted_serves = options
             .max_serves
             .or_else(|| env_parse::<usize>("MAKEPAD_AI_PEER_MAX_SERVES"))
-            .unwrap_or(DEFAULT_MAX_SERVES)
-            .clamp(1, 64);
+            .unwrap_or(DEFAULT_MAX_SERVES);
+        let max_serves = wanted_serves.clamp(1, 64);
+        if max_serves != wanted_serves {
+            eprintln!("peer-cache: {wanted_serves} blob workers clamped to {max_serves} (supported: 1 to 64)");
+        }
         let mbps = options
             .mbps
             .or_else(|| env_parse::<f64>("MAKEPAD_AI_PEER_MBPS"))
@@ -131,10 +141,17 @@ impl PeerRuntime {
             leases: ServeLeases::new(),
             chunk_max,
             max_serves,
-            active_serves: Arc::new(AtomicUsize::new(0)),
+            serves_in_flight: AtomicUsize::new(0),
+            #[cfg(test)]
+            read_gate: None,
             throttle: mbps.map(Throttle::mb_per_sec),
             env_sources,
         }
+    }
+
+    pub(crate) fn start_pool(&self) -> Option<RouteWorker> {
+        // A paired phone may fetch without the node-to-node transfer secret.
+        self.serve.then(|| RouteWorker::new("peer-blob", "blob worker unavailable", self.max_serves))
     }
 
     /// Serving is on only with networked hub permission, configured on AND a secret (fail
@@ -233,64 +250,38 @@ fn error_response(status: u16, reason: &'static str, message: String) -> HttpSer
     HttpServerResponse::new(header, body)
 }
 
-fn busy_response() -> HttpServerResponse {
-    let body = ErrorJson {
-        error: "peer serve capacity reached on this node".to_string(),
-    }
-    .serialize_json()
-    .into_bytes();
-    let header = format!(
-        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 1\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    HttpServerResponse::new(header, body)
-}
-
 fn etag_for(digest: &str) -> String {
     format!("\"sha256:{digest}\"")
 }
 
-struct ServeSlot {
-    active: Arc<AtomicUsize>,
-}
+/// Count queued and running serves until their read finishes or the queued job is dropped.
+struct BlobServe(Arc<ServiceShared>);
 
-impl ServeSlot {
-    fn try_acquire(active: &Arc<AtomicUsize>, cap: usize) -> Option<Self> {
-        let mut current = active.load(Ordering::Relaxed);
-        loop {
-            if current >= cap {
-                return None;
-            }
-            match active.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return Some(Self {
-                        active: active.clone(),
-                    })
-                }
-                Err(seen) => current = seen,
-            }
+impl BlobServe {
+    fn new(shared: &Arc<ServiceShared>) -> Self {
+        let peer = &shared.peer;
+        let previous = peer.serves_in_flight.fetch_add(1, Ordering::Relaxed);
+        if previous == peer.max_serves {
+            eprintln!("peer-cache: blob pool at capacity ({}), 1 request waiting", peer.max_serves);
         }
+        Self(Arc::clone(shared))
     }
 }
 
-impl Drop for ServeSlot {
+impl Drop for BlobServe {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::AcqRel);
+        self.0.peer.serves_in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 /// Routes one `GET /v1/model_blob/<digest>`. Cheap checks (path, auth,
 /// allow-list, range math) run inline on the route thread; the bounded file
-/// read + response happen on a spawned worker so a blob chunk never stalls
+/// read + response run on the blob pool so a blob chunk never stalls
 /// `/health`, `/generate` or job polling. The response sender is consumed
 /// either way.
-pub fn route_blob(
+pub(crate) fn route_blob(
     shared: &Arc<ServiceShared>,
+    pool: Option<&RouteWorker>,
     headers: &HttpServerHeaders,
     caller: &makepad_network::fleet::front::Caller,
     response_sender: mpsc::Sender<HttpServerResponse>,
@@ -325,13 +316,13 @@ pub fn route_blob(
     // the on-device model files: no node-to-node ticket, the same
     // allow-list, range and concurrency rules below --
     let peer = &shared.peer;
-    if !peer.serve {
+    let Some(pool) = pool else {
         return respond(error_response(
             403,
             "Forbidden",
             "peer-cache serving is disabled on this node".to_string(),
         ));
-    }
+    };
     if caller.role != makepad_network::fleet::id::Role::Paired {
         // -- fail closed without a secret --
         let Some(secret) = peer.secret.as_ref().filter(|_| peer.serve) else {
@@ -413,29 +404,27 @@ pub fn route_blob(
     // Whole small file without a Range -> plain 200; everything else 206.
     let whole = range.is_none() && len == blob.size;
 
-    // -- bounded concurrency; excess is an immediate, honest 503 --
-    let Some(slot) = ServeSlot::try_acquire(&peer.active_serves, peer.max_serves) else {
-        return respond(busy_response());
-    };
-
-    let shared = shared.clone();
-    std::thread::spawn(move || {
-        let _slot = slot;
-        let response = read_chunk_response(&shared, &blob, start, len, whole);
-        let _ = response_sender.send(response);
-    });
+    let serve = BlobServe::new(shared);
+    pool.dispatch(Box::new(move || read_chunk_response(serve, &blob, start, len, whole)), response_sender);
 }
 
 /// Reads one bounded chunk under a serve lease, re-verifying the receipt
 /// first, and builds the 200/206 response.
 fn read_chunk_response(
-    shared: &Arc<ServiceShared>,
+    serve: BlobServe,
     blob: &crate::peer::BlobEntry,
     start: u64,
     len: u64,
     whole: bool,
 ) -> HttpServerResponse {
+    let shared = &serve.0;
     let peer = &shared.peer;
+    #[cfg(test)]
+    if let Some(gate) = &peer.read_gate {
+        let (release, wait) = mpsc::channel();
+        gate.send((std::thread::current().id(), release)).expect("the test must see the worker enter the blob read");
+        wait.recv().expect("the test must release the blob read");
+    }
     let _lease = peer.leases.lease(&blob.path);
     // Fail closed against replacement between routing and this read.
     if find_verified_blob(&shared.registry, &shared.cache_dir, &blob.digest).is_none() {
@@ -543,12 +532,79 @@ mod tests {
     }
 
     #[test]
-    fn serve_slots_bound_and_release() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let a = ServeSlot::try_acquire(&active, 2).expect("slot 1");
-        let _b = ServeSlot::try_acquire(&active, 2).expect("slot 2");
-        assert!(ServeSlot::try_acquire(&active, 2).is_none(), "at cap");
-        drop(a);
-        assert!(ServeSlot::try_acquire(&active, 2).is_some(), "released");
+    fn blob_serves_queue_at_capacity_and_use_every_free_worker() {
+        use crate::backend::CancelToken;
+        use crate::registry::Registry;
+        use crate::server::lifecycle_tests::{fixture_shared_serving, request_headers};
+        use makepad_network::fleet::{front::Caller, id::Role};
+
+        let bytes = b"abcd";
+        let digest = crate::sha256::sha256_hex(bytes);
+        let cache = std::env::temp_dir().join(format!("hub-blob-pool-{}", std::process::id()));
+        std::fs::create_dir(&cache).unwrap();
+        let mut shared = fixture_shared_serving(&[], None, true);
+        let source = Arc::get_mut(&mut shared).unwrap();
+        source.cache_dir = cache.clone();
+        source.registry = Registry::parse(&format!(r#"{{"models":[{{
+            "id":"blob","domain":"text","backend":"testpattern","available":true,"gated":false,
+            "files":[{{"repo":"","path":"","local":true,"cache_as":"chunk","size":4,"sha256":"{digest}"}}]
+        }}]}}"#)).unwrap();
+        let file = &source.registry.models[0].files[0];
+        std::fs::write(file.dest_path(&cache), bytes).unwrap();
+        source.downloader.ensure_file(file, &cache, &mut |_| {}, &CancelToken::new())
+            .expect("the local file must have a verified receipt before serving");
+        let (entered, at_gate) = mpsc::channel();
+        source.peer.read_gate = Some(entered);
+        source.peer.secret = None;
+        source.peer.throttle = None;
+        let phone = Caller { role: Role::Paired, ..Caller::local() };
+
+        for threads in [1, 2] {
+            Arc::get_mut(&mut shared).unwrap().peer.max_serves = threads;
+            let pool = shared.peer.start_pool().expect("paired phones must have a blob pool");
+            let request = |range: Option<&str>| {
+                let mut headers = request_headers("GET", &format!("{BLOB_PATH_PREFIX}{digest}"), None);
+                if let Some(range) = range {
+                    headers.lines.push(format!("Range: bytes={range}\r\n"));
+                }
+                let (send, receive) = mpsc::channel();
+                route_blob(&shared, Some(&pool), &headers, &phone, send);
+                assert!(matches!(receive.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                    "a valid GET must wait for its chunk instead of returning an immediate refusal");
+                receive
+            };
+            let whole = request(None);
+            let (first_worker, release_first) = at_gate.recv().expect("the first blob must enter its read");
+            let range = request(Some("1-2"));
+            assert_eq!(shared.peer.serves_in_flight.load(Ordering::Relaxed), 2,
+                "both accepted serves must count while the first read is held");
+            if threads == 1 {
+                assert!(matches!(at_gate.try_recv(), Err(mpsc::TryRecvError::Empty)),
+                    "a single worker must leave the second read queued");
+                release_first.send(()).unwrap();
+                let (next_worker, release_second) = at_gate.recv().expect("the queued read must start when the first finishes");
+                assert_eq!(next_worker, first_worker, "the queued read must reuse the single worker");
+                release_second.send(()).unwrap();
+            } else {
+                let (other_worker, release_second) = at_gate.recv().expect("a free second worker must start before the first finishes");
+                assert_ne!(other_worker, first_worker, "two workers must hold independent chunk reads");
+                release_second.send(()).unwrap();
+                release_first.send(()).unwrap();
+            }
+
+            let tail = |len| format!("ETag: \"sha256:{digest}\"\r\nAccept-Ranges: bytes\r\nCache-Control: no-cache\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+            let whole = whole.recv().expect("the whole-file GET must receive its reply");
+            assert_eq!(whole.header, format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n{}", tail(4)),
+                "a whole-file serve must retain its exact 200 headers");
+            assert_eq!(whole.body, bytes, "the whole-file GET must receive every byte");
+            let range = range.recv().expect("the ranged GET must receive its reply");
+            assert_eq!(range.header, format!("HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes 1-2/4\r\n{}", tail(2)),
+                "a ranged serve must retain its exact 206 headers");
+            assert_eq!(range.body, b"bc", "the ranged GET must receive exactly the requested bytes");
+            pool.close();
+            assert_eq!(shared.peer.serves_in_flight.load(Ordering::Relaxed), 0,
+                "a drained pool must release both serves from the in-flight count");
+        }
+        std::fs::remove_dir_all(cache).unwrap();
     }
 }

@@ -14,8 +14,6 @@
 # and the chat backends — the person's own Claude Code / Codex CLIs, Claude
 # Desktop over MCP, the Claude API. The machine's own model (the hub's local
 # runtime: Qwen on Metal/CUDA) is the separate `localai` feature.
-#
-# Design of record: local/agent_state/aichat/DESIGN.md
 
 [package]
 name = "makepad-ai-services"

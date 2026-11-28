@@ -95,7 +95,7 @@ impl ChatProvider for GrokCliChatProvider {
                 detail: p.display().to_string(),
             },
             None => ProviderAvailability::Unavailable {
-                reason: "grok CLI not found on this host (set GROK_CLI_PATH or install grok)".to_string(),
+                reason: super::unavailable_reason("grok CLI not found on this host (set GROK_CLI_PATH or install grok)"),
             },
         }
     }
@@ -105,7 +105,7 @@ impl ChatProvider for GrokCliChatProvider {
             return Err("a turn is already in flight".to_string());
         }
         let Some(cli) = self.cli.clone() else {
-            return Err("grok CLI not found".to_string());
+            return Err(super::unavailable_reason("grok CLI not found"));
         };
         let prompt = build_prompt_only(input, self.resume.is_some());
         let cwd = turn_dir("grok");

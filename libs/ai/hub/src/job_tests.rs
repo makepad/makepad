@@ -25,6 +25,7 @@ enum CancelMode {
 
 #[derive(Default)]
 struct Hub {
+    model: Option<&'static str>,
     attempts: Vec<GenerateRequestJson>,
     requests: Vec<GenerateRequestJson>,
     jobs: BTreeMap<String, JobStatusJson>,
@@ -54,7 +55,7 @@ impl Default for Farm {
 }
 impl GenRouter for Farm {
     fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
-        self.0.lock().unwrap().automatic && domain == "image" && request.queue_policy.is_none()
+        self.0.lock().unwrap().automatic && FleetRouter::default().use_idle_admission(domain, request)
     }
     fn route(
         &self,
@@ -64,8 +65,9 @@ impl GenRouter for Farm {
     ) -> Result<GenPick, String> {
         let mut state = self.0.lock().unwrap();
         state.routes += 1;
-        let index = (0..state.available)
-            .find(|i| !excluded.contains(&format!("http://hub-{i}")))
+        let (index, hub) = state.hubs[..state.available].iter().enumerate()
+            .find(|(i, hub)| !excluded.contains(&format!("http://hub-{i}"))
+                && (request.model.is_empty() || hub.model.is_none_or(|id| id == request.model)))
             .ok_or("no alternate provider")?;
         Ok(GenPick {
             provider: Box::new(Provider {
@@ -74,7 +76,7 @@ impl GenRouter for Farm {
                 origin: Mutex::new(None),
             }),
             base_url: format!("http://hub-{index}"),
-            model: request.model.clone(),
+            model: hub.model.unwrap_or(&request.model).to_string(),
             model_state: Some("ready".into()),
         })
     }
@@ -451,6 +453,97 @@ fn one_busy_healthy_node_deliberately_queues_after_idle_admission_refusal() {
 }
 
 #[test]
+fn video_batch_uses_idle_admission_and_falls_back_to_queue() {
+    fn policies(hub: &Hub) -> Vec<&str> {
+        hub.attempts.iter().map(|attempt| attempt.queue_policy.as_deref().unwrap()).collect()
+    }
+
+    let farm = Farm::default();
+    {
+        let mut state = farm.0.lock().unwrap();
+        state.available = 2;
+        state.automatic = true;
+    }
+    let start = || {
+        let mut job = GenJob::new(Arc::new(farm.clone()), ("batch".into(), 1));
+        let request = GenerateRequestJson { model: "fasth3-4step".into(), ..Default::default() };
+        job.start(Domain::Video, request, Want::All).unwrap();
+        job
+    };
+    let active = vec![start(), start()];
+    assert_eq!(active[0].provider_url(), Some("http://hub-0"));
+    assert_eq!(active[1].provider_url(), Some("http://hub-1"));
+    let mut queued = start();
+    assert!(matches!(queued.poll(), JobPoll::Progress { stage, permille: 0 } if stage.contains("all eligible GPUs busy; queued")));
+    assert_eq!(queued.provider_url(), Some("http://hub-0"), "queue on the router's first choice");
+    assert!(queued.request.as_ref().unwrap().queue_policy.is_none(), "preserve caller policy for retries");
+
+    let state = farm.0.lock().unwrap();
+    assert_eq!(policies(&state.hubs[0]), ["reject", "reject", "reject", "queue"]);
+    assert_eq!(state.hubs[0].requests.len(), 2, "only the first and queued jobs were accepted");
+    assert_eq!(policies(&state.hubs[1]), ["reject", "reject"]);
+    assert_eq!(state.hubs[1].requests.len(), 1, "second clip obtained the other idle GPU");
+}
+
+#[test]
+fn explicit_model_survives_a_custom_router_pick() {
+    struct Router(Farm, &'static str);
+    impl GenRouter for Router {
+        fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
+            let mut pick = self.0.route(domain, request, excluded)?;
+            pick.model = self.1.into();
+            Ok(pick)
+        }
+    }
+
+    for picked_model in ["", "flux1-dev"] {
+        let farm = Farm::default();
+        let mut job = GenJob::new(Arc::new(Router(farm.clone(), picked_model)), ("model-pin".into(), 1));
+        job.start(Domain::Image, image(None, None), Want::All).unwrap();
+        assert_eq!(farm.0.lock().unwrap().hubs[0].requests[0].model, "flux1-schnell");
+        assert_eq!(job.model(), Some("flux1-schnell"));
+    }
+}
+
+#[test]
+fn video_auto_retry_does_not_lock_tier_model() {
+    let full = "fasth3-4step";
+    let q4 = "fasth3-4step-q4-24g";
+    for (any_model, target, expected_model) in [(Some(true), 1, q4), (None, 2, full)] {
+        let farm = Farm::default();
+        {
+            let mut state = farm.0.lock().unwrap();
+            state.automatic = true;
+            for (hub, model) in state.hubs.iter_mut().zip([full, q4, full]) { hub.model = Some(model); }
+        }
+        let mut job = GenJob::new(Arc::new(farm.clone()), ("video-retry".into(), 1));
+        job.start(Domain::Video, GenerateRequestJson { any_model, ..Default::default() }, Want::All).unwrap();
+        assert_eq!(job.provider_url(), Some("http://hub-0"));
+        assert_eq!(job.model(), Some(full));
+        {
+            let mut state = farm.0.lock().unwrap();
+            assert_eq!(state.hubs[0].requests[0].model, full);
+            let status = state.hubs[0].jobs.get_mut("job-0").unwrap();
+            status.state = JOB_STATE_ERROR.into();
+            status.error = Some("insufficient VRAM".into());
+        }
+        assert!(matches!(job.poll(), JobPoll::Progress { stage, .. } if stage.contains("retrying on")));
+        let url = format!("http://hub-{target}");
+        assert_eq!(job.provider_url(), Some(url.as_str()));
+        assert_eq!(job.model(), Some(expected_model));
+        {
+            let mut state = farm.0.lock().unwrap();
+            let hub = &mut state.hubs[target];
+            assert_eq!(hub.requests[0].model, expected_model);
+            let status = hub.jobs.get_mut("job-0").unwrap();
+            status.state = JOB_STATE_DONE.into();
+            status.model = any_model.is_none().then(String::new);
+        }
+        assert!(matches!(job.poll(), JobPoll::Done(output) if output.model == expected_model && output.node == url));
+    }
+}
+
+#[test]
 fn explicit_policy_and_ambiguous_post_failure_do_not_gain_automatic_retries() {
     for policy in ["queue", "reject"] {
         let farm = Farm::default();
@@ -634,6 +727,42 @@ mod lease_protocol_tests {
             let mut explicit = request.clone(); explicit.queue_policy = Some(policy.into());
             assert!(!FleetRouter::default().use_idle_admission("image", &explicit));
         }
+    }
+
+    #[test]
+    fn installed_only_auto_video_keeps_all_vram_tiers() {
+        let tiers = [
+            ("large", "fasth3-4step", 96, "loaded"),
+            ("small", "fasth3-4step-q4-24g", 24, "ready"),
+            ("medium", "minimax-h3-nvfp4-32g", 32, "ready"),
+        ];
+        let mut nodes: Vec<_> = tiers.iter().map(|&(host, id, gib, state)| {
+            let mut node = snapshot(host, "0.3.0", state);
+            let health = node.health.as_mut().unwrap();
+            health.vram_free_mb = Some(gib * 1024);
+            health.vram_total_mb = health.vram_free_mb;
+            let spec = crate::registry::embedded_registry().find(id).unwrap();
+            let model = &mut node.models[0];
+            model.id = id.into();
+            model.domain = "video".into();
+            model.backend = spec.backend.clone();
+            model.vram_gb = spec.vram_gb;
+            node
+        }).collect();
+        let route = |nodes: &[fleet::BoxSnapshot], any_model, expected: usize| {
+            let request = GenerateRequestJson { any_model, ..leased_request("") };
+            let pick = FleetRouter { installed_only: true }.route_snapshots_with_diagnosis(
+                nodes.to_vec(), "video", &request, |_, _| "no installed tier".into(),
+            ).unwrap();
+            assert_eq!(pick.base_url, nodes[expected].base_url);
+            assert_eq!(pick.model, tiers[expected].1);
+        };
+        route(&nodes, Some(true), 0);
+        nodes[0].health.as_mut().unwrap().jobs_pending = Some(1);
+        route(&nodes, Some(true), 1);
+        route(&nodes, None, 0);
+        nodes[1].health.as_mut().unwrap().jobs_pending = Some(1);
+        route(&nodes, Some(true), 2);
     }
 
     #[test]

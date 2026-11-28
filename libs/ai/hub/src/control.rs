@@ -5,8 +5,7 @@
 //!
 //! The snapshot itself is assembled in `server.rs` (it needs the service
 //! state); this module holds only the process-wide pieces, so the job store
-//! and the backends can report into it without a handle. Contract:
-//! local/agent_state/fast-rust/hub-vision/CONTROL_API.md.
+//! and the backends can report into it without a handle.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

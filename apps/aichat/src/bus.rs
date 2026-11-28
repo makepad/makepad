@@ -47,11 +47,23 @@ impl ServiceBus {
                     self.logged_rejection = true;
                     error!("AI chat rejected a frame from the window manager: {}", rejected.error);
                 }
-                let (true, Some(from), Some(call_id)) = (rejected.mismatch, rejected.endpoint, rejected.call_id)
-                    else { return true };
+                let reply = rejected.mismatch || rejected.kind == RejectedKind::Result;
+                let (true, Some(from), Some(call_id)) = (
+                    reply,
+                    rejected.endpoint.filter(|ep| is_opaque_id(ep)),
+                    rejected.call_id.filter(|id| is_opaque_id(id)),
+                ) else {
+                    return true;
+                };
+                let mut result = if rejected.mismatch {
+                    ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH)
+                } else {
+                    ToolResult::failed(call_id, format!("tool reply rejected: {}", rejected.error))
+                };
+                result.bound();
                 HostedUp {
                     from: Some(EndpointId(from)),
-                    msg: ServiceUp::Result(ToolResult::unavailable(call_id, HOSTED_BUILD_MISMATCH)),
+                    msg: ServiceUp::Result(result),
                 }
             }
         };
@@ -127,6 +139,25 @@ impl ServiceBus {
 mod tests {
     use super::*;
     use makepad_ai_services::engine::{EngineCore, NoModelWithReason, RegistryUp};
+
+    #[test]
+    fn rejected_result_reaches_registry_as_failed_and_bad_progress_is_dropped() {
+        let registry = ServiceRegistry::new();
+        let mut bus = ServiceBus::default();
+        let w4 = EndpointId("w4".into());
+        let frame = |msg| HostedUp { from: Some(w4.clone()), msg }.to_json();
+        let register = ServiceUp::Register { manifest: ServiceManifest::new("files", "Files", "The file browser."), port_tag: 4 };
+        assert!(bus.on_custom(&registry, &frame(register)), "the bus consumes the registration");
+        let result = ToolResult::ok("c1", "x".repeat(MAX_RESULT_WIRE_BYTES + 1), "");
+        assert!(bus.on_custom(&registry, &frame(ServiceUp::Result(result))), "the bus consumes the oversized reply");
+        assert!(matches!(registry.pump().as_slice(), [RegistryUp::Result(from, r)]
+            if from == &w4 && r.call_id == "c1" && r.outcome == ToolOutcome::Failed && r.text.contains("result: payload over wire cap")),
+            "the registry receives the failed result for the original endpoint and call");
+
+        let progress = ServiceUp::Progress { call_id: "c2".into(), note: String::new(), permille: 1001, task: None };
+        assert!(bus.on_custom(&registry, &frame(progress)), "the bus consumes invalid progress");
+        assert!(registry.pump().is_empty(), "invalid progress leaves the call open");
+    }
 
     #[test]
     fn hosted_subscriptions_and_messages_cross_the_adapter_unchanged() {

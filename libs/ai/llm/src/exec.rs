@@ -17,7 +17,7 @@
 //! not enough memory) fails closed at `ExecRuntime::new()` or at graph
 //! compile, with the reason in the error.
 
-use crate::metal_compiled::MetalContextBuffers;
+use crate::metal_compiled::{MetalContextBuffers, MetalSharedTail};
 use makepad_ai_metal::{MetalDeviceFeatures, MetalRuntime};
 use crate::Context;
 
@@ -30,7 +30,7 @@ use crate::vulkan_exec::{
 };
 use crate::error::{LlamaError, Result};
 use crate::runtime::{
-    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count,
+    compile_hybrid_decode_metal_with_shared_tail,
     create_metal_context_buffer_with_runtime, reserve_hybrid_decode_main_buffer_size,
     CompiledHybridDecodeMetal, HybridDecodeBatchLayout, HybridDecodeGraph, HybridDecodeRun,
     HybridDecodeSpec, HybridSharedCacheTensorIds, LogitsProbeInput,
@@ -58,7 +58,7 @@ pub enum ExecFeatures {
 
 /// The per-backend GPU view of a ggml `Context` arena.
 pub enum ExecContextBuffers {
-    Metal(MetalContextBuffers),
+    Metal { buffers: MetalContextBuffers, shared_tail: MetalSharedTail },
     Cuda(CudaContextArena),
     #[cfg(any(target_os = "linux", target_os = "android"))]
     Vulkan(VulkanContextArena),
@@ -80,38 +80,120 @@ pub enum ExecRuntime {
     Vulkan(VulkanExecRuntime),
 }
 
-impl ExecRuntime {
-    /// Bind the platform-native backend, failing closed when it cannot run.
-    /// `MAKEPAD_LLM_BACKEND` (`metal` / `cuda` / `vulkan`) pins a backend
-    /// for tests and probes; production uses the platform's own.
-    pub fn new() -> Result<Self> {
+pub(crate) struct RuntimeScratchInput<'a> {
+    pub spec: &'a HybridDecodeSpec,
+    pub spec_mtp: Option<&'a HybridDecodeSpec>,
+    pub weights: &'a [crate::gguf::GgufTensorInfo],
+    pub max_batch: usize,
+    pub max_kv_rows: usize,
+}
+
+impl RuntimeScratchInput<'_> {
+    fn cuda_shape(&self) -> crate::cuda_exec::CudaScratchSpec {
+        let (max_weight_k, max_f16_weight_k) = crate::cuda_exec::weight_k_bounds(self.weights);
+        crate::cuda_exec::CudaScratchSpec {
+            max_weight_k, max_f16_weight_k, max_batch: self.max_batch,
+            max_fattn_vec_tmp_bytes: crate::cuda_exec::fattn_vec_scratch_bytes(
+                self.spec, self.spec_mtp, self.max_kv_rows,
+            ),
+        }
+    }
+}
+
+fn planned_metal_scratch_bytes(input: &RuntimeScratchInput<'_>, features: MetalDeviceFeatures) -> Result<usize> {
+    let mut largest = 0;
+    for spec in std::iter::once(input.spec).chain(input.spec_mtp) {
+        // Small queries select vector flash kernels up through 19 tokens.
+        for n_q in std::iter::once(input.max_batch.max(1)).chain((input.max_batch > 19).then_some(19)) {
+            let bytes = crate::runtime::plan_hybrid_decode_metal_tail_bytes(
+                input.weights, spec, n_q, n_q, input.max_kv_rows.max(1), features,
+            )?;
+            largest = largest.max(bytes);
+        }
+    }
+    Ok(largest)
+}
+
+impl ExecContextBuffers {
+    pub(crate) fn shared_tail_bytes(&self) -> usize {
+        match self {
+            Self::Metal { shared_tail, .. } => shared_tail.size_bytes(),
+            _ => 0,
+        }
+    }
+}
+
+impl ExecBackendKind {
+    pub fn resolve_env() -> Result<Self> {
         match std::env::var("MAKEPAD_LLM_BACKEND").ok().as_deref() {
-            None | Some("") | Some("native") => Self::with_backend(ExecBackendKind::Native),
-            Some("metal") => Self::with_backend(ExecBackendKind::Metal),
-            Some("cuda") => Self::with_backend(ExecBackendKind::Cuda),
-            Some("vulkan") => Self::with_backend(ExecBackendKind::Vulkan),
+            None | Some("") | Some("native") => Self::Native.resolve(),
+            Some("metal") => Ok(Self::Metal),
+            Some("cuda") => Ok(Self::Cuda),
+            Some("vulkan") => Ok(Self::Vulkan),
             Some(other) => Err(LlamaError::unsupported(format!(
                 "MAKEPAD_LLM_BACKEND must be metal, cuda or vulkan, got '{other}'"
             ))),
         }
     }
 
+    pub fn resolve(self) -> Result<Self> {
+        if self != Self::Native {
+            Ok(self)
+        } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+            Ok(Self::Metal)
+        } else if cfg!(any(target_os = "windows", target_os = "linux")) {
+            Ok(Self::Cuda)
+        } else if cfg!(target_os = "android") {
+            Ok(Self::Vulkan)
+        } else {
+            Err(LlamaError::unsupported("no native LLM execution backend for this platform"))
+        }
+    }
+
+    pub(crate) fn planned_scratch_bytes(self, input: &RuntimeScratchInput<'_>) -> Result<usize> {
+        match self.resolve()? {
+            Self::Cuda => Ok(crate::cuda_exec::planned_scratch_bytes(input.cuda_shape())),
+            Self::Metal => planned_metal_scratch_bytes(input, MetalDeviceFeatures {
+                has_bfloat: false, has_tensor: false, has_simdgroup_mm: true,
+            }),
+            Self::Vulkan => Ok(0),
+            Self::Native => unreachable!(),
+        }
+    }
+}
+
+impl ExecRuntime {
+    pub(crate) fn planned_scratch_bytes(&self, input: &RuntimeScratchInput<'_>) -> Result<usize> {
+        match self {
+            Self::Metal(runtime) => planned_metal_scratch_bytes(input, runtime.features()),
+            _ => self.backend_kind().planned_scratch_bytes(input),
+        }
+    }
+
+    pub(crate) fn reserve_runtime_scratch(&self, input: &RuntimeScratchInput<'_>) -> Result<()> {
+        if let Self::Cuda(runtime) = self {
+            runtime.reserve_graph_scratch(input.cuda_shape())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn runtime_scratch_bytes(&self, buffers: &ExecContextBuffers, planned: usize) -> usize {
+        match self {
+            Self::Metal(_) => planned.max(buffers.shared_tail_bytes()),
+            Self::Cuda(runtime) => planned.max(runtime.scratch_bytes()),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            Self::Vulkan(_) => 0,
+        }
+    }
+
+    /// Bind the platform-native backend, or the explicit MAKEPAD_LLM_BACKEND.
+    pub fn new() -> Result<Self> {
+        Self::with_backend(ExecBackendKind::resolve_env()?)
+    }
+
     pub fn with_backend(kind: ExecBackendKind) -> Result<Self> {
-        match kind {
-            ExecBackendKind::Native => {
-                if cfg!(any(target_os = "macos", target_os = "ios")) {
-                    Self::with_backend(ExecBackendKind::Metal)
-                } else if cfg!(any(target_os = "windows", target_os = "linux")) {
-                    Self::with_backend(ExecBackendKind::Cuda)
-                } else if cfg!(target_os = "android") {
-                    Self::with_backend(ExecBackendKind::Vulkan)
-                } else {
-                    Err(LlamaError::unsupported(
-                        "no native LLM execution backend for this platform (Metal on \
-                         macOS/iOS, CUDA on Windows/Linux)",
-                    ))
-                }
-            }
+        match kind.resolve()? {
+            ExecBackendKind::Native => unreachable!(),
             ExecBackendKind::Metal => Ok(Self::Metal(
                 MetalRuntime::new().map_err(LlamaError::unsupported)?,
             )),
@@ -201,9 +283,10 @@ impl ExecRuntime {
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<ExecContextBuffers> {
         match self {
-            Self::Metal(runtime) => Ok(ExecContextBuffers::Metal(
-                create_metal_context_buffer_with_runtime(runtime, ctx)?,
-            )),
+            Self::Metal(runtime) => Ok(ExecContextBuffers::Metal {
+                buffers: create_metal_context_buffer_with_runtime(runtime, ctx)?,
+                shared_tail: MetalSharedTail::new(),
+            }),
             Self::Cuda(runtime) => Ok(ExecContextBuffers::Cuda(
                 runtime.create_context_arena_with_progress(ctx, progress)?,
             )),
@@ -233,14 +316,15 @@ impl ExecRuntime {
         n_seqs: usize,
     ) -> Result<CompiledHybridDecode> {
         match (self, shared_buffers) {
-            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+            (Self::Metal(runtime), ExecContextBuffers::Metal { buffers, shared_tail }) => {
                 Ok(CompiledHybridDecode::Metal(
-                    compile_hybrid_decode_metal_with_shared_runtime_and_state_and_outputs_and_attention_key_count(
+                    compile_hybrid_decode_metal_with_shared_tail(
                         weights,
                         spec,
                         runtime,
                         shared_cache,
                         buffers,
+                        shared_tail,
                         n_tokens,
                         n_outputs,
                         attention_key_base,
@@ -293,7 +377,7 @@ impl ExecRuntime {
         len: usize,
     ) -> Result<Vec<u8>> {
         match (self, buffers) {
-            (Self::Metal(_), ExecContextBuffers::Metal(_)) => Ok(ctx
+            (Self::Metal(_), ExecContextBuffers::Metal { .. }) => Ok(ctx
                 .data_at(offset, len)
                 .map_err(LlamaError::format)?
                 .to_vec()),
@@ -328,7 +412,7 @@ impl ExecRuntime {
         }
 
         match (self, buffers) {
-            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+            (Self::Metal(runtime), ExecContextBuffers::Metal { buffers, .. }) => {
                 const ZERO_CHUNK_BYTES: usize = 8 << 20;
                 let max_len = ranges.iter().map(|(_, len)| *len).max().unwrap_or(0);
                 let zeroes = vec![0u8; max_len.min(ZERO_CHUNK_BYTES)];
@@ -382,7 +466,7 @@ impl ExecRuntime {
             .map_err(LlamaError::format)?
             .copy_from_slice(bytes);
         match (self, buffers) {
-            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+            (Self::Metal(runtime), ExecContextBuffers::Metal { buffers, .. }) => {
                 let main_offset = offset.checked_sub(buffers.ro_split).ok_or_else(|| {
                     LlamaError::format(format!(
                         "refusing to write read-only Metal state range [{}..+{}) below split {}",
@@ -419,7 +503,7 @@ impl ExecRuntime {
         len: usize,
     ) -> Result<Vec<u8>> {
         match (self, buffers) {
-            (Self::Metal(runtime), ExecContextBuffers::Metal(buffers)) => {
+            (Self::Metal(runtime), ExecContextBuffers::Metal { buffers, .. }) => {
                 let main_offset = offset.checked_sub(buffers.ro_split).ok_or_else(|| {
                     LlamaError::format(format!(
                         "read-only Metal state range [{}..+{}) below split {}",

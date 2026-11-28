@@ -15,7 +15,7 @@ use crate::card::Card;
 use crate::engine::pictures::{self as kept, NewPicture, PictureWrite, SentPicture};
 use crate::engine::registry::{RegistryUp, ServiceRegistry};
 use crate::pictures::PictureRef;
-use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
+use crate::engine::{Model, ModelEvent, ModelImage, PictureRoom, ToolDefinition};
 use crate::state::*;
 use crate::wire::*;
 use makepad_micro_serde::*;
@@ -74,6 +74,10 @@ const ATTACHMENTS_BYTES: usize = 4 * MAX_CONTEXT_BYTES;
 const SAVED_RESULT_BYTES: usize = 2048;
 /// The earlier conversation told to the model after a restart, at most.
 const RESUMED_BYTES: usize = 24 * 1024;
+/// Older readers skip unknown row kinds and reject unknown fields.
+const STOPPED_KIND_PREFIX: &str = "stopped_";
+const UNSENT_KIND_PREFIX: &str = "unsent_";
+const FAILED_KIND_PREFIX: &str = "failed_";
 
 /// A conversation on disk ([`EngineCore::saved_chat`]).
 #[derive(SerJson, DeJson)]
@@ -82,19 +86,39 @@ struct SavedChat {
     rows: Vec<SavedRow>,
 }
 
-#[derive(SerJson, DeJson)]
+#[derive(Clone, SerJson, DeJson)]
 struct SavedRow {
-    /// `user`, `assistant`, `tool`, `tool_failed`.
+    /// `user`, `assistant`, `tool`, or `tool_failed`, prefixed with `stopped_` or `unsent_` when excluded from context, or `failed_` when the line was sent and its turn then ended on an error.
     kind: String,
-    /// A tool's canonical name.
+    /// A tool's canonical name, or a failed user line's picture readback note.
     title: String,
     text: String,
     /// The pictures a person's line carried.
     pictures: Option<Vec<PictureRef>>,
 }
 
+/// The user row can precede its actual turn: people can queue more lines
+/// while a reply streams, and console calls can appear between its tool rows.
+enum RowOrigin {
+    Other,
+    UserLine(u64),
+    Stopped,
+    Failed,
+    Unsent(u64),
+    /// A persisted tool is displayed as a system note. Keep its original
+    /// row so a second save preserves its result and Stop mark.
+    RestoredTool(Box<SavedRow>),
+}
+
 /// The line a person's pictures make on their own: the picture is the message.
 const PICTURES_ONLY: &str = "Use the attached picture as the reference.";
+
+/// A failed line's original picture and the exact fitted bytes to use on a retry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReturnedPicture {
+    pub original: SentPicture,
+    pub for_model: std::sync::Arc<[u8]>,
+}
 
 /// What the host should do after a `pump`.
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +138,8 @@ pub enum EngineEvent {
     /// ([`PictureWrite::run`]), never on the UI thread. Until it ends the picture is read from
     /// memory, and what needs its file waits for it ([`SentPicture::kept_path`]).
     KeepPicture(PictureWrite),
+    /// Return a failed composer submission, including the originals in selection order.
+    ReturnLine { id: u64, text: String, pictures: Vec<ReturnedPicture> },
 }
 
 struct Pending {
@@ -161,8 +187,16 @@ struct Parked {
     proposed: String,
     /// Opened by the person (`propose`), not asked by the model.
     by_person: bool,
-    /// The tool's canonical name (`fab.save`): what "always in this chat" allows.
-    grant: String,
+    app: String,
+    /// Effective risk when the card was opened.
+    risk: Risk,
+}
+
+impl Parked {
+    fn can_allow_for_chat(&self, registry: &ServiceRegistry) -> bool {
+        // The host can raise the floor while the person is looking at the card.
+        self.risk != Risk::Destructive && registry.risk_floor(&self.app) != Risk::Destructive
+    }
 }
 
 /// What the model is told when the person changed a parked call's
@@ -224,10 +258,41 @@ struct Subscription {
     closing: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineStage {
+    /// Queued, or failed synchronously before `model.send_user`.
+    Pending,
+    /// `model.send_user` was called and `LineFate::Started` was logged; no visible output or tool call yet.
+    Sent,
+    /// The model emitted visible text or a tool call.
+    Acted,
+}
+
+/// A line of the person's on its way to the model: at once, or when the turn it waits behind
+/// ends.
+struct PersonLine {
+    id: u64,
+    stage: LineStage,
+    text: String,
+    /// Its own pictures, for the model with it.
+    images: Vec<ModelImage>,
+    /// Only a composer line carries a draft and the composer's target.
+    draft: Option<ComposerDraft>,
+}
+
+struct ComposerDraft {
+    text: String,
+    /// Store indices stay valid for the lifetime of queued and active lines.
+    pictures: Vec<(usize, ModelImage)>,
+}
+
 pub struct EngineCore {
     registry: ServiceRegistry,
     model: Box<dyn Model>,
     state: EngineState,
+    /// One origin per visible entry, including when the transcript rolls over.
+    row_origins: VecDeque<RowOrigin>,
+    active_line: Option<PersonLine>,
     pending: HashMap<String, Pending>,
     parked: HashMap<String, Parked>,
     /// Tools the person allowed for the rest of this conversation (by
@@ -248,7 +313,12 @@ pub struct EngineCore {
     doctrine: String,
     turn_active: bool,
     /// Lines the person typed during the turn, for its end.
-    waiting_lines: VecDeque<String>,
+    waiting_lines: VecDeque<PersonLine>,
+    /// The id the person's next line gets. Ids only grow for the engine's life, across new
+    /// conversations, so the line log never names one twice.
+    next_line: u64,
+    /// The latest context picture offered for the person's next ordinary line.
+    next_line_picture: Option<ModelImage>,
     /// When the model got the turn, while it has it without a word.
     model_since: Option<f64>,
     subscriptions: HashMap<String, Subscription>,
@@ -288,6 +358,8 @@ impl EngineCore {
             registry,
             model,
             state,
+            row_origins: VecDeque::new(),
+            active_line: None,
             pending: HashMap::new(),
             parked: HashMap::new(),
             allowed: std::collections::BTreeSet::new(),
@@ -300,6 +372,8 @@ impl EngineCore {
             doctrine: doctrine.unwrap_or(DOCTRINE).to_string(),
             turn_active: false,
             waiting_lines: VecDeque::new(),
+            next_line: 1,
+            next_line_picture: None,
             model_since: None,
             subscriptions: HashMap::new(),
             subscription_order: Vec::new(),
@@ -314,6 +388,19 @@ impl EngineCore {
             fitting: HashMap::new(),
             queued: Vec::new(),
         }
+    }
+
+    fn push_entry(&mut self, entry: Entry) {
+        self.push_row(entry, RowOrigin::Other);
+    }
+
+    fn push_row(&mut self, entry: Entry, origin: RowOrigin) {
+        self.state.push(entry);
+        self.row_origins.push_back(origin);
+        while self.row_origins.len() > self.state.entries.len() {
+            self.row_origins.pop_front();
+        }
+        debug_assert_eq!(self.row_origins.len(), self.state.entries.len(), "every transcript row must have an origin");
     }
 
     pub fn state(&self) -> &EngineState {
@@ -365,27 +452,52 @@ impl EngineCore {
 
     /// Swap the model (a provider change). The conversation restarts.
     pub fn set_model(&mut self, model: Box<dyn Model>) {
-        self.model.cancel();
+        self.stop_turn(false);
+        self.next_line_picture = None;
         self.model = model;
         self.state.provider_label = self.model.label();
         self.seen_generation = None;
-        self.end_turn();
-        self.state.push(Entry::System { text: format!("now answering with {}", self.state.provider_label) });
+        self.push_entry(Entry::System { text: format!("now answering with {}", self.state.provider_label) });
+    }
+
+    /// Room for the person's own pictures. The view only rides along if it fits beside them.
+    pub fn picture_room(&self) -> PictureRoom {
+        self.model.picture_room()
+    }
+
+    /// Offer context for the person's next ordinary line. A newer view supersedes the old one.
+    pub fn set_next_line_picture(&mut self, picture: Option<ModelImage>) -> Result<(), String> {
+        self.next_line_picture = None;
+        if let Some(picture) = picture {
+            self.model.admit_images(std::slice::from_ref(&picture))?;
+            self.next_line_picture = Some(picture);
+        }
+        Ok(())
     }
 
     /// The person's turn. A line starting with `/` is the local tool
     /// console: `/files.list_dir {"path":"~"}` runs the tool directly and
-    /// shows the result, no model involved.
-    pub fn send(&mut self, text: &str, now: f64) {
-        let text = text.trim();
+    /// shows the result, no model involved. The line's id ([`EngineState::line_log`]);
+    /// `None` for an empty line or a console line, which start no turn.
+    pub fn send(&mut self, draft: &str, now: f64) -> Option<u64> {
+        let text = draft.trim();
         if text.is_empty() {
-            return;
+            return None;
         }
         if let Some(rest) = text.strip_prefix('/') {
             self.console(rest.trim(), now);
-            return;
+            return None;
         }
-        self.say(text, Vec::new());
+        let images = self.next_line_picture.take().into_iter().collect();
+        Some(self.say(text, Vec::new(), images, Some(ComposerDraft { text: draft.into(), pictures: Vec::new() })))
+    }
+
+    /// Exactly `text` as the person's line, for a line a product writes for them: no trimming,
+    /// no console, no pictures (the view's picture stays for their next ordinary line) and none
+    /// of the composer's attachments. It waits behind a running turn like a typed line. The
+    /// line's id ([`EngineState::line_log`]).
+    pub fn send_exact(&mut self, text: &str) -> u64 {
+        self.say(text, Vec::new(), Vec::new(), None)
     }
 
     /// The person's line with the pictures they sent along: the model looks at them with it
@@ -393,8 +505,9 @@ impl EngineCore {
     /// conversation, kept on disk when it is ([`Self::keep_chat`]). The same picture sent again
     /// is the same picture (its file is named by its hash), under its first name; another
     /// picture under a name the conversation has is numbered apart (`keys-2.webp`). The line
-    /// ends `[attached: <names>]`. `Err` when the model cannot look at pictures: nothing is sent.
-    pub fn send_pictures(&mut self, text: &str, pictures: Vec<NewPicture>, _now: f64) -> Result<(), String> {
+    /// ends `[attached: <names>]`. The line's id ([`EngineState::line_log`]); `Err` when the
+    /// model cannot look at pictures: nothing is sent.
+    pub fn send_pictures(&mut self, text: &str, pictures: Vec<NewPicture>, _now: f64) -> Result<u64, String> {
         // Each picture's name here: its own if this picture was sent before, else a free one.
         let mut names: Vec<String> = Vec::with_capacity(pictures.len());
         for (i, picture) in pictures.iter().enumerate() {
@@ -405,9 +518,20 @@ impl EngineCore {
             });
             names.push(name);
         }
-        let images = pictures.iter().zip(&names).map(|(p, name)| ModelImage { label: format!("reference: {name}"), png: p.for_model.clone() }).collect();
-        self.model.attach_images(images)?;
+        let own: Vec<ModelImage> = pictures.iter().zip(&names).map(|(p, name)| ModelImage {
+            label: format!("reference: {name}"),
+            png: p.for_model.clone(),
+        }).collect();
+        // The person's own pictures decide the send. The plate picture rides along only when the
+        // model takes it with them; a refused send keeps it for the text-only line that follows.
+        self.model.admit_images(&own)?;
+        let mut images: Vec<ModelImage> = self.next_line_picture.take().into_iter().collect();
+        images.extend(own.iter().cloned());
+        if self.model.admit_images(&images).is_err() {
+            images = own;
+        }
         let turn = self.lines + 1;
+        let mut draft = ComposerDraft { text: text.into(), pictures: Vec::with_capacity(pictures.len()) };
         let mut refs = Vec::with_capacity(pictures.len());
         for (picture, name) in pictures.into_iter().zip(&names) {
             let at = match self.pictures.iter().position(|p| p.file == picture.file) {
@@ -424,6 +548,7 @@ impl EngineCore {
             if sent.turns.last() != Some(&turn) {
                 sent.turns.push(turn);
             }
+            draft.pictures.push((at, ModelImage { label: picture.name, png: picture.for_model }));
             let reference = sent.reference();
             if !refs.contains(&reference) {
                 refs.push(reference);
@@ -432,28 +557,32 @@ impl EngineCore {
         let text = text.trim();
         let mut line = if text.is_empty() { PICTURES_ONLY.to_string() } else { text.to_string() };
         line.push_str(&format!("\n[attached: {}]", refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")));
-        self.say(&line, refs);
-        Ok(())
+        Ok(self.say(&line, refs, images, Some(draft)))
     }
 
-    /// A line of the person's in the transcript, and to the model now or at the turn's end.
-    fn say(&mut self, text: &str, pictures: Vec<PictureRef>) {
-        self.push_user(text, pictures);
+    /// A line of the person's in the transcript, and to the model now or at the turn's end; its
+    /// id. Only a composer submission is returned on failure.
+    fn say(&mut self, text: &str, pictures: Vec<PictureRef>, images: Vec<ModelImage>, draft: Option<ComposerDraft>) -> u64 {
+        let id = self.next_line;
+        self.next_line += 1;
+        self.push_user(text, pictures, draft.is_some(), RowOrigin::UserLine(id), LineDelivery::Sent);
+        let line = PersonLine { id, stage: LineStage::Pending, text: text.into(), images, draft };
         // A line typed during a turn waits for its end: it never throws away
         // what the model is working on. Stop is what ends a turn.
         if self.turn_active {
-            self.waiting_lines.push_back(text.to_string());
+            self.waiting_lines.push_back(line);
             self.state.touch();
-            return;
+            return id;
         }
-        self.start_turn(text);
+        self.start_turn(line);
+        id
     }
 
-    fn push_user(&mut self, text: &str, pictures: Vec<PictureRef>) {
+    fn push_user(&mut self, text: &str, pictures: Vec<PictureRef>, pointing: bool, origin: RowOrigin, delivery: LineDelivery) {
         self.lines += 1;
         // What the line points at stays with it in the transcript.
-        let attachments = self.state.target.as_ref().map(|t| t.attachments.clone()).unwrap_or_default();
-        self.state.push(Entry::User { text: text.to_string(), pictures, attachments });
+        let attachments = if pointing { self.state.target.as_ref().map(|t| t.attachments.clone()).unwrap_or_default() } else { Vec::new() };
+        self.push_row(Entry::User { text: text.to_string(), pictures, attachments, delivery }, origin);
     }
 
     /// The pictures the person sent in this conversation, one per picture, oldest first.
@@ -461,8 +590,10 @@ impl EngineCore {
         &self.pictures
     }
 
-    /// The model gets the person's line, already in the transcript.
-    fn start_turn(&mut self, text: &str) {
+    /// The model gets the person's line, already in the transcript: the one place a line starts
+    /// its turn ([`LineFate::Started`]).
+    fn start_turn(&mut self, mut line: PersonLine) {
+        let id = line.id;
         self.reconfigure_if_needed();
         self.focus_target();
         self.state.status = Status::Thinking;
@@ -470,11 +601,23 @@ impl EngineCore {
         self.state.rate = None;
         self.turn_active = true;
         let dynamic = self.registry.dynamic_context();
-        let mut context = self.turn_context(dynamic);
-        if let Some(earlier) = self.resumed.take() {
+        let mut context = self.turn_context(dynamic, line.draft.is_some());
+        if let Some(earlier) = &self.resumed {
             context = format!("# The conversation before the app restarted (the model and tools now are as the current state says)\n{earlier}\n\n{context}");
         }
-        self.model.send_user(text, &context);
+        if !line.images.is_empty() {
+            if let Err(why) = self.model.attach_images(std::mem::take(&mut line.images)) {
+                let reason = format!("the line's pictures could not be delivered: {why}");
+                self.state.line_log.push(LineFate::Dropped(id));
+                self.active_line = Some(line);
+                self.fail_turn(reason);
+                return;
+            }
+        }
+        line.stage = LineStage::Sent;
+        self.state.line_log.push(LineFate::Started(id));
+        self.model.send_user(&line.text, &context);
+        self.active_line = Some(line);
         self.state.touch();
     }
 
@@ -487,26 +630,41 @@ impl EngineCore {
             .state
             .entries
             .iter()
-            .filter_map(|entry| match entry {
-                Entry::User { text, pictures, .. } => Some(SavedRow {
-                    kind: "user".into(),
-                    title: String::new(),
-                    text: text.clone(),
-                    pictures: (!pictures.is_empty()).then(|| pictures.clone()),
-                }),
-                Entry::Assistant { text, streaming: false } if !text.trim().is_empty() => {
-                    Some(SavedRow { kind: "assistant".into(), title: String::new(), text: text.clone(), pictures: None })
-                }
-                Entry::Tool(t) => match &t.status {
-                    ToolStatus::Done { outcome, text, .. } => {
-                        let mut text = text.clone();
-                        truncate_to_char_boundary(&mut text, SAVED_RESULT_BYTES);
-                        let kind = if matches!(outcome, ToolOutcome::Ok) { "tool" } else { "tool_failed" };
-                        Some(SavedRow { kind: kind.into(), title: canonical_name(&t.service, &t.tool), text, pictures: None })
+            .zip(&self.row_origins)
+            .filter_map(|(entry, origin)| {
+                let saved_kind = |kind: &str| {
+                    match origin {
+                        RowOrigin::Stopped => format!("{STOPPED_KIND_PREFIX}{kind}"),
+                        RowOrigin::Failed => format!("{FAILED_KIND_PREFIX}{kind}"),
+                        RowOrigin::Unsent(_) => format!("{UNSENT_KIND_PREFIX}{kind}"),
+                        _ => kind.to_owned(),
                     }
+                };
+                match entry {
+                    Entry::User { text, pictures, delivery, .. } => Some(SavedRow {
+                        kind: saved_kind("user"),
+                        title: match delivery { LineDelivery::NotSent(detail) => detail.clone(), _ => String::new() },
+                        text: text.clone(),
+                        pictures: (!pictures.is_empty()).then(|| pictures.clone()),
+                    }),
+                    Entry::Assistant { text, streaming: false } if !text.trim().is_empty() => {
+                        Some(SavedRow { kind: saved_kind("assistant"), title: String::new(), text: text.clone(), pictures: None })
+                    }
+                    Entry::Tool(t) => match &t.status {
+                        ToolStatus::Done { outcome, text, .. } => {
+                            let mut text = text.clone();
+                            truncate_to_char_boundary(&mut text, SAVED_RESULT_BYTES);
+                            let kind = if matches!(outcome, ToolOutcome::Ok) { "tool" } else { "tool_failed" };
+                            Some(SavedRow { kind: saved_kind(kind), title: canonical_name(&t.service, &t.tool), text, pictures: None })
+                        }
+                        _ => None,
+                    },
+                    Entry::System { .. } => match origin {
+                        RowOrigin::RestoredTool(row) => Some(row.as_ref().clone()),
+                        _ => None,
+                    },
                     _ => None,
-                },
-                _ => None,
+                }
             })
             .collect();
         SavedChat { version: 1, rows }.serialize_json()
@@ -554,10 +712,20 @@ impl EngineCore {
         }
         let mut earlier = String::new();
         for row in &chat.rows {
-            match row.kind.as_str() {
+            let (kind, origin, delivery) = if let Some(kind) = row.kind.strip_prefix(STOPPED_KIND_PREFIX) {
+                (kind, RowOrigin::Stopped, LineDelivery::Stopped)
+            } else if let Some(kind) = row.kind.strip_prefix(UNSENT_KIND_PREFIX) {
+                (kind, RowOrigin::Unsent(0), LineDelivery::NotSent(row.title.clone()))
+            } else if let Some(kind) = row.kind.strip_prefix(FAILED_KIND_PREFIX) {
+                (kind, RowOrigin::Failed, LineDelivery::Failed)
+            } else {
+                (row.kind.as_str(), RowOrigin::Other, LineDelivery::Sent)
+            };
+            let in_context = matches!(delivery, LineDelivery::Sent | LineDelivery::Failed);
+            match kind {
                 "user" => {
                     let pictures = row.pictures.clone().unwrap_or_default();
-                    self.push_user(&row.text, pictures.clone());
+                    self.push_user(&row.text, pictures.clone(), true, origin, delivery);
                     for picture in pictures {
                         // A name no picture file has is never read: the saved chat names files in
                         // `dir` only, never one outside it.
@@ -579,16 +747,17 @@ impl EngineCore {
                         self.pictures[at].turns.push(self.lines);
                     }
                 }
-                "assistant" => self.state.push(Entry::Assistant { text: row.text.clone(), streaming: false }),
+                "assistant" => self.push_row(Entry::Assistant { text: row.text.clone(), streaming: false }, origin),
                 "tool" | "tool_failed" => {
                     let mut line = row.text.lines().next().unwrap_or("").to_string();
                     truncate_to_char_boundary(&mut line, 160);
-                    let verdict = if row.kind == "tool" { "done" } else { "failed" };
-                    self.state.push(Entry::System { text: format!("{} {verdict}: {line}", row.title) });
+                    let verdict = if kind == "tool" { "done" } else { "failed" };
+                    self.push_row(Entry::System { text: format!("{} {verdict}: {line}", row.title) }, RowOrigin::RestoredTool(Box::new(row.clone())));
                 }
                 _ => continue,
             }
-            let label = match row.kind.as_str() {
+            if !in_context { continue; }
+            let label = match kind {
                 "user" => "[user]".to_string(),
                 "assistant" => "[assistant]".to_string(),
                 kind => format!("[{} {}]", if kind == "tool" { "tool result" } else { "tool failed" }, row.title),
@@ -603,8 +772,8 @@ impl EngineCore {
             }
             earlier = format!("[...earlier lines left out]\n{}", &earlier[cut..]);
         }
-        self.state.push(Entry::System { text: "Restored the conversation from before the restart".into() });
-        self.resumed = Some(earlier);
+        self.push_entry(Entry::System { text: "Restored the conversation from before the restart".into() });
+        self.resumed = (!earlier.is_empty()).then_some(earlier);
         Ok(())
     }
 
@@ -632,7 +801,7 @@ impl EngineCore {
     pub fn announce(&mut self, text: &str) {
         let mut text = text.to_string();
         truncate_to_char_boundary(&mut text, MAX_CONTEXT_BYTES);
-        self.state.push(Entry::System { text });
+        self.push_entry(Entry::System { text });
     }
 
     /// The chips over the composer.
@@ -652,7 +821,9 @@ impl EngineCore {
     }
 
     /// The per-turn context: the services' volatile state, then the target.
-    fn turn_context(&self, mut dynamic: String) -> String {
+    /// The context of a line: what the person is looking at, and (`pointing`) what the line points
+    /// at.
+    fn turn_context(&self, mut dynamic: String, pointing: bool) -> String {
         let Some(target) = &self.state.target else { return dynamic };
         let mut line = format!("The person is looking at {} ({}).", target.label, target.app);
         if !target.context.trim().is_empty() {
@@ -662,7 +833,7 @@ impl EngineCore {
         truncate_to_char_boundary(&mut line, MAX_CONTEXT_BYTES);
         // What the person points at, each with what the host says of it. Bounded as a whole: a
         // long list is cut with a note, never refused (the host's own tools read the rest).
-        if !target.attachments.is_empty() {
+        if pointing && !target.attachments.is_empty() {
             let mut picks = String::from("\nThe person points at (chips on their line):");
             for a in &target.attachments {
                 picks.push_str(&format!("\n- {} ({})", a.label, a.kind));
@@ -706,7 +877,7 @@ impl EngineCore {
             } else {
                 format!("tools: {}", names.join(", "))
             };
-            self.state.push(Entry::System { text });
+            self.push_entry(Entry::System { text });
             return;
         }
         let (name, args) = match line.split_once(char::is_whitespace) {
@@ -736,6 +907,7 @@ impl EngineCore {
         let open: Vec<String> = self.external.keys().cloned().collect();
         for call_id in open {
             self.parked.remove(&call_id);
+            self.fitting.remove(&call_id);
             if let Some(p) = self.pending.remove(&call_id) {
                 self.registry.send(&p.endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
             }
@@ -743,27 +915,52 @@ impl EngineCore {
         }
     }
 
-    /// Stop the turn: the model, every running call, every parked one.
+    /// Stop the model and the calls it made for this turn.
     pub fn cancel(&mut self, _now: f64) {
-        self.waiting_lines.clear();
+        self.stop_turn(false);
+    }
+
+    fn stop_turn(&mut self, include_console: bool) {
+        if let Some(line) = self.active_line.take() {
+            if !include_console {
+                self.mark_line(line.id, LineDelivery::Stopped);
+            }
+            if line.stage != LineStage::Pending {
+                self.state.line_log.push(LineFate::Stopped(line.id));
+            }
+        }
+        for line in std::mem::take(&mut self.waiting_lines) {
+            if !include_console {
+                self.mark_line(line.id, LineDelivery::Stopped);
+            }
+            self.state.line_log.push(LineFate::Dropped(line.id));
+        }
         self.model.cancel();
-        let running: Vec<(String, EndpointId)> = self.pending.drain().map(|(id, p)| (id, p.endpoint)).collect();
+        // A refusal already queued for this line must never be handed back against a retype.
+        let _ = self.model.poll();
+        self.cancel_calls(include_console);
+        self.end_turn();
+    }
+
+    fn cancel_calls(&mut self, include_console: bool) {
+        // Console, proposed and external calls all have from_console set. A conversation clear owns those too.
+        let stop = |from_console: bool| include_console || !from_console;
+        let running: Vec<_> = self.pending.extract_if(|_, p| stop(p.from_console)).map(|(id, p)| (id, p.endpoint)).collect();
         for (call_id, endpoint) in running {
             self.registry.send(&endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
             self.mark_done(&call_id, &ToolResult::cancelled(&call_id));
         }
-        let parked: Vec<String> = self.parked.drain().map(|(id, _)| id).collect();
+        let parked: Vec<_> = self.parked.extract_if(|_, p| stop(p.from_console)).map(|(id, _)| id).collect();
         for call_id in parked {
             self.mark_done(&call_id, &ToolResult::denied(&call_id, "cancelled"));
         }
-        let fitting: Vec<String> = self.fitting.drain().map(|(id, _)| id).collect();
+        let fitting: Vec<_> = self.fitting.extract_if(|_, (from_console, _, _)| stop(*from_console)).map(|(id, _)| id).collect();
         for call_id in fitting {
             self.mark_done(&call_id, &ToolResult::cancelled(&call_id));
         }
-        if let Some(a) = self.awaiting.take() {
+        if let Some(a) = self.awaiting.take_if(|a| stop(a.from_console)) {
             self.mark_done(&a.call_id, &ToolResult::cancelled(&a.call_id));
         }
-        self.end_turn();
     }
 
     /// Stop one tool row, including a silent call. Other calls keep running.
@@ -789,8 +986,9 @@ impl EngineCore {
 
     /// A new conversation: same services, same provider, empty transcript. The pictures the
     /// person sent go with the old one: their files are removed.
-    pub fn clear(&mut self, now: f64) {
-        self.cancel(now);
+    pub fn clear(&mut self, _now: f64) {
+        self.stop_turn(true);
+        self.next_line_picture = None;
         self.allowed.clear();
         self.resumed = None;
         // A write under way leaves no file of a picture that went with the chat.
@@ -806,6 +1004,7 @@ impl EngineCore {
         self.drop_subscriptions();
         self.model.reset();
         self.state.entries.clear();
+        self.row_origins.clear();
         self.state.thinking.clear();
         self.state.rate = None;
         self.state.status = Status::Idle;
@@ -813,11 +1012,19 @@ impl EngineCore {
         self.state.touch();
     }
 
-    /// The person's "always in this chat" on a parked call: its tool runs
-    /// without a card for the rest of the conversation (see [`Self::allowed`]),
-    /// starting with this call (run with `args` as [`Self::confirm_with`]).
+    /// Whether this card can offer "Always in this chat".
+    pub fn can_allow_for_chat(&self, call_id: &str) -> bool {
+        self.parked.get(call_id).is_some_and(|parked| parked.can_allow_for_chat(&self.registry))
+    }
+
+    /// Run this call with `args` as in [`Self::confirm_with`] and allow its tool
+    /// for the conversation. Destructive calls require a separate Run each time.
     pub fn allow_for_chat(&mut self, call_id: &str, args: Option<String>, now: f64) -> Result<(), String> {
-        let Some(grant) = self.parked.get(call_id).map(|parked| parked.grant.clone()) else { return Ok(()) };
+        let Some(parked) = self.parked.get(call_id) else { return Ok(()) };
+        if !parked.can_allow_for_chat(&self.registry) {
+            return Err("This tool needs your approval each time. Press Run to approve this call.".into());
+        }
+        let grant = canonical_name(&parked.app, &parked.call.tool);
         self.confirm_with(call_id, true, args, now)?;
         self.allowed.insert(grant);
         self.state.touch();
@@ -924,6 +1131,7 @@ impl EngineCore {
         let mut events = Vec::new();
         for up in self.registry.pump() {
             match up {
+                RegistryUp::ConfirmAnswer { .. } => {}
                 RegistryUp::Result(endpoint, result) => self.on_result(&endpoint, result, now),
                 RegistryUp::Progress { endpoint, call_id, note, permille, task } => {
                     if let Some(p) = self.pending.get_mut(&call_id) {
@@ -971,7 +1179,7 @@ impl EngineCore {
         }
         if !self.turn_active {
             if let Some(line) = self.waiting_lines.pop_front() {
-                self.start_turn(&line);
+                self.start_turn(line);
             } else {
                 self.deliver_next_message(now);
             }
@@ -992,7 +1200,7 @@ impl EngineCore {
             }
         });
         for text in unkept {
-            self.state.push(Entry::System { text });
+            self.push_entry(Entry::System { text });
         }
         // What asks the host (a picture to fit or keep), this pump's or from outside one.
         events.append(&mut self.queued);
@@ -1043,7 +1251,7 @@ impl EngineCore {
         if let Err(e) = self.model.configure(&system, &tools) {
             // Never let the table drift: restart the conversation instead.
             self.model.reset();
-            self.state.push(Entry::System { text: format!("the tools changed; the conversation restarted ({e})") });
+            self.push_entry(Entry::System { text: format!("the tools changed; the conversation restarted ({e})") });
             let _ = self.model.configure(&system, &tools);
         }
         self.seen_generation = Some(generation);
@@ -1085,6 +1293,7 @@ impl EngineCore {
 
     fn on_model_event(&mut self, ev: ModelEvent, now: f64) -> Option<EngineEvent> {
         match ev {
+            ModelEvent::Note(text) => self.push_entry(Entry::System { text }),
             ModelEvent::Loading { phase, fraction } => {
                 // Election may already have picked a node while it is loading.
                 self.state.provider_label = self.model.label();
@@ -1102,6 +1311,9 @@ impl EngineCore {
                 self.state.status = Status::Thinking;
             }
             ModelEvent::Delta(text) => {
+                if !text.trim().is_empty() || self.state.streaming_mut().is_some() {
+                    if let Some(line) = &mut self.active_line { line.stage = LineStage::Acted; }
+                }
                 self.state.model_note.clear();
                 self.state.status = Status::Streaming;
                 match self.state.streaming_mut() {
@@ -1110,7 +1322,10 @@ impl EngineCore {
                     // a newline before its first tool call must not leave a
                     // blank block above the card.
                     None if text.trim().is_empty() => {}
-                    None => self.state.push(Entry::Assistant { text: text.trim_start().to_string(), streaming: true }),
+                    None => self.push_row(
+                        Entry::Assistant { text: text.trim_start().to_string(), streaming: true },
+                        self.active_line.as_ref().map_or(RowOrigin::Other, |line| RowOrigin::UserLine(line.id)),
+                    ),
                 }
             }
             ModelEvent::Thinking(text) => {
@@ -1128,6 +1343,7 @@ impl EngineCore {
                 return Some(EngineEvent::ToolCallPartial { call_id, name, partial_json });
             }
             ModelEvent::ToolCall { call_id, name, args } => {
+                if let Some(line) = &mut self.active_line { line.stage = LineStage::Acted; }
                 // A row that never got text sits above the card as a gap.
                 self.drop_empty_assistant();
                 self.state.model_note.clear();
@@ -1136,18 +1352,85 @@ impl EngineCore {
             }
             ModelEvent::Rate(r) => self.state.rate = Some(r),
             ModelEvent::TurnDone { tool_calls } => {
-                if tool_calls == 0 && self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() {
-                    self.end_turn();
+                if tool_calls == 0 {
+                    // An independent console call may keep the engine busy after
+                    // the model has already committed this line.
+                    self.finish_line();
+                    if self.pending.is_empty() && self.fitting.is_empty() && self.parked.is_empty() {
+                        self.end_turn();
+                    }
                 }
             }
-            ModelEvent::Error(e) => {
-                self.state.push(Entry::System { text: e.clone() });
-                self.end_turn();
-                self.state.status = Status::Error(e);
-            }
+            ModelEvent::Error(reason) => self.fail_turn(reason),
         }
         self.state.touch();
         None
+    }
+
+    fn mark_line(&mut self, id: u64, delivery: LineDelivery) {
+        for (entry, origin) in self.state.entries.iter_mut().zip(&mut self.row_origins) {
+            if matches!(origin, RowOrigin::UserLine(owner) if *owner == id) {
+                *origin = match (&delivery, &*entry) {
+                    (LineDelivery::Stopped, _) => RowOrigin::Stopped,
+                    (LineDelivery::Failed, Entry::User { .. }) => RowOrigin::Failed,
+                    (LineDelivery::Failed, _) | (LineDelivery::Sent, _) => RowOrigin::Other,
+                    (LineDelivery::NotSent(_), _) => RowOrigin::Unsent(id),
+                };
+                match entry {
+                    Entry::User { delivery: state, .. } => *state = delivery.clone(),
+                    Entry::Assistant { streaming, .. } => *streaming = false,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// A returned picture could not be read. Keep its name with the line even after a restart.
+    pub fn return_picture_errors(&mut self, id: u64, errors: Vec<String>) {
+        if errors.is_empty() { return; }
+        for (entry, origin) in self.state.entries.iter_mut().zip(&self.row_origins) {
+            if matches!(origin, RowOrigin::Unsent(owner) if *owner == id) {
+                if let Entry::User { delivery: LineDelivery::NotSent(detail), .. } = entry {
+                    *detail = format!("could not return {}", errors.join(", "));
+                    self.state.touch();
+                    break;
+                }
+            }
+        }
+    }
+
+    fn fail_turn(&mut self, reason: String) {
+        if let Some(line) = self.active_line.take() {
+            if line.stage == LineStage::Acted {
+                self.mark_line(line.id, LineDelivery::Failed);
+            } else {
+                self.mark_line(line.id, LineDelivery::NotSent(String::new()));
+                if let Some(draft) = line.draft {
+                    let pictures = draft.pictures.into_iter().map(|(at, image)| {
+                        let mut original = self.pictures[at].clone();
+                        original.name = image.label;
+                        ReturnedPicture { original, for_model: image.png }
+                    }).collect();
+                    self.queued.push(EngineEvent::ReturnLine { id: line.id, text: draft.text, pictures });
+                }
+            }
+            if line.stage != LineStage::Pending {
+                self.state.line_log.push(LineFate::Failed(line.id));
+            }
+        }
+        self.model.cancel();
+        self.cancel_calls(false);
+        self.end_turn();
+        self.push_entry(Entry::System { text: reason.clone() });
+        self.state.status = Status::Error(reason);
+    }
+
+    fn finish_line(&mut self) {
+        // Only a committed first turn consumes the restored context. Stop and failure
+        // take their active line before ending the turn, so a retry receives it again.
+        if self.active_line.take().is_some() {
+            self.resumed = None;
+        }
     }
 
     fn end_turn(&mut self) {
@@ -1155,6 +1438,7 @@ impl EngineCore {
             *streaming = false;
         }
         self.drop_empty_assistant();
+        self.finish_line();
         self.turn_active = false;
         self.state.status = Status::Idle;
         self.state.thinking.clear();
@@ -1203,7 +1487,8 @@ impl EngineCore {
     fn dispatch_with(&mut self, call_id: String, name: &str, args: &str, from_console: bool, propose: bool, now: f64) -> Option<EngineEvent> {
         let (app, tool) = split_name(name);
         let (app, tool) = (app.to_string(), tool.to_string());
-        self.state.push(Entry::Tool(self.card(&call_id, &app, name, args)));
+        let owner = if from_console { None } else { self.active_line.as_ref().map(|line| line.id) };
+        self.push_row(Entry::Tool(self.card(&call_id, &app, name, args)), owner.map_or(RowOrigin::Other, RowOrigin::UserLine));
         if app == "bus" {
             self.dispatch_bus(call_id, &tool, args, from_console);
             return None;
@@ -1265,8 +1550,9 @@ impl EngineCore {
         }
         let risk = def.risk.max(self.registry.risk_floor(&app));
         let call = ServiceCall { call_id: call_id.clone(), tool: tool.clone(), args: args_json, caller: None, origin: CallOrigin::Conversation };
-        let grant = canonical_name(&app, &tool);
-        let gated = risk >= Risk::Request && (!from_console || self.external.contains_key(&call_id)) && !self.allowed.contains(&grant);
+        let gated = risk >= Risk::Request
+            && (!from_console || self.external.contains_key(&call_id))
+            && (risk == Risk::Destructive || !self.allowed.contains(&canonical_name(&app, &tool)));
         // A proposal that only looks or changes the app's own state (Read,
         // Act) runs at once as a console call, with no card; a request or a
         // destructive one parks.
@@ -1302,7 +1588,7 @@ impl EngineCore {
                 t.status = ToolStatus::Confirm;
                 t.card = card;
             }
-            self.parked.insert(call_id.clone(), Parked { endpoint, proposed: call.args.clone(), by_person: propose, call, from_console, schema, grant });
+            self.parked.insert(call_id.clone(), Parked { endpoint, proposed: call.args.clone(), by_person: propose, call, from_console, schema, app, risk });
             self.state.touch();
             return Some(EngineEvent::Confirm { call_id });
         }
@@ -1668,7 +1954,7 @@ impl EngineCore {
             input.push_str(&format!("\ndropped: {dropped}"));
         }
         self.reconfigure_if_needed();
-        self.state.push(Entry::Event(entry));
+        self.push_entry(Entry::Event(entry));
         self.state.status = Status::Thinking;
         self.state.thinking.clear();
         self.state.rate = None;
@@ -1755,9 +2041,19 @@ impl EngineCore {
         if !self.parked.is_empty() {
             return;
         }
-        let before = self.state.entries.len();
-        self.state.entries.retain(|e| !matches!(e, Entry::Assistant { text, .. } if text.trim().is_empty()));
-        if self.state.entries.len() != before {
+        let mut keep = 0;
+        for index in 0..self.state.entries.len() {
+            if !matches!(&self.state.entries[index], Entry::Assistant { text, .. } if text.trim().is_empty()) {
+                if keep != index {
+                    self.state.entries.swap(keep, index);
+                    self.row_origins.swap(keep, index);
+                }
+                keep += 1;
+            }
+        }
+        if keep < self.state.entries.len() {
+            self.state.entries.truncate(keep);
+            self.row_origins.truncate(keep);
             self.state.touch();
         }
     }
@@ -1823,7 +2119,7 @@ impl EngineCore {
                 self.model.reset();
                 self.seen_generation = None;
                 self.end_turn();
-                self.state.push(Entry::System { text: "the conversation was reset by the app".into() });
+                self.push_entry(Entry::System { text: "the conversation was reset by the app".into() });
             }
         }
     }
@@ -1852,6 +2148,11 @@ mod tests {
         cancels: usize,
         resets: usize,
         fail_configure_once: bool,
+        sees_images: bool,
+        /// The most pictures one input takes, as the hub's validator allows four.
+        max_images: usize,
+        attached: Vec<ModelImage>,
+        received: Vec<(String, Vec<ModelImage>)>,
     }
 
     impl Scripted {
@@ -1865,9 +2166,14 @@ mod tests {
                 cancels: 0,
                 resets: 0,
                 fail_configure_once: false,
+                sees_images: false,
+                max_images: usize::MAX,
+                attached: Vec::new(),
+                received: Vec::new(),
             }
         }
-        fn next(&mut self) {
+        fn received_input(&mut self, input: &str) {
+            self.received.push((input.to_string(), std::mem::take(&mut self.attached)));
             if let Some(batch) = self.script.pop_front() {
                 self.out.extend(batch);
             }
@@ -1893,12 +2199,29 @@ mod tests {
         fn send_user(&mut self, text: &str, dynamic_context: &str) {
             let mut m = self.0.lock().unwrap();
             m.sends.push((text.to_string(), dynamic_context.to_string()));
-            m.next();
+            m.received_input(text);
         }
         fn send_tool_result(&mut self, call_id: &str, text: &str, is_error: bool) {
             let mut m = self.0.lock().unwrap();
             m.tool_results.push((call_id.to_string(), text.to_string(), is_error));
-            m.next();
+            m.received_input(call_id);
+        }
+        fn picture_room(&self) -> PictureRoom {
+            let m = self.0.lock().unwrap();
+            if m.sees_images { PictureRoom::Fits(m.max_images) } else { PictureRoom::NoPictures }
+        }
+        fn admit_images(&self, images: &[ModelImage]) -> Result<(), String> {
+            let m = self.0.lock().unwrap();
+            if images.is_empty() || (m.sees_images && images.len() <= m.max_images) {
+                Ok(())
+            } else {
+                Err("no vision".into())
+            }
+        }
+        fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
+            self.admit_images(&images)?;
+            self.0.lock().unwrap().attached.extend(images);
+            Ok(())
         }
         fn cancel(&mut self) {
             self.0.lock().unwrap().cancels += 1;
@@ -1958,35 +2281,464 @@ mod tests {
         setup_with_lease(script, 1)
     }
 
+    #[cfg(feature = "engine")]
+    #[test]
+    fn a_node_refusal_reaches_the_transcript_once_and_keeps_the_diagnostic_in_the_log() {
+        use crate::engine::local_model::LocalModel;
+        use makepad_ai_hub::hub_chat::ChatRoute;
+
+        let route = ChatRoute::Fleet { base: "http://192.0.2.76:8123".into(), model: "qwen".into() };
+        let mut adapter = LocalModel::new(None);
+        let public = "This line doesn't fit in the room the model has left in this chat. Try it with fewer pictures, or start a new chat.";
+        for diagnostic in [
+            "context overflow: the prompt is 33001 tokens and the answer needs 128 more, but this node's context is 32768 tokens (shorten the conversation, or POST /llm/context to raise it)",
+            "backend error: session context overflow: need 37934 tokens, max_context is 32768",
+        ] {
+            let mut log = Vec::new();
+            let failure = route.failure(diagnostic, |detail| log.push(detail.to_owned()));
+            let (mut core, model, _port, _) = setup(vec![adapter.model_events(vec![failure])]);
+            model.lock().unwrap().sees_images = true;
+            let picture = NewPicture { name: "map.png".into(), original: vec![1, 2].into(), file: "map.png".into(),
+                width: 1, height: 1, for_model: vec![3].into() };
+            let line = core.send_pictures(" describe these pictures ", vec![picture], 0.0).unwrap();
+            let events = core.pump(0.1);
+            let returned: Vec<_> = events.iter().filter_map(|e| match e {
+                EngineEvent::ReturnLine { id, text, pictures } => Some((*id, text.as_str(), pictures)),
+                _ => None,
+            }).collect();
+            assert!(matches!(returned.as_slice(), [(id, " describe these pictures ", pictures)] if *id == line
+                && pictures.len() == 1 && pictures[0].original.name == "map.png" && pictures[0].original.data().unwrap().as_ref() == [1, 2]
+                && pictures[0].for_model.as_ref() == [3]),
+                "the refusal must return the original composer text and picture exactly once");
+            assert!(matches!(&core.state().entries[0], Entry::User { delivery: LineDelivery::NotSent(_), .. }),
+                "the refused user row must be marked not sent immediately");
+            assert_eq!(log, [diagnostic], "the original node diagnostic with its counts must reach the log once");
+            assert!(matches!(core.state().entries.as_slice(), [Entry::User { .. }, Entry::System { text }] if text == public),
+                "the refusal must produce one plain transcript line with no endpoint or route label: {:?}", core.state().entries);
+            assert_eq!(core.state().status, Status::Error(public.into()), "the visible refusal must still leave a failed status");
+        }
+    }
+
+    #[test]
+    fn a_stopped_turn_is_visible_after_restore_and_absent_from_model_context() {
+        // The strict reader in builds that share this save but predate Stop marks.
+        #[derive(DeJson)]
+        struct OldChat {
+            version: u32,
+            rows: Vec<OldRow>,
+        }
+        #[derive(DeJson)]
+        struct OldRow {
+            kind: String,
+            title: String,
+            text: String,
+            pictures: Option<Vec<PictureRef>>,
+        }
+        let japan = "What is the capital of Japan?";
+        let count = "Count from 1 to 300";
+        let partial = "1 2 3";
+        let (mut core, original_model, _port, _) = setup(vec![
+            done("Tokyo"),
+            vec![
+                ModelEvent::Delta(partial.into()),
+                ModelEvent::ToolCall { call_id: "pictures".into(), name: "chat.pictures".into(), args: "{}".into() },
+                call("files.list_dir", "{}"),
+                ModelEvent::TurnDone { tool_calls: 2 },
+            ],
+        ]);
+        core.send(japan, 0.0);
+        core.pump(0.1);
+        core.send(count, 0.2);
+        core.pump(0.3);
+        core.cancel(0.4);
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Stopped, .. } if text == count)),
+            "Stop must mark the running line immediately");
+        let saved = core.saved_chat();
+        let old = OldChat::deserialize_json(&saved).expect("an older build must strictly parse the entire save containing a stopped turn");
+        assert_eq!(old.version, 1, "the older reader must accept the save version");
+        let kinds: Vec<_> = old.rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, ["user", "assistant", "stopped_user", "stopped_assistant", "stopped_tool", "stopped_tool_failed"],
+            "only rows produced by the stopped turn must carry the prefix, including successful and failed tools");
+        let visible_to_old: Vec<_> = old.rows.iter()
+            .filter(|r| matches!(r.kind.as_str(), "user" | "assistant" | "tool" | "tool_failed"))
+            .map(|r| (r.text.as_str(), r.title.as_str(), r.pictures.as_deref()))
+            .collect();
+        assert_eq!(visible_to_old, [(japan, "", None), ("Tokyo", "", None)],
+            "the old build must restore both completed rows exactly and skip the entire stopped turn");
+
+        // This conversation has no picture files. keep_chat sweeps its empty directory.
+        let dir = std::env::temp_dir().join(format!("aichat-stop-restore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty chat picture directory");
+        let (mut restored, model, _port, _) = setup(vec![]);
+        restored.keep_chat(dir.clone(), Some(&saved)).expect("restore the marked save");
+        let entries = &restored.state().entries;
+        assert!(entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Stopped, .. } if text == count)),
+            "the restored transcript must identify the stopped line");
+        assert!(entries.iter().any(|e| matches!(e, Entry::Assistant { text, streaming: false } if text == partial)),
+            "the partial reply must still be readable after restart");
+        assert_eq!(restored.saved_chat(), saved, "saving the restored transcript must preserve its tool row and Stop marks");
+        for text in ["What is the capital of Italy?", "What is the capital of Italy?"] {
+            restored.send(text, 1.0);
+            let context = model.lock().unwrap().sends.last().unwrap().1.clone();
+            assert!(context.contains(japan) && context.contains("Tokyo"), "the next request must carry both sides of the completed turn");
+            assert!(!context.contains(count) && !context.contains(partial) && !context.contains("[tool failed") && !context.contains("[tool result"),
+                "no part of the stopped turn may reach the model after restore");
+            restored.cancel(1.1);
+        }
+
+        core.send_exact("host exact line");
+        original_model.lock().unwrap().out.push(ModelEvent::Error("host refusal".into()));
+        let host_events = core.pump(1.2);
+        assert!(!host_events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { .. })),
+            "a host's exact line must never appear in the person's composer");
+        core.send("refused question", 1.3);
+        original_model.lock().unwrap().out.extend([
+            ModelEvent::Delta("partial refused answer".into()),
+            ModelEvent::ToolCall { call_id: "refused-tool".into(), name: "chat.pictures".into(), args: "{}".into() },
+            ModelEvent::Error("node disconnected".into()),
+        ]);
+        let failed_events = core.pump(1.4);
+        assert!(!failed_events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { .. })),
+            "a line the model already answered must never go back to the composer");
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Failed, .. } if text == "refused question")),
+            "a line that ran tools and then failed is marked failed, never not sent");
+        assert!(!core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::NotSent(_), .. } if text == "refused question")),
+            "a sent line is never labelled not sent");
+        let failed = core.saved_chat();
+        let old = OldChat::deserialize_json(&failed).expect("the strict legacy row shape must still read a failed turn");
+        let kinds: Vec<_> = old.rows.iter().rev().take(4).map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, ["tool", "assistant", "failed_user", "unsent_user"],
+            "a line that acted keeps its rows as sent and failed, with zero unsent rows; a failed exact line before any reply stays unsent");
+        let (mut reopened, model, _p, _) = setup(vec![vec![ModelEvent::Error("another refusal".into())]]);
+        reopened.keep_chat(dir.clone(), Some(&failed)).expect("the failed conversation must restore");
+        assert!(reopened.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Failed, .. }
+            if text == "refused question")), "the failed line must still be visible and marked failed after restart");
+        assert_eq!(reopened.saved_chat(), failed, "the failed partial reply and tool must survive another save");
+        reopened.send("first retry", 1.5);
+        reopened.pump(1.6);
+        reopened.send("second retry", 1.7);
+        for (_, context) in &model.lock().unwrap().sends {
+            assert!(context.contains(japan) && context.contains("Tokyo"), "failure of the first resumed turn must preserve the completed context");
+            assert!(context.contains("refused question") && context.contains("partial refused answer") && context.contains("[tool result chat.pictures]"),
+                "a sent line, its partial reply and its tool result are part of the restored context");
+            assert!(!context.contains("host exact line"), "an unsent line must not re-enter the restored context");
+        }
+
+        original_model.lock().unwrap().out.push(ModelEvent::Error("already queued".into()));
+        core.send("stop before the failure is pumped", 1.8);
+        core.cancel(1.9);
+        core.send("new active line", 2.0);
+        assert!(!core.pump(2.1).iter().any(|e| matches!(e, EngineEvent::ReturnLine { .. })),
+            "a stopped line's queued failure must never return the newer active draft");
+
+        let legacy = r#"{"version":1,"rows":[{"kind":"user","title":"","text":"Count from 1 to 300"},{"kind":"assistant","title":"","text":"1 2 3"},{"kind":"tool","title":"files.list_dir","text":"old result"}]}"#;
+        let (mut restored, model, _port, _) = setup(vec![]);
+        restored.keep_chat(dir.clone(), Some(legacy)).expect("version 1 saves containing only plain kinds must remain readable");
+        assert!(matches!(&restored.state().entries[0], Entry::User { delivery: LineDelivery::Sent, .. }), "an old user row must default to unstopped");
+        restored.send("continue", 0.0);
+        let context = &model.lock().unwrap().sends[0].1;
+        assert!(context.contains(count) && context.contains(partial) && context.contains("old result"),
+            "every unmarked legacy row must still reach the model");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Regression: a line typed mid-turn killed the turn, and the model
     /// started again on the same results.
     #[test]
     fn a_line_typed_during_a_turn_waits_for_its_end() {
-        let (mut core, model, _port, _e) = setup(vec![
-            vec![ModelEvent::Delta("Thinking it over".into())],
+        let (mut core, model, mut port, _e) = setup(vec![
+            vec![ModelEvent::Note("One earlier picture is out of view.".into()), ModelEvent::Delta("Thinking it over".into())],
             done("Second answer."),
         ]);
+        let image = |label: &str, byte: u8| ModelImage { label: label.into(), png: vec![byte].into() };
+        let picture = NewPicture {
+            name: "reference.png".into(), file: "reference.png".into(), width: 1, height: 1,
+            original: vec![1].into(), for_model: vec![1].into(),
+        };
+        let answer_with_picture = |port: &mut AiServicePort, b64: &str| {
+            let PortEvent::Call(call) = port.test_drain().remove(0) else { panic!("the tool received its call") };
+            let mut result = ToolResult::ok(&call.call_id, "a picture", "captured");
+            result.images.push(b64.into());
+            port.reply(result);
+            call.call_id
+        };
+        let last_input = || model.lock().unwrap().received.last().unwrap().clone();
+
+        model.lock().unwrap().sees_images = true;
         core.send("first", 0.0);
         core.pump(0.1);
+        assert!(core.state().entries.windows(2).any(|pair| matches!(pair,
+            [Entry::User { text: line, .. }, Entry::System { text }] if line == "first" && text == "One earlier picture is out of view."
+        )), "the model's note belongs in the transcript beside the person's line");
         core.send("second", 0.2);
+        core.send_pictures("third", vec![picture.clone()], 0.2).unwrap();
         core.pump(0.3);
         {
             let m = model.lock().unwrap();
-            assert_eq!(m.cancels, 0, "the turn goes on");
-            assert_eq!(m.sends.len(), 1);
+            assert_eq!(m.cancels, 0, "queueing leaves the running turn alone");
+            assert_eq!(m.sends.len(), 1, "neither queued line has reached the model");
         }
-        let users = core.state().entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
-        assert_eq!(users, 2, "the line shows at once");
+        let users: Vec<_> = core.state().entries.iter().filter_map(|e| match e {
+            Entry::User { text, .. } => Some(text.as_str()), _ => None,
+        }).collect();
+        assert_eq!(users, ["first", "second", "third\n[attached: reference.png]"], "the lines appear at send, with the attachment on its owner's entry");
         model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
         core.pump(0.4);
-        assert_eq!(model.lock().unwrap().sends.len(), 2);
-        assert_eq!(model.lock().unwrap().sends[1].0, "second");
-        // Stop ends the turn and what waits for it.
-        core.send("third", 0.6);
+        assert_eq!(last_input(), ("second".into(), vec![]), "the plain queued line gets no later line's picture");
+        core.pump(0.5);
+        assert_eq!(last_input(), ("third\n[attached: reference.png]".into(), vec![image("reference: reference.png", 1)]), "the third line receives its own picture");
+
+        core.send_pictures("cancel me", vec![picture.clone()], 0.6).unwrap();
         core.cancel(0.7);
         core.pump(0.8);
-        assert_eq!(model.lock().unwrap().sends.len(), 2);
-        assert_eq!(core.state().status, Status::Idle);
+        assert_eq!(model.lock().unwrap().sends.len(), 3, "Stop drops the queued line");
+        assert_eq!(core.state().status, Status::Idle, "Stop ends the running turn");
+        core.send(r#"/files.list_dir {"path":"."}"#, 1.0);
+        answer_with_picture(&mut port, "Ag==");
+        core.pump(1.1);
+        assert!(model.lock().unwrap().tool_results.is_empty(), "a console screenshot stays with the console call");
+        core.send("plain after stop and console", 1.2);
+        assert_eq!(last_input(), ("plain after stop and console".into(), vec![]), "neither a cancelled line nor a console result leaves a picture for the next input");
+
+        core.set_next_line_picture(Some(image("previous view", 3))).unwrap();
+        core.set_next_line_picture(Some(image("current view", 4))).unwrap();
+        model.lock().unwrap().out.extend([call("files.list_dir", r#"{"path":"."}"#), ModelEvent::TurnDone { tool_calls: 1 }]);
+        core.pump(1.3);
+        let call_id = answer_with_picture(&mut port, "BQ==");
+        core.pump(1.4);
+        assert_eq!(last_input(), (call_id, vec![image("picture 1 of this result", 5)]), "the model's call receives its result picture and leaves the plate for the person");
+        core.send("with the plate", 1.5);
+        model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        core.pump(1.6);
+        assert_eq!(last_input(), ("with the plate".into(), vec![image("current view", 4)]), "the next ordinary line owns the latest plate picture");
+
+        core.set_next_line_picture(Some(image("another view", 6))).unwrap();
+        core.send_pictures("both", vec![picture.clone()], 1.7).unwrap();
+        model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        core.pump(1.8);
+        assert_eq!(last_input(), ("both\n[attached: reference.png]".into(), vec![image("another view", 6), image("reference: reference.png", 1)]),
+            "the plate and the person's dropped picture travel together without changing the transcript suffix");
+
+        model.lock().unwrap().max_images = 4;
+        core.set_next_line_picture(Some(image("a view too many", 7))).unwrap();
+        assert_eq!(core.picture_room(), PictureRoom::Fits(4), "the view leaves the person's full room available");
+        core.send_pictures("four", vec![picture.clone(), picture.clone(), picture.clone(), picture.clone()], 1.9).unwrap();
+        model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        core.pump(1.95);
+        let (_, four) = last_input();
+        assert!(four.len() == 4 && four.iter().all(|i| i.label == "reference: reference.png"),
+            "the person's own pictures go when the plate picture does not fit beside them: {four:?}");
+
+        model.lock().unwrap().sees_images = false;
+        let before = core.state().entries.len();
+        assert_eq!(core.picture_room(), PictureRoom::NoPictures);
+        assert_eq!(core.send_pictures("fallback", vec![picture], 2.0).unwrap_err(), "no vision", "an unsupported picture is refused at send, even during a turn");
+        assert_eq!(core.state().entries.len(), before, "a refused picture enters no line in the transcript");
+        core.send("fallback", 2.1);
+        model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        core.pump(2.2);
+        assert_eq!(last_input(), ("fallback".into(), vec![]), "the panel's plain-text fallback sends just the text");
+    }
+
+    /// Each of the person's lines logs its fate once, in order, at the point it happens, so a
+    /// reader that keeps its own index sees every line start or drop.
+    #[test]
+    fn each_line_logs_whether_it_started_or_was_dropped() {
+        let (mut core, model, mut port, _e) = setup(vec![vec![ModelEvent::Delta("Working".into())]]);
+        let picture = NewPicture {
+            name: "reference.png".into(), file: "reference.png".into(), width: 1, height: 1,
+            original: vec![1].into(), for_model: vec![1].into(),
+        };
+        let view = ModelImage { label: "the view".into(), png: vec![9].into() };
+        let end_turn = || model.lock().unwrap().out.push(ModelEvent::TurnDone { tool_calls: 0 });
+        let last_input = || model.lock().unwrap().received.last().unwrap().clone();
+        let mut read = 0;
+        let mut since = |core: &EngineCore| {
+            let new = core.state().line_log[read..].to_vec();
+            read = core.state().line_log.len();
+            new
+        };
+        model.lock().unwrap().sees_images = true;
+
+        let first = core.send("first", 0.0).unwrap();
+        assert_eq!(since(&core), [LineFate::Started(first)], "a line sent while idle starts at once");
+        let second = core.send("second", 0.2).unwrap();
+        let third = core.send_pictures("third", vec![picture.clone()], 0.2).unwrap();
+        assert_eq!(since(&core), [], "lines sent during a turn log nothing while they wait");
+        end_turn();
+        core.pump(0.3);
+        end_turn();
+        core.pump(0.4);
+        assert_eq!(since(&core), [LineFate::Started(second), LineFate::Started(third)], "two lines that start between two reads both appear, in order");
+
+        let fourth = core.send("fourth", 0.5).unwrap();
+        let fifth = core.send("fifth", 0.5).unwrap();
+        core.cancel(0.6);
+        assert_eq!(since(&core), [LineFate::Stopped(third), LineFate::Dropped(fourth), LineFate::Dropped(fifth)],
+            "a stop records the running line as stopped, and drops each waiting line");
+
+        let busy = core.send("busy", 0.7).unwrap();
+        let late = core.send_pictures("late", vec![picture], 0.7).unwrap();
+        model.lock().unwrap().sees_images = false;
+        let before = core.state().entries.len();
+        end_turn();
+        let events = core.pump(0.8);
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { id, text, pictures }
+            if *id == late && text == "late" && pictures.len() == 1)),
+            "the queued attachment failure must return that queued line with its picture");
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::NotSent(_), .. }
+            if text.starts_with("late"))), "the queued line must be visibly marked not sent");
+        assert_eq!(since(&core), [LineFate::Started(busy), LineFate::Dropped(late)], "a line whose pictures cannot be delivered is dropped, not started");
+        let reason = "the line's pictures could not be delivered: no vision";
+        assert!(matches!(&core.state().entries[before..], [Entry::System { text }] if text == reason),
+            "a synchronous attachment failure must keep its own reason in exactly one transcript row");
+        assert_eq!(core.state().status, Status::Error(reason.into()), "a synchronous attachment failure must leave the failed indicator set");
+
+        model.lock().unwrap().sees_images = true;
+        let pick = Attachment { id: "knob".into(), label: "knob".into(), kind: "edit".into(), detail: String::new() };
+        core.set_target(Some(Target { label: "Files".into(), app: "files".into(), context: String::new(), attachments: vec![pick] }));
+        core.set_next_line_picture(Some(view.clone())).unwrap();
+        let words = " /draft: keep these words\n[attached: none] ";
+        let exact = core.send_exact(words);
+        assert_eq!(since(&core), [LineFate::Started(exact)], "an exact line starts like a typed one");
+        assert!(matches!(core.state().entries.last(), Some(Entry::User { text, pictures, attachments, .. }) if text == words && pictures.is_empty() && attachments.is_empty()),
+            "the exact line's transcript entry is its text, byte for byte, with no picks: {:?}", core.state().entries.last());
+        assert_eq!(last_input(), (words.to_string(), vec![]), "the model gets the exact text, without the view's picture");
+        assert!(!model.lock().unwrap().sends.last().unwrap().1.contains("points at"), "an exact line does not claim the picks");
+        end_turn();
+        core.pump(0.9);
+        let next = core.send("next", 1.0).unwrap();
+        assert_eq!(last_input(), ("next".into(), vec![view]), "the view's picture waits for the next ordinary line");
+
+        let waiting = core.send("waiting", 1.1).unwrap();
+        core.clear(1.2);
+        let after = core.send("after the clear", 1.3).unwrap();
+        assert_eq!(since(&core), [LineFate::Started(next), LineFate::Stopped(next), LineFate::Dropped(waiting), LineFate::Started(after)],
+            "a new conversation stops the running line, drops the waiting line and keeps the log");
+        assert!(after > waiting, "line ids never repeat across conversations");
+        assert_eq!(core.send(r#"/files.list_dir {"path":"."}"#, 1.4), None, "a console line is no line of the conversation");
+        assert_eq!(since(&core), [], "a console line logs nothing");
+        end_turn();
+        core.pump(1.5);
+        core.cancel(1.6);
+        core.clear(1.7);
+        assert_eq!(since(&core), [], "a stop or clear while idle records no fate");
+
+        let _ = port.test_drain(); // the console line's call above is still out
+        let stopped = core.send("stopped by a swap", 1.8).unwrap();
+        model.lock().unwrap().out.push(ModelEvent::ToolCall { call_id: "swap-call".into(), name: "files.list_dir".into(), args: "{}".into() });
+        core.pump(1.81);
+        let dispatched = port.test_drain();
+        assert!(matches!(dispatched.as_slice(), [PortEvent::Call(c)] if c.call_id == "swap-call"), "the running line has a tool call in flight: {dispatched:?}");
+        let queued = core.send("queued behind the swap", 1.8).unwrap();
+        let _ = since(&core);
+        core.set_model(scripted(vec![]).0);
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Cancel { call_id }] if call_id == "swap-call"),
+            "a model swap cancels the running tool call at the service");
+        assert!(matches!(&core.state().tool("swap-call").unwrap().status, ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. }),
+            "a model swap leaves the in-flight tool row cancelled");
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Stopped, .. } if text == "queued behind the swap")),
+            "a queued line dropped by the swap reads stopped");
+        let saved = core.saved_chat();
+        let rows = SavedChat::deserialize_json(&saved).unwrap().rows;
+        assert!(rows.iter().any(|r| r.kind == "stopped_user" && r.text == "queued behind the swap"),
+            "a dropped queued line saves as non-context");
+        let dir = std::env::temp_dir().join(format!("aichat-dropped-queue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty chat picture directory");
+        let (mut reopened, reopened_model, _p, _) = setup(vec![]);
+        reopened.keep_chat(dir.clone(), Some(&saved)).expect("restore the save with a dropped queued line");
+        reopened.send("after the restore", 3.0);
+        let context = reopened_model.lock().unwrap().sends.last().unwrap().1.clone();
+        assert!(!context.contains("queued behind the swap"), "a line the model never received stays out of the restored context");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(since(&core), [LineFate::Stopped(stopped), LineFate::Dropped(queued)], "swapping the model mid-turn stops the line and drops the waiting one");
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Stopped, .. } if text == "stopped by a swap")),
+            "a model swap marks the running line stopped");
+        let none = EngineCore::new(ServiceRegistry::new(), Box::new(crate::engine::NoModel::default()), None, 2);
+        assert!(core.state().has_model() && !none.state().has_model(), "a chat with no model says so, for the app's exact lines to refuse");
+    }
+
+    /// Saves from builds that wrote `unsent_*` rows for every kind still restore, and none of
+    /// those rows reaches the model.
+    #[test]
+    fn legacy_unsent_rows_restore_as_not_sent_and_stay_out_of_context() {
+        let fixture = r#"{"version":1,"rows":[
+            {"kind":"user","title":"","text":"kept q"},
+            {"kind":"assistant","title":"","text":"kept a"},
+            {"kind":"unsent_user","title":"could not return b.png","text":"old refused"},
+            {"kind":"unsent_assistant","title":"","text":"old partial"},
+            {"kind":"unsent_tool","title":"chat.pictures","text":"old tool ok"},
+            {"kind":"unsent_tool_failed","title":"files.list_dir","text":"old tool err"}]}"#;
+        let dir = std::env::temp_dir().join(format!("aichat-legacy-unsent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty chat picture directory");
+        let (mut restored, model, _port, _) = setup(vec![]);
+        restored.keep_chat(dir.clone(), Some(fixture)).expect("a save with legacy unsent rows must restore");
+        assert!(restored.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::NotSent(d), .. }
+            if text == "old refused" && d == "could not return b.png")),
+            "a legacy unsent_user row restores as not sent with its detail");
+        let rows = SavedChat::deserialize_json(&restored.saved_chat()).unwrap().rows;
+        let kinds: Vec<_> = rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, ["user", "assistant", "unsent_user", "unsent_assistant", "unsent_tool", "unsent_tool_failed"],
+            "every legacy unsent kind survives another save");
+        assert_eq!(rows[2].title, "could not return b.png", "the unsent line keeps its title verbatim");
+        restored.send("next", 0.0);
+        let context = model.lock().unwrap().sends[0].1.clone();
+        assert!(context.contains("kept q") && context.contains("kept a"), "the sent rows reach the model");
+        for text in ["old refused", "old partial", "old tool ok", "old tool err", "[tool result", "[tool failed"] {
+            assert!(!context.contains(text), "legacy unsent row {text:?} must stay out of the model context");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failure in a later tool round fails the line (it acted), and the call still running is
+    /// cancelled as part of the failure, so it saves as a failed tool and not an unsent one.
+    #[test]
+    fn post_action_overflow_across_tool_rounds_marks_in_flight_tool_failed_not_unsent() {
+        let (mut core, _model, mut port, _e) = setup(vec![
+            vec![call("files.list_dir", "{}"), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![ModelEvent::ToolCall { call_id: "m2".into(), name: "files.list_dir".into(), args: "{}".into() }, ModelEvent::Error("context overflow".into())],
+        ]);
+        let id = core.send_exact("multi-round");
+        core.pump(0.1);
+        let PortEvent::Call(first) = port.test_drain().remove(0) else { panic!("the first round's call") };
+        port.reply(ToolResult::ok(&first.call_id, "Desktop/", "listed"));
+        let events = core.pump(0.2);
+        assert!(!events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { .. })), "a line that acted in an earlier round never returns to the composer");
+        assert_eq!(core.state().line_log, [LineFate::Started(id), LineFate::Failed(id)], "the line started and failed once");
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { delivery: LineDelivery::Failed, .. })), "the line reads failed");
+        assert!(matches!(&core.state().tool("m2").unwrap().status, ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. }),
+            "the in-flight second-round call is cancelled by the failure");
+        let kinds = SavedChat::deserialize_json(&core.saved_chat()).unwrap().rows.into_iter().map(|r| r.kind).collect::<Vec<_>>();
+        assert_eq!(kinds, ["failed_user", "tool", "tool_failed"], "no row of the failed line saves as unsent");
+    }
+
+    /// A started line that fails records its fate; one that acted is failed, one that did not is
+    /// not sent, and a whitespace-only delta is no action.
+    #[test]
+    fn whitespace_only_delta_before_error_is_still_not_sent() {
+        let (mut core, model, _port, _e) = setup(vec![]);
+        let id = core.send("hi", 0.0).unwrap();
+        model.lock().unwrap().out.extend([ModelEvent::Delta(" \n\t".into()), ModelEvent::Error("empty completion".into())]);
+        let events = core.pump(0.1);
+        assert!(events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { text, .. } if text == "hi")),
+            "a whitespace-only reply is no action: the line returns to the composer");
+        assert!(matches!(&core.state().entries[0], Entry::User { delivery: LineDelivery::NotSent(d), .. } if d.is_empty()),
+            "the line is marked not sent");
+        let kinds = SavedChat::deserialize_json(&core.saved_chat()).unwrap().rows.into_iter().map(|r| r.kind).collect::<Vec<_>>();
+        assert_eq!(kinds, ["unsent_user"], "the line is saved unsent");
+        assert_eq!(core.state().line_log, [LineFate::Started(id), LineFate::Failed(id)], "the log says it started and failed");
+
+        let acted = core.send("act", 0.2).unwrap();
+        model.lock().unwrap().out.extend([
+            ModelEvent::ToolCall { call_id: "p".into(), name: "chat.pictures".into(), args: "{}".into() },
+            ModelEvent::Error("overflow".into()),
+        ]);
+        let events = core.pump(0.3);
+        assert!(!events.iter().any(|e| matches!(e, EngineEvent::ReturnLine { .. })), "a line that ran a tool is not returned");
+        assert_eq!(core.state().line_log[2..], [LineFate::Started(acted), LineFate::Failed(acted)], "a failure after a tool call is logged failed");
     }
 
     /// Regression: with the last call over, the chat said "Waiting for the
@@ -2062,6 +2814,7 @@ mod tests {
     fn destructive_calls_wait_for_the_person() {
         let (mut core, model, mut port, _e) = setup(vec![
             vec![call("files.trash", r#"{"path":"~/old.txt"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            vec![ModelEvent::ToolCall { call_id: "m2".into(), name: "files.trash".into(), args: r#"{"path":"~/other.txt"}"#.into() }],
             done("Done."),
         ]);
         core.send("trash old.txt", 0.0);
@@ -2069,8 +2822,17 @@ mod tests {
         assert!(events.contains(&EngineEvent::Confirm { call_id: "m1".into() }));
         assert!(port.test_drain().is_empty(), "nothing reached the app yet");
         assert!(matches!(core.state().tool("m1").map(|t| t.status.clone()), Some(ToolStatus::Confirm)));
-        core.confirm("m1", false, 0.2);
-        assert_eq!(model.lock().unwrap().tool_results[0].2, true, "denied is an error to the model");
+        assert!(!core.can_allow_for_chat("m1"), "the card must hide Always");
+        assert!(core.allow_for_chat("m1", None, 0.2).is_err(), "Always must refuse this call");
+        assert!(core.allowed().next().is_none(), "the refusal must leave no grant");
+        assert!(port.test_drain().is_empty(), "refusing Always must leave the call parked");
+        core.confirm("m1", true, 0.3);
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Call(c)] if c.call_id == "m1" && c.tool == "trash"), "Run sends exactly the approved call");
+        port.reply(ToolResult::ok("m1", "done", "done"));
+        assert!(core.pump(0.4).contains(&EngineEvent::Confirm { call_id: "m2".into() }), "the next call must ask again");
+        assert!(port.test_drain().is_empty(), "the second call must wait for its own press");
+        core.confirm("m2", false, 0.5);
+        assert_eq!(model.lock().unwrap().tool_results[1].2, true, "denied is an error to the model");
         assert!(port.test_drain().is_empty());
         // The floor makes a Read tool destructive too.
         let (mut core, _model, mut port, _e) = setup(vec![vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }]]);
@@ -2083,6 +2845,31 @@ mod tests {
 
     fn export_call(args: &str) -> Vec<Vec<ModelEvent>> {
         vec![vec![call("files.export", args), ModelEvent::TurnDone { tool_calls: 1 }], done("Exported.")]
+    }
+
+    #[test]
+    fn a_destructive_floor_overrides_an_existing_chat_grant() {
+        let (mut core, _model, mut port, _e) = setup(vec![]);
+        // Act tools normally run immediately. A Request floor gives the person a card to grant.
+        core.registry().set_risk_floor("files", Risk::Request);
+        let id = core.propose("files", "open", "{}", 0.0);
+        assert!(core.can_allow_for_chat(&id), "the settings card offers Always");
+        core.allow_for_chat(&id, None, 0.1).unwrap();
+        assert!(core.allowed().any(|tool| tool == "files.open"), "Always records the tool grant");
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Call(c)] if c.call_id == id));
+        let (reply, _results) = std::sync::mpsc::channel();
+        assert!(core.call_external("files.open", "{}", reply.clone(), 0.2).is_none());
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Call(c)] if c.tool == "open"), "the grant works at Request risk");
+
+        let proposal = core.propose("files", "open", "{}", 0.3);
+        core.registry().set_risk_floor("files", Risk::Destructive);
+        assert!(!core.can_allow_for_chat(&proposal), "an open card also respects the raised floor");
+        assert!(core.allow_for_chat(&proposal, Some("{}".into()), 0.4).is_err());
+        let Some(EngineEvent::Confirm { call_id }) = core.call_external("files.open", "{}", reply, 0.5) else {
+            panic!("a new call must park despite its earlier grant");
+        };
+        assert!(!core.can_allow_for_chat(&call_id), "the raised floor also hides Always on the new call");
+        assert!(port.test_drain().is_empty(), "neither call may run without approval");
     }
 
     #[test]
@@ -2201,7 +2988,12 @@ mod tests {
         p2.test_drain();
         reg.focus(&e2);
         let _ = e1;
-        let (model, shared) = scripted(vec![vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }], done("ok")]);
+        let (model, shared) = scripted(vec![
+            Vec::new(), // "hello" is stopped before it answers
+            Vec::new(), // "what is here" is stopped too
+            vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
+            done("ok"),
+        ]);
         let mut core = EngineCore::new(reg, model, None, 1);
         core.send("hello", 0.0);
         assert_eq!(shared.lock().unwrap().sends[0].1.contains("# Focus"), false, "no target, no focus block");
@@ -2534,18 +3326,43 @@ mod tests {
     }
 
     #[test]
-    fn cancel_and_clear_leave_nothing_pending() {
+    fn turn_stop_preserves_independent_calls_and_clear_stops_them() {
         let (mut core, model, mut port, _e) = setup(vec![
             vec![call("files.list_dir", r#"{"path":"~"}"#), ModelEvent::TurnDone { tool_calls: 1 }],
         ]);
         core.send("list", 0.0);
+        core.send("list", 0.05); // The same text, queued before the first turn's tool row.
         core.pump(0.1);
         let _ = port.test_drain();
+        core.send(r#"/files.list_dir {"path":"console"}"#, 0.1);
+        let (reply, external_result) = std::sync::mpsc::channel();
+        core.call_external("files.list_dir", r#"{"path":"external"}"#, reply, 0.1);
+        let calls = port.test_drain();
+        let [PortEvent::Call(console), PortEvent::Call(external)] = calls.as_slice() else { panic!("both independent calls must be dispatched: {calls:?}") };
+        let card = core.propose("files", "export", r#"{"path":"~","format":"zip"}"#, 0.1);
         core.cancel(0.2);
-        assert!(matches!(&port.test_drain()[0], PortEvent::Cancel { .. }));
-        assert!(matches!(core.state().tool("m1").map(|t| t.status.clone()), Some(ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. })));
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Cancel { call_id }] if call_id == "m1"), "only the model's call is stopped at the service");
+        assert!(matches!(&core.state().tool("m1").unwrap().status, ToolStatus::Done { outcome: ToolOutcome::Cancelled, note, .. } if note == "cancelled"));
         assert_eq!(core.state().status, Status::Idle);
-        core.clear(0.3);
+        assert_eq!(core.state().tool(&card).unwrap().status, ToolStatus::Confirm, "the person's parked card survives Stop");
+        port.progress(&console.call_id, "still working", 100);
+        port.reply(ToolResult::ok(&external.call_id, "external answer", "done"));
+        core.pump(0.3);
+        assert!(matches!(&core.state().tool(&console.call_id).unwrap().status, ToolStatus::Running { note, .. } if note == "still working"));
+        let result = external_result.try_recv().expect("the outside caller receives its answer after Stop");
+        assert_eq!((result.call_id, result.outcome, result.text.as_str()), (external.call_id.clone(), ToolOutcome::Ok, "external answer"));
+        let saved = SavedChat::deserialize_json(&core.saved_chat()).expect("read the save after Stop");
+        let kinds: Vec<_> = saved.rows.iter().map(|r| r.kind.as_str()).collect();
+        assert_eq!(kinds, ["stopped_user", "stopped_user", "stopped_tool_failed", "tool"],
+            "Stop must mark the started line, the queued line it dropped and the turn's tool, preserving the independent tool");
+        model.lock().unwrap().script.push_back(done("finished"));
+        core.send("finish this", 0.3);
+        core.pump(0.4);
+        core.cancel(0.4);
+        assert!(core.state().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::Sent, .. } if text == "finish this")),
+            "Stop during independent work must leave an already completed model turn unmarked");
+        core.clear(0.4);
+        assert!(matches!(port.test_drain().as_slice(), [PortEvent::Cancel { call_id }] if call_id == &console.call_id), "clearing the conversation still stops the remaining call");
         assert!(core.state().entries.is_empty());
         assert_eq!(model.lock().unwrap().resets, 1);
     }

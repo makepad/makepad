@@ -6,7 +6,7 @@
 //! files. SkinTokens was the motion campaign's PREFERRED rigger: one
 //! autoregressive pass emits skeleton + skin weights (26 joints, 33.6s on
 //! the GPU-A) and `--use_transfer` keeps the input texture — vs UniRig's
-//! 3-stage ~145s (local/agent_state/motion-123.md P2b).
+//! 3-stage ~145s.
 //!
 //! Box provisioning knob (default = the .59 layout):
 //!   MAKEPAD_RIG_CMD  command template, `{in}`/`{out}` are GLB paths

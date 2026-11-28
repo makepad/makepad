@@ -344,6 +344,31 @@ fn accepted_job_poll_failure_keeps_job_and_never_replays_output() {
 }
 
 #[test]
+fn reset_conversation_during_admission_backoff_drops_pending_without_cancel_post() {
+    let t = Script::new([refused(503), accepted()]);
+    let mut p = t.provider(&[N1]);
+    p.begin_turn(&input()).unwrap();
+    assert!(p.pending.is_some());
+    p.picks.mark_dead(N2);
+    let old_session = p.conversation.clone();
+
+    p.reset_conversation();
+    assert_eq!(t.0.borrow().cancels, 0);
+    assert!(p.pending.is_none());
+    assert_ne!(p.conversation, old_session);
+    assert!(p.picks.is_dead(N2));
+    t.advance();
+    assert!(p.poll().is_empty());
+    assert_eq!(t.0.borrow().posts.len(), 1, "the abandoned turn must never retry");
+
+    p.begin_turn(&input()).unwrap();
+    assert!(p.active.is_some());
+    let state = t.0.borrow();
+    assert_eq!(state.posts.len(), 2);
+    assert_eq!(state.posts[1].1.get("chat_session").and_then(Value::as_str), Some(p.conversation.as_str()));
+}
+
+#[test]
 fn cancel_waiting_or_during_reprobe_prevents_next_post() {
     for (reply, during_probe) in [(refused(409), false), (refused(409), true),
         (raw_reply(EMPTY503), false), (raw_reply(EMPTY503), true)] {

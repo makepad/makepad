@@ -1,13 +1,17 @@
 //! Every account a tool's worker has seen signed in, with its readings over time, kept in
 //! `usage-<tool>.json` next to the app's settings (ported from Scope's account history). Only
-//! the email, the plan, the limits' used shares and reset times, and when they were read go in
-//! it: no CLI output, no credential. The worker owns the file (one per tool, so no two writers);
-//! it is the person's own (mode 0600). Every account stays, however many; a long history, or
+//! the email (Antigravity's CLI names none: its one account is [`LOCAL_ACCOUNT`]), the plan, the
+//! limits' used shares and reset times, and when they were read go in it: no CLI output, no
+//! credential. The worker owns the file (one per tool, so no two writers); it is the person's
+//! own (mode 0600). Every account stays, however many; a long history, or
 //! one that would outgrow its file, thins older readings rather than stopping or dropping one.
 
 use crate::usage::{account_email, plan_name, truncate, Limit, Provider, Reading, MAX_UNIX};
 use makepad_strict_json::Value;
 use std::path::{Path, PathBuf};
+
+/// History key for a provider whose CLI exposes no read-only account email (`agy`).
+pub const LOCAL_ACCOUNT: &str = "local";
 
 /// Readings an account keeps; past it the older half keeps every other one.
 const SAMPLES: usize = 256;
@@ -30,6 +34,7 @@ pub struct Sample {
     pub session: Option<SampleWindow>,
     pub week: Option<SampleWindow>,
     pub fable: Option<SampleWindow>,
+    pub neon: Option<SampleWindow>,
 }
 
 impl Sample {
@@ -38,11 +43,12 @@ impl Sample {
             Limit::Session => self.session.as_ref(),
             Limit::Week => self.week.as_ref(),
             Limit::Fable => self.fable.as_ref(),
+            Limit::Neon => self.neon.as_ref(),
         }
     }
 
     fn same_values(&self, other: &Sample) -> bool {
-        self.session == other.session && self.week == other.week && self.fable == other.fable
+        self.session == other.session && self.week == other.week && self.fable == other.fable && self.neon == other.neon
     }
 }
 
@@ -74,6 +80,10 @@ pub struct History {
     load_failed: bool,
 }
 
+fn history_account(provider: Provider, account: Option<&str>) -> Option<String> {
+    account_email(account).or_else(|| (provider == Provider::Agy).then(|| LOCAL_ACCOUNT.to_owned()))
+}
+
 impl History {
     pub fn path(dir: &Path, provider: Provider) -> PathBuf {
         dir.join(format!("usage-{}.json", provider.key()))
@@ -95,13 +105,16 @@ impl History {
 
     /// One read: the account's history gains it (a failure only notes the check).
     pub fn observe(&mut self, reading: &Reading, at: u64) {
-        let Some(email) = account_email(reading.account.as_deref()) else { return };
+        let Some(email) = history_account(self.provider, reading.account.as_deref()) else { return };
         let window = |limit: Limit| {
             reading.window(limit).map(|w| SampleWindow { used: w.used_percent, reset_at: w.reset_at, reset_text: w.reset_at.is_none().then(|| w.reset_text.as_deref().map(|t| truncate(t, 160))).flatten() })
         };
-        let sample = Sample { at, session: window(Limit::Session), week: window(Limit::Week), fable: window(Limit::Fable) };
-        let success = reading.error.is_none() && (sample.session.is_some() || sample.week.is_some() || sample.fable.is_some());
+        let sample = Sample { at, session: window(Limit::Session), week: window(Limit::Week), fable: window(Limit::Fable), neon: window(Limit::Neon) };
+        let success = reading.error.is_none() && (sample.session.is_some() || sample.week.is_some() || sample.fable.is_some() || sample.neon.is_some());
         if !self.accounts.iter().any(|a| a.email == email) {
+            if email == LOCAL_ACCOUNT && !success {
+                return;
+            }
             self.accounts.push(AccountHistory { email: email.clone(), first_seen_at: at, ..Default::default() });
         }
         let account = self.accounts.iter_mut().find(|a| a.email == email).expect("added above");
@@ -197,7 +210,13 @@ fn encode(accounts: &[AccountHistory], provider: Provider) -> String {
                 ("reset_credits", opt(a.reset_credits.map(u64::from))),
                 (
                     "samples",
-                    Value::Arr(a.samples.iter().map(|s| makepad_strict_json::obj(vec![("at", Value::Int(s.at as i64)), ("session", window_json(&s.session)), ("week", window_json(&s.week)), ("fable", window_json(&s.fable))])).collect()),
+                    Value::Arr(a.samples.iter().map(|s| {
+                        let mut fields = vec![("at", Value::Int(s.at as i64)), ("session", window_json(&s.session)), ("week", window_json(&s.week)), ("fable", window_json(&s.fable))];
+                        if s.neon.is_some() {
+                            fields.push(("neon", window_json(&s.neon)));
+                        }
+                        makepad_strict_json::obj(fields)
+                    }).collect()),
                 ),
             ])
         })
@@ -240,14 +259,25 @@ fn decode(bytes: &[u8], provider: Provider) -> Result<Vec<AccountHistory>, Strin
     let rows = value.get("accounts").and_then(Value::as_arr).ok_or("invalid account list")?;
     let mut accounts: Vec<AccountHistory> = Vec::new();
     for row in rows {
-        let email = account_email(row.get("email").and_then(Value::as_str)).ok_or("invalid email")?;
+        let raw = row.get("email").and_then(Value::as_str);
+        let email = if provider == Provider::Agy && raw == Some(LOCAL_ACCOUNT) {
+            LOCAL_ACCOUNT.to_owned()
+        } else {
+            account_email(raw).ok_or("invalid email")?
+        };
         if accounts.iter().any(|a| a.email == email) {
             return Err("an account twice".into());
         }
         let samples = row.get("samples").and_then(Value::as_arr).filter(|s| s.len() <= SAMPLES).ok_or("invalid samples")?;
         let samples = samples
             .iter()
-            .map(|s| Ok(Sample { at: time(s, "at")?, session: decode_window(s.get("session"))?, week: decode_window(s.get("week"))?, fable: decode_window(s.get("fable"))? }))
+            .map(|s| Ok(Sample {
+                at: time(s, "at")?,
+                session: decode_window(s.get("session"))?,
+                week: decode_window(s.get("week"))?,
+                fable: decode_window(s.get("fable"))?,
+                neon: decode_window(s.get("neon"))?,
+            }))
             .collect::<Result<Vec<_>, String>>()?;
         accounts.push(AccountHistory {
             email,
@@ -377,6 +407,53 @@ mod tests {
         }
         assert!(History::open(Some(path.clone()), Provider::Codex).error.is_some(), "another tool's file is not taken");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_local_account_persists_neon_and_skips_ghost_failures() {
+        let dir = std::env::temp_dir().join(format!("aihub-usage-agy-{}-{}", std::process::id(), crate::usage::now()));
+        let path = History::path(&dir, Provider::Agy);
+        assert_eq!(path, dir.join("usage-agy.json"), "Antigravity has its own history file");
+        let mut h = History::open(Some(path.clone()), Provider::Agy);
+        let failure = Reading::failed(None, "timed out");
+        h.observe(&failure, 100);
+        assert!(h.accounts.is_empty() && !path.exists(), "a first failed read creates neither an account nor a file");
+
+        let good = Reading {
+            plan: Some("Google AI Ultra".into()),
+            windows: vec![UsageWindow { limit: Some(Limit::Neon), used_percent: Some(35.0), reset_at: Some(3600), ..Default::default() }],
+            ..Default::default()
+        };
+        h.observe(&good, 700);
+        assert_eq!(h.accounts.len(), 1, "a successful anonymous read creates one account");
+        let account = &h.accounts[0];
+        assert_eq!((account.email.as_str(), account.plan.as_deref()), (LOCAL_ACCOUNT, Some("Google AI Ultra")), "the local account keeps its plan");
+        assert!(account.last_check_succeeded && account.first_seen_at == 700, "a Neon-only reading counts as the first success");
+        let samples = account.samples.clone();
+        assert_eq!(samples, [Sample { at: 700, neon: Some(SampleWindow { used: Some(35.0), reset_at: Some(3600), reset_text: None }), ..Default::default() }], "the successful read keeps its Neon window");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "usage-agy.json is private");
+        }
+        let mut again = History::open(Some(path), Provider::Agy);
+        assert_eq!(again.accounts, h.accounts, "the local account and its Neon window survive a restart");
+        again.observe(&failure, 1300);
+        let account = &again.accounts[0];
+        assert!(!account.last_check_succeeded && account.last_checked_at == 1300, "a later failure updates the check time and outcome");
+        assert_eq!(account.samples, samples, "a failed read preserves the saved readings");
+        assert_eq!(History::open(again.path.clone(), Provider::Agy).accounts, again.accounts, "the failed check survives a restart");
+        std::fs::remove_dir_all(dir).unwrap();
+
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(decode(encode(&h.accounts, provider).as_bytes(), provider), Err("invalid email".into()), "{provider:?} requires a saved email");
+            let mut legacy = History::open(None, provider);
+            legacy.observe(&reading("user@example.com", 10.0, 2.0), 100);
+            let encoded = encode(&legacy.accounts, provider);
+            assert!(!encoded.contains("\"neon\""), "{provider:?} keeps the original sample fields when Neon is absent");
+        }
+        h.accounts[0].email = "not-an-email".into();
+        assert_eq!(decode(encode(&h.accounts, Provider::Agy).as_bytes(), Provider::Agy), Err("invalid email".into()), "only the exact local key is accepted without an email");
     }
 
     /// Every account stays, however many (a 33rd pushes none out); a history that would outgrow

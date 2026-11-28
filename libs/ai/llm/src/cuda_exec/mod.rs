@@ -37,6 +37,93 @@ mod imp;
 #[path = "stub.rs"]
 mod imp;
 
+/// Transient bf16 weight slab for prefill GEMM.
+pub(crate) const GEMM_SLAB_BYTES: usize = 256 << 20;
+pub(crate) const GRAPH_ACT_SCRATCH: usize = 64 << 20;
+pub(crate) const GRAPH_WEIGHT_SCRATCH: usize = GEMM_SLAB_BYTES;
+/// One flash-attention MMA fixup tile per SM, in float2 elements.
+pub(crate) const FATTN_MMA_FIXUP_BYTES_PER_SM: usize = 8 * 64 * 130 * 8;
+pub(crate) const MMQ_FIXUP_BYTES_PER_SM: usize = 128 * 128 * 4;
+pub(crate) const GEMM_F16_MIN_COLUMNS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CudaScratchSpec {
+    pub max_weight_k: usize,
+    pub max_f16_weight_k: usize,
+    pub max_batch: usize,
+    pub max_fattn_vec_tmp_bytes: usize,
+}
+
+/// Both vector kernels share the allocation, including their partial softmax rows.
+pub(crate) fn fattn_vec_tmp_bytes_for(n_q: usize, q_heads: usize, kc: usize) -> usize {
+    let tmp128 = kc.div_ceil(128).saturating_mul(128 * 4 + 8);
+    let tmp256 = kc.div_ceil(256).saturating_mul(256 * 4 + 8);
+    tmp128.max(tmp256).saturating_mul(n_q).saturating_mul(q_heads)
+}
+
+pub(crate) fn fattn_vec_scratch_bytes(
+    spec: &HybridDecodeSpec,
+    spec_mtp: Option<&HybridDecodeSpec>,
+    max_kv_rows: usize,
+) -> usize {
+    std::iter::once(spec).chain(spec_mtp).flat_map(|spec| &spec.layers)
+        .filter_map(|layer| {
+            let crate::runtime::HybridLayerSpec::Attention { decode, .. } = layer else {
+                return None;
+            };
+            let block = &decode.block;
+            if !matches!(block.q_head_dim, 128 | 256) || block.v_head_dim != block.q_head_dim {
+                return None;
+            }
+            let kc = if block.q_head_count / block.kv_head_count.max(1) > 4 {
+                max_kv_rows.min(8191)
+            } else {
+                max_kv_rows
+            };
+            Some(fattn_vec_tmp_bytes_for(1, block.q_head_count as usize, kc))
+        }).max().unwrap_or(0)
+}
+
+pub(crate) fn weight_k_bounds(weights: &[crate::gguf::GgufTensorInfo]) -> (usize, usize) {
+    let mut max_k = 0;
+    let mut f16_k = 0;
+    for weight in weights.iter().filter(|t| t.dimensions.len() >= 2) {
+        let k = usize::try_from(weight.dimensions[0]).unwrap_or(usize::MAX);
+        max_k = max_k.max(k);
+        if weight.tensor_type == crate::TensorType::F16 {
+            f16_k = f16_k.max(k);
+        }
+    }
+    (max_k, f16_k)
+}
+
+pub(crate) fn act_scratch_bytes(sm_count: u32, shape: CudaScratchSpec) -> usize {
+    let sm = sm_count as usize;
+    let batch = shape.max_batch;
+    let k = shape.max_weight_k;
+    let mut acts = GRAPH_ACT_SCRATCH
+        .max(sm.saturating_mul(FATTN_MMA_FIXUP_BYTES_PER_SM))
+        .max(shape.max_fattn_vec_tmp_bytes)
+        .max(k.saturating_mul(batch).saturating_mul(2));
+    if batch >= GEMM_F16_MIN_COLUMNS {
+        acts = acts.max(shape.max_f16_weight_k.saturating_mul(batch).saturating_mul(4));
+    }
+    if batch >= 128 && k >= 128 {
+        let mmq = (batch / 128 * 128).saturating_mul(k / 128).saturating_mul(144)
+            .saturating_add(sm.saturating_mul(MMQ_FIXUP_BYTES_PER_SM));
+        acts = acts.max(mmq);
+    }
+    acts
+}
+
+pub(crate) fn weight_scratch_bytes(shape: CudaScratchSpec) -> usize {
+    GRAPH_WEIGHT_SCRATCH.max(shape.max_weight_k.saturating_mul(2))
+}
+
+pub(crate) fn planned_scratch_bytes(shape: CudaScratchSpec) -> usize {
+    act_scratch_bytes(0, shape).saturating_add(weight_scratch_bytes(shape))
+}
+
 /// Pointer-stability epoch for the device scratch buffers.
 ///
 /// A captured CUDA graph bakes device pointers into its nodes. The scratch
@@ -149,6 +236,14 @@ impl CudaRawGraphSession {
 }
 
 impl CudaExecRuntime {
+    pub(crate) fn reserve_graph_scratch(&self, shape: CudaScratchSpec) -> Result<()> {
+        self.imp.reserve_graph_scratch(shape)
+    }
+
+    pub fn scratch_bytes(&self) -> usize {
+        self.imp.scratch_bytes()
+    }
+
     /// Graphs execute sequentially and share weights and persistent state.
     /// All context leaves must be allocated before compiling the family.
     pub fn create_raw_graph_sessions(

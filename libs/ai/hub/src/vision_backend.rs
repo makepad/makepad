@@ -278,7 +278,10 @@ fn decode_png(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize)
     Ok((to_rgb8(&pixels, width * height, components), width, height))
 }
 
-fn decode_jpeg(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+fn jpeg_header(bytes: &[u8]) -> Result<(
+    makepad_zune_jpeg::JpegDecoder<makepad_zune_core::bytestream::ZCursor<&[u8]>>,
+    (usize, usize),
+), AssetAiError> {
     use makepad_zune_jpeg::makepad_zune_core::bytestream::ZCursor;
     use makepad_zune_jpeg::makepad_zune_core::colorspace::ColorSpace;
     use makepad_zune_jpeg::makepad_zune_core::options::DecoderOptions;
@@ -288,9 +291,45 @@ fn decode_jpeg(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize
     decoder
         .decode_headers()
         .map_err(|e| AssetAiError::Params(format!("vision: jpeg decode: {e:?}")))?;
-    let (width, height) = decoder
+    let dimensions = decoder
         .dimensions()
         .ok_or_else(|| AssetAiError::Params("vision: jpeg decode: no dimensions".into()))?;
+    Ok((decoder, dimensions))
+}
+
+/// Dimensions used by the chat tower, before allocating pixels.
+#[cfg(feature = "llm")]
+pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(usize, usize), AssetAiError> {
+    let (width, height) = match image_kind(bytes)? {
+        ImageKind::Png => {
+            let header = crate::subproc_img::png_header(bytes)
+                .ok_or_else(|| AssetAiError::Params("vision: png decode: missing IHDR".into()))?;
+            (header.width as usize, header.height as usize)
+        }
+        ImageKind::Jpeg => jpeg_header(bytes)?.1,
+        #[cfg(all(feature = "video", target_os = "windows"))]
+        ImageKind::Clip => {
+            let decoder = makepad_video::VideoFileDecoder::open_bytes(bytes)
+                .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?;
+            (decoder.info().width as usize, decoder.info().height as usize)
+        }
+        #[cfg(all(feature = "video", not(target_os = "windows")))]
+        ImageKind::Clip => {
+            let first = makepad_video::mp4_first_frame::first_access_unit(bytes)
+                .map_err(|e| AssetAiError::Params(format!("vision: clip decode: {e}")))?;
+            (first.width as usize, first.height as usize)
+        }
+        #[cfg(not(feature = "video"))]
+        ImageKind::Clip => return Err(AssetAiError::Params(
+            "vision: clip inputs need a build with the `video` feature".into(),
+        )),
+    };
+    check_image_dimensions(width, height)?;
+    Ok((width, height))
+}
+
+fn decode_jpeg(bytes: &[u8], max_pixels: usize) -> Result<(Vec<u8>, usize, usize), AssetAiError> {
+    let (mut decoder, (width, height)) = jpeg_header(bytes)?;
     check_image_dimensions_within(width, height, max_pixels)?;
     let pixels = decoder
         .decode()
@@ -325,6 +364,14 @@ fn to_rgb8(src: &[u8], pixel_count: usize, components: usize) -> Vec<u8> {
     out
 }
 
+pub(crate) fn fitted_size(width: usize, height: usize, max_edge: usize) -> (usize, usize) {
+    let longest = width.max(height);
+    if longest <= max_edge || max_edge == 0 || width == 0 || height == 0 {
+        return (width, height);
+    }
+    (((width * max_edge) / longest).max(1), ((height * max_edge) / longest).max(1))
+}
+
 /// Box-average downscale so the longest edge is at most `max_edge`, aspect
 /// preserved. Images already inside the budget pass through untouched —
 /// upscaling would only spend image tokens on invented pixels.
@@ -334,12 +381,10 @@ pub fn downscale_to_fit(
     height: usize,
     max_edge: usize,
 ) -> (Vec<u8>, usize, usize) {
-    let longest = width.max(height);
-    if longest <= max_edge || max_edge == 0 || width == 0 || height == 0 {
+    let (dst_w, dst_h) = fitted_size(width, height, max_edge);
+    if (dst_w, dst_h) == (width, height) {
         return (rgb.to_vec(), width, height);
     }
-    let dst_w = ((width * max_edge) / longest).max(1);
-    let dst_h = ((height * max_edge) / longest).max(1);
     let mut out = vec![0u8; dst_w * dst_h * 3];
     for y in 0..dst_h {
         let sy0 = y * height / dst_h;

@@ -9,9 +9,9 @@ use crate::tensor::{
 };
 
 use crate::metal_selector::FC_SSM_CONV;
-use crate::metal_selector::{build_graph_plan, MetalGraphNodePlan, MetalStageKind};
+use crate::metal_selector::{build_graph_plan, MetalGraphPlan, MetalGraphNodePlan, MetalStageKind};
 use makepad_ai_metal::{
-    BufferStorageMode, FunctionConstantValue, MetalBufferBindingRef, MetalDeviceFeatures,
+    BufferStorageMode, FunctionConstantValue, MetalBuffer, MetalBufferBindingRef, MetalDeviceFeatures,
     MetalPipeline, MetalRuntime, MetalSize,
 };
 
@@ -995,7 +995,8 @@ pub struct MetalCompiledGraph {
     pub main_buffer_size: usize,
     pub tail_buffer_size: usize,
     pub main_buffer: makepad_ai_metal::MetalBuffer,
-    pub tail_buffer: Option<makepad_ai_metal::MetalBuffer>,
+    pub tail_buffer: Option<MetalBuffer>,
+    shared_tail: Option<MetalSharedTail>,
     /// Read-only weight buffer serving logical offsets [0, ro_split);
     /// offsets at or above ro_split resolve into main_buffer at
     /// offset - ro_split. ro_split == 0 (no ro_buffer) keeps today's
@@ -1016,6 +1017,47 @@ pub struct MetalContextBuffers {
     pub ro_buffer: Option<makepad_ai_metal::MetalBuffer>,
     pub ro_split: usize,
     pub main_buffer: makepad_ai_metal::MetalBuffer,
+}
+
+/// One grow-only tail buffer shared by the compiled shapes of a session.
+#[derive(Clone, Debug, Default)]
+pub struct MetalSharedTail(std::rc::Rc<std::cell::RefCell<Option<MetalBuffer>>>);
+
+impl MetalSharedTail {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.0.borrow().as_ref().map_or(0, MetalBuffer::size_bytes)
+    }
+
+    pub(crate) fn needs_alloc(
+        current: Option<(usize, BufferStorageMode)>,
+        required_bytes: usize,
+        storage: BufferStorageMode,
+    ) -> bool {
+        required_bytes > 0 && current.is_none_or(|(size, mode)| size < required_bytes || mode != storage)
+    }
+
+    pub(crate) fn ensure(
+        &self, runtime: &MetalRuntime, required_bytes: usize, storage: BufferStorageMode,
+    ) -> Result<(), String> {
+        let mut slot = self.0.borrow_mut();
+        let current = slot.as_ref().map(|buffer| (buffer.size_bytes(), buffer.storage()));
+        if Self::needs_alloc(current, required_bytes, storage) {
+            if slot.is_some() {
+                runtime.wait_idle()?;
+            }
+            let size = required_bytes.max(current.map_or(0, |(bytes, _)| bytes));
+            *slot = Some(runtime.create_buffer(size, storage)?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn buffer(&self) -> Option<MetalBuffer> {
+        self.0.borrow().clone()
+    }
 }
 
 pub struct MetalGraphSession {
@@ -1048,8 +1090,24 @@ pub fn prepare_graph_with_reuse_cooldown(
     let graph_plan = build_graph_plan(ctx, graph, features)?;
     let (bindings, main_buffer_size, reclaimed) =
         collect_tensor_bindings(ctx, graph, &graph_plan, reuse_delay)?;
+    let (offsets, tail_buffer_size) = layout_graph_tail(&graph_plan)?;
+    let nodes = graph_plan.nodes.iter().zip(offsets)
+        .map(|(plan, offset)| prepared_node_from_plan(plan, offset))
+        .collect();
+
+    Ok(MetalPreparedGraph {
+        features,
+        nodes,
+        bindings,
+        main_buffer_size,
+        tail_buffer_size,
+        reclaimed,
+    })
+}
+
+pub(crate) fn layout_graph_tail(graph_plan: &MetalGraphPlan) -> Result<(Vec<usize>, usize), String> {
     let mut tail_cursor = 0usize;
-    let mut nodes = Vec::with_capacity(graph_plan.nodes.len());
+    let mut offsets = Vec::with_capacity(graph_plan.nodes.len());
     for plan in &graph_plan.nodes {
         let tail_offset_bytes = if plan.program.resources.output_tail_bytes == 0 {
             0
@@ -1059,7 +1117,7 @@ pub fn prepare_graph_with_reuse_cooldown(
         tail_cursor = tail_offset_bytes
             .checked_add(plan.program.resources.output_tail_bytes)
             .ok_or_else(|| "Metal graph tail offset overflow".to_string())?;
-        nodes.push(prepared_node_from_plan(plan, tail_offset_bytes));
+        offsets.push(tail_offset_bytes);
     }
     let tail_buffer_size = if graph_plan.total_output_tail_bytes == 0 {
         ggml_pad(tail_cursor, GGML_MEM_ALIGN)
@@ -1070,14 +1128,14 @@ pub fn prepare_graph_with_reuse_cooldown(
         )
     };
 
-    Ok(MetalPreparedGraph {
-        features,
-        nodes,
-        bindings,
-        main_buffer_size,
-        tail_buffer_size,
-        reclaimed,
-    })
+    Ok((offsets, tail_buffer_size))
+}
+
+pub(crate) fn planned_tail_buffer_size(
+    ctx: &Context, graph: &Graph, features: MetalDeviceFeatures,
+) -> Result<usize, String> {
+    let plan = build_graph_plan(ctx, graph, features)?;
+    Ok(layout_graph_tail(&plan)?.1)
 }
 
 pub fn create_context_main_buffer(
@@ -1267,6 +1325,7 @@ fn compile_prepared_graph_from_buffers(
         tail_buffer_size: prepared.tail_buffer_size,
         main_buffer,
         tail_buffer,
+        shared_tail: None,
         ro_buffer,
         ro_split,
         reclaimed: prepared.reclaimed.clone(),
@@ -1323,6 +1382,21 @@ pub fn compile_prepared_graph_with_context_buffers(
         buffers.ro_buffer.clone(),
         buffers.ro_split,
     )
+}
+
+pub(crate) fn compile_prepared_graph_with_context_buffers_and_shared_tail(
+    runtime: &MetalRuntime,
+    prepared: &MetalPreparedGraph,
+    buffers: &MetalContextBuffers,
+    shared_tail: &MetalSharedTail,
+    tail_storage: BufferStorageMode,
+) -> Result<MetalCompiledGraph, String> {
+    shared_tail.ensure(runtime, prepared.tail_buffer_size, tail_storage)?;
+    let mut compiled = compile_prepared_graph_from_buffers(
+        runtime, prepared, buffers.main_buffer.clone(), None, buffers.ro_buffer.clone(), buffers.ro_split,
+    )?;
+    compiled.shared_tail = Some(shared_tail.clone());
+    Ok(compiled)
 }
 
 pub fn compile_graph_session(
@@ -1403,6 +1477,16 @@ impl MetalGraphSession {
     ) -> Result<Self, String> {
         let compiled =
             compile_prepared_graph_with_context_buffers(&runtime, prepared, buffers, tail_storage)?;
+        Ok(Self { runtime, compiled })
+    }
+
+    pub(crate) fn from_runtime_with_context_buffers_and_shared_tail(
+        runtime: MetalRuntime, prepared: &MetalPreparedGraph, buffers: &MetalContextBuffers,
+        shared_tail: &MetalSharedTail, tail_storage: BufferStorageMode,
+    ) -> Result<Self, String> {
+        let compiled = compile_prepared_graph_with_context_buffers_and_shared_tail(
+            &runtime, prepared, buffers, shared_tail, tail_storage,
+        )?;
         Ok(Self { runtime, compiled })
     }
 
@@ -2929,8 +3013,9 @@ fn dispatch_cumsum(
     let nbt3 = u64::try_from(net2).map_err(|_| "cumsum net2 exceeds u64".to_string())? * nbt2;
     let smem = ggml_pad(32 * std::mem::size_of::<f32>(), 16);
 
+    let tail_buf = resolve_tail_buffer(compiled)?;
     let dst_ref = buffer_ref(compiled, 3, tensor.id);
-    let tmp_ref = tail_node_buffer_ref(compiled, node, 2, 0)?;
+    let tmp_ref = tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 2, 0)?;
     let blk_args = KArgsCumsumBlk {
         ne00: src0_layout.ne[0],
         ne01: src0_layout.ne[1],
@@ -4467,6 +4552,7 @@ fn dispatch_mul_mat_id(
     let base = stage.descriptor.base_name.as_str();
 
     if base.starts_with("kernel_mul_mm_id_") {
+        let tail_buf = resolve_tail_buffer(compiled)?;
         let map_stage = stage_kind(node, MetalStageKind::Aux, tensor.op)?;
         let tpe_bytes = mul_mat_id_extra_tpe_bytes(src0)?;
         let args_map0 = KArgsMulMmIdMap0 {
@@ -4488,8 +4574,8 @@ fn dispatch_mul_mat_id(
             bytes_of(&args_map0),
             &[
                 buffer_ref(compiled, 1, src2_id),
-                tail_node_buffer_ref(compiled, node, 2, 0)?,
-                tail_node_buffer_ref(compiled, node, 3, tpe_bytes)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 2, 0)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 3, tpe_bytes)?,
             ],
             &[(0, map_stage.pipeline.smem_bytes)],
             MetalSize {
@@ -4536,8 +4622,8 @@ fn dispatch_mul_mat_id(
             &[
                 buffer_ref(compiled, 1, src0_id),
                 buffer_ref(compiled, 2, src1_id),
-                tail_node_buffer_ref(compiled, node, 3, 0)?,
-                tail_node_buffer_ref(compiled, node, 4, tpe_bytes)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 3, 0)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 4, tpe_bytes)?,
                 buffer_ref(compiled, 5, tensor.id),
             ],
             &[(0, stage.pipeline.smem_bytes)],
@@ -4685,6 +4771,7 @@ fn dispatch_argsort_like(
     let tmp_row_bytes = ggml_type_size_for_type(TensorType::I32)
         * usize::try_from(src0.ne[0]).map_err(|_| "argsort temp row bytes overflow".to_string())?;
 
+    let tail_buf = resolve_tail_buffer(compiled)?;
     for i03 in 0..src0.ne[3] {
         for i02 in 0..src0.ne[2] {
             for i01 in 0..src0.ne[1] {
@@ -4706,7 +4793,7 @@ fn dispatch_argsort_like(
 
                 let mut dst_binding =
                     buffer_ref_with_offset(compiled, 2, tensor.id, dst_row_offset)?;
-                let mut tmp_binding = tail_node_buffer_ref(compiled, node, 3, tmp_row_offset)?;
+                let mut tmp_binding = tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 3, tmp_row_offset)?;
                 let mut merge_passes = 0usize;
                 let mut parity_len = block_top_k;
                 while parity_len < effective_ne0 {
@@ -5173,6 +5260,7 @@ fn dispatch_flash_attn_ext(
     let has_bias = max_bias != 0.0;
     let has_scap = logit_softcap != 0.0;
 
+    let tail_buf = resolve_tail_buffer(compiled)?;
     let pad_bytes = flash_attn_ext_extra_pad_bytes(q, k, v, mask)?;
     let blk_bytes = flash_attn_ext_extra_blk_bytes(q, mask)?;
     let tmp_bytes = flash_attn_ext_extra_tmp_bytes(q, v)?;
@@ -5252,7 +5340,7 @@ fn dispatch_flash_attn_ext(
                     mask_id
                         .map(|id| buffer_ref(compiled, 3, id))
                         .unwrap_or_else(|| buffer_ref(compiled, 3, q_id)),
-                    tail_node_buffer_ref(compiled, node, 4, 0)?,
+                    tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 4, 0)?,
                 ],
                 &[],
                 MetalSize {
@@ -5317,8 +5405,8 @@ fn dispatch_flash_attn_ext(
                 sinks_id
                     .map(|id| buffer_ref(compiled, 5, id))
                     .unwrap_or_else(|| buffer_ref(compiled, 5, q_id)),
-                tail_node_buffer_ref(compiled, node, 6, 0)?,
-                tail_node_buffer_ref(compiled, node, 7, pad_bytes + blk_bytes)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 6, 0)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 7, pad_bytes + blk_bytes)?,
             ],
             &[(0, stage_main.pipeline.smem_bytes)],
             MetalSize {
@@ -5355,7 +5443,7 @@ fn dispatch_flash_attn_ext(
             &stage_reduce.pipeline,
             bytes_of(&args_reduce),
             &[
-                tail_node_buffer_ref(compiled, node, 1, pad_bytes + blk_bytes)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 1, pad_bytes + blk_bytes)?,
                 buffer_ref(compiled, 2, tensor.id),
             ],
             &[],
@@ -5419,7 +5507,7 @@ fn dispatch_flash_attn_ext(
                 mask_id
                     .map(|id| buffer_ref(compiled, 3, id))
                     .unwrap_or_else(|| buffer_ref(compiled, 3, q_id)),
-                tail_node_buffer_ref(compiled, node, 4, 0)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 4, 0)?,
             ],
             &[],
             MetalSize {
@@ -5457,7 +5545,7 @@ fn dispatch_flash_attn_ext(
                 mask_id
                     .map(|id| buffer_ref(compiled, 1, id))
                     .unwrap_or_else(|| buffer_ref(compiled, 1, q_id)),
-                tail_node_buffer_ref(compiled, node, 2, pad_bytes)?,
+                tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 2, pad_bytes)?,
             ],
             &[],
             MetalSize {
@@ -5528,8 +5616,8 @@ fn dispatch_flash_attn_ext(
             sinks_id
                 .map(|id| buffer_ref(compiled, 5, id))
                 .unwrap_or_else(|| buffer_ref(compiled, 5, q_id)),
-            tail_node_buffer_ref(compiled, node, 6, 0)?,
-            tail_node_buffer_ref(compiled, node, 7, pad_bytes)?,
+            tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 6, 0)?,
+            tail_node_buffer_ref(&tail_buf, compiled.tail_buffer_size, node, 7, pad_bytes)?,
             buffer_ref(compiled, 8, tensor.id),
         ],
         &[(0, stage_main.pipeline.smem_bytes)],
@@ -5890,41 +5978,29 @@ fn buffer_ref_with_offset<'a>(
     })
 }
 
-fn tail_buffer_ref<'a>(
-    compiled: &'a MetalCompiledGraph,
-    index: u64,
-    offset_bytes: usize,
-) -> Result<MetalBufferBindingRef<'a>, String> {
-    let buffer = compiled
-        .tail_buffer
-        .as_ref()
+fn resolve_tail_buffer(compiled: &MetalCompiledGraph) -> Result<MetalBuffer, String> {
+    let buffer = compiled.shared_tail.as_ref().and_then(MetalSharedTail::buffer)
+        .or_else(|| compiled.tail_buffer.clone())
         .ok_or_else(|| "compiled graph is missing a tail buffer".to_string())?;
-    if offset_bytes > compiled.tail_buffer_size {
-        return Err(format!(
-            "tail buffer offset {} exceeds size {}",
-            offset_bytes, compiled.tail_buffer_size
-        ));
+    if buffer.size_bytes() < compiled.tail_buffer_size {
+        return Err(format!("Metal tail buffer has {} bytes, needs {}", buffer.size_bytes(), compiled.tail_buffer_size));
     }
-    Ok(MetalBufferBindingRef {
-        index,
-        buffer,
-        offset_bytes,
-    })
+    Ok(buffer)
 }
 
 fn tail_node_buffer_ref<'a>(
-    compiled: &'a MetalCompiledGraph,
+    buffer: &'a MetalBuffer,
+    tail_buffer_size: usize,
     node: &MetalCompiledNode,
     index: u64,
     local_offset: usize,
 ) -> Result<MetalBufferBindingRef<'a>, String> {
-    tail_buffer_ref(
-        compiled,
-        index,
-        node.tail_offset_bytes
-            .checked_add(local_offset)
-            .ok_or_else(|| "tail node buffer offset overflow".to_string())?,
-    )
+    let offset_bytes = node.tail_offset_bytes.checked_add(local_offset)
+        .ok_or_else(|| "tail node buffer offset overflow".to_string())?;
+    if offset_bytes > tail_buffer_size {
+        return Err(format!("tail buffer offset {} exceeds size {}", offset_bytes, tail_buffer_size));
+    }
+    Ok(MetalBufferBindingRef { index, buffer, offset_bytes })
 }
 
 #[allow(dead_code)]
@@ -6139,6 +6215,44 @@ mod tests {
     use crate::tensor::{BufferUsage, TensorType};
     #[cfg(target_os = "macos")]
     use crate::tensor::ggml_row_size_for_type;
+
+    #[test]
+    fn shared_tail_policy_and_graph_tail_parity() -> crate::Result<()> {
+        use crate::runtime::{build_hybrid_decode_graph_with_attention_key_count, plan_hybrid_decode_metal_tail_bytes};
+        use BufferStorageMode::{Private, Shared};
+        assert!(!MetalSharedTail::needs_alloc(None, 0, Private));
+        assert!(MetalSharedTail::needs_alloc(None, 128, Private));
+        assert!(!MetalSharedTail::needs_alloc(Some((128, Private)), 64, Private));
+        assert!(MetalSharedTail::needs_alloc(Some((128, Private)), 256, Private));
+        assert!(MetalSharedTail::needs_alloc(Some((128, Private)), 64, Shared));
+
+        let features = MetalDeviceFeatures { has_bfloat: false, has_tensor: false, has_simdgroup_mm: true };
+        for (kv, layers, moe, batch) in [
+            (TensorType::Q8_0, 1, false, 32), (TensorType::F32, 1, false, 32),
+            (TensorType::F16, 0, true, 64),
+        ] {
+            let (mut spec, weights) = crate::session::tests::scratch_fixture(layers, 16, 256, 256, kv, moe);
+            if !moe {
+                spec.layers.retain(|layer| matches!(layer, crate::runtime::HybridLayerSpec::Attention { .. }));
+            }
+            let planned = plan_hybrid_decode_metal_tail_bytes(&weights, &spec, batch, batch, 256, features)?;
+            let mut ctx = Context::new(InitParams { mem_size: 0, mem_buffer: None, no_alloc: true });
+            let mut ids = BTreeMap::new();
+            for weight in weights {
+                let dims: Vec<_> = weight.dimensions.iter().map(|&n| n as i64).collect();
+                let id = ctx.new_named_tensor(&weight.name, weight.tensor_type, dims.len(), &dims, BufferUsage::Weights)
+                    .map_err(crate::LlamaError::format)?;
+                ids.insert(weight.name, id);
+            }
+            let decode = build_hybrid_decode_graph_with_attention_key_count(
+                &mut ctx, &ids, &spec, None, batch, batch, 0, 256,
+            )?;
+            let prepared = prepare_graph(&ctx, &decode.graph, features).map_err(crate::LlamaError::format)?;
+            assert!(prepared.tail_buffer_size > 0);
+            assert_eq!(planned, prepared.tail_buffer_size, "tail parity for {kv:?}, moe={moe}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn prepare_graph_collects_bindings_and_tail_bytes() {

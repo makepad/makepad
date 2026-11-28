@@ -22,15 +22,21 @@ pub struct GpuInfo {
     pub compute_cap: Option<f64>,
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn unified_free_mb(metal_free_mb: Option<u64>, ram_available_mb: Option<u64>) -> Option<u64> {
+    match (metal_free_mb, ram_available_mb) {
+        (Some(metal), Some(ram)) => Some(metal.min(ram)),
+        (metal, ram) => metal.or(ram),
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "ai-common"))]
 pub fn query_gpu() -> GpuInfo {
-    let Ok((free, total)) = makepad_ai_common::backend::gpu_memory_info() else {
-        return GpuInfo::default();
-    };
+    let metal = makepad_ai_common::backend::gpu_memory_info().ok();
     GpuInfo {
         name: makepad_ai_common::backend::device_name(),
-        vram_free_mb: Some((free as u64) / (1 << 20)),
-        vram_total_mb: Some((total as u64) / (1 << 20)),
+        vram_free_mb: unified_free_mb(metal.map(|(free, _)| free as u64 >> 20), crate::ram::query_ram().map(|r| r.free_mb)),
+        vram_total_mb: metal.map(|(_, total)| total as u64 >> 20),
         compute_cap: None,
         unified: true,
     }
@@ -63,6 +69,7 @@ pub fn query_gpu() -> GpuInfo {
         )
     };
     GpuInfo {
+        vram_free_mb: unified_free_mb(None, crate::ram::query_ram().map(|r| r.free_mb)),
         vram_total_mb: (rc == 0 && len == size_of::<u64>()).then_some(bytes / (1 << 20)),
         unified: true,
         ..Default::default()
@@ -84,6 +91,9 @@ pub fn query_gpu() -> GpuInfo {
 }
 
 /// Whether nvidia-smi may be asked now ([`nvidia::Probe::usable`]); never on macOS, which has none.
+// Only `control.rs` calls it, where no Mac memory backend answers instead; its macOS test runs
+// only in that build too.
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 pub(crate) fn nvidia_smi_usable() -> bool {
     #[cfg(not(target_os = "macos"))]
     { PROBE.usable(Instant::now()) }
@@ -235,8 +245,13 @@ struct Slot {
 
 impl Slot {
     fn refresh(&self) {
+        let started = Instant::now();
         let info = query_gpu();
-        *self.facts.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), info));
+        let mut facts = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        // A load or unload can publish a newer sample while the probe runs.
+        if facts.as_ref().is_none_or(|(when, _)| *when <= started) {
+            *facts = Some((Instant::now(), info));
+        }
         self.asked.store(false, Ordering::Release);
     }
 }
@@ -274,6 +289,15 @@ impl GpuCache {
         Self { slot: Arc::new(slot) }
     }
 
+    /// Record free memory observed after a residency change in an initialized cache.
+    pub fn note_fresh_free_mb(&self, free_mb: u64) {
+        let mut facts = self.slot.facts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((when, info)) = facts.as_mut() {
+            info.vram_free_mb = Some(free_mb);
+            *when = Instant::now();
+        }
+    }
+
     pub fn get(&self) -> GpuInfo {
         let mut guard = self.slot.facts.lock().unwrap_or_else(|e| e.into_inner());
         let Some((when, info)) = guard.as_ref() else {
@@ -298,6 +322,41 @@ impl GpuCache {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gpu_cache_note_fresh_free_mb_updates_cached_reading_without_overwriting_fixed() {
+        use super::{GpuCache, GpuInfo, Ordering};
+        let cache = GpuCache::fixed(GpuInfo {
+            name: Some("GPU-A".into()), vram_free_mb: Some(22_617), vram_total_mb: Some(24_564),
+            unified: false, compute_cap: Some(8.9),
+        });
+        cache.note_fresh_free_mb(2_187);
+        let info = cache.get();
+        assert_eq!(info.vram_free_mb, Some(2_187));
+        assert_eq!(info.name.as_deref(), Some("GPU-A"));
+        assert_eq!(info.vram_total_mb, Some(24_564));
+        assert!(!info.unified);
+        assert_eq!(info.compute_cap, Some(8.9));
+        assert!(cache.slot.asked.load(Ordering::Acquire), "fixed cache still suppresses probes");
+
+        let empty = GpuCache::new();
+        empty.note_fresh_free_mb(1_000);
+        assert!(empty.slot.facts.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn unified_free_mb_takes_tighter_of_metal_and_host_ram() {
+        use super::unified_free_mb;
+        for (metal, ram, free) in [
+            (Some(192_000), Some(160_000), Some(160_000)),
+            (Some(12_000), Some(16_000), Some(12_000)),
+            (None, Some(8_000), Some(8_000)),
+            (Some(12_000), None, Some(12_000)),
+            (None, None, None),
+        ] {
+            assert_eq!(unified_free_mb(metal, ram), free);
+        }
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn gpu_facts_and_probe_retries() {
@@ -317,8 +376,8 @@ mod tests {
             assert!(info.unified, "macOS should report unified memory");
             assert!(info.vram_total_mb.is_some(), "hw.memsize should supply total memory");
             assert!(
-                info.vram_free_mb.is_none() && info.name.is_none() && info.compute_cap.is_none(),
-                "hw.memsize should supply only the memory total"
+                info.vram_free_mb.is_some() && info.vram_free_mb <= info.vram_total_mb,
+                "available host RAM should be bounded by physical RAM"
             );
             assert!(!super::nvidia_smi_usable(), "a Mac should never ask nvidia-smi");
         }

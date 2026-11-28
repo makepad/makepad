@@ -72,8 +72,8 @@ pub struct LocalLlmConfig {
     /// The GGUF to load. Path policy (env overrides, checkout search) is the
     /// app's business; the engine takes the answer.
     pub model: PathBuf,
-    /// Append-only window for the session's whole life.
-    pub max_context: u32,
+    /// Explicit per-session window cap. By default the worker fits it to available GPU memory.
+    pub max_context: Option<u32>,
     /// Per-turn generation cap.
     pub max_new_tokens: usize,
     /// Stop a turn while this much context is still left, so the next fits.
@@ -84,9 +84,9 @@ impl LocalLlmConfig {
     pub fn new(model: PathBuf) -> Self {
         Self {
             model,
-            max_context: 16384,
+            max_context: None,
             max_new_tokens: 640,
-            min_remaining_context: 256,
+            min_remaining_context: 512,
         }
     }
 }
@@ -147,6 +147,12 @@ pub enum ChatEvent {
     },
     /// The window is full; this session cannot continue.
     ContextFull,
+}
+
+/// A worker event and the generation of the conversation that produced it.
+pub(crate) struct TaggedChatEvent {
+    pub(crate) generation: u64,
+    pub(crate) event: ChatEvent,
 }
 
 // --------------------------------------------------------------- the prompt
@@ -269,7 +275,7 @@ pub fn arg<'a>(args: &'a [(String, String)], key: &str) -> &'a str {
 
 /// A call block in the contract's JSON form (`{"name", "arguments"}`, or a
 /// spelling the contract parser hears), as names and string arguments.
-fn contract_calls(body: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
+pub(crate) fn contract_calls(body: &str) -> Option<Vec<(String, Vec<(String, String)>)>> {
     let text = format!("<tool_call>{body}</tool_call>");
     let (_, calls) = crate::claude_cli_calls::parse_calls(&text).ok()??;
     if calls.is_empty() {

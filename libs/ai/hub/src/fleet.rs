@@ -199,43 +199,11 @@ impl FleetRoles {
     }
 }
 
-/// Host part of a base URL, lowercased and without scheme, port or path.
-pub(crate) fn host_of(base_url: &str) -> String {
-    let base_url = base_url.trim();
-    let rest = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest);
-    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    // Credentials belong to transport configuration, never to routing labels
-    // or user-facing errors.
-    let rest = rest.rsplit('@').next().unwrap_or(rest);
-    // IPv6 literals lose their brackets; a bare IPv6 address has no port.
-    let host = match rest.strip_prefix('[') {
-        Some(inner) => inner.split(']').next().unwrap_or(inner),
-        None if rest.parse::<std::net::Ipv6Addr>().is_ok() => rest,
-        None => rest.split(':').next().unwrap_or(rest),
-    };
-    host.trim().to_ascii_lowercase()
-}
-
-/// A machine name for people: IP addresses become a node's last octet or hex
-/// group, loopback is "this machine", and host names keep their name. An empty
-/// host is "unknown node".
-pub fn node_label(base_url: &str) -> String {
-    let host = host_of(base_url);
-    if host.is_empty() {
-        "unknown node".to_string()
-    } else if host == "localhost" {
-        "this machine".to_string()
-    } else {
-        match host.parse::<std::net::IpAddr>() {
-            Ok(ip) if ip.is_loopback() => "this machine".to_string(),
-            Ok(std::net::IpAddr::V4(ip)) => format!("node {}", ip.octets()[3]),
-            Ok(std::net::IpAddr::V6(ip)) => format!("node {:x}", ip.segments()[7]),
-            Err(_) => host,
-        }
-    }
-}
+// The URL-to-host reading and the people-facing node name are shared with
+// crates that must not link the hub (the flow engine's lineage records the
+// node that made a value): one implementation, in `makepad-core-util`.
+pub use makepad_core_util::node_label::node_label;
+pub(crate) use makepad_core_util::node_label::host_of;
 
 /// Process-wide roles, read once from the environment.
 pub fn fleet_roles() -> &'static FleetRoles {
@@ -548,13 +516,34 @@ pub fn vram_admission_for_model(snapshot: &BoxSnapshot, model: &ModelInfoJson) -
     vram_admission(snapshot, model, 0)
 }
 
+fn exceeded_video_canvas(model: &ModelInfoJson, request: &GenerateRequestJson) -> Option<(u64, u64)> {
+    use crate::h3_backend::{video_max_pixel_frames, DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_WIDTH};
+
+    if model.domain != "video" {
+        return None;
+    }
+    let spec = crate::registry::embedded_registry().find(&model.id)?;
+    let limit = video_max_pixel_frames(spec)?;
+    let dimension = |value: Option<u32>, default| u64::from(value.filter(|&n| n > 0).unwrap_or(default));
+    let requested = dimension(request.width, DEFAULT_WIDTH)
+        .saturating_mul(dimension(request.height, DEFAULT_HEIGHT))
+        .saturating_mul(dimension(request.frames, DEFAULT_FRAMES));
+    (requested > limit).then_some((requested, limit))
+}
+
 /// Request-specific admission: model baseline + request workspace + service
-/// reserve must fit the node's usable ceiling.
+/// reserve must fit the node's usable ceiling, and video must fit its tier's canvas.
 pub fn vram_admission_for_request(
     snapshot: &BoxSnapshot,
     model: &ModelInfoJson,
     request: &GenerateRequestJson,
 ) -> VramAdmission {
+    if exceeded_video_canvas(model, request).is_some() {
+        let total_mb = snapshot.health.as_ref()
+            .and_then(|health| health.vram_usable_mb.or(health.vram_total_mb))
+            .unwrap_or(0);
+        return VramAdmission::Incompatible { required_total_mb: total_mb.saturating_add(1), total_mb };
+    }
     vram_admission(snapshot, model, request_workspace_mb(model, request))
 }
 
@@ -1570,6 +1559,23 @@ pub fn pick_for_domain_eta_request_label(
     })
 }
 
+/// Keep installed offers for a pinned model, or every installed, automatically
+/// routable model in the domain when the caller allows model mixing.
+pub fn retain_installed_for_domain(mut snapshots: Vec<BoxSnapshot>, domain: &str, wanted: &str) -> Vec<BoxSnapshot> {
+    snapshots.retain_mut(|snapshot| {
+        snapshot.models.retain(|info| {
+            info.available && matches!(info.state.as_str(), "ready" | "loaded")
+                && if wanted.is_empty() {
+                    info.domain == domain && !is_synthetic_fallback(info) && !is_explicit_only(info)
+                } else {
+                    info.id == wanted
+                }
+        });
+        !snapshot.models.is_empty()
+    });
+    snapshots
+}
+
 /// The readiness filter: a job goes only to nodes that already have its
 /// model ready or loaded, so it never makes a node download weights.
 /// Returns the model to run and the nodes that do not have it. `wanted`
@@ -1657,6 +1663,13 @@ pub fn unroutable_request_error(
                 reasons.push(format!(
                     "{node}: {} is not available ({}); enable it or choose another model",
                     model.id, model.state
+                ));
+                continue;
+            }
+            if let Some((requested, limit)) = exceeded_video_canvas(model, request) {
+                reasons.push(format!(
+                    "{node}: {} exceeds canvas ceiling ({requested} > {limit} pixel-frames); use draft/standard or a larger GPU",
+                    model.id
                 ));
                 continue;
             }
@@ -2524,6 +2537,41 @@ mod tests {
                 .map(|(i, model, _)| (i, model)),
             Some((1, "fast".to_string()))
         );
+    }
+
+    #[test]
+    fn video_hd_skips_q4_24g_ceiling() {
+        let nvfp4 = "minimax-h3-nvfp4-32g";
+        let q4 = "fasth3-4step-q4-24g";
+        let mut h3 = model(nvfp4, "video", MODEL_STATE_LOADED, true);
+        h3.backend = "h3".to_string();
+        let mut fast = model(q4, "video", MODEL_STATE_READY, true);
+        fast.backend = "fast".to_string();
+        fast.progress_total = Some(80_000_000_000);
+        let fleet = vec![
+            with_vram(snapshot("http://warm-h3", 0, vec![h3]), 32 * 1024, 32 * 1024, 0),
+            with_vram(snapshot("http://cold-fast", 0, vec![fast]), 24 * 1024, 24 * 1024, 0),
+        ];
+
+        assert_eq!(
+            pick_for_domain_eta_request(&fleet, "video", &GenerateRequestJson::default())
+                .map(|(i, model, _)| (i, model)),
+            Some((1, q4.to_string())),
+            "the preferred on-disk backend wins at the default canvas"
+        );
+        let hd = GenerateRequestJson {
+            width: Some(1280), height: Some(704), frames: Some(124), ..Default::default()
+        };
+        assert!(matches!(model_admission_for_request(&fleet[1], q4, &hd), Some(VramAdmission::Incompatible { .. })));
+        assert!(pick_for_model_eta(&fleet, q4, &hd).is_none());
+        assert_eq!(
+            pick_for_domain_eta_request(&fleet, "video", &hd).map(|(i, model, _)| (i, model)),
+            Some((0, nvfp4.to_string()))
+        );
+        let reason = unroutable_request_error(&fleet[1..], "video", &hd);
+        assert!(reason.contains(&format!("{q4} exceeds canvas ceiling")), "{reason}");
+        let default_frames = GenerateRequestJson { frames: Some(0), ..hd };
+        assert!(pick_for_model_eta(&fleet, q4, &default_frames).is_none(), "zero frames uses the backend default");
     }
 
     #[test]

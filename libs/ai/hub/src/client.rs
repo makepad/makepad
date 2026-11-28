@@ -17,20 +17,88 @@
 //! from a worker (the sandbox toolcall broker already does).
 
 use crate::error::AssetAiError;
-use crate::http_client::{http_fetch, HttpClientRequest};
+use crate::http_client::{http_fetch, http_fetch_no_redirect, HttpClientRequest, HttpClientResponse};
 use crate::protocol::{
     ByeRequestJson, ByeResponseJson, GenerateRequestJson, HealthJson,
     JobStatusJson, KeepaliveRequestJson, KeepaliveResponseJson, ModelInfoJson, ModelsJson,
 };
 use crate::registry::Domain;
 use makepad_micro_serde::{DeJson, SerJson};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[path = "client_submission.rs"]
 mod submission;
 #[cfg(test)]
 #[path = "client_submission_tests.rs"]
 mod submission_tests;
+
+/// A strict session shares its redirect failure across discovery and the selected provider.
+#[derive(Clone, Default)]
+pub(crate) struct RequestPolicy {
+    redirect_failure: Option<Arc<OnceLock<String>>>,
+}
+
+impl RequestPolicy {
+    pub(crate) fn on_device() -> Self {
+        Self { redirect_failure: Some(Arc::default()) }
+    }
+
+    pub(crate) fn is_on_device(&self) -> bool {
+        self.redirect_failure.is_some()
+    }
+
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if let Some(reason) = self.redirect_failure.as_deref().and_then(OnceLock::get) {
+            return Err(reason.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_on_device_url(url: &str) -> Result<(), AssetAiError> {
+        let url = crate::http_client::parse_url(url)?;
+        if url.https || url.host != "127.0.0.1" {
+            return Err(AssetAiError::Http("on-device requests require an HTTP loopback node".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fetch(&self, request: &HttpClientRequest) -> Result<HttpClientResponse, AssetAiError> {
+        let Some(failure) = &self.redirect_failure else { return http_fetch(request); };
+        self.check().map_err(AssetAiError::Http)?;
+        // Machine records supply only a port. Check the resulting numeric origin again at I/O.
+        Self::check_on_device_url(request.url)?;
+        let response = http_fetch_no_redirect(request)?;
+        if (300..400).contains(&response.status) {
+            let reason = failure.get_or_init(|| {
+                let why = format!("On-device request refused an HTTP {} redirect from the local node.", response.status);
+                eprintln!("[ai-hub] {why}");
+                why
+            });
+            return Err(AssetAiError::Http(reason.clone()));
+        }
+        Ok(response)
+    }
+}
+
+impl submission::Transport for RequestPolicy {
+    fn post(&mut self, url: &str, headers: &[(String, String)], body: &[u8]) -> Result<submission::Reply, AssetAiError> {
+        if !self.is_on_device() {
+            return submission::HttpTransport.post(url, headers, body);
+        }
+        let mut request = HttpClientRequest::post(url, "application/json", body);
+        request.extra_headers = headers;
+        let response = self.fetch(&request)?;
+        // Reuse admission's strict framing and no-job checks with the single-hop response.
+        // The HTTP client omits the reason phrase, so an empty 503 cannot authorize a retry.
+        use std::io::Read;
+        let mut head = format!("HTTP/1.1 {}\r\n", response.status);
+        for (key, value) in response.headers {
+            head.push_str(&format!("{key}: {value}\r\n"));
+        }
+        head.push_str("\r\n");
+        submission::read_reply(&mut head.as_bytes().chain(response.body))
+    }
+}
 
 /// One artifact fetched from a provider.
 #[derive(Clone, Debug)]
@@ -128,6 +196,7 @@ pub trait ContentProvider {
 /// `ContentProvider` over a `makepad-asset-ai` service at `base_url`,
 /// e.g. `http://192.0.2.89:8765`.
 pub struct LocalService {
+    policy: RequestPolicy,
     base_url: String,
     auth_headers: Vec<(String, String)>,
     lease_origin: Mutex<Option<(String, u64)>>,
@@ -143,14 +212,14 @@ pub fn mark_if_fleet(base_url: &str) {
     }
 }
 
-const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
 /// Generated artifacts (video!) can be large.
 const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 
 impl LocalService {
     fn post_cancel(&self, job_id: &str, body: &[u8]) -> Result<JobStatusJson, AssetAiError> {
         let url = format!("{}/job/{job_id}/cancel", self.base_url);
-        let response = http_fetch(&self.post_request(&url, "application/json", body))?;
+        let response = self.policy.fetch(&self.post_request(&url, "application/json", body))?;
         let status = response.status;
         let body = response.read_body_to_vec(MAX_JSON_BODY)?;
         parse_json_body(status, &body, &url)
@@ -164,10 +233,17 @@ impl LocalService {
         mark_if_fleet(&base_url);
         Self {
             base_url,
+            policy: RequestPolicy::default(),
             auth_headers: Vec::new(),
             lease_origin: Mutex::new(None),
             capacity_wait: None,
         }
+    }
+
+    #[cfg(feature = "speech")]
+    pub(crate) fn with_policy(mut self, policy: RequestPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Retain queued work across confirmed capacity refusals until its owner cancels it.
@@ -225,7 +301,7 @@ impl LocalService {
 
     fn get_json<T: DeJson>(&self, path: &str) -> Result<T, AssetAiError> {
         let url = format!("{}{}", self.base_url, path);
-        let response = http_fetch(&self.get_request(&url))?;
+        let response = self.policy.fetch(&self.get_request(&url))?;
         let status = response.status;
         let body = response.read_body_to_vec(MAX_JSON_BODY)?;
         parse_json_body::<T>(status, &body, &url)
@@ -241,6 +317,9 @@ impl LocalService {
         transport: &mut impl submission::Transport,
     ) -> Result<String, AssetAiError> {
         if cancelled() { return Err(AssetAiError::Cancelled); }
+        if self.policy.is_on_device() && request.route.is_some() {
+            return Err(AssetAiError::Params("on-device speech cannot delegate a job to the fleet".into()));
+        }
         let mut request_with_model = None;
         // A routed request leaves the choice to the receiving hub, which picks across the fleet
         // (its `route_domain` names the domain); that hub need not have a model of its own.
@@ -332,14 +411,14 @@ impl ContentProvider for LocalService {
     }
 
     fn try_request(&self, domain: Domain, request: &GenerateRequestJson) -> Result<String, AssetAiError> {
-        self.request_pending_using(domain, request, false, &|| false, &mut |_| {}, &mut submission::HttpTransport)
+        self.request_pending_using(domain, request, false, &|| false, &mut |_| {}, &mut self.policy.clone())
     }
 
     fn request_pending(
         &self, domain: Domain, request: &GenerateRequestJson,
         cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str),
     ) -> Result<String, AssetAiError> {
-        self.request_pending_using(domain, request, true, cancelled, pending, &mut submission::HttpTransport)
+        self.request_pending_using(domain, request, true, cancelled, pending, &mut self.policy.clone())
     }
 
     fn poll(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
@@ -357,7 +436,7 @@ impl ContentProvider for LocalService {
 
     fn discard(&self, job_id: &str) -> Result<(), AssetAiError> {
         let url = format!("{}/job/{job_id}/discard", self.base_url);
-        let response = http_fetch(&self.post_request(&url, "application/json", b"{}"))?;
+        let response = self.policy.fetch(&self.post_request(&url, "application/json", b"{}"))?;
         if response.status != 200 {
             return Err(AssetAiError::Http(format!("{url}: http {}", response.status)));
         }
@@ -379,7 +458,7 @@ impl ContentProvider for LocalService {
             origin_epoch,
         }
         .serialize_json();
-        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
+        let response = self.policy.fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
         let status = response.status;
         let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
         let parsed: KeepaliveResponseJson = parse_json_body(status, &bytes, &url)?;
@@ -404,7 +483,7 @@ impl ContentProvider for LocalService {
         };
         let url = format!("{}/bye", self.base_url);
         let body = ByeRequestJson { origin_key }.serialize_json();
-        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
+        let response = self.policy.fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
         let status = response.status;
         let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
         let _: ByeResponseJson = parse_json_body(status, &bytes, &url)?;
@@ -413,7 +492,7 @@ impl ContentProvider for LocalService {
 
     fn fetch_artifact(&self, artifact_id: &str) -> Result<ArtifactBytes, AssetAiError> {
         let url = format!("{}/artifact/{artifact_id}", self.base_url);
-        let response = http_fetch(&self.get_request(&url))?;
+        let response = self.policy.fetch(&self.get_request(&url))?;
         let status = response.status;
         let content_type = response
             .header("content-type")

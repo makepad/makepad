@@ -33,6 +33,7 @@ mod tray;
 mod usage;
 mod usage_claude;
 mod usage_codex;
+mod usage_agy;
 mod usage_history;
 mod view;
 
@@ -159,6 +160,7 @@ impl Hub {
             (path, conf)
         });
         let settings = Settings::load(node.is_some());
+        makepad_ai_hub::gpu_yield::set_log_sink(|line| log!("{line}"));
         let serve = Serve::start();
         serve.plan(Plan::of(&settings, node.as_ref().map(|(_, c)| c)));
         let now = now_ms();

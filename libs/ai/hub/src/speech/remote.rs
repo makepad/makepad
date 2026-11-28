@@ -4,7 +4,7 @@
 //! with word partials is the realtime-websocket shape and comes later.
 
 use super::SpeechReach;
-use crate::client::{ArtifactBytes, ContentProvider, LocalService};
+use crate::client::{ArtifactBytes, ContentProvider, LocalService, RequestPolicy};
 use crate::job::{process_origin, GenJob, GenOutput, GenPick, GenRouter, JobPoll, Want};
 use crate::protocol::{
     GenerateRequestJson, SpeechTimingsJson, TranscriptJson, MODEL_STATE_DOWNLOADING, MODEL_STATE_LOADED,
@@ -28,25 +28,32 @@ const FIRST_BEACON_WAIT: Duration = Duration::from_millis(2500);
 pub(crate) struct RemotePipe {
     pub base_url: String,
     pub model: String,
+    policy: RequestPolicy,
 }
 
 impl RemotePipe {
-    /// The best node in reach serving `domain` with one of `backends`:
-    /// loopback nodes first (the machine node is the RAM holder), then the
-    /// LAN; a loaded model beats a ready one beats one still arriving.
+    /// The best node in reach serving this pipe, by tier then model readiness.
     pub(crate) fn find(reach: SpeechReach, domain: Domain, backends: &[&str]) -> Option<RemotePipe> {
-        let mut best: Option<((std::cmp::Reverse<u8>, u8), RemotePipe)> = None;
-        for url in candidate_urls(reach) {
-            let Some((rank, pipe)) = Self::at(&url, domain, backends) else { continue };
-            // The hub's tier decides first (this machine, pinned, LAN): a node of a
-            // better tier that serves the pipe at all beats a LAN node that merely
-            // has it more loaded. Readiness only breaks ties inside a tier.
-            let key = (std::cmp::Reverse(crate::hub_order::tier(&url)), rank);
-            if best.as_ref().map_or(true, |(k, _)| key > *k) {
+        Self::find_with(reach, domain, backends, &RequestPolicy::default(), &Nodes::default()).ok().flatten()
+    }
+
+    pub(super) fn find_with(
+        reach: SpeechReach, domain: Domain, backends: &[&str], policy: &RequestPolicy, nodes: &Nodes,
+    ) -> Result<Option<Self>, String> {
+        let mut best = None;
+        for url in nodes.candidates(reach, policy) {
+            let candidate = Self::at_with(&url, domain, backends, policy);
+            policy.check()?;
+            let Some((rank, pipe)) = candidate else { continue };
+            // All strict candidates have the same tier. Looking up the interface here
+            // would open a socket even though we only need the model's readiness.
+            let tier = if policy.is_on_device() { 0 } else { (nodes.tier)(&url) };
+            let key = (std::cmp::Reverse(tier), rank);
+            if best.as_ref().is_none_or(|(previous, _)| key > *previous) {
                 best = Some((key, pipe));
             }
         }
-        best.map(|(_, pipe)| pipe)
+        Ok(best.map(|(_, pipe)| pipe))
     }
 
     /// The speech-to-text pipe of the hub at `base_url` and no other, or why there is none, in
@@ -58,15 +65,20 @@ impl RemotePipe {
             return Err("the voice hub has no speech-to-text model (whisper)".to_string());
         };
         match model.state.as_str() {
-            MODEL_STATE_LOADED | MODEL_STATE_READY => Ok(RemotePipe { base_url: base_url.to_string(), model: model.id }),
+            MODEL_STATE_LOADED | MODEL_STATE_READY => Ok(RemotePipe { base_url: base_url.to_string(), model: model.id, policy: RequestPolicy::default() }),
             MODEL_STATE_DOWNLOADING => Err("the voice hub is still downloading its whisper model".to_string()),
             _ => Err("the whisper model is not installed on the voice hub".to_string()),
         }
     }
 
     /// The pipe at one node, with its readiness rank, when it serves one.
+    #[cfg(feature = "tts")]
     pub(crate) fn at(base_url: &str, domain: Domain, backends: &[&str]) -> Option<(u8, RemotePipe)> {
-        let service = LocalService::new(base_url);
+        Self::at_with(base_url, domain, backends, &RequestPolicy::default())
+    }
+
+    pub(super) fn at_with(base_url: &str, domain: Domain, backends: &[&str], policy: &RequestPolicy) -> Option<(u8, RemotePipe)> {
+        let service = LocalService::new(base_url).with_policy(policy.clone());
         let models = service.list_models().ok()?;
         let mut best: Option<(u8, String)> = None;
         for model in models {
@@ -79,7 +91,7 @@ impl RemotePipe {
             let rank = match model.state.as_str() {
                 MODEL_STATE_LOADED => 3,
                 MODEL_STATE_READY => 2,
-                MODEL_STATE_DOWNLOADING => 1,
+                MODEL_STATE_DOWNLOADING if !policy.is_on_device() => 1,
                 // "absent": the node could acquire it, but a first utterance
                 // would wait on a 1.6 GB download. Not a serving pipe today.
                 _ => continue,
@@ -89,7 +101,7 @@ impl RemotePipe {
             }
         }
         let (rank, model) = best?;
-        Some((rank, RemotePipe { base_url: base_url.to_string(), model }))
+        Some((rank, RemotePipe { base_url: base_url.to_string(), model, policy: policy.clone() }))
     }
 
     /// The node's installed voices (`GET /voices`), or the built-in English
@@ -220,7 +232,7 @@ impl RemotePipe {
         on_chunk: &mut dyn FnMut(ArtifactBytes),
     ) -> Result<GenOutput, String> {
         if cancelled() { return Err("cancelled".into()); }
-        let router = Arc::new(PipeRouter(self.base_url.clone()));
+        let router = Arc::new(PipeRouter { base_url: self.base_url.clone(), policy: self.policy.clone() });
         let mut job = GenJob::new(router, process_origin("speech"));
         job.start(domain, request, want).map_err(|e| format!("{}: {e}", self.base_url))?;
         // A job is lost only when it stops moving, never for taking long: a node
@@ -234,7 +246,9 @@ impl RemotePipe {
                 job.cancel();
                 return Err("cancelled".into());
             }
-            let moved = match job.poll() {
+            let event = job.poll();
+            self.policy.check()?;
+            let moved = match event {
                 JobPoll::Done(output) => {
                     if discard {
                         // (what was said is the person's: the hub deletes the job once its output
@@ -243,6 +257,7 @@ impl RemotePipe {
                             eprintln!("[speech] the hub did not delete a finished job: {why}");
                         }
                     }
+                    self.policy.check()?;
                     return Ok(output);
                 }
                 JobPoll::Chunk(chunk) => {
@@ -276,27 +291,51 @@ impl RemotePipe {
 }
 
 /// This pipe's node and nothing else: it was chosen for its model already.
-struct PipeRouter(String);
+struct PipeRouter {
+    base_url: String,
+    policy: RequestPolicy,
+}
 
 impl GenRouter for PipeRouter {
     fn route(&self, _domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
-        if excluded.contains(&self.0) {
-            return Err(format!("{} refused the job", self.0));
+        if excluded.contains(&self.base_url) {
+            return Err(format!("{} refused the job", self.base_url));
         }
-        Ok(GenPick { provider: Box::new(LocalService::new(&self.0)), base_url: self.0.clone(), model: request.model.clone(), model_state: None })
+        Ok(GenPick { provider: Box::new(LocalService::new(&self.base_url).with_policy(self.policy.clone())), base_url: self.base_url.clone(), model: request.model.clone(), model_state: None })
     }
 }
 
-/// Every node this reach allows, loopback first.
-fn candidate_urls(reach: SpeechReach) -> Vec<String> {
-    let mut urls = Vec::new();
-    if reach >= SpeechReach::Machine {
-        for (_, entry) in crate::machine::read_node_entries() {
-            if entry.port > 0 {
-                urls.push(format!("http://127.0.0.1:{}", entry.port));
-            }
-        }
+fn machine_ports() -> Vec<u16> {
+    crate::machine::read_node_entries().into_iter()
+        .map(|(_, entry)| entry.port).filter(|port| *port != 0).collect()
+}
+
+pub(super) struct Nodes<'a> {
+    pub machine_ports: &'a dyn Fn() -> Vec<u16>,
+    pub add_and_order_network: &'a dyn Fn(SpeechReach, &mut Vec<String>),
+    pub tier: &'a dyn Fn(&str) -> u8,
+}
+
+impl Default for Nodes<'_> {
+    fn default() -> Self {
+        Self { machine_ports: &machine_ports, add_and_order_network: &add_and_order_network, tier: &crate::hub_order::tier }
     }
+}
+
+impl Nodes<'_> {
+    pub(super) fn candidates(&self, reach: SpeechReach, policy: &RequestPolicy) -> Vec<String> {
+        let mut urls = Vec::new();
+        if reach >= SpeechReach::Machine {
+            urls.extend((self.machine_ports)().into_iter().map(|port| format!("http://127.0.0.1:{port}")));
+        }
+        if !policy.is_on_device() {
+            (self.add_and_order_network)(reach, &mut urls);
+        }
+        urls
+    }
+}
+
+fn add_and_order_network(reach: SpeechReach, urls: &mut Vec<String>) {
     if reach >= SpeechReach::Lan {
         let discovered = crate::discovery::start_listener();
         // Give a brand-new listener one beacon interval to hear the fleet,
@@ -323,8 +362,7 @@ fn candidate_urls(reach: SpeechReach) -> Vec<String> {
     }
     // One ranking for every client: this machine's hub, a pinned hub, the rest
     // sorted; and `find` takes the first of equal readiness, not the last heard.
-    crate::hub_order::order(&mut urls);
-    urls
+    crate::hub_order::order(urls);
 }
 
 fn base64(bytes: &[u8]) -> String {

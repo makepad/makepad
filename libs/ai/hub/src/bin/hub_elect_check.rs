@@ -6,7 +6,7 @@
 //! ```
 
 use makepad_ai_hub::hub::AiHub;
-use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
+use makepad_ai_hub::hub_chat::{ChatReach, HubChatConfig, HubChatSession};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig};
 use makepad_ai_hub::speech::{SpeechReach, SttConfig, SttEngine, SttEvent, TtsConfig, TtsEngine, TtsEvent};
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ fn main() {
         }
     }
     let chat = HubChatSession::start(HubChatConfig {
+        reach: ChatReach::Lan,
         llm: LocalLlmConfig::new(std::path::PathBuf::new()),
         preferred_model: Some("qwen3.8-27b".into()),
         max_tokens: Some(8),

@@ -4,6 +4,7 @@
 //! and these are it.
 
 use crate::engine::{Model, ModelEvent, ToolDefinition};
+use crate::state::NO_MODEL_LABEL;
 
 /// Nothing answers. Sends fail at once with a plain message; the tool
 /// console still works because it never touches the model.
@@ -14,7 +15,7 @@ pub struct NoModel {
 
 impl Model for NoModel {
     fn label(&self) -> String {
-        "No model".into()
+        NO_MODEL_LABEL.into()
     }
     fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
         Ok(())
@@ -45,7 +46,7 @@ impl NoModelWithReason {
 
 impl Model for NoModelWithReason {
     fn label(&self) -> String {
-        "No model".into()
+        NO_MODEL_LABEL.into()
     }
     fn configure(&mut self, _system: &str, _tools: &[ToolDefinition]) -> Result<(), String> {
         Ok(())

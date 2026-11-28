@@ -1,10 +1,12 @@
-//! The panel's Usage section: per tool (Claude, Codex) a header with the read's state and a
-//! Reconnect button that ends the hub's warm CLI and starts a fresh one, then one line per
-//! account. The account signed in now comes first, then every other account the tool was seen
-//! signed in as, the most headroom first, so the person sees which account to switch to. A line
-//! names the account in a masked form (never the whole address) and shows each limit (session,
-//! the week of all models, Fable's week) as a small bar with its share and when it resets; a
-//! narrower panel drops words, then reset times, then bars, never wrapping to a second line.
+//! The panel's Usage section: per tool (Claude, Codex, Antigravity) a header with the read's
+//! state and a Reconnect button that ends the hub's warm CLI and starts a fresh one (for
+//! Antigravity, which keeps none, it reads again at once), then one line per account. The
+//! account signed in now comes first, then every other account the tool was seen signed in as,
+//! the most headroom first, so the person sees which account to switch to. A line names the
+//! account in a masked form (never the whole address; Antigravity's CLI names none, so its one
+//! line is "Account") and shows each limit (session, the week of all models, Fable's week,
+//! Neon's) as a small bar with its share and when it resets; a narrower panel drops words, then
+//! reset times, then bars, never wrapping to a second line.
 //! A click on a line opens its detail under it (each limit with its reset time, when it was
 //! read, its free resets, a week's trace); another click closes it.
 //!
@@ -15,7 +17,7 @@
 
 use super::{Hit, HubAppView, ViewState};
 use crate::usage::{clock_label, countdown, plan_label, Busy, Limit, Provider, ProviderState, UsageWindow, POLL_SECONDS};
-use crate::usage_history::{AccountHistory, Sample, SampleWindow};
+use crate::usage_history::{AccountHistory, Sample, SampleWindow, LOCAL_ACCOUNT};
 use makepad_shell_kit::graph::{trace, Span};
 use makepad_shell_kit::ui::{cut_top, inset, rect, HAlign, Ico};
 use makepad_shell_kit::{alpha, darker, CtrlState, ShellTokens};
@@ -51,6 +53,8 @@ fn level(used: f64, tok: &ShellTokens) -> Vec4f {
 const AVAILABLE: Vec4f = Vec4f { x: 0.30, y: 0.78, z: 0.42, w: 1.0 };
 /// Fable's week in the traces (the week of all models is the theme's colour).
 const FABLE: Vec4f = Vec4f { x: 0.66, y: 0.52, z: 0.95, w: 1.0 };
+/// Antigravity Neon in the traces (distinct from Week blue and Fable purple).
+const NEON: Vec4f = Vec4f { x: 0.25, y: 0.75, z: 0.85, w: 1.0 };
 /// The traces show the last week.
 const TRACE_SECS: u64 = 7 * 86400;
 const WARN: Vec4f = Vec4f { x: 0.93, y: 0.62, z: 0.20, w: 1.0 };
@@ -77,7 +81,7 @@ pub(super) fn switch_order<'a>(accounts: &'a [AccountHistory], current: Option<&
     let key = |a: &AccountHistory| {
         let latest = a.latest();
         let free = latest.is_some_and(|s| available(s, now));
-        let week = latest.and_then(|s| [effective(s.week.as_ref(), now), effective(s.fable.as_ref(), now)].into_iter().flatten().reduce(f64::max)).unwrap_or(f64::INFINITY);
+        let week = latest.and_then(|s| [s.week.as_ref(), s.fable.as_ref(), s.neon.as_ref()].into_iter().filter_map(|w| effective(w, now)).reduce(f64::max)).unwrap_or(f64::INFINITY);
         (!free, week)
     };
     others.sort_by(|a, b| {
@@ -151,7 +155,9 @@ fn history_row(account: &AccountHistory, sample: &Sample, current: bool, now: u6
 /// A tool's lines: the account signed in now first (its latest reading, else the last one it
 /// had), then every other account seen, in the order to switch to.
 pub(super) fn rows(state: &ProviderState, now: u64) -> Vec<Row> {
-    let current = state.latest.account.clone();
+    let current = state.latest.account.clone().or_else(|| {
+        (state.provider == Provider::Agy && state.latest.stuck.is_none() && state.shown().is_some()).then(|| LOCAL_ACCOUNT.to_owned())
+    });
     let mut out = Vec::new();
     if let Some(email) = &current {
         let history = state.accounts.iter().find(|a| &a.email == email);
@@ -185,6 +191,9 @@ pub(super) fn rows(state: &ProviderState, now: u64) -> Vec<Row> {
 /// An account as its line names it, never its whole address: the start of its name, the
 /// digits it ends in (what tells `name1@` from `name2@`) and the start of its domain.
 pub(super) fn account_label(email: &str) -> String {
+    if email == LOCAL_ACCOUNT {
+        return "Account".into();
+    }
     let (local, domain) = email.split_once('@').unwrap_or((email, ""));
     let digits = local.chars().rev().take_while(char::is_ascii_digit).count();
     let stem: Vec<char> = local.chars().take(local.chars().count() - digits).collect();
@@ -338,6 +347,7 @@ fn short_name(limit: Limit) -> &'static str {
         Limit::Session => "S",
         Limit::Week => "W",
         Limit::Fable => "F",
+        Limit::Neon => "N",
     }
 }
 
@@ -573,11 +583,16 @@ impl HubAppView {
         cut_top(rest, 4.0).1
     }
 
-    /// The last week of an account's readings: the week of all models, and Fable's.
+    /// The last seven days of Week, Fable and Neon readings, or Session for a session-only history.
     fn spark(&mut self, cx: &mut Cx2d, tok: &ShellTokens, plot: Rect, samples: &[Sample], now: u64, width: f32) {
         let span = Span { t0: now.saturating_sub(TRACE_SECS) as f64, t1: now as f64, lo: 0.0, hi: 100.0 };
         self.d.solid(cx, rect(plot.pos.x, plot.pos.y + plot.size.y - 1.0, plot.size.x, 1.0), alpha(tok.popups.text, 0.10));
-        for (limit, color, fill) in [(Limit::Fable, FABLE, 0.0), (Limit::Week, tok.controls.selected_color, 0.18)] {
+        let traces: &[_] = if samples.iter().any(|s| s.week.is_some() || s.fable.is_some() || s.neon.is_some()) {
+            &[(Limit::Fable, FABLE, 0.0), (Limit::Neon, NEON, 0.18), (Limit::Week, tok.controls.selected_color, 0.18)]
+        } else {
+            &[(Limit::Session, NEON, 0.18)]
+        };
+        for &(limit, color, fill) in traces {
             let mut points = samples.iter().filter_map(|s| s.window(limit).map(|w| (s.at as f64, w.used.map_or(f32::NAN, |u| u as f32))));
             trace(&mut self.g, cx, plot, &mut points, span, TRACE_SECS as f64, color, fill, width);
         }
@@ -654,7 +669,7 @@ mod tests {
     #[test]
     fn the_account_with_the_most_headroom_comes_first() {
         let now = 1_800_000_000;
-        let accounts = vec![
+        let mut accounts = vec![
             account("a@example.com", 30.0, now + 3600, now - 600),
             account("b@example.com", 99.0, now - 60, now - 86400),
             account("c@example.com", 10.0, now + 7200, now - 1200),
@@ -663,6 +678,9 @@ mod tests {
         let order: Vec<&str> = switch_order(&accounts, Some("d@example.com"), now).iter().map(|a| a.email.as_str()).collect();
         assert_eq!(order, ["b@example.com", "c@example.com", "a@example.com"], "b's week reset a minute ago: free again");
         assert!(available(accounts[1].latest().unwrap(), now) && !available(accounts[0].latest().unwrap(), now));
+        accounts[2].samples[0].neon = Some(SampleWindow { used: Some(60.0), reset_at: Some(now + 3600), reset_text: None });
+        let order: Vec<&str> = switch_order(&accounts, Some("d@example.com"), now).into_iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(order, ["b@example.com", "a@example.com", "c@example.com"], "c's tighter Neon limit reduces its headroom");
     }
 
     /// Once a window's reset passed it shows as available, so the account has headroom.
@@ -715,6 +733,60 @@ mod tests {
         s.latest = Reading::failed(None, "Not signed in");
         s.last_ok = None;
         assert!(rows(&s, now).iter().all(|r| !r.current) && rows(&s, now).len() == 3);
+    }
+
+    #[test]
+    fn agy_anonymous_row_shows_current_dimmed_and_signed_out_states() {
+        let at = 1_800_000_000;
+        let good = Reading {
+            plan: Some("Google AI Ultra".into()),
+            windows: vec![UsageWindow { limit: Some(Limit::Neon), used_percent: Some(35.0), reset_at: Some(at + 3600), ..Default::default() }],
+            ..Default::default()
+        };
+        let mut history = crate::usage_history::History::open(None, Provider::Agy);
+        history.observe(&good, at);
+        let mut state = ProviderState { provider: Provider::Agy, accounts: Arc::new(history.accounts), ..Default::default() };
+        let lines = rows(&state, at);
+        assert_eq!(lines.len(), 1, "startup restores the one saved account");
+        assert!(!lines[0].current && !lines[0].fresh, "the saved row is historical before the first read");
+
+        state.checked_at = at;
+        state.latest = good.clone();
+        state.last_ok = Some((at, good));
+        let lines = rows(&state, at);
+        assert_eq!(lines.len(), 1, "the live anonymous account and its history share one row");
+        let row = &lines[0];
+        assert_eq!(row.email, LOCAL_ACCOUNT, "the row uses the saved local key");
+        assert_eq!(account_label(&row.email), "Account", "the anonymous row has a readable label");
+        assert!(row.current && row.fresh && !row.can_reset, "a fresh Antigravity row is current with no reset action");
+        assert_eq!(row.plan.as_deref(), Some("Google AI Ultra"), "the live row shows its plan");
+        assert_eq!(row.cells[0].used, Some(35.0), "the live Neon bar shows the reported share");
+        assert_eq!(short_name(Limit::Neon), "N", "Neon's compact column label is N");
+        for row_w in [460.0 - 32.0, 560.0 - 32.0] {
+            let columns = Columns::of(&lines, row_w, 0.0);
+            assert_eq!(columns.limits, [Limit::Neon], "only Neon takes a column");
+            let used = DOT_W + LABEL_MIN + columns.fit.cell_w() + Columns::trailing(columns.reset_w) + CHEVRON_W;
+            assert!(used <= row_w, "the Neon row needs {used} px within {row_w} px");
+        }
+
+        state.checked_at += POLL_SECONDS;
+        state.latest = Reading::failed(None, "timed out");
+        let lines = rows(&state, state.checked_at);
+        assert_eq!(lines.len(), 1, "a timeout keeps the anonymous row");
+        let stale = &lines[0];
+        assert!(stale.current && !stale.fresh && stale.read_at == at, "the timeout dims and dates the last successful read");
+        assert_eq!(stale.cells, row.cells, "the stale row keeps the last good limits");
+
+        state.latest.stuck = Some(Stuck::Login);
+        let lines = rows(&state, state.checked_at);
+        assert_eq!(lines.len(), 1, "signing out keeps one history row");
+        assert!(!lines[0].current && !lines[0].fresh && lines[0].read_at == at, "the signed-out row shows when history was read");
+        assert_eq!(lines[0].cells, row.cells, "the signed-out row loads the same Neon window from history");
+        assert_eq!(status_text(&state, state.checked_at), ("stuck: waiting for login".into(), true), "the header asks for login");
+
+        let missing = ProviderState { provider: Provider::Agy, checked_at: at, latest: Reading::failed(None, "CLI missing"), ..Default::default() };
+        assert!(rows(&missing, at).is_empty(), "a missing CLI with no history has no row");
+        assert_eq!(status_text(&missing, at), ("not read".into(), true), "the header reports a missing first reading");
     }
 
     /// A line names its account without the whole address, and accounts that differ only in

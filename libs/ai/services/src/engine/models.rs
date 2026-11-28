@@ -19,7 +19,7 @@ use crate::engine::{Model, ModelEvent, ToolDefinition};
 use crate::provider::CLAUDE_DESKTOP;
 use crate::state::{ProviderChoice, ProviderRow};
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderKind};
-use makepad_ai_hub::providers::claude_api::{BlockingClaudeTransport, ClaudeApiChatProvider, ClaudeApiConfig, ClaudeAuth};
+use makepad_ai_hub::providers::claude_api::{BlockingClaudeTransport, ClaudeApiChatProvider, ClaudeApiConfig, ClaudeAuth, TranscriptMark};
 use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json as json;
 
@@ -150,8 +150,13 @@ pub fn fallback_choice(choice: &ProviderChoice) -> Option<ProviderChoice> {
     }
 }
 
-/// Build the model for a choice, honestly: `Err` names why it cannot be.
+/// Build the model for a choice, honestly: `Err` names why it cannot be. A
+/// launch with no model (`MAKEPAD_AI_PROVIDER=none`) gets none, whatever was
+/// picked or saved: the panel's own "none".
 pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn Model>, String> {
+    if makepad_ai_hub::providers::no_model().is_some() {
+        return Ok(Box::new(NoModel::default()));
+    }
     match choice {
         // With or without weights on this machine: the election decides
         // where the model runs, and the first line says so if nowhere.
@@ -202,6 +207,7 @@ pub struct ClaudeModel {
     provider: Option<ClaudeApiChatProvider<BlockingClaudeTransport>>,
     system: String,
     history: Vec<ChatMessage>,
+    turn_start: Option<(usize, TranscriptMark)>,
     in_turn: bool,
     turn_text: String,
     queued: Vec<ModelEvent>,
@@ -215,6 +221,7 @@ impl ClaudeModel {
             provider: None,
             system: String::new(),
             history: Vec::new(),
+            turn_start: None,
             in_turn: false,
             turn_text: String::new(),
             queued: Vec::new(),
@@ -257,17 +264,21 @@ impl Model for ClaudeModel {
     }
 
     fn send_user(&mut self, text: &str, dynamic_context: &str) {
-        self.history.push(ChatMessage::new(ChatRole::User, text));
-        self.turn_text.clear();
-        let mut input = TurnInput::new(self.system.clone(), self.history.clone());
-        input.dynamic_context = dynamic_context.to_string();
         let Some(provider) = &mut self.provider else {
             self.queued.push(ModelEvent::Error("the cloud API is not configured".into()));
             return;
         };
+        self.turn_start = Some((self.history.len(), provider.checkpoint()));
+        self.history.push(ChatMessage::new(ChatRole::User, text));
+        self.turn_text.clear();
+        let mut input = TurnInput::new(self.system.clone(), self.history.clone());
+        input.dynamic_context = dynamic_context.to_string();
         match provider.begin_turn(&input) {
             Ok(()) => self.in_turn = true,
-            Err(e) => self.queued.push(ModelEvent::Error(e)),
+            Err(e) => {
+                self.cancel();
+                self.queued.push(ModelEvent::Error(e));
+            }
         }
     }
 
@@ -275,13 +286,19 @@ impl Model for ClaudeModel {
         let Some(provider) = &mut self.provider else { return };
         let output = if is_error { format!("ERROR: {text}") } else { text.to_string() };
         if let Err(e) = provider.continue_function(call_id, &output) {
+            self.cancel();
             self.queued.push(ModelEvent::Error(e));
         }
     }
 
     fn cancel(&mut self) {
         if let Some(provider) = &mut self.provider {
-            provider.cancel();
+            if let Some((row, mark)) = self.turn_start.take() {
+                self.history.truncate(row);
+                provider.restore(mark);
+            } else {
+                provider.cancel();
+            }
         }
         self.in_turn = false;
     }
@@ -316,6 +333,7 @@ impl Model for ClaudeModel {
                     out.push(ModelEvent::ToolCall { call_id, name: name.replace("__", "."), args: arguments });
                 }
                 ProviderEvent::Done { text } => {
+                    self.turn_start = None;
                     let full = if text.trim().is_empty() { self.turn_text.clone() } else { text };
                     if !full.trim().is_empty() {
                         self.history.push(ChatMessage::new(ChatRole::Assistant, full));
@@ -324,8 +342,9 @@ impl Model for ClaudeModel {
                     out.push(ModelEvent::TurnDone { tool_calls: 0 });
                 }
                 ProviderEvent::Error(e) => {
-                    self.in_turn = false;
+                    self.cancel();
                     out.push(ModelEvent::Error(e));
+                    break;
                 }
             }
         }

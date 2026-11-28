@@ -218,6 +218,7 @@ pub struct HubSnapshot {
     pub recent: Vec<Request>,
     pub gpu_used_mb: u32,
     pub gpu_total_mb: u32,
+    /// Zero when the hub reports a null context in auto mode.
     pub context: u32,
     /// The chat model the context setting applies to.
     pub chat_model: Option<String>,
@@ -321,9 +322,8 @@ pub enum HubCommand {
     Yield { mb: u64, unload: bool, reserve_mb: u64 },
     /// This node's compute mode (the panel's picker): saved by the app, and sent to its hub.
     SetCompute(ComputeMode),
-    /// What the WM tells its node's hub about this machine: whether a game is being played
-    /// (`POST /control/local-use` `use`; the mode is the app's and stays as it is).
-    LocalUse { gaming: bool },
+    /// The game state and UI reserve the WM reports to its hub over `/control/local-use`.
+    LocalUse { gaming: bool, ui_reserve_mb: Option<u64> },
     /// Fetch a catalogue model; `confirmed`: the person said yes to its licence.
     Download { id: String, confirmed: bool },
     /// Stop a download (the partial file stays; Download resumes it).
@@ -544,9 +544,10 @@ fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: st
         match t.get_json(&format!("{base}/control")) {
             Ok(v) => {
                 let admission = parse_snapshot(&v).admission;
-                if let Some(cmd @ HubCommand::LocalUse { gaming }) = &local {
+                if let Some(cmd @ HubCommand::LocalUse { gaming, ui_reserve_mb }) = &local {
+                    let reported = v.get("gpu").and_then(|g| g.get("ui_reserve_mb")).and_then(|n| n.as_u64());
                     // Not taken yet, or a hub that lost it (restarted between two polls).
-                    if !local_sent || admission.as_ref().is_some_and(|a| lost_local_use(a, *gaming)) {
+                    if !local_sent || admission.as_ref().is_some_and(|a| lost_local_use(a, reported, *gaming, *ui_reserve_mb)) {
                         local_sent = run_command(&mut t, &base, cmd, &shared);
                     }
                 }
@@ -573,9 +574,11 @@ fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: st
 
 /// Whether the hub's admission says it does not hold the WM's report: a game it pauses for
 /// (Automatic) that it takes jobs through, or a pause for a game that ended.
-fn lost_local_use(a: &Admission, gaming: bool) -> bool {
+fn lost_local_use(a: &Admission, reported_ui_reserve_mb: Option<u64>, gaming: bool, want_ui_reserve_mb: Option<u64>) -> bool {
     let paused_for_game = !a.open && a.reason == "gaming";
-    (a.mode == ComputeMode::Automatic && gaming && a.open) || (!gaming && paused_for_game)
+    let lost_game = (a.mode == ComputeMode::Automatic && gaming && a.open) || (!gaming && paused_for_game);
+    lost_game || (a.mode != ComputeMode::AiFirst
+        && want_ui_reserve_mb.is_some_and(|want| want > 0 && reported_ui_reserve_mb.is_some_and(|got| got < want)))
 }
 
 /// The control API request for `cmd`; None for the picker's compute mode (the app saves it
@@ -591,7 +594,13 @@ pub fn command_request(base: &str, cmd: &HubCommand) -> Option<(String, makepad_
             format!("{base}/control/yield"),
             obj(vec![("mb", Value::Int(*mb as i64)), ("unload", Value::Bool(*unload)), ("reserve_mb", Value::Int(*reserve_mb as i64))]),
         ),
-        HubCommand::LocalUse { gaming } => (format!("{base}/control/local-use"), obj(vec![("use", s(if *gaming { "gaming" } else { "" }))])),
+        HubCommand::LocalUse { gaming, ui_reserve_mb } => {
+            let mut fields = vec![("use", s(if *gaming { "gaming" } else { "" }))];
+            if let Some(mb) = ui_reserve_mb {
+                fields.push(("ui_reserve_mb", Value::Int(*mb as i64)));
+            }
+            (format!("{base}/control/local-use"), obj(fields))
+        }
         // The AI Hub app takes these itself.
         HubCommand::SetCompute(_) | HubCommand::Download { .. } | HubCommand::CancelDownload(_) | HubCommand::Delete(_) => return None,
     })
@@ -726,13 +735,21 @@ mod tests {
     #[test]
     fn the_wm_tells_a_hub_that_lost_its_game_again_and_never_sets_the_mode() {
         let a = |open, reason: &str, mode| Admission { open, reason: reason.into(), mode };
-        assert!(lost_local_use(&a(true, "unsupported", ComputeMode::Automatic), true), "a restarted hub takes jobs through the game");
-        assert!(!lost_local_use(&a(false, "gaming", ComputeMode::Automatic), true));
-        assert!(lost_local_use(&a(false, "gaming", ComputeMode::Automatic), false), "it still pauses for a game that ended");
-        assert!(!lost_local_use(&a(true, "ai-first", ComputeMode::AiFirst), true), "AI First takes jobs through a game");
-        assert!(!lost_local_use(&a(false, "operator-unavailable", ComputeMode::Unavailable), false));
-        let (url, body) = command_request("https://192.0.2.89:8123", &HubCommand::LocalUse { gaming: true }).unwrap();
+        assert!(lost_local_use(&a(true, "unsupported", ComputeMode::Automatic), None, true, None), "a restarted hub takes jobs through the game");
+        assert!(!lost_local_use(&a(false, "gaming", ComputeMode::Automatic), None, true, None));
+        assert!(lost_local_use(&a(false, "gaming", ComputeMode::Automatic), None, false, None), "it still pauses for a game that ended");
+        assert!(!lost_local_use(&a(true, "ai-first", ComputeMode::AiFirst), None, true, None), "AI First takes jobs through a game");
+        assert!(!lost_local_use(&a(false, "operator-unavailable", ComputeMode::Unavailable), None, false, None));
+        let auto = a(true, "unsupported", ComputeMode::Automatic);
+        assert!(lost_local_use(&auto, Some(0), false, Some(1536)));
+        assert!(!lost_local_use(&a(true, "ai-first", ComputeMode::AiFirst), Some(0), false, Some(1536)));
+        for reported in [Some(1536), Some(2048), None] {
+            assert!(!lost_local_use(&auto, reported, false, Some(1536)));
+        }
+        let (url, body) = command_request("https://192.0.2.89:8123", &HubCommand::LocalUse { gaming: true, ui_reserve_mb: Some(1536) }).unwrap();
         assert_eq!(url, "https://192.0.2.89:8123/control/local-use");
+        assert_eq!(body.to_json(), r#"{"use":"gaming","ui_reserve_mb":1536}"#);
+        let (_, body) = command_request("", &HubCommand::LocalUse { gaming: true, ui_reserve_mb: None }).unwrap();
         assert_eq!(body.to_json(), r#"{"use":"gaming"}"#);
         assert!(command_request("", &HubCommand::SetCompute(ComputeMode::UiFirst)).is_none());
     }

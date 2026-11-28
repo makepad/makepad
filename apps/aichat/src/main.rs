@@ -6,7 +6,7 @@
 //! as studio `Custom` frames, which the panel turns into registry links.
 
 pub use makepad_widgets;
-use makepad_app_aichat::AiChatPanelAction;
+use makepad_app_aichat::{AiChatPanel, AiChatPanelAction};
 use makepad_widgets::*;
 
 app_main!(App);
@@ -41,6 +41,11 @@ pub struct App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         makepad_wm_api::set_title(cx, "AI");
+        if cx.in_host() {
+            if let Some(mut panel) = self.ui.widget(cx, ids!(panel)).borrow_mut::<AiChatPanel>() {
+                panel.use_private_registry();
+            }
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {

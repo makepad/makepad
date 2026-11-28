@@ -14,7 +14,7 @@
 use crate::chat_wire::{
     sanitize_public_error, split_delta_text, tool_arguments_too_large, ChatMessage,
     ProviderAvailability, ProviderKind, MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
-    MAX_TOOL_RESULT_BYTES, MAX_TURN_TEXT_BYTES,
+    MAX_TURN_TEXT_BYTES,
 };
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json::{self as json, Value};
@@ -104,8 +104,10 @@ impl ResponsesConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::providers::openai::DEFAULT_OPENAI_MODEL.to_string());
+        // A launch with no model (`super::no_model`) takes no key.
         let api_key = std::env::var(crate::providers::openai::OPENAI_API_KEY_ENV)
             .ok()
+            .filter(|_| super::no_model().is_none())
             .and_then(|s| ApiKey::new(s).ok());
         ResponsesConfig {
             kind: ProviderKind::OpenAi,
@@ -114,10 +116,10 @@ impl ResponsesConfig {
             endpoint: crate::providers::openai::OPENAI_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             idle_timeout: RESPONSES_IDLE_TIMEOUT,
-            missing_key_reason: format!(
+            missing_key_reason: super::unavailable_reason(&format!(
                 "{} is not set",
                 crate::providers::openai::OPENAI_API_KEY_ENV
-            ),
+            )),
         }
     }
 
@@ -126,8 +128,10 @@ impl ResponsesConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::providers::grok::DEFAULT_GROK_MODEL.to_string());
+        // A launch with no model (`super::no_model`) takes no key.
         let api_key = std::env::var(crate::providers::grok::GROK_API_KEY_ENV)
             .ok()
+            .filter(|_| super::no_model().is_none())
             .and_then(|s| ApiKey::new(s).ok());
         ResponsesConfig {
             kind: ProviderKind::Grok,
@@ -136,7 +140,7 @@ impl ResponsesConfig {
             endpoint: crate::providers::grok::GROK_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             idle_timeout: RESPONSES_IDLE_TIMEOUT,
-            missing_key_reason: format!("{} is not set", crate::providers::grok::GROK_API_KEY_ENV),
+            missing_key_reason: super::unavailable_reason(&format!("{} is not set", crate::providers::grok::GROK_API_KEY_ENV)),
         }
     }
 
@@ -684,7 +688,7 @@ impl<T: ResponsesTransport> ChatProvider for ResponsesChatProvider<T> {
         if call_id.len() > MAX_CALL_ID {
             return Err("function call_id missing or invalid".to_string());
         }
-        if output.len() > MAX_TOOL_RESULT_BYTES {
+        if output.len() > MAX_TOOL_JSON_BYTES + 64 {
             return Err("function output too large".to_string());
         }
         let pending = self.pending_call_id.take().unwrap();
@@ -782,5 +786,62 @@ impl<T: ResponsesTransport> Drop for ResponsesChatProvider<T> {
             self.cancel.cancel();
             self.active = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat_wire::ChatRole;
+    use std::time::Instant;
+
+    struct FakeTransport {
+        requests: mpsc::Sender<Value>,
+    }
+
+    impl ResponsesTransport for FakeTransport {
+        fn post_json(&self, _: &str, _: &str, body: &[u8], _: &CancelToken, _: Duration) -> Result<RawHttp, String> {
+            let request = json::parse(body).expect("valid request body");
+            let reply = if request.get("previous_response_id").is_some() {
+                r#"{"id":"r2","status":"completed","output":[{"type":"output_text","text":"done"}]}"#
+            } else {
+                r#"{"id":"r1","status":"completed","output":[{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"}]}"#
+            };
+            self.requests.send(request).unwrap();
+            Ok(RawHttp { status: 200, body: reply.as_bytes().to_vec() })
+        }
+    }
+
+    fn finish_response(provider: &mut ResponsesChatProvider<FakeTransport>) -> Vec<ProviderEvent> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let events = provider.poll();
+            if !events.is_empty() { return events; }
+            assert!(Instant::now() < deadline, "the fake Responses worker must answer");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn continue_function_accepts_result_above_16kib_and_refuses_above_wire_cap() {
+        let (tx, requests) = mpsc::channel();
+        let config = ResponsesConfig::openai(ApiKey::new("test-token").unwrap(), "test-model");
+        let tools = json::parse(br#"[{"type":"function","name":"lookup","parameters":{"type":"object"}}]"#).unwrap();
+        let mut provider = ResponsesChatProvider::new(config, FakeTransport { requests: tx }, Some(tools));
+        provider.begin_turn(&TurnInput::new("system", vec![ChatMessage::new(ChatRole::User, "look up")])).unwrap();
+        assert!(matches!(finish_response(&mut provider).last(), Some(ProviderEvent::FunctionCall { call_id, .. }) if call_id == "c1"),
+            "the first response requests the tool");
+
+        let oversized = "x".repeat(MAX_TOOL_JSON_BYTES + 65);
+        assert_eq!(provider.continue_function("c1", &oversized), Err("function output too large".into()), "one byte over the limit is refused");
+        let output = json::s("x".repeat(32 * 1024 - 2)).to_json();
+        provider.continue_function("c1", &output).expect("the pending call accepts the 32 KiB result after refusal");
+        assert!(matches!(finish_response(&mut provider).last(), Some(ProviderEvent::Done { text }) if text == "done"),
+            "the continuation completes the turn");
+
+        let bodies: Vec<Value> = requests.try_iter().collect();
+        assert_eq!(bodies.len(), 2, "only the accepted continuation sends a second request");
+        let item = &bodies[1].get("input").unwrap().as_arr().unwrap()[0];
+        assert_eq!(item.get("output").and_then(Value::as_str), Some(output.as_str()), "the request contains the full 32 KiB tool result");
     }
 }

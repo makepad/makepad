@@ -496,6 +496,13 @@ impl JobStore {
             .unwrap_or(false)
     }
 
+    /// Whether job `id` is over (done, error or cancelled). False for an unknown id.
+    pub fn is_finished(&self, id: &str) -> bool {
+        self.jobs.get(id).is_some_and(|job| {
+            matches!(job.state, JobState::Done { .. } | JobState::Error { .. } | JobState::Cancelled)
+        })
+    }
+
     /// The model ONE job runs on. `running_models` answers for the whole box
     /// and so mixes the admission classes together; a worker that needs to
     /// know what IT is about to run — to remember whose device caches it will
@@ -624,6 +631,7 @@ impl JobStore {
                     think_tokens: None,
                     visible_tokens: None,
                     gen_tokens: None,
+                    measure: None,
                 },
             );
             update(&mut serving);

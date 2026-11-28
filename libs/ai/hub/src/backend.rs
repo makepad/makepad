@@ -351,18 +351,14 @@ impl GenerateParams {
                 .as_ref()
                 .is_some_and(|messages| !messages.is_empty());
         let prompt = if is_chat {
-            match request.chat_messages.as_deref() {
-                Some(messages) if !messages.is_empty() => {
-                    crate::protocol::assemble_chat_prompt_with_think(
-                        request.chat_system.as_deref().unwrap_or(""),
-                        messages,
-                        // `thinking: false` on this request closes the think block (3.8
-                        // ignores /no_think); anything else keeps the node's mode.
-                        crate::protocol::think_prefill_for_request(&request.model, request.thinking),
-                    )
-                }
-                _ => request.prompt.clone().unwrap_or_default(),
-            }
+            crate::protocol::render_chat(
+                request.chat_system.as_deref().unwrap_or(""),
+                request.chat_messages.iter().flatten().map(|m| (
+                    m.role.as_str(), m.text.as_str(), m.images.iter().flatten().map(|b64| crate::protocol::chat_image_key(b64)),
+                )),
+                crate::protocol::think_prefill_for_request(&request.model, request.thinking),
+                Some(request.prompt.as_deref().unwrap_or("")), |_| {},
+            )
         } else {
             request.prompt.clone().unwrap_or_default()
         };
@@ -439,7 +435,7 @@ impl GenerateParams {
             // physics: the LLM lane clamps to its context minus the prompt
             // at admission. The default stays modest for the non-chat
             // domains (captions, expansions) that never asked for a number.
-            max_tokens: request.max_tokens.unwrap_or(512).max(16),
+            max_tokens: crate::llm_backend::requested_tokens(request.max_tokens),
             temperature: if temperature.is_finite() {
                 temperature.clamp(0.0, 2.0) as f32
             } else {
@@ -1577,8 +1573,9 @@ pub(crate) fn fetch_on_demand(spec: &ModelSpec, role: &str, downloader: &Downloa
 /// Separate variants rather than one struct because they arrive at different
 /// moments — warmth at prefill, the think split as the reply grows — and a
 /// whole-struct update would blank whichever half it did not know.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServingUpdate {
+    Measure(crate::protocol::ChatMeasure),
     /// The turn ingested `tokens` at prefill; `resumed` when that was only the
     /// delta because the lane kept this conversation's cache.
     Prefill { tokens: usize, resumed: bool },
@@ -1589,6 +1586,25 @@ pub enum ServingUpdate {
     /// COUNT rather than left to be scraped off the `decode k/n` progress
     /// label, which only exists while that label is the current one.
     Decode { generated: usize },
+}
+
+impl ServingUpdate {
+    pub(crate) fn apply(self, serving: &mut crate::protocol::ServingStatusJson) {
+        match self {
+            Self::Measure(measure) => serving.measure = Some(measure),
+            Self::Prefill { tokens, resumed } => {
+                serving.prefix_ingested = Some(tokens as u64);
+                serving.prefix_resumed = Some(resumed);
+            }
+            Self::Think { think, visible } => {
+                serving.think_tokens = Some(think as u64);
+                serving.visible_tokens = visible.map(|v| v as u64);
+            }
+            Self::Decode { generated } => {
+                serving.gen_tokens = Some(generated as u64);
+            }
+        }
+    }
 }
 
 /// Sink for [`ServingUpdate`]s. `&mut dyn FnMut` like every other sink here.

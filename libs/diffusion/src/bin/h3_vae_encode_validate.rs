@@ -333,13 +333,10 @@ fn model_main() {
         .get("image")
         .map(PathBuf::from)
         .or_else(|| {
-            [
-                r"C:\ai\i2v_input_960x544.png",
-                "local/agent_state/minimax-h3-files/i2v_input_960x544.png",
-            ]
-            .iter()
-            .map(PathBuf::from)
-            .find(|path| path.exists())
+            [r"C:\ai\i2v_input_960x544.png"]
+                .iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
         });
 
     let run_stage = |name: &str| stage == "all" || stage == name;

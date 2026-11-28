@@ -15,8 +15,6 @@
 //! is slot scheduling, not service logic — and because keeping it here lets the
 //! `llama-slot-probe` gates drive the ACTUAL shipping scheduler on real
 //! hardware instead of replicating its call sequence.
-//!
-//! Design of record: `local/agent_state/qwen-parallel/batched-session-design.md`.
 
 use std::collections::VecDeque;
 
@@ -114,7 +112,12 @@ enum LanePhase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneOutcome {
+    /// The model sampled a stop token.
     Complete,
+    /// The lane reached the requested token budget.
+    LengthLimit,
+    /// A short chunk ended generation without a stop token.
+    Exhausted,
     Cancelled,
 }
 
@@ -566,8 +569,10 @@ impl LaneScheduler {
                 token: emitted,
                 produced: lane.produced,
             });
-            if lane.produced >= lane.request.max_new || stop_tokens.contains(&next) {
+            if stop_tokens.contains(&next) {
                 lane.phase = LanePhase::Done(LaneOutcome::Complete);
+            } else if lane.produced >= lane.request.max_new {
+                lane.phase = LanePhase::Done(LaneOutcome::LengthLimit);
             }
         }
         events
@@ -592,14 +597,16 @@ impl LaneScheduler {
     /// An empty chunk ends the lane whatever `stopped` says. A generator that
     /// returned nothing cannot make progress, and looping on it is a spin with
     /// no exit.
-    pub fn on_generated(&mut self, lane: usize, tokens: &[i32], stopped: bool) -> Vec<LaneEvent> {
+    pub fn on_generated(&mut self, lane: usize, tokens: &[i32], mut stopped: bool, exhausted: bool) -> Vec<LaneEvent> {
         let mut events = Vec::new();
         let stop_tokens = &self.stop_tokens;
         let Some(slot) = self.lanes.get_mut(lane).and_then(|l| l.as_mut()) else {
             return events;
         };
+        let before = slot.produced;
         for &token in tokens {
             if stop_tokens.contains(&token) {
+                stopped = true;
                 break;
             }
             slot.produced += 1;
@@ -610,10 +617,14 @@ impl LaneScheduler {
                 produced: slot.produced,
             });
         }
-        if stopped || tokens.is_empty() || slot.produced >= slot.request.max_new {
+        if stopped {
             slot.phase = LanePhase::Done(LaneOutcome::Complete);
+        } else if exhausted || tokens.is_empty() {
+            slot.phase = LanePhase::Done(LaneOutcome::Exhausted);
+        } else if slot.produced >= slot.request.max_new {
+            slot.phase = LanePhase::Done(LaneOutcome::LengthLimit);
         }
-        let _ = self.table.advance(lane, tokens.len());
+        let _ = self.table.advance(lane, slot.produced - before);
         events
     }
 
@@ -762,11 +773,10 @@ impl LaneScheduler {
             table
                 .adopt_state(index, outcome.live_state_offset, outcome.mtp_filled)
                 .map_err(|e| format!("lane {index}: {e}"))?;
-            if outcome.stop_reason.is_some()
-                || lane.produced >= lane.request.max_new
-                || stop_tokens.contains(&outcome.next)
-            {
+            if outcome.stop_reason.is_some() || stop_tokens.contains(&outcome.next) {
                 lane.phase = LanePhase::Done(LaneOutcome::Complete);
+            } else if lane.produced >= lane.request.max_new {
+                lane.phase = LanePhase::Done(LaneOutcome::LengthLimit);
             }
         }
         Ok(events)
@@ -1439,17 +1449,13 @@ impl LaneExecutor {
                         .continue_sampled_with(want, params, sampler)
                         .map_err(|e| format!("solo decode: {e}"))?
                 };
-                // Two ways the turn is over, and the second is not a stop
-                // reason: a chunk shorter than asked for, with no reason
-                // given, means the session cannot make progress. The
-                // single-lane worker has always broken on both; the lane
-                // worker inherited neither.
-                let stopped = generated.stop_reason != crate::LlamaStopReason::MaxNewTokens
-                    || generated.token_ids.len() < want;
+                let stopped = generated.stop_reason != crate::LlamaStopReason::MaxNewTokens;
+                let exhausted = !stopped && generated.token_ids.len() < want;
                 events.extend(self.scheduler.on_generated(
                     SOLO_LANE,
                     &generated.token_ids,
                     stopped,
+                    exhausted,
                 ));
                 // The chunk moved the session's resume row and its draft-head
                 // fill. Slot 0's copies do not move on their own, and the next
@@ -1655,6 +1661,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_distinguishes_stop_token_length_limit_and_exhausted() {
+        let finished = |sched: &mut LaneScheduler, outcome| {
+            assert_eq!(sched.reap(), [LaneEvent::Finished { job: 1, lane: 0, outcome }]);
+        };
+        for (max_new, next, expected) in [
+            (2, EOS, LaneOutcome::Complete), (1, EOS, LaneOutcome::Complete), (1, 101, LaneOutcome::LengthLimit),
+        ] {
+            for spec in [false, true] {
+                let mut sched = spec_scheduler(1);
+                prefilled(&mut sched, 1, &[10], max_new, 100);
+                let LaneStep::Decode { plan, .. } = sched.next_step() else { panic!("expected decode") };
+                if spec {
+                    sched.on_speculated(&plan, &[outcome(&[100], next, 0, 1)]).unwrap();
+                } else {
+                    sched.on_decoded(&plan, &[next]);
+                }
+                finished(&mut sched, expected);
+            }
+        }
+        for (tokens, stopped, exhausted, expected) in [
+            (&[1, 2][..], false, false, LaneOutcome::LengthLimit),
+            (&[1, 2], true, false, LaneOutcome::Complete),
+            (&[1], false, true, LaneOutcome::Exhausted),
+            (&[], false, false, LaneOutcome::Exhausted),
+        ] {
+            let mut sched = scheduler(1);
+            prefilled(&mut sched, 1, &[10], 2, 100);
+            sched.on_generated(0, tokens, stopped, exhausted);
+            finished(&mut sched, expected);
+        }
+    }
+
+    #[test]
     fn a_lane_finishes_at_its_token_budget_and_frees_its_slot() {
         let mut sched = scheduler(2);
         sched.submit(request(1, &[1, 2], 3));
@@ -1667,7 +1706,7 @@ mod tests {
         assert!(events.contains(&LaneEvent::Finished {
             job: 1,
             lane: 0,
-            outcome: LaneOutcome::Complete
+            outcome: LaneOutcome::LengthLimit
         }));
         assert_eq!(sched.slots_claimed(), 0, "a finished lane frees its slot");
         assert_eq!(sched.slots_free(), 2);
@@ -1709,13 +1748,13 @@ mod tests {
         assert!(events.contains(&LaneEvent::Finished {
             job: 1,
             lane: 0,
-            outcome: LaneOutcome::Complete
+            outcome: LaneOutcome::LengthLimit
         }));
         assert!(
             events.contains(&LaneEvent::Finished {
                 job: 2,
                 lane: 0,
-                outcome: LaneOutcome::Complete
+                outcome: LaneOutcome::LengthLimit
             }),
             "the queued job must be admitted once lane 0 frees, not stranded"
         );
@@ -1895,7 +1934,7 @@ mod tests {
         };
         sched.on_prefilled(lane, tokens.len(), 0);
 
-        let events = sched.on_generated(0, &[41, 42, 43], false);
+        let events = sched.on_generated(0, &[41, 42, 43], false, false);
         assert_eq!(
             events,
             vec![
@@ -1917,7 +1956,7 @@ mod tests {
         sched.on_prefilled(lane, tokens.len(), 0);
         // A speculative round can overshoot the budget; the lane must still
         // finish rather than run on.
-        sched.on_generated(0, &[1, 2, 3], false);
+        sched.on_generated(0, &[1, 2, 3], false, false);
         assert_eq!(sched.remaining(0), 0);
         assert!(matches!(
             sched.reap().first(),
@@ -2000,7 +2039,7 @@ mod tests {
         };
         sched.on_prefilled(lane, tokens.len(), 100);
 
-        let events = sched.on_generated(0, &[41, 42], true);
+        let events = sched.on_generated(0, &[41, 42], true, false);
         assert_eq!(events.len(), 2, "both tokens are still the lane's output");
         assert!(
             sched
@@ -2026,8 +2065,8 @@ mod tests {
         };
         sched.on_prefilled(lane, tokens.len(), 100);
 
-        assert!(sched.on_generated(0, &[], false).is_empty());
-        assert!(!sched.reap().is_empty(), "an empty chunk retires the lane");
+        assert!(sched.on_generated(0, &[], false, false).is_empty());
+        assert!(sched.reap().contains(&LaneEvent::Finished { job: 3, lane: 0, outcome: LaneOutcome::Exhausted }));
         assert!(sched.is_idle(), "and the worker gets to block again");
     }
 
@@ -2061,7 +2100,7 @@ mod tests {
             panic!("expected prefill");
         };
         sched.on_prefilled(lane, tokens.len(), 100);
-        sched.on_generated(0, &[41], true);
+        sched.on_generated(0, &[41], true, false);
         sched.reap();
 
         sched.submit(request(2, &[1], 512));
@@ -2370,7 +2409,7 @@ mod tests {
         let mut finished: Vec<_> = run_to_completion(&mut sched, 2 * jobs.len())
             .into_iter()
             .filter_map(|event| match event {
-                LaneEvent::Finished { job, outcome: LaneOutcome::Complete, .. } => Some(job),
+                LaneEvent::Finished { job, outcome: LaneOutcome::LengthLimit, .. } => Some(job),
                 _ => None,
             })
             .collect();

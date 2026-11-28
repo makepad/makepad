@@ -1,6 +1,5 @@
 //! FLUX.2 text-encoder tap-parity validator against the frozen diffusers
-//! oracle dumps (local/agent_state/flux2-port-files/ref_dump_flux2.py,
-//! `--phase te`).
+//! oracle dumps (`--phase te`).
 //!
 //! Usage:
 //!   flux2-check-te <text_encoder_dir> <dumps_dir> [--tokenizer <dir>] [--strict]

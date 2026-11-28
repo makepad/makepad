@@ -189,6 +189,10 @@ pub struct ArtifactMeta {
 }
 
 pub struct ServiceShared {
+    #[cfg(all(test, feature = "llm"))]
+    payload_gates: lifecycle_tests::PayloadGates,
+    // The owner and HTTP callers share partial updates to activity and the UI reserve.
+    local_use: Mutex<()>,
     pub activity: Arc<crate::activity::ActivityGate>,
     /// The two claude-cli switches (LAN use, PR reviews), set by the hub's owner.
     pub claude: crate::claude_cli::Scopes,
@@ -199,6 +203,9 @@ pub struct ServiceShared {
     pub models: Mutex<HashMap<String, ModelTrack>>,
     pub artifacts: Mutex<HashMap<String, ArtifactMeta>>,
     pub gpu: GpuCache,
+    /// Concurrent inspectors share one header read per installed model and session layout.
+    #[cfg(feature = "llm")]
+    llm_plans: Mutex<HashMap<(String, String, u32), Arc<OnceLock<()>>>>,
     /// Idle-card VRAM ceiling measured before any service model loaded and
     /// refreshed whenever an eviction pass leaves no resident behind.
     pub vram_usable: residency::UsableVram,
@@ -397,6 +404,9 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         peer.env_sources.len()
     );
     let shared = Arc::new(ServiceShared {
+        #[cfg(all(test, feature = "llm"))]
+        payload_gates: Default::default(),
+        local_use: Mutex::new(()),
         activity: activity.clone(),
         claude: Default::default(),
         leases: Mutex::new(crate::lease::LeaseTable::new()),
@@ -408,6 +418,8 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         jobs,
         models: Mutex::new(models),
         artifacts: Mutex::new(HashMap::new()),
+        #[cfg(feature = "llm")]
+        llm_plans: Default::default(),
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
         front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
@@ -740,6 +752,54 @@ fn admit(shared: &ServiceShared, request: HttpServerRequest) -> Option<HttpServe
     None
 }
 
+type RouteJob = Box<dyn FnOnce() -> HttpServerResponse + Send>;
+type RouteReply = mpsc::Sender<HttpServerResponse>;
+
+/// Each route worker owns its FIFO. The response goes directly to the waiting connection.
+pub(crate) struct RouteWorker {
+    send: mpsc::Sender<(RouteJob, RouteReply)>,
+    threads: Vec<JoinHandle<()>>,
+    unavailable: &'static str,
+}
+
+impl RouteWorker {
+    pub(crate) fn new(name: &str, unavailable: &'static str, threads: usize) -> Self {
+        assert!(threads > 0, "a route worker needs at least one thread");
+        let (send, rx) = mpsc::channel::<(RouteJob, RouteReply)>();
+        let rx = Arc::new(Mutex::new(rx));
+        let threads = (0..threads).map(|_| {
+            let rx = Arc::clone(&rx);
+            std::thread::Builder::new().name(name.into()).spawn(move || loop {
+                // Release the receiver before running the job so another thread can take work.
+                let next = rx.lock().unwrap().recv();
+                let Ok((job, reply)) = next else { break };
+                let _ = reply.send(job());
+            }).expect("start HTTP route worker")
+        }).collect();
+        Self { send, threads, unavailable }
+    }
+
+    pub(crate) fn dispatch(&self, job: RouteJob, reply: RouteReply) {
+        if let Err(mpsc::SendError((_, reply))) = self.send.send((job, reply)) {
+            let _ = reply.send(error_json(503, self.unavailable.into()));
+        }
+    }
+
+    pub(crate) fn close(self) {
+        drop(self.send);
+        for thread in self.threads {
+            let _ = thread.join();
+        }
+    }
+}
+
+pub(crate) fn room_job(request: ChatRoomRequest) -> RouteJob {
+    Box::new(move || match crate::llm_backend::chat_measure::measure(request) {
+        Ok(room) => ok_json(room.serialize_json()),
+        Err(reason) => error_json(400, reason),
+    })
+}
+
 fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerRequest>, addr: SocketAddr) {
     let scheme = if addr.ip().to_canonical().is_loopback() { "http" } else { "https" };
     let ip = match addr.ip() {
@@ -749,6 +809,11 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
     };
     let home = format!("{scheme}://{}", SocketAddr::new(ip, addr.port()));
     let _ = shared.routing_home.set(home.clone());
+    let room = RouteWorker::new("chat-room", "chat room worker unavailable", 1);
+    // A bye must see every lease created by a generate ahead of it.
+    let generate = RouteWorker::new("generate-payload", "generate worker unavailable", 1);
+    let artifact = RouteWorker::new("artifact-body", "artifact worker unavailable", 1);
+    let blob_pool = shared.peer.start_pool();
     let stages = Box::new(crate::talk::HubStages(home));
     let (mut talk, worker) = crate::talk::Talk::start(stages, shared.front_secret.clone());
     while let Ok(request) = request_rx.recv() {
@@ -785,10 +850,18 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                         let _ = response_sender.send(unauthorized_response());
                         continue;
                     };
-                    crate::peer_serve::route_blob(&shared, &headers, &caller, response_sender);
+                    crate::peer_serve::route_blob(&shared, blob_pool.as_ref(), &headers, &caller, response_sender);
                 } else {
-                    let response = route_get_request(&shared, &headers);
-                    let _ = response_sender.send(response);
+                    if let Err(refusal) = authorize_get(&shared, &headers) {
+                        let _ = response_sender.send(refusal);
+                    } else if let Some(id) = headers.path.strip_prefix("/artifact/") {
+                        match artifact_job(&shared, id) {
+                            Ok(job) => artifact.dispatch(job, response_sender),
+                            Err(refusal) => { let _ = response_sender.send(refusal); }
+                        }
+                    } else {
+                        let _ = response_sender.send(route_get(&shared, &headers.path));
+                    }
                 }
             }
             HttpServerRequest::Post {
@@ -796,6 +869,23 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 body,
                 response,
             } => {
+                if headers.path == "/chat/room" {
+                    let Some(caller) = caller_of(&shared, &headers) else {
+                        let _ = response.send(unauthorized_response());
+                        continue;
+                    };
+                    if crate::intake_scope::is_intake(&caller.client_id) {
+                        let _ = response.send(error_json(403, "intake scope: route".into()));
+                        continue;
+                    }
+                    match std::str::from_utf8(&body).map_err(|e| e.to_string()).and_then(|text|
+                        ChatRoomRequest::deserialize_json_lenient(text).map_err(|e| e.to_string())
+                    ) {
+                        Ok(request) => room.dispatch(room_job(request), response),
+                        Err(e) => { let _ = response.send(error_json(400, format!("bad chat room request: {e}"))); }
+                    }
+                    continue;
+                }
                 // the intake gate answers from its own worker: the route loop never waits on the
                 // upstream Messages API
                 if headers.path == "/v1/messages" {
@@ -811,8 +901,16 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                     let _ = response.send(error_json(404, "no such kernel route".into()));
                     continue;
                 }
-                let out = route_post_request(&shared, &headers, &body);
-                let _ = response.send(out);
+                let caller = match post_caller(&shared, &headers) {
+                    Ok(caller) => caller,
+                    Err(refusal) => { let _ = response.send(refusal); continue; }
+                };
+                if matches!(headers.path.as_str(), "/generate" | "/bye") {
+                    let shared = Arc::clone(&shared);
+                    generate.dispatch(Box::new(move || post_payload(&shared, &caller, &headers, &body)), response);
+                } else {
+                    let _ = response.send(post_payload(&shared, &caller, &headers, &body));
+                }
             }
             HttpServerRequest::PostPending { body, .. } => {
                 body.reject(error_json(503, "POST pre-admission is not configured".into()));
@@ -891,6 +989,12 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
             }
         }
     }
+    if let Some(pool) = blob_pool {
+        pool.close();
+    }
+    generate.close();
+    artifact.close();
+    room.close();
     drop(talk);
     let _ = worker.join();
 }
@@ -1010,47 +1114,47 @@ fn unauthorized_response() -> HttpServerResponse {
     error_json(401, "unauthorized".to_string())
 }
 
-fn route_get_request(
-    shared: &Arc<ServiceShared>,
-    headers: &HttpServerHeaders,
-) -> HttpServerResponse {
-    let Some(caller) = caller_of(shared, headers) else {
-        return unauthorized_response();
-    };
+fn authorize_get(shared: &ServiceShared, headers: &HttpServerHeaders) -> Result<(), HttpServerResponse> {
+    let caller = caller_of(shared, headers).ok_or_else(unauthorized_response)?;
     if !may_read(shared, &caller, &headers.path) {
-        return error_json(404, "no such job".to_string());
+        return Err(error_json(404, "no such job".to_string()));
     }
-    route_get(shared, &headers.path)
+    Ok(())
 }
 
-fn route_post_request(
+fn post_caller(
+    shared: &ServiceShared,
+    headers: &HttpServerHeaders,
+) -> Result<makepad_network::fleet::front::Caller, HttpServerResponse> {
+    let caller = caller_of(shared, headers).ok_or_else(unauthorized_response)?;
+    if headers.path == "/control/local-use" {
+        // Only the WM hosting this hub sets its mode and local use.
+        if !caller.this_machine {
+            return Err(error_json(403, "local-use is set by this machine's window manager only".to_string()));
+        }
+    } else if crate::intake_scope::is_intake(&caller.client_id)
+        && !crate::intake_scope::route_allowed("POST", &headers.path)
+    {
+        return Err(error_json(403, "intake scope: route".to_string()));
+    }
+    Ok(caller)
+}
+
+fn post_payload(
     shared: &Arc<ServiceShared>,
+    caller: &makepad_network::fleet::front::Caller,
     headers: &HttpServerHeaders,
     body: &[u8],
 ) -> HttpServerResponse {
-    let Some(caller) = caller_of(shared, headers) else {
-        return unauthorized_response();
-    };
     if headers.path == "/control/local-use" {
-        // Only the WM hosting this hub sets its mode and local use: a caller
-        // proven to hold this machine's own key (or a loopback-only hub's
-        // caller). A fleet credential of another machine never does.
-        if !caller.this_machine {
-            return error_json(403, "local-use is set by this machine's window manager only".to_string());
-        }
         return control_local_use(shared, body);
     }
-    if crate::intake_scope::is_intake(&caller.client_id) {
-        if !crate::intake_scope::route_allowed("POST", &headers.path) {
-            return error_json(403, "intake scope: route".to_string());
-        }
-        if headers.path == "/generate" {
-            if let Err(refusal) = crate::intake_scope::gate_generate(&shared.cache_dir, &caller.client_id, &headers.lines, body) {
-                return refusal;
-            }
+    if headers.path == "/generate" && crate::intake_scope::is_intake(&caller.client_id) {
+        if let Err(refusal) = crate::intake_scope::gate_generate(&shared.cache_dir, &caller.client_id, &headers.lines, body) {
+            return refusal;
         }
     }
-    route_post_by(shared, &caller, &headers.path, body)
+    route_post_by(shared, caller, &headers.path, body)
 }
 
 /// A control request from the host that runs this service in-process (the desktop AI Hub
@@ -1081,18 +1185,27 @@ fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResp
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need {\"mode\": \"auto\"|\"ui-first\"|\"ai-first\"|\"unavailable\", \"use\": \"gaming\"|\"\"}".to_string());
     };
-    let mode = match value.get("mode").and_then(Value::as_str) {
-        None => shared.activity.mode(),
-        Some(name) => match crate::activity::ComputeMode::parse(name) {
-            Some(mode) => mode,
-            None => return error_json(400, format!("unknown mode {name:?}")),
+    let req_mode = match value.get("mode") {
+        None => None,
+        Some(v) => match v.as_str().and_then(crate::activity::ComputeMode::parse) {
+            Some(mode) => Some(mode),
+            None => return error_json(400, format!("unknown mode {}", v.to_json())),
         },
     };
-    let gaming = match value.get("use").and_then(Value::as_str) {
-        None => shared.activity.gaming(),
-        Some("gaming") => true,
-        Some("") => false,
-        Some(other) => return error_json(400, format!("unknown local use {other:?}")),
+    let req_gaming = match value.get("use") {
+        None => None,
+        Some(v) => match v.as_str() {
+            Some("gaming") => Some(true),
+            Some("") => Some(false),
+            _ => return error_json(400, format!("unknown local use {}", v.to_json())),
+        },
+    };
+    let ui_reserve_mb = match value.get("ui_reserve_mb") {
+        None => None,
+        Some(v) => match v.as_u64() {
+            Some(mb) => Some(mb),
+            None => return error_json(400, "ui_reserve_mb must be an unsigned integer".into()),
+        },
     };
     let quiet = match value.get("quiet") {
         None => None,
@@ -1101,14 +1214,24 @@ fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResp
             None => return error_json(400, "\"quiet\" is who holds the machine quiet, or \"\"".to_string()),
         },
     };
+    let guard = shared.local_use.lock().unwrap();
     let (was_mode, was_gaming) = (shared.activity.mode(), shared.activity.gaming());
-    shared.activity.set_local_use(mode, gaming);
+    let mode = req_mode.unwrap_or(was_mode);
+    let gaming = req_gaming.unwrap_or(was_gaming);
+    if req_mode.is_some() || req_gaming.is_some() {
+        shared.activity.set_local_use(mode, gaming);
+    }
     let was_quiet = shared.activity.quiet_holder();
     let ended = quiet.as_deref().and_then(|holder| shared.activity.set_quiet(holder));
-    if mode == crate::activity::ComputeMode::AiFirst {
-        crate::gpu_yield::set_ui_reserve_mb(0);
-    }
+    let (prev_reserve, next_reserve) = crate::gpu_yield::apply_local_use_reserve(
+        req_mode.map(|m| m == crate::activity::ComputeMode::AiFirst), ui_reserve_mb,
+    );
+    let mut snap = shared.activity.snapshot();
+    drop(guard);
     shared.jobs.with(|store| store.interrupt_for_activity());
+    if next_reserve != prev_reserve {
+        crate::gpu_yield::emit_log(&format!("[local-use] UI reserve {prev_reserve} -> {next_reserve} MB"));
+    }
     if let Some(holder) = quiet.as_deref().filter(|h| !h.is_empty() && *h != was_quiet) {
         #[cfg(feature = "kernel")]
         let streams = crate::program_serve::service().end_all();
@@ -1119,7 +1242,6 @@ fn control_local_use(shared: &Arc<ServiceShared>, body: &[u8]) -> HttpServerResp
     if let Some(e) = &ended {
         eprintln!("[local-use] the quiet of {} is over: it refused {} request(s){}", e.holder, e.refused, if e.said.is_empty() { String::new() } else { format!(" ({})", e.said.join("; ")) });
     }
-    let mut snap = shared.activity.snapshot();
     if let Some(e) = ended {
         snap.refused = Some(e.refused);
         snap.refused_said = Some(e.said);
@@ -1183,36 +1305,39 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
             None => error_json(404, format!("no such job: {job_id}")),
         };
     }
-    if let Some(artifact_id) = path.strip_prefix("/artifact/") {
-        let meta = {
-            let artifacts = shared.artifacts.lock().unwrap();
-            artifacts
-                .get(artifact_id)
-                .map(|meta| (meta.path.clone(), meta.bytes.clone(), meta.content_type.clone(), meta.sha256.clone(), meta.byte_len))
-        };
-        return match meta {
-            Some((_, Some(bytes), content_type, sha256, _)) => artifact_response(&content_type, &sha256, bytes.to_vec()),
-            Some((path, None, content_type, sha256, byte_len)) => match fs::read(&path) {
-                Ok(bytes) => {
-                    // Length gate against on-disk truncation between persist
-                    // and serve; the client re-verifies the full hash.
-                    if bytes.len() as u64 != byte_len {
-                        return error_json(
-                            500,
-                            format!(
-                                "artifact {artifact_id} corrupted on disk: {} bytes, expected {byte_len}",
-                                bytes.len()
-                            ),
-                        );
-                    }
-                    artifact_response(&content_type, &sha256, bytes)
-                }
-                Err(e) => error_json(500, format!("artifact read failed: {e}")),
-            },
-            None => error_json(404, format!("no such artifact: {artifact_id}")),
-        };
-    }
     error_json(404, format!("no such endpoint: GET {path}"))
+}
+
+/// Take ownership of the bytes or open file before the next route can discard the artifact.
+fn artifact_job(shared: &Arc<ServiceShared>, artifact_id: &str) -> Result<RouteJob, HttpServerResponse> {
+    let (path, bytes, content_type, sha256, byte_len) = shared.artifacts.lock().unwrap()
+        .get(artifact_id)
+        .map(|meta| (meta.path.clone(), meta.bytes.clone(), meta.content_type.clone(), meta.sha256.clone(), meta.byte_len))
+        .ok_or_else(|| error_json(404, format!("no such artifact: {artifact_id}")))?;
+    if let Some(bytes) = bytes {
+        return Ok(Box::new(move || artifact_response(&content_type, &sha256, bytes.to_vec())));
+    }
+    let read_error = |e| error_json(500, format!("artifact read failed: {e}"));
+    let mut file = fs::File::open(path).map_err(read_error)?;
+    let artifact_id = artifact_id.to_owned();
+    #[cfg(all(test, feature = "llm"))]
+    let gate = shared.payload_gates.artifact.clone();
+    Ok(Box::new(move || {
+        use std::io::Read;
+        #[cfg(all(test, feature = "llm"))]
+        gate.hold();
+        let mut bytes = Vec::new();
+        if let Err(e) = file.read_to_end(&mut bytes) {
+            return read_error(e);
+        }
+        // Length gate against on-disk truncation; the client re-verifies the full hash.
+        if bytes.len() as u64 != byte_len {
+            return error_json(500, format!(
+                "artifact {artifact_id} corrupted on disk: {} bytes, expected {byte_len}", bytes.len()
+            ));
+        }
+        artifact_response(&content_type, &sha256, bytes)
+    }))
 }
 
 /// Cancel one job and, when it was still queued, tear down the realtime
@@ -1241,7 +1366,24 @@ fn cancel_job_with_teardown(
     outcome
 }
 
-/// The lease reaper tick: cancel everything whose origin went silent.
+/// Cancel each lapsed lease's job through the ordinary teardown, and return the
+/// ones cancelled. A job that already finished (done, error or cancelled) leaves
+/// only its lease behind: the table has dropped the row, and the job keeps its result.
+fn cancel_lapsed(
+    shared: &Arc<ServiceShared>,
+    mut lapsed: Vec<(String, crate::lease::Lapse)>,
+) -> Vec<(String, crate::lease::Lapse)> {
+    if lapsed.is_empty() {
+        return lapsed;
+    }
+    shared.jobs.with(|store| lapsed.retain(|(job_id, _)| !store.is_finished(job_id)));
+    for (job_id, _) in &lapsed {
+        cancel_job_with_teardown(shared, job_id);
+    }
+    lapsed
+}
+
+/// Release leases whose origins went silent and count those that still require cancellation.
 /// Called every ~2s from the reaper thread; also directly from tests.
 pub(crate) fn reap_lapsed_leases(shared: &Arc<ServiceShared>) -> usize {
     let lapsed = shared
@@ -1249,11 +1391,11 @@ pub(crate) fn reap_lapsed_leases(shared: &Arc<ServiceShared>) -> usize {
         .lock()
         .unwrap()
         .reap(crate::jobs::now_ms());
-    for (job_id, why) in &lapsed {
+    let cancelled = cancel_lapsed(shared, lapsed);
+    for (job_id, why) in &cancelled {
         eprintln!("[lease] {job_id}: origin lapsed ({why:?}) — cancelling");
-        let _ = cancel_job_with_teardown(shared, job_id);
     }
-    lapsed.len()
+    cancelled.len()
 }
 
 #[cfg(test)]
@@ -1291,20 +1433,68 @@ fn scoped_origin(caller: &makepad_network::fleet::front::Caller, key: &str) -> S
     }
 }
 
-/// `{"configured":N|null,"loaded":N|null,"max":N,"min":N,"vram_free_mb":N|null,
-/// "kv":"q8"|"f16","kv_configured":..|null,"kv_loaded":..|null,"kv_options":["f16","q8"]}`:
-/// the window set by `POST /llm/context` (null until set), the window of the
-/// session loaded now (null when none), the card's free memory, and the
-/// attention KV precision (wanted now / set / loaded).
+fn active_chat_id(shared: &Arc<ServiceShared>) -> Option<String> {
+    chat_model_id(shared).or_else(|| {
+        shared.registry.models.iter().find(|s| s.backend == "llm" &&
+            s.file_by_role("llm-gguf").is_some_and(|f| f.dest_path(&shared.cache_dir).is_file()))
+            .map(|s| s.id.clone())
+    })
+}
+
+fn ensure_llm_plan_for(shared: &ServiceShared, model_id: &str) -> Option<crate::gpu_yield::LlmMemory> {
+    let kv = crate::llm_context::kv_wanted();
+    let lanes = crate::llm_backend::configured_lane_count() as u32;
+    let lookup = || crate::gpu_yield::llm_memory_for(model_id, kv.slug(), lanes);
+    if let Some(memory) = lookup() { return Some(memory); }
+    #[cfg(feature = "llm")]
+    {
+        let path = shared.registry.find(model_id)?.file_by_role("llm-gguf")?.dest_path(&shared.cache_dir);
+        if !path.is_file() { return None; }
+        let slot = shared.llm_plans.lock().unwrap().entry((model_id.into(), kv.slug().into(), lanes)).or_default().clone();
+        slot.get_or_init(|| {
+            let config = crate::llm_backend::llama_worker::session_config(kv, lanes);
+            match makepad_ai_llm::LlamaSession::plan_memory(&path, config) {
+                Ok(plan) => crate::gpu_yield::note_llm_plan(crate::gpu_yield::LlmMemory::from_plan(model_id.into(), kv.slug().into(), &plan)),
+                Err(e) => crate::gpu_yield::emit_log(&format!("[llm-context] {model_id}: could not plan session: {e}")),
+            }
+        });
+        lookup()
+    }
+    #[cfg(not(feature = "llm"))]
+    { let _ = shared; None }
+}
+
+fn active_llm_memory(shared: &Arc<ServiceShared>) -> Option<crate::gpu_yield::LlmMemory> {
+    ensure_llm_plan_for(shared, &active_chat_id(shared)?)
+}
+
+fn llm_held_mb(shared: &ServiceShared) -> u64 {
+    shared.models.lock().unwrap().iter()
+        .filter(|(id, state)| matches!(state, ModelTrack::Loaded) && shared.registry.find(id).is_some_and(|s| s.backend == "llm"))
+        .map(|(id, _)| crate::control::model_mb(id).or_else(|| crate::gpu_yield::llm_memory_of(id)?.load_cost_mb).unwrap_or(0))
+        .sum()
+}
+
+fn reported_fit(memory: &crate::gpu_yield::LlmMemory, gpu: &crate::gpu::GpuInfo, held: u64) -> Option<u32> {
+    crate::gpu_yield::context_fit(memory, gpu.vram_free_mb?, held, gpu.unified, crate::llm_context::MIN_CONTEXT)
+}
+
+/// Report the configured override, installed model's native limit and present fit.
 fn llm_context_json(shared: &Arc<ServiceShared>) -> String {
     use crate::llm_context::KvPrecision;
     let num = |v: Option<u32>| v.map_or(Value::Null, |n| Value::Int(n as i64));
     let kv = |v: Option<KvPrecision>| v.map_or(Value::Null, |k| json::s(k.slug()));
-    let free = shared.gpu.get().vram_free_mb.map_or(Value::Null, |n| Value::Int(n as i64));
+    let gpu = shared.gpu.get();
+    let memory = active_llm_memory(shared);
+    let fit = memory.as_ref().and_then(|m| reported_fit(m, &gpu, llm_held_mb(shared)));
+    let free = gpu.vram_free_mb.map_or(Value::Null, |n| Value::Int(n as i64));
     json::obj(vec![
-        ("configured", num(crate::llm_context::requested())),
+        ("configured", num(crate::llm_backend::explicit_context_override())),
         ("loaded", num(crate::llm_context::loaded())),
-        ("max", Value::Int(crate::llm_context::max_context() as i64)),
+        ("fit", num(fit)),
+        ("model_max", num(memory.as_ref().map(|m| m.model_max_context).filter(|&n| n > 0))),
+        ("ui_reserve_mb", Value::Int(crate::gpu_yield::ui_reserve_mb() as i64)),
+        ("bytes_per_token", memory.as_ref().map_or(Value::Null, |m| Value::Int(m.bytes_per_lane_token() as i64))),
         ("min", Value::Int(crate::llm_context::MIN_CONTEXT as i64)),
         ("vram_free_mb", free),
         ("kv", json::s(crate::llm_context::kv_wanted().slug())),
@@ -1315,12 +1505,36 @@ fn llm_context_json(shared: &Arc<ServiceShared>) -> String {
     .to_json()
 }
 
+fn context_change_log_line(
+    caller: &makepad_network::fleet::front::Caller,
+    context: Option<u32>,
+    kv: Option<crate::llm_context::KvPrecision>,
+    apply: bool,
+    job_id: Option<&str>,
+) -> String {
+    let context = match context {
+        Some(0) => "auto".to_owned(),
+        Some(n) => n.to_string(),
+        None => "unchanged".to_owned(),
+    };
+    let kv = kv.map_or("unchanged", |k| k.slug());
+    let job = job_id.map_or_else(String::new, |id| format!(" (job={id})"));
+    format!("[llm-context] change by {}: context={context}, kv={kv}, apply={apply}{job}", holder_name(caller))
+}
+
 /// `POST /llm/context {"context": N, "kv": "q8"|"f16"}` (either field alone).
 fn set_llm_context(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller, body: &[u8]) -> HttpServerResponse {
     let Ok(value) = json::parse(body) else {
         return error_json(400, "need a JSON body {\"context\": <tokens>, \"kv\": \"q8\"|\"f16\"}".to_string());
     };
-    let context = value.get("context").and_then(Value::as_u64);
+    let context = match value.get("context") {
+        None => None,
+        Some(Value::Null) => Some(0),
+        Some(v) => match v.as_u64() {
+            Some(n) => Some(n.min(u64::from(u32::MAX)) as u32),
+            None => return error_json(400, "context must be an unsigned token count or null".into()),
+        }
+    };
     let kv = match value.get("kv").and_then(Value::as_str) {
         Some(text) => match crate::llm_context::KvPrecision::parse(text) {
             Some(kv) => Some(kv),
@@ -1331,26 +1545,34 @@ fn set_llm_context(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet:
     if context.is_none() && kv.is_none() {
         return error_json(400, "need {\"context\": <tokens>} and/or {\"kv\": \"q8\"|\"f16\"}".to_string());
     }
-    if let Some(context) = context {
-        crate::llm_context::set(&shared.cache_dir, context.min(u32::MAX as u64) as u32);
-    }
+    let context = context.map(|n| {
+        if n == 0 {
+            crate::llm_context::clear(&shared.cache_dir);
+            0
+        } else {
+            let model_max = active_llm_memory(shared).map(|m| m.model_max_context).filter(|&n| n > 0);
+            crate::llm_context::set(&shared.cache_dir, n, model_max)
+        }
+    });
     if let Some(kv) = kv {
         crate::llm_context::set_kv(&shared.cache_dir, kv);
     }
-    // `"apply": true` reloads the chat model now instead of at its next job.
-    if value.get("apply").and_then(Value::as_bool) == Some(true) {
-        if let Some(model) = chat_model_id(shared) {
-            return match submit_control(shared, caller, &model, crate::backend::ModelControl::Load) {
-                Ok(job_id) => {
-                    let mut out = llm_context_json(shared);
-                    out.truncate(out.len() - 1);
-                    ok_json(format!("{out},\"job_id\":{}}}", json::s(job_id).to_json()))
-                }
-                Err(e) => generate_refused(&e),
-            };
+    let apply = value.get("apply").and_then(Value::as_bool) == Some(true);
+    let job = if apply {
+        active_chat_id(shared).map(|model| submit_control(shared, caller, &model, crate::backend::ModelControl::Load)).transpose()
+    } else {
+        Ok(None)
+    };
+    crate::gpu_yield::emit_log(&context_change_log_line(caller, context, kv, apply, job.as_ref().ok().and_then(|id| id.as_deref())));
+    match job {
+        Ok(Some(id)) => {
+            let mut out = llm_context_json(shared);
+            out.truncate(out.len() - 1);
+            ok_json(format!("{out},\"job_id\":{}}}", json::s(id).to_json()))
         }
+        Ok(None) => ok_json(llm_context_json(shared)),
+        Err(e) => generate_refused(&e),
     }
-    ok_json(llm_context_json(shared))
 }
 
 /// The node's chat model: the loaded llm-backend model, else the first
@@ -1532,7 +1754,7 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
     let unload = value.get("unload").and_then(Value::as_bool).unwrap_or(false);
     if shared.activity.mode() == crate::activity::ComputeMode::AiFirst {
         // The operator chose AI over the UI: nothing is given back.
-        eprintln!("[gpu-yield] AI First: not yielding {mb} MB to the UI");
+        crate::gpu_yield::emit_log(&format!("[gpu-yield] AI First: not yielding {mb} MB to the UI"));
         return ok_json(json::obj(vec![("ai_first", Value::Bool(true))]).to_json());
     }
     if let Some(reserve) = value.get("reserve_mb").and_then(Value::as_u64) {
@@ -1554,12 +1776,12 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
         let spawned = std::thread::Builder::new().name("gpu-relief".into()).spawn(move || {
             std::thread::sleep(at.saturating_duration_since(Instant::now()));
             if !crate::gpu_yield::relief_current(epoch) {
-                eprintln!("[gpu-yield] relief dropped: the UI was short again since");
+                crate::gpu_yield::emit_log(&format!("[gpu-yield] relief dropped: the UI was short again since"));
                 return;
             }
             let model = chat_model_id(&shared).unwrap_or(model);
             if let Err(e) = submit_control(&shared, &caller, &model, crate::backend::ModelControl::Yield { mb: 0, unload: false, free_mb: None }) {
-                eprintln!("[gpu-yield] relief not queued: {e}");
+                crate::gpu_yield::emit_log(&format!("[gpu-yield] relief not queued: {e}"));
             }
         });
         if let Err(e) = spawned {
@@ -1587,23 +1809,42 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
 /// window, in one rebuild, as far as the budget allows with the UI's reserve
 /// kept. Nothing happens when it would not grow by at least one step.
 fn run_relief(shared: &Arc<ServiceShared>, backends: &HashMap<String, Box<dyn ContentBackend>>) -> String {
+    let mut gpu = shared.gpu.get();
+    gpu.vram_free_mb = residency::fresh_free_mb();
+    run_relief_with(shared, backends, &gpu)
+}
+
+fn run_relief_with(
+    shared: &Arc<ServiceShared>,
+    backends: &HashMap<String, Box<dyn ContentBackend>>,
+    gpu: &crate::gpu::GpuInfo,
+) -> String {
     let Some(chat) = chat_model_id(shared).filter(|id| backends.get(id).is_some_and(|b| b.is_resident())) else {
         crate::gpu_yield::set_context_ceiling(None);
+        crate::gpu_yield::reset_relief_state();
         return "relief: no chat model loaded; its next load is sized by the budget".to_string();
     };
     let loaded = crate::llm_context::loaded().unwrap_or(0);
-    let configured = crate::llm_backend::configured_context_per_lane().unwrap_or(loaded);
-    let (Some(memory), Some(free)) = (crate::gpu_yield::llm_memory_of(&chat), residency::fresh_free_mb()) else {
-        return format!("relief: {chat} stays at {loaded} (no accounting or free-memory reading)");
+    let Some(memory) = crate::gpu_yield::llm_memory_for(&chat, crate::llm_context::kv_loaded().unwrap_or_else(crate::llm_context::kv_wanted).slug(),
+        crate::llm_backend::configured_lane_count() as u32).filter(|m| m.model_max_context > 0) else {
+        return format!("relief: {chat} stays at {loaded} (no model accounting)");
     };
+    let Some(free) = gpu.vram_free_mb else {
+        return format!("relief: {chat} stays at {loaded} (no free-memory reading)");
+    };
+    let configured = crate::llm_backend::explicit_context_override().unwrap_or(memory.model_max_context).min(memory.model_max_context);
     let held = crate::control::model_mb(&chat).or(memory.load_cost_mb).unwrap_or(0);
-    let Some(to) = crate::gpu_yield::grow_target(&memory, free, held, crate::gpu_yield::ui_reserve_mb(), configured, loaded, crate::llm_context::MIN_CONTEXT) else {
-        let why = if loaded >= configured { "already the configured window" } else { "no room for more next to the UI" };
-        return format!("relief: {chat} stays at {loaded} (configured {configured}; {why})");
+    let reserve = crate::gpu_yield::effective_reserve_mb(gpu.unified);
+    let hysteresis = crate::gpu_yield::relief_hysteresis_mb();
+    let Some(to) = crate::gpu_yield::grow_target_with_hysteresis(&memory, free, held, reserve, hysteresis, gpu.unified, configured, loaded, crate::llm_context::MIN_CONTEXT) else {
+        return format!("relief: {chat} stays at {loaded} (target {configured})");
     };
-    crate::gpu_yield::set_context_ceiling((to < configured).then_some(to));
     match queue_control(shared, &chat, crate::backend::ModelControl::Load) {
-        Ok(job) => format!("relief: {chat} context {loaded} -> {to} (configured {configured}; reloading, {job})"),
+        Ok(job) => {
+            crate::gpu_yield::hold_relief_target(to, configured);
+            crate::llm_context::bump_generation();
+            format!("relief: {chat} context {loaded} -> {to} (configured {configured}; reloading, {job})")
+        }
         Err(e) => format!("relief: {chat} grow to {to} not queued: {e}"),
     }
 }
@@ -1635,7 +1876,7 @@ fn run_yield(
             model: id.clone(),
             context: crate::llm_context::loaded().unwrap_or(0),
             min_context: crate::llm_context::MIN_CONTEXT,
-            kv_bytes_per_token: m.map_or(0, |m| m.kv_bytes_per_token),
+            kv_bytes_per_token: m.map_or(0, |m| m.bytes_per_lane_token()),
             resident_mb: crate::control::model_mb(id).or(m.and_then(|m| m.load_cost_mb)).unwrap_or(0),
         }
     });
@@ -1658,8 +1899,10 @@ fn run_yield(
     for step in &plan.steps {
         progress(&format!("yield: {}", step.line()));
         match step {
-            Step::ShrinkContext { model, to, .. } => {
+            Step::ShrinkContext { model, from, to, frees_mb } => {
+                crate::gpu_yield::note_yield_shrink(*from, *to, *frees_mb);
                 crate::gpu_yield::hold_ceiling(*to);
+                crate::llm_context::bump_generation();
                 evict_resident(shared, backends, model, progress)?;
                 reload = Some(model.clone());
             }
@@ -1667,23 +1910,28 @@ fn run_yield(
                 evict_resident(shared, backends, model, progress)?;
             }
             Step::UnloadHeld { model, .. } => {
-                eprintln!("[gpu-yield] the UI needs the memory: unloading {model}, held by {}", shared.holds.holders(model).join(", "));
+                crate::gpu_yield::emit_log(&format!("[gpu-yield] the UI needs the memory: unloading {model}, held by {}", shared.holds.holders(model).join(", ")));
                 evict_resident(shared, backends, model, progress)?;
             }
             Step::UnloadChat { model, .. } => {
                 evict_resident(shared, backends, model, progress)?;
+                crate::gpu_yield::clear_pending_hold();
+                crate::gpu_yield::reset_relief_state();
                 reload = None;
             }
         }
         done.push(step.line());
     }
     let free_after = residency::fresh_free_mb();
+    if let Some(after) = free_after {
+        shared.gpu.note_fresh_free_mb(after);
+    }
     let freed = free_before.zip(free_after).map(|(b, a)| a.saturating_sub(b));
     let mut report = crate::gpu_yield::yield_report(mb, allow_unload, wanted, &done, freed, free_after, plan.short_mb);
     if chat_busy && wanted > 0 {
         report.push_str("; the chat model is answering, left as is");
     }
-    eprintln!("[gpu-yield] {report}");
+    crate::gpu_yield::emit_log(&format!("[gpu-yield] {report}"));
     if let Some(model) = reload {
         // The model comes back at once at its smaller window (when the UI's
         // reserve allows; otherwise on the next chat request, if it does).
@@ -1836,18 +2084,16 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
     let mut models: Vec<(String, Value)> = Vec::new();
     // The largest window each chat model could have now next to the UI's
     // reserve: free memory plus what the loaded chat model(s) would give back.
-    let is_llm = |id: &str| shared.registry.find(id).is_some_and(|s| s.backend == "llm");
-    let llm_held: u64 = tracker
-        .iter()
-        .filter(|(id, t)| matches!(t, ModelTrack::Loaded) && is_llm(id))
-        .map(|(id, _)| model_mb(id).unwrap_or(0))
-        .sum();
+    let llm_held = llm_held_mb(shared);
+    let active_id = active_chat_id(shared);
+    let active_memory = active_id.as_deref().and_then(|id| ensure_llm_plan_for(shared, id));
+    let active_model_max = active_memory.as_ref().map(|m| m.model_max_context).filter(|&n| n > 0);
+    let active_fit = active_memory.as_ref().and_then(|m| reported_fit(m, &gpu, llm_held));
     let context_fit = |id: &str| -> Option<u64> {
-        let memory = crate::gpu_yield::llm_memory_of(id)?;
-        let free = gpu.vram_free_mb?;
-        crate::gpu_yield::context_fit(&memory, free, llm_held, crate::llm_context::max_context(), crate::llm_context::MIN_CONTEXT)
-            .map(u64::from)
-            .or(Some(0))
+        let memory = ensure_llm_plan_for(shared, id)?;
+        // Zero explicitly disables larger windows when even the floor cannot fit.
+        gpu.vram_free_mb?;
+        Some(u64::from(reported_fit(&memory, &gpu, llm_held).unwrap_or(0)))
     };
     for spec in &shared.registry.models {
         let track = tracker.get(&spec.id).cloned();
@@ -1858,7 +2104,7 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
             Some(ModelTrack::Downloading { .. }) => ("downloading", None),
             Some(ModelTrack::Error(message)) => ("error", Some(message.clone())),
             Some(ModelTrack::Ready) | Some(ModelTrack::Absent) | None => {
-                let present = matches!(track, Some(ModelTrack::Ready)) || ((pinned || busy > 0) && spec.files_present(&shared.cache_dir));
+                let present = matches!(track, Some(ModelTrack::Ready)) || ((pinned || busy > 0 || active_id.as_ref() == Some(&spec.id)) && spec.files_present(&shared.cache_dir));
                 if !present && busy == 0 {
                     continue;
                 }
@@ -1903,16 +2149,13 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
     models.sort_by(|a, b| a.0.cmp(&b.0));
 
     use crate::llm_context::{self as lc, KvPrecision};
-    let options: Vec<Value> = [16384u32, 32768, 49152, 65536, 81920, 98304, 131072]
-        .iter()
-        .filter(|t| **t >= lc::MIN_CONTEXT && **t <= lc::max_context())
-        .map(|t| Value::Int(*t as i64))
-        .collect();
+    let options = crate::gpu_yield::context_options(active_model_max, active_fit, lc::MIN_CONTEXT)
+        .into_iter().map(|n| Value::Int(n as i64)).collect();
     let llm = json::obj(vec![
-        ("model", text(chat_model_id(shared))),
-        ("context", Value::Int(crate::llm_backend::configured_context_per_lane().unwrap_or(32768) as i64)),
+        ("model", text(active_id)),
+        ("context", num(lc::loaded().or_else(crate::llm_backend::explicit_context_override).or(active_fit).map(u64::from))),
         ("context_loaded", num(lc::loaded().map(u64::from))),
-        ("context_max", Value::Int(lc::max_context() as i64)),
+        ("context_max", num(active_model_max.map(u64::from))),
         ("context_min", Value::Int(lc::MIN_CONTEXT as i64)),
         ("context_options", Value::Arr(options)),
         ("kv", json::s(lc::kv_wanted().slug())),
@@ -1924,16 +2167,21 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
         // to the UI, or the room left at load); null when none.
         ("context_ceiling", num(crate::gpu_yield::context_ceiling().map(u64::from))),
         // The loaded session's own accounting (CONTROL_API.md v1 addition).
-        ("memory", crate::gpu_yield::llm_memory().map_or(Value::Null, |m| {
+        ("memory", active_memory.map_or(Value::Null, |m| {
             json::obj(vec![
                 ("model", json::s(m.model.clone())),
                 ("context", Value::Int(m.context as i64)),
                 ("kv", json::s(m.kv.clone())),
+                ("model_max_context", Value::Int(m.model_max_context as i64)),
+                ("lanes", Value::Int(m.lanes as i64)),
+                ("mask_bytes_per_token", Value::Int(m.mask_bytes_per_token as i64)),
+                ("measured", Value::Bool(m.measured)),
                 ("weights_mb", Value::Int(m.weights_mb as i64)),
                 ("kv_mb", Value::Int(m.kv_mb as i64)),
                 ("kv_bytes_per_token", Value::Int(m.kv_bytes_per_token as i64)),
                 ("state_mb", Value::Int(m.state_mb as i64)),
                 ("activations_mb", Value::Int(m.activations_mb as i64)),
+                ("runtime_scratch_mb", Value::Int(m.runtime_scratch_mb as i64)),
                 ("load_cost_mb", num(m.load_cost_mb)),
             ])
         })),
@@ -2058,9 +2306,7 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
             .lock()
             .unwrap()
             .owner_restarted(&origin.node_key, origin.epoch);
-        for (job_id, _) in &restarted {
-            let _ = cancel_job_with_teardown(shared, job_id);
-        }
+        cancel_lapsed(shared, restarted);
         let outcome = shared
             .leases
             .lock()
@@ -2083,12 +2329,10 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
             return error_json(400, "malformed bye body".to_string());
         };
         let lapsed = shared.leases.lock().unwrap().bye(&scoped_origin(caller, &req.origin_key));
-        for (job_id, _) in &lapsed {
-            let _ = cancel_job_with_teardown(shared, job_id);
-        }
+        let cancelled = cancel_lapsed(shared, lapsed);
         return ok_json(
             ByeResponseJson {
-                cancelled: lapsed.len() as u64,
+                cancelled: cancelled.len() as u64,
             }
             .serialize_json(),
         );
@@ -2231,14 +2475,14 @@ fn route_parsed_generate(shared: &Arc<ServiceShared>, caller: &makepad_network::
             return error_json(400, e.to_string());
         }
     }
-    // Chat pictures are checked here, not on the worker: a picture that does
-    // not decode must be a 400, never a failed turn that tears down the
-    // resident session.
+    // Validate before submission: a bad picture gets a 400 and leaves the resident session alone.
     if !params.chat_images.is_empty() {
         let sees = (spec.backend == "llm" && spec.file_by_role("mmproj").is_some()) || spec.backend == crate::claude_cli::BACKEND;
         if !sees {
             return error_json(400, format!("model {} cannot look at pictures", spec.id));
         }
+        #[cfg(all(test, feature = "llm"))]
+        shared.payload_gates.generate.hold();
         for image in &params.chat_images {
             if let Err(e) = crate::vision_backend::decode_image_rgb8(&image.bytes) {
                 return error_json(400, format!("picture {}: {e}", image.key));
@@ -2482,9 +2726,9 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         ram_reserve_mb: crate::ram::HOST_GATE.then(crate::ram::host_reserve_mb),
         ram_idle_mb: Some(ram_idle_mb),
         os: Some(crate::ram::OS.to_string()),
-        llm_context_configured: crate::llm_context::requested().map(u64::from),
+        llm_context_configured: crate::llm_backend::explicit_context_override().map(u64::from),
         llm_context_loaded: crate::llm_context::loaded().map(u64::from),
-        llm_context_max: Some(u64::from(crate::llm_context::max_context())),
+        llm_context_max: active_llm_memory(shared).map(|m| u64::from(m.model_max_context)).filter(|&n| n > 0),
         llm_kv: Some(crate::llm_context::kv_wanted().slug().to_string()),
         llm_kv_loaded: crate::llm_context::kv_loaded().map(|k| k.slug().to_string()),
         max_job_body_bytes: Some(MAX_JOB_BODY_BYTES),
@@ -3056,7 +3300,7 @@ fn execute_job(
                 std::thread::sleep(Duration::from_millis(250));
             }
             let report = with_backends(shared, |backends| run_relief(shared, backends));
-            eprintln!("[gpu-yield] {report}");
+            crate::gpu_yield::emit_log(&format!("[gpu-yield] {report}"));
             shared.jobs.with(|store| {
                 store.set_text(job_id, report.clone());
                 store.set_progress(job_id, "relieved", 1.0)
@@ -3091,6 +3335,13 @@ fn execute_job(
                 progress_shared.jobs.with(|store| store.set_progress(&job, stage, 0.5))
             })
         })?;
+        if spec.backend == "llm" {
+            crate::gpu_yield::clear_pending_hold();
+            crate::gpu_yield::reset_relief_state();
+        }
+        if let Some(after) = residency::fresh_free_mb() {
+            shared.gpu.note_fresh_free_mb(after);
+        }
         shared.jobs.with(|store| store.set_progress(job_id, "unloaded", 1.0));
         return Ok(Vec::new());
     }
@@ -3273,6 +3524,7 @@ fn execute_job(
         // exactly today's behaviour: generation re-takes the lock and holds it
         // for the duration, so the device stays one-job-at-a-time for it.
         let load_started = Instant::now();
+        let model_mb_before = crate::control::model_mb(&spec.id);
         let (load_error, concurrent) = with_backends(shared, |backends| {
             let backend = backends.get_mut(&spec.id).unwrap();
             let error = match cancel.check().and_then(|()| backend.ensure_loaded(&mut ctx)) {
@@ -3339,13 +3591,17 @@ fn execute_job(
             return Err(error);
         }
 
-        // A cancel raised while the model was loading unwinds before
-        // generation.
-        cancel.check()?;
-        // (read only after a cold load: a fresh read spawns a query)
-        if let Some((before, after)) = free_before_load.and_then(|before| Some((before, residency::fresh_free_mb()?))) {
-            crate::control::set_model_mb(&spec.id, Some(before.saturating_sub(after)));
+        if free_before_load.is_some() || params.control == Some(crate::backend::ModelControl::Load)
+            || crate::control::model_mb(&spec.id) != model_mb_before {
+            if let Some(after) = residency::fresh_free_mb() {
+                shared.gpu.note_fresh_free_mb(after);
+                if let (Some(before), None) = (free_before_load, crate::control::model_mb(&spec.id)) {
+                    crate::control::set_model_mb(&spec.id, Some(before.saturating_sub(after)));
+                }
+            }
         }
+        // A cancel raised while the model was loading unwinds before generation.
+        cancel.check()?;
         if params.control == Some(crate::backend::ModelControl::Load) {
             note_host_peak(&spec.id, host_window.take());
             shared.jobs.with(|store| store.set_progress(job_id, "loaded", 1.0));
@@ -3378,19 +3634,7 @@ fn execute_job(
             let serving_job = job_id.to_string();
             let mut serving_sink = move |update: crate::backend::ServingUpdate| {
                 serving_shared.jobs.with(|store| {
-                    store.update_serving(&serving_job, |serving| match update {
-                        crate::backend::ServingUpdate::Prefill { tokens, resumed } => {
-                            serving.prefix_ingested = Some(tokens as u64);
-                            serving.prefix_resumed = Some(resumed);
-                        }
-                        crate::backend::ServingUpdate::Think { think, visible } => {
-                            serving.think_tokens = Some(think as u64);
-                            serving.visible_tokens = visible.map(|v| v as u64);
-                        }
-                        crate::backend::ServingUpdate::Decode { generated } => {
-                            serving.gen_tokens = Some(generated as u64);
-                        }
-                    })
+                    store.update_serving(&serving_job, |serving| update.apply(serving));
                 });
             };
             match &concurrent {
@@ -3507,12 +3751,15 @@ fn execute_job(
     // Some backends put their weights on the device at their first job, not
     // at load: measure again once that job is done, keep the larger figure.
     if let Some((before, after)) = free_before_load.and_then(|before| Some((before, residency::fresh_free_mb()?))) {
-        let at_load = crate::control::model_mb(&spec.id).unwrap_or(0);
-        let holds = with_backends(shared, |b| b.get(&spec.id).map_or(true, |b| b.holds_gpu_between_jobs()));
-        // (a per-job backend's first job also creates the process's CUDA
-        // context, which is not the model's)
-        let mb = if holds { at_load.max(before.saturating_sub(after)) } else { 0 };
-        crate::control::set_model_mb(&spec.id, Some(mb));
+        shared.gpu.note_fresh_free_mb(after);
+        if spec.backend != "llm" {
+            let at_load = crate::control::model_mb(&spec.id).unwrap_or(0);
+            let holds = with_backends(shared, |b| b.get(&spec.id).map_or(true, |b| b.holds_gpu_between_jobs()));
+            // (a per-job backend's first job also creates the process's CUDA
+            // context, which is not the model's)
+            let mb = if holds { at_load.max(before.saturating_sub(after)) } else { 0 };
+            crate::control::set_model_mb(&spec.id, Some(mb));
+        }
     }
     shared
         .last_used
@@ -3577,8 +3824,15 @@ fn execute_job(
         });
     }
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    let caller = match crate::control::job_meta(job_id) {
+        Some(meta) => match meta.app {
+            Some(app) => format!("{} (app {app})", meta.client),
+            None => meta.client,
+        },
+        None => "?".to_string(),
+    };
     eprintln!(
-        "[job] {job_id} {}: queued {} ms, prepare {:.0} ms, admit {:.0} ms, load {:.0} ms, generate {:.0} ms, store {:.0} ms; {:.0} ms",
+        "[job] {job_id} {} for {caller}: queued {} ms, prepare {:.0} ms, admit {:.0} ms, load {:.0} ms, generate {:.0} ms, store {:.0} ms; {:.0} ms",
         spec.id,
         shared.jobs.with(|store| store.waited_ms(job_id)).map_or("?".to_string(), |w| w.to_string()),
         ms(prepared),
@@ -4490,10 +4744,15 @@ fn admit_for_load(
     // A chat model this hub has loaded before is sized by its own accounting
     // (its window is fitted to the room at load, down to the floor), not by
     // the registry's peak for the biggest window.
-    let est_mb = match crate::gpu_yield::llm_memory_of(&spec.id).filter(|_| spec.backend == "llm") {
-        Some(memory) => crate::gpu_yield::smallest_load_mb(&memory),
-        None => residency::estimated_peak_mb(spec),
+    let memory = if spec.backend == "llm" {
+        let kv = crate::llm_context::kv_wanted();
+        let lanes = crate::llm_backend::configured_lane_count() as u32;
+        crate::gpu_yield::llm_memory_for(&spec.id, kv.slug(), lanes)
+            .or_else(|| crate::gpu_yield::llm_memory_of(&spec.id))
+    } else {
+        None
     };
+    let est_mb = memory.map_or_else(|| residency::estimated_peak_mb(spec), |m| crate::gpu_yield::smallest_load_mb(&m, gpu.unified));
     if est_mb == 0 {
         return Ok(());
     }
@@ -4620,10 +4879,39 @@ fn oom_evict_all_others(
 }
 
 #[cfg(test)]
-mod lifecycle_tests {
+pub(crate) mod lifecycle_tests {
     use super::*;
     use crate::backend::{ArtifactData, CancelToken, ProgressSink};
     use crate::registry::{Domain, FileSpec, ModelSpec};
+
+    #[cfg(feature = "llm")]
+    #[derive(Default)]
+    pub(super) struct PayloadGates {
+        pub(super) generate: Gate,
+        pub(super) artifact: Arc<Gate>,
+    }
+
+    #[cfg(feature = "llm")]
+    #[derive(Default)]
+    pub(super) struct Gate(Mutex<Option<(mpsc::Sender<String>, mpsc::Receiver<()>)>>);
+
+    #[cfg(feature = "llm")]
+    impl Gate {
+        fn arm(&self) -> (mpsc::Receiver<String>, mpsc::Sender<()>) {
+            let (entered, at_gate) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            *self.0.lock().unwrap() = Some((entered, wait));
+            (at_gate, release)
+        }
+
+        pub(super) fn hold(&self) {
+            let gate = self.0.lock().unwrap().take();
+            if let Some((entered, wait)) = gate {
+                let _ = entered.send(std::thread::current().name().unwrap_or_default().into());
+                let _ = wait.recv();
+            }
+        }
+    }
 
     #[test]
     fn unified_admission_reports_the_overage_without_bypassing_cuda() {
@@ -4790,7 +5078,7 @@ mod lifecycle_tests {
             let meta = &artifacts[&refs[0].id];
             assert!(meta.path.as_os_str().is_empty() && meta.bytes.is_some(), "kept in memory, no file named");
         }
-        let served = route_get(&shared, &refs[0].url);
+        let served = artifact_job(&shared, &refs[0].id).map(|read| read()).unwrap_or_else(|error| error);
         assert!(served.header.starts_with("HTTP/1.1 200"), "{}", served.header);
         assert_eq!(served.body, br#"{"text":"a picnic"}"#.to_vec(), "served from memory");
         purge_jobs(&shared, &[crate::jobs::EvictedJob { job_id: id.clone(), artifact_ids: vec![refs[0].id.clone()] }]);
@@ -4995,6 +5283,20 @@ mod lifecycle_tests {
         assert_eq!((backend.loads, backend.generates), (1, 0));
     }
 
+    fn route_get_request(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders) -> HttpServerResponse {
+        match authorize_get(shared, headers) {
+            Ok(()) => route_get(shared, &headers.path),
+            Err(refusal) => refusal,
+        }
+    }
+
+    fn route_post_request(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, body: &[u8]) -> HttpServerResponse {
+        match post_caller(shared, headers) {
+            Ok(caller) => post_payload(shared, &caller, headers, body),
+            Err(refusal) => refusal,
+        }
+    }
+
     fn fixture_shared(pins: &[&str]) -> Arc<ServiceShared> {
         fixture_shared_with_secret(pins, None)
     }
@@ -5006,7 +5308,7 @@ mod lifecycle_tests {
         fixture_shared_serving(pins, front_secret, false)
     }
 
-    fn fixture_shared_serving(
+    pub(crate) fn fixture_shared_serving(
         pins: &[&str],
         front_secret: Option<&str>,
         serve: bool,
@@ -5019,6 +5321,9 @@ mod lifecycle_tests {
             ..Default::default()
         };
         Arc::new(ServiceShared {
+            #[cfg(all(test, feature = "llm"))]
+            payload_gates: Default::default(),
+            local_use: Mutex::new(()),
             activity: crate::activity::ActivityGate::new(crate::activity::Config { enabled:false, supported:false, ..Default::default() }),
             claude: Default::default(),
             registry: Registry::default(),
@@ -5029,6 +5334,8 @@ mod lifecycle_tests {
             artifacts: Mutex::new(HashMap::new()),
             // A discrete card with no figures, whatever this machine has: the routes' answers
             // must not depend on the host (a Mac reports unified memory).
+            #[cfg(feature = "llm")]
+            llm_plans: Default::default(),
             gpu: GpuCache::fixed(crate::gpu::GpuInfo::default()),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
@@ -5058,9 +5365,250 @@ mod lifecycle_tests {
         })
     }
 
+    fn chat_fixture(model: &str, free: u64) -> Arc<ServiceShared> {
+        let mut shared = fixture_shared(&[model]);
+        let inner = Arc::get_mut(&mut shared).unwrap();
+        inner.registry = Registry::parse(&format!(r#"{{"models":[{{"id":"{model}","domain":"text","backend":"llm","available":true,"gated":false,"files":[]}}]}}"#)).unwrap();
+        inner.gpu = GpuCache::fixed(crate::gpu::GpuInfo { vram_free_mb: Some(free), ..Default::default() });
+        inner.models.get_mut().unwrap().insert(model.into(), ModelTrack::Ready);
+        shared
+    }
+
+    #[test]
+    fn control_local_use_updates_ui_reserve_and_respects_ai_first() {
+        use crate::{activity::ComputeMode, gpu_yield as gy};
+        let _guard = crate::llm_context::test_settings();
+        let prev = gy::set_ui_reserve_state_for_test(0, 0, false);
+        let shared = chat_fixture("reserve-chat", 8192);
+        let post = |body: &[u8], code, reserve| {
+            let r = control_local_use(&shared, body);
+            assert!(r.header.starts_with(&format!("HTTP/1.1 {code} ")), "{}", r.header);
+            assert_eq!(gy::ui_reserve_mb(), reserve);
+        };
+        post(br#"{"use":"","ui_reserve_mb":1536}"#, 200, 1536);
+        post(br#"{"use":"","ui_reserve_mb":1024}"#, 200, 1536);
+        post(br#"{"mode":"ai-first","ui_reserve_mb":1536}"#, 200, 0);
+        post(br#"{"use":"","ui_reserve_mb":2048}"#, 200, 0);
+        assert_eq!(shared.activity.mode(), ComputeMode::AiFirst);
+        gy::set_ui_reserve_mb(1536);
+        assert_eq!(gy::ui_reserve_mb(), 0);
+        post(br#"{"mode":"auto"}"#, 200, 1536);
+        post(br#"{"mode":"ai-first","ui_reserve_mb":"bad"}"#, 400, 1536);
+        assert_eq!(shared.activity.mode(), ComputeMode::Automatic);
+
+        gy::set_ui_reserve_state_for_test(2048, 0, false);
+        post(br#"{"use":"","ui_reserve_mb":1536}"#, 200, 2048);
+        post(br#"{"mode":"ai-first"}"#, 200, 0);
+        post(br#"{"mode":"auto"}"#, 200, 2048);
+        post(br#"{"use":"","ui_reserve_mb":1536}"#, 200, 2048);
+        gy::restore_ui_reserve_state_for_test(prev);
+    }
+
+    #[test]
+    fn set_llm_context_formats_caller_and_change_audit_line() {
+        let mut caller = makepad_network::fleet::front::Caller::local();
+        caller.client_id = "operator".into();
+        caller.app = Some("hub-control".into());
+        assert_eq!(context_change_log_line(&caller, Some(0), None, true, Some("job-48")),
+            "[llm-context] change by hub-control (operator): context=auto, kv=unchanged, apply=true (job=job-48)");
+        caller.app = None;
+        assert_eq!(context_change_log_line(&caller, Some(32768), Some(crate::llm_context::KvPrecision::Q8), false, None),
+            "[llm-context] change by operator: context=32768, kv=q8, apply=false");
+    }
+
+    fn relief_test_memory(model: &str, loaded: u32) -> crate::gpu_yield::LlmMemory {
+        use crate::llm_context as lc;
+        crate::gpu_yield::LlmMemory {
+            model: model.into(), model_max_context: 262_144, context: loaded, kv: lc::kv_wanted().slug().into(),
+            lanes: crate::llm_backend::configured_lane_count() as u32,
+            weights_mb: 15_702, state_mb: 789, activations_mb: 512, kv_mb: 1156,
+            kv_bytes_per_token: 36_992, mask_bytes_per_token: 1_024, runtime_scratch_mb: 0,
+            load_cost_mb: Some(18_600), measured: true,
+        }
+    }
+
+    #[test]
+    fn relief_grows_auto_fitted_model_toward_model_max_without_override() {
+        use crate::{gpu_yield as gy, llm_context as lc};
+        let _guard = lc::test_settings();
+        let model = "relief-chat";
+        let loaded = 32_768;
+        let memory = relief_test_memory(model, loaded);
+        let to = 114_688u32;
+        let free = memory.fixed_mb_for(false) + (u64::from(to) * memory.bytes_per_lane_token()).div_ceil(1 << 20)
+            + gy::effective_reserve_mb(false) + gy::HEADROOM_MB + gy::RELIEF_HYSTERESIS_MB - memory.load_cost_mb.unwrap();
+        let shared = chat_fixture(model, free);
+        gy::note_llm_memory(memory);
+        lc::set_loaded(loaded);
+        let backend: Box<dyn ContentBackend> = Box::new(ResidentFixture { resident: true, loads: 0, generates: 0 });
+        let generation = lc::generation();
+        let backends = HashMap::from([(model.to_string(), backend)]);
+        let report = run_relief_with(&shared, &backends, &shared.gpu.get());
+        let ceiling = gy::context_ceiling();
+        gy::clear_pending_hold();
+        gy::reset_relief_state();
+        gy::set_context_ceiling(None);
+        lc::set_loaded(0);
+        assert_eq!(ceiling, Some(to), "{report}");
+        assert_eq!(lc::generation(), generation + 1);
+        assert_eq!(shared.jobs.with(|s| s.pending_count()), 1, "{report}");
+    }
+
+    #[test]
+    fn run_relief_respects_hysteresis_and_holds_relief_target_on_queue() {
+        use crate::{backend::ModelControl, gpu_yield as gy, llm_context as lc};
+        let _guard = lc::test_settings();
+        let model = "relief-target-chat";
+        let loaded = 32_768;
+        let to = 114_688;
+        let upper = 262_144;
+        let memory = relief_test_memory(model, loaded);
+        let held = memory.load_cost_mb.unwrap();
+        let reserve = gy::effective_reserve_mb(false);
+        let room_at = |window| memory.fixed_mb_for(false)
+            + (u64::from(window) * memory.bytes_per_lane_token()).div_ceil(1 << 20)
+            + reserve + gy::HEADROOM_MB - held;
+        let free_after_relief = room_at(to) + gy::RELIEF_HYSTERESIS_MB;
+        let shared = chat_fixture(model, room_at(loaded) + 200);
+        set_model_state(&shared, model, ModelTrack::Loaded);
+        gy::note_llm_memory(memory.clone());
+        crate::control::set_model_mb(model, Some(held));
+        gy::reset_relief_state();
+        gy::clear_pending_hold();
+        gy::set_context_ceiling(None);
+        lc::set_loaded(loaded);
+        let generation = lc::generation();
+        let backend: Box<dyn ContentBackend> = Box::new(ResidentFixture { resident: true, loads: 0, generates: 0 });
+        let backends = HashMap::from([(model.to_string(), backend)]);
+
+        let report = run_relief_with(&shared, &backends, &shared.gpu.get());
+        assert_eq!(lc::loaded(), Some(loaded), "{report}");
+        assert_eq!(lc::generation(), generation, "{report}");
+        assert_eq!(shared.jobs.with(|s| s.pending_count()), 0, "{report}");
+
+        shared.gpu.note_fresh_free_mb(free_after_relief);
+        let report = run_relief_with(&shared, &backends, &shared.gpu.get());
+        assert_eq!(gy::context_ceiling(), Some(to), "{report}");
+        assert_eq!(lc::generation(), generation + 1);
+        shared.jobs.with(|s| {
+            assert_eq!(s.pending_count(), 1, "{report}");
+            let id = s.take_next().unwrap();
+            assert!(matches!(s.take_params(&id), Some(JobParams::Generate(p)) if p.control == Some(ModelControl::Load)));
+        });
+        assert_eq!(gy::settle_ceiling_detailed(131_072, upper), gy::SettledCeiling { window: to, source: Some(gy::FitSource::Relief) });
+
+        // Page in the larger KV cache with the same total desktop budget.
+        let new_kv = (u64::from(to) * u64::from(memory.lanes) * memory.kv_bytes_per_token).div_ceil(1 << 20);
+        let delta = new_kv - memory.kv_mb;
+        let recorded = gy::note_llm_memory(gy::LlmMemory {
+            context: to, kv_mb: new_kv, load_cost_mb: Some(held + delta), ..memory
+        });
+        lc::set_loaded(to);
+        let free = free_after_relief - delta;
+        shared.gpu.note_fresh_free_mb(free);
+        let view = || json::parse(llm_context_json(&shared).as_bytes()).unwrap();
+        assert!(view().get("fit").and_then(Value::as_u64).unwrap() < u64::from(to), "stale held MB understates the new fit");
+        crate::control::set_model_mb(model, recorded.load_cost_mb);
+        let info = view();
+        let fit = gy::context_fit(&recorded, free, held + delta, false, lc::MIN_CONTEXT).unwrap();
+        assert!(fit >= to);
+        assert_eq!(info.get("loaded").and_then(Value::as_u64), Some(u64::from(to)));
+        assert_eq!(info.get("fit").and_then(Value::as_u64), Some(u64::from(fit)));
+
+        // A closed admission gate rejects a further grow. Its proposed target
+        // must leave neither a pending hold nor a change in burst history.
+        shared.jobs.with(|s| s.set_activity(shared.activity.clone()));
+        let _ = shared.activity.set_quiet("relief-test");
+        let prev_state = gy::relief_state_snapshot();
+        let prev_ceiling = gy::context_ceiling();
+        let jobs = shared.jobs.with(|s| s.pending_count());
+        shared.gpu.note_fresh_free_mb(free + 8_192);
+        let generation = lc::generation();
+        let refused = run_relief_with(&shared, &backends, &shared.gpu.get());
+        assert!(refused.contains("not queued"), "{refused}");
+        assert_eq!(shared.jobs.with(|s| s.pending_count()), jobs);
+        assert_eq!(gy::relief_state_snapshot(), prev_state);
+        assert_eq!(gy::context_ceiling(), prev_ceiling);
+        assert_eq!(gy::settle_ceiling_detailed(upper, upper), gy::SettledCeiling { window: upper, source: None });
+        assert_eq!(lc::generation(), generation);
+
+        gy::hold_ceiling(49_152);
+        let prev_ceiling = gy::context_ceiling();
+        let refused = run_relief_with(&shared, &backends, &shared.gpu.get());
+        assert!(refused.contains("not queued"), "{refused}");
+        assert_eq!(lc::generation(), generation);
+        assert_eq!(gy::relief_state_snapshot(), prev_state);
+        assert_eq!(gy::context_ceiling(), prev_ceiling);
+        assert_eq!(gy::settle_ceiling_detailed(upper, upper), gy::SettledCeiling {
+            window: 49_152, source: Some(gy::FitSource::YieldHold),
+        });
+        crate::control::set_model_mb(model, None);
+        lc::set_loaded(0);
+        gy::set_context_ceiling(None);
+        gy::clear_pending_hold();
+        gy::reset_relief_state();
+    }
+
+    #[test]
+    fn post_llm_context_null_clears_override_to_auto_fit() {
+        let _guard = crate::llm_context::test_settings();
+        let dir = std::env::temp_dir().join(format!("hub-post-context-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let model = "unknown-context-chat";
+        let mut shared = chat_fixture(model, 96_000);
+        Arc::get_mut(&mut shared).unwrap().cache_dir = dir.clone();
+        crate::gpu_yield::note_llm_plan(crate::gpu_yield::LlmMemory {
+            model: model.into(), kv: crate::llm_context::kv_wanted().slug().into(),
+            lanes: crate::llm_backend::configured_lane_count() as u32, ..Default::default()
+        });
+        let post = |body| {
+            let response = route_post(&shared, "/llm/context", body);
+            assert!(response.header.starts_with("HTTP/1.1 200"), "{}", response.header);
+            json::parse(&response.body).unwrap()
+        };
+        let info = post(br#"{"context":32768}"#);
+        assert_eq!(info.get("configured").and_then(Value::as_u64), Some(32768));
+        assert_eq!(info.get("model_max"), Some(&Value::Null));
+        let control = json::parse(control_json(&shared).as_bytes()).unwrap();
+        assert_eq!(control.get("llm").unwrap().get("context_max"), Some(&Value::Null));
+        assert_eq!(health_json(&shared).llm_context_max, None);
+        assert!(dir.join("llm-context.json").is_file());
+        let rev = crate::llm_context::generation();
+        assert_eq!(post(br#"{"context":null}"#).get("configured"), Some(&Value::Null));
+        assert_eq!(crate::llm_context::generation(), rev + 1);
+        assert!(!dir.join("llm-context.json").exists());
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn get_llm_context_and_control_expose_model_max_and_fit_without_32k_or_64k_defaults() {
+        let _guard = crate::llm_context::test_settings();
+        let model = "planned-chat";
+        let shared = chat_fixture(model, 96_000);
+        let before = json::parse(llm_context_json(&shared).as_bytes()).unwrap();
+        assert_eq!(before.get("model_max"), Some(&Value::Null));
+        assert_eq!(before.get("fit"), Some(&Value::Null));
+        crate::gpu_yield::note_llm_plan(crate::gpu_yield::LlmMemory {
+            model: model.into(), model_max_context: 262_144, lanes: crate::llm_backend::configured_lane_count() as u32,
+            kv: crate::llm_context::kv_wanted().slug().into(), weights_mb: 5800, state_mb: 300,
+            activations_mb: 512, kv_bytes_per_token: 17408, mask_bytes_per_token: 1024, ..Default::default()
+        });
+        let info = json::parse(llm_context_json(&shared).as_bytes()).unwrap();
+        assert_eq!(info.get("configured"), Some(&Value::Null));
+        assert_eq!(info.get("model_max").and_then(Value::as_u64), Some(262_144));
+        assert_eq!(info.get("fit"), info.get("model_max"));
+        assert!(info.get("max").is_none());
+        let control = json::parse(control_json(&shared).as_bytes()).unwrap();
+        let llm = control.get("llm").unwrap();
+        assert_eq!(llm.get("context"), info.get("fit"));
+        assert_eq!(llm.get("context_max"), info.get("model_max"));
+        assert_eq!(llm.get("context_options").and_then(Value::as_arr).unwrap().last().and_then(Value::as_u64), Some(262_144));
+        assert_eq!(health_json(&shared).llm_context_max, Some(262_144));
+    }
+
     /// `front`: (secret, client id) as the TLS front would stamp them (a
     /// node credential: no admin; client `wm` proved this machine's own key).
-    fn request_headers(verb: &str, path: &str, front: Option<(&str, &str)>) -> HttpServerHeaders {
+    pub(crate) fn request_headers(verb: &str, path: &str, front: Option<(&str, &str)>) -> HttpServerHeaders {
         let mut lines = vec![
             format!("{verb} {path} HTTP/1.1\r\n"),
             "Host: 127.0.0.1\r\n".to_string(),
@@ -5332,10 +5880,92 @@ mod lifecycle_tests {
                 assert!(answer.starts_with("HTTP/1.1 200"), "an app dialling {host}: {answer}");
             }
             assert!(get(&format!("Host: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\n")).starts_with("HTTP/1.1 200"));
+            let body = r#"{"model":"unloaded-room-test","domain":"chat","max_tokens":64,"chat_messages":[{"role":"user","text":"look","images":[{"key":"0000000000000001","w":1,"h":1}]}]}"#;
+            let answer = exchange(&format!("POST /chat/room HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
+            let (_, json) = answer.split_once("\r\n\r\n").expect("the room worker must answer the original HTTP request");
+            let room = ChatMeasure::deserialize_json(json).expect("room must accept a job body with picture descriptors");
+            assert_eq!((room.sees.as_str(), room.reserve, room.fits), ("unknown", 64, None), "an unloaded model must still report its reserve without guessing a fit");
             let app = bye(&format!("Host: localhost:{port}\r\n"));
             assert!(app.starts_with("HTTP/1.1 200") && app.contains("\"cancelled\":1"), "an app's /bye: {app}");
             assert_eq!(held(), 0, "the app's /bye ran");
         });
+    }
+
+    /// While a picture validates and an artifact reads, each on its own worker, light routes
+    /// answer; a bye waits behind the generate whose lease it must see.
+    #[cfg(feature = "llm")]
+    #[test]
+    fn health_answers_during_picture_validation_and_artifact_read_and_bye_follows_generate() {
+        let mut shared = fixture_shared(&[]);
+        Arc::get_mut(&mut shared).unwrap().registry = Registry::parse(r#"{"models":[{
+            "id":"picture-chat","domain":"text","backend":"llm","available":true,"gated":false,
+            "files":[{"repo":"","path":"","role":"mmproj","cache_as":"tower","local":true,"optional":true}]
+        }]}"#).expect("the fixture must describe a chat model that admits pictures");
+
+        let png = crate::testpattern::encode_png_rgb8(&[1, 2, 3], 1, 1).unwrap();
+        let path = std::env::temp_dir().join(format!("hub-route-artifact-{}", std::process::id()));
+        std::io::Write::write_all(&mut fs::File::create_new(&path).unwrap(), &png).unwrap();
+        let digest = crate::sha256::sha256_hex(&png);
+        shared.artifacts.lock().unwrap().insert("picture".into(), ArtifactMeta {
+            path: path.clone(), bytes: None, content_type: "image/png".into(),
+            sha256: digest.clone(), byte_len: png.len() as u64,
+        });
+        let (validating, allow_generate) = shared.payload_gates.generate.arm();
+        let (reading, allow_read) = shared.payload_gates.artifact.arm();
+        let (tx, rx) = mpsc::channel();
+        let route_shared = shared.clone();
+        let route = std::thread::spawn(move || route_loop(route_shared, rx, ([127, 0, 0, 1], 0).into()));
+        let request = |path: &str, body: Option<Vec<u8>>| {
+            let (reply, receive) = mpsc::channel();
+            let message = match body {
+                Some(body) => HttpServerRequest::Post { headers: request_headers("POST", path, None), body, response: reply },
+                None => HttpServerRequest::Get { headers: request_headers("GET", path, None), response_sender: reply },
+            };
+            tx.send(message).unwrap();
+            receive
+        };
+        let with_image = |image: &str| format!(
+            r#"{{"model":"picture-chat","origin_key":"chat","chat_messages":[{{"role":"user","text":"describe","images":["{image}"]}}]}}"#
+        ).into_bytes();
+        let encode = |bytes: &[u8]| String::from_utf8(makepad_base64::base64_encode(bytes, &makepad_base64::BASE64_STANDARD)).unwrap();
+        let generate = request("/generate", Some(with_image(&encode(&png))));
+        assert_eq!(validating.recv().unwrap(), "generate-payload", "picture validation must run on its own worker");
+        let artifact = request("/artifact/picture", None);
+        assert_eq!(reading.recv().unwrap(), "artifact-body", "the disk read must run independently of picture validation");
+        let bye = request("/bye", Some(br#"{"origin_key":"chat"}"#.to_vec()));
+        let health = request("/health", None).recv().expect("health must answer with both payload workers held");
+        assert!(health.header.starts_with("HTTP/1.1 200 OK"), "health must succeed with both payload workers held");
+        assert!(matches!(generate.try_recv(), Err(mpsc::TryRecvError::Empty)), "the picture request must still be validating");
+        assert!(matches!(artifact.try_recv(), Err(mpsc::TryRecvError::Empty)), "the artifact response must still be waiting for its read");
+        assert!(matches!(bye.try_recv(), Err(mpsc::TryRecvError::Empty)), "bye must wait for the earlier generate to register its lease");
+
+        // Discard unlinks the file. A GET already admitted must still serve its open handle.
+        fs::remove_file(&path).unwrap();
+        allow_read.send(()).unwrap();
+        let check_reply = |actual: HttpServerResponse, expected: HttpServerResponse, property: &str| {
+            assert_eq!(actual.header, expected.header, "{property}: response headers");
+            assert_eq!(actual.body, expected.body, "{property}: response body");
+        };
+        check_reply(artifact.recv().unwrap(), artifact_response("image/png", &digest, png.clone()),
+            "the open artifact must survive removal and retain its digest and bytes");
+        allow_generate.send(()).unwrap();
+        check_reply(generate.recv().unwrap(), ok_json(GenerateResponseJson {
+            job_id: Some("job-1".into()), error: None, think_open: Some(false),
+        }.serialize_json()), "a valid picture must receive the usual generate response");
+        check_reply(bye.recv().unwrap(), ok_json(ByeResponseJson { cancelled: 1 }.serialize_json()),
+            "bye must report the job created by the held generate");
+        assert_eq!(shared.jobs.with(|store| store.status_json("job-1").unwrap().state), "cancelled",
+            "bye must actually cancel the newly leased job");
+
+        let broken = &png[..8]; // PNG signature, but no decodable frame.
+        let b64 = encode(broken);
+        let reason = crate::vision_backend::decode_image_rgb8(broken).unwrap_err();
+        let refused = request("/generate", Some(with_image(&b64))).recv().unwrap();
+        check_reply(refused, error_json(400, format!("picture {}: {reason}", chat_image_key(&b64))),
+            "an undecodable picture must retain its validation 400 and decoder message");
+        assert_eq!(shared.jobs.with(|store| store.pending_count()), 0, "a refused picture must never enqueue a job");
+        drop(tx);
+        route.join().expect("the route loop must drain and join its workers");
     }
 
     /// The gate covers the websocket upgrade, and a request the fleet front stamped keeps the
@@ -5402,10 +6032,10 @@ mod lifecycle_tests {
     }
 
     /// The blob endpoint's answer for `caller` (no peer ticket sent).
-    fn blob_status(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::front::Caller) -> String {
+    fn blob_status(shared: &Arc<ServiceShared>, pool: Option<&RouteWorker>, caller: &makepad_network::fleet::front::Caller) -> String {
         let headers = request_headers("GET", &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)), None);
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::peer_serve::route_blob(shared, &headers, caller, tx);
+        crate::peer_serve::route_blob(shared, pool, &headers, caller, tx);
         let response = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("a response");
         response.header.lines().next().unwrap_or("").to_string()
     }
@@ -5413,21 +6043,24 @@ mod lifecycle_tests {
     #[test]
     fn paired_phones_fetch_blobs_without_a_peer_ticket_nodes_still_need_one() {
         let shared = fixture_shared_serving(&[], Some("front-secret"), true);
+        let pool = shared.peer.start_pool();
+        let status = |caller| blob_status(&shared, pool.as_ref(), caller);
         let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
         let lan = makepad_network::fleet::front::Caller { client_id: "someone".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
         let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
         // The paired phone passes the gate and reaches the digest allow-list
         // (nothing verified in this fixture): 404, not 401/403.
-        assert!(blob_status(&shared, &phone).contains("404"), "{}", blob_status(&shared, &phone));
+        assert!(status(&phone).contains("404"), "{}", status(&phone));
         // Everyone else (the admin Mac included) still needs the node-to-node
         // transfer secret and a ticket: refused before the allow-list (this fixture has no secret).
         for caller in [&lan, &node] {
-            let status = blob_status(&shared, caller);
+            let status = status(caller);
             assert!(status.contains("401") || status.contains("403"), "{status}");
         }
+        pool.unwrap().close();
         // An operator who turned serving off turns it off for paired phones too.
         let off = fixture_shared_serving(&[], Some("front-secret"), false);
-        assert!(blob_status(&off, &phone).contains("403"));
+        assert!(blob_status(&off, off.peer.start_pool().as_ref(), &phone).contains("403"));
         // Without a front stamp (no fleet credential) nothing gets in.
         let headers = request_headers("GET", &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)), None);
         assert!(caller_of(&shared, &headers).is_none());
@@ -5706,6 +6339,40 @@ mod lifecycle_tests {
             .register("job-3", origin3, now.saturating_sub(60_000));
         assert_eq!(reap_lapsed_leases(&shared), 1);
         assert!(shared.leases.lock().unwrap().is_empty());
+
+        let finished_job = || {
+            shared.jobs.with(|store| {
+                use crate::jobs::{JobClass, JobParams, QueuePolicy};
+                let id = store.submit_as(
+                    JobParams::Generate(crate::jobs::tests::generate_params("m")),
+                    QueuePolicy::Queue,
+                    JobClass::Chat,
+                ).expect("submit");
+                assert_eq!(store.take_next_of(JobClass::Chat).as_ref(), Some(&id));
+                store.finish(&id, Vec::new());
+                id
+            })
+        };
+        let id = finished_job();
+        let origin = Origin { node_key: "origin-c".into(), epoch: 1 };
+        shared.leases.lock().unwrap().register(&id, origin, now.saturating_sub(60_000));
+        assert_eq!(
+            reap_lapsed_leases(&shared), 0,
+            "a finished job's leftover lease is released, not cancelled"
+        );
+        assert!(shared.leases.lock().unwrap().is_empty(), "and its row is gone");
+        assert_eq!(
+            shared.jobs.with(|store| store.status_json(&id)).unwrap().state, "done",
+            "the finished job keeps its result"
+        );
+
+        let id = finished_job();
+        let origin = Origin { node_key: "origin-d".into(), epoch: 1 };
+        shared.leases.lock().unwrap().register(&id, origin, now);
+        let bye = route_post(&shared, "/bye", br#"{"origin_key":"origin-d"}"#);
+        let body = String::from_utf8(bye.body).unwrap();
+        assert!(body.contains("\"cancelled\":0"), "{body}");
+        assert!(shared.leases.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -5933,11 +6600,11 @@ fn json_response(status: u16, json: String) -> HttpServerResponse {
     HttpServerResponse::new(header, body)
 }
 
-fn ok_json(json: String) -> HttpServerResponse {
+pub(crate) fn ok_json(json: String) -> HttpServerResponse {
     json_response(200, json)
 }
 
-fn error_json(status: u16, message: String) -> HttpServerResponse {
+pub(crate) fn error_json(status: u16, message: String) -> HttpServerResponse {
     json_response(status, ErrorJson { error: message }.serialize_json())
 }
 

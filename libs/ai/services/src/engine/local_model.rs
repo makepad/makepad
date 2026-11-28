@@ -10,12 +10,12 @@
 //! block the model reads like any other message. A changed system prompt
 //! travels the same way.
 
-use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
+use crate::engine::{Model, ModelEvent, ModelImage, PictureRoom, ToolDefinition};
 use crate::state::{hub_claude_pick, ProviderChoice, ProviderRow, HUB_CLAUDE_MODEL};
 use makepad_ai_hub::hub::REQUIRED_MODEL_ENV;
-use makepad_ai_hub::hub_chat::{ChatRoute, HubChatConfig, HubChatSession, HubOffer};
+use makepad_ai_hub::hub_chat::{ChatReach, ChatRoute, HubChatConfig, HubChatSession, HubOffer};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig, ToolSpec};
-use makepad_ai_hub::providers::provider::ToolImage;
+use makepad_ai_hub::providers::provider::{validate_tool_images, ToolImage, MAX_TOOL_IMAGES};
 use makepad_platform::thread::SignalToUI;
 use makepad_strict_json as json;
 use std::path::{Path, PathBuf};
@@ -27,9 +27,7 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
 /// The environment override for the local model file.
 pub const LOCAL_MODEL_ENV: &str = "MAKEPAD_AI_CHAT_MODEL";
-const MAX_CONTEXT: u32 = 32768;
 const MAX_NEW_TOKENS: usize = 768;
-const MIN_REMAINING_CONTEXT: usize = 256;
 
 /// Where the local weights are, or `None` when this machine has none.
 /// Independent of the working directory — an app launched from a copied
@@ -368,6 +366,7 @@ pub struct LocalModel {
     /// The Claude model a turn on the hub's Claude runs (`hub:claude-cli:<id>`).
     claude_model: Option<String>,
     session: Option<HubChatSession>,
+    input_images: Vec<ModelImage>,
     system: String,
     tools: Vec<ToolDefinition>,
     /// Tools/system changed after the session started: rendered into the
@@ -388,6 +387,7 @@ impl LocalModel {
             hub_model: None,
             claude_model: None,
             session: None,
+            input_images: Vec::new(),
             system: String::new(),
             tools: Vec::new(),
             pending_update: None,
@@ -420,9 +420,7 @@ impl LocalModel {
 
     fn start_session(&mut self) {
         let mut llm = LocalLlmConfig::new(self.model_path.clone().unwrap_or_default());
-        llm.max_context = MAX_CONTEXT;
         llm.max_new_tokens = MAX_NEW_TOKENS;
-        llm.min_remaining_context = MIN_REMAINING_CONTEXT;
         let tools = self
             .tools
             .iter()
@@ -433,6 +431,7 @@ impl LocalModel {
         // goes by small steps instead of reasoning for minutes before the first.
         let thinking = (self.hub_model.as_deref() != Some(crate::state::HUB_CLAUDE_MODEL)).then_some(false);
         self.session = Some(HubChatSession::start(HubChatConfig {
+            reach: ChatReach::Lan,
             llm,
             // Exactly this model when one is named; else the machine's election.
             preferred_model: self.hub_model.clone().or_else(|| std::env::var(REQUIRED_MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty())),
@@ -451,8 +450,14 @@ impl LocalModel {
     /// while the calls ran rides in with the first result (the same block a
     /// user turn would carry).
     fn send_round(&mut self) {
-        let Some(mut results) = self.round.take_complete() else { return };
+        let Some(results) = self.round.take_complete() else { return };
         let Some(session) = &self.session else { return };
+        let mut results: Vec<_> = results.into_iter().map(|(mut text, is_error, images)| {
+            if let Err(why) = attach_to_session(session, images) {
+                text.push_str(&format!("\n[the pictures of this result did not reach you: {why}]"));
+            }
+            (text, is_error)
+        }).collect();
         if let Some(first) = results.first_mut() {
             first.0 = with_update(self.pending_update.take(), &first.0);
         }
@@ -485,10 +490,12 @@ impl LocalModel {
 /// before that, and calls may finish in any order.
 #[derive(Default)]
 struct ToolRound {
-    calls: Vec<(String, Option<(String, bool)>)>,
+    calls: Vec<(String, Option<RoundAnswer>)>,
     /// How many answers the session waits for; `None` while the model is still replying.
     owed: Option<usize>,
 }
+
+type RoundAnswer = (String, bool, Vec<ModelImage>);
 
 impl ToolRound {
     fn called(&mut self, call_id: &str) {
@@ -500,14 +507,14 @@ impl ToolRound {
     }
 
     /// An answer to a call of another round (a stopped turn's) is dropped.
-    fn answer(&mut self, call_id: &str, text: &str, is_error: bool) {
+    fn answer(&mut self, call_id: &str, text: &str, is_error: bool, images: Vec<ModelImage>) {
         if let Some((_, slot)) = self.calls.iter_mut().find(|(id, _)| id == call_id) {
-            *slot = Some((text.to_string(), is_error));
+            *slot = Some((text.to_string(), is_error, images));
         }
     }
 
     /// The results in call order, once every call the reply made has one.
-    fn take_complete(&mut self) -> Option<Vec<(String, bool)>> {
+    fn take_complete(&mut self) -> Option<Vec<RoundAnswer>> {
         let owed = self.owed.filter(|owed| *owed > 0)?;
         if self.calls.len() < owed || self.calls.iter().any(|(_, answer)| answer.is_none()) {
             return None;
@@ -523,6 +530,22 @@ fn with_update(update: Option<String>, text: &str) -> String {
         Some(u) => format!("{}\n{}", u.trim_end(), text),
         None => text.to_string(),
     }
+}
+
+fn tool_image(image: ModelImage) -> ToolImage {
+    ToolImage { label: image.label, png: image.png }
+}
+
+fn route_picture_room(route: Option<&ChatRoute>) -> PictureRoom {
+    match route {
+        Some(ChatRoute::InProcess { .. }) => PictureRoom::NoPictures,
+        _ => PictureRoom::Fits(MAX_TOOL_IMAGES),
+    }
+}
+
+fn attach_to_session(session: &HubChatSession, images: Vec<ModelImage>) -> Result<(), String> {
+    if images.is_empty() { return Ok(()); }
+    session.attach_images(images.into_iter().map(tool_image).collect())
 }
 
 impl Model for LocalModel {
@@ -557,7 +580,6 @@ impl Model for LocalModel {
 
     fn send_user(&mut self, text: &str, dynamic_context: &str) {
         if self.session.is_none() {
-            // Without pictures, the first user line starts the session.
             self.start_session();
         }
         let Some(session) = &self.session else {
@@ -576,6 +598,10 @@ impl Model for LocalModel {
         }
         turn.push_str(text);
         self.round = ToolRound::default();
+        if let Err(why) = attach_to_session(session, std::mem::take(&mut self.input_images)) {
+            self.queued.push(ModelEvent::Error(why));
+            return;
+        }
         session.send_user_turn(turn);
     }
 
@@ -585,20 +611,30 @@ impl Model for LocalModel {
         true
     }
 
+    fn picture_room(&self) -> PictureRoom {
+        route_picture_room(self.session.as_ref().and_then(HubChatSession::route).as_ref())
+    }
+
+    fn admit_images(&self, images: &[ModelImage]) -> Result<(), String> {
+        if !images.is_empty() && self.picture_room() == PictureRoom::NoPictures {
+            return Err("this model cannot look at pictures".into());
+        }
+        validate_tool_images(&images.iter().cloned().map(tool_image).collect::<Vec<_>>())
+    }
+
     fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
-        if images.is_empty() { return Ok(()); }
-        if self.session.is_none() { self.start_session(); }
-        self.session.as_ref().ok_or("the local model is not loaded")?.attach_images(
-            images.into_iter().map(|image| ToolImage { label: image.label, png: image.png }).collect(),
-        )
+        self.admit_images(&images)?;
+        self.input_images = images;
+        Ok(())
     }
 
     fn send_tool_result(&mut self, call_id: &str, text: &str, is_error: bool) {
-        self.round.answer(call_id, text, is_error);
+        self.round.answer(call_id, text, is_error, std::mem::take(&mut self.input_images));
         self.send_round();
     }
 
     fn cancel(&mut self) {
+        self.input_images.clear();
         if let Some(session) = &self.session {
             session.cancel();
         }
@@ -606,6 +642,7 @@ impl Model for LocalModel {
     }
 
     fn reset(&mut self) {
+        self.input_images.clear();
         // The context is append-only; a fresh conversation is a fresh
         // session (the hub election keeps the weights resident where it can).
         // A model never started stays unstarted: the next line starts it.
@@ -615,9 +652,15 @@ impl Model for LocalModel {
     }
 
     fn poll(&mut self) -> Vec<ModelEvent> {
+        let events = self.session.as_ref().map(HubChatSession::poll).unwrap_or_default();
+        self.model_events(events)
+    }
+}
+
+impl LocalModel {
+    pub(super) fn model_events(&mut self, events: Vec<ChatEvent>) -> Vec<ModelEvent> {
         let mut out = std::mem::take(&mut self.queued);
-        let Some(session) = &self.session else { return out };
-        for event in session.poll() {
+        for event in events {
             match event {
                 ChatEvent::Loading { phase, fraction } => out.push(ModelEvent::Loading { phase, fraction }),
                 ChatEvent::Ready { .. } => out.push(ModelEvent::Ready),
@@ -672,13 +715,13 @@ mod tests {
     fn a_tool_round_keeps_answers_that_come_before_the_reply_ends() {
         let mut round = ToolRound::default();
         round.called("l1");
-        round.answer("l1", "one", false);
+        round.answer("l1", "one", false, Vec::new());
         round.called("l2");
         assert_eq!(round.take_complete(), None, "the reply is still going");
         round.owed(2);
         assert_eq!(round.take_complete(), None, "l2 has no answer");
-        round.answer("l2", "two", true);
-        assert_eq!(round.take_complete(), Some(vec![("one".to_string(), false), ("two".to_string(), true)]));
+        round.answer("l2", "two", true, Vec::new());
+        assert_eq!(round.take_complete(), Some(vec![("one".to_string(), false, Vec::new()), ("two".to_string(), true, Vec::new())]));
         assert_eq!(round.take_complete(), None, "a round goes out once");
     }
 
@@ -689,11 +732,16 @@ mod tests {
         round.called("l1");
         round.called("l2");
         round.owed(2);
-        round.answer("l2", "second", false);
-        round.answer("old", "a stopped turn's", false);
+        let image = |label: &str| ModelImage { label: label.into(), png: vec![1].into() };
+        round.answer("l2", "second", false, vec![image("second picture")]);
+        round.answer("old", "a stopped turn's", false, vec![image("old picture")]);
         assert_eq!(round.take_complete(), None);
-        round.answer("l1", "first", false);
-        assert_eq!(round.take_complete(), Some(vec![("first".to_string(), false), ("second".to_string(), false)]));
+        round.answer("l1", "first", false, Vec::new());
+        assert_eq!(
+            round.take_complete(),
+            Some(vec![("first".into(), false, Vec::new()), ("second".into(), false, vec![image("second picture")])]),
+            "an early result keeps its picture in call order and a stopped turn contributes none"
+        );
     }
 
     #[test]
@@ -793,6 +841,9 @@ mod tests {
         let claude = ChatRoute::Fleet { base: "https://192.0.2.91:8124".into(), model: HUB_CLAUDE_MODEL.into() };
         assert_eq!(route_label(&claude), "AI hub · 91 · Claude Code");
         assert_eq!(makepad_ai_hub::claude_cli::MODEL_ID, HUB_CLAUDE_MODEL);
+        assert_eq!(route_picture_room(Some(&route)), PictureRoom::Fits(MAX_TOOL_IMAGES), "the elected fleet node keeps its current picture room");
+        assert_eq!(route_picture_room(Some(&ChatRoute::MachineNode { port: 8123 })), PictureRoom::Fits(MAX_TOOL_IMAGES), "a loopback node also takes pictures");
+        assert_eq!(route_picture_room(Some(&ChatRoute::InProcess { model: "chat.gguf".into() })), PictureRoom::NoPictures, "the text-only in-process worker must leave pictures attached");
     }
 
     fn offer(base: &str, model: &str, backend: &str) -> HubOffer {

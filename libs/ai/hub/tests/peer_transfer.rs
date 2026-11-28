@@ -939,40 +939,25 @@ fn request_named_peer_sources_outside_the_fleet_roster_are_ignored() {
 }
 
 #[test]
-fn concurrent_serves_beyond_the_bound_get_503() {
-    let bytes = test_bytes(128 * 1024);
+fn concurrent_serves_beyond_the_bound_queue() {
+    let bytes = test_bytes(32);
     let digest = makepad_ai_hub::sha256::sha256_hex(&bytes);
     let registry = Registry::parse(&registry_json(&digest, bytes.len() as u64, None)).unwrap();
-    let spec = registry.find("peer-model").unwrap().files[0].clone();
-
-    // max_serves 1 + 0.25 MB/s pacing: the second request holds the single
-    // slot for ~0.5s of pacing, during which a third gets an immediate 503.
-    let source = start_box("bound-src", &registry, 128 * 1024, 1, Some(0.25), Vec::new());
-    seed_verified(&source.cache, &spec, &bytes);
+    let source = start_box("bound-src", &registry, 64 * 1024, 1, Some(0.0), Vec::new());
+    seed_verified(&source.cache, &registry.find("peer-model").unwrap().files[0], &bytes);
     let receiver = receiver_key();
     let ticket = PeerTicket::mint(&secret(), &source.node_key, &receiver, &digest, now_unix() + 60);
 
-    // Prime the throttle (first reservation is free). The whole file fits
-    // one chunk, so a no-Range GET is a plain 200.
-    let reply = blob_get(&source.base, &digest, Some(&ticket), Some(&receiver), None, &[]);
-    assert_eq!(reply.status, 200);
-
-    let base = source.base.clone();
-    let ticket2 = ticket.clone();
-    let receiver2 = receiver.clone();
-    let slow = std::thread::spawn(move || {
-        blob_get(&base, &digest, Some(&ticket2), Some(&receiver2), None, &[]).status
+    let start = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        let clients: Vec<_> = (0..3).map(|_| scope.spawn(|| {
+            start.wait();
+            blob_get(&source.base, &digest, Some(&ticket), Some(&receiver), None, &[])
+        })).collect();
+        for client in clients {
+            let reply = client.join().expect("each concurrent GET must finish");
+            assert_eq!(reply.status, 200, "every GET must succeed even with a single blob worker");
+            assert_eq!(reply.body, bytes, "every GET must receive the complete verified file");
+        }
     });
-    std::thread::sleep(Duration::from_millis(200));
-    let reply = blob_get(
-        &source.base,
-        &makepad_ai_hub::sha256::sha256_hex(&bytes),
-        Some(&ticket),
-        Some(&receiver),
-        None,
-        &[],
-    );
-    assert_eq!(reply.status, 503, "at capacity -> immediate honest refusal");
-    assert_eq!(reply.header("retry-after"), Some("1"));
-    assert_eq!(slow.join().unwrap(), 200, "the in-flight serve completes");
 }

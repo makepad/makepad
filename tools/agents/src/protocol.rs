@@ -13,6 +13,34 @@ use std::{
 };
 
 pub use crate::wire::*;
+
+#[cfg(target_os = "macos")]
+pub(crate) const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    )
+))]
+pub(crate) const O_NOFOLLOW: i32 = 0o100000;
+#[cfg(all(
+    target_os = "linux",
+    not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))
+))]
+pub(crate) const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+
 #[derive(Clone, Debug)]
 pub struct SessionLocation {
     pub state_dir: PathBuf,
@@ -115,10 +143,7 @@ pub fn read_private(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
     }
     let mut options = OpenOptions::new();
     options.read(true);
-    #[cfg(target_os = "macos")]
-    options.custom_flags(0x100 | 0x4);
-    #[cfg(target_os = "linux")]
-    options.custom_flags(0x20000 | 0x800);
+    options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
     let file = options.open(path).map_err(error)?;
     let after = file.metadata().map_err(error)?;
     if after.dev() != before.dev() || after.ino() != before.ino() {
@@ -202,10 +227,7 @@ impl SessionLock {
         let path = location.lock_path();
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).mode(0o600);
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100 | 0x4);
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20000 | 0x800);
+        options.custom_flags(O_NOFOLLOW | O_NONBLOCK);
         let file = options.open(&path).map_err(error)?;
         let metadata = file.metadata().map_err(error)?;
         if !metadata.is_file()

@@ -1,7 +1,7 @@
 //! FLUX.2 shared foundation: pinned architecture facts, configs, the
 //! empirical-mu flow schedule, and weight-layout readers for the new bundle.
 //!
-//! Fact sources (gathered 2026-08-13, see local/agent_state/flux2-port.md):
+//! Fact sources (gathered 2026-08-13):
 //! - github.com/black-forest-labs/flux2 `src/flux2/{model,sampling,
 //!   autoencoder,text_encoder}.py` (canonical params, verbatim mu formula,
 //!   VAE params, TE layer taps),

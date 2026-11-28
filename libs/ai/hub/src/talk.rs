@@ -661,14 +661,14 @@ struct Failed {
 /// `need` and `max` of a chat node's refusal of a prompt longer than its window, in either
 /// wording: "need N tokens, max_context is M" (the session), or "context overflow: the prompt is
 /// P tokens and the answer needs R more, but this node's context is M tokens" (the worker).
-fn overflow_counts(error: &str) -> Option<(usize, usize)> {
+pub(crate) fn overflow_counts(error: &str) -> Option<(usize, usize)> {
     if let Some(counts) = crate::hub_chat::context_overflow(error) { return Some(counts); }
     let rest = &error[error.find("context overflow:")?..];
     let after = |key: &str| -> Option<usize> {
         let tail = &rest[rest.find(key)? + key.len()..];
         tail.trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
     };
-    Some((after("the prompt is")? + after("the answer needs")?, after("context is")?))
+    Some((after("the prompt is")?.checked_add(after("the answer needs")?)?, after("context is")?))
 }
 
 /// Reasons the hub's own refusals carry in their text, wherever a stage's error wraps them, with

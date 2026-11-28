@@ -1,16 +1,19 @@
-//! Account usage of the coding CLIs signed in on this machine (Claude Code, Codex): the account
-//! each is logged in as, how much of its session and weekly limits (all models, Fable) it used,
-//! and when they reset. Ported from Scope's usage readers with their safety rules: no prompt is
-//! ever sent, no credential file is read, and only rate-limit and identity fields are kept.
+//! Account usage of the coding CLIs signed in on this machine (Claude Code, Codex, Antigravity):
+//! the account each is logged in as (Antigravity's CLI names none), how much of its session and
+//! weekly limits (all models, Fable, Gemini 4 Neon) it used, and when they reset. Claude's and
+//! Codex's readers are ported from Scope's, and Antigravity's keeps their safety rules: no prompt
+//! is ever sent, no credential file is read, and only rate-limit and identity fields are kept.
 //!
-//! Each tool has one lifetime worker thread holding one warm CLI (Claude's interactive terminal
-//! and its `/usage` screen, Codex's app-server and its rate-limit protocol). The worker reads it
-//! about every 10 min ([`POLL_SECONDS`]) and publishes a snapshot to the UI through a bounded
-//! channel. A failed read never starts a new CLI: the person's Reconnect does, so a CLI stuck
-//! at a login cannot loop. An account change ends the old CLI once (its limits are the old
-//! account's) and the next read starts one for the new account. The person's Reset limits
-//! (Codex) spends one of the signed-in account's free resets on the same worker, between reads,
-//! and reads again at once: the refreshed limits are its answer.
+//! Each tool has one lifetime worker thread. Claude's and Codex's hold one warm CLI (Claude's
+//! interactive terminal and its `/usage` screen, Codex's app-server and its rate-limit
+//! protocol); Antigravity's runs its CLI's read-only print-mode `/usage` once per read, so no
+//! idle CLI stays resident. The worker reads about every 10 min ([`POLL_SECONDS`]) and publishes
+//! a snapshot to the UI through a bounded channel. A failed read never starts a new CLI: the
+//! person's Reconnect does, so a CLI stuck at a login cannot loop. An account change ends the
+//! old CLI once (its limits are the old account's) and the next read starts one for the new
+//! account. The person's Reset limits (Codex) spends one of the signed-in account's free resets
+//! on the same worker, between reads, and reads again at once: the refreshed limits are its
+//! answer.
 
 use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions};
 use makepad_widgets::Cx;
@@ -35,15 +38,17 @@ pub enum Provider {
     #[default]
     Claude,
     Codex,
+    Agy,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 2] = [Provider::Claude, Provider::Codex];
+    pub const ALL: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::Agy];
 
     pub fn label(self) -> &'static str {
         match self {
             Provider::Claude => "Claude",
             Provider::Codex => "Codex",
+            Provider::Agy => "Antigravity",
         }
     }
 
@@ -51,27 +56,32 @@ impl Provider {
         match self {
             Provider::Claude => "claude",
             Provider::Codex => "codex",
+            Provider::Agy => "agy",
         }
     }
 }
 
 /// Which limit a window is: the rolling session (5 h), the week over all models, the week of
-/// Fable. Other buckets (Sonnet, Spark, OAuth apps) have none and are not shown.
+/// Fable, or Gemini 4 Neon's limit over a window that is neither (Antigravity's bucket named no
+/// 5-hour or weekly window). Other buckets (Sonnet, Spark, OAuth apps, Antigravity's other model
+/// groups) have none and are not shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
     Session,
     Week,
     Fable,
+    Neon,
 }
 
 impl Limit {
-    pub const ALL: [Limit; 3] = [Limit::Session, Limit::Week, Limit::Fable];
+    pub const ALL: [Limit; 4] = [Limit::Session, Limit::Week, Limit::Fable, Limit::Neon];
 
     pub fn label(self) -> &'static str {
         match self {
             Limit::Session => "Session",
             Limit::Week => "Week",
             Limit::Fable => "Fable",
+            Limit::Neon => "Neon",
         }
     }
 }
@@ -331,6 +341,7 @@ fn reader(provider: Provider, cwd: &Path) -> Option<Box<dyn Reader>> {
     match provider {
         Provider::Claude => Some(Box::new(crate::usage_claude::ClaudeReader::new(cwd.to_path_buf()))),
         Provider::Codex => Some(Box::new(crate::usage_codex::CodexReader::new(cwd.to_path_buf()))),
+        Provider::Agy => Some(Box::new(crate::usage_agy::AgyReader::new(cwd.to_path_buf()))),
     }
 }
 
@@ -493,9 +504,8 @@ pub fn push_window(windows: &mut Vec<UsageWindow>, window: UsageWindow) {
     }
 }
 
-/// An ISO-8601 time with an explicit UTC offset, as Unix seconds (the tests write their
-/// times so).
-#[cfg(test)]
+/// An ISO-8601 time with an explicit UTC offset, as Unix seconds.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub fn parse_reset_at(text: &str) -> Option<u64> {
     let b = text.as_bytes();
     if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't') || b[13] != b':' || b[16] != b':' {

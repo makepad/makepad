@@ -116,8 +116,25 @@ pub struct Qwen35MoeTensors {
     pub layers: Vec<Qwen35MoeLayerTensors>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_inventory_build_count() {
+    INVENTORY_BUILDS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn inventory_build_count() -> usize {
+    INVENTORY_BUILDS.with(|count| count.get())
+}
+
 impl Qwen35MoeTensors {
     pub fn from_model(model: &LlamaModel) -> Result<Self> {
+        #[cfg(test)]
+        INVENTORY_BUILDS.with(|count| count.set(count.get() + 1));
         let cfg = model.require_qwen35moe()?;
         let token_embd = required_tensor(model, "token_embd.weight")?;
         let output_norm = required_tensor(model, "output_norm.weight")?;

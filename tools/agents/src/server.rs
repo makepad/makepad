@@ -422,10 +422,7 @@ pub fn start(mut options: StartOptions, restart: bool) -> Result<Value, String> 
     }
     let mut log_options = OpenOptions::new();
     log_options.create(true).append(true).mode(0o600);
-    #[cfg(target_os = "macos")]
-    log_options.custom_flags(0x100);
-    #[cfg(target_os = "linux")]
-    log_options.custom_flags(0x20000);
+    log_options.custom_flags(crate::protocol::O_NOFOLLOW);
     let log = log_options.open(&log_path).map_err(error)?;
     if log.metadata().map_err(error)?.len() > 512 * 1024 {
         log.set_len(0).map_err(error)?;

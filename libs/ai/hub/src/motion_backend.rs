@@ -6,7 +6,7 @@
 //! stack (C:\ai\motion_hymotion.py: HY-Motion 1.0 FULL generation in
 //! venv_hymotion, then the motion campaign's direction-based retarget in
 //! venv_unirig bpy — NEVER the global-delta transfer, which double-applies
-//! the rest pose; see local/agent_state/motion-123.md P4) through the shared
+//! the rest pose) through the shared
 //! subprocess runner with `.glb` temp files.
 //!
 //! This oracle preserves the original three-clip parity contract: its params

@@ -12,7 +12,12 @@ pub const MAX_MESSAGES: usize = 128;
 /// Remote calls also check their actual service/routing fields before sending.
 /// Only actual input is allocated; this ceiling does not size any buffer.
 pub const MAX_TOOL_JSON_BYTES: usize = (1 << 20) - 4;
-/// Serialized tool results retain their independent history/message budget.
+/// Recommended per-page budget for tools that split or paginate large replies
+/// (matching `ai-services::wire::MAX_RESULT_BYTES`), keeping chat context lean.
+/// This is a soft target for paginating tools, not a provider hard cap:
+/// `continue_function` in the native API providers accepts tool results up to
+/// [`MAX_TOOL_JSON_BYTES`] + 64 bytes (matching `MAX_RESULT_WIRE_BYTES` plus
+/// error prefixes).
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
 pub fn tool_arguments_too_large(bytes: usize) -> String {

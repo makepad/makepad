@@ -5,7 +5,7 @@
 //! the answer is [`AppLine`]s, one per message, and the channel ends with the last. A call goes
 //! to the app's port like any call from its own chat and is answered in the app's
 //! `handle_event` (the registry wakes the UI thread); closing the channel cancels it. The caller
-//! confirms risky calls before it makes them: the port's own validation is the app's floor.
+//! waits for the person in the addressed app before a destructive tool is dispatched.
 
 use crate::engine::core::CallActivity;
 use crate::engine::{RegistryUp, ServiceRegistry};
@@ -21,7 +21,7 @@ const POLL: Duration = Duration::from_millis(10);
 
 /// Serves `app` on the process's endpoint (once, from [`ServiceRegistry::process`]).
 pub(crate) fn serve() {
-    makepad_platform::remote::register_service("app", 1, open, close);
+    makepad_platform::remote::register_service("app", 1, open, close, None);
 }
 
 fn cancels() -> &'static Mutex<HashMap<usize, Arc<AtomicBool>>> {
@@ -122,19 +122,46 @@ fn answer(registry: &ServiceRegistry, request: AppRequest, out: &Sink, cancelled
 }
 
 /// Every running instance with its manifest, then the apps the host can start.
+/// When no instance is connected yet, appends the platform's age note as `AppLine::Progress`.
 pub fn list(registry: &ServiceRegistry) -> Vec<AppLine> {
+    list_at(registry, makepad_platform::remote::app_age())
+}
+
+fn list_at(registry: &ServiceRegistry, age: Duration) -> Vec<AppLine> {
     let mut lines = Vec::new();
+    let mut has_connected = false;
     for info in registry.services() {
         if info.connected {
             let endpoint = EndpointId(info.endpoint.clone());
             if let (Some(meta), Some(manifest)) = (registry.meta(&endpoint), registry.manifest(&endpoint)) {
                 lines.push(AppLine::Instance { endpoint, meta, manifest });
+                has_connected = true;
             }
         } else if info.launchable {
             lines.push(AppLine::Launchable { id: info.id, label: info.label });
         }
     }
+    if !has_connected {
+        lines.push(AppLine::Progress {
+            note: makepad_platform::remote::no_app_tools_note_for(age),
+            permille: 0,
+        });
+    }
     lines
+}
+
+fn no_instance_reason(service: &str, running: &[String], age: Duration) -> String {
+    if running.is_empty() {
+        format!(
+            "no running instance of `{service}` here: {}",
+            makepad_platform::remote::no_app_tools_note_for(age)
+        )
+    } else {
+        format!(
+            "no running instance of `{service}` here; running: {} (`tools` lists their tools)",
+            running.join(", ")
+        )
+    }
 }
 
 /// One call, start to end: routed to the instance, its progress handed to `progress`, its
@@ -167,11 +194,10 @@ pub fn call(
                 running.push(info.id);
             }
         }
-        let why = match running.is_empty() {
-            true => format!("no running instance of `{service}` here"),
-            false => format!("no running instance of `{service}` here; running: {} (`tools` lists their tools)", running.join(", ")),
-        };
-        return ToolResult::unavailable(&call_id, why);
+        return ToolResult::unavailable(
+            &call_id,
+            no_instance_reason(service, &running, makepad_platform::remote::app_age()),
+        );
     };
     // a named instance is that one or none (the registry's pick falls back to the focused one)
     if let Some(wanted) = instance {
@@ -184,17 +210,36 @@ pub fn call(
     let Some(manifest) = registry.manifest(&endpoint) else {
         return ToolResult::unavailable(&call_id, "the app went away");
     };
-    if manifest.tool(tool).is_none() {
+    let Some(def) = manifest.tool(tool) else {
         let names: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
         return ToolResult::refused(&call_id, format!("`{service}` has no tool `{tool}` (it has: {})", names.join(", ")));
-    }
-    let Some(rx) = registry.call_remote(&endpoint, ServiceCall { call_id: call_id.clone(), tool: tool.to_string(), args, caller, origin: CallOrigin::Remote }) else {
+    };
+    if cancelled.load(Ordering::Acquire) { return ToolResult::cancelled(&call_id) }
+    let call = ServiceCall { call_id: call_id.clone(), tool: tool.to_string(), args, caller, origin: CallOrigin::Remote };
+    let held = def.risk.max(registry.risk_floor(&manifest.id)) >= Risk::Destructive;
+    let mut waiting = held.then(|| {
+        let name = registry.meta(&endpoint).map_or(manifest.label, |m| m.display_name);
+        format!("waiting for the person to confirm in {name}")
+    });
+    let (rx, mut original) = if held {
+        (registry.confirm_remote(&endpoint, &call), Some(call))
+    } else {
+        (registry.call_remote(&endpoint, call), None)
+    };
+    let Some(rx) = rx else {
         return ToolResult::unavailable(&call_id, "the app went away");
     };
     let started = Instant::now();
     let mut activity = CallActivity::new(0.0);
     let mut last_permille = 0;
+    let mut last_note = started;
+    if let Some(note) = &waiting { progress(note, 0); }
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            registry.end_remote(&call_id);
+            registry.send(&endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
+            return ToolResult::cancelled(&call_id);
+        }
         registry.pump_remote();
         match rx.recv_timeout(POLL) {
             Ok(RegistryUp::Result(_, result)) => return result,
@@ -203,6 +248,20 @@ pub fn call(
                 last_permille = permille;
                 progress(&note, permille);
             }
+            Ok(RegistryUp::ConfirmAnswer { allow, .. }) => {
+                if cancelled.load(Ordering::Acquire) { continue }
+                let Some(call) = original.take() else { continue };
+                if !allow {
+                    registry.end_remote(&call_id);
+                    return ToolResult::refused(&call_id, "the person declined");
+                }
+                if !registry.dispatch_allowed(&endpoint, call) {
+                    registry.end_remote(&call_id);
+                    return ToolResult::unavailable(&call_id, "the app went away");
+                }
+                waiting = None;
+                activity.progress(started.elapsed().as_secs_f64());
+            }
             Ok(RegistryUp::Message { .. }) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -210,12 +269,13 @@ pub fn call(
                 return ToolResult::unavailable(&call_id, "the app went away");
             }
         }
-        if cancelled.load(Ordering::Relaxed) {
-            registry.end_remote(&call_id);
-            registry.send(&endpoint, ServiceDown::Cancel { call_id: call_id.clone() });
-            return ToolResult::cancelled(&call_id);
-        }
-        if activity.poll(started.elapsed().as_secs_f64()) {
+        if let Some(note) = &waiting {
+            // A waiting person keeps the MCP channel active across its 15-minute silence limit.
+            if last_note.elapsed() >= Duration::from_secs(60) {
+                progress(note, 0);
+                last_note = Instant::now();
+            }
+        } else if activity.poll(started.elapsed().as_secs_f64()) {
             progress("not responding — Stop to cancel", last_permille);
         }
     }
@@ -225,6 +285,55 @@ pub fn call(
 mod tests {
     use super::*;
     use crate::port::{AiServicePort, PortEvent};
+
+    #[test]
+    fn platform_no_app_tools_progress_line_parses_as_app_line_progress() {
+        use makepad_platform::remote::{builtin_instances, no_app_tools_note_for, no_app_tools_progress_line};
+        for (seconds, elapsed) in [(4, "4 s ago"), (7200, "2 h ago")] {
+            let age = Duration::from_secs(seconds);
+            let note = no_app_tools_note_for(age);
+            assert!(note.contains(elapsed), "{note}");
+            assert_eq!(
+                AppLine::parse(&no_app_tools_progress_line(age)),
+                Some(AppLine::Progress { note, permille: 0 }),
+            );
+        }
+        assert_eq!(builtin_instances().len(), 4);
+    }
+
+    #[test]
+    fn empty_registry_list_and_call_report_app_age_until_a_service_connects() {
+        let registry = ServiceRegistry::new();
+        let age = Duration::from_secs(4);
+        let progress = AppLine::Progress {
+            note: makepad_platform::remote::no_app_tools_note_for(age),
+            permille: 0,
+        };
+        assert_eq!(list_at(&registry, age), [progress.clone()]);
+        assert_eq!(
+            no_instance_reason("town", &[], age),
+            "no running instance of `town` here: no AI tools of its own open yet (app started 4 s ago); an app may open them once it has started — try again, or see ui/logs"
+        );
+        assert_eq!(
+            no_instance_reason("town", &["calc".into()], age),
+            "no running instance of `town` here; running: calc (`tools` lists their tools)"
+        );
+        let result = call(&registry, "town", "join", None, "{}".into(), None, &AtomicBool::new(false), &mut |_, _| {});
+        assert_eq!(result.outcome, ToolOutcome::Unavailable);
+        assert!(result.text.starts_with("no running instance of `town` here: no AI tools of its own open yet (app started "), "{}", result.text);
+        assert!(result.text.ends_with("try again, or see ui/logs"), "{}", result.text);
+
+        registry.mark_launchable("notes", "Notes");
+        let notes = AppLine::Launchable { id: "notes".into(), label: "Notes".into() };
+        assert_eq!(list_at(&registry, age), [notes.clone(), progress]);
+
+        let (_port, link) = AiServicePort::in_process(calc()).unwrap();
+        let endpoint = registry.register(link, "in this window", None).unwrap();
+        let lines = list_at(&registry, age);
+        assert_eq!(lines.len(), 2);
+        assert!(matches!(&lines[0], AppLine::Instance { endpoint: id, manifest, .. } if id == &endpoint && manifest.id == "calc"));
+        assert_eq!(lines[1], notes);
+    }
 
     fn calc() -> ServiceManifest {
         ServiceManifest::new("calc", "Calculator", "Adds.").with_tool(ToolDef::new(
@@ -309,21 +418,144 @@ mod tests {
         app.join().unwrap();
     }
 
+    struct CancelOnDrop<'a>(&'a AtomicBool);
+    impl Drop for CancelOnDrop<'_> {
+        fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+    }
+
+    #[test]
+    fn remote_confirmation_requires_the_addressed_endpoint_and_cancel_withdraws() {
+        use crate::port::ServiceLink;
+        let registry = ServiceRegistry::new();
+        let (link, target) = ServiceLink::pair(calc());
+        let endpoint = registry.register(link, "", None).unwrap();
+        let (link, other) = ServiceLink::pair(calc());
+        let other_id = registry.register(link, "", None).unwrap();
+        registry.set_risk_floor("calc", Risk::Destructive);
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let (waiting, note) = std::sync::mpsc::channel();
+            let target_id = endpoint.as_str();
+            let (reg, stop) = (&registry, &cancel);
+            let task = scope.spawn(move || call(reg, "calc", "add", Some(target_id), "{}".into(),
+                None, stop, &mut |text, _| waiting.send(text.to_string()).unwrap()));
+            let _cleanup = CancelOnDrop(&cancel);
+            assert_eq!(note.recv().unwrap(), "waiting for the person to confirm in Calculator");
+            let first = target.down.recv().unwrap();
+            let ServiceDown::Confirm { call_id, tool, args } = first.msg else { panic!("a raw receiver must see only a prompt") };
+            assert_eq!((tool.as_str(), args.as_str()), ("add", "{}"));
+            other.up.send(HostedUp { from: Some(endpoint.clone()), msg: ServiceUp::ConfirmAnswer {
+                call_id: call_id.clone(), allow: true,
+            }}).unwrap();
+            registry.pump_remote();
+            // Pump synchronously and inspect the pending phase, so this checks the wrong
+            // endpoint even if the waiting thread has not been scheduled since the reply.
+            assert!(registry.confirm_pending(&endpoint, &call_id));
+            assert!(!registry.confirm_pending(&other_id, &call_id));
+            assert!(target.down.try_recv().is_err());
+            cancel.store(true, Ordering::Release);
+            assert_eq!(task.join().unwrap().outcome, ToolOutcome::Cancelled);
+            assert_eq!(target.down.recv().unwrap().msg, ServiceDown::Cancel { call_id: call_id.clone() });
+            target.up.send(HostedUp { from: None, msg: ServiceUp::ConfirmAnswer { call_id, allow: true } }).unwrap();
+            assert!(registry.pump().is_empty());
+            assert!(target.down.try_recv().is_err(), "late Allow cannot dispatch a cancelled call");
+        });
+    }
+
+    #[test]
+    fn a_remote_tool_waits_for_the_port_and_only_allow_delivers_the_original_call() {
+        use makepad_platform::{Cx, Event};
+        let registry = ServiceRegistry::new();
+        let mut manifest = calc();
+        for (name, risk) in [("act", Risk::Act), ("request", Risk::Request), ("change", Risk::Destructive)] {
+            manifest = manifest.with_tool(ToolDef::new(name, "A test tool.", r#"{"type":"object"}"#, risk));
+        }
+        let (mut port, link) = AiServicePort::in_process(manifest).unwrap();
+        let endpoint = registry.register(link, "", None).unwrap();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        port.handle_event(&mut cx, &Event::Signal);
+        let args = r#"{ "first": "one\ntwo", "n": 4 }"#;
+        for (i, name) in ["add", "act", "request", "change", "change", "change"].into_iter().enumerate() {
+            let cancel = AtomicBool::new(false);
+            std::thread::scope(|scope| {
+                let task = scope.spawn(|| call(&registry, "calc", name, None, args.into(), Some("caller".into()),
+                    &cancel, &mut |_, _| {}));
+                let _cleanup = CancelOnDrop(&cancel);
+                let mut answered = false;
+                let mut delivered = None;
+                while !task.is_finished() {
+                    for event in port.handle_event(&mut cx, &Event::Signal) {
+                        let PortEvent::Call(c) = event else { panic!("a held cancel escaped the port") };
+                        assert!(i < 3 || (i == 5 && answered), "only local Allow releases a held call");
+                        assert_eq!(c, ServiceCall { call_id: c.call_id.clone(), tool: name.into(),
+                            caller: Some("caller".into()), args: args.into(), origin: CallOrigin::Remote });
+                        delivered = Some(c.call_id.clone());
+                        port.reply(ToolResult::ok(c.call_id, "", ""));
+                    }
+                    if let Some(id) = cx.confirmation_head().get() {
+                        assert!(i >= 3);
+                        let (title, details) = cx.confirmation_text(id).unwrap();
+                        assert_eq!(title, "A program outside Calculator asks to run change");
+                        assert_eq!(details, "first: one\\ntwo\nn: 4");
+                        if i == 3 { cancel.store(true, Ordering::Release); }
+                        else { answered = cx.answer_confirmation(id, i == 5); }
+                    }
+                    std::thread::yield_now();
+                }
+                let result = task.join().unwrap();
+                match i {
+                    3 => assert_eq!(result.outcome, ToolOutcome::Cancelled),
+                    4 => { assert_eq!(result.outcome, ToolOutcome::Refused); assert_eq!(result.text, "the person declined"); }
+                    _ => assert_eq!(Some(result.call_id), delivered),
+                }
+                assert!(port.handle_event(&mut cx, &Event::Signal).is_empty());
+                assert_eq!(cx.confirmation_head().get(), None);
+            });
+        }
+        let call = ServiceCall { call_id: "chat1".into(), tool: "change".into(), args: args.into(),
+            caller: None, origin: CallOrigin::Conversation };
+        assert!(registry.send(&endpoint, ServiceDown::Call(call.clone())));
+        assert_eq!(port.handle_event(&mut cx, &Event::Signal), vec![PortEvent::Call(call)]);
+    }
+
     #[test]
     fn the_built_in_services_are_valid_manifests() {
+        use makepad_strict_json::Value;
+
         let lines = makepad_platform::remote::builtin_instances();
         assert_eq!(lines.len(), 4, "ui, edit, logs, inspect");
         let mut tools = 0;
+        let mut edit_dispatchers = 0;
         for l in &lines {
             match AppLine::parse(l) {
                 Some(AppLine::Instance { endpoint, manifest, .. }) => {
                     assert_eq!(endpoint.as_str(), manifest.id);
                     manifest.validate().unwrap_or_else(|e| panic!("{}: {e}", manifest.id));
+                    for tool in &manifest.tools {
+                        let name = format!("{}.{}", manifest.id, tool.name);
+                        let schema = crate::wire::parse_tool_json(&tool.parameters).expect(&name);
+                        assert_eq!(schema.get("type").and_then(Value::as_str), Some("object"), "{name}");
+                        assert!(matches!(schema.get("properties"), Some(Value::Obj(_))), "{name} lacks properties");
+                        for keyword in ["oneOf", "anyOf", "allOf"] {
+                            assert!(schema.get(keyword).is_none(), "{name} has top-level {keyword}");
+                        }
+                        if matches!(name.as_str(), "edit.design" | "edit.tweak_op") {
+                            let ops = schema.get("properties").and_then(|p| p.get("op"))
+                                .and_then(|op| op.get("enum")).and_then(Value::as_arr).expect(&name);
+                            if name == "edit.design" {
+                                assert_eq!(ops.len(), makepad_remote::params::DESIGN.len(), "{name}");
+                            } else {
+                                assert!(ops.iter().all(|op| op.as_str().is_some_and(|s| !s.starts_with("design_"))), "{name}");
+                            }
+                            edit_dispatchers += 1;
+                        }
+                    }
                     tools += manifest.tools.len();
                 }
                 other => panic!("not an instance line: {other:?} from {l}"),
             }
         }
+        assert_eq!(edit_dispatchers, 2, "edit.design and edit.tweak_op must both be advertised");
         assert!(tools >= 45, "{tools}");
         // a built-in call's answer reads as a result line
         let refused = makepad_platform::remote::builtin_call("c1", "ui", "frobnicate", "{}").unwrap();

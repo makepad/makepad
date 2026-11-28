@@ -49,7 +49,10 @@ use crate::{
     GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NEOX, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
 };
 
-use super::{CudaDeviceFeatures, ScratchEpoch};
+use super::{
+    act_scratch_bytes, weight_scratch_bytes, CudaDeviceFeatures, CudaScratchSpec, ScratchEpoch,
+    GEMM_F16_MIN_COLUMNS, GEMM_SLAB_BYTES, GRAPH_ACT_SCRATCH, GRAPH_WEIGHT_SCRATCH,
+};
 use crate::error::{LlamaError, Result};
 use crate::runtime::{
     build_hybrid_decode_graph_with_attention_key_count, build_hybrid_decode_graph_with_sequences,
@@ -116,19 +119,6 @@ type RoformerAttnFn = unsafe fn(
     cudaStream_t,
 ) -> makepad_ai_cuda::llm_ops::CudaError;
 
-/// Transient bf16 weight-slab bound for the GEMM path.
-const GEMM_SLAB_BYTES: usize = 256 << 20;
-/// Narrowest activation an f16 weight is worth casting and handing to cuBLAS
-/// for. Below this the per-launch cost of the cast plus the GEMM outweighs
-/// the dot-product-per-element fallback, which is efficient enough when there
-/// are only a handful of columns to broadcast the weight across.
-const GEMM_F16_MIN_COLUMNS: usize = 32;
-/// Stable scratch reserved before CUDA-graph capture so `cudaMalloc`
-/// cannot happen on the capturing stream. Official ggml-alloc + cuBLAS
-/// workspace is allocated before ggml-cuda.cu:4149 BeginCapture. Prefill
-/// GEMM needs the 256 MiB slab plus DS4/fattn fixup in acts.
-const GRAPH_ACT_SCRATCH: usize = 64 << 20;
-const GRAPH_WEIGHT_SCRATCH: usize = GEMM_SLAB_BYTES;
 /// VRAM the arena refuses to consume (driver/display/allocator slack).
 const VRAM_RESERVE_DEFAULT: u64 = 1 << 30;
 
@@ -325,8 +315,8 @@ impl Scratch {
             if graph_capture_open() {
                 return Err(LlamaError::format(format!(
                     "{what}: device scratch must grow {} -> {size} bytes DURING CUDA graph \
-                     capture. Raise the pre-capture reserve (GRAPH_ACT_SCRATCH / \
-                     GRAPH_WEIGHT_SCRATCH) so the buffer is already large enough.",
+                     capture. Raise the pre-capture reserve (activation floor {GRAPH_ACT_SCRATCH} bytes / \
+                     weight floor {GRAPH_WEIGHT_SCRATCH} bytes) so the buffer is already large enough.",
                     self.size
                 )));
             }
@@ -628,6 +618,30 @@ impl Runtime {
             }
         }
         features
+    }
+
+    pub(super) fn reserve_graph_scratch(&self, shape: CudaScratchSpec) -> Result<()> {
+        let features = self.features();
+        let act_target = act_scratch_bytes(features.sm_count, shape);
+        let weight_target = weight_scratch_bytes(shape);
+        let mut acts = self.state.scratch_acts.borrow_mut();
+        let mut weights = self.state.scratch_weights.borrow_mut();
+        let delta = act_target.saturating_sub(acts.size)
+            .saturating_add(weight_target.saturating_sub(weights.size));
+        let reserve = vram_reserve_bytes();
+        if (delta as u64).saturating_add(reserve) > features.free_vram_bytes {
+            return Err(LlamaError::unsupported(format!(
+                "CUDA graph scratch needs {delta} more bytes plus {reserve} bytes reserve, {} bytes free",
+                features.free_vram_bytes,
+            )));
+        }
+        acts.ensure(act_target, "graph act scratch")?;
+        weights.ensure(weight_target, "graph weight scratch")?;
+        Ok(())
+    }
+
+    pub(super) fn scratch_bytes(&self) -> usize {
+        self.state.scratch_acts.borrow().size.saturating_add(self.state.scratch_weights.borrow().size)
     }
 
     pub(super) fn reserve_main_buffer_size(
@@ -3046,7 +3060,7 @@ impl Compiled {
         self.state
             .scratch_acts
             .borrow_mut()
-            .ensure(GRAPH_ACT_SCRATCH, "graph act scratch")?;
+            .ensure(act_scratch_bytes(self.state.features.sm_count, CudaScratchSpec::default()), "graph act scratch")?;
         self.state
             .scratch_weights
             .borrow_mut()

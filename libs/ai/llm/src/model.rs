@@ -9,10 +9,15 @@ use crate::gguf::{GgufFile, GgufTensorInfo};
 use crate::plan::ModelExecutionPlan;
 use crate::qwen35::Qwen35Tensors;
 use crate::qwen35_runtime::{
-    qwen35_execution_plan, qwen35_hybrid_decode_spec, qwen35_mtp_decode_spec,
+    qwen35_execution_plan, qwen35_execution_plan_with_tensors, qwen35_hybrid_decode_spec,
+    qwen35_hybrid_decode_spec_with_tensors, qwen35_mtp_decode_spec,
+    qwen35_mtp_decode_spec_with_tensors,
 };
 use crate::qwen35moe::Qwen35MoeTensors;
-use crate::qwen35moe_runtime::{qwen35moe_execution_plan, qwen35moe_hybrid_decode_spec};
+use crate::qwen35moe_runtime::{
+    qwen35moe_execution_plan, qwen35moe_execution_plan_with_tensors, qwen35moe_hybrid_decode_spec,
+    qwen35moe_hybrid_decode_spec_with_tensors,
+};
 use crate::runtime::HybridDecodeSpec;
 use crate::weights::GgufWeightLayout;
 use std::path::Path;
@@ -67,6 +72,11 @@ pub struct LlamaModel {
     /// the tensor inventory at all, so it costs no VRAM. Speculative decoding
     /// turns it on before the execution plan is built.
     load_mtp: bool,
+}
+
+pub(crate) enum ModelTensors {
+    Qwen35(Qwen35Tensors),
+    Qwen35Moe(Qwen35MoeTensors),
 }
 
 impl LlamaModel {
@@ -182,6 +192,90 @@ impl LlamaModel {
         )))
     }
 
+    /// Build the tensor inventory for this MTP choice without changing the model.
+    pub(crate) fn model_tensors(&self, load_mtp: bool) -> Result<ModelTensors> {
+        match self.architecture {
+            LlamaArchitecture::Qwen35 => Ok(ModelTensors::Qwen35(
+                Qwen35Tensors::from_model_with_mtp(self, load_mtp)?,
+            )),
+            LlamaArchitecture::Qwen35Moe => {
+                Ok(ModelTensors::Qwen35Moe(Qwen35MoeTensors::from_model(self)?))
+            }
+            _ => Err(LlamaError::unsupported(format!(
+                "execution plan builder is not implemented for architecture '{}'",
+                self.architecture.name()
+            ))),
+        }
+    }
+
+    pub(crate) fn execution_plan_with_tensors(
+        &self,
+        tensors: &ModelTensors,
+    ) -> Result<ModelExecutionPlan> {
+        match tensors {
+            ModelTensors::Qwen35(t) => qwen35_execution_plan_with_tensors(self, t),
+            ModelTensors::Qwen35Moe(t) => qwen35moe_execution_plan_with_tensors(self, t),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn hybrid_decode_spec_with_tensors(
+        &self,
+        tensors: &ModelTensors,
+        max_context: u32,
+        max_sequences: u32,
+        attention_k_type: TensorType,
+        attention_v_type: TensorType,
+        recurrent_r_type: TensorType,
+        recurrent_s_type: TensorType,
+    ) -> Result<HybridDecodeSpec> {
+        match tensors {
+            ModelTensors::Qwen35(t) => qwen35_hybrid_decode_spec_with_tensors(
+                self,
+                t,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+            ModelTensors::Qwen35Moe(t) => qwen35moe_hybrid_decode_spec_with_tensors(
+                self,
+                t,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                recurrent_r_type,
+                recurrent_s_type,
+            ),
+        }
+    }
+
+    pub(crate) fn mtp_decode_spec_with_tensors(
+        &self,
+        tensors: &ModelTensors,
+        max_context: u32,
+        max_sequences: u32,
+        attention_k_type: TensorType,
+        attention_v_type: TensorType,
+        restricted_head: bool,
+    ) -> Result<Option<HybridDecodeSpec>> {
+        match tensors {
+            ModelTensors::Qwen35(t) => qwen35_mtp_decode_spec_with_tensors(
+                self,
+                t,
+                max_context,
+                max_sequences,
+                attention_k_type,
+                attention_v_type,
+                restricted_head,
+            ),
+            ModelTensors::Qwen35Moe(_) => Ok(None),
+        }
+    }
+
     pub fn hybrid_decode_spec(
         &self,
         max_context: u32,
@@ -253,6 +347,10 @@ impl LlamaModel {
 
     pub fn validate_layout(&self) -> Result<()> {
         let plan = self.execution_plan()?;
+        self.validate_plan_layout(&plan)
+    }
+
+    pub(crate) fn validate_plan_layout(&self, plan: &ModelExecutionPlan) -> Result<()> {
         if plan.inventory.layers.is_empty() {
             return Err(LlamaError::format(format!(
                 "model '{}' produced an empty layer inventory",

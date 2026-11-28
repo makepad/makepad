@@ -32,6 +32,14 @@ pub(super) enum Compiled {}
 pub(super) enum RawSession {}
 
 impl Runtime {
+    pub(super) fn reserve_graph_scratch(&self, _shape: super::CudaScratchSpec) -> Result<()> {
+        Err(LlamaError::unsupported(unavailable_reason()))
+    }
+
+    pub(super) fn scratch_bytes(&self) -> usize {
+        0
+    }
+
     pub(super) fn create_raw_sessions(
         &self,
         _ctx: &Context,

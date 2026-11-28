@@ -40,6 +40,7 @@ pub mod beats_backend;
 #[cfg(feature = "stems-native")]
 pub mod stems_backend;
 pub mod body_native_backend;
+mod chat_shorten;
 pub mod chat_wire;
 pub mod claude_cli;
 pub mod claude_cli_calls;

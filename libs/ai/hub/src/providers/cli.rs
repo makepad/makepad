@@ -29,18 +29,24 @@ enum IoLine {
     Exit,
 }
 
-/// Resolve a CLI executable. An explicit `env_override` path wins and, when
-/// it is not a file, nothing else is tried — a wrong override must fail
-/// loudly, not fall back to whatever is on `$PATH`. Otherwise `$PATH`, then
-/// the vendors' usual install dirs (`extra` may use a leading `~`).
+/// Resolve a CLI executable. A launch with no model
+/// ([`super::no_model`]) finds none, wherever one is. An explicit
+/// `env_override` path wins and, when it is not a file, nothing else is
+/// tried — a wrong override must fail loudly, not fall back to whatever is
+/// on `$PATH`. Otherwise `$PATH`, then the vendors' usual install dirs
+/// (`extra` may use a leading `~`).
 pub fn find_cli(env_override: &str, name: &str, extra: &[&str]) -> Option<PathBuf> {
     // USERPROFILE on Windows (HOME is usually unset there), HOME elsewhere.
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
-    find_cli_from(std::env::var_os(env_override), std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
+    let provider = std::env::var_os(super::PROVIDER_ENV);
+    find_cli_from(provider.as_deref(), std::env::var_os(env_override), std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
 }
 
-/// [`find_cli`] with the override, `PATH` and the home dir given.
-fn find_cli_from(override_path: Option<OsString>, path: Option<&OsStr>, home: &Path, name: &str, extra: &[&str]) -> Option<PathBuf> {
+/// [`find_cli`] with the provider, the override, `PATH` and the home dir given.
+fn find_cli_from(provider: Option<&OsStr>, override_path: Option<OsString>, path: Option<&OsStr>, home: &Path, name: &str, extra: &[&str]) -> Option<PathBuf> {
+    if super::no_model_in(provider).is_some() {
+        return None;
+    }
     if let Some(p) = override_path {
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
@@ -530,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_override_never_falls_back() {
+    fn a_wrong_override_never_falls_back_and_none_finds_nothing() {
         let root = std::env::temp_dir().join(format!("makepad-find-cli-override-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (bin, nowhere) = (root.join("bin"), root.join("nowhere"));
@@ -542,9 +548,16 @@ mod tests {
         let path = std::env::join_paths([&bin]).unwrap();
         // The override names a directory, not a file: the PATH binary may
         // not be substituted for it.
-        assert_eq!(find_cli_from(Some(root.clone().into_os_string()), Some(&path), &nowhere, "fake-cli", &[]), None);
-        // Without it, the PATH binary is found.
-        assert_eq!(find_cli_from(None, Some(&path), &nowhere, "fake-cli", &[]), Some(cli));
+        assert_eq!(find_cli_from(None, Some(root.clone().into_os_string()), Some(&path), &nowhere, "fake-cli", &[]), None);
+        // Without it, the PATH binary is found, also under a named provider.
+        assert_eq!(find_cli_from(None, None, Some(&path), &nowhere, "fake-cli", &[]), Some(cli.clone()));
+        assert_eq!(find_cli_from(Some(OsStr::new("claude-cli")), None, Some(&path), &nowhere, "fake-cli", &[]), Some(cli.clone()));
+        // A launch with no model (MAKEPAD_AI_PROVIDER=none) finds no CLI: not
+        // on PATH, and not at an override that names the file itself.
+        for none in ["none", " none\n"] {
+            assert_eq!(find_cli_from(Some(OsStr::new(none)), None, Some(&path), &nowhere, "fake-cli", &[]), None, "{none:?} finds no CLI on PATH");
+            assert_eq!(find_cli_from(Some(OsStr::new(none)), Some(cli.clone().into_os_string()), Some(&path), &nowhere, "fake-cli", &[]), None, "{none:?} ignores the override");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

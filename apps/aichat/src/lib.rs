@@ -19,6 +19,7 @@ use makepad_widgets::*;
 
 pub mod attach;
 pub mod bus;
+mod chat_store;
 #[cfg(feature = "gen")]
 pub mod gen;
 pub mod feedback;
@@ -93,6 +94,7 @@ fn ai_callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<Strin
             if !matches!(how.as_str(), "run" | "always" | "cancel") {
                 return Err("need confirm=run|always|cancel".into());
             }
+            panel::remote_answer_allowed(&how)?;
             cx.global::<AiSlotRequests>().confirm.push(how);
             cx.new_next_frame();
             cx.redraw_all();

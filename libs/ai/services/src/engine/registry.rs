@@ -34,6 +34,15 @@ struct Entry {
     port_tag: Option<u32>,
 }
 
+#[derive(PartialEq)]
+enum RemotePhase { Awaiting, Allowed, Running }
+
+struct RemoteCall {
+    endpoint: EndpointId,
+    replies: Sender<RegistryUp>,
+    phase: RemotePhase,
+}
+
 #[derive(Default)]
 struct Inner {
     entries: HashMap<EndpointId, Entry>,
@@ -48,7 +57,7 @@ struct Inner {
     risk_floors: HashMap<String, Risk>,
     /// Calls made through [`ServiceRegistry::call_remote`] (the process's `app` service): their
     /// progress and result go to the waiting caller, whoever drains the links.
-    remote: HashMap<String, (EndpointId, Sender<RegistryUp>)>,
+    remote: HashMap<String, RemoteCall>,
     /// Up-frames for the conversation (the core's calls, publications) drained by a remote
     /// caller's pump, kept for the core's next [`ServiceRegistry::pump`].
     queued: Vec<RegistryUp>,
@@ -59,6 +68,7 @@ struct Inner {
 /// One frame from a service, as the core receives it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RegistryUp {
+    ConfirmAnswer { endpoint: EndpointId, call_id: String, allow: bool },
     Result(EndpointId, ToolResult),
     Progress { endpoint: EndpointId, call_id: String, note: String, permille: u16, task: Option<TaskCard> },
     Message { endpoint: EndpointId, sub_id: String, message: Message },
@@ -76,18 +86,15 @@ impl ServiceRegistry {
         Self::default()
     }
 
-    /// The process's registry: every in-process service of this process, whichever chat panel
-    /// shows them, and what the process's `app` service lists and calls. Created on first use,
-    /// which also serves `app` on the process's endpoint, except in a host's `--stdin-loop`
-    /// child: its services are the host's to serve.
+    /// The registry of this process's AI services, shared by its in-process chat panels.
+    /// On native platforms with an `app` service, the first use also serves this registry
+    /// on the process's own endpoint, including when a window manager hosts the app.
     pub fn process() -> ServiceRegistry {
         static PROCESS: OnceLock<ServiceRegistry> = OnceLock::new();
         PROCESS
             .get_or_init(|| {
                 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-                if !makepad_platform::should_run_stdin_loop_from_env() {
-                    crate::app_service::serve();
-                }
+                crate::app_service::serve();
                 ServiceRegistry::new()
             })
             .clone()
@@ -97,15 +104,47 @@ impl ServiceRegistry {
     /// progress and result arrive on the returned channel, whoever drains the links; drive them
     /// with [`pump_remote`](Self::pump_remote). `None` when the endpoint is gone.
     pub fn call_remote(&self, endpoint: &EndpointId, call: ServiceCall) -> Option<Receiver<RegistryUp>> {
+        self.begin_remote(endpoint, call.call_id.clone(), ServiceDown::Call(call))
+    }
+
+    // Only the `app` service (native, outside Android) holds a remote call for the person's confirm.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub(crate) fn confirm_remote(&self, endpoint: &EndpointId, call: &ServiceCall) -> Option<Receiver<RegistryUp>> {
+        self.begin_remote(endpoint, call.call_id.clone(), ServiceDown::Confirm {
+            call_id: call.call_id.clone(), tool: call.tool.clone(), args: call.args.clone(),
+        })
+    }
+
+    fn begin_remote(&self, endpoint: &EndpointId, call_id: String, msg: ServiceDown) -> Option<Receiver<RegistryUp>> {
         let (tx, rx) = channel();
-        let call_id = call.call_id.clone();
-        self.inner.lock().unwrap().remote.insert(call_id.clone(), (endpoint.clone(), tx));
-        if self.send(endpoint, ServiceDown::Call(call)) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.remote.insert(call_id.clone(), RemoteCall {
+            endpoint: endpoint.clone(), replies: tx,
+            phase: if matches!(msg, ServiceDown::Confirm { .. }) { RemotePhase::Awaiting } else { RemotePhase::Running },
+        });
+        if Self::send_locked(&inner, endpoint, msg) {
             Some(rx)
         } else {
-            self.inner.lock().unwrap().remote.remove(&call_id);
+            inner.remote.remove(&call_id);
             None
         }
+    }
+
+    /// Consume this endpoint's approval once. Removing and re-registering an endpoint
+    /// between the answer and dispatch cannot transfer its outstanding approvals.
+    // Only the `app` service (native, outside Android) holds a remote call for the person's confirm.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub(crate) fn dispatch_allowed(&self, endpoint: &EndpointId, call: ServiceCall) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(pending) = inner.remote.get_mut(&call.call_id) else { return false };
+        if &pending.endpoint != endpoint || pending.phase != RemotePhase::Allowed { return false }
+        pending.phase = RemotePhase::Running;
+        Self::send_locked(&inner, endpoint, ServiceDown::Call(call))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_pending(&self, endpoint: &EndpointId, id: &str) -> bool {
+        self.inner.lock().unwrap().remote.get(id).is_some_and(|r| &r.endpoint == endpoint && r.phase == RemotePhase::Awaiting)
     }
 
     /// The remote caller stopped waiting (answered, cancelled, or gave up): later frames of the
@@ -240,11 +279,11 @@ impl ServiceRegistry {
             return;
         }
         // a remote caller waiting on the instance hears that it went away
-        inner.remote.retain(|call_id, (to, tx)| {
-            if to != endpoint {
+        inner.remote.retain(|call_id, remote| {
+            if &remote.endpoint != endpoint {
                 return true;
             }
-            let _ = tx.send(RegistryUp::Result(to.clone(), ToolResult::unavailable(call_id.as_str(), "the app went away")));
+            let _ = remote.replies.send(RegistryUp::Result(endpoint.clone(), ToolResult::unavailable(call_id.as_str(), "the app went away")));
             false
         });
         inner.order.retain(|e| e != endpoint);
@@ -570,7 +609,10 @@ impl ServiceRegistry {
     /// in-process port drains its link on the app's events, so the UI is
     /// woken: a call must not wait for the next mouse move.
     pub fn send(&self, endpoint: &EndpointId, msg: ServiceDown) -> bool {
-        let inner = self.inner.lock().unwrap();
+        Self::send_locked(&self.inner.lock().unwrap(), endpoint, msg)
+    }
+
+    fn send_locked(inner: &Inner, endpoint: &EndpointId, msg: ServiceDown) -> bool {
         let sent = match inner.entries.get(endpoint) {
             Some(e) => e.link.down.send(HostedDown { to: Some(endpoint.clone()), msg }).is_ok(),
             None => false,
@@ -600,13 +642,24 @@ impl ServiceRegistry {
 
     /// A result or progress frame: to its remote caller, or kept for the conversation.
     fn deliver(inner: &mut Inner, up: RegistryUp) {
-        let (call_id, done) = match &up {
-            RegistryUp::Result(_, r) => (r.call_id.as_str(), true),
-            RegistryUp::Progress { call_id, .. } => (call_id.as_str(), false),
+        let (endpoint, call_id, done) = match &up {
+            RegistryUp::ConfirmAnswer { endpoint, call_id, allow } => {
+                if let Some(remote) = inner.remote.get_mut(call_id) {
+                    if remote.phase == RemotePhase::Awaiting && &remote.endpoint == endpoint {
+                        remote.phase = RemotePhase::Allowed;
+                        let _ = remote.replies.send(up.clone());
+                        if !allow { inner.remote.remove(call_id); }
+                    }
+                }
+                return;
+            }
+            RegistryUp::Result(endpoint, r) => (endpoint, r.call_id.as_str(), true),
+            RegistryUp::Progress { endpoint, call_id, .. } => (endpoint, call_id.as_str(), false),
             RegistryUp::Message { .. } => return inner.queued.push(up),
         };
-        if let Some((_, tx)) = inner.remote.get(call_id) {
-            let _ = tx.send(up.clone());
+        if let Some(remote) = inner.remote.get(call_id) {
+            if &remote.endpoint != endpoint || remote.phase != RemotePhase::Running { return }
+            let _ = remote.replies.send(up.clone());
             if done {
                 let call_id = call_id.to_string();
                 inner.remote.remove(&call_id);
@@ -634,7 +687,14 @@ impl ServiceRegistry {
                     }
                 };
                 // A frame's own `from` is never trusted: the link IS the sender.
-                if frame.msg.validate().is_err() {
+                if let Err(err) = frame.msg.validate() {
+                    if let ServiceUp::Result(r) = frame.msg {
+                        if is_opaque_id(&r.call_id) {
+                            let mut failed = ToolResult::failed(r.call_id, format!("tool reply rejected: {err}"));
+                            failed.bound();
+                            out.push(RegistryUp::Result(endpoint.clone(), failed));
+                        }
+                    }
                     continue;
                 }
                 match frame.msg {
@@ -651,6 +711,9 @@ impl ServiceRegistry {
                             inner.generation += 1;
                         }
                     }
+                    ServiceUp::ConfirmAnswer { call_id, allow } => out.push(RegistryUp::ConfirmAnswer {
+                        endpoint: endpoint.clone(), call_id, allow,
+                    }),
                     ServiceUp::Result(r) => out.push(RegistryUp::Result(endpoint.clone(), r)),
                     ServiceUp::Progress { call_id, note, permille, task } => {
                         out.push(RegistryUp::Progress { endpoint: endpoint.clone(), call_id, note, permille, task })
@@ -769,6 +832,22 @@ mod tests {
         assert!(matches!(&ups[1], RegistryUp::Result(ep, r) if ep == &e && r.call_id == "c1"));
         assert_eq!(reg.dynamic_context(), "Running now — call their tools directly: Files (files.stat)\n[Files] cwd=~\n");
         assert!(!reg.send(&EndpointId("nope".into()), ServiceDown::ChatOpen { open: true }));
+    }
+
+    #[test]
+    fn invalid_result_on_link_surfaces_as_failed_instead_of_dropping() {
+        let reg = ServiceRegistry::new();
+        let (link, host) = ServiceLink::pair(app("files", "Files", &["stat"]));
+        let endpoint = reg.register(link, "", None).expect("the link registers");
+        let result = ToolResult::ok("c1", "x".repeat(MAX_RESULT_WIRE_BYTES + 1), "");
+        host.up.send(HostedUp { from: None, msg: ServiceUp::Result(result) }).unwrap();
+        assert!(matches!(reg.pump().as_slice(), [RegistryUp::Result(from, r)]
+            if from == &endpoint && r.call_id == "c1" && r.outcome == ToolOutcome::Failed && r.text.contains("result: payload over wire cap")),
+            "the registry delivers an oversized reply as a failure for its caller");
+
+        let result = ToolResult::ok("bad id", "", "");
+        host.up.send(HostedUp { from: None, msg: ServiceUp::Result(result) }).unwrap();
+        assert!(reg.pump().is_empty(), "an invalid call id cannot receive a synthetic failure");
     }
 
     #[test]

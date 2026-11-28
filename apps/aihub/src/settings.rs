@@ -130,8 +130,9 @@ pub struct Settings {
     /// The compute mode the hub runs under (the panel's Automatic / UI First / AI First /
     /// Unavailable picker), sent to the hub at each start.
     pub compute: makepad_ai_hub::activity::ComputeMode,
-    /// Read the coding CLIs' account usage (one warm Claude terminal and Codex app-server,
-    /// about every 10 min). On in the desktop app, off on a WM node.
+    /// Read the coding CLIs' account usage (one warm Claude terminal and Codex app-server, and
+    /// one short Antigravity print-mode run per read, about every 10 min). On in the desktop
+    /// app, off on a WM node.
     pub usage: bool,
 }
 

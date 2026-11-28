@@ -1,18 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::{ggml_row_size_for_type, TensorType};
 
 use crate::error::{LlamaError, Result};
-use crate::exec::{CompiledHybridDecode, ExecContextBuffers, ExecRuntime};
+use crate::exec::{CompiledHybridDecode, ExecBackendKind, ExecContextBuffers, ExecRuntime, RuntimeScratchInput};
 use crate::draft_vocab::DraftVocab;
 use crate::model::LlamaModel;
 use crate::plan::ModelExecutionPlan;
 use crate::sampler::{self, Distribution, RowOut, RowReadout, RowWeights, WeighSpec};
 use crate::slots::MROPE_COMPONENTS;
 use crate::runtime::{
-    allocate_hybrid_shared_cache_tensors, HybridCacheLayout, HybridCacheShape, HybridCacheTypes,
-    HybridDecodeBatchLayout, HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
+    allocate_hybrid_shared_cache_tensors, attention_mask_tensor_type, HybridCacheLayout,
+    HybridCacheShape, HybridCacheTemplate, HybridCacheTypes, HybridDecodeBatchLayout,
+    HybridDecodeRun, HybridDecodeSpec, HybridLayerSpec,
     HybridSharedCacheTensorIds, LogitsProbeInput, ProbeInputKind,
 };
 use crate::vocab::LlamaVocab;
@@ -209,6 +211,37 @@ impl SessionGraphParams {
     }
 }
 
+fn draft_head_source(plan: &ModelExecutionPlan) -> Result<&crate::GgufTensorInfo> {
+    use crate::qwen35_runtime::{INVENTORY_NEXTN_SHARED_HEAD, INVENTORY_OUTPUT};
+
+    plan.inventory
+        .globals
+        .get(INVENTORY_NEXTN_SHARED_HEAD)
+        .or_else(|| plan.inventory.globals.get(INVENTORY_OUTPUT))
+        .ok_or_else(|| LlamaError::format("execution plan is missing draft head source tensor"))
+}
+
+fn restricted_draft_head_bytes(
+    model_path: &Path,
+    plan: &ModelExecutionPlan,
+) -> Result<Option<usize>> {
+    let source = draft_head_source(plan)?;
+    let [width, rows, ..] = source.dimensions.as_slice() else {
+        return Err(LlamaError::format("draft head source is missing its row dimensions"));
+    };
+    let vocab_size = u32::try_from(*rows)
+        .map_err(|_| LlamaError::format("draft head vocabulary size does not fit in u32"))?;
+    let Some(vocab) = DraftVocab::load_for_model(model_path, vocab_size)? else {
+        return Ok(None);
+    };
+    let width = i64::try_from(*width)
+        .map_err(|_| LlamaError::format("draft head row width does not fit in i64"))?;
+    let row_bytes = ggml_row_size_for_type(source.tensor_type, width).map_err(LlamaError::format)?;
+    let bytes = row_bytes.checked_mul(vocab.len())
+        .ok_or_else(|| LlamaError::format("restricted draft head size overflows"))?;
+    Ok(Some(bytes))
+}
+
 /// Build the row-compacted draft LM head: gather the draft vocabulary's rows
 /// out of the full `output.weight` into a new `[n_embd, draft_vocab]` tensor of
 /// the same quantised type.
@@ -220,18 +253,11 @@ impl SessionGraphParams {
 /// resident prefix of the arena is what gets uploaded.
 fn build_restricted_draft_head(
     weights: &mut LoadedGgufWeights,
-    model: &LlamaModel,
+    plan: &ModelExecutionPlan,
     vocab: &DraftVocab,
 ) -> Result<()> {
-    let tensors = model.qwen35_tensors()?;
-    let source_name = tensors
-        .mtp
-        .as_ref()
-        .and_then(|mtp| mtp.shared_head.as_ref())
-        .unwrap_or(&tensors.globals.output)
-        .name
-        .clone();
-    let source_id = weights.require_tensor_id(&source_name)?;
+    let source_name = &draft_head_source(plan)?.name;
+    let source_id = weights.require_tensor_id(source_name)?;
     let source = weights
         .ctx
         .tensor(source_id)
@@ -317,14 +343,16 @@ fn mtp_carry_ring(prefill_batch_size: usize, draft_max: usize, max_context: usiz
 /// 2048 tokens. That is a wrong-hidden-state feeding the draft head, which
 /// surfaces as the model getting subtly worse rather than as an error. Per-lane
 /// blocks make the collision unrepresentable.
-fn carry_rows_total(carry_ring: usize, lanes: usize) -> usize {
-    (carry_ring + 2) * lanes.max(1)
+fn carry_rows_total(carry_ring: usize, lanes: usize) -> Result<usize> {
+    carry_ring.checked_add(2)
+        .and_then(|rows| rows.checked_mul(lanes.max(1)))
+        .ok_or_else(|| LlamaError::format("mtp carry row count overflows"))
 }
 
 fn carry_ring_bytes(hidden_size: u32, carry_ring: usize, lanes: usize) -> Result<usize> {
     ggml_row_size_for_type(TensorType::F32, i64::from(hidden_size))
         .map_err(LlamaError::format)?
-        .checked_mul(carry_rows_total(carry_ring, lanes))
+        .checked_mul(carry_rows_total(carry_ring, lanes)?)
         .ok_or_else(|| LlamaError::format("overflow sizing the mtp hidden carry"))
 }
 
@@ -390,6 +418,7 @@ impl SpeculativeStats {
 }
 
 struct SessionGraphSet {
+    planned_runtime_scratch: usize,
     shared_runtime: ExecRuntime,
     shared_cache: HybridSharedCacheTensorIds,
     shared_buffers: ExecContextBuffers,
@@ -495,16 +524,42 @@ fn shared_cache_ranges(
 pub struct SessionMemory {
     /// The whole arena: weights + main region.
     pub total: usize,
-    /// The read-only weights region (0 for a single-arena context).
+    /// Page-rounded mapped weight region, or the packed weight bytes for an owned arena.
     pub weights: usize,
     /// Attention K/V caches for every slot at the session's context.
     pub attention_kv: usize,
-    /// What one more token of context costs in `attention_kv`, per slot.
+    /// Bytes per shared attention row, including the active MTP layer.
     pub attention_kv_per_token: usize,
-    /// Recurrent r/s state rows, the draft head's checkpoints and carry.
+    /// Eager causal-mask bytes per attention row at the loaded prompt batch capacity.
+    pub mask_bytes_per_token: usize,
+    /// Native context length declared in the GGUF.
+    pub model_max_context: u32,
+    /// Recurrent rows (including checkpoints), MTP carry and the restricted draft head.
     pub state: usize,
     /// Planned activations and scratch (the rest of the main region).
     pub activations: usize,
+    /// Persistent backend runtime scratch outside the ggml arena.
+    pub runtime_scratch: usize,
+}
+
+/// Pre-load arena sizing from the GGUF header and optional draft vocabulary sidecar.
+/// The native window sets the carry and prompt batch capacities. Shorter sessions
+/// can use fewer state and mask bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionMemoryPlan {
+    pub model_max_context: u32,
+    pub weights: usize,
+    /// Recurrent rows, MTP carry and the restricted draft head.
+    pub state: usize,
+    /// Configured activation budget before the eager causal masks.
+    pub activations_base: usize,
+    /// Persistent backend runtime scratch outside the ggml arena.
+    pub runtime_scratch: usize,
+    /// KV bytes per shared attention row across all active layers.
+    pub attention_kv_per_token: usize,
+    /// Causal-mask bytes per shared attention row at native prompt batch capacity.
+    pub mask_bytes_per_token: usize,
+    pub lanes: u32,
 }
 
 /// A rewind point of a [`LlamaSession`]; see [`LlamaSession::save_state`].
@@ -537,7 +592,7 @@ impl LlamaSessionState {
 
 pub struct LlamaSession {
     model: LlamaModel,
-    vocab: LlamaVocab,
+    vocab: Arc<LlamaVocab>,
     plan: ModelExecutionPlan,
     spec: HybridDecodeSpec,
     spec_embeddings: HybridDecodeSpec,
@@ -566,7 +621,61 @@ pub struct LlamaSession {
     last_run: Option<HybridDecodeRun>,
 }
 
+impl LlamaModel {
+    /// Size a session without mapping weights or allocating device memory.
+    /// The plan uses the model's native context regardless of `config.max_context`.
+    pub fn plan_session_memory(&self, config: LlamaSessionConfig) -> Result<SessionMemoryPlan> {
+        if config.max_sequences == 0 {
+            return Err(LlamaError::format("session max_sequences must be at least 1"));
+        }
+        let load_mtp = config.spec_draft_max > 0 && self.has_mtp_block();
+        let model_max_context = self.context_length()?;
+        let tensors = self.model_tensors(load_mtp)?;
+        let plan = self.execution_plan_with_tensors(&tensors)?;
+        self.validate_plan_layout(&plan)?;
+        let weights = planned_weight_bytes(
+            self.gguf.file_size,
+            crate::MappedRegion::page_size(),
+            plan.full_weights.total_bytes,
+        );
+        let spec = self.hybrid_decode_spec_with_tensors(
+            &tensors,
+            GRAPH_KEY_BUCKET as u32, 1,
+            config.attention_k_type, config.attention_v_type,
+            config.recurrent_r_type, config.recurrent_s_type,
+        )?;
+        let (spec_mtp, head_bytes) = if load_mtp {
+            let head = restricted_draft_head_bytes(&self.gguf.path, &plan)?;
+            let mtp = self.mtp_decode_spec_with_tensors(
+                &tensors,
+                GRAPH_KEY_BUCKET as u32, 1,
+                config.attention_k_type, config.attention_v_type, head.is_some(),
+            )?;
+            (mtp, head.unwrap_or(0))
+        } else {
+            (None, 0)
+        };
+        let recurrent_per_row = match &plan.hybrid_cache {
+            Some(template) => recurrent_bytes_per_row(template, config)?,
+            None => {
+                // Only an attention-only session can load without a cache template.
+                attention_cache_bytes_from_spec(&spec)?;
+                0
+            }
+        };
+        plan_from_parts(
+            config, model_max_context, weights, recurrent_per_row, &spec, spec_mtp.as_ref(),
+            head_bytes, ExecBackendKind::resolve_env()?, &plan.full_weights.tensors,
+        )
+    }
+}
+
 impl LlamaSession {
+    /// Read the GGUF header and size a session before loading any weights.
+    pub fn plan_memory(path: impl AsRef<Path>, config: LlamaSessionConfig) -> Result<SessionMemoryPlan> {
+        LlamaModel::load(path)?.plan_session_memory(config)
+    }
+
     pub fn load(path: impl AsRef<Path>, config: LlamaSessionConfig) -> Result<Self> {
         Self::load_with_progress(path, config, &mut |_, _| {})
     }
@@ -592,6 +701,10 @@ impl LlamaSession {
 
     pub fn model(&self) -> &LlamaModel {
         &self.model
+    }
+
+    pub fn shared_vocab(&self) -> Arc<LlamaVocab> {
+        Arc::clone(&self.vocab)
     }
 
     pub fn vocab(&self) -> &LlamaVocab {
@@ -662,49 +775,7 @@ impl LlamaSession {
     /// a context knob turns into an out-of-memory at load, on the box, after a
     /// swap.
     pub fn attention_cache_bytes(&self) -> Result<usize> {
-        // NOT `attention_cache_bytes_from_spec`: that one REFUSES a spec
-        // containing recurrent layers, because it is the fallback for sizing a
-        // whole cache without a template. Every hybrid model has recurrent
-        // layers, so asking it here returned an error that a caller would
-        // reasonably turn into 0 — and a zero-byte KV report is worse than no
-        // report, because it reads as a fact.
-        let mut total = 0usize;
-        let mut seen = BTreeSet::new();
-        for layer in &self.spec.layers {
-            let HybridLayerSpec::Attention { decode, .. } = layer else {
-                continue;
-            };
-            if !seen.insert(decode.cache_layer_index) {
-                continue;
-            }
-            let rows = u64::from(decode.cache.max_context)
-                .checked_mul(u64::from(decode.cache.max_sequences))
-                .ok_or_else(|| LlamaError::format("attention cache rows overflow"))?;
-            for (width, ty) in [
-                (
-                    u64::from(decode.block.k_head_dim) * u64::from(decode.block.kv_head_count),
-                    decode.cache.k_type,
-                ),
-                (
-                    u64::from(decode.block.v_head_dim) * u64::from(decode.block.kv_head_count),
-                    decode.cache.v_type,
-                ),
-            ] {
-                let elements = width
-                    .checked_mul(rows)
-                    .ok_or_else(|| LlamaError::format("attention cache elements overflow"))?;
-                let bytes = ggml_row_size_for_type(
-                    ty,
-                    i64::try_from(elements)
-                        .map_err(|_| LlamaError::format("attention elements do not fit in i64"))?,
-                )
-                .map_err(LlamaError::format)?;
-                total = total
-                    .checked_add(bytes)
-                    .ok_or_else(|| LlamaError::format("attention cache bytes overflow"))?;
-            }
-        }
-        Ok(total)
+        attention_cache_bytes_for_specs(&self.spec, self.spec_mtp.as_ref())
     }
 
     /// Bytes one more token of context costs, per lane.
@@ -721,18 +792,36 @@ impl LlamaSession {
     /// hub reports and sizes the context from; nothing here is estimated.
     pub fn memory(&self) -> Result<SessionMemory> {
         let total = self.weights.ctx.mem_size();
-        let weights = self.weights.ctx.ro_split();
+        let ro_split = self.weights.ctx.ro_split();
+        let weights = if ro_split > 0 { ro_split } else { self.plan.full_weights.total_bytes };
         let attention_kv = self.attention_cache_bytes()?;
-        let caches = self.context_extra_bytes.saturating_sub(self.config.extra_activation_bytes);
-        let state = caches.saturating_sub(attention_kv);
+        // A reserve can grow on graph retries. Count the allocated state tensors
+        // so scratch space stays in activations and every lane's rows are counted.
+        let state = self.graphs.shared_cache.recurrent.values()
+            .flat_map(|ids| [ids.r_cache, ids.s_cache])
+            .chain(self.graphs.hidden_carry)
+            .chain(self.weights.tensor_id(crate::qwen35_runtime::MTP_DRAFT_HEAD_TENSOR))
+            .try_fold(0usize, |total, id| {
+                let tensor = self.weights.ctx.tensor(id)
+                    .ok_or_else(|| LlamaError::format(format!("invalid state tensor id {id}")))?;
+                total.checked_add(tensor.nbytes())
+                    .ok_or_else(|| LlamaError::format("session state size overflows"))
+            })?;
         let activations = total.saturating_sub(weights + attention_kv + state);
         Ok(SessionMemory {
             total,
             weights,
             attention_kv,
             attention_kv_per_token: attention_kv / self.attention_arena_rows.max(1),
+            mask_bytes_per_token: mask_bytes_per_token_for_spec(
+                &self.spec, prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
+            )?,
+            model_max_context: self.model.context_length()?,
             state,
             activations,
+            runtime_scratch: self.graphs.shared_runtime.runtime_scratch_bytes(
+                &self.graphs.shared_buffers, self.graphs.planned_runtime_scratch,
+            ),
         })
     }
 
@@ -1569,15 +1658,18 @@ impl LlamaSession {
         Self::from_owned_model_with_progress(model, config, &mut |_, _| {})
     }
 
-    fn from_owned_model_with_progress(
+    pub fn from_owned_model_with_progress(
         mut model: LlamaModel,
         config: LlamaSessionConfig,
         progress: &mut dyn FnMut(&str, f64),
     ) -> Result<Self> {
         // The nextn block only enters the tensor inventory (and therefore
         // VRAM) when speculative decoding will actually use it.
-        model.set_load_mtp(config.spec_draft_max > 0 && model.has_mtp_block());
-        model.validate_layout()?;
+        let load_mtp = config.spec_draft_max > 0 && model.has_mtp_block();
+        model.set_load_mtp(load_mtp);
+        let tensors = model.model_tensors(load_mtp)?;
+        let plan = model.execution_plan_with_tensors(&tensors)?;
+        model.validate_plan_layout(&plan)?;
         if config.max_sequences == 0 {
             return Err(LlamaError::format(
                 "session max_sequences must be at least 1",
@@ -1588,9 +1680,8 @@ impl LlamaSession {
         // rows on Qwen3.8) — seconds, and previously inside the silence
         // between `parse` and `mmap`.
         progress("load llm vocab", 0.115);
-        let vocab = LlamaVocab::from_model(&model)?;
+        let vocab = Arc::new(LlamaVocab::from_model(&model)?);
         progress("load llm plan", 0.120);
-        let plan = model.execution_plan()?;
         let max_context = resolve_max_context(&model, config)?;
         // `max_context` is PER SLOT. Slots share one flat attention arena of
         // `slots * per_slot_context` rows, and the slot index is folded into
@@ -1615,7 +1706,8 @@ impl LlamaSession {
             recurrent_r_type: config.recurrent_r_type,
             recurrent_s_type: config.recurrent_s_type,
         };
-        let mut spec = model.hybrid_decode_spec(
+        let mut spec = model.hybrid_decode_spec_with_tensors(
+            &tensors,
             cache_shape.n_ctx_seq,
             cache_shape.n_seq_max,
             config.attention_k_type,
@@ -1647,11 +1739,7 @@ impl LlamaSession {
         //
         // With speculation each slot owns `draft_max + 2` rows: the live row
         // plus one checkpoint per verify-batch position.
-        let rows_per_slot = if draft_max > 0 { draft_max + 2 } else { 1 };
-        let recurrent_rows = (config.max_sequences as usize)
-            .checked_mul(rows_per_slot)
-            .and_then(|rows| u32::try_from(rows).ok())
-            .ok_or_else(|| LlamaError::format("recurrent row count is too large"))?;
+        let recurrent_rows = recurrent_row_count(config.max_sequences, draft_max)?;
         for spec in [&mut spec, &mut spec_embeddings] {
             for layer in spec.layers.iter_mut() {
                 if let HybridLayerSpec::Recurrent { decode, .. } = layer {
@@ -1677,7 +1765,8 @@ impl LlamaSession {
             );
         }
         let mut spec_mtp = if draft_max > 0 {
-            model.mtp_decode_spec(
+            model.mtp_decode_spec_with_tensors(
+                &tensors,
                 cache_shape.n_ctx_seq,
                 cache_shape.n_seq_max,
                 config.attention_k_type,
@@ -1687,6 +1776,7 @@ impl LlamaSession {
         } else {
             None
         };
+        drop(tensors);
         if spec_mtp.is_none() {
             // No draft head: drop the hidden carry the main spec asked for.
             spec.hidden_carry = None;
@@ -1714,26 +1804,12 @@ impl LlamaSession {
         // The template sizes every cache at `config.max_sequences`; the extra
         // recurrent checkpoint rows and the hidden carry are on top of that.
         if let (Some(template), true) = (plan.hybrid_cache.as_ref(), draft_max > 0) {
-            let extra_rows = u64::from(recurrent_rows.saturating_sub(cache_shape.n_seq_max));
-            let per_row = ggml_row_size_for_type(
-                config.recurrent_r_type,
-                i64::try_from(template.recurrent_r_width).map_err(|_| {
-                    LlamaError::format("recurrent r width does not fit in i64")
-                })?,
-            )
-            .map_err(LlamaError::format)?
-                + ggml_row_size_for_type(
-                    config.recurrent_s_type,
-                    i64::try_from(template.recurrent_s_width).map_err(|_| {
-                        LlamaError::format("recurrent s width does not fit in i64")
-                    })?,
-                )
-                .map_err(LlamaError::format)?;
+            let extra_rows = recurrent_rows.saturating_sub(cache_shape.n_seq_max) as usize;
+            let per_row = recurrent_bytes_per_row(template, config)?;
             cache_bytes = cache_bytes
                 .checked_add(
                     per_row
-                        .checked_mul(template.recurrent_layers.len())
-                        .and_then(|v| usize::try_from(extra_rows).ok().and_then(|r| v.checked_mul(r)))
+                        .checked_mul(extra_rows)
                         .ok_or_else(|| {
                             LlamaError::format("overflow sizing recurrent checkpoint rows")
                         })?,
@@ -1762,6 +1838,8 @@ impl LlamaSession {
             config.max_sequences as usize,
             context_extra_bytes,
             prompt_batch_capacity(config.prefill_batch_size, max_context_usize),
+            native_scratch_bounds(config, model.context_length()?, draft_max)?,
+            attention_arena_rows as usize,
             progress,
         )?;
 
@@ -2166,6 +2244,8 @@ impl LlamaSession {
                         self.config.max_sequences as usize,
                         self.context_extra_bytes,
                         prompt_batch_capacity(self.config.prefill_batch_size, self.max_context),
+                        native_scratch_bounds(self.config, self.model.context_length()?, self.speculation_depth())?,
+                        self.attention_arena_rows,
                         &mut |_, _| {},
                     )?;
                     self.weights = weights;
@@ -4024,6 +4104,8 @@ fn build_runtime_state(
     carry_lanes: usize,
     context_extra_bytes: usize,
     prompt_batch_capacity: usize,
+    scratch_bounds: (usize, usize),
+    attention_arena_rows: usize,
     progress: &mut dyn FnMut(&str, f64),
 ) -> Result<(LoadedGgufWeights, SessionGraphSet)> {
     // Weights come from a read-only mmap of the gguf (clean file-backed
@@ -4076,7 +4158,7 @@ fn build_runtime_state(
                     2,
                     &[
                         i64::from(carry_spec.hidden_size),
-                        i64::try_from(carry_rows_total(carry_ring, carry_lanes)).map_err(
+                        i64::try_from(carry_rows_total(carry_ring, carry_lanes)?).map_err(
                             |_| LlamaError::format("mtp carry ring does not fit in i64"),
                         )?,
                     ],
@@ -4088,7 +4170,7 @@ fn build_runtime_state(
                 .insert(carry_spec.tensor_name.clone(), carry);
             hidden_carry = Some(carry);
             if let Some(vocab) = draft_vocab {
-                build_restricted_draft_head(&mut weights, model, vocab)?;
+                build_restricted_draft_head(&mut weights, plan, vocab)?;
             }
         }
         let prompt_batch_capacity = prompt_batch_capacity.max(1);
@@ -4130,6 +4212,13 @@ fn build_runtime_state(
         progress("load llm upload", 0.18);
         let weight_bytes = weights.ctx.ro_split().max(weights.ctx.used_mem());
         let gb = weight_bytes as f64 / 1e9;
+        let scratch_input = RuntimeScratchInput {
+            spec, spec_mtp, weights: &plan.full_weights.tensors,
+            max_batch: scratch_bounds.0.max(prompt_batch_capacity),
+            max_kv_rows: scratch_bounds.1.max(attention_arena_rows),
+        };
+        let planned_runtime_scratch = shared_runtime.planned_scratch_bytes(&scratch_input)?;
+        shared_runtime.reserve_runtime_scratch(&scratch_input)?;
         let shared_buffers = shared_runtime.create_context_buffers_with_progress(
             &weights.ctx,
             &mut |done, total| {
@@ -4182,6 +4271,7 @@ fn build_runtime_state(
                 return Ok((
                     weights,
                     SessionGraphSet {
+                        planned_runtime_scratch,
                         shared_runtime,
                         shared_cache,
                         shared_buffers,
@@ -4217,6 +4307,159 @@ fn should_retry_graph_reserve(err: &LlamaError) -> bool {
 
 fn prompt_batch_capacity(prefill_batch_size: usize, max_context: usize) -> usize {
     prefill_batch_size.max(1).min(max_context.max(1))
+}
+
+fn native_scratch_bounds(
+    config: LlamaSessionConfig, model_max_context: u32, draft_max: usize,
+) -> Result<(usize, usize)> {
+    let native_context = (model_max_context as usize).checked_next_multiple_of(GRAPH_KEY_BUCKET)
+        .ok_or_else(|| LlamaError::format("native context bucket overflows"))?;
+    let lanes = config.max_sequences.max(1) as usize;
+    let verify_batch = draft_max.checked_add(1).and_then(|n| n.checked_mul(lanes))
+        .ok_or_else(|| LlamaError::format("native verification batch overflows"))?;
+    let max_kv_rows = native_context.checked_mul(lanes)
+        .ok_or_else(|| LlamaError::format("native attention arena rows overflow"))?;
+    Ok((prompt_batch_capacity(config.prefill_batch_size, native_context).max(verify_batch), max_kv_rows))
+}
+
+fn planned_weight_bytes(file_size: u64, page_size: Option<usize>, tensor_sum: usize) -> usize {
+    page_size
+        .and_then(|page| crate::MappedRegion::mapped_len_with_page(file_size, page))
+        .unwrap_or(tensor_sum)
+}
+
+fn recurrent_row_count(lanes: u32, draft_max: usize) -> Result<u32> {
+    let rows = if draft_max == 0 {
+        Some(1)
+    } else {
+        draft_max.checked_add(2).and_then(|rows| u32::try_from(rows).ok())
+    };
+    rows.and_then(|rows| lanes.checked_mul(rows))
+        .ok_or_else(|| LlamaError::format("recurrent row count is too large"))
+}
+
+fn recurrent_bytes_per_row(template: &HybridCacheTemplate, config: LlamaSessionConfig) -> Result<usize> {
+    let row_bytes = |ty, width| {
+        let width = i64::try_from(width)
+            .map_err(|_| LlamaError::format("recurrent row width does not fit in i64"))?;
+        ggml_row_size_for_type(ty, width).map_err(LlamaError::format)
+    };
+    let r = row_bytes(config.recurrent_r_type, template.recurrent_r_width)?;
+    let s = row_bytes(config.recurrent_s_type, template.recurrent_s_width)?;
+    r.checked_add(s)
+        .and_then(|size| size.checked_mul(template.recurrent_layers.len()))
+        .ok_or_else(|| LlamaError::format("recurrent row size overflows"))
+}
+
+fn plan_from_parts(
+    config: LlamaSessionConfig,
+    model_max_context: u32,
+    weights: usize,
+    recurrent_per_row: usize,
+    spec: &HybridDecodeSpec,
+    spec_mtp: Option<&HybridDecodeSpec>,
+    head_bytes: usize,
+    backend: ExecBackendKind,
+    weight_tensors: &[crate::gguf::GgufTensorInfo],
+) -> Result<SessionMemoryPlan> {
+    let draft_max = if spec_mtp.is_some() { config.spec_draft_max } else { 0 };
+    let rows = recurrent_row_count(config.max_sequences, draft_max)?;
+    let mut state = recurrent_per_row.checked_mul(rows as usize)
+        .ok_or_else(|| LlamaError::format("recurrent state size overflows"))?;
+    if let Some(mtp) = spec_mtp {
+        let hidden = mtp.hidden_carry.as_ref()
+            .ok_or_else(|| LlamaError::format("mtp decode spec is missing its hidden carry"))?;
+        let ring = mtp_carry_ring(config.prefill_batch_size, draft_max, model_max_context as usize);
+        let carry = carry_ring_bytes(hidden.hidden_size, ring, config.max_sequences as usize)?;
+        state = state.checked_add(carry).and_then(|n| n.checked_add(head_bytes))
+            .ok_or_else(|| LlamaError::format("session state size overflows"))?;
+    }
+    let batch = prompt_batch_capacity(config.prefill_batch_size, model_max_context as usize);
+    let (max_batch, max_kv_rows) = native_scratch_bounds(config, model_max_context, draft_max)?;
+    let scratch_input = RuntimeScratchInput {
+        spec, spec_mtp, weights: weight_tensors, max_batch, max_kv_rows,
+    };
+    Ok(SessionMemoryPlan {
+        runtime_scratch: backend.planned_scratch_bytes(&scratch_input)?,
+        model_max_context,
+        weights,
+        state,
+        activations_base: config.extra_activation_bytes,
+        attention_kv_per_token: attention_cache_bytes_for_specs(spec, spec_mtp)? / GRAPH_KEY_BUCKET,
+        mask_bytes_per_token: mask_bytes_per_token_for_spec(spec, batch)?,
+        lanes: config.max_sequences,
+    })
+}
+
+fn attention_cache_bytes_for_specs(
+    spec: &HybridDecodeSpec,
+    spec_mtp: Option<&HybridDecodeSpec>,
+) -> Result<usize> {
+    // NOT `attention_cache_bytes_from_spec`: that one REFUSES a spec
+    // containing recurrent layers, because it is the fallback for sizing a
+    // whole cache without a template. Every hybrid model has recurrent
+    // layers, so asking it here returned an error that a caller would
+    // reasonably turn into 0 — and a zero-byte KV report is worse than no
+    // report, because it reads as a fact.
+    let mut total = 0usize;
+    let mut seen = BTreeSet::new();
+    for layer in spec.layers.iter().chain(spec_mtp.into_iter().flat_map(|mtp| &mtp.layers)) {
+        let HybridLayerSpec::Attention { decode, .. } = layer else {
+            continue;
+        };
+        if !seen.insert(decode.cache_layer_index) {
+            continue;
+        }
+        let rows = u64::from(decode.cache.max_context)
+            .checked_mul(u64::from(decode.cache.max_sequences))
+            .ok_or_else(|| LlamaError::format("attention cache rows overflow"))?;
+        for (width, ty) in [
+            (
+                u64::from(decode.block.k_head_dim) * u64::from(decode.block.kv_head_count),
+                decode.cache.k_type,
+            ),
+            (
+                u64::from(decode.block.v_head_dim) * u64::from(decode.block.kv_head_count),
+                decode.cache.v_type,
+            ),
+        ] {
+            let elements = width
+                .checked_mul(rows)
+                .ok_or_else(|| LlamaError::format("attention cache elements overflow"))?;
+            let bytes = ggml_row_size_for_type(
+                ty,
+                i64::try_from(elements)
+                    .map_err(|_| LlamaError::format("attention elements do not fit in i64"))?,
+            )
+            .map_err(LlamaError::format)?;
+            total = total
+                .checked_add(bytes)
+                .ok_or_else(|| LlamaError::format("attention cache bytes overflow"))?;
+        }
+    }
+    Ok(total)
+}
+
+fn mask_bytes_per_token_for_spec(spec: &HybridDecodeSpec, n_tokens: usize) -> Result<usize> {
+    let mut masks = BTreeSet::new();
+    let mut total = 0usize;
+    for layer in &spec.layers {
+        let HybridLayerSpec::Attention { decode, .. } = layer else {
+            continue;
+        };
+        if !decode.block.causal {
+            continue;
+        }
+        let ty = attention_mask_tensor_type(decode.block.q_head_dim, n_tokens);
+        if masks.insert((ty as u32, decode.block.causal_window)) {
+            let width = i64::try_from(n_tokens)
+                .map_err(|_| LlamaError::format("mask batch size does not fit in i64"))?;
+            let bytes = ggml_row_size_for_type(ty, width).map_err(LlamaError::format)?;
+            total = total.checked_add(bytes)
+                .ok_or_else(|| LlamaError::format("attention mask bytes per token overflow"))?;
+        }
+    }
+    Ok(total)
 }
 
 fn attention_cache_bytes_from_spec(spec: &HybridDecodeSpec) -> Result<usize> {
@@ -4414,7 +4657,7 @@ pub(crate) fn collapse_last_token_run(run: HybridDecodeRun) -> Result<HybridDeco
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         argmax_penalized, argmax_token_id, draft_head_fill_after, draw, host_distribution,
         mtp_carry_ring, penalty_window, slot_lower_bounds, slot_lower_bounds_per_token,
@@ -4423,6 +4666,732 @@ mod tests {
     };
     use crate::sampler::Distribution;
     use crate::Result;
+
+    struct TempGguf(std::path::PathBuf);
+
+    impl Drop for TempGguf {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(crate::DraftVocab::sidecar_path(&self.0));
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn inventory_fixture(architecture: crate::LlamaArchitecture) -> Result<TempGguf> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        fn string(buf: &mut Vec<u8>, text: &str) {
+            buf.extend_from_slice(&(text.len() as u64).to_le_bytes());
+            buf.extend_from_slice(text.as_bytes());
+        }
+
+        let arch = architecture.name();
+        let moe = architecture == crate::LlamaArchitecture::Qwen35Moe;
+        let blocks = if moe { 8 } else { 9 };
+        let mut integers = vec![
+            ("block_count", blocks),
+            ("context_length", 4096),
+            ("embedding_length", 64),
+            ("attention.head_count", 2),
+            ("attention.head_count_kv", 1),
+            ("attention.key_length", 32),
+            ("attention.value_length", 32),
+            ("rope.dimension_count", 32),
+            ("ssm.conv_kernel", 4),
+            ("ssm.state_size", 32),
+            ("ssm.group_count", 1),
+            ("ssm.time_step_rank", 2),
+            ("ssm.inner_size", 64),
+            ("full_attention_interval", 4),
+        ];
+        if moe {
+            integers.extend([
+                ("expert_count", 4u32),
+                ("expert_used_count", 2),
+                ("expert_feed_forward_length", 32),
+                ("expert_shared_feed_forward_length", 32),
+            ]);
+        } else {
+            integers.extend([("feed_forward_length", 128), ("nextn_predict_layers", 1)]);
+        }
+        let floats = [
+            ("rope.freq_base", 10000f32),
+            ("attention.layer_norm_rms_epsilon", 1e-6),
+        ];
+        let mut names = vec![
+            "token_embd.weight".to_owned(),
+            "output.weight".to_owned(),
+            "output_norm.weight".to_owned(),
+        ];
+        for layer in 0..blocks {
+            let mut suffixes = vec!["attn_norm.weight", "post_attention_norm.weight"];
+            if moe {
+                suffixes.extend([
+                    "ffn_gate_inp.weight",
+                    "ffn_gate_up_exps.weight",
+                    "ffn_down_exps.weight",
+                    "ffn_gate_inp_shexp.weight",
+                    "ffn_gate_shexp.weight",
+                    "ffn_up_shexp.weight",
+                    "ffn_down_shexp.weight",
+                ]);
+            } else {
+                suffixes.extend(["ffn_gate.weight", "ffn_up.weight", "ffn_down.weight"]);
+            }
+            if (layer + 1) % 4 == 0 || layer == 8 {
+                suffixes.extend([
+                    "attn_q.weight",
+                    "attn_k.weight",
+                    "attn_v.weight",
+                    "attn_output.weight",
+                    "attn_q_norm.weight",
+                    "attn_k_norm.weight",
+                ]);
+            } else {
+                suffixes.extend([
+                    "attn_qkv.weight",
+                    "attn_gate.weight",
+                    "ssm_conv1d.weight",
+                    "ssm_dt.bias",
+                    "ssm_a",
+                    "ssm_beta.weight",
+                    "ssm_alpha.weight",
+                    "ssm_norm.weight",
+                    "ssm_out.weight",
+                ]);
+            }
+            if layer == 8 {
+                suffixes.extend([
+                    "nextn.enorm.weight",
+                    "nextn.hnorm.weight",
+                    "nextn.eh_proj.weight",
+                    "nextn.shared_head_head.weight",
+                ]);
+            }
+            names.extend(suffixes.into_iter().map(|s| format!("blk.{layer}.{s}")));
+        }
+        let mut buf = b"GGUF".to_vec();
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&(names.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&((integers.len() + floats.len() + 2) as u64).to_le_bytes());
+        string(&mut buf, "general.architecture");
+        buf.extend_from_slice(&8u32.to_le_bytes()); // STRING
+        string(&mut buf, arch);
+        for (key, value) in integers {
+            string(&mut buf, &format!("{arch}.{key}"));
+            buf.extend_from_slice(&4u32.to_le_bytes()); // UINT32
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        for (key, value) in floats {
+            string(&mut buf, &format!("{arch}.{key}"));
+            buf.extend_from_slice(&6u32.to_le_bytes()); // FLOAT32
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        string(&mut buf, &format!("{arch}.rope.dimension_sections"));
+        buf.extend_from_slice(&9u32.to_le_bytes()); // ARRAY of UINT32
+        buf.extend_from_slice(&4u32.to_le_bytes());
+        buf.extend_from_slice(&4u64.to_le_bytes());
+        for value in [8u32; 4] {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+        // All tensors alias a single body. Only their GGUF shapes enter the graph planner.
+        for name in names {
+            let suffix = name.strip_prefix("blk.").and_then(|s| s.split_once('.'))
+                .map_or(name.as_str(), |(_, suffix)| suffix);
+            let dims: &[u64] = match suffix {
+                "token_embd.weight" | "output.weight" | "nextn.shared_head_head.weight" => &[64, 32],
+                "output_norm.weight" | "attn_norm.weight" | "post_attention_norm.weight"
+                | "nextn.enorm.weight" | "nextn.hnorm.weight" => &[64],
+                "attn_q_norm.weight" | "attn_k_norm.weight" | "ssm_norm.weight" => &[32],
+                "attn_q.weight" | "attn_qkv.weight" | "ffn_gate.weight" | "ffn_up.weight" => &[64, 128],
+                "attn_k.weight" | "attn_v.weight" | "ffn_gate_shexp.weight" | "ffn_up_shexp.weight" => &[64, 32],
+                "attn_output.weight" | "attn_gate.weight" | "ssm_out.weight" => &[64, 64],
+                "nextn.eh_proj.weight" | "ffn_down.weight" => &[128, 64],
+                "ssm_conv1d.weight" => &[4, 128],
+                "ssm_dt.bias" | "ssm_a" => &[2],
+                "ssm_beta.weight" | "ssm_alpha.weight" => &[64, 2],
+                "ffn_gate_inp.weight" => &[64, 4],
+                "ffn_gate_up_exps.weight" => &[64, 64, 4],
+                "ffn_down_exps.weight" => &[32, 64, 4],
+                "ffn_gate_inp_shexp.weight" => &[64, 1],
+                "ffn_down_shexp.weight" => &[32, 64],
+                _ => panic!("missing inventory fixture shape for {suffix}"),
+            };
+            string(&mut buf, &name);
+            buf.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+            for dim in dims {
+                buf.extend_from_slice(&dim.to_le_bytes());
+            }
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        buf.resize(buf.len().next_multiple_of(32) + (64 << 10), 0);
+        let temp = TempGguf(std::env::temp_dir().join(format!(
+            "makepad-inventory-{arch}-{}-{}.gguf",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        )));
+        std::fs::write(&temp.0, buf)?;
+        Ok(temp)
+    }
+
+    fn check_inventory_layers(
+        model: &crate::LlamaModel,
+        spec: &crate::HybridDecodeSpec,
+    ) -> Result<()> {
+        use crate::runtime::{HybridLayerFfnSpec, HybridLayerSpec};
+        use crate::TensorType::{F16, F32, Q8_0};
+
+        let moe = model.architecture == crate::LlamaArchitecture::Qwen35Moe;
+        assert_eq!(spec.layers.len(), 8);
+        for (index, layer) in spec.layers.iter().enumerate() {
+            let i = index as u32;
+            let ffn = match layer {
+                HybridLayerSpec::Attention {
+                    layer_index,
+                    decode,
+                    ffn,
+                    ..
+                } => {
+                    assert_eq!(*layer_index, i);
+                    assert_eq!((i + 1) % 4, 0);
+                    let expected = if moe {
+                        crate::qwen35moe_attention_decode_spec(model, i, 256, 1, Q8_0, Q8_0)?
+                    } else {
+                        crate::qwen35_attention_decode_spec(model, i, 256, 1, Q8_0, Q8_0)?
+                    };
+                    assert_eq!(
+                        format!("{decode:?}"),
+                        format!("{expected:?}"),
+                        "attention {i}"
+                    );
+                    ffn
+                }
+                HybridLayerSpec::Recurrent {
+                    layer_index,
+                    decode,
+                    ffn,
+                } => {
+                    assert_eq!(*layer_index, i);
+                    assert_ne!((i + 1) % 4, 0);
+                    let expected = if moe {
+                        crate::qwen35moe_delta_net_recurrent_decode_spec(model, i, 1, F16, F32)?
+                    } else {
+                        crate::qwen35_delta_net_recurrent_decode_spec(model, i, 1, F16, F32)?
+                    };
+                    assert_eq!(
+                        format!("{decode:?}"),
+                        format!("{expected:?}"),
+                        "recurrent {i}"
+                    );
+                    ffn
+                }
+            };
+            let expected = if moe {
+                HybridLayerFfnSpec::Moe(crate::qwen35moe_moe_ffn_spec(model, i)?)
+            } else {
+                HybridLayerFfnSpec::Dense(crate::qwen35_dense_ffn_spec(model, i)?)
+            };
+            assert_eq!(format!("{ffn:?}"), format!("{expected:?}"), "FFN {i}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn qwen_spec_and_memory_plan_build_inventory_once() -> Result<()> {
+        use crate::TensorType::{F16, F32, Q8_0};
+        macro_rules! builds {
+            ($arch:ident, $count:literal, $call:expr) => {{
+                crate::$arch::reset_inventory_build_count();
+                let value = $call?;
+                assert_eq!(
+                    crate::$arch::inventory_build_count(),
+                    $count,
+                    "{}",
+                    stringify!($call)
+                );
+                value
+            }};
+        }
+
+        let dense_file = inventory_fixture(crate::LlamaArchitecture::Qwen35)?;
+        let model = crate::LlamaModel::load(&dense_file.0)?;
+        let main_plan = builds!(qwen35, 1, model.execution_plan());
+        assert_eq!(super::draft_head_source(&main_plan)?.name, "output.weight");
+        let spec = builds!(
+            qwen35,
+            1,
+            model.hybrid_decode_spec(256, 1, Q8_0, Q8_0, F16, F32)
+        );
+        check_inventory_layers(&model, &spec)?;
+        assert_eq!(
+            builds!(qwen35, 1, crate::qwen35_first_attention_block_spec(&model)).0,
+            3
+        );
+        assert_eq!(
+            builds!(qwen35, 1, crate::qwen35_first_recurrent_block_spec(&model)).0,
+            0
+        );
+        assert_eq!(
+            builds!(qwen35, 1, crate::qwen35_first_dense_ffn_spec(&model)).0,
+            0
+        );
+
+        let mut enabled = model.clone();
+        enabled.set_load_mtp(true);
+        let mtp = builds!(
+            qwen35,
+            1,
+            enabled.mtp_decode_spec(256, 1, Q8_0, Q8_0, false)
+        );
+        assert!(mtp.is_some());
+
+        let no_draft = crate::LlamaSessionConfig::default();
+        let draft = crate::LlamaSessionConfig {
+            spec_draft_max: 4,
+            ..no_draft
+        };
+        assert!(!model.load_mtp());
+        let main_memory = builds!(qwen35, 1, model.plan_session_memory(no_draft));
+        assert!(!model.load_mtp());
+        let draft_memory = builds!(qwen35, 1, model.plan_session_memory(draft));
+        assert!(!model.load_mtp());
+        assert!(main_memory.attention_kv_per_token > 0);
+        assert_eq!(
+            draft_memory.attention_kv_per_token * 2,
+            main_memory.attention_kv_per_token * 3
+        );
+
+        let vocab = crate::DraftVocab::select(&[1; 32], 0.25, &[], 1)?;
+        vocab.write(&crate::DraftVocab::sidecar_path(&dense_file.0))?;
+        let head_bytes = 64 * 4 * vocab.len();
+        let restricted = builds!(qwen35, 1, model.plan_session_memory(draft));
+        assert!(!model.load_mtp());
+        assert_eq!(restricted.state, draft_memory.state + head_bytes);
+        assert_eq!(
+            builds!(qwen35, 1, enabled.plan_session_memory(no_draft)),
+            main_memory
+        );
+        assert!(enabled.load_mtp());
+
+        let plan = builds!(qwen35, 1, enabled.execution_plan());
+        assert_eq!(
+            super::draft_head_source(&plan)?.name,
+            "blk.8.nextn.shared_head_head.weight"
+        );
+        let mut weights = plan.full_weights.allocate_context_with_extra(64 << 10)?;
+        assert_eq!(
+            builds!(
+                qwen35,
+                0,
+                super::restricted_draft_head_bytes(&dense_file.0, &plan)
+            ),
+            Some(head_bytes)
+        );
+        builds!(
+            qwen35,
+            0,
+            super::build_restricted_draft_head(&mut weights, &plan, &vocab)
+        );
+        assert!(weights
+            .tensor_id(crate::qwen35_runtime::MTP_DRAFT_HEAD_TENSOR)
+            .is_some());
+
+        let moe_file = inventory_fixture(crate::LlamaArchitecture::Qwen35Moe)?;
+        let moe = crate::LlamaModel::load(&moe_file.0)?;
+        builds!(qwen35moe, 1, moe.execution_plan());
+        let spec = builds!(
+            qwen35moe,
+            1,
+            moe.hybrid_decode_spec(256, 1, Q8_0, Q8_0, F16, F32)
+        );
+        check_inventory_layers(&moe, &spec)?;
+        assert_eq!(
+            builds!(
+                qwen35moe,
+                1,
+                crate::qwen35moe_first_attention_block_spec(&moe)
+            )
+            .0,
+            3
+        );
+        assert_eq!(
+            builds!(
+                qwen35moe,
+                1,
+                crate::qwen35moe_first_recurrent_block_spec(&moe)
+            )
+            .0,
+            0
+        );
+        assert_eq!(
+            builds!(qwen35moe, 1, crate::qwen35moe_first_moe_ffn_spec(&moe)).0,
+            0
+        );
+        assert!(builds!(qwen35moe, 0, moe.mtp_decode_spec(256, 1, Q8_0, Q8_0, false)).is_none());
+        let tensors = moe.model_tensors(false)?;
+        assert!(builds!(
+            qwen35moe,
+            0,
+            moe.mtp_decode_spec_with_tensors(&tensors, 256, 1, Q8_0, Q8_0, false)
+        )
+        .is_none());
+        builds!(qwen35moe, 1, moe.plan_session_memory(no_draft));
+        Ok(())
+    }
+
+    fn attention_memory_spec(indices: &[u32], head_dim: u32, max_context: u32) -> super::HybridDecodeSpec {
+        use crate::runtime::{
+            AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
+            DenseGatedFfnSpec, DenseLayerFfnSpec, HybridDecodeSpec, HybridLayerFfnSpec,
+            HybridLayerSpec, ProbeInputKind,
+        };
+        use crate::{TensorType, UnaryOp};
+
+        let input = ProbeInputKind::Embeddings {
+            hidden_size: 4 * head_dim,
+            input_type: TensorType::F32,
+        };
+        let layers = indices.iter().map(|&index| HybridLayerSpec::Attention {
+            layer_index: index,
+            decode: AttentionDecodeSpec {
+                block: AttentionBlockSpec {
+                    input: input.clone(),
+                    input_norm_name: String::new(),
+                    q_proj_name: String::new(),
+                    q_proj_scale_name: None,
+                    q_layout: AttentionQueryLayout::Plain,
+                    k_proj_name: String::new(),
+                    k_proj_scale_name: None,
+                    v_proj_name: None,
+                    v_proj_scale_name: None,
+                    output_proj_name: String::new(),
+                    output_proj_scale_name: None,
+                    q_norm_name: None,
+                    k_norm_name: None,
+                    v_norm_epsilon: None,
+                    q_head_dim: head_dim,
+                    q_head_count: 4,
+                    k_head_dim: head_dim,
+                    kv_head_count: 4,
+                    v_head_dim: head_dim,
+                    rms_epsilon: 1e-6,
+                    rope: None,
+                    rope_factors_name: None,
+                    attention_scale: 1.0,
+                    causal: true,
+                    causal_window: None,
+                    residual: true,
+                },
+                cache: AttentionKvCacheSpec {
+                    max_context,
+                    max_sequences: 1,
+                    k_type: TensorType::Q8_0,
+                    v_type: TensorType::Q8_0,
+                },
+                cache_layer_index: index,
+                write_kv: true,
+            },
+            ffn: HybridLayerFfnSpec::Dense(DenseLayerFfnSpec {
+                input_norm: None,
+                ffn: DenseGatedFfnSpec {
+                    gate_proj_name: String::new(),
+                    up_proj_name: String::new(),
+                    down_proj_name: String::new(),
+                    gate_proj_scale_name: None,
+                    up_proj_scale_name: None,
+                    down_proj_scale_name: None,
+                    gate_activation: UnaryOp::Silu,
+                },
+            }),
+            post_attention_norm: None,
+            post_ffn_norm: None,
+            per_layer_input: None,
+            output_scale_name: None,
+        }).collect();
+        HybridDecodeSpec {
+            input,
+            output_norm_name: String::new(),
+            output_name: String::new(),
+            rms_epsilon: 1e-6,
+            final_logit_softcap: None,
+            per_layer_input: None,
+            layers,
+            hidden_carry: None,
+            mtp_prologue: None,
+            recurrent_checkpoints: false,
+        }
+    }
+
+    /// GGUF shapes only. Layers can reuse the same weight IDs, as each produces its own graph nodes.
+    pub(crate) fn scratch_fixture(
+        attention_layers: u32, q_heads: u32, dim: u32, cache_rows: u32, kv: crate::TensorType, moe: bool,
+    ) -> (super::HybridDecodeSpec, Vec<crate::gguf::GgufTensorInfo>) {
+        use crate::runtime::*;
+        use crate::{TensorType::F32, UnaryOp::Silu};
+        let mut weights = Vec::new();
+        let mut weight = |name: &str, dims: &[u64]| {
+            weights.push(crate::gguf::GgufTensorInfo {
+                name: name.into(), tensor_type: F32, dimensions: dims.to_vec(),
+                offset: 0, size_bytes: 4 * dims.iter().product::<u64>(),
+            });
+            name.to_owned()
+        };
+        let input = ProbeInputKind::Embeddings { hidden_size: 64, input_type: F32 };
+        let indices: Vec<_> = (1..=attention_layers).collect();
+        let mut spec = attention_memory_spec(&indices, dim, cache_rows);
+        spec.input = input.clone();
+        spec.output_name = weight("output", &[64, 32]);
+        spec.output_norm_name = weight("norm", &[64]);
+        let dense = HybridLayerFfnSpec::Dense(DenseLayerFfnSpec {
+            input_norm: None,
+            ffn: DenseGatedFfnSpec {
+                gate_proj_name: weight("gate", &[64, 64]), up_proj_name: weight("up", &[64, 64]),
+                down_proj_name: weight("down", &[64, 64]), gate_activation: Silu,
+                gate_proj_scale_name: None, up_proj_scale_name: None, down_proj_scale_name: None,
+            },
+        });
+        let q_dim = u64::from(q_heads) * u64::from(dim);
+        let kv_dim = 4 * u64::from(dim);
+        let q_proj = weight("q", &[64, q_dim]);
+        let k_proj = weight("k", &[64, kv_dim]);
+        let v_proj = weight("v", &[64, kv_dim]);
+        let out_proj = weight("attn_out", &[q_dim, 64]);
+        for layer in &mut spec.layers {
+            if let HybridLayerSpec::Attention { decode, ffn, .. } = layer {
+                let block = &mut decode.block;
+                block.input = input.clone();
+                block.input_norm_name = spec.output_norm_name.clone();
+                block.q_head_count = q_heads;
+                block.q_proj_name = q_proj.clone();
+                block.k_proj_name = k_proj.clone();
+                block.v_proj_name = Some(v_proj.clone());
+                block.output_proj_name = out_proj.clone();
+                decode.cache.k_type = kv;
+                decode.cache.v_type = kv;
+                *ffn = dense.clone();
+            }
+        }
+        let ffn = if moe {
+            HybridLayerFfnSpec::Moe(MoeFfnSpec {
+                input: input.clone(), input_norm: None, router_proj_name: weight("router", &[64, 128]),
+                expert_count: 128, expert_used_count: 8, gating_func: ExpertGatingFunc::SoftMax,
+                normalize_selected_weights: true, weight_scale: 1.0,
+                merged_gate_up_proj_name: Some(weight("experts", &[64, 128, 128])),
+                gate_proj_name: None, gate_proj_scale_name: None, up_proj_name: String::new(),
+                up_proj_scale_name: None, down_proj_name: weight("experts_down", &[64, 64, 128]),
+                down_proj_scale_name: None, activation: Silu, shared_expert: None,
+            })
+        } else { dense };
+        let recurrent = DeltaNetRecurrentBlockSpec {
+            input, embedding_length: 64, input_norm_name: spec.output_norm_name.clone(),
+            merged_input_proj_name: None, qkv_proj_name: weight("qkv", &[64, 128]),
+            qkv_proj_scale_name: None, z_proj_name: weight("z", &[64, 64]), z_proj_scale_name: None,
+            beta_proj_name: weight("beta", &[64, 2]), beta_proj_scale_name: None,
+            alpha_proj_name: weight("alpha", &[64, 2]), alpha_proj_scale_name: None,
+            dt_bias_name: weight("dt", &[2]), a_name: weight("a", &[2]),
+            conv_kernel_name: weight("conv", &[4, 128]), norm_name: weight("ssm_norm", &[32]),
+            output_proj_name: weight("ssm_out", &[64, 64]), output_proj_scale_name: None,
+            key_head_dim: 32, key_head_count: 1, value_head_dim: 32, value_head_count: 2,
+            rms_epsilon: 1e-6, residual: true,
+        };
+        spec.layers.insert(0, HybridLayerSpec::Recurrent {
+            layer_index: 0, ffn, decode: DeltaNetRecurrentDecodeSpec {
+                block: recurrent, cache: DeltaNetRecurrentStateSpec {
+                    max_sequences: 1, r_type: F32, s_type: F32,
+                },
+            },
+        });
+        (spec, weights)
+    }
+
+    #[test]
+    fn cuda_and_metal_runtime_scratch_match_backend_formulas() -> Result<()> {
+        use crate::cuda_exec::{self as cuda, CudaScratchSpec};
+        use crate::exec::{ExecBackendKind as Backend, RuntimeScratchInput};
+        use crate::runtime::HybridLayerSpec;
+        use crate::TensorType::{F16, F32, Q8_0};
+        let default = CudaScratchSpec { max_weight_k: 17_408, max_batch: 512, ..Default::default() };
+        assert_eq!(cuda::planned_scratch_bytes(default), 320 << 20);
+        for (sm, bytes) in [(0, 64 << 20), (80, 64 << 20), (128, 68_157_440), (170, 90_521_600)] {
+            assert_eq!(cuda::act_scratch_bytes(sm, default), bytes);
+        }
+        let wide = CudaScratchSpec { max_weight_k: 16_384, max_batch: 3_073, ..default };
+        assert_eq!(cuda::act_scratch_bytes(128, wide), 100_696_064);
+        assert_eq!(cuda::planned_scratch_bytes(wide), 369_131_520);
+        let half = CudaScratchSpec { max_batch: 2_048, max_f16_weight_k: 16_384, ..wide };
+        assert_eq!(cuda::act_scratch_bytes(128, half), 128 << 20);
+
+        let native = 262_144;
+        for (heads, kv_heads, expected) in [(64, 16, 68_157_440), (24, 4, 798_720)] {
+            let mut spec = attention_memory_spec(&[0], 256, 256);
+            if let HybridLayerSpec::Attention { decode, .. } = &mut spec.layers[0] {
+                decode.block.q_head_count = heads;
+                decode.block.kv_head_count = kv_heads;
+            }
+            for window in [4096, 69_632, native] {
+                let config = super::LlamaSessionConfig { max_context: Some(window), prefill_batch_size: 512, ..Default::default() };
+                let bounds = super::native_scratch_bounds(config, native, 0)?;
+                assert_eq!(bounds, (512, native as usize));
+                let tmp = cuda::fattn_vec_scratch_bytes(&spec, None, bounds.1);
+                assert_eq!(tmp, expected);
+                let shape = CudaScratchSpec { max_fattn_vec_tmp_bytes: tmp, ..default };
+                for sm in [0, 80] {
+                    assert_eq!(cuda::act_scratch_bytes(sm, shape), expected.max(64 << 20));
+                }
+            }
+        }
+
+        let metal = |layers, heads, dim, cache_rows, kv, moe, batch, rows| {
+            let (spec, weights) = scratch_fixture(layers, heads, dim, cache_rows, kv, moe);
+            Backend::Metal.planned_scratch_bytes(&RuntimeScratchInput {
+                spec: &spec, spec_mtp: None, weights: &weights, max_batch: batch, max_kv_rows: rows,
+            })
+        };
+        for (layers, heads, batch, expected) in [
+            (8, 16, 512, 142_344_192), (8, 16, 32, 139_886_592), (8, 16, 1, 8_750_080),
+            (16, 24, 512, 419_954_688), (16, 24, 32, 415_039_488),
+        ] {
+            assert_eq!(metal(layers, heads, 256, 256, Q8_0, false, batch, native as usize)?, expected);
+        }
+        for rows in [69_632, native] {
+            assert_eq!(metal(8, 16, 256, rows, Q8_0, false, 512, native as usize)?, 142_344_192);
+        }
+        assert_eq!(metal(1, 16, 256, 256, F32, false, 32, 256)?, 17_174_560);
+        let vec_tail = metal(1, 16, 128, 256, Q8_0, false, 19, 256)?;
+        assert!(vec_tail > 0);
+        assert_eq!(metal(1, 16, 128, 256, Q8_0, false, 512, 256)?, vec_tail);
+        assert_eq!(metal(0, 16, 256, 256, Q8_0, false, 512, 256)?, 0);
+        assert_eq!(metal(0, 16, 256, 256, Q8_0, true, 512, 256)?, 787_456);
+        assert_eq!(metal(0, 16, 256, 256, Q8_0, true, 1, 256)?, 512);
+
+        let (spec, mut weights) = scratch_fixture(8, 16, 256, 256, Q8_0, false);
+        weights.extend([(17_408, Q8_0), (64, F16)].map(|(k, ty)| crate::gguf::GgufTensorInfo {
+            name: format!("unused-{k}"), dimensions: vec![k, 2], tensor_type: ty,
+            offset: 0, size_bytes: 2 * crate::ggml_row_size_for_type(ty, k as i64).unwrap() as u64,
+        }));
+        assert_eq!(cuda::weight_k_bounds(&weights), (17_408, 64));
+        let input = RuntimeScratchInput { spec: &spec, spec_mtp: None, weights: &weights, max_batch: 512, max_kv_rows: native as usize };
+        assert_eq!(Backend::Cuda.planned_scratch_bytes(&input)?, 320 << 20);
+        assert_eq!(Backend::Vulkan.planned_scratch_bytes(&input)?, 0);
+        for (backend, expected) in [(Backend::Cuda, 320 << 20), (Backend::Metal, 142_344_192)] {
+            for window in [4096, native] {
+                let config = super::LlamaSessionConfig { max_context: Some(window), prefill_batch_size: 512, ..Default::default() };
+                let plan = super::plan_from_parts(config, native, 0, 0, &spec, None, 0, backend, &weights)?;
+                assert_eq!(plan.attention_kv_per_token, 17_408);
+                assert_eq!(plan.runtime_scratch, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn attention_cache_bytes_includes_mtp_layer_without_double_counting() -> Result<()> {
+        use super::attention_cache_bytes_for_specs;
+
+        let indices = (3..64).step_by(4).collect::<Vec<_>>();
+        let main = attention_memory_spec(&indices, 256, 4096);
+        let mut mtp = attention_memory_spec(&[64], 256, 4096);
+        assert_eq!(attention_cache_bytes_for_specs(&main, None)?, 4096 * 34_816);
+        assert_eq!(attention_cache_bytes_for_specs(&main, Some(&mtp))?, 4096 * 36_992);
+        mtp.layers.push(main.layers[0].clone());
+        assert_eq!(attention_cache_bytes_for_specs(&main, Some(&mtp))?, 4096 * 36_992);
+        Ok(())
+    }
+
+    #[test]
+    fn mask_bytes_per_token_scales_with_prefill_batch_and_mask_dtype() -> Result<()> {
+        use super::{mask_bytes_per_token_for_spec, HybridLayerSpec};
+
+        let mut flash = attention_memory_spec(&[3, 7], 256, 4096);
+        assert_eq!(mask_bytes_per_token_for_spec(&flash, 512)?, 1024);
+        assert_eq!(mask_bytes_per_token_for_spec(&flash, 1024)?, 2048);
+        if let HybridLayerSpec::Attention { decode, .. } = &mut flash.layers[1] {
+            decode.block.causal_window = Some(128);
+        }
+        assert_eq!(mask_bytes_per_token_for_spec(&flash, 512)?, 2048);
+
+        let mut non_flash = attention_memory_spec(&[3], 96, 4096);
+        assert_eq!(mask_bytes_per_token_for_spec(&non_flash, 512)?, 2048);
+        if let HybridLayerSpec::Attention { decode, .. } = &mut non_flash.layers[0] {
+            decode.block.causal = false;
+        }
+        assert_eq!(mask_bytes_per_token_for_spec(&non_flash, 512)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn session_memory_plan_state_is_independent_of_context_length() -> Result<()> {
+        use super::{plan_from_parts, prompt_batch_capacity, recurrent_bytes_per_row,
+            HybridCacheTemplate, LlamaSessionConfig, GRAPH_KEY_BUCKET};
+        use crate::runtime::HybridHiddenCarrySpec;
+        use crate::TensorType;
+
+        let native_context = 262_144;
+        let main = attention_memory_spec(&[3], 256, GRAPH_KEY_BUCKET as u32);
+        let mut mtp = attention_memory_spec(&[4], 256, GRAPH_KEY_BUCKET as u32);
+        mtp.hidden_carry = Some(HybridHiddenCarrySpec { tensor_name: "carry".into(), hidden_size: 128 });
+        let template = HybridCacheTemplate {
+            attention_layers: vec![3, 4],
+            recurrent_layers: vec![0, 1],
+            attention_k_width: 1024, attention_v_width: 1024,
+            recurrent_r_width: 32, recurrent_s_width: 64,
+        };
+        // Two layers, each with 32 F16 conv elements and 64 F32 state elements per row.
+        let recurrent_row = 2 * (32 * 2 + 64 * 4);
+        for lanes in [1, 2] {
+            let config = LlamaSessionConfig {
+                prefill_batch_size: 512, spec_draft_max: 4, max_sequences: lanes,
+                recurrent_r_type: TensorType::F16, recurrent_s_type: TensorType::F32,
+                ..Default::default()
+            };
+            let per_row = recurrent_bytes_per_row(&template, config)?;
+            assert_eq!(per_row, recurrent_row);
+            let plan = |context, draft, head_bytes| {
+                plan_from_parts(
+                    LlamaSessionConfig { max_context: Some(context), ..config },
+                    native_context, 8192, per_row, &main, draft, head_bytes, super::ExecBackendKind::Cuda, &[],
+                )
+            };
+            let expected = plan(4096, Some(&mtp), 0)?;
+            assert_eq!(expected.state, (6 * recurrent_row + (2048 + 2) * 128 * 4) * lanes as usize);
+            assert_eq!(expected.attention_kv_per_token, 2 * 2176);
+            assert_eq!(expected.lanes, lanes);
+            assert_eq!(expected.model_max_context, native_context);
+            assert_eq!(expected.activations_base, config.extra_activation_bytes);
+            for window in [4096, 32768, 256] {
+                let planned = plan(window, Some(&mtp), 0)?;
+                assert_eq!(planned, expected, "requested context changed the plan");
+                let ring = mtp_carry_ring(512, 4, window as usize);
+                let loaded_state = (6 * recurrent_row + (ring + 2) * 128 * 4) * lanes as usize;
+                let loaded_mask = prompt_batch_capacity(512, window as usize) * 2;
+                if window == 256 {
+                    assert!(planned.state >= loaded_state);
+                    assert!(planned.mask_bytes_per_token >= loaded_mask);
+                } else {
+                    assert_eq!(planned.state, loaded_state);
+                    assert_eq!(planned.mask_bytes_per_token, loaded_mask);
+                }
+            }
+            assert_eq!(plan(4096, None, 0)?.state, recurrent_row * lanes as usize);
+            assert_eq!(plan(4096, Some(&mtp), 512)?.state, expected.state + 512);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn planned_weight_bytes_matches_mapped_and_copied_paths() {
+        use super::planned_weight_bytes;
+
+        let file_size = 17_001;
+        for (page, mapped) in [(4096, 20_480), (16_384, 32_768)] {
+            assert_eq!(planned_weight_bytes(file_size, Some(page), 15_000), mapped);
+            assert_eq!(planned_weight_bytes(file_size, Some(page), 12_000), mapped);
+        }
+        assert_eq!(planned_weight_bytes(file_size, None, 12_000), 12_000);
+        assert_eq!(planned_weight_bytes(0, Some(4096), 12_000), 12_000);
+        assert_eq!(planned_weight_bytes(u64::MAX, Some(4096), 12_000), 12_000);
+    }
 
     /// The production sampler's distribution, densely over the row.
     fn dense_probabilities(

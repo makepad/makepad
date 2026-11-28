@@ -59,12 +59,20 @@ impl AiSettings {
         if cfg!(target_arch = "wasm32") {
             return None;
         }
-        // A hidden test instance keeps its settings and saved chats apart.
-        if let Some(dir) = std::env::var_os("MAKEPAD_AICHAT_DIR").filter(|d| !d.is_empty()) {
-            return Some(PathBuf::from(dir).join("settings"));
+        let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+        Self::path_from(var("MAKEPAD_AICHAT_DIR"), var("MAKEPAD_TEST_HOME"), var("HOME").or_else(|| var("USERPROFILE")))
+    }
+
+    /// A hidden test instance keeps its settings and saved chats apart: in its
+    /// `MAKEPAD_AICHAT_DIR`, else below an absolute `MAKEPAD_TEST_HOME`, as
+    /// `makepad_platform::home::app_state_home` keeps an app's own state. Fab's
+    /// chats went to a box's own `~/.makepad` from a lane's run (11-27).
+    fn path_from(dir: Option<PathBuf>, test_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+        if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+            return Some(dir.join("settings"));
         }
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-        Some(PathBuf::from(home).join(".makepad").join("aichat").join("settings"))
+        let home = test_home.filter(|h| h.is_absolute()).or(home)?;
+        Some(home.join(".makepad").join("aichat").join("settings"))
     }
 
     pub fn load() -> AiSettings {
@@ -130,5 +138,16 @@ mod tests {
         }
         assert_eq!(AiSettings::saved_or_provider(None, "claude-cli").provider.slug(), "claude-cli");
         assert_eq!(AiSettings::parse("garbage"), AiSettings::default());
+    }
+
+    #[test]
+    fn a_test_instance_keeps_its_settings_and_chats_below_its_test_home() {
+        let (home, test) = (PathBuf::from("person-home"), std::env::temp_dir().join("test-home"));
+        let path = |dir: Option<&str>, test_home: Option<PathBuf>| AiSettings::path_from(dir.map(PathBuf::from), test_home, Some(home.clone()));
+        assert_eq!(path(None, None), Some(home.join(".makepad/aichat/settings")), "no test home: the person's own, as before");
+        assert_eq!(path(None, Some(test.clone())), Some(test.join(".makepad/aichat/settings")), "an absolute test home holds a test instance's");
+        assert_eq!(path(None, Some(PathBuf::from("rel"))), Some(home.join(".makepad/aichat/settings")), "a relative test home is no test home");
+        assert_eq!(path(Some("chat-dir"), Some(test)), Some(PathBuf::from("chat-dir").join("settings")), "MAKEPAD_AICHAT_DIR comes first");
+        assert_eq!(path(Some(""), None), Some(home.join(".makepad/aichat/settings")), "an empty MAKEPAD_AICHAT_DIR counts as unset");
     }
 }

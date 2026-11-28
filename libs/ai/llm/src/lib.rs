@@ -159,7 +159,8 @@ pub fn ui_reserve_bytes() -> u64 {
 pub use draft_vocab::DraftVocab;
 pub use session::{
     LlamaGeneration, LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig,
-    LlamaSessionState, LlamaStopReason, SessionMemory, SpecLane, SpecRoundOutcome, SpeculativeStats,
+    LlamaSessionState, LlamaStopReason, SessionMemory, SessionMemoryPlan, SpecLane, SpecRoundOutcome,
+    SpeculativeStats,
 };
 pub use vision::{
     calc_size_preserved_ratio, preprocess_rgb8, read_ppm, vision_rope_positions, PreparedImage,

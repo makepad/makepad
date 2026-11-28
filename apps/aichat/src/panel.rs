@@ -11,7 +11,7 @@
 //! next frame so streaming, deadlines and the cloud provider's polling all
 //! advance without a host timer.
 
-use crate::attach::{self, Dropped, Source};
+use crate::attach::{self, DecodeQueue, DecodeTask, Dropped, PictureDraft, PictureError, PreparedPicture, SlotState, Source};
 use crate::bus::ServiceBus;
 use crate::pictures::{self, ChatPictures, PictureKept};
 #[cfg(feature = "gen")]
@@ -20,7 +20,7 @@ use crate::settings::AiSettings;
 #[cfg(feature = "engine")]
 use makepad_ai_services::engine::models::{build_model, fallback_choice, hub_generation, hub_rows, provider_rows};
 use makepad_ai_services::engine::NoModelWithReason;
-use makepad_ai_services::engine::{EngineCore, EngineEvent, ModelImage, SentPicture, ServiceRegistry};
+use makepad_ai_services::engine::{EngineCore, EngineEvent, ModelImage, PictureRoom, ReturnedPicture, SentPicture, ServiceRegistry};
 use makepad_ai_services::mcp::mcpb;
 use makepad_ai_services::provider::{CLAUDE_DESKTOP, PROVIDER_ENV};
 use makepad_ai_services::card::{Card, CardValues, Field, MAX_FIELDS};
@@ -29,7 +29,7 @@ use makepad_ai_services::progress_eta::ProgressTracker;
 use makepad_ai_services::wire::{api_name, split_name, Risk, ToolDef, ToolOutcome};
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::tip::TipWidgetRefExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use makepad_widgets::ai_slot::AiSlotRequests;
@@ -40,16 +40,137 @@ pub const MAX_CHIPS: usize = 4;
 
 /// The picture picker's dialog id.
 const ATTACH_DIALOG: LiveId = live_id!(ai_chat_attach);
-/// The composer's picture chips, in order.
+/// The host's pointing chips, in order.
 const PICK_CHIPS: [LiveId; 6] = [live_id!(pick0), live_id!(pick1), live_id!(pick2), live_id!(pick3), live_id!(pick4), live_id!(pick5)];
-const ATTACH_PICS: [LiveId; 4] = [live_id!(attach_pic0), live_id!(attach_pic1), live_id!(attach_pic2), live_id!(attach_pic3)];
-/// A sent line's picture slots.
-const USER_PICS: [LiveId; 4] = [live_id!(upic0), live_id!(upic1), live_id!(upic2), live_id!(upic3)];
 /// The buttons under a finished turn, in display order.
 const TURN_BUTTONS: [LiveId; 3] = [live_id!(turn_act0), live_id!(turn_act1), live_id!(turn_act2)];
 
 fn slot_id(slot: usize) -> LiveId {
     LiveId::from_str(&format!("f{slot}"))
+}
+
+fn prepend_text(returned: &str, draft: &str) -> String {
+    match (returned.is_empty(), draft.is_empty()) {
+        (true, _) => draft.into(),
+        (_, true) => returned.into(),
+        _ => format!("{returned}\n{draft}"),
+    }
+}
+
+fn log_picture_error(name: &str, detail: &str) {
+    log!("aichat: {name}: {detail}");
+}
+
+fn read_original(stored: &SentPicture) -> Result<Arc<[u8]>, PictureError> {
+    let path = match stored.kept_now() {
+        Some(Ok(path)) => path,
+        _ => match stored.data() {
+            Ok(bytes) => return Ok(bytes),
+            // A write may have settled between the two calls. Use the file's
+            // typed I/O error if it has a path now. A cleared chat has none.
+            Err(detail) => stored.kept_now().and_then(Result::ok)
+                .ok_or_else(|| PictureError::rewritten("not found", detail))?,
+        },
+    };
+    std::fs::read(path).map(Arc::from)
+        .map_err(|e| PictureError::open(e.kind(), format!("its file does not read ({e})")))
+}
+
+/// Only the original needs a read. Reuse both the fitted PNG and the chip.
+fn returned_picture(picture: ReturnedPicture, thumb: Option<Arc<[u8]>>) -> Result<Dropped, PictureError> {
+    let stored = picture.original;
+    let original = read_original(&stored)?;
+    let ext = stored.file.rsplit_once('.').map(|(_, ext)| ext).unwrap_or_default();
+    if makepad_ai_services::engine::picture_file(&original, ext) != stored.file {
+        return Err(PictureError::rewritten("changed since it was sent", "its saved file has changed"));
+    }
+    let (width, height) = makepad_image_decode::image_size_by_data(&picture.for_model, Path::new("picture.png"))
+        .map_err(|e| PictureError::rewritten("damaged or unreadable picture", format!("its fitted picture could not be read ({e})")))?;
+    let sent = attach::Attachment { name: stored.name, png: picture.for_model, width, height, thumb };
+    Ok(Dropped { original, file: stored.file, width: stored.width, height: stored.height, sent })
+}
+
+enum PictureLoad {
+    Reading(TaskHandle<Result<PreparedPicture, PictureError>>),
+    Decoding(DecodeTask<Result<Dropped, PictureError>>),
+}
+
+impl PictureLoad {
+    fn poll(&mut self, cx: &mut Cx, name: &str) -> Option<Result<Dropped, PictureError>> {
+        if let Self::Reading(handle) = self {
+            let picture = match handle.try_take()?.map_err(PictureError::load).and_then(|r| r) {
+                Ok(picture) => picture,
+                Err(error) => return Some(Err(error)),
+            };
+            let name = name.to_owned();
+            let pool = cx.task_pool();
+            *self = Self::Decoding(cx.global::<DecodeQueue>().submit(pool, Class::Visible, picture.is_large(), move || picture.decode(&name)));
+        }
+        match self {
+            Self::Decoding(task) => task.try_take().map(|r| r.unwrap_or_else(|e| Err(PictureError::load(e)))),
+            Self::Reading(_) => None,
+        }
+    }
+
+    fn cancel(self) {
+        match self {
+            Self::Reading(handle) => { handle.cancel(); handle.detach(); }
+            Self::Decoding(task) => task.cancel(),
+        }
+    }
+}
+
+struct ReturningPictures {
+    line: u64,
+    names: Vec<String>,
+    read: TaskHandle<Vec<Result<Dropped, PictureError>>>,
+}
+
+fn pictures_that_go(room: PictureRoom, attached: usize) -> usize {
+    match room {
+        PictureRoom::NoPictures => 0,
+        PictureRoom::Fits(n) => n.min(attached),
+        PictureRoom::Unknown => attached,
+    }
+}
+
+fn room_notice(room: PictureRoom, attached: usize) -> Option<String> {
+    let left = attached - pictures_that_go(room, attached);
+    if left == 0 {
+        return None;
+    }
+    match room {
+        PictureRoom::NoPictures => Some("This model cannot look at pictures: they stay attached.".into()),
+        PictureRoom::Fits(n) => {
+            let pictures = if n == 1 { "picture" } else { "pictures" };
+            let stay = if left == 1 { "stays" } else { "stay" };
+            Some(format!("This model takes {n} {pictures} with a line: the other {left} {stay} attached for the next."))
+        }
+        PictureRoom::Unknown => None,
+    }
+}
+
+/// Update the list when its pictures change. The file hash identifies the thumbnail across
+/// draft edits, recycled transcript rows and restored conversations.
+fn fill_picture_list<'a>(cx: &mut Cx, list: FlatListRef, pictures: impl Iterator<Item = (&'a str, &'a Arc<[u8]>)>) {
+    let Some(mut list) = list.borrow_mut() else { return };
+    for (slot, (file, png)) in pictures.enumerate() {
+        if let Some(item) = list.item(cx, LiveId(slot as u64 + 1), id!(Thumb)) {
+            let key = Path::new(file).with_extension("thumb.png");
+            let _ = item.image(cx, ids!(pic)).load_image_from_data_async(cx, &key, png.clone());
+        }
+    }
+    let before = list.items.len();
+    list.items.retain_visible();
+    if list.items.len() < before {
+        cx.widget_tree_mark_dirty(list.widget_uid());
+    }
+}
+
+fn draw_picture_list(cx: &mut Cx2d, scope: &mut Scope, list: &FlatList) {
+    for id in 1..=list.items.len() {
+        list.items[LiveId(id as u64)].widget.draw_all(cx, scope);
+    }
 }
 
 script_mod! {
@@ -147,14 +268,31 @@ script_mod! {
         }
     }
 
+    let PictureList = FlatList{
+        width: Fill height: Fit
+        flow: Flow.Right{wrap: true}
+        spacing: 4 wrap_spacing: 4
+        scroll_bars +: {show_scroll_x: false show_scroll_y: false}
+    }
+
     // One picture waiting in the composer, with its own remove button.
-    let AttachPic = View{
-        visible: false
-        width: Fit
-        height: Fit
+    let AttachPic = RoundedView{
+        width: 108
+        height: 36
         flow: Overlay
         align: Align{x: 1.0 y: 0.0}
-        pic := Image{width: 48 height: 36 fit: ImageFit.Smallest}
+        draw_bg +: {color: theme.color_u_1 border_radius: 5.0}
+        View{
+            width: Fill height: Fill align: Align{x: 0.5 y: 0.5}
+            pic := Image{width: Fill height: Fill fit: ImageFit.Smallest}
+        }
+        placeholder := View{
+            width: Fill height: Fill flow: Down spacing: 0
+            padding: Inset{left: 4 right: 3 top: 0 bottom: 0}
+            align: Align{y: 0.5}
+            chip_name := Meta{width: Fill height: 15 padding: 0 margin: Inset{right: 16} max_lines: 1 text_overflow: TextOverflow.Ellipsis}
+            chip_state := Meta{width: Fill height: 15 padding: 0 max_lines: 1}
+        }
         Tip{
             text: "Remove this picture"
             pic_remove := CloseButtonSm{}
@@ -481,14 +619,15 @@ script_mod! {
                         visible: false
                         width: Fill
                         height: Fit
-                        flow: Right
-                        spacing: 4
-                        upic0 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
-                        upic1 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
-                        upic2 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
-                        upic3 := Image{visible: false width: 64 height: 48 fit: ImageFit.Smallest}
+                        line_thumbs := PictureList{
+                            Thumb := View{
+                                width: 64 height: 48
+                                pic := Image{width: Fill height: Fill fit: ImageFit.Smallest}
+                            }
+                        }
                     }
                     user_text := Line{}
+                    user_stopped := Meta{visible: false text: "stopped"}
                     user_picks := Meta{
                         visible: false
                         width: Fill
@@ -933,25 +1072,19 @@ script_mod! {
                 visible: false
                 width: Fill
                 height: Fit
-                flow: Right
-                spacing: 8
+                flow: Down
+                spacing: 2
                 padding: Inset{left: 4 right: 0 bottom: 2}
-                align: Align{y: 0.5}
-                attach_pic0 := AttachPic{}
-                attach_pic1 := AttachPic{}
-                attach_pic2 := AttachPic{}
-                attach_pic3 := AttachPic{}
-                attach_label := Label{
-                    width: Fill
-                    text: ""
-                    draw_text +: {
-                        color: theme.color_text_meta
-                        text_style: theme.font_regular{font_size: 8.5}
+                draft_thumbs := PictureList{Thumb := AttachPic{}}
+                picture_notice := Meta{visible: false width: Fill}
+                View{
+                    width: Fill height: Fit
+                    flow: Right spacing: 8 align: Align{y: 0.5}
+                    attach_label := Meta{width: Fill}
+                    Tip{
+                        text: "Remove the pictures"
+                        attach_clear := CloseButtonSm{}
                     }
-                }
-                Tip{
-                    text: "Remove the pictures"
-                    attach_clear := CloseButtonSm{}
                 }
             }
 
@@ -1215,9 +1348,21 @@ pub struct AiChatPanel {
     /// The window's F10 overlay made this panel; any other is the app's own chat.
     #[live(false)]
     in_overlay: bool,
+    /// Where the input that made this panel's pending actions came from: `Some(None)` the person,
+    /// `Some(Some(who))` a program driving the app (sticky once seen), `None` none. Kept because
+    /// the click arrives as an action after the input's origin marker has cleared; cleared after
+    /// each actions event, so it never answers a later click.
+    #[rust]
+    press_origin: Option<Option<String>>,
     /// Pictures waiting for the next line.
     #[rust]
-    attachments: Vec<Dropped>,
+    attachments: PictureDraft<PictureLoad, Dropped>,
+    /// Failed submissions whose originals are being read, in failure order.
+    #[rust]
+    returning: VecDeque<ReturningPictures>,
+    /// The last picture refusal, shown with the draft until its pictures or model change.
+    #[rust]
+    picture_refusal: Option<String>,
     /// The microphone button's state, set by the host.
     #[rust]
     voice: VoiceUi,
@@ -1234,19 +1379,19 @@ pub struct AiChatPanel {
     /// build the rows.
     #[rust]
     rows_key: Option<(u64, u64, bool)>,
-    /// Dropped pictures being decoded on the task pool.
+    /// One footer note per failed selection, until the next send.
     #[rust]
-    loading: Vec<TaskHandle<Result<Dropped, String>>>,
+    load_notices: Vec<String>,
     /// Pictures the model asked to see again (`chat.picture`), being fitted to it on the task
     /// pool, by call id.
     #[rust]
-    fitting: Vec<(String, TaskHandle<Result<Vec<u8>, String>>)>,
+    fitting: Vec<(String, DecodeTask<Result<Vec<u8>, String>>)>,
     /// The small copies of a restored chat's pictures, being made on the task pool.
     #[rust]
-    thumbs_loading: Option<TaskHandle<Vec<(String, Arc<[u8]>)>>>,
-    /// The attachment chips show this many pictures.
+    thumbs_loading: Vec<(String, DecodeTask<Result<Arc<[u8]>, String>>)>,
+    /// Slot revision and number of originals still being returned to this draft.
     #[rust]
-    attach_shown: Option<(usize, usize)>,
+    attach_shown: Option<(u64, usize)>,
     /// The ids of the attachment chips as drawn, by slot, and the one the pointer is over.
     #[rust]
     pick_ids: Vec<String>,
@@ -1310,7 +1455,7 @@ pub struct AiChatPanel {
     notice: Option<String>,
     #[rust]
     engine: Option<EngineCore>,
-    /// The process's registry: the panel shows the services every port of this process opened.
+    /// Embedded panels share the process registry. An external WM pane has its own bus mirror.
     #[rust(ServiceRegistry::process())]
     registry: ServiceRegistry,
     #[rust]
@@ -1385,7 +1530,8 @@ impl AiChatPanel {
     /// session's restart for a deploy among them (one ended two chats with the WM, 11-06).
     fn publish_unsaved(&mut self, cx: &mut Cx) {
         let replying = self.engine.as_ref().is_some_and(|e| matches!(e.state().status, Status::Thinking | Status::Streaming | Status::WaitingForTool));
-        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0;
+        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty()
+            || self.attachments.count != 0 || self.marks.count > 0;
         let what = if replying { Some("an AI chat reply still coming") } else if typed { Some("an AI chat message not sent") } else { None };
         if what != self.unsaved_published.as_deref() {
             self.unsaved_published = what.map(str::to_string);
@@ -1400,6 +1546,13 @@ impl AiChatPanel {
     /// The registry a host plugs in-process links into.
     pub fn registry(&self) -> &ServiceRegistry {
         &self.registry
+    }
+
+    /// Keep a hosted pane's mirrored WM services private to this panel.
+    /// Call before starting the engine or receiving bus registrations.
+    pub fn use_private_registry(&mut self) {
+        debug_assert!(self.engine.is_none(), "use_private_registry must run before ensure_engine");
+        self.registry = ServiceRegistry::new();
     }
 
     /// A studio `Custom` frame that may be a bus frame from the WM.
@@ -1469,6 +1622,7 @@ impl AiChatPanel {
             return;
         }
         self.chat_key = Some(key);
+        self.chat_written = None;
         // An engine already up takes the saved chat now if nothing was said yet.
         self.keep_engine_chat();
     }
@@ -1483,10 +1637,7 @@ impl AiChatPanel {
     fn keep_engine_chat(&mut self) {
         let Some(path) = self.chat_path() else { return };
         let Some(engine) = self.engine.as_mut() else { return };
-        let saved = engine.state().entries.is_empty().then(|| std::fs::read_to_string(&path).ok()).flatten();
-        if let Err(e) = engine.keep_chat(path.with_extension("pictures"), saved.as_deref()) {
-            log!("aichat: the saved chat {} did not come back: {e}", path.display());
-        }
+        crate::chat_store::keep(&path, engine, std::time::SystemTime::now());
         self.pictures_moved = true;
     }
 
@@ -1497,7 +1648,7 @@ impl AiChatPanel {
         self.pictures_moved = false;
         let Some(engine) = self.engine.as_ref() else { return };
         *cx.global::<ChatPictures>() = ChatPictures::of(engine);
-        if self.thumbs_loading.is_some() {
+        if !self.thumbs_loading.is_empty() {
             // The job under way covers what it was given; the rest on its return.
             self.pictures_moved = true;
             return;
@@ -1506,10 +1657,14 @@ impl AiChatPanel {
         if missing.is_empty() {
             return;
         }
-        let job = move || missing.iter().filter_map(|p| p.data().and_then(|data| attach::thumb(&data, &p.name)).ok().map(|thumb| (p.file.clone(), thumb))).collect();
-        match cx.task_pool().submit(Class::Background, job) {
-            Ok(handle) => self.thumbs_loading = Some(handle),
-            Err(e) => log!("aichat: the chat's pictures are not shown ({e:?})"),
+        for picture in missing {
+            let file = picture.file.clone();
+            let large = attach::large_decode(picture.width as usize, picture.height as usize);
+            let pool = cx.task_pool();
+            let task = cx.global::<DecodeQueue>().submit(pool, Class::Background, large, move || {
+                attach::thumb(&picture.data()?, &picture.name)
+            });
+            self.thumbs_loading.push((file, task));
         }
     }
 
@@ -1523,17 +1678,8 @@ impl AiChatPanel {
             return;
         }
         self.chat_written = Some(state.generation);
-        if state.entries.is_empty() {
-            let _ = std::fs::remove_file(&path);
-            return;
-        }
-        let text = engine.saved_chat();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        if let Err(error) = crate::chat_store::write(&path, engine) {
+            log!("aichat: could not write {} ({error})", path.display());
         }
     }
 
@@ -1635,7 +1781,7 @@ impl AiChatPanel {
                         ToolDef::new(api_name(service, tool), def.description, def.parameters, Risk::Read)
                     })
                     .collect();
-                let dir = makepad_platform::home::makepad_home().join("mcpb");
+                let dir = makepad_platform::home::app_state_home().join("mcpb");
                 mcpb::write(&dir, &app_id, &self.app_title(&app_id), &exe, &tools)
             })
             .and_then(|path| mcpb::open_in_claude_desktop(&path).map(|_| path));
@@ -1691,25 +1837,88 @@ impl AiChatPanel {
         self.send(cx, text);
     }
 
-    /// Images the model sees with its next input — for a host's tool that
-    /// captured something while a tool round is in flight (its results
-    /// carry the pictures). `Err` when the model cannot see images.
-    pub fn attach_for_model(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
-        self.ensure_engine().model_mut().attach_images(images)
+    /// Exactly `text` as the person's line, for a line the app writes for them: the composer's
+    /// text, pictures and marks stay as they are, and the line carries none of them. It waits
+    /// behind a running turn like a typed line. The line's id, whose fate the engine logs
+    /// ([`EngineState::line_log`]); refused only when no model answers.
+    pub fn send_exact(&mut self, cx: &mut Cx, text: &str) -> Result<u64, &'static str> {
+        let engine = self.ensure_engine();
+        if !engine.state().has_model() {
+            return Err("No AI model is connected");
+        }
+        let id = engine.send_exact(text);
+        self.view.redraw(cx);
+        Ok(id)
+    }
+
+    /// The current view to send with the person's next ordinary line.
+    pub fn set_next_line_picture(&mut self, picture: Option<ModelImage>) -> Result<(), String> {
+        self.ensure_engine().set_next_line_picture(picture)
     }
 
     /// A picture for the person's next line, as if dropped on the panel.
     pub fn attach(&mut self, cx: &mut Cx, source: Source) {
-        match cx.task_pool().submit(Class::Visible, move || attach::load(source)) {
-            Ok(handle) => self.loading.push(handle),
-            Err(e) => self.note(cx, format!("could not read the picture ({e:?})")),
+        self.attach_batch(cx, std::iter::once(source));
+    }
+
+    fn attach_batch(&mut self, cx: &mut Cx, sources: impl IntoIterator<Item = Source>) {
+        let items = sources.into_iter().map(|source| {
+            let name = source.name();
+            let label = name.clone();
+            let handle = cx.task_pool().submit(Class::Visible, move || PreparedPicture::read(source, &label))
+                .map(PictureLoad::Reading).map_err(PictureError::load);
+            (name, handle)
+        });
+        self.attachments.select(items, &mut self.load_notices, log_picture_error);
+        self.picture_refusal = None;
+        self.view.redraw(cx);
+    }
+
+    fn show_draft_pictures(&self, cx: &mut Cx, slots_changed: bool) {
+        let list = self.view.flat_list(cx, ids!(draft_thumbs));
+        let mut list = slots_changed.then(|| list.borrow_mut()).flatten();
+        let mut labels: Vec<_> = self.returning.iter().flat_map(|line| line.names.iter())
+            .map(|name| format!("{name} (returning…)")).collect();
+        for slot in self.attachments.slots() {
+            let status = match &slot.state {
+                SlotState::Reading(_) => "reading…".to_owned(),
+                SlotState::Failed(_) => "couldn't be read".to_owned(),
+                SlotState::Ready(picture) => format!("{}×{}", picture.width, picture.height),
+            };
+            labels.push(format!("{} ({status})", slot.name));
+            let Some(item) = list.as_mut().and_then(|list| list.item(cx, LiveId(slot.id), id!(Thumb))) else { continue };
+            let ready = matches!(slot.state, SlotState::Ready(_));
+            item.view(cx, ids!(placeholder)).set_visible(cx, !ready);
+            item.image(cx, ids!(pic)).set_visible(cx, ready);
+            if let SlotState::Ready(picture) = &slot.state {
+                let key = Path::new(&picture.file).with_extension("thumb.png");
+                let png = picture.sent.thumb.as_ref().unwrap_or(&picture.sent.png);
+                let _ = item.image(cx, ids!(pic)).load_image_from_data_async(cx, &key, png.clone());
+            } else {
+                item.label(cx, ids!(chip_name)).set_text(cx, &slot.name);
+                item.label(cx, ids!(chip_state)).set_text(cx, &status);
+            }
         }
+        if let Some(mut list) = list {
+            let before = list.items.len();
+            list.items.retain_visible();
+            if list.items.len() < before { cx.widget_tree_mark_dirty(list.widget_uid()); }
+        }
+        self.view.label(cx, ids!(attach_label)).set_text(cx, &labels.join(", "));
     }
 
     /// Answer every parked card as if clicked (the bridge's `/ai?confirm=`):
     /// `run`, `always` (run, and allow the tool for the rest of the chat) or
     /// `cancel`.
+    ///
+    /// Only `cancel` is taken: Run and Always are the person's press in the app, so a program
+    /// driving the app cannot approve its own parked call.
     pub fn answer_cards(&mut self, cx: &mut Cx, how: &str) {
+        if let Err(reason) = remote_answer_allowed(how) {
+            log!("ai chat: {reason}");
+            self.note(cx, reason);
+            return;
+        }
         let now = Self::now(cx);
         let parked: Vec<String> = self.ensure_engine().state().entries.iter().filter_map(|e| match e {
             Entry::Tool(t) if matches!(t.status, ToolStatus::Confirm) => Some(t.call_id.clone()),
@@ -1748,6 +1957,7 @@ impl AiChatPanel {
             self.provider_rows = rows.clone();
             let engine = self.engine.as_mut().unwrap();
             engine.set_model(model);
+            self.picture_refusal = None;
             engine.set_provider_facts(choice, rows, local_only);
             if let Err(reason) = settings.save() {
                 self.note(cx, format!("Could not save the provider choice: {reason}"));
@@ -1763,28 +1973,13 @@ impl AiChatPanel {
     }
 
     fn poll_loading(&mut self, cx: &mut Cx) {
-        let mut i = 0;
-        while i < self.loading.len() {
-            match self.loading[i].try_take() {
-                Some(result) => {
-                    self.loading.remove(i).detach();
-                    match result {
-                        Ok(Ok(picture)) => {
-                            self.attachments.push(picture);
-                            // At most four pictures ride with one line.
-                            if self.attachments.len() > 4 {
-                                self.attachments.remove(0);
-                            }
-                        }
-                        Ok(Err(e)) => self.note(cx, e),
-                        Err(e) => self.note(cx, format!("could not read the picture ({e:?})")),
-                    }
-                    self.view.redraw(cx);
-                }
-                None => i += 1,
-            }
+        let before = self.attachments.revision;
+        self.attachments.poll_batches(|name, job| job.poll(cx, name), &mut self.load_notices, log_picture_error);
+        if self.attachments.revision != before {
+            self.picture_refusal = None;
+            self.view.redraw(cx);
         }
-        if self.hold.releasing() && self.loading.is_empty() {
+        if self.hold.releasing() && self.attachments.reading == 0 {
             self.finish_release(cx);
         }
     }
@@ -1808,9 +2003,7 @@ impl AiChatPanel {
         if self.hold.is_waiting() {
             if marks.count == 0 && !self.hold.releasing() {
                 // cleared while the line waited: it goes as it was typed
-                let text = self.hold.finish().unwrap_or_default();
-                self.marks_through = true;
-                self.send(cx, text);
+                self.finish_release(cx);
             } else {
                 self.ask_marks(cx);
             }
@@ -1831,36 +2024,97 @@ impl AiChatPanel {
         if !self.hold.begin_release() {
             return;
         }
-        match picture {
-            Some(source) => self.attach(cx, source),
-            None => self.finish_release(cx),
+        if let Some(source) = picture {
+            self.attach(cx, source);
+        }
+        if self.attachments.reading == 0 {
+            self.finish_release(cx);
         }
     }
 
     fn finish_release(&mut self, cx: &mut Cx) {
         if let Some(text) = self.hold.finish() {
+            // This submit was requested earlier. The input may now contain a
+            // failed line returned to the composer or words typed since.
+            let input = self.view.text_input(cx, ids!(input));
+            let draft = input.text();
+            input.set_text(cx, "");
             self.marks_through = true;
             self.send(cx, text);
+            if !draft.is_empty() { input.set_text(cx, &prepend_text(&input.text(), &draft)); }
         }
     }
 
     /// The person gave up on the held line: it is back in the composer.
     fn cancel_held(&mut self, cx: &mut Cx) {
         if let Some(text) = self.hold.finish() {
-            self.view.text_input(cx, ids!(input)).set_text(cx, &text);
+            let input = self.view.text_input(cx, ids!(input));
+            input.set_text(cx, &prepend_text(&text, &input.text()));
             self.note(cx, "not sent: the marks were not ready".into());
         }
+    }
+
+    fn return_line(&mut self, cx: &mut Cx, id: u64, text: String, pictures: Vec<ReturnedPicture>) {
+        let input = self.view.text_input(cx, ids!(input));
+        if !text.is_empty() {
+            input.set_text(cx, &prepend_text(&text, &input.text()));
+        }
+        if !pictures.is_empty() {
+            let names: Vec<_> = pictures.iter().map(|p| p.original.name.clone()).collect();
+            let originals: Vec<_> = pictures.into_iter().map(|p| {
+                let thumb = self.thumbs.get(&p.original.file).cloned();
+                (p, thumb)
+            }).collect();
+            match cx.task_pool().submit(Class::Visible, move || originals.into_iter().map(|(p, thumb)| returned_picture(p, thumb)).collect()) {
+                Ok(read) => self.returning.push_back(ReturningPictures { line: id, names, read }),
+                Err(e) => self.return_read_failed(id, &names, PictureError::load(e)),
+            }
+        }
+        self.view.redraw(cx);
+    }
+
+    fn return_read_failed(&mut self, id: u64, names: &[String], error: PictureError) {
+        let names = names.join(", ");
+        let reason = error.report(&names, log_picture_error);
+        self.ensure_engine().return_picture_errors(id, vec![format!("{names} ({reason})")]);
+    }
+
+    fn prepend_pictures(&mut self, id: u64, names: Vec<String>, results: Vec<Result<Dropped, PictureError>>) {
+        let mut returned = Vec::new();
+        let mut errors = Vec::new();
+        for (name, result) in names.into_iter().zip(results) {
+            match result {
+                Ok(picture) => returned.push(picture),
+                Err(why) => {
+                    let reason = why.report(&name, log_picture_error);
+                    errors.push(format!("{name} ({reason})"));
+                }
+            }
+        }
+        self.attachments.prepend_ready(returned.into_iter().map(|picture| (picture.sent.name.clone(), picture)));
+        self.ensure_engine().return_picture_errors(id, errors);
     }
 
     /// Take what the task pool finished: pictures fitted for the model, and a restored chat's
     /// small copies.
     fn poll_pictures(&mut self, cx: &mut Cx) {
+        // Returned pictures belong to the draft, even if a newer submission is
+        // still waiting for its marks. Let that submission go with its own chips.
+        while !self.hold.is_waiting() {
+            let Some(result) = self.returning.front_mut().and_then(|line| line.read.try_take()) else { break };
+            let line = self.returning.pop_front().unwrap();
+            line.read.detach();
+            match result {
+                Ok(pictures) => self.prepend_pictures(line.line, line.names, pictures),
+                Err(e) => self.return_read_failed(line.line, &line.names, PictureError::load(format!("{e:?}"))),
+            }
+            self.view.redraw(cx);
+        }
         let mut i = 0;
         while i < self.fitting.len() {
             match self.fitting[i].1.try_take() {
                 Some(result) => {
-                    let (call_id, handle) = self.fitting.remove(i);
-                    handle.detach();
+                    let (call_id, _) = self.fitting.remove(i);
                     let fitted = result.unwrap_or_else(|e| Err(format!("the picture could not be read ({e:?})")));
                     self.ensure_engine().picture_fitted(&call_id, fitted);
                     self.view.redraw(cx);
@@ -1868,18 +2122,16 @@ impl AiChatPanel {
                 None => i += 1,
             }
         }
-        if let Some(result) = self.thumbs_loading.as_mut().and_then(|handle| handle.try_take()) {
-            if let Some(handle) = self.thumbs_loading.take() {
-                handle.detach();
+        self.thumbs_loading.retain(|(file, task)| {
+            let Some(result) = task.try_take() else { return true };
+            match result.and_then(|r| r) {
+                Ok(thumb) => { self.thumbs.insert(file.clone(), thumb); }
+                Err(e) => log!("aichat: the chat picture is not shown ({e})"),
             }
-            match result {
-                Ok(thumbs) => self.thumbs.extend(thumbs),
-                Err(e) => log!("aichat: the chat's pictures are not shown ({e:?})"),
-            }
-            // Task cards show their input pictures too.
             self.task_rows_filled.clear();
             self.view.redraw(cx);
-        }
+            false
+        });
     }
 
     fn handle_drop(&mut self, cx: &mut Cx, event: &Event) {
@@ -1894,20 +2146,35 @@ impl AiChatPanel {
                 }
             }
             DragHit::Drop(drop) => {
-                let sources: Vec<Source> = drop.items.iter().filter_map(Source::from_drag_item).collect();
+                let sources: Vec<_> = drop.items.iter().filter_map(Source::from_drag_item).collect();
                 if sources.is_empty() {
                     self.note(cx, "drop a PNG, JPEG or WebP picture".into());
                 }
-                for source in sources.into_iter().take(4) {
-                    self.attach(cx, source);
-                }
+                self.attach_batch(cx, sources);
             }
             _ => {}
         }
     }
 
+    /// A line that cannot go yet stays in the composer. A chip or a bridge line that is not
+    /// the draft goes after it: what is already in the composer is never replaced.
+    fn keep_in_composer(&mut self, cx: &mut Cx, text: &str) {
+        let input = self.view.text_input(cx, ids!(input));
+        let draft = input.text();
+        if draft != text {
+            input.set_text(cx, &prepend_text(&draft, text));
+        }
+        input.take_key_focus(cx);
+        self.view.redraw(cx);
+    }
+
     fn send(&mut self, cx: &mut Cx, text: String) {
         let now = Self::now(cx);
+        // A returned line's pictures are still being read: this line waits behind it.
+        if !self.returning.is_empty() && !self.marks_through {
+            self.keep_in_composer(cx, &text);
+            return;
+        }
         self.notice = None;
         // A pasted path to a picture is an attachment, not a line.
         if let Some(source) = Source::from_pasted_text(&text) {
@@ -1915,9 +2182,23 @@ impl AiChatPanel {
             self.view.text_input(cx, ids!(input)).set_text(cx, "");
             return;
         }
+        let console = text.trim().starts_with('/');
+        let room = self.ensure_engine().picture_room();
+        // Enter can arrive before the disabled Send button is drawn. A line waits while any
+        // chip still reads; a console command carries no pictures and never waits.
+        let ready = self.attachments.ready();
+        if ready.is_none() && !console {
+            self.keep_in_composer(cx, &text);
+            return;
+        }
+        let ready = ready.unwrap_or_default();
+        let count = pictures_that_go(room, ready.len());
+        if !self.marks_through {
+            self.load_notices.clear();
+        }
         // Marks on the page go with the line: it waits until the host has them resolved and
         // their picture (the host's `MarksWanted`), and the person's text is never sent without.
-        if self.marks.count > 0 && !self.marks_through && !text.trim().starts_with('/') {
+        if self.marks.count > 0 && !self.marks_through && !console {
             self.hold.take_line(text);
             let input = self.view.text_input(cx, ids!(input));
             input.set_text(cx, "");
@@ -1928,21 +2209,20 @@ impl AiChatPanel {
         }
         self.marks_through = false;
         let mut sent = false;
-        if !self.attachments.is_empty() && !text.trim().starts_with('/') {
-            let pictures = std::mem::take(&mut self.attachments);
-            self.attach_shown = None;
-            for picture in &pictures {
-                let thumb = picture.sent.thumb.clone().unwrap_or_else(|| picture.sent.png.clone());
-                self.thumbs.insert(picture.file.clone(), thumb);
-            }
-            // The line goes with its pictures; the chat keeps them, and the app's tools take
-            // them by name.
-            match self.ensure_engine().send_pictures(&text, pictures.into_iter().map(Dropped::into_new).collect(), now) {
-                Ok(()) => {
+        if count > 0 && !console {
+            let pictures = ready.into_iter().take(count).cloned().map(Dropped::into_new).collect();
+            match self.ensure_engine().send_pictures(&text, pictures, now) {
+                Ok(_) => {
+                    self.attachments.sent(count, |picture| {
+                        self.thumbs.insert(picture.file, picture.sent.thumb.unwrap_or(picture.sent.png));
+                    });
+                    self.picture_refusal = None;
                     sent = true;
                     self.share_pictures(cx);
                 }
-                Err(e) => self.note(cx, format!("the pictures were not sent: {e}")),
+                Err(e) => {
+                    self.picture_refusal = Some(format!("The pictures were not sent: {}. They stay attached.", e.trim_end_matches('.')));
+                }
             }
         }
         if !sent {
@@ -2196,6 +2476,14 @@ impl AiChatPanel {
         }
     }
 
+    fn footer_line(state: &EngineState, notice: Option<&String>) -> (Option<String>, bool) {
+        // Engine failures already have a transcript row and the failed status dot.
+        match notice {
+            Some(text) => (Some(text.clone()), true),
+            None => (Self::work_line(state), matches!(state.status, Status::Error(_))),
+        }
+    }
+
     /// The line at the end of the conversation while something happens:
     /// `None` when idle.
     fn work_line(state: &EngineState) -> Option<String> {
@@ -2391,8 +2679,9 @@ impl Widget for AiChatPanel {
         if let Event::Custom(json) = event {
             self.on_custom(json);
         }
+        cx.global::<DecodeQueue>().pump();
         self.handle_drop(cx, event);
-        if !self.loading.is_empty() {
+        if self.attachments.reading != 0 {
             self.poll_loading(cx);
         }
         self.hover_picks(cx, event);
@@ -2424,9 +2713,7 @@ impl Widget for AiChatPanel {
             if self.paste_request == Some(reply.request) {
                 self.paste_request = None;
                 self.pasted += 1;
-                if let Some(source) = Source::from_clipboard(&reply.content, self.pasted) {
-                    self.attach(cx, source);
-                }
+                self.attach_batch(cx, Source::from_clipboard(&reply.content, self.pasted));
             }
         }
         if let Event::KeyDown(ke) = event {
@@ -2499,6 +2786,7 @@ impl Widget for AiChatPanel {
         let uid = self.widget_uid();
         let mut wanted = Vec::new();
         let mut keep = Vec::new();
+        let mut returned = Vec::new();
         if let Some(engine) = self.engine.as_mut() {
             for ev in engine.pump(now) {
                 match ev {
@@ -2509,12 +2797,17 @@ impl Widget for AiChatPanel {
                     }
                     EngineEvent::PictureWanted { call_id, picture, rect } => wanted.push((call_id, picture, rect)),
                     EngineEvent::KeepPicture(write) => keep.push(write),
+                    EngineEvent::ReturnLine { id, text, pictures } => returned.push((id, text, pictures)),
                 }
             }
             busy = engine.needs_pump() || engine.state().status.is_busy();
         }
+        for (id, text, pictures) in returned {
+            self.return_line(cx, id, text, pictures);
+        }
+        busy |= !self.returning.is_empty() && !self.hold.is_waiting();
         // The pool's picture jobs are polled on the frames they ask for.
-        busy |= self.thumbs_loading.is_some();
+        busy |= !self.thumbs_loading.is_empty();
         // A picture the person sent is written to its file on the task pool, and its end wakes
         // the app: what waits for the file (the app's picture tools) goes on then.
         for write in keep {
@@ -2529,10 +2822,10 @@ impl Widget for AiChatPanel {
         }
         // A picture the model asks to see again: read and fitted on the task pool.
         for (call_id, picture, rect) in wanted {
-            match cx.task_pool().submit(Class::Visible, move || pictures::fit_for_model(&picture, rect)) {
-                Ok(handle) => self.fitting.push((call_id, handle)),
-                Err(e) => self.ensure_engine().picture_fitted(&call_id, Err(format!("the picture could not be read ({e:?})"))),
-            }
+            let large = attach::large_decode(picture.width as usize, picture.height as usize);
+            let pool = cx.task_pool();
+            let task = cx.global::<DecodeQueue>().submit(pool, Class::Visible, large, move || pictures::fit_for_model(&picture, rect));
+            self.fitting.push((call_id, task));
         }
         self.bus.relay_down(&self.registry);
         if changed {
@@ -2543,14 +2836,25 @@ impl Widget for AiChatPanel {
         if busy {
             self.next_frame = cx.new_next_frame();
         }
-        self.view.handle_event(cx, event, scope);
+        // The confirmation sheet's rule: a click counts as the person's only when the input event
+        // that made it was. Run and Always read their click later, from the actions, so the
+        // origin of the event that made those actions is kept until then.
+        let made = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        if !made.is_empty() {
+            if !matches!(event, Event::Actions(_)) {
+                self.press_origin = note_press(self.press_origin.take(), cx.injected_by());
+            }
+            cx.extend_actions(made);
+        }
         self.widget_match_event(cx, event, scope);
+        // A press's origin answers only the actions that follow it, never a later click.
+        if matches!(event, Event::Actions(_)) { self.press_origin = None; }
         self.publish_unsaved(cx);
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         // The engine exists once the panel is on screen.
-        let _ = self.ensure_engine();
+        let room = self.ensure_engine().picture_room();
         let state = self.engine.as_ref().unwrap().state().clone();
         self.update_rows(&state);
         if self.drawn_generation != state.generation {
@@ -2561,7 +2865,7 @@ impl Widget for AiChatPanel {
         mcp_row.set_visible(cx, state.provider.slug() == CLAUDE_DESKTOP);
 
         // The header's dot: ready, working, or nothing answers.
-        let silent = matches!(state.status, Status::Error(_)) || state.provider_label == "No model";
+        let silent = matches!(state.status, Status::Error(_)) || !state.has_model();
         let working = state.status.is_busy();
         let dot = if silent {
             StatusKind::Error
@@ -2572,23 +2876,10 @@ impl Widget for AiChatPanel {
         };
         self.view.widget(cx, ids!(status_dot)).set_text(cx, dot.name());
 
-        // The line at the end of the conversation: what happens now, or
-        // what went wrong.
-        let (line, failed) = match (&self.notice, &state.status) {
-            (Some(notice), _) => (Some(notice.clone()), true),
-            (None, Status::Error(e)) => (Some(e.clone()), true),
-            (None, _) => (Self::work_line(&state), false),
-        };
-        let work = match line {
-            Some(line) => {
-                let (line, bar) = self.load_line(&state, line);
-                Some((line, bar, failed))
-            }
-            None => {
-                let _ = self.load_line(&state, String::new());
-                None
-            }
-        };
+        let (line, failed) = Self::footer_line(&state, self.notice.as_ref());
+        let show_work = line.is_some() || failed;
+        let (line, bar) = self.load_line(&state, line.unwrap_or_default());
+        let work = show_work.then_some((line, bar, failed));
 
         // Send turns into Stop while a turn runs; with nothing typed, no
         // picture and no marks it is greyed. A greyed Send takes no press, so
@@ -2596,8 +2887,13 @@ impl Widget for AiChatPanel {
         let busy = state.status.is_busy();
         self.view.button(cx, ids!(send_button)).set_visible(cx, !busy);
         self.view.button(cx, ids!(stop_button)).set_visible(cx, busy);
-        let typed = !self.view.text_input(cx, ids!(input)).text().trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0;
-        self.view.widget(cx, ids!(send_button)).set_disabled(cx, !typed);
+        let returning = self.returning.iter().map(|line| line.names.len()).sum::<usize>();
+        let attached = self.attachments.count + returning;
+        let count = pictures_that_go(room, attached);
+        let draft = self.view.text_input(cx, ids!(input)).text();
+        let typed = !draft.trim().is_empty() || count > 0 || self.marks.count > 0;
+        let ready = returning == 0 && (draft.trim_start().starts_with('/') || self.attachments.reading == 0);
+        self.view.widget(cx, ids!(send_button)).set_disabled(cx, !(typed && ready));
         self.view.widget(cx, ids!(mic_tip)).set_visible(cx, matches!(self.voice, VoiceUi::Idle | VoiceUi::Busy));
         self.view.widget(cx, ids!(mic_button)).set_disabled(cx, self.voice == VoiceUi::Busy);
         self.view.widget(cx, ids!(mic_live_tip)).set_visible(cx, self.voice == VoiceUi::Listening);
@@ -2608,26 +2904,19 @@ impl Widget for AiChatPanel {
             self.view.label(cx, ids!(allowed_label)).set_text(cx, &format!("Runs without asking in this chat: {}", allowed.join(", ")));
         }
 
-        let shown = (self.attachments.len(), self.loading.len());
+        let shown = (self.attachments.revision, returning);
         if self.attach_shown != Some(shown) {
+            let slots_changed = self.attach_shown.is_none_or(|(revision, _)| revision != self.attachments.revision);
             self.attach_shown = Some(shown);
-            self.view.view(cx, ids!(attach_row)).set_visible(cx, shown.0 + shown.1 > 0);
-            let mut names: Vec<String> = self.attachments.iter().map(|a| format!("{} ({}×{})", a.sent.name, a.width, a.height)).collect();
-            if !self.loading.is_empty() {
-                names.push("reading…".into());
-            }
-            self.view.label(cx, ids!(attach_label)).set_text(cx, &names.join(", "));
-            for (slot, id) in ATTACH_PICS.iter().enumerate() {
-                let chip = self.view.view(cx, &[*id]);
-                match self.attachments.get(slot) {
-                    Some(picture) => {
-                        chip.set_visible(cx, true);
-                        let thumb = picture.sent.thumb.clone().unwrap_or_else(|| picture.sent.png.clone());
-                        let _ = chip.image(cx, ids!(pic)).load_png_from_data(cx, &thumb);
-                    }
-                    None => chip.set_visible(cx, false),
-                }
-            }
+            self.view.view(cx, ids!(attach_row)).set_visible(cx, attached > 0);
+            self.show_draft_pictures(cx, slots_changed);
+        }
+        let capacity = room_notice(room, attached);
+        let notice = self.picture_refusal.as_deref().or(capacity.as_deref());
+        let label = self.view.label(cx, ids!(picture_notice));
+        label.set_visible(cx, notice.is_some());
+        if let Some(text) = notice {
+            label.set_text(cx, text);
         }
 
         // Nothing said yet: a hint and the host's starting points instead
@@ -2711,16 +3000,31 @@ impl Widget for AiChatPanel {
             }
         }
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            if let Some(list) = item.borrow::<FlatList>() {
+                for item in self.attachments.slots().filter_map(|slot| list.items.get(&LiveId(slot.id))) {
+                    item.widget.draw_all(cx, scope);
+                }
+                continue;
+            }
             let Some(mut list) = item.borrow_mut::<PortalList>() else { continue };
             let total = self.rows.len();
-            list.set_item_range(cx, 0, total + work.is_some() as usize);
+            let work_index = total + self.load_notices.len();
+            list.set_item_range(cx, 0, work_index + work.is_some() as usize);
             while let Some(index) = list.next_visible_item(cx) {
                 if index >= total {
+                    if let Some(note) = self.load_notices.get(index - total) {
+                        let row = list.item(cx, index, id!(SystemRow));
+                        row.label(cx, ids!(system_text)).set_text(cx, note);
+                        row.draw_all(cx, &mut Scope::empty());
+                        continue;
+                    }
                     // The work line follows the last row (the list asks
                     // past its range to fill the view: those stay empty).
-                    let Some((line, bar, failed)) = work.as_ref().filter(|_| index == total) else { continue };
+                    let Some((line, bar, failed)) = work.as_ref().filter(|_| index == work_index) else { continue };
                     let row = list.item(cx, index, id!(WorkRow));
-                    row.label(cx, ids!(work_label)).set_text(cx, line);
+                    let label = row.label(cx, ids!(work_label));
+                    label.set_visible(cx, !line.is_empty());
+                    label.set_text(cx, line);
                     row.widget(cx, ids!(work_dot)).set_text(cx, if *failed { StatusKind::Error } else { StatusKind::InProgress }.name());
                     row.view(cx, ids!(load_row)).set_visible(cx, bar.is_some());
                     if let Some(value) = bar {
@@ -2755,9 +3059,15 @@ impl Widget for AiChatPanel {
                 };
                 let entry = &state.entries[at];
                 let row = match entry {
-                    Entry::User { text, pictures, attachments } => {
-                        let row = list.item(cx, index, id!(UserRow));
+                    Entry::User { text, pictures, attachments, delivery } => {
+                        let mut row = list.item(cx, index, id!(UserRow));
                         row.label(cx, ids!(user_text)).set_text(cx, text);
+                        let note = row.label(cx, ids!(user_stopped));
+                        let label = delivery_note(delivery);
+                        note.set_visible(cx, label.is_some());
+                        if let Some(text) = label {
+                            note.set_text(cx, &text);
+                        }
                         let pointed = row.label(cx, ids!(user_picks));
                         pointed.set_visible(cx, !attachments.is_empty());
                         if !attachments.is_empty() {
@@ -2765,22 +3075,21 @@ impl Widget for AiChatPanel {
                         }
                         // The line's pictures that have their small copy (a restored chat's
                         // come from the task pool a moment later).
-                        let thumbs: Vec<&Arc<[u8]>> = pictures.iter().filter_map(|p| self.thumbs.get(&p.file)).collect();
-                        row.view(cx, ids!(user_pics)).set_visible(cx, !thumbs.is_empty());
-                        if self.pics_filled.get(&row.widget_uid()) != Some(&(at, thumbs.len())) {
-                            self.pics_filled.insert(row.widget_uid(), (at, thumbs.len()));
-                            for (slot, id) in USER_PICS.iter().enumerate() {
-                                let image = row.image(cx, &[*id]);
-                                match thumbs.get(slot) {
-                                    Some(png) => {
-                                        image.set_visible(cx, true);
-                                        let _ = image.load_png_from_data(cx, png);
-                                    }
-                                    None => image.set_visible(cx, false),
-                                }
+                        let thumbs = pictures.iter().filter_map(|p| Some((p.file.as_str(), self.thumbs.get(&p.file)?)));
+                        let count = thumbs.clone().count();
+                        row.view(cx, ids!(user_pics)).set_visible(cx, count > 0);
+                        if self.pics_filled.get(&row.widget_uid()) != Some(&(at, count)) {
+                            self.pics_filled.insert(row.widget_uid(), (at, count));
+                            let list = row.flat_list(cx, ids!(line_thumbs));
+                            fill_picture_list(cx, list, thumbs);
+                        }
+                        let scope = &mut Scope::empty();
+                        while let Some(item) = row.draw(cx, scope).step() {
+                            if let Some(list) = item.borrow::<FlatList>() {
+                                draw_picture_list(cx, scope, &list);
                             }
                         }
-                        row
+                        continue;
                     }
                     Entry::Event(event) => {
                         let row = list.item(cx, index, id!(EventRow));
@@ -2814,12 +3123,14 @@ impl Widget for AiChatPanel {
                     }
                     Entry::Tool(ToolEntry { status: ToolStatus::Confirm, card: Some(card), call_id, .. }) => {
                         let row = list.item(cx, index, id!(RequestRow));
+                        row.button(cx, ids!(req_always)).set_visible(cx, self.ensure_engine().can_allow_for_chat(call_id));
                         let values = self.card_edits.entry(call_id.clone()).or_insert_with(|| card.values()).clone();
                         self.draw_card(cx, &row, call_id, card, &values);
                         row
                     }
                     Entry::Tool(t) if matches!(t.status, ToolStatus::Confirm) => {
                         let row = list.item(cx, index, id!(ConfirmRow));
+                        row.button(cx, ids!(run_always)).set_visible(cx, self.ensure_engine().can_allow_for_chat(&t.call_id));
                         row.label(cx, ids!(confirm_title)).set_text(cx, &format!("{} changes things outside the app. Run it?", Self::tool_line(t)));
                         row
                     }
@@ -2902,7 +3213,49 @@ impl Widget for AiChatPanel {
     }
 }
 
+/// What the remote `confirm` route may do: only cancel.
+pub fn remote_answer_allowed(how: &str) -> Result<(), String> {
+    if how == "cancel" {
+        Ok(())
+    } else {
+        Err(format!("confirm {how} is refused: the person must press Run in the app; a remote confirm can only cancel"))
+    }
+}
+
+/// The origin of the input since the last actions, after one more event from `now`: an injected
+/// event stays injected until the actions that follow it are handled.
+fn note_press(before: Option<Option<String>>, now: Option<String>) -> Option<Option<String>> {
+    match before {
+        Some(Some(injected)) => Some(Some(injected)),
+        _ => Some(now),
+    }
+}
+
+/// Run and Always count only from the person's own press: `press` is where the click's input
+/// came from (see `AiChatPanel::press_origin`); an unknown origin is refused too.
+fn judge_press(press: Option<Option<String>>, what: &str) -> Result<(), String> {
+    match press {
+        Some(None) => Ok(()),
+        Some(Some(who)) => Err(format!("{what} refused: the press was injected by {who}; only the person's own press in the app answers it, and the call stays parked")),
+        None => Err(format!("{what} refused: the press has no known origin; the call stays parked")),
+    }
+}
+
 impl AiChatPanel {
+    /// True when the press being answered came from the person. An injected press of Run or
+    /// Always is refused and logged with its sender, and the row or card stays parked. Taking
+    /// resets the mark, so one local press answers one click.
+    fn take_local_press(press_origin: &mut Option<Option<String>>, notice: &mut Option<String>, what: &str) -> bool {
+        match judge_press(press_origin.take(), what) {
+            Ok(()) => true,
+            Err(reason) => {
+                log!("ai chat: {reason}");
+                *notice = Some(format!("{what} needs your own press in the app"));
+                false
+            }
+        }
+    }
+
     /// The editors and buttons of a settings card row. True when the row
     /// was one and something happened.
     fn card_actions(&mut self, cx: &mut Cx, item: &WidgetRef, actions: &Actions, call_id: &str, now: f64) -> bool {
@@ -2934,6 +3287,9 @@ impl AiChatPanel {
             }
         }
         if item.button(cx, ids!(req_run)).clicked(actions) {
+            if !Self::take_local_press(&mut self.press_origin, &mut self.notice, "Run on the settings card") {
+                return true;
+            }
             let args = card.args(edits).to_json();
             // A refusal leaves the card parked with its reasons on it.
             if self.ensure_engine().confirm_with(call_id, true, Some(args), now).is_ok() {
@@ -2942,9 +3298,14 @@ impl AiChatPanel {
             return true;
         }
         if item.button(cx, ids!(req_always)).clicked(actions) {
+            if !Self::take_local_press(&mut self.press_origin, &mut self.notice, "Always on the settings card") {
+                return true;
+            }
             let args = card.args(edits).to_json();
-            if self.ensure_engine().allow_for_chat(call_id, Some(args), now).is_ok() {
-                self.card_edits.remove(call_id);
+            match self.ensure_engine().allow_for_chat(call_id, Some(args), now) {
+                Ok(()) => { self.card_edits.remove(call_id); }
+                Err(reason) if !self.ensure_engine().can_allow_for_chat(call_id) => self.notice = Some(reason),
+                Err(_) => {} // Argument errors are shown beside the editors.
             }
             return true;
         }
@@ -2963,12 +3324,12 @@ impl WidgetMatchEvent for AiChatPanel {
         let returned = input.returned(actions).map(|(text, _)| text);
         if let Some(text) = returned {
             // Enter on an empty line with no picture sends nothing.
-            if !text.trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0 {
+            if !text.trim().is_empty() || self.attachments.count != 0 || self.marks.count > 0 {
                 self.send(cx, text);
             }
         } else if self.view.button(cx, ids!(send_button)).clicked(actions) {
             let text = input.text();
-            if !text.trim().is_empty() || !self.attachments.is_empty() || self.marks.count > 0 {
+            if !text.trim().is_empty() || self.attachments.count != 0 || self.marks.count > 0 {
                 self.send(cx, text);
             }
         }
@@ -3003,14 +3364,10 @@ impl WidgetMatchEvent for AiChatPanel {
         for action in actions {
             match action.downcast_ref::<FileDialogAction>() {
                 Some(FileDialogAction::FileSelected { id, paths }) if *id == ATTACH_DIALOG => {
-                    for path in paths.iter().take(4) {
-                        self.attach(cx, Source::Path(path.clone()));
-                    }
+                    self.attach_batch(cx, paths.iter().cloned().map(Source::Path));
                 }
                 Some(FileDialogAction::FileLoaded { id, files }) if *id == ATTACH_DIALOG => {
-                    for file in files.iter().take(4) {
-                        self.attach(cx, Source::Bytes { name: file.name.clone(), bytes: file.bytes.clone() });
-                    }
+                    self.attach_batch(cx, files.iter().map(|file| Source::Bytes { name: file.name.clone(), bytes: file.bytes.clone() }));
                 }
                 _ => {}
             }
@@ -3057,15 +3414,30 @@ impl WidgetMatchEvent for AiChatPanel {
             self.view.redraw(cx);
         }
         if self.view.button(cx, ids!(attach_clear)).clicked(actions) {
-            self.attachments.clear();
-            self.attach_shown = None;
+            self.attachments.clear(PictureLoad::cancel);
+            for line in self.returning.drain(..) {
+                line.read.cancel();
+                line.read.detach();
+            }
+            self.picture_refusal = None;
+            if self.hold.releasing() {
+                self.finish_release(cx);
+            }
             self.view.redraw(cx);
         }
-        for (slot, id) in ATTACH_PICS.iter().enumerate() {
-            if self.view.view(cx, &[*id]).button(cx, ids!(pic_remove)).clicked(actions) && slot < self.attachments.len() {
-                self.attachments.remove(slot);
-                self.attach_shown = None;
-                self.view.redraw(cx);
+        if self.attach_shown.is_some() {
+            let list = self.view.flat_list(cx, ids!(draft_thumbs));
+            for (id, item) in list.items_with_actions(actions) {
+                if item.button(cx, ids!(pic_remove)).clicked(actions) {
+                    if let Some(SlotState::Reading(job)) = self.attachments.remove(id.0, &mut self.load_notices) {
+                        job.cancel();
+                    }
+                    self.picture_refusal = None;
+                    self.view.redraw(cx);
+                }
+            }
+            if self.hold.releasing() && self.attachments.reading == 0 {
+                self.finish_release(cx);
             }
         }
         if let Some(at) = self.view.drop_down(cx, ids!(provider_pick)).changed(actions) {
@@ -3085,6 +3457,7 @@ impl WidgetMatchEvent for AiChatPanel {
         if self.view.button(cx, ids!(new_chat)).clicked(actions) {
             let now = Self::now(cx);
             self.notice = None;
+            self.load_notices.clear();
             self.ensure_engine().clear(now);
             self.thumbs.clear();
             self.share_pictures(cx);
@@ -3145,10 +3518,16 @@ impl WidgetMatchEvent for AiChatPanel {
                         cx.widget_action(self.widget_uid(), AiChatPanelAction::TaskAction { call_id, action });
                     }
                 } else if item.button(cx, ids!(run_button)).clicked(actions) {
-                    self.ensure_engine().confirm(&call_id, true, now);
+                    if Self::take_local_press(&mut self.press_origin, &mut self.notice, "Run") {
+                        self.ensure_engine().confirm(&call_id, true, now);
+                    }
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(run_always)).clicked(actions) {
-                    let _ = self.ensure_engine().allow_for_chat(&call_id, None, now);
+                    if Self::take_local_press(&mut self.press_origin, &mut self.notice, "Always") {
+                        if let Err(reason) = self.ensure_engine().allow_for_chat(&call_id, None, now) {
+                            self.notice = Some(reason);
+                        }
+                    }
                     self.view.redraw(cx);
                 } else if item.button(cx, ids!(deny_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, false, now);
@@ -3164,9 +3543,397 @@ impl WidgetMatchEvent for AiChatPanel {
     }
 }
 
+/// What a user row says about its line's fate, when it is not simply sent.
+fn delivery_note(delivery: &LineDelivery) -> Option<String> {
+    match delivery {
+        LineDelivery::Sent => None,
+        LineDelivery::Stopped => Some("stopped".into()),
+        LineDelivery::Failed => Some("failed".into()),
+        LineDelivery::NotSent(detail) if detail.is_empty() => Some("not sent".into()),
+        LineDelivery::NotSent(detail) => Some(format!("not sent · {detail}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_reply_keeps_transcript_at_end_until_scrolled_up() {
+        use makepad_ai_services::engine::{Model, ModelEvent, ToolDefinition};
+        use makepad_widgets::{cx_draw::CxDraw, makepad_platform::event::{ScrollEvent, ScrollPhase}};
+        use std::sync::Mutex;
+
+        struct StreamModel(Arc<Mutex<Vec<ModelEvent>>>);
+        impl Model for StreamModel {
+            fn label(&self) -> String { "Stream".into() }
+            fn configure(&mut self, _: &str, _: &[ToolDefinition]) -> Result<(), String> { Ok(()) }
+            fn send_user(&mut self, _: &str, _: &str) {}
+            fn send_tool_result(&mut self, _: &str, _: &str, _: bool) {}
+            fn cancel(&mut self) {}
+            fn reset(&mut self) {}
+            fn poll(&mut self) -> Vec<ModelEvent> { std::mem::take(&mut *self.0.lock().unwrap()) }
+        }
+
+        makepad_widgets::test_cx::on_test_cx(|| {
+            let mut pool = makepad_widgets::test_cx::checkout_test_cx(|vm| {
+                makepad_widgets::script_mod(vm);
+                crate::script_mod(vm);
+            });
+            let cx = &mut *pool;
+            let mut panel = cx.with_vm(AiChatPanel::script_new_with_default);
+            panel.use_private_registry();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let model = StreamModel(events.clone());
+            panel.engine = Some(EngineCore::new(panel.registry.clone(), Box::new(model), None, 1));
+            for turn in 0..4 {
+                panel.send(cx, format!("turn {turn}"));
+                events.lock().unwrap().extend([
+                    ModelEvent::Delta("short reply".into()),
+                    ModelEvent::TurnDone { tool_calls: 0 },
+                ]);
+                panel.ensure_engine().pump(turn as f64);
+            }
+            panel.send(cx, "last turn".into());
+            events.lock().unwrap().push(ModelEvent::Delta("streaming start".into()));
+            panel.ensure_engine().pump(4.0);
+            assert!(matches!(panel.state().unwrap().status, Status::Streaming));
+
+            let size = dvec2(360.0, 240.0);
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, size);
+            let mut draw_list = DrawList2d::new(cx);
+            let mut draw_panel = |cx: &mut Cx, panel: &mut AiChatPanel| -> (ActionsBuf, bool) {
+                cx.new_draw_event = DrawEvent::default();
+                let actions = cx.capture_actions(|cx| {
+                    let event = DrawEvent::default();
+                    let mut draw = CxDraw::new(cx, &event);
+                    let mut frame = Cx2d::new(&mut draw);
+                    frame.begin_pass(&pass, None);
+                    draw_list.begin_always(&mut frame);
+                    frame.begin_root_turtle(size, Layout::flow_down());
+                    let _ = panel.draw_walk(&mut frame, &mut Scope::empty(), Walk::fixed(size.x, size.y));
+                    frame.end_pass_sized_turtle();
+                    draw_list.end(&mut frame);
+                    frame.end_pass(&pass);
+                });
+                (actions, cx.new_draw_event.will_redraw())
+            };
+
+            let transcript = panel.view.portal_list(cx, ids!(transcript));
+            assert!((0..4).any(|_| !draw_panel(cx, &mut panel).1), "initial transcript kept redrawing");
+            assert!(transcript.borrow().unwrap().is_scrollable() && transcript.is_at_end());
+            let range_before = transcript.borrow().unwrap().range_end();
+            let reply_id = range_before - 2;
+            let footer_id = range_before - 1;
+            let reply_before = transcript.drawn_slot(reply_id).expect("streaming reply drawn").size;
+            assert!(transcript.drawn_slot(footer_id).expect("WorkRow footer drawn").size > 0.0);
+
+            events.lock().unwrap().push(ModelEvent::Delta("\n\nline 1\n\nline 2\n\nline 3\n\nline 4\n\nline 5\n\nline 6".into()));
+            panel.ensure_engine().pump(4.1);
+            let mut reached_end_count = 0;
+            let settled = (0..4).any(|_| {
+                let (actions, will_redraw) = draw_panel(cx, &mut panel);
+                assert!(!transcript.scrolled(&actions));
+                reached_end_count += usize::from(transcript.reached_end(&actions));
+                !will_redraw
+            });
+            assert!(settled, "growing the reply kept the transcript redrawing");
+            assert_eq!(transcript.borrow().unwrap().range_end(), range_before);
+            assert!(transcript.drawn_slot(reply_id).expect("streaming reply drawn").size > reply_before);
+            assert!(transcript.is_at_end());
+            let footer = transcript.drawn_slot(footer_id).expect("WorkRow footer drawn");
+            let viewport_h = transcript.area().rect(cx).size.y;
+            assert!(footer.size > 0.0 && footer.start >= 0.0 && footer.start + footer.size <= viewport_h + 1.0);
+            assert!(reached_end_count <= 1, "the footer re-entered more than once");
+
+            let (idle, idle_redraw) = draw_panel(cx, &mut panel);
+            assert!(!idle_redraw && transcript.is_at_end() && !transcript.scrolled(&idle) && !transcript.reached_end(&idle));
+            let up = Event::Scroll(ScrollEvent {
+                window_id: WindowId(1, 1),
+                scroll: dvec2(0.0, -120.0),
+                abs: transcript.area().rect(cx).center(),
+                modifiers: KeyModifiers::default(),
+                handled_x: Default::default(),
+                handled_y: Default::default(),
+                is_mouse: true,
+                time: 4.2,
+                phase: ScrollPhase::None,
+            });
+            panel.handle_event(cx, &up, &mut Scope::empty());
+            let (away, _) = draw_panel(cx, &mut panel);
+            assert!(!transcript.is_at_end() && !transcript.scrolled(&away));
+        });
+    }
+
+    #[test]
+    fn aichat_private_registry_does_not_populate_process_registry() {
+        use makepad_ai_services::wire::{EndpointId, HostedUp, ServiceManifest, ServiceUp};
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut panel = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            super::script_mod(vm);
+            AiChatPanel::script_new_with_default(vm)
+        });
+        panel.use_private_registry();
+        let id = "private_pane_mirror";
+        let register = HostedUp {
+            from: Some(EndpointId("w7".into())),
+            msg: ServiceUp::Register { manifest: ServiceManifest::new(id, "Mirror", "A mirrored WM service."), port_tag: 7 },
+        };
+        assert!(panel.on_custom(&register.to_json()));
+        let services = panel.registry().services();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].id, id);
+        assert!(ServiceRegistry::process().services().iter().all(|service| service.id != id));
+    }
+
+    #[test]
+    fn delivery_note_matches_every_line_fate() {
+        assert_eq!(delivery_note(&LineDelivery::Sent), None, "a sent line has no note");
+        assert_eq!(delivery_note(&LineDelivery::Stopped).as_deref(), Some("stopped"), "stopped note");
+        assert_eq!(delivery_note(&LineDelivery::Failed).as_deref(), Some("failed"), "a line that acted then failed says failed, not not sent");
+        assert_eq!(delivery_note(&LineDelivery::NotSent(String::new())).as_deref(), Some("not sent"), "plain not sent");
+        assert_eq!(delivery_note(&LineDelivery::NotSent("could not return b.png".into())).as_deref(),
+            Some("not sent · could not return b.png"), "not sent keeps its detail");
+    }
+
+    #[test]
+    fn the_composer_offers_what_fits_and_explains_what_stays() {
+        use PictureRoom::{Fits, NoPictures, Unknown};
+        for (room, attached, go, notice) in [
+            (Fits(4), 0, 0, None),
+            (Fits(4), 3, 3, None),
+            (Fits(4), 4, 4, None),
+            (Fits(4), 6, 4, Some("This model takes 4 pictures with a line: the other 2 stay attached for the next.")),
+            (Fits(1), 2, 1, Some("This model takes 1 picture with a line: the other 1 stays attached for the next.")),
+            (Fits(0), 1, 0, Some("This model takes 0 pictures with a line: the other 1 stays attached for the next.")),
+            (NoPictures, 0, 0, None),
+            (NoPictures, 6, 0, Some("This model cannot look at pictures: they stay attached.")),
+            (Unknown, 0, 0, None),
+            (Unknown, 6, 6, None),
+        ] {
+            assert_eq!(pictures_that_go(room, attached), go, "send with {room:?}, {attached} attached");
+            assert_eq!(room_notice(room, attached).as_deref(), notice, "notice with {room:?}, {attached} attached");
+        }
+        let state = EngineState { status: Status::Error("the recorded refusal".into()), ..Default::default() };
+        assert_eq!(AiChatPanel::footer_line(&state, None), (None, true), "the failed state must not draw its transcript text again in the footer");
+        let notice = String::from("the composer notice");
+        assert_eq!(AiChatPanel::footer_line(&state, Some(&notice)), (Some(notice.clone()), true), "an unrelated composer notice must remain visible after a turn failed");
+    }
+
+    #[test]
+    fn each_selection_reports_its_own_failed_reads_in_order() {
+        let first = ["a.png", "x.png", "b.png", "c.png", "y.png", "d.png", "missing.png", "photo.heic"];
+        let mut draft = PictureDraft::default();
+        let mut completed = HashMap::new();
+        let mut notes = Vec::new();
+        let mut logs = Vec::new();
+        let mut log = |name: &str, detail: &str| logs.push((name.to_owned(), detail.to_owned()));
+        draft.select(first.into_iter().enumerate().map(|(i, name)| {
+            (name.into(), if i == 4 { Err(PictureError::load(makepad_platform::thread::SubmitError::Closed)) } else { Ok(i) })
+        }), &mut notes, &mut log);
+        assert!(matches!(draft.slots().nth(4).unwrap().state, SlotState::Failed(_)), "a submission failure must mark its chip immediately");
+        // Real read and decode failures finish out of order. The submission failure is already known.
+        let failed = |source: Source| {
+            let name = source.name();
+            Err(attach::load_picture(source, &name).expect_err("the selected test picture must fail to load"))
+        };
+        let bytes: Arc<[u8]> = Arc::from(&b"\x89PNG\r\n\x1a\n"[..]);
+        let decoder_error = makepad_image_decode::decode_rgba(&bytes).expect_err("the truncated PNG must reach the decoder and fail");
+        let missing = std::env::temp_dir().join(format!("aichat-missing-picture-{}", std::process::id())).join("missing.png");
+        let io_error = std::fs::metadata(&missing).expect_err("the missing selection must have an OS diagnostic");
+        completed.insert(7, failed(Source::Path("photo.heic".into())));
+        completed.insert(6, failed(Source::Path(missing)));
+        completed.insert(1, failed(Source::Bytes { name: "x.png".into(), bytes }));
+        completed.insert(5, Ok("d"));
+        completed.insert(2, Ok("b"));
+        draft.poll_batches(|_, i| completed.remove(i), &mut notes, &mut log);
+        assert!(matches!(draft.slots().nth(1).unwrap().state, SlotState::Failed(_)), "a decode failure must mark its chip while the selection is open");
+        assert!(matches!(draft.slots().nth(2).unwrap().state, SlotState::Ready("b")), "a success beside a pending picture must be visible immediately");
+        assert!(notes.is_empty(), "an unfinished selection must not publish a partial note");
+
+        let other = Source::Bytes { name: "z.png".into(), bytes: Arc::from(&b"plain text"[..]) };
+        draft.select([(other.name(), failed(other).map(|_| 0usize)), ("removed.png".into(), failed(Source::Path("removed.heic".into())).map(|_| 0)),
+            ("e.png".into(), Ok(8))].into_iter(), &mut notes, &mut log);
+        let removed = draft.slots().find(|slot| slot.name == "removed.png").unwrap().id;
+        draft.remove(removed, &mut notes);
+        completed.insert(0, Ok("a"));
+        draft.poll_batches(|_, i| completed.remove(i), &mut notes, &mut log);
+        assert!(notes.is_empty(), "neither selection has settled yet");
+        completed.insert(8, Ok("e"));
+        completed.insert(3, Ok("c"));
+        draft.poll_batches(|_, i| completed.remove(i), &mut notes, &mut log);
+        assert_eq!(draft.ready().unwrap(), [&"a", &"b", &"c", &"d", &"e"], "the note must remove all failed chips and preserve success order");
+        assert_eq!(notes, [
+            concat!("4 of 8 couldn't be read: x.png (damaged or unreadable picture), y.png (couldn't be loaded, try again), ",
+                "missing.png (not found), photo.heic (HEIC photos cannot be read here yet; save it as JPEG or PNG and drop that)"),
+            "z.png couldn't be read (not a PNG, JPEG, WebP, GIF or BMP picture)",
+        ], "each batch must show one note with only person-facing reasons in selection order, even when both finish on one frame");
+        assert_eq!(logs, [
+            ("y.png".into(), "task pool closed".into()),
+            ("x.png".into(), format!("cannot decode ({decoder_error})")),
+            ("missing.png".into(), io_error.to_string()),
+        ], "the log must receive each rewritten diagnostic exactly once and nothing for the plain format reasons");
+        draft.poll_batches(|_, _| panic!("a settled handle was polled again"), &mut notes, |_, _| {});
+        assert_eq!(notes.len(), 2, "a settled selection must not publish its note twice");
+    }
+
+    #[test]
+    fn a_partial_send_and_a_refusal_keep_the_unsent_pictures_in_order() {
+        use makepad_ai_services::engine::{Model, ModelEvent, ToolDefinition};
+        use makepad_platform::clipboard_read::{ClipboardContent, ClipboardFile, ClipboardImage};
+
+        // The clipboard may also offer a preview bitmap of a selection of files.
+        let files = ["a.png", "b.png", "skip.txt", "c.png", "d.png", "e.png", "f.png"];
+        let clipboard = ClipboardContent {
+            files: files.iter().map(|name| ClipboardFile {
+                url: String::new(),
+                path: std::env::temp_dir().join(name).to_string_lossy().into_owned(),
+            }).collect(),
+            image: Some(ClipboardImage::Png(Arc::new(vec![]))),
+            ..Default::default()
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut panel = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            super::script_mod(vm);
+            AiChatPanel::script_new_with_default(vm)
+        });
+        panel.attachments.prepend_ready(Source::from_clipboard(&clipboard, 1).into_iter().enumerate().map(|(i, file)| {
+            let name = file.name();
+            let picture = attach::load(Source::Rgba {
+                name: name.clone(), width: 1, height: 1, rgba: Arc::new(vec![i as u8, 0, 0, 255]),
+            }).unwrap();
+            (name, picture)
+        }));
+        let names = |panel: &AiChatPanel| panel.attachments.slots().filter_map(|s| match &s.state {
+            SlotState::Ready(p) => Some(p.sent.name.clone()), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(names(&panel), ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"]);
+        let list = panel.view.flat_list(&cx, ids!(draft_thumbs));
+        panel.show_draft_pictures(&mut cx, true);
+        let list = list.borrow().expect("the composer has a picture list");
+        assert_eq!(list.items.len(), 6, "all six have a thumbnail slot");
+        assert!(!list.items[LiveId(6)].widget.widget(&cx, ids!(pic_remove)).is_empty(), "the sixth has its own remove button");
+        drop(list);
+
+        struct Four { failed: bool }
+        impl Model for Four {
+            fn label(&self) -> String { "Four".into() }
+            fn picture_room(&self) -> PictureRoom { PictureRoom::Fits(4) }
+            fn configure(&mut self, _: &str, _: &[ToolDefinition]) -> Result<(), String> { Ok(()) }
+            fn admit_images(&self, images: &[ModelImage]) -> Result<(), String> {
+                if images.len() == 4 { Ok(()) } else { Err("batch refused".into()) }
+            }
+            fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> { self.admit_images(&images) }
+            fn send_user(&mut self, _: &str, _: &str) { self.failed = true; }
+            fn send_tool_result(&mut self, _: &str, _: &str, _: bool) {}
+            fn cancel(&mut self) {}
+            fn reset(&mut self) {}
+            fn poll(&mut self) -> Vec<ModelEvent> {
+                if std::mem::take(&mut self.failed) { vec![ModelEvent::Error("node refused".into())] } else { Vec::new() }
+            }
+        }
+
+        panel.engine = Some(EngineCore::new(panel.registry.clone(), Box::new(Four { failed: false }), None, 1));
+        panel.attach(&mut cx, Source::Rgba { name: "waiting.png".into(), width: 1, height: 1, rgba: Arc::new(vec![0; 4]) });
+        let before = panel.state().unwrap().entries.len();
+        panel.send(&mut cx, "compare".into());
+        assert_eq!(panel.state().unwrap().entries.len(), before, "even when four earlier pictures fit, a later placeholder must hold Send");
+        panel.send(&mut cx, "/help".into());
+        assert!(panel.state().unwrap().entries.len() > before, "a console command carries no pictures and must not wait for a reading chip");
+        assert!(matches!(panel.attachments.slots().last().unwrap().state, SlotState::Reading(_)), "a console command must leave the placeholder in the draft");
+        let waiting = panel.attachments.slots().last().unwrap().id;
+        let Some(SlotState::Reading(job)) = panel.attachments.remove(waiting, &mut panel.load_notices) else {
+            panic!("the removed placeholder must return its outstanding job for cancellation");
+        };
+        job.cancel();
+        panel.send(&mut cx, "compare".into());
+        assert_eq!(names(&panel), ["e.png", "f.png"]);
+        let engine = panel.engine.as_ref().unwrap();
+        assert_eq!(engine.pictures().iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["a.png", "b.png", "c.png", "d.png"]);
+        panel.send(&mut cx, "just the text if refused".into());
+        assert_eq!(names(&panel), ["e.png", "f.png"]);
+        assert_eq!(panel.picture_refusal.as_deref(), Some("The pictures were not sent: batch refused. They stay attached."));
+        assert!(matches!(panel.state().unwrap().entries.last(), Some(Entry::User { text, pictures, .. }) if text == "just the text if refused" && pictures.is_empty()));
+
+        let before = panel.state().unwrap().entries.len();
+        panel.attach(&mut cx, Source::Rgba { name: "pending.png".into(), width: 1, height: 1, rgba: Arc::new(vec![0, 0, 0, 255]) });
+        panel.send(&mut cx, "with the pending picture".into());
+        assert_eq!(panel.state().unwrap().entries.len(), before, "Enter keeps the draft while a picture that would go is loading");
+        assert_eq!(panel.view.text_input(&cx, ids!(input)).text(), "with the pending picture");
+
+        let input = panel.view.text_input(&cx, ids!(input));
+        input.set_text(&mut cx, "new text");
+        let source = Source::Rgba { name: "new.png".into(), width: 1, height: 1, rgba: Arc::new(vec![42, 0, 0, 255]) };
+        panel.attach(&mut cx, source.clone());
+        let mut decoded = Some(attach::load(source).unwrap());
+        panel.attachments.poll_batches(|name, _| (name == "new.png").then(|| Ok(decoded.take().unwrap())), &mut Vec::new(), |_, _| {});
+        let event = panel.ensure_engine().pump(1.0).into_iter().find_map(|event| match event {
+            EngineEvent::ReturnLine { id, text, pictures } => Some((id, text, pictures)),
+            _ => None,
+        }).expect("a refused picture line must reach the panel");
+        panel.return_line(&mut cx, event.0, event.1, event.2);
+        assert_eq!(input.text(), "compare\nnew text", "returning the line must prepend its text and preserve the new draft");
+        let rows = panel.state().unwrap().entries.len();
+        panel.send(&mut cx, "a chip's line".into());
+        assert_eq!(input.text(), "compare\nnew text\na chip's line",
+            "a line that cannot go while the returned pictures are read must wait behind the draft, never replace it");
+        assert_eq!(panel.state().unwrap().entries.len(), rows, "nothing goes while the returned pictures are read");
+        let pending = panel.returning.pop_front().expect("picture reads must run off the UI thread");
+        let read = pending.read;
+        let returned = std::thread::spawn(move || read.join()).join().unwrap().expect("the stored originals must be readable");
+        panel.prepend_pictures(pending.line, pending.names, returned);
+        assert_eq!(names(&panel), ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png", "new.png"],
+            "every returned chip must precede both the pictures left at Send and the newly attached picture");
+        let SlotState::Ready(first) = &panel.attachments.slots().next().unwrap().state else { panic!("the first returned chip must be ready") };
+        assert!(Arc::ptr_eq(first.sent.thumb.as_ref().unwrap(), panel.thumbs.get(&first.file).unwrap()),
+            "a returned chip must reuse the thumbnail of the picture that was sent");
+
+        let dir = std::env::temp_dir().join(format!("aichat-failed-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        panel.ensure_engine().keep_chat(dir.clone(), None).expect("bind the test chat picture store");
+        for e in panel.ensure_engine().pump(2.0) {
+            if let EngineEvent::KeepPicture(write) = e { write.run(); }
+        }
+        let originals = panel.attachments.slots().take(4).map(|s| match &s.state {
+            SlotState::Ready(p) => p.clone().into_new(), _ => panic!("all four returned pictures must be ready"),
+        }).collect();
+        panel.ensure_engine().send_pictures("missing original", originals, 2.1).unwrap();
+        let (id, pictures) = panel.ensure_engine().pump(2.2).into_iter().find_map(|e| match e {
+            EngineEvent::ReturnLine { id, pictures, .. } => Some((id, pictures)),
+            _ => None,
+        }).expect("the next refused line must return its store references");
+        std::fs::remove_file(dir.join(&pictures[1].original.file)).expect("remove just one saved original");
+        let labels = pictures.iter().map(|p| p.original.name.clone()).collect();
+        let results = pictures.into_iter().map(|p| returned_picture(p, None)).collect();
+        panel.prepend_pictures(id, labels, results);
+        assert_eq!(&names(&panel)[..3], ["a.png", "c.png", "d.png"], "a missing original must not block the other returned pictures");
+        assert!(panel.state().unwrap().entries.iter().any(|e| matches!(e, Entry::User { text, delivery: LineDelivery::NotSent(detail), .. }
+            if text.starts_with("missing original") && detail == "could not return b.png (not found)")),
+            "the failed row must identify the missing original using only the person's reason");
+        std::fs::remove_dir_all(dir).expect("remove the test picture store");
+
+    }
+
+    /// Run and Always answer only a local press; a remote `confirm` can only cancel.
+    #[test]
+    fn run_and_always_need_the_persons_own_press() {
+        assert!(judge_press(Some(None), "Run").is_ok(), "a local press runs it");
+        let injected = judge_press(Some(Some("agent LANE7".into())), "Always").unwrap_err();
+        assert!(injected.contains("Always refused") && injected.contains("agent LANE7"), "{injected}");
+        assert!(judge_press(None, "Run").is_err(), "a press of unknown origin is refused");
+        let injected = note_press(Some(None), Some("agent".into()));
+        assert_eq!(note_press(injected.clone(), None), injected, "a local event after an injected press can't launder it");
+        assert_eq!(note_press(None, None), Some(None), "a local press alone is the person's");
+        assert!(remote_answer_allowed("cancel").is_ok(), "remote cancel works");
+        for how in ["run", "always"] {
+            let refused = remote_answer_allowed(how).unwrap_err();
+            assert!(refused.contains("person must press Run in the app"), "remote confirm {how}: {refused}");
+        }
+    }
 
     /// A call's row reads its arguments as `key: value` text, a string that holds a separator in
     /// quotes; a long one is cut with an ellipsis, short of what a row could hold.

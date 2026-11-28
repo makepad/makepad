@@ -33,7 +33,7 @@ pub mod local_model;
 pub mod models;
 
 pub use core::{
-    EngineCore, EngineEvent, DOCTRINE, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
+    EngineCore, EngineEvent, ReturnedPicture, DOCTRINE, MAX_SUBSCRIPTIONS, MAX_SUBSCRIPTION_QUEUE,
     WAKE_INTERVAL_SECS,
 };
 pub use no_model::{ClaudeDesktopModel, NoModel, NoModelWithReason};
@@ -77,6 +77,14 @@ pub struct ModelImage {
     pub png: std::sync::Arc<[u8]>,
 }
 
+/// How many of the person's pictures the model takes with one line, by its own report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureRoom {
+    NoPictures,
+    Fits(usize),
+    Unknown,
+}
+
 /// What a model reports back, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModelEvent {
@@ -84,6 +92,8 @@ pub enum ModelEvent {
     Loading { phase: String, fraction: f64 },
     /// Ready to take a turn.
     Ready,
+    /// A note from the model to the person, shown in the transcript.
+    Note(String),
     /// A piece of the visible answer.
     Delta(String),
     /// A piece of the model's reasoning, when the provider shows it.
@@ -139,6 +149,15 @@ pub trait Model {
     /// engine only rebinds mid-turn when this is true.
     fn can_rebind_mid_turn(&self) -> bool {
         false
+    }
+
+    fn picture_room(&self) -> PictureRoom {
+        PictureRoom::NoPictures
+    }
+
+    /// Check whether these pictures can go with an input, without staging them.
+    fn admit_images(&self, images: &[ModelImage]) -> Result<(), String> {
+        if images.is_empty() { Ok(()) } else { Err("this model cannot look at images".into()) }
     }
 
     /// Images the model sees with its next input (a user line or the

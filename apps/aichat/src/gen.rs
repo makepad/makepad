@@ -231,7 +231,6 @@ fn json_string(s: &str) -> String {
 }
 
 fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMut(&str, u16)) -> Result<GenDone, String> {
-    use makepad_ai_hub::home::makepad_home;
     use makepad_ai_hub::job::{generate, process_origin, FleetRouter, Want};
     use makepad_ai_hub::protocol::GenerateRequestJson;
     use makepad_ai_hub::registry::Domain;
@@ -251,7 +250,7 @@ fn run_image(args: &ImageArgs, cancel: &Arc<AtomicBool>, progress: &mut dyn FnMu
     if artifact.content_type != "image/png" {
         return Err(format!("image.generate returned {}", artifact.content_type));
     }
-    let dir = makepad_home().join("gen");
+    let dir = makepad_platform::home::app_state_home().join("gen");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot make {}: {e}", dir.display()))?;
     let stamp = Cx::time_now().max(0.0) as u64;
     let path = dir.join(format!("{stamp}-{}.{}", slug(&args.prompt), extension_for(&artifact.content_type)));

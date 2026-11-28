@@ -13,7 +13,7 @@
 //!   the hub side holds only engine state (KV warmth). Killing the hub costs
 //!   a re-prefill, never a conversation (aicore.md §7).
 
-use crate::hub_chat::{HubChatConfig, HubChatSession};
+use crate::hub_chat::{ChatReach, HubChatConfig, HubChatSession};
 use crate::local_llm::{LocalLlmConfig, ToolSpec, WakeHook};
 use crate::pipe::PipeId;
 
@@ -61,6 +61,7 @@ impl AiHub {
     /// blocks.
     pub fn start_local_chat(&self, config: ChatConfig) -> HubChatSession {
         HubChatSession::start(HubChatConfig {
+            reach: ChatReach::Lan,
             llm: config.llm,
             // `MAKEPAD_AI_MODEL` names the one model every app chat on this
             // machine must use: exactly it or an error, never another model.

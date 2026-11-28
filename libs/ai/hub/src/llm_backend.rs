@@ -21,6 +21,9 @@
 //! fan-out, artifact shaping — compiles and tests WITHOUT the feature via a
 //! stubbed generation fn, which is what CI runs.
 
+#[path = "chat_measure.rs"]
+pub(crate) mod chat_measure;
+
 use crate::backend::{CancelToken, ArtifactData, BackendCtx, ContentBackend, GenerateParams, ProgressSink};
 use crate::error::AssetAiError;
 use makepad_micro_serde::*;
@@ -169,7 +172,7 @@ pub(crate) enum PrefixOutcome {
 #[derive(Default)]
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
 pub(crate) struct PrefixCache {
-    /// Prompt + reply + suffix the resident KV corresponds to.
+    /// The prefilled prompt and generated reply held in the resident KV.
     committed: String,
     /// Whose it is. `None` when the KV holds nothing usable.
     live: Option<PrefixOwner>,
@@ -200,17 +203,25 @@ impl PrefixCache {
     /// linear scan.
     const SEEN_MAX: usize = 32;
 
-    /// Classify this job against the resident prefix, WITHOUT changing the
-    /// reuse rule: a hit is still "the new prompt literally extends the
-    /// committed text", which is exactly the condition under which the
-    /// resident KV is the prompt's own prefix.
+    /// Classify this job against the resident prefix. A hit is "the new
+    /// prompt literally and strictly extends the committed text": the
+    /// resident KV is then the prompt's own prefix, and prefilling the
+    /// non-empty delta gives the first token the logits of the prompt's own
+    /// last token. A resend of exactly the committed text is no hit: the
+    /// logits a decode leaves behind need not be the last token's (a
+    /// speculative round leaves a synthetic row), and a warm path would skip
+    /// the context check.
     pub(crate) fn classify(&self, kind: &str, prompt_text: &str) -> (PrefixOutcome, PrefixOwner) {
         let owner = PrefixOwner::new(kind, prompt_text);
         // A different ChatML family must never extend the previous prefix even
         // if the bytes happen to line up: the systems differ, and a stale hit
         // is the expand->chat contamination path.
         let same_family = self.live.as_ref().is_some_and(|live| live.kind == kind);
-        if same_family && !self.committed.is_empty() && prompt_text.starts_with(&self.committed) {
+        if same_family
+            && !self.committed.is_empty()
+            && prompt_text.len() > self.committed.len()
+            && prompt_text.starts_with(&self.committed)
+        {
             return (PrefixOutcome::Hit, owner);
         }
         let outcome = if self.seen.contains(&owner) {
@@ -259,6 +270,17 @@ impl PrefixCache {
 
     pub(crate) fn committed(&self) -> &str {
         &self.committed
+    }
+
+    fn finish_turn(&mut self, owner: &PrefixOwner, prompt: &str, reply: &str) {
+        self.commit(owner, [prompt, reply].concat());
+    }
+
+    /// The part still to prefill after a live hit or a kept-state restore:
+    /// never empty, since a hit strictly extends the committed text. `None`
+    /// for a prompt that does not.
+    fn warm_delta<'a>(&self, prompt: &'a str) -> Option<&'a str> {
+        prompt.strip_prefix(self.committed.as_str()).filter(|delta| !delta.is_empty())
     }
 
     /// Whose the live KV is and the text it holds, when it holds something.
@@ -336,14 +358,20 @@ impl<S> KeptPrefixes<S> {
     /// conversation a prefill.
     pub(crate) const SLOTS: usize = 2;
 
-    /// Takes out the kept state this prompt extends: the same family, and the
-    /// longest such text.
+    /// Takes out the kept state this prompt strictly extends: the same family,
+    /// and the longest such text. As for a live hit, a resend of exactly the
+    /// kept text resumes nothing.
     pub(crate) fn take(&mut self, kind: &str, prompt: &str) -> Option<Kept<S>> {
         let at = self
             .slots
             .iter()
             .enumerate()
-            .filter(|(_, kept)| kept.owner.kind == kind && !kept.text.is_empty() && prompt.starts_with(&kept.text))
+            .filter(|(_, kept)| {
+                kept.owner.kind == kind
+                    && !kept.text.is_empty()
+                    && prompt.len() > kept.text.len()
+                    && prompt.starts_with(&kept.text)
+            })
             .max_by_key(|(_, kept)| kept.text.len())
             .map(|(at, _)| at)?;
         self.slots.remove(at)
@@ -474,7 +502,11 @@ pub(crate) fn apply_chat_thinking_control(
     {
         return;
     }
-    let system = request.chat_system.get_or_insert_with(String::new);
+    disable_thinking(&mut request.chat_system);
+}
+
+fn disable_thinking(system: &mut Option<String>) {
+    let system = system.get_or_insert_with(String::new);
     if system.trim_end().ends_with("/no_think") {
         return;
     }
@@ -484,17 +516,154 @@ pub(crate) fn apply_chat_thinking_control(
     system.push_str("/no_think");
 }
 
-/// One expansion request handed to the generator: a full chat-template prompt
-/// plus sampling settings. The seed differs per variant.
+pub(crate) fn requested_tokens(requested: Option<u32>) -> u32 {
+    requested.unwrap_or(512).max(16)
+}
+
+fn generation_budget(model: &str, requested: u32, chat: bool) -> u32 {
+    if crate::protocol::model_uses_open_think(model) {
+        requested.max(if chat { 128 } else { 512 })
+    } else {
+        requested
+    }
+}
+
+pub(crate) const DECODE_RESERVE: usize = 512;
+
+/// Marks a refusal that leaves the session as it was (a request error).
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+pub(crate) const TOO_LONG: &str = "context overflow:";
+
+/// `Some(message)` when `prompt` tokens plus `reserve` for the answer do
+/// not fit `max_context`.
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+pub(crate) fn overflow_message(prompt: usize, reserve: usize, max_context: usize) -> Option<String> {
+    (!fits_window(prompt, reserve, max_context)).then(|| {
+        format!(
+            "{TOO_LONG} the prompt is {prompt} tokens and the answer needs {reserve} more, \
+             but this node's context is {max_context} tokens (shorten the conversation, or \
+             POST /llm/context to raise it)"
+        )
+    })
+}
+
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplyBudget {
+    pub(crate) max_new: usize,
+    pub(crate) capped_by_context: bool,
+}
+
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeStop {
+    StopToken,
+    MaxNew,
+    Exhausted,
+}
+
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+pub(crate) fn plan_reply_budget(prompt_tokens: usize, requested_max_tokens: u32, window: usize) -> Result<ReplyBudget, String> {
+    let requested = requested_max_tokens.max(1);
+    if let Some(error) = overflow_message(prompt_tokens, answer_reserve(requested), window) {
+        return Err(error);
+    }
+    let room = window - prompt_tokens;
+    Ok(ReplyBudget { max_new: room.min(requested as usize), capped_by_context: room < requested as usize })
+}
+
+#[cfg_attr(not(any(feature = "llm", test)), allow(dead_code))]
+pub(crate) fn finish_reply(prompt_tokens: usize, generated: usize, budget: ReplyBudget, window: usize, stop: DecodeStop) -> Result<(), String> {
+    if stop == DecodeStop::Exhausted || (stop == DecodeStop::MaxNew && budget.capped_by_context) {
+        let used = prompt_tokens.saturating_add(generated);
+        let more = window.saturating_sub(used).saturating_add(1).max(DECODE_RESERVE);
+        return Err(overflow_message(used, more, window).expect("exhaustion always exceeds the window"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+    use crate::talk::overflow_counts;
+
+    #[test]
+    fn explicit_context_override_returns_none_when_unset_and_prefers_runtime_over_env() {
+        assert_eq!(context_override(None, None), None);
+        assert_eq!(context_override(Some(65_536), Some("32768")), Some(65_536));
+        assert_eq!(context_override(None, Some("32768")), Some(32_768));
+    }
+
+    #[test]
+    fn overflow_message_reports_fitted_window_and_does_not_name_32k() {
+        let msg = overflow_message(120_000, DECODE_RESERVE, 114_688).unwrap();
+        assert!(msg.contains("120000") && msg.contains("512") && msg.contains("114688"));
+        assert_eq!(overflow_counts(&msg), Some((120_512, 114_688)));
+    }
+
+    #[test]
+    fn long_session_never_silently_starves_the_reply() {
+        let window = 4096;
+        let full = ReplyBudget { max_new: 512, capped_by_context: false };
+        for prompt in (512..=3584).step_by(512) {
+            assert_eq!(plan_reply_budget(prompt, 512, window), Ok(full));
+        }
+        let capped = plan_reply_budget(3584, u32::MAX, window).unwrap();
+        assert_eq!(capped, ReplyBudget { capped_by_context: true, ..full });
+        for request in [512, u32::MAX] {
+            let msg = plan_reply_budget(3585, request, window).unwrap_err();
+            assert!(msg.starts_with(TOO_LONG));
+            assert_eq!(overflow_counts(&msg), Some((4097, window)));
+        }
+        for request in [1, 512] {
+            assert!(plan_reply_budget(window, request, window).unwrap_err().starts_with(TOO_LONG));
+        }
+        let budget = plan_reply_budget(3000, u32::MAX, window).unwrap();
+        assert_eq!(budget, ReplyBudget { max_new: 1096, capped_by_context: true });
+        assert_eq!(finish_reply(3000, 400, budget, window, DecodeStop::StopToken), Ok(()));
+        let msg = finish_reply(3000, 1096, budget, window, DecodeStop::MaxNew).unwrap_err();
+        assert_eq!(overflow_counts(&msg), Some((4608, window)));
+        let bounded = plan_reply_budget(3000, 512, window).unwrap();
+        assert_eq!(finish_reply(3000, 512, bounded, window, DecodeStop::MaxNew), Ok(()));
+        for b in [bounded, budget] {
+            let msg = finish_reply(3000, 200, b, window, DecodeStop::Exhausted).unwrap_err();
+            assert!(msg.starts_with(TOO_LONG));
+            assert!(overflow_counts(&msg).is_some_and(|(need, max)| max == window && need > max));
+        }
+    }
+}
+
+fn fits_window(prompt: usize, reserve: usize, window: usize) -> bool {
+    prompt.checked_add(reserve).is_some_and(|n| n <= window)
+}
+
+fn answer_reserve(budget: u32) -> usize {
+    (budget as usize).min(DECODE_RESERVE)
+}
+
+#[cfg(feature = "llm")]
+fn tokenize_run(
+    vocab: &makepad_ai_llm::LlamaVocab,
+    text: &str,
+    add_special: bool,
+    last: bool,
+) -> Result<Vec<i32>, String> {
+    let mut tokens = vocab.tokenize(text, add_special, true).map_err(|e| format!("tokenize: {e:?}"))?;
+    if last && tokens.last().copied() == vocab.eos_token_id() {
+        tokens.pop();
+    }
+    Ok(tokens)
+}
+
+/// One expansion request handed to the generator. The seed differs per variant.
 #[derive(Clone, Debug)]
 pub struct ExpandJob {
+    /// Full rendered prompt. After generation the KV holds this and the raw reply.
     pub prompt_text: String,
+    pub tail_text: String,
     pub max_tokens: u32,
     pub temperature: f32,
     pub seed: u64,
-    /// Appended after the generated text in the worker's committed prefix.
-    /// Expander jobs use `"\n"`; chat uses [`crate::protocol::CHAT_COMMIT_SUFFIX`].
-    pub commit_suffix: String,
     /// KV-reuse domain: `"chat"` or `"expand:<target_domain>"`. Jobs of
     /// different kinds never continue each other's committed prefix — the
     /// ChatML systems differ, so a prefix match would be meaningless and a
@@ -618,6 +787,8 @@ pub struct LlmBackend {
     /// GGUF path resolved by `ensure_loaded` (real path only).
     #[cfg_attr(not(feature = "llm"), allow(dead_code))]
     gguf_path: Option<PathBuf>,
+    #[cfg_attr(not(feature = "llm"), allow(dead_code))]
+    loaded_generation: u64,
 }
 
 impl LlmBackend {
@@ -628,6 +799,7 @@ impl LlmBackend {
             generator: Generator::Stub(generate),
             prompts_dir: None,
             gguf_path: None,
+            loaded_generation: 0,
         }
     }
 
@@ -640,6 +812,7 @@ impl LlmBackend {
             generator: Generator::Llama(None),
             prompts_dir: None,
             gguf_path: None,
+            loaded_generation: 0,
         }
     }
 
@@ -693,7 +866,7 @@ fn expand_through(
         .map_err(|e| {
             if e == "cancelled" {
                 AssetAiError::Cancelled
-            } else if e.starts_with(llama_worker::TOO_LONG)
+            } else if e.starts_with(TOO_LONG)
                 || e.contains("session context overflow")
             {
                 // The session refuses a token past its context before it
@@ -734,45 +907,41 @@ impl ContentBackend for LlmBackend {
                     Some(_) => Some(ctx.path_by_role("mmproj")?),
                     None => None,
                 };
-                // A new window (POST /llm/context, or a GPU-budget ceiling) or
-                // a new KV precision: rebuild the session. Any job in flight
-                // has finished, ensure_loaded runs between jobs.
-                let wanted = llama_worker::llm_context_wanted();
-                let kv_wanted = crate::llm_context::kv_wanted();
-                if worker.is_some() && crate::llm_context::loaded().is_some_and(|c| c != wanted) {
-                    (ctx.progress)(&format!("context {} -> {wanted}: rebuilding the session", crate::llm_context::loaded().unwrap_or(0)), 0.05);
+                use crate::gpu_yield::{self, LlmMemory};
+                if worker.is_some() && (self.loaded_generation != crate::llm_context::generation() || self.gguf_path.as_deref() != Some(gguf.as_path())) {
+                    (ctx.progress)("rebuilding the session", 0.05);
                     close_worker(worker);
-                }
-                if worker.is_some() && crate::llm_context::kv_loaded().is_some_and(|k| k != kv_wanted) {
-                    (ctx.progress)(&format!("kv {} -> {}: rebuilding the session", crate::llm_context::kv_loaded().map_or("?", |k| k.slug()), kv_wanted.slug()), 0.05);
-                    close_worker(worker);
-                }
-                if worker.is_some() && self.gguf_path.as_deref() != Some(gguf.as_path()) {
-                    close_worker(worker);
+                    crate::control::set_model_mb(&self.model_id, None);
+                    crate::llm_context::set_loaded(0);
+                    crate::llm_context::set_kv_loaded(None);
                 }
                 if worker.is_none() {
-                    // UI first: the window is what fits next to the UI's
-                    // reserve, from this model's own accounting at its last
-                    // load; a model that would not leave the reserve free is
-                    // not loaded at all.
+                    let generation = crate::llm_context::generation();
+                    let load_cfg = llama_worker::LoadPlanConfig::snapshot();
+                    let kv_wanted = load_cfg.kv;
+                    let lanes = load_cfg.lanes;
+                    let model = makepad_ai_llm::LlamaModel::load(&gguf)
+                        .map_err(|e| AssetAiError::Backend(format!("load llm header: {e}")))?;
+                    let plan = model.plan_session_memory(load_cfg.session)
+                        .map_err(|e| AssetAiError::Backend(format!("plan llm memory: {e}")))?;
+                    let cold = LlmMemory::from_plan(self.model_id.clone(), kv_wanted.slug().into(), &plan);
+                    gpu_yield::note_llm_plan(cold.clone());
+                    let memory = gpu_yield::llm_memory_for(&self.model_id, kv_wanted.slug(), lanes)
+                        .filter(|m| m.measured).unwrap_or(cold);
                     let gpu = crate::gpu::query_gpu();
                     let free_before = gpu.vram_free_mb;
-                    let reserve = crate::gpu_yield::ui_reserve_mb();
-                    let known = crate::gpu_yield::llm_memory_of(&self.model_id)
-                        .filter(|m| m.kv == kv_wanted.slug());
-                    if let (Some(free), Some(memory), true) = (free_before, known.as_ref(), reserve > 0) {
-                        let fit = crate::gpu_yield::fit_context(memory, free, reserve, llama_worker::configured_context(), crate::llm_context::MIN_CONTEXT)
-                            .or_else(|error| {
-                                if gpu.unified {
-                                    Ok(crate::llm_context::MIN_CONTEXT)
-                                } else {
-                                    Err(error)
-                                }
-                            })
-                            .map_err(AssetAiError::Unavailable)?;
-                        crate::gpu_yield::settle_ceiling(fit, llama_worker::configured_context());
+                    let explicit = explicit_context_override();
+                    let mut decision = gpu_yield::fit_context_detailed(&memory, free_before,
+                        gpu_yield::effective_reserve_mb(gpu.unified), gpu.unified, explicit, crate::llm_context::MIN_CONTEXT)
+                        .map_err(AssetAiError::Unavailable)?;
+                    let upper = explicit.unwrap_or(decision.model_max).min(decision.model_max);
+                    let settled = gpu_yield::settle_ceiling_detailed(decision.chosen, upper);
+                    let wanted = settled.window;
+                    decision.chosen = wanted;
+                    if let Some(source) = settled.source {
+                        decision.source = source;
                     }
-                    let wanted = llama_worker::llm_context_wanted();
+                    gpu_yield::emit_log(&decision.log_line());
                     let gb = std::fs::metadata(&gguf)
                         .map(|m| m.len() as f64 / 1e9)
                         .unwrap_or(0.0);
@@ -780,30 +949,34 @@ impl ContentBackend for LlmBackend {
                     // Loads weights on the worker thread; blocks until the
                     // session reports in so load errors surface here.
                     let spawned = llama_worker::LlamaWorker::spawn(
-                        gguf.clone(),
-                        mmproj,
-                        self.model_id.clone(),
+                        model, load_cfg.for_context(wanted), mmproj, self.model_id.clone(),
                         ctx.progress,
                     )
                     .map_err(|e| AssetAiError::Backend(format!("llm load: {e}")))?;
+                    let actual = spawned.max_context();
                     if let Some(m) = spawned.memory() {
                         let mb = |b: usize| (b as u64).div_ceil(1 << 20);
                         let after = crate::residency::fresh_free_mb();
-                        crate::gpu_yield::note_llm_memory(crate::gpu_yield::LlmMemory {
+                        let load_cost_mb = free_before.zip(after).map(|(b, a)| b.saturating_sub(a));
+                        let recorded = gpu_yield::note_llm_memory(LlmMemory {
                             model: self.model_id.clone(),
-                            context: wanted,
+                            context: actual, model_max_context: m.model_max_context, lanes, measured: true,
+                            mask_bytes_per_token: m.mask_bytes_per_token as u64,
                             kv: kv_wanted.slug().to_string(),
                             weights_mb: mb(m.weights),
                             kv_mb: mb(m.attention_kv),
                             kv_bytes_per_token: m.attention_kv_per_token as u64,
                             state_mb: mb(m.state),
                             activations_mb: mb(m.activations),
-                            load_cost_mb: free_before.zip(after).map(|(b, a)| b.saturating_sub(a)),
+                            runtime_scratch_mb: mb(m.runtime_scratch),
+                            load_cost_mb,
                         });
+                        crate::control::set_model_mb(&self.model_id, recorded.load_cost_mb.or_else(|| Some(recorded.accounted_mb())));
                     }
                     *worker = Some(spawned);
                     self.gguf_path = Some(gguf);
-                    crate::llm_context::set_loaded(wanted);
+                    self.loaded_generation = generation;
+                    crate::llm_context::set_loaded(actual);
                     crate::llm_context::set_kv_loaded(Some(kv_wanted));
                     (ctx.progress)("llm session ready", 0.9);
                 }
@@ -828,6 +1001,7 @@ impl ContentBackend for LlmBackend {
                 // there, and this returns once they have. Next ensure_loaded
                 // respawns.
                 close_worker(worker);
+                crate::control::set_model_mb(&self.model_id, None);
                 self.gguf_path = None;
                 crate::llm_context::set_loaded(0);
                 crate::llm_context::set_kv_loaded(None);
@@ -1042,17 +1216,10 @@ fn llm_generate_streamed(
                 // Chat gets the same treatment at a lower floor: a 32-token
                 // chat budget is spent inside the open think and the reply
                 // truncates to nothing.
-                max_tokens: if is_chat {
-                    if crate::protocol::model_uses_open_think(model_id) {
-                        params.max_tokens.max(128)
-                    } else {
-                        params.max_tokens
-                    }
-                } else if crate::protocol::model_uses_open_think(model_id) {
-                    params.max_tokens.max(512)
-                } else {
-                    params.max_tokens
-                },
+                max_tokens: generation_budget(model_id, params.max_tokens, is_chat),
+                tail_text: if is_chat {
+                    params.chat_messages.last().map(|m| m.text.clone()).unwrap_or_else(|| params.prompt.clone())
+                } else { String::new() },
                 // Greedy decode would make every variant identical; sampled
                 // variants past the first get a floor temperature.
                 temperature: if index == 0 {
@@ -1061,11 +1228,6 @@ fn llm_generate_streamed(
                     params.temperature.max(0.7)
                 },
                 seed: params.seed.wrapping_add(index as u64),
-                commit_suffix: if is_chat {
-                    crate::protocol::CHAT_COMMIT_SUFFIX.to_string()
-                } else {
-                    "\n".to_string()
-                },
                 kind: if is_chat {
                     "chat".to_string()
                 } else {
@@ -1152,15 +1314,25 @@ fn llm_generate_streamed(
 ///
 /// `None` when unset, so the caller keeps its own default rather than this
 /// function inventing one.
-pub fn configured_context_per_lane() -> Option<u32> {
-    // The runtime setting (POST /llm/context) outranks the environment.
-    if let Some(context) = crate::llm_context::requested() {
-        return Some(context);
-    }
-    std::env::var("MAKEPAD_ASSET_AI_LLM_CONTEXT")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|per_lane| *per_lane > 0)
+pub fn explicit_context_override() -> Option<u32> {
+    context_override(crate::llm_context::requested(), std::env::var("MAKEPAD_ASSET_AI_LLM_CONTEXT").ok().as_deref())
+}
+
+fn context_override(runtime: Option<u32>, configured: Option<&str>) -> Option<u32> {
+    runtime.or_else(|| configured?.trim().parse::<u32>().ok()
+        .filter(|n| *n > 0).map(|n| crate::llm_context::clamp(n, None)))
+}
+
+#[cfg(feature = "llm")]
+pub(crate) fn current_fit_window(model_id: &str) -> Option<u32> {
+    let explicit = explicit_context_override();
+    let Some(memory) = crate::gpu_yield::llm_memory_for(
+        model_id, crate::llm_context::kv_wanted().slug(), configured_lane_count() as u32,
+    ) else { return explicit };
+    let gpu = crate::gpu::query_gpu();
+    crate::gpu_yield::fit_context_detailed(&memory, gpu.vram_free_mb,
+        crate::gpu_yield::effective_reserve_mb(gpu.unified), gpu.unified, explicit, crate::llm_context::MIN_CONTEXT)
+        .ok().map(|d| d.chosen)
 }
 
 /// Tokens held back from a prompt so there is room to answer it.
@@ -1168,7 +1340,7 @@ pub fn configured_context_per_lane() -> Option<u32> {
 /// A prompt that exactly fills the context leaves nowhere for the reply, and
 /// the failure lands at the first decode rather than at admission.
 #[cfg_attr(not(feature = "llm"), allow(dead_code))]
-pub(crate) const DECODE_HEADROOM: usize = 512;
+pub(crate) const DECODE_HEADROOM: usize = DECODE_RESERVE;
 
 /// Drop the oldest non-system turn from a rendered ChatML prompt.
 ///
@@ -1571,8 +1743,10 @@ mod stall_tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "llm")]
-mod llama_worker {
-    use super::ExpandJob;
+pub(crate) mod llama_worker {
+    use super::{DecodeStop, ExpandJob, ReplyBudget, TOO_LONG, finish_reply, overflow_message, plan_reply_budget};
+    use super::chat_measure::resident::{self, Geometry};
+    use std::sync::Arc;
     use crate::backend::CancelToken;
     use makepad_ai_llm::{
         LlamaSamplerState, LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaStopReason,
@@ -1580,12 +1754,6 @@ mod llama_worker {
     use std::path::PathBuf;
     use std::sync::mpsc;
 
-    /// Big enough for the chat lane's taught context + tool-round history
-    /// (8192 was the wall the sandbox-LLM doom benchmark died on at 9064
-    /// tokens); still far under the model's native 262k window so the KV
-    /// cache stays modest. Long-context decode is safe since the FlashMma
-    /// gate fix (the 16k cliff is gone fleet-wide).
-    const MAX_CONTEXT: u32 = 32768;
     /// Batched prefill: measured 350-600 tok/s vs ~28 tok/s at batch 1 on
     /// the 9B (see libs/converse qwen_filter.rs).
     ///
@@ -1611,88 +1779,118 @@ mod llama_worker {
             .unwrap_or(PREFILL_BATCH_DEFAULT)
     }
 
-    /// Concurrent decode lanes. 1 keeps the single-lane worker, which is the
-    /// path every existing deployment runs; >1 selects the batched worker.
-    ///
-    /// A box-level decision (VRAM and card), so it is an env knob rather than
-    /// a per-request one: `MAKEPAD_ASSET_AI_LLM_LANES`.
-    fn lane_count() -> usize {
-        super::configured_lane_count()
-    }
+    const SPEC_DRAFT_MAX: usize = 3;
 
-    /// Context each lane may hold. The arena is `lanes * this`.
-    ///
-    /// `MAKEPAD_ASSET_AI_LLM_CONTEXT` sets it directly, in tokens PER LANE —
-    /// which is the unit people actually reason in ("64k per chat") and the
-    /// unit `/health` advertises. Unset, it falls back to dividing the built-in
-    /// budget, which is exactly what every box did before the knob existed.
-    ///
-    /// A knob rather than a constant because the right answer is per BOX: the
-    /// same number that fits comfortably on a 96 GB card is an
-    /// out-of-memory-at-load on a 32 GB one, and a hardcoded const has to be
-    /// wrong for one of them.
-    /// The per-conversation window a session built now gets.
-    pub(super) fn llm_context_wanted() -> u32 {
-        context_per_lane()
-    }
-
-    /// The attention KV-cache type a session built now gets
-    /// (`crate::llm_context::kv_wanted`: runtime setting, env, default q8).
-    fn kv_cache_type() -> makepad_ai_llm::TensorType {
-        match crate::llm_context::kv_wanted() {
+    fn session_config_with_prefill(
+        kv: crate::llm_context::KvPrecision,
+        lanes: u32,
+        prefill_batch_size: usize,
+    ) -> LlamaSessionConfig {
+        let dtype = match kv {
             crate::llm_context::KvPrecision::Q8 => makepad_ai_llm::TensorType::Q8_0,
             crate::llm_context::KvPrecision::F16 => makepad_ai_llm::TensorType::F16,
+        };
+        LlamaSessionConfig {
+            max_sequences: lanes.max(1),
+            spec_draft_max: SPEC_DRAFT_MAX,
+            prefill_batch_size,
+            attention_k_type: dtype,
+            attention_v_type: dtype,
+            ..Default::default()
         }
     }
 
-    /// What is configured, under the ceiling the GPU budget set
-    /// (`crate::gpu_yield`: a yield to the UI, or the room at load).
-    fn context_per_lane() -> u32 {
-        crate::gpu_yield::capped_context(super::configured_context_per_lane().unwrap_or_else(|| {
-            context_for_lanes(MAX_CONTEXT, lane_count())
-        }))
+    pub(crate) fn session_config(kv: crate::llm_context::KvPrecision, lanes: u32) -> LlamaSessionConfig {
+        session_config_with_prefill(kv, lanes, prefill_batch())
     }
 
-    /// The window configured, before any GPU-budget ceiling.
-    pub(super) fn configured_context() -> u32 {
-        super::configured_context_per_lane().unwrap_or_else(|| context_for_lanes(MAX_CONTEXT, lane_count()))
+    /// Settings shared by planning, allocation, lane scheduling and accounting for one load.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct LoadPlanConfig {
+        pub(crate) kv: crate::llm_context::KvPrecision,
+        pub(crate) lanes: u32,
+        pub(crate) session: LlamaSessionConfig,
     }
 
-    /// Split a total context budget across lanes.
-    ///
-    /// Separated from the env lookup so the arithmetic is testable: getting it
-    /// wrong either overruns VRAM (multiplying instead of dividing) or hands
-    /// every conversation a uselessly short window, and both are quiet.
-    fn context_for_lanes(total: u32, lanes: usize) -> u32 {
-        (total / lanes.max(1) as u32).max(1)
+    impl LoadPlanConfig {
+        pub(crate) fn new(kv: crate::llm_context::KvPrecision, lanes: u32, prefill_batch_size: usize) -> Self {
+            let lanes = lanes.max(1);
+            Self { kv, lanes, session: session_config_with_prefill(kv, lanes, prefill_batch_size) }
+        }
+
+        pub(crate) fn snapshot() -> Self {
+            Self::new(
+                crate::llm_context::kv_wanted(),
+                super::configured_lane_count() as u32,
+                prefill_batch(),
+            )
+        }
+
+        pub(crate) fn for_context(self, max_context: u32) -> LlamaSessionConfig {
+            LlamaSessionConfig { max_context: Some(max_context), ..self.session }
+        }
     }
 
-    #[cfg(test)]
-    mod lane_config_tests {
-        use super::{context_for_lanes, MAX_CONTEXT};
+    #[test]
+    fn load_plan_config_keeps_plan_allocation_and_accounting_identical_across_kv_change() {
+        use crate::llm_context::{self, KvPrecision};
+        use makepad_ai_llm::TensorType;
 
-        #[test]
-        fn lanes_divide_the_context_budget_they_do_not_multiply_it() {
-            // The arena is lanes x per-lane, so per-lane must DIVIDE. The
-            // opposite mistake allocates 4x the KV and fails at load, on the
-            // box, after a swap.
-            assert_eq!(context_for_lanes(32768, 1), 32768);
-            assert_eq!(context_for_lanes(32768, 2), 16384);
-            assert_eq!(context_for_lanes(32768, 4), 8192);
-            for lanes in 1..=8 {
-                let per = context_for_lanes(MAX_CONTEXT, lanes);
-                assert!(
-                    per * lanes as u32 <= MAX_CONTEXT,
-                    "{lanes} lanes x {per} overruns the {MAX_CONTEXT} budget"
-                );
+        struct RestoreSettings {
+            kv: Option<KvPrecision>,
+            dir: PathBuf,
+        }
+
+        impl Drop for RestoreSettings {
+            fn drop(&mut self) {
+                llm_context::restore_kv_for_test(self.kv);
+                let _ = std::fs::remove_file(self.dir.join("llm-context.json"));
+                let _ = std::fs::remove_dir(&self.dir);
             }
         }
 
-        #[test]
-        fn a_degenerate_lane_count_still_yields_a_usable_window() {
-            assert_eq!(context_for_lanes(32768, 0), 32768, "zero lanes reads as one");
-            assert!(context_for_lanes(4, 8) >= 1, "never a zero-length context");
-        }
+        let _guard = llm_context::test_settings();
+        let restore = RestoreSettings {
+            kv: llm_context::kv_requested(),
+            dir: std::env::temp_dir().join(format!("llm-load-plan-config-{}", std::process::id())),
+        };
+        std::fs::create_dir_all(&restore.dir).unwrap();
+        llm_context::set_kv(&restore.dir, KvPrecision::Q8);
+        let rev = llm_context::generation();
+        let load_cfg = LoadPlanConfig::snapshot();
+        let plan_cfg = load_cfg.session;
+
+        llm_context::set_kv(&restore.dir, KvPrecision::F16);
+        assert_eq!(llm_context::kv_wanted(), KvPrecision::F16);
+        assert!(llm_context::generation() > rev);
+        let spawn_cfg = load_cfg.for_context(114_688);
+        assert_eq!(load_cfg.kv, KvPrecision::Q8);
+        assert_eq!(plan_cfg.max_context, None);
+        assert_eq!(spawn_cfg.max_context, Some(114_688));
+        assert_eq!(spawn_cfg.attention_k_type, TensorType::Q8_0);
+        assert_eq!(spawn_cfg.attention_v_type, TensorType::Q8_0);
+        assert_eq!(spawn_cfg.attention_k_type, plan_cfg.attention_k_type);
+        assert_eq!(spawn_cfg.attention_v_type, plan_cfg.attention_v_type);
+        assert_eq!(spawn_cfg.max_sequences, plan_cfg.max_sequences);
+        assert_eq!(spawn_cfg.max_sequences, load_cfg.lanes);
+        assert_eq!(spawn_cfg.prefill_batch_size, plan_cfg.prefill_batch_size);
+        assert_eq!(spawn_cfg.spec_draft_max, plan_cfg.spec_draft_max);
+        assert_eq!(spawn_cfg.recurrent_r_type, plan_cfg.recurrent_r_type);
+        assert_eq!(spawn_cfg.recurrent_s_type, plan_cfg.recurrent_s_type);
+        assert_eq!(spawn_cfg.extra_activation_bytes, plan_cfg.extra_activation_bytes);
+        assert_eq!(spawn_cfg.skip_logits_readback, plan_cfg.skip_logits_readback);
+        assert_eq!(spawn_cfg.weigh_on_host, plan_cfg.weigh_on_host);
+
+        let multi = LoadPlanConfig::new(KvPrecision::F16, 4, 256).for_context(32_768);
+        assert_eq!(multi.max_context, Some(32_768));
+        assert_eq!(multi.attention_k_type, TensorType::F16);
+        assert_eq!(multi.attention_v_type, TensorType::F16);
+        assert_eq!(multi.max_sequences, 4);
+        assert_eq!(multi.prefill_batch_size, 256);
+        assert_eq!(multi.spec_draft_max, SPEC_DRAFT_MAX);
+        let single = LoadPlanConfig::new(KvPrecision::Q8, 0, 512);
+        assert_eq!(single.lanes, 1);
+        assert_eq!(single.session.max_sequences, 1);
     }
 
     /// Say ONCE why a long conversation keeps prefilling cold.
@@ -1726,7 +1924,9 @@ mod llama_worker {
     /// executor, so a lone client keeps today's speed.
     fn run_lane_worker(
         session: makepad_ai_llm::LlamaSession,
+        config: LlamaSessionConfig,
         model_id: String,
+        geometry: &Geometry,
         rx: mpsc::Receiver<WorkerMsg>,
     ) {
         use super::TurnPhase;
@@ -1739,7 +1939,7 @@ mod llama_worker {
             cancel: CancelToken,
             token_ids: Vec<i32>,
             streamed: String,
-            max_tokens: usize,
+            budget: ReplyBudget,
             /// Prompt tokens this turn handed the scheduler. The denominator
             /// of its prefill meter, and the only place that number exists —
             /// the scheduler reports an ingest ONCE, when the whole prompt is
@@ -1781,7 +1981,7 @@ mod llama_worker {
         }
 
 
-        let lanes = lane_count();
+        let lanes = config.max_sequences.max(1) as usize;
         let table = match session.new_slot_table() {
             Ok(table) => table,
             Err(err) => {
@@ -1791,7 +1991,7 @@ mod llama_worker {
         };
         // The scheduler chunks prefill with the same batch the session uses,
         // so the two cannot drift into a graph neither of them sized for.
-        let scheduler = LaneScheduler::new(table).with_prefill_chunk(prefill_batch());
+        let scheduler = LaneScheduler::new(table).with_prefill_chunk(config.prefill_batch_size);
         let advert_model = model_id.clone();
         let mut exec = LaneExecutor::new(session, scheduler, LlamaSamplingParams::default())
             .on_counts(move |counts| {
@@ -1832,7 +2032,7 @@ mod llama_worker {
         // Reported as "unknown" rather than 0 when the session cannot answer.
         // A zero-byte KV report reads as a fact, and sizing a card from it is
         // exactly the mistake this line exists to prevent.
-        let geometry = match (
+        let cache_geometry = match (
             exec.session().attention_cache_bytes(),
             exec.session().attention_cache_bytes_per_token(),
         ) {
@@ -1844,8 +2044,8 @@ mod llama_worker {
         };
         eprintln!(
             "[llm-worker] batched worker: {lanes} lanes x {} tok, \
-             speculation depth {}, {geometry}",
-            context_per_lane(),
+             speculation depth {}, {cache_geometry}",
+            exec.session().max_context(),
             exec.session().speculation_depth(),
         );
         // The batched ladder this box will actually run, priced on its own
@@ -1892,6 +2092,7 @@ mod llama_worker {
                     break;
                 };
                 if !job.images.is_empty() {
+                    publish_room(&events, job_room(&job, &model_id, geometry, exec.session().vocab(), exec.session().max_context()));
                     let _ = events.send(WorkerEvent::Done(Err(
                         "pictures in chat need the single-lane worker on this node \
                          (MAKEPAD_ASSET_AI_LLM_LANES=1)"
@@ -1908,17 +2109,14 @@ mod llama_worker {
             let _alone = was_idle && arrivals.len() == 1;
             'arrival: for (job, cancel, events) in arrivals {
                 {
-                let tokens = match exec.session().vocab().tokenize(&job.prompt_text, true, true) {
-                    Ok(mut tokens) => {
-                        // ChatML already ends the turn; a gguf with
-                        // add_eos_token would make the first decode EOS.
-                        if tokens.last().copied() == exec.session().vocab().eos_token_id() {
-                            tokens.pop();
-                        }
-                        tokens
-                    }
+                let window = exec.session().max_context();
+                let mut room = job_room(&job, &model_id, geometry, exec.session().vocab(), window);
+                let tokenize = |text: &str| super::tokenize_run(exec.session().vocab(), text, true, true);
+                let mut tokens = match tokenize(&job.prompt_text) {
+                    Ok(tokens) => tokens,
                     Err(err) => {
-                        let _ = events.send(WorkerEvent::Done(Err(format!("tokenize: {err:?}"))));
+                        publish_room(&events, room);
+                        let _ = events.send(WorkerEvent::Done(Err(err)));
                         continue;
                     }
                 };
@@ -1931,9 +2129,8 @@ mod llama_worker {
                 // player never chose. Dropping the oldest turns is what a chat
                 // client would do, and the taught context is never a
                 // candidate: it is who the assistant IS, not what it recalls.
-                let budget = (context_per_lane() as usize).saturating_sub(super::DECODE_HEADROOM);
+                let budget = window.saturating_sub(super::answer_reserve(job.max_tokens.max(1)).max(super::DECODE_HEADROOM));
                 let mut prompt_text = job.prompt_text.clone();
-                let mut tokens = tokens;
                 let mut dropped = 0usize;
                 while tokens.len() > budget {
                     let Some(shorter) = super::drop_oldest_turn(&prompt_text) else {
@@ -1941,31 +2138,32 @@ mod llama_worker {
                     };
                     prompt_text = shorter;
                     dropped += 1;
-                    tokens = match exec.session().vocab().tokenize(&prompt_text, true, true) {
-                        Ok(mut t) => {
-                            if t.last().copied() == exec.session().vocab().eos_token_id() {
-                                t.pop();
-                            }
-                            t
-                        }
+                    tokens = match tokenize(&prompt_text) {
+                        Ok(tokens) => tokens,
                         Err(err) => {
-                            let _ = events
-                                .send(WorkerEvent::Done(Err(format!("tokenize: {err:?}"))));
+                            publish_room(&events, room);
+                            let _ = events.send(WorkerEvent::Done(Err(err)));
                             continue 'arrival;
                         }
                     };
                 }
-                if tokens.len() > budget {
-                    // Only reachable when the system block alone does not fit,
-                    // which is a configuration problem and says so.
-                    let _ = events.send(WorkerEvent::Done(Err(format!(
-                        "this conversation's system prompt alone needs {} tokens, more than the \
-                         {budget} a lane can hold (raise MAKEPAD_ASSET_AI_LLM_CONTEXT or lower \
-                         MAKEPAD_ASSET_AI_LLM_LANES)",
-                        tokens.len()
-                    ))));
-                    continue;
+                record_count(&mut room, tokens.len());
+                publish_room(&events, room);
+                // Compaction still targets its established headroom. The final
+                // chat refusal is decided by the generation budget on this session.
+                if job.kind != "chat" {
+                    if let Some(err) = overflow_message(tokens.len(), super::DECODE_HEADROOM, window) {
+                        let _ = events.send(WorkerEvent::Done(Err(err)));
+                        continue;
+                    }
                 }
+                let reply_budget = match plan_reply_budget(tokens.len(), job.max_tokens, window) {
+                    Ok(budget) => budget,
+                    Err(err) => {
+                        let _ = events.send(WorkerEvent::Done(Err(err)));
+                        continue;
+                    }
+                };
                 if dropped > 0 {
                     eprintln!(
                         "[llm-worker] turn {id}: compacted {dropped} oldest turn(s) to fit \
@@ -1980,13 +2178,6 @@ mod llama_worker {
                 // and the two disagreeing means ingesting a delta at position 0
                 // of a lane that holds none of the history.
                 let prompt_tokens = tokens.len();
-                // The reply budget is physical, not policy: whatever the
-                // client asked for, a lane can only decode into the context
-                // it has left after this prompt. Clamping HERE (not at the
-                // params layer) keeps the progress meter's denominator and
-                // the scheduler's stop condition the same honest number.
-                let max_new = (job.max_tokens.max(1) as usize)
-                    .min((context_per_lane() as usize).saturating_sub(prompt_tokens).max(1));
                 let request = LaneRequest {
                     job: id,
                     // The CONVERSATION is the identity (lanes.rs: never a
@@ -2003,7 +2194,7 @@ mod llama_worker {
                     // Never a veto from here: the scheduler decides whether a
                     // lane can be resumed, and it is the only thing that knows.
                     reset_first: false,
-                    max_new,
+                    max_new: reply_budget.max_new,
                     sampling: LlamaSamplingParams {
                         temperature: job.temperature.max(0.0),
                         top_p: 0.95,
@@ -2022,7 +2213,7 @@ mod llama_worker {
                         cancel,
                         token_ids: Vec::new(),
                         streamed: String::new(),
-                        max_tokens: max_new,
+                        budget: reply_budget,
                         prompt_tokens,
                         lane: None,
                         phase: TurnPhase::Waiting,
@@ -2158,7 +2349,7 @@ mod llama_worker {
                         lane.token_ids.push(token);
                         let _ =
                             lane.events
-                                .send(WorkerEvent::Token(produced as u32, lane.max_tokens as u32));
+                                .send(WorkerEvent::Token(produced as u32, lane.budget.max_new as u32));
                         if !touched.contains(&job) {
                             touched.push(job);
                         }
@@ -2166,14 +2357,16 @@ mod llama_worker {
                     LaneEvent::Finished { job, outcome, .. } => {
                         touched.retain(|id| *id != job);
                         let Some(lane) = jobs.remove(&job) else { continue };
-                        let result = match outcome {
+                        let stop = match outcome {
                             LaneOutcome::Cancelled => Err("cancelled".to_string()),
-                            LaneOutcome::Complete => exec
-                                .session()
-                                .vocab()
-                                .decode_tokens(&lane.token_ids)
-                                .map_err(|e| format!("detokenize: {e:?}")),
+                            LaneOutcome::Complete => Ok(DecodeStop::StopToken),
+                            LaneOutcome::LengthLimit => Ok(DecodeStop::MaxNew),
+                            LaneOutcome::Exhausted => Ok(DecodeStop::Exhausted),
                         };
+                        let result = stop.and_then(|reason| finish_reply(
+                            lane.prompt_tokens, lane.token_ids.len(), lane.budget, exec.session().max_context(), reason,
+                        )).and_then(|()| exec.session().vocab().decode_tokens(&lane.token_ids)
+                            .map_err(|e| format!("detokenize: {e:?}")));
                         // The final counts, once. The per-step updates stop at
                         // the last step, and a reply that ends in the same
                         // chunk its think block closed in would leave a client
@@ -2232,13 +2425,6 @@ mod llama_worker {
                                 "[llm-worker] turn {job}: {total} tokens generated, all visible"
                             );
                         }
-                        // The session's KV now holds prompt + reply + suffix,
-                        // so the NEXT turn of this conversation is a delta
-                        // prefill instead of the whole history again. Only for
-                        // a turn that ran alone and completed: a cancelled or
-                        // failed turn leaves the KV somewhere the committed
-                        // text does not describe, and claiming it would hand
-                        // the next turn a prefix that is not there.
                         {
                             let now = exec.session().speculative_stats();
                             if let (Some(now), Some(then)) = (now, spec_mark) {
@@ -2436,19 +2622,21 @@ mod llama_worker {
         tx: mpsc::Sender<WorkerMsg>,
         gone: std::sync::Arc<std::sync::Mutex<Option<mpsc::Receiver<()>>>>,
         memory: Option<makepad_ai_llm::SessionMemory>,
+        max_context: u32,
     }
 
     impl LlamaWorker {
         pub fn spawn(
-            gguf: PathBuf,
+            model: makepad_ai_llm::LlamaModel,
+            config: LlamaSessionConfig,
             mmproj: Option<PathBuf>,
             model_id: String,
-            progress: &mut dyn FnMut(&str, f64),
+            progress: crate::backend::ProgressSink,
         ) -> Result<Self, String> {
             use std::time::{Duration, Instant};
             enum BootEvt {
                 Progress(String, f64),
-                Ready(Result<Option<makepad_ai_llm::SessionMemory>, String>),
+                Ready(Result<(Option<makepad_ai_llm::SessionMemory>, u32), String>),
             }
             let (tx, rx) = mpsc::channel::<WorkerMsg>();
             let (boot_tx, boot_rx) = mpsc::channel::<BootEvt>();
@@ -2459,60 +2647,38 @@ mod llama_worker {
                 .name("llm-expander".to_string())
                 .spawn(move || {
                     let _gone = gone_tx;
-                    let config = LlamaSessionConfig {
-                        max_context: Some(context_per_lane()),
-                        max_sequences: lane_count() as u32,
-                        prefill_batch_size: prefill_batch(),
-                        // MTP speculative decoding (nextn draft head). 3 is
-                        // the measured sweet spot on served chat (Blackwell
-                        // A/B: n3 106.3 vs n5 101.3 tok/s full head, 121.6
-                        // vs 119.8 restricted) and shortens the losing
-                        // chains on low-acceptance expander prose; 8 crosses
-                        // the MMVQ column cliff (see qwen38-mtp campaign).
-                        // Models without an MTP block load exactly as before
-                        // (draft head only loads when the gguf carries one),
-                        // and the .draftvocab sidecar is picked up when it
-                        // sits beside the gguf (full head otherwise).
-                        spec_draft_max: 3,
-                        // q8 stores K/V as 8-bit blocks (about half the f16
-                        // bytes); see crate::llm_context for the setting.
-                        attention_k_type: kv_cache_type(),
-                        attention_v_type: kv_cache_type(),
-                        ..LlamaSessionConfig::default()
-                    };
-                    let mut session = match LlamaSession::load_with_progress(
-                        &gguf,
+                    let mut session = match LlamaSession::from_owned_model_with_progress(
+                        model,
                         config,
                         &mut |stage, frac| {
                             let _ = boot_tx.send(BootEvt::Progress(stage.to_string(), frac));
                         },
                     ) {
-                        Ok(session) => {
-                            let _ = boot_tx.send(BootEvt::Ready(Ok(session.memory().ok())));
-                            session
-                        }
+                        Ok(session) => session,
                         Err(err) => {
                             let _ = boot_tx.send(BootEvt::Ready(Err(format!("{err:?}"))));
                             return;
                         }
                     };
-                    // Advertise this box's decode capacity now the weights are
-                    // resident. One lane today: `max_sequences` defaults to 1,
-                    // so anything larger would be advertising capacity that
-                    // does not exist. The number moves when the batched worker
-                    // lands; the CONTRACT does not, which is the point of
-                    // shipping the protocol once rather than in stages.
+                    let lanes = config.max_sequences.max(1) as usize;
+                    let mmproj = mmproj.filter(|_| vision_mode() != "off");
+                    let geometry = Arc::new(Geometry::new(mmproj.clone(), image_px(), lanes));
+                    if let Err(err) = geometry.read() {
+                        eprintln!("[llm-worker] vision geometry: {err}");
+                    }
+                    let _facts = resident::publish(model_id.clone(), session.shared_vocab(), geometry.clone());
                     crate::lane_advert::publish(crate::lane_advert::LaneFacts::idle(
                         model_id.clone(),
-                        lane_count() as u64,
-                        u64::from(context_per_lane()),
+                        lanes as u64,
+                        session.max_context() as u64,
                     ));
-                    if lane_count() > 1 {
-                        run_lane_worker(session, model_id.clone(), rx);
+                    let _ = boot_tx.send(BootEvt::Ready(Ok((session.memory().ok(), session.max_context() as u32))));
+                    if lanes > 1 {
+                        run_lane_worker(session, config, model_id.clone(), &geometry, rx);
                     } else {
                         let mut prefix = super::PrefixCache::default();
                         let mut kept = super::KeptPrefixes::default();
-                        let mut vision = ChatVision::new(mmproj, model_id.clone());
+                        let mut vision = ChatVision::new(mmproj, model_id.clone(), geometry);
                         if vision.load_at_start() {
                             if let Err(err) = vision.warm() {
                                 eprintln!("[llm-worker] vision tower at start: {err}");
@@ -2524,6 +2690,7 @@ mod llama_worker {
                             // stays resident and its next turn comes back here.
                             crate::lane_advert::lane_entered();
                             let tokens_before = session.token_count();
+                            let mut room = job_room(&job, &model_id, &vision.geometry, session.vocab(), session.max_context());
                             let result = run_expand(
                                 &mut session,
                                 &mut prefix,
@@ -2532,7 +2699,9 @@ mod llama_worker {
                                 &job,
                                 &cancel,
                                 &events,
+                                &mut room,
                             );
+                            publish_room(&events, room);
                             // A job that failed or was cancelled after it
                             // prefilled or decoded leaves the session past its
                             // committed text: it no longer holds what the cache
@@ -2576,7 +2745,7 @@ mod llama_worker {
             let mut mark = 0.10_f64;
             let mut shown = 0.0_f64;
             let mut phase_started = Instant::now();
-            let memory = loop {
+            let (memory, max_context) = loop {
                 match boot_rx.recv_timeout(HEARTBEAT) {
                     Ok(BootEvt::Progress(next_stage, next_mark)) => {
                         stage = next_stage;
@@ -2602,7 +2771,11 @@ mod llama_worker {
                     }
                 }
             };
-            Ok(Self { tx, gone: std::sync::Arc::new(std::sync::Mutex::new(Some(gone_rx))), memory })
+            Ok(Self { tx, gone: std::sync::Arc::new(std::sync::Mutex::new(Some(gone_rx))), memory, max_context })
+        }
+
+        pub fn max_context(&self) -> u32 {
+            self.max_context
         }
 
         /// The session's own accounting of its device bytes, from its load.
@@ -2695,6 +2868,8 @@ mod llama_worker {
     /// conversation re-prefilled after a miss does not encode them again.
     pub(super) struct ChatVision {
         mmproj: Option<PathBuf>,
+        geometry: Arc<Geometry>,
+        grid_mismatch_reported: bool,
         /// The chat model, whose resident size the tower adds to.
         model_id: String,
         tower: Option<makepad_ai_llm::VisionTower>,
@@ -2730,10 +2905,13 @@ mod llama_worker {
     }
 
     impl ChatVision {
-        pub(super) fn new(mmproj: Option<PathBuf>, model_id: String) -> Self {
-            let mmproj = if vision_mode() == "off" { None } else { mmproj };
+        pub(super) fn new(mmproj: Option<PathBuf>, model_id: String, geometry: Arc<Geometry>) -> Self {
             crate::control::set_vision(mmproj.is_some(), false);
-            Self { mmproj, model_id, tower: None, encoded: Vec::new(), measured: false }
+            Self {
+                geometry,
+                mmproj, model_id, grid_mismatch_reported: false,
+                tower: None, encoded: Vec::new(), measured: false,
+            }
         }
 
         pub(super) fn load_at_start(&self) -> bool {
@@ -2761,8 +2939,9 @@ mod llama_worker {
                     tower.device_description(),
                     started.elapsed().as_secs_f64(),
                     path.display(),
-                    image_px(),
+                    self.geometry.image_px,
                 );
+                self.geometry.set(tower.config.clone());
                 self.tower = Some(tower);
                 crate::control::set_vision(true, true);
             }
@@ -2772,7 +2951,7 @@ mod llama_worker {
         /// Load the tower and compile its graph for a square picture of the
         /// configured size, so the first picture costs no load.
         pub(super) fn warm(&mut self) -> Result<(), String> {
-            let px = image_px();
+            let px = self.geometry.image_px;
             {
                 // A flat grey square, encoded through the same path a request takes.
                 let rgb = vec![128u8; px * px * 3];
@@ -2811,7 +2990,7 @@ mod llama_worker {
             let (rgb, width, height) = crate::vision_backend::decode_image_rgb8(&image.bytes)
                 .map_err(|e| format!("{e}"))?;
             let (rgb, width, height) =
-                crate::vision_backend::downscale_to_fit(&rgb, width, height, image_px());
+                crate::vision_backend::downscale_to_fit(&rgb, width, height, self.geometry.image_px);
             // The tower's device copy is made at its first encode (the
             // compiled graph holds it): that is where its memory shows.
             let free_before = if self.measured { None } else { crate::residency::fresh_free_mb() };
@@ -2857,25 +3036,33 @@ mod llama_worker {
         Image(std::rc::Rc<EncodedImage>),
     }
 
-    fn prompt_len(segs: &[PromptSeg]) -> usize {
-        segs.iter()
-            .map(|seg| match seg {
+    impl PromptSeg {
+        fn len(&self) -> usize {
+            match self {
                 PromptSeg::Tokens(tokens) => tokens.len(),
                 PromptSeg::Image(image) => image.tokens_w * image.tokens_h,
-            })
-            .sum()
+            }
+        }
     }
 
-    /// Tokenize `text` (a whole prompt, or the delta past the resident
-    /// prefix), encoding the pictures its markers name.
-    fn prepare_prompt(
-        session: &LlamaSession,
+    fn prompt_len(segs: &[PromptSeg]) -> usize {
+        segs.iter().map(PromptSeg::len).sum()
+    }
+
+    enum MeasuredSeg<'a> {
+        Ready(PromptSeg),
+        Picture(&'a crate::backend::ChatImage, (usize, usize)),
+    }
+
+    /// Keep the tokenized runs for prefill. A picture with known geometry
+    /// needs only its header here, even if its marker appears several times.
+    fn measure_prompt<'a>(
         vision: &mut ChatVision,
         text: &str,
-        add_special: bool,
-        job: &ExpandJob,
+        images: &'a [crate::backend::ChatImage],
         events: &mpsc::Sender<WorkerEvent>,
-    ) -> Result<Vec<PromptSeg>, String> {
+        mut tokenize: impl FnMut(&str, bool, bool) -> Result<Vec<i32>, String>,
+    ) -> Result<Vec<MeasuredSeg<'a>>, String> {
         use crate::protocol::PromptPiece;
         let pieces = crate::protocol::split_chat_images(text);
         let last = pieces.len().saturating_sub(1);
@@ -2883,30 +3070,136 @@ mod llama_worker {
         for (index, piece) in pieces.into_iter().enumerate() {
             match piece {
                 PromptPiece::Text(text) => {
-                    let mut tokens = session
-                        .vocab()
-                        .tokenize(text, add_special && index == 0, true)
-                        .map_err(|e| format!("tokenize: {e:?}"))?;
-                    // ChatML already ends the turn. A GGUF with
-                    // add_eos_token=true would append EOS here and the first
-                    // decode token is then EOS (empty expansion).
-                    if index == last && tokens.last().copied() == session.vocab().eos_token_id() {
-                        tokens.pop();
-                    }
-                    segs.push(PromptSeg::Tokens(tokens));
+                    let tokens = tokenize(text, index == 0, index == last)?;
+                    segs.push(MeasuredSeg::Ready(PromptSeg::Tokens(tokens)));
                 }
                 PromptPiece::Image(key) => {
-                    let image = job.images.iter().find(|image| image.key == key).ok_or_else(|| {
+                    let image = images.iter().find(|image| image.key == key).ok_or_else(|| {
                         format!(
                             "the conversation shows picture {key} but this request does not \
                              carry it (resend each turn's images with it)"
                         )
                     })?;
-                    segs.push(PromptSeg::Image(vision.encode(image, events)?));
+                    segs.push(if let Some(config) = vision.geometry.read()? {
+                        let (w, h) = crate::vision_backend::image_dimensions(&image.bytes)
+                            .map_err(|e| e.to_string())?;
+                        MeasuredSeg::Picture(image, vision.geometry.fitted_grid(config, w, h))
+                    } else {
+                        // No header yet. Keep the original encode path and its refusal.
+                        MeasuredSeg::Ready(PromptSeg::Image(vision.encode(image, events)?))
+                    });
                 }
             }
         }
         Ok(segs)
+    }
+
+    // Build the receipt from the request's actual image headers. A missing
+    // tower or undeliverable picture leaves its count unknown, even on error.
+    fn job_room(
+        job: &ExpandJob,
+        model: &str,
+        geometry: &Geometry,
+        vocab: &makepad_ai_llm::LlamaVocab,
+        window: usize,
+    ) -> Option<crate::protocol::ChatMeasure> {
+        if job.kind != "chat" {
+            return None;
+        }
+        let pictures = crate::protocol::split_chat_images(&job.prompt_text)
+            .into_iter()
+            .filter_map(|piece| {
+                let crate::protocol::PromptPiece::Image(key) = piece else {
+                    return None;
+                };
+                let tokens = job.images.iter().find(|pic| pic.key == key).and_then(|pic| {
+                    let (w, h) = crate::vision_backend::image_dimensions(&pic.bytes).ok()?;
+                    let (w, h) = geometry.grid(w, h).ok()??;
+                    Some((w * h) as u64)
+                });
+                Some(crate::protocol::PictureTokens { key: key.into(), tokens })
+            })
+            .collect();
+        let tail = super::tokenize_run(vocab, &job.tail_text, false, false).ok().map(|ids| ids.len());
+        Some(super::chat_measure::measurement(model, window, job.max_tokens, None, tail, pictures, geometry.sees()))
+    }
+
+    fn record_count(room: &mut Option<crate::protocol::ChatMeasure>, prompt: usize) {
+        if let Some(room) = room {
+            room.prompt_tokens = Some(prompt as u64);
+            room.fits = Some(super::fits_window(prompt, room.reserve as usize, room.window as usize));
+        }
+    }
+
+    fn publish_room(events: &mpsc::Sender<WorkerEvent>, room: Option<crate::protocol::ChatMeasure>) {
+        if let Some(room) = room {
+            let _ = events.send(WorkerEvent::Serving(crate::backend::ServingUpdate::Measure(room)));
+        }
+    }
+
+    fn encode_if_fits(
+        measured: Vec<MeasuredSeg<'_>>,
+        vision: &mut ChatVision,
+        events: &mpsc::Sender<WorkerEvent>,
+        window: usize,
+        occupied: usize,
+        budget: u32,
+        room: &mut Option<crate::protocol::ChatMeasure>,
+    ) -> Result<Vec<PromptSeg>, String> {
+        let count: usize = measured.iter().map(|seg| match seg {
+            MeasuredSeg::Ready(seg) => seg.len(),
+            MeasuredSeg::Picture(_, (w, h)) => w * h,
+        }).sum();
+        record_count(room, occupied + count);
+        check_fits(occupied + count, budget, window)?;
+
+        let mut ready = Vec::with_capacity(measured.len());
+        for seg in measured {
+            ready.push(match seg {
+                MeasuredSeg::Ready(seg) => seg,
+                MeasuredSeg::Picture(image, grid) => {
+                    let encoded = vision.encode(image, events)?;
+                    if grid != (encoded.tokens_w, encoded.tokens_h) {
+                        if !vision.grid_mismatch_reported {
+                            eprintln!(
+                                "[llm-worker] picture {}: header grid {}x{}, encoded {}x{}; using encoded grid",
+                                image.key, grid.0, grid.1, encoded.tokens_w, encoded.tokens_h,
+                            );
+                            vision.grid_mismatch_reported = true;
+                        }
+                        if let Some(room) = room {
+                            for pic in room.pictures.iter_mut().filter(|p| p.key == image.key) {
+                                pic.tokens = Some((encoded.tokens_w * encoded.tokens_h) as u64);
+                            }
+                        }
+                    }
+                    PromptSeg::Image(encoded)
+                }
+            });
+        }
+        let actual = prompt_len(&ready);
+        if actual != count {
+            record_count(room, occupied + actual);
+            check_fits(occupied + actual, budget, window)?;
+        }
+        Ok(ready)
+    }
+
+    fn prepare_prompt(
+        session: &LlamaSession,
+        vision: &mut ChatVision,
+        text: &str,
+        add_special: bool,
+        job: &ExpandJob,
+        events: &mpsc::Sender<WorkerEvent>,
+        available: usize,
+        room: &mut Option<crate::protocol::ChatMeasure>,
+    ) -> Result<Vec<PromptSeg>, String> {
+        let measured = measure_prompt(vision, text, &job.images, events, |text, first, last| {
+            super::tokenize_run(session.vocab(), text, add_special && first, last)
+        })?;
+        let occupied = session.max_context() - available;
+        encode_if_fits(measured, vision, events, session.max_context(), occupied, job.max_tokens, room)
     }
 
     fn append_prompt(
@@ -2936,26 +3229,431 @@ mod llama_worker {
         Ok(())
     }
 
-    /// Tokens kept free after a prompt so the answer has room.
-    const DECODE_RESERVE: usize = 128;
-
-    /// Marks a refusal that leaves the session as it was (a request error).
-    pub(super) const TOO_LONG: &str = "context overflow:";
-
-    /// `Some(message)` when `prompt` tokens plus `reserve` for the answer do
-    /// not fit `max_context`.
-    pub(super) fn overflow_message(prompt: usize, reserve: usize, max_context: usize) -> Option<String> {
-        (prompt + reserve > max_context).then(|| {
-            format!(
-                "{TOO_LONG} the prompt is {prompt} tokens and the answer needs {reserve} more, \
-                 but this node's context is {max_context} tokens (shorten the conversation, or \
-                 POST /llm/context to raise it)"
-            )
-        })
-    }
+    #[cfg(test)]
+    use super::DECODE_RESERVE;
 
     #[cfg(test)]
     mod overflow_tests {
+        use super::*;
+
+        #[test]
+        fn picture_headers_count_the_tower_grid_before_encoding() {
+            use crate::backend::ChatImage;
+            use crate::protocol::chat_image_marker;
+            use crate::vision_backend::{decode_image_rgb8, downscale_to_fit};
+            use makepad_ai_llm::{preprocess_rgb8, VisionConfig};
+
+            let config = VisionConfig {
+                image_size: 768, patch_size: 16, n_merge: 2, min_pixels: 8 * 32 * 32,
+                max_pixels: 64 * 32 * 32, image_mean: [0.0; 3], image_std: [1.0; 3],
+                n_embd: 16, n_ffn: 16, n_layers: 1, n_heads: 1, proj_dim: 16, eps: 1e-6,
+            };
+            let px = IMAGE_PX_DEFAULT;
+            let shapes = [
+                (96, 96, (3, 3)), (151, 53, (5, 2)), (53, 151, (2, 5)),
+                (5, 5, (3, 3)), (px, 64, (px / 32, 2)),
+                (2 * px + 1, 96, (px / 32, 1)), (320, 320, (8, 8)),
+            ];
+            let mut prompt = String::from("Compare the pictures ");
+            let mut images = Vec::new();
+            let mut grids = Vec::new();
+            for (i, (w, h, expected)) in shapes.into_iter().enumerate() {
+                let bytes = match i {
+                    1 => crate::testpattern::encode_png_rgba(&vec![0; w * h * 4], w, h)
+                        .expect("the wide RGBA fixture must encode"),
+                    2 => {
+                        let mut jpeg = Vec::new();
+                        jpeg_encoder::Encoder::new(&mut jpeg, 85)
+                            .encode(&vec![0; w * h * 3], w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+                            .expect("the tall JPEG fixture must encode");
+                        jpeg
+                    }
+                    _ => crate::testpattern::encode_png_rgb8(&vec![0; w * h * 3], w, h)
+                        .expect("the RGB fixture must encode"),
+                };
+                let (rgb, width, height) = decode_image_rgb8(&bytes).expect("the reference image must decode");
+                let (rgb, width, height) = downscale_to_fit(&rgb, width, height, px);
+                let prepared = preprocess_rgb8(&rgb, width, height, &config)
+                    .expect("the reference pixels must reach the tower's preprocessing");
+                let grid = (prepared.tokens_w(), prepared.tokens_h());
+                assert_eq!(grid, expected, "the tower's grid changed for {w}x{h}");
+                grids.push(grid);
+                let key = format!("{i:016x}");
+                prompt.push_str(&chat_image_marker(&key));
+                images.push(ChatImage { key, bytes: std::sync::Arc::new(bytes) });
+            }
+            prompt.push_str(&chat_image_marker(&images[0].key));
+            grids.push(grids[0]);
+            let (events, stages) = mpsc::channel();
+            let mut vision = ChatVision::new(None, String::new(), Arc::new(Geometry::new(None, px, 1)));
+            vision.geometry.set(config);
+            // One token per text run in this fixture. The real request uses its session vocab.
+            let measure = |vision: &mut ChatVision| {
+                measure_prompt(vision, &prompt, &images, &events, |_, _, _| Ok(vec![1]))
+                    .expect("measuring all markers must work without weights")
+            };
+            let plan = measure(&mut vision);
+            let counted: Vec<_> = plan.iter().filter_map(|seg| match seg {
+                MeasuredSeg::Picture(_, grid) => Some(*grid),
+                _ => None,
+            }).collect();
+            assert_eq!(counted, grids, "header grids must match the tower in order, including the repeated picture");
+            let tokens = grids.len() + 1 + grids.iter().map(|(w, h)| w * h).sum::<usize>();
+            let room = tokens + DECODE_RESERVE;
+            let refusal = encode_if_fits(plan, &mut vision, &events, room - 1, 0, 512, &mut None).err()
+                .expect("one token over must refuse before touching the tower");
+            assert_eq!(Some(refusal), overflow_message(tokens, DECODE_RESERVE, room - 1),
+                "the refusal must name the full prompt count and the actual window");
+            assert!(stages.try_recv().is_err(), "a refused request must never start looking at a picture");
+
+            // Supply cache hits with the actual CPU-preprocessed grids. No GPU or weights.
+            for (image, &(tokens_w, tokens_h)) in images.iter().zip(&grids) {
+                vision.encoded.push((image.key.clone(), std::rc::Rc::new(EncodedImage {
+                    embeddings: Vec::new(), tokens_w, tokens_h,
+                })));
+            }
+            let ready = encode_if_fits(measure(&mut vision), &mut vision, &events, room, 0, 512, &mut None)
+                .expect("an exact fit including the answer reserve must be admitted");
+            assert_eq!(prompt_len(&ready), tokens, "the prefill must carry every text run and both occurrences of the repeated grid");
+        }
+
+        // A header-only BPE vocabulary. ChatML boundaries are real control
+        // tokens and ordinary bytes fall back to '?' (no model or weights).
+        fn test_vocab(model: &str) -> Arc<makepad_ai_llm::LlamaVocab> {
+            fn string(bytes: &mut Vec<u8>, s: &str) {
+                bytes.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                bytes.extend_from_slice(s.as_bytes());
+            }
+            let mut bytes = b"GGUF".to_vec();
+            bytes.extend_from_slice(&3u32.to_le_bytes());
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.extend_from_slice(&4u64.to_le_bytes());
+            string(&mut bytes, "tokenizer.ggml.model");
+            bytes.extend_from_slice(&8u32.to_le_bytes());
+            string(&mut bytes, "gpt2");
+            string(&mut bytes, "tokenizer.ggml.tokens");
+            bytes.extend_from_slice(&9u32.to_le_bytes());
+            bytes.extend_from_slice(&8u32.to_le_bytes());
+            let pieces = ["?", "<|im_start|>", "<|im_end|>", "<|vision_start|>", "<|vision_end|>"];
+            bytes.extend_from_slice(&(pieces.len() as u64).to_le_bytes());
+            for piece in pieces {
+                string(&mut bytes, piece);
+            }
+            string(&mut bytes, "tokenizer.ggml.token_type");
+            bytes.extend_from_slice(&9u32.to_le_bytes());
+            bytes.extend_from_slice(&5u32.to_le_bytes());
+            bytes.extend_from_slice(&(pieces.len() as u64).to_le_bytes());
+            for kind in [1i32, 3, 3, 3, 3] {
+                bytes.extend_from_slice(&kind.to_le_bytes());
+            }
+            string(&mut bytes, "tokenizer.ggml.unknown_token_id");
+            bytes.extend_from_slice(&4u32.to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            let path = std::env::temp_dir().join(format!("{model}-{}.gguf", std::process::id()));
+            std::fs::write(&path, bytes).expect("the fixture vocabulary must be writable");
+            let header = makepad_ai_llm::GgufFile::open(&path).expect("the fixture header must parse");
+            std::fs::remove_file(path).expect("the fixture must be removed after reading its header");
+            Arc::new(
+                makepad_ai_llm::LlamaVocab::from_gguf(&header)
+                    .expect("the fixture must use the real BPE tokenizer"),
+            )
+        }
+
+        #[test]
+        fn a_warm_chat_prefills_every_token_in_the_resident_measure() {
+            use super::super::{tokenize_run, PrefixCache, PrefixOutcome};
+            use crate::protocol::{ChatRoomRequest, ChatRoomRow, CHAT_COMMIT_SUFFIX};
+
+            let model = "warm-prefix-test";
+            let vocab = test_vocab(model);
+            let _resident = resident::publish(
+                model.into(),
+                vocab.clone(),
+                Arc::new(Geometry::new(None, 768, 1)),
+            );
+            let row = |role: &str, text: &str| ChatRoomRow {
+                role: role.into(),
+                text: text.into(),
+                images: None,
+            };
+            let mut request = ChatRoomRequest {
+                model: model.into(),
+                chat_system: Some("Help".into()),
+                chat_messages: Some(vec![row("user", "Japan?")]),
+                ..Default::default()
+            };
+            let first = resident::render_request(&mut request.clone(), |_| {});
+            let reply = "Tokyo.";
+            request
+                .chat_messages
+                .as_mut()
+                .unwrap()
+                .extend([row("assistant", reply), row("user", "Italy?")]);
+            let second = resident::render_request(&mut request.clone(), |_| {});
+            let measured = super::super::chat_measure::measure(request)
+                .expect("the resident model must measure turn two");
+
+            let mut cache = PrefixCache::default();
+            let (_, owner) = cache.classify("chat", &first);
+            cache.finish_turn(&owner, &first, reply);
+            assert_eq!(
+                cache.classify("chat", &second).0,
+                PrefixOutcome::Hit,
+                "an echoed reply must reuse the first turn"
+            );
+            let delta = cache
+                .warm_delta(&second)
+                .expect("turn two must leave a delta after the committed reply");
+            let mut warm = tokenize_run(&vocab, &first, true, true).unwrap();
+            warm.extend(tokenize_run(&vocab, reply, false, false).unwrap());
+            warm.extend(tokenize_run(&vocab, delta, false, true).unwrap());
+            assert_eq!(
+                Some(warm.len() as u64),
+                measured.prompt_tokens,
+                "the warm KV must contain every token charged by the resident measure"
+            );
+            assert_eq!(
+                warm,
+                tokenize_run(&vocab, &second, true, true).unwrap(),
+                "warm and cold prefills must put identical fixture tokens in the KV"
+            );
+            assert_eq!(
+                cache.committed(),
+                format!("{first}{reply}"),
+                "the committed text must end with the last generated byte"
+            );
+            assert!(
+                delta.starts_with(CHAT_COMMIT_SUFFIX),
+                "the next prefill must supply the assistant's end-of-turn marker and newline"
+            );
+        }
+
+        #[test]
+        fn room_matches_admission_while_generation_is_busy() {
+            use super::super::{
+                apply_chat_thinking_control, llm_generate_streamed, tokenize_run,
+            };
+            use crate::protocol::*;
+            use makepad_micro_serde::DeJson;
+
+            let model = "room-test-qwen3.8";
+            let vocab = test_vocab(model);
+            let geometry = Arc::new(Geometry::new(None, 768, 1));
+            geometry.set(makepad_ai_llm::VisionConfig {
+                image_size: 768,
+                patch_size: 16,
+                n_merge: 2,
+                min_pixels: 32 * 32,
+                max_pixels: 768 * 768,
+                image_mean: [0.; 3],
+                image_std: [1.; 3],
+                n_embd: 16,
+                n_ffn: 16,
+                n_layers: 1,
+                n_heads: 1,
+                proj_dim: 16,
+                eps: 1e-6,
+            });
+            let registration = resident::publish(model.into(), vocab.clone(), geometry.clone());
+            let bytes = crate::testpattern::encode_png_rgb8(&[0; 3], 1, 1).expect("one pixel must encode");
+            let b64 = makepad_network::digest::base64_encode(&bytes);
+            let key = chat_image_key(&b64);
+            let body = |picture: &str| format!(r#"{{
+                "model":"{model}", "chat_system":"Help", "thinking":false, "max_tokens":64, "prompt":"unused",
+                "chat_messages":[
+                    {{"role":"user","text":"Compare","images":[{picture},{picture}]}},
+                    {{"role":"assistant","text":"I see them."}},
+                    {{"role":"user","text":"Which fits?"}}
+                ]
+            }}"#);
+            use makepad_micro_serde::SerJson;
+            let descriptor = ChatPictureSize { key: key.clone(), w: 1, h: 1 }.serialize_json();
+            let mut request = ChatRoomRequest::deserialize_json(&body(&descriptor)).unwrap();
+            let mut generate = GenerateRequestJson::deserialize_json(&body(&b64.serialize_json())).unwrap();
+            apply_chat_thinking_control(&mut generate);
+            let params = crate::backend::GenerateParams::from_request(&generate)
+                .expect("the same pictures must enter the generate path");
+            assert_eq!(resident::render_request(&mut request.clone(), |_| {}), params.prompt, "the descriptors and real job must render identical bytes, including thinking controls and picture order");
+            let (entered, busy) = mpsc::channel();
+            let (release, gate) = mpsc::channel();
+            let (receipt, admitted) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                llm_generate_streamed(
+                    model,
+                    None,
+                    &mut |job, _, _, _, _| {
+                        entered.send(()).unwrap();
+                        let exact_window: usize =
+                            gate.recv().expect("the room thread must complete while generation waits");
+                        let mut vision = ChatVision::new(None, model.into(), geometry.clone());
+                        vision.encoded.push((
+                            key.clone(),
+                            std::rc::Rc::new(EncodedImage { embeddings: Vec::new(), tokens_w: 1, tokens_h: 1 }),
+                        ));
+                        let (events, updates) = mpsc::channel();
+                        for window in [exact_window, exact_window - 1] {
+                            let mut room = job_room(job, model, &geometry, &vocab, window);
+                            let plan = measure_prompt(
+                                &mut vision,
+                                &job.prompt_text,
+                                &job.images,
+                                &events,
+                                |s, first, last| tokenize_run(&vocab, s, first, last),
+                            )
+                            .unwrap();
+                            let result =
+                                encode_if_fits(plan, &mut vision, &events, window, 0, job.max_tokens, &mut room);
+                            publish_room(&events, room);
+                            let event = updates
+                                .try_iter()
+                                .find_map(|event| match event {
+                                    WorkerEvent::Serving(update) => Some(update),
+                                    _ => None,
+                                })
+                                .expect("the generation worker must publish its receipt on both exits");
+                            let mut store = crate::jobs::JobStore::new();
+                            let id = store
+                                .submit_as(
+                                    crate::jobs::JobParams::Generate(params.clone()),
+                                    crate::jobs::QueuePolicy::Queue,
+                                    crate::jobs::JobClass::Chat,
+                                )
+                                .unwrap();
+                            store.update_serving(&id, |status| event.apply(status));
+                            match &result {
+                                Ok(_) => store.finish(&id, vec![]),
+                                Err(message) => store.fail(&id, message.clone()),
+                            }
+                            let wire = store.status_json(&id).unwrap().serialize_json();
+                            let status = JobStatusJson::deserialize_json(&wire)
+                                .expect("the job receipt must round trip through the wire");
+                            assert_eq!(
+                                status.error.as_ref(),
+                                result.as_ref().err(),
+                                "existing clients must still receive the original refusal text"
+                            );
+                            receipt
+                                .send((
+                                    status.serving.unwrap().measure.unwrap(),
+                                    result.map(|pieces| prompt_len(&pieces)),
+                                ))
+                                .unwrap();
+                        }
+                        Ok("done".into())
+                    },
+                    &params,
+                    &mut |_, _| {},
+                    &mut |_| {},
+                    &CancelToken::new(),
+                )
+                .unwrap();
+            });
+            busy.recv().expect("the generator must enter its gate first");
+            let thread = crate::server::RouteWorker::new("chat-room", "chat room worker unavailable", 1);
+            let ask = |request: ChatRoomRequest| {
+                let (send, receive) = mpsc::channel();
+                thread.dispatch(crate::server::room_job(request), send);
+                let response = receive.recv().expect("a busy generator must leave the room thread responsive");
+                ChatMeasure::deserialize_json(std::str::from_utf8(&response.body).unwrap())
+                    .expect("the HTTP reply must contain a chat measure")
+            };
+            let cold = ask(request.clone());
+            assert_eq!(
+                cold.pictures.iter().map(|p| p.tokens).collect::<Vec<_>>(),
+                [Some(1), Some(1)],
+                "a repeated picture occupies room at each occurrence"
+            );
+            assert_eq!(cold.sees, "yes", "the header alone must advertise picture capability");
+            assert_eq!(cold.reserve, 128, "the open-think generation floor must contribute its actual reserve");
+            let calls = resident::tokenizer_calls(model);
+            request.chat_messages.as_mut().unwrap()[1].text.push('?');
+            let warm = ask(request.clone());
+            assert_eq!(
+                resident::tokenizer_calls(model) - calls,
+                1,
+                "only the changed row may enter the tokenizer again"
+            );
+            assert_eq!(
+                warm.prompt_tokens,
+                cold.prompt_tokens.map(|n| n + 1),
+                "the changed text must reach the count"
+            );
+            let exact = (cold.prompt_tokens.unwrap() + cold.reserve) as usize;
+            release.send(exact).unwrap();
+            let (fit, result) = admitted.recv().unwrap();
+            assert_eq!(
+                result.unwrap() as u64,
+                cold.prompt_tokens.unwrap(),
+                "the sum of measured rows and grids must equal actual whole-run prefill tokens"
+            );
+            assert_eq!(
+                fit,
+                ChatMeasure { window: exact as u64, fits: Some(true), ..cold.clone() },
+                "admission must publish the same counts and admit an exact fit"
+            );
+            let (short, result) = admitted.recv().unwrap();
+            assert_eq!(
+                short,
+                ChatMeasure { window: exact as u64 - 1, fits: Some(false), ..cold.clone() },
+                "a smaller worker window must be on the refusal"
+            );
+            assert_eq!(
+                result.err(),
+                overflow_message(cold.prompt_tokens.unwrap() as usize, cold.reserve as usize, exact - 1),
+                "the existing refusal text must give the actual prompt, reserve and window"
+            );
+            worker.join().expect("the gated generation must finish");
+            for (id, requested, reserve) in [
+                ("room-test", Some(u32::MAX), 512),
+                ("room-test", None, 512),
+                ("room-test", Some(64), 64),
+                (model, Some(64), 128),
+            ] {
+                let room = ask(ChatRoomRequest {
+                    model: id.into(),
+                    max_tokens: requested,
+                    prompt: Some("raw text".into()),
+                    ..Default::default()
+                });
+                assert_eq!(
+                    room.reserve, reserve,
+                    "request {requested:?} on {id} must publish its effective reserve"
+                );
+                assert!(
+                    check_fits(
+                        10,
+                        super::super::generation_budget(id, super::super::requested_tokens(requested), true),
+                        10 + reserve as usize
+                    )
+                    .is_ok(),
+                    "the worker must admit exactly that reserve for {requested:?} on {id}"
+                );
+                assert!(
+                    check_fits(
+                        11,
+                        super::super::generation_budget(id, super::super::requested_tokens(requested), true),
+                        10 + reserve as usize
+                    )
+                    .is_err(),
+                    "the worker must refuse one extra token for {requested:?} on {id}"
+                );
+                if id == model {
+                    assert_eq!(
+                        room.prompt_tokens, room.tail_tokens,
+                        "the raw prompt must reach the measure without ChatML wrapping"
+                    );
+                }
+            }
+            drop(registration);
+            let unloaded = ask(request);
+            assert_eq!(
+                (unloaded.sees.as_str(), unloaded.prompt_tokens, unloaded.fits),
+                ("unknown", None, None),
+                "unloading must retire the vocab, counts and capability together"
+            );
+            thread.close();
+        }
+
         #[test]
         fn the_refusal_names_the_counts_and_marks_itself() {
             assert_eq!(super::overflow_message(1000, 128, 2048), None);
@@ -2967,8 +3665,8 @@ mod llama_worker {
 
     /// Refuses a prompt the session cannot hold (with room to answer),
     /// naming the counts. Called before anything touches the session.
-    fn check_fits(session: &LlamaSession, pieces: &[PromptSeg]) -> Result<(), String> {
-        overflow_message(prompt_len(pieces), DECODE_RESERVE, session.max_context())
+    fn check_fits(prompt: usize, budget: u32, available: usize) -> Result<(), String> {
+        overflow_message(prompt, super::answer_reserve(budget), available)
             .map_or(Ok(()), Err)
     }
 
@@ -2980,6 +3678,7 @@ mod llama_worker {
         job: &ExpandJob,
         cancel: &CancelToken,
         events: &mpsc::Sender<WorkerEvent>,
+        room: &mut Option<crate::protocol::ChatMeasure>,
     ) -> Result<String, String> {
         use super::PrefixOutcome;
         let cancelled = || "cancelled".to_string();
@@ -2993,12 +3692,11 @@ mod llama_worker {
         let committed_len = prefix.committed().len();
         eprintln!(
             "[llm-worker] job start: session={} prefix={outcome:?} committed={committed_len}B \
-             prompt={}B max_tokens={} temp={} suffix={:?}",
+             prompt={}B max_tokens={} temp={}",
             owner.short(),
             job.prompt_text.len(),
             job.max_tokens,
             job.temperature,
-            job.commit_suffix,
         );
         // Everything below charges its prefill to `outcome`: on a hit only the
         // delta is prefilled (real work), on an interleaved miss the entire
@@ -3008,52 +3706,38 @@ mod llama_worker {
         let mut prefilled = 0usize;
         // A context-full restart is a cold prefill however we got here: the
         // history no longer fits, so no slot count would have saved it.
+        let mut context_full = false;
         if matches!(outcome, PrefixOutcome::Hit | PrefixOutcome::Restored) {
-            let delta = job.prompt_text[committed_len..].to_string();
-            if !delta.is_empty() {
-                let extra = prepare_prompt(session, vision, &delta, false, job, events)?;
-                if session.remaining_context() < prompt_len(&extra) + DECODE_RESERVE {
-                    // The conversation outgrew the context: re-prefill it
-                    // whole, but only if it fits at all -- checked BEFORE the
-                    // reset, so a refusal leaves the resident prefix intact.
-                    let pieces = prepare_prompt(session, vision, &job.prompt_text, true, job, events)?;
-                    check_fits(session, &pieces)?;
-                    session.reset().map_err(|e| format!("reset: {e:?}"))?;
-                    prefix.invalidate();
-                    outcome = PrefixOutcome::Cold;
-                    prefilled = prompt_len(&pieces);
-                    let _ = events.send(WorkerEvent::Stage(format!(
-                        "prefill {prefilled} tok (context full)"
-                    )));
-                    append_prompt(session, &pieces, &mut |done, total| {
-                        let _ = events.send(WorkerEvent::Stage(format!(
-                            "prefill {done}/{total} tok (context full)"
-                        )));
-                    })
-                    .map_err(|e| format!("prefill: {e}"))?;
-                } else {
-                    prefilled = prompt_len(&extra);
-                    append_prompt(session, &extra, &mut |done, total| {
-                        let _ = events.send(WorkerEvent::Stage(format!(
-                            "kv reuse {done}/{total} tok"
-                        )));
-                    })
-                    .map_err(|e| format!("prefill-continue: {e}"))?;
-                }
-            } else {
-                let _ = events.send(WorkerEvent::Stage("kv reuse".into()));
+            match prefix.warm_delta(&job.prompt_text) {
+                // A hit strictly extends the committed text, so this is never
+                // taken; the full prompt is prefilled cold if it were.
+                None => outcome = PrefixOutcome::Cold,
+                Some(delta) => match prepare_prompt(session, vision, delta, false, job, events, session.remaining_context(), room) {
+                    Ok(extra) => {
+                        prefilled = prompt_len(&extra);
+                        append_prompt(session, &extra, &mut |done, total| {
+                            let _ = events.send(WorkerEvent::Stage(format!("kv reuse {done}/{total} tok")));
+                        })
+                        .map_err(|e| format!("prefill-continue: {e}"))?;
+                    }
+                    Err(e) if e.starts_with(TOO_LONG) => {
+                        // A cold prefill may still fit. Keep the resident prefix until we know.
+                        context_full = true;
+                        outcome = PrefixOutcome::Cold;
+                    }
+                    Err(e) => return Err(e),
+                },
             }
-        } else {
-            // Tokenize (and look at pictures) BEFORE touching the session, so
-            // a prompt that cannot fit is refused with the session intact.
-            let pieces = prepare_prompt(session, vision, &job.prompt_text, true, job, events)?;
-            check_fits(session, &pieces)?;
+        }
+        if !matches!(outcome, PrefixOutcome::Hit | PrefixOutcome::Restored) {
+            let pieces = prepare_prompt(session, vision, &job.prompt_text, true, job, events, session.max_context(), room)?;
             session.reset().map_err(|e| format!("reset: {e:?}"))?;
             prefix.invalidate();
             prefilled = prompt_len(&pieces);
-            // Say WHY in the stage string: a user watching a turn take three
-            // seconds should see that it is a session switch, not the model.
-            let why = if outcome == PrefixOutcome::Interleaved {
+            let why = if context_full {
+                let _ = events.send(WorkerEvent::Stage(format!("prefill {prefilled} tok (context full)")));
+                " (context full)"
+            } else if outcome == PrefixOutcome::Interleaved {
                 " (session switch)"
             } else {
                 ""
@@ -3089,7 +3773,11 @@ mod llama_worker {
         // Chunks give the job protocol its three boundaries — cancel check,
         // progress event, partial-text snapshot — every ~4 speculative
         // rounds.
-        let max = job.max_tokens.max(1) as usize;
+        let prompt_tokens = session.token_count();
+        let window = session.max_context();
+        let budget = plan_reply_budget(prompt_tokens, job.max_tokens, window).inspect_err(|_| prefix.invalidate())?;
+        let max = budget.max_new;
+        let mut stop = DecodeStop::MaxNew;
         // The SAME penalties the lane worker applies. A box whose answers
         // depend on whether it happened to be configured for lanes is a
         // difference nobody can reproduce from the outside.
@@ -3125,7 +3813,10 @@ mod llama_worker {
             }
             let generated = session
                 .continue_sampled_with(want, sampling, &mut sampler)
-                .map_err(|e| format!("decode: {e:?}"))?;
+                .map_err(|e| {
+                    prefix.invalidate();
+                    format!("decode: {e:?}")
+                })?;
             token_ids.extend_from_slice(&generated.token_ids);
             let _ = events.send(WorkerEvent::Token(token_ids.len() as u32, max as u32));
             // The same count as a serving FACT, not only as a progress label
@@ -3147,14 +3838,15 @@ mod llama_worker {
                 }
             }
             if generated.stop_reason != LlamaStopReason::MaxNewTokens {
+                stop = DecodeStop::StopToken;
                 break;
             }
             if generated.token_ids.len() < want {
-                // Short without a stop reason: the session cannot make
-                // progress (context full); looping again would spin.
+                stop = DecodeStop::Exhausted;
                 break;
             }
         }
+        finish_reply(prompt_tokens, token_ids.len(), budget, window, stop).inspect_err(|_| prefix.invalidate())?;
         let text = session
             .vocab()
             .decode_tokens(&token_ids)
@@ -3172,14 +3864,8 @@ mod llama_worker {
             stats.cold,
             stats.interleaved,
         );
-        let mut committed = String::with_capacity(
-            job.prompt_text.len() + text.len() + job.commit_suffix.len(),
-        );
-        committed.push_str(&job.prompt_text);
-        committed.push_str(&text);
-        committed.push_str(&job.commit_suffix);
         kept.set_live_returns(!job.session.is_empty());
-        prefix.commit(&owner, committed);
+        prefix.finish_turn(&owner, &job.prompt_text, &text);
         Ok(text)
     }
 
@@ -3655,10 +4341,10 @@ mod tests {
             ChatMessageJson { images: None, role: "user".into(), text: "second message".into() },
         ];
         let p2 = assemble_chat_prompt("SYS", &turn2);
-        let committed = format!("{p1}hello{CHAT_COMMIT_SUFFIX}");
+        let committed = format!("{p1}hello");
         assert!(
-            p2.starts_with(&committed),
-            "turn2 must extend committed KV prefix\ncommitted={committed:?}\np2={p2:?}"
+            p2.strip_prefix(&committed).is_some_and(|delta| delta.starts_with(CHAT_COMMIT_SUFFIX)),
+            "turn two must close the assistant reply immediately after the committed KV prefix"
         );
 
         let request = GenerateRequestJson {
@@ -3679,7 +4365,6 @@ mod tests {
             Box::new(|job: &ExpandJob| {
                 assert!(!job.prompt_text.contains("Intent:"));
                 assert!(job.prompt_text.contains("<|im_start|>user\nhi"));
-                assert_eq!(job.commit_suffix, CHAT_COMMIT_SUFFIX);
                 Ok("hello".into())
             }),
         );
@@ -3837,8 +4522,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn chat_turns(system: &str, turns: &[(&str, &str)]) -> Vec<String> {
-        // Prefix-stable ChatML, exactly as `assemble_chat_prompt` builds it:
-        // prompt_n + reply + CHAT_COMMIT_SUFFIX is a prefix of prompt_{n+1}.
+        // The lane holds prompt_n + reply. The next prompt closes that reply.
         let mut out = Vec::new();
         let mut base = format!("<|im_start|>system\n{system}<|im_end|>\n");
         for (user, reply) in turns {
@@ -3873,11 +4557,39 @@ mod tests {
         let (outcome, owner) = cache.classify("chat", &turns[0]);
         assert_eq!(outcome, PrefixOutcome::Cold);
         cache.record(outcome, &owner, 40, std::time::Duration::ZERO);
-        cache.commit(&owner, format!("{}hi<|im_end|>\n", turns[0]));
+        cache.finish_turn(&owner, &turns[0], "hi");
 
         let (outcome, _) = cache.classify("chat", &turns[1]);
         assert_eq!(outcome, PrefixOutcome::Hit);
         assert_eq!(cache.stats().interleaved, 0);
+    }
+
+    /// A resend of exactly what the KV holds is not warm, live or kept: no
+    /// delta's prefill would give the next token the logits of the prompt's
+    /// own last token, and a warm path would skip the context check.
+    #[test]
+    fn only_a_strictly_longer_prompt_continues_the_held_text() {
+        use crate::protocol::CHAT_COMMIT_SUFFIX;
+        let turns = chat_turns("SYS", &[("hello", "hi"), ("more", "sure")]);
+        let held = format!("{}hi", turns[0]);
+        let mut cache = PrefixCache::default();
+        let (outcome, owner) = cache.classify("chat", &turns[0]);
+        cache.record(outcome, &owner, 40, std::time::Duration::ZERO);
+        cache.finish_turn(&owner, &turns[0], "hi");
+
+        assert_ne!(cache.classify("chat", &held).0, PrefixOutcome::Hit, "a resend of the held text must prefill cold");
+        assert_eq!(cache.warm_delta(&held), None, "the held text must leave no delta");
+        assert_eq!(cache.warm_delta("<|im_start|>system\nother"), None, "a prompt the KV does not start must leave no delta");
+        assert_eq!(cache.classify("chat", &turns[1]).0, PrefixOutcome::Hit, "the next turn must stay warm");
+        assert!(
+            cache.warm_delta(&turns[1]).is_some_and(|delta| delta.starts_with(CHAT_COMMIT_SUFFIX)),
+            "the next turn's delta must start by closing the held reply"
+        );
+
+        let mut kept = KeptPrefixes::default();
+        kept.keep(Kept { owner, text: held.clone(), state: (), bytes: 0 });
+        assert!(kept.take("chat", &held).is_none(), "a kept state must not resume a resend of its own text");
+        assert!(kept.take("chat", &turns[1]).is_some(), "a kept state must resume the next turn");
     }
 
     /// The §2 finding, as a test: two chats alternating on one worker miss on
@@ -3892,7 +4604,7 @@ mod tests {
         let serve = |cache: &mut PrefixCache, prompt: &str, reply: &str| {
             let (outcome, owner) = cache.classify("chat", prompt);
             cache.record(outcome, &owner, 4000, std::time::Duration::from_millis(1300));
-            cache.commit(&owner, format!("{prompt}{reply}<|im_end|>\n"));
+            cache.finish_turn(&owner, prompt, reply);
             outcome
         };
 
@@ -3935,7 +4647,7 @@ mod tests {
     fn a_different_chatml_family_never_extends_the_prefix() {
         let mut cache = PrefixCache::default();
         let owner = PrefixOwner::new("expand:image", "<|im_start|>user\nx<|im_end|>\n");
-        cache.commit(&owner, "<|im_start|>user\nx<|im_end|>\n".to_string());
+        cache.finish_turn(&owner, "<|im_start|>user\nx<|im_end|>\n", "");
         let (outcome, _) = cache.classify("chat", "<|im_start|>user\nx<|im_end|>\nmore");
         assert_eq!(outcome, PrefixOutcome::Cold);
     }

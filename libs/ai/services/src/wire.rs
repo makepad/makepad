@@ -41,8 +41,6 @@ use makepad_micro_serde::*;
 
 /// Bytes a service brief may occupy in the system prompt.
 pub const MAX_BRIEF_BYTES: usize = 4 * 1024;
-/// Bytes of one tool's JSON-schema text.
-pub const MAX_PARAMETERS_BYTES: usize = 8 * 1024;
 /// Tools one service may declare. Studio's F10 service alone carries its
 /// tab, canvas, code, iteration and architecture tools; 128 leaves room for
 /// the architecture view's later waves without folding tools into
@@ -55,11 +53,13 @@ pub const MAX_TOPICS: usize = 16;
 pub const MAX_FILTER_BYTES: usize = 1024;
 /// Bytes of a message's model-facing text.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
-/// Bytes of a result's model-facing text; the router truncates past this.
+/// Recommended text budget per page for paginating tools. The combined
+/// wire ceiling for result text and data is [`MAX_RESULT_WIRE_BYTES`].
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
 /// Combined base64 bytes of a result's PNG or JPEG images, separate from its text.
 pub const MAX_RESULT_IMAGE_BYTES: usize = 900 * 1024;
-/// Bytes of a result's structured data (JSON).
+/// Recommended structured-data budget per page for [`ToolResult::data`],
+/// which shares [`MAX_RESULT_WIRE_BYTES`] with the text. Hard cap for [`Message::data`].
 pub const MAX_DATA_BYTES: usize = 16 * 1024;
 /// Bytes of a result's transcript note.
 pub const MAX_NOTE_BYTES: usize = 256;
@@ -74,10 +74,70 @@ pub const MAX_CONTEXT_BYTES: usize = 2 * 1024;
 /// Mirrored by ai-hub's chat_wire::MAX_TOOL_JSON_BYTES (neither data-only
 /// crate depends on the remote transport).
 pub const MAX_ARGS_BYTES: usize = (1 << 20) - 4;
+/// Real wire ceiling for a result's `text` + `data` together, matching
+/// [`MAX_ARGS_BYTES`]. [`ToolResult::bound`] also checks the hosted frame size.
+pub const MAX_RESULT_WIRE_BYTES: usize = MAX_ARGS_BYTES;
+
+// Printable text and valid JSON at most double when quoted. Other text can
+// contain control bytes that take six bytes each, checked by ToolResult::bound.
+const _: () = assert!(
+    MAX_FRAME_BYTES >= 2 * MAX_RESULT_WIRE_BYTES + MAX_RESULT_IMAGE_BYTES + 256 * 1024,
+    "MAX_FRAME_BYTES must hold maximal printable text or JSON at 2x, plus base64 images and envelope"
+);
 
 pub fn arguments_too_large(bytes: usize) -> String {
     format!("the encoded call is {bytes} bytes; one call carries {MAX_ARGS_BYTES} (including routing fields). Send a smaller first part, then append the rest with the service's edit tool.")
 }
+
+pub fn result_too_large(bytes: usize) -> String {
+    format!("the tool reply is {bytes} bytes; one reply carries {MAX_RESULT_WIRE_BYTES}. Ask for a smaller range or page.")
+}
+
+pub fn result_frame_too_large(bytes: usize) -> String {
+    format!("the JSON-encoded tool reply is {bytes} bytes; one hosted frame carries {MAX_FRAME_BYTES}. Ask for a smaller range or page.")
+}
+
+fn looks_like_json(text: &str) -> bool {
+    let trimmed = text.trim();
+    match trimmed.as_bytes().first() {
+        Some(b'{' | b'[') => true,
+        Some(b'"') => {
+            trimmed.len() >= 2
+                && trimmed.ends_with('"')
+                && makepad_strict_json::parse_picked(
+                    trimmed.as_bytes(),
+                    0,
+                    true,
+                    &|_| makepad_strict_json::Pick::Skip,
+                ).is_ok()
+        }
+        Some(b'-' | b'0'..=b'9' | b't' | b'f' | b'n') => {
+            makepad_strict_json::parse_picked(
+                trimmed.as_bytes(),
+                0,
+                true,
+                &|_| makepad_strict_json::Pick::Skip,
+            ).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Serialized byte length of a JSON string body (excluding quotes) under
+/// `makepad_micro_serde::SerJson for str`: `\n`/`\r`/`\t`/`\`/`"` take 2
+/// bytes and all other ASCII control bytes (`< 0x20`) take 6 (`\u00XX`).
+fn json_escaped_len(s: &str) -> usize {
+    let mut len = s.len();
+    for b in s.bytes() {
+        match b {
+            b'\n' | b'\r' | b'\t' | b'\\' | b'"' => len += 1,
+            0x00..=0x1f => len += 5,
+            _ => {}
+        }
+    }
+    len
+}
+
 /// Longest service id.
 pub const MAX_SERVICE_ID: usize = 24;
 /// Longest tool short name.
@@ -86,15 +146,25 @@ pub const MAX_TOOL_NAME: usize = 32;
 pub const MAX_ID_BYTES: usize = 64;
 /// Bytes of a whole manifest's text fields together: brief, label and every
 /// tool's and topic's name, description, schema and card layout. This is a
-/// bound in its own right, so one `Register` frame always carries a manifest
-/// that validates. The frame assertion below accounts for JSON escaping.
+/// separate raw-text budget in addition to the encoded registration frame cap.
 pub const MAX_MANIFEST_BYTES: usize = 1792 * 1024;
-/// Bytes of one hosted frame. Anything larger is dropped unread. A
-/// `Register` frame carries a whole manifest as JSON, and JSON escaping can
-/// at worst double a text field (every byte a quote or a backslash), so the
-/// frame cap is at least twice [`MAX_MANIFEST_BYTES`] plus envelope room:
-/// a manifest the validator accepts always transports.
+/// Bytes of one hosted frame. The receiver drops larger frames before decoding.
+/// Printable text and valid JSON (including tab, newline and carriage return
+/// whitespace) at most double when escaped. Other control bytes below 0x20
+/// take six bytes. [`ServiceManifest::validate`], [`ServiceManifest::admit`]
+/// and [`ToolResult::bound`] budget for them before the host stamps the frame.
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Exact JSON byte overhead of an unstamped `HostedUp { from: None, msg: ServiceUp::Result(_) }`
+/// (`micro_serde` omits `Option::None` struct fields).
+const HOSTED_RESULT_WRAPPER_BYTES: usize = r#"{"wm_ai":{"msg":{"Result":[]}}}"#.len();
+/// Exact worst-case byte growth when the WM stamps `from: Some(EndpointId(...))`
+/// onto an unstamped [`HostedUp`] (adding `"from":["..."],` — 12 bytes plus up to
+/// `2 * MAX_ID_BYTES` for a printable-ASCII opaque id escaped as JSON).
+const MAX_HOSTED_STAMP_BYTES: usize = r#""from":[""],"#.len() + 2 * MAX_ID_BYTES;
+/// Serialized byte ceiling for an unstamped [`HostedUp`] frame so both the WM
+/// and `aichat` (after the WM stamps `from`) stay within [`MAX_FRAME_BYTES`].
+pub(crate) const MAX_UNSTAMPED_FRAME_BYTES: usize = MAX_FRAME_BYTES - MAX_HOSTED_STAMP_BYTES;
 
 /// Bytes the label may occupy (checked in [`ServiceManifest::validate`]).
 const MAX_LABEL_BYTES: usize = 48;
@@ -102,7 +172,7 @@ const MAX_LABEL_BYTES: usize = 48;
 pub const MAX_LAYOUT_BYTES: usize = 2 * 1024;
 const _: () = assert!(
     MAX_FRAME_BYTES >= 2 * MAX_MANIFEST_BYTES + 64 * 1024,
-    "MAX_FRAME_BYTES must hold a JSON-escaped maximal manifest plus its envelope"
+    "MAX_FRAME_BYTES must hold maximal printable manifest text or JSON at 2x plus its envelope"
 );
 /// Bytes of an instance's display name or location line.
 pub const MAX_META_BYTES: usize = 128;
@@ -193,6 +263,13 @@ impl CardLayout {
             + self.order.iter().map(|f| f.arg.len() + f.label.len()).sum::<usize>()
             + self.hide.iter().map(String::len).sum::<usize>()
     }
+
+    fn encoded_bytes(&self) -> usize {
+        48 + json_escaped_len(&self.title)
+            + json_escaped_len(&self.confirm)
+            + self.order.iter().map(|f| 24 + json_escaped_len(&f.arg) + json_escaped_len(&f.label)).sum::<usize>()
+            + self.hide.iter().map(|h| 3 + json_escaped_len(h)).sum::<usize>()
+    }
 }
 
 /// One named stream a service may publish.
@@ -220,6 +297,12 @@ impl TopicDef {
         self.name.len() + self.description.len() + self.schema.as_ref().map_or(0, String::len)
     }
 
+    fn encoded_bytes(&self) -> usize {
+        44 + json_escaped_len(&self.name)
+            + json_escaped_len(&self.description)
+            + self.schema.as_deref().map_or(0, json_escaped_len)
+    }
+
     fn problem(&self, service: &str, earlier: &[TopicDef]) -> Option<String> {
         if !is_ident(&self.name, MAX_TOOL_NAME) {
             return Some(format!("service '{}' topic '{}' is not [a-z0-9_]{{1,{}}}", service, self.name, MAX_TOOL_NAME));
@@ -231,9 +314,6 @@ impl TopicDef {
             return Some(format!("topic '{}.{}' description is empty after trimming ({} bytes)", service, self.name, self.description.len()));
         }
         if let Some(schema) = &self.schema {
-            if schema.len() > MAX_PARAMETERS_BYTES {
-                return Some(format!("topic '{}.{}' schema is {} bytes; the cap is {}", service, self.name, schema.len(), MAX_PARAMETERS_BYTES));
-            }
             if let Some(deep) = too_deep(schema) {
                 return Some(format!("topic '{}.{}' schema {deep}", service, self.name));
             }
@@ -279,6 +359,13 @@ impl ToolDef {
             + self.layout.as_ref().map_or(0, CardLayout::bytes)
     }
 
+    fn encoded_bytes(&self) -> usize {
+        104 + json_escaped_len(&self.name)
+            + json_escaped_len(&self.description)
+            + json_escaped_len(&self.parameters)
+            + self.layout.as_ref().map_or(0, CardLayout::encoded_bytes)
+    }
+
     fn problem(&self, service: &str, earlier: &[ToolDef]) -> Option<String> {
         if !is_ident(&self.name, MAX_TOOL_NAME) {
             return Some(format!("service '{}' tool '{}' is not [a-z0-9_]{{1,{}}}", service, self.name, MAX_TOOL_NAME));
@@ -288,9 +375,6 @@ impl ToolDef {
         }
         if self.description.trim().is_empty() {
             return Some(format!("tool '{}.{}' description is empty after trimming ({} bytes)", service, self.name, self.description.len()));
-        }
-        if self.parameters.len() > MAX_PARAMETERS_BYTES {
-            return Some(format!("tool '{}.{}' schema is {} bytes; the cap is {}", service, self.name, self.parameters.len(), MAX_PARAMETERS_BYTES));
         }
         if let Some(deep) = too_deep(&self.parameters) {
             return Some(format!("tool '{}.{}' schema {deep}", service, self.name));
@@ -408,16 +492,20 @@ impl ServiceManifest {
         if total > MAX_MANIFEST_BYTES {
             return Err(format!("service '{}' manifest is {} bytes; the cap is {}", self.id, total, MAX_MANIFEST_BYTES));
         }
+        let encoded = self.encoded_frame_bytes();
+        if encoded > MAX_UNSTAMPED_FRAME_BYTES {
+            return Err(format!("service '{}' manifest encodes to {} bytes; the frame cap is {}", self.id, encoded, MAX_FRAME_BYTES));
+        }
         Ok(())
     }
 
     /// Drop entries with bad names, later duplicates, empty descriptions,
-    /// invalid or oversized schemas, or oversized layouts. Then drop tools
+    /// invalid or too-deep schemas, or oversized layouts. Then drop tools
     /// and topics past their count caps, then the largest entries until the
-    /// text fits the manifest cap. Ties drop the later entry, with topics
-    /// after tools. Every other tool and topic stays, in its original order.
-    /// Each removal returns a diagnostic. The id, label and brief remain
-    /// unchanged; only problems with these fields can still fail `validate()`.
+    /// text fits both the manifest cap and the encoded hosted-frame cap. Ties
+    /// drop the later entry, with topics after tools. Remaining entries keep
+    /// their original order. Each removal returns a diagnostic. Only the id,
+    /// label and brief can still fail `validate()`.
     pub fn admit(&mut self) -> Vec<String> {
         let mut problems = Vec::new();
         for tool in std::mem::take(&mut self.tools) {
@@ -461,6 +549,21 @@ impl ServiceManifest {
             problems.push(format!("ai service '{}': {kind} '{name}' not served: manifest is {total} bytes; the cap is {MAX_MANIFEST_BYTES} (entry is {bytes} bytes)", self.id));
             total -= bytes;
         }
+        let mut encoded = self.encoded_frame_bytes();
+        while encoded > MAX_UNSTAMPED_FRAME_BYTES {
+            let largest = self.tools.iter().enumerate()
+                .map(|(index, tool)| (tool.encoded_bytes(), false, index))
+                .chain(self.topics.iter().enumerate().map(|(index, topic)| (topic.encoded_bytes(), true, index)))
+                .max_by_key(|(bytes, _, _)| *bytes);
+            let Some((bytes, is_topic, index)) = largest else { break };
+            let (kind, name) = if is_topic {
+                ("topic", self.topics.remove(index).name)
+            } else {
+                ("tool", self.tools.remove(index).name)
+            };
+            problems.push(format!("ai service '{}': {kind} '{name}' not served: encoded manifest is {encoded} bytes; the frame cap is {MAX_FRAME_BYTES} (entry encodes to {bytes} bytes)", self.id));
+            encoded -= bytes;
+        }
         problems
     }
 
@@ -468,6 +571,15 @@ impl ServiceManifest {
         self.brief.len() + self.label.len()
             + self.tools.iter().map(ToolDef::bytes).sum::<usize>()
             + self.topics.iter().map(TopicDef::bytes).sum::<usize>()
+    }
+
+    // Includes the registration envelope and fixed JSON syntax for each entry.
+    fn encoded_frame_bytes(&self) -> usize {
+        160 + json_escaped_len(&self.id)
+            + json_escaped_len(&self.label)
+            + json_escaped_len(&self.brief)
+            + self.tools.iter().map(ToolDef::encoded_bytes).sum::<usize>()
+            + self.topics.iter().map(TopicDef::encoded_bytes).sum::<usize>()
     }
 }
 
@@ -688,10 +800,11 @@ pub enum Disposition {
 pub struct ToolResult {
     pub call_id: String,
     pub outcome: ToolOutcome,
-    /// What the model reads. Bounded at [`MAX_RESULT_BYTES`].
+    /// What the model reads. Page at [`MAX_RESULT_BYTES`]. The combined wire
+    /// cap for text and data is [`MAX_RESULT_WIRE_BYTES`].
     pub text: String,
-    /// Structured data for the model or the panel, as JSON text; empty when
-    /// there is none. Bounded at [`MAX_DATA_BYTES`].
+    /// Structured JSON data for the model or panel, empty when absent. Page at
+    /// [`MAX_DATA_BYTES`]. Shares the [`MAX_RESULT_WIRE_BYTES`] wire cap with `text`.
     pub data: String,
     /// One dim transcript line: "planned Dam → Utrecht, 41 min".
     pub note: String,
@@ -751,6 +864,13 @@ impl TaskCard {
         [&self.title, &self.source, &self.picture, &self.stage, &self.host, &self.result, &self.result_picture].iter().map(|t| t.len()).sum::<usize>()
             + self.stages.iter().map(String::len).sum::<usize>()
             + self.actions.iter().map(|a| a.id.len() + a.label.len()).sum::<usize>()
+    }
+
+    fn escaped_bytes(&self) -> usize {
+        [&self.title, &self.source, &self.picture, &self.stage, &self.host, &self.result, &self.result_picture]
+            .iter().map(|t| json_escaped_len(t)).sum::<usize>()
+            + self.stages.iter().map(|s| json_escaped_len(s) + 3).sum::<usize>()
+            + self.actions.iter().map(|a| json_escaped_len(&a.id) + json_escaped_len(&a.label) + 24).sum::<usize>()
     }
 
     /// Keep it within [`MAX_TASK_BYTES`]: the oldest stages go first, then the actions.
@@ -839,10 +959,89 @@ impl ToolResult {
         self
     }
 
-    /// Enforce the caps in place. Truncated text says so at its end, so the
-    /// model knows it is reading a head, not the whole. Data that does not
-    /// fit is dropped whole — a truncated JSON is worse than none.
+    fn bound_note(note: &mut String) {
+        if note.len() > MAX_NOTE_BYTES {
+            truncate_to_char_boundary(note, MAX_NOTE_BYTES - 3);
+            note.push('…');
+        }
+    }
+
+    fn append_images_truncated_note(note: &mut String) {
+        const MARKER: &str = "[images truncated by the router]";
+        if note.len() <= MAX_NOTE_BYTES && note.ends_with(MARKER) {
+            return;
+        }
+        if note.is_empty() {
+            note.push_str(MARKER);
+            return;
+        }
+        if note.len().saturating_add(1 + MARKER.len()) > MAX_NOTE_BYTES {
+            truncate_to_char_boundary(note, MAX_NOTE_BYTES - MARKER.len() - "… ".len());
+            if !note.is_empty() {
+                note.push_str("… ");
+            }
+        } else {
+            note.push(' ');
+        }
+        note.push_str(MARKER);
+    }
+
+    fn may_exceed_frame_cap(&self) -> bool {
+        // Lengths alone usually suffice even at six encoded bytes per input byte.
+        let images_raw: usize = self.images.iter().map(String::len).sum();
+        let subs_raw: usize = self.subscribe.iter()
+            .map(|s| s.topic.len() + s.filter.as_ref().map_or(0, String::len))
+            .sum();
+        let task_raw = self.task.as_ref().map_or(0, TaskCard::bytes);
+        let raw = self.call_id.len() + self.text.len() + self.data.len() + self.note.len() + images_raw + task_raw + subs_raw;
+        let elems = self.images.len().saturating_mul(3)
+            .saturating_add(self.subscribe.len().saturating_mul(64))
+            .saturating_add(self.task.as_ref().map_or(0, |t| {
+                t.stages.len().saturating_mul(3).saturating_add(t.actions.len().saturating_mul(32))
+            }));
+        if raw.saturating_mul(6).saturating_add(elems).saturating_add(512) <= MAX_UNSTAMPED_FRAME_BYTES {
+            return false;
+        }
+        // Count actual escapes before allocating a serialized frame. The 512
+        // bytes cover the fixed wrapper, result and task fields in both estimates.
+        let escaped = json_escaped_len(&self.call_id)
+            .saturating_add(json_escaped_len(&self.text))
+            .saturating_add(json_escaped_len(&self.data))
+            .saturating_add(json_escaped_len(&self.note))
+            .saturating_add(self.images.iter().map(|i| json_escaped_len(i).saturating_add(3)).sum::<usize>())
+            .saturating_add(self.task.as_ref().map_or(0, TaskCard::escaped_bytes))
+            .saturating_add(self.subscribe.iter().map(|s| {
+                json_escaped_len(&s.topic)
+                    .saturating_add(s.filter.as_deref().map_or(0, json_escaped_len))
+                    .saturating_add(64)
+            }).sum::<usize>())
+            .saturating_add(512);
+        escaped > MAX_UNSTAMPED_FRAME_BYTES
+    }
+
+    fn hosted_frame_bytes(&self) -> usize {
+        self.serialize_json().len().saturating_add(HOSTED_RESULT_WRAPPER_BYTES)
+    }
+
+    /// Enforce the wire and hosted-frame caps in place without truncating
+    /// `text` mid-payload. If `text` exceeds [`MAX_RESULT_WIRE_BYTES`], the
+    /// result becomes [`ToolOutcome::Failed`] carrying [`result_too_large`].
+    /// Otherwise excess images are dropped (recording the marker in `note`
+    /// when `text` looks like JSON or is within the marker length of the wire
+    /// cap), `data` pushing `text + data` past [`MAX_RESULT_WIRE_BYTES`] is
+    /// dropped whole, `note` is bounded at [`MAX_NOTE_BYTES`], and any `task`
+    /// is bounded in place. Finally, if JSON escaping (up to 6x for control
+    /// bytes `< 0x20`) would push the unstamped [`HostedUp`] frame past
+    /// `MAX_UNSTAMPED_FRAME_BYTES`, `data` and then trailing `images` are
+    /// shed; if still over, the result becomes [`ToolOutcome::Failed`]
+    /// carrying [`result_frame_too_large`].
     pub fn bound(&mut self) {
+        if self.text.len() > MAX_RESULT_WIRE_BYTES {
+            let bytes = self.text.len();
+            let call_id = std::mem::take(&mut self.call_id);
+            *self = ToolResult::failed(call_id, result_too_large(bytes));
+            return;
+        }
         let count = self.images.len();
         let mut remaining = MAX_RESULT_IMAGE_BYTES;
         self.images.retain(|image| {
@@ -852,22 +1051,50 @@ impl ToolResult {
             remaining -= image.len();
             true
         });
-        if self.images.len() != count {
-            self.text.push_str("\n…[images truncated by the router]");
+        let images_dropped = self.images.len() != count;
+        if images_dropped {
+            const MARKER: &str = "\n…[images truncated by the router]";
+            if looks_like_json(&self.text)
+                || self.text.len().saturating_add(MARKER.len()) > MAX_RESULT_WIRE_BYTES
+            {
+                Self::append_images_truncated_note(&mut self.note);
+            } else {
+                self.text.push_str(MARKER);
+            }
         }
-        if self.text.len() > MAX_RESULT_BYTES {
-            truncate_to_char_boundary(&mut self.text, MAX_RESULT_BYTES - 32);
-            self.text.push_str("\n…[truncated by the router]");
-        }
-        if self.data.len() > MAX_DATA_BYTES {
+        if self.text.len().saturating_add(self.data.len()) > MAX_RESULT_WIRE_BYTES {
             self.data.clear();
         }
-        if self.note.len() > MAX_NOTE_BYTES {
-            truncate_to_char_boundary(&mut self.note, MAX_NOTE_BYTES - 3);
-            self.note.push('…');
-        }
+        Self::bound_note(&mut self.note);
         if let Some(task) = &mut self.task {
             task.bound();
+        }
+        if self.may_exceed_frame_cap() {
+            let mut encoded = self.hosted_frame_bytes();
+            if encoded > MAX_UNSTAMPED_FRAME_BYTES && !self.data.is_empty() {
+                self.data.clear();
+                encoded = self.hosted_frame_bytes();
+            }
+            if encoded > MAX_UNSTAMPED_FRAME_BYTES && !self.images.is_empty() {
+                let mut marked = images_dropped;
+                while encoded > MAX_UNSTAMPED_FRAME_BYTES {
+                    let Some(img) = self.images.last() else { break };
+                    let saved = json_escaped_len(img) + 2 + usize::from(self.images.len() > 1);
+                    self.images.pop();
+                    encoded -= saved;
+                    if !marked {
+                        let before_note = json_escaped_len(&self.note);
+                        Self::append_images_truncated_note(&mut self.note);
+                        encoded = encoded - before_note + json_escaped_len(&self.note);
+                        marked = true;
+                    }
+                }
+                encoded = self.hosted_frame_bytes();
+            }
+            if encoded > MAX_UNSTAMPED_FRAME_BYTES {
+                let call_id = std::mem::take(&mut self.call_id);
+                *self = ToolResult::failed(call_id, result_frame_too_large(encoded));
+            }
         }
     }
 }
@@ -906,6 +1133,7 @@ pub enum ServiceUp {
     /// Going away on purpose (the host also forgets a service whose
     /// transport dies).
     Unregister,
+    ConfirmAnswer { call_id: String, allow: bool },
 }
 
 /// Engine → service.
@@ -923,6 +1151,7 @@ pub enum ServiceDown {
     /// The host's chat pane is showing (or not). Informational: an
     /// embedded panel may hide itself while the desktop one is up.
     ChatOpen { open: bool },
+    Confirm { call_id: String, tool: String, args: String },
 }
 
 impl ServiceUp {
@@ -936,11 +1165,8 @@ impl ServiceUp {
                 if !is_opaque_id(&r.call_id) {
                     return Err("result: bad call id".into());
                 }
-                if r.text.len() > MAX_RESULT_BYTES + 64 {
-                    return Err("result: text over cap".into());
-                }
-                if r.data.len() > MAX_DATA_BYTES {
-                    return Err("result: data over cap".into());
+                if r.text.len().saturating_add(r.data.len()) > MAX_RESULT_WIRE_BYTES {
+                    return Err("result: payload over wire cap".into());
                 }
                 if r.images.iter().fold(0usize, |bytes, image| bytes.saturating_add(image.len())) > MAX_RESULT_IMAGE_BYTES {
                     return Err("result: images over cap".into());
@@ -994,7 +1220,8 @@ impl ServiceUp {
                 }
                 Ok(())
             }
-            ServiceUp::Unregister => Ok(()),
+            ServiceUp::ConfirmAnswer { call_id, .. } if !is_opaque_id(call_id) => Err("confirm answer: bad call id".into()),
+            ServiceUp::ConfirmAnswer { .. } | ServiceUp::Unregister => Ok(()),
         }
     }
 }
@@ -1009,15 +1236,15 @@ impl ServiceDown {
                 }
                 Ok(())
             }
-            ServiceDown::Call(c) => {
-                if !is_opaque_id(&c.call_id) {
+            ServiceDown::Call(ServiceCall { call_id, tool, args, .. }) | ServiceDown::Confirm { call_id, tool, args } => {
+                if !is_opaque_id(call_id) {
                     return Err("call: bad call id".into());
                 }
-                if !is_ident(&c.tool, MAX_TOOL_NAME) {
+                if !is_ident(tool, MAX_TOOL_NAME) {
                     return Err("call: bad tool name".into());
                 }
-                if c.args.len() > MAX_ARGS_BYTES {
-                    return Err(arguments_too_large(c.args.len()));
+                if args.len() > MAX_ARGS_BYTES {
+                    return Err(arguments_too_large(args.len()));
                 }
                 Ok(())
             }
@@ -1086,11 +1313,22 @@ struct DownEnvelope {
     wm_ai: HostedDown,
 }
 
+/// Which frame shape a [`RejectedFrame`] carried, read only to decide whether
+/// a caller is waiting for an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RejectedKind {
+    Call,
+    Result,
+    Progress,
+    Other,
+}
+
 /// A refused hosted frame. Only a typed decode failure is a wire mismatch.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RejectedFrame {
     pub error: String,
     pub mismatch: bool,
+    pub kind: RejectedKind,
     pub endpoint: Option<String>,
     pub call_id: Option<String>,
 }
@@ -1113,6 +1351,7 @@ fn parse_hosted<T>(
         return Some(Err(RejectedFrame {
             error: format!("hosted frame is {} bytes; the cap is {MAX_FRAME_BYTES}", json.len()),
             mismatch: false,
+            kind: RejectedKind::Other,
             endpoint: None,
             call_id: None,
         }));
@@ -1125,20 +1364,30 @@ fn parse_hosted<T>(
         Err(error) => (error.to_string(), true),
     };
 
-    // Only the address and call id can be used from a rejected frame.
+    // Only the address, frame kind and call id can be used from a rejected frame.
     let root = makepad_strict_json::parse(json.as_bytes()).ok();
     let envelope = root.as_ref().and_then(|root| root.get(HOSTED_KEY));
     let msg = envelope.and_then(|frame| frame.get("msg"));
     let tuple_arg = |variant: &str| msg?.get(variant)?.as_arr()?.first();
-    let (address, payload) = match direction {
-        Direction::Down => ("to", tuple_arg("Call")),
-        Direction::Up => ("from", tuple_arg("Result").or_else(|| msg?.get("Progress"))),
+    let (address, kind, payload) = match direction {
+        Direction::Down => match tuple_arg("Call") {
+            Some(payload) => ("to", RejectedKind::Call, Some(payload)),
+            None => ("to", RejectedKind::Other, None),
+        },
+        Direction::Up => match tuple_arg("Result") {
+            Some(payload) => ("from", RejectedKind::Result, Some(payload)),
+            None => match msg.and_then(|msg| msg.get("Progress")) {
+                Some(payload) => ("from", RejectedKind::Progress, Some(payload)),
+                None => ("from", RejectedKind::Other, None),
+            },
+        },
     };
     let endpoint = envelope.and_then(|frame| frame.get(address)?.as_arr()?.first()?.as_str());
     let call_id = payload.and_then(|payload| payload.get("call_id")?.as_str());
     Some(Err(RejectedFrame {
         error,
         mismatch,
+        kind,
         endpoint: endpoint.map(str::to_owned),
         call_id: call_id.map(str::to_owned),
     }))
@@ -1407,18 +1656,51 @@ mod tests {
             caller: None, origin: CallOrigin::Conversation,
         };
         let down = |call| HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(call) };
-        let missing_origin = down(call.clone()).to_json().replace(r#","origin":{"Conversation":[]}"#, "");
+        let missing_origin = down(call).to_json().replace(r#","origin":{"Conversation":[]}"#, "");
         let rejected = HostedDown::parse_checked(&missing_origin).unwrap().unwrap_err();
         assert!(rejected.mismatch && rejected.error.contains("origin"), "{rejected:?}");
         assert_eq!(rejected.endpoint.as_deref(), Some("e1"));
         assert_eq!(rejected.call_id.as_deref(), Some("c1"));
-        let oversized = down(ServiceCall { args: "x".repeat(MAX_ARGS_BYTES + 1), ..call }).to_json();
-        assert_eq!(HostedDown::parse(&oversized), None, "oversized args are dropped, not truncated");
-        let rejected = HostedDown::parse_checked(&oversized).unwrap().unwrap_err();
-        assert!(!rejected.mismatch);
-        assert_eq!(rejected.error, arguments_too_large(MAX_ARGS_BYTES + 1));
         let bad = HostedDown { to: None, msg: ServiceDown::Call(ServiceCall { call_id: "c 1".into(), tool: "Plan".into(), args: "{}".into(), caller: None, origin: CallOrigin::Conversation }) };
         assert_eq!(HostedDown::parse(&bad.to_json()), None);
+    }
+
+    #[test]
+    fn validate_accepts_results_up_to_wire_cap_and_classifies_rejected_kinds() {
+        let json_string = |bytes: usize| format!(r#""{}""#, "x".repeat(bytes - 2));
+        let up = |msg| HostedUp { from: Some(ep("e1")), msg };
+        let result = ToolResult::ok("c1", json_string(64 * 1024), "").with_data(json_string(32 * 1024));
+        let frame = up(ServiceUp::Result(result));
+        assert_eq!(HostedUp::parse(&frame.to_json()), Some(frame), "large JSON text and data round-trip intact");
+
+        let result = ToolResult::ok("c1", "x".repeat(MAX_RESULT_WIRE_BYTES - 2), "").with_data("{}");
+        let mut frame = up(ServiceUp::Result(result));
+        assert_eq!(frame.msg.validate(), Ok(()), "the combined payload can fill the wire cap exactly");
+        let ServiceUp::Result(result) = &mut frame.msg else { unreachable!() };
+        result.text.push('x');
+        let rejected = HostedUp::parse_checked(&frame.to_json()).unwrap().unwrap_err();
+        assert!(!rejected.mismatch, "oversized results are validation failures");
+        assert_eq!(rejected.kind, RejectedKind::Result, "oversized results remain identifiable");
+        assert_eq!(rejected.call_id.as_deref(), Some("c1"), "oversized results retain the call id");
+        assert_eq!(rejected.error, "result: payload over wire cap", "the refusal names the combined cap");
+
+        let progress = up(ServiceUp::Progress { call_id: "c1".into(), note: String::new(), permille: 1001, task: None });
+        let rejected = HostedUp::parse_checked(&progress.to_json()).unwrap().unwrap_err();
+        assert!(!rejected.mismatch, "invalid progress is a validation failure");
+        assert_eq!(rejected.kind, RejectedKind::Progress, "invalid progress remains non-terminal");
+        assert_eq!(rejected.call_id.as_deref(), Some("c1"), "invalid progress retains the call id");
+
+        let call = ServiceCall {
+            call_id: "c1".into(), tool: "plan".into(), args: "x".repeat(MAX_ARGS_BYTES + 1),
+            caller: None, origin: CallOrigin::Conversation,
+        };
+        let oversized = HostedDown { to: Some(ep("e1")), msg: ServiceDown::Call(call) }.to_json();
+        assert_eq!(HostedDown::parse(&oversized), None, "oversized arguments are refused in full");
+        let rejected = HostedDown::parse_checked(&oversized).unwrap().unwrap_err();
+        assert!(!rejected.mismatch, "oversized calls are validation failures");
+        assert_eq!(rejected.kind, RejectedKind::Call, "oversized calls remain identifiable");
+        assert_eq!(rejected.call_id.as_deref(), Some("c1"), "oversized calls retain the call id");
+        assert_eq!(rejected.error, arguments_too_large(MAX_ARGS_BYTES + 1), "the refusal gives the encoded argument size");
     }
 
     #[test]
@@ -1483,24 +1765,17 @@ mod tests {
         topic_schema.topics[0].schema = Some("[]".into());
         assert!(topic_schema.validate().unwrap_err().contains("schema is not a JSON object"));
 
-        let mut admitted = route().with_tool(ToolDef::new("verbose", "d".repeat(4 * 1024), r#"{"type":"object"}"#, Risk::Read));
+        let big_tool = sized_tool(0, 16 * 1024);
+        let big_topic = sized_topic(0, 16 * 1024);
+        let mut admitted = route()
+            .with_tool(ToolDef::new("verbose", "d".repeat(4 * 1024), r#"{"type":"object"}"#, Risk::Read))
+            .with_tool(big_tool)
+            .with_topic(big_topic);
         admitted.topics[0].description = "d".repeat(4 * 1024);
-        admitted.validate().expect("4 KiB descriptions are valid for tools and topics");
+        admitted.validate().expect("4 KiB descriptions and 16 KiB schemas are valid for tools and topics");
         let good = admitted.clone();
-        let mut oversized = maximal_tool(0);
-        oversized.name = "oversize_schema".into();
-        oversized.parameters.push(' ');
-        let schema_bytes = oversized.parameters.len();
-        admitted.tools.push(oversized);
-        let error = admitted.validate().unwrap_err();
-        assert!(error.contains(&format!("schema is {schema_bytes} bytes; the cap is {MAX_PARAMETERS_BYTES}")), "{error}");
-        let problems = admitted.admit();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].starts_with("ai service 'route': tool 'oversize_schema' not served:"), "{problems:?}");
-        assert!(problems[0].contains(&format!("schema is {schema_bytes} bytes")), "{problems:?}");
+        assert!(admitted.admit().is_empty(), "admission keeps large valid schemas");
         assert_eq!(admitted, good, "good tools, long descriptions and topics stay unchanged");
-        admitted.validate().unwrap();
-        assert!(admitted.admit().is_empty(), "admission is idempotent");
 
         let mut empty = route();
         empty.tools[0].description = " \t\n".into();
@@ -1511,11 +1786,12 @@ mod tests {
         names.topics[0].name = "long".repeat(MAX_TOOL_NAME);
         let mut layout = route();
         layout.tools[0].layout = Some(CardLayout::new("x".repeat(MAX_LAYOUT_BYTES + 1), ""));
-        let mut topic_size = route();
-        topic_size.topics[0].schema = Some(" ".repeat(MAX_PARAMETERS_BYTES + 1));
-        for mut invalid in [schema, not_object, topic_schema, empty, names, layout, topic_size] {
+        let mut topic_deep = route();
+        topic_deep.topics[0].schema = Some(nest(35));
+        for mut invalid in [schema, not_object, topic_schema, empty, names, layout, topic_deep] {
             assert!(!invalid.admit().is_empty());
             invalid.validate().unwrap();
+            assert!(invalid.admit().is_empty(), "admission is idempotent");
         }
         let mut label = route();
         label.label.clear();
@@ -1527,22 +1803,23 @@ mod tests {
         }
     }
 
-    /// A tool at the name, schema and layout caps, with a valid argument object.
-    fn maximal_tool(index: usize) -> ToolDef {
+    /// A tool at the name and layout caps with a valid argument object of `schema_bytes`.
+    fn sized_tool(index: usize, schema_bytes: usize) -> ToolDef {
         let name = format!("{:_<width$}", format!("t{index}"), width = MAX_TOOL_NAME);
         let head = r#"{"type":"object","properties":{"p":{"type":"string","description":""#;
         let tail = r#""}},"additionalProperties":false}"#;
-        let schema = format!("{head}{}{tail}", "s".repeat(MAX_PARAMETERS_BYTES - head.len() - tail.len()));
-        assert_eq!(schema.len(), MAX_PARAMETERS_BYTES);
+        let schema = format!("{head}{}{tail}", "s".repeat(schema_bytes - head.len() - tail.len()));
+        assert_eq!(schema.len(), schema_bytes);
         ToolDef::new(name, "d", &schema, Risk::Act)
             .with_layout(CardLayout::new("c".repeat(MAX_LAYOUT_BYTES), ""))
     }
 
-    fn maximal_topic(index: usize) -> TopicDef {
+    fn sized_topic(index: usize, schema_bytes: usize) -> TopicDef {
         let name = format!("{:_<width$}", format!("p{index}"), width = MAX_TOOL_NAME);
         let head = r#"{"type":"object","properties":{"v":{"type":"string","description":""#;
         let tail = r#""}}}"#;
-        let schema = format!("{head}{}{tail}", "s".repeat(MAX_PARAMETERS_BYTES - head.len() - tail.len()));
+        let schema = format!("{head}{}{tail}", "s".repeat(schema_bytes - head.len() - tail.len()));
+        assert_eq!(schema.len(), schema_bytes);
         TopicDef::new(name, "d").with_schema(schema)
     }
 
@@ -1572,10 +1849,10 @@ mod tests {
             &"b".repeat(MAX_BRIEF_BYTES),
         );
         for i in 0..MAX_TOOLS {
-            m = m.with_tool(maximal_tool(i));
+            m = m.with_tool(sized_tool(i, 10 * 1024));
         }
         for i in 0..MAX_TOPICS {
-            m = m.with_topic(maximal_topic(i));
+            m = m.with_topic(sized_topic(i, 10 * 1024));
         }
         let padding = MAX_MANIFEST_BYTES - m.bytes();
         m.tools[0].description.push_str(&"\"".repeat(padding));
@@ -1634,16 +1911,246 @@ mod tests {
         assert_eq!(HostedUp::parse(&huge), None);
     }
 
+    fn json_array(bytes: usize) -> String {
+        format!(r#"["{}"]"#, "x".repeat(bytes - 4))
+    }
+
     #[test]
-    fn a_result_is_bounded_without_splitting_characters() {
-        let mut r = ToolResult::ok("c", "é".repeat(MAX_RESULT_BYTES), "n".repeat(MAX_NOTE_BYTES + 10))
-            .with_data("d".repeat(MAX_DATA_BYTES + 1));
+    fn a_large_json_result_passes_intact_up_to_wire_cap() {
+        let text = json_array(64 * 1024);
+        let data = json_array(32 * 1024);
+        let mut r = ToolResult::ok("c1", &text, "é".repeat(MAX_NOTE_BYTES)).with_data(&data);
         r.bound();
-        assert!(r.text.len() <= MAX_RESULT_BYTES);
-        assert!(r.text.ends_with("[truncated by the router]"));
-        assert!(r.note.len() <= MAX_NOTE_BYTES);
-        assert!(r.note.ends_with('…'));
-        assert!(r.data.is_empty(), "oversized data is dropped whole");
+        assert_eq!(r.outcome, ToolOutcome::Ok, "a large JSON reply succeeds");
+        assert!(r.text == text && r.data == data, "both JSON payloads retain every byte");
+        assert!(parse_tool_json(&r.text).is_ok(), "the model receives valid JSON text");
+        assert!(parse_tool_json(&r.data).is_ok(), "the panel receives valid JSON data");
+        assert!(r.note.len() <= MAX_NOTE_BYTES, "the transcript note fits its byte cap");
+        assert!(r.note.ends_with('…'), "the shortened UTF-8 note ends with an ellipsis");
+        let frame = HostedUp { from: None, msg: ServiceUp::Result(r) };
+        assert!(HostedUp::parse(&frame.to_json()) == Some(frame), "the large JSON reply round-trips");
+    }
+
+    #[test]
+    fn a_result_over_wire_cap_fails_cleanly_without_truncating_json() {
+        let oversized = MAX_RESULT_WIRE_BYTES + 1;
+        let large_image = || "A".repeat(MAX_RESULT_IMAGE_BYTES + 1);
+        let mut r = ToolResult::ok("c1", json_array(oversized), "done")
+            .with_data("{}")
+            .with_preview()
+            .with_disposition(Disposition::EndTurn)
+            .with_subscription(SubscriptionRequest::new("trip"));
+        r.images.push(large_image());
+        r.task = Some(TaskCard { title: "t".into(), ..Default::default() });
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Failed, "oversized text fails the call");
+        assert_eq!(r.call_id, "c1", "the failure still identifies the call");
+        assert_eq!(r.text, result_too_large(oversized), "the failure reports the original text size");
+        assert_eq!(r.note, r.text, "the transcript shows the same failure as the model");
+        assert!(r.data.is_empty(), "the failure discards structured data");
+        assert!(r.images.is_empty(), "the failure discards images");
+        assert!(!r.preview, "the failure clears the preview request");
+        assert_eq!(r.disposition, Disposition::Continue, "the failure lets the turn continue");
+        assert!(r.subscribe.is_empty(), "the failure requests no subscriptions");
+        assert!(r.task.is_none(), "the failure clears the task card");
+        assert!(ServiceUp::Result(r).validate().is_ok(), "the receiver accepts the failure");
+
+        let text = json_array(1024);
+        let mut r = ToolResult::ok("c2", &text, "").with_data(json_array(MAX_RESULT_WIRE_BYTES));
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "excess data leaves the call successful");
+        assert_eq!(r.text, text, "shedding data preserves the JSON text");
+        assert!(r.data.is_empty(), "data over the combined budget is dropped whole");
+
+        r.images.push(large_image());
+        r.bound();
+        assert!(r.images.is_empty(), "the oversized image is removed");
+        assert_eq!(r.text, text, "the image marker leaves the JSON array intact");
+        assert!(parse_tool_json(&r.text).is_ok(), "the JSON array still parses after shedding images");
+        assert!(r.note.contains("[images truncated by the router]"), "the note records the dropped image");
+
+        let text = "x".repeat(MAX_RESULT_WIRE_BYTES - 8);
+        let mut r = ToolResult::ok("c3", &text, "");
+        r.images.push(large_image());
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "near-cap text succeeds after shedding images");
+        assert!(r.text == text, "near-cap text retains every byte");
+        assert!(r.note.contains("[images truncated by the router]"), "the marker fits in the note");
+        assert!(ServiceUp::Result(r).validate().is_ok(), "the receiver accepts near-cap text");
+
+        // A note already at or past MAX_NOTE_BYTES trims its prefix so the marker survives.
+        for long_note in ["n".repeat(MAX_NOTE_BYTES), format!("a{}", "é".repeat(MAX_NOTE_BYTES))] {
+            let mut r = ToolResult::ok("c4", &text, long_note);
+            r.images.push(large_image());
+            r.bound();
+            assert!(r.note.len() <= MAX_NOTE_BYTES, "a full note stays within MAX_NOTE_BYTES");
+            assert!(
+                r.note.ends_with("… [images truncated by the router]"),
+                "a full note keeps the image-truncation marker after trimming its prefix",
+            );
+            assert!(ServiceUp::Result(r.clone()).validate().is_ok(), "the receiver accepts the trimmed note");
+            // Re-bounding after another dropped image does not duplicate the marker.
+            r.images.push(large_image());
+            r.bound();
+            assert_eq!(
+                r.note.matches("[images truncated by the router]").count(),
+                1,
+                "re-bounding does not duplicate the image-truncation marker",
+            );
+        }
+
+        // Scalar JSON replies keep valid JSON text and move the image marker to note,
+        // while plain prose starting with numbers, quotes or keywords keeps the text marker.
+        for scalar in [r#""text""#, "42", "-3.5", "true", "false", "null"] {
+            let mut r = ToolResult::ok("c5", scalar, "");
+            r.images.push(large_image());
+            r.bound();
+            assert_eq!(r.text, scalar, "shedding images preserves scalar JSON reply {scalar}");
+            assert!(parse_tool_json(&r.text).is_ok(), "scalar JSON reply {scalar} still parses");
+            assert!(r.note.contains("[images truncated by the router]"), "scalar JSON reply {scalar} notes the dropped image");
+        }
+        for plain in ["41 min", "true: saved", r#""hi" there"#, r#""a" and "b""#] {
+            let mut r = ToolResult::ok("c6", plain, "");
+            r.images.push(large_image());
+            r.bound();
+            assert!(
+                r.text.ends_with("\n…[images truncated by the router]"),
+                "plain text {plain:?} still receives the model-visible image marker",
+            );
+            assert!(r.note.is_empty(), "plain text {plain:?} does not move the marker into note");
+        }
+    }
+
+    #[test]
+    fn control_char_heavy_results_and_manifests_stay_within_frame_cap() {
+        for c in (0u8..=127).map(char::from).chain(['é', '—', '🛠']) {
+            let s = c.to_string();
+            assert_eq!(json_escaped_len(&s) + 2, s.serialize_json().len(), "encoded length for {c:?}");
+        }
+        let sample = ToolResult::ok("c1", "ok", "");
+        let unstamped = HostedUp { from: None, msg: ServiceUp::Result(sample.clone()) }.to_json().len();
+        assert_eq!(sample.hosted_frame_bytes(), unstamped, "the wrapper matches real unstamped frames");
+        let stamp = EndpointId("\"".repeat(MAX_ID_BYTES));
+        let stamped = HostedUp { from: Some(stamp.clone()), msg: ServiceUp::Result(sample) }.to_json().len();
+        assert_eq!(stamped - unstamped, MAX_HOSTED_STAMP_BYTES, "the reserve matches worst-case stamp growth");
+
+        let check_transport = |msg, case| {
+            let frame = HostedUp { from: Some(stamp.clone()), msg };
+            let json = frame.to_json();
+            assert!(json.len() <= MAX_FRAME_BYTES, "{case} fits the stamped frame cap");
+            assert!(HostedUp::parse(&json) == Some(frame), "{case} round-trips after stamping");
+        };
+        let mut r = ToolResult::ok("c1", "\x00".repeat(700 * 1024), "");
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Failed, "oversized encoded text fails cleanly");
+        assert_eq!(r.call_id, "c1", "the frame-size failure identifies the original call");
+        assert!(r.text.contains(&MAX_FRAME_BYTES.to_string()), "the failure names the hosted frame cap");
+        let msg = ServiceUp::Result(r);
+        assert!(msg.validate().is_ok(), "the receiver accepts the frame-size failure");
+        check_transport(msg, "the frame-size failure");
+
+        let text = "\x1b".repeat(500 * 1024);
+        let mut r = ToolResult::ok("c2", &text, "").with_data("\x1b".repeat(250 * 1024));
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "shedding encoded data preserves success");
+        assert!(r.text == text, "shedding encoded data preserves every text byte");
+        assert!(r.data.is_empty(), "excess encoded data is dropped whole");
+        check_transport(ServiceUp::Result(r), "the text without excess data");
+
+        let text = "\x1b".repeat(550 * 1024);
+        let mut r = ToolResult::ok("c3", &text, "");
+        let first_image = "A".repeat(450 * 1024);
+        r.images = vec![first_image.clone(), "B".repeat(450 * 1024)];
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "shedding trailing images preserves success");
+        assert!(r.text == text, "shedding trailing images preserves every text byte");
+        assert!(r.images == [first_image], "the first image survives while the trailing image is shed");
+        assert!(r.note.contains("[images truncated by the router]"), "the note records the shed image");
+        check_transport(ServiceUp::Result(r), "the reply with its first image");
+
+        // A NUL-filled note trims 180 encoded bytes when making room for the
+        // image-truncation marker; that shrinkage must not suppress shedding
+        // the over-cap image itself, while still avoiding over-shedding once an
+        // image has actually been dropped.
+        let text = "\x00".repeat(698_978 - MAX_NOTE_BYTES);
+        let note = "\x00".repeat(MAX_NOTE_BYTES);
+        let mut r = ToolResult::ok(stamp.as_str(), &text, &note);
+        r.images.push("AAAA".into());
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES + 6,
+            "one AAAA image puts the NUL-note exact-ceiling frame 6 bytes over",
+        );
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "shedding the single over-cap image preserves success");
+        assert!(r.text == text, "shedding the single over-cap image preserves every text byte");
+        assert!(r.images.is_empty(), "the over-cap image is actually shed before marking the note");
+        assert!(
+            r.note.ends_with("… [images truncated by the router]"),
+            "the note records the shed image",
+        );
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES - 180,
+            "shedding AAAA and marking the NUL note saves 6 + 180 encoded bytes",
+        );
+        assert!(ServiceUp::Result(r.clone()).validate().is_ok(), "the receiver accepts the shed reply");
+        check_transport(ServiceUp::Result(r), "the NUL-note reply after shedding AAAA");
+
+        let mut r = ToolResult::ok(stamp.as_str(), &text, &note);
+        r.images = vec!["AAAA".into(), "BBBB".into()];
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES + 13,
+            "two 4-byte images put the NUL-note exact-ceiling frame 13 bytes over",
+        );
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "shedding the trailing image preserves success");
+        assert_eq!(r.images, ["AAAA"], "the exact note-marker savings keep the first image");
+        assert!(
+            r.note.ends_with("… [images truncated by the router]"),
+            "the note records the shed trailing image",
+        );
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES - 174,
+            "shedding BBBB and marking the NUL note leaves the frame 174 bytes under the cap",
+        );
+        assert!(ServiceUp::Result(r).validate().is_ok(), "the receiver accepts the reply keeping AAAA");
+
+        // Conversely, when shedding the first image alone drops below the cap
+        // but appending the marker to an empty note (+32) pushes back over, the
+        // loop keeps shedding until the marked frame fits.
+        let text = "\x00".repeat(698_972);
+        let mut r = ToolResult::ok(stamp.as_str(), &text, "");
+        r.images = vec!["A".repeat(30), "B".repeat(20)];
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES + 19,
+            "two images put the 36-bytes-under frame 19 bytes over",
+        );
+        r.bound();
+        assert_eq!(r.outcome, ToolOutcome::Ok, "continuing to shed after adding the marker preserves success");
+        assert!(r.images.is_empty(), "the second image is also shed once the +32-byte marker pushes back over");
+        assert_eq!(r.note, "[images truncated by the router]", "the empty note receives the truncation marker");
+        assert_eq!(
+            r.hosted_frame_bytes(),
+            MAX_UNSTAMPED_FRAME_BYTES - 4,
+            "shedding both images (55 bytes) and adding the marker (+32) lands 4 bytes under the cap",
+        );
+        assert!(ServiceUp::Result(r).validate().is_ok(), "the receiver accepts the multi-shed marked reply");
+
+        let tool = |name| ToolDef::new(name, "\x00".repeat(400 * 1024), r#"{"type":"object"}"#, Risk::Read);
+        let mut manifest = ServiceManifest::new("files", "Files", "").with_tool(tool("first")).with_tool(tool("later"));
+        let err = manifest.validate().expect_err("the control-heavy manifest exceeds the frame cap");
+        assert!(err.contains("frame cap"), "the refusal names the encoded frame cap");
+        let problems = manifest.admit();
+        assert_eq!(problems.len(), 1, "one entry removal brings the manifest within budget");
+        assert!(problems[0].contains("tool 'later' not served"), "the diagnostic identifies the later tied tool");
+        assert_eq!(manifest.tools.len(), 1, "admission keeps one tool");
+        assert_eq!(manifest.tools[0].name, "first", "the earlier tied tool survives");
+        assert!(manifest.validate().is_ok(), "the admitted manifest passes wire validation");
+        check_transport(ServiceUp::Register { manifest, port_tag: u32::MAX }, "the admitted manifest");
     }
 
     #[test]

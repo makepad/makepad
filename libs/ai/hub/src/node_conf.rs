@@ -12,7 +12,6 @@
 //! cache_dir = /home/me/.makepad/weights-chat   # default: the hub's own (~/.makepad/weights)
 //! model = qwen3.8-27b             # the chat model loaded at start and pinned; apps the WM starts use it
 //! context = 32768                 # the chat context per lane at start (the app's panel changes it live)
-//! context_max = 81920
 //! kv = q8_0
 //! pin = kokoro,whisper-large-v3-turbo   # models kept loaded besides the chat model
 //! nice = 10                       # the app's scheduling priority (Unix)
@@ -55,7 +54,6 @@ pub struct NodeConf {
     pub cache_dir: Option<String>,
     pub model: String,
     pub context: Option<u32>,
-    pub context_max: Option<u32>,
     pub kv: Option<String>,
     pub pin: Vec<String>,
     pub nice: i32,
@@ -78,7 +76,6 @@ impl Default for NodeConf {
             cache_dir: None,
             model: String::new(),
             context: None,
-            context_max: None,
             kv: None,
             pin: Vec::new(),
             nice: 10,
@@ -139,7 +136,6 @@ impl NodeConf {
                 "cache_dir" => { s.cache_dir = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "model" => { s.model = value.to_string(); true }
                 "context" => value.parse().map(|c| s.context = Some(c)).is_ok(),
-                "context_max" => value.parse().map(|c| s.context_max = Some(c)).is_ok(),
                 "kv" => { s.kv = Some(value.to_string()).filter(|v| !v.is_empty()); true }
                 "pin" => { s.pin = value.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect(); true }
                 "nice" => value.parse().map(|n| s.nice = n).is_ok(),
@@ -173,9 +169,6 @@ impl NodeConf {
         out.push_str(&format!("model = {}\n", self.model));
         if let Some(c) = self.context {
             out.push_str(&format!("context = {c}\n"));
-        }
-        if let Some(c) = self.context_max {
-            out.push_str(&format!("context_max = {c}\n"));
         }
         if let Some(kv) = &self.kv {
             out.push_str(&format!("kv = {kv}\n"));
@@ -234,9 +227,6 @@ impl NodeConf {
         }
         if let Some(c) = self.context {
             env.push(("MAKEPAD_ASSET_AI_LLM_CONTEXT".to_string(), c.to_string()));
-        }
-        if let Some(c) = self.context_max {
-            env.push(("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX".to_string(), c.to_string()));
         }
         if let Some(kv) = &self.kv {
             env.push(("MAKEPAD_ASSET_AI_LLM_KV".to_string(), kv.clone()));
@@ -310,9 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn settings_read_what_the_node_ran_with_and_write_back_the_same() {
+    fn node_conf_keeps_context_override_and_ignores_legacy_context_max() {
         let text = "port = 8123\nhost = 192.0.2.89\ncache_dir = /home/me/.makepad/weights-chat\nmodel = qwen3.8-27b # the 27B\n\
-                    context = 32768\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\ncompute = ai-first\n\
+                    context = 65536\ncontext_max = 81920\nkv = q8_0\npin = kokoro, whisper-large-v3-turbo\nnice = 10\ncompute = ai-first\n\
                     features = node,claude-stub\n\
                     models = all\nmodels_licences = none,community,non-commercial\nmodels_mbps = 40\nenv MAKEPAD_CUDA_ROOT = /opt/cuda\nenv MAKEPAD_AI_UI_RESERVE_MB = 1536\nbogus = 1\n";
         let s = NodeConf::parse(text);
@@ -326,7 +316,7 @@ mod tests {
         let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
         assert_eq!(get("MAKEPAD_AI_MODEL"), Some("qwen3.8-27b"));
         assert_eq!(get("MAKEPAD_AI_PIN_MODELS"), Some("qwen3.8-27b,kokoro,whisper-large-v3-turbo"));
-        assert_eq!((get("MAKEPAD_ASSET_AI_LLM_CONTEXT"), get("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX"), get("MAKEPAD_ASSET_AI_LLM_KV")), (Some("32768"), Some("81920"), Some("q8_0")));
+        assert_eq!((get("MAKEPAD_ASSET_AI_LLM_CONTEXT"), get("MAKEPAD_ASSET_AI_LLM_CONTEXT_MAX"), get("MAKEPAD_ASSET_AI_LLM_KV")), (Some("65536"), None, Some("q8_0")));
         assert_eq!((get("MAKEPAD_CUDA_ROOT"), get("MAKEPAD_AI_UI_RESERVE_MB")), (Some("/opt/cuda"), Some("1536")));
         assert_eq!((get("MAKEPAD_AI_PREFETCH"), get("MAKEPAD_AI_PREFETCH_LICENCES"), get("MAKEPAD_AI_PREFETCH_MBPS")), (Some("all"), Some("none,community,non-commercial"), Some("40")));
         assert_eq!(NodeConf::parse(&s.render()), s);

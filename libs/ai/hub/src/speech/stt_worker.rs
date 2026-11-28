@@ -2,6 +2,7 @@
 
 use super::remote::RemotePipe;
 use super::{SpeechReach, SttConfig, SttEngine, SttEngineInfo, SttEvent, SttMsg, Transcript};
+use crate::client::RequestPolicy;
 use crate::pipe::PipeId;
 use crate::registry::Domain;
 use makepad_system_speech as sys;
@@ -11,11 +12,32 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub(crate) fn run(
-    config: SttConfig,
+/// Discovery inputs for one session. Tests can supply an empty machine without changing
+/// process-wide pins, model paths or the installed OS recognizer.
+pub(super) struct Sources<'a> {
+    #[cfg(feature = "stt")]
+    pub weights: fn() -> Option<std::path::PathBuf>,
+    pub nodes: super::remote::Nodes<'a>,
+    pub os_on_device: fn(&str) -> bool,
+}
+
+impl Default for Sources<'_> {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "stt")]
+            weights: super::weights::whisper_model_path,
+            nodes: Default::default(),
+            os_on_device: sys::stt::on_device,
+        }
+    }
+}
+
+pub(super) fn run(
+    mut config: SttConfig,
     msg_rx: Receiver<SttMsg>,
     event_tx: Sender<SttEvent>,
     generation: Arc<AtomicU64>,
+    sources: &Sources,
 ) {
     let wake = config.wake.clone();
     let send = move |event: SttEvent| {
@@ -25,7 +47,8 @@ pub(crate) fn run(
         }
     };
 
-    let mut engine = match choose(&config, &send) {
+    config.reach = config.effective_reach();
+    let mut engine = match choose(&config, &send, sources) {
         Ok(engine) => engine,
         Err(why) => return send(SttEvent::Failed(why)),
     };
@@ -247,8 +270,12 @@ trait Engine {
 
 // ----------------------------------------------------------------- choosing
 
-fn choose(config: &SttConfig, send: &dyn Fn(SttEvent)) -> Result<Box<dyn Engine>, String> {
+fn choose(config: &SttConfig, send: &dyn Fn(SttEvent), sources: &Sources) -> Result<Box<dyn Engine>, String> {
+    let policy = if config.on_device_only { RequestPolicy::on_device() } else { RequestPolicy::default() };
     if !config.hubs.is_empty() {
+        if config.on_device_only {
+            return Err("On-device recognition cannot use named hubs.".into());
+        }
         // (the named hubs and nothing else: not this process, this machine, the beacon or the OS)
         send(SttEvent::Loading { phase: "reaching the voice hub".into(), fraction: 0.0 });
         let mut why = Vec::new();
@@ -270,10 +297,10 @@ fn choose(config: &SttConfig, send: &dyn Fn(SttEvent)) -> Result<Box<dyn Engine>
         {
             if !super::in_process_allowed("whisper") {
                 reasons.push("in-process whisper is off on this platform (MAKEPAD=whisper enables it)".into());
-            } else if let Some(path) = super::weights::whisper_model_path() {
-                match whisper::elect_and_load(&path, config, send) {
+            } else if let Some(path) = (sources.weights)() {
+                match whisper::elect_and_load(&path, config, send, &policy) {
                     Ok(engine) => return Ok(engine),
-                    Err(why) => reasons.push(why),
+                    Err(why) => { policy.check()?; reasons.push(why); }
                 }
             } else {
                 reasons.push(format!("no whisper weights ({}) on this machine", super::weights::WHISPER_MODEL_FILE));
@@ -284,7 +311,7 @@ fn choose(config: &SttConfig, send: &dyn Fn(SttEvent)) -> Result<Box<dyn Engine>
 
         if config.reach >= SpeechReach::Machine {
             send(SttEvent::Loading { phase: "looking for a whisper node".into(), fraction: 0.0 });
-            match RemotePipe::find(config.reach, Domain::Stt, &["whisper"]) {
+            match RemotePipe::find_with(config.reach, Domain::Stt, &["whisper"], &policy, &sources.nodes)? {
                 Some(pipe) => return Ok(Box::new(RemoteStt { pipe })),
                 None => reasons.push(format!("no node in reach ({:?}) serves stt.whisper", config.reach)),
             }
@@ -292,13 +319,21 @@ fn choose(config: &SttConfig, send: &dyn Fn(SttEvent)) -> Result<Box<dyn Engine>
     }
 
     if want_system {
-        if sys::stt::available() {
+        let available = if config.on_device_only {
+            (sources.os_on_device)(&config.language)
+        } else {
+            sys::stt::available()
+        };
+        if available {
             let _ = sys::stt::prepare(&config.language);
             return Ok(Box::new(SystemStt));
         }
         reasons.push(format!("no system recognizer here ({})", sys::stt::engine_name()));
     }
 
+    if config.on_device_only {
+        return Err("No on-device speech recognizer here. Install a speech model in AI Hub.".into());
+    }
     Err(reasons.join("; "))
 }
 
@@ -307,6 +342,7 @@ fn stt_options(config: &SttConfig) -> sys::SttOptions {
         language: config.language.clone(),
         partial_results: config.partial_results,
         prefer_offline: config.prefer_offline,
+        on_device_only: config.on_device_only,
         timestamps: config.timestamps,
     }
 }
@@ -451,6 +487,7 @@ mod whisper {
         path: &Path,
         config: &SttConfig,
         send: &dyn Fn(SttEvent),
+        policy: &RequestPolicy,
     ) -> Result<Box<dyn Engine>, String> {
         let key = weights::election_key(path);
         let deadline = Instant::now() + HOLDER_PATIENCE;
@@ -459,9 +496,10 @@ mod whisper {
                 Ok(Some(record)) => match record.state {
                     ResidencyState::Ready { port } if port > 0 && config.reach >= SpeechReach::Machine => {
                         let url = format!("http://127.0.0.1:{port}");
-                        if let Some((_, pipe)) = RemotePipe::at(&url, Domain::Stt, &["whisper"]) {
+                        if let Some((_, pipe)) = RemotePipe::at_with(&url, Domain::Stt, &["whisper"], policy) {
                             return Ok(Box::new(RemoteStt { pipe }));
                         }
+                        policy.check()?;
                         // The holder serves something, but not this pipe.
                         break;
                     }

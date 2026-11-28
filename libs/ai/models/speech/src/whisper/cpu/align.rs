@@ -38,7 +38,7 @@ fn median_width() -> usize {
 
 /// Where inside its DTW span a row's word starts: the first frame whose
 /// attention reaches this share of the span's peak. Measured on Kokoro takes
-/// (2 takes, 89 words; `local/agent_state/edits/reports/L9-ai-timings.md`):
+/// (2 takes, 89 words):
 /// span starts ran 0.12-0.16 s early after pauses; at 0.4 the starts sit
 /// +0.02..+0.04 s from the acoustic onsets of words after a pause and
 /// -0.02 s from Kokoro's own phoneme clock (0.3 and 0.5 bracket it).

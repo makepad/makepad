@@ -73,12 +73,14 @@ mod imp {
     unsafe impl Sync for MappedRegion {}
 
     impl MappedRegion {
-        pub fn map_file(path: &Path) -> Result<Self, String> {
+        /// Page granularity of a mapped weight region on this platform.
+        pub fn page_size() -> Option<usize> {
             let page = unsafe { getpagesize() };
-            if page <= 0 {
-                return Err("mmap: getpagesize failed".to_string());
-            }
-            let page = page as usize;
+            (page > 0).then_some(page as usize)
+        }
+
+        pub fn map_file(path: &Path) -> Result<Self, String> {
+            let page = Self::page_size().ok_or_else(|| "mmap: getpagesize failed".to_string())?;
 
             let c_path = CString::new(path.as_os_str().as_bytes())
                 .map_err(|_| format!("mmap: path {:?} contains a NUL byte", path))?;
@@ -92,10 +94,7 @@ mod imp {
                 unsafe { close(fd) };
                 return Err(format!("mmap: failed to size {:?}", path));
             }
-            let Some(len) = usize::try_from(file_size)
-                .ok()
-                .and_then(|size| size.checked_next_multiple_of(page))
-            else {
+            let Some(len) = Self::mapped_len_with_page(file_size as u64, page) else {
                 unsafe { close(fd) };
                 return Err(format!("mmap: file size {} overflows usize", file_size));
             };
@@ -244,6 +243,10 @@ mod imp {
     }
 
     impl MappedRegion {
+        pub fn page_size() -> Option<usize> {
+            None
+        }
+
         pub fn map_file(path: &Path) -> Result<Self, String> {
             Err(format!(
                 "mmap is unavailable on this platform (cannot map {:?})",
@@ -276,6 +279,16 @@ mod imp {
 pub use imp::MappedRegion;
 
 impl MappedRegion {
+    /// Length of a whole-file mapping, including its last partial page.
+    pub fn mapped_len_with_page(file_size: u64, page: usize) -> Option<usize> {
+        if file_size == 0 || page == 0 {
+            return None;
+        }
+        usize::try_from(file_size)
+            .ok()
+            .and_then(|size| size.checked_next_multiple_of(page))
+    }
+
     /// Convenience wrapper taking anything path-like.
     pub fn map(path: impl AsRef<Path>) -> Result<Self, String> {
         Self::map_file(path.as_ref())

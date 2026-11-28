@@ -54,7 +54,7 @@ impl GenPick {
 pub trait GenRouter: Send + Sync {
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String>;
 
-    /// Fleet images prefer immediate admission on an idle GPU. Fixed-node
+    /// Fleet images and videos prefer immediate admission on an idle GPU. Fixed-node
     /// and custom routers keep the request's own queue policy.
     fn use_idle_admission(&self, _domain: &str, _request: &GenerateRequestJson) -> bool { false }
 }
@@ -154,7 +154,12 @@ impl FleetRouter {
         }
         let heard = snapshots.clone();
         let mut routed = request.clone();
-        if self.installed_only {
+        if self.installed_only && request.model.is_empty() && request.any_model == Some(true) {
+            snapshots = fleet::retain_installed_for_domain(snapshots, domain, "");
+            if snapshots.is_empty() {
+                return Err(diagnosis(&heard, &request.model));
+            }
+        } else if self.installed_only {
             let Some((model, without)) = fleet::installed_model(&snapshots, domain, &request.model) else {
                 return Err(diagnosis(&heard, &request.model));
             };
@@ -171,7 +176,7 @@ impl FleetRouter {
 
 impl GenRouter for FleetRouter {
     fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
-        domain == "image" && request.queue_policy.is_none()
+        matches!(domain, "image" | "video") && request.queue_policy.is_none()
     }
 
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
@@ -189,7 +194,8 @@ pub fn ordinary_model<'a>(models: &'a [ModelInfoJson], domain: &str) -> Option<&
 
 /// A hub's routing for the jobs it runs for its clients (`/talk`'s stages): this hub first, then
 /// the pinned hubs and the LAN fleet, by ETA. An empty model takes this hub's ordinary first
-/// available model of the domain when it has one. `stop` ends routing between probes.
+/// available model of the domain when it has one, unless the caller opts into model mixing.
+/// `stop` ends routing between probes.
 pub struct HubRouter {
     pub home: String,
     pub stop: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -207,7 +213,7 @@ impl GenRouter for HubRouter {
         }
         // Use the serving hub's ordinary first available model for this domain when it has one.
         let mut request = request.clone();
-        if request.model.is_empty() {
+        if request.model.is_empty() && request.any_model != Some(true) {
             let local = nodes.iter().find(|node| node.base_url == self.home);
             if let Some(model) = local.and_then(|node| ordinary_model(&node.models, domain)) {
                 request.model = model.id.clone();
@@ -225,7 +231,7 @@ impl GenRouter for HubRouter {
         picked
     }
 
-    /// As the fleet router: an image without a queue policy tries an idle GPU first.
+    /// As the fleet router: images and videos without a queue policy try an idle GPU first.
     fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
         FleetRouter::default().use_idle_admission(domain, request)
     }
@@ -264,7 +270,7 @@ pub fn route_generation(
 }
 
 /// ETA pick over probed snapshots. Leased requests skip nodes too old to
-/// hold a lease; an image without an explicit queue policy prefers an idle
+/// hold a lease; an image or video without an explicit queue policy prefers an idle
 /// GPU that can serve it over a busy one with the model loaded.
 fn route_by_eta(
     mut snapshots: Vec<fleet::BoxSnapshot>,
@@ -278,8 +284,8 @@ fn route_by_eta(
             Err(reason) => { incompatible.push(reason); false },
         });
     }
-    if domain == "image" && request.queue_policy.is_none() {
-        // Loaded-model affinity must not serialize a parallel image batch
+    if matches!(domain, "image" | "video") && request.queue_policy.is_none() {
+        // Loaded-model affinity must not serialize a parallel batch
         // on one busy GPU while another eligible GPU is idle. Score only
         // idle candidates when at least one can actually serve the model.
         let idle: Vec<_> = snapshots.iter().filter(|snapshot| snapshot.jobs_pending() == 0).cloned().collect();
@@ -451,7 +457,7 @@ impl TransportRecovery {
 
 /// A 502/503/504, timeout or reset while talking to an accepted job.
 pub fn transient_transport_error(error: &AssetAiError) -> bool {
-    let (AssetAiError::Http(message) | AssetAiError::Io(message)) = error else { return false; };
+    let (AssetAiError::Http(message) | AssetAiError::HttpTransport(message) | AssetAiError::Io(message)) = error else { return false; };
     let message = message.to_ascii_lowercase();
     // Parsing/encoding failures are not transport interruptions, even when
     // the bad response text happens to mention a retryable status or timeout.
@@ -516,6 +522,8 @@ pub struct GenJob {
     want: Want,
     job_id: Option<String>,
     request: Option<GenerateRequestJson>,
+    auto_any_model: bool,
+    submitted_model: String,
     seed_used: Option<u64>,
     provider_url: Option<String>,
     refusals: Vec<(String, String)>,
@@ -558,6 +566,8 @@ impl GenJob {
             want: Want::All,
             job_id: None,
             request: None,
+            auto_any_model: false,
+            submitted_model: String::new(),
             seed_used: None,
             provider_url: None,
             refusals: Vec::new(),
@@ -587,7 +597,17 @@ impl GenJob {
 
     /// The node the job was submitted to (its label), once it is.
     pub fn node(&self) -> Option<String> {
-        self.provider_url.as_deref().map(fleet::node_label)
+        self.provider_url().map(fleet::node_label)
+    }
+
+    /// The provider that accepted the job.
+    pub fn provider_url(&self) -> Option<&str> {
+        self.provider_url.as_deref()
+    }
+
+    /// The model named on the accepted submission, when the route has one.
+    pub fn model(&self) -> Option<&str> {
+        (!self.submitted_model.is_empty()).then_some(self.submitted_model.as_str())
     }
 
     /// Route and submit. The request's origin becomes this job's lease.
@@ -597,6 +617,8 @@ impl GenJob {
         self.seed_used = request.seed;
         self.domain = Some(domain);
         self.want = want;
+        self.auto_any_model = request.model.is_empty() && request.any_model == Some(true);
+        self.submitted_model.clear();
         self.request = Some(request);
         self.provider = None;
         self.provider_url = None;
@@ -650,10 +672,6 @@ impl GenJob {
             if submitted.model.is_empty() {
                 submitted.model = picked.model.clone();
             }
-            // Keep the caller's policy (None) for later retries. The wire
-            // override only controls this admission attempt; seed, model,
-            // prompt and media remain unchanged.
-            let accepted_request = submitted.clone();
             if automatic { submitted.queue_policy = Some(if queue_fallback { "queue" } else { "reject" }.into()); }
             let admitted = picked.provider.try_request(domain, &submitted);
             if automatic && !queue_fallback && matches!(admitted, Err(AssetAiError::Busy)) {
@@ -668,8 +686,12 @@ impl GenJob {
                     self.attempts += 1;
                     self.queued = false;
                     self.admission_delay = INITIAL_ADMISSION_DELAY;
-                    // A retry moves the accepted request to another machine,
-                    // preserving the model the user already started with.
+                    self.submitted_model = submitted.model.clone();
+                    let mut accepted_request = submitted;
+                    // The wire policy applies to one attempt. A mixed-model
+                    // retry also gets a fresh choice of tier.
+                    accepted_request.queue_policy = request.queue_policy.clone();
+                    if self.auto_any_model { accepted_request.model.clear(); }
                     self.request = Some(accepted_request);
                     let retry_stage = (!self.refusals.is_empty()).then(|| {
                         let refused = self.refusals.iter()
@@ -724,6 +746,7 @@ impl GenJob {
 
     fn retry_on(&mut self, error: String, picked: Option<GenPick>) -> JobPoll {
         let url = self.provider_url.take().unwrap_or_else(|| "unknown node".to_string());
+        self.submitted_model.clear();
         if let Some(provider) = self.provider.take() {
             provider.bye();
         }
@@ -874,7 +897,7 @@ impl GenJob {
             self.artifacts.push(artifact);
         }
         self.artifact_recovery = TransportRecovery::default();
-        let model = status.model.clone().or_else(|| self.request.as_ref().map(|request| request.model.clone())).unwrap_or_default();
+        let model = status.model.filter(|model| !model.is_empty()).unwrap_or_else(|| self.submitted_model.clone());
         JobPoll::Done(GenOutput {
             text: status.text,
             artifacts: std::mem::take(&mut self.artifacts),

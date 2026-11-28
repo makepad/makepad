@@ -1,6 +1,7 @@
 //! Human feedback for a Studio-launched standalone app. The UI only queues
 //! commands; one worker captures this app's drawable and commits a spool event.
 
+use crate::attach::{self, PictureError, PreparedPicture, Source};
 use makepad_widgets::ai_slot::{AiSelectedRegion, AiSlotRequests};
 use makepad_widgets::widget_hooks::{TweakDiffEntry, WidgetHooks};
 use makepad_widgets::makepad_micro_serde::*;
@@ -11,7 +12,7 @@ use makepad_widgets::makepad_platform::{
 use makepad_widgets::*;
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -50,8 +51,6 @@ script_mod! {
 }
 
 const MAX_MESSAGE: usize = 4 * 1024;
-const MAX_PIXELS: usize = 16 * 1024 * 1024;
-const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn enabled_from_env() -> bool {
     Config::from_env().is_some()
@@ -265,19 +264,12 @@ fn atomic_write(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-fn save_frame(
-    config: &Config,
-    region: AiSelectedRegion,
-    frame: Frame,
-) -> Result<(FeedbackImage, Arc<Vec<u8>>), String> {
-    let [fw, fh] = [frame.width as usize, frame.height as usize];
-    if fw == 0
-        || fh == 0
-        || fw.checked_mul(fh).is_none_or(|n| n > MAX_PIXELS)
-        || frame.rgba.len() != fw * fh * 4
-    {
-        return Err("Captured drawable exceeds the image limit".into());
-    }
+fn feedback_error(name: &str, error: PictureError) -> String {
+    error.report(name, |name, detail| log!("feedback: {name}: {detail}")).into()
+}
+
+fn capture_crop(region: AiSelectedRegion, frame_size: [u32; 2]) -> Result<[u32; 4], String> {
+    let [fw, fh] = frame_size.map(|side| side as usize);
     let [ww, wh] = [region.window_size.x, region.window_size.y];
     let r = region.rect;
     if ![ww, wh, r.pos.x, r.pos.y, r.size.x, r.size.y]
@@ -297,16 +289,26 @@ fn save_frame(
     if right <= x || bottom <= y {
         return Err("The selected region is outside this drawable".into());
     }
-    let width = right - x;
-    let height = bottom - y;
-    let mut rgba = Vec::with_capacity(width * height * 4);
-    for row in y..bottom {
-        rgba.extend_from_slice(&frame.rgba[(row * fw + x) * 4..(row * fw + right) * 4]);
+    Ok([x as u32, y as u32, (right - x) as u32, (bottom - y) as u32])
+}
+
+fn save_frame(
+    config: &Config,
+    region: AiSelectedRegion,
+    frame: Frame,
+) -> Result<(FeedbackImage, Arc<Vec<u8>>), String> {
+    let stride = frame.width as usize;
+    let len = stride.checked_mul(frame.height as usize).and_then(|pixels| pixels.checked_mul(4));
+    if frame.rgba.is_empty() || len != Some(frame.rgba.len()) {
+        return Err("Captured drawable has missing or invalid pixels".into());
     }
-    let png = Cx::encode_rgba_as_png(width as u32, height as u32, &rgba)?;
-    if png.len() > MAX_IMAGE_BYTES {
-        return Err("The PNG exceeds 32 MiB; select a smaller area".into());
-    }
+    let frame_size = [frame.width, frame.height];
+    let pixel_crop = capture_crop(region, frame_size)?;
+    let [x, y, crop_w, crop_h] = pixel_crop.map(|n| n as usize);
+    let start = (y * stride + x) * 4;
+    let (width, height, png) = attach::fitted_png(&frame.rgba[start..], stride, crop_w, crop_h, attach::MAX_SIDE)
+        .map_err(|e| feedback_error("selected area", e))?;
+    let r = region.rect;
     let filename = format!("capture-{}.png", event_id());
     atomic_write(&config.dir, &filename, &png)?;
     Ok((
@@ -318,10 +320,10 @@ fn save_frame(
             source: "app_drawable".into(),
             coordinate_space: "window_layout".into(),
             window_id: Some(region.window_id),
-            window_size: [ww, wh],
-            frame_size: [frame.width, frame.height],
+            window_size: [region.window_size.x, region.window_size.y],
+            frame_size,
             crop: [r.pos.x, r.pos.y, r.size.x, r.size.y],
-            pixel_crop: [x as u32, y as u32, width as u32, height as u32],
+            pixel_crop,
         },
         Arc::new(png),
     ))
@@ -343,31 +345,27 @@ fn import_image(
     config: &Config,
     source: ImageSource,
 ) -> Result<(FeedbackImage, Arc<Vec<u8>>), String> {
-    let (name, bytes): (String, Arc<[u8]>) = match source {
+    let source = match source {
         ImageSource::Path(path) => {
             if !path.is_absolute() || path.as_os_str().len() > 4096 {
                 return Err("Drop an absolute image path of at most 4096 bytes".into());
             }
-            let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if !meta.is_file()
-                || meta.file_type().is_symlink()
-                || meta.len() as usize > MAX_IMAGE_BYTES
-            {
-                return Err("Drop a regular image file of at most 32 MiB".into());
+            let meta = fs::symlink_metadata(&path)
+                .map_err(|e| feedback_error(&path.to_string_lossy(), PictureError::open(e.kind(), e)))?;
+            if !meta.file_type().is_file() {
+                return Err("Drop a regular image file".into());
             }
-            let mut bytes = Vec::new();
-            fs::File::open(&path)
-                .map_err(|e| e.to_string())?
-                .take(MAX_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|e| e.to_string())?;
-            (path.to_string_lossy().into_owned(), Arc::from(bytes))
+            Source::Path(path)
         }
-        ImageSource::Bytes { name, bytes } => (name, bytes),
+        ImageSource::Bytes { name, bytes } => Source::Bytes { name, bytes },
     };
-    if bytes.len() > MAX_IMAGE_BYTES || !image_name_supported(&name) {
-        return Err("Use a PNG, JPEG or WebP image of at most 32 MiB".into());
+    let name = source.name();
+    if !image_name_supported(&name) {
+        return Err("Use a PNG, JPEG or WebP image".into());
     }
+    let report = |e| feedback_error(&name, e);
+    let prepared = PreparedPicture::read(source, &name).map_err(report)?;
+    let bytes = prepared.encoded_bytes().ok_or("Use an encoded PNG, JPEG or WebP image")?;
     let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
     let jpeg = bytes.starts_with(b"\xff\xd8\xff");
     let webp = bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP");
@@ -398,38 +396,19 @@ fn import_image(
     {
         return Err("Use a still WebP image for feedback".into());
     }
-    let (width, height) = image_size_by_data(&bytes, Path::new(&name))
-        .map_err(|e| format!("Image dimensions: {e}"))?;
-    if width == 0 || height == 0 || width.checked_mul(height).is_none_or(|n| n > MAX_PIXELS) {
-        return Err("Images are limited to 16 megapixels".into());
-    }
-    let decoded =
-        decode_image_from_data(&bytes).map_err(|e| format!("Cannot decode image: {e}"))?;
-    if decoded.animation.is_some()
-        || decoded
-            .width
-            .checked_mul(decoded.height)
-            .is_none_or(|n| n > MAX_PIXELS)
-    {
-        return Err("Use a still image of at most 16 megapixels".into());
-    }
-    let mut rgba = Vec::with_capacity(decoded.width * decoded.height * 4);
-    for p in &decoded.data {
-        rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
-    }
-    let png = Cx::encode_rgba_as_png(decoded.width as u32, decoded.height as u32, &rgba)?;
-    if png.len() > MAX_IMAGE_BYTES {
-        return Err("The normalized PNG exceeds 32 MiB; use a smaller image".into());
-    }
+    let pixels = attach::rgba_picture(bytes).map_err(report)?;
+    let (width, height) = (pixels.width, pixels.height);
+    let (saved_w, saved_h, png) = attach::fitted_png(
+        &pixels.rgba, width as usize, width as usize, height as usize, attach::MAX_SIDE,
+    ).map_err(report)?;
     let path = format!("attachment-{}.png", event_id());
     atomic_write(&config.dir, &path, &png)?;
-    let (width, height) = (decoded.width as u32, decoded.height as u32);
     Ok((
         FeedbackImage {
             path,
             mime: "image/png".into(),
-            width,
-            height,
+            width: saved_w as u32,
+            height: saved_h as u32,
             source: "dropped_image".into(),
             coordinate_space: "image_pixels".into(),
             window_id: None,
@@ -648,12 +627,6 @@ fn worker(
                     },
                     move |frame| {
                         if Instant::now() < after || sent.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        if (frame.width as usize)
-                            .checked_mul(frame.height as usize)
-                            .is_none_or(|n| n > MAX_PIXELS)
-                        {
                             return;
                         }
                         let data = Frame {
@@ -924,8 +897,7 @@ impl StudioAppFeedback {
             {
                 Some(ImageSource::Path(PathBuf::from(path)))
             }
-            DragItem::VirtualFile(file)
-                if image_name_supported(&file.name) && file.bytes.len() <= MAX_IMAGE_BYTES =>
+            DragItem::VirtualFile(file) if image_name_supported(&file.name) =>
             {
                 Some(ImageSource::Bytes {
                     name: file.name.clone(),
@@ -1074,5 +1046,87 @@ impl Widget for StudioAppFeedback {
             }
         }
         step
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Seek, SeekFrom};
+
+    #[test]
+    fn feedback_fits_the_saved_png_and_keeps_the_original_coordinates() {
+        let region = |window_size, pos, size| AiSelectedRegion { window_id: 1, window_size, rect: Rect { pos, size } };
+        // Exercise the actual crop and fit rules on a 6K drawable without allocating it.
+        let large = region(dvec2(3072., 1728.), dvec2(16., 8.), dvec2(3000., 1687.5));
+        let crop = capture_crop(large, [6144, 3456]).expect("a crop over the old 16 MP cap must be admitted");
+        assert_eq!(crop, [32, 16, 6000, 3375], "the large crop must keep its device-pixel origin and extent");
+        assert_eq!(attach::fitted_size(crop[2] as usize, crop[3] as usize, attach::MAX_SIDE), (1024, 576),
+            "a 6K capture must fit the model edge at its own aspect ratio");
+
+        let dir = std::env::temp_dir().join(format!("aichat-feedback-{}", event_id()));
+        fs::create_dir(&dir).unwrap();
+        let config = Config { dir, flow: "f".into(), artifact: "a".into(), run: "r".into(), revision: "rev".into() };
+        let saved_pixels = |image: &FeedbackImage| {
+            let bytes = fs::read(config.dir.join(&image.path)).expect("the feedback PNG must exist in the spool");
+            let (w, h, pixels) = makepad_image_decode::decode_rgba(&bytes).expect("the saved PNG must decode");
+            assert_eq!((w, h), (image.width as usize, image.height as usize), "event dimensions must match the saved PNG");
+            pixels
+        };
+        // Two frame pixels per window point. Distinct neighbours and a border
+        // expose a wrong crop offset, filter width or source row stride.
+        let mut pixels = vec![255; 2052 * 12 * 4];
+        for y in 2..10 {
+            for x in 2..2050 {
+                let at = (y * 2052 + x) * 4;
+                pixels[at..at + 4].copy_from_slice(&[2 + 8 * (x % 2) as u8, 8 * y as u8, 0, 255]);
+            }
+        }
+        let pixels = Arc::new(pixels);
+        let capture = |x, w| {
+            let selection = region(dvec2(1026., 6.), dvec2(x, 1.), dvec2(w, 4.));
+            let frame = Frame { width: 2052, height: 12, rgba: pixels.clone() };
+            save_frame(&config, selection, frame).expect("the selected crop must be written").0
+        };
+        let scaled = capture(1., 1024.);
+        assert_eq!((scaled.width, scaled.height), (1024, 4), "the spool must hold the fitted crop");
+        assert_eq!(scaled.pixel_crop, [2, 2, 2048, 8], "fitting must preserve the full-resolution pixel crop");
+        assert_eq!((scaled.frame_size, scaled.window_size), ([2052, 12], [1026., 6.]), "frame pixels and window points must retain their own sizes");
+        assert_eq!((scaled.coordinate_space.as_str(), scaled.crop), ("window_layout", [1., 1., 1024., 4.]), "the selected layout rectangle must remain exact");
+        let fitted = saved_pixels(&scaled);
+        assert_eq!((&fitted[..4], &fitted[fitted.len() - 4..]), (&[6, 20, 0, 255][..], &[6, 68, 0, 255][..]),
+            "the fitted pixels must average the selection without sampling its border");
+
+        let small = capture(1.25, 4.);
+        assert_eq!(small.pixel_crop, [2, 2, 9, 8], "fractional selection edges must still round outwards in frame pixels");
+        assert_eq!((small.width, small.height), (9, 8), "a small crop must pass through at its own size");
+        let expected: Vec<u8> = (2..10).flat_map(|row| &pixels[(2052 * row + 2) * 4..(2052 * row + 11) * 4]).copied().collect();
+        assert_eq!(saved_pixels(&small), expected, "a small crop must preserve every selected pixel");
+
+        // A legal private PNG chunk, sparse on disk. Its CRC covers "feEd"
+        // followed by exactly 32 MiB of zeroes. The image itself is one row.
+        let png = Cx::encode_rgba_as_png(2048, 1, &vec![75; 2048 * 4]).unwrap();
+        let end = png.len() - 12; // IEND
+        let path = config.dir.join("wide.png");
+        let mut file = fs::File::create_new(&path).unwrap();
+        file.write_all(&png[..end]).unwrap();
+        let padding = 32u32 << 20;
+        file.write_all(&padding.to_be_bytes()).unwrap();
+        file.write_all(b"feEd").unwrap();
+        file.seek(SeekFrom::Current(i64::from(padding))).unwrap();
+        file.write_all(&0x952b_b3bcu32.to_be_bytes()).unwrap();
+        file.write_all(&png[end..]).unwrap();
+        drop(file);
+        let imported = import_image(&config, ImageSource::Path(path)).expect("a real PNG over 32 MiB must be imported").0;
+        assert_eq!((imported.width, imported.height), (1024, 1), "an imported image must use the same model edge");
+        assert_eq!((imported.frame_size, imported.pixel_crop), ([2048, 1], [0, 0, 2048, 1]), "import coordinates must describe the original image");
+        assert_eq!((imported.coordinate_space.as_str(), imported.crop), ("image_pixels", [0., 0., 2048., 1.]), "import geometry must stay in original image pixels");
+        assert_eq!(saved_pixels(&imported), vec![75; 1024 * 4], "a large import must save the fitted pixels");
+
+        let mut over_wide = png;
+        over_wide[16..20].copy_from_slice(&16385u32.to_be_bytes());
+        let source = ImageSource::Bytes { name: "wide.png".into(), bytes: over_wide.into() };
+        assert_eq!(import_image(&config, source).unwrap_err(), "over 16384 pixels a side", "an import must use the chat decoder's plain size refusal");
+        fs::remove_dir_all(&config.dir).unwrap();
     }
 }

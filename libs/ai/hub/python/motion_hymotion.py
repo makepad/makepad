@@ -2,7 +2,7 @@
 """motion_hymotion.py <in.glb> <out.glb> — the motion domain's box script.
 
 Rigged GLB + params sidecar in, animated GLB with NAMED in-place clips out.
-Two proven stages from the motion campaign (local/agent_state/motion-123.md):
+Two proven stages from the motion campaign:
 
 1. HY-Motion text-to-motion (C:\\ai\\HY-Motion-1.0, THIS interpreter =
    venv_hymotion): one prompt line per requested clip ("text#frames#id" in

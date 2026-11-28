@@ -49,7 +49,7 @@ pub struct Card {
     pub fields: Vec<Field>,
     /// The confirm button's label.
     pub confirm: String,
-    /// What the tool does, in a sentence.
+    /// What the tool does, followed by a preview of any fixed object lists with display text.
     pub why: String,
     /// Prefilled arguments the card does not show, passed through unchanged.
     pub fixed: Vec<(String, Value)>,
@@ -134,6 +134,69 @@ enum Shape {
 fn is_string_array(property: &Value) -> bool {
     type_names(property) == ["array"]
         && property.get("items").is_some_and(|items| items.get("enum").is_none() && type_names(items) == ["string"])
+}
+
+fn fixed_item_text<'a>(item: &'a Value, schema: &Value) -> Option<&'a str> {
+    let nonempty = |value: &'a Value| value.as_str().filter(|s| !s.trim_start().is_empty());
+    if let Some(Value::Obj(properties)) = schema.get("properties") {
+        if !properties.is_empty() {
+            let text = |key: &str, property: &Value| {
+                let types = type_names(property);
+                if types.contains(&"string") && property.get("enum").is_none() {
+                    item.get(key).and_then(nonempty)
+                } else {
+                    None
+                }
+            };
+            let required = schema.get("required").and_then(Value::as_arr).unwrap_or(&[]);
+            return required.iter().filter_map(Value::as_str).find_map(|key| {
+                let (_, property) = properties.iter().find(|(name, _)| name == key)?;
+                text(key, property)
+            }).or_else(|| properties.iter().find_map(|(key, property)| text(key, property)));
+        }
+    }
+    let Value::Obj(entries) = item else { return None };
+    entries.iter().find_map(|(_, value)| nonempty(value))
+}
+
+fn summarize_fixed_items(fixed: &[(String, Value)], properties: &[(String, Value)]) -> Option<String> {
+    const MAX_ITEMS: usize = 6;
+    const MAX_CHARS: usize = 64;
+    let mut summary = String::new();
+    for (arg, value) in fixed {
+        let Value::Arr(items) = value else { continue };
+        if items.is_empty() || !items.iter().all(|item| matches!(item, Value::Obj(_))) {
+            continue;
+        }
+        let Some((_, property)) = properties.iter().find(|(name, _)| name == arg) else { continue };
+        let schema = property.get("items").unwrap_or(&Value::Null);
+        let mut shown = 0;
+        let mut remaining = 0;
+        for (index, item) in items.iter().enumerate() {
+            let Some(text) = fixed_item_text(item, schema) else { continue };
+            if shown == 0 {
+                summary.push_str(&format!("\n{} ({}):", humanise(arg), items.len()));
+            }
+            let mut chars = text.split_whitespace().enumerate().flat_map(|(i, word)| {
+                (i > 0).then_some(' ').into_iter().chain(word.chars())
+            });
+            let mut excerpt: String = chars.by_ref().take(MAX_CHARS).collect();
+            if chars.next().is_some() {
+                excerpt.pop();
+                excerpt.push('…');
+            }
+            summary.push_str(&format!("\n{}. {excerpt}", index + 1));
+            shown += 1;
+            if shown == MAX_ITEMS {
+                remaining = items.len() - index - 1;
+                break;
+            }
+        }
+        if remaining > 0 {
+            summary.push_str(&format!("\n… and {remaining} more"));
+        }
+    }
+    (!summary.is_empty()).then_some(summary)
 }
 
 /// A free-form map (`{"type": "object"}` with no declared properties). When
@@ -316,6 +379,10 @@ impl Card {
         }
         let title = layout.map(|l| l.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| humanise(tool));
         let confirm = layout.map(|l| l.confirm.clone()).filter(|c| !c.is_empty()).unwrap_or_else(|| DEFAULT_CONFIRM.to_string());
+        let mut why = first_sentence(description);
+        if let Some(summary) = summarize_fixed_items(&fixed, properties) {
+            why.push_str(&summary);
+        }
         // The keys of an expanded map are typed in the schema the edits are checked against.
         for (arg, types) in typed_maps {
             let Value::Obj(top) = &mut input else { break };
@@ -325,7 +392,7 @@ impl Card {
                 map.push(("properties".into(), Value::Obj(types)));
             }
         }
-        Ok(Card { tool: tool.to_string(), title, fields, confirm, why: first_sentence(description), fixed, problem: None, maps, schema: input })
+        Ok(Card { tool: tool.to_string(), title, fields, confirm, why, fixed, problem: None, maps, schema: input })
     }
 
     /// The values as prefilled.
@@ -623,6 +690,64 @@ mod tests {
         assert_eq!(card.args(&values).get("tags"), Some(&Value::Arr(vec![s("one"), s("two"), s("three")])));
         values.lines[at] = "  ".into();
         assert!(card.args(&values).get("tags").is_none(), "an empty optional list is left out");
+    }
+
+    #[test]
+    fn card_summarizes_fixed_prompts_without_comma_splitting() {
+        let schema = r#"{"type":"object","properties":{
+            "prompt":{"type":"string"},
+            "prompts":{"type":"array","minItems":1,"items":{"type":"object","properties":{
+                "title":{"type":"string"},"prompt":{"type":"string"},"seed":{"type":"integer"}
+            },"required":["prompt"]}},
+            "duration":{"type":"number"},
+            "resolution":{"type":"string","enum":["standard","hd"]},
+            "model":{"type":"string","enum":["auto","fasth3-4step"]}
+        }}"#;
+        let prompts = parse(br#"[
+            {"title":"Rain","prompt":"neon city, rain","seed":17},
+            {"prompt":"laser tunnel,\n  blue light"},
+            {"prompt":"chrome ocean, slow waves"}
+        ]"#).unwrap();
+        let prefill = obj(vec![("prompts", prompts.clone())]);
+        let card = Card::for_schema("vj_video_generate", "Generate video clips.", schema, None, &prefill).unwrap();
+        assert_eq!(card.fixed, vec![("prompts".into(), prompts.clone())]);
+        assert_eq!(card.why, "Generate video clips.\nPrompts (3):\n1. neon city, rain\n2. laser tunnel, blue light\n3. chrome ocean, slow waves");
+        assert_eq!(card.fields.iter().map(Field::arg).collect::<Vec<_>>(), ["prompt", "duration", "resolution", "model"]);
+        let mut edits = card.values();
+        edits.lines[1] = "2.5".into();
+        edits.picks = vec![2, 2];
+        let args = card.args(&edits);
+        assert!(args.get("prompt").is_none());
+        assert_eq!(args.get("prompts"), Some(&prompts));
+        assert_eq!(args.get("duration"), Some(&Value::F64(2.5)));
+        assert_eq!(args.get("resolution"), Some(&s("hd")));
+        assert_eq!(args.get("model"), Some(&s("fasth3-4step")));
+        assert!(card.validate(&args).is_ok());
+
+        let schema = schema.replace("\"prompt\"", "\"caption\"").replace("\"prompts\"", "\"scenes\"");
+        let summary = |schema: &str, scenes| {
+            let prefill = obj(vec![("scenes", Value::Arr(scenes))]);
+            Card::for_schema("sequence", "Draw.", schema, None, &prefill).unwrap().why
+        };
+        let mut scenes = vec![obj(vec![("title", s("Short title")), ("caption", s("é".repeat(65)))])];
+        scenes.extend((2..=8).map(|i| obj(vec![("caption", s(format!("Scene {i}")))])));
+        assert_eq!(summary(&schema, scenes), format!("Draw.\nScenes (8):\n1. {}…\n2. Scene 2\n3. Scene 3\n4. Scene 4\n5. Scene 5\n6. Scene 6\n… and 2 more", "é".repeat(63)));
+
+        for (total, captioned, expected) in [
+            (7, 2..=7, "2. B\n3. C\n4. D\n5. E\n6. F\n7. G"),
+            (8, 1..=5, "1. A\n2. B\n3. C\n4. D\n5. E"),
+            (8, 2..=8, "2. B\n3. C\n4. D\n5. E\n6. F\n7. G\n… and 1 more"),
+        ] {
+            let scenes = ["A", "B", "C", "D", "E", "F", "G", "H"][..total]
+                .iter().enumerate().map(|(i, caption)| {
+                    if captioned.contains(&(i + 1)) { obj(vec![("caption", s(*caption))]) } else { obj(vec![]) }
+                }).collect();
+            assert_eq!(summary(&schema, scenes), format!("Draw.\nScenes ({total}):\n{expected}"));
+        }
+
+        let nullable = schema.replace(r#""caption":{"type":"string"}"#, r#""caption":{"type":["string","null"]}"#);
+        let scenes = vec![obj(vec![("caption", Value::Null)]), obj(vec![("caption", s("Rain"))])];
+        assert_eq!(summary(&nullable, scenes), "Draw.\nScenes (2):\n2. Rain");
     }
 
     #[test]

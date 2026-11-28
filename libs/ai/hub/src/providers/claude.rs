@@ -29,7 +29,7 @@
 
 use crate::chat_wire::{ChatRole, ProviderAvailability, ProviderKind};
 use crate::providers::cli::{categorize_cli_failure, cli_command, turn_dir, CliTurn};
-use crate::providers::provider::{tool_image_media_type, validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
+use crate::providers::provider::{tool_image_media_type, validate_tool_image_payloads, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
 
@@ -139,6 +139,10 @@ impl ClaudeCodeChatProvider {
         self
     }
 
+    fn take_image_message(&mut self, prompt: &str) -> String {
+        image_message(prompt, &std::mem::take(&mut self.images))
+    }
+
     fn begin_live(&mut self, cli: PathBuf, input: &TurnInput) -> Result<(), String> {
         if self.session.as_mut().is_some_and(|s| s.system != input.system || !s.cli.alive()) {
             if let Some(session) = self.session.take() {
@@ -152,7 +156,7 @@ impl ClaudeCodeChatProvider {
             // per turn goes in the turn.
             prompt = format!("[context]\n{}\n{prompt}", input.dynamic_context);
         }
-        let line = image_message(&prompt, &std::mem::take(&mut self.images));
+        let line = self.take_image_message(&prompt);
         if self.session.is_none() {
             let mut args = build_args_with_mcp(&self.model, &None, &input.system, self.mcp.as_ref());
             args.insert(1, "--input-format".into());
@@ -550,8 +554,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
                 detail: p.display().to_string(),
             },
             None => ProviderAvailability::Unavailable {
-                reason: "Claude Code CLI not found on this host (set CLAUDE_CODE_PATH or install claude)"
-                    .to_string(),
+                reason: super::unavailable_reason("Claude Code CLI not found on this host (set CLAUDE_CODE_PATH or install claude)"),
             },
         }
     }
@@ -561,7 +564,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
             return Err("a turn is already in flight".to_string());
         }
         let Some(cli) = self.cli.clone() else {
-            return Err("Claude Code CLI not found".to_string());
+            return Err(super::unavailable_reason("Claude Code CLI not found"));
         };
         if self.live {
             return self.begin_live(cli, input);
@@ -572,13 +575,12 @@ impl ChatProvider for ClaudeCodeChatProvider {
             args.push("--effort".into());
             args.push(effort.clone());
         }
-        let images = std::mem::take(&mut self.images);
-        if !images.is_empty() {
+        if !self.images.is_empty() {
             // Images need the structured input: one user message whose
             // content is the prompt plus the image blocks.
             args.insert(1, "--input-format".into());
             args.insert(2, "stream-json".into());
-            prompt = image_message(&prompt, &images);
+            prompt = self.take_image_message(&prompt);
         }
         let dir = turn_dir("claude");
         let mut command = cli_command(&cli, &dir);
@@ -605,7 +607,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
     }
 
     fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
-        validate_tool_images(&images)?;
+        validate_tool_image_payloads(&images)?;
         if self.turn.is_some() || self.session.as_ref().is_some_and(|s| s.parse.is_some()) {
             return Err("images must be attached between turns".into());
         }
@@ -650,6 +652,26 @@ fn usage_note(result: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_six_picture_line_reaches_claude_stdin_in_order() {
+        let pictures = super::super::provider::six_cli_pictures();
+        let mut provider = ClaudeCodeChatProvider::new(None);
+        provider.attach_tool_images(pictures.clone()).expect("Claude must accept all six pictures");
+        let line = provider.take_image_message("compare");
+        let user = json::parse(line.as_bytes()).expect("Claude stdin must be stream JSON");
+        let blocks = user.get("message").and_then(|m| m.get("content")).and_then(Value::as_arr)
+            .expect("the user message must carry content blocks");
+        assert_eq!(blocks.len(), 1 + 2 * pictures.len(), "each picture must follow the prompt with a label and an image");
+        for (pair, picture) in blocks[1..].chunks_exact(2).zip(&pictures) {
+            assert_eq!(pair[0].get("text").and_then(Value::as_str), Some(format!("[image: {}]", picture.label).as_str()),
+                "each Claude label must appear in selection order");
+            let data = pair[1].get("source").and_then(|s| s.get("data")).and_then(Value::as_str)
+                .expect("each Claude label must be followed by image data");
+            assert_eq!(makepad_base64::base64_decode(data.as_bytes()).unwrap().as_slice(), &*picture.png,
+                "Claude must receive the original picture bytes after the corresponding label");
+        }
+    }
 
     #[test]
     fn the_prompt_is_not_in_argv() {

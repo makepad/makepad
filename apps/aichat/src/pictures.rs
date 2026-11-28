@@ -93,6 +93,9 @@ mod tests {
         fn poll(&mut self) -> Vec<ModelEvent> {
             std::mem::take(&mut self.0.lock().unwrap().out)
         }
+        fn admit_images(&self, _images: &[ModelImage]) -> Result<(), String> {
+            Ok(())
+        }
         fn attach_images(&mut self, images: Vec<ModelImage>) -> Result<(), String> {
             self.0.lock().unwrap().images.extend(images);
             Ok(())

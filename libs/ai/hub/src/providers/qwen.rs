@@ -34,10 +34,13 @@
 //! honestly.
 
 use crate::chat_wire::{ChatMessage, ChatRole, ProviderAvailability, ProviderKind, ServingFacts};
+use crate::client::RequestPolicy;
+use crate::hub_chat::{no_machine_model, ChatReach};
 use crate::providers::fleet_http;
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Transport seam so the provider is deterministic under test. The real
@@ -54,7 +57,7 @@ pub trait FleetTransport {
     fn post_json_detailed(&mut self, url: &str, body: &Value) -> Result<Value, FleetError> {
         self.post_json(url, body).map_err(FleetError::Other)
     }
-    /// Admission scheduling clock; scripted transports can advance fake time.
+    /// Retry scheduling clock; scripted transports can advance fake time.
     fn now(&self) -> Instant { Instant::now() }
 }
 
@@ -65,6 +68,8 @@ pub enum FleetError {
     /// A complete rejection. `no_job` requires an absent/null job id and an
     /// explicit JSON error, or the typed low-level empty 503 refusal.
     Http { status: u16, reason: String, no_job: bool },
+    /// Transport failed without proving whether a request reached the hub.
+    Transport(String),
     Other(String),
 }
 
@@ -72,7 +77,7 @@ impl std::fmt::Display for FleetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Http { status, reason, .. } => write!(f, "http {status}: {reason}"),
-            Self::Connection(s) | Self::Other(s) => f.write_str(s),
+            Self::Connection(s) | Self::Transport(s) | Self::Other(s) => f.write_str(s),
         }
     }
 }
@@ -147,6 +152,55 @@ impl FleetTransport for HttpFleetTransport {
     }
 }
 
+impl RequestPolicy {
+    fn chat_request(&self, method: &str, url: &str, body: Option<&Value>) -> Result<Value, FleetError> {
+        if !self.is_on_device() {
+            return HttpFleetTransport::request(method, url, body);
+        }
+        use crate::http_client::{BearerAuth, HttpClientRequest};
+        let secret = std::env::var("MAKEPAD_AI_HUB_SECRET").ok();
+        let token = secret.as_deref().map(str::trim);
+        if token.is_some_and(|s| s.contains(['\r', '\n'])) {
+            return Err(FleetError::Other("bearer credential contains a newline".into()));
+        }
+        let text = body.map(Value::to_json);
+        let mut request = match &text {
+            Some(text) => HttpClientRequest::post(url, "application/json", text.as_bytes()),
+            None => HttpClientRequest::get(url),
+        };
+        request.bearer = token.map(|token| BearerAuth { host_suffix: "127.0.0.1", token });
+        let transport_error = |e: crate::error::AssetAiError| match e {
+            crate::error::AssetAiError::HttpTransport(_) => FleetError::Transport(e.to_string()),
+            _ => FleetError::Other(e.to_string()),
+        };
+        let reply = self.fetch(&request).map_err(transport_error)?;
+        let status = reply.status;
+        let value = reply.read_body_to_vec(crate::client::MAX_JSON_BODY).map_err(transport_error)
+            .and_then(|bytes| if bytes.is_empty() { Ok(Value::Null) } else {
+                json::parse(&bytes).map_err(|e| FleetError::Other(format!("response json: {e}")))
+            });
+        // The status still applies when the error body is missing or unreadable.
+        // Without a complete refusal it cannot authorize another POST.
+        let value = if (200..300).contains(&status) { value? } else { value.unwrap_or(Value::Null) };
+        HttpFleetTransport::response(status, value, body, token)
+    }
+}
+
+impl FleetTransport for RequestPolicy {
+    fn get_json(&mut self, url: &str) -> Result<Value, String> {
+        self.get_json_detailed(url).map_err(|e| e.to_string())
+    }
+    fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, String> {
+        self.post_json_detailed(url, body).map_err(|e| e.to_string())
+    }
+    fn get_json_detailed(&mut self, url: &str) -> Result<Value, FleetError> {
+        self.chat_request("GET", url, None)
+    }
+    fn post_json_detailed(&mut self, url: &str, body: &Value) -> Result<Value, FleetError> {
+        self.chat_request("POST", url, Some(body))
+    }
+}
+
 fn bounded_reason(reason: &str) -> String {
     let mut out: String = reason.chars().take(384).map(|c| if c.is_control() { ' ' } else { c }).collect();
     if reason.chars().count() > 384 { out.push('…'); }
@@ -164,7 +218,7 @@ struct PendingSubmission {
     model: String,
     body: Value,
     inferred_open_think: bool,
-    delay: Duration,
+    retries: u8,
     retry_at: Instant,
     last_refusal: String,
     note: Option<String>,
@@ -208,9 +262,21 @@ struct ActiveJob {
     /// Consecutive failed polls. A single dropped TCP connect must not
     /// kill a long generation turn; the job keeps running server-side.
     poll_fails: u8,
+    retry_at: Option<Instant>,
 }
 
-/// Consecutive poll failures tolerated before the turn is declared dead.
+const MACHINE_WAIT_NOTE: &str = "waiting for this computer's AI Hub";
+
+fn backoff(retries: u8, first: Duration, ceiling: Duration) -> Duration {
+    first.saturating_mul(2u32.saturating_pow(retries.into())).min(ceiling)
+}
+
+fn machine_backoff(retries: u8) -> Duration {
+    // Ten seconds is the retry pace for a busy hub, not a limit on the wait.
+    backoff(retries, Duration::from_millis(250), Duration::from_secs(10))
+}
+
+/// Consecutive LAN poll failures tolerated before the turn is declared dead.
 /// Connect timeouts run ~3 s each, so this rides out a ~1 minute node
 /// stall (a busy box mid-import evicts and reloads the LLM; the job
 /// itself survives server-side).
@@ -334,6 +400,7 @@ impl FleetPickCache {
 
 pub struct FleetQwenChatProvider<T: FleetTransport> {
     transport: T,
+    reach: ChatReach,
     /// Node base URLs from LAN discovery, e.g. `http://192.0.2.80:8123`.
     bases: Vec<String>,
     /// Exact fleet model requested by the caller. `None` keeps the normal
@@ -381,11 +448,21 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
     /// and the box prefills only the delta (aicore §7). The session's own
     /// history strips thinking for storage and display; this mirror exists
     /// because the KV cannot (the recurrent layers never rewind).
-    wire: Vec<WireTurn>,
+    wire: Vec<Arc<WireTurn>>,
     /// Pictures for the next turn's newest row, labelled.
     pending_images: Vec<RowPicture>,
     /// Re-send pictures on their original history rows to preserve the KV prefix.
-    row_images: Vec<(ChatRole, String, Vec<RowPicture>)>,
+    row_images: Vec<PictureRow>,
+}
+
+type PictureRow = (ChatRole, Arc<String>, Vec<RowPicture>);
+
+/// A turn can evict earlier pictures and clear the wire mirror. Keep the
+/// original rows, sharing their text and encoded picture buffers.
+pub(crate) struct FleetTranscriptMark {
+    wire: Vec<Arc<WireTurn>>,
+    row_images: Vec<PictureRow>,
+    pending_images: Vec<RowPicture>,
 }
 
 /// A picture riding on one history row: what it shows (from the tool or
@@ -393,7 +470,7 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
 #[derive(Clone, Debug, PartialEq)]
 struct RowPicture {
     label: String,
-    b64: String,
+    b64: Arc<String>,
 }
 
 /// What an older tool result's pictures leave behind once a newer result
@@ -424,24 +501,37 @@ struct WireTurn {
 }
 
 impl<T: FleetTransport> FleetQwenChatProvider<T> {
+    pub(crate) fn checkpoint(&self) -> FleetTranscriptMark {
+        FleetTranscriptMark {
+            wire: self.wire.clone(),
+            row_images: self.row_images.clone(),
+            pending_images: self.pending_images.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, mark: FleetTranscriptMark) {
+        self.cancel();
+        self.wire = mark.wire;
+        self.row_images = mark.row_images;
+        self.pending_images = mark.pending_images;
+    }
+
     pub fn new(transport: T, bases: Vec<String>) -> FleetQwenChatProvider<T> {
-        Self::new_inner(transport, bases)
+        Self::for_reach(transport, bases, ChatReach::Lan)
     }
 
     fn conversation_id() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        format!("{:016x}{:08x}", t as u64, std::process::id())
+        format!("{:016x}{:08x}{:x}", t as u64, std::process::id(), seq)
     }
 
-    fn new_inner(transport: T, bases: Vec<String>) -> FleetQwenChatProvider<T> {
-        FleetQwenChatProvider::with_pick_cache(
-            transport,
-            bases,
-            std::sync::Arc::new(FleetPickCache::new()),
-        )
+    pub(crate) fn for_reach(transport: T, bases: Vec<String>, reach: ChatReach) -> Self {
+        Self::with_cache(transport, bases, std::sync::Arc::default(), reach)
     }
 
     /// Share one node/model pick (and one dead-node list) across providers.
@@ -450,10 +540,21 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         bases: Vec<String>,
         picks: std::sync::Arc<FleetPickCache>,
     ) -> FleetQwenChatProvider<T> {
-        let mut bases = bases;
-        crate::hub_order::order(&mut bases);
+        Self::with_cache(transport, bases, picks, ChatReach::Lan)
+    }
+
+    fn with_cache(transport: T, mut bases: Vec<String>, picks: std::sync::Arc<FleetPickCache>, reach: ChatReach) -> Self {
+        match reach {
+            ChatReach::Machine => {
+                bases.retain(|base| RequestPolicy::check_on_device_url(base).is_ok());
+                bases.sort();
+                bases.dedup();
+            }
+            ChatReach::Lan => crate::hub_order::order(&mut bases),
+        }
         FleetQwenChatProvider {
             transport,
+            reach,
             bases,
             preferred_model: None,
             wanted_listed: Vec::new(),
@@ -493,7 +594,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     /// labels as a note; the person's own pictures (references) stay.
     fn remember_images(&mut self, input: &TurnInput, fresh_reader: bool) -> Result<(), String> {
         self.row_images.retain(|(role, text, _)| {
-            input.messages.iter().any(|m| m.role == *role && m.text == *text)
+            input.messages.iter().any(|m| m.role == *role && m.text == text.as_str())
         });
         if self.pending_images.is_empty() { return Ok(()); }
         // Pictures belong to the row they came with: the person's newest line,
@@ -503,15 +604,15 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         let row = input.messages.last()
             .filter(|m| matches!(m.role, ChatRole::User | ChatRole::Tool))
             .ok_or("pictures go with a user line or a tool result")?;
-        let index = self.row_images.iter().position(|(role, text, _)| *role == row.role && *text == row.text)
+        let index = self.row_images.iter().position(|(role, text, _)| *role == row.role && text.as_str() == row.text)
             .unwrap_or_else(|| {
-                self.row_images.push((row.role, row.text.clone(), Vec::new()));
+                self.row_images.push((row.role, Arc::new(row.text.clone()), Vec::new()));
                 self.row_images.len() - 1
             });
         if fresh_reader && row.role == ChatRole::Tool {
             for (role, _, pictures) in self.row_images.iter_mut() {
                 if *role == ChatRole::Tool {
-                    pictures.iter_mut().for_each(|picture| picture.b64.clear());
+                    pictures.iter_mut().for_each(|picture| picture.b64 = Arc::default());
                 }
             }
         }
@@ -576,6 +677,11 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         self
     }
 
+    pub(crate) fn waiting_for_machine(&self) -> bool {
+        self.reach == ChatReach::Machine
+            && (self.pending.is_some() || self.active.as_ref().is_some_and(|job| job.retry_at.is_some()))
+    }
+
     fn cancelled(&self) -> bool {
         self.cancel_signal.as_ref().is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
     }
@@ -600,7 +706,12 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     }
 
     fn probe(&mut self) -> Result<(String, String, bool), String> {
-        if let Some(home) = &self.home {
+        // A launch with no model (`super::no_model`) asks no hub.
+        if let Some(reason) = super::no_model() {
+            return Err(reason.to_string());
+        }
+        // The cached pick holds only a model id. On-device turns verify the current backend.
+        if let Some(home) = self.home.as_ref().filter(|_| self.reach == ChatReach::Lan) {
             if self.bases.contains(&home.0) && !self.picks.is_dead(&home.0)
                 && crate::fleet::role_allows(&home.0, "chat")
                 && self.preferred_model.as_deref().is_none_or(|wanted| wanted == home.1)
@@ -608,7 +719,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 return Ok(home.clone());
             }
         }
-        if let Some(pick) = self.picks.fresh() {
+        if let Some(pick) = self.picks.fresh().filter(|_| self.reach == ChatReach::Lan) {
             if self.bases.contains(&pick.0)
                 && crate::fleet::role_allows(&pick.0, "chat")
                 && self.preferred_model.as_deref().is_none_or(|wanted| wanted == pick.1) {
@@ -616,6 +727,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             }
         }
         if self.bases.is_empty() {
+            if self.reach == ChatReach::Machine { return Err(no_machine_model(self.preferred_model.as_deref())); }
             return Err(format!(
                 "no fleet nodes heard on the LAN yet (listening for fleet '{}')",
                 crate::discovery::wanted_fleet()
@@ -627,7 +739,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if let Some(last) = self.picks.last_base() {
             // The last good node goes first, but never ahead of a better tier
             // (this machine's hub, a pinned hub): the ranking is the election.
-            let better_tier_exists = order.first().is_some_and(|f| crate::hub_order::tier(f) < crate::hub_order::tier(&last));
+            let better_tier_exists = self.reach == ChatReach::Lan
+                && order.first().is_some_and(|f| crate::hub_order::tier(f) < crate::hub_order::tier(&last));
             if let Some(i) = order.iter().position(|b| b == &last).filter(|_| !better_tier_exists) {
                 let good = order.remove(i);
                 order.insert(0, good);
@@ -647,7 +760,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         // over for a lane-rich LAN node. A tier that yields nothing falls to the next.
         let mut tiers: Vec<(u8, Vec<String>)> = Vec::new();
         for base in order {
-            let t = crate::hub_order::tier(&base);
+            let t = if self.reach == ChatReach::Machine { 0 } else { crate::hub_order::tier(&base) };
             match tiers.last_mut() {
                 Some((last, group)) if *last == t => group.push(base),
                 _ => tiers.push((t, vec![base])),
@@ -679,6 +792,13 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             self.picks.remember(base.clone(), model.clone(), text_fallback);
             return Ok((base, model, text_fallback));
         }
+        }
+        if self.reach == ChatReach::Machine {
+            return Err(if notes.reasons.is_empty() {
+                no_machine_model(self.preferred_model.as_deref())
+            } else {
+                notes.reasons.join("; ")
+            });
         }
         // STALE-OK: the LAN to a busy GPU box drops the odd connect, and a
         // probe window can catch two drops in a row. A node that served
@@ -779,7 +899,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             reasons.push(format!("{base}: malformed models response"));
             return None;
         };
-        if !has_chat {
+        if !has_chat && self.reach == ChatReach::Lan {
             reasons.push(format!("{base}: no chat capability (will try text models)"));
         }
         let mut preferred_chat: Option<String> = None;
@@ -792,6 +912,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                 continue;
             };
             if !matches!(domain, "chat" | "text") { continue; }
+            if !self.reach.allows_backend(row.get("backend").and_then(Value::as_str).unwrap_or("")) { continue; }
             if wanted == Some(id) && !self.wanted_listed.iter().any(|b| b == base) {
                 self.wanted_listed.push(base.to_string());
             }
@@ -863,18 +984,23 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
     }
 
     fn wait_submission(&mut self, mut pending: PendingSubmission, reason: String) {
-        let reason = bounded_reason(&reason);
-        if pending.delay.is_zero() {
-            pending.delay = Duration::from_millis(500);
+        let delay = if self.reach == ChatReach::Machine {
+            if pending.retries == 0 {
+                pending.note = Some(MACHINE_WAIT_NOTE.into());
+            }
+            machine_backoff(pending.retries)
         } else {
-            pending.delay = (pending.delay * 2).min(Duration::from_secs(8));
-        }
-        let jitter = pending.body.get("seed").and_then(Value::as_u64).unwrap_or(0) % 251;
-        let delay = pending.delay + Duration::from_millis(jitter);
+            let reason = bounded_reason(&reason);
+            let jitter = pending.body.get("seed").and_then(Value::as_u64).unwrap_or(0) % 251;
+            let delay = backoff(pending.retries, Duration::from_millis(500), Duration::from_secs(8))
+                + Duration::from_millis(jitter);
+            pending.note = Some(format!("waiting for {} admission (retry in {:.1}s): {reason}",
+                pending.model, delay.as_secs_f64()));
+            pending.last_refusal = reason;
+            delay
+        };
         pending.retry_at = self.transport.now() + delay;
-        pending.note = Some(format!("waiting for {} admission (retry in {:.1}s): {reason}",
-            pending.model, delay.as_secs_f64()));
-        pending.last_refusal = reason;
+        pending.retries = pending.retries.saturating_add(1);
         self.pending = Some(pending);
     }
 
@@ -890,6 +1016,8 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             Ok(value) => value,
             Err(error) => {
                 match &error {
+                    FleetError::Http { status: 429 | 503, no_job: true, .. } if self.reach == ChatReach::Machine => {}
+                    _ if self.reach == ChatReach::Machine => return Err(format!("{}: {error}", pending.base)),
                     FleetError::Http { status: 409 | 429 | 503, reason, no_job: true }
                         if crate::error::AssetAiError::admission_refusal(reason).is_some() => {}
                     // A model disabled at this peer can still run at another peer.
@@ -903,7 +1031,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
                     _ => return Err(format!("{}: {error}", pending.base)),
                 }
                 let reason = format!("{}: {error}", pending.base);
-                if pending.delay.is_zero() {
+                if pending.retries == 0 {
                     eprintln!("waiting for {} admission: {}", pending.model, bounded_reason(&reason));
                 }
                 self.wait_submission(pending, reason);
@@ -917,11 +1045,12 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
             .unwrap_or(pending.inferred_open_think);
         self.home = Some((pending.base.clone(), pending.model.clone(),
             pending.body.get("domain").and_then(Value::as_str) == Some("text")));
+        if self.reach == ChatReach::Machine { pending.retries = 0; }
         self.active = Some(ActiveJob {
             base: pending.base.clone(), submission: pending, job, delivered: 0, finished: false,
             last_note: String::new(), gen_tokens: 0, think_tokens: None,
             think_opened: false, open_think, visible_tokens: None,
-            prefix_ingested: None, poll_fails: 0,
+            prefix_ingested: None, poll_fails: 0, retry_at: None,
         });
         if self.cancelled() { self.cancel(); }
         Ok(())
@@ -965,6 +1094,15 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         if now < pending.retry_at {
             self.pending = Some(pending);
             return Vec::new();
+        }
+        if self.reach == ChatReach::Machine {
+            return match self.submit(pending) {
+                Ok(()) => Vec::new(),
+                Err(error) => {
+                    self.wire.clear();
+                    vec![ProviderEvent::Error(error)]
+                }
+            };
         }
         // Revalidate the SAME model; no cached/stale pick may override a
         // current refusal or send this logical turn to a different model.
@@ -1100,6 +1238,10 @@ pub struct ChatOffer {
 /// including the hub's Claude (`claude-cli`), which the election only gives a
 /// client that names it. Two GETs (`/health`, `/models`), nothing loaded.
 pub fn chat_offers<T: FleetTransport>(transport: &mut T, base: &str) -> Result<Vec<ChatOffer>, String> {
+    chat_offers_for(transport, base, ChatReach::Lan)
+}
+
+pub(crate) fn chat_offers_for<T: FleetTransport>(transport: &mut T, base: &str, reach: ChatReach) -> Result<Vec<ChatOffer>, String> {
     if !crate::fleet::role_allows(base, "chat") {
         return Err(format!("{base}: role excludes chat"));
     }
@@ -1126,11 +1268,11 @@ pub fn chat_offers<T: FleetTransport>(transport: &mut T, base: &str) -> Result<V
         if row.get("state").and_then(Value::as_str).is_some_and(|state| !matches!(state, "loaded" | "ready")) {
             continue;
         }
-        if offers.iter().any(|o: &ChatOffer| o.model == id) {
+        let backend = row.get("backend").and_then(Value::as_str).unwrap_or("");
+        if !reach.allows_backend(backend) || offers.iter().any(|o: &ChatOffer| o.model == id) {
             continue;
         }
-        let backend = row.get("backend").and_then(Value::as_str).unwrap_or("").to_string();
-        offers.push(ChatOffer { model: id.to_string(), backend });
+        offers.push(ChatOffer { model: id.to_string(), backend: backend.to_string() });
     }
     Ok(offers)
 }
@@ -1197,7 +1339,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         self.pending_images = images.into_iter().map(|image| RowPicture {
             label: image.label,
             b64: String::from_utf8(makepad_base64::base64_encode(&image.png, &makepad_base64::BASE64_STANDARD))
-                .expect("base64 is ASCII"),
+                .expect("base64 is ASCII").into(),
         }).collect();
         Ok(())
     }
@@ -1206,10 +1348,10 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         if self.active.is_some() || self.pending.is_some() {
             return Err("a turn is already in flight".to_string());
         }
-        tap_turn_input(input);
+        if self.reach == ChatReach::Lan { tap_turn_input(input); }
         let (base, model, text_fallback) = self.probe()?;
         if text_fallback && (!self.pending_images.is_empty() || self.row_images.iter().any(|(role, text, _)| {
-            input.messages.iter().any(|m| m.role == *role && m.text == *text)
+            input.messages.iter().any(|m| m.role == *role && m.text == text.as_str())
         })) {
             return Err("this node's model cannot look at pictures".into());
         }
@@ -1253,14 +1395,14 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 }
                 role => crate::local_llm::wire_turn(role, &m.text),
             };
-            self.wire.push(WireTurn { role: m.role, wire_role, text });
+            self.wire.push(Arc::new(WireTurn { role: m.role, wire_role, text }));
         }
         let messages: Vec<Value> = self
             .wire
             .iter()
             .zip(&input.messages)
             .map(|(w, m)| {
-                match self.row_images.iter().find(|(role, text, _)| *role == m.role && *text == m.text).map(|(_, _, pictures)| pictures) {
+                match self.row_images.iter().find(|(role, text, _)| *role == m.role && text.as_str() == m.text).map(|(_, _, pictures)| pictures) {
                     Some(pictures) if pictures.iter().all(|picture| picture.b64.is_empty()) => json::obj(vec![
                         ("role", json::s(w.wire_role)),
                         ("text", json::s(format!("{}{}", w.text, superseded_note(pictures)))),
@@ -1270,7 +1412,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                     Some(pictures) => json::obj(vec![
                         ("role", json::s(w.wire_role)),
                         ("text", json::s(format!("{}{}", w.text, pictures_note(pictures)))),
-                        ("images", Value::Arr(pictures.iter().map(|picture| json::s(picture.b64.clone())).collect())),
+                        ("images", Value::Arr(pictures.iter().map(|picture| json::s(picture.b64.as_str())).collect())),
                     ]),
                     None => json::obj(vec![("role", json::s(w.wire_role)), ("text", json::s(w.text.clone()))]),
                 }
@@ -1313,7 +1455,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         let now = self.transport.now();
         let pending = PendingSubmission {
             base, model, body, inferred_open_think,
-            delay: Duration::ZERO, retry_at: now, last_refusal: String::new(),
+            retries: 0, retry_at: now, last_refusal: String::new(),
             note: None, excluded_bases: HashSet::new(), interrupted_bases: HashSet::new(),
         };
         let result = self.submit(pending);
@@ -1336,18 +1478,32 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             self.active = None;
             return Vec::new();
         }
+        if active.retry_at.is_some_and(|at| self.transport.now() < at) {
+            return Vec::new();
+        }
         let url = format!("{}/job/{}", active.base, active.job);
         let status = match self.transport.get_json_detailed(&url) {
             Ok(v) => {
                 active.poll_fails = 0;
+                active.retry_at = None;
                 v
             }
             Err(e) => {
-                active.poll_fails += 1;
-                let terminal = matches!(e, FleetError::Http { status, .. } if !matches!(status, 429 | 503));
-                if !terminal && active.poll_fails < MAX_POLL_FAILS {
-                    // Transient: the job is still running on the node.
-                    return Vec::new();
+                let busy = matches!(e, FleetError::Http { status: 429 | 503, .. });
+                let previous_fails = active.poll_fails;
+                active.poll_fails = previous_fails.saturating_add(1);
+                match self.reach {
+                    ChatReach::Machine if busy || matches!(e, FleetError::Connection(_) | FleetError::Transport(_)) => {
+                        active.retry_at = Some(self.transport.now() + machine_backoff(previous_fails));
+                        if previous_fails == 0 {
+                            active.last_note.clear();
+                            return vec![ProviderEvent::Status { note: MACHINE_WAIT_NOTE.into(), permille: 0 }];
+                        }
+                        return Vec::new();
+                    }
+                    ChatReach::Lan if active.poll_fails < MAX_POLL_FAILS
+                        && (busy || !matches!(e, FleetError::Http { .. })) => return Vec::new(),
+                    _ => {}
                 }
                 self.active = None;
                 return vec![ProviderEvent::Error(format!("fleet job poll failed: {e}"))];
@@ -1385,6 +1541,11 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
         // will never see (the think block). Absent from an older service, and
         // then simply not forwarded.
         let serving = status.get("serving");
+        if let Some(window) = serving.and_then(|s| s.get("measure"))
+            .and_then(|m| m.get("window")).and_then(Value::as_u64).filter(|n| *n > 0)
+        {
+            self.contexts.insert(active.base.clone(), window);
+        }
         // How many tokens the turn has generated. `serving.gen_tokens` is the
         // box REPORTING a count; the `decode k/n` stage is a progress LABEL we
         // scrape when the box is too old to report one.
@@ -1486,7 +1647,7 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 if unclosed_think {
                     full.push_str("</think>\n");
                 }
-                tap_completion(&full);
+                if self.reach == ChatReach::Lan { tap_completion(&full); }
                 // Mirror the RAW reply — without the synthetic tags — onto
                 // the wire transcript: the lane's KV holds exactly these
                 // tokens after the open `<think>\n` the template laid down,
@@ -1497,15 +1658,18 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
                 let raw = partial.to_string();
                 events.push(ProviderEvent::Done { text: full });
                 self.active = None;
-                self.wire.push(WireTurn {
+                self.wire.push(Arc::new(WireTurn {
                     role: ChatRole::Assistant,
                     wire_role: "assistant",
                     text: raw,
-                });
+                }));
             }
             Some("error") => {
                 let msg =
                     status.get("error").and_then(Value::as_str).unwrap_or("fleet job failed");
+                if let Some((_, max)) = crate::talk::overflow_counts(msg).filter(|&(_, max)| max > 0) {
+                    self.contexts.insert(active.base.clone(), max as u64);
+                }
                 events.push(ProviderEvent::Error(msg.to_string()));
                 self.active = None;
             }
@@ -1524,6 +1688,13 @@ impl<T: FleetTransport> ChatProvider for FleetQwenChatProvider<T> {
             let url = format!("{}/job/{}/cancel", active.base, active.job);
             let _ = self.transport.post_json(&url, &Value::Obj(Vec::new()));
         }
+    }
+
+    /// Start a fresh conversation on the elected node, keeping its picks and context ceiling.
+    fn reset_conversation(&mut self) {
+        self.cancel();
+        self.row_images.clear();
+        self.conversation = Self::conversation_id();
     }
 }
 
@@ -1736,6 +1907,9 @@ mod wire_transcript_tests {
     #[derive(Clone, Default)]
     struct Scripted {
         generates: Rc<RefCell<Vec<Value>>>,
+        cancels: Rc<RefCell<Vec<String>>>,
+        gets: Rc<RefCell<Vec<String>>>,
+        health_context: Option<u64>,
         replies: Rc<RefCell<VecDeque<String>>>,
         polls: Rc<RefCell<VecDeque<Value>>>,
         think_open: Rc<RefCell<Option<bool>>>,
@@ -1745,6 +1919,10 @@ mod wire_transcript_tests {
 
     impl FleetTransport for Scripted {
         fn post_json(&mut self, url: &str, body: &Value) -> Result<Value, String> {
+            if url.ends_with("/cancel") {
+                self.cancels.borrow_mut().push(url.to_string());
+                return Ok(Value::Null);
+            }
             assert!(url.ends_with("/generate"), "{url}");
             self.generates.borrow_mut().push(body.clone());
             let n = self.generates.borrow().len();
@@ -1755,11 +1933,18 @@ mod wire_transcript_tests {
             Ok(json::obj(fields))
         }
         fn get_json(&mut self, url: &str) -> Result<Value, String> {
+            self.gets.borrow_mut().push(url.to_string());
             if url.ends_with("/health") {
-                return Ok(json::obj(vec![(
-                    "capabilities",
-                    Value::Arr(vec![json::s("chat")]),
-                )]));
+                let lanes = self.health_context.map_or(Value::Null, |context| json::obj(vec![
+                    ("context_per_slot", Value::Int(context.try_into().unwrap())),
+                    ("lanes_active", Value::Int(0)),
+                    ("slots_total", Value::Int(2)),
+                ]));
+                return Ok(json::obj(vec![
+                    ("capabilities", Value::Arr(vec![json::s("chat")])),
+                    ("lanes", lanes),
+                    ("llm_context_loaded", Value::Null),
+                ]));
             }
             if url.ends_with("/models") {
                 let claude = json::obj(vec![
@@ -1841,6 +2026,84 @@ mod wire_transcript_tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn reset_conversation_cancels_active_rotates_session_clears_images_and_keeps_home_picks_contexts() {
+        let base = "http://n1:1";
+        let node = Scripted { health_context: Some(65_536), ..Scripted::default() };
+        let mut provider = FleetQwenChatProvider::new(node.clone(), vec![base.into()]);
+        let picture = crate::providers::provider::ToolImage {
+            label: "red".into(),
+            png: crate::testpattern::encode_png_rgb8(&[255, 0, 0], 1, 1).unwrap().into(),
+        };
+        let question = "what colour is it?";
+        let first = TurnInput::new("SYS", vec![user(question)]);
+        provider.attach_tool_images(vec![picture.clone()]).unwrap();
+        node.replies.borrow_mut().push_back("red".into());
+        provider.begin_turn(&first).unwrap();
+        assert!(provider.poll().iter().any(|e| matches!(e, ProviderEvent::Done { .. })));
+        let home = provider.home.clone();
+        assert_eq!(home.as_ref().map(|h| h.0.as_str()), Some(base));
+        assert_eq!(provider.context_tokens(), Some(65_536));
+        let old_session = node.generates.borrow()[0].get("chat_session").and_then(Value::as_str).unwrap().to_string();
+
+        let second = TurnInput::new("SYS", vec![user(question), assistant("red"), user("what shape?")]);
+        provider.begin_turn(&second).unwrap();
+        provider.attach_tool_images(vec![picture]).unwrap();
+        let gets_before = node.gets.borrow().len();
+        provider.reset_conversation();
+        assert_eq!(node.cancels.borrow().as_slice(), ["http://n1:1/job/j2/cancel"]);
+        assert!(provider.active.is_none());
+        assert!(provider.wire.is_empty());
+        assert!(provider.row_images.is_empty());
+        assert!(provider.pending_images.is_empty());
+        assert_eq!(provider.home, home);
+        assert_eq!(provider.picks.stale(), home);
+        assert_eq!(provider.picks.lanes_for(base), Some((0, 2)));
+        assert_eq!(provider.context_tokens(), Some(65_536));
+        assert_ne!(provider.conversation, old_session);
+
+        provider.begin_turn(&first).unwrap();
+        assert_eq!(node.gets.borrow().len(), gets_before, "the elected LAN node needs no new probe");
+        let generates = node.generates.borrow();
+        let fresh = &generates[2];
+        assert_eq!(fresh.get("chat_session").and_then(Value::as_str), Some(provider.conversation.as_str()));
+        let messages = fresh.get("chat_messages").and_then(Value::as_arr).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].get("text").and_then(Value::as_str), Some(question));
+        assert!(messages[0].get("images").is_none());
+    }
+
+    #[test]
+    fn cold_hub_learns_fitted_window_from_serving_measure_and_tracks_resize() {
+        let node = Scripted::default();
+        let mut provider = FleetQwenChatProvider::new(node.clone(), vec!["http://192.0.2.1".into()]);
+        let mut history = Vec::new();
+        for window in [262_144, 114_688] {
+            history.push(user("hello"));
+            node.polls.borrow_mut().push_back(json::obj(vec![
+                ("state", json::s("done")),
+                ("partial_text", json::s("ok")),
+                ("serving", json::obj(vec![("measure", json::obj(vec![("window", Value::Int(window))]))])),
+            ]));
+            provider.begin_turn(&TurnInput::new("SYS", history.clone())).unwrap();
+            if history.len() == 1 { assert_eq!(provider.context_tokens(), None); }
+            drain_done(&mut provider);
+            assert_eq!(provider.context_tokens(), Some(window as usize));
+            history.push(assistant("ok"));
+        }
+    }
+
+    #[test]
+    fn overflow_refusal_updates_known_context_window() {
+        let node = Scripted::default();
+        let msg = crate::llm_backend::overflow_message(120_000, crate::llm_backend::DECODE_RESERVE, 114_688).unwrap();
+        node.polls.borrow_mut().push_back(json::obj(vec![("state", json::s("error")), ("error", json::s(msg))]));
+        let mut provider = FleetQwenChatProvider::new(node, vec!["http://192.0.2.1".into()]);
+        provider.begin_turn(&TurnInput::new("SYS", vec![user("hello")])).unwrap();
+        assert!(provider.poll().iter().any(|e| matches!(e, ProviderEvent::Error(_))));
+        assert_eq!(provider.context_tokens(), Some(114_688));
     }
 
     #[test]

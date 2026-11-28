@@ -200,15 +200,14 @@ fn block_end(text: &str, from: usize, close: &str) -> usize {
     text[from..].find(close).map_or(text.len(), |e| from + e + close.len())
 }
 
-/// The calls in a reply and where the first one starts. `None` when the
-/// reply holds no call; `Err` when a call block cannot be read (the text is
-/// then relayed as written, for the caller to refuse).
-pub fn parse_calls(text: &str) -> Result<Option<(usize, Vec<Call>)>, ()> {
-    let mut calls = Vec::new();
-    // Per call: an `<invoke>` with nothing inside (Claude sometimes writes
-    // such a stub before the real call).
-    let mut stubs = Vec::new();
-    let mut first = None;
+struct ParsedBlock {
+    span: std::ops::Range<usize>,
+    calls: Vec<Call>,
+    stub: bool,
+}
+
+fn parse_blocks(text: &str) -> Result<Vec<ParsedBlock>, ()> {
+    let mut blocks = Vec::new();
     let mut pos = 0;
     while let Some((at, marker)) = earliest_marker(text, pos) {
         let (end, found) = match marker {
@@ -246,16 +245,6 @@ pub fn parse_calls(text: &str) -> Result<Option<(usize, Vec<Call>)>, ()> {
                 }
             }
         };
-        if !found.is_empty() {
-            let stub = matches!(marker, "<invoke" | "<function_calls>")
-                && found.iter().all(|c| c.args.is_empty())
-                && text[at..end].split('>').skip(1).all(|piece| piece.split('<').next().unwrap_or("").trim().is_empty());
-            stubs.extend(std::iter::repeat(stub).take(found.len()));
-            calls.extend(found);
-        }
-        if first.is_none() && !calls.is_empty() {
-            first = Some(at);
-        }
         // An unclosed tool_call runs to the end; the closers of a mixed
         // spelling (`</function></tool_call>`) are skipped with it.
         let mut next = end;
@@ -265,13 +254,26 @@ pub fn parse_calls(text: &str) -> Result<Option<(usize, Vec<Call>)>, ()> {
                 next = text.len() - after.len();
             }
         }
+        if !found.is_empty() {
+            let stub = matches!(marker, "<invoke" | "<function_calls>")
+                && found.iter().all(|c| c.args.is_empty())
+                && text[at..end].split('>').skip(1).all(|piece| piece.split('<').next().unwrap_or("").trim().is_empty());
+            blocks.push(ParsedBlock { span: at..next, calls: found, stub });
+        }
         pos = next;
     }
-    if stubs.iter().any(|stub| !stub) {
-        let mut keep = stubs.iter().map(|stub| !stub);
-        calls.retain(|_| keep.next().unwrap_or(true));
-    }
-    Ok(first.map(|at| (at, calls)))
+    Ok(blocks)
+}
+
+/// The calls in a reply and where the first one starts. `None` when the
+/// reply holds no call; `Err` when a call block cannot be read (the text is
+/// then relayed as written, for the caller to refuse).
+pub fn parse_calls(text: &str) -> Result<Option<(usize, Vec<Call>)>, ()> {
+    let blocks = parse_blocks(text)?;
+    let Some(first) = blocks.first().map(|b| b.span.start) else { return Ok(None) };
+    let drop_stubs = blocks.iter().any(|b| !b.stub);
+    let calls = blocks.into_iter().filter(|b| !drop_stubs || !b.stub).flat_map(|b| b.calls).collect();
+    Ok(Some((first, calls)))
 }
 
 fn standard_value(v: &Value) -> String {
@@ -327,18 +329,25 @@ fn contract_value(v: &Value) -> Value {
 
 /// An earlier assistant turn with its calls in the [`CONTRACT`] form.
 pub fn history_to_contract(text: &str) -> String {
-    let Ok(Some((at, calls))) = parse_calls(text) else { return text.to_string() };
-    let mut out = text[..at].to_string();
-    for (i, call) in calls.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    let Ok(blocks) = parse_blocks(text) else { return text.to_string() };
+    if blocks.is_empty() { return text.to_string(); }
+    let drop_stubs = blocks.iter().any(|b| !b.stub);
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for block in blocks {
+        out.push_str(&text[cursor..block.span.start]);
+        cursor = block.span.end;
+        if drop_stubs && block.stub { continue; }
+        for (i, call) in block.calls.into_iter().enumerate() {
+            if i > 0 { out.push('\n'); }
+            let args = Value::Obj(call.args.into_iter().map(|(k, v)| (k, contract_value(&v))).collect());
+            let object = json::obj(vec![("name", json::s(call.name)), ("arguments", args)]);
+            out.push_str("<tool_call>\n");
+            out.push_str(&object.to_json());
+            out.push_str("\n</tool_call>");
         }
-        let args = Value::Obj(call.args.iter().map(|(k, v)| (k.clone(), contract_value(v))).collect());
-        let object = json::obj(vec![("name", json::s(call.name.clone())), ("arguments", args)]);
-        out.push_str("<tool_call>\n");
-        out.push_str(&object.to_json());
-        out.push_str("\n</tool_call>");
     }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -433,6 +442,16 @@ mod tests {
             "On it.\n<tool_call>\n{\"name\":\"world.set_source\",\"arguments\":{\"source\":\"game.sky({})\",\"size\":120}}\n</tool_call>"
         );
         assert_eq!(history_to_contract("plain"), "plain");
+    }
+
+    #[test]
+    fn history_to_contract_preserves_trimmed_notes_and_prose_around_live_calls() {
+        let call = "<tool_call><function=doc.edit><parameter=slot>arch</parameter></function></tool_call>";
+        let json = "<tool_call>\n{\"name\":\"doc.edit\",\"arguments\":{\"slot\":\"arch\"}}\n</tool_call>";
+        let note = "[trimmed superseded tool call: doc.edit (slot \"old\") — replaced by a later call; payload omitted to fit context]";
+        assert_eq!(history_to_contract(&format!("Working.\n{call}\n{note}")), format!("Working.\n{json}\n{note}"));
+        assert_eq!(history_to_contract(&format!("{note}\n{call} between {call} after.")), format!("{note}\n{json} between {json} after."));
+        assert_eq!(history_to_contract(note), note);
     }
 
     #[test]

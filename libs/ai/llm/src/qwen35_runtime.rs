@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 use crate::{TensorType, UnaryOp, GGML_ROPE_TYPE_IMROPE};
 
 use crate::error::{LlamaError, Result};
-use crate::model::LlamaModel;
+use crate::model::{LlamaModel, Qwen35Config};
 use crate::plan::{
     ModelExecutionPlan, ModelLayerInventory, ModelLayerRole, ModelTailProbePlan,
     ModelTensorInventory,
 };
-use crate::qwen35::{Qwen35LayerKind, Qwen35Tensors};
+use crate::qwen35::{Qwen35LayerKind, Qwen35LayerTensors, Qwen35Tensors};
 use crate::runtime::{
     AttentionBlockSpec, AttentionDecodeSpec, AttentionKvCacheSpec, AttentionQueryLayout,
     AttentionRopeSpec, DeltaNetRecurrentBlockSpec, DeltaNetRecurrentDecodeSpec,
@@ -97,6 +97,24 @@ impl Qwen35Dims {
     }
 }
 
+pub(crate) const INVENTORY_OUTPUT: &str = "output";
+pub(crate) const INVENTORY_NEXTN_SHARED_HEAD: &str = "nextn_shared_head";
+
+fn find_layer(tensors: &Qwen35Tensors, layer_index: u32) -> Result<&Qwen35LayerTensors> {
+    if let Some(layer) = tensors
+        .layers
+        .get(layer_index as usize)
+        .filter(|layer| layer.index == layer_index)
+    {
+        return Ok(layer);
+    }
+    tensors
+        .layers
+        .iter()
+        .find(|layer| layer.index == layer_index)
+        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))
+}
+
 pub fn qwen35_token_logits_probe_spec(model: &LlamaModel) -> Result<LogitsProbeSpec> {
     let tensors = model.qwen35_tensors()?;
     let cfg = model.require_qwen35()?;
@@ -116,7 +134,17 @@ pub fn qwen35_embedding_logits_probe_spec(model: &LlamaModel) -> Result<LogitsPr
     let tensors = model.qwen35_tensors()?;
     let dims = Qwen35Dims::from_model(model, &tensors)?;
     let cfg = model.require_qwen35()?;
-    Ok(LogitsProbeSpec {
+    Ok(qwen35_embedding_logits_probe_spec_with_tensors(
+        cfg, &dims, &tensors,
+    ))
+}
+
+fn qwen35_embedding_logits_probe_spec_with_tensors(
+    cfg: &Qwen35Config,
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+) -> LogitsProbeSpec {
+    LogitsProbeSpec {
         input: ProbeInputKind::Embeddings {
             hidden_size: dims.embedding_length,
             input_type: TensorType::F32,
@@ -125,7 +153,7 @@ pub fn qwen35_embedding_logits_probe_spec(model: &LlamaModel) -> Result<LogitsPr
         output_name: tensors.globals.output.name.clone(),
         rms_epsilon: cfg.attention_layer_norm_rms_epsilon,
         final_logit_softcap: None,
-    })
+    }
 }
 
 pub fn qwen35_attention_block_spec(
@@ -135,15 +163,20 @@ pub fn qwen35_attention_block_spec(
     let tensors = model.qwen35_tensors()?;
     let dims = Qwen35Dims::from_model(model, &tensors)?;
     let cfg = model.require_qwen35()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
+    qwen35_attention_block_spec_for_layer(cfg, &dims, &tensors, layer)
+}
+
+fn qwen35_attention_block_spec_for_layer(
+    cfg: &Qwen35Config,
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+    layer: &Qwen35LayerTensors,
+) -> Result<AttentionBlockSpec> {
     let attention = layer.attention.as_ref().ok_or_else(|| {
         LlamaError::format(format!(
             "qwen35 layer {} is {} and does not expose full-attention tensors",
-            layer_index,
+            layer.index,
             layer.kind.name()
         ))
     })?;
@@ -211,9 +244,11 @@ pub fn qwen35_first_attention_block_spec(model: &LlamaModel) -> Result<(u32, Att
         .iter()
         .find(|layer| layer.kind == Qwen35LayerKind::Attention)
         .ok_or_else(|| LlamaError::format("qwen35 model has no attention layers"))?;
+    let dims = Qwen35Dims::from_model(model, &tensors)?;
+    let cfg = model.require_qwen35()?;
     Ok((
         layer.index,
-        qwen35_attention_block_spec(model, layer.index)?,
+        qwen35_attention_block_spec_for_layer(cfg, &dims, &tensors, layer)?,
     ))
 }
 
@@ -225,15 +260,42 @@ pub fn qwen35_attention_decode_spec(
     k_type: TensorType,
     v_type: TensorType,
 ) -> Result<AttentionDecodeSpec> {
+    let tensors = model.qwen35_tensors()?;
+    let dims = Qwen35Dims::from_model(model, &tensors)?;
+    let cfg = model.require_qwen35()?;
+    let layer = find_layer(&tensors, layer_index)?;
+    qwen35_attention_decode_spec_for_layer(
+        cfg,
+        &dims,
+        &tensors,
+        layer,
+        max_context,
+        max_sequences,
+        k_type,
+        v_type,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen35_attention_decode_spec_for_layer(
+    cfg: &Qwen35Config,
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+    layer: &Qwen35LayerTensors,
+    max_context: u32,
+    max_sequences: u32,
+    k_type: TensorType,
+    v_type: TensorType,
+) -> Result<AttentionDecodeSpec> {
     Ok(AttentionDecodeSpec {
-        block: qwen35_attention_block_spec(model, layer_index)?,
+        block: qwen35_attention_block_spec_for_layer(cfg, dims, tensors, layer)?,
         cache: AttentionKvCacheSpec {
             max_context,
             max_sequences,
             k_type,
             v_type,
         },
-        cache_layer_index: layer_index,
+        cache_layer_index: layer.index,
         write_kv: true,
     })
 }
@@ -245,15 +307,20 @@ pub fn qwen35_recurrent_block_spec(
     let tensors = model.qwen35_tensors()?;
     let dims = Qwen35Dims::from_model(model, &tensors)?;
     let cfg = model.require_qwen35()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
+    qwen35_recurrent_block_spec_for_layer(cfg, &dims, &tensors, layer)
+}
+
+fn qwen35_recurrent_block_spec_for_layer(
+    cfg: &Qwen35Config,
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+    layer: &Qwen35LayerTensors,
+) -> Result<DeltaNetRecurrentBlockSpec> {
     let recurrent = layer.recurrent.as_ref().ok_or_else(|| {
         LlamaError::format(format!(
             "qwen35 layer {} is {} and does not expose recurrent tensors",
-            layer_index,
+            layer.index,
             layer.kind.name()
         ))
     })?;
@@ -309,9 +376,11 @@ pub fn qwen35_first_recurrent_block_spec(
         .iter()
         .find(|layer| layer.kind == Qwen35LayerKind::Recurrent)
         .ok_or_else(|| LlamaError::format("qwen35 model has no recurrent layers"))?;
+    let dims = Qwen35Dims::from_model(model, &tensors)?;
+    let cfg = model.require_qwen35()?;
     Ok((
         layer.index,
-        qwen35_recurrent_block_spec(model, layer.index)?,
+        qwen35_recurrent_block_spec_for_layer(cfg, &dims, &tensors, layer)?,
     ))
 }
 
@@ -322,8 +391,32 @@ pub fn qwen35_delta_net_recurrent_decode_spec(
     r_type: TensorType,
     s_type: TensorType,
 ) -> Result<DeltaNetRecurrentDecodeSpec> {
+    let tensors = model.qwen35_tensors()?;
+    let dims = Qwen35Dims::from_model(model, &tensors)?;
+    let cfg = model.require_qwen35()?;
+    let layer = find_layer(&tensors, layer_index)?;
+    qwen35_delta_net_recurrent_decode_spec_for_layer(
+        cfg,
+        &dims,
+        &tensors,
+        layer,
+        max_sequences,
+        r_type,
+        s_type,
+    )
+}
+
+fn qwen35_delta_net_recurrent_decode_spec_for_layer(
+    cfg: &Qwen35Config,
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+    layer: &Qwen35LayerTensors,
+    max_sequences: u32,
+    r_type: TensorType,
+    s_type: TensorType,
+) -> Result<DeltaNetRecurrentDecodeSpec> {
     Ok(DeltaNetRecurrentDecodeSpec {
-        block: qwen35_recurrent_block_spec(model, layer_index)?,
+        block: qwen35_recurrent_block_spec_for_layer(cfg, dims, tensors, layer)?,
         cache: DeltaNetRecurrentStateSpec {
             max_sequences,
             r_type,
@@ -335,13 +428,16 @@ pub fn qwen35_delta_net_recurrent_decode_spec(
 pub fn qwen35_dense_ffn_spec(model: &LlamaModel, layer_index: u32) -> Result<DenseLayerFfnSpec> {
     let tensors = model.qwen35_tensors()?;
     let cfg = model.require_qwen35()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
 
-    Ok(DenseLayerFfnSpec {
+    Ok(qwen35_dense_ffn_spec_for_layer(cfg, layer))
+}
+
+fn qwen35_dense_ffn_spec_for_layer(
+    cfg: &Qwen35Config,
+    layer: &Qwen35LayerTensors,
+) -> DenseLayerFfnSpec {
+    DenseLayerFfnSpec {
         input_norm: Some(RmsNormSpec {
             weight_name: layer.post_attention_norm.name.clone(),
             epsilon: cfg.attention_layer_norm_rms_epsilon,
@@ -355,7 +451,7 @@ pub fn qwen35_dense_ffn_spec(model: &LlamaModel, layer_index: u32) -> Result<Den
             down_proj_scale_name: layer.ffn.scales.down.as_ref().map(|t| t.name.clone()),
             gate_activation: UnaryOp::Silu,
         },
-    })
+    }
 }
 
 pub fn qwen35_first_dense_ffn_spec(model: &LlamaModel) -> Result<(u32, DenseLayerFfnSpec)> {
@@ -364,7 +460,8 @@ pub fn qwen35_first_dense_ffn_spec(model: &LlamaModel) -> Result<(u32, DenseLaye
         .layers
         .first()
         .ok_or_else(|| LlamaError::format("qwen35 model has no layers"))?;
-    Ok((layer.index, qwen35_dense_ffn_spec(model, layer.index)?))
+    let cfg = model.require_qwen35()?;
+    Ok((layer.index, qwen35_dense_ffn_spec_for_layer(cfg, layer)))
 }
 
 pub fn qwen35_attention_block_layout(
@@ -372,11 +469,7 @@ pub fn qwen35_attention_block_layout(
     layer_index: u32,
 ) -> Result<GgufWeightLayout> {
     let tensors = model.qwen35_tensors()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
     let attention = layer.attention.as_ref().ok_or_else(|| {
         LlamaError::format(format!(
             "qwen35 layer {} is {} and does not expose full-attention tensors",
@@ -407,11 +500,7 @@ pub fn qwen35_recurrent_block_layout(
     layer_index: u32,
 ) -> Result<GgufWeightLayout> {
     let tensors = model.qwen35_tensors()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
     let recurrent = layer.recurrent.as_ref().ok_or_else(|| {
         LlamaError::format(format!(
             "qwen35 layer {} is {} and does not expose recurrent tensors",
@@ -443,11 +532,7 @@ pub fn qwen35_recurrent_block_layout(
 
 pub fn qwen35_dense_ffn_layout(model: &LlamaModel, layer_index: u32) -> Result<GgufWeightLayout> {
     let tensors = model.qwen35_tensors()?;
-    let layer = tensors
-        .layers
-        .iter()
-        .find(|layer| layer.index == layer_index)
-        .ok_or_else(|| LlamaError::format(format!("missing qwen35 layer {}", layer_index)))?;
+    let layer = find_layer(&tensors, layer_index)?;
 
     let mut weights = vec![
         layer.post_attention_norm.clone(),
@@ -495,6 +580,13 @@ pub fn qwen35_hybrid_cache_template(model: &LlamaModel) -> Result<HybridCacheTem
     let tensors = model.qwen35_tensors()?;
     let dims = Qwen35Dims::from_model(model, &tensors)?;
 
+    qwen35_hybrid_cache_template_with_tensors(&dims, &tensors)
+}
+
+fn qwen35_hybrid_cache_template_with_tensors(
+    dims: &Qwen35Dims,
+    tensors: &Qwen35Tensors,
+) -> Result<HybridCacheTemplate> {
     let attention_layers = tensors
         .layers
         .iter()
@@ -528,20 +620,46 @@ pub fn qwen35_hybrid_decode_spec(
     recurrent_s_type: TensorType,
 ) -> Result<HybridDecodeSpec> {
     let tensors = model.qwen35_tensors()?;
+    qwen35_hybrid_decode_spec_with_tensors(
+        model,
+        &tensors,
+        max_context,
+        max_sequences,
+        attention_k_type,
+        attention_v_type,
+        recurrent_r_type,
+        recurrent_s_type,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn qwen35_hybrid_decode_spec_with_tensors(
+    model: &LlamaModel,
+    tensors: &Qwen35Tensors,
+    max_context: u32,
+    max_sequences: u32,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+    recurrent_r_type: TensorType,
+    recurrent_s_type: TensorType,
+) -> Result<HybridDecodeSpec> {
     let cfg = model.require_qwen35()?;
+    let dims = Qwen35Dims::from_model(model, tensors)?;
 
     // The MTP block lives at the end of `tensors.layers` but is not part of
     // the main forward pass; it runs in its own draft graph.
     let main_layers = tensors.main_layers();
     let mut layers = Vec::with_capacity(main_layers.len());
     for layer in main_layers {
-        let ffn = HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec(model, layer.index)?);
+        let ffn = HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec_for_layer(cfg, layer));
         match layer.kind {
             Qwen35LayerKind::Attention => layers.push(HybridLayerSpec::Attention {
                 layer_index: layer.index,
-                decode: qwen35_attention_decode_spec(
-                    model,
-                    layer.index,
+                decode: qwen35_attention_decode_spec_for_layer(
+                    cfg,
+                    &dims,
+                    tensors,
+                    layer,
                     max_context,
                     max_sequences,
                     attention_k_type,
@@ -555,9 +673,11 @@ pub fn qwen35_hybrid_decode_spec(
             }),
             Qwen35LayerKind::Recurrent => layers.push(HybridLayerSpec::Recurrent {
                 layer_index: layer.index,
-                decode: qwen35_delta_net_recurrent_decode_spec(
-                    model,
-                    layer.index,
+                decode: qwen35_delta_net_recurrent_decode_spec_for_layer(
+                    cfg,
+                    &dims,
+                    tensors,
+                    layer,
                     max_sequences,
                     recurrent_r_type,
                     recurrent_s_type,
@@ -608,23 +728,47 @@ pub fn qwen35_mtp_decode_spec(
     restricted_head: bool,
 ) -> Result<Option<HybridDecodeSpec>> {
     let tensors = model.qwen35_tensors()?;
+    qwen35_mtp_decode_spec_with_tensors(
+        model,
+        &tensors,
+        max_context,
+        max_sequences,
+        attention_k_type,
+        attention_v_type,
+        restricted_head,
+    )
+}
+
+pub(crate) fn qwen35_mtp_decode_spec_with_tensors(
+    model: &LlamaModel,
+    tensors: &Qwen35Tensors,
+    max_context: u32,
+    max_sequences: u32,
+    attention_k_type: TensorType,
+    attention_v_type: TensorType,
+    restricted_head: bool,
+) -> Result<Option<HybridDecodeSpec>> {
     let cfg = model.require_qwen35()?;
     let Some(mtp) = tensors.mtp.as_ref() else {
         return Ok(None);
     };
+    let dims = Qwen35Dims::from_model(model, tensors)?;
+    let layer = find_layer(tensors, mtp.layer_index)?;
     let epsilon = cfg.attention_layer_norm_rms_epsilon;
     let layer = HybridLayerSpec::Attention {
         layer_index: mtp.layer_index,
-        decode: qwen35_attention_decode_spec(
-            model,
-            mtp.layer_index,
+        decode: qwen35_attention_decode_spec_for_layer(
+            cfg,
+            &dims,
+            tensors,
+            layer,
             max_context,
             max_sequences,
             attention_k_type,
             attention_v_type,
         )?,
         post_attention_norm: None,
-        ffn: HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec(model, mtp.layer_index)?),
+        ffn: HybridLayerFfnSpec::Dense(qwen35_dense_ffn_spec_for_layer(cfg, layer)),
         post_ffn_norm: None,
         per_layer_input: None,
         output_scale_name: None,
@@ -688,8 +832,16 @@ pub fn qwen35_mtp_decode_spec(
 
 pub fn qwen35_execution_plan(model: &LlamaModel) -> Result<ModelExecutionPlan> {
     let tensors = model.qwen35_tensors()?;
-    let dims = Qwen35Dims::from_model(model, &tensors)?;
-    let inventory = qwen35_inventory(&tensors);
+    qwen35_execution_plan_with_tensors(model, &tensors)
+}
+
+pub(crate) fn qwen35_execution_plan_with_tensors(
+    model: &LlamaModel,
+    tensors: &Qwen35Tensors,
+) -> Result<ModelExecutionPlan> {
+    let dims = Qwen35Dims::from_model(model, tensors)?;
+    let cfg = model.require_qwen35()?;
+    let inventory = qwen35_inventory(tensors);
 
     Ok(ModelExecutionPlan {
         architecture: model.architecture.clone(),
@@ -697,11 +849,11 @@ pub fn qwen35_execution_plan(model: &LlamaModel) -> Result<ModelExecutionPlan> {
         vocab_size: Some(dims.vocab_size),
         full_weights: inventory.weight_layout()?,
         tail_probe: ModelTailProbePlan {
-            spec: qwen35_embedding_logits_probe_spec(model)?,
-            weights: GgufWeightLayout::from_tensors(qwen35_tail_probe_tensors(&tensors))?,
+            spec: qwen35_embedding_logits_probe_spec_with_tensors(cfg, &dims, tensors),
+            weights: GgufWeightLayout::from_tensors(qwen35_tail_probe_tensors(tensors))?,
             extra_activation_bytes: 8 << 20,
         },
-        hybrid_cache: Some(qwen35_hybrid_cache_template(model)?),
+        hybrid_cache: Some(qwen35_hybrid_cache_template_with_tensors(&dims, tensors)?),
         inventory,
     })
 }
@@ -710,7 +862,7 @@ fn qwen35_inventory(tensors: &Qwen35Tensors) -> ModelTensorInventory {
     let mut globals = BTreeMap::new();
     insert_tensor(&mut globals, "token_embd", &tensors.globals.token_embd);
     insert_tensor(&mut globals, "output_norm", &tensors.globals.output_norm);
-    insert_tensor(&mut globals, "output", &tensors.globals.output);
+    insert_tensor(&mut globals, INVENTORY_OUTPUT, &tensors.globals.output);
 
     if let Some(mtp) = tensors.mtp.as_ref() {
         insert_tensor(&mut globals, "nextn_enorm", &mtp.enorm);
@@ -718,7 +870,7 @@ fn qwen35_inventory(tensors: &Qwen35Tensors) -> ModelTensorInventory {
         insert_tensor(&mut globals, "nextn_eh_proj", &mtp.eh_proj);
         insert_optional_tensor(&mut globals, "nextn_eh_proj.scale", &mtp.eh_proj_scale);
         insert_optional_tensor(&mut globals, "nextn_shared_head_norm", &mtp.shared_head_norm);
-        insert_optional_tensor(&mut globals, "nextn_shared_head", &mtp.shared_head);
+        insert_optional_tensor(&mut globals, INVENTORY_NEXTN_SHARED_HEAD, &mtp.shared_head);
         insert_optional_tensor(&mut globals, "nextn_embed_tokens", &mtp.embed_tokens);
     }
 

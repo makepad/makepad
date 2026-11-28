@@ -7,6 +7,8 @@ use std::fmt;
 pub enum AssetAiError {
     /// HTTP client / transport failure (downloader, provider client).
     Http(String),
+    /// Connection or response I/O failure, distinct from a rejected request.
+    HttpTransport(String),
     /// Local filesystem failure.
     Io(String),
     /// Registry file failed to parse or validate.
@@ -55,7 +57,7 @@ impl AssetAiError {
 impl fmt::Display for AssetAiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AssetAiError::Http(m) => write!(f, "http error: {m}"),
+            AssetAiError::Http(m) | AssetAiError::HttpTransport(m) => write!(f, "http error: {m}"),
             AssetAiError::Io(m) => write!(f, "io error: {m}"),
             AssetAiError::Registry(m) => write!(f, "registry error: {m}"),
             AssetAiError::Download(m) => write!(f, "download error: {m}"),

@@ -248,12 +248,24 @@ pub struct EventEntry {
     pub final_: bool,
 }
 
+/// Whether this visible line belongs to the model's conversation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LineDelivery {
+    Sent,
+    Stopped,
+    /// The line reached the model (it answered or called tools), then the turn ended on an error.
+    Failed,
+    /// The line never took effect (rejected before any reply or tool call).
+    /// The note includes any pictures that could not be returned to the composer.
+    NotSent(String),
+}
+
 /// One line of the transcript.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     /// A line the person sent, with the pictures it carried and what it pointed at
     /// (the composer's attachments when it was sent).
-    User { text: String, pictures: Vec<crate::pictures::PictureRef>, attachments: Vec<Attachment> },
+    User { text: String, pictures: Vec<crate::pictures::PictureRef>, attachments: Vec<Attachment>, delivery: LineDelivery },
     Event(EventEntry),
     /// `streaming` while deltas still arrive; the panel draws the landed
     /// text with markup and the streaming text plain.
@@ -261,6 +273,23 @@ pub enum Entry {
     Tool(ToolEntry),
     /// The engine talking: "Route connected", an error, a refusal.
     System { text: String },
+}
+
+/// The label of a chat no model answers.
+pub const NO_MODEL_LABEL: &str = "No model";
+
+/// What became of one of the person's lines, by its id (the engine's `send`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineFate {
+    /// The model got the line: its turn starts, at once or when the turn it waited behind ended.
+    Started(u64),
+    /// The line never reached the model: a stop dropped it while it waited, or its pictures
+    /// could not be delivered.
+    Dropped(u64),
+    /// The person stopped the running turn (Stop, Escape, New chat, or model swap) after it started.
+    Stopped(u64),
+    /// The running turn ended on a model error after it started.
+    Failed(u64),
 }
 
 /// Everything the panel draws. `generation` bumps on every change so a
@@ -289,6 +318,11 @@ pub struct EngineState {
     pub suggestions: Vec<Suggestion>,
     /// The composer's target chip.
     pub target: Option<Target>,
+    /// Each line's fate, in the order they happened: one entry per line that reached the model
+    /// or was dropped (a started line may later append `Stopped` or `Failed`), none for a console line or a restored one. Append-only for the engine's
+    /// whole life, across new conversations (16 bytes a line), so a reader that keeps its own
+    /// index never misses one, however many happen between two reads.
+    pub line_log: Vec<LineFate>,
     pub generation: u64,
 }
 
@@ -343,6 +377,11 @@ impl EngineState {
     pub fn service(&self, id: &str) -> Option<&ServiceInfo> {
         self.services.iter().find(|s| s.id == id)
     }
+
+    /// Whether a model answers this chat (a line to none fails at once).
+    pub fn has_model(&self) -> bool {
+        self.provider_label != NO_MODEL_LABEL
+    }
 }
 
 #[cfg(test)]
@@ -353,7 +392,7 @@ mod tests {
     fn the_transcript_is_bounded_and_generation_moves() {
         let mut s = EngineState::default();
         for i in 0..(MAX_ENTRIES + 5) {
-            s.push(Entry::User { text: i.to_string(), pictures: Vec::new(), attachments: Vec::new() });
+            s.push(Entry::User { text: i.to_string(), pictures: Vec::new(), attachments: Vec::new(), delivery: LineDelivery::Sent });
         }
         assert_eq!(s.entries.len(), MAX_ENTRIES);
         assert_eq!(s.generation, (MAX_ENTRIES + 5) as u64);

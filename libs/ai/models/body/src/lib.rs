@@ -4,8 +4,7 @@
 //! and no subprocess.
 //!
 //! The architecture is implemented after the SAM 3D Body paper
-//! (arXiv:2602.15989) and the port spec in `local/agent_state/sam3dbody/`
-//! (tensor inventory, op order, formulas), the DINOv3 backbone after the
+//! (arXiv:2602.15989) and its tensor inventory, op order and formulas, the DINOv3 backbone after the
 //! Apache-2.0 HF transformers implementation the TRELLIS conditioner in
 //! `makepad-ai-trellis` already follows, and the MHR rig after the
 //! Apache-2.0 Momentum Human Rig release. Our code stays MIT with the

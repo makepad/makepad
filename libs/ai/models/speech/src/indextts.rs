@@ -16,7 +16,7 @@
 //!
 //! Everything is CPU f32 in the crate's established style (`sa3::linear`,
 //! `sa3::par_rows`, plain `Vec<f32>` rows). Oracle dumps for stage validation
-//! live in `local/indextts_ref/dumps/` (see `local/agent_state/indextts-port.md`);
+//! live in `local/indextts_ref/dumps/`;
 //! the `indextts_*_validate` bins compare against them.
 
 use std::path::PathBuf;

@@ -124,6 +124,21 @@ pub struct Qwen35Tensors {
     pub mtp: Option<Qwen35MtpTensors>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static INVENTORY_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_inventory_build_count() {
+    INVENTORY_BUILDS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn inventory_build_count() -> usize {
+    INVENTORY_BUILDS.with(|count| count.get())
+}
+
 impl Qwen35Tensors {
     pub fn from_model(model: &LlamaModel) -> Result<Self> {
         Self::from_model_with_mtp(model, false)
@@ -132,6 +147,8 @@ impl Qwen35Tensors {
     /// `load_mtp` mirrors llama.cpp's `mparams.load_mtp`: the nextn block is
     /// skipped entirely (zero VRAM) unless speculative decoding wants it.
     pub fn from_model_with_mtp(model: &LlamaModel, load_mtp: bool) -> Result<Self> {
+        #[cfg(test)]
+        INVENTORY_BUILDS.with(|count| count.set(count.get() + 1));
         let cfg = model.require_qwen35()?;
         let token_embd = required_tensor(model, "token_embd.weight")?;
         let output_norm = required_tensor(model, "output_norm.weight")?;

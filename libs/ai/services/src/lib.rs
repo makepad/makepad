@@ -13,8 +13,6 @@
 //!   tool result.
 //! - [`mcp`] — the Claude Desktop bundle writer. The bundle runs
 //!   `makepad-remote mcp` to reach the app's tools through its `app` service.
-//!
-//! Design of record: `local/agent_state/aichat/DESIGN.md`.
 
 #[cfg(all(feature = "platform", not(any(target_arch = "wasm32", target_os = "android"))))]
 pub mod app_service;

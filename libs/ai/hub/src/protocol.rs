@@ -278,6 +278,51 @@ pub struct ChatMessageJson {
     pub images: Option<Vec<String>>,
 }
 
+/// The chat subset of a generate body. Pictures carry the key of their base64
+/// and the original dimensions, so asking for room uploads no pixels.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct ChatRoomRequest {
+    pub model: String,
+    pub prompt: Option<String>,
+    pub chat_system: Option<String>,
+    pub chat_messages: Option<Vec<ChatRoomRow>>,
+    pub thinking: Option<bool>,
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct ChatRoomRow {
+    pub role: String,
+    pub text: String,
+    pub images: Option<Vec<ChatPictureSize>>,
+}
+
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct ChatPictureSize {
+    pub key: String,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub struct PictureTokens {
+    pub key: String,
+    pub tokens: Option<u64>,
+}
+
+/// Counts that need an unavailable vocabulary or tower geometry are absent.
+#[derive(Clone, Debug, PartialEq, Eq, SerJson, DeJson)]
+pub struct ChatMeasure {
+    pub model: String,
+    pub window: u64,
+    pub reserve: u64,
+    pub prompt_tokens: Option<u64>,
+    pub tail_tokens: Option<u64>,
+    pub pictures: Vec<PictureTokens>,
+    pub sees: String,
+    pub fits: Option<bool>,
+}
+
 /// Empty-think prefill so Qwen3 / Qwen3.6 skip the think block.
 pub const CHAT_THINK_PREFILL: &str = "<think>\n\n</think>\n\n";
 /// Qwen3.8 official generation prompt: thinking is on by default. Closing
@@ -363,8 +408,7 @@ pub fn think_prefill_for_expand(model_id: &str) -> &'static str {
         CHAT_THINK_PREFILL
     }
 }
-/// Appended after the generated assistant text so the next chat prompt is
-/// a strict string-prefix extension (KV reuse).
+/// Closes a historical assistant reply at the start of the next warm prefill.
 pub const CHAT_COMMIT_SUFFIX: &str = "<|im_end|>\n";
 
 /// The think block a FINISHED assistant turn is rendered with.
@@ -483,7 +527,7 @@ pub fn split_chat_images(prompt: &str) -> Vec<PromptPiece<'_>> {
 
 /// Prefix-stable ChatML for multi-turn chat. Previous assistant turns are
 /// reconstructed with the same think-prefill the generation prompt used, so
-/// `prompt_n + reply + CHAT_COMMIT_SUFFIX` is a prefix of `prompt_{n+1}`.
+/// `prompt_{n+1}` extends the lane's `prompt_n + reply` with the closing marker.
 pub fn assemble_chat_prompt(system: &str, messages: &[ChatMessageJson]) -> String {
     assemble_chat_prompt_with_think(system, messages, CHAT_THINK_PREFILL)
 }
@@ -493,6 +537,27 @@ pub fn assemble_chat_prompt_with_think(
     messages: &[ChatMessageJson],
     think_prefill: &str,
 ) -> String {
+    render_chat(
+        system,
+        messages.iter().map(|m| (m.role.as_str(), m.text.as_str(), m.images.iter().flatten().map(|b64| chat_image_key(b64)))),
+        think_prefill, None, |_| {},
+    )
+}
+
+/// Both job admission and room measurement render these bytes. The measure
+/// also uses each row boundary for memoizing text between ChatML controls.
+pub(crate) fn render_chat<'a, I: IntoIterator<Item = String>>(
+    system: &str,
+    rows: impl Iterator<Item = (&'a str, &'a str, I)>,
+    think_prefill: &str,
+    fallback: Option<&str>,
+    mut row_end: impl FnMut(usize),
+) -> String {
+    let mut rows = rows.peekable();
+    if let Some(fallback) = fallback.filter(|_| rows.peek().is_none()) {
+        row_end(fallback.len());
+        return fallback.to_string();
+    }
     let history_prefill = history_think_prefill(think_prefill);
     let mut out = String::new();
     out.push_str("<|im_start|>system\n");
@@ -503,8 +568,9 @@ pub fn assemble_chat_prompt_with_think(
         out.push_str(sys);
     }
     out.push_str("<|im_end|>\n");
-    for m in messages {
-        let role = match m.role.as_str() {
+    row_end(out.len());
+    for (role, text, keys) in rows {
+        let role = match role {
             "assistant" => "assistant",
             "system" => "system",
             _ => "user",
@@ -513,7 +579,7 @@ pub fn assemble_chat_prompt_with_think(
         out.push_str(role);
         out.push('\n');
         if role == "assistant" {
-            let kept = assistant_history_text(&m.text);
+            let kept = assistant_history_text(text);
             if kept.contains("</think>") {
                 // The client echoed the reply VERBATIM — reasoning included.
                 // That text is the KV's own content: render it after the
@@ -528,15 +594,17 @@ pub fn assemble_chat_prompt_with_think(
                 out.push_str(kept);
             }
         } else {
-            for image in m.images.iter().flatten() {
-                out.push_str(&chat_image_marker(&chat_image_key(image)));
+            for key in keys {
+                out.push_str(&chat_image_marker(&key));
             }
-            out.push_str(&m.text);
+            out.push_str(text);
         }
         out.push_str("<|im_end|>\n");
+        row_end(out.len());
     }
     out.push_str("<|im_start|>assistant\n");
     out.push_str(think_prefill);
+    row_end(out.len());
     out
 }
 
@@ -558,6 +626,9 @@ pub struct PixalOptionsJson {
 #[derive(Clone, Debug, Default, SerJson, DeJson)]
 pub struct GenerateRequestJson {
     pub model: String,
+    /// With an empty model, allow fleet routing to choose a different model
+    /// for each node, including on admission retries.
+    pub any_model: Option<bool>,
     /// Lease origin (aicore §8): the submitter's durable node key. Absent on
     /// every legacy client — no origin, no lease, exactly today's behavior.
     pub origin_key: Option<String>,
@@ -583,7 +654,7 @@ pub struct GenerateRequestJson {
     pub queue_class: Option<String>,
     /// `"fleet"`: this hub routes the job for its caller, an app on this machine, the way
     /// `/talk` routes its stages (this hub first, then the pinned hubs and the LAN fleet, by
-    /// ETA; an image without a queue policy tries an idle GPU first), and keeps a job of its own
+    /// ETA; images and videos without a queue policy try an idle GPU first), and keeps a job of its own
     /// that mirrors the routed one: progress, streamed text and pieces, the artifacts (copied
     /// here) and the end. The client polls, fetches and cancels that job as any other. The
     /// node gets a plain request, so a job is routed once at most. Such a request does no work
@@ -1153,6 +1224,7 @@ pub struct ServingStatusJson {
     /// generated count of zero and its meter read an authoritative-looking
     /// `0 tok/s`. A counter is a counter; it does not belong in a label.
     pub gen_tokens: Option<u64>,
+    pub measure: Option<ChatMeasure>,
 }
 
 /// Live-session counters mirrored on `GET /job/<id>` (see
@@ -1535,10 +1607,8 @@ mod warm_history_tests {
 
     /// Open-think warmth, achieved: a client that echoes the reply VERBATIM
     /// (reasoning included — the fleet provider's wire transcript does
-    /// exactly this) gets a rendered turn that is byte-identical to the
-    /// tokens the lane generated, so the next prompt extends the KV and the
-    /// node prefills only the delta. This is the property the wire mirror
-    /// in `providers/qwen.rs` exists to provide.
+    /// exactly this) reproduces the prompt and raw reply held in the lane.
+    /// The next prefill supplies the closing marker and the new turn.
     #[test]
     fn an_echoed_raw_reply_makes_open_think_warm() {
         let (system, first_turn, visible) = a_real_conversation();
@@ -1547,7 +1617,7 @@ mod warm_history_tests {
         let prompt_1 = assemble_chat_prompt_with_think(&system, &first_turn, think);
         let reasoning = "The door is at x=3. A lamp goes beside it.";
         let raw = format!("{reasoning}\n</think>\n\n{visible}");
-        let committed = format!("{prompt_1}{raw}{CHAT_COMMIT_SUFFIX}");
+        let closed_turn = format!("{prompt_1}{raw}{CHAT_COMMIT_SUFFIX}");
 
         let mut second_turn = first_turn.clone();
         second_turn.push(msg("assistant", &raw));
@@ -1555,15 +1625,15 @@ mod warm_history_tests {
         let prompt_2 = assemble_chat_prompt_with_think(&system, &second_turn, think);
 
         assert!(
-            prompt_2.starts_with(&committed),
-            "an echoed raw turn must extend what the lane holds.\n  held:  {:?}\n  sent:  {:?}",
-            &committed[committed.len().saturating_sub(120)..],
-            &prompt_2[..prompt_2.len().min(committed.len() + 40)],
+            prompt_2.starts_with(&closed_turn),
+            "the next prompt must close the lane's raw reply.\n  expected:  {:?}\n  sent:  {:?}",
+            &closed_turn[closed_turn.len().saturating_sub(120)..],
+            &prompt_2[..prompt_2.len().min(closed_turn.len() + 40)],
         );
         assert!(
-            prompt_2.len() - committed.len() < 120,
-            "the delta should be one user turn, got {} bytes",
-            prompt_2.len() - committed.len()
+            prompt_2.len() - closed_turn.len() < 120,
+            "only the new user turn should follow the closing marker, got {} bytes",
+            prompt_2.len() - closed_turn.len()
         );
     }
 

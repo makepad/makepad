@@ -27,7 +27,7 @@ pub(super) fn submit(
     transport: &mut impl Transport,
 ) -> Result<String, AssetAiError> {
     let reply = transport.post(url, headers, body).map_err(|e| match e {
-        AssetAiError::Http(reason) | AssetAiError::Io(reason) => AssetAiError::Http(reason),
+        AssetAiError::Http(reason) | AssetAiError::HttpTransport(reason) | AssetAiError::Io(reason) => AssetAiError::Http(reason),
         other => AssetAiError::Http(other.to_string()),
     })?;
     match reply {

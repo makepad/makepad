@@ -1,12 +1,11 @@
-//! The hub control API from a terminal (contract:
-//! local/agent_state/fast-rust/hub-vision/CONTROL_API.md), plus a chat probe
+//! The hub control API from a terminal, plus a chat probe
 //! that can show the model a picture.
 //!
 //! ```text
 //! hub-control <base> get | watch | load <model> | unload <model>
 //! hub-control <base> yield <mb> [unload] [reserve_mb]   (what the WM asks under GPU pressure)
 //! hub-control <base> local-use gaming|none              (what the WM reports; its own hub only)
-//! hub-control <base> context <tokens> | kv f16|q8        (applied at once)
+//! hub-control <base> context <tokens|auto|null> | kv f16|q8        (applied at once)
 //! hub-control <base> ask <model> <prompt> [--image <png|jpg>] [--max N]
 //!             [--session S] [--thinking true|false] [--system <text>] [--temp T]
 //! hub-control <base> gen <body.json>          (POST /generate, wait, print status)
@@ -83,7 +82,11 @@ fn run() -> Result<(), String> {
         "context" | "kv" => {
             let value = rest.first().ok_or("which value?")?;
             let field = if command == "context" {
-                ("context", Value::Int(value.parse::<i64>().map_err(|e| e.to_string())?))
+                let tokens = match value.as_str() {
+                    "auto" | "null" => Value::Null,
+                    n => Value::Int(i64::from(n.parse::<u32>().map_err(|e| e.to_string())?)),
+                };
+                ("context", tokens)
             } else {
                 ("kv", json::s(value.as_str()))
             };

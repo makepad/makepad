@@ -10,7 +10,7 @@
 use crate::chat_wire::{
     sanitize_public_error, split_delta_text, tool_arguments_too_large, ChatMessage, ChatRole,
     ProviderAvailability, ProviderKind, MAX_MESSAGES, MAX_TOOL_CALL_ID, MAX_TOOL_JSON_BYTES,
-    MAX_TOOL_RESULT_BYTES, MAX_TURN_TEXT_BYTES,
+    MAX_TURN_TEXT_BYTES,
 };
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_network::blocking_http::{
@@ -106,6 +106,7 @@ impl ClaudeApiConfig {
     }
 
     /// The API key from `ANTHROPIC_API_KEY`: a subscription login is never a credential here.
+    /// A launch with no model ([`super::no_model`]) takes no key.
     pub fn from_env(kind: ProviderKind) -> Self {
         let model = std::env::var(CLAUDE_MODEL_ENV)
             .ok()
@@ -113,7 +114,7 @@ impl ClaudeApiConfig {
             .unwrap_or_else(|| DEFAULT_CLAUDE_MODEL.to_string());
         let api_key = std::env::var(ANTHROPIC_API_KEY_ENV)
             .ok()
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty() && super::no_model().is_none());
         let (auth, unavailable_reason) = match api_key.map(ClaudeAuth::api_key) {
             Some(Ok(auth)) => (Some(auth), missing_credential_reason()),
             Some(Err(_)) => (None, format!("{ANTHROPIC_API_KEY_ENV} is invalid")),
@@ -157,7 +158,7 @@ fn anthropic_beta(config: &ClaudeApiConfig) -> String {
 }
 
 fn missing_credential_reason() -> String {
-    format!("{ANTHROPIC_API_KEY_ENV} is not set")
+    super::unavailable_reason(&format!("{ANTHROPIC_API_KEY_ENV} is not set"))
 }
 
 fn bound_model(model: String) -> String {
@@ -891,14 +892,43 @@ pub struct ClaudeApiChatProvider<T: ClaudeApiTransport = BlockingClaudeTransport
     transport: Arc<T>,
     cancel: CancelToken,
     active: Option<Active>,
-    messages: Vec<Value>,
-    input_messages: Option<Vec<ChatMessage>>,
-    system: String,
+    messages: Arc<Vec<Value>>,
+    input_messages: Option<Arc<Vec<ChatMessage>>>,
+    system: Arc<str>,
     tools_enabled: bool,
     pending_tool: Option<PendingTool>,
 }
 
+/// The signed transcript can be replaced (edited history or a changed system
+/// prompt strips thinking). Share the original prefix until the turn finishes.
+pub struct TranscriptMark {
+    messages: Arc<Vec<Value>>,
+    input_messages: Option<Arc<Vec<ChatMessage>>>,
+    pending_tool: Option<PendingTool>,
+    system: Arc<str>,
+    tools_enabled: bool,
+}
+
 impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
+    pub fn checkpoint(&self) -> TranscriptMark {
+        TranscriptMark {
+            messages: self.messages.clone(),
+            input_messages: self.input_messages.clone(),
+            pending_tool: self.pending_tool.clone(),
+            system: self.system.clone(),
+            tools_enabled: self.tools_enabled,
+        }
+    }
+
+    pub fn restore(&mut self, mark: TranscriptMark) {
+        self.cancel();
+        self.messages = mark.messages;
+        self.input_messages = mark.input_messages;
+        self.pending_tool = mark.pending_tool;
+        self.system = mark.system;
+        self.tools_enabled = mark.tools_enabled;
+    }
+
     pub fn with_transport(
         config: ClaudeApiConfig,
         transport: T,
@@ -910,9 +940,9 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
             transport: Arc::new(transport),
             cancel: CancelToken::new(),
             active: None,
-            messages: Vec::new(),
+            messages: Arc::default(),
             input_messages: None,
-            system: String::new(),
+            system: Arc::default(),
             tools_enabled: true,
             pending_tool: None,
         }
@@ -1000,7 +1030,7 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
             .map_err(|_| "failed to start provider worker".to_string())?;
         // Once dispatched, this exact prefix belongs to the conversation,
         // including when the request is later cancelled or fails.
-        self.messages = request_messages;
+        self.messages = Arc::new(request_messages);
         self.active = Some(Active { rx });
         Ok(())
     }
@@ -1051,8 +1081,8 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             .is_some_and(|previous| input.messages.starts_with(previous));
         let mut messages;
         if extends {
-            messages = self.messages.clone();
-            if self.system != input.system || self.tools_enabled != input.tools_enabled {
+            messages = self.messages.as_ref().clone();
+            if self.system.as_ref() != input.system || self.tools_enabled != input.tools_enabled {
                 strip_thinking(&mut messages);
             }
             if let Some(tool) = &self.pending_tool {
@@ -1080,9 +1110,9 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             self.native_tools.as_ref(), input.tools_enabled,
         )?;
         self.spawn_request(body, messages)?;
-        self.system = input.system.clone();
+        self.system = Arc::from(input.system.as_str());
         self.tools_enabled = input.tools_enabled;
-        self.input_messages = Some(input.messages.clone());
+        self.input_messages = Some(Arc::new(input.messages.clone()));
         self.pending_tool = None;
         Ok(())
     }
@@ -1092,7 +1122,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             return Err("a turn is already in flight".to_string());
         }
         validate_call_id(call_id)?;
-        if output.len() > MAX_TOOL_RESULT_BYTES {
+        if output.len() > MAX_TOOL_JSON_BYTES + 64 {
             return Err("function output too large".to_string());
         }
         match self.pending_tool.as_ref() {
@@ -1102,7 +1132,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             }
             Some(_) => {},
         };
-        let mut messages = self.messages.clone();
+        let mut messages = self.messages.as_ref().clone();
         messages.push(tool_result_message(call_id, output, false));
         let body = build_request_body(
             &self.config,
@@ -1128,7 +1158,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
                     return vec![ProviderEvent::Error("provider state error".to_string())];
                 };
                 if !parsed.content.is_empty() {
-                    self.messages.push(json::obj(vec![
+                    Arc::make_mut(&mut self.messages).push(json::obj(vec![
                         ("role", json::s("assistant")),
                         ("content", Value::Arr(parsed.content)),
                     ]));
@@ -1175,9 +1205,9 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
     fn reset_conversation(&mut self) {
         self.cancel.cancel();
         self.active = None;
-        self.messages.clear();
+        self.messages = Arc::default();
         self.input_messages = None;
-        self.system.clear();
+        self.system = Arc::default();
         self.pending_tool = None;
         self.cancel = CancelToken::new();
     }
@@ -1467,6 +1497,75 @@ data: {}
     }
 
     #[test]
+    fn continue_function_accepts_result_above_16kib_and_refuses_above_wire_cap() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let transport = FakeTransport {
+            seen: seen.clone(),
+            responses: Mutex::new(VecDeque::from([
+                stream_blocks(&[tool_block("c1")], "tool_use"),
+                stream_blocks(&[text_block("done")], "end_turn"),
+            ])),
+        };
+        let config = ClaudeApiConfig::new(ProviderKind::ClaudeCli, ClaudeAuth::api_key("test-token").unwrap(), DEFAULT_CLAUDE_MODEL);
+        let tools = json::parse(br#"[{"name":"lookup","input_schema":{"type":"object"}}]"#).unwrap();
+        let mut provider = ClaudeApiChatProvider::with_transport(config, transport, Some(tools));
+        provider.begin_turn(&TurnInput::new("system", vec![ChatMessage::new(ChatRole::User, "look up")])).unwrap();
+        assert!(matches!(finish_response(&mut provider).last(), Some(ProviderEvent::FunctionCall { call_id, .. }) if call_id == "c1"),
+            "the first response requests the tool");
+
+        let oversized = "x".repeat(MAX_TOOL_JSON_BYTES + 65);
+        assert_eq!(provider.continue_function("c1", &oversized), Err("function output too large".into()), "one byte over the limit is refused");
+        let output = json::s("x".repeat(32 * 1024 - 2)).to_json();
+        provider.continue_function("c1", &output).expect("the pending call accepts the 32 KiB result after refusal");
+        assert!(matches!(finish_response(&mut provider).last(), Some(ProviderEvent::Done { text }) if text == "done"),
+            "the continuation completes the turn");
+
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2, "only the accepted continuation sends a second request");
+        let body = json::parse(&requests[1].body).unwrap();
+        let message = body.get("messages").unwrap().as_arr().unwrap().last().unwrap();
+        let block = &message.get("content").unwrap().as_arr().unwrap()[0];
+        assert_eq!(block.get("content").and_then(Value::as_str), Some(output.as_str()), "the request contains the full 32 KiB tool result");
+    }
+
+    #[test]
+    fn restoring_a_stopped_round_preserves_the_completed_signed_transcript() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let responses = VecDeque::from([
+            stream_blocks(&[thinking("kept signature"), tool_block("kept")], "tool_use"),
+            stream_blocks(&[text_block("first reply")], "end_turn"),
+            stream_blocks(&[thinking("stopped signature"), tool_block("stopped")], "tool_use"),
+            stream_blocks(&[text_block("last reply")], "end_turn"),
+        ]);
+        let transport = FakeTransport { seen: seen.clone(), responses: Mutex::new(responses) };
+        let config = ClaudeApiConfig::new(ProviderKind::ClaudeCli, ClaudeAuth::api_key("test-token").unwrap(), DEFAULT_CLAUDE_MODEL);
+        let tools = json::parse(br#"[{"name":"lookup","input_schema":{"type":"object"}}]"#).unwrap();
+        let mut provider = ClaudeApiChatProvider::with_transport(config, transport, Some(tools));
+        let mut input = TurnInput::new("system", vec![ChatMessage::new(ChatRole::User, "first question")]);
+        provider.begin_turn(&input).unwrap();
+        finish_response(&mut provider);
+        provider.continue_function("kept", "first result").unwrap();
+        finish_response(&mut provider);
+        input.messages.push(ChatMessage::new(ChatRole::Assistant, "first reply"));
+        let mark = provider.checkpoint();
+        input.messages.push(ChatMessage::new(ChatRole::User, "same question"));
+        provider.begin_turn(&input).unwrap();
+        finish_response(&mut provider);
+        assert_eq!(provider.pending_tool.as_ref().unwrap().call_id, "stopped", "Stop must exercise a pending tool call");
+        provider.restore(mark);
+        provider.begin_turn(&input).unwrap();
+        finish_response(&mut provider);
+        let seen = seen.lock().unwrap();
+        let sent = |index: usize| json::parse(&seen[index].body).unwrap().get("messages").unwrap().clone();
+        let last = sent(3);
+        assert_eq!(last, sent(2), "the retyped line must reproduce the exact request from before the stopped tool call");
+        let rows = last.as_arr().unwrap();
+        assert_eq!(rows[1].get("content"), Some(&Value::Arr(vec![thinking("kept signature"), tool_block("kept")])), "the earlier signed tool call must survive Stop");
+        assert_eq!(rows[2], tool_result_message("kept", "first result", false), "the earlier tool result must survive Stop");
+        assert_eq!(last.to_json().matches("same question").count(), 1, "the retyped line must appear once");
+    }
+
+    #[test]
     fn transport_faked_round_trip_preserves_deltas_and_request_shape() {
         let response = br#"event: message_start
 data: {"type":"message_start","message":{}}
@@ -1631,7 +1730,7 @@ data: {"type":"message_stop"}
             }
             assert_eq!(messages.last().unwrap().get("content"), Some(&Value::Arr(vec![text_block("second context"), text_block("second question")])));
 
-            let before = provider.messages.clone();
+            let before = provider.messages.as_ref().clone();
             input.system = "changed system".into();
             input.messages.push(ChatMessage::new(ChatRole::Assistant, "reply"));
             input.messages.push(ChatMessage::new(ChatRole::User, "third question"));

@@ -144,6 +144,7 @@ impl HubPanel {
                 self.elsewhere = !self.elsewhere;
                 None
             }
+            HubHit::Context(_) if snap.context == 0 => None,
             HubHit::Context(up) => {
                 let now = snap.context;
                 let next = if up { hub_context_up(snap) } else { snap.context_options.iter().rev().copied().find(|c| *c < now) };
@@ -296,7 +297,7 @@ impl HubPanel {
             let can_up = hub_context_up(hub).is_some();
             for (label, up) in [("-", false), ("+", true)] {
                 let r = rect(x, row.pos.y + 3.0, step, row.size.y - 6.0);
-                let enabled = if up { can_up } else { hub.context_options.iter().any(|c| *c < hub.context) };
+                let enabled = if up { can_up } else { hub.context > 0 && hub.context_options.iter().any(|c| *c < hub.context) };
                 let state = if !enabled { CtrlState::Disabled } else if self.hot == Some(HubHit::Context(up)) { CtrlState::Hover } else { CtrlState::Normal };
                 d.button(cx, r, &tok, state, None, label, tok.font.body_small, fg, true);
                 if enabled {
@@ -304,7 +305,8 @@ impl HubPanel {
                 }
                 x += step + 4.0;
                 if !up {
-                    d.label(cx, rect(x, row.pos.y, 48.0, row.size.y), true, tok.font.body_small, fg, HAlign::Center, &kilo(hub.context));
+                    let context = if hub.context == 0 { "auto".to_owned() } else { kilo(hub.context) };
+                    d.label(cx, rect(x, row.pos.y, 48.0, row.size.y), true, tok.font.body_small, fg, HAlign::Center, &context);
                     x += 48.0 + 4.0;
                 }
             }
@@ -648,6 +650,7 @@ fn hub_icon(kind: ModelKind) -> Ico {
 /// The next larger context the hub offers that still fits next to the UI (the chat
 /// model's `context_fit`; unknown = not capped).
 fn hub_context_up(hub: &HubSnapshot) -> Option<u32> {
+    if hub.context == 0 { return None; }
     let fit = hub.models.iter().find(|m| Some(&m.id) == hub.chat_model.as_ref()).and_then(|m| m.context_fit);
     hub.context_options.iter().copied().find(|c| *c > hub.context && fit.is_none_or(|f| *c <= f))
 }
@@ -674,6 +677,22 @@ mod tests {
             context_options: vec![16384, 32768, 49152, 65536],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn panel_handles_null_context_and_262k_context_options() {
+        let parse = |text: &str| crate::hub_control::parse_snapshot(&makepad_strict_json::parse(text.as_bytes()).unwrap());
+        let empty = parse(r#"{"llm":{"context":null,"context_options":[]}}"#);
+        let fitted = parse(r#"{"llm":{"model":"q","context":114688,"context_options":[16384,32768,65536,114688,131072,262144]},"models":[{"id":"q","kind":"chat","context_fit":114688}]}"#);
+        assert_eq!(empty.context, 0);
+        assert_eq!(fitted.context_options.last(), Some(&262144));
+        let mut panel = HubPanel::default();
+        for up in [true, false] {
+            panel.hits = vec![(HubHit::Context(up), rect(0.0, 0.0, 10.0, 10.0))];
+            assert_eq!(panel.click(dvec2(5.0, 5.0), &empty), None);
+            assert_eq!(panel.click(dvec2(5.0, 5.0), &fitted), (!up).then_some(HubCommand::SetContext(65536)));
+        }
+        assert_eq!(hub_context_up(&HubSnapshot { context: 0, ..fitted }), None);
     }
 
     #[test]
