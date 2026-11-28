@@ -13,9 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
-const MAX_CONTEXT: u32 = 32768;
 const MAX_NEW_TOKENS: usize = 768;
-const MIN_REMAINING_CONTEXT: usize = 256;
 
 pub struct LocalAgent {
     model_path: PathBuf,
@@ -54,9 +52,7 @@ impl Agent for LocalAgent {
     fn create_session(&mut self, _cx: &mut Cx, config: SessionConfig) -> SessionId {
         let session_id = SessionId::new();
         let mut llm = LocalLlmConfig::new(self.model_path.clone());
-        llm.max_context = MAX_CONTEXT;
         llm.max_new_tokens = MAX_NEW_TOKENS;
-        llm.min_remaining_context = MIN_REMAINING_CONTEXT;
         let tools = config
             .tools
             .into_iter()

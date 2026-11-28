@@ -1862,6 +1862,7 @@ fn make_mod(file: &str, code: &str) -> ScriptMod {
     ScriptMod::new("", "", &(file), 0, 0, &(code), &[])
 }
 
+/// Guest modules evaluated here belong in `tests::flow_guest_funnels_have_empty_manifests`.
 fn eval_checked(vm: &mut ScriptVm, file: &str, code: &str) -> Result<ScriptValue, String> {
     vm.capture_errors();
     let value = vm.with_instruction_limit(FLOW_INSTRUCTION_LIMIT as u64, |vm| {
@@ -1873,6 +1874,17 @@ fn eval_checked(vm: &mut ScriptVm, file: &str, code: &str) -> Result<ScriptValue
         return Err(error.trim().to_string());
     }
     Ok(value)
+}
+
+fn run_host_registration(vm: &mut ScriptVm, f: impl FnOnce(&mut ScriptVm)) -> Result<(), String> {
+    vm.capture_errors();
+    with_splash_resources(vm, f);
+    let errors = vm.take_errors();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n"))
+    }
 }
 
 fn json_to_script(vm: &mut ScriptVm<'_>, value: &makepad_strict_json::Value) -> ScriptValue {
@@ -2093,10 +2105,13 @@ fn set_subtree_locked(cx: &mut Cx, root: &WidgetRef, locked: bool) {
 /// widgets, then the face prelude. The flow prelude, registry, closure and
 /// the package are not evaluated again.
 fn reload_face_modules(vm: &mut ScriptVm<'_>) -> Result<(), String> {
+    vm.capture_errors();
     vm.with_reload(|vm| {
-        makepad_code_editor::script_mod(vm);
-        crate::theme::script_mod(vm);
-        register_face_widgets(vm);
+        with_splash_resources(vm, |vm| {
+            makepad_code_editor::script_mod(vm);
+            crate::theme::script_mod(vm);
+            register_face_widgets(vm);
+        });
     });
     let errors = vm.take_errors();
     vm.capture_errors();
@@ -2565,6 +2580,7 @@ impl FaceHost {
     }
 
     /// Use the authoritative registry and qualify bridge writes by component instance.
+    /// Guest-source provenance is checked by `tests::flow_guest_funnels_have_empty_manifests`.
     #[allow(clippy::too_many_arguments)]
     pub fn mount_scoped_with_registry(
         cx: &mut Cx,
@@ -2582,7 +2598,10 @@ impl FaceHost {
         let appearance = appearance::current(cx);
         // The library is registered once, already in the window's appearance.
         let ui_errors = Rc::new(RefCell::new(Vec::new()));
-        let vm_id = cx.alloc_splash_vm_with_ui(false, appearance::isolate_ui(appearance.clone(), ui_errors.clone()));
+        let vm_id = cx.alloc_splash_vm_with_grants(
+            HostGrants::NONE,
+            Some(appearance::isolate_ui(appearance.clone(), ui_errors.clone())),
+        );
         // A live edit restyles it in place like an appearance change (`apply_appearance`).
         makepad_widgets::widget_async::isolate_reloads_with_host(cx, vm_id);
         let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap_ref().heap_key());
@@ -2625,11 +2644,13 @@ impl FaceHost {
                 if !ui_errors.is_empty() {
                     return Err(ui_errors.join("\n"));
                 }
-                makepad_code_editor::script_mod(vm);
-                crate::theme::script_mod(vm);
+                run_host_registration(vm, |vm| {
+                    makepad_code_editor::script_mod(vm);
+                    crate::theme::script_mod(vm);
+                })?;
                 vm.new_module(id!(flow));
                 eval_checked(vm, PRELUDE_FILE, PRELUDE)?;
-                register_face_widgets(vm);
+                run_host_registration(vm, register_face_widgets)?;
                 eval_checked(vm, FACES_FILE, FACES)?;
                 eval_checked(vm, RECIPE_FILE, RECIPE_PRELUDE)?;
                 let bridge = make_bridge(vm, instance_name, false, nodes_for_bridge.clone(), crate::hierarchy::prefix(instance_path));
@@ -2732,6 +2753,7 @@ impl FaceHost {
     /// root as this host's one face. The surface sees the same `flow`
     /// bridge a node face sees, with `surface: true` on every call it
     /// posts, so the app writes its `bind :=` edits to the live instance.
+    /// Guest-source provenance is checked by `tests::flow_guest_funnels_have_empty_manifests`.
     pub fn mount_surface(
         cx: &mut Cx,
         parent: WidgetUid,
@@ -2745,7 +2767,10 @@ impl FaceHost {
         let appearance = appearance::current(cx);
         // The library is registered once, already in the window's appearance.
         let ui_errors = Rc::new(RefCell::new(Vec::new()));
-        let vm_id = cx.alloc_splash_vm_with_ui(false, appearance::isolate_ui(appearance.clone(), ui_errors.clone()));
+        let vm_id = cx.alloc_splash_vm_with_grants(
+            HostGrants::NONE,
+            Some(appearance::isolate_ui(appearance.clone(), ui_errors.clone())),
+        );
         // A live edit restyles it in place like an appearance change (`apply_appearance`).
         makepad_widgets::widget_async::isolate_reloads_with_host(cx, vm_id);
         let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap_ref().heap_key());
@@ -2783,11 +2808,13 @@ impl FaceHost {
                 if !ui_errors.is_empty() {
                     return Err(ui_errors.join("\n"));
                 }
-                makepad_code_editor::script_mod(vm);
-                crate::theme::script_mod(vm);
+                run_host_registration(vm, |vm| {
+                    makepad_code_editor::script_mod(vm);
+                    crate::theme::script_mod(vm);
+                })?;
                 vm.new_module(id!(flow));
                 eval_checked(vm, PRELUDE_FILE, PRELUDE)?;
-                register_face_widgets(vm);
+                run_host_registration(vm, register_face_widgets)?;
                 eval_checked(vm, FACES_FILE, FACES)?;
                 eval_checked(vm, RECIPE_FILE, RECIPE_PRELUDE)?;
                 makepad_flow::graph::install_registry(vm, registry).map_err(|error| error.to_string())?;
@@ -4408,6 +4435,91 @@ mod tests {
     use std::cell::Cell;
     use std::sync::{Arc, Mutex};
 
+    // Match the guest text independently of the file or manifest assigned by
+    // the evaluator. Host UI registration can create other bodies in the same VM.
+    fn assert_guest_bodies(vm: &ScriptVm, funnel: &str, marker: &str) {
+        let mut found = false;
+        for index in 0..vm.body_count() {
+            let body = u16::try_from(index).unwrap();
+            if vm.body_text(ScriptIp { body, index: 0 }).is_some_and(|(_, text)| text.contains(marker)) {
+                found = true;
+                let (manifest, path) = vm.body_module(body)
+                    .unwrap_or_else(|| panic!("{funnel}: missing module for body {body}"));
+                assert!(manifest.is_empty(), "{funnel}: guest body {body} ({path}) has manifest {manifest:?}");
+            }
+        }
+        assert!(found, "{funnel}: found no body containing {marker}");
+    }
+
+    /// Flow's companion to widgets core's `splash::guest_funnels::GUEST_FUNNELS`.
+    #[test]
+    fn flow_guest_funnels_have_empty_manifests() {
+        use makepad_flow::{document::Registry, graph};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let registry = Registry::with_builtins();
+        let file = "workflow.splash";
+        let source = "use mod.flow.*\nFlow{label: \"guest_funnel_workflow\"}";
+        let closure = Closure { modules: vec![makepad_flow::ModuleSource {
+            alias: "part".into(), path: "part.splash".into(), hash: String::new(),
+            source: "use mod.flow.*\nComponent{label: \"guest_funnel_component\"}".into(),
+        }] };
+        let graph = cx.with_vm(|vm| {
+            graph::install_prelude(vm, &registry).unwrap();
+            graph::instantiate_module(vm, &closure, "part", "").unwrap();
+            assert_guest_bodies(vm, "Flow component instance", "guest_funnel_component");
+            let flow = graph::evaluate_in(vm, source, file).unwrap();
+            assert_guest_bodies(vm, "Flow graph", "guest_funnel_workflow");
+            graph::graph_of(vm, flow, source, file, &registry).unwrap()
+        });
+        let face = FaceHost::mount_with(&mut cx, WidgetUid(0), "test", file, source, &graph, &[], &closure, None);
+        assert!(face.error.is_none(), "Flow face: {:?}", face.error);
+        cx.with_script_vm_id(face.vm_id, |vm| {
+            assert_guest_bodies(vm, "Flow face", "guest_funnel_workflow");
+            assert_guest_bodies(vm, "Flow pinned component", "guest_funnel_component");
+        });
+        face.free(&mut cx);
+
+        let surface = FaceHost::mount_surface(&mut cx, WidgetUid(0), "test", "surface.splash",
+            "View{label := Label{text: \"guest_funnel_surface\"}}", &graph, &[], &registry);
+        assert!(surface.error.is_none(), "Flow surface: {:?}", surface.error);
+        cx.with_script_vm_id(surface.vm_id, |vm| assert_guest_bodies(vm, "Flow surface", "guest_funnel_surface"));
+        surface.free(&mut cx);
+    }
+
+    // Core checks the receiving WidgetRef. This crate also links the Markdown
+    // family, so it can drive the fenced source all the way into that widget.
+    #[test]
+    fn markdown_runsplash_fence_creates_guest_bodies_with_empty_manifests() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let markdown = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                Markdown{splash_block := View{splash_view := Splash{allow_net: true}}}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        markdown.set_text(&mut cx, "```runsplash\nlet guest_funnel_fence = 1\n```");
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx = Cx2d::new(&mut draw);
+            cx.begin_pass(&pass, None);
+            list.begin_always(&mut cx);
+            cx.begin_root_turtle(dvec2(200.0, 100.0), Layout::flow_down());
+            markdown.draw_walk_all(&mut cx, &mut Scope::empty(), Walk::fill());
+            cx.end_pass_sized_turtle();
+            list.end(&mut cx);
+            cx.end_pass(&pass);
+        }
+        let splash = markdown.widget(&cx, ids!(splash_view)).as_splash();
+        let heap = splash.isolate_heap_key(&mut cx).expect("Markdown fence must create a Splash isolate");
+        assert!(cx.with_vm_of_heap(heap, &mut |vm| assert_guest_bodies(vm, "Markdown fenced Splash", "guest_funnel_fence")));
+    }
+
     fn model(id: &str, node: &str, available: bool, state: &str) -> ModelInfoDto {
         ModelInfoDto {
             id: id.into(),
@@ -5133,5 +5245,80 @@ Flow{video}
             vec![("ask".into(), "text".into(), "draft".into())]
         );
         host.free(&mut cx);
+    }
+
+    /// Mounting a face or surface and restyling it under `HostGrants::NONE`
+    /// with the house theme (no desktop style sheet) must produce zero script
+    /// errors while keeping `Window` / `WindowChrome` absent from the isolate.
+    #[test]
+    fn face_and_surface_mount_and_restyle_under_none_grants_have_zero_script_errors() {
+        let source = include_str!("../../../libs/flow/recipes/templates/prompt-to-image.splash");
+        let graph = makepad_flow::graph::evaluate(source, "<none-grants-theme>").unwrap();
+        let catalog = makepad_flow::graph::prelude_catalog().unwrap();
+        let registry = makepad_flow::document::Registry::with_builtins();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            // Pin the house theme regardless of MAKEPAD_WIDGET_STYLE in the environment.
+            makepad_widgets::desktop_style::uninstall(vm);
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+        });
+        appearance::sync(&mut cx);
+
+        let mut host = FaceHost::mount_with(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "<none-grants-theme>",
+            source,
+            &graph,
+            &catalog,
+            &Closure::default(),
+            None,
+        );
+        assert!(host.error.is_none(), "face mount errors: {:?}", host.error);
+        cx.with_script_vm_id(host.vm_id, |vm| {
+            assert_eq!(vm.cx().script_data.std.grants(), HostGrants::NONE);
+            let widgets = vm.module(id!(widgets));
+            let window = vm.value(widgets, id!(Window));
+            let chrome = vm.value(widgets, id!(WindowChrome));
+            assert!(window.is_nil() || window.is_err(), "guest face isolate must not register Window");
+            assert!(chrome.is_nil() || chrome.is_err(), "guest face isolate must not register WindowChrome");
+            let theme = vm.module(id!(theme));
+            assert!(vm.value(theme, id!(flow_window)).as_color().is_some());
+        });
+
+        // Exercise `prepare_isolate` + `reload_face_modules` under NONE with no sheet.
+        set_base_theme(&mut cx, BaseTheme::Light);
+        cx.with_vm(|vm| vm.with_reload(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+        }));
+        appearance::sync(&mut cx);
+        assert!(host.apply_appearance(&mut cx), "face apply_appearance under NONE must succeed");
+        set_base_theme(&mut cx, BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::theme::script_mod(vm);
+        }));
+        appearance::sync(&mut cx);
+        assert!(host.apply_appearance(&mut cx), "face apply_appearance back to Dark must succeed");
+        host.free(&mut cx);
+
+        let surface = FaceHost::mount_surface(
+            &mut cx,
+            WidgetUid(0),
+            "test",
+            "surface.splash",
+            "View{label := Label{text: \"ok\"}}",
+            &graph,
+            &catalog,
+            &registry,
+        );
+        assert!(surface.error.is_none(), "surface mount errors: {:?}", surface.error);
+        cx.with_script_vm_id(surface.vm_id, |vm| {
+            assert_eq!(vm.cx().script_data.std.grants(), HostGrants::NONE);
+        });
+        surface.free(&mut cx);
     }
 }

@@ -119,7 +119,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(makepad_widgets::script_mod);
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let storage = cx.storage("clock.test");
         let (replies, _upstream) = ReplySink::pair();
         let handles = InstanceHandles {
@@ -168,7 +168,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(makepad_widgets::script_mod);
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let storage = cx.storage("clock.test.ink");
         let (replies, _upstream) = ReplySink::pair();
         let handles = InstanceHandles {
@@ -180,7 +180,6 @@ mod tests {
         let open = CLOCK_MODULE.open_schema().empty_open().unwrap();
         let sheet = |dark: bool| StyleSheet::load(DesktopStyle::Ios.sheet(dark));
         let InstanceParts { mut root, executor, shutdown } = cx.with_script_vm_id(vm_id, |vm| {
-            makepad_widgets::makepad_platform::script::res::script_mod(vm);
             desktop_style::install(vm, sheet(false));
             vm.with_reload(|vm| {
                 makepad_widgets::widgets_mod(vm);

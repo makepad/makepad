@@ -90,7 +90,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(makepad_widgets::script_mod);
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let storage_a = cx.storage("mail.test.a");
         let storage_b = cx.storage("mail.test.b");
         let (replies_a, _up_a) = ReplySink::pair();

@@ -1,6 +1,7 @@
 use super::backend::{Backend, FileError};
 use super::config::SharedConfig;
 use super::events::{EventCursor, EventHub};
+use super::server::FlowConn as Conn;
 use super::util::log;
 use crate::document::closure::Closure;
 use crate::runtime::store::SourceResult;
@@ -14,7 +15,7 @@ use crate::{
 };
 use crate::engine::results::{ResultQuery, ResultRef, ResultStore};
 use makepad_bounded_http::{
-    etag_matches, if_range_matches, parse_range, BodyError, Conn, Head, Method, RangeSpec, Resp,
+    etag_matches, if_range_matches, parse_range, BodyError, Head, Method, RangeSpec, Resp,
 };
 use makepad_micro_serde::{DeJson, SerJson};
 use std::collections::HashMap;

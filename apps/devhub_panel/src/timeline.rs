@@ -1409,7 +1409,8 @@ impl FleetTimeline {
             return;
         };
         let cpu = c.cpu_pct.map_or(String::new(), |p| format!(" \u{b7} cpu {p:.0}%"));
-        self.small(cx, x, y + LINE_H * 1.3, w, &format!("{} {} \u{b7} {} cores{cpu} \u{b7} load {:.1}", c.arch, c.os, c.cores, c.load1), muted);
+        let waiting = c.cpu_wait.filter(|n| *n >= 1.0).map_or(String::new(), |n| format!(" \u{b7} {n:.0} waiting"));
+        self.small(cx, x, y + LINE_H * 1.3, w, &format!("{} {} \u{b7} {} cores{cpu} \u{b7} load {:.1}{waiting}", c.arch, c.os, c.cores, c.load1), muted);
         let mut l3 = format!("RAM {:.0}/{:.0} GB", (c.ram_gb - c.ram_avail_gb).max(0.0), c.ram_gb);
         for (i, (_, vram)) in c.gpus.iter().enumerate() {
             match c.gpu_busy.get(i) {
@@ -1611,7 +1612,8 @@ impl FleetTimeline {
                             v.push(format!("{} \u{b7} {} cores \u{b7} {:.0} GB RAM", c.cpu, c.cores, c.ram_gb));
                         }
                         let cpu = c.cpu_pct.map_or("-".to_string(), |p| format!("{p:.0}%"));
-                        v.push(format!("cpu {cpu} \u{b7} load {:.1} \u{b7} RAM {:.0}/{:.0} GB used", c.load1, (c.ram_gb - c.ram_avail_gb).max(0.0), c.ram_gb));
+                        let waiting = c.cpu_wait.filter(|n| *n >= 1.0).map_or(String::new(), |n| format!(" \u{b7} {n:.0} waiting"));
+                        v.push(format!("cpu {cpu} \u{b7} load {:.1}{waiting} \u{b7} RAM {:.0}/{:.0} GB used", c.load1, (c.ram_gb - c.ram_avail_gb).max(0.0), c.ram_gb));
                         for (i, (g, vram)) in c.gpus.iter().enumerate() {
                             let busy = c.gpu_busy.get(i).map_or(String::new(), |(u, m)| format!(" \u{b7} {u:.0}% \u{b7} {m:.0} GB used"));
                             v.push(format!("GPU {g} \u{b7} {vram:.0} GB{busy}"));

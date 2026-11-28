@@ -9,7 +9,7 @@ use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 
 pub fn identity_dir() -> PathBuf {
-    makepad_network::fleet::makepad_home().join("party").join("tls")
+    makepad_widgets::makepad_platform::home::app_state_home().join("party").join("tls")
 }
 
 /// The address this box's default route leaves from. A UDP socket

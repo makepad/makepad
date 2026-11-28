@@ -288,7 +288,7 @@ struct ChatTab {
 
 /// Where a width the person dragged the sidebar to is kept.
 fn sidebar_file() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".makepad/code/sidebar-width"))
+    crate::state_home().map(|home| home.join(".makepad/code/sidebar-width"))
 }
 
 /// The sidebar width the person last set, if any (a sane range only).
@@ -304,7 +304,7 @@ fn open_files_file(root: &std::path::Path) -> Option<std::path::PathBuf> {
     for byte in root.to_string_lossy().bytes() {
         hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
     }
-    std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(format!(".makepad/code/open-files-{hash:016x}")))
+    crate::state_home().map(|home| home.join(format!(".makepad/code/open-files-{hash:016x}")))
 }
 
 /// The remembered file tabs, in order, and the one that was selected.

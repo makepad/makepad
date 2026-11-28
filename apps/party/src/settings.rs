@@ -95,7 +95,7 @@ pub struct Settings {
 impl Settings {
     /// The party's settings file.
     pub fn file() -> PathBuf {
-        makepad_network::fleet::makepad_home().join("party").join("settings.conf")
+        makepad_widgets::makepad_platform::home::app_state_home().join("party").join("settings.conf")
     }
 
     /// The settings saved at `path`, the defaults when there are none.

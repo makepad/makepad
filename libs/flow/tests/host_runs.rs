@@ -1,8 +1,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 //! Socket tests for the F2 lane: instance/run/value routes over real HTTP,
 //! against `FlowServer::start` with fake seams injected via
-//! `FlowServerConfig::with_seams` (§12 headless acceptance, adapted to the
-//! Gates list in `local/agent_state/flow/briefs/F2-routes.md`).
+//! `FlowServerConfig::with_seams` (§12 headless acceptance).
 
 mod support;
 

@@ -177,6 +177,10 @@ pub struct ResultFiles {
     /// The generator that made the value, its model and prompt.
     pub generator: String,
     pub model: String,
+    /// The hub node that ran the nearest generator job, as people name it
+    /// (`node 42`), never its address; empty when none did. The library
+    /// keeps it as the annotation's `backend`.
+    pub hub: String,
     pub prompt: String,
     /// The seed the nearest generator job reported.
     pub seed: Option<u64>,

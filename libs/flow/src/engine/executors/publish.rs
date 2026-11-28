@@ -202,6 +202,7 @@ impl Executor for PublishExecutor {
             artist: cut(&sanitize_annotation(string_param(node, "artist")), MAX_NAME_BYTES),
             generator: PUBLISH_GENERATOR.to_string(),
             model: cut(&sanitize_annotation(nearest.map(|record| record.model.clone()).unwrap_or_default()), MAX_NAME_BYTES),
+            hub: cut(&sanitize_annotation(nearest.map(|record| record.hub.clone()).unwrap_or_default()), MAX_NAME_BYTES),
             prompt: cut(&lineage.prompt, MAX_PROMPT_BYTES),
             seed: record.and_then(|record| record.seed),
             digest: record.map(|record| recipe_digest.unwrap_or_else(|| params_digest(&record.params))),
@@ -315,6 +316,9 @@ fn provenance_fields(run: &PublishRun, node: &str, bpm: Option<f64>) -> Vec<(Str
             }
             if !record.model.is_empty() {
                 fields.push(("model".to_string(), Json::Str(record.model.clone())));
+            }
+            if !record.hub.is_empty() {
+                fields.push(("hub".to_string(), Json::Str(record.hub.clone())));
             }
             if let Some(seed) = record.seed {
                 fields.push(("seed".to_string(), Json::Int(seed.min(i64::MAX as u64) as i64)));
@@ -588,6 +592,61 @@ pub(crate) fn image_type_and_dims(bytes: &[u8], content_type: &str) -> Result<(R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lineage_records_hub_node_label_never_raw_ip() {
+        use std::collections::HashMap;
+        let source = r#"use mod.flow.*
+let prompt = Input{ type: @text default: "koi" }
+let seeds = Input{ type: @list default: [5, 9] }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 model: "flux1-schnell" }
+let fan = Map{ type: @image many: 4 body: image.image() over: seeds.list() bind: @seed }
+let pick = Choose{ type: @image many: 4 from: fan.items() }
+let video = Video{ prompt: prompt.text() image: pick.image() }
+let published = Publish{ value: video.video() }
+Flow{ prompt, seeds, image, fan, pick, video, published }
+"#;
+        let graph = crate::graph::evaluate(source, "hub.splash").unwrap();
+        let png = |byte: u8| Value::media(PortType::Image, "image/png", vec![byte; 8]);
+        let values_with = |video_url: &str, item_url: &str| {
+            let mut values = HashMap::new();
+            let mut put = |node: &str, port: &str, value: PortValue| {
+                values.insert((node.to_string(), port.to_string()), value);
+            };
+            put("prompt", "text", PortValue::One(Value::text("koi")));
+            put("fan", "items", PortValue::Seq(crate::Sequence { ty: PortType::Image, values: vec![png(1), png(2)] }));
+            put("fan", "used", PortValue::One(Value::json(format!(
+                r#"{{"items":[{{"seed_used":5,"model_used":"flux1-schnell"}},{{"seed_used":9,"model_used":"flux1-dev","provider_url":"{item_url}"}}],"dropped":[]}}"#,
+            ))));
+            put("pick", "image", PortValue::One(png(2)));
+            put("pick", "index", PortValue::One(Value::json("1")));
+            put("video", "video", PortValue::One(Value::media(PortType::Video, "video/mp4", b"mp4".to_vec())));
+            put("video", "model_used", PortValue::One(Value::text("fasth3-4step-q4-24g")));
+            put("video", "seed_used", PortValue::One(Value::json("77")));
+            put("video", "provider_url", PortValue::One(Value::text(video_url)));
+            values
+        };
+        let lineage = Lineage::of(&graph, "published", &values_with("http://192.0.2.42:8787", "http://192.0.2.9:8787"));
+        assert_eq!(lineage.generators[0].hub, "node 42");
+        // The picked Map item's job ran on its own node.
+        assert_eq!(lineage.generators[1].hub, "node 9");
+        let run = PublishRun { flow: "gen:video".into(), lineage, ..Default::default() };
+        let fields = provenance_fields(&run, "published", None);
+        let text = Json::Obj(fields.clone()).to_json();
+        assert!(!text.contains("192.0.2"), "{text}");
+        let generators = fields.iter().find(|(name, _)| name == "generators").unwrap().1.as_arr().unwrap().to_vec();
+        let hubs: Vec<_> = generators.iter().map(|record| record.get("hub").and_then(|hub| hub.as_str())).collect();
+        assert_eq!(hubs, [Some("node 42"), Some("node 9")]);
+
+        // No node, a local provider and the preview generator record no hub.
+        for url in ["", super::super::lineage::LOCAL_PROVIDER, super::super::lineage::PREVIEW_PROVIDER] {
+            let lineage = Lineage::of(&graph, "published", &values_with(url, url));
+            assert!(lineage.generators.iter().all(|record| record.hub.is_empty()), "{url:?}");
+            let run = PublishRun { lineage, ..Default::default() };
+            let text = Json::Obj(provenance_fields(&run, "published", None)).to_json();
+            assert!(!text.contains("\"hub\""), "{url:?}: {text}");
+        }
+    }
 
     #[test]
     fn slug_is_alias_safe() {

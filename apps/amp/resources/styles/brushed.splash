@@ -2,8 +2,7 @@
 // light aluminium key caps with dark printed glyphs, black anodised screen
 // surround, dark display glass for the lists, orange indicator light.
 //
-// A style is assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md). Save the file and
+// A style is assignments only, over the base templates in `src/hw.rs`. Save the file and
 // a pinned instance (`--style brushed`) restyles within half a second.
 use mod.prelude.widgets_internal.*
 

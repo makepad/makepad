@@ -62,7 +62,7 @@ script_mod! {
         // Solid surfaces: no blending, and skip triangles that face away
         // from the camera. They are on the hidden far side.
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
 
         // What the shader writes: the vertex's clip position, and the pixel's
         // colour (into the pass's colour texture).

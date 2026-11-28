@@ -54,37 +54,27 @@ pub fn items(sessions: &[SessionInfo]) -> Vec<Item> {
     out
 }
 
-/// The sizes the context menu offers: 16k, 32k, 64k and the largest the node
-/// says fits, each with the VRAM the node reports for it, plus KV precision.
+/// The node's context sizes, memory estimates and KV choices.
 pub fn context_items(report: Option<&ContextReport>, current: u32) -> Vec<Item> {
-    let mut sizes = vec![16384u32, 32768, 65536];
+    let mut options: Vec<_> = report.into_iter().flat_map(|r| &r.options).collect();
+    options.sort_unstable_by_key(|o| o.tokens);
     let max_fit = report.map_or(0, |r| r.max_fit);
-    if max_fit > 0 && !sizes.contains(&max_fit) {
-        sizes.push(max_fit);
-        sizes.sort_unstable();
-    }
-    let mut out: Vec<Item> = sizes
-        .into_iter()
-        .map(|tokens| {
-            let option = report.and_then(|r| r.options.iter().find(|o| o.tokens == tokens));
-            let mut title = format!("Context {}", short_tokens(tokens));
-            if tokens == max_fit {
-                title.push_str(" (max that fits)");
-            }
-            if tokens == current {
-                title.push_str(" (current)");
-            }
-            let hint = match option {
-                Some(o) if !o.fits => match o.vram_mb {
-                    Some(mb) => format!("KV ~{:.1} GB, does not fit", mb as f32 / 1024.0),
-                    None => "does not fit".to_string(),
-                },
-                Some(o) => o.vram_mb.map_or(String::new(), |mb| format!("KV ~{:.1} GB", mb as f32 / 1024.0)),
-                None => String::new(),
-            };
-            Item { title, hint, cmd: Cmd::SetContext(tokens) }
-        })
-        .collect();
+    let mut out: Vec<Item> = options.into_iter().map(|o| {
+        let mut title = format!("Context {}", short_tokens(o.tokens));
+        if max_fit > 0 && o.tokens == max_fit {
+            title.push_str(" (max that fits)");
+        }
+        if current > 0 && o.tokens == current {
+            title.push_str(" (current)");
+        }
+        let hint = match (o.vram_mb, o.fits) {
+            (Some(mb), true) => format!("~{:.1} GB", mb as f32 / 1024.0),
+            (Some(mb), false) => format!("~{:.1} GB, does not fit", mb as f32 / 1024.0),
+            (None, true) => String::new(),
+            (None, false) => "does not fit".into(),
+        };
+        Item { title, hint, cmd: Cmd::SetContext(o.tokens) }
+    }).collect();
     for (kv, hint) in [
         ("q8", "half the memory per token, slightly lower quality"),
         ("f16", "reference quality, twice the memory per token"),
@@ -178,6 +168,7 @@ mod tests {
             kv: Some("q8".into()),
             max_fit: 49152,
             options: vec![
+                ContextOption { tokens: 262144, vram_mb: None, fits: false },
                 ContextOption { tokens: 16384, vram_mb: Some(18_400), fits: true },
                 ContextOption { tokens: 32768, vram_mb: Some(19_800), fits: true },
                 ContextOption { tokens: 65536, vram_mb: Some(22_000), fits: false },
@@ -187,16 +178,16 @@ mod tests {
         let menu = context_items(Some(&report), 32768);
         let titles: Vec<&str> = menu.iter().map(|i| i.title.as_str()).collect();
         assert_eq!(titles, [
-            "Context 16k", "Context 32k (current)", "Context 48k (max that fits)", "Context 64k",
+            "Context 16k", "Context 32k (current)", "Context 48k (max that fits)", "Context 64k", "Context 256k",
             "KV cache: 8-bit (q8) (current)", "KV cache: 16-bit (f16)",
         ]);
-        assert_eq!(menu[0].hint, "KV ~18.0 GB");
-        assert_eq!(menu[3].hint, "KV ~21.5 GB, does not fit");
+        assert_eq!(menu[0].hint, "~18.0 GB");
+        assert_eq!(menu[3].hint, "~21.5 GB, does not fit");
         assert_eq!(menu[2].cmd, Cmd::SetContext(49152));
-        // Before the node reported: the three sizes have no memory estimates.
-        let bare = context_items(None, 16384);
-        assert_eq!(bare.len(), 5);
-        assert!(bare[..3].iter().all(|i| i.hint.is_empty()));
+        for bare in [context_items(None, 0), context_items(Some(&ContextReport::default()), 0)] {
+            assert_eq!(bare.len(), 2);
+            assert!(bare.iter().all(|i| matches!(i.cmd, Cmd::SetKv(_))));
+        }
     }
 
     #[test]

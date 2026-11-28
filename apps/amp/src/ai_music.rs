@@ -198,7 +198,7 @@ pub enum AiEvent {
 
 /// Where the conversation is kept: `~/.makepad/amp/ai-music`.
 pub fn session_dir() -> PathBuf {
-    makepad_ai_hub::home::makepad_home().join("amp").join("ai-music")
+    makepad_widgets::makepad_platform::home::app_state_home().join("amp").join("ai-music")
 }
 
 /// Where the songs go: `~/Music/AI music` (the "AI music" playlist).

@@ -22,7 +22,7 @@ pub fn roll_dir_in(home: &Path) -> PathBuf {
 
 /// The camera roll of this user.
 pub fn roll_dir() -> PathBuf {
-    roll_dir_in(&makepad_widgets::makepad_platform::home::makepad_home())
+    roll_dir_in(&makepad_widgets::makepad_platform::home::app_state_home())
 }
 
 /// The name a shot taken at `time` (plus `millis` into that second) gets.

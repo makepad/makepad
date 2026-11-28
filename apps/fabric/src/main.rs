@@ -1502,7 +1502,7 @@ impl App {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
-        let directory = makepad_ai_hub::home::makepad_home().join("fabric/exports");
+        let directory = makepad_widgets::makepad_platform::home::app_state_home().join("fabric/exports");
         if let Err(error) = std::fs::create_dir_all(&directory) {
             self.set_app_status(cx, format!("could not create {}: {error}", directory.display()));
             return;

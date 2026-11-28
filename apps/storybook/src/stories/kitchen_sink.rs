@@ -1,7 +1,7 @@
 //! The kitchen sink: every common control and every instrument on one
 //! screen, and the same controls held still in each of their states.
 //!
-//! Both pages use the library's templates under their own names and dress
+//! These pages use the library's templates under their own names and dress
 //! nothing, so whatever a style sheet does to a widget is what shows here.
 //! They carry no prose, only a caption over each group, so one grab of the
 //! canvas at the catalogue's own window size holds the whole page.
@@ -486,6 +486,54 @@ script_mod! {
             }
         }
     }
+
+    let FaceRow = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: 24.
+        align: Align{x: 0.0 y: 0.5}
+    }
+
+    mod.stories.KitchenSinkFaces = StoryPage{
+        padding: Inset{left: 12. right: 12. top: 12. bottom: 12.}
+        spacing: 0.
+        face_backdrop := SolidView{
+            width: Fit
+            height: Fit
+            flow: Down
+            padding: Inset{left: 24. right: 24. top: 28. bottom: 28.}
+            draw_bg +: {
+                color: theme.color_surface_container
+                pixel: fn() { return vec4(self.color.rgb, 1.0) }
+            }
+            face_matrix := mod.storybook.StillView{
+                width: Fit
+                height: Fit
+                flow: Down
+                spacing: 28.
+                FaceRow{
+                    rbt_rest   := RadioButtonTabFlat{width: 96. height: 40. text: ""}
+                    rbt_hover  := RadioButtonTabFlat{width: 96. height: 40. text: "" animator +: {hover: {default: @on}}}
+                    rbt_down   := RadioButtonTabFlat{width: 96. height: 40. text: "" animator +: {hover: {default: @down}}}
+                    rbt_focus  := RadioButtonTabFlat{width: 96. height: 40. text: "" animator +: {focus: {default: @on}}}
+                    rbt_active := RadioButtonTabFlat{width: 96. height: 40. text: "" animator +: {active: {default: @on}}}
+                }
+                FaceRow{
+                    bf_rest  := ButtonFlat{width: 96. height: 26. text: ""}
+                    bf_hover := ButtonFlat{width: 96. height: 26. text: "" animator +: {hover: {default: @on}}}
+                    bf_down  := ButtonFlat{width: 96. height: 26. text: "" animator +: {hover: {default: @down}}}
+                    bf_focus := ButtonFlat{width: 96. height: 26. text: "" animator +: {focus: {default: @on}}}
+                }
+                FaceRow{
+                    bfr_rest  := ButtonFlatter{width: 96. height: 26. text: ""}
+                    bfr_hover := ButtonFlatter{width: 96. height: 26. text: "" animator +: {hover: {default: @on}}}
+                    bfr_down  := ButtonFlatter{width: 96. height: 26. text: "" animator +: {hover: {default: @down}}}
+                    bfr_focus := ButtonFlatter{width: 96. height: 26. text: "" animator +: {focus: {default: @on}}}
+                }
+            }
+        }
+    }
 }
 
 /// A view that hands no event to its children. The state matrix builds each
@@ -504,6 +552,29 @@ impl Widget for SinkStillView {
     }
 
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+}
+
+fn settle_face_states(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    if !actions.is_empty() { return; }
+    for (widget, state) in [
+        (ids!(rbt_rest), ids!(hover.off)), (ids!(rbt_hover), ids!(hover.on)),
+        (ids!(rbt_down), ids!(hover.down)), (ids!(rbt_focus), ids!(focus.on)),
+        (ids!(rbt_active), ids!(active.on)),
+    ] {
+        if let Some(mut tab) = root.radio_button(cx, widget).borrow_mut() {
+            tab.animator_cut(cx, state);
+        }
+    }
+    for (widget, state) in [
+        (ids!(bf_rest), ids!(hover.off)), (ids!(bf_hover), ids!(hover.on)),
+        (ids!(bf_down), ids!(hover.down)), (ids!(bf_focus), ids!(focus.on)),
+        (ids!(bfr_rest), ids!(hover.off)), (ids!(bfr_hover), ids!(hover.on)),
+        (ids!(bfr_down), ids!(hover.down)), (ids!(bfr_focus), ids!(focus.on)),
+    ] {
+        if let Some(mut button) = root.button(cx, widget).borrow_mut() {
+            button.animator_cut(cx, state);
+        }
+    }
 }
 
 pub const STORIES: &[Story] = &[
@@ -537,4 +608,52 @@ pub const STORIES: &[Story] = &[
         controls: &[],
         on_actions: None,
     },
+    Story {
+        key: "overview/kitchen-sink/faces",
+        category: "Overview",
+        component: "Kitchen sink",
+        also: &[],
+        name: "Faces",
+        dsl: "KitchenSinkFaces",
+        added: "2025-06-01",
+        tags: &["style sheet review", "state matrix", "button", "tab", "contrast"],
+        doc: "# Faces\n\nFlat tabs and buttons held in each state, with their faces exposed for inspection.",
+        subject: "",
+        feature: None,
+        controls: &[],
+        on_actions: Some(settle_face_states),
+    },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_faces_page_builds_all_thirteen_specimens() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let page = cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            vm.capture_errors();
+            self::script_mod(vm);
+            let stories = vm.module(id!(stories));
+            let page = WidgetRef::script_from_value(vm, vm.value(stories, id!(KitchenSinkFaces)));
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "building KitchenSinkFaces: {errors:?}");
+            page
+        });
+        settle_face_states(&mut cx, &page, &[]);
+        for name in ["rest", "hover", "down", "focus", "active"] {
+            let tab = LiveId::from_str(&format!("rbt_{name}"));
+            assert!(page.radio_button(&cx, &[tab]).borrow().is_some(), "missing rbt_{name}");
+            if name == "active" { continue; }
+            for prefix in ["bf", "bfr"] {
+                let button = LiveId::from_str(&format!("{prefix}_{name}"));
+                assert!(page.button(&cx, &[button]).borrow().is_some(), "missing {prefix}_{name}");
+            }
+        }
+        assert_eq!(makepad_platform::shader_error::take(), None, "a specimen shader failed");
+    }
+}

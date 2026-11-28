@@ -18,6 +18,9 @@ pub struct Provenance {
     pub prompt: String,
     /// More tags for every published asset (valid store labels).
     pub tags: Vec<String>,
+    /// The published assets' title as the caller gave it (a clip named after
+    /// its prompt); `None` or blank: `<preset> · <the prompt's first words>`.
+    pub title: Option<String>,
 }
 
 /// The artist music and voice lists show for generated audio.
@@ -29,6 +32,8 @@ pub const STUDIO_TAG: &str = "flow-studio";
 pub fn prepare(graph: &Graph, provenance: &Provenance) -> Graph {
     let mut next = graph.clone();
     let title = title_for(provenance);
+    // A title the caller gave names every result, over a preset's own.
+    let explicit = provenance.title.as_deref().is_some_and(|title| !title.trim().is_empty());
     for point in publish_points(graph) {
         let destination = Destination::of(&point.ty, point.domain.as_deref());
         // The stems of one song share its title; each says which stem it is.
@@ -54,7 +59,7 @@ pub fn prepare(graph: &Graph, provenance: &Provenance) -> Graph {
                 }
             }
             set(node, "tags", Literal::Arr(merged.into_iter().map(Literal::Str).collect()));
-            if text_param(node, "title").is_none_or(|text| text.trim().is_empty()) {
+            if explicit || text_param(node, "title").is_none_or(|text| text.trim().is_empty()) {
                 set(node, "title", Literal::Str(title.clone()));
             }
             if matches!(destination, Destination::Music | Destination::Voice)
@@ -72,8 +77,11 @@ pub fn prepare(graph: &Graph, provenance: &Provenance) -> Graph {
     next
 }
 
-/// `<preset> · <the prompt's first words>`.
+/// The title the caller gave, as it is; else `<preset> · <the prompt's first words>`.
 pub fn title_for(provenance: &Provenance) -> String {
+    if let Some(title) = provenance.title.as_deref().map(str::trim).filter(|title| !title.is_empty()) {
+        return title.to_string();
+    }
     let prompt = provenance.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     if prompt.is_empty() {
         return provenance.label.clone();
@@ -159,7 +167,7 @@ mod tests {
     }
 
     fn provenance(key: &str) -> Provenance {
-        Provenance { preset: key.into(), label: "Music".into(), prompt: "slow dub techno".into(), tags: Vec::new() }
+        Provenance { preset: key.into(), label: "Music".into(), prompt: "slow dub techno".into(), tags: Vec::new(), title: None }
     }
 
     fn tags_of(node: &Node) -> Vec<String> {
@@ -214,7 +222,7 @@ mod tests {
 
     #[test]
     fn long_prompts_are_cut_for_titles() {
-        let title = title_for(&Provenance { preset: String::new(), label: "Image".into(), prompt: "word ".repeat(40), tags: Vec::new() });
+        let title = title_for(&Provenance { preset: String::new(), label: "Image".into(), prompt: "word ".repeat(40), tags: Vec::new(), title: None });
         assert!(title.ends_with('…'));
         assert!(title.chars().count() < 80);
     }

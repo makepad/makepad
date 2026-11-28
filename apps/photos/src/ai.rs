@@ -142,15 +142,15 @@ pub fn addable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Where an added picture may come from. Mirrors the hub's home rule
-/// (`MAKEPAD_HOME`, else `~/.makepad`) without linking the hub: the
-/// photos lib is a web pilot and must stay light.
+/// Where an added picture may come from. The generated-image root follows
+/// AI Chat's app state home. The person's home also supplies pictures.
 pub fn allowed_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
-    // every path below it relative to the current folder.
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
-        roots.push(PathBuf::from(home).join("gen"));
+    // With neither override, the user-home entries below cover the default.
+    if std::env::var_os("MAKEPAD_HOME").is_some_and(|home| !home.is_empty())
+        || std::env::var_os("MAKEPAD_TEST_HOME").is_some_and(|home| Path::new(&home).is_absolute())
+    {
+        roots.push(makepad_platform::home::app_state_home().join("gen"));
     }
     if let Some(user_home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         let user_home = PathBuf::from(user_home);
@@ -243,12 +243,12 @@ mod tests {
 
     #[test]
     fn add_takes_only_image_files_inside_the_allowed_roots() {
-        assert!(addable(Path::new("relative.png")).unwrap_err().contains("absolute"));
-        assert!(addable(Path::new("/etc/passwd")).unwrap_err().contains("only png"));
-        assert!(addable(Path::new("/etc/hosts.png")).unwrap_err().contains("only files under"));
+        assert!(addable(Path::new("relative.png")).unwrap_err().contains("absolute"), "a relative image path must be refused");
+        assert!(addable(Path::new("/etc/passwd")).unwrap_err().contains("only png"), "a non-image extension must be refused");
+        assert!(addable(Path::new("/etc/hosts.png")).unwrap_err().contains("only files under"), "images outside the allowed roots must be refused");
         let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
         let missing = home.join("surely-not-here-zz.png");
-        assert!(addable(&missing).unwrap_err().contains("not a file"));
-        assert!(allowed_roots().iter().any(|r| r.ends_with("gen")));
+        assert!(addable(&missing).unwrap_err().contains("not a file"), "a missing image in the person's home must reach the file check");
+        assert!(allowed_roots().contains(&makepad_platform::home::app_state_home().join("gen")), "Photos must accept the current instance's AI Chat gen directory");
     }
 }

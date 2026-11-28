@@ -33,6 +33,9 @@ fn the_status_item_works_again_after_a_restart_as_a_new_process() {
         .env("MAKEPAD_TRAY_SELFTEST", "stay")
         .env("MAKEPAD_HAL_BACKEND", "metal")
         .env("MAKEPAD_HIDE_WINDOWS", "1")
+        // its endpoint, which `inspect` asks for the relaunch, as an ordinary launch (it is off
+        // by default, makepad_remote::ask)
+        .env("MAKEPAD_REMOTE", "local")
         .stdout(out.try_clone().unwrap())
         .stderr(out)
         .spawn()

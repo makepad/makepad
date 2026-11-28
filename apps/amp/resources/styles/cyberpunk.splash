@@ -6,8 +6,7 @@
 // slices, a wedge-ladder signal meter and a segmented, chroma-fringed
 // spectrum. Wet metal: the front takes the screen's light in streaks.
 //
-// Assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+// Assignments only, over the base templates in `src/hw.rs`.
 use mod.prelude.widgets_internal.*
 
 // ---- palette: black glass, electric cyan, hot magenta, warning yellow ----

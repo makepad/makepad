@@ -116,7 +116,7 @@ Stages: `prompt:Input` → `expand:Llm` → `styled:Fn` → `image:Image` →
 `picture:Output`. The text edges replace the later prompt
 (`PromptFromText` semantics); the small `Fn` appends the chosen style. Image
 parameters are 1024×1024 and 8 steps. This is copied verbatim from the
-normative example in `local/agent_state/flow/DESIGN.md:224-258`; the current
+normative example of the flow design; the current
 Asset UI's shorter expand→image recipe is `apps/asset-ui/src/pipeline.rs:425`.
 
 ### `dream.splash`

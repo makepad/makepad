@@ -55,7 +55,7 @@ pub struct Running {
 /// The party started here last (`party/code`; before that file, the party
 /// whose kept pictures changed last), so a restart keeps it.
 fn last_code() -> Option<String> {
-    let home = makepad_network::fleet::makepad_home().join("party");
+    let home = makepad_widgets::makepad_platform::home::app_state_home().join("party");
     let saved = std::fs::read_to_string(home.join("code")).ok().map(|c| c.trim().to_string());
     if let Some(code) = saved.filter(|c| code::valid(c)) {
         return Some(code);
@@ -76,13 +76,13 @@ pub fn party(port: u16, code: Option<String>, extra: &[String], hub: Option<&str
         return Err("a party code is 6 to 32 of 23456789abcdefghjkmnpqrstuvwxyz".into());
     }
     // A restart keeps the party: the phones' open pages and the QR stay valid.
-    let home = makepad_network::fleet::makepad_home().join("party");
+    let home = makepad_widgets::makepad_platform::home::app_state_home().join("party");
     if let Err(e) = std::fs::create_dir_all(&home).and_then(|()| std::fs::write(home.join("code"), &code)) {
         eprintln!("[party] the party code is not kept for a restart: {e}");
     }
     let id = identity(extra)?;
     // Kept sources of this party, and only those, go here.
-    let kept = makepad_network::fleet::makepad_home().join("party").join("kept").join(&code);
+    let kept = makepad_widgets::makepad_platform::home::app_state_home().join("party").join("kept").join(&code);
     let budget = Party::default_budget();
     eprintln!("[party] guests' pictures may hold up to {} MB of memory, {} MB from any one address", budget.total >> 20, budget.per_address >> 20);
     let party = Arc::new(Party::new(kept, budget).with_settings(crate::settings::Settings::load(crate::settings::Settings::file())));

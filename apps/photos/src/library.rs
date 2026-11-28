@@ -121,7 +121,7 @@ pub fn roots_in_order(checkout: Vec<PathBuf>, home: PathBuf, bundled: Option<Pat
 /// Where an installed app — and a phone — keeps its own libraries: the
 /// makepad home's `photos/image-tiles`, one collection per directory.
 pub fn home_root() -> PathBuf {
-    makepad_widgets::makepad_platform::home::makepad_home().join("photos").join("image-tiles")
+    makepad_widgets::makepad_platform::home::app_state_home().join("photos").join("image-tiles")
 }
 
 /// The set bundled with this crate, when the build carries it: the crate's

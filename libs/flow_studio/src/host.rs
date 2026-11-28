@@ -68,7 +68,7 @@ pub fn flow_dir(name: &str) -> PathBuf {
     if hidden() {
         return std::env::temp_dir().join(format!("flow-hidden-{}", std::process::id())).join(name);
     }
-    makepad_ai_hub::home::makepad_home().join("flow").join(name)
+    makepad_widgets::makepad_platform::home::app_state_home().join("flow").join(name)
 }
 
 pub fn default_host() -> StudioHost {

@@ -7,7 +7,10 @@ publish = false
 
 [dependencies]
 makepad-widgets-core = { path = "../../widgets/core" }
-makepad-widgets-rich-text = { path = "../../widgets/families/rich_text" }
 makepad-widgets-fab = { path = "../../widgets/families/fab" }
 makepad-widgets-media = { path = "../../widgets/families/media" }
 makepad-widgets-pickers = { path = "../../widgets/families/pickers" }
+
+[dev-dependencies]
+# The canvas tests place a Markdown card.
+makepad-widgets-rich-text = { path = "../../widgets/families/rich_text" }

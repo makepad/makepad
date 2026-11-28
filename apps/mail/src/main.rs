@@ -178,12 +178,13 @@ fn native_mail_dark_appearance() -> bool {
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         #[cfg(target_os = "macos")]
-        if desktop_style::current_name(vm).is_none() {
+        {
             let dark = native_mail_dark_appearance();
-            desktop_style::install(vm, desktop_style::StyleSheet::load(
-                desktop_style::DesktopStyle::Macos.sheet(dark),
-            ));
-            log!("mail: using macOS {} appearance", if dark { "dark" } else { "light" });
+            if desktop_style::install_default(vm, |_| {
+                desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Macos.sheet(dark))
+            }) {
+                log!("mail: using macOS {} appearance", if dark { "dark" } else { "light" });
+            }
         }
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);

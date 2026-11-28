@@ -11,8 +11,9 @@ use super::hub_context::{ContextHub, Node};
 use super::scope_log::ScopeLog;
 use super::session_store::{self, Saved};
 use super::{prompt, tools};
-use makepad_ai_hub::hub_chat::{ChatRoute, HubChatConfig, HubChatSession};
+use makepad_ai_hub::hub_chat::{ChatReach, ChatRoute, ContextOverflow, HubChatConfig, HubChatSession};
 use makepad_ai_hub::local_llm::{ChatEvent, LocalLlmConfig, ToolSpec};
+use makepad_ai_hub::providers::provider::ToolImage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -33,11 +34,31 @@ pub(super) enum Reply {
     Answer(String),
 }
 
+trait ChatSession: Send {
+    fn send_user_turn(&self, text: String);
+    fn send_tool_results(&self, results: Vec<(String, bool)>);
+    fn attach_images(&self, images: Vec<ToolImage>) -> Result<(), String>;
+    fn cancel(&self);
+    fn poll(&self) -> Vec<ChatEvent>;
+    fn route(&self) -> Option<ChatRoute>;
+    fn take_overflow(&self) -> Option<ContextOverflow>;
+}
+
+impl ChatSession for HubChatSession {
+    fn send_user_turn(&self, text: String) { HubChatSession::send_user_turn(self, text) }
+    fn send_tool_results(&self, results: Vec<(String, bool)>) { HubChatSession::send_tool_results(self, results) }
+    fn attach_images(&self, images: Vec<ToolImage>) -> Result<(), String> { HubChatSession::attach_images(self, images) }
+    fn cancel(&self) { HubChatSession::cancel(self) }
+    fn poll(&self) -> Vec<ChatEvent> { HubChatSession::poll(self) }
+    fn route(&self) -> Option<ChatRoute> { HubChatSession::route(self) }
+    fn take_overflow(&self) -> Option<ContextOverflow> { HubChatSession::take_overflow(self) }
+}
+
 /// One conversation with the model: the main agent, or a sub-agent.
 pub(super) struct Lane {
     pub id: LaneId,
     pub read_only: bool,
-    pub session: HubChatSession,
+    session: Box<dyn ChatSession>,
     pub specs: Vec<ToolSpec>,
     /// What the model has seen (summary first, then the verbatim turns).
     pub items: Vec<Item>,
@@ -51,6 +72,13 @@ pub(super) struct Lane {
     pub needs_reseed: bool,
 }
 
+/// The prompt and tools that will be installed together in a fresh session.
+struct LaneSystem {
+    base: String,
+    specs: Vec<ToolSpec>,
+    chars: usize,
+}
+
 /// How a model turn (and the tool rounds inside it) ended.
 #[derive(Debug, PartialEq)]
 pub(super) enum End {
@@ -60,8 +88,24 @@ pub(super) enum End {
     Failed,
 }
 
+enum Fold {
+    Folded { before: u32, after: u32 },
+    NothingToFold,
+    FreesNothing { before: u32, after: u32 },
+}
+
+impl Fold {
+    fn folded(&self) -> bool {
+        matches!(self, Self::Folded { .. })
+    }
+}
+
 pub(super) struct Engine {
     pub cfg: AgentConfig,
+    /// Explicit request passed to new sessions, independent of the fitted window.
+    context_override: Option<u32>,
+    /// Latest known window. Zero until the hub reports one in auto mode.
+    context_tokens: u32,
     cmd_rx: Receiver<Command>,
     evt_tx: Sender<AgentEvent>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -87,6 +131,7 @@ pub(super) struct Engine {
     title: String,
     log: std::cell::RefCell<Option<ScopeLog>>,
     hub: Box<dyn ContextHub>,
+    start_chat: Box<dyn Fn(HubChatConfig) -> Box<dyn ChatSession> + Send>,
     /// The node's context report was fetched (or the node has no such op).
     ctx_known: bool,
     /// The precision from the last node report, for switch notices.
@@ -151,6 +196,8 @@ impl Engine {
     ) -> Engine {
         let mode = cfg.approval;
         Engine {
+        context_override: cfg.context_tokens,
+        context_tokens: cfg.context_tokens.unwrap_or(0),
         cfg,
         cmd_rx,
         evt_tx,
@@ -176,6 +223,7 @@ impl Engine {
         title: String::new(),
         log: std::cell::RefCell::new(None),
         hub,
+        start_chat: Box::new(|config| Box::new(HubChatSession::start(config))),
         ctx_known: false,
         kv: None,
         owner: fresh_owner(),
@@ -250,7 +298,7 @@ impl Engine {
 /// Whether a conversation of `used` tokens is past the fold threshold of a
 /// `max`-token window.
 pub(super) fn over_budget_at(used: u32, max: u32) -> bool {
-    used as f32 > max as f32 * COMPACT_AT
+    max > 0 && used as f32 > max as f32 * COMPACT_AT
 }
 
 fn args_brief(args: &[(String, String)]) -> String {
@@ -294,9 +342,7 @@ impl Engine {
         id
     }
 
-    /// Start a model session for a lane (0 = the main agent). `seed` is text
-    /// carried in the system turn: a summary and recent turns.
-    pub fn new_lane(&mut self, id: LaneId, read_only: bool, seed: &str) -> Lane {
+    fn fresh_system(&self, id: LaneId, read_only: bool) -> LaneSystem {
         let specs = tools::specs(id != 0, read_only);
         let root = self.cfg.root.display().to_string();
         let base = if id == 0 {
@@ -304,13 +350,24 @@ impl Engine {
         } else {
             prompt::sub_agent_prompt(&root, read_only, &self.notes)
         };
-        let mut system = base.clone();
-        if !seed.is_empty() {
-            system.push('\n');
-            system.push_str(seed);
-        }
         let tools_chars: usize = specs.iter().map(|t| t.name.len() + t.description.len() + t.parameters.len() + 20).sum();
-        let session = self.start_session(system.clone(), &specs);
+        let chars = base.chars().count() + tools_chars;
+        LaneSystem { base, specs, chars }
+    }
+
+    /// Start a model session for a lane (0 = the main agent). `seed` is text
+    /// carried in the system turn: a summary and recent turns.
+    pub fn new_lane(&self, id: LaneId, read_only: bool, seed: &str) -> Lane {
+        self.start_lane(id, read_only, seed, self.fresh_system(id, read_only))
+    }
+
+    fn start_lane(&self, id: LaneId, read_only: bool, seed: &str, system: LaneSystem) -> Lane {
+        let LaneSystem { base: mut prompt, specs, chars } = system;
+        if !seed.is_empty() {
+            prompt.push('\n');
+            prompt.push_str(seed);
+        }
+        let session = self.start_session(prompt, &specs);
         Lane {
             id,
             read_only,
@@ -318,17 +375,18 @@ impl Engine {
             specs,
             items: Vec::new(),
             // The seed is counted through the lane's items, not here.
-            system_chars: base.chars().count() + tools_chars,
+            system_chars: chars,
             notes_chars: self.notes.chars().count(),
             call_chars: 0,
             needs_reseed: false,
         }
     }
 
-    fn start_session(&self, system: String, specs: &[ToolSpec]) -> HubChatSession {
+    fn start_session(&self, system: String, specs: &[ToolSpec]) -> Box<dyn ChatSession> {
         let mut llm = LocalLlmConfig::new(PathBuf::new());
-        llm.max_context = self.cfg.context_tokens;
-        HubChatSession::start(HubChatConfig {
+        llm.max_context = self.context_override;
+        (self.start_chat)(HubChatConfig {
+            reach: ChatReach::Lan,
             llm,
             preferred_model: self.cfg.model.clone(),
             max_tokens: Some(8192),
@@ -518,7 +576,7 @@ impl Engine {
         }
         self.emit(AgentEvent::Usage(Usage {
             context_used: self.used_tokens(lane),
-            context_max: self.cfg.context_tokens,
+            context_max: self.context_tokens,
             tokens_per_sec: self.tokens_per_sec,
             total_generated: self.total_generated,
             segments: context::segments(lane.system_chars, lane.notes_chars, &lane.items),
@@ -528,12 +586,15 @@ impl Engine {
     /// The lane's context as the node counts it, estimated: our chars/3.5 estimate times what
     /// the node's own count showed the estimate to miss (`token_scale`, learnt from an overflow).
     fn used_tokens(&self, lane: &Lane) -> u32 {
-        let est = context::total_tokens(lane.system_chars + lane.call_chars, &lane.items);
-        (est as f32 * self.token_scale).ceil() as u32
+        self.estimated_tokens(lane.system_chars + lane.call_chars, &lane.items)
+    }
+
+    fn estimated_tokens(&self, system_chars: usize, items: &[Item]) -> u32 {
+        (context::total_tokens(system_chars, items) as f32 * self.token_scale).ceil() as u32
     }
 
     fn over_budget(&self, lane: &Lane) -> bool {
-        over_budget_at(self.used_tokens(lane), self.cfg.context_tokens)
+        over_budget_at(self.used_tokens(lane), self.context_tokens)
     }
 
     /// Where the lane's chat runs; `None` while the election is pending or
@@ -568,7 +629,7 @@ impl Engine {
 
     fn adopt_report(&mut self, report: &ContextReport) {
         if report.current > 0 {
-            self.cfg.context_tokens = report.current;
+            self.context_tokens = report.current;
         }
         self.kv = report.kv.clone();
     }
@@ -577,7 +638,6 @@ impl Engine {
     /// (a refusal leaves everything as it was), then a fold when the
     /// conversation no longer fits the new budget, then the new max in `Usage`.
     pub fn set_context(&mut self, lane: &mut Lane, tokens: u32) {
-        let old = self.cfg.context_tokens;
         self.emit(AgentEvent::Notice(format!("Switching the node to a {} context...", short_tokens(tokens))));
         // A switch asked for right at start waits for the election.
         let waited = Instant::now();
@@ -587,22 +647,25 @@ impl Engine {
         let node = Self::node_of(lane);
         match self.hub.set_context(node.as_ref(), tokens) {
             Err(why) => {
-                self.emit(AgentEvent::Error(format!(
-                    "context stays at {}: {why}",
-                    short_tokens(old)
-                )));
                 self.fetch_context(node, lane);
+                let kept = if self.context_tokens > 0 { format!("at {}", short_tokens(self.context_tokens)) } else { "unchanged".into() };
+                eprintln!("code: context stays {kept}: {why}");
+                self.emit(AgentEvent::Error(format!("context stays {kept}: {why}")));
             }
             Ok(report) => {
-                self.cfg.context_tokens = tokens;
+                self.context_override = Some(tokens);
+                self.context_tokens = if report.current > 0 { report.current } else { tokens };
                 self.adopt_report(&report);
-                let folded = self.over_budget(lane) && self.compact(lane, true);
-                let now = self.cfg.context_tokens;
-                let note = if folded {
-                    format!("Context is now {}; older turns were folded into a summary to fit.", short_tokens(now))
-                } else {
-                    format!("Context is now {}.", short_tokens(now))
-                };
+                let folded = self.over_budget(lane) && self.compact(lane, true).folded();
+                let now = self.context_tokens;
+                let mut note = format!("Context is now {}", short_tokens(now));
+                if now != tokens {
+                    note.push_str(&format!(" (fitted from {} to GPU memory)", short_tokens(tokens)));
+                }
+                if folded {
+                    note.push_str("; older turns were folded into a summary to fit");
+                }
+                note.push('.');
                 self.emit(AgentEvent::Notice(note));
                 self.emit(AgentEvent::ContextReport(report));
                 self.emit_usage(lane);
@@ -612,7 +675,8 @@ impl Engine {
 
     /// The share of the window the files attached to one request may take.
     fn refs_budget_chars(&self) -> usize {
-        (self.cfg.context_tokens as f32 * REFS_SHARE * 3.5) as usize
+        if self.context_tokens == 0 { return usize::MAX; }
+        (self.context_tokens as f32 * REFS_SHARE * 3.5) as usize
     }
 
     /// Switch KV precision, keeping the conversation and adopting whatever
@@ -629,6 +693,7 @@ impl Engine {
         match self.hub.set_kv(node.as_ref(), &kv) {
             Err(why) => {
                 let old = self.kv.as_deref().map_or_else(|| "unchanged".to_string(), |kv| format!("at {}", kv_label(kv)));
+                eprintln!("code: KV cache stays {old}: {why}");
                 self.emit(AgentEvent::Error(format!("KV cache stays {old}: {why}")));
                 self.fetch_context(node, lane);
             }
@@ -642,7 +707,8 @@ impl Engine {
     }
 
     fn tail_chars(&self) -> usize {
-        (self.cfg.context_tokens as f32 * TAIL_SHARE * 3.5) as usize
+        if self.context_tokens == 0 { return usize::MAX; }
+        (self.context_tokens as f32 * TAIL_SHARE * 3.5) as usize
     }
 
     /// Ask the model (in its current session, whose history it still has) for
@@ -676,17 +742,15 @@ impl Engine {
         }
     }
 
-    /// Fold the old items into one summary and continue in a fresh session
-    /// that carries it. Returns whether anything was folded.
-    fn compact(&mut self, lane: &mut Lane, ask_model: bool) -> bool {
+    /// Continue in a fresh session only when folding the old items saves tokens.
+    fn compact(&mut self, lane: &mut Lane, ask_model: bool) -> Fold {
         let cut = context::tail_start(&lane.items, self.tail_chars());
-        if cut == 0 {
-            return false;
+        if cut == 0 || (cut == 1 && matches!(lane.items.first(), Some(Item::Summary(_)))) {
+            return Fold::NothingToFold;
         }
         let before = self.used_tokens(lane);
-        let asked = if ask_model && !lane.needs_reseed { self.ask_summary(lane) } else { None };
-        let summary = asked.unwrap_or_else(|| context::mechanical_summary(&lane.items[..cut], 2000));
-        let mut items = vec![Item::Summary(summary)];
+        let system = self.fresh_system(lane.id, lane.read_only);
+        let mut items = vec![Item::Summary(String::new())];
         // The request being worked on stays word for word.
         if let Some(last_user) = lane.items.iter().rposition(|i| matches!(i, Item::User { .. })) {
             if last_user < cut {
@@ -694,40 +758,66 @@ impl Engine {
             }
         }
         items.extend(lane.items[cut..].iter().cloned());
-        self.restart(lane, items);
-        let after = self.used_tokens(lane);
+        // A fresh session counts its seed through items and starts with zero call_chars.
+        // If its tail alone costs too much, leave the current session's pending turn alone.
+        let tail_cost = self.estimated_tokens(system.chars, &items[1..]);
+        if tail_cost >= before {
+            return Fold::FreesNothing { before, after: tail_cost };
+        }
+        let asked_session = ask_model && !lane.needs_reseed;
+        let asked = if asked_session { self.ask_summary(lane) } else { None };
+        let asked_cost = asked.map(|summary| {
+            items[0] = Item::Summary(summary);
+            self.estimated_tokens(system.chars, &items)
+        });
+        let after = match asked_cost {
+            Some(cost) if cost < before => cost,
+            _ => {
+                items[0] = Item::Summary(context::mechanical_summary(&lane.items[..cut], 2000));
+                self.estimated_tokens(system.chars, &items)
+            }
+        };
+        if after >= before {
+            if asked_session {
+                lane.needs_reseed = true;
+            }
+            return Fold::FreesNothing { before, after };
+        }
+        self.restart(lane, items, system);
         if lane.id == 0 {
-            self.emit(AgentEvent::Summarised { upto: cut, tokens_saved: before.saturating_sub(after) });
+            self.emit(AgentEvent::Summarised { upto: cut, tokens_saved: before - after });
         }
         self.emit_usage(lane);
-        true
+        Fold::Folded { before, after }
     }
 
     /// Replace the lane's session by a fresh one seeded with `items`.
-    fn restart(&mut self, lane: &mut Lane, items: Vec<Item>) {
+    fn restart(&self, lane: &mut Lane, items: Vec<Item>, system: LaneSystem) {
         let (summary, tail) = match items.first() {
             Some(Item::Summary(s)) => (Some(s.clone()), &items[1..]),
             _ => (None, &items[..]),
         };
         let seed = context::seed_text(summary.as_deref(), tail);
-        let fresh = self.new_lane(lane.id, lane.read_only, &seed);
+        let mut fresh = self.start_lane(lane.id, lane.read_only, &seed, system);
+        fresh.items = items;
         lane.session.cancel();
-        lane.session = fresh.session;
-        lane.system_chars = fresh.system_chars;
-        lane.call_chars = 0;
-        lane.items = items;
-        lane.needs_reseed = false;
+        *lane = fresh;
+    }
+
+    fn reseed(&self, lane: &mut Lane) {
+        let items = std::mem::take(&mut lane.items);
+        let system = self.fresh_system(lane.id, lane.read_only);
+        self.restart(lane, items, system);
     }
 
     // -------------------------------------------------------------- turns
 
     fn submit(&mut self, lane: &mut Lane, text: String, refs: Vec<String>) {
-        if lane.needs_reseed {
-            let items = std::mem::take(&mut lane.items);
-            self.restart(lane, items);
-        }
         if self.over_budget(lane) {
             self.compact(lane, true);
+        }
+        if lane.needs_reseed {
+            self.reseed(lane);
         }
         if self.title.is_empty() {
             self.title = text.lines().next().unwrap_or("").chars().take(60).collect();
@@ -810,7 +900,8 @@ impl Engine {
             folded.extend(items[cut..].iter().cloned());
             items = folded;
         }
-        self.restart(lane, items);
+        let system = self.fresh_system(lane.id, lane.read_only);
+        self.restart(lane, items, system);
         self.reopen_log();
         let shown = lane
             .items
@@ -849,12 +940,49 @@ impl Engine {
         (ok, text)
     }
 
+    fn record_turn_done(&mut self, tokens: usize, secs: f64, context_max: usize) {
+        if context_max > 0 {
+            self.context_tokens = context_max.min(u32::MAX as usize) as u32;
+        }
+        self.total_generated += tokens as u64;
+        if secs > 0.0 && tokens > 0 {
+            self.tokens_per_sec = tokens as f32 / secs as f32;
+        }
+    }
+
+    fn recover_overflow(&mut self, lane: &mut Lane, round: &mut usize, overflow: Option<ContextOverflow>) -> bool {
+        let Some(ContextOverflow { need, max }) = overflow else { return false };
+        *round += 1;
+        if max > 0 {
+            self.context_tokens = max.min(u32::MAX as usize) as u32;
+        }
+        let estimate = context::total_tokens(lane.system_chars + lane.call_chars, &lane.items).max(1);
+        self.token_scale = (need as f32 / estimate as f32).clamp(self.token_scale, 4.0);
+        let fold = self.compact(lane, false);
+        let (before, after, outcome) = match fold {
+            Fold::Folded { before, after } => (before, after, "retrying"),
+            Fold::FreesNothing { before, after } => (before, after, "the fold freed nothing"),
+            Fold::NothingToFold => {
+                let used = self.used_tokens(lane);
+                (used, used, "nothing left to fold")
+            }
+        };
+        eprintln!("code: overflow round {round}: used {before} -> {after}, node need {need}, max {max}: {outcome}");
+        if !fold.folded() {
+            self.emit_usage(lane);
+            return false;
+        }
+        self.emit(AgentEvent::Notice("The conversation outgrew the model's context: older turns were folded into a summary.".into()));
+        lane.session.send_user_turn("Continue the task. The latest tool results are in the recent turns above.".into());
+        true
+    }
+
     /// One user request: model turns and tool rounds until the model stops
     /// asking for tools. Returns how it ended.
     pub fn turn(&mut self, lane: &mut Lane, text: String) -> End {
         lane.session.send_user_turn(text);
         let mut nudged = false;
-        let mut refolded = false;
+        let mut overflow_round = 0;
         let mut rounds = 0usize;
         let mut seen: HashMap<String, u32> = HashMap::new();
         loop {
@@ -889,11 +1017,8 @@ impl Engine {
                         }
                         ChatEvent::Working(_) => {}
                         ChatEvent::ToolCall { name, args } => calls.push((name, args)),
-                        ChatEvent::TurnDone { tokens, secs, .. } => {
-                            self.total_generated += tokens as u64;
-                            if secs > 0.0 && tokens > 0 {
-                                self.tokens_per_sec = tokens as f32 / secs as f32;
-                            }
+                        ChatEvent::TurnDone { tokens, secs, context_max, .. } => {
+                            self.record_turn_done(tokens, secs, context_max);
                             finished = true;
                         }
                         ChatEvent::ContextFull => {
@@ -907,18 +1032,10 @@ impl Engine {
                         ChatEvent::Failed(why) => {
                             // The route re-elects with an empty history.
                             lane.needs_reseed = true;
-                            // The node counted more than we estimated: learn its ratio, fold the
-                            // old turns (mechanically: the session is gone) and go on, once.
-                            if let (false, Some(real)) = (refolded, overflow_tokens(&why)) {
-                                let est = context::total_tokens(lane.system_chars + lane.call_chars, &lane.items).max(1);
-                                self.token_scale = (real as f32 / est as f32).clamp(self.token_scale, 4.0);
-                                if self.compact(lane, false) {
-                                    refolded = true;
-                                    self.emit(AgentEvent::Notice("The conversation outgrew the model's context: older turns were folded into a summary.".into()));
-                                    lane.session.send_user_turn("Continue the task. The latest tool results are in the recent turns above.".to_string());
-                                    overflowed = true;
-                                    break;
-                                }
+                            let overflow = lane.session.take_overflow();
+                            if self.recover_overflow(lane, &mut overflow_round, overflow) {
+                                overflowed = true;
+                                break;
                             }
                             self.status_event(lane, &ChatEvent::Failed(why));
                             return End::Failed;
@@ -986,24 +1103,17 @@ impl Engine {
                 }
             }
             self.emit_usage(lane);
-            if self.over_budget(lane) && self.compact(lane, true) {
-                // The fresh session has no pending turn to answer: tell it to go on.
-                lane.session.send_user_turn(
-                    "Continue the task. The latest tool results are in the recent turns above.".to_string(),
-                );
+            if self.over_budget(lane) && self.compact(lane, true).folded() {
+                continue_after_restart(lane);
+            } else if lane.needs_reseed {
+                // The summary request abandoned the pending tool turn.
+                self.reseed(lane);
                 continue_after_restart(lane);
             } else {
                 lane.session.send_tool_results(results);
             }
         }
     }
-}
-
-/// The prompt size in a node's context-overflow refusal ("the prompt is 49172 tokens and ...").
-fn overflow_tokens(why: &str) -> Option<u32> {
-    let rest = &why[why.find("context overflow")?..];
-    let after = &rest[rest.find("the prompt is ")? + "the prompt is ".len()..];
-    after.split_whitespace().next()?.parse().ok()
 }
 
 /// Most tool rounds one request may take before it stops and asks.
@@ -1032,8 +1142,10 @@ fn announces_work(answer: &str) -> bool {
         || ["i'll ", "i will ", "let me ", "now i", "next, i", "i'm going to ", "i need to "].iter().any(|p| low.starts_with(p))
 }
 
-/// After a mid-task fold the session already got its "continue" turn.
-fn continue_after_restart(_lane: &mut Lane) {}
+/// The fresh session has the tool results in its seed and needs a new user turn.
+fn continue_after_restart(lane: &Lane) {
+    lane.session.send_user_turn("Continue the task. The latest tool results are in the recent turns above.".into());
+}
 
 #[cfg(test)]
 mod tests {
@@ -1050,13 +1162,16 @@ mod tests {
 
     impl ContextHub for FakeHub {
         fn report(&mut self, _: Option<&Node>) -> Result<ContextReport, String> {
+            if let Some(why) = &self.refuse {
+                return Err(why.clone());
+            }
             Ok(ContextReport { current: 32768, kv: Some(self.kv.clone()), max_fit: 49152, options: vec![] })
         }
         fn set_context(&mut self, _: Option<&Node>, tokens: u32) -> Result<ContextReport, String> {
             self.asked.lock().unwrap().push(tokens);
             match &self.refuse {
                 Some(why) => Err(why.clone()),
-                None => Ok(ContextReport { current: tokens, kv: Some(self.kv.clone()), max_fit: 49152, options: vec![] }),
+                None => Ok(ContextReport { current: tokens.min(65_536), kv: Some(self.kv.clone()), max_fit: 65_536, options: vec![] }),
             }
         }
         fn set_kv(&mut self, node: Option<&Node>, kv: &str) -> Result<ContextReport, String> {
@@ -1070,7 +1185,75 @@ mod tests {
         }
     }
 
-    fn rig(context: u32, refuse: Option<&str>) -> (Engine, Lane, Receiver<AgentEvent>, Arc<Mutex<Vec<u32>>>) {
+    #[derive(Default)]
+    struct SessionRecord {
+        system_prompt: String,
+        user_turns: Vec<String>,
+        result_batches: usize,
+        cancelled: bool,
+        pending_tool_turn: bool,
+        events: Vec<ChatEvent>,
+    }
+
+    #[derive(Default)]
+    struct ChatScript {
+        replies: VecDeque<Vec<ChatEvent>>,
+        sessions: Vec<SessionRecord>,
+    }
+
+    struct ScriptedSession {
+        script: Arc<Mutex<ChatScript>>,
+        index: usize,
+    }
+
+    impl ScriptedSession {
+        fn queue_reply(&self, script: &mut ChatScript) {
+            let reply = script.replies.pop_front().unwrap_or_default();
+            let session = &mut script.sessions[self.index];
+            session.pending_tool_turn = reply.iter().any(|event| matches!(event, ChatEvent::TurnDone { tool_calls, .. } if *tool_calls > 0));
+            session.events = reply;
+        }
+    }
+
+    impl ChatSession for ScriptedSession {
+        fn send_user_turn(&self, text: String) {
+            let mut script = self.script.lock().unwrap();
+            script.sessions[self.index].user_turns.push(text);
+            self.queue_reply(&mut script);
+        }
+        fn send_tool_results(&self, _: Vec<(String, bool)>) {
+            let mut script = self.script.lock().unwrap();
+            let session = &mut script.sessions[self.index];
+            session.result_batches += 1;
+            if session.pending_tool_turn {
+                self.queue_reply(&mut script);
+            }
+        }
+        fn attach_images(&self, _: Vec<ToolImage>) -> Result<(), String> {
+            panic!("unexpected images in scripted chat")
+        }
+        fn cancel(&self) {
+            let mut script = self.script.lock().unwrap();
+            let session = &mut script.sessions[self.index];
+            session.cancelled = true;
+            session.pending_tool_turn = false;
+        }
+        fn poll(&self) -> Vec<ChatEvent> {
+            let events = std::mem::take(&mut self.script.lock().unwrap().sessions[self.index].events);
+            assert!(!events.is_empty(), "session {} polled without a scripted reply", self.index);
+            events
+        }
+        fn route(&self) -> Option<ChatRoute> { Some(ChatRoute::InProcess { model: "test".into() }) }
+        fn take_overflow(&self) -> Option<ContextOverflow> { None }
+    }
+
+    fn rig(context: Option<u32>, refuse: Option<&str>) -> (Engine, Lane, Receiver<AgentEvent>, Arc<Mutex<Vec<u32>>>) {
+        rig_with_script(context, refuse, Arc::default())
+    }
+
+    fn rig_with_script(context: Option<u32>, refuse: Option<&str>, script: Arc<Mutex<ChatScript>>)
+        -> (Engine, Lane, Receiver<AgentEvent>, Arc<Mutex<Vec<u32>>>)
+    {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let (_cmd_tx, cmd_rx) = channel();
         let (evt_tx, evt_rx) = channel();
@@ -1083,6 +1266,12 @@ mod tests {
         };
         let hub = FakeHub { asked: asked.clone(), refuse: refuse.map(String::from), kv: "q8".into() };
         let mut eng = Engine::build(cfg, cmd_rx, evt_tx, Arc::new(|| {}), Box::new(hub));
+        eng.start_chat = Box::new(move |config| {
+            let mut state = script.lock().unwrap();
+            let index = state.sessions.len();
+            state.sessions.push(SessionRecord { system_prompt: config.system_prompt, ..Default::default() });
+            Box::new(ScriptedSession { script: script.clone(), index })
+        });
         let mut lane = eng.new_lane(0, false, "");
         // No node answers in a test: fold without asking the model.
         lane.needs_reseed = true;
@@ -1102,12 +1291,12 @@ mod tests {
 
     #[test]
     fn growing_the_context_moves_the_budget_and_keeps_the_conversation() {
-        let (mut eng, mut lane, rx, asked) = rig(16384, None);
+        let (mut eng, mut lane, rx, asked) = rig(Some(16384), None);
         chat(&mut lane, 6);
         let before = lane.items.clone();
         eng.set_context(&mut lane, 65536);
         assert_eq!(*asked.lock().unwrap(), vec![65536]);
-        assert_eq!(eng.cfg.context_tokens, 65536);
+        assert_eq!(eng.context_tokens, 65536);
         assert_eq!(lane.items, before);
         let ev = events(&rx);
         assert!(ev.iter().any(|e| matches!(e, AgentEvent::Usage(u) if u.context_max == 65536)));
@@ -1116,12 +1305,27 @@ mod tests {
     }
 
     #[test]
+    fn auto_context_learns_completed_turn_and_uses_the_applied_window() {
+        let (mut eng, mut lane, rx, _) = rig(None, None);
+        assert_eq!((eng.context_override, eng.context_tokens), (None, 0));
+        assert!(!over_budget_at(100_000, 0));
+        assert_eq!((eng.refs_budget_chars(), eng.tail_chars()), (usize::MAX, usize::MAX));
+
+        eng.record_turn_done(100, 1.0, 114_688);
+        eng.record_turn_done(1, 0.0, 0);
+        assert_eq!((eng.context_override, eng.context_tokens), (None, 114_688));
+        eng.set_context(&mut lane, 131_072);
+        assert_eq!((eng.context_override, eng.context_tokens), (Some(131_072), 65_536));
+        assert!(events(&rx).iter().any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("fitted from 128k"))));
+    }
+
+    #[test]
     fn shrinking_below_the_conversation_folds_it() {
-        let (mut eng, mut lane, rx, _) = rig(65536, None);
+        let (mut eng, mut lane, rx, _) = rig(Some(65536), None);
         chat(&mut lane, 8); // ~4.6k tokens
         assert!(!eng.over_budget(&lane));
         eng.set_context(&mut lane, 4096); // 70% = 2.9k
-        assert_eq!(eng.cfg.context_tokens, 4096);
+        assert_eq!(eng.context_tokens, 4096);
         assert!(matches!(lane.items.first(), Some(Item::Summary(_))));
         assert!(lane.items.len() < 16);
         // The fold made it fit, and the last request is still there.
@@ -1134,15 +1338,90 @@ mod tests {
 
     #[test]
     fn a_refusal_leaves_the_old_size_and_the_conversation() {
-        let (mut eng, mut lane, rx, _) = rig(32768, Some("not enough free GPU memory"));
+        let (mut eng, mut lane, rx, _) = rig(Some(32768), Some("not enough free GPU memory"));
         chat(&mut lane, 4);
         let before = lane.items.clone();
         eng.set_context(&mut lane, 65536);
-        assert_eq!(eng.cfg.context_tokens, 32768);
+        assert_eq!(eng.context_override, Some(32768));
+        assert_eq!(eng.context_tokens, 32768);
         assert_eq!(lane.items, before);
         let ev = events(&rx);
         assert!(ev.iter().any(|e| matches!(e, AgentEvent::Error(m) if m.contains("stays at 32k") && m.contains("GPU memory"))));
         assert!(ev.iter().all(|e| !matches!(e, AgentEvent::Usage(u) if u.context_max != 32768)));
+
+        let (mut cold, mut lane, rx, _) = rig(None, Some("no model loaded"));
+        cold.set_context(&mut lane, 65536);
+        assert_eq!((cold.context_override, cold.context_tokens), (None, 0));
+        assert!(events(&rx).iter().any(|e| matches!(e, AgentEvent::Error(m) if m == "context stays unchanged: no model loaded")));
+    }
+
+    #[test]
+    fn lone_summary_gives_nothing_to_fold() {
+        let script = Arc::new(Mutex::new(ChatScript::default()));
+        let (mut eng, mut lane, _, _) = rig_with_script(Some(2048), None, script.clone());
+        lane.needs_reseed = false;
+        lane.items = vec![Item::Summary("earlier work".into()), Item::user("continue")];
+        assert_eq!(context::tail_start(&lane.items, eng.tail_chars()), 1);
+        assert!(matches!(eng.compact(&mut lane, true), Fold::NothingToFold));
+        let state = script.lock().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions[0].user_turns.is_empty() && state.sessions[0].result_batches == 0);
+        assert!(!state.sessions[0].cancelled && !lane.needs_reseed);
+    }
+
+    #[test]
+    fn rejected_tail_measurement_returns_frees_nothing_without_asking_model() {
+        let script = Arc::new(Mutex::new(ChatScript::default()));
+        let (mut eng, mut lane, _, _) = rig_with_script(Some(2048), None, script.clone());
+        lane.needs_reseed = false;
+        // The last assistant stays in the tail and the latest user must be kept verbatim.
+        lane.items = vec![Item::user("u".repeat(1500)), Item::Assistant("a".repeat(1500))];
+        let kept = lane.items.clone();
+        assert!(matches!(eng.compact(&mut lane, true), Fold::FreesNothing { before, after } if before == after));
+        assert_eq!(lane.items, kept);
+        let state = script.lock().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state.sessions[0].user_turns.is_empty() && state.sessions[0].result_batches == 0);
+        assert!(!state.sessions[0].cancelled && !lane.needs_reseed);
+    }
+
+    #[test]
+    fn refused_fold_during_tool_round_reseeds_and_finishes_turn() {
+        let done = |tool_calls| ChatEvent::TurnDone { tool_calls, tokens: 1, secs: 1.0, context_used: 0, context_max: 3000 };
+        let script = Arc::new(Mutex::new(ChatScript {
+            replies: VecDeque::from([
+                vec![ChatEvent::ToolCall { name: "todo".into(), args: vec![("items".into(), "[x] check".into())] }, done(1)],
+                vec![ChatEvent::Delta("s".repeat(2000)), done(0)],
+                vec![ChatEvent::Delta("Finished.".into()), done(0)],
+            ]),
+            sessions: Vec::new(),
+        }));
+        let (mut eng, mut lane, rx, _) = rig_with_script(Some(3000), None, script.clone());
+        lane.needs_reseed = false;
+        for i in 0..10 {
+            lane.items.push(Item::user(format!("q{i}")));
+            lane.items.push(Item::Assistant(format!("a{i}")));
+        }
+        lane.items.push(Item::user("u".repeat(1600)));
+        lane.items.push(Item::Assistant("a".repeat(1600)));
+        let original = lane.items.clone();
+        assert!(eng.over_budget(&lane));
+        assert_eq!(eng.turn(&mut lane, "Update the plan.".into()), End::Done("Finished.".into()));
+        assert!(!lane.needs_reseed);
+        assert_eq!(lane.items[..original.len()], original);
+        assert_eq!(lane.items.len(), original.len() + 2);
+        assert!(matches!(&lane.items[original.len()], Item::Tool { name, result, ok: true, .. } if name == "todo" && result == "plan updated"));
+        assert!(events(&rx).iter().all(|e| !matches!(e, AgentEvent::Summarised { .. })));
+        let state = script.lock().unwrap();
+        assert_eq!(state.sessions.len(), 2);
+        let first = &state.sessions[0];
+        assert_eq!(first.user_turns, ["Update the plan.", context::SUMMARY_REQUEST]);
+        assert!(first.cancelled);
+        assert_eq!(first.result_batches, 0);
+        let second = &state.sessions[1];
+        assert!(second.system_prompt.ends_with(&context::seed_text(None, &lane.items[..original.len() + 1])));
+        assert!(second.system_prompt.contains("plan updated"));
+        assert_eq!(second.user_turns, ["Continue the task. The latest tool results are in the recent turns above."]);
     }
 
     #[test]
@@ -1158,9 +1437,9 @@ mod tests {
 
     #[test]
     fn the_nodes_report_sets_the_budget_at_start() {
-        let (mut eng, lane, rx, _) = rig(16384, None);
+        let (mut eng, lane, rx, _) = rig(Some(16384), None);
         eng.fetch_context(None, &lane);
-        assert_eq!(eng.cfg.context_tokens, 32768);
+        assert_eq!(eng.context_tokens, 32768);
         assert_eq!(eng.kv.as_deref(), Some("q8"));
         assert!(events(&rx).iter().any(|e| matches!(e, AgentEvent::ContextReport(r) if r.max_fit == 49152)));
     }
@@ -1175,9 +1454,49 @@ mod tests {
     }
 
     #[test]
-    fn a_context_overflow_names_the_nodes_count() {
-        let why = "qwen3.8-27b on 127.0.0.1: bad request: context overflow: the prompt is 49172 tokens and the answer needs 128 more, but this node's context is 49152 tokens";
-        assert_eq!(overflow_tokens(why), Some(49172));
-        assert_eq!(overflow_tokens("model unavailable: not enough GPU memory"), None);
+    fn terminal_overflow_folds_while_each_round_frees_tokens() {
+        let (mut eng, mut lane, rx, _) = rig(None, None);
+        assert_eq!(eng.fresh_system(0, false).chars, lane.system_chars);
+        chat(&mut lane, 8);
+        assert_eq!(eng.context_tokens, 0);
+        assert_eq!(eng.token_scale, 1.0);
+        assert_eq!(lane.items.len(), 16);
+
+        let mut round = 0;
+        let initial_estimate = eng.used_tokens(&lane);
+        let need = initial_estimate as usize + 8_192;
+        // Grow the next session's base prompt to exercise a changed system size offline.
+        eng.notes.push_str("Keep the original units in all calculations.");
+        let fresh_chars = eng.fresh_system(0, false).chars;
+        assert!(fresh_chars > lane.system_chars);
+        assert!(eng.recover_overflow(&mut lane, &mut round, Some(ContextOverflow { need, max: 8_192 })));
+        assert_eq!(lane.system_chars, fresh_chars);
+        assert_eq!(eng.context_tokens, 8_192);
+        assert!(eng.token_scale > 1.0);
+        assert!(matches!(lane.items.first(), Some(Item::Summary(_))));
+        let count = lane.items.len();
+        assert!(count > 3 && count < 16);
+        let after_first = eng.used_tokens(&lane);
+        let emitted = events(&rx);
+        let saved = (initial_estimate as f32 * eng.token_scale).ceil() as u32 - after_first;
+        assert!(saved > 0);
+        assert!(emitted.iter().any(|e| matches!(e, AgentEvent::Summarised { tokens_saved, .. } if *tokens_saved == saved)));
+        assert!(emitted.iter().any(|e| matches!(e, AgentEvent::Usage(u) if u.context_max == 8_192)));
+        assert!(emitted.iter().any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("folded"))));
+
+        assert!(eng.recover_overflow(&mut lane, &mut round, Some(ContextOverflow { need: 5_000, max: 4_096 })));
+        assert_eq!(eng.context_tokens, 4_096);
+        assert!(lane.items.len() < count);
+        assert!(eng.used_tokens(&lane) < after_first);
+        assert!(events(&rx).iter().any(|e| matches!(e, AgentEvent::Summarised { .. })));
+
+        let kept = lane.items.clone();
+        assert!(!eng.recover_overflow(&mut lane, &mut round, Some(ContextOverflow { need: 3_000, max: 2_048 })));
+        assert_eq!(eng.context_tokens, 2_048);
+        assert_eq!(lane.items, kept, "a fold that freed nothing must preserve the conversation");
+        assert!(events(&rx).iter().all(|e| !matches!(e, AgentEvent::Summarised { .. })));
+        assert_eq!(round, 3);
+        assert!(!eng.recover_overflow(&mut lane, &mut round, None));
+        assert_eq!(round, 3);
     }
 }

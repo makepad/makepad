@@ -94,7 +94,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(makepad_widgets::script_mod);
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let storage = cx.storage("calendar.test");
         let (replies, _upstream) = ReplySink::pair();
         let handles = InstanceHandles {

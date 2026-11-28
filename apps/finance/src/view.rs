@@ -810,7 +810,7 @@ impl Range {
 /// home's `finance/` directory. The module keeps this; the standalone
 /// window overrides it to a checkout-relative path in `main.rs`.
 fn default_db_path() -> PathBuf {
-    makepad_widgets::makepad_platform::home::makepad_home().join("finance").join("finance.db")
+    makepad_widgets::makepad_platform::home::app_state_home().join("finance").join("finance.db")
 }
 
 #[derive(Script, ScriptHook, Widget)]

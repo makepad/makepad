@@ -222,7 +222,7 @@ impl Script {
                     self.emit(AgentEvent::Idle);
                 }
                 Ok(Command::SetContext(tokens)) => {
-                    self.config.context_tokens = tokens;
+                    self.config.context_tokens = Some(tokens);
                     self.emit(AgentEvent::Notice(format!("Context is now {}.", short_tokens(tokens))));
                     self.emit(AgentEvent::ContextReport(self.report()));
                     self.usage(0.0, &[(SegmentKind::System, 2_400)]);
@@ -257,13 +257,13 @@ impl Script {
             .map(|&tokens| ContextOption { tokens, vram_mb: Some(vram(tokens)), fits: vram(tokens) <= free })
             .collect();
         let max_fit = options.iter().filter(|o| o.fits).map(|o| o.tokens).max().unwrap_or(0);
-        ContextReport { current: self.config.context_tokens, kv: Some(self.kv.clone()), max_fit, options }
+        ContextReport { current: self.config.context_tokens.unwrap_or(max_fit), kv: Some(self.kv.clone()), max_fit, options }
     }
 
     fn usage(&mut self, rate: f32, segments: &[(SegmentKind, u32)]) {
         self.emit(AgentEvent::Usage(Usage {
             context_used: self.context,
-            context_max: self.config.context_tokens.max(1),
+            context_max: self.report().current,
             tokens_per_sec: rate,
             total_generated: self.generated,
             segments: segments.iter().map(|&(kind, tokens)| ContextSegment { kind, tokens }).collect(),

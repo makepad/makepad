@@ -57,7 +57,7 @@ impl AppModule for FinanceModule {
             // does on this machine. A first run with an empty database
             // seeds the generated demo household, exactly like the
             // desktop's first run.
-            view.set_db_path(makepad_widgets::makepad_platform::home::makepad_home().join("finance").join("finance.db"));
+            view.set_db_path(makepad_widgets::makepad_platform::home::app_state_home().join("finance").join("finance.db"));
         }
         InstanceParts {
             root: root.clone(),

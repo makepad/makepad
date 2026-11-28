@@ -9,10 +9,16 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Makepad Code in the terminal: an interactive coding agent, or one task with -p"
 
+# On Windows the binary is a stub that says it is not supported there (no termios); the
+# windows bucket keeps that stub building with no warnings.
+[package.metadata.makepad.platform-gaps]
+windows = {}
+
 [[bin]]
 name = "makepad-code"
 path = "src/main.rs"
 
-[dependencies]
+# (Unix only: the Windows stub uses none of them)
+[target.'cfg(unix)'.dependencies]
 makepad-code-agent = { path = "../agent" }
 makepad-cell-width = { path = "../../../libs/cell_width" }

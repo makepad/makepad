@@ -74,6 +74,7 @@ script_mod! {
             labels: ["Dark" "Light" "Skeleton"]
             selected_item: 0
         }
+        focus_canvas := ButtonFlat{text: "Focus" a11y: {label: "Focus canvas (Cmd+Shift+F)"}}
         inspect := ButtonFlat{
             text: "Inspect"
             give_up := 1
@@ -242,6 +243,8 @@ pub struct App {
     /// The key of the story on the canvas.
     #[rust]
     current: Option<String>,
+    #[rust]
+    focus: bool,
 }
 
 impl App {
@@ -267,7 +270,7 @@ impl App {
         if self.ui.story_navigator(cx, ids!(navigator)).select(cx, story.key) {
             self.persist_folds(cx);
         }
-        self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
+        if !self.focus { self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story); }
         self.ui.controls_panel(cx, ids!(controls)).set_story(cx, story);
         self.ui.actions_panel(cx, ids!(actions)).clear(cx);
         self.ui
@@ -275,7 +278,7 @@ impl App {
             .set_text(cx, &format!("{} / {}", story.component, story.name));
         self.refresh_star(cx);
         settings::set(settings::LAST_STORY, story.key);
-        remote::set_current(story.key);
+        remote::mark_story_opened(story.key);
         log!("storybook: story {}", story.key);
     }
 
@@ -285,11 +288,37 @@ impl App {
         self.ui.button_set(cx, ids_array!(reset, reset_icon)).clicked(actions)
     }
 
+    fn apply_focus_layout(&self, cx: &mut Cx) {
+        self.ui.widget(cx, ids!(toolbar_pane)).set_visible(cx, !self.focus);
+        let outer = self.ui.widget(cx, ids!(split));
+        outer.as_splitter().set_solo(cx, self.focus.then_some(SplitterSide::B));
+        // Splitter exposes its two panes as unnamed children. Its B pane is
+        // the inner splitter, whose A pane holds the canvas.
+        outer.children(&mut |_, pane| {
+            if pane.borrow::<Splitter>().is_some() {
+                pane.as_splitter().set_solo(cx, self.focus.then_some(SplitterSide::A));
+            }
+        });
+    }
+
+    fn set_focus(&mut self, cx: &mut Cx, on: bool) {
+        self.focus = on;
+        self.apply_focus_layout(cx);
+        if !on {
+            if let Some(story) = self.current() {
+                self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
+            }
+            self.refresh_subject(cx);
+        }
+        remote::mark_focus(on);
+        cx.redraw_all();
+    }
+
     fn drain_requests(&mut self, cx: &mut Cx) {
         for request in remote::take_requests() {
             match request {
                 remote::Request::Open(key) => self.open_story(cx, &key),
-                remote::Request::Theme(index) => theme::select(cx, index),
+                remote::Request::Focus(on) => self.set_focus(cx, on),
                 remote::Request::Reset => {
                     self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
                     self.settle_story(cx);
@@ -483,6 +512,7 @@ impl MatchEvent for App {
             _ => "overview/welcome/welcome".to_string(),
         };
         self.open_story(cx, &key);
+        remote::mark_startup(self.current.as_deref().unwrap_or(&key), &theme::names()[theme::choice()]);
         remote::install(cx);
         log!("storybook: {} stories registered", registry::all().count());
         log!(
@@ -492,7 +522,16 @@ impl MatchEvent for App {
         );
     }
 
+    fn handle_key_down(&mut self, cx: &mut Cx, key: &KeyEvent) {
+        if key.key_code == KeyCode::KeyF && key.modifiers.logo && key.modifiers.shift && !key.is_repeat {
+            self.set_focus(cx, !self.focus);
+        }
+    }
+
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(focus_canvas)).clicked(actions) {
+            self.set_focus(cx, !self.focus);
+        }
         if let Some(key) = self.ui.story_navigator(cx, ids!(navigator)).opened(actions) {
             self.open_story(cx, &key);
         }
@@ -641,6 +680,7 @@ impl AppMain for App {
             theme_select.set_labels(cx, theme::labels());
             theme_select.set_selected_item(cx, choice);
             remote::install(cx);
+            if self.focus { self.apply_focus_layout(cx); }
         }
         self.drain_requests(cx);
         self.ui.handle_event(cx, event, &mut Scope::empty());
@@ -652,7 +692,7 @@ impl AppMain for App {
         // After the tree has handled the event its index is current, so the
         // subject lookup lands on the story just built rather than on what
         // the index still held from before.
-        self.refresh_subject(cx);
+        if !self.focus { self.refresh_subject(cx); }
         if let Event::LiveEdit = event {
             // Everything was rebuilt from its templates; the panels are plain
             // state the rebuild reset, so they get their story again.
@@ -660,7 +700,7 @@ impl AppMain for App {
                 self.ui
                     .label(cx, ids!(story_title))
                     .set_text(cx, &format!("{} / {}", story.component, story.name));
-                self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
+                if !self.focus { self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story); }
             }
             // The canvas rebuilt the page from its template in the tree's
             // pass above, blank of what its handler had put on it.
@@ -676,7 +716,9 @@ impl AppMain for App {
             // carries its own type: what the steps were worth under the
             // last one is worth nothing here. It starts again from the
             // state the markup is in, and the next draw walks it down.
+            remote::mark_live_edit_applied(&theme::names()[theme::choice()]);
         }
+        if matches!(event, Event::Draw(_)) { remote::mark_drawn(); }
     }
 }
 
@@ -727,6 +769,7 @@ mod tests {
         let app = App {
             ui,
             current: None,
+            focus: false,
         };
         (cx, app, pass, list)
     }
@@ -1001,7 +1044,7 @@ mod tests {
         });
         let pass = DrawPass::new(&mut cx);
         let list = DrawList2d::new(&mut cx);
-        (cx, App { ui, current: None }, pass, list, value)
+        (cx, App { ui, current: None, focus: false }, pass, list, value)
     }
 
     /// Keep `band` back from the body, the way the window does before every

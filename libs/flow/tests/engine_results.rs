@@ -170,6 +170,7 @@ fn a_derived_publish_is_found_by_digest_and_names_its_parent() {
                 model: "realesrgan".into(),
                 seed: Some(42),
                 params: vec![("factor".into(), Literal::Num(2.0))],
+                hub: String::new(),
             }],
             prompt: "a sunset".into(),
             sources: vec![source.digest],
@@ -215,7 +216,7 @@ fn a_runs_digest_finds_its_primary_product_before_its_siblings() {
         node.params.push(("recipe_digest".into(), Literal::Str(recipe.clone())));
         // (a product of a generator: one with none records no digest)
         let lineage = Lineage {
-            generators: vec![GeneratorRecord { node: "gen".into(), type_name: "Gen".into(), domain: "image".into(), model: "m".into(), seed: Some(41), params: Vec::new() }],
+            generators: vec![GeneratorRecord { node: "gen".into(), type_name: "Gen".into(), domain: "image".into(), model: "m".into(), seed: Some(41), params: Vec::new(), hub: String::new() }],
             prompt: "a sunset".into(),
             sources: Vec::new(),
         };
@@ -249,6 +250,7 @@ fn presets_are_flow_kind_results() {
         artist: String::new(),
         generator: String::new(),
         model: String::new(),
+        hub: String::new(),
         prompt: String::new(),
         seed: None,
         digest: None,

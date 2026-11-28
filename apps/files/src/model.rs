@@ -9,8 +9,8 @@ use std::{
 };
 
 pub use makepad_diskmap::{
-    display_name, extension_of, is_playable_video, is_thumbnailable, kind_for, skip_for_scan,
-    FileKind,
+    display_name, extension_of, is_playable_video, is_thumbnailable, kind_for, makepad_home,
+    skip_for_scan, FileKind,
 };
 
 #[cfg(test)]
@@ -644,17 +644,22 @@ mod tests {
     // writing one key must never eat the others.
     #[test]
     fn setting_one_preference_keeps_the_rest() {
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(
+            prefs_path(), makepad_widgets::makepad_platform::home::app_state_home().join("files/prefs"),
+            "Files preferences must use the current instance's app state home",
+        );
         let text = "scan_all=1\nprojection=ortho\n";
-        assert_eq!(pref_find(text, "projection").as_deref(), Some("ortho"));
-        assert_eq!(pref_find(text, "missing"), None);
+        assert_eq!(pref_find(text, "projection").as_deref(), Some("ortho"), "an existing preference must be readable");
+        assert_eq!(pref_find(text, "missing"), None, "a missing preference must have no value");
         let replaced = pref_replace(text, "projection", "persp");
-        assert_eq!(pref_find(&replaced, "projection").as_deref(), Some("persp"));
-        assert_eq!(pref_find(&replaced, "scan_all").as_deref(), Some("1"));
+        assert_eq!(pref_find(&replaced, "projection").as_deref(), Some("persp"), "replacing a key must update its value");
+        assert_eq!(pref_find(&replaced, "scan_all").as_deref(), Some("1"), "replacing a key must preserve other preferences");
         // A new key appends; nothing else moves.
         let grown = pref_replace(&replaced, "filter_side", "1");
-        assert_eq!(pref_find(&grown, "filter_side").as_deref(), Some("1"));
-        assert_eq!(pref_find(&grown, "scan_all").as_deref(), Some("1"));
-        assert_eq!(grown.lines().count(), 3);
+        assert_eq!(pref_find(&grown, "filter_side").as_deref(), Some("1"), "a newly added preference must be readable");
+        assert_eq!(pref_find(&grown, "scan_all").as_deref(), Some("1"), "adding a key must preserve other preferences");
+        assert_eq!(grown.lines().count(), 3, "adding a key must append one line");
     }
 
     // The rule that keeps macOS from throwing a permission dialog per
@@ -870,27 +875,4 @@ mod tests {
         assert_eq!(head, "one\ntwo\n…");
         fs::remove_file(&file).ok();
     }
-}
-
-/// The makepad home directory (`MAKEPAD_HOME`, else the user home; a temp dir as a
-/// last resort) — the same rule the AI hub uses, kept local so demo builds without the
-/// chat feature do not link the hub for a path.
-// The shared per-user home for Makepad AI state.
-pub fn makepad_home() -> PathBuf {
-    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
-    // every path below it relative to the current folder.
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
-        return PathBuf::from(home);
-    }
-    // USERPROFILE on Windows, HOME elsewhere; temp dir as a last resort. The web has no
-    // environment and no temp dir (std's temp_dir panics there): its home is a fixed
-    // virtual path that only ever names browser-storage keys.
-    #[cfg(target_arch = "wasm32")]
-    return PathBuf::from("/.makepad");
-    #[cfg(not(target_arch = "wasm32"))]
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".makepad")
 }

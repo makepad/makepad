@@ -1,6 +1,5 @@
 # calendar — part of the Makepad app family: standalone window, and a module
-# (src/module.rs) the window manager seats in-process. Spec of record:
-# local/agent_state/wm-all/apps/calendar-redesign.md; contract: .../CONTRACT.md.
+# (src/module.rs) the window manager seats in-process.
 
 [package]
 name = "makepad-app-calendar"

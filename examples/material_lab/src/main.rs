@@ -33,7 +33,10 @@
 //! fog and SSR. 1/2 bracket a known hit in depth; 0 removes the bracket.
 //! In the early-depth scene E changes fragment work and B moves the prefill.
 //! --trace-series measures the four combinations at natural presentation.
-//! In `--scene=traced-tiles`, R rotates the boxes and X clears or restores one atlas cell.
+//! With `--scene=traced-volume`, --trace-series times the camera outside and inside the room,
+//! pairing frames from two prewarmed programs while a separate pass holds the GPU clock.
+//! In `--scene=traced-volume`, X opens or restores a hole through a pillar. I moves inside,
+//! N slices the wall with the near plane, and V returns to the outside view.
 use makepad_draw::*;
 use makepad_render::makepad_render_material::{Hook, HookMask, HookSet, MaterialDesc};
 use makepad_render::{
@@ -50,7 +53,8 @@ use makepad_scene::{
     UnlitParams, World,
 };
 
-mod traced_tiles;
+mod traced_volume;
+use traced_volume::VolumeCamera;
 app_main!(App);
 
 pub const COLUMNS: usize = 7;
@@ -76,6 +80,17 @@ script_mod! {
         var phase = dot(p, vec3(1.7, 2.3, 0.9))
         for i in 0..192 { phase = sin(phase * 1.91 + d.z) }
         return vec4(hit.xyz, phase)
+    }
+    mod.widgets.LabClockHold = mod.draw.DrawQuad{
+        iters: uniform(380.0)
+        scene: texture_2d(float)
+        pixel: fn() -> vec4 {
+            var phase = self.pos.x + self.scene.sample_nearest(self.pos).x * 1.0e-6
+            for i in 0..u32(self.iters) {
+                for j in 0..8 { phase = sin(phase * 1.91 + self.pos.y) }
+            }
+            return vec4(0.5 + 0.5 * phase, 0.0, 0.0, 1.0)
+        }
     }
     mod.widgets.lab_hit_color = fn(material: float, p: vec3) -> vec4 {
         return vec4(vec3(1.0, 1.0, 1.0) * (1.0 + material * 0.0001), 1.0)
@@ -128,11 +143,11 @@ enum Scene {
     Ibl,
     Traced,
     EarlyDepth,
-    Tiles,
+    Volume,
 }
 
 impl Scene {
-    fn traced(self) -> bool { matches!(self, Self::Traced | Self::EarlyDepth | Self::Tiles) }
+    fn traced(self) -> bool { matches!(self, Self::Traced | Self::EarlyDepth | Self::Volume) }
 }
 
 fn scene() -> Scene {
@@ -142,7 +157,7 @@ fn scene() -> Scene {
         Some("ibl") => Scene::Ibl,
         Some("traced") => Scene::Traced,
         Some("traced-early-depth") => Scene::EarlyDepth,
-        Some("traced-tiles") => Scene::Tiles,
+        Some("traced-volume") => Scene::Volume,
         _ => Scene::Hooks,
     })
 }
@@ -314,7 +329,7 @@ fn items_world(scene: Scene) -> World {
         Scene::Ibl => {
             w.environment.ibl = Some(makepad_scene::Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
         }
-        Scene::Hooks | Scene::Traced | Scene::EarlyDepth | Scene::Tiles => {}
+        Scene::Hooks | Scene::Traced | Scene::EarlyDepth | Scene::Volume => {}
     }
     w
 }
@@ -582,6 +597,7 @@ fn trace_volumes_available(cx: &Cx) -> bool {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct TraceControls {
+    camera: VolumeCamera,
     view: SurfaceView,
     caster: bool,
     ao: bool,
@@ -590,19 +606,21 @@ struct TraceControls {
     expensive: bool,
     front: bool,
     depth_probe: i8,
-    turned: bool,
     cleared: bool,
 }
 
 struct TraceLab {
     controls: TraceControls,
     early: bool,
-    tiles: Option<traced_tiles::TileFixture>,
+    volume_series: Option<traced_volume::VolumeSeries>,
+    volume: Option<traced_volume::VolumeFixture>,
+    outside_name: &'static str,
     series_block: Option<usize>,
     captures: Option<std::path::PathBuf>,
     revision: u64,
     installed: Option<(u64, TraceControls)>,
     availability: SurfaceView,
+    inside_draws: u64,
     held: std::rc::Rc<std::cell::Cell<bool>>,
     recipe: TracedSurfaceRecipe,
     world: World,
@@ -668,9 +686,9 @@ fn trace_packed_asset(renderer: &mut Renderer, cx: &mut Cx, name: &str, vertices
 }
 
 impl TraceLab {
-    fn install_subject(r: &mut Renderer, tiles: bool, recipe: TracedSurfaceRecipe) {
-        if tiles {
-            r.install_traced_surface_for_passes("tiles".into(), recipe, TracedSurfacePasses { sun: true, ..TracedSurfacePasses::OUTSIDE });
+    fn install_subject(r: &mut Renderer, name: &str, recipe: TracedSurfaceRecipe, inside: bool) {
+        if name != "analytic" {
+            r.install_traced_surface_for_passes(name.into(), recipe, TracedSurfacePasses { inside: name == "volume" && inside, sun: true, ..TracedSurfacePasses::OUTSIDE });
         } else {
             r.install_traced_outside_preview("analytic".into(), recipe);
         }
@@ -680,15 +698,18 @@ impl TraceLab {
         let args: Vec<_> = std::env::args().collect();
         let arg = |prefix: &str| args.iter().find_map(|s| s.strip_prefix(prefix));
         let early = scene == Scene::EarlyDepth;
-        let series = early && args.iter().any(|s| s == "--trace-series");
+        let trace_series = args.iter().any(|s| s == "--trace-series");
+        let volume_series = scene == Scene::Volume && trace_series;
+        let series = (early || volume_series) && trace_series;
         let controls = TraceControls {
+            camera: VolumeCamera::Outside,
             view: match arg("--trace-view=").unwrap_or("traced") {
                 "traced" => SurfaceView::Traced, "mesh" => SurfaceView::Mesh, "waiting" => SurfaceView::Waiting,
                 "failed" => SurfaceView::Failed, "omit" => SurfaceView::Omitted, v => panic!("unknown trace view {v}"),
             },
             caster: args.iter().any(|s| s == "--trace-caster"), ao: args.iter().any(|s| s == "--trace-ssao"),
             fog: args.iter().any(|s| s == "--trace-fog"), ssr: args.iter().any(|s| s == "--trace-ssr"),
-            depth_probe: 0, turned: false, cleared: false,
+            depth_probe: 0, cleared: false,
             expensive: early && !series && arg("--trace-work=") == Some("expensive"),
             front: !series && arg("--trace-prefill=") == Some("front"),
         };
@@ -698,7 +719,7 @@ impl TraceLab {
         lab.depth_texture = Texture::new_with_format(cx, TextureFormat::DepthD32Sampled { size: size.clone(), initial: true });
         lab.pass.set_depth_texture(cx, &lab.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         lab.pass.set_keep_camera_matrix(cx, true);
-        lab.pass.set_gpu_timing_enabled(cx, early);
+        lab.pass.set_gpu_timing_enabled(cx, early || volume_series);
         cx.set_pick_ids(true);
         let r = &mut lab.renderer;
         r.set_hdr_output(true);
@@ -714,28 +735,28 @@ impl TraceLab {
             for p in &mut g.positions { *p = [2.0 * p[0], 2.0 * p[1] - 1.0, 2.0 * p[2]]; }
         }
         trace_asset(r, cx, "ball", ball, [0.0, 0.5], 2, &[]);
-        if scene == Scene::Tiles {
+        if scene == Scene::Volume {
             trace_asset(r, cx, "receiver", box_mesh.clone(), [0.0, 0.8], 4, &[]);
             r.set_model_casts_shadow("receiver", false);
         } else {
             trace_asset(r, cx, "box", box_mesh.clone(), [0.0, 0.5], 2, if early { &["analytic", "costly"] } else { &["analytic"] });
         }
         trace_asset(r, cx, "bar", box_mesh, [0.0, 0.8], 3, &[]);
-        let (plane_z, slope) = if scene == Scene::Tiles { (-1.5, 0.0) } else { (-0.45, 1.4) };
+        let (plane_z, slope) = if scene == Scene::Volume { (-1.5, 0.0) } else { (-0.45, 1.4) };
         let normal = vec3f(0.0, slope, 1.0).normalize();
         let mut plane = GeometryData { indices: vec![0, 1, 2, 0, 2, 3], ..Default::default() };
         for (x, y) in [(-4.2,-1.6), (4.2,-1.6), (4.2,1.6), (-4.2,1.6)] {
             plane.positions.push([x, y, plane_z - slope*y]);
             plane.normals.push([normal.x, normal.y, normal.z]);
         }
-        let plane_mr = if scene == Scene::Tiles { [0.0, 0.8] } else { [0.65, 0.12] };
+        let plane_mr = if scene == Scene::Volume { [0.0, 0.8] } else { [0.65, 0.12] };
         trace_asset(r, cx, "plane", plane, plane_mr, 1, &[]);
         // Isolate receiving the separate bar's shadow. Neither reference sphere casts.
         for name in ["ball", "plane"] { r.set_model_casts_shadow(name, false); }
         r.set_csm_config(1024, 20.0);
         r.set_gpu_lightmap_mode(if early { GpuLightmapMode::Off } else { GpuLightmapMode::Realtime });
-        let (tiles, mut cheap) = if scene == Scene::Tiles {
-            let (fixture, recipe) = traced_tiles::TileFixture::install(r, cx);
+        let (volume, mut cheap) = if scene == Scene::Volume {
+            let (fixture, recipe) = traced_volume::VolumeFixture::install(r, cx, volume_series);
             (Some(fixture), recipe)
         } else {
             let recipe = cx.with_vm(|vm| {
@@ -757,15 +778,21 @@ impl TraceLab {
         let held = std::rc::Rc::new(std::cell::Cell::new(false));
         let gate = held.clone();
         cheap.host_vm = Some(std::rc::Rc::new(move |cx, build| !gate.get() && cx.try_with_vm(|vm| build(vm)).is_some()));
-        Self::install_subject(r, tiles.is_some(), cheap.clone());
+        let name = if volume.is_some() { "volume" } else { "analytic" };
+        Self::install_subject(r, name, cheap.clone(), true);
+        let volume_series = volume_series.then(|| {
+            Self::install_subject(r, "volume_no_inside", cheap.clone(), false);
+            let iters = arg("--trace-gpu-load-iters=").map_or(380, |v| v.parse().expect("trace GPU load iterations"));
+            traced_volume::VolumeSeries::new(cx, iters, &volume.as_ref().unwrap().subject_no_inside)
+        });
         let mut world = World::new();
         world.sky = None;
-        let sun = if tiles.is_some() { vec3f(0.0, 0.5, 1.0) } else { vec3f(0.0, 0.82, 0.57) };
+        let sun = if scene == Scene::Volume { vec3f(0.0, 0.5, 1.0) } else { vec3f(0.0, 0.82, 0.57) };
         world.lights.push(Light::Sun { dir: sun.normalize(), color: Vec3f::all(1.0), lux: 1.6, shadow: Default::default() });
         world.lights.push(Light::Sky { top: Vec3f::all(0.75), ground: Vec3f::all(0.45), intensity: 0.8 });
-        Self { controls, early, tiles, series_block: series.then_some(0),
+        Self { controls, early, volume_series, volume, outside_name: name, series_block: (early && series).then_some(0),
             captures: arg("--trace-captures=").map(Into::into), revision: 1, installed: None, world,
-            availability: SurfaceView::Traced, recipe: cheap, held,
+            inside_draws: 0, availability: SurfaceView::Traced, recipe: cheap, held,
             surface: Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size, initial: true }),
             envspec: Texture::new_with_format(cx, hdr), recording: None, primed: false, rendered: false,
             announced: false, color_read: None, surface_read: None, pick_read: None, files: Vec::new(), writer: None, ssr_frames: None, timed_samples: 0 }
@@ -773,7 +800,7 @@ impl TraceLab {
 
     fn key(&mut self, key: KeyCode) {
         // Finish the requested readbacks before accepting another picture.
-        if self.captures.is_some() && !self.announced { return; }
+        if self.volume_series.is_some() || (self.captures.is_some() && !self.announced) { return; }
         let old = self.controls;
         let c = &mut self.controls;
         match key {
@@ -783,11 +810,46 @@ impl TraceLab {
             KeyCode::KeyG => c.fog = !c.fog, KeyCode::KeyS => c.ssr = !c.ssr,
             KeyCode::Key1 => c.depth_probe = -1, KeyCode::Key2 => c.depth_probe = 1, KeyCode::Key0 => c.depth_probe = 0,
             KeyCode::KeyC => c.caster = !c.caster, KeyCode::KeyE if self.early => c.expensive = !c.expensive,
-            KeyCode::KeyR if self.tiles.is_some() => c.turned = !c.turned,
-            KeyCode::KeyX if self.tiles.is_some() => c.cleared = !c.cleared,
+            KeyCode::KeyX if self.volume.is_some() => c.cleared = !c.cleared,
+            KeyCode::KeyI if self.volume.is_some() => c.camera = VolumeCamera::Inside,
+            KeyCode::KeyN if self.volume.is_some() => c.camera = VolumeCamera::Slice,
+            KeyCode::KeyV if self.volume.is_some() => c.camera = VolumeCamera::Outside,
             KeyCode::KeyB if self.early => c.front = !c.front, _ => return,
         }
         if self.controls != old { self.revision += 1; }
+    }
+
+    fn ball(name: &str, x: f32) -> ModelInstance {
+        trace_instance(name, [x, 0.0, 0.0], [0.9; 3], [1.0, 0.22, 0.055])
+    }
+
+    fn place_models(&self, r: &mut Renderer) {
+        let c = self.controls;
+        let plane_color = if self.volume.is_some() { [0.7; 3] } else { [0.12, 0.56, 0.82] };
+        let mut placed = vec![
+            trace_instance("plane", [0.0; 3], [1.0; 3], plane_color),
+            Self::ball("ball", -1.45),
+        ];
+        if c.caster {
+            placed.push(trace_instance("bar", [0.0, 1.85, 1.85], [3.0, 0.085, 0.04], [0.3; 3]));
+        }
+        if self.early {
+            // Identical XY coverage and opaque submission before the attachment in both cases.
+            placed.push(trace_instance("bar", [1.15, 0.0, if c.front { 1.15 } else { -2.9 }],
+                [0.8, 0.94, 0.015], [0.16, 0.8, 0.12]));
+        }
+        if c.depth_probe != 0 {
+            // At target pixel (centre + 40, 150), the ray hits z = sqrt(r² - x² - y²).
+            let z = (0.9_f32.powi(2) - 0.405_f32.powi(2) - 0.005_f32.powi(2)).sqrt();
+            for x in [-1.45, 1.45] {
+                placed.push(trace_instance("bar", [x + 0.405, -0.005, z + 0.006 * c.depth_probe as f32 - 0.001],
+                    [0.035, 0.035, 0.001], [0.16, 0.8, 0.12]));
+            }
+        }
+        if let Some(cube) = self.volume.as_ref().and_then(|v| v.interior_cube(c.camera)) {
+            placed.push(cube.clone());
+        }
+        r.set_models(placed);
     }
 
     fn configure(&mut self, lab: &mut MaterialLab, cx: &mut Cx) {
@@ -800,9 +862,9 @@ impl TraceLab {
         self.announced = false;
         self.timed_samples = 0;
         self.ssr_frames = None;
-        if let Some(fixture) = &mut self.tiles {
-            fixture.set_cleared(cx, c.cleared);
-            // A cell edit only uploads the texel. Keep the same placements,
+        if let Some(fixture) = &mut self.volume { fixture.set_cleared(cx, c.cleared); }
+        if self.volume.is_some() {
+            // A cell edit only uploads the changed texels. Keep the same placements,
             // attachments and cascade state for its next picture.
             if previous.is_some_and(|(_, old)| c == TraceControls { cleared: c.cleared, ..old }) { return; }
         }
@@ -810,50 +872,27 @@ impl TraceLab {
         self.world.environment.fog = if c.fog {
             makepad_scene::Fog::Exp2 { color: vec3f(0.12, 0.45, 0.85), density: 0.12 }
         } else { makepad_scene::Fog::None };
-        let ball = |name, x| trace_instance(name, [x, 0.0, 0.0], [0.9; 3], [1.0, 0.22, 0.055]);
-        let plane_color = if self.tiles.is_some() { [0.7; 3] } else { [0.12, 0.56, 0.82] };
-        let mut placed = vec![
-            trace_instance("plane", [0.0; 3], [1.0; 3], plane_color),
-            ball("ball", -1.45),
-        ];
-        if c.caster && self.tiles.is_none() {
-            placed.push(trace_instance("bar", [0.0, 1.85, 1.85], [3.0, 0.085, 0.04], [0.3; 3]));
-        }
-        if self.early {
-            // Identical XY coverage and opaque submission before the attachment in both cases.
-            placed.push(trace_instance("bar", [1.15, 0.0, if c.front { 1.15 } else { -2.9 }],
-                [0.8, 0.94, 0.015], [0.16, 0.8, 0.12]));
-        }
-        if self.tiles.is_some() {
-            traced_tiles::TileFixture::depth_probes(&mut placed, c.depth_probe);
-            traced_tiles::TileFixture::shadow_probes(&mut placed, c.caster);
-        } else if c.depth_probe != 0 {
-            // At target pixel (centre + 40, 150), the ray hits z = sqrt(r² - x² - y²).
-            let z = (0.9_f32.powi(2) - 0.405_f32.powi(2) - 0.005_f32.powi(2)).sqrt();
-            for x in [-1.45, 1.45] {
-                placed.push(trace_instance("bar", [x + 0.405, -0.005, z + 0.006 * c.depth_probe as f32 - 0.001],
-                    [0.035, 0.035, 0.001], [0.16, 0.8, 0.12]));
-            }
-        }
-        r.set_models(placed);
+        self.place_models(r);
         // Hold a fresh install before its VM is entered. T releases that very
         // generation; after a terminal failure it starts a fresh one.
         if c.view != self.availability {
             match c.view {
                 SurfaceView::Waiting => {
                     self.held.set(true);
-                    Self::install_subject(r, self.tiles.is_some(), self.recipe.clone());
+                    Self::install_subject(r, self.outside_name, self.recipe.clone(), true);
                 }
                 SurfaceView::Failed => {
                     self.held.set(false);
                     let mut invalid = self.recipe.clone();
-                    invalid.textures = vec![(live_id!(missing_lab_input), self.surface.clone())].into();
-                    Self::install_subject(r, self.tiles.is_some(), invalid);
+                    let mut bindings = invalid.textures.to_vec();
+                    bindings.push((live_id!(missing_lab_input), self.surface.clone()));
+                    invalid.textures = bindings.into();
+                    Self::install_subject(r, self.outside_name, invalid, true);
                 }
                 SurfaceView::Traced => {
                     self.held.set(false);
                     if self.availability == SurfaceView::Failed {
-                        Self::install_subject(r, self.tiles.is_some(), self.recipe.clone());
+                        Self::install_subject(r, self.outside_name, self.recipe.clone(), true);
                     }
                 }
                 _ => {}
@@ -867,7 +906,9 @@ impl TraceLab {
             _ => self.program(),
         };
         r.set_world_attachments(subject.into_iter().map(|name| {
-            if name == "tiles" { traced_tiles::TileFixture::instance(c.turned) } else { ball(name, 1.45) }
+            if name == "volume" {
+                self.volume.as_ref().unwrap().subject.clone()
+            } else { Self::ball(name, 1.45) }
         }).collect());
         lab.pass.clear_color_textures(cx);
         lab.pass.set_color_texture(cx, &lab.color_texture, DrawPassClearColor::ClearWith(vec4(0.025, 0.03, 0.05, 1.0)));
@@ -880,20 +921,25 @@ impl TraceLab {
         }
     }
 
-    fn outside_name(&self) -> &'static str {
-        if self.tiles.is_some() { "tiles" } else { "analytic" }
-    }
-
     fn program(&self) -> Option<&'static str> {
         match self.controls.view {
             SurfaceView::Traced if self.controls.expensive => Some("costly"),
-            SurfaceView::Traced | SurfaceView::Waiting | SurfaceView::Failed => Some(self.outside_name()),
+            SurfaceView::Traced | SurfaceView::Waiting | SurfaceView::Failed => Some(self.outside_name),
             _ => None,
         }
     }
 
     fn draw(&mut self, lab: &mut MaterialLab, cx: &mut Cx2d, rect: Rect) {
         if self.installed.map(|(revision, _)| revision) != Some(self.revision) { self.configure(lab, cx.cx); }
+        let mut tag = if self.announced { self.revision } else { 0 };
+        if let Some(series) = &mut self.volume_series {
+            let camera;
+            (camera, tag) = series.next_frame(cx.cx, &mut lab.renderer, self.announced);
+            if self.controls.camera != camera {
+                self.controls.camera = camera;
+                self.place_models(&mut lab.renderer);
+            }
+        }
         let c = self.controls;
         let program = self.program();
         // One history step is a completed trace, resolve and apply. Re-recording
@@ -927,21 +973,24 @@ impl TraceLab {
         }
         let size = dvec2(PASS_W as f64, PASS_H as f64);
         let local = Rect { pos: dvec2(0.0, 0.0), size };
-        // Exactly 100 target texels per metre. Right-handed view along -Z,
-        // near/far and all objects inside the common Metal/GL clip interval.
-        let eye = vec3f(0.0, 0.0, 8.0);
-        let mut projection = Mat4f::identity();
-        projection.v[0] = 0.25;
-        projection.v[5] = 2.0 / 3.0;
-        projection.v[10] = -1.0 / 16.0;
-        let scene = SceneState3D { time: 0.0, camera_pos: eye, view: Mat4f::look_at(eye, Vec3f::default(), vec3f(0.0, 1.0, 0.0)),
+        let (eye, target, projection) = if let Some(room) = &self.volume {
+            let (eye, target, fov) = room.camera(c.camera);
+            (eye, target, Mat4f::perspective(fov, PASS_W as f32 / PASS_H as f32, 0.1, 20.0))
+        } else {
+            // The orthographic depth fixtures use 100 texels per metre.
+            let mut projection = Mat4f::identity();
+            projection.v[0] = 0.25;
+            projection.v[5] = 2.0 / 3.0;
+            projection.v[10] = -1.0 / 16.0;
+            (vec3f(0.0, 0.0, 8.0), Vec3f::default(), projection)
+        };
+        let scene = SceneState3D { time: 0.0, camera_pos: eye, view: Mat4f::look_at(eye, target, vec3f(0.0, 1.0, 0.0)),
             projection, viewport_rect: local };
         lab.pass.set_size(cx, size);
         lab.pass.set_dpi_factor(cx, 1.0);
         cx.make_child_pass(&lab.pass);
         lab.renderer.set_pass_camera(cx.cx, &lab.pass, &scene);
-        let tag = if self.announced { self.revision } else { 0 };
-        if self.early { lab.pass.set_gpu_time_tag(cx.cx, tag); }
+        if self.early || self.volume_series.is_some() { lab.pass.set_gpu_time_tag(cx.cx, tag); }
         // Post and AO receive logical points and multiply by the host's DPI.
         let post_size = size / cx.current_dpi_factor();
         lab.renderer.run_screen_ao(cx, &lab.pass, &lab.depth_texture, post_size, makepad_render::ScreenAoParams {
@@ -956,10 +1005,18 @@ impl TraceLab {
             sky_analytic: None, terrain: Some(&mut lab.draw_terrain), shadow: None, shadow_sdf: None, firework: None,
             flare: None, water: None, screen: None, screen_instances: &[], view_model: None };
         let stats = lab.renderer.draw_scene_full(&mut Cx3d::new(cx.cx), &mut lab.draw_list, &mut draws, &self.world, scene, None, Some(&mut lab.draw_models));
+        self.inside_draws = stats.traced_inside_draws;
         cx.end_pass(&lab.pass);
         if let CxDrawPassParent::DrawPass(host) = lab.pass.parent(cx.cx) {
             if let Some(first) = lab.renderer.run_post(cx, post_size, &lab.color_texture, host) {
                 lab.pass.set_pass_parent(cx.cx, first);
+            }
+        }
+        if let Some(series) = &mut self.volume_series {
+            series.draw_clock_hold(cx, &lab.color_texture);
+            if tag != 0 {
+                assert_eq!(stats.world_attachment_draws, 1, "missing volume at tag {tag}");
+                series.record_submission(tag, self.inside_draws);
             }
         }
         lab.draw_bg.draw_vars.set_texture(0, &lab.color_texture);
@@ -970,7 +1027,7 @@ impl TraceLab {
         let submitted = match c.view {
             _ if rejected => stats.world_attachment_draws == 0,
             SurfaceView::Traced | SurfaceView::Mesh => stats.world_attachment_draws == 1,
-            SurfaceView::Waiting => lab.renderer.traced_surface_state(self.outside_name()) == TracedSurfaceState::Waiting && stats.world_attachment_draws == 0,
+            SurfaceView::Waiting => lab.renderer.traced_surface_state(self.outside_name) == TracedSurfaceState::Waiting && stats.world_attachment_draws == 0,
             SurfaceView::Omitted => stats.world_attachment_draws == 0,
             SurfaceView::Failed => false,
         };
@@ -1027,7 +1084,12 @@ impl TraceLab {
     }
 
     fn request_capture(&mut self, lab: &MaterialLab, cx: &mut Cx) {
-        if self.captures.is_none() { return; }
+        let Some(dir) = &self.captures else { return };
+        if let Some(volume) = &self.volume {
+            let uniforms = &cx.passes[lab.pass.draw_pass_id()].pass_uniforms;
+            let path = dir.join(format!("{}.volume", self.revision));
+            self.files.push((path, volume.metadata(uniforms.camera_view, uniforms.camera_projection, self.controls.camera)));
+        }
         let tex = lab.draw_bg.draw_vars.texture_slots[0].as_ref().unwrap();
         let ssr = self.controls.ssr;
         if ssr {
@@ -1064,7 +1126,7 @@ impl TraceLab {
                 }
             }
         }
-        if self.files.len() == 2 + usize::from(c.ssr) {
+        if self.files.len() == 2 + usize::from(c.ssr) + usize::from(self.volume.is_some()) {
             let files = self.files.clone();
             if let Ok(task) = cx.task_pool().submit(makepad_platform::thread::Class::Background, move || {
                 for (path, bytes) in files { std::fs::write(path, bytes.as_slice())?; }
@@ -1088,14 +1150,19 @@ impl TraceLab {
                 (SurfaceView::Failed, reason.as_str())
             } else { (c.view, "") };
             let volumes = trace_volumes_available(cx.cx);
-            log!("material lab: traced rendered {} {:?} caster={} ssao={} fog={} ssr={} work={} prefill={} backend={} volumes={} reason={}",
+            log!("material lab: traced rendered {} {:?} caster={} ssao={} fog={} ssr={} work={} prefill={} inside={} backend={} volumes={} reason={}",
                 self.revision, view, c.caster, c.ao, c.fog, c.ssr,
                 if c.expensive { "expensive" } else { "cheap" }, if c.front { "front" } else { "behind" },
-                cx.gpu_backend().name(), volumes, reason);
+                self.inside_draws, cx.gpu_backend().name(), volumes, reason);
         }
         const SERIES_BLOCKS: usize = 6 * 4;
-        let measuring = self.early && self.series_block != Some(SERIES_BLOCKS) && c.view == SurfaceView::Traced
-            && !program.is_some_and(|name| lab.renderer.traced_surface_failure(name).is_some());
+        let rejected = program.is_some_and(|name| lab.renderer.traced_surface_failure(name).is_some());
+        if let Some(series) = &mut self.volume_series {
+            series.finish_frame(cx, &lab.pass);
+            return;
+        }
+        let measuring = self.early && self.series_block != Some(SERIES_BLOCKS)
+            && c.view == SurfaceView::Traced && !rejected;
         if !self.announced || measuring { cx.new_next_frame(); }
         if measuring {
             for (sample_tag, ms) in lab.pass.take_gpu_time_samples(cx.cx) {

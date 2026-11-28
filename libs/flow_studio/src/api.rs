@@ -19,10 +19,11 @@
 use super::models::{self, NeedState};
 use super::presets::{self, Group};
 use super::{FlowStudio, Picked, RunPhase};
-use makepad_flow::engine::results::ResultRef;
+use makepad_flow::engine::results::{ResultRef, ResultStore};
 use makepad_flow::{Literal, PortType, Value};
 use makepad_widgets::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 /// A preset as the AI sees it.
 #[derive(Clone, Debug)]
@@ -52,6 +53,8 @@ pub struct PresetInfo {
     pub params: Vec<(String, String, String)>,
     /// A `Choose` gate: the job stops for a pick unless `RunRequest::pick`.
     pub chooses: bool,
+    /// Number of language-model nodes in the preset.
+    pub llm_nodes: usize,
     /// Why the preset cannot run as written (a pinned model of another
     /// kind, an input nothing feeds); `run_preset` refuses it with these.
     pub problems: Vec<String>,
@@ -81,6 +84,9 @@ pub struct RunRequest {
     /// Run only this node, what it needs upstream and the Publish nodes it
     /// alone feeds (a node's own Run on the FLOW canvas).
     pub only: Option<String>,
+    /// The published results' title as given (a clip named after its
+    /// prompt); `None`: `<preset> · <the prompt's first words>`.
+    pub title: Option<String>,
 }
 
 impl RunRequest {
@@ -117,6 +123,12 @@ impl RunRequest {
 
     pub fn seed(self, seed: u64) -> Self {
         self.param(None, "seed", Literal::Num(seed as f64))
+    }
+
+    /// Title every published result with `title`, as it is.
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = Some(title.to_string());
+        self
     }
 }
 
@@ -198,6 +210,52 @@ impl FlowStudio {
         !self.presets.is_empty() && self.snapshot.mode.is_some()
     }
 
+    /// The host's result store, once it has opened.
+    pub fn result_store(&self) -> Option<Arc<dyn ResultStore>> {
+        self.results.clone()
+    }
+
+    /// Installed models in this hub domain, with the nodes that have each one.
+    /// Both model ids and node lists are sorted and unique.
+    pub fn installed_models(&self, domain: &str) -> Vec<(String, Vec<String>)> {
+        let mut models: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for model in &self.snapshot.models {
+            if model.domain == domain && model.state.installed() {
+                models.entry(&model.id).or_default().insert(&model.node);
+            }
+        }
+        models.into_iter().map(|(id, nodes)| {
+            (id.to_owned(), nodes.into_iter().map(str::to_owned).collect())
+        }).collect()
+    }
+
+    /// How many hub nodes have a model of this domain installed: how many
+    /// jobs of it can run side by side.
+    pub fn installed_node_count(&self, domain: &str) -> usize {
+        let nodes: BTreeSet<&str> = self.snapshot.models.iter()
+            .filter(|model| model.domain == domain && model.state.installed())
+            .map(|model| model.node.as_str())
+            .collect();
+        nodes.len()
+    }
+
+    /// Work in flight: a run, a hub probe, jobs or results on their way to
+    /// or from the worker, or a boot retry still to come.
+    pub fn busy(&self) -> bool {
+        self.runs.iter().any(super::RunRecord::active)
+            || self.probing
+            || !self.outbox.is_empty()
+            || !self.pending_specs.is_empty()
+            || !self.pending_faces.is_empty()
+            || !self.uploads.is_empty()
+            || self.boot_retry_at.is_some()
+    }
+
+    /// Whether the studio is configured to use the preview generator.
+    pub fn is_preview_mode(&self) -> bool {
+        self.mode == models::GenMode::Preview || self.snapshot.preview()
+    }
+
     /// Every preset, with what it needs and where it can run now.
     pub fn presets_info(&self) -> Vec<PresetInfo> {
         self.all_presets().map(|preset| {
@@ -225,6 +283,7 @@ impl FlowStudio {
                     Some((slot.node.clone(), slot.key.clone(), presets::text_param(node, &slot.key).unwrap_or_default()))
                 }).collect(),
                 chooses: preset.graph.nodes.iter().any(|node| node.kind == "choose"),
+                llm_nodes: preset.llm_nodes,
             }
         }).collect()
     }
@@ -257,7 +316,7 @@ impl FlowStudio {
         }).filter(|tag| !tag.is_empty()).collect();
         let lan_only = !request.preview && self.mode == models::GenMode::Fleet;
         let shown_key = preset.key.clone();
-        let id = self.start_run(preset, &graph, text, media, origin, lan_only, tags)?;
+        let id = self.start_run(preset, &graph, text, media, origin, lan_only, tags, request.title.clone())?;
         self.rows_dirty = true;
         // A run of the preset the page shows (from the chat's card, too)
         // comes onto the canvas, where its nodes can be cancelled.
@@ -688,6 +747,87 @@ mod tests {
 
     fn param(graph: &makepad_flow::Graph, node: &str, key: &str) -> Option<Literal> {
         graph.nodes.iter().find(|candidate| candidate.id == node)?.params.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone())
+    }
+
+    #[test]
+    fn presets_info_marks_llm_nodes_on_expanded_presets() {
+        let cases = [("bundled:expanded-prompt-to-image", 1), ("studio:flux-dev", 0), ("gen:image", 0)];
+        let studio = FlowStudio {
+            presets: cases.iter().map(|(key, _)| preset(key)).collect(),
+            ..Default::default()
+        };
+        let info = studio.presets_info();
+        for (key, count) in cases {
+            assert_eq!(info.iter().find(|entry| entry.key == key).map(|entry| entry.llm_nodes), Some(count), "{key}");
+        }
+    }
+
+    #[test]
+    fn installed_models_filters_and_deduplicates_by_domain() {
+        use models::{GenMode, HubModel, HubSnapshot, ModelState};
+        let model = |id: &str, domain: &str, node: &str, state| HubModel {
+            id: id.into(), domain: domain.into(), node: node.into(), state, detail: String::new(),
+        };
+        let mut studio = FlowStudio { mode: GenMode::Preview, ..Default::default() };
+        assert!(studio.is_preview_mode(), "configured for preview before the first probe");
+        studio.mode = GenMode::Fleet;
+        studio.snapshot = HubSnapshot {
+            mode: Some(GenMode::Fleet),
+            models: vec![
+                model("b", "image", "right", ModelState::Ready),
+                model("a", "image", "left", ModelState::Loaded),
+                model("b", "image", "left", ModelState::Loaded),
+                model("b", "image", "right", ModelState::Loaded),
+                model("a", "image", "right", ModelState::Downloading),
+                model("c", "image", "left", ModelState::Absent),
+                model("d", "audio", "right", ModelState::Ready),
+            ],
+            ..Default::default()
+        };
+        assert!(!studio.is_preview_mode(), "fleet mode after a fleet probe");
+        assert_eq!(studio.installed_models("image"), vec![
+            ("a".into(), vec!["left".into()]),
+            ("b".into(), vec!["left".into(), "right".into()]),
+        ]);
+        assert_eq!(studio.installed_models("audio"), vec![("d".into(), vec!["right".into()])]);
+        // Unique nodes with any installed model of the domain.
+        assert_eq!(studio.installed_node_count("image"), 2);
+        assert_eq!(studio.installed_node_count("audio"), 1);
+        assert_eq!(studio.installed_node_count("video"), 0);
+        studio.snapshot.mode = Some(GenMode::Preview);
+        assert!(studio.is_preview_mode(), "the snapshot reports preview mode");
+    }
+
+    #[test]
+    fn busy_while_anything_is_in_flight() {
+        let mut studio = FlowStudio::default();
+        assert!(!studio.busy());
+        studio.probing = true;
+        assert!(studio.busy());
+        studio.probing = false;
+        studio.boot_retry_at = Some(1.0);
+        assert!(studio.busy());
+        studio.boot_retry_at = None;
+        studio.pending_specs.push((1, "video".into(), Vec::new()));
+        assert!(studio.busy());
+        studio.pending_specs.clear();
+        assert!(!studio.busy());
+    }
+
+    #[test]
+    fn explicit_run_request_title_omits_preset_prefix() {
+        let video = preset("gen:video");
+        let title_of = |request: RunRequest| {
+            let (graph, text, _) = apply_request(&video, &request).unwrap();
+            let provenance = crate::provenance_for(&video, &text, Vec::new(), request.title.clone());
+            let prepared = crate::prepare::prepare(&graph, &provenance);
+            let publish = prepared.nodes.iter().find(|node| node.kind == "publish").expect("a Publish");
+            crate::presets::text_param(publish, "title").unwrap_or_default()
+        };
+        let prompt = "neon city rain, slow push-in";
+        assert_eq!(title_of(RunRequest::new("AI").text("prompt", prompt).title("Neon city rain")), "Neon city rain");
+        assert_eq!(title_of(RunRequest::new("AI").text("prompt", prompt).title("  ")), format!("Video · {prompt}"));
+        assert_eq!(title_of(RunRequest::new("AI").text("prompt", prompt)), format!("Video · {prompt}"));
     }
 
     #[test]

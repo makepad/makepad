@@ -503,173 +503,455 @@ fn traced_sphere_scene() {
     capture(true);
 }
 
-#[test]
-fn traced_tile_hit_and_miss() {
-    use makepad_test::KeyCode::*;
-    let mut config = TestConfig::current_package(env!("CARGO_MANIFEST_DIR"), env!("CARGO_PKG_NAME"),
-        "pixels::traced_tile_hit_and_miss").unwrap();
-    let dir = config.artifacts_dir.clone();
-    config.app_args.push("--scene=traced-tiles".into());
-    config.app_args.push(format!("--trace-captures={}", dir.display()));
-    run_with_config(config, |app: TestApp| -> Result<(), TestError> {
-        if !traced_scene_available(&app, &dir, "tiles")? { return Ok(()); }
-        let mut revision = 1;
-        let mut picture = |key, view| {
-            app.press_key(key);
-            revision += 1;
-            app.wait_for_log_contains(&format!("material lab: traced rendered {revision} {view} "));
-            TraceImage::read(&dir, revision, false)
-        };
-        let at = |x| TraceImage::at(x, 150);
-        let hit = |image: &TraceImage, x, emission: [u8; 3], label| {
-            assert_eq!(image.id(x, 150), 2, "{label}: no tile in pick replay at {x}");
-            let rgb = image.rgb[at(x)];
-            for (observed, byte) in rgb.into_iter().zip(emission) {
-                assert!((observed - f32::from(byte) / 255.0).abs() < 0.012,
-                    "{label}: expected linear emission {emission:?}/255 at {x}, saw {rgb:?}");
-            }
-        };
-        let base = TraceImage::read(&dir, 1, false);
-        hit(&base, 464, [224,48,128], "first cell at z=0.5");
-        hit(&base, 500, [32,184,80], "late hit at z=-0.25 after six empty cells");
-        // Adjacent pixels straddle the box boundary. The material byte is
-        // identical, but these atlas tiles select different palette pages.
-        hit(&base, 544, [68,31,212], "last column of left tile");
-        hit(&base, 545, [200,145,35], "first column of right tile");
-        let behind = picture(Key1, "Traced");
-        let front = picture(Key2, "Traced");
-        let front_reference = picture(KeyO, "Omitted");
-        for x in [464,500] {
-            assert_eq!(behind.id(x,150), 2, "rear depth bracket covered the tile hit at {x}");
-            assert_eq!(behind.rgb[at(x)], base.rgb[at(x)], "rear bracket changed hit color at {x}");
-            assert_eq!(front.id(x,150), 3, "front depth bracket did not win at {x}");
-            assert_eq!(front_reference.id(x,150), 3, "missing reference bracket at {x}");
-            assert_eq!(front.rgb[at(x)], front_reference.rgb[at(x)], "front bracket lost color depth at {x}");
-            assert_ne!(front.rgb[at(x)], base.rgb[at(x)], "front bracket did not cover the emission at {x}");
-        }
-        let plane = picture(Key0, "Omitted");
-        let receiver = |image: &TraceImage, x, label| {
-            assert_eq!(plane.id(x,150), 1, "{label}: missing reference receiver at {x}");
-            assert_eq!(image.id(x,150), 1, "{label}: miss did not pick through at {x}");
-            assert_eq!(image.rgb[at(x)], plane.rgb[at(x)], "{label}: miss changed receiver color at {x}");
-        };
-        receiver(&base, 516, "empty column inside the conservative box");
-        receiver(&base, 480, "empty column before rotation");
-        // The ortho camera maps pixel centres to x=(u+0.5-400)/100,
-        // y=(150-v-0.5)/100. Compare each receiver to itself with both
-        // casters omitted. Use the sphere fixture's 15% shadow contrast
-        // and its 0.003 linear RGB noise floor.
-        let shadow_factor = |image: &TraceImage, x, y, id, label: &str| -> [f32; 3] {
-            assert_eq!(plane.id(x, y), id, "{label}: missing reference receiver at ({x},{y})");
-            assert_eq!(image.id(x, y), id, "{label}: camera lost the receiver at ({x},{y})");
-            let i = TraceImage::at(x, y);
-            std::array::from_fn(|c| {
-                let lit = plane.rgb[i][c];
-                assert!(lit > 0.003, "{label}: reference receiver is dark at ({x},{y})");
-                image.rgb[i][c] / lit
-            })
-        };
-        let shadow = |image: &TraceImage, x, y, id, dark: bool, label: &str| {
-            let i = TraceImage::at(x, y);
-            for (c, factor) in shadow_factor(image, x, y, id, label).into_iter().enumerate() {
-                let matches = if dark { factor < 0.85 } else { (image.rgb[i][c] - plane.rgb[i][c]).abs() < 0.003 };
-                assert!(matches, "{label} at ({x},{y}): RGB {:?}, lit {:?}", image.rgb[i], plane.rgb[i]);
-            }
-        };
+use makepad_draw::{vec4f, Mat4f};
+use makepad_render::traced_volume::{TracedVolumeTile, VolumePage};
 
-        // Along each sun ray y=-0.195+0.5*z. At x=0.895 the ray enters
-        // the box at z=0.5, crosses the first pad at z=0, then hits the
-        // late cell at z=-0.25 before reaching the backdrop at z=-1.5.
-        shadow(&base, 489, 169, 4, false, "pad between proxy entry and late hit");
-        shadow(&base, 489, 244, 1, true, "same ray behind the late hit");
-        shadow(&base, 478, 229, 1, false, "sun ray through empty tile column 2");
-        // At z=0 row 215 crosses material 97 at y=0.095, inside its y=[-0.375,0.375]
-        // slab. Even the flank samples are >0.10 m inside its x=[1.20,1.825] shadow.
-        // The near fit is 3.09 m / 1024 texels. Its 3-texel disk, 2x2 compare and
-        // normal bias reach <0.02 m, so both flanks and the join see full occlusion.
-        for x in [530, 560] { shadow(&base, x, 215, 1, true, "occupied flank of the tile join"); }
-        let left = shadow_factor(&base, 530, 215, 1, "left flank");
-        let right = shadow_factor(&base, 560, 215, 1, "right flank");
-        // PBR adds (hash-0.5)*0.03 to the white receiver AO and clamps it.
-        // Ambient scales by a in [0.985,1], direct light by b=0.65+0.35*a.
-        // Divide both intensities by a: each is a positive sum of a constant
-        // and a term scaled by b/a. Across the row their ratio can therefore
-        // change by at most max(b/a)/min(b/a). Each of the two measured ratios
-        // also rounds a numerator and denominator to binary16 (unit roundoff 2^-11).
-        let min_ao = 1.0 - 0.03 / 2.0;
-        let ao_spread = (0.65 + 0.35 * min_ao) / min_ao;
-        let roundoff = 1.0 / 2048.0;
-        let half_spread = (1.0 + roundoff) / (1.0 - roundoff);
-        let spread = ao_spread * half_spread * half_spread;
-        for x in 539..=551 {
-            for (c, factor) in shadow_factor(&base, x, 215, 1, "tile join").into_iter().enumerate() {
-                let lo = left[c].max(right[c]) / spread;
-                let hi = left[c].min(right[c]) * spread;
-                assert!((lo..=hi).contains(&factor), "tile join at ({x},215), channel {c}: factor {factor} outside [{lo}, {hi}]");
-                assert!(factor < 0.85, "continuous shadow across the tile edge at ({x},215), channel {c}");
-            }
-        }
+#[derive(Debug, PartialEq)]
+struct VolumeCapture {
+    view: Mat4f,
+    projection: Mat4f,
+    transform: Mat4f,
+    pitch: f32,
+    tile_cells: u32,
+    dims: [u32; 3],
+    tiles: Vec<TracedVolumeTile>,
+    cells: Vec<u8>,
+    coarse: Vec<u8>,
+    cube: Option<Mat4f>,
+}
 
-        let mesh_only = picture(KeyC, "Omitted");
-        let both = picture(KeyT, "Traced");
-        // The stock bar on the first ray lies at z=0.30, closer to the
-        // sun than its pad. The second bar at z=-0.95 lies behind its pad
-        // (z=-0.65) and ahead of the backdrop. Both rays cross the late slab.
-        shadow(&mesh_only, 489, 169, 4, true, "near stock caster alone");
-        shadow(&both, 489, 169, 4, true, "near stock depth survives the later traced draw");
-        shadow(&mesh_only, 501, 201, 4, false, "far stock caster behind the second pad");
-        shadow(&mesh_only, 501, 244, 1, true, "far stock caster reaches the backdrop");
-        shadow(&both, 501, 201, 4, true, "near tile wins over far stock depth");
-        let tile_only = picture(KeyC, "Traced");
-        shadow(&tile_only, 464, 253, 1, true, "editable cell casts onto the backdrop");
-        let cleared = picture(KeyX, "Traced");
-        receiver(&cleared, 464, "cleared cell behind the original box");
-        for (x,y) in [(451,150), (464,137), (500,150), (544,150), (545,150)] {
-            let i = TraceImage::at(x, y);
-            assert_eq!(cleared.pick[i], 2, "clearing one cell hid another at ({x},{y})");
-            assert_eq!(cleared.rgb[i], base.rgb[i], "clearing one cell changed another at ({x},{y})");
+impl VolumeCapture {
+    fn read(dir: &std::path::Path, revision: usize) -> Self {
+        use makepad_draw::makepad_platform::makepad_micro_serde::DeBin;
+        let bytes = std::fs::read(dir.join(format!("{revision}.volume"))).unwrap();
+        let mut pos = 0;
+        let (view, projection, transform) = DeBin::de_bin(&mut pos, &bytes).unwrap();
+        let (pitch, tile_cells, dims) = DeBin::de_bin(&mut pos, &bytes).unwrap();
+        let count = usize::de_bin(&mut pos, &bytes).unwrap();
+        let tiles = (0..count).map(|_| {
+            let (origin_cells, extent, atlas_origin, palette_page) = DeBin::de_bin(&mut pos, &bytes).unwrap();
+            TracedVolumeTile { origin_cells, extent, atlas_origin, palette_page }
+        }).collect();
+        let cells = Vec::de_bin(&mut pos, &bytes).unwrap();
+        let coarse = Vec::de_bin(&mut pos, &bytes).unwrap();
+        let cube = Option::<[f32; 16]>::de_bin(&mut pos, &bytes).unwrap().map(|v| Mat4f { v });
+        assert_eq!(pos, bytes.len(), "all capture metadata consumed");
+        Self { view: Mat4f { v: view }, projection: Mat4f { v: projection }, transform: Mat4f { v: transform },
+            pitch, tile_cells, dims, tiles, cells, coarse, cube }
+    }
+
+    fn clip_from_model(&self) -> Mat4f {
+        Mat4f::mul(&self.projection, &Mat4f::mul(&self.view, &self.transform))
+    }
+
+    fn pixel(&self, p: [f32; 3]) -> usize {
+        let q = self.clip_from_model().transform_vec4(vec4f(p[0], p[1], p[2], 1.0));
+        let x = ((1.0 + q.x / q.w) * 0.5 * TraceImage::W as f32).floor() as usize;
+        let y = ((1.0 - q.y / q.w) * 0.5 * TraceImage::H as f32).floor() as usize;
+        assert!(x < TraceImage::W && y < TraceImage::H, "probe outside capture");
+        TraceImage::at(x, y)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VolumeFace { tile: usize, axis: u8, positive: bool, material: u8 }
+
+// Perspective projection of the corners bounds every ray through this outside proxy.
+fn proxy_bounds(matrix: &Mat4f, tile: &TracedVolumeTile, pitch: f32) -> [f32; 4] {
+    let mut bounds = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for corner in 0..8 {
+        let [x,y,z] = [0,1,2].map(|a| pitch * (tile.origin_cells[a] +
+            if corner & (1 << a) == 0 { 0 } else { i32::from(tile.extent[a]) }) as f32);
+        let q = matrix.transform_vec4(vec4f(x,y,z,1.0));
+        assert!(q.w > 0.0, "outside proxy spans the eye");
+        let x = (1.0 + q.x / q.w) * (TraceImage::W as f32 * 0.5);
+        let y = (1.0 - q.y / q.w) * (TraceImage::H as f32 * 0.5);
+        bounds = [bounds[0].min(x), bounds[1].min(y), bounds[2].max(x), bounds[3].max(y)];
+    }
+    bounds
+}
+
+fn proxy_entry(p: [f32; 3], d: [f32; 3], extent: [u8; 3]) -> Option<f32> {
+    let (mut enter, mut exit) = (0.0f32, f32::INFINITY);
+    for a in 0..3 {
+        let hi = f32::from(extent[a]);
+        if d[a] == 0.0 {
+            if !(0.0..hi).contains(&p[a]) { return None; }
+        } else {
+            let t0 = -p[a] / d[a];
+            let t1 = (hi - p[a]) / d[a];
+            enter = enter.max(t0.min(t1));
+            exit = exit.min(t0.max(t1));
         }
-        // The edited cell spans x=[0.575,0.7], y=[-0.125,0], z=[0.375,0.5].
-        // On the backdrop, y projects to y-0.5*(z+1.5). Row 253's ray
-        // stays in the cleared row for the full slab; its neighbours still cast.
-        shadow(&cleared, 464, 253, 1, false, "clearing one cell opens its shadow");
-        for (x,y) in [(451, 253), (464, 244), (464, 264)] {
-            shadow(&cleared, x, y, 1, true, "neighbour of the edited cell still casts");
-        }
-        let restored = picture(KeyX, "Traced");
-        shadow(&restored, 464, 253, 1, true, "restored cell casts again");
-        assert_eq!(restored.pick, tile_only.pick, "restoring the cell changed the visible geometry");
-        for y in 0..TraceImage::H {
-            for x in 0..TraceImage::W {
-                let i = TraceImage::at(x, y);
-                if !matches!(tile_only.pick[i], 1 | 4) { continue; }
-                assert_eq!(cleared.pick[i], tile_only.pick[i], "clearing a cell hid a receiver at ({x},{y})");
-                // Projected cell corners plus three pixels for the near
-                // cascade's filtered edge. Newly exposed camera pixels had pick 2 above.
-                let outside_edit = !((454..=473).contains(&x) && (240..=266).contains(&y));
-                for c in 0..3 {
-                    let before = tile_only.rgb[i][c];
-                    assert!((restored.rgb[i][c] - before).abs() < 0.003, "shadow failed to restore at ({x},{y})");
-                    if outside_edit {
-                        assert!((cleared.rgb[i][c] - before).abs() < 0.003, "edit moved another shadow at ({x},{y})");
+    }
+    (enter < exit).then_some(enter)
+}
+
+fn replay_volume(capture: &VolumeCapture, label: &str) -> Vec<Option<VolumeFace>> {
+    let (w, h) = (TraceImage::W, TraceImage::H);
+    let page = VolumePage { dims: capture.dims, cells: &capture.cells, coarse: &capture.coarse };
+    let clip = capture.clip_from_model();
+    let inverse = clip.invert();
+    let eye = Mat4f::mul(&capture.view, &capture.transform).invert().transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0));
+    let eye_cells = [eye.x, eye.y, eye.z].map(|v| v / capture.pitch);
+    let bounds: Vec<_> = capture.tiles.iter().map(|t| proxy_bounds(&clip, t, capture.pitch)).collect();
+    let mut faces = vec![None; w*h];
+    let mut samples: [Vec<u32>; 3] = Default::default();
+    let (mut raw, mut early_z) = (0usize, 0usize);
+    let mut steps = Vec::with_capacity(capture.tiles.len());
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let covers = |b: &[f32; 4]| b[0] <= px && px <= b[2] && b[1] <= py && py <= b[3];
+            if !bounds.iter().any(covers) { continue; }
+            let q = inverse.transform_vec4(vec4f(2.0*px / w as f32 - 1.0, 1.0 - 2.0*py / h as f32, 0.0, 1.0));
+            let ray = (q.to_vec3f() / q.w - eye.to_vec3f()).normalize();
+            let d = [ray.x, ray.y, ray.z];
+            let mut depth = f32::INFINITY;
+            let mut face = None;
+            steps.clear();
+            for (i, tile) in capture.tiles.iter().enumerate() {
+                if !covers(&bounds[i]) { continue; }
+                let p = [0,1,2].map(|a| eye_cells[a] - tile.origin_cells[a] as f32);
+                let Some(entry) = proxy_entry(p, d, tile.extent) else { continue };
+                raw += 1;
+                // Ray distance orders depth exactly as window Z on this pixel. The
+                // backdrop is behind every box and the stock sphere is beside them.
+                if entry > depth { continue; }
+                early_z += 1;
+                match tile.march_counted(&page, p, d, capture.tile_cells, true) {
+                    Ok(hit) => {
+                        steps.push(hit.steps);
+                        if hit.t <= depth {
+                            depth = hit.t;
+                            face = Some(VolumeFace { tile: i, axis: hit.axis, positive: d[hit.axis as usize] < 0.0, material: hit.material });
+                        }
                     }
+                    Err(count) => steps.push(count),
+                }
+            }
+            if steps.is_empty() { continue; }
+            faces[y*w+x] = face;
+            // Group all marches for a pixel by its final view: shallow incidence
+            // on a visible face, through the front opening, or the exterior shell.
+            let front_t = (8.0 - eye_cells[2]) / d[2];
+            let front_x = eye_cells[0] + d[0]*front_t;
+            let front_y = eye_cells[1] + d[1]*front_t;
+            let category = if face.is_some_and(|f| d[f.axis as usize].abs() < 0.35) { 2 }
+                else if (-10.0..8.0).contains(&front_x) && (-7.0..6.0).contains(&front_y) { 1 } else { 0 };
+            samples[category].extend_from_slice(&steps);
+        }
+    }
+    let summary = |mut v: Vec<u32>| {
+        v.sort_unstable();
+        assert!(!v.is_empty(), "missing M1 population");
+        [v[(v.len()-1)/2], v[(v.len()-1)*95/100], *v.last().unwrap()]
+    };
+    let all: Vec<_> = samples.iter().flatten().copied().collect();
+    assert_eq!(all.len(), early_z);
+    let [exterior, interior, grazing] = samples.map(summary);
+    println!("M1 {label} steps p50/p95/max overall={:?} exterior={exterior:?} interior/aperture={interior:?} grazing={grazing:?}", summary(all));
+    println!("M2 {label} pixels={} raw={} ({:.5}/pixel) earlyz={} ({:.5}/pixel)", w*h, raw, raw as f64/(w*h) as f64, early_z, early_z as f64/(w*h) as f64);
+    assert!(raw > early_z && early_z > 0, "overlapping room proxies exercise early Z");
+
+    faces
+}
+
+fn volume_parity(capture: &VolumeCapture, image: &TraceImage, omitted: &TraceImage, surface: &[u8], label: &str) {
+    use std::collections::BTreeMap;
+    let start = std::time::Instant::now();
+    let faces = replay_volume(capture, label);
+    let (w,h) = (TraceImage::W, TraceImage::H);
+    assert_eq!(surface.len(), w*h*4);
+    let mut classes = BTreeMap::<VolumeFace, (usize, usize)>::new();
+    let (mut interior, mut correct, mut hits, mut matched_hits) = (0,0,0,0);
+    for y in 1..h-1 {
+        for x in 1..w-1 {
+            let i = y*w+x;
+            let signature = |f: Option<VolumeFace>| f.map(|f| (f.axis, f.positive, f.material));
+            if (y-1..=y+1).any(|v| (x-1..=x+1).any(|u| signature(faces[v*w+u]) != signature(faces[i]))) { continue; }
+            interior += 1;
+            let expected_id = if faces[i].is_some() { 5 } else { omitted.pick[i] };
+            correct += usize::from(image.pick[i] == expected_id);
+            if let Some(f) = faces[i] {
+                hits += 1;
+                let count = classes.entry(f).or_default();
+                count.0 += 1;
+                let tile = capture.tiles[f.tile];
+                let color = [(40 + 48*u32::from(tile.palette_page)) as f32 / 255.0,
+                    (25 + 30*u32::from(f.material)) as f32 / 255.0];
+                let mut normal = [0.0; 3];
+                normal[f.axis as usize] = if f.positive { 1.0 } else { -1.0 };
+                let n = capture.transform.transform_vec4(vec4f(normal[0],normal[1],normal[2],0.0)).to_vec3f().normalize();
+                let (nx,ny) = makepad_render::skin::oct_encode(n);
+                let oct = [nx,ny].map(|v| ((v*0.5+0.5)*255.0).round() as u8);
+                if image.pick[i] == 5 && (0..2).all(|c| (image.rgb[i][c]-color[c]).abs() < 0.012
+                    && surface[4*i+c].abs_diff(oct[c]) <= 1) && surface[4*i+3] == 255 {
+                    count.1 += 1;
+                    matched_hits += 1;
                 }
             }
         }
-        let turned = picture(KeyR, "Traced");
-        // This ray now enters the left side, crosses X and Z cell planes,
-        // and reaches material 6 through its X face inside depth slice 1.
-        hit(&turned, 480, [32,184,80], "oblique side entry");
-        // Rotation sends x to 1.45+(local_x+local_z)/sqrt(2). The late
-        // slab now covers x=0.785 and the first slab leaves x=0.645.
-        shadow(&restored, 464, 229, 1, true, "old silhouette before rotation");
-        shadow(&turned, 464, 229, 1, false, "old silhouette clears after rotation");
-        shadow(&turned, 478, 229, 1, true, "rotated late slab darkens the old gap");
-        // At local z=0.125 the shared face projects to x=1.45+0.125/sqrt(2).
-        // The second ray passes through the empty part of the left box
-        // before its first occupied cell in the right brick.
-        shadow(&turned, 553, 215, 1, true, "rotated ray enters the seam in the left brick");
-        shadow(&turned, 554, 215, 1, true, "rotated ray reaches the right brick past the empty left box");
+    }
+    let qualifying = classes.values().filter(|(pixels, _)| *pixels >= 4).count();
+    println!("parity {label}: {correct}/{interior} interior picks, {matched_hits}/{hits} interior tile/material/normal matches, {qualifying} qualifying faces, replay {:?}", start.elapsed());
+    assert!(correct * 1000 > interior * 995, "{label}: {correct}/{interior} interior picks");
+    for (face,(expected,found)) in &classes {
+        assert!(*expected < 4 || *found > 0, "{label}: missing {face:?}, {expected} CPU interior pixels");
+    }
+    assert!(hits > 0 && matched_hits * 1000 > hits * 995, "{label}: {matched_hits}/{hits} interior face matches");
+}
+
+#[test]
+fn material_lab_traced_volume_cpu_gpu_parity() {
+    use makepad_test::KeyCode::*;
+    let mut config = TestConfig::current_package(env!("CARGO_MANIFEST_DIR"), env!("CARGO_PKG_NAME"),
+        "pixels::material_lab_traced_volume_cpu_gpu_parity").unwrap();
+    let dir = config.artifacts_dir.clone();
+    config.app_args.push("--scene=traced-volume".into());
+    config.app_args.push(format!("--trace-captures={}", dir.display()));
+    run_with_config(config, |app: TestApp| -> Result<(), TestError> {
+        if !traced_scene_available(&app, &dir, "volume")? {
+            println!("volume unavailable: verified the diagnostic, stock geometry, and identical omitted capture");
+            return Ok(());
+        }
+        let picture = |key, rev, view| {
+            app.press_key(key);
+            app.wait_for_log_contains(&format!("material lab: traced rendered {rev} {view} "));
+            TraceImage::read(&dir, rev, false)
+        };
+        let base = TraceImage::read(&dir, 1, false);
+        let full = VolumeCapture::read(&dir, 1);
+        let edited = picture(KeyX, 2, "Traced");
+        let clear = VolumeCapture::read(&dir, 2);
+        assert_eq!(full.cells.iter().zip(&clear.cells).filter(|(a,b)| a != b).count(), 64);
+        assert_eq!(full.coarse.iter().zip(&clear.coarse).filter(|(a,b)| a != b).count(), 1);
+        let restored = picture(KeyX, 3, "Traced");
+        let omitted = picture(KeyO, 4, "Omitted");
+        // Projection of the edited pillar centre, its sun ray on z=-1.5,
+        // and a neighbouring parallel ray outside the pillar's footprint.
+        let hole = full.pixel([-0.2, 0.2, 0.2]);
+        assert_eq!((base.pick[hole], edited.pick[hole]), (5,1), "X opens the pillar to the backdrop");
+        let shadow = full.pixel([-0.2,-0.65,-1.5]);
+        assert_eq!(restored.pick[hole], 5, "restoring the coarse block restores the visible pillar");
+        let neighbour = full.pixel([-0.52,-0.65,-1.5]);
+        for (i, blocked) in [(shadow,true),(neighbour,false)] {
+            assert_eq!((base.pick[i], edited.pick[i], omitted.pick[i]), (1,1,1), "backdrop probe ({},{})", i%TraceImage::W, i/TraceImage::W);
+            for c in 0..3 {
+                let lit = omitted.rgb[i][c];
+                let before = base.rgb[i][c];
+                let after = edited.rgb[i][c];
+                assert!(lit > 0.003 && if blocked { before < 0.85*lit } else { (before-lit).abs() < 0.003 },
+                    "pillar shadow at ({},{}): {before}, omitted {lit}", i%TraceImage::W, i/TraceImage::W);
+                assert!((restored.rgb[i][c]-before).abs() < 0.003, "restoring the block restores its shadow");
+                assert!((after-lit).abs() < 0.003, "edited shadow at ({},{}): {after}, omitted {lit}", i%TraceImage::W, i/TraceImage::W);
+            }
+        }
+        // S captures the renderer's world-normal output independently of RGB/pick.
+        // The two shadow captures above differ only in uploaded atlas bytes.
+        let mesh = picture(KeyM, 5, "Mesh");
+        assert_eq!(mesh.pick[full.pixel([0.0; 3])], 2, "M substitutes the reference mesh");
+        let failed = picture(KeyF, 6, "Failed");
+        assert!(failed.pick == omitted.pick && failed.rgb == omitted.rgb, "failed volume draws only the stock scene");
+        picture(KeyT, 7, "Traced");
+        let normal_full = picture(KeyS, 8, "Traced");
+        let normal_clear = picture(KeyX, 9, "Traced");
+        for (label, input, image, normals, revision) in [
+            ("full", &full, &base, normal_full, 8), ("edited", &clear, &edited, normal_clear, 9),
+        ] {
+            assert_eq!(*input, VolumeCapture::read(&dir, revision), "normal replay must use identical CPU data");
+            assert!(image.pick == normals.pick, "normal replay must show the same geometry");
+            volume_parity(input, image, &omitted, &std::fs::read(dir.join(format!("{revision}.surface"))).unwrap(), label);
+        }
+        Ok(())
+    }).unwrap();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NearSurface {
+    Background(u8),
+    Cube,
+    Voxel(VolumeFace),
+}
+
+impl NearSurface {
+    // A coplanar same-material seam is interior even where the palette page changes.
+    // Keep those pixels in the crack check, as in the exterior replay.
+    fn same_interior(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Voxel(a), Self::Voxel(b)) => (a.axis, a.positive, a.material) == (b.axis, b.positive, b.material),
+            (Self::Cube, Self::Cube) | (Self::Background(_), Self::Background(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NearPixel {
+    surface: NearSurface,
+    voxel_t: f32,
+    cube_t: f32,
+}
+
+// The vertex cull uses the model-space near plane and a margin of 0.05 trace cells.
+// Evaluate clip.z at all eight corners, independently of the shader's extreme-corner selection.
+fn straddling_tiles(capture: &VolumeCapture) -> usize {
+    let clip = capture.clip_from_model();
+    let normal = makepad_draw::vec3f(clip.v[2], clip.v[6], clip.v[10]);
+    let margin = normal.length() * (0.05 * capture.pitch);
+    capture.tiles.iter().filter(|tile| {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for corner in 0..8 {
+            let [x, y, z] = [0, 1, 2].map(|a| {
+                let offset = if corner & (1 << a) == 0 { 0 } else { i32::from(tile.extent[a]) };
+                (tile.origin_cells[a] + offset) as f32 * capture.pitch
+            });
+            let z = clip.transform_vec4(vec4f(x, y, z, 1.0)).z;
+            min = min.min(z);
+            max = max.max(z);
+        }
+        min <= margin && max >= -margin
+    }).count()
+}
+
+fn replay_from_near(capture: &VolumeCapture, omitted: &TraceImage) -> Vec<NearPixel> {
+    let (w, h) = (TraceImage::W, TraceImage::H);
+    let inverse = capture.clip_from_model().invert();
+    let eye = Mat4f::mul(&capture.view, &capture.transform).invert().transform_vec4(vec4f(0.0, 0.0, 0.0, 1.0));
+    let cube_local = capture.cube.map(|cube| Mat4f::mul(&cube.invert(), &capture.transform));
+    let page = VolumePage { dims: capture.dims, cells: &capture.cells, coarse: &capture.coarse };
+    let mut result = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            let q = inverse.transform_vec4(vec4f(2.0 * (x as f32 + 0.5) / w as f32 - 1.0,
+                1.0 - 2.0 * (y as f32 + 0.5) / h as f32, 0.0, 1.0));
+            let near = q.to_vec3f() / q.w;
+            let ray = (near - eye.to_vec3f() / eye.w).normalize();
+            // Both intersections return distance along the ray in model metres.
+            let cube_t = cube_local.and_then(|matrix| {
+                let p = matrix.transform_vec4(near.to_vec4());
+                let d = matrix.transform_vec4(vec4f(ray.x, ray.y, ray.z, 0.0));
+                proxy_entry([p.x + 1.0, p.y + 1.0, p.z + 1.0], [d.x, d.y, d.z], [2; 3])
+            }).unwrap_or(f32::INFINITY);
+            let cells = near / capture.pitch;
+            let d = [ray.x, ray.y, ray.z];
+            let mut voxel_t = f32::INFINITY;
+            let mut face = None;
+            for (i, tile) in capture.tiles.iter().enumerate() {
+                let origin = tile.origin_cells;
+                let p = [cells.x - origin[0] as f32, cells.y - origin[1] as f32, cells.z - origin[2] as f32];
+                if let Some(hit) = tile.march(&page, p, d, capture.tile_cells, true) {
+                    let t = hit.t * capture.pitch;
+                    if t < voxel_t {
+                        voxel_t = t;
+                        face = Some(VolumeFace { tile: i, axis: hit.axis, positive: d[hit.axis as usize] < 0.0, material: hit.material });
+                    }
+                }
+            }
+            let surface = if cube_t < voxel_t { NearSurface::Cube }
+                else if let Some(face) = face { NearSurface::Voxel(face) }
+                else { NearSurface::Background(omitted.pick[y*w+x]) };
+            result.push(NearPixel { surface, voxel_t, cube_t });
+        }
+    }
+    result
+}
+
+fn near_parity(label: &str, inside: u64, capture: &VolumeCapture, image: &TraceImage, omitted: &TraceImage) {
+    let (w, h) = (TraceImage::W, TraceImage::H);
+    let rays = replay_from_near(capture, omitted);
+    let straddling = straddling_tiles(capture);
+    assert_eq!(capture.tiles.len(), 4);
+    assert_eq!(capture.cube.is_some(), label != "outside");
+    assert_eq!(inside, u64::from(label != "outside"), "{label}: recorded Inside draws");
+    assert!(!omitted.pick.contains(&5), "{label}: O must omit the volume");
+    let mut cpu_tiles = vec![false; capture.tiles.len()];
+    let mut gpu_tiles = cpu_tiles.clone();
+    for p in &rays {
+        if let NearSurface::Voxel(f) = p.surface { cpu_tiles[f.tile] = true; }
+    }
+    let (mut interior, mut correct, mut sliced_solid_hits) = (0, 0, 0);
+    let (mut cube_in_front_of_voxel, mut voxel_in_front_of_cube) = (0, 0);
+    let mut cracks = 0;
+    let mut first_crack = None;
+    let mut first_mismatch = None;
+    for y in 1..h-1 {
+        for x in 1..w-1 {
+            let i = y*w+x;
+            let p = rays[i];
+            if (y-1..=y+1).any(|v| (x-1..=x+1).any(|u| !rays[v*w+u].surface.same_interior(p.surface))) { continue; }
+            interior += 1;
+            let pick = image.pick[i];
+            let matched = match p.surface {
+                NearSurface::Background(id) => pick == id && id != 4,
+                NearSurface::Cube => {
+                    if pick == 4 && omitted.pick[i] == 4 && p.voxel_t.is_finite() { cube_in_front_of_voxel += 1; }
+                    pick == 4
+                }
+                NearSurface::Voxel(f) => {
+                    let red = f32::from(40 + 48*capture.tiles[f.tile].palette_page) / 255.0;
+                    let green = f32::from(25 + 30*f.material) / 255.0;
+                    let matched = pick == 5 && (image.rgb[i][0]-red).abs() < 0.012 && (image.rgb[i][1]-green).abs() < 0.012;
+                    if matched {
+                        gpu_tiles[f.tile] = true;
+                        if p.voxel_t == 0.0 { sliced_solid_hits += 1; }
+                        if p.voxel_t < p.cube_t && p.cube_t.is_finite() && omitted.pick[i] == 4 { voxel_in_front_of_cube += 1; }
+                    }
+                    if pick == omitted.pick[i] {
+                        cracks += 1;
+                        first_crack.get_or_insert((x, y, p, pick, image.rgb[i]));
+                    }
+                    matched
+                }
+            };
+            if !matched { first_mismatch.get_or_insert((x, y, p, pick, image.rgb[i], omitted.pick[i])); }
+            correct += usize::from(matched);
+        }
+    }
+    println!("{label} inside={inside} interior={interior} agreement={correct}/{interior} straddling={straddling} sliced_solid_hits={sliced_solid_hits} cube_in_front_of_voxel={cube_in_front_of_voxel} voxel_in_front_of_cube={voxel_in_front_of_cube} cracks={cracks} visible_tiles={cpu_tiles:?} matched_tiles={gpu_tiles:?}");
+    assert_eq!(cracks, 0, "{label}: first crack (x,y,CPU,GPU pick,RGB) {first_crack:?}");
+    assert!(correct * 1000 > interior * 995, "{label}: first mismatch (x,y,CPU,GPU pick,RGB,omitted pick) {first_mismatch:?}");
+    assert_eq!(gpu_tiles, cpu_tiles, "{label}: missing visible tile");
+    if label == "outside" {
+        assert_eq!(straddling, 0);
+    } else {
+        assert!(straddling > 0);
+        if label == "inside" { assert!(straddling < 4, "Inside vertex cull must reject a tile"); }
+        if label == "slice" { assert!(sliced_solid_hits > 0, "the near plane must cut visible solid cells"); }
+        assert!(cube_in_front_of_voxel >= 50 && voxel_in_front_of_cube >= 50, "{label}: both depth orders must be visible");
+    }
+}
+
+#[test]
+fn material_lab_inside_and_near_plane_cut_parity() {
+    use makepad_test::KeyCode::*;
+    let mut config = TestConfig::current_package(env!("CARGO_MANIFEST_DIR"), env!("CARGO_PKG_NAME"),
+        "pixels::material_lab_inside_and_near_plane_cut_parity").unwrap();
+    let dir = config.artifacts_dir.clone();
+    config.app_args.push("--scene=traced-volume".into());
+    config.app_args.push(format!("--trace-captures={}", dir.display()));
+    run_with_config(config, |app: TestApp| -> Result<(), TestError> {
+        if !traced_scene_available(&app, &dir, "volume")? { return Ok(()); }
+        let picture = |key: Option<makepad_test::KeyCode>, revision, view| -> Result<_, TestError> {
+            if let Some(key) = key { app.press_key(key); }
+            let prefix = format!("material lab: traced rendered {revision} {view} ");
+            app.wait_for_log_contains(&prefix);
+            let log = app.log_since(0)?;
+            let line = log.lines.iter().find(|line| line.contains(&prefix)).unwrap();
+            let inside: u64 = line.split_once(" inside=").unwrap().1.split_once(" backend=").unwrap().0.parse().unwrap();
+            Ok((TraceImage::read(&dir, revision, false), VolumeCapture::read(&dir, revision), inside))
+        };
+        type Picture = (TraceImage, VolumeCapture, u64);
+        let check = |label, (image, capture, inside): Picture, (omitted, baseline, absent): Picture| {
+            assert_eq!(capture, baseline, "{label}: identical matrices, cube and volume data across T/O");
+            assert_eq!(absent, 0, "{label}: omitted pass submitted an Inside draw");
+            near_parity(label, inside, &capture, &image, &omitted);
+        };
+        check("outside", picture(None, 1, "Traced")?, picture(Some(KeyO), 2, "Omitted")?);
+        let omitted = picture(Some(KeyI), 3, "Omitted")?;
+        check("inside", picture(Some(KeyT), 4, "Traced")?, omitted);
+        check("slice", picture(Some(KeyN), 5, "Traced")?, picture(Some(KeyO), 6, "Omitted")?);
         Ok(())
     }).unwrap();
 }

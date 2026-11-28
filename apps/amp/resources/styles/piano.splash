@@ -2,8 +2,7 @@
 // specular reflection bands, a smoked-glass bezel round the screen, flush
 // minimal keys, thin chrome edges and an ice-blue glow.
 //
-// A style is assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+// A style is assignments only, over the base templates in `src/hw.rs`.
 use mod.prelude.widgets_internal.*
 
 // ---- palette: the lists, the spectrum, the bars ----

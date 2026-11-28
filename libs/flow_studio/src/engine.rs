@@ -117,7 +117,7 @@ impl StudioEngine {
         config.registry = registry;
         config.executors = executors;
         config.seams = seams;
-        config.run_lanes = 2;
+        config.run_lanes = 4;
         let services = HostServices {
             work,
             results,
@@ -408,25 +408,27 @@ impl StudioEngine {
 mod tests {
     use super::*;
     use makepad_flow::engine::Seams;
+    use makepad_flow::runtime::HostWork;
 
     const SOURCE: &str = "use mod.flow.*\nlet prompt = Input{ type: @text default: \"a fox\" }\nlet image = Image{ prompt: prompt.text() width: 64 height: 64 }\nlet out = Output{ type: @image value: image.image() }\nFlow{ prompt, image, out }\n";
 
     #[test]
     fn jobs_of_one_preset_run_side_by_side() {
         let values = std::env::temp_dir().join(format!("flow-studio-jobs-{}", std::process::id()));
-        let work = makepad_flow::runtime::StdHostWork::new(2, 32, 4).unwrap();
+        let work = makepad_flow::runtime::StdHostWork::new(2, 32, 5).unwrap();
         let seams = Seams { gen: Arc::new(crate::preview_gen::PreviewGen), ..Seams::unconfigured() };
-        let mut engine = StudioEngine::start_with(work, values.clone(), seams, None).unwrap();
+        let mut engine = StudioEngine::start_with(work.clone(), values.clone(), seams, None).unwrap();
+        assert_eq!(work.budget().loops_free, 0, "the engine worker and all four run lanes must start");
         let mut events = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut started = false;
         let mut finished: HashMap<u64, RunState> = HashMap::new();
-        while finished.len() < 3 && std::time::Instant::now() < deadline {
+        while finished.len() < 4 && std::time::Instant::now() < deadline {
             engine.pump(&mut events);
             if engine.ready() && !started {
                 started = true;
-                // Three jobs of the same preset, fired together.
-                for run in 1..=3 {
+                // Submit every job before pumping any of their replies.
+                for run in 1..=4 {
                     engine.run(RunSpec { run, definition: definition_name("studio:test", run), source: SOURCE.into(), file_name: "test.splash".into(), inputs: Vec::new() });
                 }
             }
@@ -441,8 +443,9 @@ mod tests {
         }
         engine.stop();
         let _ = std::fs::remove_dir_all(&values);
-        assert_eq!(finished.len(), 3, "{finished:?}");
-        assert!(finished.values().all(|state| *state == RunState::Done), "{finished:?}");
+        for run in 1..=4 {
+            assert_eq!(finished.get(&run), Some(&RunState::Done), "job {run}: {finished:?}");
+        }
         assert!(engine.active.is_empty(), "every job retired its instance and definition");
     }
 

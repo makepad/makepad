@@ -27,7 +27,7 @@ impl GenExecutor {
     pub fn poll_at(&mut self, now: Instant) -> Poll {
         match self.job.poll_at(now) {
             JobPoll::Pending => Poll::Pending,
-            JobPoll::Progress { permille, stage } => Poll::Progress { permille, stage },
+            JobPoll::Progress { permille, stage } => Poll::Progress { permille, stage: node_stage(self.job.provider_url(), stage) },
             JobPoll::Delta(text) => Poll::Delta { port: "text".to_string(), text },
             // a streaming job's published chunk: the flow node takes the finished job's artifacts
             JobPoll::Chunk(_) => Poll::Pending,
@@ -37,6 +37,18 @@ impl GenExecutor {
                 Err(error) => Poll::Failed(error),
             },
         }
+    }
+}
+
+/// A live progress stage that names the hub node running the job
+/// (`node 42 · denoising 3/8`): once, and never for a local provider or the
+/// preview generator, whose stages say what they are themselves.
+fn node_stage(provider_url: Option<&str>, stage: String) -> String {
+    match provider_url.and_then(super::lineage::hub_label) {
+        Some(node) if !stage.contains(&node) => {
+            if stage.is_empty() { node } else { format!("{node} · {stage}") }
+        }
+        _ => stage,
     }
 }
 
@@ -270,6 +282,7 @@ fn build_request(node: &Node, domain: Domain, inputs: &[(String, Value)]) -> Res
     request.peer_sources = (string_array_param(node, "peer_sources")).or(request.peer_sources);
     request.peer_tickets = (string_array_param(node, "peer_tickets")).or(request.peer_tickets);
     request.loras = (lora_param(node)?).or(request.loras);
+    request.any_model = bool_param(node, "any_model").or(request.any_model);
     Ok(request)
 }
 
@@ -282,7 +295,7 @@ pub(crate) fn unsupported_params(node: &Node) -> Vec<String> {
         "request_domain", "chat_system", "chat_messages", "voice", "speed", "language",
         "emotion", "seconds", "lyrics", "score", "score_mode", "score_only", "remesh_resolution", "texture", "decimation_target", "texture_size",
         "gaussians", "motion_mode", "canny_low", "canny_high", "loras", "peer_sources",
-        "peer_tickets",
+        "peer_tickets", "any_model",
     ];
     node.params
         .iter()
@@ -505,8 +518,9 @@ fn chat_messages_param(node: &Node) -> Result<Option<Vec<ChatMessageJson>>, Stri
 
 #[cfg(test)]
 mod seed_tests {
-    use super::{append_seed_used, seed_param};
+    use super::{append_seed_used, build_request, node_stage, seed_param, unsupported_params};
     use crate::{Literal, Loc, Node};
+    use makepad_ai_hub::registry::Domain;
 
     fn random_node() -> Node {
         Node {
@@ -541,6 +555,26 @@ mod seed_tests {
         append_seed_used(&mut outputs, Some(first));
         assert_eq!(outputs[0].0, "seed_used");
         assert_eq!(outputs[0].1.as_text().unwrap(), first.to_string());
+    }
+
+    #[test]
+    fn any_model_is_read_from_the_node_and_live_progress_names_the_hub_node() {
+        let mut node = random_node();
+        node.domain = Some("video".into());
+        node.params = vec![("any_model".into(), Literal::Bool(true))];
+        assert!(unsupported_params(&node).is_empty(), "{:?}", unsupported_params(&node));
+        assert_eq!(build_request(&node, Domain::Video, &[]).unwrap().any_model, Some(true));
+        node.params.clear();
+        assert_eq!(build_request(&node, Domain::Video, &[]).unwrap().any_model, None);
+
+        let url = Some("http://192.0.2.42:8787");
+        assert_eq!(node_stage(url, "denoising 3/8".into()), "node 42 · denoising 3/8");
+        assert_eq!(node_stage(url, String::new()), "node 42");
+        // Once: a stage that already names the node keeps its words.
+        assert_eq!(node_stage(url, "node 42 · loading".into()), "node 42 · loading");
+        for quiet in [None, Some(""), Some("preview"), Some("provider")] {
+            assert_eq!(node_stage(quiet, "rendering 2/4".into()), "rendering 2/4", "{quiet:?}");
+        }
     }
 }
 

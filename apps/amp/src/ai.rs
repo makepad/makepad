@@ -23,9 +23,10 @@ use crate::ai_schema;
 use crate::hw;
 use crate::layout;
 use crate::style_store;
-use makepad_ai_services::engine::ModelImage;
+use makepad_ai_hub::makepad_base64::{base64_encode, BASE64_STANDARD};
+use makepad_ai_services::pictures::{fit_pictures, RgbaPicture};
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_ai_services::wire::{Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult};
+use makepad_ai_services::wire::{Risk, ServiceCall, ServiceManifest, ToolDef, ToolResult, MAX_RESULT_IMAGE_BYTES};
 use makepad_app_aichat::attach;
 use makepad_app_aichat::AiChatPanel;
 use makepad_milkdrop::library::PresetLibrary;
@@ -221,7 +222,7 @@ struct Shot {
     call_id: String,
     path: PathBuf,
     deadline: f64,
-    task: Option<TaskHandle<Result<attach::Attachment, String>>>,
+    task: Option<TaskHandle<Result<ToolResult, String>>>,
 }
 
 /// Calls that wait for the pack's index.
@@ -1163,7 +1164,7 @@ impl ThemeAi {
         }
     }
 
-    fn poll_shots(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+    fn poll_shots(&mut self, cx: &mut Cx) {
         let now = cx.seconds_since_app_start();
         let mut i = 0;
         while i < self.shots.len() {
@@ -1172,17 +1173,7 @@ impl ThemeAi {
                 if let Some(result) = task.try_take() {
                     let shot = self.shots.remove(i);
                     match result {
-                        Ok(Ok(picture)) => {
-                            let small = shot.path.with_extension("model.png");
-                            let _ = std::fs::write(&small, &picture.png);
-                            let image = ModelImage { label: format!("screenshot of the app ({}×{})", picture.width, picture.height), png: picture.png.clone() };
-                            let attached = chat_panel(cx, ui).borrow_mut::<AiChatPanel>().map(|mut p| p.attach_for_model(vec![image]));
-                            match attached {
-                                Some(Ok(())) => self.ok(&shot.call_id, format!("Screenshot taken ({}×{}); the picture comes with this result. It is one still frame: motion and beat pulses do not show in it.", picture.width, picture.height), "screenshot"),
-                                Some(Err(e)) => self.fail(&shot.call_id, format!("The screenshot was taken but this model cannot see images: {e}")),
-                                None => self.fail(&shot.call_id, "the chat is not there to take the picture"),
-                            }
-                        }
+                        Ok(Ok(reply)) => self.reply(reply),
                         Ok(Err(e)) => self.fail(&shot.call_id, format!("The screenshot could not be read: {e}")),
                         Err(e) => self.fail(&shot.call_id, format!("The screenshot could not be read: {e:?}")),
                     }
@@ -1191,13 +1182,20 @@ impl ThemeAi {
             } else {
                 let complete = std::fs::read(&shot.path).ok().filter(|b| b.len() > 64 && b[b.len() - 8..b.len() - 4] == *b"IEND");
                 if let Some(bytes) = complete {
+                    let small = shot.path.with_extension("model.png");
+                    let call_id = shot.call_id.clone();
                     let task = cx.task_pool().submit(Class::Visible, move || {
                         let decoded = decode_image_from_data(&bytes).map_err(|e| format!("{e}"))?;
                         let mut rgba = Vec::with_capacity(decoded.width * decoded.height * 4);
                         for p in &decoded.data[..decoded.width * decoded.height] {
                             rgba.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]);
                         }
-                        attach::normalize("screenshot".into(), decoded.width, decoded.height, &rgba)
+                        let frame = RgbaPicture { width: decoded.width as u32, height: decoded.height as u32, rgba };
+                        let (png, [width, height]) = fit_pictures(&[(frame, [1, 1])], MAX_RESULT_IMAGE_BYTES, attach::MAX_SIDE as u32, |_, _, _| {})?.remove(0);
+                        let _ = std::fs::write(small, &png);
+                        let mut reply = ToolResult::ok(call_id, format!("Screenshot taken ({width}×{height}); the picture comes with this result. It is one still frame: motion and beat pulses do not show in it."), "screenshot");
+                        reply.images.push(String::from_utf8(base64_encode(&png, &BASE64_STANDARD)).expect("base64 is ASCII"));
+                        Ok(reply)
                     });
                     match task {
                         Ok(task) => shot.task = Some(task),
@@ -1330,7 +1328,7 @@ pub fn handle_event(cx: &mut Cx, event: &Event, ui: &WidgetRef) {
         }
         ai.pump(cx, ui);
         if !ai.shots.is_empty() {
-            ai.poll_shots(cx, ui);
+            ai.poll_shots(cx);
         }
         if let Some(task) = ai.pack_task.as_mut() {
             if let Some(result) = task.try_take() {

@@ -150,8 +150,14 @@ mod.theme.flow_badge_waiting = theme.color_surface_container_lowest
 true
 "#;
 
+fn has_widget(vm: &mut ScriptVm, name: LiveId) -> bool {
+    let widgets = vm.module(id!(widgets));
+    let value = vm.bx.heap_ref().value(widgets, name.into(), NoTrap);
+    !(value.is_nil() || value.is_err())
+}
+
 fn eval_theme(vm: &mut ScriptVm, module_path: &str, code: String) {
-    vm.eval(ScriptMod::new(&(env!("CARGO_MANIFEST_DIR")), &(module_path), "src/theme.rs", 0, 0, &(code), &[]));
+    vm.eval(ScriptMod::new(&(env!("CARGO_MANIFEST_DIR")), &(module_path), file!(), 0, 0, &(code), &[]));
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -159,9 +165,53 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // The house theme declares its window chrome: traffic lights at the caption's left,
     // on every host (the system's own on macOS). A desktop sheet picked (or handed down
     // by the window manager) keeps the host's chrome (`WindowChrome.Follow`).
-    if makepad_widgets::desktop_style::current_name(vm).is_none() {
+    // Isolates without `HostGrants::DESKTOP_SHELL` do not register `Window` or
+    // `WindowChrome`, so only apply the chrome rule when both exist in `mod.widgets`.
+    if makepad_widgets::desktop_style::current_name(vm).is_none()
+        && has_widget(vm, id!(Window))
+        && has_widget(vm, id!(WindowChrome))
+    {
         eval_theme(vm, "flow_theme_chrome", "mod.widgets.Window.chrome = mod.widgets.WindowChrome.Lights".into());
     }
     // After the required script has finished, so this eval does not interrupt it.
     bind_optional_aliases(vm);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_script_mod_succeeds_in_none_isolate_and_sets_lights_chrome_on_main_vm() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            makepad_widgets::desktop_style::uninstall(vm);
+            makepad_widgets::script_mod(vm);
+            vm.capture_errors();
+            script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "main VM theme errors: {errors:?}");
+            assert!(theme_color(vm, "flow_window").is_some());
+            let widgets = vm.module(id!(widgets));
+            let window = vm.value(widgets, id!(Window)).as_object().expect("main VM registers Window");
+            let chrome_enum = vm.value(widgets, id!(WindowChrome)).as_object().expect("main VM registers WindowChrome");
+            let lights = vm.value(chrome_enum, id!(Lights));
+            assert_eq!(vm.value(window, id!(chrome)), lights, "main VM house theme sets WindowChrome.Lights");
+        });
+
+        let vm_id = cx.alloc_splash_vm();
+        cx.with_script_vm_id(vm_id, |vm| {
+            assert!(!vm.cx().script_data.std.has_grant(HostGrants::DESKTOP_SHELL));
+            assert!(!has_widget(vm, id!(Window)));
+            assert!(!has_widget(vm, id!(WindowChrome)));
+            assert!(makepad_widgets::desktop_style::current_name(vm).is_none());
+            vm.capture_errors();
+            script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "NONE isolate theme errors: {errors:?}");
+            assert!(theme_color(vm, "flow_window").is_some(), "required flow_* aliases must be installed");
+            assert!(theme_color(vm, "flow_text_code").is_some(), "optional flow_* aliases must be installed");
+        });
+        cx.free_splash_vm(vm_id);
+    }
 }

@@ -11,8 +11,8 @@ pub type ToolId = u64;
 pub struct AgentConfig {
     /// The workspace root every file tool is confined to.
     pub root: PathBuf,
-    /// Context window in tokens the core budgets against.
-    pub context_tokens: u32,
+    /// Explicit context override in tokens. By default the hub fits the window.
+    pub context_tokens: Option<u32>,
     /// Exact model id to prefer; `None` lets the hub elect.
     pub model: Option<String>,
     pub approval: ApprovalMode,

@@ -7,6 +7,7 @@
 
 use makepad_ai_hub::client::{ArtifactBytes, ContentProvider};
 use makepad_ai_hub::error::AssetAiError;
+use makepad_ai_hub::fleet;
 use makepad_ai_hub::protocol::{GenerateRequestJson, HealthJson, JobStatusJson, ModelInfoJson};
 use makepad_ai_hub::registry::Domain;
 use makepad_ai_hub::job::{FleetRouter, GenPick, GenRouter};
@@ -46,7 +47,7 @@ pub struct LanOrPreview {
 }
 
 /// The `provider_url` a preview fallback reports.
-pub const PREVIEW_NODE: &str = "preview";
+pub const PREVIEW_NODE: &str = makepad_flow::engine::executors::lineage::PREVIEW_PROVIDER;
 
 impl GenRouter for LanOrPreview {
     fn use_idle_admission(&self, domain: &str, request: &GenerateRequestJson) -> bool {
@@ -54,12 +55,23 @@ impl GenRouter for LanOrPreview {
     }
 
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
-        let installed = FleetRouter { installed_only: true };
-        let snapshots = makepad_ai_hub::job::fleet_snapshots(excluded);
-        if makepad_ai_hub::fleet::installed_model(&snapshots, domain, &request.model).is_some() || !excluded.is_empty() || !self.fallback {
+        self.route_snapshots(makepad_ai_hub::job::fleet_snapshots(excluded), domain, request, excluded)
+    }
+}
+
+impl LanOrPreview {
+    fn route_snapshots(&self, snapshots: Vec<fleet::BoxSnapshot>, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
+        let installed = || {
+            if request.model.is_empty() && request.any_model == Some(true) {
+                !fleet::retain_installed_for_domain(snapshots.clone(), domain, "").is_empty()
+            } else {
+                fleet::installed_model(&snapshots, domain, &request.model).is_some()
+            }
+        };
+        if !excluded.is_empty() || !self.fallback || installed() {
             // A node already refused or failed this job: that is the job's
             // answer, never a silent preview.
-            return installed.route_snapshots(snapshots, domain, request).map_err(|error| {
+            return FleetRouter { installed_only: true }.route_snapshots(snapshots, domain, request).map_err(|error| {
                 if excluded.is_empty() { error } else { format!("no other LAN node has a {domain} model ready ({error})") }
             });
         }
@@ -277,8 +289,26 @@ mod tests {
 
     #[test]
     fn domains_without_a_preview_refuse_with_a_reason() {
-        let provider = PreviewProvider::default();
-        let error = provider.request(Domain::parse("video").unwrap(), &GenerateRequestJson::default()).unwrap_err();
+        let router = LanOrPreview { fallback: true };
+        let request = GenerateRequestJson { any_model: Some(true), ..Default::default() };
+        let mut node = fleet::BoxSnapshot::new("http://video.example");
+        node.health = Some(PreviewProvider::default().health().unwrap());
+        node.models.push(ModelInfoJson::deserialize_json(
+            r#"{"id":"fasth3-4step","domain":"video","backend":"fast","available":true,"gated":false,"state":"ready"}"#
+        ).unwrap());
+        let pick = router.route_snapshots(vec![node.clone()], "video", &request, &[]).unwrap();
+        assert_eq!(pick.base_url, node.base_url);
+        assert_eq!(pick.model, "fasth3-4step");
+
+        node.models[0].state = "absent".into();
+        let mut synthetic = node.models[0].clone();
+        synthetic.id = "pattern".into();
+        synthetic.backend = "testpattern".into();
+        synthetic.state = "loaded".into();
+        node.models.push(synthetic);
+        let preview = router.route_snapshots(vec![node], "video", &request, &[]).unwrap();
+        assert_eq!(preview.base_url, PREVIEW_NODE);
+        let error = preview.provider.request(Domain::Video, &request).unwrap_err();
         assert!(error.to_string().contains("AI Hub"));
     }
 

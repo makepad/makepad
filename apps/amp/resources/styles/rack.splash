@@ -3,8 +3,7 @@
 // round the volume encoder, a long VU ladder, cyan status light with amber
 // warnings, stencilled white labels.
 //
-// Assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+// Assignments only, over the base templates in `src/hw.rs`.
 use mod.prelude.widgets_internal.*
 
 // ---- palette: the lists, the spectrum, the bars ----

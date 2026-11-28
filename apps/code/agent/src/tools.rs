@@ -1135,7 +1135,7 @@ mod tests {
 
     fn engine() -> (Engine, Receiver<AgentEvent>) {
         let (tx, rx) = channel();
-        let cfg = AgentConfig { root: std::env::temp_dir(), context_tokens: 32768, model: None, approval: ApprovalMode::Auto, session_dir: None };
+        let cfg = AgentConfig { root: std::env::temp_dir(), context_tokens: Some(32768), model: None, approval: ApprovalMode::Auto, session_dir: None };
         (Engine::tools_only(cfg, tx, std::sync::Arc::new(|| {})), rx)
     }
 

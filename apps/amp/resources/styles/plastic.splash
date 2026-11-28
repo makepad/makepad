@@ -3,8 +3,7 @@
 // with bold dark glyphs, a charcoal moulded screen surround with a thin
 // chrome trim, smoky display windows, red and green LEDs.
 //
-// Assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+// Assignments only, over the base templates in `src/hw.rs`.
 use mod.prelude.widgets_internal.*
 
 // ---- palette: the lists, the spectrum, the bars ----

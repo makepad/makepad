@@ -9,7 +9,7 @@ use makepad_bounded_http::{Conn, HeadError, Method, Resp};
 use std::fs::File;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -18,6 +18,11 @@ const KEEPALIVE_IDLE_MS: u64 = 30_000;
 const READ_TIMEOUT_MS: u64 = 10_000;
 const WRITE_TIMEOUT_MS: u64 = 10_000;
 const MAX_REQUESTS_PER_CONN: u32 = 256;
+
+#[cfg(not(test))]
+pub(super) type FlowConn = Conn<TcpStream>;
+#[cfg(test)]
+pub(super) type FlowConn = Conn<tests::ProbeTransport>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoints {
@@ -75,6 +80,17 @@ pub struct FlowServer {
 
 impl FlowServer {
     pub fn start(config: FlowServerConfig) -> Result<Self, ServerError> {
+        Self::start_inner(
+            config,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn start_inner(
+        config: FlowServerConfig,
+        #[cfg(test)] mut control_probe: Option<tests::ShutdownProbe>,
+    ) -> Result<Self, ServerError> {
         config.validate()?;
         std::fs::create_dir_all(&config.root)
             .map_err(|error| ServerError::io("create flow root", error))?;
@@ -137,12 +153,18 @@ impl FlowServer {
         ] {
             let thread_route = route.clone();
             let thread_stop = stop.clone();
+            #[cfg(test)]
+            let probe = if plane == Plane::Control { control_probe.take() } else { None };
             let name = match plane {
                 Plane::Control => "flow-server-control-accept",
                 Plane::Data => "flow-server-data-accept",
             };
             match std::thread::Builder::new().name(name.to_string()).spawn(move || {
-                accept_loop(listener, thread_route, plane, cap, thread_stop)
+                accept_loop(
+                    listener, thread_route, plane, cap, thread_stop,
+                    #[cfg(test)]
+                    probe,
+                )
             }) {
                 Ok(join) => acceptors.push(join),
                 Err(error) => {
@@ -292,21 +314,27 @@ fn write_listen(config: &FlowServerConfig, control: SocketAddr, data: SocketAddr
     )
 }
 
+struct ConnectionWorker {
+    join: JoinHandle<()>,
+    wake: Weak<TcpStream>,
+}
+
 fn accept_loop(
     listener: TcpListener,
     route: RouteCtx,
     plane: Plane,
     max_connections: usize,
     stop: Arc<AtomicBool>,
+    #[cfg(test)] mut probe: Option<tests::ShutdownProbe>,
 ) {
     let active = Arc::new(AtomicUsize::new(0));
-    let mut joins: Vec<JoinHandle<()>> = Vec::new();
+    let mut workers: Vec<ConnectionWorker> = Vec::new();
     let mut idle = 0u32;
     while !stop.load(Ordering::Relaxed) {
         let mut index = 0;
-        while index < joins.len() {
-            if joins[index].is_finished() {
-                let join = joins.swap_remove(index);
+        while index < workers.len() {
+            if workers[index].join.is_finished() {
+                let join = workers.swap_remove(index).join;
                 let _ = join.join();
             } else {
                 index += 1;
@@ -314,6 +342,9 @@ fn accept_loop(
         }
         match listener.accept() {
             Ok((stream, _)) => {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 idle = 0;
                 if active.load(Ordering::Relaxed) >= max_connections {
                     refuse_capacity(stream);
@@ -324,14 +355,31 @@ fn accept_loop(
                 let stop = stop.clone();
                 let active_for_connection = active.clone();
                 let config = route.config.clone();
+                let wake_stream = match stream.try_clone() {
+                    Ok(socket) => Some(Arc::new(socket)),
+                    Err(error) => {
+                        log(&config, &format!("connection wake socket clone failed: {error}"));
+                        None
+                    }
+                };
+                // Only the worker keeps the duplicate alive, so an unreaped
+                // join handle cannot delay ordinary EOF for the client.
+                let wake = wake_stream.as_ref().map(Arc::downgrade).unwrap_or_default();
+                #[cfg(test)]
+                let connection_probe = probe.as_mut().and_then(tests::ShutdownProbe::next_connection);
                 match std::thread::Builder::new()
                     .name("flow-server-connection".to_string())
                     .spawn(move || {
-                        serve_connection(stream, &route, plane, &stop);
+                        serve_connection(
+                            stream, &route, plane, &stop,
+                            #[cfg(test)]
+                            connection_probe,
+                        );
+                        drop(wake_stream);
                         active_for_connection.fetch_sub(1, Ordering::Relaxed);
                     })
                 {
-                    Ok(join) => joins.push(join),
+                    Ok(join) => workers.push(ConnectionWorker { join, wake }),
                     Err(error) => {
                         active.fetch_sub(1, Ordering::Relaxed);
                         log(&config, &format!("connection thread spawn failed: {error}"));
@@ -349,7 +397,20 @@ fn accept_loop(
             Err(_) => std::thread::sleep(Duration::from_millis(50)),
         }
     }
-    for join in joins {
+    for worker in &workers {
+        if let Some(stream) = worker.wake.upgrade() {
+            match makepad_bounded_http::wake_idle_read(&stream) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+                Err(error) => log(&route.config, &format!("connection read wake failed: {error}")),
+            }
+        }
+    }
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        probe.wake_pass_finished();
+    }
+    for ConnectionWorker { join, .. } in workers {
         let _ = join.join();
     }
 }
@@ -365,11 +426,21 @@ fn refuse_capacity(stream: TcpStream) {
     );
 }
 
-fn serve_connection(stream: TcpStream, route: &RouteCtx, plane: Plane, stop: &AtomicBool) {
+fn serve_connection(
+    stream: TcpStream,
+    route: &RouteCtx,
+    plane: Plane,
+    stop: &AtomicBool,
+    #[cfg(test)] probe: Option<tests::ConnectionProbe>,
+) {
     if stream.set_nonblocking(false).is_err() {
         return;
     }
-    let Ok(mut connection) = Conn::new(stream, READ_TIMEOUT_MS, WRITE_TIMEOUT_MS) else {
+    #[cfg(not(test))]
+    let connection = FlowConn::new(stream, READ_TIMEOUT_MS, WRITE_TIMEOUT_MS);
+    #[cfg(test)]
+    let connection = tests::ProbeTransport::connection(stream, probe);
+    let Ok(mut connection) = connection else {
         return;
     };
     let mut served = 0;
@@ -404,4 +475,188 @@ fn serve_connection(stream: TcpStream, route: &RouteCtx, plane: Plane, stop: &At
 
 fn plain_error(status: u16, message: &str) -> Resp {
     Resp::bytes(status, "text/plain; charset=utf-8", message.as_bytes().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_bounded_http::Transport;
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::sync::mpsc::Sender;
+
+    #[derive(Debug)]
+    enum Event {
+        IdlePending(Sender<()>),
+        IdleResult(Result<usize, io::ErrorKind>),
+        TailPending(Sender<()>),
+        WakePassFinished,
+    }
+
+    enum Watch {
+        Idle { response_written: bool },
+        Tail,
+        TailByte,
+    }
+
+    pub(super) struct ConnectionProbe {
+        watch: Watch,
+        events: Sender<Event>,
+    }
+
+    pub(super) struct ShutdownProbe {
+        connections: std::vec::IntoIter<Option<ConnectionProbe>>,
+        events: Sender<Event>,
+    }
+
+    impl ShutdownProbe {
+        pub(super) fn next_connection(&mut self) -> Option<ConnectionProbe> {
+            self.connections.next().flatten()
+        }
+
+        pub(super) fn wake_pass_finished(self) {
+            self.events.send(Event::WakePassFinished).unwrap();
+        }
+    }
+
+    pub(crate) struct ProbeTransport {
+        stream: TcpStream,
+        probe: Option<ConnectionProbe>,
+    }
+
+    impl ProbeTransport {
+        pub(super) fn connection(stream: TcpStream, probe: Option<ConnectionProbe>) -> io::Result<FlowConn> {
+            stream.set_nodelay(true)?;
+            stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)))?;
+            Ok(Conn::over(Self { stream, probe }, READ_TIMEOUT_MS))
+        }
+    }
+
+    impl Read for ProbeTransport {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if let Some(ConnectionProbe { watch: Watch::Idle { response_written: true }, events }) = &self.probe {
+                self.stream.set_nonblocking(true)?;
+                assert_eq!(self.stream.read(buf).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                let (resume, gate) = mpsc::channel();
+                events.send(Event::IdlePending(resume)).unwrap();
+                gate.recv().unwrap();
+                let result = self.stream.read(buf);
+                events.send(Event::IdleResult(result.as_ref().copied().map_err(io::Error::kind))).unwrap();
+                self.stream.set_nonblocking(false)?;
+                return result;
+            }
+            self.stream.read(buf)
+        }
+    }
+
+    impl Write for ProbeTransport {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if let Some(probe) = &mut self.probe {
+                match &mut probe.watch {
+                    Watch::Idle { response_written } => {
+                        let written = self.stream.write(buf)?;
+                        *response_written = written == buf.len();
+                        return Ok(written);
+                    }
+                    Watch::Tail => {
+                        assert!(
+                            buf.starts_with(b"HTTP/1.1 ") && buf.ends_with(b"\r\n\r\n[]"),
+                            "tail hold needs head and body in one write"
+                        );
+                        let prefix = &buf[..buf.len() - 1];
+                        self.stream.write_all(prefix)?;
+                        probe.watch = Watch::TailByte;
+                        return Ok(prefix.len());
+                    }
+                    Watch::TailByte => {
+                        let (resume, gate) = mpsc::channel();
+                        probe.events.send(Event::TailPending(resume)).unwrap();
+                        gate.recv().unwrap();
+                    }
+                }
+            }
+            self.stream.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.stream.flush()
+        }
+    }
+
+    impl Transport for ProbeTransport {
+        fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+            self.stream.set_read_timeout(timeout)
+        }
+
+        fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+            self.stream.set_nonblocking(nonblocking)
+        }
+
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.stream.peer_addr()
+        }
+    }
+
+    fn request_flows(endpoints: &Endpoints) -> BufReader<TcpStream> {
+        let mut client = TcpStream::connect(endpoints.control).unwrap();
+        write!(client, "GET /v1/flows HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n", endpoints.token).unwrap();
+        let mut reader = BufReader::new(client);
+        let headers: Vec<_> = (&mut reader).lines().map(Result::unwrap)
+            .take_while(|line| !line.is_empty()).collect();
+        assert_eq!(headers[0].split_whitespace().nth(1), Some("200"));
+        assert!(headers.iter().any(|line| line.eq_ignore_ascii_case("Content-Length: 2")), "{headers:?}");
+        reader
+    }
+
+    #[test]
+    fn shutdown_wakes_idle_read_and_finishes_partial_response() {
+        let root = std::env::temp_dir().join(format!("flow-shutdown-{}", random_u64().unwrap()));
+        // On a setup assertion, drop the gate channels before the server joins its workers.
+        let server;
+        let (idle_tx, idle_events) = mpsc::channel();
+        let (tail_tx, tail_events) = mpsc::channel();
+        let (wake_tx, wake_events) = mpsc::channel();
+        // Other platforms assert only the partial response. In particular, Windows
+        // keeps bounded_http's idle read slice until the stop-event wake is implemented.
+        let probe = ShutdownProbe {
+            connections: vec![
+                cfg!(unix).then_some(ConnectionProbe { watch: Watch::Idle { response_written: false }, events: idle_tx }),
+                Some(ConnectionProbe { watch: Watch::Tail, events: tail_tx }),
+            ].into_iter(),
+            events: wake_tx,
+        };
+        server = FlowServer::start_inner(FlowServerConfig::new(root.clone()), Some(probe)).unwrap();
+        let endpoints = server.endpoints();
+        let mut idle = request_flows(&endpoints);
+        let mut body = [0; 2];
+        idle.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"[]");
+        let idle_gate = cfg!(unix).then(|| match idle_events.recv().unwrap() {
+            Event::IdlePending(resume) => resume,
+            event => panic!("expected a pending idle read, got {event:?}"),
+        });
+
+        let mut writer = request_flows(&endpoints);
+        let mut body = Vec::from([0]);
+        writer.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"[");
+        let Event::TailPending(tail_gate) = tail_events.recv().unwrap() else {
+            panic!("expected a pending response tail");
+        };
+        let shutdown = std::thread::spawn(move || server.shutdown());
+        assert!(matches!(wake_events.recv().unwrap(), Event::WakePassFinished));
+        if let Some(resume) = idle_gate {
+            resume.send(()).unwrap();
+        }
+        tail_gate.send(()).unwrap();
+        shutdown.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+
+        writer.read_to_end(&mut body).unwrap();
+        assert_eq!(&body, b"[]", "shutdown interrupted the response");
+        if cfg!(unix) {
+            let event = idle_events.try_recv().expect("idle read exited without a result");
+            assert!(matches!(event, Event::IdleResult(Ok(0) | Err(io::ErrorKind::NotConnected))),
+                "expected shutdown to end the idle read, got {event:?}");
+        }
+    }
 }

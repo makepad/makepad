@@ -2011,8 +2011,18 @@ impl WidgetMatchEvent for AgentView {
         let items = list.items_with_actions(actions);
         if !items.is_empty() {
             let rows = self.rows();
-            for (index, item) in items {
+            'items: for (index, item) in items {
                 let Some(&line) = rows.get(index) else { continue };
+                for (id, md) in Self::link_widgets(line, self.entry_of(line)) {
+                    if *md { continue; }
+                    let label = item.label(cx, *id);
+                    if let Some(span) = label.link_pressed(actions) {
+                        if let Some(target) = self.spans_for(line, &label.text()).get(span) {
+                            self.open_link(cx, target);
+                            continue 'items;
+                        }
+                    }
+                }
                 match line {
                     Line::Hunk(e, h) => {
                         if item.button(cx, ids!(undo_button)).clicked(actions) {
@@ -2122,7 +2132,79 @@ impl AgentView {
 
 #[cfg(test)]
 mod tests {
-    use super::at_token;
+    use super::*;
+
+    #[test]
+    fn code_transcript_a11y_link_press_opens_file() {
+        use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+        use makepad_platform::a11y::{semantic_rect, snapshot_rect};
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(super::super::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.widgets.*
+                AgentView{}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        {
+            let mut view = root.borrow_mut::<AgentView>().expect("the transcript fixture is an AgentView");
+            view.root = PathBuf::from("/virtual");
+            view.exists.insert("src/main.rs".into(), true);
+            view.t.entries.push(Entry::User { text: "see src/main.rs:12".into(), refs: Vec::new() });
+        }
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        let size = dvec2(800.0, 600.0);
+        pass.set_size(&mut cx, size);
+        cx.a11y.on = true;
+        cx.a11y.begin_frame();
+        let window = cx.a11y.begin_node(WidgetUid::new().0, None);
+        cx.a11y.begin_window(WindowId(1, 1));
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            list.begin_always(&mut cx2d);
+            overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            overlay.end(&mut cx2d);
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+        cx.a11y.end_window();
+        cx.a11y.end_node(window, a11y_tree::Node { role: a11y_tree::Role::Window, ..Default::default() }, Area::Empty);
+        let mut a11y = std::mem::take(&mut cx.a11y);
+        let mut tree = a11y_tree::mirror::Tree::default();
+        a11y.finish_frame(
+            Area::Empty,
+            |_| None,
+            |area| snapshot_rect(&area, &cx).map(semantic_rect),
+            |area| area.is_valid(&cx).then(|| {
+                let p = area.rect(&cx).pos;
+                [p.x as f32, p.y as f32]
+            }),
+            |_, bytes| { tree.apply(a11y_tree::wire::decode_update(&bytes).unwrap()); },
+        );
+        cx.a11y = a11y;
+        let link = tree.nodes.values().find(|n| n.role == a11y_tree::Role::Link && n.name == "src/main.rs:12")
+            .expect("the transcript exposes the path and line as a link");
+        let event = Event::A11yAction(a11y_tree::ActionRequest {
+            req: 1, node: link.id, action: a11y_tree::Actions::PRESS, arg: a11y_tree::ActionArg::None,
+        });
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &event, &mut Scope::empty()));
+        assert!(actions.filter_widget_actions(root.widget_uid()).any(|item| matches!(item.cast::<IdeAction>(),
+            IdeAction::OpenFile { path, line: Some(12), col: None } if path == "src/main.rs")),
+            "pressing the transcript link opens src/main.rs at line 12");
+    }
 
     #[test]
     fn at_queries_start_at_a_word_start_and_end_at_the_cursor() {

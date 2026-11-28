@@ -665,7 +665,7 @@ impl FlowStudio {
     /// Fire a run: record it in the history and hand it to the worker to
     /// prepare. The page and the API both start runs here.
     fn start_run(&mut self, preset: Preset, base: &Graph, text: HashMap<String, String>, media: HashMap<String, Picked>,
-        origin: String, lan_only: bool, tags: Vec<String>) -> Result<u64, String> {
+        origin: String, lan_only: bool, tags: Vec<String>, title: Option<String>) -> Result<u64, String> {
         let missing: Vec<String> = preset.inputs.iter()
             .filter(|input| input.ty.is_media() && !media.contains_key(&input.node))
             .map(|input| input.label.clone()).collect();
@@ -679,9 +679,7 @@ impl FlowStudio {
             return Err(format!("not run: {}", problems.join("; ")));
         }
         let graph = Arc::new(graph);
-        let prompt = preset.inputs.iter().find(|input| input.ty == PortType::Text)
-            .and_then(|input| text.get(&input.node)).cloned().unwrap_or_default();
-        let provenance = Provenance { preset: preset.key.clone(), label: preset.label.clone(), prompt, tags };
+        let provenance = provenance_for(&preset, &text, tags, title);
         let picks: Vec<MediaPick> = preset.inputs.iter().filter_map(|input| {
             let picked = media.get(&input.node)?;
             Some(MediaPick { node: input.node.clone(), port: input.ty.as_str().to_string(), ty: input.ty.clone(), reference: picked.reference.clone() })
@@ -766,6 +764,14 @@ impl FlowStudio {
             inputs,
         });
     }
+}
+
+/// Who made a run, for its published assets: the preset, its first text
+/// input's value as the prompt, the caller's tags and title.
+fn provenance_for(preset: &Preset, text: &HashMap<String, String>, tags: Vec<String>, title: Option<String>) -> Provenance {
+    let prompt = preset.inputs.iter().find(|input| input.ty == PortType::Text)
+        .and_then(|input| text.get(&input.node)).cloned().unwrap_or_default();
+    Provenance { preset: preset.key.clone(), label: preset.label.clone(), prompt, tags, title }
 }
 
 impl RunRecord {
@@ -966,7 +972,7 @@ impl FlowStudio {
         std::mem::take(&mut self.outcome)
     }
 
-    fn hub_line(&self) -> String {
+    pub fn hub_line(&self) -> String {
         let mut line = self.snapshot.line();
         if !self.assets_note.is_empty() {
             line.push_str(" · ");
@@ -1284,8 +1290,8 @@ impl FlowStudio {
             let (model, hub) = match url.as_str() {
                 // No LAN node had the model: say so, not "preview on preview".
                 preview_gen::PREVIEW_NODE => ("preview generator (no LAN node has the model)".to_string(), String::new()),
-                "" | "provider" => (text("model_used"), String::new()),
-                url => (text("model_used"), makepad_ai_hub::fleet::node_label(url)),
+                // The node by its label, never its address; none for a local provider.
+                url => (text("model_used"), makepad_flow::engine::executors::lineage::hub_label(url).unwrap_or_default()),
             };
             if !record.origin.is_empty() {
                 record.events.push(JobEvent::Ran { node: node.to_string(), model: model.clone(), hub: hub.clone(), seed: text("seed_used") });

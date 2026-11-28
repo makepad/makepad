@@ -721,7 +721,7 @@ fn theme_roles_come_from_each_roots_owning_vm() {
     cx.init_cx_os();
     let mut roots = Vec::new();
     for colour in [vec4(0.1, 0.2, 0.3, 1.0), vec4(0.8, 0.7, 0.6, 1.0)] {
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let root = cx.with_script_vm_id(vm_id, |vm| {
             makepad_widgets::script_mod(vm);
             script_eval!(vm,{

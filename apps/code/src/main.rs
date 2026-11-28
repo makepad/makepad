@@ -46,7 +46,7 @@ fn config_from_args() -> (AgentConfig, Vec<String>) {
     if makepad_code_agent::mock::presentation() {
         let config = AgentConfig {
             root: PathBuf::from("demo"),
-            context_tokens: 16384,
+            context_tokens: None,
             model: None,
             approval: ApprovalMode::Allowlist,
             session_dir: None,
@@ -56,7 +56,7 @@ fn config_from_args() -> (AgentConfig, Vec<String>) {
     let mut root: Option<PathBuf> = None;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut approval = ApprovalMode::Allowlist;
-    let mut context_tokens = 16384u32;
+    let mut context_tokens = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -67,7 +67,7 @@ fn config_from_args() -> (AgentConfig, Vec<String>) {
                     _ => ApprovalMode::Allowlist,
                 }
             }
-            "--context" => context_tokens = args.next().and_then(|v| v.parse().ok()).unwrap_or(context_tokens),
+            "--context" => context_tokens = args.next().and_then(|v| v.parse().ok()).or(context_tokens),
             other if !other.starts_with("--") => {
                 let path = PathBuf::from(other);
                 if path.is_file() {
@@ -90,7 +90,7 @@ fn config_from_args() -> (AgentConfig, Vec<String>) {
     };
     let root = root.canonicalize().unwrap_or(root);
     let files = files.iter().filter_map(|f| f.strip_prefix(&root).ok()).map(|f| f.to_string_lossy().replace('\\', "/")).collect();
-    let session_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".makepad/code/sessions"));
+    let session_dir = state_home().map(|home| home.join(".makepad/code/sessions"));
     let config = AgentConfig { root, context_tokens, model: None, approval, session_dir };
     (config, files)
 }
@@ -122,4 +122,11 @@ impl AppMain for App {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
+}
+
+/// The home folder Code keeps its own state below (`.makepad/code`): an absolute
+/// `MAKEPAD_TEST_HOME` for a test instance, as `makepad_platform::home::app_state_home`
+/// keeps an app's own state, else `HOME`, as before.
+pub(crate) fn state_home() -> Option<PathBuf> {
+    std::env::var_os("MAKEPAD_TEST_HOME").map(PathBuf::from).filter(|home| home.is_absolute()).or_else(|| std::env::var_os("HOME").map(PathBuf::from))
 }

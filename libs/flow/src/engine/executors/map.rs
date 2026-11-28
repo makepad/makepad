@@ -223,7 +223,7 @@ impl<C: MapChild> MapRun<C> {
     }
 
     /// `items` in element order, and `used`: one record per item (the
-    /// element, the seed and model its job reported), aligned with `items`,
+    /// element, the seed, model and node its job reported), aligned with `items`,
     /// plus the dropped elements and why.
     fn finish(&mut self) -> Poll {
         let mut items = Sequence::empty(self.ty.clone());
@@ -263,6 +263,10 @@ fn collect(port: &str, outputs: &[(String, PortValue)]) -> Result<(Value, Json),
     }
     if let Some(model) = one("model_used").and_then(|value| value.as_text().ok()) {
         record.push(("model_used".to_string(), Json::Str(model.to_string())));
+    }
+    // The node that ran the job, for the lineage; absent when it said nothing.
+    if let Some(url) = one("provider_url").and_then(|value| value.as_text().ok()).filter(|url| !url.trim().is_empty()) {
+        record.push(("provider_url".to_string(), Json::Str(url.to_string())));
     }
     Ok((value, Json::Obj(record)))
 }

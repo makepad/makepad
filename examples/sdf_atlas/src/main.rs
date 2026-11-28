@@ -36,7 +36,6 @@
 pub use makepad_widgets;
 
 use makepad_widgets::*;
-use makepad_widgets::makepad_platform::makepad_hal::gpu_prof;
 use std::sync::{Arc, Mutex};
 
 app_main!(App);
@@ -576,10 +575,10 @@ impl AtlasView {
                 let t = Target::new(cx.cx.cx, name, N, N, TextureFormat::RenderRf32 { size: fixed(N, N), initial: true });
                 self.bench.push((t, Vec::new()));
             }
-            gpu_prof::start(gpu_prof::StartOptions { keep_s: 20, split_every: 0, ..Default::default() });
         }
-        // GPU ms per bench pass of the frames the profiler recorded since the last look
-        if let Some(rec) = gpu_prof::recording_of(None) {
+        // GPU ms per bench pass of the frames the profiler recorded since the last look: this
+        // app's own session through the HAL (the first query starts a 20 s recording)
+        if let Some(rec) = cx.cx.cx.gpu_prof_recording(20) {
             for f in rec.frames.iter().filter(|f| f.id > self.prof_from && !f.split) {
                 for p in &f.passes {
                     let name = rec.s(p.name);

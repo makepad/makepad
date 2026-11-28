@@ -18,6 +18,26 @@ pub struct GeneratorRecord {
     /// The seed the job reported (`seed_used`), else a fixed seed it asked for.
     pub seed: Option<u64>,
     pub params: Vec<(String, Literal)>,
+    /// The hub node that ran the job, as people name it (`node 42`, `this
+    /// machine`; see [`hub_label`]), never its address; empty when a local
+    /// provider or the preview generator ran it, or it said nothing.
+    pub hub: String,
+}
+
+/// The `provider_url` the preview generator reports (no LAN node had the model).
+pub const PREVIEW_PROVIDER: &str = "preview";
+/// The `provider_url` an in-process provider reports.
+pub const LOCAL_PROVIDER: &str = "provider";
+
+/// The hub node a job's `provider_url` names, as people name it: `None` for
+/// no URL, a local provider or the preview generator, else the node's label
+/// (`node 42`, `this machine`), never the raw address.
+pub fn hub_label(provider_url: &str) -> Option<String> {
+    let url = provider_url.trim();
+    if url.is_empty() || url == LOCAL_PROVIDER || url == PREVIEW_PROVIDER {
+        return None;
+    }
+    Some(makepad_core_util::node_label::node_label(url))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -75,6 +95,7 @@ impl Lineage {
                 let reported = |port: &str| value_text(&current, port);
                 let mut model = reported("model_used").unwrap_or_default();
                 let mut seed = reported("seed_used").and_then(|text| text.trim().parse::<u64>().ok());
+                let mut provider = reported("provider_url").unwrap_or_default();
                 if let Some(map) = map_of_body {
                     // A Map body ran once per element; the item a Choose
                     // took says which run made the value.
@@ -86,6 +107,7 @@ impl Lineage {
                     if let Some(item) = item {
                         model = item.get("model_used").and_then(|value| value.as_str()).unwrap_or_default().to_string();
                         seed = item.get("seed_used").and_then(|value| value.as_u64());
+                        provider = item.get("provider_url").and_then(|value| value.as_str()).unwrap_or_default().to_string();
                     }
                 }
                 if model.is_empty() {
@@ -116,6 +138,7 @@ impl Lineage {
                     model,
                     seed,
                     params: current_node.params.clone(),
+                    hub: hub_label(&provider).unwrap_or_default(),
                 });
             }
             for edge in graph.edges.iter().filter(|edge| edge.to_node == current) {
@@ -177,17 +200,26 @@ Flow{ prompt, seeds, image, fan, pick, video, published }
         put("prompt", "text", PortValue::One(Value::text("koi")));
         put("fan", "items", PortValue::Seq(Sequence { ty: PortType::Image, values: vec![png(1), png(2)] }));
         put("fan", "used", PortValue::One(Value::json(
-            r#"{"items":[{"seed_used":5,"model_used":"flux1-schnell"},{"seed_used":9,"model_used":"flux1-dev"}],"dropped":[]}"#,
+            r#"{"items":[{"seed_used":5,"model_used":"flux1-schnell","provider_url":"http://192.0.2.7:8787"},{"seed_used":9,"model_used":"flux1-dev","provider_url":"http://192.0.2.9:8787"}],"dropped":[]}"#,
         )));
         put("pick", "image", PortValue::One(png(2)));
         put("pick", "index", PortValue::One(Value::json("1")));
         put("video", "video", PortValue::One(Value::media(PortType::Video, "video/mp4", b"mp4".to_vec())));
         put("video", "model_used", PortValue::One(Value::text("minimax-h3")));
         put("video", "seed_used", PortValue::One(Value::json("77")));
+        put("video", "provider_url", PortValue::One(Value::text("http://192.0.2.42:8787")));
 
         let lineage = Lineage::of(&graph, "published", &values);
         let records: Vec<_> = lineage.generators.iter().map(|record| (record.node.as_str(), record.model.as_str(), record.seed)).collect();
         assert_eq!(records, [("video", "minimax-h3", Some(77)), ("image", "flux1-dev", Some(9))]);
+        // The node that ran each job, by its label; the picked Map item's own node.
+        let hubs: Vec<_> = lineage.generators.iter().map(|record| record.hub.as_str()).collect();
+        assert_eq!(hubs, ["node 42", "node 9"]);
+        assert_eq!(hub_label("http://192.0.2.42:8787").as_deref(), Some("node 42"));
+        assert_eq!(hub_label("http://127.0.0.1:8787").as_deref(), Some("this machine"));
+        for none in ["", "  ", LOCAL_PROVIDER, PREVIEW_PROVIDER] {
+            assert_eq!(hub_label(none), None, "{none:?}");
+        }
         assert_eq!(lineage.prompt, "koi");
         // The video, the picked image and both candidates, each once.
         assert_eq!(lineage.sources.len(), 3);

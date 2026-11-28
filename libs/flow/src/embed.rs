@@ -44,7 +44,13 @@ pub fn default_root() -> PathBuf {
     if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some_and(|value| !value.is_empty() && value != "0") {
         return std::env::temp_dir().join(format!("stage-hidden-{}", std::process::id())).join("flow");
     }
-    makepad_ai_hub::home::makepad_home().join("flow")
+    // Mirror the platform's app_state_home here. Flow has no platform dependency.
+    let home = std::env::var_os("MAKEPAD_TEST_HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".makepad"))
+        .unwrap_or_else(makepad_ai_hub::home::makepad_home);
+    home.join("flow")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

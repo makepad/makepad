@@ -2,6 +2,9 @@
 //! (CODE_MOCK=1): type a request, watch it stream, approve the edit with
 //! `y`, interrupt a second request with Esc, list and resume the saved
 //! session, leave with Ctrl+D. Also one line-mode (pipe) run.
+//!
+//! Unix only, like the binary it drives: on Windows the binary is a stub.
+#![cfg(unix)]
 
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;

@@ -38,7 +38,7 @@ script_mod! {
 
     mod.draw.DrawPhysMesh = mod.std.set_type_default() do #(DrawPhysMesh::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -104,7 +104,7 @@ script_mod! {
         clear_color: #x0b1016
         draw_bg: mod.draw.DrawXrSceneTexture{}
         draw_mesh: mod.draw.DrawPhysMesh{
-            backface_culling: true
+            cull_mode: @Back
         }
         camera: mod.widgets.XrCamera{
             fov_y: 42.0

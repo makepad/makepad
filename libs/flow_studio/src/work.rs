@@ -7,7 +7,7 @@ use makepad_widgets::{Cx, Class, TaskPool, ThreadOptions, ThreadSpawner};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const LOOPS: usize = 4;
+const LOOPS: usize = 5; // One engine worker and four run lanes.
 const JOBS: usize = 64;
 
 struct Permit(Arc<AtomicUsize>);

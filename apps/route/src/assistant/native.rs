@@ -164,7 +164,8 @@ impl AssistantService {
         // AI on by default again (perf campaign over); MAKEPAD_NO_AI=1
         // keeps the GPU clear of the 9B/4B/whisper chain when profiling
         // the map renderer.
-        if std::env::var_os("MAKEPAD_NO_AI").is_some() {
+        // MAKEPAD_AI_PROVIDER=none: no model at all, local or cloud.
+        if std::env::var_os("MAKEPAD_NO_AI").is_some() || makepad_ai_hub::providers::no_model().is_some() {
             return;
         }
         let api_key = read_secret("ANTHROPIC_API_KEY");

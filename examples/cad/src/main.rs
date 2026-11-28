@@ -742,7 +742,7 @@ script_mod! {
 
     mod.draw.DrawCadMesh = mod.std.set_type_default() do #(DrawCadMesh::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -827,10 +827,10 @@ script_mod! {
         ground_color: vec4(0.09, 0.13, 0.16, 1.0)
         draw_bg: mod.draw.DrawXrSceneTexture{}
         draw_mesh: mod.draw.DrawCadMesh{
-            backface_culling: true
+            cull_mode: @Back
         }
         draw_ground: mod.draw.DrawCadMesh{
-            backface_culling: false
+            cull_mode: @None
         }
         camera: mod.widgets.XrCamera{
             fov_y: 42.0

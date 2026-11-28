@@ -20,8 +20,9 @@
 use super::plan::{Endpoint, LivePlanSpec, OwnerSlice, PlanError};
 use super::value::{EndpointValue, ProbeValue, WriteRefusal};
 use crate::document::ident::{Generation, InstanceId};
+use makepad_script::ScriptInterrupt;
 use std::any::Any;
-use std::sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, Arc};
+use std::sync::{atomic::{AtomicU32, AtomicUsize, Ordering}, Arc, Mutex};
 
 /// An owner-typed command for one admitted trigger endpoint: what a write
 /// cannot say with a number, a toggle, a note or a pulse (a decoded track
@@ -95,12 +96,35 @@ pub struct BaseInfo {
 
 /// One prepare's cancellation and execution state, shared by the host and its workers.
 #[derive(Clone, Default)]
-pub struct PrepareControl(Arc<PrepareState>);
+pub struct PrepareControl {
+    state: Arc<PrepareState>,
+    instruction_budget: Option<u64>,
+}
 
 #[derive(Default)]
 struct PrepareState {
     cancelled: AtomicU32,
     executions: Arc<AtomicUsize>,
+    script_runs: AtomicUsize,
+    scripts: Mutex<Vec<Option<ScriptInterrupt>>>,
+}
+
+/// Registers one script run until the guard leaves scope.
+#[must_use = "hold the guard while the script runs"]
+pub struct ScriptRunGuard {
+    state: Arc<PrepareState>,
+    slot: usize,
+}
+
+impl Drop for ScriptRunGuard {
+    fn drop(&mut self) {
+        let mut scripts = self.state.scripts.lock().unwrap();
+        scripts[self.slot] = None;
+        self.state.script_runs.fetch_sub(1, Ordering::Relaxed);
+        while let Some(None) = scripts.last() {
+            scripts.pop();
+        }
+    }
 }
 
 /// Keeps a prepare marked as executing for the lifetime of this scope.
@@ -114,16 +138,55 @@ impl Drop for ExecutionGuard<'_> {
 }
 
 impl PrepareControl {
+    /// Share this request's Stop and registration, narrowing the allowance for each evaluation.
+    pub fn with_instruction_budget(&self, instructions: u64) -> Self {
+        Self { state: self.state.clone(), instruction_budget: Some(self.instruction_budget.map_or(instructions, |n| n.min(instructions))) }
+    }
+
+    /// The allowance for each evaluation, if this request carries one.
+    pub fn instruction_budget(&self) -> Option<u64> {
+        self.instruction_budget
+    }
+
     /// Start a separately cancellable prepare that shares this control's execution counter.
     pub fn renewed(&self) -> PrepareControl {
-        PrepareControl(Arc::new(PrepareState {
+        let state = Arc::new(PrepareState {
             cancelled: AtomicU32::new(0),
-            executions: self.0.executions.clone(),
-        }))
+            executions: self.state.executions.clone(),
+            script_runs: AtomicUsize::new(0),
+            scripts: Mutex::default(),
+        });
+        Self { state, instruction_budget: self.instruction_budget }
     }
 
     pub fn cancel(&self) {
         self.word().store(1, Ordering::Relaxed);
+        for script in self.state.scripts.lock().unwrap().iter().flatten() {
+            script.stop();
+        }
+    }
+
+    /// Stop this run silently on cancellation, including a cancellation before registration.
+    pub fn stop_script_on_cancel(&self, script: ScriptInterrupt) -> ScriptRunGuard {
+        let mut scripts = self.state.scripts.lock().unwrap();
+        // Under this lock we see an earlier cancel, or cancel will see the registered run.
+        if self.is_cancelled() {
+            script.stop();
+        }
+        let slot = if let Some(index) = scripts.iter().position(Option::is_none) {
+            scripts[index] = Some(script);
+            index
+        } else {
+            scripts.push(Some(script));
+            scripts.len() - 1
+        };
+        self.state.script_runs.fetch_add(1, Ordering::Relaxed);
+        ScriptRunGuard { state: self.state.clone(), slot }
+    }
+
+    /// True while a script is registered on this word. Renewed controls have separate runs and share the [`Self::executing`] counter.
+    pub fn script_running(&self) -> bool {
+        self.state.script_runs.load(Ordering::Relaxed) != 0
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -131,23 +194,23 @@ impl PrepareControl {
     }
 
     pub fn word(&self) -> &AtomicU32 {
-        &self.0.cancelled
+        &self.state.cancelled
     }
 
     /// Borrow the same counter for executors across a library boundary.
     pub fn execution_counter(&self) -> &AtomicUsize {
-        &self.0.executions
+        &self.state.executions
     }
 
     /// True while any control sharing this counter holds an execution guard.
     pub fn executing(&self) -> bool {
-        self.0.executions.load(Ordering::Relaxed) != 0
+        self.state.executions.load(Ordering::Relaxed) != 0
     }
 
     /// Mark work as executing until the returned guard drops, including during unwind.
     pub fn enter_execution(&self) -> ExecutionGuard<'_> {
-        self.0.executions.fetch_add(1, Ordering::Relaxed);
-        ExecutionGuard(&self.0.executions)
+        self.state.executions.fetch_add(1, Ordering::Relaxed);
+        ExecutionGuard(&self.state.executions)
     }
 }
 
@@ -323,5 +386,41 @@ mod tests {
         assert!(!sibling.is_cancelled() && control.executing(), "the sibling is still executing");
         drop(b);
         assert!(!control.executing(), "the last worker released the shared counter");
+    }
+
+    #[test]
+    fn cancellation_stops_only_registered_script_runs() {
+        use makepad_script::ScriptInterrupt;
+        let owner = PrepareControl::default();
+        assert_eq!(owner.instruction_budget(), None, "ordinary requests have no budget");
+        let budget = owner.with_instruction_budget(1);
+        let next = budget.renewed();
+        assert_eq!(next.instruction_budget(), budget.instruction_budget(), "renewal preserves the per-evaluation allowance");
+        let finished = ScriptInterrupt::default();
+        let running = ScriptInterrupt::default();
+        let second = ScriptInterrupt::default();
+        let other = ScriptInterrupt::default();
+        assert!(!owner.script_running(), "a new word has no registered scripts");
+        let first = budget.stop_script_on_cancel(finished.clone());
+        assert!(owner.script_running(), "the held registration is visible");
+        assert!(!next.script_running(), "a renewed sibling has no part in this run");
+        let active = {
+            let submitter = owner.clone();
+            submitter.stop_script_on_cancel(running.clone())
+        };
+        drop(first);
+        assert!(owner.script_running(), "the overlapping registration outlives its submitting handle");
+        let second_run = owner.stop_script_on_cancel(second.clone());
+        let _other = next.stop_script_on_cancel(other.clone());
+
+        owner.cancel();
+        assert!(running.is_interrupted() && second.is_interrupted(), "cancel reaches every registered run");
+        assert!(!finished.is_interrupted(), "a completed VM can run again");
+        assert!(!other.is_interrupted(), "renewed controls own independent registrations");
+        let late = ScriptInterrupt::default();
+        let late_run = owner.stop_script_on_cancel(late.clone());
+        assert!(late.is_interrupted(), "an already-cancelled owner stops a new run at registration");
+        drop((late_run, second_run, active));
+        assert!(!owner.script_running() && next.script_running(), "the last guard clears only its own word");
     }
 }

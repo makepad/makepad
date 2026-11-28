@@ -110,6 +110,9 @@ fn take_finished(slot: &mut Option<Finished>) -> Option<CompletedCapture> {
 
 #[derive(Default)]
 struct Feed {
+    /// The instant a test reads as now (it moves timestamps by hand); the app reads the system clock.
+    #[cfg(test)]
+    clock: Option<Instant>,
     capture: Option<Capture>,
     finished: Option<Finished>,
     actual: Option<(Instant, Measured)>,
@@ -121,6 +124,15 @@ struct Feed {
 }
 
 impl Feed {
+    /// The feed's time: the system's monotonic clock, or a test's fixed instant.
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.clock {
+            return now;
+        }
+        Instant::now()
+    }
+
     fn active(&self) -> bool {
         !self.closed && self.fault.is_none()
     }
@@ -200,7 +212,8 @@ impl Feed {
         let (Some((at, actual)), Some((rt, rich))) = (self.actual, self.rich) else {
             return Link::Connecting;
         };
-        if at.elapsed() > ACTUAL_AGE || rt.elapsed() > RICH_AGE {
+        let now = self.now();
+        if now.saturating_duration_since(at) > ACTUAL_AGE || now.saturating_duration_since(rt) > RICH_AGE {
             return Link::Fault("Controller telemetry is stale".into());
         }
         // The independently timed reports must agree on the teach mode before admitting a capture.
@@ -259,7 +272,7 @@ impl Controller {
             return Err("Collect the previous recording first".into());
         }
         if feed.capture.is_some() { return Err("Already recording".into()); }
-        let armed = Instant::now();
+        let armed = feed.now();
         let setup = feed.teaching_setup(armed)?;
         let (_, previous) = feed.actual.unwrap();
         feed.capture = Some(Capture {
@@ -271,7 +284,8 @@ impl Controller {
     pub fn stop_capture(&mut self) {
         if let Some((feed, _)) = &self.session {
             let mut feed = feed.lock().unwrap();
-            feed.check_capture(Instant::now());
+            let now = feed.now();
+            feed.check_capture(now);
             feed.finish_capture("Stopped by operator");
         }
     }
@@ -279,7 +293,8 @@ impl Controller {
     /// Sample count and elapsed robot microseconds while a take is active.
     pub fn capture_status(&self) -> Option<(usize, u64)> {
         let mut feed = self.session.as_ref()?.0.lock().unwrap();
-        feed.check_capture(Instant::now());
+        let now = feed.now();
+        feed.check_capture(now);
         let capture = feed.capture.as_ref()?;
         Some((capture.count, capture.first_us.map_or(0, |t| capture.prev_us - t)))
     }
@@ -287,7 +302,8 @@ impl Controller {
     pub fn take_completed_capture(&mut self) -> Option<CompletedCapture> {
         if self.detached.is_some() { return take_finished(&mut self.detached); }
         let mut feed = self.session.as_ref()?.0.lock().unwrap();
-        feed.check_capture(Instant::now());
+        let now = feed.now();
+        feed.check_capture(now);
         take_finished(&mut feed.finished)
     }
 
@@ -477,7 +493,7 @@ fn receive_reports(stream: &mut impl Read, port: u16, feed: &Mutex<Feed>) -> io:
     let mut last_arrival: Option<Instant> = None;
     while feed.lock().unwrap().active() {
         read_frame(stream, &mut buf)?;
-        let now = Instant::now();
+        let now = feed.lock().unwrap().now();
         if last_arrival.is_some_and(|last| now.duration_since(last) > max_gap) {
             return Err(invalid("Report gap; reconnect to acquire a fresh session"));
         }
@@ -631,6 +647,7 @@ fn command(ip: IpAddr, feed: &Mutex<Feed>, action: Action) -> Result<String, Str
 mod tests {
     use super::*;
 
+    // Test feeds use a fixed clock because first-call JIT compilation on a loaded box can outlast the 200 ms freshness window.
     fn rich_frame() -> Vec<u8> {
         let mut frame = vec![0; 574];
         frame[..4].copy_from_slice(&574u32.to_be_bytes());
@@ -650,7 +667,7 @@ mod tests {
         rt[424..428].copy_from_slice(&999.0f32.to_le_bytes());
         rt[116..120].copy_from_slice(&0.25f32.to_le_bytes());
         rt[472..476].copy_from_slice(&120.0f32.to_le_bytes());
-        let mut feed = Feed { actual: Some((at, measured(&rt).unwrap())), ..Default::default() };
+        let mut feed = Feed { clock: Some(at), actual: Some((at, measured(&rt).unwrap())), ..Default::default() };
         assert!(matches!(feed.link(), Link::Connecting));
         feed.rich = Some((at, metadata(&rich).unwrap()));
         let Link::Live(sample) = feed.link() else { panic!("valid pose") };
@@ -678,6 +695,7 @@ mod tests {
         let mut rt = vec![0; 784];
         rt[12] = 2;
         let feed = Arc::new(Mutex::new(Feed {
+            clock: Some(at),
             actual: Some((at, measured(&rt).unwrap())), rich: Some((at, metadata(&rich_frame()).unwrap())),
             ..Default::default()
         }));
@@ -714,6 +732,7 @@ mod tests {
         rich[91..95].copy_from_slice(&25.0f32.to_le_bytes());
         rich[141..145].copy_from_slice(&(-1.0f32).to_le_bytes()); // base gravity -Z
         let feed = Arc::new(Mutex::new(Feed {
+            clock: Some(now),
             actual: Some((now, measured(&actual_frame(12_000, 0.)).unwrap())),
             rich: Some((now, metadata(&rich).unwrap())),
             ..Default::default()
@@ -804,8 +823,11 @@ mod tests {
     fn stopping_during_a_pending_append_waits_for_the_last_accepted_packet() {
         let (mut app, feed, _) = teaching_session();
         app.start_capture().unwrap();
-        let (buffer, packet) = feed.lock().unwrap().on_measurement(
-            Instant::now(), measured(&actual_frame(16_000, 0.4)).unwrap()).unwrap();
+        let (buffer, packet) = {
+            let mut feed = feed.lock().unwrap();
+            let now = feed.now();
+            feed.on_measurement(now, measured(&actual_frame(16_000, 0.4)).unwrap()).unwrap()
+        };
         app.disconnect();
         assert!(app.take_completed_capture().is_none());
         buffer.lock().unwrap().push(packet);
@@ -828,7 +850,7 @@ mod tests {
         use std::net::{Shutdown, TcpListener};
 
         // Keep both endpoints on ephemeral loopback ports; a test cannot reach lab hardware.
-        let feed = Mutex::new(Feed::default());
+        let feed = Mutex::new(Feed { clock: Some(Instant::now()), ..Default::default() });
         let mut rt = vec![0; 784];
         rt[..4].copy_from_slice(&784u32.to_be_bytes());
         rt[4..12].copy_from_slice(&1000u64.to_be_bytes());

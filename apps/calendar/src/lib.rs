@@ -1,6 +1,5 @@
 //! calendar as a library: one root widget, a pure engine, and the module
-//! the window manager seats in-process. Built from
-//! `local/agent_state/wm-all/apps/calendar-redesign.md`.
+//! the window manager seats in-process.
 
 pub use makepad_widgets;
 

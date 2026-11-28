@@ -5,8 +5,6 @@
 //!   sample turns grey; two frames mixed in one picture show a phase seam),
 //! - the frame number, 16 bits of 8x8 px red(1)/blue(0) blocks, X//!   top, bit 0 leftmost) and bottom-right (row 4..12 from the bottom, bit 0 rightmost) on grey
 //!   bands of 16 px: a picture whose two stamps differ is torn or incomplete.
-//!
-//! `local/agent_state/relax-campaign/wmsync-tools/framecheck.py` decodes a grab of it.
 use makepad_widgets::*;
 
 app_main!(App);

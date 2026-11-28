@@ -3,8 +3,7 @@
 // light pipe, a black glass screen set deep into the white, and a single
 // red-orange status light. Clinical, bright, calm.
 //
-// Assignments only, over the base templates in `src/hw.rs`
-// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+// Assignments only, over the base templates in `src/hw.rs`.
 use mod.prelude.widgets_internal.*
 
 // ---- palette: black glass lists, the status red ----

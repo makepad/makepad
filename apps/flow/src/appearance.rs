@@ -8,9 +8,8 @@
 //! to it: at mount, before anything the package wrote is evaluated, and on
 //! a change, by rebuilding the isolate's theme and stock prototypes under
 //! reload and cloning the presentation objects a package authored onto the
-//! fresh prototypes. Nothing here evaluates package script. The allocator's
-//! strip stays in force: `fs`, `run`, `res` and `cx.quit` are `nil` again
-//! before any sheet or package source runs.
+//! fresh prototypes. Host registration loads fonts and icons inside a resource
+//! scope. Package sources run with the isolate's normal grants.
 
 use makepad_widgets::desktop_style::{self, StyleSheet};
 use makepad_widgets::makepad_script::trap::NoTrap;
@@ -109,12 +108,9 @@ fn base_name(base: BaseTheme) -> &'static str {
 /// unless `force`, an isolate that already reads the same tokens with no
 /// sheet anywhere is left as the allocator made it.
 ///
-/// 1. `theme_mod` under reload, behind a `mod.res` that holds only the
-///    `crate_resource` the widget prelude already carried: pristine bases,
-///    fonts, `mod.draw`, the prelude header. `mod.res` is `nil` again before
-///    anything else runs.
+/// 1. Rebuild pristine bases, fonts, draw and the prelude in a host resource scope.
 /// 2. The sheet's theme phase, then the main VM's tokens over it.
-/// 3. Under reload: `widgets_mod`, with every captured token explicitly
+/// 3. Under reload: `isolate_widgets_mod`, with every captured token explicitly
 ///    preserved in the sheet so role derivation cannot overwrite saved
 ///    colors. The snapshot already contains the window manager's palette.
 ///
@@ -162,7 +158,7 @@ pub fn prepare_isolate(vm: &mut ScriptVm, appearance: &Appearance, force: bool) 
     }
     vm.capture_errors();
     vm.with_reload(|vm| {
-        makepad_widgets::widgets_mod(vm);
+        makepad_widgets::isolate_widgets_mod(vm);
     });
     let errors = vm.take_errors();
     vm.capture_errors();
@@ -173,8 +169,8 @@ pub fn prepare_isolate(vm: &mut ScriptVm, appearance: &Appearance, force: bool) 
     }
 }
 
-/// A fresh isolate's UI registration in `appearance` (for
-/// `alloc_splash_vm_with_ui`): the theme, the base, the sheet's theme phase
+/// The UI registration passed to `alloc_splash_vm_with_grants` for a fresh face.
+/// It installs the theme, the base, the sheet's theme phase
 /// and the main VM's tokens, then the widget library ONCE over them -- what
 /// allocating with the stock library and [`prepare_isolate`] on top did with
 /// two registrations. Errors land in `errors`. Run at allocation only: a
@@ -230,29 +226,13 @@ fn needs_apply(vm: &mut ScriptVm, appearance: &Appearance) -> bool {
         .any(|(id, value)| vm.bx.heap_ref().value(theme, (*id).into(), NoTrap) != *value)
 }
 
-/// The base themes as the library wrote them, again. A sheet's theme phase
-/// assigns `mod.theme` one of them and writes into it, so after one sheet
-/// the bases are not pristine and `uninstall` does not make them so; the
-/// theme scripts only need `crate_resource`, which the widget prelude kept
-/// a copy of when the allocator stripped `mod.res`.
+/// Rebuild the base themes using this isolate's host-owned loader.
 fn rebuild_bases(vm: &mut ScriptVm) -> Result<(), String> {
-    let header = resolve_path(vm, &[live_id!(prelude), live_id!(widgets_header)])
-        .ok_or_else(|| "the widget prelude header is missing".to_string())?;
-    let crate_resource = own_value_id(vm, header, live_id!(crate_resource))
-        .ok_or_else(|| "the widget prelude has no crate_resource".to_string())?;
-    let res = vm.new_module(live_id!(res));
-    vm.bx.heap_mut().set_value_def(res, live_id!(crate_resource).into(), crate_resource);
     vm.capture_errors();
-    vm.with_reload(|vm| makepad_widgets::theme_mod(vm));
+    with_splash_resources(vm, |vm| vm.with_reload(makepad_widgets::theme_mod));
     let errors = vm.take_errors();
     vm.capture_errors();
-    // Whatever happened above, the strip is back before any sheet or
-    // package source can run.
-    let strip = eval_str(vm, "mod.res = nil");
-    if !errors.is_empty() {
-        return Err(errors.join("\n"));
-    }
-    strip
+    if errors.is_empty() { Ok(()) } else { Err(errors.join("\n")) }
 }
 
 fn eval_str(vm: &mut ScriptVm, code: &str) -> Result<(), String> {

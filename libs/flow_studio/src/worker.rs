@@ -473,6 +473,7 @@ fn save_preset(state: &mut State, name: &str, group: Group, graph: &Graph, value
         artist: String::new(),
         generator: "flow-studio".into(),
         model: String::new(),
+        hub: String::new(),
         prompt: String::new(),
         seed: None,
         digest: None,

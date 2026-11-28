@@ -162,10 +162,10 @@ pub fn widgets_script_mod(vm: &mut ScriptVm) {
 }
 
 /// Switch the running app to another theme.
-pub fn select(cx: &mut Cx, index: usize) {
+pub fn select(cx: &mut Cx, index: usize) -> bool {
     let names = names();
     if index >= names.len() || index == choice() {
-        return;
+        return false;
     }
     set_choice(index);
     crate::settings::set(crate::settings::THEME, &names[index]);
@@ -178,6 +178,7 @@ pub fn select(cx: &mut Cx, index: usize) {
     // not do: it does not re-run `script_mod`, and both halves of a switch
     // are emitted there.
     cx.request_style_reload();
+    true
 }
 
 #[cfg(test)]

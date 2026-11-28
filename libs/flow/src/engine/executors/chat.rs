@@ -191,7 +191,7 @@ impl ChatSeam for HubChat {
             provider.begin(system, prompt)?;
             return Ok(Box::new(ProviderChatTurn { provider: Box::new(provider) }));
         }
-        use makepad_ai_hub::hub_chat::{HubChatConfig, HubChatSession};
+        use makepad_ai_hub::hub_chat::{ChatReach, HubChatConfig, HubChatSession};
         use makepad_ai_hub::local_llm::LocalLlmConfig;
         let (path, preferred_model) = resolve_model(
             model,
@@ -199,6 +199,7 @@ impl ChatSeam for HubChat {
             &makepad_ai_hub::home::weights_dir(),
         );
         let session = HubChatSession::start(HubChatConfig {
+            reach: ChatReach::Lan,
             llm: LocalLlmConfig::new(path),
             preferred_model,
             max_tokens,

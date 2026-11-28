@@ -1,5 +1,5 @@
 //! reminders as a library: the app around one root widget, and the module the
-//! window manager seats in-process. Built from local/agent_state/wm-all/apps/reminders-spec.md.
+//! window manager seats in-process.
 
 pub use makepad_widgets;
 

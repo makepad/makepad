@@ -15,9 +15,6 @@
 //! The parts light each other through the window's relief buffer
 //! (`makepad_widgets::relief`): the screen's picture is a texture light, the
 //! LEDs are emissive surfaces, and every surface here binds the buffer.
-//!
-//! See `local/agent_state/skeuomorph/music/STYLE_GUIDE.md` for the hooks a
-//! style fills.
 
 use crate::model::Model;
 use crate::widgets::MusicBarAction;
@@ -1686,6 +1683,17 @@ fn stand_off(c: Vec4f, bg: Vec4f, toward: Vec4f, min: f32) -> Vec4f {
     (1..=10).map(|step| mix_v(c, toward, step as f32 / 10.0)).find(|m| contrast(*m, bg) >= min).unwrap_or(with_a(toward, 1.0))
 }
 
+/// The lyrics' ink, secondary ink and accent on the panel's `ground`: the
+/// palette's panel type where it reads (4.5:1), else the style's panel
+/// title and text colours, the screen's text, or plain dark or light; the
+/// accent kept at least 3:1 off the ground.
+fn lyric_inks(panel_text: Vec4f, panel_muted: Vec4f, title: Vec4f, text: Vec4f, screen_text: Vec4f, accent: Vec4f, ground: Vec4f) -> [Vec4f; 3] {
+    let (dark, light) = (vec4(0.10, 0.10, 0.11, 1.0), vec4(0.94, 0.94, 0.95, 1.0));
+    let ink = readable(panel_text, ground, &[title, screen_text, dark, light]);
+    let muted = readable(panel_muted, ground, &[text, mix_v(ink, ground, 0.3), ink]);
+    [ink, muted, stand_off(accent, ground, ink, 3.0)]
+}
+
 /// Splash giving the palette-driven templates their colours from the
 /// palette the style set.
 fn palette_defaults(vm: &mut ScriptVm) -> String {
@@ -1740,10 +1748,24 @@ fn palette_defaults(vm: &mut ScriptVm) -> String {
     set("HwNavButton.draw_text.color_down", hex(panel_text));
     set("HwPanelTitle.draw_text.color", hex(panel_text));
     set("HwPanelText.draw_text.color", hex(panel_muted));
-    // The AI song's lyrics read like the panel's text, the sung line in the accent.
-    set("HwLyrics.ink", hex(panel_text));
-    set("HwLyrics.muted", hex(panel_muted));
-    set("HwLyrics.accent", hex(accent));
+    // The AI song's lyrics read like the panel's text, the sung line in the
+    // accent, on the panel they sit in (HwPanel's ground). A style that
+    // darkens its panels without naming `panel_text` (Piano Black) left them
+    // dark on dark: each ink that would not read becomes the panel type the
+    // style gave its titles and texts, or the screen's, or plain dark or
+    // light, whichever reads.
+    let template_color = |vm: &mut ScriptVm, template: LiveId, draw: LiveId, key: LiveId| {
+        let t = vm.heap().value(widgets, template.into(), NoTrap).as_object()?;
+        let d = vm.heap().value(t, draw.into(), NoTrap).as_object()?;
+        vm.heap().value(d, key.into(), NoTrap).as_color().map(Vec4f::from_u32)
+    };
+    let panel_ground = template_color(vm, id!(HwPanel), id!(draw_bg), id!(ground)).unwrap_or(vec4(0.165, 0.176, 0.192, 1.0));
+    let title_ink = template_color(vm, id!(HwPanelTitle), id!(draw_text), id!(color)).unwrap_or(panel_text);
+    let text_ink = template_color(vm, id!(HwPanelText), id!(draw_text), id!(color)).unwrap_or(panel_muted);
+    let [lyric_ink, lyric_muted, lyric_accent] = lyric_inks(panel_text, panel_muted, title_ink, text_ink, screen_text, accent, panel_ground);
+    set("HwLyrics.ink", hex(lyric_ink));
+    set("HwLyrics.muted", hex(lyric_muted));
+    set("HwLyrics.accent", hex(lyric_accent));
     set("HwKey.draw_bg.glow_ink", hex(accent));
     set("HwKeyIcon.draw_icon.color", "mod.widgets.HwKeyButton.draw_text.color".into());
     // The caption buttons: the caption's ink (or the screen text), the accent.
@@ -2275,6 +2297,22 @@ mod contrast_tests {
             let muted = key("screen_muted", "#x868c95");
             let (sel, hover) = row_tint_alphas(bg, fg, accent);
             let name = path.file_stem().unwrap().to_string_lossy().to_string();
+            // The lyrics read on the panel they sit in (Piano Black's were
+            // the default dark panel type on its near-black panel).
+            let set_to = |path: &str| {
+                let at = format!("mod.widgets.{path} = ");
+                text.lines().find_map(|l| l.strip_prefix(at.as_str())).filter(|v| v.trim().starts_with("#x")).map(hexv)
+            };
+            let (panel_text, panel_muted) = (key("panel_text", "#x2b2e33"), key("panel_muted", "#x5a5e66"));
+            let ground = set_to("HwPanel.draw_bg.ground").unwrap_or_else(|| hexv("#x2a2d31"));
+            let title = set_to("HwPanelTitle.draw_text.color").unwrap_or(panel_text);
+            let body = set_to("HwPanelText.draw_text.color").unwrap_or(panel_muted);
+            let [ink, soft, lit] = lyric_inks(panel_text, panel_muted, title, body, fg, accent, ground);
+            for (what, c, min) in [("ink", ink, 4.5), ("muted", soft, 4.5), ("accent", lit, 3.0)] {
+                if contrast(c, ground) < min {
+                    bad.push(format!("{name}: the lyrics' {what} reads {:.2}:1 on its panel", contrast(c, ground)));
+                }
+            }
             // A field a style sets that the template does not name stays
             // set in every style picked after it (Y2K's `custom_scope` once
             // left the next styles drawing its scope path). Draw objects are

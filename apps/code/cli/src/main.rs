@@ -14,30 +14,43 @@
 //! Modules: `term` (raw mode, size, signals, keys), `line` (the prompt's
 //! editor), `render` (style, screen, rows), `text` (widths, wrapping),
 //! `app` (the session: events, keys, slash commands).
+//!
+//! Unix only: the terminal layer is termios and Unix file descriptors. On
+//! Windows the binary says so and exits 1.
 
+#[cfg(unix)]
 mod app;
+#[cfg(unix)]
 mod line;
+#[cfg(unix)]
 mod render;
+#[cfg(unix)]
 mod term;
+#[cfg(unix)]
 mod text;
 
+#[cfg(unix)]
 use makepad_code_agent::event::{AgentConfig, ApprovalMode};
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 const USAGE: &str = "usage: makepad-code [DIR] [--root DIR] [--approve ask|allowlist|auto] [--context N]
                     [--ref PATH]... [--resume [ID|last]] [-p TASK...]
 
   -p, --print TASK   run one task, print what happens, exit (no TASK: read stdin)
   --root DIR         the project folder (default: DIR or the current folder)
   --approve MODE     ask: everything asks; allowlist: risky actions ask (default); auto: nothing asks
-  --context N        context window in tokens (default 16384)
+  --context N        explicit context window in tokens (default: hub auto-fit)
   --ref PATH         attach a file to the first request (repeatable)
   --resume [ID]      continue a saved session (no ID or 'last': the newest)
 
 In the session: /help lists the commands. Esc or Ctrl+C interrupts; Ctrl+D or
 Ctrl+C twice at an empty prompt exits. CODE_MOCK=1 runs a scripted agent.";
 
+#[cfg(unix)]
 pub struct Options {
     pub config: AgentConfig,
     pub print: Option<String>,
@@ -45,10 +58,11 @@ pub struct Options {
     pub resume: Option<String>,
 }
 
+#[cfg(unix)]
 fn parse_args() -> Result<Options, String> {
     let mut root: Option<PathBuf> = None;
     let mut approval = ApprovalMode::Allowlist;
-    let mut context_tokens = 16384u32;
+    let mut context_tokens = None;
     let mut refs = Vec::new();
     let mut resume = None;
     let mut print: Option<Vec<String>> = None;
@@ -61,7 +75,7 @@ fn parse_args() -> Result<Options, String> {
                 approval = app::parse_mode(&args.next().unwrap_or_default()).ok_or("--approve is ask, allowlist or auto")?
             }
             "--context" => {
-                context_tokens = args.next().and_then(|v| app::parse_tokens(&v)).ok_or("--context needs a size, e.g. 32768 or 32k")?
+                context_tokens = Some(args.next().and_then(|v| app::parse_tokens(&v)).ok_or("--context needs a size, e.g. 32768 or 32k")?)
             }
             "--ref" => refs.push(args.next().ok_or("--ref needs a path")?),
             "--resume" => {
@@ -101,7 +115,7 @@ fn parse_args() -> Result<Options, String> {
             context_tokens,
             model: None,
             approval,
-            session_dir: home().map(|h| h.join(".makepad/code/sessions")),
+            session_dir: state_home().map(|h| h.join(".makepad/code/sessions")),
         },
         print,
         refs,
@@ -109,10 +123,20 @@ fn parse_args() -> Result<Options, String> {
     })
 }
 
+#[cfg(unix)]
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
 }
 
+/// The home folder Code keeps its own state below (`.makepad/code`), the app's rule
+/// (its `state_home`), so a test home's app and CLI share their sessions: an absolute
+/// `MAKEPAD_TEST_HOME`, else [`home`].
+#[cfg(unix)]
+fn state_home() -> Option<PathBuf> {
+    std::env::var_os("MAKEPAD_TEST_HOME").map(PathBuf::from).filter(|h| h.is_absolute()).or_else(home)
+}
+
+#[cfg(unix)]
 fn main() {
     let options = match parse_args() {
         Ok(o) => o,
@@ -130,9 +154,10 @@ fn main() {
 }
 
 /// The full session in a terminal: raw keys, the live prompt.
+#[cfg(unix)]
 fn run_interactive(options: Options) -> i32 {
     // The agent's and the hub's diagnostics go to a log, not over the prompt.
-    let dir = home().map(|h| h.join(".makepad/code"));
+    let dir = state_home().map(|h| h.join(".makepad/code"));
     let old_stderr = dir.as_ref().and_then(|d| {
         let _ = std::fs::create_dir_all(d);
         term::redirect_stderr(&d.join("cli.log"))
@@ -189,6 +214,7 @@ fn run_interactive(options: Options) -> i32 {
 }
 
 /// Lines in, plain rows out: pipes, scripts and `-p`.
+#[cfg(unix)]
 fn run_lines(options: Options) -> i32 {
     let tty_out = term::is_tty(1);
     let style = render::Style::detect(tty_out);
@@ -253,6 +279,7 @@ fn run_lines(options: Options) -> i32 {
 }
 
 /// A panic puts the terminal back before the message.
+#[cfg(unix)]
 fn install_panic_hook(old_stderr: Option<i32>) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -268,4 +295,12 @@ fn install_panic_hook(old_stderr: Option<i32>) {
         }
         default(info);
     }));
+}
+
+/// The terminal layer is termios and Unix file descriptors (`term`): there is no
+/// console port, so the binary says so rather than failing to build.
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("makepad-code: the terminal CLI needs a Unix terminal (termios: Linux or macOS); it is not supported on Windows");
+    std::process::exit(1);
 }

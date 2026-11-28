@@ -117,7 +117,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(makepad_widgets::script_mod);
-        let vm_id = cx.alloc_splash_vm_with_network(false);
+        let vm_id = cx.alloc_splash_vm_with_grants(HostGrants::LOCAL_RESOURCES, None);
         let storage = cx.storage("weather.test");
         let (replies, _upstream) = ReplySink::pair();
         let handles = InstanceHandles {
@@ -137,8 +137,8 @@ mod tests {
 
         // Full is the default face; the host asks for the tile the same
         // way it asks a standalone window, over `Event::Custom`. The
-        // isolate has no network (`alloc_splash_vm_with_network(false)`)
-        // and needs none: the forecast is generated in-process.
+        // isolate has only the local resource grant. It generates its
+        // forecast in-process.
         let entry = enter_isolate(&mut cx, vm_id);
         root.handle_event(&mut cx, &Event::Custom(HostedViewMode::Tile.to_json()), &mut Scope::empty());
         leave_isolate(&mut cx, entry);
