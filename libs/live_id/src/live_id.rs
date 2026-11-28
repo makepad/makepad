@@ -20,7 +20,7 @@ impl LiveIdInterner {
         self.id_to_string.contains_key(&LiveId::from_str(val))
     }
 
-    pub fn with<F, R>(f: F) -> R
+    pub(crate) fn with<F, R>(f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
     {
@@ -74,7 +74,7 @@ thread_local! {
     /// without the table's lock. Every identifier a lexer reads asks the table; with its one
     /// lock, 16 threads lexing a 140 KB text at once took 42 ms each, one alone 2.9 ms; with
     /// these, 3.9 ms each (11-07).
-    static KNOWN_NAMES: std::cell::RefCell<(u64, LiveIdMap<LiveId, Box<str>>)> = std::cell::RefCell::new((0, LiveIdMap::default()));
+    static KNOWN_NAMES: std::cell::RefCell<(u64, LiveIdMap<LiveId, String>)> = std::cell::RefCell::new((0, LiveIdMap::default()));
 }
 
 /// `f` of `id`'s name as this thread found it in the table, if it did and no name was replaced
@@ -105,11 +105,29 @@ fn remember_name(id: LiveId, name: &str, replaced: u64) {
     relax_api::process_heap(|| {
         let _ = KNOWN_NAMES.try_with(|known| {
             let mut known = known.borrow_mut();
-            if known.0 == replaced {
-                known.1.insert(id, name.into());
+            if known.0 == replaced && known.1.try_reserve(1).is_ok() {
+                if let Some(copy) = try_copy_name(name) {
+                    known.1.insert(id, copy);
+                }
             }
         });
     })
+}
+
+fn try_copy_name(name: &str) -> Option<String> {
+    let mut copy = String::new();
+    copy.try_reserve_exact(name.len()).ok()?;
+    copy.push_str(name);
+    Some(copy)
+}
+
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NameInsert {
+    Recorded,
+    Collision,
+    Refused,
 }
 
 #[relax_api(plain)]
@@ -273,6 +291,27 @@ impl LiveId {
             }
             remember_name(id, id_str, replaced);
             true
+        })
+    }
+
+    /// Records a name without replacing an existing spelling. A refused grow leaves the id unnamed.
+    #[relax_api]
+    pub fn lut_try_insert(id: LiveId, id_str: &str) -> NameInsert {
+        let compare = |name: &str| if name == id_str { NameInsert::Recorded } else { NameInsert::Collision };
+        if let Some(result) = known_name(id, compare) {
+            return result;
+        }
+        LiveIdInterner::with(|table| {
+            let names = &mut table.id_to_string;
+            if let Some(stored) = names.get(&id) {
+                return compare(stored);
+            }
+            if names.try_reserve(1).is_err() {
+                return NameInsert::Refused;
+            }
+            let Some(copy) = try_copy_name(id_str) else { return NameInsert::Refused };
+            names.insert(id, copy);
+            NameInsert::Recorded
         })
     }
 

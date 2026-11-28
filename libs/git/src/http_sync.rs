@@ -888,6 +888,16 @@ pub fn unpack_pack(
     }).collect())
 }
 
+/// Import a fetch into an existing object store, resolving thin deltas there.
+pub(crate) fn import_fetch_pack(
+    repo: &mut Repository,
+    pack: &[u8],
+    hooks: &mut dyn HttpSyncHooks,
+) -> Result<(), GitError> {
+    import_pack(&repo.common_dir.clone(), pack, Some(repo), false, hooks)?;
+    Ok(())
+}
+
 fn import_pack(
     git_dir: &Path,
     pack_data: &[u8],

@@ -205,7 +205,19 @@ fn handle_stamp(_file: &std::fs::File, meta: &std::fs::Metadata) -> Stamp {
 const O_NOFOLLOW: i32 = 0x0100;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 const O_NONBLOCK: i32 = 0x0004;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+// Linux's O_NOFOLLOW differs by architecture: arm, aarch64, powerpc and
+// powerpc64 use 0o100000 (where 0o400000 is O_LARGEFILE on arm/aarch64
+// and O_DIRECT on powerpc); x86, x86_64, riscv and loongarch use the
+// generic 0o400000.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(target_arch = "aarch64", target_arch = "arm", target_arch = "powerpc", target_arch = "powerpc64")
+))]
+const O_NOFOLLOW: i32 = 0o100000;
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(target_arch = "aarch64", target_arch = "arm", target_arch = "powerpc", target_arch = "powerpc64"))
+))]
 const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const O_NONBLOCK: i32 = 0o4000;
@@ -1045,6 +1057,37 @@ mod tests {
             }]
         );
         assert_eq!(settler.pending(), 0);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn open_no_follow_refuses_a_symlink_and_opens_a_regular_file() {
+        use std::io::Read;
+
+        let dir = std::env::temp_dir().join(format!(
+            "fswatch-nofollow-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("target");
+        let link = dir.join("link");
+        let contents = b"watched bytes";
+        std::fs::write(&target, contents).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let link_open = open_no_follow(&link);
+        let target_open = open_no_follow(&target);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let error = link_open.expect_err("opening a symlink must fail");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(error.raw_os_error(), Some(40), "expected ELOOP");
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        assert_eq!(error.raw_os_error(), Some(62), "expected ELOOP");
+        let mut bytes = Vec::new();
+        target_open.expect("open regular file").read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.as_slice(), contents, "regular file contents");
     }
 
     #[test]

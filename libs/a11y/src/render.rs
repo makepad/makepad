@@ -21,7 +21,7 @@ fn quote(s: &str, max: usize) -> String {
 pub fn node_line(n: &Node) -> String {
     let mut s = format!("#{} {}", n.id.short(), n.role.short());
     if !n.name.is_empty() {
-        let _ = write!(s, " {}", quote(&n.name, 60));
+        let _ = write!(s, " {}", quote(&n.name, usize::MAX));
     }
     let value = if !n.value.is_empty() { Some(n.value.as_str()) } else { n.text.as_ref().map(|t| t.content.as_str()).filter(|c| !c.is_empty() && *c != n.name) };
     if let Some(v) = value {

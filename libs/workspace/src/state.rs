@@ -9,7 +9,7 @@
 
 use makepad_widgets_data::dock::DockItem;
 use makepad_widgets_core::makepad_micro_serde::*;
-use makepad_widgets_core::makepad_platform::home::makepad_home;
+use makepad_widgets_core::makepad_platform::home::app_state_home;
 use makepad_widgets_core::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -56,7 +56,7 @@ impl Args {
     pub fn state_dir(&self) -> PathBuf {
         self.state_dir
             .clone()
-            .unwrap_or_else(|| makepad_home().join(self.app))
+            .unwrap_or_else(|| app_state_home().join(self.app))
     }
 }
 

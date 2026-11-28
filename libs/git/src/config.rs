@@ -221,6 +221,14 @@ pub fn get(text: &str, key: &str) -> Result<Option<String>, GitError> {
     Ok(parse(text).entries.into_iter().rev().find(|e| e.name == name && matches(&e.section, &e.subsection, &section, &sub)).map(|e| e.value.unwrap_or_else(|| "true".into())))
 }
 
+/// `(subsection, value)` of every `<section>.<subsection>.<name>` entry, in file order: the lists
+/// git reads by subsection, such as `url.<base>.insteadOf`.
+pub fn subsection_values(text: &str, section: &str, name: &str) -> Vec<(String, String)> {
+    let (section, name) = (section.to_ascii_lowercase(), name.to_ascii_lowercase());
+    parse(text).entries.into_iter().filter(|e| e.section == section && e.name == name)
+        .filter_map(|e| Some((e.subsection?, e.value.unwrap_or_else(|| "true".into())))).collect()
+}
+
 /// A boolean as git reads one (`true`/`yes`/`on`/`1`, `false`/`no`/`off`/`0`/empty).
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {

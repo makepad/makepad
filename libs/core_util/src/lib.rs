@@ -10,12 +10,15 @@
 //!   flushes, then `_exit`, natively and under the JIT alike.
 //! - [`blocking`]: a blocking wait that holds no CPU, through the host's hook.
 //! - [`once`]: a value computed once whose other askers wait off the CPU.
+//! - [`node_label`]: a service URL's host, and a machine name for people
+//!   (`node 42`, `this machine`) that never shows a raw address.
 //!
 //! Nothing here knows about assets, flows, models or any application.
 
 pub mod blocking;
 pub mod file_name;
 pub mod netif;
+pub mod node_label;
 pub mod once;
 pub mod process_end;
 pub mod sha256;

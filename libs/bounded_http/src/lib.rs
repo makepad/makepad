@@ -188,6 +188,22 @@ impl Transport for TcpStream {
     }
 }
 
+/// Wake a reader in [`Conn::next_request`]'s idle slice on Unix. The read
+/// returns EOF, leaving the write half open to finish an in-flight response.
+///
+/// On Windows, SD_RECEIVE does not wake a receive that is already blocked.
+/// Rust's `close_read_wakes_up` test in `library/std/src/net/tcp/tests.rs`
+/// skips Windows for that reason. Idle reads there still end at the next
+/// 250 ms slice. A stop event per plane with WSAEventSelect is queued for
+/// the architect.
+pub fn wake_idle_read(stream: &TcpStream) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let wake = |socket: &TcpStream| socket.shutdown(std::net::Shutdown::Read);
+    #[cfg(not(unix))]
+    let wake = |_: &TcpStream| Ok(());
+    wake(stream)
+}
+
 pub struct Conn<S: Transport = TcpStream> {
     stream: S,
     buf: Vec<u8>,

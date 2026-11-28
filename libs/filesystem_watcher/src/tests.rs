@@ -1,8 +1,12 @@
 //! Headless watcher tests against a temporary directory on the host OS.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use super::*;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::sync::mpsc;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::time::Duration;
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn scratch(tag: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -20,6 +24,7 @@ fn scratch(tag: &str) -> PathBuf {
 
 /// Wait for an event whose path ends with `name` (or the root itself when
 /// `name` is empty) and satisfies `accept`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn wait_for(
     rx: &mpsc::Receiver<FileSystemEvent>,
     seen: &mut Vec<FileSystemEvent>,

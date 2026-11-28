@@ -2,7 +2,7 @@
 //! presentations of one live workspace and by the zoomable tasks view. A
 //! presenter changes geometry and input coordinates; it never owns
 //! documents, processes or Dock items.
-pub use makepad_canvas::{Camera, ORIGIN};
+pub use makepad_canvas::Camera;
 use makepad_widgets_core::*;
 
 /// What a presentation shows of its whole space: the map bounds and, when

@@ -308,6 +308,64 @@ fn alternates_are_resolved_relative_to_the_common_objects_dir() {
 }
 
 #[test]
+fn inaccessible_alternate_errors_instead_of_object_not_found() {
+    let (base, main, _wt, local_commit, _) = fixture(false);
+    let objects = main.join(".git/objects");
+    fs::create_dir_all(objects.join("info")).unwrap();
+    let alternates = objects.join("info/alternates");
+    let file = base.path().join("regular-file");
+    fs::write(&file, b"").unwrap();
+    fs::write(&alternates, format!("{}\n", file.display())).unwrap();
+    let missing = ObjectId::from_hex("0123456789012345678901234567890123456789").unwrap();
+    let mut repo = Repository::open(&main).unwrap();
+    assert!(matches!(repo.read_commit(&missing), Err(GitError::Io(_))));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestoreAccess<'a>(&'a Path);
+        impl Drop for RestoreAccess<'_> {
+            fn drop(&mut self) {
+                fs::set_permissions(self.0, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+
+        let gate = base.path().join("gate");
+        let alt = gate.join("alt");
+        let mut alt_repo = init_repo(&alt);
+        let (alt_commit, _) = commit(&mut alt_repo, &[], vec![], "alternate\n");
+        fs::write(&alternates, format!("{}\n", alt.join(".git/objects").display())).unwrap();
+        assert_eq!(repo.read_commit(&alt_commit).unwrap().message, "alternate\n");
+
+        let restore = RestoreAccess(&gate);
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::metadata(&alt).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
+            let mut fresh = Repository::open(&main).unwrap();
+            assert!(matches!(fresh.read_commit(&alt_commit), Err(GitError::Io(_))));
+            assert!(matches!(repo.read_commit(&alt_commit), Err(GitError::Io(_))));
+        }
+        drop(restore);
+        assert_eq!(repo.read_commit(&alt_commit).unwrap().message, "alternate\n");
+
+        // A cached, empty pack list must also report a listing failure on a miss.
+        let pack = objects.join("pack");
+        fs::create_dir_all(&pack).unwrap();
+        let restore = RestoreAccess(&pack);
+        fs::set_permissions(&pack, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&pack).is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied) {
+            assert!(matches!(repo.read_commit(&missing), Err(GitError::Io(_))));
+        }
+        drop(restore);
+        assert!(matches!(repo.read_commit(&missing), Err(GitError::ObjectNotFound(_))));
+    }
+
+    fs::write(&alternates, format!("{}\n", base.path().join("gone").display())).unwrap();
+    let mut repo = Repository::open(&main).unwrap();
+    repo.open_packs().unwrap();
+    assert!(repo.read_commit(&local_commit).is_ok());
+}
+
+#[test]
 fn index_is_private_while_staged_blobs_are_shared() {
     let (_base, main, wt, _feature, private) = fixture(false);
     fs::write(wt.join("new.txt"), "staged in the worktree\n").unwrap();

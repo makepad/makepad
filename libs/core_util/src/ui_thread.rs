@@ -1,9 +1,11 @@
 //! Identifies threads that run a user interface and counts work that belongs on a worker.
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
+    static THREAD_HITS: RefCell<BTreeMap<&'static str, usize>> = const { RefCell::new(BTreeMap::new()) };
     static UI_THREAD: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -14,6 +16,11 @@ pub fn mark_ui_thread() {
 
 pub fn is_ui_thread() -> bool {
     UI_THREAD.get()
+}
+
+/// How often this operation has been reported on the calling thread.
+pub fn thread_hits(message: &str) -> usize {
+    THREAD_HITS.with_borrow(|hits| hits.get(message).copied().unwrap_or(0))
 }
 
 /// One counter per guarded operation. Only a violation touches the atomic.
@@ -28,7 +35,9 @@ impl WorkerOnly {
     }
 
     pub fn check(&'static self) {
-        if is_ui_thread() && self.hits.fetch_add(1, Ordering::Relaxed) == 0 {
+        if !is_ui_thread() { return; }
+        THREAD_HITS.with_borrow_mut(|hits| *hits.entry(self.message).or_default() += 1);
+        if self.hits.fetch_add(1, Ordering::Relaxed) == 0 {
             let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
             if reported.is_empty() {
                 crate::process_end::at_exit(end_run);

@@ -243,22 +243,15 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The makepad home directory (`MAKEPAD_HOME`, else the user home; a temp dir as a
-/// last resort).
+/// The app state home shared by Files and its disk maps.
 pub fn makepad_home() -> PathBuf {
-    // An empty MAKEPAD_HOME counts as unset: PathBuf::from("") would make
-    // every path below it relative to the current folder.
-    if let Some(home) = std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty()) {
-        return PathBuf::from(home);
-    }
+    // Browser storage keys have a fixed virtual home. The browser has no temp directory.
     #[cfg(target_arch = "wasm32")]
-    return PathBuf::from("/.makepad");
-    #[cfg(not(target_arch = "wasm32"))]
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".makepad")
+    if !std::env::var_os("MAKEPAD_TEST_HOME").is_some_and(|home| Path::new(&home).is_absolute()) {
+        return std::env::var_os("MAKEPAD_HOME").filter(|home| !home.is_empty())
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/.makepad"));
+    }
+    makepad_widgets_core::makepad_platform::home::app_state_home()
 }
 
 /// Containers, Mail, Messages, Safari, CloudStorage and Mobile Documents live,

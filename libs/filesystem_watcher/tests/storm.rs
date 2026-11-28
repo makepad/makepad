@@ -3,14 +3,22 @@
 
 use makepad_filesystem_watcher::settle::probe_file;
 use makepad_filesystem_watcher::{
-    FileProbe, FileSystemEvent, FileSystemEventKind, FileSystemWatcher, SettleConfig, Settlement,
-    Settler, WatchRoot,
+    FileProbe, FileSystemEvent, FileSystemEventKind, SettleConfig, Settlement, Settler,
 };
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::sync::mpsc::{self, Receiver};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -43,6 +51,7 @@ impl Drop for TempDir {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn p95_ms(mut samples: Vec<f64>) -> f64 {
     if samples.is_empty() {
         return 0.0;
@@ -52,6 +61,7 @@ fn p95_ms(mut samples: Vec<f64>) -> f64 {
     samples[idx.min(samples.len() - 1)]
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn start_watcher(roots: Vec<WatchRoot>) -> (FileSystemWatcher, Receiver<FileSystemEvent>) {
     let (tx, rx) = mpsc::channel();
     let watcher = FileSystemWatcher::start(roots, move |event| {
@@ -61,6 +71,7 @@ fn start_watcher(roots: Vec<WatchRoot>) -> (FileSystemWatcher, Receiver<FileSyst
     (watcher, rx)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn drain(rx: &Receiver<FileSystemEvent>, window: Duration) -> Vec<FileSystemEvent> {
     let deadline = Instant::now() + window;
     let mut out = Vec::new();
@@ -78,6 +89,7 @@ fn drain(rx: &Receiver<FileSystemEvent>, window: Duration) -> Vec<FileSystemEven
     out
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn collect_until(
     rx: &Receiver<FileSystemEvent>,
     timeout: Duration,
@@ -102,10 +114,12 @@ fn collect_until(
     seen
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_rescan_for(event: &FileSystemEvent, root: &Path) -> bool {
     matches!(&event.kind, FileSystemEventKind::RescanRequired { root: r, .. } if r == root)
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn file_kind_created_or_changed(event: &FileSystemEvent) -> bool {
     event.is_dir != Some(true)
         && matches!(

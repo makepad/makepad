@@ -223,43 +223,30 @@ pub fn resolve_commondir(git_dir: &Path) -> Result<PathBuf, GitError> {
     Ok(resolved)
 }
 
-/// Lexically remove `.` components and cancel `..` against a preceding
-/// normal component only; leading or unmatched `..` are kept. Used for paths
-/// that may not exist yet; existing paths go through `canonicalize`.
-fn normalize_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                let cancels = matches!(
-                    out.components().next_back(),
-                    Some(Component::Normal(_))
-                );
-                if cancels {
-                    out.pop();
-                } else {
-                    out.push("..");
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// Resolve one line of `objects/info/alternates`; relative entries are taken
-/// from the common `objects` directory. An existing destination resolves with
-/// filesystem semantics; a missing one keeps its unresolved shape.
-fn resolve_alternate(common_dir: &Path, line: &str) -> PathBuf {
+/// Resolve one alternate relative to the common objects directory. A missing
+/// alternate is skipped. An alternate that cannot be inspected is an error.
+fn resolve_alternate(common_dir: &Path, line: &str) -> Result<Option<PathBuf>, GitError> {
     let path = Path::new(line);
     let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
         common_dir.join("objects").join(path)
     };
-    joined.canonicalize().unwrap_or_else(|_| normalize_path(&joined))
+    let meta = match fs::metadata(&joined) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(GitError::io_at("inspect alternate", &joined, e)),
+    };
+    if !meta.is_dir() {
+        return Err(GitError::io_at(
+            "inspect alternate",
+            &joined,
+            std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory"),
+        ));
+    }
+    let dir = joined.canonicalize()
+        .map_err(|e| GitError::io_at("resolve alternate", &joined, e))?;
+    Ok(Some(dir))
 }
 
 /// Every place objects can come from: the common `objects` directory, the
@@ -305,10 +292,9 @@ pub(crate) fn object_sources(common_dir: &Path) -> Result<ObjectSources, GitErro
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let dir = resolve_alternate(common_dir, line);
-                if !dir.is_dir() {
+                let Some(dir) = resolve_alternate(common_dir, line)? else {
                     continue;
-                }
+                };
                 packs.extend(find_packs_in_objects_dir(&dir)?);
                 loose_dirs.push(dir.clone());
                 alternate_dirs.push(dir);
@@ -1305,65 +1291,15 @@ impl Repository {
     /// `git read-tree -u -m` does: only paths whose blob or mode differ are
     /// rewritten or removed, so unchanged files keep their timestamps, and a
     /// file that no longer matches `old_tree` is never overwritten. The index
-    /// is updated for exactly those paths. Nothing is refused for untracked
-    /// files; callers assert cleanliness first.
+    /// is updated under the same lock as the files. An untracked file in
+    /// the way of an addition is left alone.
     pub fn update_worktree(
         &mut self,
         old_tree: &ObjectId,
         new_tree: &ObjectId,
     ) -> Result<(), GitError> {
-        self.ensure_object_sources()?;
-        let old_files = self.flatten_tree_with_mode(old_tree)?;
-        let new_files = self.flatten_tree_with_mode(new_tree)?;
-        let mut removed: Vec<&String> = Vec::new();
-        let mut written: Vec<(&String, ObjectId, u32)> = Vec::new();
-        for (path, (oid, mode)) in &old_files {
-            if !new_files.contains_key(path) {
-                removed.push(path);
-                let _ = (oid, mode);
-            }
-        }
-        for (path, (oid, mode)) in &new_files {
-            if old_files.get(path) != Some(&(*oid, *mode)) {
-                written.push((path, *oid, *mode));
-            }
-        }
-        // Refuse before touching anything: every path we would replace or
-        // delete must be a safe worktree path (no "..", ".git", separators
-        // in a name, or symlinked parent folder) and must still hold its
-        // old content.
-        for path in removed.iter().copied().chain(written.iter().map(|(p, _, _)| *p)) {
-            let file = worktree::checked_worktree_path(&self.workdir, path)?;
-            if let Some((old_oid, _)) = old_files.get(path) {
-                if file.is_file() && worktree::hash_file_blob(&file)? != *old_oid {
-                    return Err(GitError::InvalidObject(format!(
-                        "{path} was modified locally; the update would overwrite it"
-                    )));
-                }
-            }
-        }
-        removed.sort();
-        written.sort_by(|a, b| a.0.cmp(b.0));
-        let mut index = self.read_index()?;
-        for path in &removed {
-            let file = worktree::checked_worktree_path(&self.workdir, path)?;
-            if file.is_file() {
-                fs::remove_file(&file)?;
-            }
-            worktree::unstage_file(&mut index, path);
-            if let Some(parent) = file.parent() {
-                worktree::remove_empty_dirs(parent, &self.workdir);
-            }
-        }
-        for (path, oid, mode) in &written {
-            let data = self.read_blob(oid)?;
-            let entry = worktree::write_worktree_file(&self.workdir, path, *oid, *mode, &data)?;
-            match index.entries.binary_search_by(|e| e.path.cmp(&entry.path)) {
-                Ok(at) => index.entries[at] = entry,
-                Err(at) => index.entries.insert(at, entry),
-            }
-        }
-        self.write_index(&index)
+        let lock = crate::index::IndexLock::acquire(&self.git_dir)?;
+        crate::follow::Checkout::prepare(self, lock, old_tree, new_tree)?.apply()
     }
 
     /// Flatten a tree into `path -> (oid, mode)` using the shared object store.
@@ -1701,7 +1637,7 @@ impl Repository {
     fn packs_moved(&mut self) -> bool {
         let Some(packs) = &self.packs else { return false };
         let read: std::collections::BTreeSet<std::ffi::OsString> = packs.iter().filter_map(|p| p.pack_path.with_extension("idx").file_name().map(|n| n.to_os_string())).collect();
-        if pack_index_names(&self.common_dir) == read {
+        if pack_index_names(&self.common_dir).as_ref() == Some(&read) {
             return false;
         }
         self.packs = None;
@@ -1739,16 +1675,35 @@ impl Repository {
 
 /// The pack indexes on disk by file name (a pack is named by its content's hash): the store's and
 /// each alternate's, as [`object_sources`] reads them.
-fn pack_index_names(common_dir: &Path) -> std::collections::BTreeSet<std::ffi::OsString> {
+fn pack_index_names(common_dir: &Path) -> Option<std::collections::BTreeSet<std::ffi::OsString>> {
     let primary = common_dir.join("objects");
     let mut dirs = vec![primary.clone()];
-    if let Ok(content) = fs::read_to_string(primary.join("info").join("alternates")) {
-        dirs.extend(content.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| resolve_alternate(common_dir, l)));
+    match fs::read_to_string(primary.join("info").join("alternates")) {
+        Ok(content) => {
+            for line in content.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+                if let Some(dir) = resolve_alternate(common_dir, line).ok()? {
+                    dirs.push(dir);
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
     }
-    dirs.iter().filter_map(|d| fs::read_dir(d.join("pack")).ok()).flatten().flatten()
-        .map(|e| e.file_name())
-        .filter(|n| Path::new(n).extension().is_some_and(|x| x == "idx"))
-        .collect()
+    let mut names = std::collections::BTreeSet::new();
+    for dir in dirs {
+        let entries = match fs::read_dir(dir.join("pack")) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        for entry in entries {
+            let name = entry.ok()?.file_name();
+            if Path::new(&name).extension().is_some_and(|ext| ext == "idx") {
+                names.insert(name);
+            }
+        }
+    }
+    Some(names)
 }
 
 /// The packs' error when they did not open and the object is no loose one either: both said

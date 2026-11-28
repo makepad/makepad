@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::GitError;
 use crate::oid::ObjectId;
@@ -244,37 +244,55 @@ pub fn write_index_durable(git_dir: &Path, index: &Index) -> Result<(), GitError
 }
 
 fn write_index_inner(git_dir: &Path, index: &Index, durable: bool) -> Result<(), GitError> {
-    let data = serialize_index(index)?;
-    let index_path = git_dir.join("index");
-    let lock_path = git_dir.join("index.lock");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                GitError::InvalidIndex(format!(
-                    "{} is locked: another git writes it ({} exists)",
-                    index_path.display(),
-                    lock_path.display()
-                ))
-            } else {
-                GitError::io_at("create", &lock_path, e)
-            }
-        })?;
-    let written = file.write_all(&data).and_then(|_| if durable { file.sync_all() } else { Ok(()) });
-    drop(file);
-    if let Err(e) = written {
-        let _ = fs::remove_file(&lock_path);
-        return Err(GitError::io_at("write", &lock_path, e));
+    IndexLock::acquire(git_dir)?.commit(index, durable)
+}
+
+/// Owns index.lock from the first checkout check until the index is published.
+pub(crate) struct IndexLock {
+    path: PathBuf,
+    file: fs::File,
+    published: bool,
+}
+
+impl IndexLock {
+    pub(crate) fn acquire(git_dir: &Path) -> Result<Self, GitError> {
+        let path = git_dir.join("index.lock");
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&path)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    GitError::InvalidIndex(format!("index is locked ({} exists)", path.display()))
+                } else {
+                    GitError::io_at("create", &path, e)
+                }
+            })?;
+        Ok(Self { path, file, published: false })
     }
-    if let Err(e) = fs::rename(&lock_path, &index_path) {
-        let _ = fs::remove_file(&lock_path);
-        return Err(GitError::io_at("rename", &lock_path, e));
+
+    pub(crate) fn commit(mut self, index: &Index, durable: bool) -> Result<(), GitError> {
+        self.file.write_all(&serialize_index(index)?)
+            .map_err(|e| GitError::io_at("write", &self.path, e))?;
+        if durable {
+            self.file.sync_all().map_err(|e| GitError::io_at("sync", &self.path, e))?;
+        }
+        fs::rename(&self.path, self.path.with_file_name("index"))
+            .map_err(|e| GitError::io_at("rename", &self.path, e))?;
+        self.published = true;
+        #[cfg(unix)]
+        if durable {
+            let dir = self.path.parent().unwrap();
+            fs::File::open(dir).and_then(|d| d.sync_all())
+                .map_err(|e| GitError::io_at("sync", dir, e))?;
+        }
+        Ok(())
     }
-    #[cfg(unix)]
-    if durable { fs::File::open(git_dir).and_then(|d| d.sync_all()).map_err(|e| GitError::io_at("sync", git_dir, e))?; }
-    Ok(())
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Serialize an index to binary v2 format.

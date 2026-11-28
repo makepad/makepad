@@ -1143,6 +1143,83 @@ pub fn format_unified_diff(diff: &FileDiff, context_lines: usize) -> String {
     output
 }
 
+/// Format a bounded diff against the two texts it indexed. An exhausted
+/// search already describes its unmatched middle as a replacement.
+pub fn format_bounded_unified_diff(
+    diff: &BoundedDiff,
+    old_text: &str,
+    new_text: &str,
+    path: Option<&str>,
+    context_lines: usize,
+) -> String {
+    // Gaps between equal runs are replacements (possibly empty on one side).
+    // Myers compares content only. If just one side of a match has no
+    // terminator, include that line in the replacement too, even on append.
+    let mut changes = Vec::new();
+    let (mut old_at, mut new_at) = (0, 0);
+    let end = (diff.old.len(), diff.new.len(), 0);
+    for (old, new, len) in diff.equal_runs().chain(std::iter::once(end)) {
+        if old_at != old || new_at != new {
+            changes.push((old_at..old, new_at..new));
+        }
+        old_at = old + len;
+        new_at = new + len;
+        if len > 0 && (diff.old.lines[old_at - 1].ending == LineEnding::None)
+            != (diff.new.lines[new_at - 1].ending == LineEnding::None)
+        {
+            old_at -= 1;
+            new_at -= 1;
+        }
+    }
+    let mut output = String::new();
+    if changes.is_empty() {
+        return output;
+    }
+    if let Some(path) = path {
+        output.push_str(&format!("--- a/{path}\n+++ b/{path}\n"));
+    }
+
+    // Consecutive replacements share a hunk when their context touches.
+    for hunk in changes.chunk_by(|(a, _), (b, _)| b.start - a.end <= context_lines.saturating_mul(2)) {
+        let (first_old, first_new) = &hunk[0];
+        let (last_old, last_new) = &hunk[hunk.len() - 1];
+        let before = context_lines.min(first_old.start).min(first_new.start);
+        let after = context_lines.min(diff.old.len() - last_old.end).min(diff.new.len() - last_new.end);
+        let old_start = first_old.start - before;
+        let new_start = first_new.start - before;
+        let old_count = last_old.end + after - old_start;
+        let new_count = last_new.end + after - new_start;
+        let old_line = old_start + usize::from(old_count != 0);
+        let new_line = new_start + usize::from(new_count != 0);
+        output.push_str(&format!("@@ -{old_line},{old_count} +{new_line},{new_count} @@\n"));
+
+        let mut emit = |prefix, text: &str, lines: &[LineRecord]| {
+            for line in lines {
+                output.push(prefix);
+                output.push_str(&text[line.full()]);
+                if line.ending == LineEnding::None {
+                    output.push_str("\n\\ No newline at end of file\n");
+                }
+            }
+        };
+        let mut old_at = old_start;
+        for (old, new) in hunk {
+            emit(' ', old_text, &diff.old.lines[old_at..old.start]);
+            emit('-', old_text, &diff.old.lines[old.clone()]);
+            emit('+', new_text, &diff.new.lines[new.clone()]);
+            old_at = old.end;
+        }
+        emit(' ', old_text, &diff.old.lines[old_at..old_at + after]);
+    }
+    output
+}
+
+/// Generate a unified patch using the default bounded Myers search.
+pub fn unified_diff(old_text: &str, new_text: &str, path: Option<&str>, context_lines: usize) -> String {
+    let diff = diff_lines_with_limits(old_text, new_text, &DiffLimits::default());
+    format_bounded_unified_diff(&diff, old_text, new_text, path, context_lines)
+}
+
 struct Hunk {
     old_start: usize,
     old_count: usize,
@@ -1673,6 +1750,24 @@ mod tests {
             assert_eq!(d.old.len(), old.lines().count());
             assert_eq!(d.new.len(), new.lines().count());
         }
+    }
+
+    #[test]
+    fn bounded_unified_diff_formats_empty_sides_and_missing_newline() {
+        assert_eq!(unified_diff("same", "same", Some("file"), 3), "");
+        assert_eq!(unified_diff("", "a\nb\n", Some("src/file"), 3),
+            "--- a/src/file\n+++ b/src/file\n@@ -0,0 +1,2 @@\n+a\n+b\n");
+        assert_eq!(unified_diff("a\nb\n", "", None, 3), "@@ -1,2 +0,0 @@\n-a\n-b\n");
+        assert_eq!(unified_diff("a\nb", "a\nb\n", None, 3),
+            "@@ -1,2 +1,2 @@\n a\n-b\n\\ No newline at end of file\n+b\n");
+        assert_eq!(unified_diff("a\nb\n", "a\nb", None, 0),
+            "@@ -2,1 +2,1 @@\n-b\n+b\n\\ No newline at end of file\n");
+        assert_eq!(unified_diff("a", "a\nb", None, 0),
+            "@@ -1,1 +1,2 @@\n-a\n\\ No newline at end of file\n+a\n+b\n\\ No newline at end of file\n");
+        assert_eq!(unified_diff("a\r\nb\r\nc\r\ntail", "a\r\nx\r\nb\r\ntail", None, 0),
+            "@@ -1,0 +2,1 @@\n+x\r\n@@ -3,1 +3,0 @@\n-c\r\n");
+        assert_eq!(unified_diff("a\r\nb\r\nc\r\ntail", "a\r\nx\r\nb\r\ntail", None, 1),
+            "@@ -1,4 +1,4 @@\n a\r\n+x\r\n b\r\n-c\r\n tail\n\\ No newline at end of file\n");
     }
 
     #[test]
