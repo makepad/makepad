@@ -482,7 +482,7 @@ fn data_of(u: &Unit, id: u32) -> Option<(Vec<u8>, u64, u64)> {
         }
         SymKind::Static(d) => {
             let start = u.syms.addr(Sym::new(id));
-            let (_, &(d2, size)) = u.static_spans.range(..=start).next_back()?;
+            let (_, d2, size) = u.syms.static_span_containing(start)?;
             if d2 != d {
                 return None;
             }

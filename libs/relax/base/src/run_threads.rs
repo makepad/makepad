@@ -12,8 +12,8 @@ use relax_session::sync::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// The threads running now: (token, name).
-static LIVE: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+/// The threads running now: (token, name, requested stack size in bytes).
+static LIVE: Mutex<Vec<(u64, String, usize)>> = Mutex::new(Vec::new());
 /// Signalled when a thread ends, and when the run begins to end.
 static CHANGED: Condvar = Condvar::new();
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -21,7 +21,7 @@ static ENDING: AtomicBool = AtomicBool::new(false);
 /// What each kind of thread that waits on something of its own needs to be woken (`on_end`).
 static WAKE: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
 
-fn live() -> relax_session::sync::MutexGuard<'static, Vec<(u64, String)>> {
+fn live() -> relax_session::sync::MutexGuard<'static, Vec<(u64, String, usize)>> {
     LIVE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -55,32 +55,34 @@ impl Drop for Running {
     }
 }
 
-/// Starts a thread of the run. One started while the run ends is one more `end_all` waits for.
+/// Starts a thread of the run on [`COMPILER_STACK`]. One started while the run ends is one more
+/// `end_all` waits for.
 pub fn spawn<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<std::thread::JoinHandle<T>> {
-    start(name, None, f)
+    start(name, COMPILER_STACK, f)
 }
 
-/// The stack of a compiler thread (the owner, the check workers, the parse and pool workers): the
-/// parser, the expander, typeck and lowering recurse once per nesting level of the source, so
-/// how deep a program may nest never depends on which of them took its work. Address space
-/// only: a thread commits what it touches.
-pub const COMPILER_STACK: usize = 256 << 20;
+/// The stack of a compiler thread (the owner, the check, parse and pool workers, and every run
+/// thread started via [`spawn`]). The parser, expander, typeck, borrowck and lowering recurse once
+/// per nesting level of the source, so how deep a program may nest never depends on which thread
+/// took its work. A thread commits only the pages it touches.
+pub const COMPILER_STACK: usize = if cfg!(target_pointer_width = "64") { 256 << 20 } else { 16 << 20 };
 
 /// `spawn`, with a stack of `stack` bytes.
 pub fn spawn_sized<T: Send + 'static>(name: &str, stack: usize, f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<std::thread::JoinHandle<T>> {
-    start(name, Some(stack), f)
+    start(name, stack, f)
 }
 
-fn start<T: Send + 'static>(name: &str, stack: Option<usize>, f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<std::thread::JoinHandle<T>> {
+/// Snapshot of live run threads and their requested stack sizes in bytes.
+pub fn live_stacks() -> Vec<(String, usize)> {
+    live().iter().map(|(_, name, stack)| (name.clone(), *stack)).collect()
+}
+
+fn start<T: Send + 'static>(name: &str, stack: usize, f: impl FnOnce() -> T + Send + 'static) -> std::io::Result<std::thread::JoinHandle<T>> {
     let _k = zone_alloc::kept();
     let token = NEXT.fetch_add(1, Ordering::Relaxed);
-    live().push((token, name.to_string()));
+    live().push((token, name.to_string(), stack));
     let running = Running(token);
-    let mut builder = std::thread::Builder::new().name(name.to_string());
-    if let Some(stack) = stack {
-        builder = builder.stack_size(stack);
-    }
-    builder.spawn(move || {
+    std::thread::Builder::new().name(name.to_string()).stack_size(stack).spawn(move || {
         let _running = running;
         let _ending = Ending;
         f()
@@ -157,9 +159,55 @@ pub fn begin_run() {
 mod tests {
     use super::*;
 
-    /// (One test: `ENDING` is the process's.)
+    // These tests share the process's LIVE and ENDING.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn spawn_defaults_to_compiler_stack_and_records_size() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let h = spawn("stack-default-probe", move || {
+            let os_stack = crate::stack::thread_stack_size();
+            let reg = live_stacks();
+            tx.send((os_stack, reg)).unwrap();
+            let _ = go_rx.recv();
+        }).unwrap();
+        let (os_stack, reg) = rx.recv().unwrap();
+        go_tx.send(()).unwrap();
+        h.join().unwrap();
+
+        assert!(reg.iter().any(|(n, s)| n == "stack-default-probe" && *s == COMPILER_STACK),
+            "default spawn must register COMPILER_STACK in LIVE: {reg:?}");
+        if let Some(bytes) = os_stack {
+            // Windows excludes its guard region from the usable stack size.
+            let min = COMPILER_STACK.saturating_sub(1 << 20);
+            assert!(bytes >= min, "default spawn OS stack {bytes} < {min} (COMPILER_STACK={COMPILER_STACK})");
+        }
+
+        let small = 4 << 20;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = spawn_sized("stack-sized-probe", small, move || {
+            let os_stack = crate::stack::thread_stack_size();
+            let reg = live_stacks();
+            tx.send((os_stack, reg)).unwrap();
+        }).unwrap();
+        let (os_stack, reg) = rx.recv().unwrap();
+        h.join().unwrap();
+
+        assert!(reg.iter().any(|(n, s)| n == "stack-sized-probe" && *s == small),
+            "spawn_sized must register explicit size {small}: {reg:?}");
+        if let Some(bytes) = os_stack {
+            // Under Relax the thread runs on a separate program stack.
+            if !cfg!(relax) {
+                assert!(bytes < COMPILER_STACK, "spawn_sized(4 MiB) unexpectedly got {bytes}");
+            }
+        }
+    }
+
     #[test]
     fn a_run_ends_with_its_threads_and_says_which_stayed() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let started = Instant::now();
         let looper = spawn("looper", || {
             while sleep(Duration::from_secs(600)) {}

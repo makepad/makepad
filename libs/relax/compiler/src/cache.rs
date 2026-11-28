@@ -735,6 +735,14 @@ pub struct CacheStats {
     pub ids_ns: u64,
 }
 
+pub(crate) const OFF_OWNER_CACHE_MSG: &str =
+    "relax: off-owner lowering accessed Unit::cache (violates CacheCell Sync invariant)";
+
+pub(crate) fn is_off_owner_cache_panic(p: &(dyn std::any::Any + Send)) -> bool {
+    p.downcast_ref::<&str>().is_some_and(|s| *s == OFF_OWNER_CACHE_MSG)
+        || p.downcast_ref::<String>().is_some_and(|s| s == OFF_OWNER_CACHE_MSG)
+}
+
 /// Interior storage for the cache installed in a Unit. The owner thread protects
 /// every access. Linker borrows one operation at a time and holds only this cell's
 /// raw pointer across callbacks, which may recursively access the same cell.
@@ -744,7 +752,13 @@ pub struct CacheCell(std::cell::UnsafeCell<Cache>);
 unsafe impl Sync for CacheCell {}
 impl CacheCell {
     pub fn new(cache: Cache) -> Self { Self(std::cell::UnsafeCell::new(cache)) }
-    pub(crate) fn get(&self) -> *mut Cache { self.0.get() }
+    pub(crate) fn get(&self) -> *mut Cache {
+        if cfg!(debug_assertions) && crate::jit::lowering_ahead_active() {
+            eprintln!("{OFF_OWNER_CACHE_MSG}\n{}", std::backtrace::Backtrace::force_capture());
+            panic!("{OFF_OWNER_CACHE_MSG}");
+        }
+        self.0.get()
+    }
     pub(crate) fn into_inner(self) -> Cache { self.0.into_inner() }
 }
 impl std::ops::Deref for CacheCell {
@@ -926,6 +940,9 @@ pub struct Cache {
     /// interface fingerprints (cache/items.rs), per crate index: what code keys name; the bound
     /// crates of this program folded in (items::apply_bound)
     iface: Vec<u128>,
+    /// Interfaces paired with the boot fingerprints for stored owner verdicts. A live edit
+    /// can rekey `iface` until after the front write that publishes the reverted collection.
+    boot_iface: Vec<u128>,
     /// the same without the bound crates: what a collected image stores (run, check and
     /// check --boundary of one program bind different sets, the image is shared by all)
     iface_plain: Vec<u128>,
@@ -1120,6 +1137,9 @@ pub struct Cache {
     /// carries a fresh image
     image_slots: usize,
     image_stale: usize,
+    /// Slots kept after re-keying against changed crates. Refresh the loaded image once
+    /// so the next start can use the current crate fingerprints.
+    image_rekeyed: usize,
     /// how many of `manifest`'s slots are the startup manifest's own: the rest are its session tail
     /// (the slots the last quit's run installed past them, record_tail)
     manifest_main: usize,
@@ -1155,9 +1175,18 @@ pub struct Cache {
     rec_tier: HashMap<u128, u8>,
     /// the root crate whose manifest load_manifest read
     manifest_root: Option<u32>,
+    /// Generation of the store from which this run loaded the manifest.
+    manifest_store_gen: u64,
+    /// Held from the re-key refresh decision through the write of the manifest and its sources:
+    /// paired with `manifest_sources_key(key)` so `spill_take` transfers the lock only with the
+    /// spill that carries the refreshed manifest.
+    refresh_claim: Option<(u128, std::fs::File)>,
     /// slot -> the code entry its code was linked from this run (lazily or prelinked): the next
     /// manifest's image takes that entry
     linked_key: HashMap<u32, u128>,
+    /// Verified prelinks whose keys were never computed here. An exit refresh needs their
+    /// original crate dependencies to place them safely in the new image.
+    linked_crates: HashMap<u32, Vec<u32>>,
     /// slot keys by slot (fixed for a run)
     slot_keys: HashMap<u32, Option<u128>>,
     /// An unnamed image slot must not cache a failed key before its identity is decoded.
@@ -1477,6 +1506,7 @@ impl Cache {
             cur_sealed: false,
             cur_shared: false,
             iface: Vec::new(),
+            boot_iface: Vec::new(),
             iface_plain: Vec::new(),
             view: Vec::new(),
             late: Vec::new(),
@@ -1556,6 +1586,7 @@ impl Cache {
             manifest_len: 0,
             image_slots: 0,
             image_stale: 0,
+            image_rekeyed: 0,
             manifest_main: 0,
             written_ids: None,
             image_built: None,
@@ -1570,7 +1601,10 @@ impl Cache {
             image_starts_over: 0,
             rec_tier: HashMap::new(),
             manifest_root: None,
+            manifest_store_gen: 0,
+            refresh_claim: None,
             linked_key: HashMap::new(),
+            linked_crates: HashMap::new(),
             slot_keys: HashMap::new(),
             key_waits: false,
             ordinal_in_edits: false,
@@ -1634,6 +1668,7 @@ impl Cache {
         let provided: Vec<(u32, u64)> = from.provided.clone();
         c.bound = provided.clone();
         c.iface = items::apply_bound(prog, &c.iface_plain, &provided);
+        c.boot_iface = c.iface.clone();
         // the views (a restored collected program digests no file: its interfaces are restored)
         let mut view = items::crate_views(prog, &c.iface_plain, &deps::atomic_crates(prog, ncr));
         view.truncate(ncr);
@@ -2136,6 +2171,10 @@ impl Cache {
             return None;
         }
         let pending = std::mem::take(&mut self.pending);
+        let refresh_claim = self.refresh_claim.as_ref()
+            .is_some_and(|(key, _)| pending.iter().rev().any(|(_, e)| e.kind == KIND_MANIFEST && e.key == *key))
+            .then(|| self.refresh_claim.take().map(|(_, file)| file))
+            .flatten();
         self.pending_bytes = 0;
         let marks = front_run::run_marks();
         let late = crate::sip::late_inputs();
@@ -2168,7 +2207,7 @@ impl Cache {
             let stale = std::mem::replace(stale, false);
             files.push((path, stale, entries));
         }
-        Some(Spill { dir: self.dir.clone(), files, shared, marks })
+        Some(Spill { dir: self.dir.clone(), files, shared, marks, refresh_claim })
     }
 
     // ------------------------------------------------------------ stable identities
@@ -3264,6 +3303,7 @@ impl Cache {
             map("data_key", &self.data_key, |_| 0),
             set("linked", &self.linked), set("missed", &self.missed),
             map("linked_key", &self.linked_key, |_| 0),
+            map("linked_crates", &self.linked_crates, |v| v.capacity() * 4),
             map("slot_keys", &self.slot_keys, |_| 0),
             map("fnkey_bytes", &self.fnkey_bytes, |v| v.as_ref().map_or(0, |b| b.capacity())),
             map("slot_by_bytes", &self.slot_by_bytes, |_| 0),
@@ -3369,13 +3409,14 @@ impl Cache {
         let outer = self.enc_defs.replace(Vec::new());
         let outer_items = self.enc_closure_items.replace(Vec::new());
         let r = self.enc_fnkey(u, key, &mut e, &mut crates, 0);
-        // the allocator shim's callers call the program's #[global_allocator] (or the default):
-        // their code depends on it, which the fn's own identity does not show
+        // the allocator shim's callers call the program's #[global_allocator] (or the default),
+        // checked or not (Unit::routes_allocator): their code depends on both, which the fn's own
+        // identity does not show
         let mut shim = E::default();
         if key_defs(u, key).first().is_some_and(|&d| u.calls_allocator_shim(d)) {
             match u.global_allocator() {
                 Some((s, t)) => {
-                    shim.u8(1);
+                    shim.u8(1 + u.routes_allocator as u8);
                     self.enc_def(u, s, &mut shim, &mut crates);
                     self.enc_ty(u, t, &mut shim, &mut crates, 0)?;
                 }
@@ -3934,7 +3975,7 @@ impl Cache {
 
     pub fn owner_verdicts(&self, epoch: u64) -> OwnerVerdicts {
         let store = self.code_path.first().and_then(|p| self.stores.iter().find(|st| st.path == *p)).cloned();
-        OwnerVerdicts::new(self.cfg, self.fps.clone(), self.iface.clone(), epoch, store)
+        OwnerVerdicts::new(self.cfg, self.fps.clone(), self.boot_iface.clone(), epoch, store)
     }
 
     /// borrowck lane: definition `d`'s body in the seen-bodies index (its path and its text,
@@ -5037,6 +5078,7 @@ impl Cache {
         self.data_crates = old.data_crates.clone();
         self.linked = old.linked.clone();
         self.linked_key = old.linked_key.clone();
+        self.linked_crates = old.linked_crates.clone();
         self.base_linked = old.base_linked.clone();
         self.cert_rejected = old.cert_rejected.clone();
         self.pending_keys = old.pending_keys.clone();
@@ -5044,8 +5086,12 @@ impl Cache {
         self.pending_verdicts = old.pending_verdicts.clone();
         self.manifest_done = old.manifest_done;
         self.manifest_len = old.manifest_len;
+        self.manifest_store_gen = old.manifest_store_gen;
         self.written_ids = old.written_ids.clone();
         self.image_built = old.image_built.clone();
+        self.image_slots = old.image_slots;
+        self.image_stale = old.image_stale;
+        self.image_rekeyed = old.image_rekeyed;
         self.replaced = old.replaced.clone();
         self.collected_committed = true;
         self.stats = old.stats.clone();
@@ -5095,6 +5141,7 @@ impl Cache {
                     Some(present.min(n))
                 })();
                 if let Some(present) = ok {
+                    self.manifest_store_gen = pk.generation;
                     // the image section after the slot list (the store keeps the mapping alive)
                     if d.u32() == Some(IMAGE_MAGIC) {
                         let rest = &p[d.p..];
@@ -5154,6 +5201,34 @@ impl Cache {
         }
     }
 
+    /// Elect one writer among processes that prelinked the same image before its refresh.
+    /// A sibling may already have committed and released the lock since our manifest load.
+    fn claim_rekey_refresh(&mut self, root: u32, key: u128) -> bool {
+        let sources_key = self.manifest_sources_key(key);
+        if self.refresh_claim.as_ref().is_some_and(|(k, _)| *k == sources_key) {
+            return true;
+        }
+        self.refresh_claim = None;
+        let dir = self.dir.join("refresh");
+        if std::fs::create_dir_all(&dir).is_err() { return true; }
+        let path = dir.join(format!("{key:032x}.lock"));
+        let Ok(file) = std::fs::File::options().create(true).truncate(false).read(true).write(true).open(path) else { return true };
+        if file.try_lock().is_err() { return false; }
+        let store_path = &self.code_path[root as usize];
+        if crate::reload::edited_crates().is_empty() && crate::store::header_generation(store_path) != Some(self.manifest_store_gen) {
+            if let Some(st) = Store::open(store_path) {
+                if let Some((KIND_MANIFEST, p)) = st.get(sources_key) {
+                    let want = self.sources_fp();
+                    if want != 0 && (D { b: p, p: 0 }).u128() == Some(want) {
+                        return false; // dropping the file releases the lock
+                    }
+                }
+            }
+        }
+        self.refresh_claim = Some((sources_key, file));
+        true
+    }
+
     /// Records this run's startup manifest (the slots installed in the first seconds after main,
     /// in order, the first `present` of them before the first present; per slot its stable key
     /// encoding and the code entry it maps to, 0 when its code has none) unless the loaded one
@@ -5168,6 +5243,7 @@ impl Cache {
             self.manifest_done = true;
             self.manifest_len = order.len();
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         }
         let t0 = std::time::Instant::now();
@@ -5184,8 +5260,9 @@ impl Cache {
             }
         }
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
-        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && { let (r, n) = self.image_replaced(); r * 50 <= n }) {
+        if self.mode == Mode::ReadOnly || order.is_empty() || (self.manifest_done && order.len() <= self.manifest_len && !self.image_rewrite && !self.image_needs_rebuild()) {
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         }
         // at exit the slots' keys can no longer be made: after the mid-run manifest the exit
@@ -5194,11 +5271,13 @@ impl Cache {
         // an O2/O3 build replaced since stay lazy at the next start (image.rs img_live).
         if self.manifest_done && crate::preempt::is_stopped() {
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         }
         let Some(key) = self.manifest_key(root) else {
             self.manifest_done = true; self.manifest_len = order.len();
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         };
         // what earlier spills of this run wrote: the image takes those entries too (mid-run, as the
@@ -5207,6 +5286,25 @@ impl Cache {
             if self.verbose { eprintln!("relax cache: startup manifest waits for the stores a spill wrote since this write began"); }
             return false;
         }
+        if self.image_built.is_none() && self.image_rekeyed > 0 && !self.image_rewrite && self.mode == Mode::On && !self.claim_rekey_refresh(root, key) {
+            if self.verbose { eprintln!("relax cache: re-keyed startup image refresh skipped (already in flight or current on disk)"); }
+            self.image_rekeyed = 0;
+            if !self.image_needs_refresh() {
+                self.linked_crates.clear();
+                self.linked_crates.shrink_to_fit();
+            }
+        }
+        // an exit whose image could not replace the loaded one makes neither the keys nor the
+        // image: it leaves what the guard after the build leaves (a test binary's children: 556 of
+        // a suite's 571 exits built an image of the slots they keyed and dropped it, a median
+        // 135 ms each)
+        if let Some(k) = self.exit_image_bound() {
+            if self.verbose { eprintln!("relax cache: startup manifest kept: at exit an image could cover at most the {} slots this run keyed of the {} the loaded one has", k, self.image_slots); }
+            self.manifest_done = true; self.manifest_len = order.len();
+            self.discard_image_resume();
+            self.refresh_claim = None;
+            return true;
+        }
         crate::run::yield_section("manifest keys");
         let mut list: Vec<(Vec<u8>, u128)> = Vec::with_capacity(order.len());
         let mut before_present = 0;
@@ -5214,7 +5312,7 @@ impl Cache {
         for (n, &id) in order.iter().enumerate() {
             if n % 16 == 15 && stop() { return false; }
             if let Some(b) = self.slot_bytes(u, id) {
-                let entry = match self.slot_key(u, id) {
+                let entry = match self.slot_key(u, id).or_else(|| self.recorded_key(&b)) {
                     Some(k) if self.has_index(&k) || self.pending_keys.contains(&k) => k,
                     _ => 0,
                 };
@@ -5246,25 +5344,25 @@ impl Cache {
         // to half a second of the exit, every session. The image's slots no call reached are
         // dropped once they outnumber the ones calls reached (`lean`): a start that moved on
         // prelinks no dead weight. (A loaded manifest that is not valid is not kept either.)
-        let lean = !self.startup_manifest_valid() || crate::jit::not_called_at_present() * 2 > self.image_slots;
+        let exit_refresh = crate::preempt::is_stopped() && self.image_built.is_none() && self.image_needs_refresh();
+        let lean = !self.startup_manifest_valid() || (!exit_refresh && crate::jit::not_called_at_present() * 2 > self.image_slots);
         // the same start as before (within 2%), the loaded manifest still valid and its image
         // current (within 2%, covering all but 2% of its cached slots, and not mostly slots no
         // call reached while its window was open: jit::startup_set_called): no new one
-        let (replaced, _) = self.image_replaced();
-        let image_current = !self.image_rewrite && match &self.image_built {
-            // this run's image: its slots replaced since it was built
-            Some((_, n, _)) => replaced * 50 <= *n,
-            None => self.image_slots == 0 || ((self.image_stale + replaced) * 50 <= self.image_slots && self.image_slots * 50 >= self.manifest_present_cached * 49 && !lean),
+        let image_current = !self.image_rewrite && !self.image_needs_rebuild() && match &self.image_built {
+            Some(_) => true,
+            None => self.image_slots == 0 || (self.image_slots * 50 >= self.manifest_present_cached * 49 && !lean),
         };
         if self.startup_manifest_valid() && new * 50 <= list.len() && image_current {
             self.manifest_done = true; self.manifest_len = order.len();
             self.image_kept = None;
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         }
         if self.verbose {
-            eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}; of the image's own slots {}), image slots {} stale {} cached at present {}",
-                self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], replaced, self.image_slots, self.image_stale, self.manifest_present_cached);
+            eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}; of the image's own slots {}), image slots {} stale {} rekeyed {} cached at present {}",
+                self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], self.image_replaced().0, self.image_slots, self.image_stale, self.image_rekeyed, self.manifest_present_cached);
         }
         // the union: the loaded manifest's own slots this start did not install, after this start's,
         // and the slots its image installed ahead in this run's image. A carried slot keeps its
@@ -5281,7 +5379,11 @@ impl Cache {
             for (i, b) in self.manifest[..self.manifest_main.min(self.manifest.len())].iter().enumerate() {
                 if i % 1024 == 1023 && stop() { return false; }
                 if mine.contains(&identity_hash(b)) { continue; }
-                let k = self.recorded_key(b).filter(|k| self.has_index(k) || self.pending_keys.contains(k)).unwrap_or(0);
+                let k = self.recorded_key(b).or_else(|| {
+                    if !crate::reload::edited_crates().is_empty() { return None; }
+                    let id = self.image_ids.as_ref()?.slot_of(b)?;
+                    self.slot_keys.get(&id).copied().flatten()
+                }).filter(|k| self.has_index(k) || self.pending_keys.contains(k)).unwrap_or(0);
                 carried.2 += (k == 0 && self.manifest_old_keys.get(i).is_some_and(|o| *o != 0)) as usize;
                 list.push((b.clone(), k));
                 carried.0 += 1;
@@ -5326,12 +5428,14 @@ impl Cache {
         let made = 'steps: {
         crate::run::yield_section("manifest tail");
         if stop() { break 'steps false; }
-        if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 {
+        let live_slots = self.image_slots.saturating_sub(self.image_stale);
+        if crate::preempt::is_stopped() && live_slots > 0 && n_img * 50 < live_slots * 49 {
             if self.verbose {
                 eprintln!("relax cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
             self.manifest_done = true; self.manifest_len = order.len();
             self.discard_image_resume();
+            self.refresh_claim = None;
             return true;
         }
         // the entry first (the yield checks: nothing is queued before the last of them)
@@ -5388,6 +5492,8 @@ impl Cache {
         if let Some((_, _, bits)) = img.filter(|_| n_img > 0) {
             // (as built: what was replaced since counts against it)
             self.image_built = Some((built_at, n_img, bits));
+            self.linked_crates.clear();
+            self.linked_crates.shrink_to_fit();
         }
         let mut removed = 0;
         for o in gone {
@@ -5406,6 +5512,26 @@ impl Cache {
         self.image_rewrite = false;
         self.discard_image_resume();
         true
+    }
+
+    /// Skip the exit build when it cannot cover 98% of the loaded image's live slots. At exit
+    /// a slot needs a memoised key or a verified prelink with its crate dependencies. A build
+    /// kept or resumed from mid-run could already contain slots outside that bound.
+    fn exit_image_bound(&self) -> Option<usize> {
+        let live_slots = self.image_slots.saturating_sub(self.image_stale);
+        if !crate::preempt::is_stopped() || self.recording_pending || self.image_resume.is_some() || self.image_kept.is_some() || live_slots == 0 {
+            return None;
+        }
+        // (one pass over the memo: a median 18 us for a test child's ~10,000 keys)
+        let mut keyed = self.slot_keys.values().filter(|k| k.is_some()).count();
+        if !self.linked_crates.is_empty() && self.image_built.is_none() && self.image_needs_refresh() {
+            for id in self.linked_crates.keys() {
+                if self.linked_key.contains_key(id) && !self.slot_keys.get(id).is_some_and(Option::is_some) {
+                    keyed += 1;
+                }
+            }
+        }
+        (keyed * 50 < live_slots * 49).then_some(keyed)
     }
 
     /// The quit's record of the session (on the owner thread): the slots of this run's install
@@ -5460,13 +5586,32 @@ impl Cache {
         true
     }
 
-    /// An in-session rebuild of the startup image is due (the mid-run writes): more than 5% of its
-    /// slots had their code replaced since it was built or loaded (O2/O3 over the O1 code: the next
-    /// start leaves those lazy). A cold run tiers up for minutes after its first write.
-    pub fn image_refresh_due(&self) -> bool {
+    /// Rebuild during a manifest write if any loaded slot was re-keyed or over 2% are stale.
+    fn image_needs_rebuild(&self) -> bool {
         let (replaced, n) = self.image_replaced();
-        let since = if self.image_built.is_some() { replaced } else { self.image_stale + replaced };
-        self.manifest_done && self.mode == Mode::On && n > 0 && since * 20 > n
+        if n == 0 { return false; }
+        match &self.image_built {
+            Some(_) => replaced * 50 > n,
+            None => self.image_rekeyed > 0 || (self.image_stale + replaced) * 50 > n,
+        }
+    }
+
+    /// Request a refresh for changed fingerprints or over 5% stale slots. Once this run
+    /// has built an image, only replacements since that build count against it.
+    pub fn image_needs_refresh(&self) -> bool {
+        if self.mode != Mode::On || self.keys_moved != 0 || !self.layout_edited.is_empty() {
+            return false;
+        }
+        match &self.image_built {
+            Some((at, n, bits)) => *n > 0 && self.replaced_in(bits, *at) * 20 > *n,
+            None => self.image_slots > 0 && (self.image_rekeyed > 0
+                || (self.image_stale + self.replaced_in(self.loaded_bits(), 0)) * 20 > self.image_slots),
+        }
+    }
+
+    /// The session already wrote its manifest and needs another image.
+    pub fn image_refresh_due(&self) -> bool {
+        self.manifest_done && self.image_needs_refresh()
     }
 
     /// The startup image's slots replaced this run, and its slots: this run's image, those
@@ -5525,6 +5670,7 @@ impl Cache {
     }
 
     pub fn flush(&mut self) -> Result<usize, String> {
+        let _claim = self.refresh_claim.take();
         if let Some(c) = self.census().filter(|_| self.verbose) {
             eprintln!("relax cache: census: {c}");
         }
@@ -5883,6 +6029,7 @@ fn resolved_spelling(dir: &str) -> String {
 /// Entries taken out of a running cache (Cache::spill_take), written off the unit.
 pub struct Spill {
     dir: PathBuf,
+    refresh_claim: Option<std::fs::File>,
     files: Vec<(PathBuf, bool, Vec<NewEntry>)>,
     /// batches of the shared code stores, written after `files`
     shared: Vec<SharedSpill>,
@@ -5951,6 +6098,7 @@ impl Spill {
 
     /// The caller holds SPILL_IO exclusively, or shared plus the cold store's lock.
     fn write_locked(self, _guard: &impl std::ops::Deref<Target = ()>, late: &[(String, u8, String, u128)]) -> Result<usize, String> {
+        let _claim = self.refresh_claim;
         pack::ensure_private_dir(&self.dir)?;
         let mut n = 0;
         for (path, stale, mut entries) in self.files {
@@ -7983,7 +8131,7 @@ pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::pat
         let lock = front_store_lock(&path);
         let _store = lock.lock().unwrap_or_else(|e| e.into_inner());
         let guard = spill_io_read();
-        Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], shared: Vec::new(), marks: marks.clone() }.write_locked(&guard, &late)?;
+        Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], shared: Vec::new(), marks: marks.clone(), refresh_claim: None }.write_locked(&guard, &late)?;
     }
     let mut probes: std::collections::BTreeMap<String, bool> = base.probes.iter().cloned().collect();
     for (p, exists) in &prog.module_probes { probes.entry(p.clone()).or_insert(*exists); }
@@ -8277,6 +8425,7 @@ impl FrontImages {
                 files.push((
                     path,
                     crate::preload::Preparsed {
+                        derive_failures: Vec::new(),
                         error: None,
                         parsed: Some((pf, f.used)),
                         prep: Some(f.prep),
@@ -8379,6 +8528,7 @@ impl FrontImages {
             // (a store an image is taken from is in use: prune keeps it)
             st.mark_used();
             Some(crate::preload::Preparsed {
+                derive_failures: Vec::new(),
                 error: None,
                 parsed: Some((pf, used)),
                 prep: Some(f.prep),
@@ -9232,7 +9382,7 @@ fn write_front_record(job: FrontWrite) -> Result<Option<usize>, String> {
     let _profile = crate::load_profile::span(profile, "front-record-write", name);
     // Keep code/old parts, even if the boot record was rejected. Cache::open decides
     // staleness after loading; an early write must not retire still-linkable code.
-    Spill { dir, files: vec![(path.clone(), false, entries)], shared: Vec::new(), marks }.write_locked(&guard, &late)?;
+    Spill { dir, files: vec![(path.clone(), false, entries)], shared: Vec::new(), marks, refresh_claim: None }.write_locked(&guard, &late)?;
     Ok(recorded.then_some(ci))
 }
 
@@ -9268,7 +9418,7 @@ mod cold_tests {
         // the load before it takes
         let record_at = |ns: u64| RECORD_NOW_NS.store(ns, std::sync::atomic::Ordering::Relaxed);
         let epoch_ns = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-        let pre = vec![crate::preload::PreCrate {  name: "quiet".into(), root, edition: 2021, cfg,
+        let pre = vec![crate::preload::PreCrate { is_bin: false, harness: false,  name: "quiet".into(), root, edition: 2021, cfg,
             deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = std::env::temp_dir().join(format!("relax-stat-graph-cache-{}-{}", std::process::id(), crate::clock::wall_ns()));
         // `sink`: the files' images are written (a load from images maps them anyway)
@@ -9336,7 +9486,7 @@ mod cold_tests {
         std::fs::write(&root, "mod late; pub struct FxIn { pub t: f32, pub kick: f32 } pub fn host_scale(t: f32) -> f32 { t * 2.0 } pub fn main() {}").unwrap();
         std::fs::write(package.join("late.rs"), "pub struct Later { pub value: u64 } pub fn later() -> u64 { 3 }").unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
-        let pre = vec![crate::preload::PreCrate { name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
+        let pre = vec![crate::preload::PreCrate { is_bin: false, harness: false, name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
             deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = dir.join("cache");
         pack::ensure_private_dir(&store).unwrap();
@@ -9408,7 +9558,7 @@ mod cold_tests {
         std::fs::write(&root, "mod late; pub struct FxIn { pub t: f32, pub kick: f32 } pub fn host_scale(t: f32) -> f32 { t * 2.0 } pub fn main() {}").unwrap();
         std::fs::write(package.join("late.rs"), "pub struct Later { pub value: u64 } pub fn later() -> u64 { 3 }").unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
-        let pre = vec![crate::preload::PreCrate { name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
+        let pre = vec![crate::preload::PreCrate { is_bin: false, harness: false, name: "test_crate".into(), root, edition: 2021, cfg: cfg.clone(),
             deps: vec![],  proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = dir.join("cache");
         // made as a run makes its cache folder, owner-only: a missing one comes from the first
@@ -9526,7 +9676,7 @@ mod cold_tests {
         let root = package.join("lib.rs").to_string_lossy().into_owned();
         std::fs::write(&root, "pub struct Pair { pub a: u32, pub b: u64 } pub fn sum(p: &Pair) -> u64 { p.a as u64 + p.b } pub fn main() {}").unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
-        let pre = vec![crate::preload::PreCrate { name: "capture".into(), root, edition: 2021, cfg: cfg.clone(),
+        let pre = vec![crate::preload::PreCrate { is_bin: false, harness: false, name: "capture".into(), root, edition: 2021, cfg: cfg.clone(),
             deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let store = dir.join("cache");
         pack::ensure_private_dir(&store).unwrap();
@@ -9604,6 +9754,7 @@ mod cold_tests {
         // bin shares its name
         let crates: [(&str, &[usize]); 8] = [("pad0", &[]), ("pad1", &[]), ("pad2", &[]), ("app", &[]), ("lib", &[]), ("user", &[3]), ("other", &[4]), ("app", &[4])];
         let pre: Vec<crate::preload::PreCrate> = crates.iter().enumerate().map(|(i, (name, deps))| crate::preload::PreCrate {
+            is_bin: false, harness: false,
             name: name.to_string(), root: dir.join(format!("c{i}/lib.rs")).to_string_lossy().into_owned(), edition: 2021, cfg: cfg.clone(),
             deps: deps.iter().map(|&d| (crates[d].0.to_string(), crates[d].0.to_string())).collect(), proc_macro: false,
             image_deps: deps.to_vec(), image_dep_names: deps.iter().map(|&d| (crates[d].0.to_string(), crates[d].0.to_string())).collect(),
@@ -9645,7 +9796,7 @@ mod cold_tests {
                 _ => (format!("pub fn f{i}() -> u32 {{ {i} }}"), vec![]),
             };
             std::fs::write(&root, text).unwrap();
-            pre.push(crate::preload::PreCrate {  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
+            pre.push(crate::preload::PreCrate { is_bin: false, harness: false,  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
                 deps: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect(), proc_macro: false,
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
@@ -9688,6 +9839,15 @@ mod cold_tests {
         assert_eq!(whole.crates.len(), names.len());
         assert!(proof.is_some());
         assert!(!images.reload_current(), "a whole restore loads nothing again");
+        // the flags a load sets on a crate (run.rs: a bin, a `--test` build) are the recipe's: a
+        // restored program has them as the cold load does (check.rs reads them for the entry point)
+        let mut flagged = pre.clone();
+        flagged[5].is_bin = true;
+        flagged[6].harness = true;
+        let (flags, _, _) = images.restore_collected(sess, &flagged).expect("flags do not change the image");
+        let got: Vec<(bool, bool)> = flags.crates.iter().map(|c| (c.is_bin, c.harness)).collect();
+        let want: Vec<(bool, bool)> = flagged.iter().map(|c| (c.is_bin, c.harness)).collect();
+        assert_eq!(got, want, "a restore keeps each crate's is_bin and harness as the recipe has them");
         // a test's subject loads again for its lints (reload_crates): with nothing changed, what it
         // loads is what the image holds, so the run records nothing again (run.rs COLLECTED_CURRENT);
         // after an edit of it, the image must be recorded again
@@ -9747,7 +9907,7 @@ mod cold_tests {
                 _ => (format!("pub fn f{i}() -> u32 {{ {i} }}"), vec![]),
             };
             std::fs::write(&root, text).unwrap();
-            pre.push(crate::preload::PreCrate {  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
+            pre.push(crate::preload::PreCrate { is_bin: false, harness: false,  name: name.to_string(), root, edition: 2021, cfg: cfg.clone(),
                 deps: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect(), proc_macro: false,
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
@@ -10005,8 +10165,8 @@ mod cold_tests {
         std::fs::write(&b, "pub fn b() -> u32 { 9 }").unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
         let pre = || vec![
-            crate::preload::PreCrate {  name: "a".into(), root: a.clone(), edition: 2021, cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] },
-            crate::preload::PreCrate {  name: "b".into(), root: b.clone(), edition: 2021, cfg: cfg.clone(), deps: vec![("alias".into(), "a".into())], proc_macro: true, image_deps: vec![0], image_dep_names: vec![("alias".into(), "a".into())] },
+            crate::preload::PreCrate { is_bin: false, harness: false,  name: "a".into(), root: a.clone(), edition: 2021, cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] },
+            crate::preload::PreCrate { is_bin: false, harness: false,  name: "b".into(), root: b.clone(), edition: 2021, cfg: cfg.clone(), deps: vec![("alias".into(), "a".into())], proc_macro: true, image_deps: vec![0], image_dep_names: vec![("alias".into(), "a".into())] },
         ];
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
@@ -10550,12 +10710,535 @@ mod data_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A slot whose code makes a trait object names its vtable's made cell. The startup image
+    /// holds it: the image's symbol table takes the made cell by the vtable's own symbol, and the
+    /// next run's load links that to a made cell of the vtable it links, as a cache link does.
+    #[test]
+    fn an_image_holds_a_slot_that_makes_a_trait_object() {
+        isolated_test!(an_image_holds_a_slot_that_makes_a_trait_object);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-image-made-cell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "#![no_std] pub fn maker() -> u32 { 1 } pub fn plain() -> u32 { 2 }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        let root = prog.load_crate("a", dir.join("a.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+        let (maker, plain) = (u.fn_id(FnKey::Inst(def(&u, "maker"), vec![])), u.fn_id(FnKey::Inst(def(&u, "plain"), vec![])));
+        let vtable = u.data(&[0u8; 24], 8, DataKind::Relocs(vec![]));
+        u.syms.set_data_name(vtable, format!("{}a::S#00000000:dyn a::T#00000000:-", crate::syms::VTABLE_NAME));
+        let vt = u.data_sym(vtable);
+        assert!(u.syms.is_vtable_sym(vt), "the fixture's object is a vtable");
+        let made = u.syms.made_sym(vt);
+        let cache_dir = dir.join("cache");
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.record(&u, maker, &[0, 0, 0, 0, 0, 0, 0, 0, 0xc3], &[RelocAt { at: 0, kind: RelocKind::Pool64, target: Reloc::Sym(made) }], &[]);
+        cache.record(&u, plain, &[0xc3], &[], &[]);
+        assert!(cache.record_manifest(&u, root, &[maker, plain], 2, &|| false));
+        assert_eq!(cache.image_built.as_ref().map(|b| b.1), Some(2), "both slots are placed, the maker with them");
+        cache.flush().unwrap();
+        drop(cache);
+        // the next run loads the manifest as a start does and links the maker's symbols from the image
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.load_manifest(root);
+        assert!(cache.has_startup_image(), "the manifest wrote a startup image");
+        let syms = cache.image_slot_syms(&mut u, maker).expect("the image holds the maker's slot");
+        assert_eq!(syms.len(), 1, "the maker's code names one symbol: {syms:?}");
+        let linked = syms[0].expect("the made cell links from the image");
+        assert!(matches!(u.syms.kind(linked.id), Some(SymKind::Made(v)) if u.syms.is_vtable_sym(Sym::new(v))), "it links to a vtable's made cell: {:?}", u.syms.kind(linked.id));
+        drop(cache);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A slot whose code reads a `#[thread_local]` static names its place (the thread-local's
+    /// offset). The startup image holds it, and the next run places the thread-local again from
+    /// the image's symbol, with the code's shape, as a cache link does.
+    #[test]
+    fn an_image_holds_a_slot_that_reads_a_thread_local() {
+        isolated_test!(an_image_holds_a_slot_that_reads_a_thread_local);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let dir = std::env::temp_dir().join(format!("relax-image-thread-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), "#![no_std]\n#![feature(thread_local)]\n#[thread_local] pub static T: u32 = 7;\npub fn reader() -> u32 { 1 }\npub fn plain() -> u32 { 2 }\n").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        let root = prog.load_crate("a", dir.join("a.rs").to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, name: &str| (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+        let (reader, plain, t) = (u.fn_id(FnKey::Inst(def(&u, "reader"), vec![])), u.fn_id(FnKey::Inst(def(&u, "plain"), vec![])), def(&u, "T"));
+        let place = u.thread_local_place(t).expect("T is placed");
+        let cache_dir = dir.join("cache");
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.record(&u, reader, &[0, 0, 0, 0, 0, 0, 0, 0, 0xc3], &[RelocAt { at: 0, kind: RelocKind::Pool64, target: Reloc::Sym(place.sym) }], &[]);
+        cache.record(&u, plain, &[0xc3], &[], &[]);
+        assert!(cache.record_manifest(&u, root, &[reader, plain], 2, &|| false));
+        assert_eq!(cache.image_built.as_ref().map(|b| b.1), Some(2), "both slots are placed, the reader with them");
+        cache.flush().unwrap();
+        drop(cache);
+        // the next run loads the manifest as a start does and links the reader's symbols from the image
+        let mut cache = open_test_cache(&u, &cache_dir);
+        cache.load_manifest(root);
+        assert!(cache.has_startup_image(), "the manifest wrote a startup image");
+        let syms = cache.image_slot_syms(&mut u, reader).expect("the image holds the reader's slot");
+        assert_eq!(syms.len(), 1, "the reader's code names one symbol: {syms:?}");
+        let linked = syms[0].expect("the thread-local's place links from the image");
+        assert!(matches!(u.syms.kind(linked.id), Some(SymKind::ThreadLocal(d)) if d == t), "it links to T's place: {:?}", u.syms.kind(linked.id));
+        drop(cache);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     impl Cache {
         fn pending_manifest_payload(&self, root: u32) -> Option<&[u8]> {
             let key = self.manifest_key(root)?;
             let (_, entry) = self.pending.iter().rev().find(|(_, e)| e.kind == KIND_MANIFEST && e.key == key)?;
             Some(&entry.payload)
         }
+    }
+
+    fn image_test_start<'a>(dir: &std::path::Path, units: &'a mut Vec<Box<Unit>>) -> (&'a mut Unit, u32) {
+        let mut session = crate::Session::default();
+        session.options.tier1 = false;
+        session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let mut prog = crate::program::Program::new(&session);
+        let cfg = crate::cfg::CfgSet::host(&session, &[]);
+        let dep = prog.load_crate("unchanged", dir.join("unchanged.rs").to_str().unwrap(), 2021, cfg.clone(), vec![]).unwrap();
+        let deps = vec![(prog.syms.intern("unchanged"), dep)];
+        let app = prog.load_crate("app", dir.join("app.rs").to_str().unwrap(), 2021, cfg, deps).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        // Dropping any Unit stops key queries for every later start in the process.
+        units.push(Unit::new(prog, tcx, 0));
+        (units.last_mut().unwrap(), app)
+    }
+
+    fn image_test_slot(u: &Unit, name: &str) -> u32 {
+        let def = (0..u.prog.defs.len() as u32).map(DefId).find(|&d| u.prog.name(d) == name).unwrap();
+        u.fn_id(FnKey::Inst(def, vec![]))
+    }
+
+    fn image_test_record(dir: &std::path::Path, u: &Unit, app: u32, order: &[u32]) {
+        let mut cache = open_test_cache(u, &dir.join("cache"));
+        for &id in order {
+            cache.record(u, id, &[0xc3], &[], &[]);
+        }
+        assert!(cache.record_manifest(u, app, order, order.len(), &|| false));
+        assert_eq!(cache.image_built.as_ref().map(|b| b.1), Some(order.len()));
+        cache.flush().unwrap();
+    }
+
+    fn image_test_prelink(dir: &std::path::Path, u: &mut Unit, app: u32) -> (Box<CacheCell>, Vec<u32>) {
+        let mut cache = open_test_cache(u, &dir.join("cache"));
+        cache.load_manifest(app);
+        u.cache = Some(Box::new(CacheCell::new(cache)));
+        let mut order = Vec::new();
+        let placed = unsafe { prelink_unit(u, &mut |u, slots| {
+            for s in slots {
+                u.fns[s.id as usize].compiled = true;
+                order.push(s.id);
+            }
+        }) };
+        assert_eq!(placed, order.len());
+        (u.cache.take().unwrap(), order)
+    }
+
+    #[test]
+    fn rekeyed_startup_image_refreshes_and_next_start_rekeys_zero() {
+        isolated_test!(rekeyed_startup_image_refreshes_and_next_start_rekeys_zero);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("relax-image-rekey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = "#![no_std]\nextern crate unchanged;\npub fn app_fn() -> u32 { unchanged::stable_fn() + 1 }\npub fn edited_fn() -> u32 { 10 }\n";
+        std::fs::write(dir.join("unchanged.rs"), "#![no_std]\npub fn stable_fn() -> u32 { 1 }\n").unwrap();
+        std::fs::write(dir.join("app.rs"), source).unwrap();
+        let mut units = Vec::new();
+        let (u, app) = image_test_start(&dir, &mut units);
+        let order = ["stable_fn", "app_fn", "edited_fn"].map(|name| image_test_slot(u, name));
+        image_test_record(&dir, u, app, &order);
+
+        let commented = format!("{source}\n// trailing comment\n");
+        std::fs::write(dir.join("app.rs"), &commented).unwrap();
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (mut cache, order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 3);
+        assert_eq!(cache.stats.prelink_rekeyed, 2, "both app slots re-key after the comment edit");
+        assert_eq!(cache.image_rekeyed, 2);
+        assert!(cache.image_needs_refresh());
+        cache.manifest_done = true;
+        cache.manifest_len = order.len();
+        assert!(cache.image_refresh_due(), "a completed mid-run manifest must refresh");
+        assert!(cache.record_manifest(u, app, &order, order.len(), &|| false));
+        cache.flush().unwrap();
+        assert_eq!(cache.image_built.as_ref().map(|b| b.1), Some(3));
+        assert!(!cache.image_refresh_due());
+        assert!(!cache.image_needs_refresh());
+        assert!(cache.linked_crates.is_empty());
+        drop(cache);
+
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (cache, order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 3);
+        assert_eq!(cache.stats.prelink_rekeyed, 0, "the next start uses the refreshed fingerprints");
+        assert_eq!(cache.stats.prelink_changed, 0);
+        assert!(!cache.image_needs_refresh());
+        drop(cache);
+
+        std::fs::write(dir.join("app.rs"), commented.replace("{ 10 }", "{ 20 }")).unwrap();
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (mut cache, mut order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 2);
+        assert_eq!(cache.stats.prelink_rekeyed, 1);
+        assert_eq!(cache.stats.prelink_changed, 1);
+        let edited = image_test_slot(u, "edited_fn");
+        assert!(!u.fns[edited as usize].compiled, "the previous body stayed lazy");
+        cache.record(u, edited, &[0x90, 0xc3], &[], &[]);
+        u.fns[edited as usize].compiled = true;
+        order.push(edited);
+        assert!(cache.record_manifest(u, app, &order, order.len(), &|| false));
+        cache.flush().unwrap();
+        drop(cache);
+
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (mut cache, order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 3);
+        assert_eq!(cache.stats.prelink_rekeyed, 0);
+        assert_eq!(cache.stats.prelink_changed, 0);
+        let edited = image_test_slot(u, "edited_fn");
+        let key = cache.slot_key(u, edited).expect("the edited body's key");
+        assert_eq!(cache.linked_key.get(&edited), Some(&key));
+        drop(cache);
+        drop(units);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Cold image with 40 dependency slots and two app slots, then a comment edit to the app.
+    fn exit_image_fixture(units: &mut Vec<Box<Unit>>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("relax-image-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut dep = String::from("#![no_std]\n");
+        for i in 0..40 { dep.push_str(&format!("pub fn f{i}() -> u32 {{ {i} }}\n")); }
+        let app_src = "#![no_std]\nextern crate unchanged;\npub fn a0() -> u32 { 0 }\npub fn a1() -> u32 { 1 }\n";
+        std::fs::write(dir.join("unchanged.rs"), dep).unwrap();
+        std::fs::write(dir.join("app.rs"), app_src).unwrap();
+        let (u, app) = image_test_start(&dir, units);
+        let mut order: Vec<_> = (0..40).map(|i| image_test_slot(u, &format!("f{i}"))).collect();
+        order.extend(["a0", "a1"].map(|name| image_test_slot(u, name)));
+        image_test_record(&dir, u, app, &order);
+        std::fs::write(dir.join("app.rs"), format!("{app_src}\n// trailing comment\n")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rekeyed_startup_image_refreshes_at_exit_keeping_unchanged_slots() {
+        isolated_test!(rekeyed_startup_image_refreshes_at_exit_keeping_unchanged_slots);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut units = Vec::new();
+        let dir = exit_image_fixture(&mut units);
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (mut cache, order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 42);
+        assert_eq!(cache.stats.prelink_rekeyed, 2);
+        assert!(cache.slot_keys.len() < 40);
+        assert_eq!(cache.linked_crates.len(), 40);
+        crate::preempt::stop_all();
+        assert!(cache.record_manifest(u, app, &order, order.len(), &|| false));
+        cache.flush().unwrap();
+        assert_eq!(cache.image_built.as_ref().map(|b| b.1), Some(42));
+        assert!(cache.linked_crates.is_empty());
+        drop(cache);
+
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (cache, order) = image_test_prelink(&dir, u, app);
+        assert_eq!(order.len(), 42);
+        assert_eq!(cache.stats.prelink_rekeyed, 0);
+        assert_eq!(cache.stats.prelink_changed, 0);
+        assert!(cache.manifest_key_crates.is_none(), "the manifest carries the edited sources' fingerprint");
+        drop(cache);
+
+        let path = dir.join("unchanged.rs");
+        let dep = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path, format!("{dep}\n// dependency edit\n")).unwrap();
+        let (u, app) = image_test_start(&dir, &mut units);
+        let (cache, order) = image_test_prelink(&dir, u, app);
+        assert!(cache.has_startup_image());
+        assert!(cache.startup_manifest_valid());
+        assert_eq!(order.len(), 0, "every slot depends on the edited crate and re-keying is stopped");
+        assert_eq!(cache.stats.prelink_changed, 42);
+        assert_eq!(cache.stats.prelink_failed, 0);
+        drop(cache);
+        drop(units);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rekeyed_startup_image_refreshes_once_across_concurrent_exits() {
+        isolated_test!(rekeyed_startup_image_refreshes_once_across_concurrent_exits);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut units = Vec::new();
+        let dir = exit_image_fixture(&mut units);
+        let mut start = || {
+            let (u, app) = image_test_start(&dir, &mut units);
+            let (cache, order) = image_test_prelink(&dir, u, app);
+            assert_eq!(order.len(), 42);
+            assert_eq!(cache.stats.prelink_rekeyed, 2);
+            (cache, app, order)
+        };
+        let (mut a, app_a, order_a) = start();
+        let (mut b, app_b, order_b) = start();
+        let (mut c, app_c, order_c) = start();
+        crate::preempt::stop_all();
+        assert!(a.record_manifest(&units[1], app_a, &order_a, order_a.len(), &|| false));
+        assert_eq!(a.image_built.as_ref().map(|b| b.1), Some(42));
+        assert!(a.refresh_claim.is_some());
+        let skip = |cache: &mut Cache, u: &Unit, app, order: &[u32]| {
+            assert!(cache.record_manifest(u, app, order, order.len(), &|| false));
+            assert_eq!(cache.image_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert!(cache.image_built.is_none());
+            assert!(cache.pending_manifest_payload(app).is_none());
+        };
+        skip(&mut b, &units[2], app_b, &order_b);
+        a.flush().unwrap();
+        assert!(a.refresh_claim.is_none());
+        skip(&mut c, &units[3], app_c, &order_c);
+        drop((a, b, c));
+        drop(units);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Minimal `Cache` for claim/spill tests: no `Unit`, no `Program`, no thread pools,
+    /// so the test needs neither `isolated_test!` nor `CACHE_UNIT`.
+    fn claim_test_cache(cache_dir: &std::path::Path, store_path: &std::path::Path, fp: u128, manifest_store_gen: u64) -> Cache {
+        Cache {
+            verbose: false,
+            mode: Mode::On,
+            dir: cache_dir.to_path_buf(),
+            stores: Vec::new(),
+            crate_path: Vec::new(),
+            stale: Vec::new(),
+            depth: vec![0],
+            key_crate: HashMap::new(),
+            cur_crate: 0,
+            index: KeyMap::default(),
+            mapped_index: None,
+            fps: vec![fp],
+            crate_names: vec!["app".to_string()],
+            crate_closure: vec![vec![1]],
+            anchors_key: 0,
+            sealed: vec![false],
+            sealed_key: 0,
+            sealed_keys: HashSet::new(),
+            machine_dirs: Vec::new(),
+            shared: None,
+            shared_path: vec![None],
+            shared_stale: vec![false],
+            shared_keys: HashSet::new(),
+            checkout_text: CheckoutText::default(),
+            cur_sealed: false,
+            cur_shared: false,
+            iface: Vec::new(),
+            boot_iface: Vec::new(),
+            iface_plain: Vec::new(),
+            view: vec![1],
+            late: vec![0],
+            late_view: vec![0],
+            late_memo: HashMap::new(),
+            deps: None,
+            bound: Vec::new(),
+            keys_moved: 0,
+            keys_moved_crates: Vec::new(),
+            layout_edited: Vec::new(),
+            name_memo: HashMap::new(),
+            body_names: HashMap::new(),
+            digests: Vec::new(),
+            def_bodies: HashMap::new(),
+            seen_body_keys: HashMap::new(),
+            seen_bodies: None,
+            seen_of: HashMap::new(),
+            code_path: vec![store_path.to_path_buf()],
+            code_stale: vec![false],
+            cert_rejected: HashSet::new(),
+            verdict_rejected: HashSet::new(),
+            slot_crates: HashMap::new(),
+            const_stale: HashSet::new(),
+            const_live: HashSet::new(),
+            const_body_keys: HashMap::new(),
+            front_stores_of: Vec::new(),
+            front_stores_n: 0,
+            enc_defs: None,
+            enc_closure_items: None,
+            crate_by_ident: HashMap::new(),
+            crate_ident: Vec::new(),
+            cfg: 1,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            pending_keys: HashSet::new(),
+            recording_pending: false,
+            front_reserved: HashSet::new(),
+            front_files: Vec::new(),
+            foreign_canon: None,
+            def_maps: HashMap::new(),
+            crate_defs: Vec::new(),
+            crate_defs_scan: None,
+            def_map_partial: None,
+            def_maps_appended: Vec::new(),
+            crate_defs_n: 0,
+            module_defs_n: 0,
+            def_keys: HashMap::new(),
+            mapped_definitions: None,
+            collected_boot: None,
+            collected_committed: false,
+            file_ids: HashMap::new(),
+            file_ids_n: 0,
+            file_hash: HashMap::new(),
+            file_idents: Vec::new(),
+            data_addr: HashMap::new(),
+            const_copy: HashMap::new(),
+            data_key: HashMap::new(),
+            data_crates: HashMap::new(),
+            data_why: HashMap::new(),
+            linked: HashSet::new(),
+            missed: HashSet::new(),
+            linking: HashSet::new(),
+            linking_data: HashSet::new(),
+            manifest: Vec::new(),
+            manifest_present: 0,
+            manifest_missing: 0,
+            manifest_uncached: 0,
+            manifest_keys: HashMap::new(),
+            manifest_key_crates: None,
+            manifest_old_keys: Vec::new(),
+            manifest_present_cached: 0,
+            image: None,
+            image_ids: None,
+            image_rewrite: false,
+            manifest_done: false,
+            manifest_len: 0,
+            image_slots: 0,
+            image_stale: 0,
+            image_rekeyed: 0,
+            manifest_main: 0,
+            written_ids: None,
+            image_built: None,
+            replaced: Vec::new(),
+            loaded_bits: std::sync::OnceLock::new(),
+            startup_ids: std::sync::OnceLock::new(),
+            image_kept: None,
+            image_resume: None,
+            image_reads: std::sync::atomic::AtomicUsize::new(0),
+            image_starts_over: 0,
+            rec_tier: HashMap::new(),
+            manifest_root: Some(0),
+            manifest_store_gen,
+            refresh_claim: None,
+            linked_key: HashMap::new(),
+            linked_crates: HashMap::new(),
+            slot_keys: HashMap::new(),
+            key_waits: false,
+            ordinal_in_edits: false,
+            last_callees: Vec::new(),
+            last_tier1: None,
+            last_kept: Vec::new(),
+            last_digest: None,
+            cur_inl: Vec::new(),
+            last_o2: false,
+            last_provisional: None,
+            last_base: false,
+            base_linked: HashSet::new(),
+            fnkey_bytes: HashMap::new(),
+            pending_verdicts: HashMap::new(),
+            slot_by_bytes: Default::default(),
+            closure_fps: HashMap::new(),
+            ty_written: Vec::new(),
+            ty_written_spare: Vec::new(),
+            ty_read: Vec::new(),
+            ty_read_spare: Vec::new(),
+            closure_ords: HashMap::new(),
+            stats: CacheStats::default(),
+            why_unencodable: HashMap::new(),
+            last_why: "",
+        }
+    }
+
+    #[test]
+    fn rekeyed_startup_image_refreshes_keeping_claim_across_spill_during_yield() {
+        let dir = std::env::temp_dir().join(format!("relax-refresh-claim-{}-{}", std::process::id(), crate::pack::nonce()));
+        let cache_dir = dir.join("cache");
+        pack::ensure_private_dir(&cache_dir).unwrap();
+        let store_path = cache_dir.join("app-0000000000000000.rcs");
+        crate::store::append(&store_path, vec![NewEntry { key: LEDGER_KEY, kind: KIND_LEDGER, payload: Vec::new() }], false).unwrap();
+        let gen0 = crate::store::header_generation(&store_path).expect("initial store generation");
+
+        let mut a = claim_test_cache(&cache_dir, &store_path, 0xaaaa, gen0);
+        let mut b = claim_test_cache(&cache_dir, &store_path, 0xaaaa, gen0);
+        let key = a.manifest_key(0).expect("manifest key");
+        let sources_key = a.manifest_sources_key(key);
+        let lock_path = cache_dir.join("refresh").join(format!("{key:032x}.lock"));
+
+        // (i) A claims the refresh, re-entry keeps the claim, and sibling B is excluded by the lock.
+        assert!(a.claim_rekey_refresh(0, key), "first claimant acquires the refresh lock");
+        assert!(a.refresh_claim.as_ref().is_some_and(|(k, _)| *k == sources_key));
+        assert!(a.claim_rekey_refresh(0, key), "re-entering with the same manifest key keeps the claim");
+        assert!(!b.claim_rekey_refresh(0, key), "sibling skips while claimant holds the lock");
+        assert!(b.refresh_claim.is_none());
+
+        // (ii) An ordinary entry and a manifest tail (KIND_MANIFEST under manifest_tail_key)
+        // spilled before the refreshed manifest must not take the claim.
+        a.record_borrowck(1, StoredVerdict::Clean);
+        a.push_pending(0, NewEntry { key: a.manifest_tail_key(key), kind: KIND_MANIFEST, payload: vec![1] });
+        let spill = a.spill_take().expect("ordinary + tail entries spill during yield");
+        assert!(spill.refresh_claim.is_none(), "non-manifest spill must not take the refresh claim");
+        assert!(a.refresh_claim.is_some());
+        spill.write().unwrap();
+        assert_ne!(crate::store::header_generation(&store_path), Some(gen0), "intervening spill bumped store generation");
+        assert!(a.refresh_claim.is_some());
+
+        // (iii) Sibling B still skips after the intervening spill bumps the store generation.
+        assert!(!b.claim_rekey_refresh(0, key), "sibling still skips via lock after intervening spill");
+        assert!(b.refresh_claim.is_none());
+
+        // (iv) The spill carrying manifest_sources_key(key) takes the claim and keeps excluding B
+        // until write() commits manifest_sources_key on disk and drops the lock.
+        let mut sources = E::default();
+        sources.u128(a.sources_fp());
+        a.push_pending(0, NewEntry { key, kind: KIND_MANIFEST, payload: vec![2] });
+        a.push_pending(0, NewEntry { key: sources_key, kind: KIND_MANIFEST, payload: sources.0 });
+        let manifest_spill = a.spill_take().expect("manifest spill");
+        assert!(manifest_spill.refresh_claim.is_some(), "manifest spill must carry the refresh claim");
+        assert!(a.refresh_claim.is_none());
+        assert!(!b.claim_rekey_refresh(0, key), "sibling stays excluded while manifest spill is unwritten");
+        manifest_spill.write().unwrap();
+
+        // (v) After manifest_spill.write(), the OS lock is released, B skips via on-disk
+        // manifest_sources_key (not a stuck lock), and a run with newer sources_fp can claim.
+        {
+            let f = std::fs::File::options().read(true).write(true).open(&lock_path).unwrap();
+            assert!(f.try_lock().is_ok(), "manifest spill write must release the lock file");
+        }
+        assert!(!b.claim_rekey_refresh(0, key), "sibling skips via committed manifest_sources_key");
+        assert!(b.refresh_claim.is_none());
+        let mut newer = claim_test_cache(&cache_dir, &store_path, 0xbbbb, gen0);
+        assert!(newer.claim_rekey_refresh(0, key), "a run with newer sources_fp claims once lock is released");
+
+        // (vi) Claiming a different manifest key drops the previous key's lock first.
+        let other_key = key ^ 1;
+        assert!(newer.claim_rekey_refresh(0, other_key), "claiming a different key succeeds");
+        assert!(newer.refresh_claim.as_ref().is_some_and(|(k, _)| *k == newer.manifest_sources_key(other_key)));
+        {
+            let f = std::fs::File::options().read(true).write(true).open(&lock_path).unwrap();
+            assert!(f.try_lock().is_ok(), "claiming another key releases the previous key's lock");
+        }
+
+        drop((a, b, newer));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -10662,6 +11345,39 @@ mod data_tests {
             }
         }
         assert!(resumed > 0 && restarted > 0, "both cases ran: {resumed} went on, {restarted} started over");
+        // At exit (the preemption stop) a slot's key is its memo, so the image an exit builds
+        // holds only the slots its run keyed. One that keyed 2 of the 40 slots its loaded image
+        // has makes no keys and no image, and ends as the guard after a build would; an image
+        // kept from a try that gave way mid-run, where a key is not always memoised, is no such
+        // bound: it is written though the exit has no key memoised at all.
+        // (its 40 entries recorded, the keys their records made forgotten: a run that linked them)
+        let mut few = fresh("exit-few");
+        few.slot_keys.clear();
+        few.image_slots = ids.len();
+        for &id in &ids[..2] {
+            assert!(few.slot_key(&u, id).is_some(), "a key made before the exit");
+        }
+        let mut kept = (1..=calls.get()).find_map(|g| {
+            let mut cache = fresh(&format!("exit-kept-{g}"));
+            let checked = Cell::new(0usize);
+            let (done, _) = record(&mut cache, &|| { checked.set(checked.get() + 1); checked.get() == g });
+            (!done && cache.image_kept.as_ref().is_some_and(|k| k.1 as usize == ids.len())).then_some(cache)
+        }).expect("a try that gives way after its build keeps its image of all 40 slots");
+        kept.slot_keys.clear();
+        kept.image_slots = ids.len();
+        // (this test's process is this test alone: isolated_test)
+        crate::preempt::stop_all();
+        let reads = few.image_reads.load(Relaxed);
+        assert!(few.record_manifest(&u, root, &ids, ids.len(), &|| false), "the exit's record ends");
+        assert_eq!(few.image_reads.load(Relaxed), reads, "an exit that keyed 2 of the loaded image's 40 slots builds no image");
+        assert!(few.manifest_done && few.manifest_len == ids.len(), "it is done with the manifest, as the guard leaves it");
+        assert!(few.image_kept.is_none() && few.image_resume.is_none(), "it keeps no image and no resume, as the guard leaves them");
+        assert!(few.pending_manifest_payload(root).is_none(), "the loaded manifest stays");
+        assert!(kept.record_manifest(&u, root, &ids, ids.len(), &|| false), "the exit's record with a kept image ends");
+        assert!(kept.image_kept.is_none(), "the kept image was taken");
+        assert!(kept.pending_manifest_payload(root).is_some(), "the kept image of 40 slots is written though the exit keyed none");
+        drop(kept);
+        drop(few);
         drop(replaced_ref);
         drop(repeat);
         drop(reference);
@@ -11812,7 +12528,6 @@ mod data_tests {
     /// its borrow error was gone (relax review B-M1).
     #[test]
     fn sibling_impls_keep_borrowck_verdicts_of_their_own() {
-        isolated_test!(sibling_impls_keep_borrowck_verdicts_of_their_own);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-siblings-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&root).unwrap();
@@ -11839,7 +12554,6 @@ mod data_tests {
     /// (stable::def_ident), whose header text and twin ordinal tell them apart.
     #[test]
     fn macro_twin_impls_key_their_header_constants_apart() {
-        isolated_test!(macro_twin_impls_key_their_header_constants_apart);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-twin-consts-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&root).unwrap();
@@ -11909,6 +12623,7 @@ mod data_tests {
             std::fs::write(&path, "pub fn value() -> u32 { 7 }").unwrap();
             let deps: Vec<(String, String)> = if ci == 0 { vec![] } else { vec![(pre[ci - 1].name.clone(), pre[ci - 1].name.clone())] };
             pre.push(crate::preload::PreCrate {
+                is_bin: false, harness: false,
                 name: name.into(), root: path, edition: 2021, cfg: cfg.clone(), deps: deps.clone(), proc_macro: ci == 1,
                 image_deps: if ci == 0 { vec![] } else { vec![ci - 1] }, image_dep_names: deps,
             });
@@ -12105,7 +12820,6 @@ mod data_tests {
 
     #[test]
     fn front_sources_have_distinct_keys_and_images() {
-        isolated_test!(front_sources_have_distinct_keys_and_images);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let path = "same.rs";
         let first = b"fn value() -> u32 { 1 }";
@@ -12401,7 +13115,6 @@ mod nounwind_tests {
 
     #[test]
     fn entries_keep_false_and_true_answers_before_code() {
-        isolated_test!(entries_keep_false_and_true_answers_before_code);
         let mut e = E::default();
         e.u8(0);
         // no inlined slots, no pending ones

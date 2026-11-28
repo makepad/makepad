@@ -265,7 +265,7 @@ impl Names {
                 let end = i + toks[i..].iter().position(|t| t.kind == T::Semi).unwrap_or(toks.len() - i);
                 let mut uses = Vec::new();
                 let tx = |k: usize| word(src, &toks[k]);
-                super::super::use_tree(&tx, toks, i + 1, end, &[], module, public, &mut uses);
+                super::super::use_tree(&tx, toks, i + 1, end, &[], module, &super::super::scan_vis(src, toks, i, true), &mut uses);
                 self.uses.entry(module.into()).or_default().extend(uses);
                 i = end + usize::from(end < toks.len());
                 continue;
@@ -316,7 +316,7 @@ impl Names {
                 if exported {
                     let root = &self.crates[ci].name;
                     self.uses.entry(root.clone()).or_default().push(crate::macros::UseItem {
-                        module: root.clone(), path: module.split("::").chain(std::iter::once(name.as_str())).map(str::to_owned).collect(), bind: Some(name), is_pub: true,
+                        module: root.clone(), path: module.split("::").chain(std::iter::once(name.as_str())).map(str::to_owned).collect(), bind: Some(name), vis: crate::macros::UseVis::Pub,
                     });
                 }
                 exported = false;
@@ -461,7 +461,7 @@ impl Names {
                 for target in self.absolute(ci, scope, &u.path) {
                     let target = self.bindings.path(&target);
                     let name = u.bind.as_ref().map(|name| self.bindings.intern(name));
-                    imports.push(Import::Use { scope: scope_id, target, name, public: u.is_pub });
+                    imports.push(Import::Use { scope: scope_id, target, name, public: u.vis.is_restricted_or_pub() });
                 }
             }
         }
@@ -914,7 +914,7 @@ impl Names {
                 // imports would resurrect the shadowed candidates.
                 if depth == 0 { at = end + usize::from(end < toks.len()); continue; }
                 let mut uses = Vec::new();
-                super::super::use_tree(&|k| word(src, &toks[k]), toks, at + 1, end, &[], module, false, &mut uses);
+                super::super::use_tree(&|k| word(src, &toks[k]), toks, at + 1, end, &[], module, &crate::macros::UseVis::Private, &mut uses);
                 for u in uses {
                     let segs = self.strs_path(&u.path);
                     let mut candidates = Vec::new();
@@ -1014,7 +1014,7 @@ impl Names {
             if toks[i].kind == T::KwUse {
                 let end = i + toks[i..].iter().position(|t| t.kind == T::Semi).unwrap_or(toks.len() - i);
                 let mut uses = Vec::new();
-                super::super::use_tree(&|k| word(src, &toks[k]), toks, i + 1, end, &[], module, false, &mut uses);
+                super::super::use_tree(&|k| word(src, &toks[k]), toks, i + 1, end, &[], module, &crate::macros::UseVis::Private, &mut uses);
                 for u in &uses {
                     let segs = self.strs_path(&u.path);
                     if rs_lazy {

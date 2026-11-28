@@ -359,7 +359,7 @@ impl ItemErrors {
 fn with_item_diagnostics(prog: &Program, tcx: &Tcx, check: impl FnOnce() -> Vec<String>) -> ItemErrors {
     let cp = tcx.dcx.checkpoint();
     let errors = check();
-    let (reported, warnings) = tcx.dcx.take_since(cp);
+    let relax_types::infer::diagnostics::Taken { errors: reported, warnings, drained: _ } = tcx.dcx.take_since(cp);
     let reported = reported.into_iter().map(|error| {
         let cause = error.cause;
         if cause.body_id == crate::program::NO_DEF { error.message }
@@ -1180,7 +1180,7 @@ pub(crate) fn run_check_slice(batch: std::sync::Arc<CheckBatch>) {
             if add > 0 { jit::queue_check(&batch, add); }
             return;
         }
-        crate::pool::checkpoint(0, "check beside the program");
+        crate::pool::checkpoint();
     }
 }
 
@@ -1914,14 +1914,47 @@ pub(crate) fn live_lints(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, 
     LiveCheck { lints, owners, borrows }
 }
 
+/// What the whole-crate checks of `crate_level` need: the crates `own` judged whole, the whole
+/// check's crates `all` (the checks across crates: the symbols, the global allocators, the entry
+/// symbol), its `binaries`, and the root crate when it is a program's `entry`.
+struct WholeCrates<'a> {
+    own: &'a [bool],
+    all: &'a [bool],
+    binaries: &'a [u32],
+    entry: Option<u32>,
+}
+
 /// The crate-level checks of the crates `own`: rustc's resolve, early, attribute and AST
-/// validation passes, which no definition's check makes. `all` holds the whole check's crates, for
-/// the checks across crates (the symbols, the global allocators, the entry symbol); `entry` is the
-/// root crate when it is a program's entry. Each error with where rustc reports it
+/// validation passes, which no definition's check makes. Each error with where rustc reports it
 /// (check_order.rs), and the erroneous imports (each counts as used). A check's
 /// (check_crate_impl) and a run's app check (check_prepared): what rustc refuses here, a run
 /// refuses too.
 fn crate_level_errors(prog: &Program, tcx: &Tcx, own: &[bool], all: &[bool], binaries: &[u32], entry: Option<u32>, st: &mut StepTimes) -> (Vec<(crate::check_order::Stage, String)>, Vec<usize>) {
+    crate_level(prog, tcx, relax_front::program::Judged::crates(own), Some(WholeCrates { own, all, binaries, entry }), st)
+}
+
+/// The crate-level checks a live edit's new texts `files` get, as a fresh build's
+/// (`crate_level_errors`) would report them in those files: a patch refuses what a fresh build
+/// refuses, or the running code and its source disagree (two `static`s of one name in one body
+/// ran, a lookup taking one for both). Only the run's own crates (CrateInfo::validate) are
+/// judged, as the app check judges them. Their cost: the edited files' items and imports, once.
+pub(crate) fn edit_crate_level_errors(prog: &Program, tcx: &Tcx, files: &[u32]) -> Vec<String> {
+    let own: Vec<bool> = prog.crates.iter().map(|c| c.validate).collect();
+    let mut st = StepTimes::new("live edit crate level");
+    crate_level(prog, tcx, relax_front::program::Judged::files(&own, files), None, &mut st).0.into_iter().map(|(_, e)| e).collect()
+}
+
+/// The crate-level checks of `judged`, and with `whole` those that need the whole crate or program.
+/// Judged by files as well as by crates (an edit's files hold every scope their items can go wrong
+/// in): duplicate_items (E0428), super_paths, impl_trait_path_privacy, private_assoc_types,
+/// gated_syntax, node_attribute_targets, param_attributes, foreign_blocks, import privacy (E0603),
+/// attribute_errors, ast_validation. Whole only: duplicate_exported_macros (an exported
+/// `macro_rules!` shares the crate root's macro namespace with every file of the crate, and the
+/// check finds a macro's file by its path, which an edited file's running and new versions share),
+/// duplicate_symbols and entry_symbol_conflict (every crate's symbols), the global allocators and
+/// lang items (one per binary, across the crates it links), proc_macro_harness (the crate's type
+/// and its root) and entry_point (the root crate's `main`).
+fn crate_level(prog: &Program, tcx: &Tcx, judged: relax_front::program::Judged, whole: Option<WholeCrates>, st: &mut StepTimes) -> (Vec<(crate::check_order::Stage, String)>, Vec<usize>) {
     use crate::check_order::{Phase, Stage, LATE_PRIVATE_IN_PUBLIC};
     use relax_types::item_checks as ic;
     let mut errors = Vec::new();
@@ -1929,27 +1962,31 @@ fn crate_level_errors(prog: &Program, tcx: &Tcx, own: &[bool], all: &[bool], bin
         errors.extend(staged(stage, found));
         st.mark(step);
     };
-    add(Stage::new(Phase::Resolve, 0), ic::duplicate_items(prog, own), "duplicate_items");
-    add(Stage::new(Phase::Resolve, 0), ic::duplicate_exported_macros(prog, own), "duplicate_exported_macros");
-    add(Stage::new(Phase::Resolve, 3), ic::super_paths(prog, own), "super_paths");
-    add(Stage::new(Phase::Late, LATE_PRIVATE_IN_PUBLIC), ic::impl_trait_path_privacy(prog, tcx, own), "impl_trait_path_privacy");
-    add(Stage::new(Phase::Late, LATE_PRIVATE_IN_PUBLIC), ic::private_assoc_types(prog, tcx, own), "private_assoc_types");
-    add(Stage::new(Phase::Early, 1), ic::gated_syntax(prog, own), "gated_syntax");
-    add(Stage::new(Phase::Attrs, 0), ic::node_attribute_targets(prog, own), "node_attribute_targets");
-    add(Stage::new(Phase::Early, 0), ic::param_attributes(prog, own), "param_attributes");
-    add(Stage::new(Phase::Early, 0), ic::foreign_blocks(prog, own), "foreign_blocks");
-    add(Stage::new(Phase::Attrs, 0), ic::duplicate_symbols(prog, all), "duplicate_symbols");
-    add(Stage::new(Phase::Attrs, 0), ic::global_allocators_and_lang_items(prog, all, binaries), "global_allocators_and_lang_items");
-    add(Stage::new(Phase::Early, 0), relax_types::proc_macro_harness::check(prog, tcx, own), "proc_macro_harness");
-    if let Some(root) = entry {
-        add(Stage::new(Phase::Attrs, 0), ic::entry_point(prog, root), "entry_point");
-        add(Stage::new(Phase::Attrs, 0), ic::entry_symbol_conflict(prog, all, root), "entry_symbol_conflict");
+    add(Stage::new(Phase::Resolve, 0), ic::duplicate_items(prog, judged), "duplicate_items");
+    if let Some(w) = &whole {
+        add(Stage::new(Phase::Resolve, 0), ic::duplicate_exported_macros(prog, w.own), "duplicate_exported_macros");
     }
-    let privacy = prog.import_privacy_errors(own);
+    add(Stage::new(Phase::Resolve, 3), ic::super_paths(prog, judged), "super_paths");
+    add(Stage::new(Phase::Late, LATE_PRIVATE_IN_PUBLIC), ic::impl_trait_path_privacy(prog, tcx, judged), "impl_trait_path_privacy");
+    add(Stage::new(Phase::Late, LATE_PRIVATE_IN_PUBLIC), ic::private_assoc_types(prog, tcx, judged), "private_assoc_types");
+    add(Stage::new(Phase::Early, 1), ic::gated_syntax(prog, judged), "gated_syntax");
+    add(Stage::new(Phase::Attrs, 0), ic::node_attribute_targets(prog, judged), "node_attribute_targets");
+    add(Stage::new(Phase::Early, 0), ic::param_attributes(prog, judged), "param_attributes");
+    add(Stage::new(Phase::Early, 0), ic::foreign_blocks(prog, judged), "foreign_blocks");
+    if let Some(w) = &whole {
+        add(Stage::new(Phase::Attrs, 0), ic::duplicate_symbols(prog, w.all, w.binaries), "duplicate_symbols");
+        add(Stage::new(Phase::Attrs, 0), ic::global_allocators_and_lang_items(prog, w.all, w.binaries), "global_allocators_and_lang_items");
+        add(Stage::new(Phase::Early, 0), relax_types::proc_macro_harness::check(prog, tcx, w.own), "proc_macro_harness");
+        if let Some(root) = w.entry {
+            add(Stage::new(Phase::Attrs, 0), ic::entry_point(prog, root), "entry_point");
+            add(Stage::new(Phase::Attrs, 0), ic::entry_symbol_conflict(prog, w.all, root), "entry_symbol_conflict");
+        }
+    }
+    let privacy = prog.import_privacy_errors(judged);
     let refused_imports = privacy.iter().filter_map(|(_, i, _)| *i).collect();
     add(Stage::new(Phase::Resolve, 6), privacy.into_iter().map(|(_, _, e)| e).collect(), "import_privacy");
-    add(Stage::new(Phase::Attrs, 0), prog.attribute_errors(own), "attribute_errors");
-    add(Stage::new(Phase::Early, 0), prog.ast_validation_errors(own), "ast_validation");
+    add(Stage::new(Phase::Attrs, 0), prog.attribute_errors(judged), "attribute_errors");
+    add(Stage::new(Phase::Early, 0), prog.ast_validation_errors(judged), "ast_validation");
     (errors, refused_imports)
 }
 
@@ -2861,10 +2898,16 @@ fn unit_stage(e: &str) -> crate::check_order::Stage {
     crate::check_order::stage_for(Stage::new(if internal { Phase::Post } else { Phase::Typeck }, 0), e)
 }
 
+/// typeck's summary for a check that failed only through errors reported elsewhere, in any of
+/// its forms (bare, or naming the first error or the first taint site).
+pub(crate) fn is_typeck_summary(e: &str) -> bool {
+    e.lines().next().unwrap_or("").contains("type checking failed due to previous errors")
+}
+
 /// A check that could not run because of an error reported elsewhere (typeck's cascade notes).
 pub(crate) fn is_follow_on(e: &str) -> bool {
     let first = e.lines().next().unwrap_or("");
-    first.contains("type checking failed due to previous errors")
+    is_typeck_summary(e)
         || first.contains("signature has unresolved types -- fix the signature errors first")
         || first.contains("has unresolved types in its signature -- fix its signature errors first")
 }

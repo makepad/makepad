@@ -5,7 +5,7 @@
 //! `relax-tokens` on, while the graph's are only checked against an allowlist), nor does
 //! `debug_assertions` (off in relax's release build, on in a dev-profile proc macro): the 10-25 incident was
 //! `TokenParser::eat_type` reading path field types (`crate::a::B`) only under relax-tokens, so
-//! `makepad check` accepted SandboxView's derive(Script) while rustc failed it ("Unexpected field
+//! `makepad check` accepted an app view's derive(Script) while rustc failed it ("Unexpected field
 //! form" + 15 E0277). The build of relax-native-macros refuses such predicates, except the listed
 //! token-model switch and runtime-only items that no expansion runs.
 use relax_lex::tokens::{Delimiter, Span, TokenStream, TokenTree};

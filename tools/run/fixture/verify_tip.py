@@ -263,11 +263,10 @@ class Verifier:
 
 
 def main():
-    root = Path(__file__).resolve().parents[3]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path.home() / "makepad")
     parser.add_argument("--devhub", type=Path, default=Path.home() / "makepad/target/host/makepad")
-    parser.add_argument("--state-dir", type=Path, default=root / "local/agent_state/relax-campaign")
+    parser.add_argument("--state-dir", type=Path, required=True, help="directory of the verifier's ledgers and logs (kept between runs)")
     parser.add_argument("--lane", default="landverify")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--pair", nargs=2, metavar=("WORK_SHA", "COMMERCIAL_SHA"))

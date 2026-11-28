@@ -1,8 +1,8 @@
 #!/bin/sh
 # First-run test of makepad.sh in a fresh folder, in a pty, against a local release service
-# serving tiny fixture loaders (a two-crate workspace whose `makepad` binary only reports that it
-# started). Runs: first, unchanged (no rebuild), changed loader (rebuild), broken loader (error
-# with log excerpt and path). Usage: sh test.sh BASE_DIR [clean|host]   (BASE_DIR: a new, empty folder)
+# serving tiny fixture loaders (a three-crate workspace whose `makepad` handles recovery and
+# reports which loader started). Runs: first, unchanged (no rebuild), changed loader (rebuild),
+# broken loader (error with log excerpt and path). Usage: sh test.sh BASE_DIR [clean|host]   (BASE_DIR: a new, empty folder)
 #   clean: PATH holds no Rust, so the script downloads its own into its folder
 #   host:  PATH is left alone, so a suitable installed Rust is used
 # Never run it against an existing installation or on a machine someone works on.
@@ -21,7 +21,10 @@ check() { # check NAME FILE PATTERN
 # publish TEXT [broken]: a new loader ZIP (named by its SHA-256 in the release) with main printing TEXT
 publish() {
     rm -rf "$base/zipfix" "$base/www/public/app/runner/fx1/loader.zip"
-    mkdir -p "$base/zipfix/fx1/dep-a" || exit 2
+    switch=$base/zipfix/fx1/libs/loader_switch
+    mkdir -p "$base/zipfix/fx1/dep-a" "$switch/src" || exit 2
+    cp "$here/../../../libs/loader_switch/Cargo.toml" "$switch/Cargo.toml" &&
+        cp "$here/../../../libs/loader_switch/src/lib.rs" "$switch/src/lib.rs" || exit 2
     cat > "$base/zipfix/fx1/Cargo.toml" <<'TOML'
 [package]
 name = "makepad-run"
@@ -29,6 +32,7 @@ version = "0.1.0"
 edition = "2021"
 [dependencies]
 dep-a = { path = "dep-a" }
+makepad-loader-switch = { path = "libs/loader_switch" }
 [[bin]]
 name = "makepad"
 path = "main.rs"
@@ -46,10 +50,15 @@ name = "dep-a"
 version = "0.1.0"
 
 [[package]]
+name = "makepad-loader-switch"
+version = "0.1.0"
+
+[[package]]
 name = "makepad-run"
 version = "0.1.0"
 dependencies = [
  "dep-a",
+ "makepad-loader-switch",
 ]
 LOCK
     printf '[package]\nname = "dep-a"\nversion = "0.1.0"\nedition = "2021"\n' > "$base/zipfix/fx1/dep-a/Cargo.toml"
@@ -84,7 +93,12 @@ RUST
     else
         cat > "$base/zipfix/fx1/main.rs" <<'RUST'
 fn main() {
-    let home = std::fs::canonicalize(std::env::var_os("RELAX_HOME").unwrap()).unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("RELAX_HOME").unwrap());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|cmd| cmd == "recover") {
+        std::process::exit(makepad_loader_switch::recover_command(&home.join("cache/loader"), &args[1..]));
+    }
+    let home = home.canonicalize().unwrap();
     let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
     let target = exe.parent().unwrap().parent().unwrap();
     let loaders = home.join("cache/loader");
@@ -95,7 +109,8 @@ fn main() {
         target.parent().unwrap().to_path_buf()
     };
     let record = folder.join("runner.launch");
-    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());
+    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), args);
+    println!("fixture loader folder: {}", folder.file_name().unwrap().to_string_lossy());
 }
 RUST
     fi
@@ -209,8 +224,8 @@ check "first run exits 0" "$base/run1.out" "Runner         [^ ]* starting"
 check "screen: header" "$base/run1.out" "Makepad.* Runner"
 check "screen: keys" "$base/run1.out" "ctrl+c stops · run makepad.sh again to continue"
 check "screen: ready" "$base/run1.out" "Ready in [0-9]*:[0-9][0-9]\. The Runner opens in a moment\."
-check "progress line, the real total" "$base/run1.out" "[0-9] / 2 crates"
-check "built: all crates" "$base/run1.out" "compiled *[^ ]*in [0-9]*:[0-9][0-9] · 2 crates"
+check "progress line, the real total" "$base/run1.out" "[0-9] / 3 crates"
+check "built: all crates" "$base/run1.out" "compiled *[^ ]*in [0-9]*:[0-9][0-9] · 3 crates"
 [ "$mode" != clean ] || check "rust downloaded" "$base/run1.out" "downloaded and unpacked in [0-9]*:[0-9][0-9]"
 # the downloaded Rust's rust-objcopy finds its LLVM: macOS release builds strip with it, unwarned
 if [ "$mode" = clean ]; then
@@ -312,16 +327,42 @@ printf '#!/bin/sh\necho hexfolder\n' > "$loader/$hex/target/host/makepad"; chmod
 printf '%s\n' src > "$loader/previous"; printf '%s\n' "$hex" > "$loader/current"
 "$base/install/makepad" > "$base/old-current.out"
 check "current folder: stable entry finds the old build" "$base/old-current.out" "^hexfolder$"
+# Pending changes which pointer the stable entry reads; the entry only selects a binary.
+unbuilt=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+mkdir "$loader/$unbuilt" || exit 2
+check_pending_entry() {
+    for previous in "$hex" ../outside "$unbuilt"; do
+        if [ "$previous" = "$hex" ]; then selected=src; expected='^hexfolder$'
+        else selected=$hex; expected='^fixture loader folder: src$'; fi
+        printf '%s\n' "$selected" > "$loader/current" && printf '%s\n' "$previous" > "$loader/previous" &&
+            printf '%s\n' "$hex" > "$loader/pending" || exit 2
+        "$base/install/makepad" > "$base/pending-entry.out" || { echo "FAIL pending entry: exit $?"; failures=$((failures + 1)); }
+        check "pending entry ($1): previous $previous" "$base/pending-entry.out" "$expected"
+        if [ "$(cat "$loader/current")" != "$selected" ] || [ "$(cat "$loader/previous")" != "$previous" ] ||
+            [ "$(cat "$loader/pending")" != "$hex" ] || [ -e "$loader/rolled-back" ]; then
+            echo "FAIL pending entry ($1): switch state changed"; failures=$((failures + 1))
+        fi
+    done
+    rm -f "$loader/pending" "$loader/previous" || exit 2
+}
+check_pending_entry "old target"
 run "$base/run5.out"
 check "current folder: up to date" "$base/run5.out" "Loader build   [^ ]* up to date"
 check "current folder: its binary runs" "$base/install/cache/logs/makepad.log" "hexfolder"
+check_pending_entry "shared target"
+rmdir "$loader/$unbuilt" || exit 2
+cp "$targets/src/host/makepad" "$loader/$hex/target/host/makepad" || exit 2
 # A code-only trial uses the selected folder. Keep the service offline so only recovery can restore the pin.
 record=$loader/$hex/runner.launch
 cp "$record" "$record.previous" || exit 2
 printf 'unconfirmed trial\n' > "$record"
 printf '%s\n' "$hex" > "$loader/previous"; printf '%s\n' "$hex" > "$loader/pending"
 mv "$base/www/public/app/runner/latest" "$base/offline-latest" || exit 2
+: > "$base/install/cache/logs/makepad.log" || exit 2
 plainrun "$base/code-rollback.out"
+# nothing tries this switch: recovery settles it at once, with no waiting line
+if grep -q 'Waiting for the update' "$base/code-rollback.out"; then echo "FAIL code rollback: waited with no open Makepad"; failures=$((failures + 1)); else echo "PASS code rollback: no wait with no open Makepad"; fi
+check "code rollback: selected folder runs" "$base/install/cache/logs/makepad.log" "^fixture loader folder: $hex$"
 mv "$base/offline-latest" "$base/www/public/app/runner/latest" || exit 2
 if [ "$code" = 0 ] && cmp -s "$base/expected.launch" "$record" && [ "$(cat "$loader/current")" = "$hex" ] \
     && [ ! -e "$record.previous" ] && [ ! -e "$loader/pending" ] && [ -s "$loader/rolled-back" ]; then
@@ -331,9 +372,11 @@ rm -f "$loader/rolled-back" || exit 2
 # an unconfirmed switch rolls back to previous (src: current deleted) with a note
 printf '%s\n' src > "$loader/previous"
 printf '%s\n' "$hex" > "$loader/pending"
+: > "$base/install/cache/logs/makepad.log" || exit 2
 run "$base/run6.out"
-check "rollback: line" "$base/run6.out" "Went back to src: the new runner did not confirm its first start"
+check "rollback: note" "$loader/rolled-back" '^The update did not confirm its first frame\.$'
 check "rollback: src binary runs" "$base/install/cache/logs/makepad.log" "fixture loader: two"
+check "rollback: selected folder" "$base/install/cache/logs/makepad.log" '^fixture loader folder: src$'
 [ ! -e "$loader/pending" ] && [ ! -e "$loader/current" ] && [ -s "$loader/rolled-back" ] && echo "PASS rollback: pointers" || { echo "FAIL rollback: pointers"; failures=$((failures + 1)); }
 
 # The coding-agent form, from a shell with no terminal: plain lines, the stable entry

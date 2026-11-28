@@ -10,5 +10,12 @@ if [ $rc -ne 0 ]; then tail -20 "$b"; echo "LOADER-FAIL build"; exit 1; fi
 said='^([^ :]+:[0-9]+:[0-9]+: )?(warning|error)'
 if grep -E "$said" "$b" | grep -qv sandbox; then grep -E "$said" "$b" | grep -v sandbox | head -20; echo "LOADER-FAIL warnings"; exit 1; fi
 grep -E '^ +Compiling' "$b" | wc -l | sed 's/^ */jit: /; s/$/ crates rebuilt/'
+# every static of a provided crate that JIT-compiled code can reach is marked shared or per_side (relax-compiler
+# boundary.rs `statics`): an unmarked one is refused when that code first runs, at every app start that reaches it
+here=$(cd "$(dirname "$0")" && pwd)
+"${CARGO_TARGET_DIR:-$PWD/target}/host/makepad" check --boundary statics --known-refused "$here/refused_statics.tsv" relax-provided-all > "$b" 2>&1
+rc=$?
+grep '^# provided statics' "$b"
+if [ $rc -ne 0 ]; then grep -E $'^(static|allow|crate|body)\tFAIL|^  reached' "$b" | head -40; tail -5 "$b"; echo "LOADER-FAIL provided statics"; exit 1; fi
 : > "${CARGO_TARGET_DIR:-$PWD/target}/host/makepad.publish"
 echo "LOADER-OK"

@@ -13,6 +13,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Whether this host supports the web runtime's linear memory.
+pub const RUNTIME: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
 /// The window's base: `u32 as *mut T` ORs it in (0 on Linux, where the window is the first 4 GB).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub const BASE: u64 = crate::zone_alloc::web::BASE as u64;

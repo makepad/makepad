@@ -1,14 +1,38 @@
 #!/bin/bash
-# keep_logs.sh <dir>: a failed step's logs into the lease's keep dir ($DEVHUB_KEEP/<dir's name>/), which
-# the lease's holder copies next to its own log (the master's bucket-logs, a leg's log dir) before the
-# lease ends and the node's scratch goes with it: whoever chases an intermittent has the evidence.
-# The logs only: the files right in <dir>, and below it *.log, *.out, *.fail and report files and
-# crash captures; never an app home's data or a JIT cache. Not under a lease (no DEVHUB_KEEP): nothing.
-[ -n "${DEVHUB_KEEP:-}" ] && [ -d "$1" ] || exit 0
-to=$DEVHUB_KEEP/$(basename "$1")
-cd "$1" || exit 0
-{ find . -mindepth 1 -maxdepth 1 -type f
-  find . -type f \( -name '*.log' -o -name '*.out' -o -name '*.fail' -o -name report -o -path '*/captures/*' \); } | sort -u |
-while IFS= read -r f; do
-  mkdir -p "$to/$(dirname "$f")" && cp -p "$f" "$to/$f"
+# Copy the failed fixture's logs to the gate's directory in the lease keep.
+valid_seg() {
+  local LC_ALL=C
+  case "$1" in
+    ""|"."|".."|-*|*/*|*\\*|*[[:space:][:cntrl:]]*) return 1 ;;
+  esac
+}
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo "usage: keep_logs.sh <src-dir> <dest-name> [subdir]" >&2
+  exit 2
+fi
+valid_seg "$2" || { echo "invalid keep destination: $2" >&2; exit 2; }
+if [ "$#" -eq 3 ]; then
+  valid_seg "$3" || { echo "invalid keep subdirectory: $3" >&2; exit 2; }
+fi
+[ -n "${DEVHUB_KEEP:-}" ] && [ -d "$1" ] && [ ! -L "$1" ] || exit 0
+case "$DEVHUB_KEEP" in
+  /*) keep_root=$DEVHUB_KEEP ;;
+  *) keep_root=$PWD/$DEVHUB_KEEP ;;
+esac
+to=$keep_root/$2
+[ ! -L "$to" ] || exit 2
+if [ "$#" -eq 3 ]; then
+  to=$to/$3
+  [ ! -L "$to" ] || exit 2
+fi
+cd -- "$1" || exit 1
+# The first branch includes every top-level file. Nested matches exclude app homes and caches.
+find . -type f \( ! -path './*/*' -o \
+  \( -name '*.log' -o -name log -o -name 'log.*' -o -name '*.out' -o -name '*.fail' \
+     -o -name report -o -name 'report.*' -o -name stall -o -name stuck -o -name reqs \
+     -o -path '*/captures/*' \) \
+   ! -path '*/home/*' ! -path '*/run/*' ! -path '*/run-prep/*' ! -path '*/runhome/*' \
+   ! -path '*/cache/*' ! -path '*/target/*' \) -print0 |
+while IFS= read -r -d '' f; do
+  mkdir -p -- "$to/${f%/*}" && cp -p -- "$f" "$to/$f" || exit 1
 done

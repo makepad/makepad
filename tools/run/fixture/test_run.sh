@@ -14,11 +14,16 @@
 # of a queue not its own. A unit whose processes do nothing (HUNG_QUIET, short here) is stopped and
 # fails HUNG, naming the test it still ran (after a child's own run of a test inside its target's), while the
 # other units go on; one that works past it is no hang (a
-# makepad-app-amp test sat in a GStreamer pipeline and its lease idled with hundreds of packages to go, 11-07). The
+# makepad-app-amp test sat in a GStreamer pipeline and its lease idled with hundreds of packages to go, 11-07), until
+# main stops it by hand (`devhub bucket stop`: its lease told `stop <unit> :: <by> :: <why>`), when it fails HUNG,
+# saying who stopped it and why, and the shard goes on. The
 # gate's own shell sleeps while its units run (it spun a core through every run, 11-07). A
 # workspace of stub crates in a temporary git repo, its JIT a stub whose `makepad test` fails a package whose
-# source says BROKEN, waits forever on one that says HANGS and works for 6 s on one that says BUSY; needs cargo,
+# source says BROKEN, waits forever on one that says HANGS, works for 6 s on one that says BUSY and for 60 s in its
+# second test on one that says SPINS; needs cargo,
 # git and python3, nothing of this tree but the gate's scripts.
+# A nested gate must not publish into the outer lease's keep.
+unset DEVHUB_KEEP
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/test_run.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT
@@ -69,7 +74,8 @@ path = "src/main.rs"'
 put tools/run/src/main.rs '// `makepad test <package> [<target>] [-- --list]` from the workspace root: one test, failing when its source says BROKEN,
 // two, the second never ending, when it says HANGS (the first run again in a child of its own before it, as the
 // harness self-exec says it: its own `running 1 test` to `test result:` inside the target; its pid in
-// TEST_RUN_LOG.pids), working 6 s when it says BUSY, its build failing before any test when it says UNBUILT;
+// TEST_RUN_LOG.pids), working 6 s when it says BUSY, 60 s in the second of two when it says SPINS (its pid in
+// TEST_RUN_LOG.pids), its build failing before any test when it says UNBUILT;
 // each run is said in TEST_RUN_LOG; with `-Z unstable-options --report-time` and RUSTC_BOOTSTRAP (the run of a part), its
 // result line ends in its time. `makepad inspect <pid> <question>`: a stub answer.
 use std::io::Write;
@@ -106,7 +112,7 @@ fn main() {
         let line = format!("{}\n", std::iter::once(pkg.as_str()).chain(sel).collect::<Vec<_>>().join(" "));
         f.write_all(line.as_bytes()).unwrap();
         // the queue values of a run stay in the shell of its gate: a unit that inherits one is said (land_gate.sh QUEUE_VARS)
-        let inherited: Vec<&str> = ["GATE_PROVEN", "GATE_TIMES", "GATE_PEAKS", "GATE_JOBS", "GATE_TEST_TIMES", "GATE_QUEUE_DIR"].into_iter().filter(|v| std::env::var_os(v).is_some()).collect();
+        let inherited: Vec<&str> = ["GATE_PROVEN", "GATE_TIMES", "GATE_PEAKS", "GATE_JOBS", "GATE_APPS", "GATE_TEST_TIMES", "GATE_QUEUE_DIR"].into_iter().filter(|v| std::env::var_os(v).is_some()).collect();
         if !inherited.is_empty() {
             let line = format!("{}\n", inherited.join(" "));
             std::fs::OpenOptions::new().create(true).append(true).open(format!("{log}.env")).unwrap().write_all(line.as_bytes()).unwrap();
@@ -137,6 +143,18 @@ fn main() {
         }
         std::thread::sleep(std::time::Duration::from_secs(3600));
     }
+    if src.contains("SPINS") {
+        println!("running 2 tests\ntest tests::it ... ok");
+        if let Some(log) = &log {
+            let line = format!("{}\n", std::process::id());
+            std::fs::OpenOptions::new().create(true).append(true).open(format!("{log}.pids")).unwrap().write_all(line.as_bytes()).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let mut n = 0u64;
+        while start.elapsed().as_secs() < 60 { n = std::hint::black_box(n.wrapping_mul(31).wrapping_add(1)); }
+        println!("test tests::stuck ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored");
+        return;
+    }
     if src.contains("BUSY") {
         let start = std::time::Instant::now();
         let mut n = 0u64;
@@ -162,14 +180,19 @@ g commit -q -am plan
 fail=""
 # the master's dealer for one shard (bucket.rs Dealer): each GATEWANT of its output answered in its $DEVHUB_TOLD with
 # the queue's next unit, the ones other shards took (DEAL_TAKEN: indexes by ,) skipped, then none; DEAL_DIGEST: the
-# dealer's queue is another; DEAL_NONE=1: it tells this shard of another queue none of its own (`<n> - <digest>`)
+# dealer's queue is another; DEAL_NONE=1: it tells this shard of another queue none of its own (`<n> - <digest>`);
+# DEAL_STOP=<unit> :: <by> :: <why>: once that unit started (GATESTART), main's stop of it (`devhub bucket stop`)
 dealer='import os, sys, time
-out, told, taken, digest, none = sys.argv[1:6]
+out, told, taken, digest, none, stop = sys.argv[1:7]
 taken = {int(x) for x in taken.split(",") if x}
 queue, nxt, answered = None, 0, set()
 while True:
     for l in (open(out).read().splitlines() if os.path.exists(out) else []):
         w = l.split()
+        if stop and l.startswith("GATESTART " + stop.split(" :: ")[0] + " "):
+            with open(told, "a") as f:
+                f.write("stop " + stop + "\n")
+            stop = ""
         if w[:1] == ["GATEQUEUE"] and len(w) == 4:
             queue = (int(w[2]), digest or w[3])
         elif w[:1] == ["GATEWANT"] and len(w) == 3 and queue and w[2] not in answered:
@@ -186,7 +209,7 @@ gate() { # gate <label> <rev> <expect ok|fail|lost> <ran: packages, sorted> <gre
   g checkout -q "$2"
   rm -f "$dir/ran" "$dir/ran.env" "$dir/out"
   if [ "${GATE_QUEUE:-}" = 1 ] && [ -n "${DEVHUB_TOLD:-}" ]; then
-    : > "$DEVHUB_TOLD"; python3 -I -c "$dealer" "$dir/out" "$DEVHUB_TOLD" "${DEAL_TAKEN:-}" "${DEAL_DIGEST:-}" "${DEAL_NONE:-}" & deals=$!
+    : > "$DEVHUB_TOLD"; python3 -I -c "$dealer" "$dir/out" "$DEVHUB_TOLD" "${DEAL_TAKEN:-}" "${DEAL_DIGEST:-}" "${DEAL_NONE:-}" "${DEAL_STOP:-}" & deals=$!
   fi
   # the gate's shell's own CPU (utime + stime, not its children's) into gate_ticks, read until it ends
   (cd "$dir/repo" && TEST_RUN_LOG=$dir/ran exec bash "$here/land_gate.sh" testrun "$base" -) > "$dir/out" 2>&1 &
@@ -206,7 +229,9 @@ gate() { # gate <label> <rev> <expect ok|fail|lost> <ran: packages, sorted> <gre
     echo "$out" | grep -qF -- "$want" || { fail="$fail $1(no \`$want\`)"; echo "$out" | tail -20; }
   done
 }
-gate shape shape ok "makepad-draw test-run-shape" "GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-OK testrun 2 packages|GATETIME test test-run-shape |GATESTART test makepad-draw "
+mkdir -p "$dir/shape-keep"
+DEVHUB_KEEP=$dir/shape-keep gate shape shape ok "makepad-draw test-run-shape" "GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-OK testrun 2 packages|GATETIME test test-run-shape |GATESTART test makepad-draw "
+[ -z "$(find "$dir/shape-keep" -mindepth 1 -print -quit)" ] || fail="$fail shape(green gate published a keep)"
 # each unit's start and end are said live, before the units' own output (it comes once they all ended): the
 # master's check-in lists one running far over its measure by them (bucket.rs slow_units)
 for p in test-run-shape makepad-draw; do
@@ -305,7 +330,7 @@ lib libs/plan test-run-plan '// HANGS
 pub fn floor(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
 test-run-shape = { path = "../shape" }'
 g commit -q -am hang
-GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
+DEVHUB_KEEP=$keep DEVHUB_LEASE=L41 GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan --profile release-checks -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
 [ "$gate_ticks" -lt 100 ] || fail="$fail hang(the gate's shell took $gate_ticks ticks of CPU: it spun while its units ran)"
 ! echo "$gate_out" | grep -q "^GATETIME test test-run-plan " || fail="$fail hang(a hung unit's seconds are no measure)"
 echo "$gate_out" | grep -q "^GATETIME test test-run-shape " || fail="$fail hang(no measure of the busy unit)"
@@ -321,5 +346,245 @@ UNIT_WATCH=$dir/broken_watch.sh GATE_PROVEN="test test-run-shape;test makepad-dr
 while read -r pid; do
   ! kill -0 "$pid" 2>/dev/null || { fail="$fail nowatch(its process $pid still runs)"; kill -KILL "$pid"; }
 done < "$dir/ran.pids"
+# a unit at work in its second test, which its watch never stops by itself, stopped by main (`devhub bucket stop`:
+# its lease told so beside the dealer's lines): it fails HUNG at its watch's next look, saying who stopped it and
+# why first, and the test it was in (its --list after it, which the same stop does not stop), its processes gone;
+# the shard's other units pass. (An in-process hub's tick kept a Fab test's wait going 40 min beside its app at
+# 0%, and nothing but a cancel of the whole run could end it, 11-27)
+g checkout -q -b stop "$base"
+lib libs/shape test-run-shape '// SPINS
+pub fn area(w: u32) -> u32 { w.pow(2) }'
+g commit -q -am stop
+rm -f "$dir/ran.pids"
+DEVHUB_KEEP=$keep GATE_RETRY="test test-run-other" GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_STOP="test test-run-shape :: main :: stuck spinning" GATE_TIMES="test test-run-shape=40;test test-run-other=20;test makepad-draw=10" HUNG_QUIET=600 HUNG_LOOK=1 gate stop stop fail "makepad-draw test-run-other test-run-shape" "GATEUNIT fail test test-run-shape|test test-run-shape: HUNG (stopped by main: stuck spinning, |HUNG: stopped by main: stuck spinning, |s into the unit; tests::stuck; its stacks: testrun-test-run-shape.hung in the run's kept logs|GATEREPRO test test-run-shape :: makepad test test-run-shape --profile release-checks -- tests::stuck --exact|GATEUNIT ok test test-run-other|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-shape"
+! echo "$gate_out" | grep -q "^GATETIME test test-run-shape " || fail="$fail stop(a stopped unit's seconds are no measure)"
+while read -r pid; do
+  ! kill -0 "$pid" 2>/dev/null || { fail="$fail stop(its process $pid still runs)"; kill -KILL "$pid"; }
+done < "$dir/ran.pids"
 if [ -n "$fail" ]; then echo "test_run FAILED:$fail"; exit 1; fi
+
+# A second workspace for selection inside product subtrees. Reuse the built stub for the gate run.
+set -e
+(
+  dir=$dir/products
+  sandbox=apps/commercial/sandbox
+  sim_dep='makepad-game-sim = { path = "../sim" }'
+  lib "$sandbox/libs/sim" makepad-game-sim ''
+  lib "$sandbox/libs/script" makepad-game-script '' "[dependencies]
+$sim_dep"
+  lib "$sandbox/libs/gen" makepad-game-gen '' "[dependencies]
+$sim_dep"
+  lib "$sandbox/libs/indirect" sandbox-indirect '' "[dependencies]
+makepad-game-script = { path = \"../script\" }
+[build-dependencies]
+$sim_dep
+[target.'cfg(any())'.dependencies]
+$sim_dep"
+  lib "$sandbox" makepad-sandbox '' '[dependencies]
+makepad-game-sim = { path = "libs/sim" }
+makepad-platform = { path = "../../../platform" }'
+  lib apps/commercial/other/tests relax-commercial-tests '' '[dependencies]
+makepad-game-sim = { path = "../../sandbox/libs/sim" }'
+  lib apps/apps/create/core makepad-town-core ''
+  lib apps/apps/create/app makepad-town '' '[dev-dependencies]
+makepad-town-core = { path = "../core" }'
+  lib platform makepad-platform ''
+  lib libs/platform-user platform-user '' '[dependencies]
+makepad-platform = { path = "../../platform" }'
+  put Cargo.toml '[workspace]
+members = ["apps/commercial/sandbox", "apps/commercial/sandbox/libs/*", "apps/commercial/other/tests",
+           "apps/apps/create/*", "platform", "libs/platform-user"]
+exclude = ["libs/stitch"]
+resolver = "2"'
+  g init -q -b products
+  g add -A
+  g commit -q -m products
+  base=$(git -C "$dir/repo" rev-parse HEAD)
+
+  expect_runs() { # name, source to touch, exact --runs output
+    local got
+    printf '\n' >> "$dir/repo/$2"
+    g commit -q -am "$1"
+    got=$(cd "$dir/repo" && python3 -I "$here/affected.py" --runs HEAD^ -)
+    [ "$got" = "$3" ] || { printf '%s FAILED\nexpected:\n%s\ngot:\n%s\n' "$1" "$3" "$got"; return 1; }
+  }
+  # The script's split measure plus an unmeasured user fits exactly. The sandbox already runs.
+  GATE_TIMES="test makepad-game-script=500;test makepad-game-script --lib=270;test makepad-sandbox=500" \
+    expect_runs test_small_group_direct_user_sandbox_miss "$sandbox/libs/sim/src/lib.rs" \
+"tests makepad-game-gen $sandbox/libs/gen
+tests makepad-game-script $sandbox/libs/script
+tests makepad-game-sim $sandbox/libs/sim
+tests makepad-sandbox $sandbox"
+  sim_rev=$(git -C "$dir/repo" rev-parse HEAD)
+  expect_runs test_small_group_dev_dep_direct_user apps/apps/create/core/src/lib.rs \
+'tests makepad-town apps/apps/create/app
+tests makepad-town-core apps/apps/create/core'
+  expect_runs test_shared_framework_crate_does_not_expand_in_slice1 platform/src/lib.rs \
+"tests makepad-platform platform
+tests makepad-sandbox $sandbox"
+
+  mkdir -p "$dir/queue"
+  printf '%s' 'test makepad-game-script=10;test makepad-game-script --lib=200;test makepad-game-gen=200' > "$dir/queue/GATE_TIMES"
+  GATE_QUEUE_DIR=$dir/queue gate test_large_direct_user_wall_over_budget_defers_explicitly "$sim_rev" ok \
+    "makepad-game-sim makepad-sandbox" "direct-users-deferred:$sandbox(2 pkgs,400s>300s)|NODEGATE-OK testrun 2 packages" || exit 1
+  [ -z "$fail" ] || { echo "test_run FAILED:$fail"; exit 1; }
+
+  put libs/stitch/Cargo.toml '[workspace]
+members = ["core", "user"]
+resolver = "2"'
+  lib libs/stitch/core stitch-core ''
+  lib libs/stitch/user stitch-user '' '[dependencies]
+stitch-core = { path = "../core" }'
+  python3 -I - "$here/affected.py" "$dir/repo" <<'PY'
+import os, runpy, sys
+from pathlib import Path
+
+def test_load_gate_times_variants_and_parts():
+    affected = runpy.run_path(sys.argv[1])
+    cases = [
+        ("test pkg=500;test pkg --lib=270", 270.0),
+        ("test pkg=250;test pkg --features web=15", 265.0),
+        ("test pkg --features web=15", 45.0),
+        ("test pkg --lib=700;test pkg --lib part 1/2=350;test pkg --lib part 2/2=350", 700.0),
+        ("test pkg --lib part 1/2=200;test pkg --lib part 2/2=200;"
+         "test pkg --lib part 1/3=100;test pkg --lib part 2/3=100;test pkg --lib part 3/3=150", 400.0),
+    ]
+    previous = os.environ.get("GATE_TIMES")
+    try:
+        for times, expected in cases:
+            os.environ["GATE_TIMES"] = times
+            got = affected["load_gate_times"](None)
+            assert got == {"pkg": expected}, (times, expected, got)
+    finally:
+        if previous is None:
+            os.environ.pop("GATE_TIMES", None)
+        else:
+            os.environ["GATE_TIMES"] = previous
+
+def test_nested_workspace_direct_users_included():
+    affected = runpy.run_path(sys.argv[1])
+    root = Path(sys.argv[2]).resolve()
+    workspace = root / "libs/stitch"
+    core, user = workspace / "core", workspace / "user"
+    packages = {}
+    members = affected["local"](root, affected["metadata"](workspace / "Cargo.toml"), packages)
+    roots = affected["workspace_roots"](root, packages)
+    assert roots == {core: workspace, user: workspace}, roots
+    assert affected["package_group"](root, core, roots) == "libs/stitch"
+    # The nested workspace's members come from its own Cargo metadata.
+    added = affected["small_group_direct_users"](root, packages, members, {core}, {}, {core})
+    assert added == {user}, added
+
+test_load_gate_times_variants_and_parts()
+test_nested_workspace_direct_users_included()
+PY
+)
+# The three real failing gates published records only for files in their own directories.
+python3 -I - "$keep" "$here/test_failures.py" "$dir/manifest-cli" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+keep, helper, scratch = map(Path, sys.argv[1:])
+for lease, pkg, hung in [("local", "test-run-plan", False), ("L41", "test-run-plan", True),
+                         ("L7", "test-run-shape", True)]:
+    run = (keep / ("gate-run." + lease)).read_text().splitlines()
+    assert len(run) == 1 and run[0].startswith("landgate.")
+    folder = keep / run[0]
+    records = [json.loads(line) for line in (folder / "gate-manifest.jsonl").read_text().splitlines()]
+    assert any(r["kind"] == "unit" and r["unit"] == "test " + pkg and "testrun-" + pkg in r["files"] for r in records)
+    if hung:
+        assert any(r["kind"] == "hung" and r["unit"] == "test " + pkg and r["test"] == "tests::stuck" for r in records)
+    for r in records:
+        files = r.get("files", []) + [r[k] for k in ("file", "unit_log", "names") if k in r]
+        assert all((folder / f).is_file() for f in files), r
+
+def cli(*args, check=True):
+    return subprocess.run([sys.executable, "-I", helper, *args], check=check)
+
+staged, dest, ptr = (scratch / f for f in ("staged", "manifest", "gate-run.local"))
+cli("--manifest", dest, "--kind", "busy", "--unit", "test u", "state.busy")
+for kind in ["test", "hung"]:
+    cli("--manifest", staged, "--kind", kind, "--unit", "test u", "--test", "t", "--unit-log", "output", "state." + kind)
+cli("--manifest", staged, "--kind", "unit", "--unit", "test u", "output", "part.names")
+cli("--manifest", staged, "--kind", "busy_clear", "--unit", "test u")
+cli("--flush-manifest", staged, dest, "--run-pointer", ptr, "landgate.demo")
+records = [json.loads(line) for line in dest.read_text().splitlines()]
+assert [r["kind"] for r in records] == ["busy", "test", "hung", "unit", "busy_clear"]
+assert all(r["v"] == 1 and r["unit"] == "test u" for r in records)
+assert records[3]["files"] == ["output", "part.names"]
+assert cli("--run-pointer", ptr, "../point outside", check=False).returncode != 0
+assert ptr.read_text() == "landgate.demo\n"
+PY
+
+# The fixture verdict may mention another directory. Only the gate-owned logs are collected.
+(
+  base=$dir/reg-said; export DEVHUB_KEEP=$base/parent/keep
+  KEEP_LOGS=$here/keep_logs.sh; run_dir=landgate.reg1
+  fx=$base/log/fixture-demo
+  mkdir -p "$fx" "$DEVHUB_KEEP" "$base/parent/sibling"
+  echo DEMO_LOG > "$fx/demo.log"
+  echo SENTINEL > "$base/parent/sibling/sentinel.log"
+  echo SIBLING_LOG > "$base/parent/sibling.log"
+  if bash "$KEEP_LOGS" "$fx"; then exit 1; fi
+  for seg in '..' '.' 'a/b' 'a\\b' '-bad'; do
+    if bash "$KEEP_LOGS" "$fx" "$seg"; then exit 1; fi
+  done
+  if bash "$KEEP_LOGS" "$fx" "$run_dir" ..; then exit 1; fi
+  [ -z "$(find "$DEVHUB_KEEP" -mindepth 1 -print -quit)" ]
+  . <(sed -n '/^said()/,/^}/p' "$here/land_gate.sh")
+  rc=0
+  said "demo: OK" 400 "demo: FAIL; logs in .."$'\n'"demo: FAIL; logs in $base/parent/sibling" "$fx" fixture-demo || rc=$?
+  [ "$rc" = 1 ] && [ ! -e "$fx" ] && [ "$(cat "$DEVHUB_KEEP/$run_dir/fixture-demo/demo.log")" = DEMO_LOG ] || exit 1
+  [ -z "$(find "$DEVHUB_KEEP" \( -name sibling.log -o -name sentinel.log \) -print -quit)" ]
+  [ ! -e "$base/parent/demo.log" ] && [ ! -e "$base/parent/sentinel.log" ] || exit 1
+  mkdir -p "$fx"; echo PASS > "$fx/pass.log"
+  said "demo: OK" 400 "demo: OK" "$fx" fixture-pass
+  [ ! -e "$fx" ] && [ ! -e "$DEVHUB_KEEP/$run_dir/fixture-pass" ]
+)
+
+# The JIT session is taken from this launch's TMPDIR, including when another path was printed.
+(
+  cd "$here/../../.."
+  base=$dir/reg-present; export DEVHUB_KEEP=$base/keep
+  log=$base/log; run_dir=landgate.reg2; KEEP_LOGS=$here/keep_logs.sh
+  mkdir -p "$log" "$DEVHUB_KEEP"
+  echo UNRELATED_SESSION_LOG > "$base/other.log"
+  export present_other=$base/other.log
+  cat > "$base/stub_present.sh" <<'STUB'
+echo OWN_SESSION_LOG > "$TMPDIR/relax-session-99999-1.log"
+ln -s "$present_other" "$TMPDIR/relax-session-99999-link.log"
+echo "relax: session log kept at $present_other"
+exit 1
+STUB
+  B="bash $base/stub_present.sh"; PRESENT_WARM=1; PRESENT_WAIT=2; SETTLE=0; fail=""
+  . <(sed -n '/^present()/,/^}/p; /^present_keep()/,/^}/p; /^settle_errors()/p' "$here/land_gate.sh")
+  rc=0; present demo . demo || rc=$?
+  [ "$rc" = 1 ]
+  output=$DEVHUB_KEEP/$run_dir/present-demo
+  grep -qF "relax: session log kept at $present_other" "$output/out.log"
+  [ "$(cat "$output/relax-session-99999-1.log")" = OWN_SESSION_LOG ]
+  [ ! -e "$output/other.log" ] && [ ! -e "$output/relax-session-99999-link.log" ] && [ ! -e "$DEVHUB_KEEP/present-demo" ] || exit 1
+  if grep -rFq UNRELATED_SESSION_LOG "$DEVHUB_KEEP"; then exit 1; fi
+)
+
+# A manual stop captures a non-unit step, ends its process, and leaves the gate running.
+(
+  log=$dir/step-stop; mkdir -p "$log"
+  export DEVHUB_TOLD=$log/told HUNG_LOOK=1
+  printf '%s\n' 'stop step demo :: main :: stuck' > "$DEVHUB_TOLD"
+  B=true fail=""
+  . <(sed -n '/^watched()/,/^}/p; /^watched_step()/,/^}/p; /^gate_mark()/,/^}/p; /^watch_hung()/,/^}/p; /^stage_manifest()/,/^}/p; /^step_fail()/p' "$here/land_gate.sh")
+  if watched_step demo "$log/demo" sh -c 'echo $$ > "$1"; exec sleep 20' _ "$log/pid" > "$log/verdict"; then exit 1; fi
+  [ "$fail" = " demo" ] && [ -s "$log/demo.hung" ] || exit 1
+  grep -q '^HUNG: stopped by main: stuck' "$log/verdict"
+  grep -qx 'GATESTEP fail demo' "$log/verdict"
+  if kill -0 "$(cat "$log/pid")" 2>/dev/null; then exit 1; fi
+  watched_step next "$log/next" echo continued 4>"$log/markers" || exit 1
+  grep -qx continued "$log/next"
+  grep -q '^GATESTEPSTART next ' "$log/markers"
+  grep -qx 'GATESTEPEND next' "$log/markers"
+)
+
 echo "test_run: ok"

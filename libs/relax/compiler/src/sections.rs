@@ -126,6 +126,25 @@ impl Unit {
     }
 }
 
+/// Tests: runs on the owner in `lay_out` right before a section's spans are published, so readers
+/// off the owner can be lined up against that insert burst (static_race_tests.rs).
+#[cfg(test)]
+static SECTIONS_INSERT_HOOK: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_sections_insert_hook(hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+    *SECTIONS_INSERT_HOOK.lock().unwrap_or_else(|e| e.into_inner()) = hook;
+}
+
+#[cfg(test)]
+fn sections_before_insert_hook() {
+    let hook = SECTIONS_INSERT_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(f) = hook {
+        f();
+    }
+}
+
 /// Lays out output section `group` (once): every static of the program's current files placed
 /// in it, in one block. Their addresses are all recorded before any initializer runs, as for
 /// any static (statics may name each other's addresses).
@@ -204,12 +223,14 @@ fn lay_out(u: &mut Unit, group: &str) -> (u64, u64) {
         }
     }
     crate::zone_alloc::kept_with(|| {
-        for &(d, _, off, len) in &laid {
+        for &(d, _, off, _) in &laid {
             u.statics.insert(d, base + off);
-            u.static_spans.insert(base + off, (d, len));
         }
         u.sections.insert(group.to_string(), Section { start: base, end: base + size, members: laid.iter().map(|m| m.0).collect() });
     });
+    #[cfg(test)]
+    sections_before_insert_hook();
+    u.syms.insert_static_spans(laid.iter().map(|&(d, _, off, len)| (base + off, d, len)));
     for &(d, t, off, len) in &laid {
         u.init_static(d, t, base + off, len);
     }
@@ -233,10 +254,11 @@ fn loader_table(u: &mut Unit, d: DefId, p: usize) -> Option<bool> {
     // Entry's every field, as the offsets below list them: this stops building when a field is
     // added to Entry and not here (a missed field reads every program's table as laid out otherwise)
     fn _listed(e: &Entry) {
-        let Entry { kind: _, module: _, key: _, sig: _, shim: _, slots: _, size: _, align: _, offsets: _, enum_layout: _, drop: _, addr: _ } = e;
+        let Entry { kind: _, run: _, module: _, key: _, sig: _, shim: _, slots: _, size: _, align: _, offsets: _, enum_layout: _, drop: _, addr: _ } = e;
     }
     let rustc = [
         std::mem::offset_of!(Entry, kind),
+        std::mem::offset_of!(Entry, run),
         std::mem::offset_of!(Entry, module),
         std::mem::offset_of!(Entry, key),
         std::mem::offset_of!(Entry, sig),
@@ -495,7 +517,7 @@ mod tests {
         let mut u = crate::jit::Unit::new(prog, tcx, core);
         // the crate provided as the loader provides the CPU budget (no op listed)
         unsafe extern "C" fn no_panic_text(_: *mut *const u8, _: *mut usize) {}
-        let fixture = crate::provided::ProvidedCrate { name: "provided_section".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), shared: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[], table: Vec::new() };
+        let fixture = crate::provided::ProvidedCrate { name: "provided_section".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), shared: Default::default(), loader: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[], table: Vec::new() };
         u.provided.push((krate, fixture));
         let (group, bound) = u.section_place(entry).expect("ENTRY is in a link section");
         assert_eq!(bound, None);

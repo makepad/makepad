@@ -1466,15 +1466,46 @@ impl<'a> Parser<'a> {
         m.table.crates.get(&self.krate).is_none_or(|t| t.mods.contains(&c.module_path))
     }
 
+    pub(super) fn use_vis(&self, vis: Vis) -> crate::macros::UseVis {
+        use crate::macros::UseVis;
+        if self.scope_stack.len() > self.mod_stack.len() || self.lazy_part {
+            return UseVis::Private;
+        }
+        match vis {
+            Vis::Private | Vis::SelfMod => UseVis::Private,
+            Vis::Pub => UseVis::Pub,
+            Vis::Crate => UseVis::Crate,
+            Vis::Super => UseVis::Super,
+            Vis::In(row) => {
+                let path = self.ast.row(row);
+                let mut segs = Vec::new();
+                if path.global() { segs.push(String::new()); }
+                for sg in self.ast.segs(path.segs) { segs.push(self.seg_text(sg)); }
+                if segs.len() >= 2 && segs[0].is_empty() && segs[1].starts_with("__relax_crate_") {
+                    segs.remove(0);
+                }
+                if segs.first().and_then(|s| s.strip_prefix("__relax_crate_")) == Some(self.krate.as_str()) {
+                    segs[0] = "crate".to_string();
+                }
+                match segs.as_slice() {
+                    [s] if s == "crate" => UseVis::Crate,
+                    [s] if s == "self" => UseVis::Private,
+                    [s] if s == "super" => UseVis::Super,
+                    _ => UseVis::In(segs),
+                }
+            }
+        }
+    }
+
     /// A `use` item's bindings for macro lookups in this parse (MacroScope::add_use).
-    fn record_use(&self, global: bool, tree: &UseTree) {
+    fn record_use(&self, global: bool, tree: &UseTree, vis: crate::macros::UseVis) {
         let Some(m) = self.macros.as_ref() else { return };
         let module = self.cur_module();
         let mut prefix: Vec<String> = Vec::new();
         if global {
             prefix.push(String::new());
         }
-        self.record_use_tree(m, &module, &mut prefix, tree);
+        self.record_use_tree(m, &module, &mut prefix, tree, &vis);
     }
 
     /// Whether the qualified macro path `path` reaches a built-in (MacroScope::reaches_builtin); with
@@ -1500,17 +1531,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn record_use_tree(&self, m: &crate::macros::MacroScope, module: &str, prefix: &mut Vec<String>, tree: &UseTree) {
+    fn record_use_tree(&self, m: &crate::macros::MacroScope, module: &str, prefix: &mut Vec<String>, tree: &UseTree, vis: &crate::macros::UseVis) {
         match tree {
             UseTree::Path(sg, rest) => {
                 let s = self.seg_text(sg);
                 if prefix.len() == 1 && prefix[0].is_empty() && s.starts_with("__relax_crate_") {
                     prefix[0] = s;
-                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest));
+                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest), vis);
                     prefix[0] = String::new();
                 } else {
                     prefix.push(s);
-                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest));
+                    self.record_use_tree(m, module, prefix, self.ast.use_tree(*rest), vis);
                     prefix.pop();
                 }
             }
@@ -1525,12 +1556,12 @@ impl<'a> Parser<'a> {
                 }
                 let mut p = prefix.clone();
                 p.push(name);
-                m.add_use(module, bind, p);
+                m.add_use(module, bind, p, vis.clone());
             }
-            UseTree::Glob => m.add_glob_use(module, prefix.clone()),
+            UseTree::Glob => m.add_glob_use(module, prefix.clone(), vis.clone()),
             UseTree::Group(v) => {
                 for t in self.ast.list(*v) {
-                    self.record_use_tree(m, module, prefix, t);
+                    self.record_use_tree(m, module, prefix, t, vis);
                 }
             }
         }
@@ -1590,7 +1621,7 @@ impl<'a> Parser<'a> {
                     if let Some(stop) = (i + 1..n).find(|&j| self.toks.at(j).kind == T::Semi) {
                         let toks = self.toks.range(i + 1, stop);
                         let text = |k: usize| String::from_utf8_lossy(self.tok_text(toks[k])).trim_start_matches("r#").to_string();
-                        crate::preload::use_tree(&text, &toks, 0, toks.len(), &[], module, false, &mut uses);
+                        crate::preload::use_tree(&text, &toks, 0, toks.len(), &[], module, &crate::macros::UseVis::Private, &mut uses);
                         i = stop;
                     }
                 }
@@ -1610,7 +1641,7 @@ impl<'a> Parser<'a> {
         let key = (module.to_string(), name.to_string(), kind as u8);
         if let Some(&hit) = s.glob_hits.get(&key) { return hit; }
         let hit = self.macros.as_ref().is_some_and(|m| {
-            let globs: Vec<_> = s.globs.iter().map(|path| crate::macros::UseItem { module: module.to_string(), path: path.clone(), bind: None, is_pub: false }).collect();
+            let globs: Vec<_> = s.globs.iter().map(|path| crate::macros::UseItem { module: module.to_string(), path: path.clone(), bind: None, vis: crate::macros::UseVis::Private }).collect();
             m.proc_macro_import(&self.krate, module, &globs, name, kind).is_some()
         });
         s.glob_hits.insert(key, hit);
@@ -1912,11 +1943,16 @@ impl<'a> Parser<'a> {
         // Relax's built-in macros (builtins.rs) when no macro_rules! of that name is visible
         let mut full_path = mpath.clone();
         full_path.push(name.clone());
+        let qualified = qual.is_some() || path.global();
         let prelude_shadowed = STD_PRELUDE_MACROS.contains(&name.as_str())
             && (m.builtin_macro(&self.krate, &module, &full_path).is_some()
-                || (qual.is_none() && !path.global() && self.no_prelude == 0 && !self.name_imported(&name, self.pos)));
+                || (!qualified && self.no_prelude == 0 && !self.name_imported(&name, self.pos)));
         let bdef = if prelude_shadowed {
             crate::builtins::builtin_macro_def(&name)
+        } else if qualified && crate::builtins::builtin_macro_def(&name).is_some() {
+            m.reaches_builtin(&self.krate, &module, &full_path)
+                .then(|| crate::builtins::builtin_macro_def(&name))
+                .flatten()
         } else {
             let scope_krate = qual.as_deref()
                 .filter(|&q| !matches!(q, "crate" | "self" | "super" | "std" | "core" | "alloc"))
@@ -3144,7 +3180,7 @@ impl<'a> Parser<'a> {
                 // imports a macro expansion wrote, and those of a file the prescan did not read
                 // (the file's own are in the prescan's tree otherwise)
                 if self.macros.is_some() && (use_lo as usize >= self.src.len() || !self.file_prescanned()) {
-                    self.record_use(global, &tree);
+                    self.record_use(global, &tree, self.use_vis(vis));
                 }
                 ItemKind::Use(self.ast.push_row(UseItem { global, tree }))
             }
@@ -3167,7 +3203,7 @@ impl<'a> Parser<'a> {
                     let crate_name = String::from_utf8_lossy(self.bytes(name.lo, name.hi)).trim_start_matches("r#").to_string();
                     let bind = rename.map_or(crate_name.clone(), |r| String::from_utf8_lossy(self.bytes(r.lo, r.hi)).trim_start_matches("r#").to_string());
                     if bind != "_" {
-                        m.add_use(&self.cur_module(), bind, vec![String::new(), crate_name]);
+                        m.add_use(&self.cur_module(), bind, vec![String::new(), crate_name], self.use_vis(vis));
                     }
                 }
                 ItemKind::ExternCrate(OptIdent::from(rename))

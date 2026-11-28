@@ -104,7 +104,7 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
         }
     }
     if !b.errors.is_empty() { errors.note_reported_error(); }
-    let (reported, warnings) = errors.take_since(checkpoint);
+    let crate::infer::diagnostics::Taken { errors: reported, warnings, drained: _ } = errors.take_since(checkpoint);
     for error in reported {
         let owner = if error.cause.body_id == crate::program::NO_DEF { body.def } else { error.cause.body_id };
         b.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "typeck", error.message));

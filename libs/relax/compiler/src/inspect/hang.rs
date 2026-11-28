@@ -5,7 +5,7 @@
 
 use super::{frame_json, json_str, thread_label, Captured, Out, Req};
 use crate::waits::{Kind, Wait};
-use makepad_cpu_budget::{Tokens, JIT};
+use makepad_cpu_budget::Tokens;
 
 /// These diagnostic replies need only string fields, including quoted text in a reason.
 fn string_field(line: &str, key: &str) -> Option<String> {
@@ -74,19 +74,15 @@ fn cycle_in(e: &[(u64, u64)]) -> Vec<u64> {
 /// The threads that cannot run again, whatever the others do: what is left once every thread that
 /// can run has freed what waits for it. A wait with no known holder (a notify) counts as free; a
 /// wait younger than `min_age_ns` too (a row lags its thread: a waiter just woken, one about to give
-/// its token up). A token is free when its class has room, when a thread holding one is free (that
-/// thread gives it back), and for the JIT's job when no other runs (it goes above the budget).
+/// its token up). A token is free when its class has room or a thread holding one can give it back.
 fn stuck_threads(waits: &[Wait], e: &[(u64, u64)], tokens: &Tokens, min_age_ns: u64, now: u64) -> Vec<u64> {
     let waiting: Vec<&Wait> = waits.iter().filter(|w| w.kind != Kind::None && now.saturating_sub(w.since_ns) >= min_age_ns).collect();
     let mut stuck: Vec<u64> = waiting.iter().map(|w| w.thread).collect();
     loop {
         let still: Vec<u64> = waiting.iter().filter(|w| stuck.contains(&w.thread)).filter(|w| match w.kind {
             Kind::Token => {
-                let jit = tokens.waiting.iter().any(|t| t.thread == w.thread && t.client == JIT);
-                let held = tokens.holders.iter().filter(|h| !h.lent);
                 tokens.running >= tokens.limits[(w.object as usize).min(2)]
-                    && (!jit || held.clone().any(|h| h.client == JIT))
-                    && held.clone().all(|h| stuck.contains(&h.thread))
+                    && tokens.holders.iter().filter(|h| !h.lent).all(|h| stuck.contains(&h.thread))
             }
             _ => e.iter().find(|x| x.0 == w.thread).is_some_and(|x| stuck.contains(&x.1)),
         }).map(|w| w.thread).collect();
@@ -122,6 +118,35 @@ fn budget_chain(stuck: &[u64], waits: &[Wait], tokens: &Tokens, list: &[super::t
     let holders: Vec<String> = tokens.holders.iter().filter(|h| !h.lent).map(|h| format!("{} {:?}", label(h.thread), h.label)).collect();
     steps.push(format!("the tokens are held by {}", holders.join(", ")));
     Some(steps.join(" -> "))
+}
+
+/// What a program thread asleep on the JIT waits for: a first call's request to the owner, a build,
+/// a query another thread runs, the check beside the program (the owner's pump is the JIT's own).
+fn on_jit(kind: Kind) -> bool {
+    matches!(kind, Kind::Owner | Kind::Build | Kind::Query | Kind::Check | Kind::Pump)
+}
+
+/// The boundary between the app's pool and the JIT's, one line of `inspect cpu`: the waits for an
+/// app token on the JIT's own threads so far (`waits::jit_token_waits`), and the program's threads
+/// asleep on the JIT now, by what they wait for, with the oldest wait. Asleep on the JIT is the one
+/// way the pools meet; a token wait on a JIT thread is a wait the other way, and with it a cycle.
+pub(crate) fn boundary_line(token_waits: u64, waits: &[Wait], now_ns: u64) -> String {
+    let asleep: Vec<&Wait> = waits.iter().filter(|w| !w.jit && on_jit(w.kind)).collect();
+    let mut line = format!("token waits on JIT threads: {token_waits}   program threads asleep on the JIT: {}", asleep.len());
+    if !asleep.is_empty() {
+        let by: Vec<String> = [Kind::Owner, Kind::Build, Kind::Query, Kind::Check, Kind::Pump].into_iter().filter_map(|kind| {
+            let n = asleep.iter().filter(|w| w.kind == kind).count();
+            (n > 0).then(|| format!("{} {n}", crate::waits::KIND_NAMES[kind as usize]))
+        }).collect();
+        let oldest = asleep.iter().map(|w| now_ns.saturating_sub(w.since_ns)).max().unwrap_or(0);
+        line += &format!(" ({}), oldest {} ms", by.join(", "), oldest / 1_000_000);
+    }
+    line
+}
+
+/// The JIT's own threads asleep on other JIT work now: its suspended jobs, and the owner's pump.
+pub(crate) fn jit_asleep(waits: &[Wait]) -> usize {
+    waits.iter().filter(|w| w.jit && on_jit(w.kind)).count()
 }
 
 /// (tests) The chain of a deadlock through the CPU budget now, of waits at least `min_age_ns` old.
@@ -430,14 +455,16 @@ mod tests {
     use super::*;
     use makepad_cpu_budget::{Holder, Waiting, APP, BACKGROUND, VISIBLE};
 
+    /// (the owner and the build's drain are the JIT's own threads)
     fn wait(thread: u64, kind: Kind, object: u64, holder: u64, label: &'static str) -> Wait {
-        Wait { thread, kind, object, holder, since_ns: 0, label }
+        Wait { thread, kind, object, holder, since_ns: 0, label, jit: thread == OWNER || thread == BUILD }
     }
-    /// `holders` hold the budget's tokens (the first is a compile job), `BUILD` waits for one.
+    /// `holders` hold the app's tokens and `BUILD`, a JIT thread, waits for one: the JIT has its own
+    /// pool, so this is a regression the inspector still reads as a chain.
     fn tokens(holders: &[u64], lent: bool) -> Tokens {
-        let holder = |(i, &thread): (usize, &u64)| Holder { thread, class: VISIBLE, client: if i == 0 { JIT } else { APP }, label: "job".into(), lent, above: false, held_ns: 0 };
-        let waiting = vec![Waiting { thread: BUILD, class: BACKGROUND, client: JIT }];
-        Tokens { running: if lent { 0 } else { 2 }, limits: [3, 2, 1], holders: holders.iter().enumerate().map(holder).collect(), waiting }
+        let holder = |&thread| Holder { thread, class: VISIBLE, client: APP, label: "job".into(), lent, held_ns: 0 };
+        let waiting = vec![Waiting { thread: BUILD, class: BACKGROUND, client: APP }];
+        Tokens { running: if lent { 0 } else { 2 }, limits: [3, 2, 1], holders: holders.iter().map(holder).collect(), waiting }
     }
     const OWNER: u64 = 9;
     const BUILD: u64 = 8;
@@ -465,16 +492,16 @@ mod tests {
         assert!(free.is_empty(), "{free:?}");
         // the holders sleep with their tokens lent: the class has room
         assert!(stuck_threads(&waits, &e, &tokens(&[1, 2], true), 1_000_000_000, NOW).is_empty());
-        // no compile job holds a token: the build goes above the budget
-        let mut app = tokens(&[1, 2], false);
-        app.holders[0].client = APP;
-        assert!(stuck_threads(&waits, &e, &app, 1_000_000_000, NOW).is_empty());
-        // an app job's wait for a token has no such way
-        app.waiting[0].client = APP;
-        assert_eq!(stuck_threads(&waits, &e, &app, 1_000_000_000, NOW).len(), 4);
         // a wait for nobody known is no claim, and neither is a row younger than the age
         let row = [wait(1, Kind::Build, 1, 0, "f")];
         assert!(stuck_threads(&row, &[], &tokens(&[], false), 0, NOW).is_empty());
         assert!(stuck_threads(&waits, &e, &tokens(&[1, 2], false), NOW + 1, NOW).is_empty());
+        // the boundary: the build's drain waits for an app token (the counter has it), and the
+        // program's two threads are asleep on the JIT, one on the owner and one on the build;
+        // the owner's pump is the JIT's own
+        let line = boundary_line(1, &waits, NOW);
+        assert_eq!(line, "token waits on JIT threads: 1   program threads asleep on the JIT: 2 (owner 1, build 1), oldest 5000 ms", "{line}");
+        assert_eq!(jit_asleep(&waits), 1, "the owner pumps for the build");
+        assert_eq!(boundary_line(0, &waits[3..], NOW), "token waits on JIT threads: 0   program threads asleep on the JIT: 0");
     }
 }

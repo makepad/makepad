@@ -302,10 +302,8 @@ fn describe_addr(u: &Unit, a: u64) -> (String, Option<(u64, u64)>) {
     if a == 0 {
         return ("null".into(), None);
     }
-    if let Some((&start, &(d, size))) = u.static_spans.range(..=a).next_back() {
-        if a < start + size.max(1) && u.statics.get(&d) == Some(&start) {
-            return (format!("static {} +{} (its storage: {} bytes)", crate::lower::display_path(&u.prog, d), a - start, size), Some((start, start + size)));
-        }
+    if let Some((start, d, size)) = u.syms.static_span_containing(a) {
+        return (format!("static {} +{} (its storage: {} bytes)", crate::lower::display_path(&u.prog, d), a - start, size), Some((start, start + size)));
     }
     if let Some((start, len, _, mutable)) = u.syms.object_of(a) {
         return (format!("{} data object at {:#x} +{} ({} bytes)", if mutable { "writable" } else { "read-only" }, start, a - start, len), Some((start, start + len)));

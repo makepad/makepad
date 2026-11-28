@@ -17,11 +17,20 @@ fn scalar(addr: u64, size: u8) -> ScalarInt {
     unsafe { std::ptr::copy_nonoverlapping(addr as *const u8, bytes.as_mut_ptr(), size as usize); }
     ScalarInt::truncate_from_uint(u128::from_le_bytes(bytes), size).0
 }
+fn normalize_ty(u: &Unit, ty: TyId) -> Result<TyId, ValTreeCreationError> {
+    if u.tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_ALIAS) {
+        u.tcx.try_normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), ty)
+            .map_err(|_| ValTreeCreationError::NonSupportedType(ty))
+    } else {
+        Ok(ty)
+    }
+}
 fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &mut HashSet<Place>, settled: &mut HashMap<Place, Result<ValTree, ValTreeCreationError>>) -> Result<ValTree, ValTreeCreationError> {
     if let Some(result) = settled.get(&place) { return result.clone(); }
     if !visited.insert(place) { return Err(ValTreeCreationError::CyclicConst); }
     if *nodes >= 100_000 { return Err(ValTreeCreationError::NodesOverflow); }
     let (addr, ty, meta) = place;
+    let ty = normalize_ty(u, ty)?;
     let tys = &u.tcx.tys;
     let result = match tys.kind(ty).clone() {
         TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char => {
@@ -30,10 +39,18 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
         }
         TyKind::FnDef(..) => { *nodes += 1; Ok(ValTree::from_branches(tys, &[])) }
         TyKind::Ref(_, inner, _) => {
+            let inner = normalize_ty(u, inner)?;
             // pointer-sized words (a wasm32 word holds the window offset: syms::read_ptr)
             let pb = u.ptr_bytes() as u64;
             let ptr = crate::syms::read_ptr(u, addr);
-            let meta = match tys.kind(inner) { TyKind::Str | TyKind::Slice(_) => Some(scalar(addr + pb, pb as u8).to_bits(pb as u8) as u64), _ => None };
+            let tail = u.lay.unsized_tail(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, inner);
+            let meta = match tail {
+                None => None,
+                Some((_, t)) if matches!(tys.kind(t), TyKind::Str | TyKind::Slice(_)) => {
+                    Some(scalar(addr + pb, pb as u8).to_bits(pb as u8) as u64)
+                }
+                Some((_, t)) => return Err(ValTreeCreationError::NonSupportedType(t)),
+            };
             const_to_valtree_inner(u, (ptr, inner, meta), nodes, visited, settled)
         }
         TyKind::Array(..) | TyKind::Slice(_) | TyKind::Str => {
@@ -54,9 +71,11 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
         }
         TyKind::Tuple(fields) => {
             let layout = u.layout_of(ty);
-            let mut branches = Vec::with_capacity(tys.list(fields).len());
-            for (i, &field) in tys.list(fields).iter().enumerate() {
-                let tree = const_to_valtree_inner(u, (addr + layout.fields[i] as u64, field, None), nodes, visited, settled)?;
+            let fields = tys.list(fields);
+            let mut branches = Vec::with_capacity(fields.len());
+            for (i, &field) in fields.iter().enumerate() {
+                let field_meta = if i + 1 == fields.len() { meta } else { None };
+                let tree = const_to_valtree_inner(u, (addr + layout.fields[i] as u64, field, field_meta), nodes, visited, settled)?;
                 branches.push(Const::new_value(tys, tree, field));
             }
             if branches.is_empty() { *nodes += 1; }
@@ -81,10 +100,12 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
                 let tree = ValTree::from_scalar_int(tys, ScalarInt::try_from_uint(variant as u128, 4).unwrap());
                 branches.push(Const::new_value(tys, tree, tys.u32_));
             }
-            for i in 0..adt.variants[variant].fields.len() {
+            let nfields = adt.variants[variant].fields.len();
+            for i in 0..nfields {
                 let field = u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), def, variant as u32, i as u32, tys.list(args));
                 let off = if adt.is_enum { layout.variant_fields[variant][i] } else { layout.fields[i] };
-                let tree = const_to_valtree_inner(u, (addr + off as u64, field, None), nodes, visited, settled)?;
+                let field_meta = if !adt.is_enum && i + 1 == nfields { meta } else { None };
+                let tree = const_to_valtree_inner(u, (addr + off as u64, field, field_meta), nodes, visited, settled)?;
                 branches.push(Const::new_value(tys, tree, field));
             }
             if branches.is_empty() { *nodes += 1; }
@@ -100,6 +121,31 @@ fn const_to_valtree_inner(u: &Unit, place: Place, nodes: &mut usize, visited: &m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_queries<R>(source: &[u8], check: impl FnOnce(&Unit, &dyn Fn(&str) -> EvalToValTreeResult) -> R) -> R {
+        crate::borrowck::lazy::disable_gandalf();
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        let dir = std::env::temp_dir().join(format!("relax-valtree-query-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lib.rs");
+        std::fs::write(&path, source).unwrap();
+        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "valtree_query", false).unwrap();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        let u = Unit::new(prog, tcx, core);
+        let query = |name: &str| {
+            let def = u.prog.defs.iter().enumerate().find_map(|(i, d)| {
+                let id = crate::program::DefId(i as u32);
+                (d.krate == krate && u.prog.name(id) == name).then_some(id)
+            }).unwrap();
+            u.tcx.const_eval_resolve(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), def, &[])
+        };
+        let result = check(&u, &query);
+        drop(u);
+        std::fs::remove_file(path).unwrap(); std::fs::remove_dir(dir).unwrap();
+        result
+    }
+
     #[test]
     fn jit_query_preserves_aggregate_types_and_reports_panics() {
         const CHILD: &str = "RELAX_VALTREE_QUERY_CHILD";
@@ -109,45 +155,69 @@ mod tests {
                 .env(CHILD, "1"));
             assert!(status.success()); return;
         }
-        crate::borrowck::lazy::disable_gandalf();
-        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
-        let dir = std::env::temp_dir().join(format!("relax-valtree-query-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("lib.rs");
-        std::fs::write(&path, br#"
+        let source = br#"
             const fn aggregate() -> (u8, [u16; 2]) { (7, [11, 13]) }
             const VALUE: (u8, [u16; 2]) = aggregate();
             const fn fail() -> usize { panic!("const evaluation panic") }
             const BAD: usize = fail();
             const AFTER: usize = 5usize.count_ones() as usize;
-        "#).unwrap();
-        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "valtree_query", false).unwrap();
-        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
-        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
-        let u = Unit::new(prog, tcx, core);
-        let query = |name| {
-            let def = u.prog.defs.iter().enumerate().find_map(|(i, d)| {
-                let id = crate::program::DefId(i as u32);
-                (d.krate == krate && u.prog.name(id) == name).then_some(id)
-            }).unwrap();
-            u.tcx.const_eval_resolve(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), def, &[])
-        };
-        let value = query("VALUE").unwrap();
-        let crate::consts::ValTreeKind::Branch(fields) = value.kind() else { panic!("tuple valtree") };
-        assert_eq!(fields.len(), 2);
-        let crate::consts::ConstKind::Value(first) = u.tcx.tys.const_kind(fields[0]) else { panic!() };
-        assert_eq!(first.valtree.try_to_leaf().unwrap().to_bits(1), 7);
-        let crate::consts::ConstKind::Value(array) = u.tcx.tys.const_kind(fields[1]) else { panic!() };
-        assert!(matches!(u.tcx.tys.kind(array.ty), TyKind::Array(..)));
-        let crate::consts::ValTreeKind::Branch(elems) = array.valtree.kind() else { panic!() };
-        assert_eq!(elems.len(), 2);
-        for (i, expected) in [11, 13].into_iter().enumerate() {
-            let crate::consts::ConstKind::Value(value) = u.tcx.tys.const_kind(elems[i]) else { panic!() };
-            assert_eq!(value.valtree.try_to_leaf().unwrap().to_bits(2), expected);
-        }
-        assert!(matches!(query("BAD"), Err(ErrorHandled::Reported(_))));
-        assert_eq!(query("AFTER").unwrap().try_to_leaf().unwrap().to_bits(8), 2);
-        drop(u);
-        std::fs::remove_file(path).unwrap(); std::fs::remove_dir(dir).unwrap();
+        "#;
+        with_queries(source, |u, query| {
+            let value = query("VALUE").unwrap();
+            let crate::consts::ValTreeKind::Branch(fields) = value.kind() else { panic!("tuple valtree") };
+            assert_eq!(fields.len(), 2);
+            let crate::consts::ConstKind::Value(first) = u.tcx.tys.const_kind(fields[0]) else { panic!() };
+            assert_eq!(first.valtree.try_to_leaf().unwrap().to_bits(1), 7);
+            let crate::consts::ConstKind::Value(array) = u.tcx.tys.const_kind(fields[1]) else { panic!() };
+            assert!(matches!(u.tcx.tys.kind(array.ty), TyKind::Array(..)));
+            let crate::consts::ValTreeKind::Branch(elems) = array.valtree.kind() else { panic!() };
+            assert_eq!(elems.len(), 2);
+            for (i, expected) in [11, 13].into_iter().enumerate() {
+                let crate::consts::ConstKind::Value(value) = u.tcx.tys.const_kind(elems[i]) else { panic!() };
+                assert_eq!(value.valtree.try_to_leaf().unwrap().to_bits(2), expected);
+            }
+            assert!(matches!(query("BAD"), Err(ErrorHandled::Reported(_))));
+            assert_eq!(query("AFTER").unwrap().try_to_leaf().unwrap().to_bits(8), 2);
+        });
+    }
+
+    #[test]
+    fn const_to_valtree_enum_unused_ptr_unsized_struct_and_alias() {
+        if !crate::test_child::run_alone(module_path!(), "const_to_valtree_enum_unused_ptr_unsized_struct_and_alias") { return; }
+        let source = br#"
+            enum Key { Number(u64), Name(String) }
+            const DELETED: Key = Key::Number(1);
+            enum Raw { Num(u64), Ptr(*const u8) }
+            const BAD: Raw = Raw::Ptr(&0u8 as *const u8);
+            const C: &core::ffi::CStr = c"hi";
+            trait Tr { type A; }
+            impl Tr for () { type A = u32; }
+            const ALIAS: <() as Tr>::A = 7;
+        "#;
+        let (passed, report) = with_queries(source, |u, query| {
+            let tys = &u.tcx.tys;
+            let leaves = |tree: &ValTree| -> Option<Vec<ScalarInt>> {
+                tree.try_to_branch()?.iter().map(|field| field.try_to_value(tys)?.valtree.try_to_leaf()).collect()
+            };
+            let int = |bits, size| ScalarInt::try_from_uint(bits, size).unwrap();
+
+            let deleted = query("DELETED");
+            let deleted_ok = deleted.as_ref().ok().and_then(leaves).as_deref() == Some(&[int(0, 4), int(1, 8)]);
+            let bad = query("BAD");
+            let bad_ok = matches!(bad, Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(t))) if matches!(tys.kind(t), TyKind::Ptr(..)))
+                && u.tcx.dcx.err_count() == 0;
+            let c = query("C");
+            let bytes = c.as_ref().ok().and_then(ValTree::try_to_branch).and_then(|fields| {
+                let [slice] = fields else { return None };
+                leaves(&slice.try_to_value(tys)?.valtree)
+            });
+            let c_ok = bytes.as_deref() == Some(&[int(b'h'.into(), 1), int(b'i'.into(), 1), int(0, 1)]);
+            let alias = query("ALIAS");
+            let alias_ok = alias.as_ref().ok().and_then(ValTree::try_to_leaf) == Some(int(7, 4));
+            let errors = u.tcx.dcx.err_count();
+            let report = format!("DELETED={deleted_ok} {deleted:?}\nBAD={bad_ok} {bad:?}\nC={c_ok} {c:?}\nALIAS={alias_ok} {alias:?}\ndiagnostics={errors}");
+            (deleted_ok && bad_ok && c_ok && alias_ok && errors == 0, report)
+        });
+        assert!(passed, "{report}");
     }
 }

@@ -120,6 +120,7 @@ fn a_run_refuses_what_rustc_refuses_in_the_apps_crates() {
     // rustc's words for each (the check that finds it: what the run left out)
     let missing: Vec<&str> = [
         "E0428: the name `twice` is defined multiple times",  // duplicate_items
+        "E0428: the name `COUNT` is defined multiple times",  // duplicate_items, a body's block
         "E0428: the name `exported` is defined multiple times",  // duplicate_exported_macros
         "E0603: module `hidden` is private",  // impl_trait_path_privacy
         "E0446: private type `Private` in public interface",  // private_assoc_types
@@ -227,6 +228,17 @@ fn run_fixture(dir: &str, package: &str) -> (std::process::ExitStatus, String, S
     run_in(&root.join("libs/relax/compiler/tests").join(dir), &["run", "--quiet", "--unattended", package])
 }
 
+/// Saves `text` over the source `path` of a running live session as an editor does: written
+/// whole to a file beside its crate's source folder, then renamed over it. A truncate-then-write
+/// leaves the file empty between the two steps, and a watcher on a loaded box can read it then.
+#[cfg(unix)]
+fn save_whole(path: &std::path::Path, text: impl AsRef<[u8]>) {
+    let src = path.parent().unwrap();
+    let staged = src.parent().unwrap().join(format!(".{}.save", path.file_name().unwrap().to_string_lossy()));
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
 /// `makepad <args>` in the workspace at `dir`, with a cache and target directory of its own: its
 /// exit, stdout and stderr.
 fn run_in(dir: &std::path::Path, args: &[&str]) -> (std::process::ExitStatus, String, String) {
@@ -275,6 +287,89 @@ fn loader_in(loader: &std::path::Path, dir: &std::path::Path) -> (Command, std::
 /// wrapper that would run the runner's own main as a program.)
 fn runner() -> String {
     std::env::var("RELAX_LOADER").unwrap_or_else(|_| env!("CARGO_BIN_EXE_makepad").to_string())
+}
+
+struct CheckTargetWorkspace {
+    dir: std::path::PathBuf,
+    scratch: std::path::PathBuf,
+}
+
+impl CheckTargetWorkspace {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let scratch = runner_in(&dir).1;
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"ok-pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() { println!(\"started\"); }\n").unwrap();
+        Self { dir, scratch }
+    }
+
+    fn runner(&self) -> Command {
+        runner_in(&self.dir).0
+    }
+}
+
+impl Drop for CheckTargetWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.scratch);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn assert_check_target_refusal(args: &[&str], output: &std::process::Output, status: i32, refusal: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(status), "{args:?}: {stderr}");
+    assert_eq!(stderr.matches(refusal).count(), 1, "{args:?}: {stderr}");
+    for triple in relax_session::options::CheckTarget::supported_triples() {
+        assert!(stderr.contains(triple), "{args:?}: missing {triple} in {stderr}");
+    }
+    assert!(!stderr.contains("relax check:"), "{args:?}: {stderr}");
+    assert!(output.stdout.is_empty(), "{args:?}: {}", String::from_utf8_lossy(&output.stdout));
+}
+
+#[test]
+fn an_unknown_check_target_is_refused_before_checking_starts() {
+    let ws = CheckTargetWorkspace::new("unknown-check-target");
+    let unknown = "aarch64-unknown-linux-gnu";
+    let refusal = format!("unknown RELAX_CHECK_TARGET `{unknown}`");
+    for args in [
+        &["check", "--no-serve", "ok-pkg"][..],
+        &["check", "ok-pkg"],
+        &["check", "--json", "--no-serve", "ok-pkg"],
+        &["check", "-p", "ok-pkg", "-p", "missing-pkg"],
+        &["check", "--src", "nonexistent.store", "ok-pkg"],
+        &["run", "--quiet", "--unattended", "ok-pkg"],
+        &["test", "ok-pkg"],
+        &["test", "src/lib.rs"],
+    ] {
+        let output = ws.runner().args(args).env("RELAX_CHECK_TARGET", unknown).output().unwrap();
+        assert_check_target_refusal(args, &output, 2, &refusal);
+    }
+
+    let args = ["pack-src", "--target", unknown];
+    let output = ws.runner().args(args).arg(ws.scratch.join("out.store")).arg("ok-pkg").output().unwrap();
+    assert_check_target_refusal(&args, &output, 1, &format!("unknown target `{unknown}`"));
+    assert!(!ws.scratch.join("out.store.pack-work").exists(), "pack-src created its work directory");
+
+    let mut empty = ws.runner();
+    let mut unset = ws.runner();
+    for command in [empty.env("RELAX_CHECK_TARGET", ""), unset.env_remove("RELAX_CHECK_TARGET")] {
+        let output = command.args(["check", "--no-serve", "ok-pkg"]).output().unwrap();
+        assert!(output.status.success(), "host check: {}", String::from_utf8_lossy(&output.stderr));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_utf8_check_target_is_refused_before_checking_starts() {
+    use std::os::unix::ffi::OsStringExt;
+    let ws = CheckTargetWorkspace::new("non-utf8-check-target");
+    let args = ["check", "--no-serve", "ok-pkg"];
+    let value = std::ffi::OsString::from_vec(vec![0xff]);
+    let output = ws.runner().args(args).env("RELAX_CHECK_TARGET", value).output().unwrap();
+    assert_check_target_refusal(&args, &output, 2, "RELAX_CHECK_TARGET is not valid UTF-8");
 }
 
 /// `run_in` with `env` set, for at most `deadline`: a run still going then is hung (no exit), and
@@ -474,7 +569,7 @@ fn a_live_test_sessions_records_reach_the_next_sessions_macro_world() {
         while let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
             if line.starts_with("testverdict ") {
                 if let Some(text) = edit.take() {
-                    std::fs::write(&main, text).unwrap();
+                    save_whole(&main, text);
                 }
             }
             took = done(&line);
@@ -543,7 +638,7 @@ fn a_live_test_sessions_verdict_is_red_while_a_save_breaks_the_borrow_check() {
         if line.starts_with("testverdict ") {
             verdicts.push(line.clone());
             if let Some(text) = saves.pop() {
-                std::fs::write(&lib, text).unwrap();
+                save_whole(&lib, text);
             }
         }
         lines.push(line);
@@ -646,7 +741,7 @@ fn a_glob_reexported_macro_call_is_taken_or_refused_as_rustc_does_live_and_in_a_
         lines.push(line);
         if ended {
             if next == saves.len() { break; }
-            std::fs::write(&api, &saves[next]).unwrap();
+            save_whole(&api, &saves[next]);
             next += 1;
         }
     }

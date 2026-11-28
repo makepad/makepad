@@ -24,6 +24,7 @@ set -u
 QBASE=${1:?mac_tests.sh <makepad base sha> <commercial base sha|->}; QCBASE=${2:--}
 here=$(cd "$(dirname "$0")" && pwd)
 log=$(mktemp -d "${TMPDIR:-/tmp}/macgate.XXXXXX") || exit 2
+run_dir=${log##*/}
 HUNG_QUIET=${HUNG_QUIET:-600}
 TP="--profile release-checks"
 fail=""
@@ -56,14 +57,28 @@ results() { grep -cE '^test .* \.\.\. |^test result:' "$1" 2>/dev/null; }
 # running <out>: a target's tests run (its `running N tests` past its last `test result:`)
 running() { awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ { if (d) d-- } END { exit !d }' "$1"; }
 stop() { local p; for p in $(tree "$1"); do kill -KILL "$p" 2>/dev/null; done; }
+stopped_by_told() {
+  [ -n "${DEVHUB_TOLD:-}" ] && [ -r "$DEVHUB_TOLD" ] || return 1
+  awk -v p="stop $1 :: " 'index($0, p) == 1 {
+    r = substr($0, length(p) + 1); i = index(r, " :: ")
+    if (i) { who = substr(r, 1, i - 1); msg = substr(r, i + 4) }
+    else { who = r; sub(/ ::$/, "", who); msg = "" }
+    if (who == "") who = "main"
+    print "stopped by " who (msg != "" ? ": " msg : ""); f = 1; exit
+  } END { exit !f }' "$DEVHUB_TOLD"
+}
 # run_unit <out>: the unit's tests into <out> under the hang watch; sets code (124: hung) and hung
 run_unit() {
   out=$1
   MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$B" test "$pkg" $TP $rest > "$out" 2>&1 < /dev/null &
   pid=$!
-  hung="" seen=-1 quiet_from=$SECONDS
+  stopped_by_hand="" hung="" seen=-1 quiet_from=$SECONDS
   while kill -0 "$pid" 2>/dev/null; do
     sleep 5
+    kill -0 "$pid" 2>/dev/null || break
+    if stop_why=$(stopped_by_told "$unit"); then
+      hung="$stop_why, $((SECONDS - t0)) s into the unit"; stopped_by_hand=1; break
+    fi
     park=$(grep -m1 -E '^relax: (panic parked on thread |compile error parked on thread |stale access parked as P[0-9]|.* -- parked as P[0-9]+ \(the app holds still)' "$out")
     if [ -n "$park" ]; then hung="its JIT parked: $park"; break; fi
     n=$(results "$out")
@@ -84,7 +99,17 @@ counts() { awk '/^test result:/ { for (i = 1; i <= NF; i++) if ($i ~ /^(passed|f
 # failing <out>: its failing tests' and errors' lines
 failing() { grep -E '^(FAILED |panicked at |error(\[E[0-9]+\])?: )' "$1" | head -60; }
 # keep <out>..: into the lease's keep dir, which the hub keeps before the lease ends; prints their names there
-keep() { local f; [ -n "${DEVHUB_KEEP:-}" ] && mkdir -p "$DEVHUB_KEEP" || return 0; for f in "$@"; do cp -p "$f" "$DEVHUB_KEEP/mac-$(basename "$f")" && printf ' mac-%s' "$(basename "$f")"; done; }
+keep() {
+  local f
+  [ -n "${DEVHUB_KEEP:-}" ] && mkdir -p "$DEVHUB_KEEP/$run_dir" || return 0
+  for f; do
+    cp -p "$f" "$DEVHUB_KEEP/$run_dir/mac-${f##*/}" && printf ' mac-%s' "${f##*/}"
+  done
+}
+keep_manifest() {
+  python3 -I "$here/test_failures.py" --manifest "$DEVHUB_KEEP/$run_dir/gate-manifest.jsonl" \
+    --run-pointer "$DEVHUB_KEEP/gate-run.${DEVHUB_LEASE:-local}" "$run_dir" --kind unit --unit "$unit" "$@" 4>&-
+}
 # why a boundary audit exits non-zero, counted and named in one line, so a red always says why: an
 # audited crate's violations (crate, body) and its failed option entries (crate, `Option<T>`), the first
 # three of each (another provided crate's `violation other` rows are listed, never failed); with no such
@@ -109,7 +134,21 @@ audit() {
   local unit="boundary $1" out="$log/unit-$units.log" code kept
   echo "GATESTART $unit $(date +%s)"
   t0=$SECONDS
-  (cd "$2" && MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$B" check --boundary all "$1") > "$out" 2>&1 < /dev/null; code=$?
+  (cd "$2" && MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$B" check --boundary all "$1") > "$out" 2>&1 < /dev/null &
+  local pid=$! stop_why
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 2
+    kill -0 "$pid" 2>/dev/null || break
+    if stop_why=$(stopped_by_told "$unit"); then
+      sample "$pid" 2 >> "$out" 2>&1
+      stop "$pid"; wait "$pid" 2>/dev/null
+      echo "GATEEND $unit"
+      echo "HUNG: $stop_why, $((SECONDS - t0)) s into the unit; its stacks: mac-${out##*/} in the run's kept logs"
+      kept=$(keep "$out"); [ -z "$kept" ] || { keep_manifest $kept; echo "GATEOUT $unit ::$kept"; }
+      echo "GATEUNIT fail $unit"; fail="$fail $unit"; return
+    fi
+  done
+  wait "$pid"; code=$?
   echo "GATEEND $unit"
   echo "GATETIME $unit $((SECONDS - t0))"
   # (what failed, counted and named: land_gate.sh qboundary_one)
@@ -120,7 +159,7 @@ audit() {
   # an audit that stopped before its rows (a crash, a JIT's exit): its output's end, where a run says why
   if grep -qE "$rows" "$out"; then grep -E -A1 "$rows" "$out" | cut -c1-600 | head -40
   else grep -vE '^ *$' "$out" | tail -40 | cut -c1-300; fi
-  kept=$(keep "$out"); [ -z "$kept" ] || echo "GATEOUT $unit ::$kept"
+  kept=$(keep "$out"); [ -z "$kept" ] || { keep_manifest $kept; echo "GATEOUT $unit ::$kept"; }
   echo "GATEREPRO $unit :: cd $2 && makepad check --boundary all $1"
   echo "GATEUNIT fail $unit"
   fail="$fail $unit"
@@ -135,7 +174,7 @@ while read -r word pkg dir rest; do
   t0=$SECONDS
   run_unit "$log/unit-$units.log"
   red=""
-  if [ "$code" != 0 ]; then
+  if [ "$code" != 0 ] && [ -z "$stopped_by_hand" ]; then
     red=$out red_code=$code red_hung=$hung
     echo "$unit: red (exit $code${hung:+, hung: $hung}; $(counts "$out")): it runs once more on this box at this tip before anyone is named"
     failing "$out" | sed 's/^/  its first run: /'
@@ -143,13 +182,18 @@ while read -r word pkg dir rest; do
     run_unit "$log/unit-$units-rerun.log"
   fi
   echo "GATEEND $unit"
+  if [ -n "$stopped_by_hand" ]; then
+    echo "HUNG: $hung; its stacks: mac-${out##*/} in the run's kept logs"
+    kept=$(keep ${red:+"$red"} "$out"); [ -z "$kept" ] || { keep_manifest $kept; echo "GATEOUT $unit ::$kept"; }
+    echo "GATEUNIT fail $unit"; fail="$fail $unit"; continue
+  fi
   grep -qE '^running [0-9]+ tests?$' "$out" && [ -z "$hung" ] && echo "GATETIME $unit $((SECONDS - t0))"
   r=$(counts "$out")
   if [ "$code" = 0 ]; then
     if [ -n "$red" ]; then
       echo "$unit: a flake: red (exit $red_code${red_hung:+, hung}), then green on its rerun ($r)"
       tail -25 "$red" | cut -c1-300 | sed 's/^/  its first run: /'
-      kept=$(keep "$red" "$out"); [ -z "$kept" ] || echo "GATEOUT $unit ::$kept"
+      kept=$(keep "$red" "$out"); [ -z "$kept" ] || { keep_manifest $kept; echo "GATEOUT $unit ::$kept"; }
       echo "GATEFLAKE $unit :: $(grep -E '^FAILED [^ ]+$' "$red" | sed 's/^FAILED //' | sort -u | tr '\n' ' ')"
     fi
     echo "$unit: ok ($r, $((SECONDS - t0)) s)"
@@ -159,7 +203,7 @@ while read -r word pkg dir rest; do
     failing "$out"
     echo "$unit: FAILED (exit $code, $r)${red:+, red on its rerun too}; its output's end:"
     tail -25 "$out" | cut -c1-300
-    kept=$(keep ${red:+"$red"} "$out"); [ -z "$kept" ] || echo "GATEOUT $unit ::$kept"
+    kept=$(keep ${red:+"$red"} "$out"); [ -z "$kept" ] || { keep_manifest $kept; echo "GATEOUT $unit ::$kept"; }
     echo "GATEUNIT fail $unit"
     fail="$fail $unit"
   fi

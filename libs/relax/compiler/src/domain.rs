@@ -297,6 +297,8 @@ pub struct ForeignSaved {
 }
 
 impl ForeignSaved {
+    const NONE: Self = Self { base: 0, heap: std::ptr::null(), entered: false };
+
     /// As plain words (a host hook that cannot name this type carries it so).
     pub fn into_words(self) -> [u64; 3] {
         [self.base, self.heap as u64, self.entered as u64]
@@ -307,19 +309,24 @@ impl ForeignSaved {
 }
 
 /// Puts the calling thread (any: a realtime audio thread, a driver's worker) in the domain of
-/// `scope` (`foreign_scope`) for a call into its code. Realtime safe: no lock, no allocation but
-/// the thread's own thread-local block on its first call into JIT code (as that first call
-/// would anyway). Nests; `foreign_leave` puts back what it found.
+/// `scope` (`foreign_scope`) for a call into its code. A switch of arenas
+/// briefly takes their chunk locks. Staying in the same domain takes no lock or allocation.
+/// A thread's first call into JIT code sets up its TLS. `foreign_leave` restores nested scopes.
 #[inline]
 pub fn foreign_enter(scope: u64) -> ForeignSaved {
-    let none = ForeignSaved { base: 0, heap: std::ptr::null(), entered: false };
-    if scope == 0 {
-        return none;
-    }
+    enter_foreign_scope(scope, false).unwrap_or(ForeignSaved::NONE)
+}
+
+/// An allocator call already in its owner's domain keeps the calling thread's current TLS.
+/// An unpublished scope has no code to enter, even when the unit still hosts other domains.
+pub(crate) fn enter_foreign_scope(scope: u64, keep_current: bool) -> Option<ForeignSaved> {
+    if scope == 0 { return None; }
     let s = unsafe { &*(scope as *const ForeignScope) };
     let base = s.base.load(std::sync::atomic::Ordering::Acquire);
-    if base == 0 {
-        return none;
+    if base == 0 { return None; }
+    if keep_current && crate::zone_alloc::domain::current() == s.heap {
+        let slot = crate::jit::tls_block_if_any();
+        if slot != 0 && unsafe { *(slot as *const u64) } == base { return Some(ForeignSaved::NONE); }
     }
     crate::jit::fresh_thread();
     let slot = crate::jit::tls_block() as *mut u64;
@@ -329,7 +336,7 @@ pub fn foreign_enter(scope: u64) -> ForeignSaved {
         if heap != s.heap {
             crate::zone_alloc::domain::restore(s.heap);
         }
-        ForeignSaved { base: prev, heap, entered: true }
+        Some(ForeignSaved { base: prev, heap, entered: true })
     }
 }
 
@@ -594,11 +601,19 @@ pub fn create(u: &Unit) -> u64 {
 
 /// Gives a domain's block back (every thread of the domain is gone).
 pub fn destroy(base: u64) {
+    unpublish(base);
+    release(base);
+}
+
+fn unpublish(base: u64) {
     for sc in SCOPES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         let _ = sc.base.compare_exchange(base, 0, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed);
     }
     forget_tls_keys(base);
     BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).retain(|&(b, _)| b != base);
+}
+
+fn release(base: u64) {
     if crate::web32::on() { crate::web32::free(base, BLOCK_SIZE) } else { crate::os::mem::free(base, BLOCK_SIZE) }
 }
 
@@ -716,6 +731,177 @@ impl DomainThread {
     }
 }
 
+/// The heap and its owner leases keep this context alive. The unit can be retired while native
+/// callers still hold blocks, so keep the end flag independently of the unit.
+struct ProgramAllocatorCtx {
+    alloc: unsafe extern "C" fn(usize, usize, bool) -> *mut u8,
+    dealloc: unsafe extern "C" fn(*mut u8, usize, usize),
+    path: String,
+    heap: std::sync::atomic::AtomicPtr<crate::zone_alloc::domain::Heap>,
+    scope: std::sync::atomic::AtomicU64,
+    code_ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ProgramAllocatorCtx {
+    fn resolve(u: &Unit) -> Result<Option<std::sync::Arc<Self>>, String> {
+        let Some(allocator) = u.global_allocator_static() else { return Ok(None) };
+        if u.global_allocator().is_none() {
+            return Err(format!("cannot resolve global allocator {}", u.prog.def_path(allocator)));
+        }
+        let entry = |name| {
+            u.core_path(&["heap", name])
+                .map(|d| u.entry(u.fn_id(crate::jit::FnKey::Inst(d, Vec::new()))) as usize)
+                .filter(|addr| *addr != 0)
+                .ok_or_else(|| format!("cannot make {name} entry for global allocator {}", u.prog.def_path(allocator)))
+        };
+        // Each core entry is extern "C" with the corresponding field's signature.
+        let alloc = entry("__relax_program_alloc")?;
+        let dealloc = entry("__relax_program_dealloc")?;
+        Ok(Some(crate::zone_alloc::kept_with(|| unsafe {
+            std::sync::Arc::new(Self {
+                alloc: std::mem::transmute(alloc),
+                dealloc: std::mem::transmute(dealloc),
+                path: u.prog.def_path(allocator),
+                heap: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+                scope: std::sync::atomic::AtomicU64::new(0),
+                code_ended: u.code_ended.clone(),
+            })
+        })))
+    }
+
+    /// Both native trampolines dispatch without locking or allocating on a thread already
+    /// in the block's domain. A cross-domain call switches arenas, taking their chunk locks
+    /// briefly as a cross-domain free does. The recovery point lets the native op return even
+    /// when the run ends inside the allocator.
+    fn call<F: FnOnce()>(&self, f: F) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        if self.code_ended.load(Acquire) { return false; }
+        unsafe extern "C" fn thunk<F: FnOnce()>(data: *mut u8) {
+            if let Some(f) = unsafe { &mut *data.cast::<Option<F>>() }.take() { f(); }
+        }
+        let mut call = Some(f);
+        crate::jit::app_call_scoped(Some(self.scope.load(Acquire)), thunk::<F>, std::ptr::from_mut(&mut call).cast())
+    }
+
+    fn checked_alloc(&self, size: usize, align: usize, zeroed: bool, result: impl FnOnce(*mut u8, bool)) -> bool {
+        self.call(|| unsafe {
+            let p = (self.alloc)(size, align, zeroed);
+            let valid = p.is_null() || crate::zone_alloc::domain::heap_owns(self.heap.load(std::sync::atomic::Ordering::Relaxed), p);
+            result(p, valid);
+        })
+    }
+
+    unsafe extern "C" fn alloc(ctx: usize, size: usize, align: usize, zeroed: bool, out: *mut *mut u8) -> bool {
+        let ctx = unsafe { &*(ctx as *const Self) };
+        ctx.checked_alloc(size, align, zeroed, |p, valid| {
+            if !valid {
+                unsafe { Self::outside(std::ptr::from_ref(ctx) as usize, p, size, align) };
+            }
+            unsafe { out.write(p) };
+        })
+    }
+
+    unsafe extern "C" fn outside(ctx: usize, p: *mut u8, size: usize, align: usize) -> ! {
+        let ctx = unsafe { &*(ctx as *const Self) };
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "relax: the program's #[global_allocator] `{}` returned {:#x} ({size} bytes, align {align}), outside the memory its domain owns (its heap, its statics and its tracked mappings): under `makepad run` an allocator must sit on `System`, a static, or tracked anonymous mappings; the process ends", ctx.path, p as usize);
+        crate::os::fault::die_by(6)
+    }
+
+    unsafe extern "C" fn dealloc(ctx: usize, p: *mut u8, size: usize, align: usize) -> bool {
+        let ctx = unsafe { &*(ctx as *const Self) };
+        ctx.call(|| unsafe { (ctx.dealloc)(p, size, align) })
+    }
+
+    // A probe can expose an untracked source such as native C code, sbrk, a raw syscall,
+    // or a file-backed mapping. Every later routed allocation still checks its own block.
+    fn probe(&self) -> Result<Option<String>, String> {
+        let interrupted = || format!("global allocator `{}` probe interrupted", self.path);
+        for (size, align) in [(16, 8), (4096, 8), (4096, 4096), (256 << 10, 8), (4 << 20, 8)] {
+            let mut block = std::ptr::null_mut();
+            let mut owned = false;
+            if !self.checked_alloc(size, align, false, |p, valid| { block = p; owned = valid; }) {
+                return Err(interrupted());
+            }
+            if block.is_null() { continue; }
+            // The allocator that made this probe block can free it directly, including on refusal.
+            let freed = unsafe { Self::dealloc(std::ptr::from_ref(self) as usize, block, size, align) };
+            if !freed { return Err(interrupted()); }
+            if !owned {
+                return Ok(Some(format!("relax: the program's #[global_allocator] `{}` returned {:#x} for a {size}-byte probe, outside the memory its domain owns (its heap, its statics and its tracked mappings) -- an untracked allocator (such as C code, sbrk, or a raw syscall): allocator routing is off for this domain, so provided crates' run ops use the domain's heap and any buffer freed or resized across the program/loader boundary may corrupt memory or abort", self.path, block as usize)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Field drop order unregisters the heap and drains owner leases before freeing their context,
+/// including if a provided crate unwinds from its teardown hook.
+struct ProgramHeap {
+    heap: Box<crate::zone_alloc::domain::DomainHeap>,
+    allocator: Option<std::sync::Arc<ProgramAllocatorCtx>>,
+}
+
+impl ProgramHeap {
+    fn new(base: u64, allocator: Option<std::sync::Arc<ProgramAllocatorCtx>>) -> Option<Self> {
+        use crate::zone_alloc::domain::{raw, DomainHeap, ProgramAllocator};
+        let program = allocator.as_deref().map(|ctx| ProgramAllocator {
+            ctx: std::ptr::from_ref(ctx) as usize,
+            alloc: ProgramAllocatorCtx::alloc,
+            dealloc: ProgramAllocatorCtx::dealloc,
+            outside: ProgramAllocatorCtx::outside,
+        });
+        let heap = crate::zone_alloc::kept_with(|| unsafe { DomainHeap::new(program, (base as usize, BLOCK_SIZE)) })?;
+        if let Some(ctx) = &allocator {
+            ctx.heap.store(heap.as_ptr().cast_mut(), std::sync::atomic::Ordering::Relaxed);
+            ctx.scope.store(scope_record(base, raw(&*heap)), std::sync::atomic::Ordering::Release);
+        }
+        Some(Self { heap, allocator })
+    }
+
+    fn install(self, loading: &Loading, base: u64, probe: bool) -> Result<DomainId, Vec<String>> {
+        let allocator = self.allocator.as_ref().filter(|_| probe).cloned();
+        {
+            let mut ds = domains();
+            let d = ds.iter_mut().find(|d| d.info.id == loading.0).expect("loading domain");
+            d.info.base = base;
+            d.heap = Some(self);
+        }
+        // Loading keeps the registered heap alive. A lazy probe entry can compile or call
+        // native code, so run it outside the domain lock and the compiler owner request.
+        if let Some(allocator) = allocator {
+            match allocator.probe() {
+                Err(error) => return fail(loading.0, vec![error]),
+                // Tracked anonymous mappings pass the probe. Only an untracked source
+                // takes this fallback, including allocations made inside native C bundles.
+                Ok(Some(line)) => {
+                    eprintln!("{line}");
+                    let ds = domains();
+                    if let Some(heap) = ds.iter().find(|d| d.info.id == loading.0).and_then(|d| d.heap.as_ref()) {
+                        heap.stop_routing();
+                    }
+                }
+                Ok(None) => {}
+            }
+        }
+        Ok(loading.0)
+    }
+}
+
+impl std::ops::Deref for ProgramHeap {
+    type Target = crate::zone_alloc::domain::DomainHeap;
+    fn deref(&self) -> &Self::Target { &self.heap }
+}
+
+impl Drop for ProgramHeap {
+    fn drop(&mut self) {
+        if self.heap.retains_statics_on_drop() {
+            // A plain fork child keeps the heap registered, including its allocator entries.
+            std::mem::forget(self.allocator.take());
+        }
+    }
+}
+
 struct Domain {
     info: DomainInfo,
     started: std::time::Instant,
@@ -737,7 +923,7 @@ struct Domain {
     /// the unit whose code it runs (0: not started on one yet)
     unit: usize,
     threads: Vec<DomainThread>,
-    heap: Option<Box<crate::zone_alloc::domain::DomainHeap>>,
+    heap: Option<ProgramHeap>,
 }
 
 /// The argv of the domain whose block is at `base` (None: the process's own).
@@ -1217,23 +1403,35 @@ fn teardown(id: DomainId) {
     drop(ds);
     // Unmapping and dropping tables can take time. Registry readers (including the UI) must
     // not wait behind those operations, and stop must not report completion ahead of them.
+    // An address the heap owns must stay mapped until the heap is unregistered and its
+    // owner leases have drained. Otherwise a loader free could reach a reused static address.
     let mut freed = 0;
     if base != 0 {
-        freed += block_committed(base);
-        destroy(base);
+        unpublish(base);
     }
-    if let Some(heap) = heap {
-        let ranges: Vec<(usize, usize)> = heap.ranges().collect();
-        for &(base, size) in &ranges {
+    let ranges = heap.as_ref().map(|heap| heap.ranges().collect::<Vec<_>>()).unwrap_or_default();
+    let mapped = heap.as_ref().map(|heap| heap.mapped_ranges()).unwrap_or_default();
+    if let Some(heap) = heap.as_ref() {
+        for &(base, size) in ranges.iter().chain(&mapped) {
             crate::run_end::heap_goes(base..base + size);
             crate::inspect::heap::forget_range(base, size);
         }
         freed += (heap.stats().1 + heap.metadata_bytes()) as u64;
-        drop(heap);
-        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        for (base, size) in ranges {
-            crate::run_end::leftovers::heap_gone(base, size);
-        }
+        freed += mapped.iter().map(|&(_, size)| size as u64).sum::<u64>();
+    }
+    if base != 0 {
+        crate::run_end::heap_goes(base as usize..base as usize + BLOCK_SIZE);
+    }
+    // A plain fork child keeps inherited PA heaps registered, including their static ranges.
+    let retain_statics = heap.as_ref().is_some_and(|h| h.retains_statics_on_drop());
+    drop(heap);
+    if base != 0 && !retain_statics {
+        freed += block_committed(base);
+        release(base);
+    }
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    for (base, size) in ranges.into_iter().chain(mapped) {
+        crate::run_end::leftovers::heap_gone(base, size);
     }
     drop((args, threads, crates));
     // The process heap keeps what the domain's threads freed in their malloc arenas (free but
@@ -1567,7 +1765,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     let _job = crate::jit::compile_job();
     let _z = crate::zone_alloc::compiler_thread();
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} start_prepared at t={:.1} ms", crate::clock::ms_since_start()); }
-    let _loading = Loading(id);
+    let loading = Loading(id);
     if let Some(d) = domains().iter_mut().find(|d| d.info.id == id) { d.unit = up as usize; }
     let t0 = std::time::Instant::now();
     // The app's first start takes the boot's resolved package (same process, same instant). Taken
@@ -1644,23 +1842,30 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
         crate::wasm_export::entry(u.wasm_export_id, fid);
         let entry = u.entry(fid);
         let (target, arg) = crate::run::main_call(u, main_def, entry)?;
-        Ok::<_, String>((target, arg, create(u)))
+        // Hosted domains share the unit's allocator shim. A different allocator in the hosted
+        // package is already ignored by its JIT code.
+        let allocator = ProgramAllocatorCtx::resolve(u)?;
+        // Only a run op (`#[relax_api(run)]`) allocates in the program's heap, so only a program
+        // that binds a crate with one is probed, or ever routes to its allocator. Any other
+        // program, with whatever allocator, runs as it does without provided crates, and its
+        // allocator shims check nothing (Unit::routes_allocator).
+        let probe = u.routes_allocator;
+        Ok::<_, String>((target, arg, create(u), allocator, probe))
     });
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} main prepared at t={:.1} ms", crate::clock::ms_since_start()); }
-    let (target, arg, base) = match prepared {
+    let (target, arg, base, allocator, probe) = match prepared {
         Ok(x) => x,
         Err(e) => return fail(id, vec![e]),
     };
     // the domain's arena is program memory: the kept heap
-    let heap = match crate::zone_alloc::kept_with(crate::zone_alloc::domain::DomainHeap::new) {
+    let heap = match ProgramHeap::new(base, allocator.filter(|_| probe)) {
         Some(h) => h,
         None => { destroy(base); return fail(id, vec!["reserving domain heap".into()]); }
     };
+    heap.install(&loading, base, probe)?;
     {
         let mut d = domains();
         if let Some(x) = d.iter_mut().find(|x| x.info.id == id) {
-            x.heap = Some(heap);
-            x.info.base = base;
             x.info.crates = g.crates.len();
             x.info.reused = n_reused;
             x.info.loaded = new_names.len();

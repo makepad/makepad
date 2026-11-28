@@ -48,7 +48,7 @@ echo "$arc" | grep -q 'shared_registry_retain` calls `[a-z:]*increment_strong_co
 native=$(cargo run --release -q -p relax-provided-fixture --bin relax-provided-enum 2>&1); native_rc=$?
 # (the JIT run's own diagnostics on stderr are not the program's lines)
 out=$(jit relax-provided-fixture --bin relax-provided-enum); rc=$?
-out=$(printf '%s\n' "$out" | grep -v -e '^relax: ' -e '^makepad-remote: ')
+out=$(printf '%s\n' "$out" | grep -v -e '^relax: ' -e '^makepad-remote: ' -e '^\[makepad-remote\] ')
 if [ $native_rc != 0 ] || [ $rc != 0 ] || [ -z "$native" ] || [ "$native" != "$out" ]; then
     fail="$fail provided-enum"
     echo "--- provided-enum native (rc $native_rc):"; echo "$native"

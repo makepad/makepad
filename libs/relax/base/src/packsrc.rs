@@ -42,7 +42,9 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
     while i < args.len() {
         let a = args[i].as_str();
         if a == "--target" {
-            target = Some(args.get(i + 1).ok_or("--target wants a triple")?.clone());
+            let t = args.get(i + 1).ok_or("--target wants a triple")?;
+            crate::options::CheckTarget::parse_triple(t)?;
+            target = Some(t.clone());
             i += 2;
         } else if a == "--fonts" {
             let f = args.get(i + 1).ok_or("--fonts wants a font asset manifest")?;
@@ -70,6 +72,31 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         return Err("pack-src needs at least one package".into());
     }
     Ok(Options { out, target, packages, fonts })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args;
+    use crate::options::CheckTarget;
+
+    #[test]
+    fn pack_src_parse_args_validates_target_triple() {
+        let parse = |args: &[&str]| {
+            let words = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            parse_args(&words).map(|opts| opts.target)
+        };
+        for triple in ["aarch64-linux-android", "wasm32-unknown-unknown"] {
+            assert_eq!(parse(&["--target", triple, "out.store", "pkg"]).unwrap().as_deref(), Some(triple));
+        }
+        assert_eq!(parse(&["out.store", "pkg"]).unwrap(), None);
+        for triple in ["aarch64-unknown-linux-gnu", ""] {
+            let error = parse(&["--target", triple, "out.store", "pkg"]).unwrap_err();
+            assert!(error.contains(&format!("unknown target `{triple}`")), "{error}");
+            for supported in CheckTarget::supported_triples() {
+                assert!(error.contains(supported), "missing {supported} in {error}");
+            }
+        }
+    }
 }
 
 /// The workspace root: the nearest folder at or above the current one whose Cargo.toml has a `[workspace]` (or `workspace.` keys).

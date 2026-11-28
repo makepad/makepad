@@ -46,7 +46,7 @@ impl Codec for DemandPart {
         Some(Self { key: Codec::get(r)?, ..Self::default() })
     }
 }
-const PART_VERSION: u32 = 13;
+const PART_VERSION: u32 = 15;
 const PART_DOMAIN: &str = "demand-part-v12";
 
 type Resolve<'a> = dyn FnMut(&str, u128) -> Option<&'static [u8]> + 'a;
@@ -260,14 +260,14 @@ pub(super) struct MacroPart {
     aliases: Arc<HashMap<String, (String, String)>>,
     uses: Vec<String>,
     modules: Option<Arc<crate::macros::CrateMods>>,
-    expansions: Arc<HashMap<(String, String), Vec<String>>>,
+    expansions: Arc<HashMap<(String, String), Vec<crate::macros::ExpUse>>>,
     s2_fmt: bool,
 }
 fields!(MacroPart, definitions, aliases, uses, modules, expansions, s2_fmt);
 impl MacroPart {
     pub(super) fn definitions(&self) -> &[Arc<crate::macros::MacroDef>] { &self.definitions }
-    /// The crate's expansion-made imports ((module, binding) -> path), as its outline found them.
-    pub(super) fn expansions(&self) -> &Arc<HashMap<(String, String), Vec<String>>> { &self.expansions }
+    /// The crate's expansion-made imports ((module, binding) -> import paths and visibilities), as its outline found them.
+    pub(super) fn expansions(&self) -> &Arc<HashMap<(String, String), Vec<crate::macros::ExpUse>>> { &self.expansions }
     fn referenced_size(&self) -> usize {
         4 + self.definitions.len() * 16 + self.aliases.plain_size() + self.uses.plain_size()
             + self.modules.plain_size() + self.expansions.plain_size() + 1
@@ -420,7 +420,7 @@ impl DemandImage {
     }
     /// The imports the expansions of crate `ci`'s outline wrote (`pub use internal as name;`
     /// beside a generated `macro_rules! internal`), under the same conditions as outline_macros.
-    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<crate::macros::ExpUse>>>> {
         let recording = self.recording.as_ref()?;
         if let Some((_, _, parts)) = recording.pending.lock().unwrap().as_ref() {
             return parts.get(ci).map(|p| p.macros.expansions().clone());

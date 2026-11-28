@@ -25,22 +25,25 @@ impl Program {
         })
     }
 
-    /// E0433 / "cannot find attribute" for the attributes of the own crates' files.
-    pub fn attribute_errors(&self, own: &[bool]) -> Vec<String> {
+    /// E0433 / "cannot find attribute" for the attributes of the files judged (the own crates', or
+    /// an edit's).
+    pub fn attribute_errors(&self, j: Judged) -> Vec<String> {
         let mut out = Vec::new();
         // the helper attributes of a derive, by crate, module and path: the macro table answers
         // them, the same for every file (None: no proc-macro derive of the table answers the path)
         let scope = crate::macros::MacroScope::new(self.macros.clone());
         let mut derive_helpers: HashMap<(&str, String, Vec<String>), Option<Vec<String>>> = HashMap::default();
         let mut by_file: Vec<Vec<DefId>> = vec![Vec::new(); self.files.len()];
-        for (i, d) in self.defs.iter().enumerate() {
-            if own.get(d.krate as usize).copied().unwrap_or(false) && (d.file as usize) < by_file.len() {
-                by_file[d.file as usize].push(DefId(i as u32));
+        for i in j.defs(self) {
+            let d = self.def(i);
+            if j.has_crate(d.krate) && (d.file as usize) < by_file.len() {
+                by_file[d.file as usize].push(i);
             }
         }
-        for (fi, f) in self.files.iter().enumerate() {
+        for fi in j.file_ids(self).map(|f| f as usize) {
+            let f = &self.files[fi];
             let krate = self.file_crate.get(fi).copied().unwrap_or(u32::MAX);
-            if !own.get(krate as usize).copied().unwrap_or(false) || f.token_input || fi == 0 {
+            if !j.has_crate(krate) || f.token_input || fi == 0 {
                 continue;
             }
             let module = match self.mods.iter().position(|m| m.file == fi as u32 && m.krate == krate) {

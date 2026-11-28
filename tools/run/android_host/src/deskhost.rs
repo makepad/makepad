@@ -21,7 +21,7 @@ use crate::logcat;
 use makepad_desk_link::host::{self, Cmd, Desktop, Frame, HostControl, HostSettings, Picture};
 use makepad_desk_link::server::{Input, InputFactory, Log};
 use makepad_desk_link::{GamepadState, ScreenInfo};
-use makepad_hal::backend::android::inject::{self, AppWindow, Pointer};
+use makepad_hal::android::inject::{self, AppWindow, Pointer};
 use makepad_hal::frame_tap::{self, Region};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};

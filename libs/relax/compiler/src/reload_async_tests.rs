@@ -44,7 +44,10 @@ pub(crate) fn live_app(tag: &str, files: &[(&str, &str)], names: &[&str], run: i
     let mut session = crate::Session::default();
     session.options.live = true;
     let session = Arc::new(session);
-    let (prog, core, app_crate) = crate::load_with_std(&session, &lib, "live_app", false).unwrap();
+    let (mut prog, core, app_crate) = crate::load_with_std(&session, &lib, "live_app", false).unwrap();
+    // the app's crate is the run's own, as a run marks it (run.rs app_crates): its edits get the
+    // checks a fresh run gives it (reload.rs edit_crate_level_errors)
+    prog.crates[app_crate as usize].validate = true;
     crate::borrowck::event::set_app_scope(vec![lib.clone()]);
     let entries_of: Vec<_> = names.iter().map(|name| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);

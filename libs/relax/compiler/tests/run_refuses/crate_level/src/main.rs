@@ -7,6 +7,13 @@ use std::alloc::System;
 fn twice() {}
 fn twice() {}
 
+// one body's two statics of one name: E0428 of its block (a run took one for both)
+fn counter() -> u32 {
+    static COUNT: u32 = 0;
+    static COUNT: u32 = 1;
+    COUNT
+}
+
 mod a {
     #[macro_export]
     macro_rules! exported {

@@ -3,12 +3,11 @@
 use super::*;
 
 impl Program {
-    pub fn ast_validation_errors(&self, own: &[bool]) -> Vec<String> {
+    pub fn ast_validation_errors(&self, j: Judged) -> Vec<String> {
         let mut out = Vec::new();
-        for i in 0..self.defs.len() {
-            let d = DefId(i as u32);
+        for d in j.defs(self) {
             let def = self.def(d);
-            if !own.get(def.krate as usize).copied().unwrap_or(false) || def.item.0 == u32::MAX {
+            if !j.has_crate(def.krate) || def.item.0 == u32::MAX {
                 continue;
             }
             if self.item_defs.get(&(def.file, def.item.0)) != Some(&d) {

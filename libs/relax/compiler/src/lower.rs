@@ -183,6 +183,20 @@ struct TreeCx {
     building: bool,
 }
 
+/// The exact live span of an awaited future's slot (`lower_await`): written from
+/// `(init_blk, init_inst)`, polled from `suspends[point].1`, dropped on Ready through
+/// `(dead_blk, dead_inst)` (starting at `ok_blk`), and suspended at `suspends[point].0`.
+#[derive(Clone, Copy)]
+struct AwaitSpan {
+    slot: VReg,
+    point: usize,
+    init_blk: u32,
+    init_inst: usize,
+    ok_blk: u32,
+    dead_blk: u32,
+    dead_inst: usize,
+}
+
 /// Lowering state of a coroutine body (an async block / async fn poll function).
 struct Coro {
     /// the coroutine type
@@ -196,9 +210,8 @@ struct Coro {
     tag: Mem,
     /// size of the upvars + state word (the state area follows)
     up_size: u32,
-    /// the slots of awaited futures (address vreg, suspension point): live only across their
-    /// own suspension point
-    await_slots: Vec<(VReg, usize)>,
+    /// each awaited future's slot and the instructions where it is live
+    await_slots: Vec<AwaitSpan>,
     /// the type of each awaited future, by its slot's address vreg (the state's shape: M5)
     await_tys: Vec<(VReg, TyId)>,
     /// slots made by an await's poll (its result): dead at its suspension point (rustc: the
@@ -807,6 +820,29 @@ impl<'a> Lcx<'a> {
                 let remedy = self.provided_layout_remedy(d, t);
                 self.provided_err(krate, format!("`{}` is {} by variant in JIT-compiled code, but it lives in a provided crate (built by rustc into the loader) and {}", ts, what, remedy));
             }
+        }
+    }
+
+    /// A call or fn pointer of JIT-compiled code naming a fn its provided crate keeps for the
+    /// loader's code (`#[relax_api(loader = "..")]`): refused here, at the use, with the crate's
+    /// text (the op to call instead, or that the fn is the loader's alone). Compiled from source,
+    /// the fn would fail later and further in, at a static its body reaches.
+    fn check_loader_only(&mut self, callee: u32) {
+        // (a lowering ahead's temporary callee identity names its key there: it has no slot yet)
+        let key = crate::jit::lower_ahead_fn_key(callee).unwrap_or_else(|| self.u.fns[callee as usize].key.clone());
+        let FnKey::Inst(d, args) = key else { return };
+        if !args.is_empty() {
+            return;
+        }
+        let krate = self.u.prog.def(d).krate;
+        let Some((_, pc)) = self.u.provided.iter().find(|(k, _)| *k == krate) else { return };
+        if pc.loader.is_empty() {
+            return;
+        }
+        let key = crate::provided::key(&self.u.prog, &self.u.tcx, d);
+        if let Some(text) = pc.loader.get(key.as_str()) {
+            let msg = format!("`{key}` of provided crate `{}` is the loader's alone (#[relax_api(loader)]): {text}", pc.name);
+            self.provided_err(krate, msg);
         }
     }
 
@@ -2087,6 +2123,12 @@ impl<'a> Lcx<'a> {
             let mut pos = vec![0u64; n];
             pos.extend(b.pos.drain(..));
             b.pos = pos;
+            if let Some(c) = self.coro.as_mut() {
+                for sp in &mut c.await_slots {
+                    if sp.init_blk == 0 { sp.init_inst += n; }
+                    if sp.dead_blk == 0 { sp.dead_inst += n; }
+                }
+            }
         }
         elaborate_drop_flags(&mut self.f, &flags);
         if let Some(c) = self.coro.take() {
@@ -2782,11 +2824,8 @@ impl<'a> Lcx<'a> {
             None => v,
         };
         let slot = self.new_slot_for(fut_t);
-        if let Some(c) = self.coro.as_mut() {
-            let k = c.suspends.len();
-            c.await_slots.push((slot, k));
-            c.await_tys.push((slot, fut_t));
-        }
+        let init_blk = self.cur;
+        let init_inst = self.f.blocks[init_blk as usize].insts.len();
         self.store_val(slot, 0, fut_t, fut);
         // no drop flag: the future is a temporary only between here and its drop after Ready
         // (rustc's `__awaitee`, initialized in its suspend state)
@@ -2820,27 +2859,33 @@ impl<'a> Lcx<'a> {
         let pending = self.f.block();
         let vi_ready = self.variant_index(out_poll, LangItem::PollReady);
         self.test_tag(&rp, out_poll, vi_ready, pending);
+        let ok_blk = self.cur;
         let scratch1 = self.f.slots.len() as u32;
         if let Some(c) = self.coro.as_mut() {
             let k = c.suspends.len();
             c.poll_scratch.push((scratch0, scratch1, k));
         }
-        let (vp, vt) = self.project(&rp, out_poll, vi_ready, 0);
-        let val = self.read_place(&vp, vt);
-        let val = match val {
-            Val::M(..) => {
-                let s2 = self.new_slot_for(t);
-                self.store_val(s2, 0, t, val);
-                Val::M(s2, 0)
-            }
-            v => v,
-        };
-        // completed: the future drops here (the end of the `match` the await lowers to)
-        let ready_cur = self.cur;
-        let _ = ready_cur;
+        // Completed: drop the awaited future before reading the Ready value out of `rp`.
+        // Invariant (relied on by coroutine_transform, which excludes await slots from its
+        // variant-conflict pass): an await slot is live only between its `store_val` before
+        // `head` and its drop here (or on cancel/unwind), and during that span no slot of
+        // another variant is read or written. `rp` is either return registers or a
+        // `poll_scratch` stack slot (never placed in the coroutine state), and `fut::drop`
+        // cannot alias it. `read_place` then loads scalar leaves or copies an aggregate into
+        // one fresh slot after `slot` is dead, so a later-variant slot may safely reuse
+        // `slot`'s state bytes.
         let ts = self.stmt_temps.split_off(mark);
         let seq = ts.iter().rev().map(|(a, t2, f2)| DropAct::Temp(*a, *t2, *f2)).collect();
         self.emit_drop_seq(seq);
+        let dead_blk = self.cur;
+        let dead_inst = self.f.blocks[dead_blk as usize].insts.len();
+        if let Some(c) = self.coro.as_mut() {
+            let k = c.suspends.len();
+            c.await_slots.push(AwaitSpan { slot, point: k, init_blk, init_inst, ok_blk, dead_blk, dead_inst });
+            c.await_tys.push((slot, fut_t));
+        }
+        let (vp, vt) = self.project(&rp, out_poll, vi_ready, 0);
+        let val = self.read_place(&vp, vt);
         let done = self.cur;
         // pending: suspend; resuming polls again; dropping the coroutine here runs the drops
         // of everything live at this point (the future included)
@@ -9493,6 +9538,7 @@ impl<'a> Lcx<'a> {
         }
         let instance = Instance::resolve_for_fn_ptr(&self.u.tcx, &self.u.prog, d, &args).expect("fn pointer instance");
         let id = self.u.instance_fn_id(instance);
+        self.check_loader_only(id);
         self.emit(Inst::FnAddr(r, id));
         r
     }
@@ -11596,6 +11642,7 @@ impl<'a> Lcx<'a> {
         if let Callee::Fn(id) = &callee {
             crate::boundary::note_call(self.u, self.b.def, &self.b.args, *id);
             self.check_provided_ownership(*id);
+            self.check_loader_only(*id);
         }
         // a #[track_caller] callee gets the caller location (this fn's own when it tracks too)
         if let Callee::Fn(id) = &callee {
@@ -13122,13 +13169,22 @@ impl<'a> Lcx<'a> {
 
     /// The allocator shim (rustc_codegen_ssa base.rs allocator_shim / codegen_allocator: `__rust_<op>`
     /// calls `__rg_<op>` of the program's `#[global_allocator]`, else the default `__rdl_<op>`):
-    /// core::heap::__rg_<op>::<A>(&STATIC, args) or core::heap::__rdl_<op>(args).
+    /// core::heap::__rg_<op>::<A>(&STATIC, args) or core::heap::__rdl_<op>(args). A program whose
+    /// domains route to its allocator calls the checked `__rg_checked_<op>` instead, except for
+    /// the loader's own `loader_<op>` calls.
     fn allocator_shim(&mut self, op: &str, vals: &[(Val, TyId)], t: TyId) -> Val {
         let mut args = vals.to_vec();
+        // the loader's own calls (rust_loader_*) are never checked; the program's are when its
+        // domains route to its allocator (Unit::routes_allocator)
+        let (op, checked) = match op.strip_prefix("loader_") {
+            Some(op) => (op, false),
+            None => (op, self.u.routes_allocator),
+        };
         let id = match self.u.global_allocator() {
             Some((s, a)) => {
-                let Some(shim) = self.u.core_path(&["heap", &format!("__rg_{op}")]) else {
-                    self.err(self.pos, format!("core has no heap::__rg_{op} (the global allocator shim)"));
+                let name = if checked { format!("__rg_checked_{op}") } else { format!("__rg_{op}") };
+                let Some(shim) = self.u.core_path(&["heap", &name]) else {
+                    self.err(self.pos, format!("core has no heap::{name} (the global allocator shim)"));
                     return self.dummy_val(t);
                 };
                 // the static as a place, as a path to it lowers (lower_def_value)
@@ -13175,7 +13231,7 @@ impl<'a> Lcx<'a> {
         if let Some(v) = self.mem_intrinsic(&name, gargs, vals, t) {
             return Some(v);
         }
-        if let Some(op) = name.strip_prefix("rust_").filter(|op| matches!(*op, "alloc" | "alloc_zeroed" | "dealloc" | "realloc")) {
+        if let Some(op) = name.strip_prefix("rust_").filter(|op| matches!(*op, "alloc" | "alloc_zeroed" | "dealloc" | "realloc" | "loader_alloc" | "loader_alloc_zeroed" | "loader_dealloc")) {
             return Some(self.allocator_shim(op, vals, t));
         }
         let mut a = Vec::new();
@@ -15033,6 +15089,114 @@ fn dense_live_check(f: &Func, c: &Coro, nv: usize, seen: &[bool], known: &[Optio
     }
 }
 
+/// Check accesses to state slots that reuse an awaited future's bytes, before SlotAddr
+/// rewriting loses their identities. The Ready block can also contain the payload copy,
+/// so the end of the span is an instruction boundary.
+#[allow(clippy::too_many_arguments)]
+fn verify_await_slot_overlap(
+    f: &Func,
+    c: &Coro,
+    spans: &[AwaitSpan],
+    seen_g: &[bool],
+    slot_defs: &[Option<u32>],
+    other_def: &[bool],
+    pts: &[u64],
+    wd: usize,
+    variant_of: &[Option<usize>],
+    slot_off: &[Option<u32>],
+) -> Result<(), String> {
+    for sp in spans {
+        let Some(a) = slot_defs[sp.slot.0 as usize] else { continue };
+        let a = a as usize;
+        let Some(oa) = slot_off[a] else { continue };
+        let sa = f.slots[a].size;
+        let (pend_blk, head, _) = c.suspends[sp.point];
+        if sa == 0 || !seen_g[head as usize] || sp.ok_blk == head {
+            continue;
+        }
+
+        let check_slot = |b: usize, bi: u32, idx: usize| {
+            if b == a { return Ok(()); }
+            let Some(ob) = slot_off[b] else { return Ok(()) };
+            let sb = f.slots[b].size;
+            if sb > 0 && oa < ob + sb && ob < oa + sa {
+                return Err(format!(
+                    "internal: coroutine await slot {a} (point {}, bytes {oa}..{}) overlaps slot {b} (variant {:?}, bytes {ob}..{}) accessed while live in {} b{bi}#{idx}",
+                    sp.point, oa + sa, variant_of[b], ob + sb, f.name
+                ));
+            }
+            Ok(())
+        };
+        let check_addr = |v: VReg, bi, idx| {
+            let v = v.0 as usize;
+            if let Some(b) = slot_defs[v] {
+                if !other_def[v] { return check_slot(b as usize, bi, idx); }
+            }
+            for (word, &bits) in pts[v * wd..][..wd].iter().enumerate() {
+                let mut bits = bits;
+                while bits != 0 {
+                    check_slot(word * 64 + bits.trailing_zeros() as usize, bi, idx)?;
+                    bits &= bits - 1;
+                }
+            }
+            Ok(())
+        };
+        let check_insts = |bi: u32, start: usize, end: usize| -> Result<(), String> {
+            let insts = &f.blocks[bi as usize].insts;
+            for (idx, inst) in insts.iter().enumerate().take(end).skip(start) {
+                match inst {
+                    Inst::Load(_, _, base, _) | Inst::VLoad(_, base, _) | Inst::AtomicLoad(_, _, _, base)
+                    | Inst::Store(_, base, ..) | Inst::VStore(base, ..) | Inst::AtomicStore(_, _, base, _)
+                    | Inst::AtomicRmw(_, _, _, _, base, _) | Inst::AtomicCas(_, _, _, _, base, _, _) => {
+                        check_addr(*base, bi, idx)?;
+                    }
+                    Inst::Copy(dst, src, _) => {
+                        check_addr(*dst, bi, idx)?;
+                        check_addr(*src, bi, idx)?;
+                    }
+                    Inst::Call(_, args, _) => {
+                        for &arg in args { check_addr(arg, bi, idx)?; }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+        if seen_g[sp.init_blk as usize] {
+            check_insts(sp.init_blk, sp.init_inst, f.blocks[sp.init_blk as usize].insts.len())?;
+        }
+        let mut cur = head;
+        for _ in 0..f.blocks.len() {
+            if !seen_g[cur as usize] || cur == sp.ok_blk || cur == pend_blk { break; }
+            let block = &f.blocks[cur as usize];
+            check_insts(cur, 0, block.insts.len())?;
+            match block.term {
+                Term::Jump(next) | Term::Invoke(next, _) => cur = next,
+                _ => break,
+            }
+        }
+        // Follow the normal return from each drop. Its unwind pad has its own drops.
+        cur = sp.ok_blk;
+        for _ in 0..f.blocks.len() {
+            if !seen_g[cur as usize] { break; }
+            let block = &f.blocks[cur as usize];
+            if cur == sp.dead_blk {
+                check_insts(cur, 0, sp.dead_inst)?;
+                break;
+            }
+            check_insts(cur, 0, block.insts.len())?;
+            match block.term {
+                Term::Jump(next) | Term::Invoke(next, _) => cur = next,
+                _ => break,
+            }
+        }
+        if seen_g[pend_blk as usize] {
+            check_insts(pend_blk, 0, f.blocks[pend_blk as usize].insts.len())?;
+        }
+    }
+    Ok(())
+}
+
 fn coro_transform_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RELAX_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "coro")))
@@ -15096,9 +15260,15 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
     // other pass sees one: per block, (the index of the inst each stood before, its slot)
     let mut dead_at: Vec<Vec<(usize, u32)>> = vec![Vec::new(); f.blocks.len()];
     let mut marked = vec![false; f.slots.len()];
+    let mut await_spans = c.await_slots.clone();
     for (bi, b) in f.blocks.iter_mut().enumerate() {
         if !b.insts.iter().any(|i| matches!(i, Inst::StorageDead(_))) {
             continue;
+        }
+        let removed_before = |idx: usize| b.insts.iter().take(idx).filter(|i| matches!(i, Inst::StorageDead(_))).count();
+        for sp in &mut await_spans {
+            if sp.init_blk as usize == bi { sp.init_inst -= removed_before(sp.init_inst); }
+            if sp.dead_blk as usize == bi { sp.dead_inst -= removed_before(sp.dead_inst); }
         }
         let pos = std::mem::take(&mut b.pos);
         for (k, i) in std::mem::take(&mut b.insts).into_iter().enumerate() {
@@ -15531,9 +15701,9 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
     let is_param = |v: usize| f.params.iter().any(|p| p.0 as usize == v);
     // the slot of each awaited future
     let mut await_slot: Vec<Option<usize>> = vec![None; ns];
-    for &(a, k) in &c.await_slots {
-        if let Some(s) = slot_defs[a.0 as usize] {
-            await_slot[s as usize] = Some(k);
+    for sp in &await_spans {
+        if let Some(s) = slot_defs[sp.slot.0 as usize] {
+            await_slot[s as usize] = Some(sp.point);
         }
     }
     // what each suspension point saves (rustc: storage-live and maybe-initialized or borrowed):
@@ -15989,8 +16159,10 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
     // rustc's eligibility (coroutine_saved_local_eligibility): a slot saved at one suspension
     // point only goes to that point's variant, unless its storage is live together with a slot
     // of another variant (then the one with more such conflicts is promoted); slots saved at
-    // several points are promoted. An awaited future never conflicts: it is live only around
-    // its own point.
+    // several points are promoted. An awaited future is excluded from `cand` on the invariant
+    // maintained by `lower_await`: it is stored immediately before `head`, dropped on Ready
+    // before its Ready payload is copied into a fresh slot (and dropped on cancel/unwind), so
+    // no slot of another variant is live or accessed during its live span (verified below).
     let nk = c.suspends.len();
     let mut variant_of: Vec<Option<usize>> = vec![None; ns];
     for s in 0..ns {
@@ -16175,6 +16347,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::colle
         }
         eprintln!("coro {:?} end {} align {}", c.ct, size, align);
     }
+    verify_await_slot_overlap(f, c, &await_spans, &seen_g, &slot_defs, &other_def, &pts, wd, &variant_of, &slot_off)?;
     let abs = |o: u32| o as i64;
     // saved slots live in the state
     for b in f.blocks.iter_mut() {
@@ -17183,6 +17356,89 @@ pub(crate) fn rir_writes(f: &Func, entry_inits: &[Inst], v: VReg) -> u32 {
 pub fn cannot_unwind_addr() -> u64 {
     let f: rt_fn_ty!(fn()) = rt_cannot_unwind;
     f as usize as u64
+}
+
+#[cfg(test)]
+mod coro_overlap_tests {
+    use super::*;
+
+    #[test]
+    fn await_slot_overlap_is_rejected() {
+        let word = Mem::Int(8, false);
+        for copy_before_drop in [true, false] {
+            let mut f = Func::new("await_slot_overlap".into(), 0);
+            let env = f.vreg(Cls::I);
+            let cx = f.vreg(Cls::I);
+            f.params.extend([env, cx]);
+            // The second variant holds the Ready payload and a smaller awaited future.
+            let first_size = 16;
+            let first_slot = f.slot(first_size, 8);
+            let kept_slot = f.slot(8, 8);
+            let next_slot = f.slot(8, 8);
+            let first = f.vreg(Cls::I);
+            let kept = f.vreg(Cls::I);
+            let next = f.vreg(Cls::I);
+            let value = f.vreg(Cls::I);
+            let entry = f.block();
+            let head = f.block();
+            let pending = f.block();
+            let ready = f.block();
+            let head2 = f.block();
+            let pending2 = f.block();
+            let ready2 = f.block();
+            let exit = f.block();
+
+            f.blocks[entry as usize].insts.extend([Inst::SlotAddr(first, first_slot), Inst::Copy(first, env, first_size)]);
+            f.blocks[entry as usize].term = Term::Jump(head);
+            for (poll, fut, ok, pend) in [(head, first, ready, pending), (head2, next, ready2, pending2)] {
+                f.blocks[poll as usize].insts.push(Inst::Load(word, value, fut, 0));
+                f.blocks[poll as usize].term = Term::Branch(value, ok, pend);
+                f.blocks[pend as usize].term = Term::Ret(vec![]);
+            }
+            let b = &mut f.blocks[ready as usize];
+            b.insts.push(Inst::SlotAddr(kept, kept_slot));
+            let copy = Inst::Copy(kept, env, 8);
+            if copy_before_drop { b.insts.push(copy.clone()); }
+            b.insts.push(Inst::Call(Callee::Fn(0), vec![first], vec![]));
+            b.insts.push(Inst::StorageDead(first_slot));
+            let dead_inst = b.insts.len();
+            if !copy_before_drop { b.insts.push(copy); }
+            b.insts.push(Inst::SlotAddr(next, next_slot));
+            let next_init = b.insts.len();
+            b.insts.push(Inst::Copy(next, env, 8));
+            b.term = Term::Jump(head2);
+            f.blocks[ready2 as usize].insts.extend([
+                Inst::Call(Callee::Fn(1), vec![next], vec![]),
+                Inst::Load(word, value, kept, 0),
+            ]);
+            f.blocks[ready2 as usize].term = Term::Jump(exit);
+            f.blocks[exit as usize].term = Term::Ret(vec![]);
+
+            let c = Coro {
+                ct: TyId(0), env, cx, frame_off: 16, tag: word, up_size: 24,
+                await_slots: vec![
+                    AwaitSpan { slot: first, point: 0, init_blk: entry, init_inst: 1, ok_blk: ready, dead_blk: ready, dead_inst },
+                    AwaitSpan { slot: next, point: 1, init_blk: ready, init_inst: next_init, ok_blk: ready2, dead_blk: ready2, dead_inst: 1 },
+                ],
+                await_tys: vec![], poll_scratch: vec![], call_private: Default::default(), call_sret: Default::default(),
+                poll_ret: TyId(0), suspends: vec![(pending, head, exit), (pending2, head2, exit)],
+                cancel_end: Some(exit), pending_ret: exit, after_done: exit, after_panic: exit,
+            };
+            let result = coroutine_transform(&mut f, &c, 8, &Default::default(), &Default::default());
+            if copy_before_drop {
+                let err = result.expect_err("the payload copy overlaps the live first future");
+                assert!(err.contains("coroutine await slot"), "{err}");
+            } else {
+                let (size, _, _, _) = result.expect("the payload copy follows the drop");
+                assert_eq!(size, c.up_size + first_size, "both variants fit in the first future's bytes");
+                for addr in [first, kept] {
+                    assert!(f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i,
+                        Inst::IBinI(IOp::Add, U64, d, base, off) if *d == addr && *base == env && *off == i64::from(c.up_size)
+                    )), "slot address {addr:?} must reuse the start of the variant");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

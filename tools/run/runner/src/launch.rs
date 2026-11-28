@@ -2,7 +2,8 @@
 //!
 //! A launcher (the runner app) keeps one small text file per app it can start,
 //! `<home>/apps/<id>.launch`. For `runner`, the running loader reads its own folder's
-//! `runner.launch`, so the loader selection also selects the Runner code. Each line is `key<TAB>value`:
+//! record. While a code switch is pending, ordinary starts read the confirmed backup and the
+//! trial reads `runner.launch`. Each line is `key<TAB>value`:
 //!
 //! ```text
 //! title   Calculator              the app's name (the OS identity shows it)
@@ -81,6 +82,35 @@ pub fn path(home: &Path, id: &str) -> Option<PathBuf> {
     }
 }
 
+/// Identity of this loader when its start checked for a pending switch. Keep it through the
+/// launch-record read even if the watcher finishes in between.
+pub(super) struct RunnerStart {
+    dir: Option<PathBuf>,
+    pub(super) trial: bool,
+}
+
+impl RunnerStart {
+    pub(super) fn for_loader(home: &Path, exe: Option<&Path>) -> Self {
+        let dir = exe.and_then(|exe| loader_source(exe, home));
+        let trial = dir.as_deref().is_some_and(|dir| {
+            let token = std::env::var(makepad_loader_switch::TRIAL_ENV).ok();
+            makepad_loader_switch::is_trial(dir.parent().unwrap(), dir, token.as_deref())
+        });
+        Self { dir, trial }
+    }
+
+    fn current(home: &Path) -> Self {
+        Self::for_loader(home, relax_compiler::dirs::loader_exe().ok().as_deref())
+    }
+
+    fn read(&self) -> Result<Launch, String> {
+        let dir = self.dir.as_deref().ok_or("The loader has no Runner launch record")?;
+        let text = makepad_loader_switch::read_record_for_start(dir.parent().unwrap(), dir, self.trial)
+            .map_err(|e| format!("Runner launch record in {}: {e}", dir.display()))?;
+        parse("runner", &text).map_err(|e| format!("Runner launch record in {}: {e}", dir.display()))
+    }
+}
+
 /// Parses a launch record's text.
 pub fn parse(id: &str, text: &str) -> Result<Launch, String> {
     let mut l = Launch { id: id.to_string(), ..Launch::default() };
@@ -137,6 +167,9 @@ fn one_line(s: &str) -> String {
 
 /// Reads the record for this app and loader.
 pub fn read(home: &Path, id: &str) -> Result<Launch, String> {
+    if id == "runner" {
+        return RunnerStart::current(home).read();
+    }
     if !valid_id(id) {
         return Err(format!("`{id}` is not an app id"));
     }
@@ -178,39 +211,48 @@ fn app_words(raw: &[Vec<u8>]) -> Result<(Option<PathBuf>, String, usize), String
 /// host's `default`. None leaves the command line unchanged. The launch's environment and folder
 /// are applied here.
 pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Option<Result<Vec<Vec<u8>>, String>> {
+    resolve_for_start(raw, default, None)
+}
+
+/// Select the record before applying any of its process-wide environment or directory changes.
+fn record_for_app(home: &Path, id: Option<&str>, default: Option<fn() -> Option<Launch>>, start: Option<RunnerStart>) -> Option<Result<Launch, String>> {
+    match id {
+        None | Some("runner") => {
+            let runner = start.unwrap_or_else(|| RunnerStart::current(home));
+            if id.is_none() && !runner.dir.as_ref().is_some_and(|dir| dir.join("runner.launch").is_file()) {
+                default.and_then(|f| f()).map(Ok)
+            } else {
+                Some(runner.read())
+            }
+        }
+        Some(id) => Some(read(home, id)),
+    }
+}
+
+pub(super) fn resolve_for_start(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>, start: Option<RunnerStart>) -> Option<Result<Vec<Vec<u8>>, String>> {
     let exe = raw.first().cloned().unwrap_or_default();
-    let mut extra = raw.len();
-    let launch = match raw.get(1).map(Vec::as_slice) {
+    let (id, extra) = match raw.get(1).map(Vec::as_slice) {
         None => {
             // a macOS bundle's: Launch Services sets it (with RELAX_HOME) from the bundle's
             // LSEnvironment; the app's own children must not inherit it
             let bundle = std::env::var("RELAX_APP").ok();
             std::env::remove_var("RELAX_APP");
-            if let Some(id) = bundle {
-                if !valid_id(&id) {
-                    return Some(Err(format!("RELAX_APP: not an app id: {id}")));
-                }
-                read(&crate::fetch::home(), &id)
-            } else if path(&crate::fetch::home(), "runner").is_some_and(|p| p.is_file()) {
-                read(&crate::fetch::home(), "runner")
-            } else {
-                match default.and_then(|f| f()) {
-                    Some(l) => Ok(l),
-                    None => return None,
-                }
+            if let Some(id) = bundle.as_deref() {
+                if !valid_id(id) { return Some(Err(format!("RELAX_APP: not an app id: {id}"))); }
             }
+            (bundle, raw.len())
         }
-        Some(b"app") => app_words(raw).and_then(|(home, id, at)| {
+        Some(b"app") => {
+            let (home, id, at) = match app_words(raw) { Ok(words) => words, Err(e) => return Some(Err(e)) };
             // the run and every program it starts keep their records in this home
             if let Some(home) = home {
                 std::env::set_var("RELAX_HOME", home);
             }
-            extra = at;
-            read(&crate::fetch::home(), &id)
-        }),
+            (Some(id), at)
+        }
         Some(_) => return None,
     };
-    let launch = match launch {
+    let launch = match record_for_app(&crate::fetch::home(), id.as_deref(), default, start)? {
         Ok(l) => l,
         Err(e) => return Some(Err(e)),
     };
@@ -296,6 +338,48 @@ mod tests {
         std::fs::create_dir_all(checkout.parent().unwrap()).unwrap();
         std::fs::write(&checkout, []).unwrap();
         assert_eq!(loader_source(&checkout, &home), None);
+
+        use makepad_loader_switch::{begin_code_switch, begin_switch, confirm_boot, write_trial, Lock, TRIAL_ENV};
+        struct RestoreMarker(Option<std::ffi::OsString>);
+        impl Drop for RestoreMarker {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var(TRIAL_ENV, value),
+                    None => std::env::remove_var(TRIAL_ENV),
+                }
+            }
+        }
+        let _marker = RestoreMarker(std::env::var_os(TRIAL_ENV));
+        std::env::remove_var(TRIAL_ENV);
+        let root = home.join("cache/loader");
+        let exe = home.join("target/loader").join(commit).join(host);
+        let words = ["app".into(), "--home".into(), home.to_str().unwrap().into(), "runner".into()];
+        let start = || crate::settle_installation(&words, Some(&exe));
+        let record = |reader| record_for_app(&home, Some("runner"), None, Some(reader)).unwrap().unwrap();
+        std::fs::write(root.join(commit).join(".built"), commit).unwrap();
+        begin_switch(&Lock::acquire(&root).unwrap(), commit, "arg\tconfirmed").unwrap();
+        let loader_trial = start();
+        assert!(loader_trial.trial, "the new loader folder identifies a legacy trial without a marker");
+        assert!(root.join("pending").is_file(), "the trial loader skips settlement even with a free switch lock");
+        assert_eq!(record(loader_trial).args, ["confirmed"], "the new loader resolves its own record");
+
+        let watcher = Lock::acquire(&root).unwrap();
+        confirm_boot(&watcher).unwrap();
+        let token = write_trial(&watcher).unwrap();
+        begin_code_switch(&watcher, commit, "arg\ttrial").unwrap();
+        for (marker, expected) in [(None, "confirmed"), (Some(token.as_str()), "trial"), (Some("stale"), "confirmed")] {
+            match marker {
+                Some(value) => std::env::set_var(TRIAL_ENV, value),
+                None => std::env::remove_var(TRIAL_ENV),
+            }
+            let reader = start();
+            std::env::remove_var(TRIAL_ENV);
+            assert_eq!(record(reader).args, [expected], "use the identity from settlement for marker {marker:?}");
+            assert!(root.join("pending").is_file(), "a read leaves the live switch pending");
+        }
+        drop(watcher);
+        assert_eq!(record(start()).args, ["confirmed"], "an ordinary start recovers after the watcher exits");
+        assert!(!root.join("pending").exists() && root.join("rolled-back").is_file(), "the ordinary loader settled the switch");
         std::fs::remove_dir_all(temp).unwrap();
     }
 

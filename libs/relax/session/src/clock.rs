@@ -23,6 +23,13 @@ pub fn cpu_ns() -> u64 {
     ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
 }
 
+/// No thread CPU clock on wasm (and std's `Instant` panics on wasm32-unknown-unknown): 0, so a
+/// duration measured with it reads 0, a missing measurement rather than an estimate.
+#[cfg(target_family = "wasm")]
+pub fn cpu_ns() -> u64 {
+    0
+}
+
 /// Estimated thread CPU ns on Windows, from scheduled thread cycles. Unlike GetThreadTimes,
 /// QueryThreadCycleTime resolves short passes. A single calibration against QPC (Instant on
 /// Windows) keeps all threads and all duration differences on the same scale. This is an

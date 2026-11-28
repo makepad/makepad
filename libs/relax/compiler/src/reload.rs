@@ -335,10 +335,10 @@ fn ctfe_relevant_bodies(prog: &Program, file: u32, changed: &[DefId]) -> bool {
     false
 }
 
-/// The running storage an edited const or static initializer made, once placed: `d` itself (a
-/// static) or a static defined inside its initializer (a `thread_local!` key's).
-fn placed_storage(u: &Unit, d: DefId) -> Option<DefId> {
-    u.statics.keys().chain(u.tls_places.keys()).copied().find(|&s| changed_body_owner(&u.prog, s, &[d]))
+/// An edited initializer already made the value of `d` or a static inside it (a `thread_local!` key's).
+fn initializer_restart(u: &Unit, versions: &[(crate::program::FileVersion, Plan)], d: DefId) -> Option<String> {
+    let s = u.statics.keys().chain(u.tls_places.keys()).copied().find(|&s| changed_body_owner(&u.prog, s, &[d]))?;
+    Some(format!("{}the initializer of `{}` changed, and `{}` already holds the value the old one made (an initializer runs once) -- restart the app", new_pos(u, versions, d), def_name(&u.prog, d), def_name(&u.prog, s)))
 }
 
 /// Every constant-evaluated context that reads one of `hit` by name, directly or through the consts
@@ -722,6 +722,7 @@ pub unsafe fn rollback(up: *mut Unit, undo: Undo, why: &str) -> Result<Vec<Strin
                 u.tcx.adts.insert(*d, adt.clone());
             }
             publish_reload(u, &undo.versions, undo.full_inputs, undo.scope.as_deref());
+            u.publish_owner_verdicts();
             u.lay.clear();
             u.prog.reclaim_caches();
             drop(fw);
@@ -763,8 +764,8 @@ pub(crate) enum Change {
     Body(DefId),
     Const(DefId),
     StaticInit(DefId),
-    /// a named-field struct's field list changed: applied when no field moves (a rename), a new
-    /// layout when no running value of it is left (layout_edit), or the restart rung
+    /// An ADT's layout or a static's declared storage type may have changed.
+    /// The commit compares the running and freshly resolved types.
     Layout(DefId),
     /// a `macro_rules!` changed: the fns of this file that invoke it are rebuilt from their new
     /// expansions (a macro used from another file takes the restart rung)
@@ -786,6 +787,19 @@ pub(crate) struct Plan {
     /// `use` items only the old version has (their position in the old file): their imports go
     pub(crate) removed_uses: Vec<u32>,
     pub(crate) attributes_changed: bool,
+}
+
+impl Plan {
+    /// A check session recollects all possible layout edits. Live statics need only their
+    /// declared types checked at the commit, without invalidating their readers.
+    fn take_live_changes(&mut self, prog: &Program, changes: &mut Vec<Change>, static_type_defs: &mut Vec<DefId>) {
+        for change in self.changes.drain(..) {
+            match change {
+                Change::Layout(d) if prog.def(d).kind == DefKind::Static => static_type_defs.push(d),
+                _ => changes.push(change),
+            }
+        }
+    }
 }
 
 /// Token texts of `pf` in [lo, hi) outside `holes` (comments are not tokens: comment-only
@@ -906,14 +920,18 @@ fn first_tok_at(toks: &(impl crate::parser::lazy_bodies::TokSeq + ?Sized), lo: u
 /// ("no method named `dispatch_a11y_action` found for `&mut Cx`", 11-16). An inner attribute
 /// (`#![..]`) stays its container's.
 fn lo_with_attrs(pf: &crate::parser::ParsedFile, it: &crate::ast::Item) -> u32 {
+    start_with_outer_attrs(pf, it.lo)
+}
+
+fn start_with_outer_attrs(pf: &crate::parser::ParsedFile, lo: u32) -> u32 {
     use crate::lexer::T;
-    if it.lo as usize >= pf.src.len() {
-        return it.lo;
+    if lo as usize >= pf.src.len() {
+        return lo;
     }
     let toks = &pf.toks;
-    let mut i = first_tok_at(toks, it.lo);
-    if i >= toks.len() || toks.at(i).lo != it.lo {
-        return it.lo;
+    let mut i = first_tok_at(toks, lo);
+    if i >= toks.len() || toks.at(i).lo != lo {
+        return lo;
     }
     while i > 0 {
         if toks.at(i - 1).kind == T::DocComment {
@@ -945,7 +963,7 @@ fn lo_with_attrs(pf: &crate::parser::ParsedFile, it: &crate::ast::Item) -> u32 {
             _ => break,
         }
     }
-    toks.at(i).lo.min(it.lo)
+    toks.at(i).lo.min(lo)
 }
 
 fn toks<'a>(pf: &'a crate::parser::ParsedFile, lo: u32, hi: u32, holes: &[(u32, u32)]) -> Vec<&'a [u8]> {
@@ -1672,7 +1690,6 @@ fn root_positions(pf: &crate::parser::ParsedFile) -> Vec<(usize, usize)> {
 /// line). None: a line names no item of the edit's text (its reason is the whole program's), or
 /// the rounds ran out: the edit restarts whole.
 unsafe fn hold_back(up: *mut Unit, edits: &[Edit], lines: &[String], t0: Instant, retries: usize, base: &IncludeBase) -> Result<Outcome, Option<String>> {
-    const SUMMARY: &str = "type checking failed due to previous errors";
     let mut srcs: Vec<Edit> = edits.iter().map(|e| Edit { file: e.file, path: e.path.clone(), src: e.src.clone() }).collect();
     // the held items' running texts go past each file's own end
     let ends: Vec<usize> = srcs.iter().map(|e| e.src.len()).collect();
@@ -1683,7 +1700,7 @@ unsafe fn hold_back(up: *mut Unit, edits: &[Edit], lines: &[String], t0: Instant
     let mut went: Vec<Vec<(usize, usize)>> = vec![Vec::new(); srcs.len()];
     for round in 0..HOLD_ROUNDS.min(retries) {
         let mut at: Vec<Vec<usize>> = vec![Vec::new(); srcs.len()];
-        for l in named.iter().filter(|l| !l.ends_with(SUMMARY)) {
+        for l in named.iter().filter(|l| !crate::check::is_typeck_summary(l)) {
             let Some((k, p)) = srcs.iter().enumerate().find_map(|(k, e)| line_at(l, &e.path, &e.src).map(|p| (k, p))) else { return Err(None) };
             if p >= ends[k] {
                 // a held item's running text: said at its line there
@@ -1720,7 +1737,7 @@ unsafe fn hold_back(up: *mut Unit, edits: &[Edit], lines: &[String], t0: Instant
             }
             Rung::Restart => reasons.extend(r.lines.iter().cloned()),
             Rung::Refuse if internal_failure(&r.lines) => return Err(None),
-            Rung::Refuse => reached.extend(r.lines.iter().filter(|l| !l.ends_with(SUMMARY)).cloned()),
+            Rung::Refuse => reached.extend(r.lines.iter().filter(|l| !crate::check::is_typeck_summary(l)).cloned()),
         }
         named = r.lines;
     }
@@ -1977,9 +1994,11 @@ impl ExpIncludes {
         Self { hot: Vec::new(), sites: Vec::new() }
     }
 
-    /// Read the includer's resolved sites once, even when no expansion text names an include.
+    /// Read the includer's resolved sites once, even when no expansion text names an include:
+    /// those of this version's text (`include_call_at`).
     pub(crate) fn of(pf: &crate::parser::ParsedFile, path: &str) -> Self {
-        let sites = crate::builtins::include_sites(path);
+        let src = &pf.src[..pf.src_len as usize];
+        let sites: Vec<(u32, String)> = crate::builtins::include_sites(path).into_iter().filter(|&(at, _)| at == u32::MAX || include_call_at(src, at)).collect();
         if !expansions_include(pf) { return Self { hot: Vec::new(), sites }; }
         let mut regions: Vec<(u32, u32, u32)> = pf.exp_map.iter().collect();
         for part in pf.parts() { regions.extend(part.exp_map.iter()); }
@@ -2010,6 +2029,36 @@ impl ExpIncludes {
     fn any(&self) -> bool {
         !self.hot.is_empty() || !self.sites.is_empty()
     }
+}
+
+/// Whether an include macro's call (include!/include_str!/include_bytes!, by any path) starts at
+/// byte `at` of text `src`. A recorded include site is its includer's path's, not one version's:
+/// each version of the file the session parsed recorded its own offset of the call, and an offset
+/// of an earlier version lies anywhere in a later one. Taken there for the call, an item it fell in
+/// included the file: a save of an included file, after edits of its includer had moved the call,
+/// marked unchanged items as changed (a static's initializer: the restart rung). At an offset of
+/// this version's text a site holds the call whose tokens the file has there (the macro's own, an
+/// include a `macro_rules!` body makes); one under another name (`use .. as`) is not taken, and
+/// a save of the file it reads is then nobody's (`include_unmatched`: a restart is offered).
+fn include_call_at(src: &[u8], at: u32) -> bool {
+    let ident = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let at = at as usize;
+    if at >= src.len() || (at > 0 && (ident(src[at - 1]) || src[at - 1] == b'$')) { return false; }
+    let space = |mut i: usize| { while i < src.len() && src[i].is_ascii_whitespace() { i += 1; } i };
+    let mut i = at;
+    if src[i..].starts_with(b"::") { i = space(i + 2); }
+    let mut last: (usize, usize);
+    loop {
+        if src.get(i) == Some(&b'$') { i += 1; }
+        let s = i;
+        while i < src.len() && ident(src[i]) { i += 1; }
+        if i == s { return false; }
+        last = (s, i);
+        i = space(i);
+        if !src[i..].starts_with(b"::") { break; }
+        i = space(i + 2);
+    }
+    src.get(i) == Some(&b'!') && matches!(&src[last.0..last.1], b"include" | b"include_str" | b"include_bytes")
 }
 
 /// The content hashes each included file was read with by the running code (one per crate that
@@ -2092,6 +2141,18 @@ fn expr_at(pf: &crate::parser::ParsedFile, it: &crate::ast::Item, e: u32) -> u32
     if (it.lo..=it.hi).contains(&e) { return e; }
     let call = pf.call_site(e);
     if (it.lo..=it.hi).contains(&call) { call } else { e }
+}
+
+fn static_init_at(pf: &crate::parser::ParsedFile, it: &crate::ast::Item, init: crate::ast::ExprId) -> u32 {
+    start_with_outer_attrs(pf, expr_at(pf, it, pf.ast.expr(init).lo))
+}
+
+/// The declared type as written, for a static's restart diagnostic.
+fn static_type_spelling(pf: &crate::parser::ParsedFile, it: &crate::ast::Item) -> String {
+    let crate::ast::ItemKind::Static(_, _, init) = it.kind else { unreachable!() };
+    let end = static_init_at(pf, it, init.get().unwrap());
+    let text = pf.src.get(it.name.hi as usize..end as usize).map(String::from_utf8_lossy).unwrap_or_default();
+    text.trim().trim_start_matches(':').trim_end().trim_end_matches('=').split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Classifies the items of one file version against the running one.
@@ -2447,26 +2508,24 @@ fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::p
                 }
             }
             (ItemKind::Static(_, _, ea), ItemKind::Static(_, _, eb)) if ea.is_some() && eb.is_some() => {
-                let (ea, eb) = (expr_at(old, a, oa.expr(ea.get().unwrap()).lo), expr_at(new, b, na.expr(eb.get().unwrap()).lo));
-                if !attrs_same || toks_norm(old, la, ea, &[]) != toks_norm(new, lb, eb, &[]) {
-                    // its declared type as each version spells it (between the name and the `=`)
-                    let ty = |pf: &crate::parser::ParsedFile, it: &crate::ast::Item, e: u32| -> String {
-                        let t = pf.src.get(it.name.hi as usize..e as usize).map(String::from_utf8_lossy).unwrap_or_default();
-                        let t = t.trim().trim_start_matches(':').trim_end().trim_end_matches('=');
-                        t.split_whitespace().collect::<Vec<_>>().join(" ")
-                    };
-                    let (ta, tb) = (ty(old, a, ea), ty(new, b, eb));
-                    if ta != tb {
-                        why.push(format!("{}: static `{}` changed its type from `{}` to `{}`: its storage holds a value of the old type -- restart the app", pos(new, b.lo), name, ta, tb));
-                    } else {
-                        why.push(format!("{}: static `{}` changed its declaration (attributes or mutability): its storage was made for the old one -- restart the app", pos(new, b.lo), name));
-                    }
+                let (ea, eb) = (static_init_at(old, a, ea.get().unwrap()), static_init_at(new, b, eb.get().unwrap()));
+                // Everything in the header through the name precedes the declared type.
+                if !attrs_same || !same_toks(old, a.lo, a.name.hi, &[], new, b.lo, b.name.hi, &[]) {
+                    why.push(format!("{}: static `{}` changed its declaration (attributes or mutability): its storage was made for the old one -- restart the app", pos(new, b.lo), name));
                     continue;
                 }
-                match def {
-                    Some(d) => out.push(Change::StaticInit(d)),
-                    None => why.push(format!("{}: static `{}` has no definition -- restart the app", pos(new, b.lo), name)),
+                let Some(d) = def else {
+                    why.push(format!("{}: static `{}` has no definition -- restart the app", pos(new, b.lo), name));
+                    continue;
+                };
+                if toks_norm(old, a.name.hi, ea, &[]) != toks_norm(new, b.name.hi, eb, &[]) {
+                    out.push(Change::Layout(d));
+                    if toks_norm(old, ea, a.hi, &[]) == toks_norm(new, eb, b.hi, &[])
+                        && !includes_moved(old, &prog.file_paths[old_file as usize], a, base, &old_exp) {
+                        continue;
+                    }
                 }
+                out.push(Change::StaticInit(d));
             }
             // a named-field struct whose fields changed and nothing else: in place when no field
             // moves, a new layout when no running value is left (decided with the types)
@@ -5899,6 +5958,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // 1-2: parse and classify every file; nothing changes yet
     let mut versions = Vec::new();
     let mut changes = Vec::new();
+    let mut static_type_defs = Vec::new();
     let mut restart = Vec::new();
     let mut kept = None;
     // a whole save holds back its restart-only items alone (hold_back): its texts stay at hand. A
@@ -5931,7 +5991,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             Ok(v) => {
                 trace_count("classify_items", v.pf.ast.items.len() + u.prog.files[e.file as usize].ast.items.len());
                 match classify(&u.prog, e.file, &v.pf, &e.path, base) {
-                    Ok(plan) if module && (plan.removed.iter().any(|d| u.prog.defs[d.0 as usize].is_pub) || plan.changes.iter().any(|c| matches!(c, Change::Layout(_)))) => {
+                    Ok(plan) if module && (plan.removed.iter().any(|d| u.prog.defs[d.0 as usize].is_pub) || plan.changes.iter().any(|c| matches!(c, Change::Layout(d) if u.prog.def(*d).kind != DefKind::Static))) => {
                         // the host holds typed pointers to a module's pub items (exports): one
                         // removed or re-signatured (remove + add) needs a fresh module, and its
                         // types have no live layout migration. Private items removed unbind as in
@@ -5939,7 +5999,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                         restart.push(format!("{}:1:1: a pub item of the module was removed or changed its signature, or a layout changed -- unload and load the new text", e.path));
                     }
                     Ok(mut plan) => {
-                        changes.extend(std::mem::take(&mut plan.changes));
+                        plan.take_live_changes(&u.prog, &mut changes, &mut static_type_defs);
                         versions.push((v, plan));
                     }
                     Err(w) => restart.extend(w),
@@ -5954,7 +6014,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         out.ms[0] = ms(t0);
         return out;
     }
-    if kept.is_some() && changes.is_empty() && restart.is_empty()
+    if kept.is_some() && changes.is_empty() && static_type_defs.is_empty() && restart.is_empty()
         && versions.iter().all(|(_, p)| p.added.is_empty() && p.removed.is_empty() && p.removed_uses.is_empty()) {
         out.rung = Rung::Patch;
         out.lines.push(format!("incomplete: {} item(s) kept at their running version", kept.unwrap()));
@@ -6006,8 +6066,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // its running value never sees the new initializer, so the edit lands by a restart
     for c in &changes {
         if let Change::Const(d) | Change::StaticInit(d) = *c {
-            if let Some(s) = placed_storage(u, d) {
-                restart.push(format!("{}the initializer of `{}` changed, and `{}` already holds the value the old one made (an initializer runs once) -- restart the app", new_pos(u, &versions, d), def_name(&u.prog, d), def_name(&u.prog, s)));
+            if !static_type_defs.contains(&d) {
+                restart.extend(initializer_restart(u, &versions, d));
             }
         }
     }
@@ -6569,7 +6629,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                 Ok(v) => match classify_moving(&u.prog, file, &v.pf, &path, base, &moving) {
                     // (its text is the running one's: no change of its own but an include that moved)
                     Ok(mut plan) => {
-                        changes.extend(std::mem::take(&mut plan.changes));
+                        plan.take_live_changes(&u.prog, &mut changes, &mut static_type_defs);
                         for &d in &plan.removed { set_names.push(def_name(&u.prog, d).into_bytes()); }
                         out.changed += plan.removed.len();
                         versions.push((v, plan));
@@ -7004,6 +7064,12 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if !versions.is_empty() { PROGRAM_EDITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
         let from = u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
         trace_stage("gandalf_carry");
+        // Force even an unread static's running type before its DefId points at the edit.
+        let static_types: Vec<_> = static_type_defs.iter().map(|&d| {
+            let def = u.prog.def(d);
+            let init_restart = if static_defs.contains(&d) { initializer_restart(u, &versions, d) } else { None };
+            (d, u.tcx.const_ty(&u.prog, d), def.file, def.item, init_restart)
+        }).collect();
         for (v, plan) in versions {
             let old = v.old;
             // (the caches commit_version clears are freed below, under this write lock)
@@ -7073,6 +7139,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                     for (d, had) in &saved_variants { u.prog.restore_variants(*d, had); }
                     restore_traits(u, &saved_traits, Some(&visible_crates));
                     u.tcx.publish_collected();
+                    u.publish_owner_verdicts();
                     drop(fw);
                     out.rung = Rung::Restart;
                     out.lines.push(e);
@@ -7190,6 +7257,24 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             add_errs.extend(e);
         }
         trace_sub("collect_added");
+        for (d, running, old_file, old_item, init_restart) in static_types {
+            let (fresh, errors) = u.tcx.const_ty_fresh(&u.prog, d);
+            if !errors.is_empty() {
+                add_errs.extend(errors);
+            } else if fresh.is_none() || fresh != running {
+                let def = u.prog.def(d);
+                let old = &u.prog.files[old_file as usize];
+                let new = &u.prog.files[def.file as usize];
+                let item = new.ast.item(def.item);
+                let ta = static_type_spelling(old, old.ast.item(old_item));
+                let tb = static_type_spelling(new, item);
+                let name = String::from_utf8_lossy(new.bytes(item.name.lo, item.name.hi));
+                layout_restart.push(format!("{}: static `{name}` changed its type from `{ta}` to `{tb}`: its storage holds a value of the old type -- restart the app", u.pos_str(def.file, item.lo)));
+                types_unapplied = true;
+            } else {
+                layout_restart.extend(init_restart);
+            }
+        }
         // field-list edits: a struct's rename in place, a new layout with no running value left, or
         // the restart rung; an enum's variants placed (enum_place)
         // the enums that took their new layout (enum_place)
@@ -7310,6 +7395,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
         trace_sub("raw_builders");
+        u.publish_owner_verdicts();
         unsafe {
             u.prog.reclaim_caches();
         }
@@ -7466,6 +7552,12 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         .map(|f| u.prog.file_paths[f as usize].clone()).chain(edit_paths).collect();
     let mut errs: Vec<String> = add_errs.into_iter().filter(|e| !(e.contains(".rs:")) || edited.iter().any(|p| e.starts_with(p.as_str()))).collect();
     errs.extend(removed_errs);
+    // what a fresh build's crate-level checks refuse in the edit's new texts (two items of one
+    // name in one module or block, E0428, and the rest of check.rs edit_crate_level_errors): a
+    // patch refuses what a fresh build refuses, the running code going on (such an edit used to
+    // apply, a lookup taking one of the two items for both)
+    let new_files: Vec<u32> = news.iter().map(|&(_, n)| n).collect();
+    errs.extend(crate::check::edit_crate_level_errors(&u.prog, &u.tcx, &new_files));
     // The edit's own errors, as a fresh build of its text reports them: they refuse it even
     // where a restart is also needed (a restart would only stop at them)
     let mut real: Vec<String> = errs.clone();
@@ -8513,6 +8605,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             u.lay.clear();
             out.lines.retain(|l| !l.starts_with("field `"));
         }
+        u.publish_owner_verdicts();
         drop(fw);
         if rekeyed { crate::cache::rekey_after_revert(up); }
         jit::bump_patch_epoch();
@@ -10478,18 +10571,16 @@ fn internal_failure(lines: &[String]) -> bool {
 
 /// What a refused edit reports after its re-check: the first attempt's reasons, then the
 /// retry's new ones. The retry's type check finds the first attempt's errors already reported
-/// and adds only the summary "type checking failed due to previous errors", which goes when a
-/// real error is listed.
+/// and adds only the summary (in any of its forms), which goes when a real error is listed.
 fn refusal_lines(first: Vec<String>, retry: Vec<String>) -> Vec<String> {
-    const SUMMARY: &str = "type checking failed due to previous errors";
     let mut out = first;
     for l in retry {
         if !out.contains(&l) {
             out.push(l);
         }
     }
-    if out.iter().any(|l| !l.ends_with(SUMMARY)) {
-        out.retain(|l| !l.ends_with(SUMMARY));
+    if out.iter().any(|l| !crate::check::is_typeck_summary(l)) {
+        out.retain(|l| !crate::check::is_typeck_summary(l));
     }
     out
 }
@@ -11027,6 +11118,21 @@ fn removed_module_line(path: &str, declares: &str) -> String {
         _ => file.strip_suffix(".rs").unwrap_or(file),
     };
     format!("error[E0583]: file not found for module `{name}`: {path} was removed and {declares} still declares it")
+}
+
+/// Whether the live watcher watches one of these absolute paths or its parent folder.
+/// Returns `None` when there is no watcher.
+pub fn watches(paths: &[String]) -> Option<bool> {
+    let inputs = {
+        let view = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+        if WATCH_GONE.load(Ordering::Acquire) { return None; }
+        view.as_ref()?.inputs.clone()
+    };
+    Some(paths.iter().any(|path| {
+        let path = crate::vfs::normalize_path(path);
+        inputs.paths.contains_key(&path) || std::path::Path::new(&path).parent()
+            .and_then(|p| p.to_str()).is_some_and(|p| inputs.paths.contains_key(p))
+    }))
 }
 
 /// Inspect takes the loaded paths on the owner: tests can load more files while the watcher
@@ -12490,7 +12596,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         drop(wait);
         trace_input(watch_ms, (read_started - seen).as_secs_f64() * 1000., ms(read_started), scanned);
         let mut o = apply_update(up, edits);
-        let only_previous_errors = !o.lines.is_empty() && o.lines.iter().all(|l| l.ends_with("type checking failed due to previous errors"));
+        let only_previous_errors = !o.lines.is_empty() && o.lines.iter().all(|l| crate::check::is_typeck_summary(l));
         let mut failure = o.failure.or_else(|| (o.rung == Rung::Refuse && internal_failure(&o.lines)).then_some(makepad_remote::hot::Outcome::Refused));
         let what = names.join(", ");
         if o.rung == Rung::Refuse || o.failure.is_some() {
@@ -13666,12 +13772,18 @@ mod refusal_tests {
     fn a_refused_edit_reports_its_type_error_not_only_the_summary() {
         isolated_test!(a_refused_edit_reports_its_type_error_not_only_the_summary);
         let e0308 = "/c/main.rs:51:24: E0308: mismatched types: expected `u32`, found `&str`".to_string();
-        let summary = "/c/main.rs:53:13: type checking failed due to previous errors".to_string();
-        assert_eq!(refusal_lines(vec![e0308.clone()], vec![summary.clone()]), vec![e0308.clone()]);
-        // a retry that finds the error again adds nothing twice
-        assert_eq!(refusal_lines(vec![e0308.clone()], vec![e0308.clone(), summary.clone()]), vec![e0308.clone()]);
-        // only the summary known: it stays (something must say why)
-        assert_eq!(refusal_lines(Vec::new(), vec![summary.clone()]), vec![summary]);
+        let bare = "/c/main.rs:53:13: type checking failed due to previous errors";
+        for summary in [
+            bare.to_string(),
+            format!("{bare}: first error: /c/main.rs:51:24: E0308: mismatched types (already shown by the session)"),
+            format!("{bare} (tainted by an error type at relax-types src/typeck.rs:2257)"),
+        ] {
+            assert_eq!(refusal_lines(vec![e0308.clone()], vec![summary.clone()]), vec![e0308.clone()]);
+            // a retry that finds the error again adds nothing twice
+            assert_eq!(refusal_lines(vec![e0308.clone()], vec![e0308.clone(), summary.clone()]), vec![e0308.clone()]);
+            // only the summary known: it stays (something must say why)
+            assert_eq!(refusal_lines(Vec::new(), vec![summary.clone()]), vec![summary]);
+        }
         // a new reason of the retry is kept after the first ones
         let other = "/c/other.rs:3:1: E0425: cannot find value `y`".to_string();
         assert_eq!(refusal_lines(vec![e0308.clone()], vec![other.clone()]), vec![e0308, other]);

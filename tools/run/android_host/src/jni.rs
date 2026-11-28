@@ -45,7 +45,7 @@ pub unsafe extern "system" fn JNI_OnLoad(vm: *mut sys::JavaVM, _: *mut c_void) -
     }
     let class = ((**env).FindClass.unwrap())(env, c"dev/makepad/android/MakepadNative".as_ptr());
     if class.is_null() { return sys::JNI_ERR; }
-    let result = makepad_hal::backend::android::register_natives(env, class);
+    let result = makepad_hal::android::register_natives(env, class);
     ((**env).DeleteLocalRef.unwrap())(env, class);
     match result {
         Ok(pending) => {
@@ -320,7 +320,7 @@ pub unsafe extern "system" fn Java_dev_makepad_run_RunActivity_boot(
     }
     let manager = AAssetManager_fromJava(env, assets) as usize;
     // The global AssetManager reference stays alive with the packed store and HAL.
-    makepad_hal::backend::android::assets::set_manager(manager as *mut c_void);
+    makepad_hal::android::assets::set_manager(manager as *mut c_void);
     let apk = PathBuf::from(jstring_to_string(env, apk_path));
     let files = PathBuf::from(jstring_to_string(env, files_dir));
     let cache = jstring_to_string(env, cache_dir);

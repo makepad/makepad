@@ -2,6 +2,7 @@
 makepad_cpu_budget::WAIT_HOOK	native host hook, set once
 makepad_cpu_budget::global::BUDGET	the machine's budget; end_run removes the rows of ended threads
 makepad_cpu_budget::os_class::BASE	nice base of this process
+makepad_cpu_budget::MACHINE	the machine's cores, read once (MAKEPAD_MACHINE_CORES, else the OS count): the same for the process's whole life, each side of a JIT run its own (per_side)
 makepad_font_core::intern::INTERNER	content-keyed Arc<str> interner
 makepad_font_core::system_fonts::font_scan::INDEX	the machine's fonts
 makepad_font_core::system_fonts::font_scan::PREWARMED	one-shot prewarm of the machine's font index
@@ -148,6 +149,7 @@ makepad_hal::compute::unsupported::ONCE	log once
 makepad_hal::frame_tap::NEXT_LOG	log pacing
 makepad_hal::framecap::DONE	finished capture seq, readers wait on it
 makepad_hal::framecap::STATE	framecap::end_run, through state(); next_seq stays so an old waiter never matches
+makepad_hal::gpu_limits::GPU_UI_RESERVE_BYTES	device facts
 makepad_hal::gpu_limits::GPU_WORKING_SET_BYTES	device facts
 makepad_hal::gpu_limits::MAX_GPU_BUFFER_BYTES	device facts
 makepad_hal::gpu_pressure::ui_reserve::ENV	env MAKEPAD_GPU_UI_RESERVE_MB read once, nothing sets it
@@ -164,6 +166,7 @@ makepad_hal::profile::LAST_MOVE	input time, expires by RECENT_NS
 makepad_hal::profile::LAST_SCROLL	input time, expires by RECENT_NS
 makepad_hal::profile::SAMPLES	profile::end_run, through lock()
 makepad_hal::session::open::NEXT_SESSION	session ids are never reused
+makepad_hal::sources::HOST	one-shot host hook: the runner installs the source host once (set_sources_host)
 makepad_hal::stream_decode::HELD	Android: no in-place restart there
 makepad_hal::stream_decode::NEXT	ids never reused
 makepad_hal::stream_encode::NEXT	ids never reused
@@ -202,6 +205,8 @@ makepad_run::quit_signal::native::FIRST_NS	first quit signal, quitting is one wa
 makepad_run::quit_signal::native::WAKE	signal pipe of this process
 makepad_run::quit_signal::native::WRITE_FD	signal pipe of this process
 makepad_run::run_host::ONCE	Once registering the HAL host and the run host, the same functions for every run
+makepad_run::sources::STATE	the source worker's state, which outlives a run's end in place: its thread stays, and a restart an update asked for ends as Updated when the next run starts
+makepad_run::sources::WAKE	condvar of the long-lived source worker thread
 makepad_script::base64::DECODE	constant decode table
 makepad_script::census::CENSUS_OTHER_VM	native fn of the census crate compiled into the loader, set once
 makepad_script::clock::monotonic_now::START	clock epoch of this process
@@ -300,9 +305,9 @@ relax_base::memstat::sites::LIVE	live bytes per host call site, frees decrement 
 relax_base::memstat::sites::LOCK	process memory stats
 relax_base::memstat::sites::PEAK	process memory stats
 relax_base::memstat::sites::USED	process memory stats
-relax_base::pool::JOB_LIFT	native host hook, set once (owner::start: relax-compiler's job lift, never JIT code)
 relax_base::pool::POOL	retire_idle ends its workers (run_end)
 relax_base::pool::THREAD_START	one-shot hook (ensure_altstack)
+relax_base::pool::JOB_SLEEPS	one-shot hook (a granted run's queue sets it when it starts; the grant is the process's environment, the same after a restart)
 relax_base::progress::REPORT	one-shot host hook
 relax_base::query::NEXT_ID	ids are never reused
 relax_base::query::job::WAIT_HOOK	one-shot native hook
@@ -360,7 +365,15 @@ relax_base::zone_alloc::compiler::NEXT_ARENA_ID	arena ids are never reused by de
 relax_base::zone_alloc::compiler::alloc_failed::SAID	once-per-process report
 relax_base::zone_alloc::compiler::bind_program_tls::ONCE	pthread TSD key of the process, not the program's (arena.rs:276)
 relax_base::zone_alloc::domain::HEAD	DomainHeap drop unlinks it
+relax_base::zone_alloc::domain::HEAP_MAPS_LIVE	total tracked anonymous mappings across live domain heaps; `forget_map` and `DomainHeap::drop` decrement each entry
 relax_base::zone_alloc::domain::HELD	spin lock of the heap registry, held only under its RAII guard (domain.rs:27)
+relax_base::zone_alloc::domain::MAPS_HIGH	upper bound of active PA heaps' tracked mappings; recomputed under `Registry::lock()` on every insert, remove, `stop_routing`, and `DomainHeap::drop`
+relax_base::zone_alloc::domain::MAPS_LOW	lower bound of active PA heaps' tracked mappings; recomputed under `Registry::lock()` on every insert, remove, `stop_routing`, and `DomainHeap::drop`
+relax_base::zone_alloc::domain::MAP_BITS	lock-free 4 MiB bucket bitmap of active PA heaps' tracked mappings; refcounted via `MAP_COUNTS` and cleared on remove, `stop_routing`, and `DomainHeap::drop`
+relax_base::zone_alloc::domain::MAP_COUNTS	per-bucket reference counts for `MAP_BITS`, accessed only under `Registry::lock()` and zeroed on remove, `stop_routing`, and `DomainHeap::drop`
+relax_base::zone_alloc::domain::PA_HEAPS	count of the registered heaps with a program allocator: each heap's drop takes its own off (domain.rs DomainHeap drop)
+relax_base::zone_alloc::domain::STATICS_HIGH	bounds of every program-allocator heap's static block the process made: they only widen, a filter in front of the registry walk (domain.rs may_be_program_memory)
+relax_base::zone_alloc::domain::STATICS_LOW	bounds of every program-allocator heap's static block the process made: they only widen, a filter in front of the registry walk (domain.rs may_be_program_memory)
 relax_base::zone_alloc::slots::DEFAULT	default arena stays
 relax_base::zone_alloc::slots::DOMAIN_KEY	OS TLS key; cfg-off: apple arm64
 relax_base::zone_alloc::slots::DOMAIN_OFFSET	layout fact of the allocator
@@ -584,6 +597,7 @@ relax_compiler::jit::AUX_UNITS_ANY	gate, true is safe
 relax_compiler::jit::BG_CV	condvar, no value
 relax_compiler::jit::BG_MX	lock
 relax_compiler::jit::BUDGET_RUN	program run flag; the restarted run is one too
+relax_compiler::jit::UNSETTLED	the JIT's settle state (report only), which each run's start sets (start_cpu_budget) and the settled sampler updates
 relax_compiler::jit::BUILD_GEN	monotone generation, waiters compare for change
 relax_compiler::jit::CHECK_FAILURES	`makepad check` only
 relax_compiler::jit::CHECK_FIRST	`--check-first` arg, same next run (run.rs:812)
@@ -915,6 +929,7 @@ relax_front::lang_items::LANG_ITEM_DATA	constant table
 relax_front::load_profile::epoch::EPOCH	clock epoch of load events
 relax_front::macro_reg::RUNNER	host hook, points to JitRunner, a unit struct (macro_reg.rs:43, pmhost.rs:114)
 relax_front::macro_reg::STATS	unit struct, access path to STATS_CELL (macro_reg.rs:323)
+relax_front::macro_reg::REGISTER	the registration lock, a unit value: free again at each registration's write (register_in)
 relax_front::macros::LOOKUP_INPUT_IDS	lookup ids never reused (macros.rs:421)
 relax_front::macros::SCOPE_IDS	scope ids never reused (macros.rs:1071)
 relax_front::parser::lazy_stats_on::E	env RELAX_LAZY_STATS read once, nothing sets it
@@ -997,7 +1012,6 @@ relax_compiler::run_end::leftovers::ON	a test mode: set once, from the process's
 relax_front::macro_reg::PURE_CRATES	the host's audited pure proc-macro crates, set once (set_host)
 relax_front::macro_reg::CALL_KRATES	crate names the CALL_KRATE thread-locals index (no destructor, so they read the same at a thread's end): an index a thread holds stays valid, one entry per name
 makepad_run::script_answers::PLATFORM	immutable: makepad-platform's build-script answer entry
-makepad_cpu_budget::JIT_UNSETTLED	the JIT's settle state, which the JIT sets at each run's start (jit.rs: set_jit_settled(false)) and as it settles
 makepad_cpu_budget::monotonic_ns::START	the process's clock origin: every reading of the process is relative to it
 makepad_hal::a11y::USER_SEQ	the person's input count for the process: an act's if_user_seq compares readings, so it only grows
 makepad_hal::backend::apple::appkit::app::shown_for_person::SHOWN	env MAKEPAD_SHOW read once; a run in place has the process's environment

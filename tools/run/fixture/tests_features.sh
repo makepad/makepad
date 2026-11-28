@@ -8,6 +8,8 @@
 # and the command it says (GATEREPRO) shows the break alone. A workspace of the crates, and stubs under the gate's
 # package names that affected.py asks for, in a temporary git repo; needs cargo, git and python3, nothing of this tree
 # but the gate's scripts.
+# A nested gate must not publish into the outer lease's keep.
+unset DEVHUB_KEEP
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/tests_features.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT

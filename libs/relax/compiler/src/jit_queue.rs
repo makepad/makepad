@@ -2,7 +2,7 @@
 //! before an entry leaves the queue; a blocked admission never reserves stale work.
 use super::*;
 use makepad_cpu_budget as budget;
-use crate::pool::{BudgetJob, JobClass, Source};
+use crate::pool::{CurrentJob, JobClass, Source};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use std::sync::atomic::AtomicUsize;
@@ -66,17 +66,64 @@ impl Serials {
     fn is_empty(&self) -> bool { self.first.is_none() }
     fn iter(&self) -> impl Iterator<Item = u64> + '_ { self.first.into_iter().chain(self.more.iter().copied()) }
 }
+// Match the budget's DEMAND_SPAN_NS so a grant responds to outside work at the same rate.
+const GRANT_SPAN_NS: u64 = 100_000_000;
+/// A granted run (`MAKEPAD_CPU_GRANT=1`: devhub's test shards, told N cores of a shared box): the
+/// cores in use outside the JIT's drains, per span the process's CPU time less the drains' running
+/// time, so the JIT's jobs, waited ones too, fit what the run's own threads leave of the grant: the
+/// cores the box was promised. A job asleep on other JIT work (`pool::suspend`) uses none and
+/// leaves its place, so what it waits for can start, and one job always runs: slow, never
+/// deadlocked. Section workers' CPU reads as outside: the JIT narrows itself, never the app.
+/// Rolled under the queue lock at each pick, the only place `running` changes.
+struct Grant {
+    /// the span's start (wall ns) and the process's CPU time then
+    span_at: u64,
+    span_cpu: u64,
+    /// awake running drain jobs times ns, summed; its value at the span's start; when it was
+    /// advanced to
+    area: u64,
+    span_area: u64,
+    area_at: u64,
+    /// the last span's reading (thousandths of a core) and the larger of the last two, whole cores
+    last: u64,
+    outside: usize,
+}
+fn outside_reading(cpu_ns: u64, jobs_ns: u64, span: u64) -> u64 {
+    cpu_ns.saturating_sub(jobs_ns).saturating_mul(1000) / span.max(1)
+}
+impl Grant {
+    fn new(now: u64, cpu: u64) -> Self {
+        Self { span_at: now, span_cpu: cpu, area: 0, span_area: 0, area_at: now, last: 0, outside: 0 }
+    }
+    fn roll(&mut self, now: u64, running: usize, cpu: impl FnOnce() -> u64) {
+        let elapsed = now.saturating_sub(self.area_at);
+        self.area = self.area.saturating_add((running as u64).saturating_mul(elapsed));
+        self.area_at = now;
+        let span = now.saturating_sub(self.span_at);
+        if span < GRANT_SPAN_NS { return; }
+        let cpu = cpu();
+        self.observe(outside_reading(cpu.saturating_sub(self.span_cpu), self.area - self.span_area, span));
+        self.span_at = now;
+        self.span_cpu = cpu;
+        self.span_area = self.area;
+    }
+    fn observe(&mut self, reading: u64) {
+        self.outside = ((reading.max(self.last) + 500) / 1000) as usize;
+        self.last = reading;
+    }
+}
 /// The admission checks' view of the running jobs and the phase (`Queue::policy`).
 struct Policy {
-    /// the burst gate: one build at a time below Interactive while the startup or the UI runs
+    /// the burst gate: one build at a time below Interactive while the startup runs or the UI is
+    /// blocked on the JIT (postframe::ui_in_episode)
     burst: bool,
     /// running builds below Interactive (the burst gate's count: a check beside the program is none)
     builds: usize,
     noninteractive: usize,
-    /// the running Background jobs but O3 builds (breadth: O2, speculation, checks)
+    /// all running Background jobs, including ahead work and the tick
     background: usize,
-    /// the running Background O3 builds: their own part while the JIT comes first (`wide`)
-    background_o3: usize,
+    /// running Background O2, speculative, reach and check jobs
+    breadth: usize,
     /// the running jobs per tier (the startup's tier widths)
     tiers: [usize; TIERS],
     /// through the startup the checks ahead of the main thread run on a few workers, as many as its
@@ -85,11 +132,12 @@ struct Policy {
     ahead_full: bool,
     limit: usize,
     background_limit: usize,
-    /// O3's Background ceiling, `budget::jit_background_limit`: the cores the app's Background work
-    /// leaves while the JIT comes first, else `background_limit`
-    wide: usize,
-    /// Visible work is queued or running here: every Background build keeps `background_limit`
-    visible: bool,
+    /// the granted cores left for the JIT's jobs after outside work (usize::MAX: not a granted run)
+    grant_width: usize,
+    /// running jobs but the tick that are not asleep on other JIT work: what the grant counts
+    awake: usize,
+    /// an O3 job is queued or running
+    o3_pending: bool,
     /// before the first present: the startup's tier widths apply
     widths: bool,
     o3_stopped: bool,
@@ -104,6 +152,7 @@ struct Running { serial: u64, promoted: bool, slot: Option<(usize, u32)>, tier: 
 pub(super) struct Queue {
     entries: Vec<Entry>,
     running: Vec<Running>,
+    grant: Option<Grant>,
     serial: u64,
     /// the threads waiting for a slot's job, per class they wait at (Interactive, Visible:
     /// owner::waiter_class)
@@ -137,8 +186,11 @@ pub(super) struct Queue {
 struct Hold { reason: usize, after: bool, since: u64, queued: u64 }
 impl Queue {
     fn new() -> Self {
+        // (made once, by `queue()`: the run's grant is its environment's)
+        let granted = std::env::var_os("MAKEPAD_CPU_GRANT").is_some_and(|v| v == "1");
+        let grant = granted.then(|| Grant::new(wall_ns(), crate::first_frame::process_cpu_ns()));
         Self { entries: Vec::new(), running: Vec::new(), serial: 0, waiters: HashMap::default(), plan: std::array::from_fn(|_| std::array::from_fn(|_| BTreeSet::new())), indices: HashMap::default(), by_slot: HashMap::default(), refresh_cursor: 0, ahead_class: budget::BACKGROUND, ahead_since: 0, ahead_len: 0,
-            tick_at: Instant::now(), tick_queued: false, timer: None, inbox: Vec::new(), quitting: false, hold: None }
+            tick_at: Instant::now(), tick_queued: false, timer: None, inbox: Vec::new(), quitting: false, hold: None, grant }
     }
     /// Queues `job` and identifies a drain for it if it can start now.
     pub(super) fn push(&mut self, job: Job, at: u64) -> Option<Kind> {
@@ -167,7 +219,6 @@ impl Queue {
         COUNTS[entry.job.tier()].fetch_add(1, Ordering::Relaxed);
         if matches!(entry.job, Job::Reach(..)) { REACH_QUEUED.fetch_add(1, Ordering::SeqCst); }
         self.entries.push(entry);
-        budget::queued(class, budget::JIT, 1);
         let policy = self.policy();
         let entry = self.entries.last().unwrap();
         self.blocked(entry, &policy).is_none().then(|| DrainsNow::get().for_job(entry.job.tier(), class))
@@ -181,13 +232,6 @@ impl Queue {
     }
     fn set_ahead_class(&mut self, class: u8) {
         if class != self.ahead_class {
-            let mut left = self.ahead_len;
-            while left != 0 {
-                let count = left.min(i32::MAX as usize) as i32;
-                budget::queued(self.ahead_class, budget::JIT, -count);
-                budget::queued(class, budget::JIT, count);
-                left -= count as usize;
-            }
             if class < self.ahead_class { self.ahead_since = wall_ns(); }
             self.ahead_class = class;
         }
@@ -220,8 +264,6 @@ impl Queue {
         if class == entry.class && key == entry.key { return false; }
         self.plan[entry.job.tier()][entry.class as usize].remove(&order(entry.key, entry.serial));
         if class != entry.class {
-            budget::queued(entry.class, budget::JIT, -1);
-            budget::queued(class, budget::JIT, 1);
             entry.since = if class < entry.class { now.wall } else if class == budget::BACKGROUND { entry.at } else { entry.since };
             entry.class = class;
         }
@@ -272,23 +314,26 @@ impl Queue {
         Some(DrainsNow::get().for_job(e.job.tier(), self.class_of(e)))
     }
     /// What the admission checks read of the running jobs and the phase, once per decision. The
-    /// burst gate holds one build at a time below Interactive while the startup or the UI runs. The
-    /// tick is housekeeping beside the builds, not one of them: it neither counts nor waits (the O2
-    /// worker and the first O3 worker's polls ran side by side; a tick that waited for the owner held
-    /// the one slot the startup's O2 builds had, and half as many ran).
+    /// burst gate holds one build at a time below Interactive while the startup runs or the UI thread
+    /// is in a JIT block episode: its hold ends with the episode (a frame, or no wait for
+    /// EPISODE_GAP_NS), not after a span of quiet. The tick is housekeeping beside the builds, not
+    /// one of them: it neither counts nor waits (the O2 worker and the first O3 worker's polls ran
+    /// side by side; a tick that waited for the owner held the one slot the startup's O2 builds had,
+    /// and half as many ran).
     fn policy(&self) -> Policy {
         let mut policy = Policy {
-            burst: !past_startup() || crate::postframe::ui_idle_ns() < BURST_UI_QUIET_NS,
+            burst: !past_startup() || crate::postframe::ui_in_episode(),
             builds: 0,
             noninteractive: 0,
             background: 0,
-            background_o3: 0,
+            breadth: 0,
             tiers: [0; TIERS],
             ahead_full: false,
             limit: budget::limit() as usize,
             background_limit: budget::background_limit() as usize,
-            wide: budget::jit_background_limit() as usize,
-            visible: self.plan.iter().any(|p| !p[budget::VISIBLE as usize].is_empty()),
+            grant_width: self.grant.as_ref().map_or(usize::MAX, |g| (budget::cores() as usize).saturating_sub(g.outside)),
+            awake: 0,
+            o3_pending: COUNTS[2].load(Ordering::Relaxed) + RUNNING[2].load(Ordering::Relaxed) > 0,
             widths: !FIRST_PRESENT.load(Ordering::Acquire) && !HEADLESS.load(Ordering::Acquire),
             o3_stopped: TIER_STOP.load(Ordering::Acquire),
             o3_startup: startup_holds_tier1(),
@@ -299,20 +344,22 @@ impl Queue {
             let class = r.class.class();
             if r.tier != 4 && class != budget::INTERACTIVE { policy.noninteractive += 1; }
             if r.tier < 4 && class != budget::INTERACTIVE { policy.builds += 1; }
-            if class == budget::BACKGROUND { if r.tier == 2 { policy.background_o3 += 1 } else { policy.background += 1 } }
-            if class == budget::VISIBLE { policy.visible = true; }
+            if r.tier != 4 && !r.class.asleep() { policy.awake += 1; }
+            if class == budget::BACKGROUND {
+                policy.background += 1;
+                if is_breadth(r.tier) { policy.breadth += 1; }
+            }
             policy.tiers[r.tier] += 1;
             if r.tier == 0 && !r.promoted { ahead += 1; }
         }
         policy.ahead_full = startup_phase() && ahead >= startup_ahead();
         policy
     }
-    /// (a check beside the program is no build: the budget alone decides how much of it runs beside them)
     fn class_blocked(&self, class: u8, tier: usize, policy: &Policy) -> Option<&'static str> {
         if tier < 4 && !eligible(class, policy.burst, policy.builds) { return Some("UI burst"); }
+        if tier != 4 && policy.awake >= policy.grant_width.max(1) { return Some("grant"); }
         if class != budget::INTERACTIVE {
-            let (background, ceiling) = background_drains(tier, policy.visible, policy.background, policy.background_o3, policy.background_limit, policy.wide);
-            if let Some(why) = drain_blocked(class, policy.noninteractive, background, policy.limit, ceiling) { return Some(why); }
+            if let Some(why) = drain_blocked(class, tier, policy) { return Some(why); }
             if policy.widths {
                 let width = match tier { 1 => 1, 2 | 3 => 2, _ => usize::MAX };
                 if policy.tiers[tier] >= width { return Some("startup tier width"); }
@@ -341,9 +388,8 @@ impl Queue {
     }
     /// Why the best queued tier-up (O2, O3) does not start at this pick: its gate (`class_blocked`,
     /// `entry_blocked`), else "idle lane" when only the other kind of worker may start it
-    /// (`takes`), else "budget" when the admission refused the head (`head_refused`). None when no
-    /// tier-up is queued or nothing holds it.
-    fn tier_up_hold(&self, head_refused: bool, takes: Takes) -> Option<usize> {
+    /// (`takes`). None when no tier-up is queued or nothing holds it.
+    fn tier_up_hold(&self, takes: Takes) -> Option<usize> {
         if (COUNTS[1].load(Ordering::Relaxed) + COUNTS[2].load(Ordering::Relaxed)) == 0 { return None; }
         let policy = self.policy();
         let (_, tier, class, serial) = [1usize, 2].into_iter()
@@ -357,7 +403,6 @@ impl Queue {
         let reason = match why {
             Some(why) => why,
             None if !takes.takes(tier, class) => "idle lane",
-            None if head_refused => "budget",
             None => return None,
         };
         Some(HOLD_REASONS.iter().position(|r| *r == reason).unwrap_or(HOLD_REASONS.len() - 1))
@@ -397,7 +442,6 @@ impl Queue {
         let mut e = self.entries.swap_remove(i);
         COUNTS[e.job.tier()].fetch_sub(1, Ordering::Relaxed);
         if matches!(e.job, Job::Reach(..)) { REACH_QUEUED.fetch_sub(1, Ordering::SeqCst); }
-        budget::queued(self.class_of(&e), budget::JIT, -1);
         self.plan[e.job.tier()][e.class as usize].remove(&order(e.key, e.serial));
         if e.job.tier() == 0 && !e.promoted { self.ahead_len -= 1; }
         e.since = self.since_of(&e);
@@ -425,21 +469,19 @@ fn rank(class: u8, key: i64, serial: u64) -> (u8, std::cmp::Reverse<i64>, u64) {
 fn order(key: i64, serial: u64) -> (std::cmp::Reverse<i64>, u64) {
     (std::cmp::Reverse(key), serial)
 }
-// Parked jobs retain their drain thread even after returning their CPU permit. Mirror
-// the budget's class ceilings so Background cannot occupy the drains Visible needs,
-// just as non-Interactive work must leave a drain for first compiles.
-fn drain_blocked(class: u8, noninteractive: usize, background: usize, limit: usize, background_limit: usize) -> Option<&'static str> {
-    if class != budget::INTERACTIVE && noninteractive >= limit { return Some("first-compile reserve"); }
-    if class == budget::BACKGROUND && background >= background_limit { return Some("visible reserve"); }
+// Jobs keep their drain while asleep. Leave drains available for Visible work and first compiles.
+fn drain_blocked(class: u8, tier: usize, policy: &Policy) -> Option<&'static str> {
+    if class != budget::INTERACTIVE && policy.noninteractive >= policy.limit { return Some("first-compile reserve"); }
+    if class == budget::BACKGROUND {
+        return background_drains(tier, policy.breadth, policy.background, policy.background_limit, policy.o3_pending);
+    }
     None
 }
-/// The running Background builds tier `tier` counts against and their ceiling. While the JIT comes
-/// first (`wide` above `background_limit`) its O3 builds take `wide` against their own count, and
-/// breadth (O2, speculation, checks) keeps `background_limit` against the rest: hot code reaches O3
-/// without waiting out the O2 backlog, and breadth takes no more than before. Visible work queued
-/// or running here: one part, as before, so its drains stay free.
-fn background_drains(tier: usize, visible: bool, rest: usize, o3: usize, background_limit: usize, wide: usize) -> (usize, usize) {
-    if visible { (rest + o3, background_limit) } else if tier == 2 { (o3, wide) } else { (rest, background_limit) }
+fn is_breadth(tier: usize) -> bool { matches!(tier, 1 | 3 | 5) }
+fn background_drains(tier: usize, breadth: usize, background: usize, background_limit: usize, o3_pending: bool) -> Option<&'static str> {
+    if background >= background_limit { return Some("visible reserve"); }
+    if o3_pending && is_breadth(tier) && breadth >= background_limit.div_ceil(2) { return Some("O3 first"); }
+    None
 }
 fn eligible(class: u8, burst: bool, noninteractive: usize) -> bool {
     !(burst && class != budget::INTERACTIVE && noninteractive != 0)
@@ -537,9 +579,8 @@ static JOB_CPU: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
 static JOB_RUNS: [AtomicU64; TIERS] = [const { AtomicU64::new(0) }; TIERS];
 /// The hold ledger's reasons: what holds a runnable tier-up back while a worker is free. The gates'
 /// own (`class_blocked`, `entry_blocked`), then "idle lane" (only a worker of the other kind may
-/// start it: idle_tiers), "budget" (the admission refused the head) and "other" (a gate this list
-/// does not name yet).
-const HOLD_REASONS: [&str; 11] = ["UI burst", "first-compile reserve", "visible reserve", "startup tier width", "demand compiles", "O3 stopped", "startup", "same slot running", "idle lane", "budget", "other"];
+/// start it: idle_tiers) and "other" (a gate this list does not name yet).
+const HOLD_REASONS: [&str; 12] = ["UI burst", "first-compile reserve", "visible reserve", "startup tier width", "demand compiles", "O3 stopped", "startup", "same slot running", "O3 first", "grant", "idle lane", "other"];
 /// Per reason, before the first present ([0]) and after it ([1]): the wall ns a free worker found the
 /// best queued tier-up held for it, and those ns times the tier-ups queued then (build-ns waiting).
 static HELD_NS: [[AtomicU64; HOLD_REASONS.len()]; 2] = [const { [const { AtomicU64::new(0) }; HOLD_REASONS.len()] }; 2];
@@ -645,19 +686,6 @@ fn idle_tiers() -> bool {
 fn is_tier_up(tier: usize) -> bool {
     tier == 1 || tier == 2
 }
-/// The JIT comes first in the CPU budget (`budget::set_jit_first`, at each pick): the app is up
-/// (its first present, or a headless run) and O3 builds are queued or running. Then its O3 builds
-/// take the physical cores the app's Background work leaves (`background_drains`); once the O3
-/// queue has drained and its last build is done, Background is one part again. O2 of everything is
-/// breadth: it is never settled, so it does not hold the phase open (a game's first world load
-/// waited out 2.5-5x the O2 builds while it did). Before the first present the start-up's tier
-/// widths apply and Background keeps its ceiling: the UI thread's first frame compiles there.
-/// Measured states, not a timer: a start-up, a first reach and the settle after an edit each queue
-/// their tier-ups.
-fn jit_first() -> bool {
-    (FIRST_PRESENT.load(Ordering::Acquire) || HEADLESS.load(Ordering::Acquire))
-        && COUNTS[2].load(Ordering::Relaxed) + RUNNING[2].load(Ordering::Relaxed) > 0
-}
 /// The calling thread may wait for a helper's check or lowering of a body it needs: not while
 /// tier-ups run at the idle policy (idle_tiers), whose prefronts check and lower bodies too, unless
 /// it runs there itself: the wait would last as long as every other thread keeps that helper's core.
@@ -758,7 +786,19 @@ impl Drains {
 struct CompilerSource;
 static SOURCE: CompilerSource = CompilerSource;
 pub(super) fn queue() -> &'static relax_session::sync::Mutex<Queue> {
-    QUEUE.get_or_init(|| crate::zone_alloc::kept_with(|| relax_session::sync::Mutex::new(Queue::new())))
+    QUEUE.get_or_init(|| crate::zone_alloc::kept_with(|| {
+        let q = Queue::new();
+        if q.grant.is_some() { crate::pool::on_job_sleep(granted_job_sleeps); }
+        relax_session::sync::Mutex::new(q)
+    }))
+}
+/// A granted run's job fell asleep on other JIT work: its place in the width is free, so a parked
+/// drain that takes waited work wakes for what is queued. Lock-free: the sleeper may hold the lock
+/// it waits under.
+fn granted_job_sleeps() {
+    if COUNTS.iter().any(|c| c.load(Ordering::Relaxed) != 0) {
+        wake_kind(DrainsNow::get().for_job(0, budget::INTERACTIVE));
+    }
 }
 static LOCK_MAX_NS: AtomicU64 = AtomicU64::new(0);
 struct QueueGuard {
@@ -1075,12 +1115,10 @@ impl Queue {
             let e = &mut self.entries[i];
             self.plan[e.job.tier()][e.class as usize].remove(&order(e.key, e.serial));
             let old = if e.job.tier() == 0 && !e.promoted { self.ahead_len -= 1; self.ahead_class } else { e.class };
-            budget::queued(old, budget::JIT, -1);
             e.promoted = true;
             e.class = wanted.min(old);
             e.since = if e.class < old { now } else { old_since };
             self.plan[e.job.tier()][e.class as usize].insert(order(e.key, e.serial));
-            budget::queued(e.class, budget::JIT, 1);
         }
         for r in &self.running {
             if r.waits_for(unit, id) && wanted < r.class.class() { r.class.reclass(wanted); }
@@ -1118,14 +1156,12 @@ impl Queue {
             let e = &mut self.entries[self.indices[&serial]];
             let tier = e.job.tier();
             self.plan[tier][e.class as usize].remove(&order(e.key, e.serial));
-            budget::queued(e.class, budget::JIT, -1);
             e.promoted = false;
             let old = e.class;
             e.class = if tier == 0 { self.ahead_len += 1; budget::BACKGROUND } else { job_class(&e.job, &now) };
             // (back in the background it has waited there since it was queued; a check ahead
             // takes the ahead class's raise again: since_of)
             e.since = if e.class < old { now.wall } else if e.class == budget::BACKGROUND { e.at } else { e.since };
-            budget::queued(if tier == 0 { self.ahead_class } else { e.class }, budget::JIT, 1);
             self.plan[tier][e.class as usize].insert(order(e.key, e.serial));
         }
         if !serials.is_empty() { self.by_slot.insert(key, serials); }
@@ -1154,13 +1190,6 @@ pub(super) fn promote(unit: usize, id: u32, class: u8) -> WaitPriority {
     WaitPriority { unit, id, class }
 }
 
-/// (tests) The class of slot `id`'s running job.
-#[cfg(test)]
-pub(super) fn running_class(unit: usize, id: u32) -> Option<u8> {
-    let _kept = crate::zone_alloc::kept();
-    lock().running.iter().find(|r| r.waits_for(unit, id)).map(|r| r.class.class())
-}
-
 /// Something waits for the check beside the program: its queued and running jobs take the waiter's
 /// class and go first in it (job_class and key give the jobs it queues from now on the same).
 pub(super) fn promote_checks() {
@@ -1172,11 +1201,9 @@ pub(super) fn promote_checks() {
         let i = q.indices[&serial];
         let (key, class) = (q.entries[i].key, q.entries[i].class);
         q.plan[5][class as usize].remove(&order(key, serial));
-        budget::queued(class, budget::JIT, -1);
         q.entries[i].class = budget::INTERACTIVE;
         q.entries[i].key = CHECK_WAITED_KEY;
         q.plan[5][budget::INTERACTIVE as usize].insert(order(CHECK_WAITED_KEY, serial));
-        budget::queued(budget::INTERACTIVE, budget::JIT, 1);
     }
     for r in q.running.iter().filter(|r| r.tier == 5) { r.class.reclass(budget::INTERACTIVE); }
     drop(q);
@@ -1204,14 +1231,9 @@ fn worker_loop(index: usize) {
         worker.os_id.store(crate::inspect::threads::self_os_id(), Ordering::Relaxed);
         let _ = worker.id.set(std::thread::current().id());
         worker.thread.set(budget::Wake::current()).ok();
-        let mut admission = budget::Admission::default();
         // the job this worker ran last, (serial, tier): it leaves `running` under the lock that
         // takes the next one (one queue lock per job)
         let mut finished: Option<(u64, usize)> = None;
-        // the last job's permit, held for the next job while that is of its class and label and
-        // nobody of the class or above waits for a slot: an admission and a release per job were
-        // two budget locks for each of a cold start's ~300k checks ahead
-        let mut held: Option<BudgetJob> = None;
         let me = std::thread::current().id();
         // (a worker restarted after a panic keeps its thread, and so its policy)
         if budget::thread_idle() && worker.kind() == Kind::Back {
@@ -1236,6 +1258,11 @@ fn worker_loop(index: usize) {
             let next = {
                 let _kept = crate::zone_alloc::kept();
                 let mut q = lock();
+                // (a job asleep on other JIT work uses no CPU: the drains' area counts awake ones)
+                let awake = if q.grant.is_some() { q.running.iter().filter(|r| !r.class.asleep()).count() } else { 0 };
+                if let Some(grant) = &mut q.grant {
+                    grant.roll(wall_ns(), awake, crate::first_frame::process_cpu_ns);
+                }
                 // (this worker parked as the tick's timer: the next idle one takes it again)
                 if q.timer == Some(me) { q.timer = None; }
                 let instant = Instant::now();
@@ -1248,30 +1275,19 @@ fn worker_loop(index: usize) {
                     q.tick_queued = true;
                     q.push(Job::Tick, wall_ns());
                 }
-                budget::set_jit_first(jit_first());
                 let now = HeatNow::take();
                 let drains = DrainsNow::get();
                 let kind = worker.kind();
                 let takes = drains.takes(kind);
                 let head = q.head(&now, takes);
-                if head.is_none() { admission = budget::Admission::default(); }
                 // what only the other kind of worker may start: wake one of those
                 // (never this worker's own kind: one of those would find what it found)
                 let other = if head.is_none() && takes != Takes::ALL { q.runnable().filter(|&k| k != kind) } else { None };
-                let picked = head.and_then(|i| {
-                    let e = &q.entries[i];
-                    let class = q.class_of(e);
-                    let job = match held.take() {
-                        Some(job) if job.keeps(class, e.job.label()) => job,
-                        other => {
-                            drop(other);
-                            let p = admission.poll(class, budget::JIT, e.job.label())?;
-                            BudgetJob::from_permit(p, class, e.job.label())
-                        }
-                    };
-                    // one entry per admission: the next free worker takes the next one (a batch held
+                let picked = head.map(|i| {
+                    // one entry per pick: the next free worker takes the next one (a batch held
                     // the frontier the main thread reached next behind the rest of its batch)
                     let e = q.remove(i);
+                    let job = CurrentJob::new(e.class, e.job.label());
                     RUNNING[e.job.tier()].fetch_add(1, Ordering::Relaxed);
                     // a tier-up while a real-time thread is live: this worker goes to the idle
                     // policy for good (its place in the count reserved under the lock)
@@ -1283,7 +1299,7 @@ fn worker_loop(index: usize) {
                     // queue lock and the cores their caches
                     let more = q.runnable();
                     let work = work_kind(&e.job, &now);
-                    Some((e, job, more, go_idle, work))
+                    (e, job, more, go_idle, work)
                 });
                 // the hold ledger: a tier-up that starts ends the open interval; a worker that parks
                 // finds why the best queued one does not start (other work started leaves it open)
@@ -1291,19 +1307,18 @@ fn worker_loop(index: usize) {
                     Some((e, ..)) if is_tier_up(e.job.tier()) => if q.hold.is_some() { q.note_hold(None, wall_ns()) },
                     Some(_) => {}
                     None => {
-                        let hold = q.tier_up_hold(head.is_some(), takes);
+                        let hold = q.tier_up_hold(takes);
                         q.note_hold(hold, wall_ns());
                     }
                 }
-                // idle, or held back by the budget: parked until a wake, the timer worker until
-                // the tick is due
+                // Park until a wake or, for the timer worker, until the tick is due.
                 picked.ok_or_else(|| ((!q.tick_queued && q.timer.is_none()).then(|| {
                     q.timer = Some(me);
                     q.tick_at.saturating_duration_since(instant)
                 }), other))
             };
             match next {
-                Ok((entry, permit, more, go_idle, work)) => {
+                Ok((entry, job, more, go_idle, work)) => {
                     worker.jobs[entry.class as usize].fetch_add(1, Ordering::Relaxed);
                     worker.waiting.store(false, Ordering::SeqCst);
                     crate::lifeline::beat();
@@ -1314,11 +1329,9 @@ fn worker_loop(index: usize) {
                     }
                     if let Some(kind) = more { wake_kind(kind); }
                     let (serial, tier) = (entry.serial, entry.job.tier());
-                    let queued_ns = wall_ns().saturating_sub(entry.since);
                     if matches!(entry.job, Job::Check(..)) && crate::check::check_waited() {
                         crate::check::slice_queued(entry.since);
                     }
-                    crate::zone_alloc::kept_with(|| budget::waited(entry.class, budget::JIT, queued_ns, entry.job.label()));
                     let active = if let Job::O3(tier) = &entry.job {
                         TIER_ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).push(tier.0);
                         Some(TierActive(tier.0))
@@ -1335,7 +1348,7 @@ fn worker_loop(index: usize) {
                         let (message, bail) = panic_payload(&*payload);
                         if !bail { eprintln!("relax: JIT job panicked: {message}"); }
                     }
-                    held = Some(permit);
+                    drop(job);
                     finished = Some((serial, tier));
                     // (this worker takes the next job itself: no wake; it keeps its arena chunks for
                     // it and hands them back when it goes idle)
@@ -1345,8 +1358,6 @@ fn worker_loop(index: usize) {
                         BOUNCES.fetch_add(1, Ordering::Relaxed);
                         wake_kind(kind);
                     }
-                    // (an idle worker, or one the budget holds back, has no permit)
-                    drop(held.take());
                     crate::zone_alloc::compiler_hand_back_idle();
                     if worker.waiting.load(Ordering::SeqCst) {
                         #[cfg(test)]
@@ -1360,6 +1371,32 @@ fn worker_loop(index: usize) {
                 }
             }
         }
+}
+
+/// The JIT pool's line of `inspect cpu`: its drains and the section workers beside them on the
+/// same thread cache, its jobs running per class (Interactive / Visible / Background, the tier-ups
+/// among them), queued per class. One hold of the queue's lock, a few counts (a bucket's length).
+pub(super) fn pool_line() -> String {
+    let _kept = crate::zone_alloc::kept();
+    let drains = DRAINS.count.load(Ordering::Relaxed).saturating_sub(DRAINS_BACK.load(Ordering::Relaxed));
+    let sections = crate::pool::stats().1.saturating_sub(drains);
+    let (running, tier_ups, queued, outside) = {
+        let q = lock();
+        let (mut running, mut tier_ups, mut queued) = ([0usize; 3], 0, [0usize; 3]);
+        for r in &q.running {
+            running[r.class.class() as usize] += 1;
+            tier_ups += usize::from(is_tier_up(r.tier));
+        }
+        for (tier, plan) in q.plan.iter().enumerate() {
+            for (stored, bucket) in plan.iter().enumerate() {
+                queued[q.bucket_class(tier, stored as u8) as usize] += bucket.len();
+            }
+        }
+        (running, tier_ups, queued, q.grant.as_ref().map(|g| g.outside))
+    };
+    let grant = outside.map(|outside| format!(", granted: {outside} cores in use outside the JIT")).unwrap_or_default();
+    format!("{drains} drains, {sections} section workers  running {} / {} / {} ({tier_ups} tier-ups)  queued {} / {} / {}  settled: {}{grant}",
+        running[0], running[1], running[2], queued[0], queued[1], queued[2], if super::jit_settled() { "yes" } else { "no" })
 }
 
 fn class_name(class: u8) -> &'static str {
@@ -1429,6 +1466,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_granted_run_caps_its_awake_jobs_and_finishes_past_its_width() {
+        assert_eq!(outside_reading(1_000_000_000, 400_000_000, 100_000_000), 6000, "drain time leaves six cores of outside work");
+        assert_eq!(outside_reading(100_000_000, 400_000_000, 100_000_000), 0, "drain time above process CPU time leaves zero outside work");
+
+        let mut grant = Grant::new(0, 0);
+        grant.observe(3000);
+        assert_eq!(grant.outside, 3, "the first span counts three cores");
+        grant.observe(4000);
+        assert_eq!(grant.outside, 4, "rising load counts in the current span");
+        grant.observe(0);
+        assert_eq!(grant.outside, 4, "the previous busy span still counts");
+        grant.observe(0);
+        assert_eq!(grant.outside, 0, "two idle spans release the grant");
+
+        let mut grant = Grant::new(0, 0);
+        grant.roll(50_000_000, 2, || panic!("a partial span must not read the CPU clock"));
+        grant.roll(100_000_000, 2, || 500_000_000);
+        assert_eq!(grant.outside, 3, "two drains across both half-spans leave three cores outside");
+
+        // the width counts every job but the tick that is awake, waited ones too, and one job
+        // always runs: with every granted core in use outside, one starts
+        let mut q = Queue::new();
+        let cores = budget::cores() as usize;
+        grant.outside = cores;
+        q.grant = Some(grant);
+        q.push(Job::Spec(1, 40), 1);
+        q.push(Job::Spec(1, 41), 2);
+        q.waiters.insert((1, 41), [1, 0]);
+        q.promote(1, 41);
+        let now = HeatNow { hu: None, wall: 100, tier: 0 };
+        let start = |q: &mut Queue, i: usize, label: &'static str| {
+            let e = q.remove(i);
+            // (made on a thread of its own, which CurrentJob gives the job's OS class; the guard
+            // goes at once, the job's control lives on in its running row)
+            let job_class_now = e.class;
+            let class = std::thread::scope(|s| s.spawn(|| crate::pool::CurrentJob::new(job_class_now, label).control()).join().unwrap());
+            q.running.push(Running { serial: e.serial, promoted: e.promoted, slot: e.slot, tier: e.job.tier(), base_class: job_class(&e.job, &now), class });
+            e.job.slot()
+        };
+        let first = q.head(&now, Takes::ALL).expect("one job runs with no spare cores");
+        assert_eq!(start(&mut q, first, "waited compile"), Some((1, 41)), "the waited compile goes first");
+        assert!(q.head(&now, Takes::ALL).is_none(), "a second job waits while one runs awake at the grant's floor");
+        let policy = q.policy();
+        assert_eq!(q.blocked(&q.entries[0], &policy), Some("grant"), "the grant accounts for the hold");
+        assert_eq!(q.class_blocked(budget::VISIBLE, 3, &policy), Some("grant"), "waited work counts against the grant too");
+        assert_eq!(q.class_blocked(budget::BACKGROUND, 4, &policy), None, "the tick runs with no spare cores");
+        // the running job falls asleep on other JIT work (pool::suspend, on its thread): its place
+        // is free, so what it waits for starts, and when it wakes it runs on
+        let sleeper = q.running[0].class.clone();
+        let asleep = { let _on = crate::pool::enter_job(Some(sleeper.clone())); crate::pool::suspend() };
+        assert!(sleeper.asleep(), "suspend marks the job asleep");
+        let next = q.head(&now, Takes::ALL).expect("a job asleep on other JIT work leaves its place");
+        assert_eq!(start(&mut q, next, "the build it waits for"), Some((1, 40)), "what it waits for starts");
+        drop(asleep);
+        assert!(!sleeper.asleep(), "the job wakes when its guard drops");
+        q.running.clear();
+
+        // more waited jobs than the width all run, never more of them awake at once than the width
+        // (waited: only the grant holds them, whatever the process's other queues hold)
+        let width = 2;
+        q.grant.as_mut().unwrap().outside = cores - width;
+        for id in 50..56 {
+            q.push(Job::Spec(1, id), id as u64);
+            q.waiters.insert((1, id), [1, 0]);
+            q.promote(1, id);
+        }
+        let (mut started, mut widest) = (0, 0);
+        loop {
+            while let Some(i) = q.head(&now, Takes::ALL) {
+                start(&mut q, i, "build");
+                started += 1;
+            }
+            widest = widest.max(q.running.len());
+            if q.running.is_empty() { break; }
+            q.running.remove(0);
+        }
+        assert_eq!(started, 6, "every job past the width runs");
+        assert_eq!(widest, width, "the run never had more awake jobs than its grant leaves");
+        assert!(q.entries.is_empty(), "nothing is left queued");
+    }
+
+    #[test]
     fn a_jobs_cpu_goes_to_its_tier_and_slot() {
         // (the counts are process-wide and other tests add to theirs: it checks what its own jobs
         // added, so it holds beside them and when a warm test process runs it again)
@@ -1471,17 +1590,23 @@ mod tests {
         assert!(eligible(budget::INTERACTIVE, true, 1), "UI waiter passes the burst gate");
         assert!(eligible(budget::BACKGROUND, true, 0), "burst permits one background job");
         assert_eq!(epoch_key(16, false, 0), epoch_key(32, false, 4_000_000_000), "aging is the enqueue epoch, without a refresh");
-        assert_eq!(drain_blocked(budget::BACKGROUND, 1, 1, 2, 1), Some("visible reserve"), "parked Background builds cannot fill the Visible drain");
-        assert_eq!(drain_blocked(budget::VISIBLE, 1, 1, 2, 1), None, "Visible work passes a parked Background build");
-        assert_eq!(drain_blocked(budget::INTERACTIVE, 2, 1, 2, 1), None, "first compiles retain their drain above both lower classes");
-        let (o3, o3_ceiling) = background_drains(2, false, 1, 1, 1, 3);
-        assert_eq!(drain_blocked(budget::BACKGROUND, 2, o3, 3, o3_ceiling), None, "while the JIT comes first an O3 build passes a running O2 build and O3 build");
-        let (o2, o2_ceiling) = background_drains(1, false, 1, 1, 1, 3);
-        assert_eq!(drain_blocked(budget::BACKGROUND, 2, o2, 3, o2_ceiling), Some("visible reserve"), "breadth keeps background_limit beside the wide O3 part");
-        let (seen, seen_ceiling) = background_drains(2, true, 0, 1, 1, 3);
-        assert_eq!(drain_blocked(budget::BACKGROUND, 1, seen, 3, seen_ceiling), Some("visible reserve"), "Visible work here: O3 keeps the old reserve");
-        assert_eq!(background_drains(2, false, 0, 0, 1, 1), (0, 1), "flag down: O3 at background_limit, as before");
         let mut q = Queue::new();
+        let mut policy = Policy { noninteractive: 1, background: 1, breadth: 1, limit: 2, background_limit: 1, ..q.policy() };
+        assert_eq!(drain_blocked(budget::BACKGROUND, 1, &policy), Some("visible reserve"), "parked Background builds cannot fill the Visible drain");
+        assert_eq!(drain_blocked(budget::VISIBLE, 1, &policy), None, "Visible work passes a parked Background build");
+        policy.noninteractive = 2;
+        assert_eq!(drain_blocked(budget::INTERACTIVE, 1, &policy), None, "first compiles retain their drain above both lower classes");
+        assert_eq!(background_drains(2, 2, 2, 3, true), None, "O3 can take the last drain beside running breadth");
+        assert_eq!(background_drains(2, 2, 3, 3, true), Some("visible reserve"), "O3 and breadth share the Background ceiling");
+        for tier in [1, 3, 5] {
+            assert_eq!(background_drains(tier, 1, 2, 3, true), None, "tier {tier} can take the rounded-up half beside O3");
+            assert_eq!(background_drains(tier, 2, 2, 3, true), Some("O3 first"), "tier {tier} leaves the last drain for O3");
+            assert_eq!(background_drains(tier, 2, 2, 3, false), None, "tier {tier} can fill the Background width once O3 finishes");
+            assert_eq!(background_drains(tier, 3, 3, 3, false), Some("visible reserve"), "tier {tier} stops at the Background ceiling");
+        }
+        for tier in [0, 4] {
+            assert_eq!(background_drains(tier, 2, 2, 3, true), None, "O3 first leaves ahead work and the tick eligible");
+        }
         q.push(Job::Spec(1, 10), 1);
         q.push(Job::Spec(1, 11), 2);
         q.waiters.insert((1, 11), [0, 2]);

@@ -147,6 +147,32 @@ impl CheckTarget {
         }
         Self::TRIPLES.iter().find(|(t, _)| *t == triple).map(|(_, c)| *c)
     }
+
+    /// Supported native triples followed by web triples, in table order.
+    pub fn supported_triples() -> impl Iterator<Item = &'static str> {
+        Self::TRIPLES.iter().map(|(t, _)| *t).chain(Self::WEB_TRIPLES.iter().map(|(t, _)| *t))
+    }
+
+    fn supported_triples_list() -> String {
+        Self::supported_triples().collect::<Vec<_>>().join(", ")
+    }
+
+    /// An unset or empty `RELAX_CHECK_TARGET` selects the host. Any other value must name a
+    /// supported target.
+    pub fn from_env_value(value: Option<&std::ffi::OsStr>) -> Result<CheckTarget, String> {
+        let Some(os) = value.filter(|v| !v.is_empty()) else {
+            return Ok(CheckTarget::Host);
+        };
+        let Some(s) = os.to_str() else {
+            return Err(format!("RELAX_CHECK_TARGET is not valid UTF-8 ({os:?}); supported targets: {}", Self::supported_triples_list()));
+        };
+        Self::from_triple(s).ok_or_else(|| format!("unknown RELAX_CHECK_TARGET `{s}`; supported targets: {}", Self::supported_triples_list()))
+    }
+
+    /// An explicit target flag must name a supported native or web triple.
+    pub fn parse_triple(triple: &str) -> Result<CheckTarget, String> {
+        Self::from_triple(triple).ok_or_else(|| format!("unknown target `{triple}`; supported targets: {}", Self::supported_triples_list()))
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ctfe { Off, Check, On }
@@ -487,11 +513,27 @@ impl Options {
         }
     }
 
-    pub fn from_env() -> Self {
+    /// Reads compiler options, including `RELAX_CHECK_TARGET`.
+    pub fn try_from_env() -> Result<Self, String> {
         Self::read(&|name| std::env::var_os(name))
     }
 
-    fn read(get: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Self {
+    /// Reads host-only backend options for standalone RIR emitters. Compiler drivers use
+    /// [`Self::try_from_env`].
+    pub fn from_env() -> Self {
+        Self::read_with(&|name| std::env::var_os(name), false).expect("host-only options read cannot fail")
+    }
+
+    fn read(get: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self, String> {
+        Self::read_with(get, true)
+    }
+
+    fn read_with(get: &dyn Fn(&str) -> Option<std::ffi::OsString>, read_check_target: bool) -> Result<Self, String> {
+        let check_target = if read_check_target {
+            CheckTarget::from_env_value(get("RELAX_CHECK_TARGET").as_deref())?
+        } else {
+            CheckTarget::Host
+        };
         let mut options = Self {
             verbose: get("RELAX_VERBOSE").is_some_and(|v| v == "1"),
             check_windows: { let os = get("RELAX_CHECK_WINDOWS"); let v = os.and_then(|v| v.into_string().ok()); v.is_some() },
@@ -570,7 +612,7 @@ impl Options {
             a64: { let os = get("RELAX_A64"); let v = os.and_then(|v| v.into_string().ok()); split(v) },
             borrowck: { let os = get("RELAX_BORROWCK"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("off") => Borrowck::Off, Some("moves") => Borrowck::Moves, _ => Borrowck::Full } },
             borrowck_all: { let os = get("RELAX_BORROWCK_ALL"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("nongeneric") => BorrowckAll::Nongeneric, None => BorrowckAll::Default, Some("std") => BorrowckAll::Std, _ => BorrowckAll::All } },
-            check_target: { let os = get("RELAX_CHECK_TARGET"); let v = os.and_then(|v| v.into_string().ok()); CheckTarget::from_triple(v.as_deref().unwrap_or("")).unwrap_or(CheckTarget::Host) },
+            check_target,
             web_threads: if get("RELAX_WEB_THREADS").as_deref() == Some(std::ffi::OsStr::new("1")) { WebThreads::On } else { WebThreads::Off },
             const_fuel: false,
             tiny_const_eval_limit: get("RELAX_TINY_CONST_EVAL_LIMIT").as_deref() == Some(std::ffi::OsStr::new("1")),
@@ -583,7 +625,7 @@ impl Options {
             cpu: CpuFeatures::default(),
         };
         options.target = options.check_target.triple().to_string();
-        options
+        Ok(options)
     }
 
     /// Exhaustive destructuring makes adding an unhashed field a compile error.
@@ -957,11 +999,74 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    fn assert_lists_supported(error: &str) {
+        for triple in CheckTarget::TRIPLES.iter().map(|t| t.0).chain(CheckTarget::WEB_TRIPLES.iter().map(|t| t.0)) {
+            assert!(error.contains(triple), "missing {triple} in {error}");
+        }
+    }
+
+    #[test]
+    fn check_target_env_unset_or_empty_is_host() {
+        for value in [None, Some("")] {
+            let options = Options::read(&|name| if name == "RELAX_CHECK_TARGET" { value.map(OsString::from) } else { None }).unwrap();
+            assert_eq!(options.check_target, CheckTarget::Host);
+            assert_eq!(options.target, CheckTarget::Host.triple());
+        }
+    }
+
+    #[test]
+    fn check_target_env_accepts_every_native_and_web_triple() {
+        let web = CheckTarget::WEB_TRIPLES.into_iter().map(|(triple, width)| (triple, CheckTarget::Web(width)));
+        for (triple, expected) in CheckTarget::TRIPLES.into_iter().chain(web) {
+            let options = Options::read(&|name| (name == "RELAX_CHECK_TARGET").then(|| triple.into())).unwrap();
+            assert_eq!(options.check_target, expected, "{triple}");
+            assert_eq!(options.target, triple);
+        }
+    }
+
+    #[test]
+    fn check_target_env_rejects_unknown_triple_and_lists_supported() {
+        for value in ["aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc", " "] {
+            let error = Options::read(&|name| (name == "RELAX_CHECK_TARGET").then(|| value.into())).unwrap_err();
+            assert!(error.contains(&format!("unknown RELAX_CHECK_TARGET `{value}`")), "{error}");
+            assert_lists_supported(&error);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_target_env_rejects_non_utf8_and_lists_supported() {
+        use std::os::unix::ffi::OsStringExt;
+        let error = Options::read(&|name| (name == "RELAX_CHECK_TARGET").then(|| OsString::from_vec(vec![0xff]))).unwrap_err();
+        assert!(error.contains("RELAX_CHECK_TARGET is not valid UTF-8"), "{error}");
+        assert_lists_supported(&error);
+    }
+
+    #[test]
+    fn check_target_parse_triple_rejects_empty_and_unknown() {
+        for value in ["", "aarch64-unknown-linux-gnu"] {
+            let error = CheckTarget::parse_triple(value).unwrap_err();
+            assert!(error.contains(&format!("unknown target `{value}`")), "{error}");
+            assert_lists_supported(&error);
+        }
+        for triple in CheckTarget::supported_triples() {
+            assert_eq!(CheckTarget::parse_triple(triple).unwrap().triple(), triple);
+        }
+    }
+
+    #[test]
+    fn host_only_options_read_ignores_check_target() {
+        for value in ["aarch64-unknown-linux-gnu", "wasm32-unknown-unknown"] {
+            let options = Options::read_with(&|name| (name == "RELAX_CHECK_TARGET").then(|| value.into()), false).unwrap();
+            assert_eq!(options.check_target, CheckTarget::Host, "{value}");
+        }
+    }
+
     /// Each grant word sets its option, `grant_words` gives the words back, and an `--allow-` word
     /// that is no grant, or a fuel that is no number, is an error naming it.
     #[test]
     fn grant_words_set_their_options_and_come_back_as_words() {
-        let (mut options, mut runtime) = (Options::read(&|_| None), RuntimeOptions::read(&|_| None));
+        let (mut options, mut runtime) = (Options::read(&|_| None).unwrap(), RuntimeOptions::read(&|_| None));
         assert!(grant_words(&options, &runtime).is_empty(), "no grant without a word");
         let words = ["--allow-c", "--allow-host-modules", "--allow-unchecked-modules", "--allow-unmetered-modules", "--allow-module-fuel=1000"];
         for w in words {
@@ -977,7 +1082,7 @@ mod tests {
 
     #[test]
     fn q2_options_preserve_parsing_and_presence() {
-        let empty = Options::read(&|_| None);
+        let empty = Options::read(&|_| None).unwrap();
         assert_eq!(empty.fingerprint(), Options::default().fingerprint());
         let opts = Options::read(&|name| match name {
             "RELAX_INLINE_LEAF" => Some("bad,17".into()),
@@ -986,7 +1091,7 @@ mod tests {
             "RELAX_BORROWCK_ALL" => Some("0".into()),
             "RELAX_CORE_HINT" => Some("0".into()),
             _ => None,
-        });
+        }).unwrap();
         assert_eq!(opts.inline_leaf, (40, 17));
         assert_eq!(opts.inline_src, None);
         assert_eq!(opts.core_hint, Some(false));
@@ -1015,7 +1120,7 @@ mod tests {
     #[test]
     fn q2_options_non_utf8_matches_var_and_var_os() {
         use std::os::unix::ffi::OsStringExt;
-        let opts = Options::read(&|_| Some(OsString::from_vec(vec![0xff])));
+        let opts = Options::read(&|name| (name != "RELAX_CHECK_TARGET").then(|| OsString::from_vec(vec![0xff]))).unwrap();
         assert!(!opts.no_avx);
         assert!(opts.no_simd);
         assert!(opts.live_stream);
@@ -1037,13 +1142,13 @@ mod tests {
         let options = Options::read(&|name| match name {
             "RELAX_REPEAT" | "RELAX_WATCHDOG_MS" | "RELAX_BURST_ARENA" => Some("123".into()),
             _ => None,
-        });
+        }).unwrap();
         assert_eq!(Options::default().fingerprint(), options.fingerprint());
     }
 
     #[test]
     fn selection_is_lazy_and_runtime_verify_reads() {
-        let options = Options::read(&|_| None);
+        let options = Options::read(&|_| None).unwrap();
         assert!(options.rs_lazy && !options.source_eager);
         assert!(RuntimeOptions::read(&|name| (name == "RELAX_LAZY_VERIFY").then(|| "1".into())).lazy_verify);
     }

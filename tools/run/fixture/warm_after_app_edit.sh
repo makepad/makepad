@@ -52,7 +52,12 @@ STEPS=${STEPS:-body item splash}
 [ -n "${BODY:-}" ] || BODY="$APPDIR/haptics.rs|    pub fn start_test(&mut self) {|        let _warm_after_app_edit = 1u32;"
 [ -n "${ITEM:-}" ] || ITEM="$APPDIR/haptics.rs"
 [ -n "${SPLASH:-}" ] || SPLASH="$APPDIR/voice_panel.rs|        spacing: 3|        spacing: 4"
-mkdir -p "${OUT:-${TMPDIR:-/tmp}}"; dir=$(mktemp -d "${OUT:-${TMPDIR:-/tmp}}/warm_after_app_edit.XXXXXX") || exit 1
+if [ -n "${GATE_FIXTURE_LOGS:-}" ]; then
+    dir=$GATE_FIXTURE_LOGS
+    mkdir -p "$dir" || exit 1
+else
+    mkdir -p "${OUT:-${TMPDIR:-/tmp}}"; dir=$(mktemp -d "${OUT:-${TMPDIR:-/tmp}}/warm_after_app_edit.XXXXXX") || exit 1
+fi
 mkdir -p "$dir/home" "$dir/t" "$dir/orig"
 saved=""
 save() { # save <file>: keep its original once
@@ -182,7 +187,7 @@ done
 restore
 if [ -z "$fail" ]; then
     echo "warm_after_app_edit: OK$out" | tr '\n' ' '; echo
-    [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
+    if [ -z "${GATE_FIXTURE_LOGS:-}" ] && [ "${KEEP:-0}" != 1 ]; then rm -rf "$dir"; fi
     exit 0
 fi
 echo "warm_after_app_edit: FAIL [$fail ] (MAX $MAX first compiles; after the present LOADS_MAX $LOADS_MAX cache loads, FIRSTS_MAX $FIRSTS_MAX first compiles)$out" | tr '\n' ' '; echo " logs in $dir"

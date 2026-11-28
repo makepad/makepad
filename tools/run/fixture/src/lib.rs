@@ -4,7 +4,8 @@
 //! `bound()` tells which side ran: only the loader's build has the feature.
 //! `provided_static.sh` covers marked shared statics (public, private, function-local, mutable,
 //! Cell-backed and arrays), per-side memo storage and thread-locals. Unmarked PLAIN_COUNT and
-//! layout-incompatible SHARED_LOG must be refused when reached from JIT code.
+//! layout-incompatible SHARED_LOG must be refused when reached from JIT code, and the items kept
+//! for the loader (`loader_count`, `Registry::clear_all`, LOADER_COUNT) where JIT code uses them.
 
 // thread-locals take no pthread key each on Android (libs/thread_local)
 #[macro_use(thread_local)]
@@ -831,6 +832,20 @@ pub fn asm_twice(v: u64) -> u64 {
 #[relax_api(per_side)]
 static MEMO: std::sync::Mutex<std::collections::BTreeMap<u64, u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// Two statics of one name inside two fns, each marked per_side: each is keyed by its own def
+/// path (its fn's), so neither stands for the other nor for a module-level static of that name.
+pub fn nested_hits_a() -> u32 {
+    #[relax_api(per_side)]
+    static HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+/// The other one (`nested_hits_a`).
+pub fn nested_hits_b() -> u32 {
+    #[relax_api(per_side)]
+    static HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
 /// Not an op: JIT code compiles it from source and reaches the per-side MEMO.
 pub fn memo_square(x: u64) -> u64 {
     if let Some(v) = MEMO.lock().unwrap().get(&x) {
@@ -1015,6 +1030,50 @@ pub fn arr_addr() -> usize {
 
 /// Layout-compatible but unmarked: direct JIT access still needs an explicit sharing mark.
 pub static PLAIN_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Kept for the loader (provided_static.sh `loader`): JIT code's call is refused where it is made,
+/// with this text, before the body (which reaches unmarked PLAIN_COUNT) would be compiled.
+#[relax_api(loader = "the loader's alone: JIT code reads the count with `relax_provided_fixture::shared_count`")]
+pub fn loader_count() -> u64 {
+    PLAIN_COUNT.load(Ordering::Relaxed)
+}
+
+/// Kept for the loader (provided_static.sh `loader-static`): native code alone writes it.
+#[relax_api(loader = "native code fills it: JIT code reads the count with `relax_provided_fixture::shared_count`")]
+pub static LOADER_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Every fn an op but one the loader keeps (provided_static.sh `loader-method`): a loader mark is
+/// no op mark, so `names_total` stays an op (Registry is opaque: compiled from source it could not
+/// read the names).
+#[relax_api(run)]
+impl Registry {
+    pub fn names_total(&self) -> usize {
+        self.names.iter().map(|n| n.len()).sum()
+    }
+
+    #[relax_api(loader = "the loader's alone: JIT code makes a new `Registry` instead")]
+    pub fn clear_all(&mut self) {
+        self.names.clear();
+        self.by_name.clear();
+    }
+}
+
+/// A type only the loader holds (provided_static.sh `loader-impl`): the impl's loader mark keeps
+/// each of its pub fns for the loader with the impl's text, and the one marked `#[relax_api]` is
+/// an op.
+pub struct LoaderHeld;
+
+#[relax_api(loader = "the loader holds it: JIT code reads the count with `relax_provided_fixture::shared_count`")]
+impl LoaderHeld {
+    #[relax_api]
+    pub fn twice(v: u64) -> u64 {
+        v * 2
+    }
+
+    pub fn count() -> u64 {
+        PLAIN_COUNT.load(Ordering::Relaxed)
+    }
+}
 
 thread_local! {
     /// A `const` thread-local without drop glue (a `#[thread_local]` static under Relax).

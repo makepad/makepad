@@ -2841,8 +2841,11 @@ mod tests {
 
     #[test]
     fn a_confinement_entry_hands_back_only_addresses_in_its_window() {
-        let base = 7 * WINDOW;
-        let host = &base as *const u64 as u64;
+        // a host address (this stack's), and the window after the one it lies in: a fixed window
+        // held the stack when a thread's stack sat at 0x7_xxxx_xxxx (base 7 * WINDOW handed it back)
+        let probe = 0u64;
+        let host = &probe as *const u64 as u64;
+        let base = (host / WINDOW + 1) * WINDOW;
         assert_eq!(ret_in(base, base + 0x1000), base + 0x1000, "an address in the window is handed back as it is");
         assert_eq!(ret_in(base, base + WINDOW - 1), base + WINDOW - 1, "the window's last byte is in it");
         assert_eq!(ret_in(base, host), 0, "a host address becomes NULL, never the window's bytes at its masked offset");

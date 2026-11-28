@@ -602,7 +602,9 @@ impl<'a> Sim<'a> {
                     for &v in &p.variants[gd.sub as usize] {
                         let n = p.def(v).name;
                         take(&mut t, (n, true), v, None, false);
-                        take(&mut t, (n, false), v, None, false);
+                        if !p.variant_is_struct(v) {
+                            take(&mut t, (n, false), v, None, false);
+                        }
                     }
                 }
                 _ => {}
@@ -1044,7 +1046,8 @@ impl<'a> Sim<'a> {
                     DefKind::Enum => {
                         for &v in &self.p.variants[gd.sub as usize] {
                             let n = self.p.def(v).name;
-                            for ns in 0..2 { if have.insert((n, ns)) { names.push((n, ns)); } }
+                            if have.insert((n, 0)) { names.push((n, 0)); }
+                            if !self.p.variant_is_struct(v) && have.insert((n, 1)) { names.push((n, 1)); }
                         }
                     }
                     _ => {}
@@ -1890,13 +1893,26 @@ mod tests {
     /// A crate written in `source` (no std), its imports resolved and replayed: the program, the
     /// crate's root module and the replay's diagnostics.
     fn replayed(source: &str, edition: u16) -> (Program, u32, Vec<(String, usize)>) {
+        replayed_with_dep(source, edition, None)
+    }
+
+    fn replayed_with_dep(source: &str, edition: u16, dep: Option<&str>) -> (Program, u32, Vec<(String, usize)>) {
         let sess = &std::sync::Arc::new(relax_session::Session::default());
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("relax-rsim-{}-{n}.rs", std::process::id()));
         std::fs::write(&path, source).unwrap();
         let mut prog = Program::new(sess);
-        let k = prog.load_crate("rsim_test", path.to_str().unwrap(), edition, crate::cfg::CfgSet::host(sess, &[]), vec![]).unwrap();
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let mut deps = Vec::new();
+        if let Some(dep) = dep {
+            let dep_path = path.with_extension("dep.rs");
+            std::fs::write(&dep_path, dep).unwrap();
+            let k = prog.load_crate("dep", dep_path.to_str().unwrap(), edition, cfg.clone(), vec![]).unwrap();
+            std::fs::remove_file(dep_path).unwrap();
+            deps.push((prog.crates[k as usize].name, k));
+        }
+        let k = prog.load_crate("rsim_test", path.to_str().unwrap(), edition, cfg, deps).unwrap();
         std::fs::remove_file(path).unwrap();
         prog.resolve_imports();
         let mut own = vec![false; prog.crates.len()];
@@ -1910,6 +1926,57 @@ mod tests {
     }
 
     fn has(v: &[(String, usize)], text: &str, line: usize) -> bool { v.iter().any(|(m, l)| m.contains(text) && *l == line) }
+
+    #[test]
+    fn braced_variant_lives_only_in_type_namespace() {
+        let a = "mod a { pub enum A { Same { x: u32 }, Empty {} } }";
+        for (item, glob, value_path, type_conflict) in [
+            ("pub const Same: u32 = 1;", "b::*", Some("rsim_test::b::Same"), false),
+            ("pub static Same: u32 = 1;", "b::*", Some("rsim_test::b::Same"), false),
+            ("pub enum B { Same }", "b::B::*", Some("rsim_test::b::B::Same"), true),
+            ("pub struct Same(pub u32);", "b::*", Some("rsim_test::b::Same"), true),
+            ("pub enum B { Same { y: u32 } }", "b::B::*", None, true),
+        ] {
+            let mut imports = vec![format!("use a::A::*; use {glob};"), format!("use {glob}; use a::A::*;")];
+            if !type_conflict { imports.push("use a::A::Same; use b::Same;".to_string()); }
+            for imports in imports {
+                let src = format!("{a} mod b {{ {item} }} {imports}");
+                let (mut p, m, diags) = replayed(&src, 2021);
+                p.crates[p.mods[m as usize].krate as usize].validate = true;
+                assert!(diags.is_empty() && p.errors.is_empty(), "{src}: {diags:?}, {:?}", p.errors);
+                let same = p.syms.get("Same").unwrap();
+                let value = p.lookup_in_scope(m, same, false).map(|d| p.def_path(d));
+                assert_eq!(value.as_deref(), value_path, "{src}: value binding");
+                assert!(p.name_ambiguity(m, same, false, false).is_none(), "{src}: ambiguous value");
+                assert_eq!(p.name_ambiguity(m, same, true, false).is_some(), type_conflict, "{src}: type ambiguity");
+                if !type_conflict {
+                    let ty = p.lookup_in_scope(m, same, true).unwrap();
+                    assert_eq!(p.def_path(ty), "rsim_test::a::A::Same", "{src}: type binding");
+                }
+            }
+        }
+        for variant in ["Same", "Same(u32)"] {
+            let src = format!("mod a {{ pub enum A {{ {variant} }} }} mod b {{ pub const Same: u32 = 1; }} use a::A::*; use b::*;");
+            let (mut p, m, diags) = replayed(&src, 2021);
+            p.crates[p.mods[m as usize].krate as usize].validate = true;
+            assert!(diags.is_empty() && p.errors.is_empty(), "{src}: {diags:?}, {:?}", p.errors);
+            assert!(p.name_ambiguity(m, p.syms.get("Same").unwrap(), false, false).is_some(), "{src}: missing value ambiguity");
+        }
+
+        // The checked crate's replay gets both bindings from its unchecked dependency's glob table.
+        let dep = format!("{a} mod b {{ pub const Same: u32 = 1; }} pub use a::A::*; pub use b::*;");
+        let (mut p, m, diags) = replayed_with_dep("use dep::*;", 2021, Some(&dep));
+        p.crates[p.mods[m as usize].krate as usize].validate = true;
+        assert!(diags.is_empty() && p.errors.is_empty(), "dependency glob: {diags:?}, {:?}", p.errors);
+        let same = p.syms.get("Same").unwrap();
+        for (ns, path) in [(true, "dep::a::A::Same"), (false, "dep::b::Same")] {
+            assert_eq!(p.def_path(p.lookup_in_scope(m, same, ns).unwrap()), path);
+            assert!(p.name_ambiguity(m, same, ns, false).is_none(), "{path}: ambiguous dependency glob");
+        }
+        let empty = p.syms.get("Empty").unwrap();
+        assert!(p.lookup_in_scope(m, empty, false).is_none(), "empty braced variant has a value binding");
+        assert_eq!(p.def_path(p.lookup_in_scope(m, empty, true).unwrap()), "dep::a::A::Empty");
+    }
 
     #[test]
     fn a_self_import_of_a_module_whose_name_is_also_a_re_exported_fn_is_determined() {

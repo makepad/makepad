@@ -19,6 +19,7 @@ name = "relax"
 path = "src/bin/relax.rs"
 
 [dependencies]
+makepad-loader-switch = { path = "../../../libs/loader_switch" }
 relax-base = { workspace = true }
 relax-compiler = { workspace = true }
 # a provided crate's read of the program's environment (relax-api env), pointed at the program's

@@ -33,8 +33,8 @@ rem this file's own folder when it holds nothing else, like the folder Explorer'
 rem makepad-runner.zip. Otherwise it is %USERPROFILE%\makepad-runner, saying so: for a download among
 rem other files, and for a temporary folder, where Windows runs a file opened inside a zip that was
 rem not extracted (and which it empties later).
-rem Under cache\loader, current selects src or a commit folder; pending rolls back to previous
-rem unless the new runner confirmed its first start. Each source has its build under target\loader.
+rem Under cache\loader, current selects src or a commit folder. While pending exists, the entry
+rem selects previous and the loader handles recovery. Each source has its build under target\loader.
 rem Run it again at any time: nothing is downloaded or compiled twice. It uses only Windows' own
 rem curl.exe, tar.exe, certutil.exe and PowerShell (for the console, release JSON, source updates).
 setlocal EnableExtensions DisableDelayedExpansion
@@ -177,32 +177,13 @@ for /f "delims=" %%I in ('powershell -NoProfile -Command "Get-ChildItem -Literal
     call :migrate_loader %%I || goto :fail
 )
 
-rem Restore an unconfirmed switch before choosing the source folder or checking its build stamp.
+rem A previous loader may predate recover. If pending survives, select previous
+rem and try again with the loader available after the build.
 if exist "!LOADER!\pending" (
-    call :read_loader_pointer pending || (set "T=Cannot read the pending loader." & goto :fail)
-    set "PENDING_NAME=!LOADER_NAME!"
     call :loader_folder previous
-    if "!LOADER_NAME!"=="src" (
-        if exist "!LOADER!\current" del /q "!LOADER!\current"
-        if exist "!LOADER!\current" exit /b 1
-    ) else (
-        >"!LOADER!\current.part" echo !LOADER_NAME!|| exit /b 1
-        move /y "!LOADER!\current.part" "!LOADER!\current" >nul || exit /b 1
-    )
-    if defined PENDING_NAME if exist "!LOADER!\!PENDING_NAME!\runner.launch.previous" (
-        set "PENDING_RECORD=!LOADER!\!PENDING_NAME!\runner.launch"
-        powershell -NoProfile -Command "$dir = Get-Item -Force -LiteralPath (Join-Path $env:LOADER $env:PENDING_NAME) -ErrorAction Stop; if ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) { exit 1 }" || (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
-        if exist "!PENDING_RECORD!\" (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
-        move /y "!PENDING_RECORD!.previous" "!PENDING_RECORD!" >nul || (set "T=Cannot restore !PENDING_RECORD!." & goto :fail)
-    )
-    >"!LOADER!\rolled-back.part" echo the new runner did not confirm its first start|| exit /b 1
-    move /y "!LOADER!\rolled-back.part" "!LOADER!\rolled-back" >nul || exit /b 1
-    del /q "!LOADER!\pending"
-    if exist "!LOADER!\pending" exit /b 1
-    set "NOTE3=Went back to !LOADER_NAME:~0,10!: the new runner did not confirm its first start."
-    if defined SCREEN (call :draw) else echo   !NOTE3!
+    if exist "!LOADER_TARGET!\host\makepad.exe" if not exist "!LOADER_TARGET!\host\makepad.exe\" call :recover_loader
 )
-call :loader_folder current
+if exist "!LOADER!\pending" (call :loader_folder previous) else call :loader_folder current
 set "SRC=!LOADER!\!LOADER_NAME!"
 set "NEW_TARGET=!LOADER_TARGETS!\!LOADER_NAME!"
 
@@ -520,6 +501,7 @@ set "LOGFILE=!LOG!" & set "TAIL=1"
 goto :fail
 :have_loader
 set "MAKEPAD=!LOADER_TARGET!\host\makepad.exe"
+if exist "!LOADER!\pending" call :recover_loader
 set "PATH=!RUST!\bin;!PATH!"
 set "MAKEPAD_LOADER_ROOT=!ROOT!"
 set "MAKEPAD_LOADER_SERVICE=!SERVICE!"
@@ -575,6 +557,19 @@ rem :temporary sets NOT_HOME when ROOT is inside %TEMP% or %TMP%. GetFullPath gi
 rem name, so a short 8.3 one (JOHNSM~1) matches too; PowerShell reads them, cmd expands no path.
 :temporary
 for /f %%T in ('powershell -NoProfile -Command "$h = [IO.Path]::GetFullPath($env:ROOT + '\'); foreach ($t in $env:TEMP, $env:TMP) { if ($t -and $h.StartsWith([IO.Path]::GetFullPath($t.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { 'temporary'; break } }"') do set "NOT_HOME=%%T"
+exit /b 0
+
+rem :recover_loader: the loader settles a switch nobody is trying. Exit 3 says an open Makepad
+rem is trying one (its watcher holds the lock): wait for it, saying so.
+:recover_loader
+"!LOADER_TARGET!\host\makepad.exe" recover >>"!LOGS!\recover.log" 2>&1
+if not "%ERRORLEVEL%"=="3" exit /b 0
+set "RL_FOOT=!FOOT!"
+set "FOOT=Waiting for the update the open Makepad is trying."
+if defined SCREEN (set "K=doing" & set "S=waiting" & set "INFO=" & call :put 4) else echo   !FOOT!
+"!LOADER_TARGET!\host\makepad.exe" recover --wait >>"!LOGS!\recover.log" 2>&1
+set "FOOT=!RL_FOOT!"
+if defined SCREEN (set "K=wait" & set "S=next" & set "INFO=" & call :put 4)
 exit /b 0
 
 :migrate_loader
@@ -949,7 +944,7 @@ if defined ENTRY_CODEPAGE chcp %ENTRY_CODEPAGE% >nul
 set "PATH=%RUST_BIN%;%PATH%"
 set "LOADER=%MAKEPAD_LOADER_ROOT%\cache\loader"
 set "LOADER_TARGETS=%MAKEPAD_LOADER_ROOT%\target\loader"
-call :loader_folder current
+if exist "%LOADER%\pending" (call :loader_folder previous) else call :loader_folder current
 "%LOADER_TARGET%\host\makepad.exe" %*
 exit /b
 

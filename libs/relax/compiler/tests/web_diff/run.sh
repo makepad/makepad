@@ -41,13 +41,14 @@ cat > "$T/u/units.json" <<J
 {"version":1,"roots":[0],"units":[{"pkg_id":"path+file://$T#web_diff@0.0.0","target":{"kind":["bin"],"name":"web_diff","src_path":"$H/web_diff.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]}]}
 J
 RELAX_CHECK_TARGET=$TRIPLE RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt "$B" run --quiet --no-live --units "$T/u/units.json" web_diff --release > "$T/relax.out" 2> "$T/relax.err"
-# (the program's own lines: not the run's own (makepad's, relax's) nor its frames' paths)
-grep -v "^makepad\|^relax: \|^  /" "$T/relax.err" > "$T/relax.txt"
+# (the program's own lines: not the run's own (makepad's, its remote startup line, relax's) nor its
+# frames' paths)
+grep -v "^makepad\|^\[makepad-remote\] \|^relax: \|^  /" "$T/relax.err" > "$T/relax.txt"
 if diff "$T/ref.txt" "$T/relax.txt" > "$T/diff"; then
   echo "web_diff $W: $(wc -l < "$T/ref.txt" | tr -d ' ') lines equal"
 else
   head -40 "$T/diff"
-  grep "^makepad\|^relax: " "$T/relax.err" | cut -c1-300 | head -8
+  grep "^makepad\|^\[makepad-remote\] \|^relax: " "$T/relax.err" | cut -c1-300 | head -8
   echo "web_diff $W: DIFFERENT (log $T/relax.err)"
   exit 1
 fi

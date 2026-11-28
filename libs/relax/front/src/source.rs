@@ -136,6 +136,7 @@ impl Entry {
 }
 
 struct Registry {
+    /// by `key`: one identity per file however its path is spelled
     paths: crate::fxhash::HashMap<String, u32>,
     entries: Vec<Arc<Entry>>,
     /// Image-local source IDs can be sparse; preserve them without allocating their gaps.
@@ -146,6 +147,14 @@ impl Default for Registry {
     fn default() -> Self {
         Self { paths: Default::default(), entries: Vec::new(), imported: Default::default(), first: 1 }
     }
+}
+
+/// A path's key in the registry: the VFS's one spelling (separators, the drive letter's case,
+/// `..`), as an include! names its file (builtins::include_path). A watcher's or a module's own
+/// spelling of the same file on Windows (`C:\..\app/src\lib.rs`) is the same source, so an edit's
+/// overlay is the snapshot an include of it reads, not a second one beside the load's.
+fn key(path: &str) -> String {
+    crate::vfs::normalize_path(path)
 }
 
 /// Shared by Program and parsing workers. Snapshots are immutable for the entire load, with one
@@ -192,16 +201,17 @@ impl SourceRegistry {
     /// Reserve a stable, 1-based ID, including for sources whose module is not loaded yet.
     /// Reading the snapshot is deferred until `get`, or supplied explicitly by `register`.
     pub fn source_id(&self, path: &str) -> u32 {
+        let k = key(path);
         let mut r = self.identities.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(id) = r.paths.get(path) { return *id; }
+        if let Some(id) = r.paths.get(&k) { return *id; }
         let id = u32::try_from(r.entries.len()).ok().and_then(|n| r.first.checked_add(n)).expect("source ID overflow");
         r.entries.push(Entry::new(path, None));
-        r.paths.insert(path.into(), id);
+        r.paths.insert(k, id);
         id
     }
 
     pub fn find(&self, path: &str) -> Option<u32> {
-        self.identities.lock().unwrap_or_else(|e| e.into_inner()).paths.get(path).copied()
+        self.identities.lock().unwrap_or_else(|e| e.into_inner()).paths.get(&key(path)).copied()
     }
 
     fn entry(&self, id: u32) -> Result<Arc<Entry>, String> {
@@ -215,10 +225,11 @@ impl SourceRegistry {
     /// (its bytes are not compared: the image is certified), or if `id` is free in the
     /// image-local range and is taken now.
     pub fn adopt_mapped(&self, id: u32, path: &str, src: &'static [u8]) -> bool {
+        let k = key(path);
         let mut r = self.identities.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&have) = r.paths.get(path) { return have == id; }
+        if let Some(&have) = r.paths.get(&k) { return have == id; }
         if id == 0 || id >= r.first || r.imported.contains_key(&id) { return false; }
-        r.paths.insert(path.into(), id);
+        r.paths.insert(k, id);
         r.imported.insert(id, Entry::new(path, Some(SourceBytes::Mapped(src))));
         true
     }
@@ -228,9 +239,10 @@ impl SourceRegistry {
     pub fn from_mapped(snapshots: impl IntoIterator<Item = (u32, String, &'static [u8])>) -> Option<Self> {
         let mut r = Registry::default();
         for (id, path, src) in snapshots {
-            if id == 0 || r.imported.contains_key(&id) || r.paths.contains_key(&path) { return None; }
+            let k = key(&path);
+            if id == 0 || r.imported.contains_key(&id) || r.paths.contains_key(&k) { return None; }
             r.first = r.first.max(id.checked_add(1)?);
-            r.paths.insert(path.clone(), id);
+            r.paths.insert(k, id);
             r.imported.insert(id, Entry::new(&path, Some(SourceBytes::Mapped(src))));
         }
         Some(Self { identities: Arc::new(Mutex::new(r)), overrides: Default::default() })
@@ -368,6 +380,16 @@ mod tests {
         assert_eq!(source.hash(), crate::crate_image::file_hash(&source.path, &source.src));
         assert_ne!(edit.get(id).unwrap().hash(), source.hash());
         assert_eq!(std::mem::size_of::<TokenOrigin>(), 20);
+        // one identity per file however a Windows path spells it (separators mixed, the drive
+        // letter's case): a save's overlay under the watcher's spelling is the snapshot an
+        // include! of the VFS's spelling reads, not the load's old one
+        let inc = sources.source_id("C:\\fake\\app/src\\inc.rs");
+        assert_eq!(sources.source_id("c:/fake/app/src/inc.rs"), inc, "the same file under the VFS's spelling");
+        assert_eq!(sources.find("c:\\fake\\app\\src\\inc.rs"), Some(inc));
+        sources.register("c:/fake/app/src/inc.rs", Arc::from(&b"old"[..])).unwrap();
+        let saved = sources.overlay("C:\\fake\\app/src\\inc.rs", Arc::from(&b"new"[..]));
+        assert_eq!(saved.register("c:/fake/app/src/inc.rs", Arc::from(&b"new"[..])), Ok(inc), "an include of the saved file reads the save");
+        assert!(sources.register("c:/fake/app/src/inc.rs", Arc::from(&b"new"[..])).is_err(), "the load's own snapshot stays as it was");
     }
 }
 

@@ -38,6 +38,8 @@
 
 use crate::jit::{FnKey, SlotWord, Unit};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 
 /// A group of invalidatable code.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -497,6 +499,22 @@ static FILLING: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new
 /// A test holds the pages out of reach this long, so a neighbour surely touches them.
 #[cfg(test)]
 pub(crate) static TRANSIT_HOLD_US: AtomicU64 = AtomicU64::new(0);
+/// A test's own hold instead (a `fn()`; 0: none): it returns when the test has seen what it
+/// waits for while the pages are out of reach (a neighbour's fault met them), not after a time.
+#[cfg(test)]
+pub(crate) static TRANSIT_HOLD_FN: AtomicUsize = AtomicUsize::new(0);
+/// The fill (its odd `TRANSIT_SEQ`) a fault last began to wait for, set as the wait begins
+/// (`TRANSIT_WAITS` counts a wait as it ends, after the fill): what a test's hold waits for.
+#[cfg(test)]
+static TRANSIT_ARRIVED: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a fault has begun to wait for the fill under way (a test's hold, which runs while
+/// the fill has its pages out of reach). Per fill, not a count: a fault that met the pages
+/// before the hold began is this fill's too.
+#[cfg(test)]
+pub(crate) fn transit_met() -> bool {
+    TRANSIT_ARRIVED.load(Ordering::SeqCst) == TRANSIT_SEQ.load(Ordering::SeqCst)
+}
 
 /// Overwrites dead ranges (chunk lo, lo, hi) with `TRAP`, per run of the pages they are on:
 /// 1. the pages out of every thread's reach (os::mem::Transit::Out: the TLB shootdown makes it
@@ -548,6 +566,11 @@ pub(crate) fn trap_fill(ranges: &mut [(u64, u64, u64)]) {
             if hold > 0 {
                 std::thread::sleep(std::time::Duration::from_micros(hold));
             }
+            let hold = TRANSIT_HOLD_FN.load(Ordering::SeqCst);
+            if hold != 0 {
+                let hold: fn() = unsafe { std::mem::transmute(hold) };
+                hold();
+            }
         }
         #[cfg(target_arch = "aarch64")]
         crate::os::mem::code_transit(span_lo, len, crate::os::mem::Transit::Read);
@@ -577,6 +600,8 @@ pub(crate) fn transit_wait(addr: u64, pc: u64) -> Option<u64> {
         return None;
     }
     if s & 1 == 1 {
+        #[cfg(test)]
+        TRANSIT_ARRIVED.store(s, Ordering::SeqCst);
         let t = std::time::Instant::now();
         let mut spins = 0u32;
         while TRANSIT_SEQ.load(Ordering::SeqCst) == s {

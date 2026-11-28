@@ -192,8 +192,21 @@ macro_rules! fields {
     }};
 }
 pub(crate) use fields;
-fields!(crate::macros::UseItem, module, path, bind, is_pub);
-fields!(crate::macros::ModItem, pos, end, macro_use, is_pub);
+impl Pack for crate::macros::UseVis {
+    fn pack(&self, w: &mut Vec<u8>, strings: &mut Strings) {
+        w.push(self.tag());
+        if let Self::In(path) = self { path.pack(w, strings); }
+    }
+    fn unpack(r: &mut Decode<'_>, strings: &[String]) -> Option<Self> {
+        Self::from_tag(u8::get(r)?, || Vec::<String>::unpack(r, strings))
+    }
+    fn plain_size(&self) -> usize {
+        1 + match self { Self::In(path) => path.plain_size(), _ => 0 }
+    }
+}
+fields!(crate::macros::ExpUse, path, vis);
+fields!(crate::macros::UseItem, module, path, bind, vis);
+fields!(crate::macros::ModItem, pos, end, macro_use, vis);
 
 impl<K: Pack + Ord + std::hash::Hash, V: Pack> Pack for HashMap<K, V> {
     fn pack(&self, w: &mut Vec<u8>, s: &mut Strings) {
@@ -247,7 +260,7 @@ mod tests {
         for macro_use in [false, true] {
             let mut modules = CrateMods { root: "c".into(), ..Default::default() };
             modules.items.insert("c::before".into(), ModItem { pos: 0, end: 5, ..Default::default() });
-            modules.items.insert("c::definitions".into(), ModItem { pos: 10, end: 30, macro_use, is_pub: false });
+            modules.items.insert("c::definitions".into(), ModItem { pos: 10, end: 30, macro_use, vis: crate::macros::UseVis::Private });
             modules.items.insert("c::after".into(), ModItem { pos: 40, end: 50, ..Default::default() });
             let mut strings = Strings::default();
             let mut bytes = Vec::new();
@@ -261,6 +274,23 @@ mod tests {
             assert_eq!(restored.in_textual_scope(&def, "c", Some(31)), macro_use);
             assert!(!restored.in_textual_scope(&def, "c", Some(9)), "a root call before the module does not inherit it");
         }
+    }
+
+    #[test]
+    fn packed_use_vis_roundtrips_all_variants() {
+        use crate::macros::{ExpUse, UseVis};
+        let values = vec![UseVis::Private, UseVis::Pub, UseVis::Crate, UseVis::Super,
+            UseVis::In(vec!["crate".into(), "nested".into()])];
+        let plain = crate::crate_image::encode(&values);
+        assert_eq!(plain.len(), values.plain_size());
+        assert_eq!(crate::crate_image::decode::<Vec<UseVis>>(&plain).unwrap(), values);
+        assert_eq!(decode::<Vec<UseVis>>(&encode(&values)).unwrap(), values);
+
+        let exps: Vec<_> = values.into_iter().map(|vis| ExpUse { path: vec!["self".into(), "item".into()], vis }).collect();
+        let plain = crate::crate_image::encode(&exps);
+        assert_eq!(plain.len(), exps.plain_size());
+        assert_eq!(crate::crate_image::decode::<Vec<ExpUse>>(&plain).unwrap(), exps);
+        assert_eq!(decode::<Vec<ExpUse>>(&encode(&exps)).unwrap(), exps);
     }
 
     /// The table keeps first-use ids, finds repeats through growth, and reads back what it wrote.

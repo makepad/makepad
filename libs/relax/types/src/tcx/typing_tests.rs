@@ -466,3 +466,56 @@ fn opaque_auto_trait_cycle_is_one_error_whichever_body_is_checked_first() {
         assert!(errors[0].contains("E0391: cycle detected when computing type of opaque `typing::cycle1::{opaque#0}`"), "{order:?}: {errors:?}");
     }
 }
+
+/// A session drain (a running program printing new errors: the compiler's Unit::flush_query_errors)
+/// that takes a check's error before the check takes it never leaves that check clean: a clean
+/// body would be run although rustc rejects it, and what other bodies see of it would change.
+#[test]
+fn a_session_drain_never_leaves_a_check_clean() {
+    use crate::next_solver::fulfill::ObligationCause;
+    let source = br#"#![no_std]
+        #![feature(auto_traits, negative_impls)]
+        auto trait Auto {}
+        struct No; impl !Auto for No {}
+        trait Tr {} impl Tr for No {}
+        fn need<T: Auto>(_: T) {}
+        fn cycle1() -> impl Tr { need(cycle2()); No }
+        fn cycle2() -> impl Tr { need(cycle1()); No }
+        fn clean() -> u8 { 1 }
+    "#;
+    thread_local! { static SHOWN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    fn drain(dcx: &crate::infer::diagnostics::DiagCtxt) {
+        let (errors, _) = dcx.drain_reported();
+        SHOWN.with(|s| s.borrow_mut().extend(errors.into_iter().map(|e| e.message)));
+    }
+    let checks = |hook: Option<fn(&crate::infer::diagnostics::DiagCtxt)>| {
+        let (prog, tcx) = program(source);
+        crate::infer::diagnostics::BEFORE_TAKE.with(|h| h.set(hook));
+        let errors = ["cycle1", "cycle2"].map(|n| tcx.typeck(&prog, named(&prog, n)).errors.to_vec());
+        let count = tcx.dcx.err_count();
+        if hook.is_some() {
+            let clean = named(&prog, "clean");
+            tcx.dcx.report(ObligationCause { body_id: clean, span: 0 }, "outside any check".into());
+            tcx.dcx.drain_reported();
+            let body = tcx.typeck(&prog, clean);
+            assert!(body.errors.is_empty(), "a stale claimable row never reaches a later check: {:?}", body.errors);
+        }
+        crate::infer::diagnostics::BEFORE_TAKE.with(|h| h.set(None));
+        (errors, count)
+    };
+    let primary = |errors: &[Vec<String>]| errors.iter().flatten()
+        .filter(|e| e.contains("E0391") && !e.contains("type checking failed due to previous errors")).count();
+    let (alone, alone_count) = checks(None);
+    assert_eq!((alone[0].len() + alone[1].len(), primary(&alone)), (1, 1), "without a drain the cycle is one E0391: {alone:?}");
+    // (the check that met the cycle: the one that takes the E0391 without a drain)
+    let met = if alone[0].is_empty() { 1 } else { 0 };
+    let (drained, drained_count) = checks(Some(drain));
+    let shown = SHOWN.with(|s| s.take());
+    assert!(!drained[met].is_empty(), "the drain took the E0391 ({shown:?}): the check that met the cycle must not come out clean: {drained:?}");
+    let [cycle1, cycle2] = drained;
+    assert!(!cycle1.iter().chain(&cycle2).any(|e| e.contains("E0277")),
+        "cycle2's hidden type must stay the error type (a clean cycle2 makes it concrete: cycle1 then fails `impl Tr: Auto`): {cycle1:?} {cycle2:?}");
+    assert_eq!(primary(&[cycle1.clone(), cycle2.clone()]) + shown.iter().filter(|m| m.contains("E0391")).count(), 1,
+        "the E0391 is delivered once, by the drain or by a check: {cycle1:?} {cycle2:?} {shown:?}");
+    assert_eq!(drained_count, alone_count, "the drain adds no rows");
+}

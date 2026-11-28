@@ -6,14 +6,261 @@
 use super::compiler::{self, Arena};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::mem::MaybeUninit;
+use std::ops::Range;
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// The program's Rust allocator, called by the loader in the owning domain's scope.
+/// The alloc and dealloc entries return false when the program's code has ended and the call did not run.
+/// Otherwise alloc writes the program's result to `out`, including null on refusal.
+#[derive(Clone, Copy)]
+pub struct ProgramAllocator {
+    pub ctx: usize,
+    pub alloc: unsafe extern "C" fn(ctx: usize, size: usize, align: usize, zeroed: bool, out: *mut *mut u8) -> bool,
+    pub dealloc: unsafe extern "C" fn(ctx: usize, p: *mut u8, size: usize, align: usize) -> bool,
+    pub outside: unsafe extern "C" fn(ctx: usize, p: *mut u8, size: usize, align: usize) -> !,
+}
+
+// A region's routing pointer addresses the first field. It also identifies the heap
+// without a registry lookup, including when this thread is in a later region.
+#[repr(C)]
+struct RegisteredAllocator {
+    entries: ProgramAllocator,
+    heap: *const Heap,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapRange {
+    addr: usize,
+    end: usize,
+}
+
+const INLINE_MAPS: usize = 16;
+
+/// Sorted, disjoint, nonempty ranges under the registry lock. Adjacent reservations
+/// keep their individual bases so each can be released independently.
+struct MapSet {
+    inline: [MapRange; INLINE_MAPS],
+    heap: *mut MapRange,
+    len: usize,
+    cap: usize,
+    linked: bool,
+}
+
+impl MapSet {
+    fn new() -> Self {
+        Self { inline: [MapRange { addr: 0, end: 0 }; INLINE_MAPS], heap: ptr::null_mut(), len: 0, cap: INLINE_MAPS, linked: true }
+    }
+
+    fn slice(&self) -> &[MapRange] {
+        if self.heap.is_null() {
+            &self.inline[..self.len]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.heap, self.len) }
+        }
+    }
+
+    fn contains(&self, addr: usize) -> bool {
+        let ranges = self.slice();
+        ranges.get(ranges.partition_point(|r| r.end <= addr)).is_some_and(|r| r.addr <= addr)
+    }
+
+    fn overlaps(&self, range: MapRange) -> Range<usize> {
+        let ranges = self.slice();
+        let first = ranges.partition_point(|r| r.end <= range.addr);
+        let count = ranges[first..].partition_point(|r| r.addr < range.end);
+        first..first + count
+    }
+
+    /// Capacity is reserved before changing the set. Only the first `len` slots
+    /// of a spilled array are initialized.
+    fn splice(&mut self, old: Range<usize>, new: &[MapRange]) {
+        let len = self.len - old.len() + new.len();
+        assert!(old.end <= self.len && len <= self.cap);
+        let data = if self.heap.is_null() { self.inline.as_mut_ptr() } else { self.heap };
+        unsafe {
+            ptr::copy(data.add(old.end), data.add(old.start + new.len()), self.len - old.end);
+            ptr::copy_nonoverlapping(new.as_ptr(), data.add(old.start), new.len());
+        }
+        self.len = len;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapRecord {
+    /// Keep normal resource tracking for this mapping.
+    NotProgramAllocator,
+    /// The heap takes responsibility for unmapping the range.
+    Recorded,
+    /// Host storage could not grow. The caller must unmap and report allocation failure.
+    Failed,
+}
+
+const INLINE_TAKEN: usize = 4;
+
+struct TakenRange {
+    heap: Arc<Heap>,
+    range: MapRange,
+    join_left: bool,
+    join_right: bool,
+}
+
+/// Clipped fragments, their original owners, and one reserved insertion slot per
+/// fragment. Dropping this token accepts the removal and releases the slots.
+pub struct TakenMaps {
+    inline: [MaybeUninit<TakenRange>; INLINE_TAKEN],
+    heap: *mut TakenRange,
+    len: usize,
+    cap: usize,
+    keep_old: bool,
+    reserved_held: bool,
+}
+
+// The spill is exclusively owned, and every initialized entry owns a Send heap lease.
+unsafe impl Send for TakenMaps {}
+
+impl std::fmt::Debug for TakenMaps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TakenMaps").field("len", &self.len).field("keep_old", &self.keep_old).finish()
+    }
+}
+
+impl TakenMaps {
+    fn empty(keep_old: bool) -> Self {
+        Self {
+            inline: [const { MaybeUninit::uninit() }; INLINE_TAKEN], heap: ptr::null_mut(),
+            len: 0, cap: INLINE_TAKEN, keep_old, reserved_held: false,
+        }
+    }
+
+    // Preflight allocates before we capture the first fragment. A retry may need
+    // a larger spill, but there are still no initialized entries to copy.
+    fn reserve_storage(&mut self, cap: usize) -> bool {
+        debug_assert_eq!(self.len, 0);
+        let data = alloc_map_storage::<TakenRange>(cap);
+        if data.is_null() { return false; }
+        unsafe { free_map_storage(self.heap, self.cap); }
+        self.heap = data;
+        self.cap = cap;
+        true
+    }
+
+    fn data_mut(&mut self) -> *mut TakenRange {
+        if self.heap.is_null() { self.inline.as_mut_ptr().cast() } else { self.heap }
+    }
+
+    fn slice(&self) -> &[TakenRange] {
+        let data = if self.heap.is_null() { self.inline.as_ptr().cast() } else { self.heap.cast_const() };
+        unsafe { std::slice::from_raw_parts(data, self.len) }
+    }
+
+    fn push(&mut self, entry: TakenRange) {
+        assert!(self.len < self.cap);
+        unsafe { self.data_mut().add(self.len).write(entry); }
+        self.len += 1;
+    }
+
+    /// Restore the clipped fragments to their owners after an OS operation failed.
+    ///
+    /// # Safety
+    /// Each removed fragment must still belong to its original live OS mapping.
+    pub unsafe fn restore(mut self) {
+        if self.keep_old { return; }
+        self.finish(|e| Some((e.range, e.join_left, e.join_right)));
+    }
+
+    fn remap_entry(e: &TakenRange, old_addr: usize, old_len: usize, new_addr: usize, new_len: usize) -> Option<MapRange> {
+        let old_end = old_addr.checked_add(old_len)?;
+        let new_end = new_addr.checked_add(new_len)?;
+        let keep_end = old_addr.checked_add(old_len.min(new_len))?;
+        if e.range.addr < old_addr || e.range.addr >= keep_end || e.range.end > old_end { return None; }
+        let addr = new_addr.checked_add(e.range.addr - old_addr)?;
+        let end = if new_len > old_len && e.range.end == old_end {
+            new_end
+        } else {
+            new_addr.checked_add(e.range.end.min(keep_end) - old_addr)?
+        };
+        Some(MapRange { addr, end })
+    }
+
+    /// Destination bases and lengths that commit_remap will return to the captured heaps.
+    pub fn remap_destinations(&self, old_addr: usize, old_len: usize, new_addr: usize, new_len: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.slice().iter().filter_map(move |e| {
+            let r = Self::remap_entry(e, old_addr, old_len, new_addr, new_len)?;
+            Some((r.addr, r.end - r.addr))
+        })
+    }
+
+    /// Commit a successful remap. Returns whether a tracked fragment survived at
+    /// the destination. Only a fragment reaching the old end can own a grown tail.
+    ///
+    /// # Safety
+    /// The page-aligned, non-overflowing ranges must describe the successful OS
+    /// remap of the source taken or pinned by this token.
+    pub unsafe fn commit_remap(mut self, old_addr: usize, old_len: usize, new_addr: usize, new_len: usize) -> bool {
+        let in_place = old_addr == new_addr && !self.keep_old;
+        self.finish(|e| {
+            let range = Self::remap_entry(e, old_addr, old_len, new_addr, new_len)?;
+            Some((range, in_place && e.join_left, in_place && new_len == old_len && e.join_right))
+        })
+    }
+
+    unsafe fn finish(&mut self, destination: impl Fn(&TakenRange) -> Option<(MapRange, bool, bool)>) -> bool {
+        let Some(_registry) = Registry::for_maps() else { return false };
+        let mut any = false;
+        let mut active_changed = false;
+        for e in self.slice() {
+            e.heap.maps_reserved.fetch_sub(1, Ordering::Release);
+            if let Some((range, left, right)) = destination(e) {
+                e.heap.restore_range(range, left, right);
+                active_changed |= e.heap.pa_active.load(Ordering::Relaxed);
+                any = true;
+            }
+        }
+        self.reserved_held = false;
+        if active_changed { recompute_map_bounds(HEAD.load(Ordering::Relaxed)); }
+        any
+    }
+}
+
+impl Drop for TakenMaps {
+    fn drop(&mut self) {
+        if self.reserved_held {
+            for e in self.slice() { e.heap.maps_reserved.fetch_sub(1, Ordering::Release); }
+        }
+        unsafe {
+            ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.data_mut(), self.len));
+            free_map_storage(self.heap, self.cap);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum MapForget {
+    /// No overlap, or the registry was unavailable in a fork child.
+    NotTracked,
+    /// All overlaps were removed or pinned, with space to restore or move them.
+    Removed(TakenMaps),
+    /// Preflight could not allocate storage. All ranges are intact;
+    /// the caller must withhold the OS operation and report ENOMEM.
+    Failed,
+}
 
 pub struct DomainHeap {
     inner: Arc<Heap>,
 }
-struct Heap {
+/// Backing storage kept alive by the domain and by outstanding owner leases.
+pub struct Heap {
     arena: Box<Arena>,
+    program: Option<RegisteredAllocator>,
+    pa_active: AtomicBool,
+    statics: (usize, usize),
+    maps_len: AtomicUsize,
+    // Slots kept for operations that have yet to restore or move their mappings.
+    maps_reserved: AtomicUsize,
+    maps: UnsafeCell<MapSet>,
     next: UnsafeCell<*mut Heap>,
 }
 unsafe impl Send for Heap {}
@@ -21,8 +268,82 @@ unsafe impl Sync for Heap {}
 
 static HELD: AtomicBool = AtomicBool::new(false);
 static HEAD: AtomicPtr<Heap> = AtomicPtr::new(std::ptr::null_mut());
+static PA_HEAPS: AtomicUsize = AtomicUsize::new(0);
+static STATICS_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+static STATICS_HIGH: AtomicUsize = AtomicUsize::new(0);
+
+const MAP_SHIFT: usize = 22;
+const MAP_BITS_N: usize = 1024;
+const MAP_WORDS: usize = MAP_BITS_N / 64;
+
+/// Each active range contributes once per 4 MiB bucket modulo 4 GiB.
+/// The registry lock serializes counts; readers only consult the atomic bitmap.
+struct MapCounts(UnsafeCell<[u32; MAP_BITS_N]>);
+unsafe impl Sync for MapCounts {}
+static MAP_COUNTS: MapCounts = MapCounts(UnsafeCell::new([0; MAP_BITS_N]));
+static MAP_BITS: [AtomicU64; MAP_WORDS] = [const { AtomicU64::new(0) }; MAP_WORDS];
+static MAPS_LOW: AtomicUsize = AtomicUsize::new(usize::MAX);
+static MAPS_HIGH: AtomicUsize = AtomicUsize::new(0);
+// Includes stopped heaps: their surviving mappings still need to be forgotten or unmapped.
+static HEAP_MAPS_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+fn for_each_bucket(r: MapRange, mut visit: impl FnMut(usize)) {
+    let first = r.addr >> MAP_SHIFT;
+    let last = (r.end - 1) >> MAP_SHIFT;
+    for i in 0..(last - first + 1).min(MAP_BITS_N) {
+        visit((first + i) & (MAP_BITS_N - 1));
+    }
+}
+
+unsafe fn map_filter_add(r: MapRange) {
+    let counts = &mut *MAP_COUNTS.0.get();
+    for_each_bucket(r, |b| {
+        counts[b] += 1;
+        if counts[b] == 1 {
+            MAP_BITS[b / 64].fetch_or(1 << (b % 64), Ordering::Release);
+        }
+    });
+}
+
+unsafe fn map_filter_sub(r: MapRange) {
+    let counts = &mut *MAP_COUNTS.0.get();
+    for_each_bucket(r, |b| {
+        counts[b] -= 1;
+        if counts[b] == 0 {
+            MAP_BITS[b / 64].fetch_and(!(1 << (b % 64)), Ordering::Release);
+        }
+    });
+}
+
+#[inline]
+fn map_bit_set(p: *mut u8) -> bool {
+    let b = (p as usize >> MAP_SHIFT) & (MAP_BITS_N - 1);
+    MAP_BITS[b / 64].load(Ordering::Acquire) & (1 << (b % 64)) != 0
+}
+
+/// Under the registry lock, only the endpoints of each sorted set are needed.
+unsafe fn recompute_map_bounds(mut head: *mut Heap) {
+    let (mut low, mut high) = (usize::MAX, 0);
+    while let Some(heap) = head.as_ref() {
+        if heap.pa_active.load(Ordering::Relaxed) {
+            let ranges = (*heap.maps.get()).slice();
+            if let [first, ..] = ranges {
+                low = low.min(first.addr);
+                high = high.max(ranges[ranges.len() - 1].end);
+            }
+        }
+        head = *heap.next.get();
+    }
+    MAPS_LOW.store(low, Ordering::Release);
+    MAPS_HIGH.store(high, Ordering::Release);
+}
+
 struct Registry;
 impl Registry {
+    fn for_maps() -> Option<Self> {
+        if super::arenas_closed() { Self::try_lock() } else { Some(Self::lock()) }
+    }
+
     fn try_lock() -> Option<Self> {
         HELD.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).ok().map(|_| Self)
     }
@@ -60,22 +381,349 @@ impl Drop for Registry {
     }
 }
 
+fn alloc_map_storage<T>(cap: usize) -> *mut T {
+    #[cfg(test)]
+    if FAIL_MAP_GROW.swap(false, Ordering::Relaxed) { return ptr::null_mut(); }
+    let Ok(layout) = Layout::array::<T>(cap) else { return ptr::null_mut() };
+    unsafe { System.alloc(layout).cast() }
+}
+
+unsafe fn free_map_storage<T>(data: *mut T, cap: usize) {
+    if !data.is_null() {
+        System.dealloc(data.cast(), Layout::array::<T>(cap).unwrap());
+    }
+}
+
+/// The caller keeps the heap alive across the unlock. Allocate the replacement and
+/// free the discarded buffer (possibly our own, after a competing grow) outside the lock.
+fn reserve_map_storage(heap: &Heap, min_cap: usize) -> bool {
+    let Some(cap) = min_cap.checked_next_power_of_two() else { return false };
+    unsafe {
+        let data = alloc_map_storage::<MapRange>(cap);
+        if data.is_null() { return false; }
+        let Some(_registry) = Registry::for_maps() else {
+            free_map_storage(data, cap);
+            return false;
+        };
+        let maps = &mut *heap.maps.get();
+        let discarded = if maps.cap < min_cap {
+            ptr::copy_nonoverlapping(maps.slice().as_ptr(), data, maps.len);
+            (std::mem::replace(&mut maps.heap, data), std::mem::replace(&mut maps.cap, cap))
+        } else {
+            (data, cap)
+        };
+        drop(_registry);
+        free_map_storage(discarded.0, discarded.1);
+    }
+    true
+}
+
+#[cfg(test)]
+static FAIL_MAP_GROW: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn fail_next_map_grow() {
+    FAIL_MAP_GROW.store(true, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn take_fail_map_grow() -> bool {
+    FAIL_MAP_GROW.swap(false, Ordering::Relaxed)
+}
+
+/// The registry owns one Arc per linked heap. The guard pins both the links and
+/// the reference counts while we walk or take a lease.
+fn registered_heaps(_registry: &Registry) -> impl Iterator<Item = (*mut Heap, &Heap)> {
+    let mut next = HEAD.load(Ordering::Relaxed);
+    std::iter::from_fn(move || unsafe {
+        let raw = next;
+        let heap = raw.as_ref()?;
+        next = *heap.next.get();
+        Some((raw, heap))
+    })
+}
+
+unsafe fn lease_heap(raw: *const Heap) -> Arc<Heap> {
+    Arc::increment_strong_count(raw);
+    Arc::from_raw(raw)
+}
+
+impl Heap {
+    /// Spend at most one reserved slot. Only join an adjacent end that was cut
+    /// from this fragment; other adjacent reservations keep their distinct bases.
+    unsafe fn restore_range(&self, range: MapRange, join_left: bool, join_right: bool) {
+        let maps = &*self.maps.get();
+        let ranges = maps.slice();
+        let mut old = maps.overlaps(range);
+        if old.len() == 1 && ranges[old.start].addr <= range.addr && range.end <= ranges[old.start].end {
+            return;
+        }
+        let mut merged = range;
+        if join_left && old.start > 0 && ranges[old.start - 1].end == range.addr {
+            old.start -= 1;
+            merged.addr = ranges[old.start].addr;
+        }
+        if join_right && old.end < ranges.len() && ranges[old.end].addr == range.end {
+            merged.end = ranges[old.end].end;
+            old.end += 1;
+        }
+        self.splice_maps(merged, old, true);
+    }
+
+    /// Replace the overlap with its surviving ends and, for an insert, the new map.
+    /// The caller holds the registry and has reserved enough space for the splice.
+    unsafe fn splice_maps(&self, range: MapRange, old: Range<usize>, insert: bool) {
+        let maps = &mut *self.maps.get();
+        let replaced = &maps.slice()[old.clone()];
+        let mut new = [range; 3];
+        let mut n = 0;
+        if let Some(first) = replaced.first().filter(|first| first.addr < range.addr) {
+            new[n] = MapRange { addr: first.addr, end: range.addr };
+            n += 1;
+        }
+        if insert {
+            new[n] = range;
+            n += 1;
+        }
+        if let Some(last) = replaced.last().filter(|last| last.end > range.end) {
+            new[n] = MapRange { addr: range.end, end: last.end };
+            n += 1;
+        }
+        if self.pa_active.load(Ordering::Relaxed) {
+            // A lock-free reader of a survivor must always see its bit, even if
+            // the range being replaced used to be the only contributor.
+            for &r in &new[..n] { map_filter_add(r); }
+            for &r in replaced { map_filter_sub(r); }
+        }
+        let old_count = old.len();
+        maps.splice(old, &new[..n]);
+        self.maps_len.store(maps.len, Ordering::Release);
+        if !maps.linked { return; }
+        if n > old_count {
+            HEAP_MAPS_LIVE.fetch_add(n - old_count, Ordering::Release);
+        } else if n < old_count {
+            HEAP_MAPS_LIVE.fetch_sub(old_count - n, Ordering::Release);
+        }
+    }
+}
+
+/// Records a live anonymous mapping on the calling thread's routing heap.
+///
+/// # Safety
+/// The nonempty, page-aligned range must be a live OS mapping, with a representable
+/// exclusive end. On Windows `addr` must be a reservation base. On `Recorded` the
+/// heap owns its release unless the caller first removes it with `forget_map` or
+/// `forget_map_exact`.
+pub unsafe fn record_map(addr: usize, len: usize) -> MapRecord {
+    let Some(end) = addr.checked_add(len) else { return MapRecord::NotProgramAllocator };
+    if len == 0 || super::arenas_closed() { return MapRecord::NotProgramAllocator; }
+    let Some(pa) = compiler::domain_here().and_then(program_allocator) else { return MapRecord::NotProgramAllocator };
+    let heap = &*pa.heap;
+    let range = MapRange { addr, end };
+    // Declared before the guard so the lease is dropped outside the lock on every return.
+    let mut lease = None;
+    let mut registry = Registry::lock();
+    loop {
+        if !heap.pa_active.load(Ordering::Relaxed) { return MapRecord::NotProgramAllocator; }
+        let maps = &*heap.maps.get();
+        let needed = maps.len + heap.maps_reserved.load(Ordering::Acquire) + 2;
+        if needed <= maps.cap {
+            heap.splice_maps(range, maps.overlaps(range), true);
+            recompute_map_bounds(HEAD.load(Ordering::Relaxed));
+            return MapRecord::Recorded;
+        }
+        let leased = lease.get_or_insert_with(|| lease_heap(pa.heap));
+        drop(registry);
+        if !reserve_map_storage(leased, needed) { return MapRecord::Failed; }
+        registry = Registry::lock();
+    }
+}
+
+/// Remove overlaps before releasing or moving the pages. The token can restore
+/// every clipped fragment if the OS operation fails.
+pub fn forget_map(addr: usize, len: usize) -> MapForget {
+    take_maps_inner(addr, len, false)
+}
+
+/// Pin the source of a remap that leaves its original mapping live.
+pub fn pin_maps(addr: usize, len: usize) -> MapForget {
+    take_maps_inner(addr, len, true)
+}
+
+fn take_maps_inner(addr: usize, len: usize, keep_old: bool) -> MapForget {
+    let mut taken = TakenMaps::empty(keep_old);
+    match change_maps(addr, len, Some(&mut taken)) {
+        Ok(true) => MapForget::Removed(taken),
+        Ok(false) => MapForget::NotTracked,
+        Err(()) => MapForget::Failed,
+    }
+}
+
+/// Discard overwritten ranges after a fixed mapping has committed. Only a split
+/// can need storage; a false result means that split could not be recorded.
+pub fn forget_map_discard(addr: usize, len: usize) -> bool {
+    change_maps(addr, len, None).is_ok()
+}
+
+/// Preflight the entire registry before capturing a lease or changing a range.
+/// Without a token no rollback slots are needed, even for a multi-heap discard.
+fn change_maps(addr: usize, len: usize, mut taken: Option<&mut TakenMaps>) -> Result<bool, ()> {
+    let Some(end) = addr.checked_add(len) else { return Ok(false) };
+    if len == 0 || HEAP_MAPS_LIVE.load(Ordering::Acquire) == 0 { return Ok(false); }
+    let range = MapRange { addr, end };
+    let keep_old = taken.as_ref().is_some_and(|t| t.keep_old);
+    loop {
+        let Some(registry) = Registry::for_maps() else { return Ok(false) };
+        unsafe {
+            let mut total_frags = 0;
+            let grow = registered_heaps(&registry).find_map(|(raw, heap)| {
+                let maps = &*heap.maps.get();
+                let old = maps.overlaps(range);
+                if old.is_empty() { return None; }
+                total_frags += old.len();
+                let extra = if keep_old {
+                    old.len()
+                } else {
+                    let replaced = &maps.slice()[old];
+                    let ends = usize::from(replaced[0].addr < addr) + usize::from(replaced[replaced.len() - 1].end > end);
+                    // Capturing a removed entry reserves its vacated slot. A discard
+                    // needs extra space only to cut a hole strictly inside one entry.
+                    if taken.is_some() { ends } else { ends.saturating_sub(replaced.len()) }
+                };
+                let needed = maps.len + heap.maps_reserved.load(Ordering::Acquire) + extra;
+                (needed > maps.cap).then(|| (lease_heap(raw), needed))
+            });
+            if let Some((leased, needed)) = grow {
+                drop(registry);
+                if !reserve_map_storage(&leased, needed) { return Err(()); }
+                continue;
+            }
+            if total_frags == 0 { return Ok(false); }
+            if let Some(buf) = taken.as_deref_mut() {
+                if total_frags > buf.cap {
+                    drop(registry);
+                    if !buf.reserve_storage(total_frags) { return Err(()); }
+                    continue;
+                }
+            }
+            let mut active_changed = false;
+            for (raw, heap) in registered_heaps(&registry) {
+                let maps = &*heap.maps.get();
+                let old = maps.overlaps(range);
+                let m = old.len();
+                if m == 0 { continue; }
+                if let Some(buf) = taken.as_deref_mut() {
+                    for r in &maps.slice()[old.clone()] {
+                        buf.push(TakenRange {
+                            heap: lease_heap(raw),
+                            range: MapRange { addr: r.addr.max(addr), end: r.end.min(end) },
+                            join_left: !keep_old && r.addr < addr,
+                            join_right: !keep_old && r.end > end,
+                        });
+                    }
+                }
+                if !keep_old {
+                    heap.splice_maps(range, old, false);
+                    active_changed |= heap.pa_active.load(Ordering::Relaxed);
+                }
+                if taken.is_some() { heap.maps_reserved.fetch_add(m, Ordering::Relaxed); }
+            }
+            if let Some(buf) = taken { buf.reserved_held = true; }
+            if active_changed { recompute_map_bounds(HEAD.load(Ordering::Relaxed)); }
+            return Ok(true);
+        }
+    }
+}
+
+/// Remove a single reservation by base before releasing it. Its own slot is
+/// sufficient for rollback, and its lease fits inline.
+pub fn forget_map_exact(addr: usize) -> Option<TakenMaps> {
+    if HEAP_MAPS_LIVE.load(Ordering::Acquire) == 0 { return None; }
+    let registry = Registry::for_maps()?;
+    unsafe {
+        for (raw, heap) in registered_heaps(&registry) {
+            let ranges = (*heap.maps.get()).slice();
+            if let Ok(i) = ranges.binary_search_by_key(&addr, |r| r.addr) {
+                let range = ranges[i];
+                let mut taken = TakenMaps::empty(false);
+                taken.push(TakenRange { heap: lease_heap(raw), range, join_left: false, join_right: false });
+                heap.splice_maps(range, i..i + 1, false);
+                heap.maps_reserved.fetch_add(1, Ordering::Relaxed);
+                taken.reserved_held = true;
+                if heap.pa_active.load(Ordering::Relaxed) {
+                    recompute_map_bounds(HEAD.load(Ordering::Relaxed));
+                }
+                return Some(taken);
+            }
+        }
+    }
+    None
+}
+
 impl DomainHeap {
-    pub fn new() -> Option<Box<Self>> {
+    /// `statics` is the domain's fixed (base, length), or (0, 0) for a heap with no static block.
+    ///
+    /// # Safety
+    /// With a program allocator, its entries and context must service this heap's Rust
+    /// layouts on any calling thread until drop drains its leases. The static range must be
+    /// reserved exclusively for this domain and stay mapped through that drain. With None
+    /// there are no additional requirements.
+    pub unsafe fn new(program: Option<ProgramAllocator>, statics: (usize, usize)) -> Option<Box<Self>> {
         let arena = Arena::create()?;
         let heap = Box::new(Self {
-            inner: Arc::new(Heap {
+            inner: Arc::new_cyclic(|owner| Heap {
                 arena,
+                program: program.map(|entries| RegisteredAllocator { entries, heap: owner.as_ptr() }),
+                pa_active: AtomicBool::new(program.is_some()),
+                statics,
+                maps_len: AtomicUsize::new(0),
+                maps_reserved: AtomicUsize::new(0),
+                maps: UnsafeCell::new(MapSet::new()),
                 next: UnsafeCell::new(std::ptr::null_mut()),
             }),
         });
         let _registry = Registry::for_create();
+        if let Some(pa) = &heap.inner.program {
+            // The Arc keeps the entries at this address for the lifetime of every region.
+            heap.inner.arena.program.store(std::ptr::from_ref(pa).cast_mut().cast(), Ordering::Relaxed);
+            if statics.1 != 0 {
+                STATICS_LOW.fetch_min(statics.0, Ordering::Release);
+                STATICS_HIGH.fetch_max(statics.0 + statics.1, Ordering::Release);
+            }
+            PA_HEAPS.fetch_add(1, Ordering::Release);
+        }
         unsafe {
             *heap.inner.next.get() = HEAD.load(Ordering::Relaxed);
             // The registry owns a strong reference; a matching free clones it under the lock.
             HEAD.store(Arc::into_raw(heap.inner.clone()) as *mut Heap, Ordering::Release);
         }
         Some(heap)
+    }
+    /// The backing storage for `heap_owns`, stable through the last owner lease.
+    pub fn as_ptr(&self) -> *const Heap {
+        Arc::as_ptr(&self.inner)
+    }
+    /// Stops routing through the program's allocator: its probe found a block outside the memory
+    /// this heap owns, before anything was routed. From here the heap is one without a program
+    /// allocator, as before routing existed: run ops allocate in it, and the loader frees and
+    /// resizes its blocks itself. Called before the domain's code runs; a region added later
+    /// copies the first one's cleared entry.
+    pub fn stop_routing(&self) {
+        let _registry = Registry::lock();
+        if !self.inner.pa_active.swap(false, Ordering::AcqRel) { return; }
+        for r in self.inner.arena.regions() {
+            r.program.store(std::ptr::null_mut(), Ordering::Release);
+        }
+        PA_HEAPS.fetch_sub(1, Ordering::Release);
+        unsafe {
+            for &r in (*self.inner.maps.get()).slice() { map_filter_sub(r); }
+            recompute_map_bounds(HEAD.load(Ordering::Relaxed));
+        }
+    }
+    /// A fork child cannot drain inherited leases. Its still-registered heap keeps its PA
+    /// static block mapped just as it keeps its arena regions.
+    pub fn retains_statics_on_drop(&self) -> bool {
+        super::arenas_closed() && self.inner.program.is_some() && self.inner.statics.1 != 0
     }
     /// (bytes in use, bytes committed), over all regions.
     pub fn stats(&self) -> (usize, usize) {
@@ -103,6 +751,20 @@ impl DomainHeap {
     pub fn ranges(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.inner.arena.regions().map(|r| r.range())
     }
+    /// Snapshot the mapping bases and lengths, including those retained by a stopped heap.
+    pub fn mapped_ranges(&self) -> Vec<(usize, usize)> {
+        loop {
+            let cap = self.inner.maps_len.load(Ordering::Acquire);
+            if cap == 0 { return Vec::new(); }
+            let mut out = Vec::with_capacity(cap);
+            let Some(_registry) = Registry::for_maps() else { return Vec::new() };
+            let ranges = unsafe { (*self.inner.maps.get()).slice() };
+            if ranges.len() <= out.capacity() {
+                for r in ranges { out.push((r.addr, r.end - r.addr)); }
+                return out;
+            }
+        }
+    }
     pub fn metadata_bytes(&self) -> usize {
         self.inner.arena.regions().count() * std::mem::size_of::<Arena>() + std::mem::size_of::<Heap>() + std::mem::size_of::<Self>()
     }
@@ -122,6 +784,17 @@ impl Drop for DomainHeap {
                     if std::ptr::eq(*link, Arc::as_ptr(&self.inner)) {
                         removed = Some(Arc::from_raw(*link));
                         *link = *self.inner.next.get();
+                        let maps = &mut *self.inner.maps.get();
+                        maps.linked = false;
+                        let ranges = maps.slice();
+                        if self.inner.pa_active.swap(false, Ordering::AcqRel) {
+                            PA_HEAPS.fetch_sub(1, Ordering::Release);
+                            for &r in ranges { map_filter_sub(r); }
+                            recompute_map_bounds(head);
+                        }
+                        if !ranges.is_empty() {
+                            HEAP_MAPS_LIVE.fetch_sub(ranges.len(), Ordering::Release);
+                        }
                         break;
                     }
                     link = (**link).next.get();
@@ -135,6 +808,28 @@ impl Drop for DomainHeap {
         // the registry, then the last Arc drop frees the mapping and metadata together.
         while Arc::strong_count(&self.inner) != 1 {
             std::thread::yield_now();
+        }
+    }
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        if super::arenas_closed() { return; }
+        let maps = self.maps.get_mut();
+        unsafe {
+            for r in maps.slice() {
+                #[cfg(unix)]
+                {
+                    extern "C" { fn munmap(addr: *mut core::ffi::c_void, len: usize) -> i32; }
+                    munmap(r.addr as *mut _, r.end - r.addr);
+                }
+                #[cfg(windows)]
+                {
+                    use relax_session::win32::{VirtualFree, MEM_RELEASE};
+                    VirtualFree(r.addr as *mut u8, 0, MEM_RELEASE);
+                }
+            }
+            free_map_storage(maps.heap, maps.cap);
         }
     }
 }
@@ -166,6 +861,28 @@ pub unsafe fn restore(heap: *const ()) {
 /// `enter`'s heap as `current` names it, for a scoped entry that switches without the registry.
 pub fn raw(heap: *const DomainHeap) -> *const () {
     unsafe { heap.as_ref() }.map_or(std::ptr::null(), |h| &*h.inner.arena as *const Arena as *const ())
+}
+
+/// Check statics and arena regions without locking. Only a candidate mapped
+/// address on a routing heap needs an exact lookup under the registry lock.
+///
+/// # Safety
+/// The domain or an owner lease must keep `heap` alive for the call.
+#[inline]
+pub unsafe fn heap_owns(heap: *const Heap, p: *mut u8) -> bool {
+    let heap = &*heap;
+    (p as usize).wrapping_sub(heap.statics.0) < heap.statics.1 || heap.arena.region_of(p).is_some()
+        || heap_owns_mapped(heap, p)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn heap_owns_mapped(heap: &Heap, p: *mut u8) -> bool {
+    if !heap.pa_active.load(Ordering::Acquire) || heap.maps_len.load(Ordering::Acquire) == 0 || !map_bit_set(p) {
+        return false;
+    }
+    let Some(_registry) = Registry::for_maps() else { return true };
+    heap.pa_active.load(Ordering::Relaxed) && (*heap.maps.get()).contains(p as usize)
 }
 
 #[derive(Clone, Copy)]
@@ -225,19 +942,44 @@ pub(super) fn hold_registry() -> impl Drop { Registry::lock() }
 
 /// Whether the owner lookup places `p` in the system heap (a test's look at a fork child's free).
 #[cfg(test)]
-pub(super) unsafe fn system_owned(p: *mut u8) -> bool { owner(p).is_none() }
+pub(super) unsafe fn system_owned(p: *mut u8) -> bool { owner::<true>(p).is_none() }
 
-/// The heap holding `p` and its region, kept alive by the lease.
-unsafe fn owner(p: *mut u8) -> Owner {
+#[cfg(test)]
+pub(super) fn map_state() -> (usize, usize, usize) {
+    (MAPS_LOW.load(Ordering::Acquire), MAPS_HIGH.load(Ordering::Acquire), HEAP_MAPS_LIVE.load(Ordering::Acquire))
+}
+
+#[cfg(test)]
+pub(super) fn map_candidate(addr: usize) -> bool { may_be_program_memory(addr as *mut u8) }
+
+// Outside the arena bounds, ordinary loader frees pay just the count load without a PA.
+// With a PA, only a candidate for one of its other ranges needs the registry lock.
+#[inline]
+fn may_be_program_memory(p: *mut u8) -> bool {
+    if PA_HEAPS.load(Ordering::Acquire) == 0 { return false; }
+    let a = p as usize;
+    (a >= STATICS_LOW.load(Ordering::Acquire) && a < STATICS_HIGH.load(Ordering::Acquire))
+        || (a >= MAPS_LOW.load(Ordering::Acquire) && a < MAPS_HIGH.load(Ordering::Acquire) && map_bit_set(p))
+}
+
+/// The heap holding `p` and its region, kept alive by the lease. For non-arena program
+/// memory the first region serves allocations after the program's code ends.
+#[inline]
+unsafe fn owner<const LOADER: bool>(p: *mut u8) -> Owner {
     // Conservative bounds only widen: ordinary native frees need no registry lock. Actual
     // ownership is still checked against live ranges, so recycled addresses are never stale.
-    if !in_heaps(p) { return Owner::System; }
+    if !in_heaps(p) && !(LOADER && may_be_program_memory(p)) { return Owner::System; }
+    owner_in_bounds::<LOADER>(p)
+}
+
+#[cold]
+unsafe fn owner_in_bounds<const LOADER: bool>(p: *mut u8) -> Owner {
     // (a fork child opened the bounds to every address, arena.rs `close_for_fork_child`: its own
     // system blocks are found here, past the bounds every free of a parent stops at, and the
     // rest outside the true bounds are the system's without the registry: it may be held)
     let _registry = if super::arenas_closed() {
         if child_system::find(p, false) { return Owner::Child; }
-        if !compiler::in_parent_heaps(p) { return Owner::System; }
+        if !compiler::in_parent_heaps(p) && !(LOADER && may_be_program_memory(p)) { return Owner::System; }
         let Some(g) = Registry::try_lock() else { return Owner::Unknown };
         g
     } else {
@@ -246,7 +988,14 @@ unsafe fn owner(p: *mut u8) -> Owner {
     };
     let mut h = HEAD.load(Ordering::Relaxed);
     while let Some(heap) = h.as_ref() {
-        if let Some(r) = heap.arena.region_of(p) {
+        // The loader owns Rust blocks by range. Program mappings join the static block here,
+        // while the heap routes through its program allocator (`stop_routing` ends that).
+        let region = heap.arena.region_of(p).or_else(|| {
+            (LOADER && program_allocator(&heap.arena).is_some()
+                && ((p as usize).wrapping_sub(heap.statics.0) < heap.statics.1 || (*heap.maps.get()).contains(p as usize)))
+                .then_some(&*heap.arena)
+        });
+        if let Some(r) = region {
             Arc::increment_strong_count(h);
             return Owner::Domain(Arc::from_raw(h), r);
         }
@@ -384,7 +1133,7 @@ pub unsafe fn dealloc(p: *mut u8) -> bool {
         release(r, p);
         return true;
     }
-    match owner(p) {
+    match owner::<false>(p) {
         Owner::Domain(_heap, r) => { release(&*r, p); true }
         Owner::Unknown => true,
         Owner::Child => { child_system::find(p, true); false }
@@ -395,7 +1144,7 @@ pub unsafe fn realloc_owned(p: *mut u8, size: usize) -> Option<*mut u8> {
     if let Some(r) = compiler::domain_here().and_then(|a| a.region_of(p)) {
         return Some(reallocate(r, p, size));
     }
-    match owner(p) {
+    match owner::<false>(p) {
         Owner::Domain(_heap, r) => Some(reallocate(&*r, p, size)),
         // The bounds include system blocks. Only a proven domain C block has a Header.
         Owner::Unknown => Some(std::ptr::null_mut()),
@@ -447,40 +1196,87 @@ pub unsafe extern "C" fn program_alloc_zeroed(size: usize, align: usize) -> *mut
         None => System.alloc_zeroed(l),
     }
 }
-/// A block of the calling thread's domain heap for a provided crate's op (the run phase), or
-/// null when the thread is in no domain or the heap refused. The heap accounting's allocator
-/// takes these without its header: a domain block is freed by address, by JIT code and native
-/// code alike.
+/// The loader consults these entries only for run allocations and Rust blocks owned by this
+/// heap. The JIT's System and C allocation ABIs use the underlying regions directly.
 #[inline]
-pub unsafe fn run_alloc(l: Layout, zeroed: bool) -> *mut u8 {
-    if !relax_session::phase::in_run() {
-        return std::ptr::null_mut();
-    }
-    match compiler::domain_here() {
-        Some(a) if zeroed => a.alloc_zeroed(l),
-        Some(a) => a.alloc(l),
-        None => std::ptr::null_mut(),
-    }
+fn program_allocator(arena: &Arena) -> Option<&RegisteredAllocator> {
+    unsafe { arena.program.load(Ordering::Acquire).cast::<RegisteredAllocator>().as_ref() }
 }
+
+/// A JIT shim checks only while its current heap routes through a program allocator.
+pub unsafe extern "C" fn program_owns(p: *mut u8) -> bool {
+    let Some(pa) = compiler::domain_here().and_then(program_allocator) else { return true };
+    heap_owns(pa.heap, p)
+}
+
+/// Called after program_owns rejected a non-null result on this thread.
+pub unsafe extern "C" fn program_outside(p: *mut u8, size: usize, align: usize) -> ! {
+    if let Some(pa) = compiler::domain_here().and_then(program_allocator) {
+        (pa.entries.outside)(pa.entries.ctx, p, size, align)
+    }
+    std::process::abort()
+}
+
+/// A block the program's allocator cannot own is the loader's (a host op's buffer).
+/// The loader frees it as its own code would drop it, including its accounting header.
+pub unsafe extern "C" fn loader_dealloc(p: *mut u8, size: usize, align: usize) {
+    crate::memstat::Counting.dealloc(p, Layout::from_size_align_unchecked(size, align));
+}
+
+pub unsafe extern "C" fn loader_realloc(p: *mut u8, old: usize, align: usize, new: usize) -> *mut u8 {
+    crate::memstat::Counting.realloc(p, Layout::from_size_align_unchecked(old, align), new)
+}
+
+#[inline]
+unsafe fn arena_alloc(arena: &Arena, l: Layout, zeroed: bool) -> *mut u8 {
+    if zeroed { arena.alloc_zeroed(l) } else { arena.alloc(l) }
+}
+
+/// A run op's headerless allocation. None lets the loader use its usual fallback. In a PA
+/// domain even a null result is final, including a failed allocation after the code ended.
+#[inline]
+pub unsafe fn run_alloc(l: Layout, zeroed: bool) -> Option<*mut u8> {
+    if !relax_session::phase::in_run() { return None; }
+    let arena = compiler::domain_here()?;
+    if let Some(pa) = program_allocator(arena) {
+        let pa = &pa.entries;
+        if super::arenas_closed() { return Some(child_alloc(l, zeroed)); }
+        let mut out = std::ptr::null_mut();
+        if (pa.alloc)(pa.ctx, l.size(), l.align(), zeroed, &mut out) { return Some(out); }
+        return Some(arena_alloc(arena, l, zeroed));
+    }
+    let p = arena_alloc(arena, l, zeroed);
+    (!p.is_null()).then_some(p)
+}
+
+#[inline]
+unsafe fn program_free_layout(arena: &Arena, p: *mut u8, l: Layout) -> bool {
+    let Some(pa) = program_allocator(arena) else { return false };
+    let pa = &pa.entries;
+    if !super::arenas_closed() {
+        // After code end the block stays live until whole-heap release.
+        (pa.dealloc)(pa.ctx, p, l.size(), l.align());
+    }
+    true
+}
+
 /// Also the native global allocator's free (every free of a provided crate passes here).
 #[inline]
 pub unsafe fn dealloc_layout(p: *mut u8, l: Layout) -> bool {
-    if compiler::domain_dealloc(p, l) {
-        return true;
-    }
-    // a block outside every domain heap's range (an ordinary native one, or the web target's
-    // linear memory): no call into the owner lookup
-    if !in_heaps(p) {
-        return false;
-    }
-    dealloc_other(p, l)
+    if compiler::domain_dealloc(p, l, |r| program_free_layout(r, p, l)) { return true; }
+    if !in_heaps(p) && !may_be_program_memory(p) { return false; }
+    dealloc_other::<true>(p, l)
 }
+
 /// A block of another domain's heap (freed by native code, another thread or after an enter).
 #[cold]
 #[inline(never)]
-unsafe fn dealloc_other(p: *mut u8, l: Layout) -> bool {
-    match owner(p) {
-        Owner::Domain(_heap, r) => { (*r).dealloc(p, l); true }
+unsafe fn dealloc_other<const LOADER: bool>(p: *mut u8, l: Layout) -> bool {
+    match owner_in_bounds::<LOADER>(p) {
+        Owner::Domain(_heap, r) => {
+            if !(LOADER && program_free_layout(&*r, p, l)) { (*r).dealloc(p, l); }
+            true
+        }
         Owner::Unknown => true,
         Owner::Child => {
             child_system::find(p, true);
@@ -510,12 +1306,30 @@ unsafe extern "C" fn dealloc_shared(p: *mut u8, size: usize, align: usize) {
 #[inline(never)]
 unsafe extern "C" fn dealloc_owned(p: *mut u8, size: usize, align: usize) {
     let l = Layout::from_size_align_unchecked(size, align);
-    let handled = if super::arenas_closed() { dealloc_layout(p, l) } else { dealloc_other(p, l) };
-    if !handled {
+    if super::arenas_closed() && compiler::domain_dealloc(p, l, |_| false) { return; }
+    if !dealloc_other::<false>(p, l) {
         System.dealloc(p, l);
     }
 }
-unsafe fn resize_layout(a: &Arena, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+unsafe fn resize_layout<const LOADER: bool>(a: &Arena, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
+    if LOADER {
+        if let Some(pa) = program_allocator(a) {
+            let pa = &pa.entries;
+            let new = Layout::from_size_align_unchecked(size, l.align());
+            let mut q = std::ptr::null_mut();
+            // GlobalAlloc permits the loader to resize by alloc, copy, free. It never calls the
+            // program's realloc, so a run ending inside the allocator leaves nothing half moved.
+            let called = !super::arenas_closed() && (pa.alloc)(pa.ctx, size, l.align(), false, &mut q);
+            if !called {
+                q = if super::arenas_closed() { child_alloc(new, false) } else { a.alloc(new) };
+            }
+            if !q.is_null() {
+                std::ptr::copy_nonoverlapping(p, q, l.size().min(size));
+                if called { (pa.dealloc)(pa.ctx, p, l.size(), l.align()); }
+            }
+            return q;
+        }
+    }
     if a.resize_in_place(p, l, size) { return p; }
     let q = a.alloc(Layout::from_size_align_unchecked(size, l.align()));
     if !q.is_null() {
@@ -524,14 +1338,19 @@ unsafe fn resize_layout(a: &Arena, p: *mut u8, l: Layout, size: usize) -> *mut u
     }
     q
 }
+#[inline]
 pub unsafe fn realloc_layout(p: *mut u8, l: Layout, size: usize) -> Option<*mut u8> {
+    realloc_owned_layout::<true>(p, l, size)
+}
+
+unsafe fn realloc_owned_layout<const LOADER: bool>(p: *mut u8, l: Layout, size: usize) -> Option<*mut u8> {
     // a fork child's domain block moves to the system heap here too: its arena's in-place
     // resize refuses and its allocation is the system heap's (arena.rs `alloc_slow`)
     if let Some(r) = compiler::domain_here().and_then(|a| a.region_of(p)) {
-        return Some(resize_layout(r, p, l, size));
+        return Some(resize_layout::<LOADER>(r, p, l, size));
     }
-    match owner(p) {
-        Owner::Domain(_heap, r) => Some(resize_layout(&*r, p, l, size)),
+    match owner::<LOADER>(p) {
+        Owner::Domain(_heap, r) => Some(resize_layout::<LOADER>(&*r, p, l, size)),
         Owner::System => None,
         // only in a fork child: its own system block, or one the address alone cannot place (the
         // registry was held at the fork). A Layout also describes an unconfirmed block: it is
@@ -552,7 +1371,7 @@ pub unsafe fn realloc_layout(p: *mut u8, l: Layout, size: usize) -> Option<*mut 
 
 pub unsafe extern "C" fn program_resize(p: *mut u8, old: usize, align: usize, size: usize) -> *mut u8 {
     let l = Layout::from_size_align_unchecked(old, align);
-    realloc_layout(p, l, size).unwrap_or_else(|| System.realloc(p, l, size))
+    realloc_owned_layout::<false>(p, l, size).unwrap_or_else(|| System.realloc(p, l, size))
 }
 
 extern "C" {
@@ -669,6 +1488,10 @@ pub unsafe extern "C" fn program_pressure_relief(zone: *const u8, goal: usize) -
 pub fn symbol(name: &[u8]) -> Option<usize> {
     compiler::bind_program_tls();
     Some(match name {
+        b"relax_program_owns" => program_owns as *const () as usize,
+        b"relax_program_outside" => program_outside as *const () as usize,
+        b"relax_loader_dealloc" => loader_dealloc as *const () as usize,
+        b"relax_loader_realloc" => loader_realloc as *const () as usize,
         b"relax_alloc" => program_alloc as *const () as usize,
         b"relax_alloc_zeroed" => program_alloc_zeroed as *const () as usize,
         b"relax_dealloc" => program_dealloc as *const () as usize,
@@ -697,8 +1520,8 @@ mod tests {
     #[test]
     fn layout_entries_fast_and_slow_paths() {
         symbol(b"relax_alloc");
-        let first = DomainHeap::new().unwrap();
-        let second = DomainHeap::new().unwrap();
+        let first = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
+        let second = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*first);
             // small (fast path), large, over-aligned, zero-sized-ish: allocate, fill, free
@@ -741,7 +1564,7 @@ mod tests {
             enter(std::ptr::null());
             // no domain: the system heap
             let p = program_alloc(32, 8);
-            assert!(owner(p).is_none());
+            assert!(owner::<false>(p).is_none());
             program_dealloc(p, 32, 8);
         }
     }
@@ -751,7 +1574,7 @@ mod tests {
     #[test]
     fn a_sparse_detached_chunk_gives_its_free_pages_back_on_free() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         // (a failed assert: this thread leaves the heap before the heap goes, a failure and no crash)
         struct Leave;
         impl Drop for Leave {
@@ -794,7 +1617,7 @@ mod tests {
     #[test]
     fn large_runs_stay_warm_and_zeroed_allocs_stay_zero() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*heap);
             // a per-frame large Vec: the freed run is parked committed and the next block of
@@ -836,7 +1659,7 @@ mod tests {
     #[test]
     fn a_full_region_reserves_another() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         let (base, size) = heap.range();
         let block = size / 64;
         unsafe {
@@ -892,7 +1715,7 @@ mod tests {
     #[test]
     fn program_malloc_trim_trims_the_domain_heap() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         let addr = &*heap as *const DomainHeap as usize;
         // half of a class's blocks freed, the low half: the current chunk is half live (not
         // sparse) and its low pages are whole free pages
@@ -954,7 +1777,7 @@ mod tests {
     #[test]
     fn densify_marks_dense_chunks_only() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*heap);
             // a sparse class: one block of 48 bytes; a dense one: 1.5 MB of 1000-byte blocks
@@ -992,7 +1815,7 @@ mod tests {
     #[test]
     fn sparse_current_chunk_gives_free_pages_back() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*heap);
             // a burst: 1.2 MB of 64-byte blocks in this thread's current chunk of the class
@@ -1051,7 +1874,7 @@ mod tests {
     #[test]
     fn a_waiting_owner_takes_the_remote_frees() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         let addr = &*heap as *const DomainHeap as usize;
         unsafe {
             enter(&*heap);
@@ -1098,7 +1921,7 @@ mod tests {
     #[test]
     fn the_monitor_settles_a_waiting_owners_chunk() {
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         let addr = &*heap as *const DomainHeap as usize;
         let (to_owner, owner_rx) = std::sync::mpsc::channel::<()>();
         let (blocks_tx, blocks_rx) = std::sync::mpsc::channel::<Vec<usize>>();
@@ -1149,7 +1972,7 @@ mod tests {
         // one 2 MB chunk per size class it had used: a large app's thread churn used up the heap's
         // reservation (exit -6 in a thread start on macOS).
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         let addr = &*heap as *const DomainHeap as usize;
         let sizes = [16usize, 48, 100, 300, 1000, 4000, 20_000, 100_000];
         for _ in 0..64 {
@@ -1176,8 +1999,8 @@ mod tests {
     #[test]
     fn cross_thread_free_realloc_and_native_state() {
         symbol(b"relax_alloc");
-        let first = DomainHeap::new().unwrap();
-        let second = DomainHeap::new().unwrap();
+        let first = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
+        let second = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*first);
             let mut p = std::ptr::null_mut();
@@ -1186,7 +2009,7 @@ mod tests {
             std::ptr::write_bytes(p, 71, 8192);
             // A native helper called on this thread must still allocate shared state.
             let native = Box::new([23u8; 2048]);
-            assert!(owner(native.as_ptr() as *mut u8).is_none());
+            assert!(owner::<false>(native.as_ptr() as *mut u8).is_none());
             enter(&*second);
             let q = program_realloc(p, 32768);
             assert!(!q.is_null());
@@ -1218,7 +2041,7 @@ mod tests {
         let Ok(mode) = std::env::var("RELAX_HEAP_CHECK_CHILD") else { return };
         assert!(compiler::heap_check_on());
         symbol(b"relax_alloc");
-        let heap = DomainHeap::new().unwrap();
+        let heap = unsafe { DomainHeap::new(None, (0, 0)) }.unwrap();
         unsafe {
             enter(&*heap);
             match mode.as_str() {

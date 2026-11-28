@@ -3778,9 +3778,9 @@ fn unused_macros(prog: &Program, own: &[bool]) {
         }
         set
     };
-    // each macro's file (the first of its path), and the `macro_rules!` definitions by (file, name position)
-    let mut file_of: HashMap<&str, usize> = HashMap::new();
-    for (i, p) in prog.file_paths.iter().enumerate() { file_of.entry(p.as_str()).or_insert(i); }
+    // the files of each path, and the `macro_rules!` definitions by (file, name position)
+    let mut files_of: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, p) in prog.file_paths.iter().enumerate() { files_of.entry(p.as_str()).or_default().push(i); }
     let mut rules_def: HashMap<(u32, u32), DefId> = HashMap::new();
     for i in 0..prog.defs.len() {
         let x = prog.def(DefId(i as u32));
@@ -3790,7 +3790,11 @@ fn unused_macros(prog: &Program, own: &[bool]) {
     }
     for d in defs {
         if d.exported || d.file.is_empty() || d.name.starts_with('_') { continue; }
-        let Some(&file) = file_of.get(d.file.as_str()) else { continue };
+        let Some(files) = files_of.get(d.file.as_str()) else { continue };
+        // A path is two files when a crate and its own test harness both parse it (`--tests`),
+        // and cfg may leave the macro in one of them only (`#[cfg(not(test))]`): the definition
+        // is the file whose `macro_rules!` item stands at its position, with that item's lint level.
+        let file = files.iter().copied().find(|&f| rules_def.contains_key(&(f as u32, d.pos))).unwrap_or(files[0]);
         let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
         if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
         let pf = &prog.files[file];

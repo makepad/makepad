@@ -68,6 +68,8 @@ name = "makepad-launcher"
 path = "launcher/main.rs"
 
 [dependencies]
+makepad-git = { path = "../../libs/git" }
+makepad-loader-switch = { path = "../../libs/loader_switch" }
 relax-api = { workspace = true, features = ["host-shims"] }
 relax-compiler = { workspace = true }
 relax-runner = { path = "runner" }

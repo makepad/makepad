@@ -1,4 +1,4 @@
-//! The embedded devhub node (local/agent_state/devhub/DESIGN.md §12): the headset or phone is a
+//! The embedded devhub node: the headset or phone is a
 //! fleet `paired` device the Mac master dials for events, the explorer and full inspect, and
 //! pushes sources to (`makepad devhub sync push <device>`). There is no checkout here: pushed files
 //! go into the run's edits folder over the APK's source store (relax vfs) and the live watcher

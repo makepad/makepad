@@ -53,6 +53,318 @@ fn has(errors: &[String], item: &str, code: &str) -> bool {
     errors.iter().any(|e| e.split_once(": ").is_some_and(|(path, rest)| (path == item || path.ends_with(&format!("::{item}"))) && rest.starts_with(code)))
 }
 
+#[test]
+fn an_inherited_check_failure_names_its_first_cause() {
+    // The missing field type is already an error at collection; check the body that reads it too.
+    let source = "#![no_std]
+        fn d() -> Missing { loop {} }
+        struct S { f: Missing }
+        fn c(s: S) -> u32 { let _x = s.f; 0 }";
+    let path = std::env::temp_dir().join(format!("relax-taint-{}.rs", crate::unique_test_suffix()));
+    std::fs::write(&path, source).unwrap();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let mut prog = crate::program::Program::new(&session);
+    let user = prog.load_crate("repro", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    std::fs::remove_file(path).unwrap();
+    prog.crates[user as usize].validate = true;
+    prog.resolve_imports();
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let check = |name: &str| {
+        let owner = crate::borrowck::body::owners(&prog)
+            .find(|o| prog.def(o.owner).krate == user && prog.name(o.owner) == name)
+            .unwrap_or_else(|| panic!("missing body for {name}"));
+        tcx.typeck(&prog, owner.owner)
+    };
+    let d = check("d");
+    let c = check("c");
+    assert_eq!(c.errors.len(), 1, "caller's inherited error: c {:?}, d {:?}", c.errors, d.errors);
+    let (_, summary) = c.errors[0].split_once(": ").expect("caller error has a source position");
+    let site = summary.strip_prefix("type checking failed due to previous errors (tainted by an error type at relax-types src/")
+        .and_then(|site| site.strip_suffix(')')).and_then(|site| site.rsplit_once(':'));
+    assert!(site.is_some_and(|(file, line)| file.ends_with(".rs") && line.parse::<u32>().is_ok_and(|n| n > 0)),
+        "caller's first taint site: {summary}");
+    assert_eq!(d.errors.len(), 2, "owner's errors: {:?}", d.errors);
+    assert!(d.errors[0].ends_with(":2:19: E0425: cannot find type `Missing` in this scope"), "owner's missing type: {:?}", d.errors);
+    assert!(d.errors[1].ends_with(":2:9: signature has unresolved types -- fix the signature errors first"),
+        "owner's signature error: {:?}", d.errors);
+}
+
+#[test]
+fn bare_struct_variant_ident_is_binding_not_path_pattern() {
+    let e = errors("
+        pub enum Role { Host, Viewer { sharer: u32 }, EmptyStruct {} }
+        pub fn single(r: Role) -> Role {
+            use Role::Viewer;
+            let Viewer = Role::Host;
+            let _: Role = Viewer;
+            match r { Viewer => Viewer }
+        }
+        pub fn glob(r: &Role) {
+            use Role::*;
+            match r { Viewer => { let _: &Role = Viewer; } }
+            match r { EmptyStruct => { let _: &Role = EmptyStruct; } }
+        }
+        pub fn modes(r: Role) -> Role {
+            use Role::Viewer;
+            match r { ref Viewer => { let _: &Role = Viewer; } }
+            match r { mut Viewer => { Viewer = Role::Host; match Viewer { Viewer @ _ => Viewer } } }
+        }
+        mod a { pub enum A { Same { x: u32 }, Other } }
+        mod b { pub enum B { Same { y: u32 } } }
+        pub fn ambiguous() {
+            use a::A::*;
+            use b::B::*;
+            match a::A::Other { Same => { let _: a::A = Same; } }
+        }");
+    assert!(e.is_empty(), "legal struct variant bindings: {e:?}");
+
+    let e = errors("
+        pub enum Role { Host, Viewer { sharer: u32 } }
+        use Role::{Host, Viewer};
+        pub fn dup(a: Role, b: Role) { match (a, b) { (Viewer, Viewer) => {} } }
+        pub fn or_miss(r: Role) { match r { Viewer | _ => {} } }
+        pub fn or_mode(r: Role) { match r { mut Viewer | Viewer => {} } }
+        pub fn dup_param(Viewer: Role, Viewer: Role) {}
+        pub fn dup_mut_host_param(mut Host: Role, mut Host: Role) {}
+        pub fn unit_ok(a: Role, b: Role) {
+            match a { Host | _ => {} }
+            match (a, b) { (Host, Host) => {}, _ => {} }
+        }");
+    for (f, code) in [("dup", "E0416"), ("or_miss", "E0408"), ("or_mode", "E0409"),
+                      ("dup_param", "E0415"), ("dup_mut_host_param", "E0415")] {
+        assert!(e.iter().any(|x| x.starts_with(&format!("repro::{f}: ")) && x.contains(&format!(": {code}: "))), "{f}: expected {code}, got {e:?}");
+    }
+    assert!(!e.iter().any(|x| x.starts_with("repro::unit_ok: ")), "unit variant paths: {e:?}");
+}
+
+#[test]
+fn glob_value_beside_braced_variant_positions() {
+    let (prog, tcx, user) = load("
+        mod a { pub enum A { Same { x: u32 } } }
+        mod b { pub const Same: u32 = 1; }
+        use a::A::*;
+        use b::*;
+        pub fn local() { let Same = 0u32; }
+        pub fn param(Same: u32) {}
+        pub async fn async_param(Same: u32) {}
+        pub fn closure() { let c = |Same: u32| {}; }
+        pub fn for_loop() { for Same in [0u32] {} }
+        mod ambiguous {
+            enum A { Same }
+            use self::A::*;
+            use super::b::*;
+            pub fn pick(v: u32) -> u32 { match v { Same => 1, _ => 2 } }
+        }
+        enum PrivateEnum { BracedVariant { x: u32 } }
+        pub use PrivateEnum::BracedVariant;");
+    for (name, origin) in [
+        ("local", "local binding"), ("param", "function argument"), ("async_param", "function argument"),
+        ("closure", "closure argument"), ("for_loop", "`for` loop binding"),
+    ] {
+        let owner = crate::borrowck::body::owners(&prog).find(|o| prog.def(o.owner).krate == user && prog.name(o.owner) == name).unwrap();
+        let body = tcx.typeck(&prog, owner.owner);
+        assert!(body.errors.is_empty(), "{name}: {:?}", body.errors);
+        let errors = crate::pattern_analysis::check_body(&prog, &tcx, &body).errors;
+        assert_eq!(errors.len(), 1, "{name}: {errors:?}");
+        assert!(errors[0].contains(&format!("E0005: refutable pattern in {origin}")), "{name}: {errors:?}");
+    }
+    let owner = crate::borrowck::body::owners(&prog).find(|o| prog.def(o.owner).krate == user && prog.name(o.owner) == "pick").unwrap();
+    let body = tcx.typeck(&prog, owner.owner);
+    assert_eq!(body.errors.len(), 1, "ambiguous pattern: {:?}", body.errors);
+    assert!(body.errors[0].contains("E0659: `Same` is ambiguous"), "{:?}", body.errors);
+
+    let mut own = vec![false; prog.crates.len()];
+    own[user as usize] = true;
+    let privacy = prog.import_privacy_errors(crate::program::Judged::crates(&own));
+    assert_eq!(privacy.len(), 1, "private enum re-export: {privacy:?}");
+    assert!(privacy[0].2.contains("E0365") && privacy[0].2.contains("BracedVariant"), "{privacy:?}");
+}
+
+#[test]
+fn non_unit_path_patterns_are_refused() {
+    let (prog, tcx, user) = load("
+        pub enum Role { Host, Member(u32), Viewer { sharer: u32 }, Empty {}, EmptyTup() }
+        pub type Alias = Role;
+        pub struct Pair(pub u32);
+        pub struct Unit;
+        pub struct Braced { pub x: u32 }
+        pub type BracedAlias = Braced;
+        pub union Union { pub x: u32 }
+        pub trait Tr { type Out; fn method(); }
+        pub struct Holder;
+        impl Tr for Holder { type Out = Role; fn method() {} }
+        pub trait NonAdt { fn non_adt(self); }
+        pub fn fun(_: u32) -> Role { Role::Host }
+        pub static ST: bool = true;
+        use Role::Viewer;
+
+        impl Role {
+            pub fn make(_: u32) -> Self { Self::Host }
+            pub fn self_paths(self) {
+                match self { Self::Viewer => {}, Self::Member => {}, Self::make => {}, _ => {} }
+            }
+            pub fn self_calls(self) {
+                match self { Self::Host() => {}, Self::Viewer(x) | Self::make(x) => { let _ = x; }, _ => {} }
+            }
+            pub fn enum_self(self) { match self { Self => {} } }
+        }
+        impl Pair { pub fn pair_self(self) { match self { Self => {} } } }
+        impl Union { pub fn union_self(self) { match self { Self => {} } } }
+        impl BracedAlias { pub fn alias_self(self) { match self { Self => {} } } }
+        impl NonAdt for u32 { fn non_adt(self) { match self { Self => {} } } }
+        impl Braced {
+            pub fn braced_self(self) { match self { Self => {} } }
+            pub fn braced_call(self) { match self { Self(x) => { let _ = x; } } }
+        }
+        impl Unit { pub fn unit_call(self) { match self { Self() => {} } } }
+        pub fn relative(r: Role) {
+            match r { Alias::Viewer => {}, <Role>::Viewer => {}, <Holder as Tr>::Out::Viewer => {},
+                      Alias::Member => {}, <Role>::Member => {}, _ => {} }
+        }
+        pub fn rejected_path(r: &Role) { match r { Role::Viewer => {}, _ => {} } }
+        pub fn rejected_tuple(r: &Role) { match r { Role::Viewer(x) => { let _ = x; }, _ => {} } }
+        pub fn direct(r: Role) {
+            match r { Role::Member => {}, Role::EmptyTup => {}, Role::Empty => {}, Role::make => {}, _ => {} }
+        }
+        pub fn names(r: Role) {
+            match r { self::Viewer => {}, self::Braced => {}, self::Pair => {}, self::fun => {},
+                      Tr::method => {}, <Holder as Tr>::method => {}, self::ST => {}, _ => {} }
+        }
+        pub fn assoc_type(v: u32) { match v { Tr::Out => {}, _ => {} } }
+        pub fn qualified_type(v: u32) { match v { <Holder as Tr>::Out => {}, _ => {} } }
+        macro_rules! pass { ($p:path) => { $p }; }
+        pub fn macro_path_viewer(r: Role) { match r { pass!(Role::Viewer) => {}, _ => {} } }
+        pub fn tuple_names<const N: u32>(v: u32) {
+            match v { pass!(N) => {}, N(_) => {}, Role::Host() => {}, self::fun(_) => {}, _ => {} }
+        }
+        pub fn generic_fn(v: u32) { match v { Vec::new => {}, _ => {} } }
+        pub fn infer() { let Role::Viewer = Default::default(); }
+        pub fn assign_viewer(r: Role, mut v: u32) { Role::Viewer(v) = r; }
+        pub fn assign_method(r: Role, mut v: u32) { Role::make(v) = r; }
+        pub fn assign_fn(r: Role, v: u32) { self::fun(v) = r; }
+        pub fn assign_unit(r: Role) { Role::Host() = r; }
+        pub fn assign_braced(r: Braced, v: u32) { self::Braced(v) = r; }
+        pub fn nested_viewer(r: Role, mut v: u32, mut x: u32) { (Role::Viewer(v), x) = (r, 1); }
+        pub fn nested_fn(r: Role, v: u32, mut x: u32) { (self::fun(v), x) = (r, 1); }
+        pub enum E { V { x: u32 } }
+        pub fn const_enum_prefix<const E: usize>(x: self::E) {
+            match x { E::V => {} _ => {} }
+        }
+        mod projection {
+            pub trait HasRole { type Out; }
+            pub struct Holder;
+            pub enum Role { Viewer { sharer: u32 } }
+            impl HasRole for Holder { type Out = Role; }
+            type A = <Holder as HasRole>::Out;
+            pub fn const_alias_prefix<const A: usize>() -> u32 {
+                let r = A::Viewer { sharer: 1 };
+                match r { A::Viewer { sharer } => sharer }
+            }
+        }
+    ");
+
+    let bare_self = "E0533: expected unit struct, found self constructor `Self`";
+    let viewer = "E0533: expected unit struct, unit variant or constant, found struct variant `Role::Viewer`";
+    let viewer_call = "E0164: expected tuple struct or tuple variant, found struct variant `Role::Viewer`";
+    let invalid_lhs = "E0070: invalid left-hand side of assignment";
+    let cases: &[(&str, &[&str])] = &[
+        ("self_paths", &[
+            "E0533: expected unit struct, unit variant or constant, found struct variant `Self::Viewer`",
+            "E0533: expected unit struct, unit variant or constant, found tuple variant `Self::Member`",
+            "E0533: expected unit struct, unit variant or constant, found associated function `Self::make`",
+        ]),
+        ("self_calls", &[
+            "E0164: expected tuple struct or tuple variant, found unit variant `Self::Host`",
+            "E0164: expected tuple struct or tuple variant, found struct variant `Self::Viewer`",
+            "E0164: expected tuple struct or tuple variant, found associated function `Self::make`",
+        ]),
+        ("pair_self", &[bare_self]), ("braced_self", &[bare_self]), ("alias_self", &[bare_self]),
+        ("enum_self", &[bare_self]), ("union_self", &[bare_self]), ("non_adt", &[bare_self]),
+        ("unit_call", &["E0164: expected tuple struct or tuple variant, found unit struct `Self`"]),
+        ("braced_call", &[
+            "error: the `Self` constructor can only be used with tuple or unit structs",
+            "E0164: expected tuple struct or tuple variant, found self constructor `Self`",
+        ]),
+        ("relative", &[
+            "E0533: expected unit struct, unit variant or constant, found struct variant `Alias::Viewer`",
+            viewer,
+            "E0533: expected unit struct, unit variant or constant, found struct variant `<<Holder as Tr>::Out>::Viewer`",
+            "E0533: expected unit struct, unit variant or constant, found tuple variant `Alias::Member`",
+            "E0533: expected unit struct, unit variant or constant, found tuple variant `Role::Member`",
+        ]),
+        ("rejected_path", &[viewer]), ("rejected_tuple", &[viewer_call]),
+        ("macro_path_viewer", &[viewer]),
+        ("direct", &[
+            "E0532: expected unit struct, unit variant or constant, found tuple variant `Role::Member`",
+            "E0532: expected unit struct, unit variant or constant, found tuple variant `Role::EmptyTup`",
+            "E0533: expected unit struct, unit variant or constant, found struct variant `Role::Empty`",
+            "E0533: expected unit struct, unit variant or constant, found associated function `Role::make`",
+        ]),
+        ("names", &[
+            "E0532: cannot find unit struct, unit variant or constant `Viewer` in module `self`",
+            "E0532: cannot find unit struct, unit variant or constant `Braced` in module `self`",
+            "E0532: expected unit struct, unit variant or constant, found tuple struct `self::Pair`",
+            "E0532: expected unit struct, unit variant or constant, found function `self::fun`",
+            "E0532: expected unit struct, unit variant or constant, found associated function `Tr::method`",
+            "E0532: expected unit struct, unit variant or constant, found associated function `Tr::method`",
+            "E0532: expected unit struct, unit variant or constant, found static `self::ST`",
+        ]),
+        ("assoc_type", &["E0782: expected a type, found a trait"]),
+        ("qualified_type", &["E0575: cannot find method or associated constant `Out` in trait `Tr`"]),
+        ("tuple_names", &[
+            "E0532: expected unit struct, unit variant or constant, found const parameter `N`",
+            "E0532: expected tuple struct or tuple variant, found const parameter `N`",
+            "E0532: expected tuple struct or tuple variant, found unit variant `Role::Host`",
+            "E0532: expected a pattern, found a function call",
+        ]),
+        ("generic_fn", &["E0533: expected unit struct, unit variant or constant, found associated function `Vec::new`"]),
+        ("infer", &[viewer]),
+        ("assign_viewer", &[viewer_call]), ("nested_viewer", &[viewer_call]),
+        ("assign_method", &["E0164: expected tuple struct or tuple variant, found associated function `Role::make`"]),
+        ("assign_fn", &[invalid_lhs]), ("nested_fn", &[invalid_lhs]),
+        ("assign_unit", &["E0618: expected function", invalid_lhs]),
+        ("assign_braced", &["E0425: cannot find function, tuple struct or tuple variant", invalid_lhs]),
+        ("const_enum_prefix", &["E0533: expected unit struct, unit variant or constant, found struct variant `E::V`"]),
+        ("const_alias_prefix", &[]),
+    ];
+    let owners: Vec<_> = crate::borrowck::body::owners(&prog).filter(|o| prog.def(o.owner).krate == user).collect();
+    for &(name, expected) in cases {
+        let owner = owners.iter().find(|o| prog.name(o.owner) == name).unwrap_or_else(|| panic!("missing body: {name}"));
+        let body = tcx.typeck(&prog, owner.owner);
+        let mut errors: Vec<_> = body.errors.iter().collect();
+        for message in expected {
+            let index = errors.iter().position(|e| e.contains(*message))
+                .unwrap_or_else(|| panic!("{name}: missing {message}, got {:?}", body.errors));
+            errors.remove(index);
+        }
+        assert!(errors.is_empty(), "{name}: unexpected diagnostics: {errors:?}");
+
+        if matches!(name, "rejected_path" | "rejected_tuple") {
+            assert!(body.pat_res.iter().any(|(_, r)| *r == crate::typeck::Res::Err), "{name}: missing error resolution");
+            assert!(body.pat_derefs.is_empty(), "{name}: invalid pattern peeled the reference");
+            assert!(body.pat_discriminant_reads.is_empty(), "{name}: invalid pattern read a tag");
+            let analysis = crate::pattern_analysis::check_body(&prog, &tcx, &body);
+            assert!(analysis.errors.is_empty(), "{name}: {:?}", analysis.errors);
+        }
+    }
+
+    // In edition 2015 the leading :: selects the crate root, even beside a type parameter.
+    let (mut prog, tcx, user) = load_source("
+        pub enum E { V { x: u32 } }
+        pub fn global_braced<E>(_e: E, v: ::E) -> u32 {
+            let w = ::E::V { x: 1 };
+            match w { ::E::V { x } => x + match v { ::E::V { x } => x } }
+        }
+        pub fn global_bare<E>(_e: E, v: ::E) { match v { ::E::V => {} } }
+    ", 2015, "repro");
+    prog.crates[user as usize].validate = true;
+    let errors = errors_of(&prog, &tcx, user);
+    assert!(!errors.iter().any(|e| e.starts_with("repro::global_braced: ")), "global_braced: {errors:?}");
+    assert_eq!(errors.len(), 1, "global_bare: {errors:?}");
+    assert!(errors[0].starts_with("repro::global_bare: ") && errors[0].contains("E0533: expected unit struct, unit variant or constant, found struct variant"), "global_bare: {errors:?}");
+}
+
 /// `let _ = *r;` mentions the place behind `r` without using its value. Going through the `Deref` reads the
 /// pointer `r`, so with `r` never initialized it is E0381, as an assignment through it would give. A mention
 /// without a `Deref` reads nothing and stays accepted.

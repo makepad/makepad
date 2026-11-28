@@ -44,6 +44,14 @@ pub enum Res {
     Err,
 }
 
+/// Name resolution diagnoses invalid pattern paths with E0532. Type-relative paths
+/// and `Self` constructors are checked against their resolved type with E0533 or E0164.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValuePathOrigin {
+    Resolved,
+    TypeRelative,
+}
+
 #[derive(Clone, Copy)]
 pub struct MethodRes {
     pub def: DefId,
@@ -506,9 +514,6 @@ pub struct Fcx<'a> {
     bind_mode: u8,
     /// nesting of check_pat (0: a pattern's root, where its bindings are checked as a set)
     pat_depth: u32,
-    /// a path pattern's resolution, made before its adjust mode is chosen (rustc pat.rs
-    /// resolve_pat_path / calc_adjust_mode): (the resolution, its type)
-    pat_path_pre: Option<(Res, TyId)>,
     /// calls whose bound-driven inference is retried after each statement
     /// calls whose Fn-bounded argument's type was still open when the call was checked
     /// (`parallel_for(tasks)` with `tasks` collected later): their Fn bounds are applied again
@@ -849,7 +854,6 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         pat_nest: 0,
         bind_mode: 0,
         pat_depth: 0,
-        pat_path_pre: None,
         extra_arg: None,
         pending_captures: Vec::new(),
         deferred_call_resolutions: Vec::new(),
@@ -1035,14 +1039,36 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
 impl<'a> Fcx<'a> {
     fn into_body(mut self) -> Body {
         if !self.b.errors.is_empty() { self.infcx.errors.note_reported_error(); }
-        let (errors, warnings) = self.infcx.errors.take_since(self.infcx.diagnostic_checkpoint);
-        for error in errors {
+        let taken = self.infcx.errors.take_since(self.infcx.diagnostic_checkpoint);
+        for error in taken.errors {
             let file = if error.cause.body_id == crate::program::NO_DEF { self.file } else { self.prog.def(error.cause.body_id).file };
             self.b.errors.push(self.prog.record_error(file, error.cause.span, "typeck", error.message));
         }
-        for warning in warnings { eprintln!("warning: {}", warning.message); }
-        if self.b.errors.is_empty() && self.infcx.tainted_by_errors() {
-            self.b.errors.push(self.prog.record_error(self.file, self.last_lo, "typeck", "type checking failed due to previous errors".into()));
+        for warning in taken.warnings { eprintln!("warning: {}", warning.message); }
+        if self.b.errors.is_empty() && (self.infcx.tainted_by_errors() || taken.drained.is_some()) {
+            use crate::infer::diagnostics::Untaken;
+            let summary = "type checking failed due to previous errors";
+            let pointer = self.infcx.errors.first_untaken().or_else(|| taken.drained.clone().map(|d| (d, Untaken::Delivered)));
+            let message = if let Some((d, how)) = pointer {
+                let file = if d.cause.body_id == crate::program::NO_DEF { self.file } else { self.prog.def(d.cause.body_id).file };
+                let loc = self.prog.error_location(file, d.cause.span);
+                let (line, col) = loc.source.line_col(loc.span.lo);
+                let how = match how {
+                    Untaken::Delivered => "already shown by the session".into(),
+                    Untaken::OtherThread(t) => format!("emitted on thread {t}"),
+                    Untaken::EarlierCopy => "its first copy came from an earlier check on this thread".into(),
+                };
+                format!("{summary}: first error: {}:{line}:{col}: {} ({how})", loc.source.path(), d.message)
+            } else if let Some(site) = self.infcx.first_taint() {
+                let file = site.file().replace('\\', "/");
+                let path = if let Some(i) = file.rfind("/src/") { &file[i + 1..] }
+                    else if file.starts_with("src/") { &file }
+                    else { file.rsplit('/').next().unwrap_or(&file) };
+                format!("{summary} (tainted by an error type at relax-types {path}:{})", site.line())
+            } else {
+                summary.into()
+            };
+            self.b.errors.push(self.prog.record_error(self.file, self.last_lo, "typeck", message));
         }
         self.b.freeze();
         self.b
@@ -1055,6 +1081,16 @@ impl<'a> Fcx<'a> {
         self.infcx.set_tainted_by_errors();
         if let Some(error) = self.infcx.errors.report_to_buffer(crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: pos }, msg) {
             self.b.errors.push(self.prog.record_error(self.file, pos, "typeck", error.message));
+        }
+    }
+
+    fn uncoded_err(&mut self, pos: u32, msg: String) {
+        self.infcx.set_tainted_by_errors();
+        if let Some(error) = self.infcx.errors.report_to_buffer(
+            crate::next_solver::fulfill::ObligationCause { body_id: self.b.def, span: pos },
+            msg,
+        ) {
+            self.b.errors.push(self.prog.record_uncoded_error(self.file, pos, "typeck", error.message));
         }
     }
 
@@ -2281,16 +2317,16 @@ impl<'a> Fcx<'a> {
         // reference, `const Z: &() = ..; match &() { Z => .. }`; rustc pat.rs AdjustMode::Pass)
         // a path pattern resolves first: a const (or assoc const, `i32::C`, `Self::C`) keeps the
         // expected type as it is, an ADT constructor peels references
-        let mut pre_const = false;
-        if let Pat::Path(path) = ast.pat(p) {
-            let (r, t) = self.resolve_value_path(path, p.0 | PAT_KEY, true, false);
-            pre_const = matches!(r, Res::Def(d) if matches!(self.prog.def(d).kind, DefKind::Const | DefKind::AssocConst));
-            self.pat_path_pre = Some((r, t));
-        }
+        let pre_path = if let Pat::Path(path) = ast.pat(p) {
+            Some(self.resolve_value_path_with_origin(path, p.0 | PAT_KEY, true, false))
+        } else {
+            None
+        };
+        let pre_unit_ctor = matches!(pre_path, Some((Res::Def(d), _, _)) if self.is_unit_ctor_def(d));
         let structural = peel_lit
             || matches!(ast.pat(p), Pat::Tuple(_) | Pat::TupleStruct(..) | Pat::Struct(..) | Pat::Slice(_))
-            || matches!(ast.pat(p), Pat::Path(_) if !pre_const)
-            || matches!(ast.pat(p), Pat::Ident { sub, by_ref: false, mutbl: false, .. } if sub.is_none() && self.ident_pat_is_path(p) && !self.ident_pat_is_const(p));
+            || pre_unit_ctor
+            || matches!(ast.pat(p), Pat::Ident { sub, by_ref: false, mutbl: false, .. } if sub.is_none() && self.ident_pat_is_unit_ctor(p));
         let mut expected = expected;
         let saved_mode = self.bind_mode;
         if structural {
@@ -2313,11 +2349,12 @@ impl<'a> Fcx<'a> {
         if let Pat::Ref(..) = ast.pat(p) {
             self.bind_mode = 0;
         }
-        self.check_pat_inner(p, expected);
+        self.check_pat_inner(p, expected, pre_path);
         // rustc_hir_typeck/expr_use_visitor.rs:943-947, 1858: capture semantics
         // depend on the variant list, never on which variants are inhabited.
         // Non-exhaustiveness counts in the defining crate as well as other crates.
-        let constructor = matches!(ast.pat(p), Pat::TupleStruct(..) | Pat::Struct(..))
+        let constructor = (matches!(ast.pat(p), Pat::TupleStruct(..) | Pat::Struct(..))
+                && !matches!(self.b.pat_res.get(&p.0), Some(Res::Err)))
             || matches!(self.b.pat_res.get(&p.0), Some(Res::Def(d))
                 if matches!(self.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
         if constructor {
@@ -2363,8 +2400,8 @@ impl<'a> Fcx<'a> {
             }
         };
         match ast.pat(p) {
-            Pat::Ident { name, sub, .. } => {
-                if !(sub.is_none() && self.ident_pat_is_path(p)) {
+            Pat::Ident { by_ref, mutbl, name, sub } => {
+                if !(sub.is_none() && !*by_ref && !*mutbl && self.ident_pat_is_path(p)) {
                     out.push((self.sym(*name), name.lo));
                 }
                 if let Some(sp) = &sub.get() {
@@ -2454,28 +2491,320 @@ impl<'a> Fcx<'a> {
         self.tcx.adts.get(&adt)?.variants.get(vi).map(|v| v.shape)
     }
 
-    fn ident_pat_is_const(&self, p: PatId) -> bool {
-        if let Pat::Ident { name, .. } = self.ast().pat(p) {
-            let s = self.sym(*name);
-            if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
-                return matches!(self.prog.def(d).kind, DefKind::Const | DefKind::AssocConst);
+    fn is_unit_ctor_def(&self, d: DefId) -> bool {
+        matches!(self.prog.def(d).kind, DefKind::Struct | DefKind::Variant)
+            && self.value_ctor_shape(d) == Some(0)
+    }
+
+    fn is_unit_or_const_pat_def(&self, d: DefId) -> bool {
+        matches!(self.prog.def(d).kind, DefKind::Const | DefKind::AssocConst)
+            || self.is_unit_ctor_def(d)
+    }
+
+    fn is_tuple_ctor_def(&self, d: DefId) -> bool {
+        matches!(self.prog.def(d).kind, DefKind::Struct | DefKind::Variant)
+            && self.value_ctor_shape(d) == Some(1)
+    }
+
+    /// Mirrors `rustc_resolve` + `rustc_ast_lowering::expr::lower_expr_assign` /
+    /// `lower_expr_to_pat`: an `ExprKind::Call(Path, _)` on the LHS of `=` lowers
+    /// to a destructuring tuple pattern only when the callee path resolves to a
+    /// tuple struct/variant constructor (`CtorKind::Fn`), a `Self` constructor
+    /// (`Res::SelfCtor`), or a type-relative path (`QPath::TypeRelative`).
+    fn is_assignee_expr(&self, a: ExprId) -> bool {
+        let ast = self.ast();
+        match &ast.expr(a).kind {
+            ExprKind::Paren(x)
+                if matches!(ast.expr(*x).kind, ExprKind::Range(OptExprId::NONE, OptExprId::NONE, false)) => true,
+            ExprKind::Paren(x) => self.is_assignee_expr(*x),
+            ExprKind::Tuple(_) | ExprKind::Array(_) | ExprKind::Struct(..) | ExprKind::Underscore => true,
+            ExprKind::Call(f, _) => self.is_assignee_call(*f),
+            _ => false,
+        }
+    }
+
+    fn is_assignee_call(&self, f: ExprId) -> bool {
+        match &self.ast().expr(f).kind {
+            ExprKind::Path(path) => self.is_assignee_call_path(path),
+            _ => false,
+        }
+    }
+
+    fn is_assignee_call_path(&self, path: &Path) -> bool {
+        let prog = self.prog;
+        let segs = crate::program::path_segs(prog, self.file, path);
+        let n = segs.len();
+        if n == 0 {
+            return false;
+        }
+        if let Some(q) = self.ast().qself(path) {
+            // `<T>::item` and `<T as Tr>::Assoc::item` are QPath::TypeRelative;
+            // `<T as Tr>::item` (1 segment) is QPath::Resolved to a trait item.
+            return n >= 2 || q.trait_path.is_none();
+        }
+        if n == 1 && !path.global() {
+            let (k, s) = segs[0];
+            if k == SegKind::SelfType {
+                return self.env.self_ty.is_some()
+                    || self.env.owner.and_then(|o| outer_impl(prog, o)).is_some();
+            }
+            if k == SegKind::SelfValue || k == SegKind::Ident {
+                let lo = self.ast().segs(path.segs)[0].name.lo;
+                if self.lookup_local(s, lo).is_some() {
+                    return false;
+                }
+                let mut scope = self.module;
+                while let Some(parent) = prog.mods[scope as usize].lexical_parent {
+                    if let Some(d) = prog.lookup_in_module(scope, s, false, &mut Vec::new()) {
+                        return self.is_tuple_ctor_def(d);
+                    }
+                    scope = parent;
+                }
+                if self.env.consts.iter().any(|c| self.env.names.get(c.0 as usize) == Some(&s)) {
+                    return false;
+                }
+            }
+            if let Some(d) = prog.lookup_in_scope(self.module, s, false) {
+                return self.is_tuple_ctor_def(d);
+            }
+            if let Some(d) = prog.relaxed_import(self.module, s, false, self.file, path.lo) {
+                return self.is_tuple_ctor_def(d);
+            }
+            return false;
+        }
+        if n == 1 && path.global() {
+            if prog.crates[prog.mods[self.module as usize].krate as usize].edition < 2018 {
+                let krate = prog.mods[self.module as usize].krate;
+                let root = prog.mods[prog.crates[krate as usize].root_mod as usize].def;
+                return prog.lookup_in_container(root, segs[0].1, false)
+                    .is_some_and(|d| self.is_tuple_ctor_def(d));
+            }
+            return false;
+        }
+        let _quiet = crate::program::QuietLookups::begin();
+        let first_is_param = !path.global()
+            && segs[0].0 == SegKind::Ident
+            && self.env.names.iter().take(self.b.args.len()).enumerate()
+                .any(|(i, nm)| *nm == segs[0].1 && !self.env.consts.iter().any(|c| c.0 as usize == i));
+        if (segs[0].0 == SegKind::SelfType && n == 2) || first_is_param {
+            return true;
+        }
+        let parent = prog.resolve_mod_path(self.module, path.global(), &segs[..n - 1], false, false);
+        if let Some(pd) = parent {
+            match prog.def(pd).kind {
+                DefKind::Mod => {
+                    if let Some(d) = prog.lookup_in_container(pd, segs[n - 1].1, false) {
+                        return self.is_tuple_ctor_def(d);
+                    }
+                    return n == 2 && !path.global()
+                        && crate::program::PRIMS.iter().any(|(nm, _)| prog.syms.get(nm) == Some(segs[0].1));
+                }
+                DefKind::Enum => {
+                    // shape 0 (unit variant) -> ValueNS resolved -> ordinary call (E0618 + E0070).
+                    // shape 1 (tuple variant) -> ValueNS resolved -> tuple pattern.
+                    // shape 2 (struct variant) or None (inherent assoc item) -> QPath::TypeRelative -> tuple pattern (E0164).
+                    return match prog.lookup_in_container(pd, segs[n - 1].1, false) {
+                        Some(d) => self.value_ctor_shape(d) != Some(0),
+                        None => true,
+                    };
+                }
+                DefKind::Trait => {
+                    let has_val = prog.traits[prog.def(pd).sub as usize].iter().copied()
+                        .any(|it| prog.def(it).name == segs[n - 1].1 && prog.def(it).kind != DefKind::AssocTy);
+                    return !has_val;
+                }
+                // Struct, Union, TypeAlias, Prim: QPath::TypeRelative.
+                _ => return true,
+            }
+        }
+        if segs[0].0 == SegKind::SelfType || self.env.names.contains(&segs[0].1) {
+            return true;
+        }
+        let sub = Path { segs: path.segs.prefix(n - 1).without_qself(), lo: path.lo };
+        if self.tcx.resolve_type_path_def(prog, self.file, self.module, &sub).is_some() {
+            return true;
+        }
+        if n == 2 && !path.global() {
+            if crate::program::PRIMS.iter().any(|(nm, _)| prog.syms.get(nm) == Some(segs[0].1)) {
+                return true;
+            }
+            if prog.relaxed_import(self.module, segs[0].1, true, self.file, path.lo).is_some() {
+                return true;
             }
         }
         false
     }
 
-    /// An identifier pattern naming a unit struct / unit variant / const (not a binding).
+    /// An identifier pattern naming a unit struct or unit variant (peels references under match ergonomics).
+    fn ident_pat_is_unit_ctor(&self, p: PatId) -> bool {
+        if let Pat::Ident { name, .. } = self.ast().pat(p) {
+            let s = self.sym(*name);
+            if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
+                return self.is_unit_ctor_def(d);
+            }
+        }
+        false
+    }
+
+    /// An identifier pattern naming a unit struct, unit variant, or constant (not a binding).
     fn ident_pat_is_path(&self, p: PatId) -> bool {
         if let Pat::Ident { name, .. } = self.ast().pat(p) {
             let s = self.sym(*name);
             if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
-                return matches!(self.prog.def(d).kind, DefKind::Const | DefKind::Variant | DefKind::Struct | DefKind::AssocConst);
+                return self.is_unit_or_const_pat_def(d);
             }
         }
         false
     }
 
-    fn check_pat_inner(&mut self, p: PatId, expected: TyId) {
+    fn mark_pat_path_error(&mut self, p: PatId) {
+        self.b.pat_res.insert(p.0, Res::Err);
+        self.b.pat_derefs.remove(&p.0);
+        let pi = self.b.pat_ix(p);
+        if pi < self.b.pat_ty.len() { self.b.pat_ty[pi] = self.tcx.tys.error; }
+    }
+
+    /// A bare path accepts constants and unit constructors. Parentheses require a tuple constructor.
+    fn check_pat_path_res(&mut self, path: &Path, r: Res, origin: ValuePathOrigin) -> bool {
+        if let Res::ConstParam(_) = r {
+            let name = self.pat_path_str(path);
+            self.err(path.lo, format!("E0532: expected unit struct, unit variant or constant, found const parameter `{name}`"));
+            return false;
+        }
+        let Res::Def(d) = r else { return true };
+        if matches!(self.prog.def(d).kind, DefKind::Const | DefKind::AssocConst) {
+            return true;
+        }
+        self.check_pat_ctor_kind(path, d, origin, false)
+    }
+
+    fn check_pat_tuple_ctor_res(&mut self, path: &Path, r: Res, origin: ValuePathOrigin) -> bool {
+        match r {
+            Res::Def(d) => self.check_pat_ctor_kind(path, d, origin, true),
+            Res::ConstParam(_) => {
+                let name = crate::tcx::path_str(self.prog, self.file, path);
+                self.err(path.lo, format!("E0532: expected tuple struct or tuple variant, found const parameter `{name}`"));
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// Formats a path for pattern diagnostics (`E0532`/`E0533`/`E0164`), matching
+    /// `rustc_hir_pretty::qpath_to_string` and `rustc_resolve` trait-item printing:
+    /// - `<Role>::Viewer` -> `Role::Viewer`
+    /// - `<Holder as HasRole>::Out::Viewer` -> `<<Holder as HasRole>::Out>::Viewer`
+    /// - `<Role as Tr>::method` -> `Tr::method`
+    fn pat_path_str(&self, path: &Path) -> String {
+        let ast = self.ast();
+        let Some(q) = ast.qself(path) else {
+            return crate::tcx::path_str(self.prog, self.file, path);
+        };
+        let segs = ast.segs(path.segs);
+        if segs.len() == 1 {
+            if let Some(tp) = q.trait_path.get() {
+                return format!("{}::{}", crate::tcx::path_str(self.prog, self.file, &tp), self.text(segs[0].name));
+            }
+            if let crate::ast::Ty::Path(qp) = ast.ty(q.ty) {
+                if qp.no_qself() && ast.segs(qp.segs).iter().all(|s| s.args().is_none()) {
+                    return format!("{}::{}", crate::tcx::path_str(self.prog, self.file, qp), self.text(segs[0].name));
+                }
+            }
+            return format!("<{}>::{}", self.ast_ty_str(q.ty), self.text(segs[0].name));
+        }
+        let qself_s = self.ast_ty_str(q.ty);
+        let mut prefix = match q.trait_path.get() {
+            Some(tp) => format!("<{qself_s} as {}>", crate::tcx::path_str(self.prog, self.file, &tp)),
+            None => format!("<{qself_s}>"),
+        };
+        for seg in &segs[..segs.len() - 1] {
+            prefix.push_str("::");
+            prefix.push_str(self.text(seg.name));
+        }
+        format!("<{prefix}>::{}", self.text(segs[segs.len() - 1].name))
+    }
+
+    fn ast_ty_str(&self, ty: crate::ast::TyId) -> String {
+        let ast = self.ast();
+        match ast.ty(ty) {
+            crate::ast::Ty::Path(p) => self.pat_path_str(p),
+            crate::ast::Ty::Ref(m, _, inner) => format!("&{}{}", if *m { "mut " } else { "" }, self.ast_ty_str(*inner)),
+            crate::ast::Ty::Ptr(m, inner) => format!("*{} {}", if *m { "mut" } else { "const" }, self.ast_ty_str(*inner)),
+            crate::ast::Ty::Slice(inner) => format!("[{}]", self.ast_ty_str(*inner)),
+            crate::ast::Ty::Tuple(list) => {
+                let elems: Vec<String> = ast.list(*list).iter().map(|&t| self.ast_ty_str(t)).collect();
+                if elems.len() == 1 { format!("({},)", elems[0]) } else { format!("({})", elems.join(", ")) }
+            }
+            crate::ast::Ty::Never => "!".to_string(),
+            crate::ast::Ty::Infer => "_".to_string(),
+            crate::ast::Ty::Paren(inner) => format!("({})", self.ast_ty_str(*inner)),
+            _ => "_".to_string(),
+        }
+    }
+
+    fn check_pat_ctor_kind(&mut self, path: &Path, d: DefId, origin: ValuePathOrigin, tuple: bool) -> bool {
+        let kind = self.prog.def(d).kind;
+        let shape = self.value_ctor_shape(d);
+        if matches!(kind, DefKind::Struct | DefKind::Variant) && (shape.is_none() || shape == Some(tuple as u8)) {
+            return true;
+        }
+        let expected = if tuple { "tuple struct or tuple variant" } else { "unit struct, unit variant or constant" };
+        let segs = self.ast().segs(path.segs);
+        let (at, message) = if path.no_qself() && segs.len() == 1 && segs[0].kind() == SegKind::SelfType {
+            if tuple {
+                if kind == DefKind::Struct && shape == Some(0) {
+                    (path.lo, "E0164: expected tuple struct or tuple variant, found unit struct `Self`".to_string())
+                } else {
+                    self.uncoded_err(
+                        path.lo,
+                        "the `Self` constructor can only be used with tuple or unit structs".to_string(),
+                    );
+                    (path.lo, "E0164: expected tuple struct or tuple variant, found self constructor `Self`".to_string())
+                }
+            } else {
+                (path.lo, "E0533: expected unit struct, found self constructor `Self`".to_string())
+            }
+        } else if origin == ValuePathOrigin::Resolved
+            && (shape == Some(2)
+                || matches!(
+                    kind,
+                    DefKind::Mod
+                        | DefKind::Enum
+                        | DefKind::Union
+                        | DefKind::Trait
+                        | DefKind::TypeAlias
+                        | DefKind::Prim(_)
+                        | DefKind::ForeignTy
+                ))
+        {
+            let (at, msg) = self.prog.unresolved_name_message(self.file, self.module, path, expected);
+            (at, format!("E0532: {msg}"))
+        } else if tuple && origin == ValuePathOrigin::Resolved && matches!(kind, DefKind::Fn | DefKind::ForeignFn) {
+            (path.lo, "E0532: expected a pattern, found a function call".to_string())
+        } else {
+            let found = match (kind, shape) {
+                (DefKind::Struct, Some(0)) => "unit struct",
+                (DefKind::Struct, Some(1)) => "tuple struct",
+                (DefKind::Variant, Some(0)) => "unit variant",
+                (DefKind::Variant, Some(1)) => "tuple variant",
+                (DefKind::Variant, _) => "struct variant",
+                (DefKind::ForeignFn, _) => "function",
+                (DefKind::ForeignStatic, _) => "static",
+                _ => crate::tcx::def_kind_descr(kind),
+            };
+            let code = match origin {
+                ValuePathOrigin::Resolved => "E0532",
+                ValuePathOrigin::TypeRelative if tuple => "E0164",
+                ValuePathOrigin::TypeRelative => "E0533",
+            };
+            let name = self.pat_path_str(path);
+            (path.lo, format!("{code}: expected {expected}, found {found} `{name}`"))
+        };
+        self.err(at, message);
+        false
+    }
+
+    fn check_pat_inner(&mut self, p: PatId, expected: TyId, pre_path: Option<(Res, TyId, ValuePathOrigin)>) {
         let ast = self.ast();
         match ast.pat(p) {
             Pat::Wild | Pat::Rest => {}
@@ -2488,28 +2817,28 @@ impl<'a> Fcx<'a> {
                 if self.tcx.validates(self.prog, self.file) && !self.scopes.iter().any(|(sy, _)| *sy == s) {
                     if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
                         let simple = sub.is_none() && !*by_ref && !*mutbl;
-                        let what = match self.prog.def(d).kind {
-                            DefKind::Struct | DefKind::Variant => match self.value_ctor_shape(d) {
-                                Some(1) => Some(if self.prog.def(d).kind == DefKind::Struct { "tuple structs" } else { "tuple variants" }),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        if let Some(what) = what {
-                            self.err(name.lo, format!("E0530: bindings cannot shadow {what}"));
-                        } else if simple {
-                            // an identifier pattern naming something ambiguous is an error, not a fresh binding
+                        let kind = self.prog.def(d).kind;
+                        // A bare identifier considers constants, constructors and statics before
+                        // it can introduce a binding. A hard ambiguity ends pattern resolution.
+                        if simple && matches!(kind, DefKind::Const | DefKind::AssocConst | DefKind::Struct | DefKind::Variant | DefKind::Static | DefKind::ForeignStatic) {
                             if let Some(e) = self.prog.name_ambiguity(self.module, s, false, false) {
                                 if let Some(m) = crate::lint::privacy_diag(self.prog, self.file, name.lo, &e) { self.err(name.lo, m); }
+                                if !e.lint {
+                                    self.mark_pat_path_error(p);
+                                    return;
+                                }
                             }
+                        }
+                        if self.is_tuple_ctor_def(d) {
+                            let what = if kind == DefKind::Struct { "tuple structs" } else { "tuple variants" };
+                            self.err(name.lo, format!("E0530: bindings cannot shadow {what}"));
                         }
                     }
                 }
                 // a unit struct / unit variant / const in scope is a path pattern, not a binding
                 if sub.is_none() && !*by_ref && !*mutbl {
                     if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
-                        let k = self.prog.def(d).kind;
-                        if matches!(k, DefKind::Const | DefKind::Variant | DefKind::Struct | DefKind::AssocConst) {
+                        if self.is_unit_or_const_pat_def(d) {
                             self.b.pat_res.insert(p.0, Res::Def(d));
                             let t = self.value_def_ty(d, None, p.0 | PAT_KEY);
                             self.coerce_or_unify(t, expected, None, name.lo);
@@ -2527,7 +2856,7 @@ impl<'a> Fcx<'a> {
                             DefKind::Static | DefKind::ForeignStatic => Some("statics"),
                             // (reached only with `mut`, `ref` or `@`: otherwise the name is a path)
                             DefKind::Const | DefKind::AssocConst => Some("constants"),
-                            DefKind::Variant | DefKind::Struct => Some("unit variants or structs"),
+                            DefKind::Variant | DefKind::Struct if self.is_unit_ctor_def(d) => Some("unit variants or structs"),
                             _ => None,
                         };
                         if let Some(what) = what {
@@ -2704,20 +3033,24 @@ impl<'a> Fcx<'a> {
                 }
             }
             Pat::Path(path) => {
-                let (r, t) = match self.pat_path_pre.take() {
+                let (r, t, origin) = match pre_path {
                     Some(x) => x,
-                    None => self.resolve_value_path(path, p.0 | PAT_KEY, true, false),
+                    None => self.resolve_value_path_with_origin(path, p.0 | PAT_KEY, true, false),
                 };
-                self.b.pat_res.insert(p.0, r);
-                if let Res::Def(pd) = r {
-                    if self.tcx.validates(self.prog, self.file) && matches!(self.prog.def(pd).kind, DefKind::Static | DefKind::ForeignStatic) {
-                        self.err(path.lo, format!("E0532: expected unit struct, unit variant or constant, found static `{}`", crate::tcx::path_str(self.prog, self.file, path)));
-                    }
+                if r == Res::Err || !self.check_pat_path_res(path, r, origin) {
+                    self.mark_pat_path_error(p);
+                    return;
                 }
+                self.b.pat_res.insert(p.0, r);
                 self.coerce_or_unify(t, expected, None, path.lo);
             }
             Pat::TupleStruct(path, v) => {
-                let (r, _) = self.resolve_value_path(path, p.0 | PAT_KEY, true, false);
+                let (r, _, origin) = self.resolve_value_path_with_origin(path, p.0 | PAT_KEY, true, false);
+                if r == Res::Err || !self.check_pat_tuple_ctor_res(path, r, origin) {
+                    self.mark_pat_path_error(p);
+                    self.check_seq_pats(ast.list(*v), &[]);
+                    return;
+                }
                 self.b.pat_res.insert(p.0, r);
                 let fields = self.ctor_fields_with(r, expected, path.lo, Some(p.0 | PAT_KEY), None);
                 // check_pat_tuple_struct: the sub-patterns cover the fields exactly, or a `..`
@@ -2734,11 +3067,7 @@ impl<'a> Fcx<'a> {
                     };
                     if let Some((what, adt, vi)) = tuple_ctor {
                         if let Some(variant) = self.tcx.adts.get(&adt).and_then(|a| a.variants.get(vi)) {
-                            if variant.shape != 1 && self.tcx.validates(self.prog, self.file) {
-                                let found = match (variant.shape, what) { (0, "variant") => "unit variant", (0, _) => "unit struct", (_, "variant") => "struct variant", _ => "struct" };
-                                self.err(path.lo, format!("E0532: expected tuple struct or tuple variant, found {} `{}`", found, crate::tcx::path_str(self.prog, self.file, path)));
-                            }
-                            if variant.shape == 1 && !(if has_rest { n <= variant.fields.len() } else { n == variant.fields.len() }) {
+                            if !(if has_rest { n <= variant.fields.len() } else { n == variant.fields.len() }) {
                                 let want = variant.fields.len();
                                 let msg = format!("E0023: this pattern has {} field{}, but the corresponding tuple {} has {} field{}", n, if n == 1 { "" } else { "s" }, what, want, if want == 1 { "" } else { "s" });
                                 self.err(path.lo, msg);
@@ -2907,14 +3236,25 @@ impl<'a> Fcx<'a> {
                     }
                 }
             }
-            ExprKind::Call(f, args) if matches!(ast.expr(f).kind, ExprKind::Path(_)) => {
+            ExprKind::Call(f, args) if self.is_assignee_call(f) => {
                 // `TupleStruct(x, y) = v` / `Variant(x, ..) = v`: fields by position
                 let path = match &ast.expr(f).kind {
                     ExprKind::Path(p) => p.clone(),
                     _ => return,
                 };
                 // the path resolves like a tuple-struct pattern's (aliases keep their written arguments)
-                let (r, _) = self.resolve_value_path(&path, a.0 | PAT_KEY, true, false);
+                let (r, _, origin) = self.resolve_value_path_with_origin(&path, a.0 | PAT_KEY, true, false);
+                if r == Res::Err || !self.check_pat_tuple_ctor_res(&path, r, origin) {
+                    self.b.res.insert(a.0, Res::Err);
+                    self.b.res.insert(f.0, Res::Err);
+                    self.set_ty(a, self.tcx.tys.error);
+                    for &x in self.ast().list(args) {
+                        if !is_rest(x) {
+                            self.check_assignee(x, self.tcx.tys.error, lo);
+                        }
+                    }
+                    return;
+                }
                 self.b.res.insert(a.0, r);
                 // the constructor path is pattern syntax: region analysis reads its resolution
                 self.b.res.insert(f.0, r);
@@ -3353,7 +3693,7 @@ impl<'a> Fcx<'a> {
                 if self.tcx.validates(prog, self.file) && segs[0].0 == SegKind::Ident && !path.global() && path.no_qself() {
                     if let Some(e) = prog.name_ambiguity(self.module, segs[0].1, true, false) { if let Some(m) = crate::lint::privacy_diag(prog, self.file, path.lo, &e) { self.err(path.lo, m); } }
                 }
-                if matches!(prog.def(d).kind, DefKind::Struct | DefKind::Union) {
+                if matches!(prog.def(d).kind, DefKind::Struct | DefKind::Union | DefKind::Variant) {
                     return Res::Def(d);
                 }
                 if prog.def(d).kind == DefKind::TypeAlias {
@@ -3367,11 +3707,6 @@ impl<'a> Fcx<'a> {
                             return Res::Def(*ad);
                         }
                     }
-                }
-            }
-            if let Some(d) = prog.lookup_in_scope(self.module, segs[0].1, false) {
-                if prog.def(d).kind == DefKind::Variant {
-                    return Res::Def(d);
                 }
             }
             self.err(path.lo, format!("E0422: cannot find struct, variant or union type `{}` in this scope", crate::tcx::path_str(prog, self.file, path)));
@@ -3404,7 +3739,7 @@ impl<'a> Fcx<'a> {
                     let at = self.tcx.alias_ty(&self.cx.with_infcx(&self.infcx), prog, alias);
                     if let TyKind::Adt(ad, _, _) = self.tcx.tys.kind(at) {
                         if prog.def(*ad).kind == DefKind::Enum {
-                            if let Some(v) = prog.lookup_in_container(*ad, segs[1].1, false).filter(|v| prog.def(*v).kind == DefKind::Variant) {
+                            if let Some(v) = prog.lookup_in_container(*ad, segs[1].1, true).filter(|v| prog.def(*v).kind == DefKind::Variant) {
                                 return Res::Def(v);
                             }
                         }
@@ -3434,8 +3769,10 @@ impl<'a> Fcx<'a> {
         self.b.dependencies.push(d);
         let parent_regions = std::mem::take(&mut self.value_path_parent_regions);
         let def = self.prog.def(d);
+        let pattern = key != u32::MAX && key & PAT_KEY != 0;
         let ty = match def.kind {
             DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn => {
+                if pattern { return self.tcx.tys.error; }
                 let n = self.tcx.fn_sig(self.prog, d).map_or(0, |s| s.n_generics);
                 let mut args = Vec::new();
                 match explicit {
@@ -3486,6 +3823,7 @@ impl<'a> Fcx<'a> {
                 self.tcx.tys.intern(TyKind::FnDef(d, self.tcx.tys.mk_list(&args), regions))
             }
             DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::ForeignStatic => {
+                if pattern && matches!(def.kind, DefKind::Static | DefKind::ForeignStatic) { return self.tcx.tys.error; }
                 let t = self.tcx.const_ty(self.prog, d).unwrap_or(self.tcx.tys.error);
                 match explicit {
                     Some(mut v) => {
@@ -3527,6 +3865,8 @@ impl<'a> Fcx<'a> {
                     Some(a) => a,
                     None => return self.tcx.tys.error,
                 };
+                let v = &adt.variants[vi as usize];
+                if pattern && v.shape > 1 { return self.tcx.tys.error; }
                 let mut args = Vec::new();
                 let mut regions = Vec::new();
                 for _ in &adt.generic_indices.lifetimes { regions.push(self.fresh_region()); }
@@ -3561,7 +3901,6 @@ impl<'a> Fcx<'a> {
                 self.write_user_type_annotation_from_args(key, d, &full, user_self_ty);
                 self.apply_fn_bounds(adt_def, &full, self.last_lo);
                 let inst = self.tcx.tys.intern(TyKind::Adt(adt_def, self.tcx.tys.mk_list(&args), regions));
-                let v = &adt.variants[vi as usize];
                 if v.shape == 1 && !adt.is_union {
                     // tuple ctor: a fn item of its own (rustc: FnDef with the ADT's args, which
                     // keeps the written lifetimes; it reifies to `fn(fields..) -> Adt` on demand)
@@ -3586,7 +3925,7 @@ impl<'a> Fcx<'a> {
         // resolve_fully_qualified_call looks up enum variants before probing: they win over inherent items)
         if let TyKind::Adt(ad, aargs, _) = self.tcx.tys.kind(st).clone() {
             if self.prog.def(ad).kind == DefKind::Enum {
-                if let Some(v) = self.prog.lookup_in_container(ad, name, false) {
+                if let Some(v) = self.prog.lookup_in_container(ad, name, true) {
                     if self.prog.def(v).kind == DefKind::Variant {
                         let t = self.value_def_ty(v, Some(self.tcx.tys.list(aargs).to_vec()), key);
                         return (Res::Def(v), t);
@@ -3714,14 +4053,20 @@ impl<'a> Fcx<'a> {
 
     /// Resolves a value path. `key`: expr or pat id for recording generic args.
     fn resolve_value_path(&mut self, path: &Path, key: u32, is_pat: bool, is_callee: bool) -> (Res, TyId) {
-        let r = self.resolve_value_path_inner(path, key, is_pat, is_callee);
-        if let Res::Def(d) = r.0 {
+        let (r, t, _) = self.resolve_value_path_with_origin(path, key, is_pat, is_callee);
+        (r, t)
+    }
+
+    fn resolve_value_path_with_origin(&mut self, path: &Path, key: u32, is_pat: bool, is_callee: bool) -> (Res, TyId, ValuePathOrigin) {
+        let (r, t, origin) = self.resolve_value_path_inner(path, key, is_pat, is_callee);
+        if let Res::Def(d) = r {
             self.check_ctor_privacy(d, path.lo);
-            if matches!(self.prog.def(d).kind, DefKind::AssocFn | DefKind::AssocConst) {
+            let kind = self.prog.def(d).kind;
+            if kind == DefKind::AssocConst || (!is_pat && kind == DefKind::AssocFn) {
                 self.check_legal_trait_for_method_call(d, path.lo);
             }
         }
-        r
+        (r, t, origin)
     }
 
     /// A tuple struct's constructor is as private as its most private field (rustc_resolve
@@ -3755,7 +4100,8 @@ impl<'a> Fcx<'a> {
         }
     }
 
-    fn resolve_value_path_inner(&mut self, path: &Path, key: u32, is_pat: bool, is_callee: bool) -> (Res, TyId) {
+    fn resolve_value_path_inner(&mut self, path: &Path, key: u32, is_pat: bool, is_callee: bool) -> (Res, TyId, ValuePathOrigin) {
+        use ValuePathOrigin::{Resolved, TypeRelative};
         let prog = self.prog;
         // hir_ty_lowering/generics.rs lower_generic_args: the item's own written
         // lifetime arguments (last segment).
@@ -3782,7 +4128,7 @@ impl<'a> Fcx<'a> {
                 };
                 if generic {
                     self.err(path.lo, "generic `Self` types are currently not permitted in anonymous constants".to_string());
-                    return (Res::Err, error);
+                    return (Res::Err, error, Resolved);
                 }
             }
         }
@@ -3793,7 +4139,7 @@ impl<'a> Fcx<'a> {
         }
         {
             let cx = self.cx.with_infcx(&self.infcx);
-            if self.tcx.prohibit_module_args(&cx, prog, self.file, self.module, path) { return (Res::Err, error); }
+            if self.tcx.prohibit_module_args(&cx, prog, self.file, self.module, path) { return (Res::Err, error, Resolved); }
         }
         if let Some(q) = self.ast().qself(path) {
             // `<T as Trait>::item`
@@ -3810,17 +4156,21 @@ impl<'a> Fcx<'a> {
                 if self.tcx.validates(self.prog, self.file) && !self.tcx.tys.has_error(t) { self.register_wf(t, path.lo); }
                 let t = self.norm(t);
                 if matches!(self.tcx.tys.kind(t), TyKind::Error) {
-                    return (Res::Err, error);
+                    return (Res::Err, error, Resolved);
                 }
-                return self.resolve_qself_no_trait(t, segs[segs.len() - 1].1, key, path.lo, path);
+                let (r, t) = self.resolve_qself_no_trait(t, segs[segs.len() - 1].1, key, path.lo, path);
+                return (r, t, if r == Res::Err { Resolved } else { TypeRelative });
             }
             let tp = &match q.trait_path.get() {
                 Some(tp) => tp,
-                None => return self.resolve_qself_no_trait(self_t, segs[segs.len() - 1].1, key, path.lo, path),
+                None => {
+                    let (r, t) = self.resolve_qself_no_trait(self_t, segs[segs.len() - 1].1, key, path.lo, path);
+                    return (r, t, if r == Res::Err { Resolved } else { TypeRelative });
+                }
             };
             let td = match self.tcx.resolve_type_path_def(prog, self.file, self.module, tp) {
                 Some(d) => d,
-                None => return (Res::Err, error),
+                None => return (Res::Err, error, Resolved),
             };
             // the trait path of `<T as a::b::Trait>::item` is privacy-checked like any path
             if self.tcx.validates(prog, self.file) && tp.segs.len() >= 2 && tp.no_qself() && tp.lo < prog.files[self.file as usize].src_len {
@@ -3831,16 +4181,33 @@ impl<'a> Fcx<'a> {
             }
             let name = segs[segs.len() - 1].1;
             let mut item = None;
+            let mut assoc_ty = false;
             for &it in &prog.traits[prog.def(td).sub as usize] {
                 if prog.def(it).name == name {
-                    item = Some(it);
+                    if prog.def(it).kind == DefKind::AssocTy {
+                        assoc_ty = true;
+                    } else {
+                        item = Some(it);
+                    }
                 }
             }
             let item = match item {
                 Some(i) => i,
+                None if assoc_ty => {
+                    let last = self.ast().segs(path.segs).last().unwrap();
+                    self.err(
+                        last.name.lo,
+                        format!(
+                            "E0575: cannot find method or associated constant `{}` in trait `{}`",
+                            self.text(last.name),
+                            prog.name(td),
+                        ),
+                    );
+                    return (Res::Err, error, Resolved);
+                }
                 None => {
                     self.err(path.lo, "no such trait item".to_string());
-                    return (Res::Err, error);
+                    return (Res::Err, error, Resolved);
                 }
             };
             let env = self.env.clone();
@@ -3876,7 +4243,7 @@ impl<'a> Fcx<'a> {
             let trait_regions = self.tcx.lower_region_args(Some(&self.infcx), prog, self.file, self.module, &env, tp);
             self.value_path_parent_regions = self.tcx.tys.region_args(trait_regions).to_vec();
             let t = self.value_def_ty(item, Some(args), key);
-            return (Res::Def(item), t);
+            return (Res::Def(item), t, Resolved);
         }
         if segs.len() == 1 && !path.global() {
             let (k, s) = segs[0];
@@ -3886,14 +4253,14 @@ impl<'a> Fcx<'a> {
                         // prohibit_generic_args: a local variable takes no arguments (E0109)
                         let seg = &self.ast().segs(path.segs)[0];
                         let cx = self.cx.with_infcx(&self.infcx);
-                        if self.tcx.prohibit_args_on(&cx, prog, self.file, seg, "local variable", self.text(seg.name)) { return (Res::Err, error); }
+                        if self.tcx.prohibit_args_on(&cx, prog, self.file, seg, "local variable", self.text(seg.name)) { return (Res::Err, error, Resolved); }
                         if self.inline_const_floor.last().is_some_and(|&f| li < f) && self.tcx.validates(prog, self.file) {
                             self.err(path.lo, "E0435: attempt to use a non-constant value in a constant".to_string());
-                            return (Res::Err, error);
+                            return (Res::Err, error, Resolved);
                         }
                         self.note_capture(li, key);
                         let t = self.b.locals[li as usize].ty;
-                        return (Res::Local(li), t);
+                        return (Res::Local(li), t, Resolved);
                     }
                 }
                 // rustc_resolve/src/late.rs value ribs: block items precede
@@ -3903,7 +4270,7 @@ impl<'a> Fcx<'a> {
                     if let Some(d) = prog.lookup_in_module(scope, s, false, &mut Vec::new()) {
                         let explicit = self.explicit_args(path, d, 0);
                         let t = self.value_def_ty(d, explicit, key);
-                        return (Res::Def(d), t);
+                        return (Res::Def(d), t, Resolved);
                     }
                     scope = parent;
                 }
@@ -3911,7 +4278,7 @@ impl<'a> Fcx<'a> {
                 if let Some(&(i, cfile, cty)) = self.env.consts.iter().find(|c| self.env.names.get(c.0 as usize) == Some(&s)) {
                     let env = self.env.clone();
                     let t = self.tcx.lower_ty(&self.cx.with_infcx(&self.infcx), prog, cfile, self.module, &env, cty);
-                    return (Res::ConstParam(i), t);
+                    return (Res::ConstParam(i), t, Resolved);
                 }
             }
             if k == SegKind::SelfType {
@@ -3920,9 +4287,19 @@ impl<'a> Fcx<'a> {
                     if let TyKind::Adt(d, args, _) = self.tcx.tys.kind(st).clone() {
                         let seg = &self.ast().segs(path.segs)[0];
                         let cx = self.cx.with_infcx(&self.infcx);
-                        if self.tcx.prohibit_args_on(&cx, prog, self.file, seg, "self constructor", "Self") { return (Res::Err, error); }
+                        if self.tcx.prohibit_args_on(&cx, prog, self.file, seg, "self constructor", "Self") { return (Res::Err, error, Resolved); }
                         let t = self.value_def_ty(d, Some(self.tcx.tys.list(args).to_vec()), key);
-                        return (Res::Def(d), t);
+                        return (Res::Def(d), t, TypeRelative);
+                    }
+                    if is_pat {
+                        let seg = &self.ast().segs(path.segs)[0];
+                        let cx = self.cx.with_infcx(&self.infcx);
+                        if self.tcx.prohibit_args_on(&cx, prog, self.file, seg, "self constructor", "Self") {
+                            return (Res::Err, error, Resolved);
+                        }
+                        let parent = prog.def(self.b.def).parent;
+                        let imp = if parent != NO_DEF { parent } else { self.b.def };
+                        return (Res::Def(imp), error, TypeRelative);
                     }
                 } else if let Some(imp) = self.env.owner.and_then(|o| outer_impl(prog, o)) {
                     // Res::SelfCtor of an enclosing impl, reached from a nested item (rustc never
@@ -3931,25 +4308,38 @@ impl<'a> Fcx<'a> {
                     if let Some(&st) = self.tcx.impl_self.get(&imp) {
                         if self.tcx.has_param(st) {
                             self.err(path.lo, "E0401: can't reference `Self` constructor from outer item".to_string());
-                            return (Res::Err, error);
+                            return (Res::Err, error, Resolved);
                         }
                         if let TyKind::Adt(d, args, _) = self.tcx.tys.kind(st).clone() {
                             let t = self.value_def_ty(d, Some(self.tcx.tys.list(args).to_vec()), key);
-                            return (Res::Def(d), t);
+                            return (Res::Def(d), t, TypeRelative);
                         }
+                        if is_pat { return (Res::Def(imp), error, TypeRelative); }
                     }
                 }
             }
             if let Some(d) = prog.lookup_in_scope(self.module, s, false) {
                 let explicit = self.explicit_args(path, d, 0);
                 let t = self.value_def_ty(d, explicit, key);
-                return (Res::Def(d), t);
+                return (Res::Def(d), t, Resolved);
             }
             if path.segs.len() == 1 && !path.global() {
                 if let Some(d) = prog.relaxed_import(self.module, s, false, self.file, path.lo) {
                     let explicit = self.explicit_args(path, d, 0);
                     let t = self.value_def_ty(d, explicit, key);
-                    return (Res::Def(d), t);
+                    return (Res::Def(d), t, Resolved);
+                }
+            }
+            if is_pat && matches!(k, SegKind::Ident | SegKind::SelfValue) {
+                let mut scope = self.module;
+                while let Some(parent) = prog.mods[scope as usize].lexical_parent {
+                    if let Some(d) = prog.lookup_in_module(scope, s, true, &mut Vec::new()) {
+                        return (Res::Def(d), error, Resolved);
+                    }
+                    scope = parent;
+                }
+                if let Some(d) = prog.lookup_in_scope(self.module, s, true) {
+                    return (Res::Def(d), error, Resolved);
                 }
             }
             if path.segs.len() == 1 && !path.global() && prog.syms.str(s) == "self" {
@@ -3957,17 +4347,17 @@ impl<'a> Fcx<'a> {
                 // (reported where the macro body wrote it)
                 let at = self.prog.files[self.file as usize].lint_pos(path.lo);
                 self.err(at, "E0424: expected value, found module `self`".to_string());
-                return (Res::Err, error);
+                return (Res::Err, error, Resolved);
             }
             // a generic parameter a constant may not name: collection reported it (Res::Err)
             if prog.const_param_restricted(self.b.def, self.file, path.lo) {
                 self.infcx.set_tainted_by_errors();
-                return (Res::Err, error);
+                return (Res::Err, error, Resolved);
             }
             let help = import_help(prog, self.module, s, false);
             let (at, message) = prog.unresolved_name_message(self.file, self.module, path, expected);
             self.err(at, format!("E0425: {message}{help}"));
-            return (Res::Err, error);
+            return (Res::Err, error, Resolved);
         }
         let n = segs.len();
         // `::f` (2015: a path from the crate root)
@@ -3977,13 +4367,18 @@ impl<'a> Fcx<'a> {
             if let Some(d) = prog.lookup_in_container(root, segs[0].1, false) {
                 let explicit = self.explicit_args(path, d, 0);
                 let t = self.value_def_ty(d, explicit, key);
-                return (Res::Def(d), t);
+                return (Res::Def(d), t, Resolved);
+            }
+            if is_pat {
+                if let Some(d) = prog.lookup_in_container(root, segs[0].1, true) {
+                    return (Res::Def(d), error, Resolved);
+                }
             }
         }
         if n == 1 && path.global() {
             let (at, message) = prog.unresolved_name_message(self.file, self.module, path, expected);
             self.err(at, format!("E0425: {message}"));
-            return (Res::Err, error);
+            return (Res::Err, error, Resolved);
         }
         if self.tcx.validates(prog, self.file) && path.no_qself() {
             if let Some(e) = prog.path_privacy(self.module, path.global(), &segs, Some(false), false, false).filter(|_| path.lo < prog.files[self.file as usize].src_len) {
@@ -4007,7 +4402,23 @@ impl<'a> Fcx<'a> {
         if let Some(pd) = parent {
             let pk = prog.def(pd).kind;
             if matches!(pk, DefKind::Mod | DefKind::Enum | DefKind::Trait) {
-                if let Some(d) = prog.lookup_in_container(pd, segs[n - 1].1, false) {
+                let mut trait_assoc_ty = false;
+                let found_item = if pk == DefKind::Trait {
+                    let mut val = None;
+                    for &it in &prog.traits[prog.def(pd).sub as usize] {
+                        if prog.def(it).name == segs[n - 1].1 {
+                            if prog.def(it).kind == DefKind::AssocTy {
+                                trait_assoc_ty = true;
+                            } else {
+                                val = Some(it);
+                            }
+                        }
+                    }
+                    val
+                } else {
+                    prog.lookup_in_container(pd, segs[n - 1].1, false)
+                };
+                if let Some(d) = found_item {
                     let offset = if pk == DefKind::Trait { self.tcx.fn_sig(self.prog, d).map_or(0, |s| s.n_parent_generics) as usize } else { 0 };
                     let last_args = self.explicit_args(path, d, offset);
                     // enum variant: generic args may sit on the enum segment
@@ -4040,16 +4451,28 @@ impl<'a> Fcx<'a> {
                         self.trait_item_paths.insert(self.last_lo, (pd, d));
                     }
                     let t = self.value_def_ty(d, explicit, key);
-                    return (Res::Def(d), t);
+                    return (Res::Def(d), t, Resolved);
+                }
+                if pk == DefKind::Trait
+                    && trait_assoc_ty
+                    && prog.crates[prog.mods[self.module as usize].krate as usize].edition >= 2021
+                {
+                    self.err(path.lo, "E0782: expected a type, found a trait".to_string());
+                    return (Res::Err, error, Resolved);
                 }
                 // `str::to_owned` with a module `str` in scope (a glob of std): a first segment
                 // naming a primitive type falls back to the type when the module lacks the item
                 // (rustc_resolve late.rs resolve_qpath, "required for backward compatibility")
                 let prim_first = n == 2 && !path.global() && crate::program::PRIMS.iter().any(|(nm, _)| prog.syms.get(nm) == Some(segs[0].1));
                 if pk != DefKind::Enum && pk != DefKind::Trait && !prim_first {
+                    if is_pat {
+                        if let Some(d) = prog.lookup_in_container(pd, segs[n - 1].1, true) {
+                            return (Res::Def(d), error, Resolved);
+                        }
+                    }
                     let (at, message) = prog.unresolved_name_message(self.file, self.module, path, expected);
                     self.err(at, format!("E0425: {message}"));
-                    return (Res::Err, error);
+                    return (Res::Err, error, Resolved);
                 }
             }
         }
@@ -4072,7 +4495,7 @@ impl<'a> Fcx<'a> {
                 let names: Vec<_> = written.iter().map(|s| self.text(s.name)).collect();
                 let message = prog.path_resolution_message(self.module, path.global(), &names, failed, parent);
                 self.err(written[failed].name.lo, format!("E0433: {message}{help}"));
-                return (Res::Err, error);
+                return (Res::Err, error, Resolved);
             }
         };
         // (rustc probe_for_name / resolve_fully_qualified_call: the self type is structurally resolved --
@@ -4088,9 +4511,9 @@ impl<'a> Fcx<'a> {
         // enum variant through a type alias / Self
         if let TyKind::Adt(ad, aargs, _) = self.tcx.tys.kind(self_ty).clone() {
             if prog.def(ad).kind == DefKind::Enum {
-                if let Some(v) = prog.lookup_in_container(ad, name, false) {
+                if let Some(v) = prog.lookup_in_container(ad, name, true) {
                     let t = self.value_def_ty(v, Some(self.tcx.tys.list(aargs).to_vec()), key);
-                    return (Res::Def(v), t);
+                    return (Res::Def(v), t, TypeRelative);
                 }
             }
         }
@@ -4124,7 +4547,7 @@ impl<'a> Fcx<'a> {
                 }
                 if crate::lint::enabled() { self.b.trait_item_paths.insert(key, item); }
                 let t = self.value_def_ty(item, Some(args), key);
-                return (Res::Def(item), t);
+                return (Res::Def(item), t, TypeRelative);
             }
         }
         match self.assemble_inherent_impl_probe(self_ty, name) {
@@ -4145,13 +4568,13 @@ impl<'a> Fcx<'a> {
                 }
                 let user_self = crate::types::user_type::UserSelfTy { impl_def_id: imp, self_ty };
                 let t = self.value_def_ty_with_self(item, Some(args), key, Some(user_self));
-                (Res::Def(item), t)
+                (Res::Def(item), t, TypeRelative)
             }
             None => {
                 // a trait method implemented for this type
                 let cands = self.extension_candidates(self_ty, name, DefKind::AssocFn);
                 if cands.iter().any(|c| self.prog.def(c.0).parent != self.prog.def(cands[0].0).parent) {
-                    self.err(path.lo, "E0034: multiple applicable items in scope".into()); return (Res::Err, error);
+                    self.err(path.lo, "E0034: multiple applicable items in scope".into()); return (Res::Err, error, Resolved);
                 }
                 if let Some(&(item, imp)) = cands.first() {
                     let offset = self.tcx.fn_sig(self.prog, item).map_or(0, |s| s.n_parent_generics) as usize;
@@ -4163,7 +4586,7 @@ impl<'a> Fcx<'a> {
                     if crate::lint::enabled() { self.b.trait_item_paths.insert(key, item); }
                     let args = self.trait_call_args(item, imp, self_ty, &la);
                     let t = self.value_def_ty(item, Some(args), key);
-                    return (Res::Def(item), t);
+                    return (Res::Def(item), t, TypeRelative);
                 }
                 // an associated const / fn of a trait: through the body's bounds (`T::ZERO` with
                 // T: Zeroable, checked as the instance type), else a trait in scope implemented
@@ -4179,17 +4602,17 @@ impl<'a> Fcx<'a> {
                         args.push(if i < la.len() { la[i] } else { self.fresh_arg(item, args.len()) });
                     }
                     let t = self.value_def_ty(item, Some(args), key);
-                    return (Res::Def(item), t);
+                    return (Res::Def(item), t, TypeRelative);
                 }
-                if let Some(r) = self.scoped_assoc_const(self_ty, name, key) {
-                    return r;
+                if let Some((r, t)) = self.scoped_assoc_const(self_ty, name, key) {
+                    return (r, t, if r == Res::Err { Resolved } else { TypeRelative });
                 }
                 // report_method_error, rustc_hir_typeck/src/method/suggest.rs:312-315.
-                if self.tcx.tys.has_error(self.infcx.deeply_resolve_ignoring_regions(self_ty)) { return (Res::Err, error); }
+                if self.tcx.tys.has_error(self.infcx.deeply_resolve_ignoring_regions(self_ty)) { return (Res::Err, error, Resolved); }
                 let ts = self.ty_str(self_ty);
                 let kind = self.ty_prefix(self_ty);
                 self.err(path.lo, format!("E0599: no function or associated item named `{}` found for {}`{}` in the current scope", prog.syms.str(name), kind, ts));
-                (Res::Err, error)
+                (Res::Err, error, Resolved)
             }
         }
     }
@@ -4892,10 +5315,10 @@ impl<'a> Fcx<'a> {
             return Some(st);
         }
         // generic param `T::item`
-        if n == 1 {
+        if n == 1 && !path.global() {
             let s = self.sym(self.ast().segs(path.segs)[0].name);
             for (i, nm) in self.env.names.iter().enumerate() {
-                if *nm == s && i < self.b.args.len() {
+                if *nm == s && i < self.b.args.len() && !self.env.consts.iter().any(|c| c.0 as usize == i) {
                     return Some(self.b.args[i]);
                 }
             }
@@ -5341,7 +5764,7 @@ impl<'a> Fcx<'a> {
             },
             ExprKind::Binary(op, a, b) => self.check_binary(e, *op, *a, *b, expected, lo),
             ExprKind::Assign(a, b) => {
-                if crate::lit::is_assignee_pattern(self.ast(), *a) {
+                if self.is_assignee_expr(*a) {
                     // destructuring assignment: the right side's type is matched by the
                     // assignee like a pattern (rustc lowers it to `let` + assignments)
                     let tb = self.check_expr(*b, None);
@@ -6000,7 +6423,11 @@ impl<'a> Fcx<'a> {
                     return arr;
                 }
                 let usize_ = self.tcx.tys.usize_;
-                self.check_expr(*n, Some(usize_));
+                // the count is a body of type `usize` (rustc type-checks it as an anonymous constant
+                // and coerces its value to that type): `16 * 16 * 4` is a usize product, its literals
+                // too, though a binary operator's left operand takes no expectation
+                let tn = self.check_expr(*n, Some(usize_));
+                self.coerce_or_unify(tn, usize_, Some(*n), self.ast().expr(*n).lo);
                 // hir_ty_lowering/mod.rs:2390: retain the repeat body's identity;
                 // fulfillment evaluates it through the same query as array types.
                 let lowered = self.tcx.lower_const_arg(self.prog, self.file, &self.env, *n, usize_);
@@ -6775,10 +7202,23 @@ impl<'a> Fcx<'a> {
     /// `(if c { &a } else { &b }) * 2` the arms stay `&u16` and `&u16: Mul<u16>` applies.
     fn operand_hint(&self, a: ExprId, hint: Option<TyId>) -> Option<TyId> {
         let mut x = a;
+        let mut negated = false;
         loop {
             match self.ast().expr(x).kind {
                 ExprKind::Paren(i) => x = i,
-                ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Block(..) | ExprKind::Unsafe(_) | ExprKind::TryBlock(_) => return None,
+                // An unsuffixed numeric literal, negated or not, takes the hint's type in check_lit,
+                // where rustc gives it none (op.rs check_overloaded_binop checks the left operand
+                // with no expectation). When both operands are scalars the built-in operator makes
+                // the literal the right operand's type and the result's anyway; otherwise the
+                // operator is `<{float} as Mul<?R>>` until `?R` is known, and the literal may fall
+                // back to f64: `0.75 * sign` with an unannotated closure parameter `sign` stored
+                // into an f32 is E0271 in rustc, which the hint made an f32 product.
+                ExprKind::Unary(UnOp::Neg, i) => {
+                    negated = true;
+                    x = i;
+                }
+                ExprKind::Lit(LitKind::Int | LitKind::Float) => return None,
+                ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Block(..) | ExprKind::Unsafe(_) | ExprKind::TryBlock(_) if !negated => return None,
                 _ => return hint,
             }
         }
@@ -8442,6 +8882,16 @@ impl<'a> Fcx<'a> {
             match prog.resolve_mod_path(self.module, path.global(), &segs[..=k], false, false) {
                 Some(d) => parent = Some(d),
                 None => { failed = k; break; }
+            }
+        }
+        if failed == n - 1 && self.tcx.validates(prog, self.file) && path.no_qself() {
+            if let Some(e) = prog.path_privacy(self.module, path.global(), &segs[..n - 1], Some(true), false, false)
+                .filter(|_| path.lo < prog.files[self.file as usize].src_len)
+            {
+                if let Some(m) = crate::lint::privacy_diag(prog, self.file, path.lo, &e) {
+                    self.err(path.lo, m);
+                    return;
+                }
             }
         }
         let std_module = parent.is_some_and(|d| matches!(prog.syms.str(prog.crates[prog.def(d).krate as usize].name), "core" | "std" | "alloc"));

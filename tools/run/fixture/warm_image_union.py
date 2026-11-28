@@ -10,15 +10,20 @@ usage: warm_image_union.py [--makepad <makepad binary>]
 
 A program that presents is written to a fresh dir (its own RELAX_HOME). Each run calls a common
 set of fns and one of two sets of its own (UNION_START=a or b, 200 slots each), presents
-(`relax_first_present`), then quits the way an app does (`relax_quit_started`: the quit write
-records the startup manifest and its image) and ends. It runs a, b, a, b, a, b under
+(`relax_first_present`), ends three frames (`relax_frame_done`) of which the first two call 200
+new fns each (through a vtable) and the last none, then quits the way an app does (`relax_quit_started`: the quit
+write records the startup manifest and its image) and ends. It runs a, b, a, b, a, b under
 `makepad run --verbose`.
   - the first run is cold and writes the manifest and the image of start a;
   - the second, of start b, finds b's slots new and a's not called, and writes the union of both;
   - from the third on, each start is held by the loaded manifest and image: every run prelinks
     from the image and none writes the manifest or the image again.
+  - from the second on, no fn the frames after the present call is linked on the main thread
+    after the present (RELAX_POSTFRAME_LOG): the startup image holds them all.
 Red before the union of recent startups (cache.rs record_manifest): every run rewrote both for
-its own start, which the next run rewrote back.
+its own start, which the next run rewrote back. Red before the startup image's window stayed open
+until a frame in which main reached no new code (postframe.rs image_window_open): it closed at the
+frame after the present, and every start linked the second frame's 200 fns on main again.
 Then the struct start a's slots read gains a field before the one they read, and it runs b, a:
   - b, the first start on the new source, records a's slots it did not run with the manifest it
     writes, stamped with the new sources;
@@ -38,6 +43,7 @@ MAIN = """use std::hint::black_box;
 
 extern "C" {
     fn relax_first_present();
+    fn relax_frame_done();
     fn relax_quit_started();
 }
 
@@ -61,6 +67,16 @@ fn only_b<const N: usize>(_s: &Shape) -> u64 {
     black_box(N as u64 * 5)
 }
 
+#[inline(never)]
+fn first_frame<const N: usize>(_s: &Shape) -> u64 {
+    black_box(N as u64 * 7)
+}
+
+#[inline(never)]
+fn next_frame<const N: usize>(_s: &Shape) -> u64 {
+    black_box(N as u64 * 11)
+}
+
 // 200 slots of `f`: one per const argument
 macro_rules! each {
     ($f:ident, $s:ident; $($n:literal)*) => { 0 $(+ $f::<{ $n }>($s) + $f::<{ 100 + $n }>($s) + $f::<{ 200 + $n }>($s) + $f::<{ 300 + $n }>($s))* };
@@ -81,11 +97,42 @@ fn start_b(s: &Shape) -> u64 {
     each!(only_b, s; %(d)s)
 }
 
+// the frames after the present reach their code through a vtable, as an app's event handlers do:
+// no call from a startup slot's code names it (the image takes such callees in by its calls)
+trait Frame {
+    fn run(&self, s: &Shape) -> u64;
+}
+
+struct One;
+struct Two;
+
+impl Frame for One {
+    #[inline(never)]
+    fn run(&self, s: &Shape) -> u64 {
+        each!(first_frame, s; %(d)s)
+    }
+}
+
+impl Frame for Two {
+    #[inline(never)]
+    fn run(&self, s: &Shape) -> u64 {
+        each!(next_frame, s; %(d)s)
+    }
+}
+
 fn main() {
     let a = std::env::var("UNION_START").map_or(false, |s| s == "a");
     let s = black_box(Shape { %(init)sb: B });
     let v = start_common(&s) + if a { start_a(&s) } else { start_b(&s) };
+    let frames: [&dyn Frame; 2] = black_box([&One, &Two]);
     unsafe { relax_first_present() };
+    // the present's frame ends; the next two reach new code, the last none
+    unsafe { relax_frame_done() };
+    let v = v + frames[0].run(&s);
+    unsafe { relax_frame_done() };
+    let v = v + frames[1].run(&s);
+    unsafe { relax_frame_done() };
+    unsafe { relax_frame_done() };
     println!("out {}", v);
     unsafe { relax_quit_started() };
 }
@@ -103,7 +150,7 @@ def source(layout):
 
 
 def expected(start):
-    return sum(n + 1 for n in NS) + sum(n * 3 + B if start == "a" else n * 5 for n in NS)
+    return sum(n + 1 + n * 7 + n * 11 for n in NS) + sum(n * 3 + B if start == "a" else n * 5 for n in NS)
 CARGO = """[package]
 name = "relax-warm-image-union"
 version = "0.1.0"
@@ -116,9 +163,9 @@ BROKE = ("panicked", "internal compiler error", "FATAL")
 WROTE = ("startup image of ", "startup manifest rewritten")
 
 
-def run(jit, pkg, home, start):
+def run(jit, pkg, home, start, frames_log):
     env = dict(os.environ, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"), RELAX_TARGET_DIR=os.path.join(home, "target"),
-               MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", UNION_START=start)
+               MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", UNION_START=start, RELAX_POSTFRAME_LOG=frames_log)
     env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
     p = subprocess.run(jit + ["run", "--quiet", "--verbose", "relax-warm-image-union"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
     err = p.stderr.splitlines()
@@ -137,7 +184,8 @@ def check(jit, work):
     for i, start in enumerate("ababab" + "ba"):
         if i == 6:
             open(os.path.join(pkg, "src", "main.rs"), "w").write(source(1))
-        p, err = run(jit, pkg, home, start)
+        frames_log = os.path.join(work, "postframe.%d" % (i + 1))
+        p, err = run(jit, pkg, home, start, frames_log)
         broke = next((l.strip()[:200] for l in err if any(b in l for b in BROKE)), None)
         out = next((l for l in p.stdout.splitlines() if l.startswith("out ")), None)
         if p.returncode != 0 or broke or not out:
@@ -146,6 +194,10 @@ def check(jit, work):
             return "run %d (start %s%s): %s, expected out %d" % (i + 1, start, ", new layout" if i >= 6 else "", out, expected(start))
         if i >= 6:
             continue
+        if i >= 1:
+            linked = [l for l in (open(frames_log, errors="replace").read().splitlines() if os.path.exists(frames_log) else []) if "first_frame" in l or "next_frame" in l]
+            if linked:
+                return "run %d (start %s): %d fns of the frames after the present linked on main after it, not prelinked (first: %s)" % (i + 1, start, len(linked), linked[0][:160])
         wrote = [w.strip() for w in WROTE if any(w in l for l in err)]
         if i == 0 and "startup image of" not in wrote:
             return "run 1 (start a): no startup image was written"

@@ -6,6 +6,7 @@
 //! makes the body "unchecked" (`BuildError`), never an error.
 use super::range::{leaf_bits, scalar_size};
 use crate::ast::{ExprId, ExprKind, LitKind, UnOp};
+use crate::const_eval::{ErrorHandled, ValTreeCreationError};
 use crate::consts::{self, GenericArg, ScalarInt, ValTree, Value};
 use crate::mir::build::thir::{Cx, ErrorGuaranteed, FieldPat, Pat, PatKind, Pinnedness};
 use crate::mir::build::BuildResult;
@@ -35,7 +36,7 @@ impl Cx<'_> {
         let (prog, tcx) = (self.root.cx.prog, self.root.cx.tcx);
         let tb = self.root.typeck;
         let flags = tcx.tys.flags(ty);
-        if flags.intersects(TypeFlags::HAS_ALIAS) || !self.valtree_type(ty, 0) {
+        if flags.intersects(TypeFlags::HAS_ALIAS | TypeFlags::HAS_TY_PARAM) {
             return self.unresolved(span, "constant pattern of a type without a value tree");
         }
         let args: Vec<GenericArg> = match tb.res_args.get(&key) {
@@ -55,39 +56,10 @@ impl Cx<'_> {
         let env = TypingEnv { mode: TypingMode::PostAnalysis, ..self.root.cx.env };
         match tcx.const_eval_resolve(prog, env, d, &args) {
             Ok(tree) => Ok(tree),
-            Err(_) => self.unresolved(span, "constant pattern does not evaluate"),
-        }
-    }
-
-    /// Whether a value of type `ty` has a value tree (rustc valtree creation: no raw pointers,
-    /// unions, trait objects, ...).
-    fn valtree_type(&self, ty: TyId, depth: u32) -> bool {
-        let tcx = self.root.cx.tcx;
-        if depth > 16 {
-            return false;
-        }
-        match *tcx.tys.kind(ty) {
-            TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Float(_) | TyKind::Str => true,
-            TyKind::Ref(_, i, _) => self.valtree_type(i, depth + 1),
-            TyKind::Array(e, _) | TyKind::Slice(e) => self.valtree_type(e, depth + 1),
-            TyKind::Tuple(l) => tcx.tys.list(l).iter().all(|x| self.valtree_type(*x, depth + 1)),
-            TyKind::Adt(d, args, _) => {
-                let Some(a) = tcx.adts.get(&d) else { return false };
-                // (a type that never has a value tree of its own may still sit in an unused variant:
-                // `None::<Cell<_>>` is a constant; `valtree_to_pat` refuses one a value actually holds)
-                if a.is_union() || a.is_manually_drop() || a.is_unsafe_cell() || a.is_unsafe_pinned() || a.is_box() {
-                    return true;
-                }
-                let tys = tcx.tys.list(args);
-                (0..a.variants.len()).all(|vi| {
-                    a.variants[vi].fields.iter().all(|f| {
-                        let ft = tcx.tys.subst(f.ty, tys);
-                        let ft = tcx.try_normalize_erasing_regions(self.root.cx.prog, self.root.cx.env, ft).unwrap_or(ft);
-                        self.valtree_type(ft, depth + 1)
-                    })
-                })
+            Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(_))) => {
+                self.unresolved(span, "constant pattern of a type without a value tree")
             }
-            _ => false,
+            Err(_) => self.unresolved(span, "constant pattern does not evaluate"),
         }
     }
 
@@ -119,7 +91,7 @@ impl Cx<'_> {
         let kind = match *tys.kind(ty) {
             TyKind::Adt(adt, args, _) => {
                 let Some(a) = tcx.adts.get(&adt) else { return self.unresolved(span, "constant of an unknown ADT") };
-                if a.is_union() || a.is_manually_drop() || a.is_unsafe_cell() || a.is_unsafe_pinned() || a.is_box() {
+                if a.is_union() || a.is_unsafe_cell() || a.is_unsafe_pinned() || a.is_box() {
                     return self.unresolved(span, "constant of a type without a value tree in a pattern");
                 }
                 let Some(branches) = value.valtree.try_to_branch() else { return self.unresolved(span, "constant ADT is not a branch") };

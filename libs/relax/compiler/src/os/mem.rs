@@ -31,7 +31,9 @@ pub fn no_codegen() -> bool {
 /// in the process (the JIT, a kernel compiler, a library) shows up here.
 #[cfg(target_vendor = "apple")]
 pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
-    #[repr(C)]
+    // `vm_region_basic_info_64` as the SDK declares it, under `#pragma pack(4)`: 36 bytes, so
+    // `count` is exactly `VM_REGION_BASIC_INFO_COUNT_64` (9).
+    #[repr(C, packed(4))]
     #[derive(Default)]
     struct BasicInfo64 {
         protection: i32,
@@ -46,7 +48,7 @@ pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
     use super::proc::{dladdr, DlInfo};
     extern "C" {
         fn mach_task_self() -> u32;
-        fn mach_vm_region(task: u32, addr: *mut u64, size: *mut u64, flavor: i32, info: *mut BasicInfo64, count: *mut u32, object: *mut u32) -> i32;
+        fn mach_vm_region(task: u32, addr: *mut u64, size: *mut u64, flavor: i32, info: *mut i32, count: *mut u32, object: *mut u32) -> i32;
     }
     const VM_REGION_BASIC_INFO_64: i32 = 9;
     const VM_PROT_EXECUTE: i32 = 4;
@@ -58,7 +60,7 @@ pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
             let mut info = BasicInfo64::default();
             let mut count = (std::mem::size_of::<BasicInfo64>() / 4) as u32;
             let mut object = 0u32;
-            if mach_vm_region(mach_task_self(), &mut addr, &mut size, VM_REGION_BASIC_INFO_64, &mut info, &mut count, &mut object) != 0 {
+            if mach_vm_region(mach_task_self(), &mut addr, &mut size, VM_REGION_BASIC_INFO_64, (&mut info as *mut BasicInfo64).cast::<i32>(), &mut count, &mut object) != 0 {
                 break;
             }
             if info.protection & VM_PROT_EXECUTE != 0 {

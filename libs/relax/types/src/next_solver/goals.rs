@@ -143,6 +143,11 @@ impl EvalCtxt<'_, '_> {
                 GenericArg::Lifetime(_) => false,
             });
             if generic { return Ok(None); }
+            if self.delegate.typing_mode.get().is_erased_not_coherence()
+                && self.const_type(&alias).is_ok_and(|ty| tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_ALIAS))
+            {
+                return Err(self.opaque_accesses.rerun_always());
+            }
             (alias.args.clone(), crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: *env, mode: self.delegate.typing_mode.get() })
         };
         match tcx.const_eval_resolve(prog, typing_env, def, &args) {

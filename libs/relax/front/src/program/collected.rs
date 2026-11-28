@@ -399,7 +399,9 @@ impl Program {
         if n > r.bytes.len() || n != pre.len() { return None; }
         let contexts = crate::source_context::Context::for_crates(pre, p.sources.clone(), session);
         p.load_recipe = pre.to_vec();
-        for context in contexts {
+        let context_count = contexts.len();
+        for (i, context) in contexts.into_iter().enumerate() {
+            let pc = pre.get(i).unwrap_or_else(|| panic!("restore_collected: {context_count} contexts but {} recipe crates", pre.len()));
             let name = Codec::get(&mut r)?;
             let root_mod = Codec::get(&mut r)?;
             let edition = Codec::get(&mut r)?;
@@ -411,7 +413,7 @@ impl Program {
             context.restore_fingerprint(selection_hash);
             p.crates.push(CrateInfo {
                 name, root_mod, edition, recursion_limit: 128, deps, cfg: CfgSet { set, session: session.clone() },
-                proc_macro, is_bin: false, harness: false, validate: false, rustc_laid: false, relaxed: OnceLock::new(), export_opt_level: OnceLock::new(), features: OnceLock::new(), impl_view: OnceLock::new(), root_path, context,
+                proc_macro, is_bin: pc.is_bin, harness: pc.harness, validate: false, rustc_laid: false, relaxed: OnceLock::new(), export_opt_level: OnceLock::new(), features: OnceLock::new(), impl_view: OnceLock::new(), root_path, context,
             });
         }
         macro_rules! get { ($($f:ident),+) => { $(p.$f = Codec::get(&mut r)?;)+ }; }

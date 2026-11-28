@@ -9,7 +9,6 @@
 #                     shown and no UI block of 100 ms or more (`inspect jit`'s session line: `UI blocked
 #                     max N ms, all N ms, spinner N`). Its first compiles on program threads (code the
 #                     first session never ran) are reported, not failed: they must only be cheap.
-# Sandbox with a Play: local/agent_state/relax-campaign/warmzero-tools/wz.py (same rule, real Play click).
 # Run from the workspace root (the JIT runs through `cargo run --profile host`).
 # PACKAGES (default "makepad-app-calculator"; each word is a `makepad run` argument list with ',' for
 # spaces), WAIT (seconds to the first present / to idle, default 300), the JIT runs through `cargo run --profile host`.
@@ -20,7 +19,12 @@ J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run -
 B=$J
 PACKAGES=${PACKAGES:-makepad-app-calculator,--no-default-features,--features,standalone}
 WAIT=${WAIT:-300}
-dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_zero.XXXXXX") || exit 1
+if [ -n "${GATE_FIXTURE_LOGS:-}" ]; then
+    dir=$GATE_FIXTURE_LOGS
+    mkdir -p "$dir" || exit 1
+else
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_zero.XXXXXX") || exit 1
+fi
 fails=0
 k=0
 session() { # session <dir> <run home> <label> <args...>: one launch to idle and quit; prints its `jit` session line
@@ -64,5 +68,5 @@ for spec in $PACKAGES; do
         fails=$((fails + 1))
     fi
 done
-[ $fails = 0 ] && [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
+if [ -z "${GATE_FIXTURE_LOGS:-}" ] && [ $fails = 0 ] && [ "${KEEP:-0}" != 1 ]; then rm -rf "$dir"; fi
 [ $fails = 0 ]

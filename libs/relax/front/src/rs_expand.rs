@@ -31,7 +31,9 @@ pub(crate) fn expand<'a>(src: &'a [u8], toks: impl Into<super::lazy_bodies::Toks
     let reuse = crate::parse_work::Session::new(Arc::default());
     let toks: super::lazy_bodies::Toks<'_> = toks.into();
     // the lints' records come from the parse (uses::unrecorded)
-    crate::macros::uses::unrecorded(|| outline(Parser::new(&ctx.cfg.session, src, toks, edition), ctx.clone(), table, reuse))
+    crate::macro_reg::capture_derive_failures(|| {
+        crate::macros::uses::unrecorded(|| outline(Parser::new(&ctx.cfg.session, src, toks, edition), ctx.clone(), table, reuse))
+    }).0
 }
 
 fn outline(mut p: Parser<'_>, ctx: std::rc::Rc<crate::builtins::FileCtx>, table: Arc<crate::macros::MacroTable>,
@@ -203,10 +205,13 @@ impl Parser<'_> {
                 out.extend_from_slice(&self.toks.range(start, stop));
             }
             if kind == T::KwUse {
+                self.pos = head;
+                let vis = self.vis()?;
                 self.pos = keyword + 1;
-                let global = self.eat(T::PathSep);
+                let global = self.eat(T::PathSep) || self.at_dollar_crate();
                 let tree = self.use_tree()?;
-                self.record_use(global, &tree);
+                let vis = self.use_vis(vis);
+                self.record_use(global, &tree, vis);
             }
             self.pos = stop;
             let mut linked = true;
@@ -335,6 +340,22 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outline_derive_failures_stay_out_of_global_table() {
+        let path = crate::macro_reg::FailurePath("derive_outline.rs");
+        let src = b"#[derive(__Slice2OutlineDerive)] pub struct S { x: u32 }";
+        let sess = Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(&sess, &[]);
+        let _guard = crate::builtins::seed_pre_derive_failure(path.0, cfg.holds("test"), 0, src.len() as u32,
+            "__Slice2OutlineDerive", "outline");
+        let mut toks = Vec::new();
+        crate::lexer::lex(src, 2021, &mut toks).map_err(|e| e.msg).unwrap();
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", path.0, "test", &cfg));
+        expand(src, toks, 2021, ctx, Arc::default());
+        assert!(!crate::builtins::has_pre_derive_entries(path.0), "outline missed the seeded entry");
+        assert!(path.messages().is_empty(), "outline published a failure");
+    }
 
     #[test]
     fn inner_cfg_precedes_item_macro_expansion() {

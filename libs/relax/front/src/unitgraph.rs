@@ -538,6 +538,8 @@ pub enum ScriptRole {
     Answered(Vec<String>),
     /// a Relax crate's own source stamp (libs/relax/self_stamp.rs): answered by `self_stamp_text`
     SelfStamp,
+    /// The compiler's source stamp, codegen parts, std digest and JIT provenance.
+    RelaxCompiler,
     /// to be removed from the source
     ToRemove,
 }
@@ -551,6 +553,7 @@ pub fn script_role(pkg: &str, bs: &BuildScript) -> ScriptRole {
         // Relax's crates compiled from source by a program (makepad-script-compute's non-provided
         // code reaches relax-backend): their script only writes the source stamp
         "relax-base" | "relax-lex" | "relax-session" | "relax-types" | "relax-backend" | "relax-codegen" | "relax-front" => ScriptRole::SelfStamp,
+        "relax-compiler" => ScriptRole::RelaxCompiler,
         _ if bs.kept => ScriptRole::Artefact,
         // pkg-config probes: the libraries of the enabled features (none with dlopen)
         "wayland-sys" => {
@@ -837,7 +840,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     if sess.options.no_codegen {
         for bs in &g.build_scripts {
             let (_, pname, _) = &g.pkg[bs.krate];
-            if !matches!(script_role(pname, bs), ScriptRole::Native(_) | ScriptRole::SelfStamp) && !noop::script(bs, &g.raw) {
+            if !matches!(script_role(pname, bs), ScriptRole::Native(_) | ScriptRole::SelfStamp | ScriptRole::RelaxCompiler) && !noop::script(bs, &g.raw) {
                 return Err(format!("build scripts are not supported in no-codegen mode: {} ({})", pname, bs.src_path));
             }
         }
@@ -1100,6 +1103,13 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                     Ok(String::new())
                 })();
                 done(i, r, out_dir, false);
+                continue;
+            }
+            ScriptRole::RelaxCompiler => {
+                match relax_compiler_answer(g, bs, root) {
+                    Ok((out_dir, lines)) => done(i, Ok(lines.join("\n")), out_dir, false),
+                    Err(e) => done(i, Err(e), String::new(), false),
+                }
                 continue;
             }
             ScriptRole::Native(a) => {
@@ -1974,20 +1984,15 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         }
         Err(why) => why,
     };
-    // One run at a time makes a script's output (its OUT_DIR is one folder for every run of this
-    // run dir): the run holds `relax-claim` beside it locked while its script runs. A run
-    // that finds it held waits and takes the output the other made, where two runs started
-    // together each compiled and ran every script. The OS drops the lock with a run that dies.
+    // One run at a time makes a reusable output. The claim covers all placements of this
+    // script: a holder's new declarations may move a waiter to a different build dir.
     // The script slot (this process's) comes first: a run holding the claim and waiting for a slot
     // could wait on a slot whose script's nested run waits for this claim (a package that is
     // both a dependency here and a build-dependency of another script).
-    // The run that holds it names itself in it (its pid and its owner, `claim_holder`):
-    // a waiter says whom it waits on, and a hang names its holder. A relax-runner test sat 26 min
-    // on its build-script claim, held by a hung run of another owner (11-13).
-    let _slot = script_slot();
     let claim_path = format!("{}/relax-claim", base_dir);
-    let claim = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&claim_path).ok();
-    if let Some(claim) = claim.as_ref().filter(|claim| claim.try_lock().is_err()) {
+    let mut waited = false;
+    let acquired = acquire_claim(&claim_path, CLAIM_WAIT_BUDGET, || {
+        waited = true;
         // (a silent run's stderr is its program's: the line goes to the session log alone.) Every
         // wait is kept beside the claim (relax-claim-waits, the last 20), a check's too, which
         // keeps no session log. A wait on a sibling of the same `check -p`, whose serial run never
@@ -2001,22 +2006,36 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         } else {
             crate::progress::log(&line);
         }
-        let _ = claim.lock();
-        // (the wait can be long: the checkout's files are read again)
-        if let Some(content) = &shared {
-            content.borrow_mut().clear();
-        }
-        let (at, standing) = place();
-        build_dir = at;
-        match standing {
-            Ok(old) => {
-                if sess.runtime.profile { eprintln!("relax build-script: {} made by another run", pname); }
-                return (Ok(old), format!("{}/out", build_dir), confined);
+    });
+    let publish = matches!(acquired, ClaimAcquire::Claimed(..));
+    match &acquired {
+        ClaimAcquire::Claimed(_slot, claim) => {
+            if waited {
+                if let Some(content) = &shared {
+                    content.borrow_mut().clear();
+                }
+                let (at, standing) = place();
+                build_dir = at;
+                match standing {
+                    Ok(old) => {
+                        if sess.runtime.profile { eprintln!("relax build-script: {} made by another run", pname); }
+                        return (Ok(old), format!("{}/out", build_dir), confined);
+                    }
+                    Err(now) => why = now,
+                }
             }
-            Err(now) => why = now,
+            if let Some(f) = claim { name_claim(f); }
+        }
+        ClaimAcquire::Fallback(_slot, elapsed) => {
+            build_dir = match own_script_dir(root, &build_dir) {
+                Ok(own) => own,
+                Err(e) => return (Err(format!("build script of {pname}: cannot reserve a private output directory: {e}")), out_dir, confined),
+            };
+            let line = format!("relax build-script: {pname} claim {claim_path} still held after {elapsed:.2?} ({}); running in isolated OUT_DIR {build_dir}/out", claim_holder(&claim_path));
+            keep_noted(&format!("{base_dir}/relax-claim-waits"), &line);
+            if sess.runtime.profile { eprintln!("{line}"); } else { crate::progress::log(&line); }
         }
     }
-    if let Some(claim) = claim.as_ref() { name_claim(claim); }
     out_dir = format!("{}/out", build_dir);
     let _ = std::fs::create_dir_all(&out_dir);
     cmd.env("OUT_DIR", &out_dir);
@@ -2025,10 +2044,11 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let env_path = format!("{}/relax-rerun-env", build_dir);
     // an output stands with its key, written after it: a folder this run makes again holds none
     // until the run is done (a start whose inputs read the same never takes it half made)
-    let _ = std::fs::remove_file(&key_path);
-    // why this script runs again, kept beside its output (relax-rerun-why: the last 20) and shown with RELAX_PROFILE
+    if publish {
+        let _ = std::fs::remove_file(&key_path);
+        note_rerun(&build_dir, &why);
+    }
     if sess.runtime.profile { eprintln!("relax build-script: {} runs: {}", pname, why); }
-    note_rerun(&build_dir, &why);
     let started = std::time::Instant::now();
     let output = cmd.output();
     if sess.runtime.profile {
@@ -2040,11 +2060,19 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
             let refused = refusals(&stdout, &out_dir);
             if !refused.is_empty() {
                 // nothing of it is kept, so it never stands
-                let _ = std::fs::remove_file(&key_path);
-                let _ = std::fs::remove_file(&output_path);
+                if publish {
+                    let _ = std::fs::remove_file(&key_path);
+                    let _ = std::fs::remove_file(&output_path);
+                }
                 return (Err(format!("{}: the build script of `{}` ran confined and printed what a confined build script may not:\n  {}", bs.src_path, pname, refused.join("\n  "))), out_dir, confined);
             }
             let stdout = if shared.is_some() { shared_output(&stdout) } else { stdout };
+            if let Some(given) = &given {
+                say_withheld(pname, &stdout, given);
+            }
+            if !publish {
+                return (Ok(stdout), out_dir, confined);
+            }
             // an output that names its checkout stands for that checkout alone (`names_checkout`),
             // one that names the program that ran it for that program alone (`names_program`)
             let own = shared.is_some() && names_checkout(&stdout, &out_dir);
@@ -2058,9 +2086,6 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
                 }
             }
             let keyed = keyed_output(&stdout, own, program);
-            if let Some(given) = &given {
-                say_withheld(pname, &stdout, given);
-            }
             if let Some(key) = rerun_key(&keyed, dir, &env_key, shared.as_ref(), given.as_deref()) {
                 let _ = std::fs::write(&output_path, &stdout);
                 let _ = std::fs::write(&key_path, key);
@@ -2071,7 +2096,7 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
             // what the script declared names the place of its next output (`script_build_dir`)
             let declared = declared_inputs(&keyed);
             if std::fs::read_to_string(&declared_path).ok().as_deref() != Some(declared.as_str()) {
-                let _ = std::fs::write(&declared_path, &declared);
+                let _ = write_atomic_text(&declared_path, &declared);
             }
             (Ok(stdout), out_dir, confined)
         }
@@ -2821,6 +2846,74 @@ fn script_slot() -> ScriptSlot {
     ScriptSlot
 }
 
+/// Claim-polling budget. Taking a process-local script slot can itself wait.
+const CLAIM_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(4);
+const CLAIM_POLL_MIN: std::time::Duration = std::time::Duration::from_millis(50);
+const CLAIM_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(200);
+
+enum ClaimAcquire {
+    Claimed(ScriptSlot, Option<std::fs::File>),
+    Fallback(ScriptSlot, std::time::Duration),
+}
+
+/// Takes a slot before trying the claim, and releases the slot between attempts.
+fn acquire_claim(claim_path: &str, budget: std::time::Duration, on_first_wait: impl FnOnce()) -> ClaimAcquire {
+    let start = std::time::Instant::now();
+    let mut delay = CLAIM_POLL_MIN;
+    let mut on_first_wait = Some(on_first_wait);
+    let Ok(claim) = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(claim_path) else {
+        return ClaimAcquire::Claimed(script_slot(), None);
+    };
+    loop {
+        let slot = script_slot();
+        if claim.try_lock().is_ok() {
+            return ClaimAcquire::Claimed(slot, Some(claim));
+        }
+        drop(slot);
+        if let Some(note) = on_first_wait.take() { note(); }
+        let remaining = budget.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return ClaimAcquire::Fallback(script_slot(), start.elapsed());
+        }
+        std::thread::sleep(delay.min(remaining));
+        delay = (delay * 2).min(CLAIM_POLL_MAX);
+    }
+}
+
+/// Reserve before registering: a recycled pid can have left an output under the same name.
+/// Exit releases its use lock. A later prune can reclaim an old dir once no root names it
+/// and no process holds it.
+fn own_script_dir(root: &BuildRoot, build_dir: &str) -> std::io::Result<String> {
+    let leaf = std::path::Path::new(build_dir).file_name().and_then(|n| n.to_str()).unwrap_or("script");
+    loop {
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("{leaf}-own-{}-{seq}", std::process::id());
+        match std::fs::create_dir(root.build.join(&name)) {
+            Ok(()) => return Ok(root.take(&name)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn write_atomic_text(path: &str, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    loop {
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = format!("{path}.tmp-{}-{seq}", std::process::id());
+        let mut file = match std::fs::File::create_new(&tmp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let written = file.write_all(text.as_bytes());
+        drop(file);
+        let result = written.and_then(|()| std::fs::rename(&tmp, path));
+        if result.is_err() { let _ = std::fs::remove_file(&tmp); }
+        return result;
+    }
+}
+
 /// A lock per output path, held while that file is written.
 fn path_lock(path: &str) -> relax_session::sync::MutexGuard<'static, ()> {
     static LOCKS: Mutex<Vec<(String, &'static Mutex<()>)>> = Mutex::new(Vec::new());
@@ -2867,6 +2960,114 @@ fn self_stamp_text(pkg: &str, features: &[String]) -> String {
     let d = relax_base::sha256::sha256(&buf);
     let stamp = u128::from_le_bytes(d[..16].try_into().unwrap());
     format!("/// This crate's source stamp (libs/relax/self_stamp.rs).\npub const SRC_STAMP: u128 = 0x{:032x};\n", stamp)
+}
+
+/// The shipped std's digest uses the same relative paths and bytes as the native build.
+fn compiler_std_digest(dir: &str) -> Result<String, String> {
+    let root = format!("{dir}/std");
+    let mut files = Vec::new();
+    let mut folders = vec![String::new()];
+    while let Some(prefix) = folders.pop() {
+        let folder = format!("{root}/{prefix}");
+        for (name, is_dir) in crate::vfs::read_dir(&folder).map_err(|e| format!("{folder}: {e}"))? {
+            let rel = format!("{prefix}{name}");
+            if is_dir {
+                folders.push(format!("{rel}/"));
+            } else {
+                let path = format!("{root}/{rel}");
+                let bytes = crate::vfs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+                files.push((rel, bytes));
+            }
+        }
+    }
+    Ok(relax_base::std_digest::digest(files))
+}
+
+fn stable_pkg_stamp(name: &str, version: &str, mut features: Vec<&str>) -> u128 {
+    features.sort_unstable();
+    features.dedup();
+    let mut bytes = Vec::from(&b"relax-jit-part"[..]);
+    for part in [name, version].into_iter().chain(features) {
+        bytes.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    let digest = relax_base::sha256::sha256(&bytes);
+    u128::from_le_bytes(digest[..16].try_into().unwrap())
+}
+
+/// The compiler's library closure, including the dependencies used on the host for macros.
+fn compiler_codegen_parts(g: &Graph, ci: usize, relax_dir: &std::path::Path) -> String {
+    let mut stamped = Vec::new();
+    let mut packages: std::collections::BTreeMap<(&str, &str), Vec<&str>> = Default::default();
+    let mut seen = vec![false; g.crates.len()];
+    let mut stack = vec![ci];
+    while let Some(k) = stack.pop() {
+        let unit = &g.crates[k];
+        if std::mem::replace(&mut seen[k], true) || matches!(unit.name.as_str(), "core" | "alloc" | "std" | "proc_macro" | "test") {
+            continue;
+        }
+        stack.extend(unit.deps.iter().map(|d| d.0));
+        if let Some(host) = &unit.host {
+            stack.extend(host.deps.iter().map(|d| d.0));
+        }
+        let (dir, name, version) = &g.pkg[k];
+        if std::path::Path::new(&crate::vfs::canonical(dir)).starts_with(relax_dir) {
+            stamped.push(name.as_str());
+        } else {
+            let features = packages.entry((name, version)).or_default();
+            features.extend(unit.features.iter().map(String::as_str));
+            if let Some(host) = &unit.host {
+                features.extend(host.features.iter().map(String::as_str));
+            }
+        }
+    }
+    stamped.sort_unstable();
+    stamped.dedup();
+    let mut others: Vec<_> = packages.into_iter().map(|((name, version), features)| (name, stable_pkg_stamp(name, version, features))).collect();
+    others.sort_unstable();
+    others.dedup();
+    let mut out = String::from("pub(crate) const CODEGEN_PARTS: &[(&str, u128)] = &[\n");
+    for name in stamped {
+        let lib = if name == "relax-compiler" { "crate".to_string() } else { name.replace('-', "_") };
+        out.push_str(&format!("    ({name:?}, {lib}::SRC_STAMP),\n"));
+    }
+    for (name, stamp) in others {
+        out.push_str(&format!("    ({name:?}, 0x{stamp:032x}),\n"));
+    }
+    out.push_str("];\n");
+    out
+}
+
+fn relax_compiler_answer(g: &Graph, bs: &BuildScript, root: &BuildRoot) -> Result<(String, Vec<String>), String> {
+    let dir = &g.pkg[bs.krate].0;
+    let parent = std::path::Path::new(dir).parent().ok_or_else(|| format!("no parent for compiler directory {dir}"))?;
+    let relax = crate::vfs::canonical(&parent.to_string_lossy());
+    let src_stamp = self_stamp_text("relax-compiler", &bs.features);
+    let parts = compiler_codegen_parts(g, bs.krate, std::path::Path::new(&relax));
+    let digest = compiler_std_digest(dir)?;
+    let name = script_name(g, bs);
+    let build_dir = if crate::vfs::in_folder(dir) {
+        let mut hash = crate::sip::Sip128::new();
+        for text in [&src_stamp, &parts, &digest] {
+            hash.str(text);
+        }
+        root.take(&format!("{name}-answered-{:016x}", hash.finish128() as u64))
+    } else {
+        root.take(&format!("{name}-answered"))
+    };
+    let out_dir = format!("{build_dir}/out");
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("{out_dir}: {e}"))?;
+    for (file, text) in [("src_stamp.rs", src_stamp), ("codegen_parts.rs", parts)] {
+        let path = format!("{out_dir}/{file}");
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            let tmp = format!("{}.tmp{}-{}", path, std::process::id(), TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                format!("{path}: {e}")
+            })?;
+        }
+    }
+    Ok((out_dir, vec![format!("cargo:rustc-env=RELAX_STD_DIGEST={digest}"), "cargo:rustc-env=RELAX_PROVENANCE=makepad jit-run jit jit-run".to_string()]))
 }
 
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3029,6 +3230,193 @@ mod shared_script_tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    static SLOT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn held_claim(dir: &Path) -> (String, std::fs::File) {
+        let path = dir.join("relax-claim");
+        let holder = std::fs::File::create_new(&path).unwrap();
+        holder.lock().unwrap();
+        (path.to_str().unwrap().to_owned(), holder)
+    }
+
+    #[test]
+    fn acquire_claim_reuses_fast_holder_and_releases_script_slot_while_waiting() {
+        let _serial = SLOT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("claim-reuse");
+        let (path, holder) = held_claim(&dir);
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let mut calls = 0;
+            let acquired = acquire_claim(&path, std::time::Duration::MAX, || {
+                calls += 1;
+                let _ = entered.send(());
+                let _ = released.recv();
+            });
+            (acquired, calls)
+        });
+        let _ = waiting.recv();
+        let running = *SCRIPT_RUNNING.lock().unwrap();
+        drop(holder);
+        drop(release);
+        let (acquired, calls) = worker.join().unwrap();
+        let claimed = matches!(acquired, ClaimAcquire::Claimed(_, Some(_)));
+        drop(acquired);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(running, 0, "the waiter holds no script slot while it waits");
+        assert!(claimed, "the waiter acquired the released claim");
+        assert_eq!(calls, 1, "the first miss was reported once");
+    }
+
+    #[test]
+    fn acquire_claim_falls_back_after_budget_on_held_claim() {
+        let _serial = SLOT_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = scratch("claim-fallback");
+        let (path, holder) = held_claim(&dir);
+        let acquired = acquire_claim(&path, std::time::Duration::ZERO, move || drop(holder));
+        let fallback = matches!(acquired, ClaimAcquire::Fallback(_, _));
+        let running = *SCRIPT_RUNNING.lock().unwrap();
+        drop(acquired);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(fallback, "expected Fallback after the claim-polling budget, got Claimed");
+        assert_eq!(running, 1, "the fallback has its script slot");
+        assert_eq!(*SCRIPT_RUNNING.lock().unwrap(), 0, "dropping the fallback releases the slot");
+    }
+
+    #[test]
+    fn write_atomic_text_replaces_content_without_leaving_temp_files() {
+        let dir = scratch("atomic-text");
+        let path = dir.join("relax-declared");
+        write_atomic_text(path.to_str().unwrap(), "first declaration").unwrap();
+        write_atomic_text(path.to_str().unwrap(), "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>(), [path]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn compiler_graph(ws: &Path) -> Graph {
+        let unit = |dir: &str, name: &str, deps: &[usize]| {
+            let dir = crate::vfs::normalize_path(&ws.join(dir).to_string_lossy());
+            GraphUnit {
+                pkg_id: format!("path+file://{dir}#{name}@1.0.0"), src_path: format!("{dir}/src/lib.rs"),
+                name: name.replace('-', "_"), kind: vec!["lib".into()], mode: "build".into(),
+                deps: deps.iter().map(|&d| (d, String::new())).collect(), ..Default::default()
+            }
+        };
+        let compiler = "relax/compiler";
+        let script = GraphUnit {
+            kind: vec!["custom-build".into()], mode: "run-custom-build".into(),
+            src_path: ws.join(compiler).join("build.rs").display().to_string(), ..unit(compiler, "relax-compiler", &[])
+        };
+        let units = vec![
+            GraphUnit { mode: "test".into(), ..unit(compiler, "relax-compiler", &[1, 2]) },
+            unit(compiler, "relax-compiler", &[2, 3, 4]),
+            script,
+            unit("relax/base", "relax-base", &[]),
+            unit("support", "support", &[]),
+            GraphUnit { host: true, ..unit("relax/base", "relax-base", &[6, 7]) },
+            unit("helper", "helper", &[]),
+            GraphUnit { sysroot: true, ..unit("relax/compiler/std/proc_macro", "proc_macro", &[]) },
+            unit("unused", "unused", &[]),
+        ];
+        load(&Units { units, roots: vec![0], ..Default::default() }, false, false).unwrap()
+    }
+
+    fn compiler_fixture(ws: &Path) -> BuildRoot {
+        for dir in ["relax/compiler/src", "relax/compiler/std/core", "relax/base"] {
+            std::fs::create_dir_all(ws.join(dir)).unwrap();
+        }
+        std::fs::write(ws.join("relax/compiler/std/core/lib.rs"), "core").unwrap();
+        std::fs::write(ws.join("relax/compiler/std/table"), [0, 255]).unwrap();
+        BuildRoot::at(ws.join("build"), ws.display().to_string(), &["compiler"])
+    }
+
+    #[test]
+    fn relax_compiler_script_role_is_in_process() {
+        let ws = scratch("compiler-role");
+        let root = compiler_fixture(&ws);
+        let g = compiler_graph(&ws);
+        let bs = &g.build_scripts[0];
+        assert!(matches!(script_role("relax-compiler", bs), ScriptRole::RelaxCompiler));
+        let (out, lines) = relax_compiler_answer(&g, bs, &root).unwrap();
+        let digest = relax_base::std_digest::digest(vec![("table".into(), vec![0, 255]), ("core/lib.rs".into(), b"core".to_vec())]);
+        assert_eq!(lines, [format!("cargo:rustc-env=RELAX_STD_DIGEST={digest}"), "cargo:rustc-env=RELAX_PROVENANCE=makepad jit-run jit jit-run".to_string()]);
+        let stamp = std::fs::read_to_string(Path::new(&out).join("src_stamp.rs")).unwrap();
+        assert_eq!(stamp, self_stamp_text("relax-compiler", &bs.features));
+        let helper = stable_pkg_stamp("helper", "1.0.0", vec![]);
+        let support = stable_pkg_stamp("support", "1.0.0", vec![]);
+        let parse_stamp = |text: &str| u128::from_str_radix(text.split("0x").nth(1).unwrap().trim_end_matches(";\n"), 16).unwrap();
+        let mut stamps = vec![parse_stamp(&stamp), parse_stamp(&self_stamp_text("relax-base", &[])), helper, support];
+        stamps.sort_unstable();
+        stamps.dedup();
+        assert_eq!(stamps.len(), 4, "each package has its own stamp");
+        let parts = std::fs::read_to_string(Path::new(&out).join("codegen_parts.rs")).unwrap();
+        assert_eq!(parts, format!(concat!(
+            "pub(crate) const CODEGEN_PARTS: &[(&str, u128)] = &[\n",
+            "    (\"relax-base\", relax_base::SRC_STAMP),\n    (\"relax-compiler\", crate::SRC_STAMP),\n",
+            "    (\"helper\", 0x{:032x}),\n    (\"support\", 0x{:032x}),\n];\n"), helper, support),
+            "include the host dependency and list each package in the library closure once");
+        std::fs::remove_dir_all(ws).unwrap();
+    }
+
+    #[test]
+    fn relax_compiler_answer_invariant_under_rs_edit() {
+        let ws = scratch("compiler-edit");
+        let root = compiler_fixture(&ws);
+        let mount = ws.join("mounted");
+        crate::vfs::mount_folder(&mount.to_string_lossy(), &ws);
+        let source = ws.join("relax/compiler/src/lib.rs");
+        let mut outputs = Vec::new();
+        for checkout in [&ws, &mount] {
+            let g = compiler_graph(checkout);
+            let answer = || {
+                let (out, lines) = relax_compiler_answer(&g, &g.build_scripts[0], &root).unwrap();
+                let stamp = std::fs::read_to_string(Path::new(&out).join("src_stamp.rs")).unwrap();
+                let parts = std::fs::read_to_string(Path::new(&out).join("codegen_parts.rs")).unwrap();
+                (out, lines, stamp, parts)
+            };
+            std::fs::write(&source, "fn f() {}\n").unwrap();
+            let before = answer();
+            std::fs::write(&source, "fn f() {} // edited\n").unwrap();
+            assert_eq!(answer(), before, "a source edit under {} keeps every output", checkout.display());
+            outputs.push(before.0);
+        }
+        assert_ne!(outputs[0], outputs[1], "the folder mount has a content-keyed output directory");
+        std::fs::remove_dir_all(ws).unwrap();
+    }
+
+    #[test]
+    fn relax_compiler_std_edit_updates_std_digest() {
+        fn copy_tree(src: &Path, dest: &Path) {
+            std::fs::create_dir_all(dest).unwrap();
+            for (name, is_dir) in crate::vfs::read_dir(src).unwrap() {
+                if is_dir {
+                    copy_tree(&src.join(&name), &dest.join(&name));
+                } else {
+                    std::fs::write(dest.join(&name), crate::vfs::read(src.join(&name)).unwrap()).unwrap();
+                }
+            }
+        }
+        let ws = scratch("compiler-std-edit");
+        let std = ws.join("relax/compiler/std");
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("compiler/std");
+        copy_tree(&shipped, &std);
+        let root = BuildRoot::at(ws.join("build"), ws.display().to_string(), &["compiler"]);
+        let mount = ws.join("mounted");
+        crate::vfs::mount_folder(&mount.to_string_lossy(), &ws);
+        let g = compiler_graph(&mount);
+        let answer = || {
+            let (out, lines) = relax_compiler_answer(&g, &g.build_scripts[0], &root).unwrap();
+            (out, lines.into_iter().find(|l| l.starts_with("cargo:rustc-env=RELAX_STD_DIGEST=")).unwrap())
+        };
+        let before = answer();
+        std::fs::write(std.join("core/lib.rs"), "// edited std\n").unwrap();
+        let after = answer();
+        assert_ne!(after.1, before.1, "changed std bytes change RELAX_STD_DIGEST");
+        assert_ne!(after.0, before.0, "a mounted checkout retains the output of each std");
+        std::fs::remove_dir_all(ws).unwrap();
     }
 
     /// A shared workspace's script output (vfs.rs SHARE) is keyed and named by what its inputs

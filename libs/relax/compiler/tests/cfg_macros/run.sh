@@ -5,7 +5,7 @@ set -euo pipefail
 fixture=$(cd "$(dirname "$0")" && pwd)
 compiler=$(cd "$fixture/../.." && pwd)
 relax_bin=${1:?usage: run.sh <absolute makepad binary> [output dir]}
-output=${2:-$compiler/local/agent_state/cfg_macros}
+output=${2:-${TMPDIR:-/tmp}/cfg_macros}
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
 export CARGO_NET_OFFLINE=true

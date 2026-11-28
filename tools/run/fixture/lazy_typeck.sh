@@ -266,7 +266,11 @@ if [ -z "$fail" ]; then
 else
   # the logs and the dependency's source as the runs left it (not the homes' caches)
   cp "$dir/fx/libs/dep/src/lib.rs" "$dir/dep-lib.rs" 2>/dev/null
-  bash "$ROOT/tools/run/fixture/keep_logs.sh" "$dir"
+  if [ -n "${GATE_KEEP_RUN_DIR:-}" ]; then
+      bash "$ROOT/tools/run/fixture/keep_logs.sh" "$dir" "$GATE_KEEP_RUN_DIR" "fixture-lazy-typeck"
+  else
+      bash "$ROOT/tools/run/fixture/keep_logs.sh" "$dir" "${dir##*/}"
+  fi
   echo "lazy_typeck: FAILED$fail (logs in $dir)"
   exit 1
 fi

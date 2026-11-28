@@ -8,7 +8,7 @@
 //! the inspector maps handles to OS threads.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::{AcqRel, Acquire, Relaxed, Release}};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 
 /// What a thread waits for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -53,6 +53,8 @@ struct Row {
     /// a static label (pointer, length): the class, the query's name
     label: AtomicUsize,
     label_len: AtomicUsize,
+    /// the thread is one of the JIT's own (`mark_jit_thread`)
+    jit: AtomicBool,
 }
 
 static TABLE: [Row; ROWS] = [const {
@@ -64,6 +66,7 @@ static TABLE: [Row; ROWS] = [const {
         since_ns: AtomicU64::new(0),
         label: AtomicUsize::new(0),
         label_len: AtomicUsize::new(0),
+        jit: AtomicBool::new(false),
     }
 }; ROWS];
 
@@ -88,6 +91,7 @@ impl Drop for Mine {
         let i = self.0.get();
         if i < ROWS {
             TABLE[i].state.store(0, Release);
+            TABLE[i].jit.store(false, Release);
             TABLE[i].thread.store(0, Release);
         }
     }
@@ -95,6 +99,45 @@ impl Drop for Mine {
 
 thread_local! {
     static MINE: Mine = const { Mine(Cell::new(usize::MAX)) };
+    static JIT_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The calling thread is one of the JIT's own: a drain or section worker of its pool, or the owner.
+/// It never waits for a token of the app's CPU budget: one that does is counted at the boundary
+/// (`jit_token_waits`). Claims and marks its row, so the inspector tells the JIT's threads from the
+/// program's.
+pub fn mark_jit_thread() {
+    let _ = JIT_THREAD.try_with(|m| m.set(true));
+    if let Some(r) = row() {
+        r.jit.store(true, Release);
+    }
+}
+
+/// The calling thread is one of the JIT's own (`mark_jit_thread`).
+pub fn is_jit_thread() -> bool {
+    JIT_THREAD.try_with(Cell::get).unwrap_or(false)
+}
+
+/// The boundary between the app's pool and the JIT's: waits for a token of the app's CPU budget on
+/// the JIT's own threads (each park of one: a drain refused its pick, a section task held in
+/// admission, a job parked at a checkpoint or for its readmission, the owner admitted into the app's
+/// pool). With the JIT outside the budget this stays 0; any other number is a wait between the pools.
+static JIT_TOKEN_WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// A JIT thread waits for a token of the app's CPU budget (see `JIT_TOKEN_WAITS`).
+pub fn count_jit_token_wait() {
+    JIT_TOKEN_WAITS.fetch_add(1, Relaxed);
+}
+
+/// The waits for a token of the app's CPU budget on the JIT's own threads so far.
+pub fn jit_token_waits() -> u64 {
+    JIT_TOKEN_WAITS.load(Relaxed)
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`): the next run in place
+/// counts its own boundary.
+pub(crate) unsafe fn reset_statics() {
+    relax_session::reset_static(&JIT_TOKEN_WAITS, AtomicU64::new(0));
 }
 
 fn row() -> Option<&'static Row> {
@@ -191,6 +234,9 @@ impl Drop for Guard {
 /// What a wait for a CPU token runs (makepad_cpu_budget::set_wait_hook).
 pub extern "C" fn token_wait(class: u8) {
     const CLASSES: [&str; 3] = ["interactive", "visible", "background"];
+    if is_jit_thread() {
+        count_jit_token_wait();
+    }
     let _w = begin(Kind::Token, class as u64, 0, CLASSES[class as usize]);
     makepad_cpu_budget::park();
 }
@@ -229,6 +275,8 @@ pub struct Wait {
     pub holder: u64,
     pub since_ns: u64,
     pub label: &'static str,
+    /// the waiting thread is one of the JIT's own (`mark_jit_thread`)
+    pub jit: bool,
 }
 
 /// Every thread's current wait (consistent per row; lock-free).
@@ -255,6 +303,7 @@ fn read(r: &Row) -> Option<Wait> {
         }
         let (object, holder, since_ns) = (r.object.load(Relaxed), r.holder.load(Relaxed), r.since_ns.load(Relaxed));
         let (l, n) = (r.label.load(Relaxed), r.label_len.load(Relaxed));
+        let jit = r.jit.load(Relaxed);
         if r.state.load(Acquire) != s0 {
             continue;
         }
@@ -271,7 +320,32 @@ fn read(r: &Row) -> Option<Wait> {
         };
         // labels are 'static strs written whole before the state word
         let label = if l == 0 { "" } else { unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(l as *const u8, n)) } };
-        return Some(Wait { thread, kind, object, holder, since_ns, label });
+        return Some(Wait { thread, kind, object, holder, since_ns, label, jit });
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A thread is the JIT's only once marked, its row says so, and its waits for an app token are
+    /// counted at the boundary. (`token_wait` itself, pre-woken: in a test under the JIT the budget's
+    /// wait hook is the loader's, whose own counter this crate's copy does not read.)
+    #[test]
+    fn a_marked_threads_token_wait_counts_at_the_boundary() {
+        let before = jit_token_waits();
+        std::thread::spawn(|| {
+            assert!(!is_jit_thread(), "a thread is the program's until it is marked");
+            mark_jit_thread();
+            assert!(is_jit_thread(), "marked, it is the JIT's");
+            {
+                let _w = begin(Kind::Build, 1, 0, "a build");
+                assert!(of(me()).is_some_and(|w| w.jit), "its row in the registry is marked");
+            }
+            makepad_cpu_budget::Wake::current().unpark();
+            token_wait(makepad_cpu_budget::VISIBLE);
+        }).join().unwrap();
+        assert!(jit_token_waits() > before, "the marked thread's token wait was counted");
+    }
 }

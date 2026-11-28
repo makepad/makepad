@@ -2,7 +2,9 @@
 // posix_spawn when PATH was set, removed or cleared and the program has no '/'; fork, the
 // child's environment becomes `environ`, execvp). A stub named like a system program, in a
 // folder only the Command's PATH holds, is what runs: spawned, with a pre_exec closure, and
-// exec'd. A failed exec leaves this process's PATH as it was. "| " lines equal real std's.
+// exec'd. A failed exec leaves this process's PATH as it was. A relative program path ("./x",
+// "../x") with a current_dir runs from that folder; on Apple real std forks for it (macOS's
+// posix_spawn with a chdir runs such a program but returns ENOENT). "| " lines equal real std's.
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -69,5 +71,17 @@ fn a03_exec_searches_the_commands_path() {
     let path = std::env::var_os("PATH");
     let e = Command::new("ls").env("PATH", "/nonexistent-relax-dir").exec();
     println!("| exec of no such program: {:?}, this PATH kept {}", e.kind(), std::env::var_os("PATH") == path);
+    clean(&dir);
+}
+
+#[test]
+fn a04_relative_program_from_current_dir() {
+    let dir = stub_dir("relative");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    println!("| ./ls in its folder: {}", said(Command::new("./ls").arg("a").current_dir(&dir)));
+    println!("| ../ls from a subfolder: {}", said(Command::new("../ls").arg("b").current_dir(&sub)));
+    println!("| status: {:?}", Command::new("./ls").current_dir(&dir).stdout(Stdio::null()).status().map(|s| s.code()).map_err(|e| e.kind()));
+    std::fs::remove_dir(&sub).unwrap();
     clean(&dir);
 }

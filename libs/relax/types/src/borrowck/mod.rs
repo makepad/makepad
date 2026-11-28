@@ -87,7 +87,7 @@ pub fn check_body_in(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, bod
     let checkpoint = tcx.dcx.checkpoint();
     let mut result = driver::check_root(cx, prog, tcx, body, fv_cx);
     if !result.errors.is_empty() || !body.errors.is_empty() { tcx.dcx.note_reported_error(); }
-    let (errors, warnings) = tcx.dcx.take_since(checkpoint);
+    let crate::infer::diagnostics::Taken { errors, warnings, drained: _ } = tcx.dcx.take_since(checkpoint);
     for error in errors {
         let owner = if error.cause.body_id == crate::program::NO_DEF { body.def } else { error.cause.body_id };
         let mut diagnostic = diagnostics::Diag::new("", crate::mir::Span { file: prog.def(owner).file, lo: error.cause.span, hi: error.cause.span }, error.message);

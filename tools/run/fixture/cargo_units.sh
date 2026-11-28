@@ -4,6 +4,8 @@
 # own (zero warnings), and a unit that fails says the command that shows it alone (GATEREPRO). A package under another's directory took the warnings of the inner
 # one's tests under its own name, with a command that compiles none of them (11-06). A workspace of stub crates, one
 # inside the other's directory, in a temporary directory; needs cargo, nothing of this tree but the gate's script.
+# A nested gate must not publish into the outer lease's keep.
+unset DEVHUB_KEEP
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/cargo_units.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT

@@ -1,0 +1,5 @@
+# Statics of a provided crate that JIT-compiled code reaches and the runtime refuses on purpose:
+# the loader build's provided-statics check (`makepad check --boundary statics`, loader_build.sh)
+# passes them and fails a row whose static is no longer one. path<TAB>why
+relax_provided_fixture::PLAIN_COUNT	provided_static.sh `unmarked` and `unmarked-ref`: an unmarked, layout-compatible static reached from JIT code is refused and asks for #[relax_api]
+relax_provided_fixture::SHARED_LOG	provided_static.sh `shared`: a static rustc's std lays out, reached through a plain fn compiled from source, is refused and names an op or per_side

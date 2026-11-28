@@ -48,6 +48,13 @@
 # sample says>` live on fd 4 (land_gate.sh's at_once: the shard's log, beside its GATESTART lines), which the
 # master's check-in lists (bucket.rs slow_units) until the unit ends. A new result after it says `GATEBUSY <unit>
 # :: 0`, and a later stall is sampled and said again. Main or the unit's owner decides what to do with it.
+# Main or the user stops such a unit by hand (`devhub bucket stop <run> <unit> <why>`): the master tells its lease
+# `stop <unit> :: <by> :: <why>` in $DEVHUB_TOLD (beside the dealer's lines, which start with a number), and at its
+# next look the watch stops it as hung, `stopped by <by>: <why>, <s> s into the unit` its cause, with its capture.
+# Its stop is read once its session's end is not (a unit that ended as it was told ended), before anything else
+# (a build, a park, a unit at work), and only its own unit's (BUSY_UNIT): a stop for another unit of the shard,
+# or a watch with no unit named (a --list), reads none. (An in-process hub's tick kept a Fab test's wait going
+# 40 min beside its app at 0%, `grow_live`, and nothing but a cancel of the whole run could end it, 11-27.)
 # Otherwise there is no time cap: a unit that works runs as long as it works. HUNG_QUIET is 9 min, a minute under
 # its lease's own look (sched.rs QUIET_STALL_MS, 10 min), so a hung test fails as itself and never makes its lease
 # look hung and hold its box (a makepad-app-amp test sat in a GStreamer pipeline, its lease idle 10 min with
@@ -60,10 +67,13 @@
 # The most it held at once, in MB in <out>.peak (the tests run's GATEPEAK), and its five largest processes then in
 # <out>.peak.by (peak_look). At each look, `<s into the unit> <KB its processes hold> <test results so far>` into
 # <out>.rss: the timeline its tests' times are read against (land_gate.sh test_times).
+# The watch records the most `run --unattended` processes seen together in the session in <out>.apps so the next
+# shard can reserve two slots (one app took 80 s to start and another got too little CPU for its test to pass, 11-26).
 # B: the JIT command for the captures (`makepad`); HUNG_QUIET, HUNG_LOOK (s between looks), IDLE_PCT; BUSY_S,
-# BUSY_UNIT (its GATEBUSY name); MEASURE_S. What sources this gives it its clock and /proc: `now`, `proc`, `nap`,
+# BUSY_UNIT (its GATEBUSY and stop name); MEASURE_S; DEVHUB_TOLD (the lease's told lines, read for its stop). What sources this gives it its clock and /proc: `now`, `proc`, `nap`,
 # wait_s <s>, read_gpu <file> and wall (the epoch s).
 set -u
+watch_here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 session=$1 out=$2
 HUNG_QUIET=${HUNG_QUIET:-540} HUNG_LOOK=${HUNG_LOOK:-10} IDLE_PCT=${IDLE_PCT:-5} B=${B:-makepad}
 BUSY_S=${BUSY_S:-0} BUSY_UNIT=${BUSY_UNIT:-} MEASURE_S=${MEASURE_S:-0}
@@ -80,16 +90,23 @@ quiet_now() {
 # unit_activity: the session's processes' CPU in µs (/proc stat utime, stime, cutime, cstime at 100 Hz), storage
 # I/O bytes (io read_bytes + write_bytes) and resident memory in KB: their RSS now, summed (status VmRSS), and the
 # largest one's own peak (VmHWM: between looks too; its pid in ua_hwm_pid) into ua_cpu, ua_io, ua_rss and ua_hwm,
-# their pids into ua_pids and each one's RSS into ua_prss, without a fork
+# their pids into ua_pids and each one's RSS into ua_prss, without a fork. A process that exits between the glob and
+# its read, or whose stat line comes back short, is skipped: under set -u its missing fields ended the watch, and its
+# unit read HUNG with 10 passed and none failed (11-26)
 unit_activity() {
-  local p s f k v h r
-  ua_cpu=0; ua_io=0; ua_rss=0; ua_hwm=0; ua_hwm_pid=""; ua_pids=(); ua_prss=()
+  local p s f k v h r argv=() i
+  ua_cpu=0; ua_io=0; ua_rss=0; ua_hwm=0; ua_hwm_pid=""; ua_pids=(); ua_prss=(); ua_apps=0
   for p in "$proc"/[0-9]*; do
     read -r s 2>/dev/null < "$p/stat" || continue
     s=${s##*) }; read -r -a f <<< "$s"
-    [ "${f[3]}" = "$session" ] || continue
+    [ "${f[3]-}" = "$session" ] || continue
     ua_pids+=("${p##*/}")
-    ua_cpu=$((ua_cpu + (f[11] + f[12] + f[13] + f[14]) * 10000))
+    if mapfile -d '' -t argv 2>/dev/null < "$p/cmdline"; then
+      for ((i = 1; i + 1 < ${#argv[@]}; i++)); do
+        if [[ ${argv[i]} = run && ${argv[i+1]} = --unattended ]]; then ua_apps=$((ua_apps + 1)); break; fi
+      done
+    fi
+    ua_cpu=$((ua_cpu + (${f[11]:-0} + ${f[12]:-0} + ${f[13]:-0} + ${f[14]:-0}) * 10000))
     while read -r k v; do case $k in read_bytes:|write_bytes:) ua_io=$((ua_io + v));; esac; done 2>/dev/null < "$p/io"
     h=0 r=0
     while read -r k v _; do case $k in VmHWM:) h=$v;; VmRSS:) r=$v; break;; esac; done 2>/dev/null < "$p/status"
@@ -114,6 +131,7 @@ cmd_of() {
 # <out>.peak.by: a build the unit set off is named
 peak_look() {
   local i j k n=${#ua_pids[@]} by="" idx=()
+  [ "$ua_apps" -le "$apps_max" ] || apps_max=$ua_apps
   if [ "$ua_hwm" -gt "$ua_rss" ]; then
     [ "$ua_hwm" -gt "$peak" ] || return 0
     peak=$ua_hwm; gb "$ua_hwm"; cmd_of "$ua_hwm_pid"
@@ -167,13 +185,13 @@ threads() {
   local p t s f n=() c0=() i=0
   for p in "$@"; do for t in "$proc/$p"/task/[0-9]*; do
     read -r s 2>/dev/null < "$t/stat" || continue
-    s=${s##*) }; read -r -a f <<< "$s"; n+=("${t#"$proc"/}"); c0+=($((f[11] + f[12])))
+    s=${s##*) }; read -r -a f <<< "$s"; n+=("${t#"$proc"/}"); c0+=($((${f[11]:-0} + ${f[12]:-0})))
   done; done
   wait_s 1
   for t in "${n[@]}"; do
     read -r s 2>/dev/null < "$proc/$t/stat" || { i=$((i + 1)); continue; }
     local comm=${s#*(}; comm=${comm%)*}; s=${s##*) }; read -r -a f <<< "$s"
-    echo "  $t $comm ${f[0]} $((f[11] + f[12] - c0[i]))% wchan $(cat "$proc/$t/wchan" 2>/dev/null)"
+    echo "  $t $comm ${f[0]-?} $((${f[11]:-0} + ${f[12]:-0} - c0[i]))% wchan $(cat "$proc/$t/wchan" 2>/dev/null)"
     i=$((i + 1))
   done
 }
@@ -290,8 +308,32 @@ look_line() { printf '%s %s %s\n' "$now" "$ua_rss" "$out_results" >> "$out.rss";
 say() { { printf '%s\n' "$1" >&4; } 2> /dev/null || :; }
 # busy_said: its stall was said (GATEBUSY); moved: when its tests last moved (a build, a new result); r1: its results then
 busy_said="" moved=0 r1=0
-stop() { echo $((peak / 1024)) > "$out.peak"; }
-peak=0
+# told_fd, told_buf: $DEVHUB_TOLD, open once it is there, and the start of a line its writer has not ended yet
+told_fd="" told_buf="" stop_why=""
+# stop_line: a stop told for this unit (`stop $BUSY_UNIT :: <by> :: <why>`) since the last look, its cause into
+# stop_why; only the lines appended since (no fork, nothing read twice)
+stop_line() {
+  local line rest who msg prefix="stop ${BUSY_UNIT:-} :: "
+  [ -n "${BUSY_UNIT:-}" ] && [ -n "${DEVHUB_TOLD:-}" ] || return 1
+  if [ -z "$told_fd" ]; then
+    [ -r "$DEVHUB_TOLD" ] || return 1
+    exec {told_fd}< "$DEVHUB_TOLD" || { told_fd=""; return 1; }
+  fi
+  while :; do
+    # (a line not ended yet waits in told_buf for the rest)
+    if IFS= read -r -u "$told_fd" line; then line=$told_buf$line told_buf=""; else told_buf+=$line; return 1; fi
+    [[ $line == "$prefix"* ]] || continue
+    rest=${line#"$prefix"}
+    if [[ $rest == *" :: "* ]]; then who=${rest%% :: *} msg=${rest#* :: }; else who=${rest% ::} msg=""; fi
+    stop_why="stopped by ${who:-main}${msg:+: $msg}, $now s into the unit"
+    return 0
+  done
+}
+stop() {
+  echo $((peak / 1024)) > "$out.peak"; echo "$apps_max" > "$out.apps"
+  [ -z "$told_fd" ] || { exec {told_fd}<&-; told_fd=""; }
+}
+peak=0 apps_max=0
 trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; stop; exit 0' TERM
 since=$now rsince=$now spin_at=0
 unit_activity; c0=$ua_cpu; i0=$ua_io; peak_look
@@ -305,17 +347,33 @@ while :; do
   if [ "${#ua_pids[@]}" = 0 ] && [ ! -e "$proc/$session" ]; then
     echo "its session has no process left, $now s into the unit: the unit ended" > "$out.ended"; stop; exit 0
   fi
+  if stop_line; then why=$stop_why; break; fi
   parked=$(parked_line)
   if [ -n "$parked" ]; then why="a process of it parked, which nobody resumes in a gate: $parked"; break; fi
   out_state; look_line
   # its tests moved (a build, a new result), or they ran BUSY_S s since with no new result: a stall, said once
   if [ "$out_in" != 1 ] || [ "$out_results" -gt "$r1" ]; then
-    [ -z "$busy_said" ] || say "GATEBUSY $BUSY_UNIT :: 0"
+    if [ -n "$busy_said" ]; then
+      say "GATEBUSY $BUSY_UNIT :: 0"
+      if [ -n "${kept_busy_dir:-}" ]; then
+        python3 -I "$watch_here/test_failures.py" --manifest "$DEVHUB_KEEP/$kept_busy_dir/gate-manifest.jsonl" --kind busy_clear --unit "$BUSY_UNIT" 4>&-
+      fi
+    fi
     busy_said="" moved=$now r1=$out_results
   elif [ "$BUSY_S" -gt 0 ] && [ -z "$busy_said" ] && [ $((now - moved)) -ge "$BUSY_S" ]; then
     keep_state "$out.busy" "busy: no new test result for $((now - moved)) s while its tests ran, $now s into the unit; nothing stops it" "$out.busy"
-    kept=$(basename "$(dirname "$out")")/$(basename "$out").busy
-    [ -z "${DEVHUB_KEEP:-}" ] || { mkdir -p "$DEVHUB_KEEP/${kept%/*}" && cp -p "$out.busy" "$DEVHUB_KEEP/$kept"; }
+    busy_dir=$(basename "$(dirname "$out")"); busy_file=$(basename "$out").busy
+    kept=$busy_dir/$busy_file; kept_busy_dir=""
+    if [ -n "${DEVHUB_KEEP:-}" ]; then
+      valid=1
+      for seg in "$busy_dir" "$busy_file"; do
+        case "$seg" in ""|"."|".."|-*|*/*|*\\*|*[[:space:][:cntrl:]]*) valid="";; esac
+      done
+      if [ -n "$valid" ] && mkdir -p -- "$DEVHUB_KEEP/$busy_dir" && cp -p -- "$out.busy" "$DEVHUB_KEEP/$kept" && [ -f "$watch_here/test_failures.py" ]; then
+        python3 -I "$watch_here/test_failures.py" --manifest "$DEVHUB_KEEP/$busy_dir/gate-manifest.jsonl" \
+          --run-pointer "$DEVHUB_KEEP/gate-run.${DEVHUB_LEASE:-local}" "$busy_dir" --kind busy --unit "$BUSY_UNIT" "$busy_file" 4>&- && kept_busy_dir=$busy_dir
+      fi
+    fi
     s="${cause:+the JIT says: $cause; }${top:+the busiest thread: $top}"
     say "GATEBUSY $BUSY_UNIT :: $(( $(wall) - (now - moved) )) $kept ${s:0:300}"
     busy_said=1
@@ -344,6 +402,6 @@ keep_state "$out.hung" "$why" "$out"
 for p in "$proc"/[0-9]*; do
   read -r s 2>/dev/null < "$p/stat" || continue
   s=${s##*) }; read -r -a f <<< "$s"
-  [ "${f[3]}" = "$session" ] && kill -KILL "${p##*/}" 2>/dev/null
+  [ "${f[3]-}" = "$session" ] && kill -KILL "${p##*/}" 2>/dev/null
 done
 exit 0

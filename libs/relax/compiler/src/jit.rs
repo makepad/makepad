@@ -384,10 +384,54 @@ pub(crate) mod bmemo;
 #[path = "settle_rebuild.rs"]
 pub(crate) mod settle_rebuild;
 
+pub(crate) const OFF_OWNER_STATICS_MSG: &str =
+    "relax: off-owner reader accessed Unit::statics (owner-only map)";
+
+pub(crate) fn is_off_owner_statics_panic(p: &(dyn std::any::Any + Send)) -> bool {
+    p.downcast_ref::<&str>().is_some_and(|s| *s == OFF_OWNER_STATICS_MSG)
+        || p.downcast_ref::<String>().is_some_and(|s| s == OFF_OWNER_STATICS_MSG)
+}
+
+/// Owner-only storage for `Unit::statics`. Enforces under `debug_assertions` that no off-owner
+/// front reader or lowering-ahead worker touches `Unit::statics` concurrently with owner
+/// mutation (single-threaded tests, `makepad check`, and `makepad serve` hold no front read).
+#[derive(Default)]
+pub struct OwnerStatics(crate::fxhash::HashMap<DefId, u64>);
+
+impl OwnerStatics {
+    #[inline]
+    fn check_access() {
+        if cfg!(debug_assertions)
+            && !owner::is_owner()
+            && (front_reads_held() > 0 || LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(false))
+        {
+            eprintln!("{OFF_OWNER_STATICS_MSG}\n{}", std::backtrace::Backtrace::force_capture());
+            panic!("{OFF_OWNER_STATICS_MSG}");
+        }
+    }
+}
+
+impl std::ops::Deref for OwnerStatics {
+    type Target = crate::fxhash::HashMap<DefId, u64>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        Self::check_access();
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for OwnerStatics {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Self::check_access();
+        &mut self.0
+    }
+}
 
 /// Heaps (MEMSAFE.DESIGN.md: placement only, never lifetime -- every block is freed by its owner's
 /// Drop). KEPT (system heap, built and grown under `zone_alloc::kept`): the Unit box, code tables,
-/// fns/fn_map, consts, const_readers, body_deps, statics/static_spans, sites/site_ix, rt/rs,
+/// fns/fn_map, consts, const_readers, body_deps, statics, sites/site_ix, rt/rs,
 /// syms, start_order, vtables, locations, lit_data, provided*, slots, missing_stubs, patch_log,
 /// forwards, kept_old/kept_at, tier-1 state, stats, errors and the scalars/addresses. COMPILER arena: prog, tcx, lay, bodies,
 /// old_bodies, coro_*, spec_cached, the unwind/unpin/cycle/core-path memos, const_failed, cache,
@@ -416,6 +460,12 @@ pub struct Unit {
     pub tcx: Tcx,
     /// provided crates (provided.rs): crate index -> its shims
     pub provided: Vec<(u32, crate::provided::ProvidedCrate)>,
+    /// Whether the boot program binds a crate with a run op (`ProvidedCrate::runs_in_program`):
+    /// only then is a domain's #[global_allocator] probed and routed to, and only then do the
+    /// allocator shims check its blocks (core::heap `__rg_checked_*`). Fixed at `Unit::new`:
+    /// code made unchecked stays so, and a crate bound later (`bind_added_provided`) does not
+    /// route a domain through it.
+    pub routes_allocator: bool,
     /// Loader static address ranges, built on the first unattributed constant pointer.
     pub(crate) provided_static_index: std::sync::OnceLock<crate::provided::SharedStaticIndex>,
     /// their opaque types: drop shim address (0: no drop)
@@ -463,7 +513,7 @@ pub struct Unit {
     /// o3_nocapture_facts; also in `body_deps`): a live edit of one builds the reader again
     /// (reload::hosts_of), whose sibling call stood on the answer. Grows as `body_deps` does.
     pub fact_deps: crate::fxhash::HashMap<u32, Vec<u32>>,
-    pub statics: crate::fxhash::HashMap<DefId, u64>,
+    pub statics: OwnerStatics,
     /// Immutable data objects of static initializers that have a cache snapshot.
     rt_static_initials: crate::fxhash::HashMap<DefId, u64>,
     /// the certificates of the constants' and statics' values of this run (ConstCert; by
@@ -472,9 +522,6 @@ pub struct Unit {
     pub const_certs: crate::fxhash::HashMap<(DefId, Vec<TyId>), ConstCert>,
     /// `#[thread_local]` statics: where each thread's copy lives (thread_local_place)
     pub tls_places: crate::fxhash::HashMap<DefId, TlsPlace>,
-    /// the statics' storage by address: start -> (static, size), so a pointer into a static
-    /// (`&S.field`, `&S[3]`) in constant data is that static's symbol plus an offset
-    pub static_spans: std::collections::BTreeMap<u64, (DefId, u64)>,
     /// the link sections laid out so far, by output section (sections.rs)
     pub(crate) sections: crate::fxhash::HashMap<String, crate::sections::Section>,
     pub sites: std::sync::Arc<relax_session::sync::Mutex<Vec<Site>>>,
@@ -564,7 +611,7 @@ pub struct Unit {
     /// thread found in the ended code gets out. (0: no code of its own: no-codegen mode)
     pub(crate) glue_end: u64,
     /// `end_code` ran
-    pub(crate) code_ended: AtomicBool,
+    pub(crate) code_ended: std::sync::Arc<AtomicBool>,
     /// Set once its code ended: the program's waits end with it (domain_threads.rs `waits`).
     #[cfg(windows)]
     pub(crate) end_event: os::win32::HANDLE,
@@ -2191,17 +2238,49 @@ const TIER1_CACHE_FRAME_MAX_FLAT: u32 = 256 * 1024;
 /// Installs before this wall time go to the startup manifest (run.rs sets it at main), as do
 /// all installs before the first present.
 pub static ORDER_UNTIL_NS: AtomicU64 = AtomicU64::new(0);
-/// How many of those installs came while the startup image's window was open (the first present
-/// and the frame after it: postframe::image_window_open): the next start prelinks them.
+/// How many of those installs came while the startup image's window was open (until the first
+/// present and the burst after it: postframe::image_window_open): the next start prelinks them.
 pub static ORDER_PRESENT_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The position in that order of the first install after the first present: from there on, an
+/// install no call reached (first_by_call: a seeded or speculative install, a worker's link
+/// ahead) is not a startup slot (startup_set_called), however long the window stays open.
+static ORDER_AT_PRESENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Slot `id` joins the session's install order (Unit::start_order); while the startup image's
+/// window is open, the order's startup part ends with it (ORDER_PRESENT_LEN). Nothing joins it
+/// once the run is quitting (QUIT_SEEN): the app's shutdown code (a large app's 2,000-2,900 slots
+/// of drop glue and teardown) is cached code that the next quit links from the cache. It went
+/// into the session's tail only when the quit write's pass came after it (4 of 20 cold runs of
+/// a large app, 11-26), and every later start of that cache linked ~2,300 more slots ahead.
+fn order_install(u: &mut Unit, id: u32) {
+    if QUIT_SEEN.load(Ordering::Relaxed) {
+        return;
+    }
+    crate::zone_alloc::kept_with(|| u.start_order.push(id));
+    let len = u.start_order.len();
+    if FIRST_PRESENT.load(Ordering::Acquire) {
+        ORDER_AT_PRESENT.fetch_min(len - 1, Ordering::Relaxed);
+    }
+    if crate::postframe::image_window_open() {
+        ORDER_PRESENT_LEN.store(len, Ordering::Relaxed);
+    }
+}
 /// The positions in the install order (Unit::start_order) of the slots this run's startup image
 /// installed (prelink_startup): [start, end).
 static PRELINKED_ORDER: [std::sync::atomic::AtomicUsize; 2] = [std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)];
 /// The counted slots this run's startup image installed ahead of any call (prelink_startup).
 static PRELINKED_AHEAD: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
-/// Those of them no call had reached when the startup image's window closed (taken by the next
-/// tick, or by the manifest's first write when no tick took it): startup_set_called.
+/// The slots the seed walk installed ahead from the manifest's startup part (spec_seed_manifest):
+/// judged by their calls as the image's slots are (take_not_called, prelinked_not_called), but
+/// not kept in the next image by the union of recent startups (prelinked_ahead): a slot seeded
+/// that no call reached is no startup slot, and never joins an image.
+static SEEDED: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
+/// Those of them and of the seeded ones no call had reached when the startup image's window
+/// closed (taken by the next tick, or by the manifest's first write when no tick took it):
+/// startup_set_called.
 static NOT_CALLED_AT_PRESENT: relax_session::sync::Mutex<Option<Vec<u32>>> = relax_session::sync::Mutex::new(None);
+/// How many of NOT_CALLED_AT_PRESENT are the image's own (the first ones): not_called_at_present.
+static NOT_CALLED_IMAGE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static NOT_CALLED_TAKEN: AtomicBool = AtomicBool::new(false);
 
 /// Slot `id`, armed by the startup image (PRELINKED_AHEAD), has not been called since: its count
@@ -2216,11 +2295,25 @@ unsafe fn not_called_since_armed(u: &Unit, id: u32) -> bool {
     (*rec.add(3)).load(Ordering::Acquire) == T_COUNTING && (*rec.add(9)).load(Ordering::Acquire) == 0 && (*rec).load(Ordering::Relaxed) == tier_refill(threshold, 0)
 }
 
-/// The slots the startup image installed ahead that no call has reached (yet): add_called follows
-/// call edges to called slots only.
+/// The slots the startup image or the seed walk installed ahead that no call has reached (yet):
+/// add_called follows call edges to called slots only.
 pub(crate) fn prelinked_not_called(u: &Unit) -> crate::fxhash::HashSet<u32> {
     let ids = PRELINKED_AHEAD.lock().unwrap_or_else(|e| e.into_inner());
-    ids.iter().copied().filter(|&id| unsafe { not_called_since_armed(u, id) }).collect()
+    let seeded = SEEDED.lock().unwrap_or_else(|e| e.into_inner());
+    ids.iter().chain(seeded.iter()).copied().filter(|&id| unsafe { not_called_since_armed(u, id) }).collect()
+}
+
+/// Slot `id` was installed by the seed walk from the manifest's startup part (owner thread): the
+/// window's close judges it with the image's slots. One installed as the window closed, after that
+/// judgement, is judged now: just installed, no call has reached it.
+unsafe fn note_seeded(u: &Unit, id: u32) {
+    let mut out = NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner());
+    crate::zone_alloc::kept_with(|| SEEDED.lock().unwrap_or_else(|e| e.into_inner()).push(id));
+    if let Some(v) = out.as_mut() {
+        if not_called_since_armed(u, id) {
+            crate::zone_alloc::kept_with(|| v.push(id));
+        }
+    }
 }
 
 /// The slots the startup image installed ahead this run (PRELINKED_AHEAD): a manifest written
@@ -2243,16 +2336,26 @@ fn note_startup_calls() {
 }
 
 /// How many of the slots the startup image installed ahead no call reached while its window was
-/// open (0 until known): the image is rewritten when they are more than a few.
+/// open (0 until known; the seeded ones are not the image's): the image is rewritten when they are
+/// more than a few.
 pub(crate) fn not_called_at_present() -> usize {
-    NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |v| v.len())
+    let out = NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner());
+    if out.is_none() { 0 } else { NOT_CALLED_IMAGE.load(Ordering::Relaxed) }
 }
 
 fn take_not_called(u: &Unit) {
     let mut out = NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner());
     if out.is_none() {
         let ids = PRELINKED_AHEAD.lock().unwrap_or_else(|e| e.into_inner());
-        *out = Some(crate::zone_alloc::kept_with(|| ids.iter().copied().filter(|&id| unsafe { not_called_since_armed(u, id) }).collect()));
+        let seeded = SEEDED.lock().unwrap_or_else(|e| e.into_inner());
+        let not_called = |&id: &u32| unsafe { not_called_since_armed(u, id) };
+        let v: Vec<u32> = crate::zone_alloc::kept_with(|| {
+            let mut v: Vec<u32> = ids.iter().copied().filter(not_called).collect();
+            NOT_CALLED_IMAGE.store(v.len(), Ordering::Relaxed);
+            v.extend(seeded.iter().copied().filter(not_called));
+            v
+        });
+        *out = Some(v);
         NOT_CALLED_TAKEN.store(true, Ordering::Relaxed);
     }
 }
@@ -2267,14 +2370,22 @@ fn take_not_called(u: &Unit) {
 /// stub is out of the slot) or without a count stub (glue, shims) -- stays only if the loaded
 /// manifest had it in its startup set (Cache::was_startup_slot); the image's callees among them
 /// go behind it (a warm start kept ~18,000 such slots, ~12,000 of them callees no startup code
-/// called, and each next image prelinked them before main).
+/// called, and each next image prelinked them before main). A slot the seed walk installed from the
+/// manifest's startup part (SEEDED) is judged as the image's are, by its count stub at the window's
+/// close (one without a count stub was a startup slot of the loaded manifest: it stays). A slot first
+/// installed after the first present stays only if a call reached it (first_by_call): the window
+/// stays open through the burst after the present, and an install ahead in it (seeded, speculative)
+/// is no call.
 fn startup_set_called(u: &Unit, order: Vec<u32>, present: usize) -> (Vec<u32>, usize) {
     take_not_called(u);
     let late: crate::fxhash::HashSet<u32> = NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or_else(Default::default, |v| v.iter().copied().collect());
     let (p0, p1) = (PRELINKED_ORDER[0].load(Ordering::Relaxed), PRELINKED_ORDER[1].load(Ordering::Relaxed));
-    if late.is_empty() && p0 == p1 {
+    let at_present = ORDER_AT_PRESENT.load(Ordering::Relaxed);
+    if late.is_empty() && p0 == p1 && at_present >= present {
         return (order, present);
     }
+    // (a seeded slot's count stub says whether a call reached it: no first call compiled it)
+    let seeded: crate::fxhash::HashSet<u32> = SEEDED.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().collect();
     let cache = u.cache.as_ref();
     let unseen = |i: usize, id: u32| {
         if i < p0 || i >= p1 {
@@ -2290,7 +2401,7 @@ fn startup_set_called(u: &Unit, order: Vec<u32>, present: usize) -> (Vec<u32>, u
             if !unsafe { not_called_since_armed(u, id) } {
                 later.push(id);
             }
-        } else if unseen(i, id) {
+        } else if unseen(i, id) || i >= at_present && !seeded.contains(&id) && !u.fns[id as usize].first_by_call.load(Ordering::Acquire) {
             later.push(id);
         } else {
             out.push(id);
@@ -2305,6 +2416,8 @@ fn startup_set_called(u: &Unit, order: Vec<u32>, present: usize) -> (Vec<u32>, u
 // The installer's own counters: the verbose [installahead] line at the run's end.
 static INSTALL_AHEAD_ENABLED: AtomicBool = AtomicBool::new(false);
 static INSTALL_AHEAD_INSTALLED: AtomicU64 = AtomicU64::new(0);
+/// of them, from the manifest's startup part before the window closed (SEEDED)
+static INSTALL_AHEAD_STARTUP: AtomicU64 = AtomicU64::new(0);
 static INSTALL_AHEAD_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static INSTALL_AHEAD_BAILS: AtomicU64 = AtomicU64::new(0);
 static INSTALL_AHEAD_LAZY: AtomicU64 = AtomicU64::new(0);
@@ -2346,8 +2459,10 @@ fn install_ahead_main_request() {
 pub(crate) fn install_ahead_line() -> String {
     let n = |c: &AtomicU64| c.load(Ordering::Relaxed);
     let first = n(&INSTALL_AHEAD_FIRST_MAIN);
-    format!("[installahead] enabled={} installed={} skipped_ready={} bails={} left_lazy={} batches={} main_yields={} first_main_index={} end_index={} owner_ns={} owner_cpu_ns={}",
-        INSTALL_AHEAD_ENABLED.load(Ordering::Relaxed), n(&INSTALL_AHEAD_INSTALLED), n(&INSTALL_AHEAD_SKIPPED), n(&INSTALL_AHEAD_BAILS), n(&INSTALL_AHEAD_LAZY), n(&INSTALL_AHEAD_BATCHES), n(&INSTALL_AHEAD_MAIN_YIELDS),
+    // (the seeded slots no call had reached at the window's close: no startup slots of the next image)
+    let seeded_late = NOT_CALLED_AT_PRESENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |v| v.len().saturating_sub(NOT_CALLED_IMAGE.load(Ordering::Relaxed)));
+    format!("[installahead] enabled={} installed={} startup_installed={} startup_not_called={} skipped_ready={} bails={} left_lazy={} batches={} main_yields={} first_main_index={} end_index={} owner_ns={} owner_cpu_ns={}",
+        INSTALL_AHEAD_ENABLED.load(Ordering::Relaxed), n(&INSTALL_AHEAD_INSTALLED), n(&INSTALL_AHEAD_STARTUP), seeded_late, n(&INSTALL_AHEAD_SKIPPED), n(&INSTALL_AHEAD_BAILS), n(&INSTALL_AHEAD_LAZY), n(&INSTALL_AHEAD_BATCHES), n(&INSTALL_AHEAD_MAIN_YIELDS),
         if first == u64::MAX { "none".to_string() } else { first.to_string() }, n(&INSTALL_AHEAD_INDEX), n(&INSTALL_AHEAD_OWNER_NS), n(&INSTALL_AHEAD_CPU_NS))
 }
 
@@ -2363,23 +2478,42 @@ unsafe fn manifest_install_allowed(up: *mut Unit) -> bool {
     ahead_policy().spec_cached && (&*up).cache.as_ref().is_some_and(|c| c.mode != crate::cache::Mode::Verify) && !manifest_install_stopped()
 }
 
-/// Installs the manifest's tail after the startup image window, in manifest order. Each guarded
-/// link is the preemption grain; a batch gives the owner back as soon as main queues a request,
-/// after a link once another thread's request waits (owner::request_waiting) and SEED_BATCH_NS
-/// after it began, as the record batches do (record_cache_batch). Given back to main only, a warm
-/// launch of a large app linked 17-28 k slots a batch in 0.7-1.0 s each: an app pool thread's lazy call waited
-/// for all of it, and every background publish (the O3 takes, the startup's) with it.
+/// Installs the manifest's slots ahead of their calls, in manifest order, on a background thread.
+/// A start the image prelinked walks the manifest's startup part first, from the prelink's end and
+/// beside main: the slots the image did not install -- left out of it, or stale (their entries
+/// replaced since it was built) -- each cost main a cache link on its own thread before its first
+/// present (a large app: ~600 a warm start, 1,000-2,000 after an edit). These go through `note_seeded`:
+/// one no call reaches by the window's close is no startup slot of the next image. A test binary's
+/// manifest is walked from its present, as before: its run never presents, so its startup part is
+/// its whole order, made of other tests' bodies (the exit's union), and walked ahead it linked a
+/// median 12,349 slots and 312 ms of owner time a test child for few calls (relax-compiler's lib
+/// tests under the JIT). The tail
+/// follows after the startup image window. Each guarded link is the preemption grain; a batch gives
+/// the owner back as soon as main queues a request, after a link once another thread's request
+/// waits (owner::request_waiting) and SEED_BATCH_NS after it began, as the record batches do
+/// (record_cache_batch). Given back to main only, a warm launch of a large app linked 17-28 k slots
+/// a batch in 0.7-1.0 s each: an app pool thread's lazy call waited for all of it, and every
+/// background publish (the O3 takes, the startup's) with it.
 pub unsafe fn spec_seed_manifest(up: *mut Unit) {
     // Verify mode compiles what it checks, and an edited program's identities are not the
     // manifest's: neither installs ahead
-    let (list, present) = owner::call(owner::Class::Program, || {
-        if !manifest_install_allowed(up) { return (Vec::new(), 0); }
-        (&*up).cache.as_ref().map(|c| (c.manifest[c.manifest_present..].to_vec(), c.manifest_present)).unwrap_or_default()
+    let (list, from, startup) = owner::call(owner::Class::Program, || {
+        if !manifest_install_allowed(up) { return (Vec::new(), 0, 0); }
+        // (no image prelinked: its startup part stays with the calls, as before the image)
+        let imaged = PRELINKED_ORDER[1].load(Ordering::Relaxed) > PRELINKED_ORDER[0].load(Ordering::Relaxed);
+        // (a test binary: a libtest harness never presents; its root crate holds cfg(test), the
+        // mark preload::crate_key tells a test crate by)
+        let test_binary = (&*up).prog.crates.get(crate::layout::root_crate() as usize).is_some_and(|c| c.cfg.holds("test"));
+        (&*up).cache.as_ref().map(|c| {
+            let present = c.manifest_present.min(c.manifest.len());
+            let from = if imaged && !test_binary { 0 } else { present };
+            (c.manifest[from..].to_vec(), from, present - from)
+        }).unwrap_or_default()
     });
     if list.is_empty() || !pipelined() {
         return;
     }
-    INSTALL_AHEAD_INDEX.store(present as u64, Ordering::Relaxed);
+    INSTALL_AHEAD_INDEX.store(from as u64, Ordering::Relaxed);
     INSTALL_AHEAD_ENABLED.store(true, Ordering::Relaxed);
     struct P(*mut Unit);
     unsafe impl Send for P {}
@@ -2390,56 +2524,67 @@ pub unsafe fn spec_seed_manifest(up: *mut Unit) {
         let up = p.0;
         set_worker(true);
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
-        if !crate::postframe::wait_image_window_closed(&manifest_install_stopped) { return; }
         let mut at = 0;
-        while at < list.len() && !manifest_install_stopped() {
-            let _job = compile_job();
-            let result = owner::publish_or_bail(|| {
-                let _install = InstallingManifest::enter();
-                if !manifest_install_allowed(up) { return false; }
-                INSTALL_AHEAD_BATCHES.fetch_add(1, Ordering::Relaxed);
-                let (t0, first) = (wall_ns(), at);
-                while at < list.len() {
-                    if manifest_install_stopped() { return false; }
-                    if owner::main_waiting() {
-                        INSTALL_AHEAD_MAIN_YIELDS.fetch_add(1, Ordering::Relaxed);
-                        return true;
-                    }
-                    // (always after one link: a stream of requests does not stop the walk)
-                    if at > first && (owner::request_waiting() || wall_ns() - t0 >= SEED_BATCH_NS) {
-                        return true;
-                    }
-                    // Advance before the guarded link: a bail leaves this slot lazy and the
-                    // next publish continues with its successor, never retries a front here.
-                    let bytes = &list[at];
-                    at += 1;
-                    INSTALL_AHEAD_INDEX.store((present + at) as u64, Ordering::Relaxed);
-                    let Some(id) = crate::cache::slot_for_bytes_unit(up, bytes) else {
-                        INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    };
-                    let f = &(&*up).fns[id as usize];
-                    if f.compiled {
-                        INSTALL_AHEAD_SKIPPED.fetch_add(1, Ordering::Relaxed);
-                    } else if f.building || f.inflight || skip_initializer_seed(&*up, id) {
-                        // A build already owns this slot, or it is an initializer: retain
-                        // the seed path's demand boundary instead of racing that build.
-                        INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
-                    } else if ready_code_locked(up, id).is_some() {
-                        INSTALL_AHEAD_INSTALLED.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                false
-            });
-            match result {
-                Ok(false) => break,
-                Ok(true) => {} // the owner's next pick serves main before this thread's publish
-                Err(_) => { INSTALL_AHEAD_BAILS.fetch_add(1, Ordering::Relaxed); }
-            }
-        }
+        seed_walk(up, &list, &mut at, startup, from, true);
+        if !crate::postframe::wait_image_window_closed(&manifest_install_stopped) { return; }
+        seed_walk(up, &list, &mut at, list.len(), from, false);
     });
+    }
+}
+
+/// spec_seed_manifest's walk of `list[*at..end]` (`from`: the manifest index of `list[0]`);
+/// `startup`: slots of the manifest's startup part (note_seeded).
+unsafe fn seed_walk(up: *mut Unit, list: &[Vec<u8>], at: &mut usize, end: usize, from: usize, startup: bool) {
+    while *at < end && !manifest_install_stopped() {
+        let _job = compile_job();
+        let result = owner::publish_or_bail(|| {
+            let _install = InstallingManifest::enter();
+            if !manifest_install_allowed(up) { return false; }
+            INSTALL_AHEAD_BATCHES.fetch_add(1, Ordering::Relaxed);
+            let (t0, first) = (wall_ns(), *at);
+            while *at < end {
+                if manifest_install_stopped() { return false; }
+                if owner::main_waiting() {
+                    INSTALL_AHEAD_MAIN_YIELDS.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                // (always after one link: a stream of requests does not stop the walk)
+                if *at > first && (owner::request_waiting() || wall_ns() - t0 >= SEED_BATCH_NS) {
+                    return true;
+                }
+                // Advance before the guarded link: a bail leaves this slot lazy and the
+                // next publish continues with its successor, never retries a front here.
+                let bytes = &list[*at];
+                *at += 1;
+                INSTALL_AHEAD_INDEX.store((from + *at) as u64, Ordering::Relaxed);
+                let Some(id) = crate::cache::slot_for_bytes_unit(up, bytes) else {
+                    INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                let f = &(&*up).fns[id as usize];
+                if f.compiled {
+                    INSTALL_AHEAD_SKIPPED.fetch_add(1, Ordering::Relaxed);
+                } else if f.building || f.inflight || skip_initializer_seed(&*up, id) {
+                    // A build already owns this slot, or it is an initializer: retain
+                    // the seed path's demand boundary instead of racing that build.
+                    INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
+                } else if ready_code_locked(up, id).is_some() {
+                    INSTALL_AHEAD_INSTALLED.fetch_add(1, Ordering::Relaxed);
+                    if startup {
+                        INSTALL_AHEAD_STARTUP.fetch_add(1, Ordering::Relaxed);
+                        note_seeded(&*up, id);
+                    }
+                } else {
+                    INSTALL_AHEAD_LAZY.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            false
+        });
+        match result {
+            Ok(false) => break,
+            Ok(true) => {} // the owner's next pick serves main before this thread's publish
+            Err(_) => { INSTALL_AHEAD_BAILS.fetch_add(1, Ordering::Relaxed); }
+        }
     }
 }
 
@@ -2477,10 +2622,7 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
     // the startup set of the next manifest (install_compiled's rule: before the first present;
     // startup_set_called keeps it there only if a call reaches it while the image's window is open)
     if u.fns[s.id as usize].patch_gen == 0 && (!FIRST_PRESENT.load(Ordering::Acquire) || wall_ns() < ORDER_UNTIL_NS.load(Ordering::Relaxed)) {
-        crate::zone_alloc::kept_with(|| u.start_order.push(s.id));
-        if crate::postframe::image_window_open() {
-            ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
-        }
+        order_install(u, s.id);
     }
     {
         let t = if tier1 { tier::O3 } else if s.base { tier::BASELINE } else if s.o2 { tier::O2 } else { tier::O1 };
@@ -2528,47 +2670,58 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
 /// call. Slots whose crates changed, whose identities do not resolve or that have code already
 /// stay lazy. RELAX_PRELINK=0 turns it off. Returns the slots installed.
 pub unsafe fn prelink_startup(up: *mut Unit) -> usize {
+    prelink_startup_report(up).prelinked
+}
+
+/// Startup cache statistics captured by the owner before it posts borrow-check notes.
+#[derive(Default, Clone, Debug)]
+pub struct PrelinkReport {
+    pub prelinked: usize,
+    pub has_startup_image: bool,
+    pub stats: Option<crate::cache::CacheStats>,
+}
+
+pub unsafe fn prelink_startup_report(up: *mut Unit) -> PrelinkReport {
     // (--check-first: every slot passes the borrow checker before its first code, cached or not)
-    if CHECK_FIRST.load(Ordering::Relaxed) || std::env::var_os("RELAX_PRELINK").map_or(false, |v| v == "0") {
-        return 0;
-    }
-    let prelinked = owner::call(owner::Class::Program, || {
-        let usable = (&*up).cache.as_ref().map_or(false, |c| c.mode != crate::cache::Mode::Verify && c.startup_manifest_valid());
-        if !usable {
-            return None;
-        }
-        let options = (&*up).prog.session.clone().options.clone();
-        let gandalf = crate::borrowck::lazy::gandalf_enabled(&options);
+    let enabled = !CHECK_FIRST.load(Ordering::Relaxed)
+        && !std::env::var_os("RELAX_PRELINK").is_some_and(|v| v == "0");
+    let (report, notes) = owner::call(owner::Class::Program, || {
+        let mut n = 0;
         let mut notes = Vec::new();
-        PRELINKED_ORDER[0].store((&*up).start_order.len(), Ordering::Relaxed);
-        let n = crate::cache::prelink_unit(up, &mut |u: &mut Unit, slots: Vec<crate::cache::PrelinkedSlot>| {
-            u.code.write().unwrap_or_else(|e| e.into_inner()).reserve(slots.len());
-            crate::zone_alloc::kept_with(|| u.start_order.reserve(slots.len()));
-            let mut arm = Vec::with_capacity(slots.len());
-            let up: *mut Unit = u;
-            let mut verdicts = Vec::new();
-            let mut twins = Vec::new();
-            for s in slots {
-                if matches!((&*up).fns[s.id as usize].key, FnKey::Plain(_)) {
-                    twins.push((s.id, s.o3));
+        if enabled && (&*up).cache.as_ref().is_some_and(|c| c.mode != crate::cache::Mode::Verify && c.startup_manifest_valid()) {
+            let options = (&*up).prog.session.clone().options.clone();
+            let gandalf = crate::borrowck::lazy::gandalf_enabled(&options);
+            PRELINKED_ORDER[0].store((&*up).start_order.len(), Ordering::Relaxed);
+            n = crate::cache::prelink_unit(up, &mut |u: &mut Unit, slots: Vec<crate::cache::PrelinkedSlot>| {
+                u.code.write().unwrap_or_else(|e| e.into_inner()).reserve(slots.len());
+                crate::zone_alloc::kept_with(|| u.start_order.reserve(slots.len()));
+                let mut arm = Vec::with_capacity(slots.len());
+                let up: *mut Unit = u;
+                let mut verdicts = Vec::new();
+                let mut twins = Vec::new();
+                for s in slots {
+                    if matches!((&*up).fns[s.id as usize].key, FnKey::Plain(_)) {
+                        twins.push((s.id, s.o3));
+                    }
+                    install_prelinked_slot(up, s, gandalf, &mut notes, &mut arm, &mut verdicts);
                 }
-                install_prelinked_slot(up, s, gandalf, &mut notes, &mut arm, &mut verdicts);
-            }
-            // (after the whole image: a twin's base may be in it, later than the twin)
-            for (t, o3) in twins {
-                twin_stored(up, t, o3);
-            }
-            (&mut *up).arm_counters(&arm);
-            // (a call reaches each through its count stub: startup_set_called reads which were called)
-            crate::zone_alloc::kept_with(|| PRELINKED_AHEAD.lock().unwrap_or_else(|e| e.into_inner()).extend(arm.iter().map(|a| a.0)));
-            for (id, v, base) in verdicts {
-                stored_tier_verdict(&*up, id, v, base);
-            }
-        });
-        PRELINKED_ORDER[1].store((&*up).start_order.len(), Ordering::Relaxed);
-        Some((n, notes))
+                // (after the whole image: a twin's base may be in it, later than the twin)
+                for (t, o3) in twins {
+                    twin_stored(up, t, o3);
+                }
+                (&mut *up).arm_counters(&arm);
+                // (a call reaches each through its count stub: startup_set_called reads which were called)
+                crate::zone_alloc::kept_with(|| PRELINKED_AHEAD.lock().unwrap_or_else(|e| e.into_inner()).extend(arm.iter().map(|a| a.0)));
+                for (id, v, base) in verdicts {
+                    stored_tier_verdict(&*up, id, v, base);
+                }
+            });
+            PRELINKED_ORDER[1].store((&*up).start_order.len(), Ordering::Relaxed);
+        }
+        let (has_startup_image, stats) = (&*up).cache.as_ref()
+            .map_or((false, None), |c| (c.has_startup_image(), Some(c.stats.clone())));
+        (PrelinkReport { prelinked: n, has_startup_image, stats }, notes)
     });
-    let Some((n, notes)) = prelinked else { return 0 };
     // the background borrow checker learns of them after the start (each note computes a
     // verdict key: per slot work the start does not wait for)
     if !notes.is_empty() {
@@ -2599,7 +2752,7 @@ pub unsafe fn prelink_startup(up: *mut Unit) -> usize {
         });
         }
     }
-    n
+    report
 }
 
 /// O3 jobs that panicked outside their build's recovery (slot left at O1)
@@ -2645,6 +2798,9 @@ pub(crate) fn panic_payload(p: &(dyn std::any::Any + Send)) -> (String, bool) {
 /// An O3 candidate's optimize_tree panicked (off the owner): counted, printed once per slot
 /// (bails only counted), and handed on as a failed build.
 fn optimize_tree_panicked(up: *mut Unit, id: u32, p: Box<dyn std::any::Any + Send>) -> Deferred {
+    if is_off_owner_statics_panic(&*p) {
+        std::panic::resume_unwind(p);
+    }
     let (msg, bail) = panic_payload(&*p);
     O3_OPT_PANICS[bail as usize].fetch_add(1, Ordering::Relaxed);
     if !bail && O3_OPT_PANICKED.lock().unwrap().insert(id) {
@@ -3472,25 +3628,35 @@ pub(crate) fn kick_app_callers(bases: &[u64]) -> bool {
 /// `thunk(data)` runs under a recovery point of its own: false when the run ended under it, and all
 /// the caller's frames go on from here with what they hold. On a thread in no domain the call is
 /// the run's app's: its statics, its heap (a thread a scope put in a domain stays in that one).
-/// Realtime safe: no lock, no allocation. A panic in the callback is the abort of any `extern "C"`
-/// callback.
+/// Dispatch within the domain takes no lock and allocates nothing. A panic in the callback is
+/// the abort of any `extern "C"` callback.
 pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
+    app_call_scoped(None, thunk, data)
+}
+
+/// With an explicit scope, call in the block owner's domain. Dispatch on a thread already in
+/// that domain takes no lock and allocates nothing. Switching domains takes the arenas' chunk
+/// locks briefly on entry and return, as a cross-domain free does. A new JIT thread also needs
+/// its initial TLS block. Without an explicit scope, use `app_call`'s run-domain rule.
+pub(crate) fn app_call_scoped(scope: Option<u64>, thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
     let enter = APP_ENTER.load(Ordering::Acquire);
-    // (out of an op: JIT code and the runtime it calls run in the kept phase)
     let _kept = crate::zone_alloc::kept();
-    fresh_thread();
+    if scope.is_none() { fresh_thread(); }
     unsafe {
         if enter == 0 {
+            if scope.is_some() { return false; }
             thunk(data);
             return true;
         }
-        // a thread in no domain (native code started it: a device's, the inspect server's; a scope
-        // put none around the call) is in the compile domain (`rt_tls_block`), whose statics and
-        // heap are not the app's: the call runs in the run's app domain and leaves it after
-        let b = tls_block_if_any();
-        let here = if b == 0 { 0 } else { *(b as *const u64) };
-        let none = here == 0 || here == crate::domain::default_base();
-        let scoped = crate::domain::foreign_enter(if none { crate::domain::run_scope() } else { 0 });
+        let scoped = if let Some(scope) = scope {
+            let Some(saved) = crate::domain::enter_foreign_scope(scope, true) else { return false };
+            saved
+        } else {
+            let b = tls_block_if_any();
+            let here = if b == 0 { 0 } else { *(b as *const u64) };
+            let none = here == 0 || here == crate::domain::default_base();
+            crate::domain::foreign_enter(if none { crate::domain::run_scope() } else { 0 })
+        };
         let ok = recovered_call(enter, thunk, data);
         crate::domain::foreign_leave(scoped);
         ok
@@ -6134,6 +6300,12 @@ fn const_eval_to_valtree(context: usize, _env: crate::tcx::TypingEnv, def: DefId
     }
     let ty = u.tcx.type_of(&u.prog, def).map_err(|_| evaluation_error())?;
     let ty = u.tcx.instantiate_ty(&u.prog, def, args, ty);
+    let ty = if u.tcx.tys.flags(ty).intersects(crate::types::TypeFlags::HAS_ALIAS) {
+        u.tcx.try_normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), ty)
+            .map_err(|_| ErrorHandled::Reported(relax_types::const_eval::ValTreeCreationError::NonSupportedType(ty)))?
+    } else {
+        ty
+    };
     // lowering ahead (off the owner): a constant the owner evaluated, from the shared table (the
     // take checks it as const_addr_shared's); one nobody evaluated is noted for the owner's
     // const_drain, and the request below ends the lowering (NeedsUnit) until the next round. A
@@ -6314,6 +6486,7 @@ impl Unit {
             prog,
             tcx,
             provided_shared: std::sync::OnceLock::new(),
+            routes_allocator: provided.iter().any(|(_, p)| p.runs_in_program()),
             provided,
             provided_static_index: std::sync::OnceLock::new(),
             provided_types,
@@ -6338,7 +6511,6 @@ impl Unit {
             rt_static_initials: Default::default(),
             const_certs: Default::default(),
             tls_places: Default::default(),
-            static_spans: Default::default(),
             sections: Default::default(),
             sites: crate::zone_alloc::kept_with(Default::default),
             site_ix: Default::default(),
@@ -6385,7 +6557,7 @@ impl Unit {
             enter: 0,
             leave: 0,
             glue_end: 0,
-            code_ended: AtomicBool::new(false),
+            code_ended: crate::zone_alloc::kept_with(|| std::sync::Arc::new(AtomicBool::new(false))),
             #[cfg(windows)]
             end_event: unsafe { os::win32::CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) },
             code_next: AtomicU64::new(misc),
@@ -6936,6 +7108,54 @@ impl Unit {
         }
     }
 
+    /// A fixture changed allocator routing. Re-lower the heap entries and any callers
+    /// that inlined their old bodies before running the fixture again.
+    #[cfg(test)]
+    pub(crate) fn reset_allocator_shims(&mut self) {
+        let mut work = std::collections::VecDeque::new();
+        let mut seed = |name, args| {
+            if let Some(def) = self.core_path(&["heap", name]) {
+                if let Some(id) = self.fn_map.get(&FnKey::Inst(def, args)) {
+                    work.push_back(id);
+                }
+            }
+        };
+        for name in ["alloc", "alloc_zeroed", "dealloc", "realloc"] {
+            seed(name, Vec::new());
+        }
+        if let Some((_, alloc_ty)) = self.global_allocator() {
+            for name in ["__rg_checked_alloc", "__rg_checked_alloc_zeroed", "__rg_checked_dealloc", "__rg_checked_realloc",
+                         "__rg_alloc", "__rg_alloc_zeroed", "__rg_dealloc", "__rg_realloc"] {
+                seed(name, vec![alloc_ty]);
+            }
+        }
+
+        let mut seen = crate::fxhash::HashSet::default();
+        while let Some(id) = work.pop_front() {
+            if !seen.insert(id) { continue; }
+            let f = &mut self.fns[id as usize];
+            work.extend(f.history().inlined_into.iter().copied());
+            if !f.compiled && f.rir.is_none() { continue; }
+            if f.compiled && f.code_len != 0 {
+                let old_map = std::mem::take(&mut f.pc_map);
+                crate::zone_alloc::slots_with(|| f.history.get_or_insert_with(Default::default).retired.push((f.code, f.code_len, old_map, f.patch_gen)));
+            }
+            let stub = self.slots.stub(id);
+            f.code = stub;
+            f.code_len = 0;
+            f.compiled = false;
+            f.rir = None;
+            f.normal_rir = None;
+            f.lowering = None;
+            f.o3.store(false, Ordering::Relaxed);
+            f.version += 1;
+            SlotWord::of(&self.slots, id).store(stub, Ordering::SeqCst);
+            if matches!(f.key, FnKey::Plain(_)) {
+                self.follow_twin(id);
+            }
+        }
+    }
+
     /// `size` bytes of the code window at `align`, counted as what they are for (`kind`, WIN_NAMES).
     fn code_bump(&self, kind: usize, size: u64, align: u64) -> u64 {
         let at = bump(&self.code_next, size, align, self.code_end, "out of code memory");
@@ -7069,10 +7289,12 @@ impl Unit {
     /// past a static's end may be the next block's start (another static, a writable block a
     /// fn's code owns): such a pointer is not attributed.
     pub fn static_sym_at(&self, addr: u64) -> Option<relax_backend::rir::Sym> {
-        let (&start, &(d, size)) = self.static_spans.range(..=addr).next_back()?;
-        if (addr != start && addr >= start + size) || self.statics.get(&d) != Some(&start) {
+        // Even a zero-sized static reserves a byte in the writable region. Addresses outside
+        // the allocated range skip the span lock.
+        if !self.in_rw(addr, 1) {
             return None;
         }
+        let (start, d, _) = self.syms.static_span_containing(addr)?;
         let mut s = self.syms.intern(crate::syms::SymKind::Static(d), start);
         s.off = (addr - start) as i64;
         Some(s)
@@ -7521,11 +7743,12 @@ impl Unit {
     }
 
     /// Whether `d` is one of the fns whose bodies call the allocator shim (core::heap's alloc,
-    /// alloc_zeroed, dealloc, realloc): their code depends on the program's global allocator.
+    /// alloc_zeroed, dealloc, realloc, and the loader's entries `__relax_program_alloc` and
+    /// `__relax_program_dealloc`): their code depends on the program's global allocator.
     pub fn calls_allocator_shim(&self, d: DefId) -> bool {
         let def = self.prog.def(d);
-        def.krate == self.core_crate && def.kind == DefKind::Fn && matches!(self.prog.name(d), "alloc" | "alloc_zeroed" | "dealloc" | "realloc")
-            && ["alloc", "alloc_zeroed", "dealloc", "realloc"].iter().any(|n| self.core_path(&["heap", n]) == Some(d))
+        def.krate == self.core_crate && def.kind == DefKind::Fn && matches!(self.prog.name(d), "alloc" | "alloc_zeroed" | "dealloc" | "realloc" | "__relax_program_alloc" | "__relax_program_dealloc")
+            && ["alloc", "alloc_zeroed", "dealloc", "realloc", "__relax_program_alloc", "__relax_program_dealloc"].iter().any(|n| self.core_path(&["heap", n]) == Some(d))
     }
 
     /// Deferred diagnostic items and Relax runtime helpers, not language-item identities.
@@ -9355,10 +9578,8 @@ impl Unit {
         }
         let l = self.layout_of(t);
         let buf = self.rw_data(l.size.max(1) as u64, l.align.max(8) as u64);
-        crate::zone_alloc::kept_with(|| {
-            self.statics.insert(d, buf);
-            self.static_spans.insert(buf, (d, l.size as u64));
-        });
+        crate::zone_alloc::kept_with(|| self.statics.insert(d, buf));
+        self.syms.insert_static_span(buf, d, l.size as u64);
         self.init_static(d, t, buf, l.size as u64)
     }
 
@@ -9393,6 +9614,7 @@ impl Unit {
                 return buf;
             }
             crate::zone_alloc::kept_with(|| self.statics.insert(d, 0));
+            self.syms.remove_static_span(buf, d);
             return 0;
         } else {
             let cert = ran.map(|r| r.1).expect("ran");
@@ -9950,12 +10172,8 @@ impl Unit {
             _ => None,
         };
         self.cache = c;
+        self.publish_owner_verdicts();
         let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
-        if let Some(c) = &self.cache {
-            if !self.front.owner_verdicts.contains_key(&epoch) {
-                self.front.owner_verdicts.insert(epoch, std::sync::Arc::new(c.owner_verdicts(epoch)));
-            }
-        }
         let src: std::sync::Arc<dyn crate::borrowck::lazy::FrontSource> = std::sync::Arc::new(BorrowckFront(self.front.clone()));
         crate::borrowck::lazy::check_before_run(&self.prog, &self.tcx, &src, d, epoch, key, cached)
     }
@@ -10168,12 +10386,7 @@ impl Unit {
             let edited = c.as_mut().is_some_and(|c| c.edited_body(self, d, key, cached.as_ref()));
             let rank = if edited { Some(rank.map_or(crate::borrowck::lazy::RANK_EDITED, |r| r.min(crate::borrowck::lazy::RANK_EDITED))) } else { rank };
             self.cache = c;
-            if let Some(c) = &self.cache {
-                let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
-                if !self.front.owner_verdicts.contains_key(&epoch) {
-                    self.front.owner_verdicts.insert(epoch, std::sync::Arc::new(c.owner_verdicts(epoch)));
-                }
-            }
+            self.publish_owner_verdicts();
             trace_stored_verdict(&self.prog, d, "instance", cached.as_ref());
             let src: std::sync::Arc<dyn crate::borrowck::lazy::FrontSource> = std::sync::Arc::new(BorrowckFront(self.front.clone()));
             let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
@@ -10293,6 +10506,23 @@ impl Unit {
         }
     }
 
+    /// Publishes the current collection's verdict source at cache install and before the
+    /// front write that advances the epoch releases its readers.
+    pub(crate) fn publish_owner_verdicts(&mut self) {
+        let Some(c) = self.cache.as_ref() else { return };
+        let epoch = self.tcx.collect_epoch.load(Ordering::SeqCst);
+        if !self.front.owner_verdicts.contains_key(&epoch) {
+            crate::zone_alloc::kept_with(|| {
+                self.front.owner_verdicts.insert_first(epoch, std::sync::Arc::new(c.owner_verdicts(epoch)));
+            });
+        }
+    }
+
+    pub(crate) fn set_cache(&mut self, cache: crate::cache::Cache) {
+        self.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        self.publish_owner_verdicts();
+    }
+
     /// SPEC-V: the verdict an earlier run stored for owner `d` under the current sources (cache.rs
     /// OwnerVerdicts: the crate fingerprints and the definition), if any.
     /// Looked up once per owner and epoch (sweep_verdicts asks again for every waiting slot).
@@ -10300,11 +10530,10 @@ impl Unit {
         if let Some(v) = self.front.stored_owner.get(&(epoch, d)) {
             return v;
         }
-        let c = self.cache.as_ref()?;
-        let v = match self.front.owner_verdicts.get(&epoch) {
-            Some(v) => v,
-            None => crate::zone_alloc::kept_with(|| self.front.owner_verdicts.insert_first(epoch, std::sync::Arc::new(c.owner_verdicts(epoch)))),
-        };
+        #[cfg(test)]
+        stored_owner_verdict_hook();
+        // Leave the per-owner memo empty until the epoch has a published verdict source.
+        let v = self.front.owner_verdicts.get(&epoch)?;
         let found = v.lookup(&self.prog, d, epoch).1;
         crate::zone_alloc::kept_with(|| self.front.stored_owner.insert_first((epoch, d), found))
     }
@@ -12163,16 +12392,13 @@ unsafe fn install_compiled(up: *mut Unit, id: u32, code: &[u8], map: Vec<(u32, u
             // at its first call (a Play's ~30,000 lazy links in the click frame)
             let before_present = !FIRST_PRESENT.load(Ordering::Acquire);
             if !ctfe && u.fns[id as usize].patch_gen == 0 && !u.fns[id as usize].compiled {
-                crate::zone_alloc::kept_with(|| u.start_order.push(id));
+                order_install(u, id);
                 // RELAX_PRESENT_FILES=1: the source file of every fn installed before the first
                 // present (what startup executes, per file)
                 if before_present && present_files() {
                     if let FnKey::Inst(d, _) = &u.fns[id as usize].key {
                         eprintln!("pre-present-fn: {:?}", u.prog.file_paths[u.prog.def(*d).file as usize]);
                     }
-                }
-                if crate::postframe::image_window_open() {
-                    ORDER_PRESENT_LEN.store(u.start_order.len(), Ordering::Relaxed);
                 }
             }
             let linked_from_cache = !record && !ctfe && !u.fns[id as usize].compiled && !u.fns[id as usize].o3.load(Ordering::Relaxed);
@@ -14829,7 +15055,6 @@ unsafe fn wait_inflight(up: *mut Unit, id: u32) {
     let (root, holder) = (flight.root, flight.holder);
     // the build runs at the class of who waits for it, or it could starve behind that class's work
     let _priority = queue::promote(up as usize, root, owner::waiter_class());
-    let _token = crate::pool::lend_served();
     // a program thread's front gives the owner back rather than wait here while program requests
     // queue (owner::may_yield): it asks again once the build ended
     owner::pump_wait_build(id, end.name, holder, &|| !(&*up).fns[id as usize].inflight || owner::may_yield());
@@ -17564,6 +17789,7 @@ unsafe fn load_modules(up: *mut Unit, mods: &[u32], why: &str) {
         }
         break defs;
     };
+    u.publish_owner_verdicts();
     let resigned = u.tcx.forget_error_signatures();
     // builds that failed for want of these names (here or on a speculative worker) run again
     for f in u.fns.iter_mut() {
@@ -22934,6 +23160,13 @@ static TIER_RATE_TOP_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 const SETTLED_MS: u64 = 32;
 /// The sampler is settled: sources sample every SETTLED_MS (os::sample::set_period)
 static SAMPLER_SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The JIT has had SETTLED_AFTER of quiet (update_sampler_settled), for inspect cpu's jit pool line.
+/// Report only: no scheduling reads it. A run that drives no budget (check, test, build scripts)
+/// reads settled.
+static UNSETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn jit_settled() -> bool {
+    !UNSETTLED.load(Ordering::Relaxed)
+}
 // Only program runs drive the budget, never check/test or compiler build scripts.
 static BUDGET_RUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SAMPLER_ACTIVITY: std::sync::Mutex<Option<(u64, std::time::Instant)>> = std::sync::Mutex::new(None);
@@ -23035,7 +23268,7 @@ fn sampler_activity() -> u64 {
 pub(crate) fn start_cpu_budget() {
     let mut activity = SAMPLER_ACTIVITY.lock().unwrap();
     *activity = Some((sampler_activity(), std::time::Instant::now()));
-    makepad_cpu_budget::set_jit_settled(false);
+    UNSETTLED.store(true, Ordering::Relaxed);
     SAMPLER_SETTLED.store(false, Ordering::Relaxed);
     BUDGET_RUN.store(true, Ordering::Release);
 }
@@ -23066,7 +23299,7 @@ fn update_sampler_settled() -> bool {
         busy::QUIET_AT.store(crate::clock::ms_since_start() as u64, Ordering::Relaxed);
     }
     if BUDGET_RUN.load(Ordering::Acquire) {
-        makepad_cpu_budget::set_jit_settled(quiet >= SETTLED_AFTER);
+        UNSETTLED.store(quiet < SETTLED_AFTER, Ordering::Relaxed);
     }
     let settled = settle_on && quiet >= SETTLED_AFTER;
     if settled != SAMPLER_SETTLED.load(Ordering::Relaxed) {
@@ -23354,9 +23587,9 @@ pub(crate) fn queue_view(n: usize) -> Vec<String> {
 pub(crate) fn queue_spent(n: usize) -> Vec<String> { queue::spent(n) }
 /// The queue's hold ledger, one line (`queue::held_line`).
 pub(crate) fn queue_held_line() -> String { queue::held_line() }
+/// The JIT pool's line of `inspect cpu` (`queue::pool_line`).
+pub(crate) fn queue_pool_line() -> String { queue::pool_line() }
 
-/// The UI must be quiet this long before concurrent non-Interactive builds resume.
-const BURST_UI_QUIET_NS: u64 = 1_000_000_000;
 
 /// Opt-in only: no extra clocks, pass timing, allocations or statistics locks when off.
 /// A live session's O3 builds outline their patched path into a private part only with
@@ -27819,17 +28052,21 @@ const SPLIT_TRIES: u8 = 2;
 /// An O3 snapshot leaves inline candidate `c` of root `id` out of this build (SPLIT_TRIES tries that
 /// made no new front; `wanted`: the fronts its last try bailed on): said on every run, not only
 /// under a trace, unless it has RIR by now. Those fronts were made and it still needs them, or
-/// they cannot be made off the owner (`unmade`, by why): the build keeps a call there, which is a
-/// bug, not a policy (a warm launch kept quicksort's stable_partition a call this way: sort_by_key
-/// 2.8x slower than with the disk cache off). The build waits for what it is missing (left_out_wait):
-/// the items its fronts asked the owner's drain for that the drain has not made yet (`noted`,
-/// wanted_key), and is queued again once, when the drain makes the first of them. A build that
-/// waits on no such item (its fronts need the owner itself, or what they asked for is made and
-/// they still failed) has the slots it needed built on the owner, each slot once in the run, and
-/// is queued again once after that. Neither repeats for the same item or slot: a build queued
-/// again after every drain that made anything was built hundreds of times in a run, leaving the
-/// same candidate out each time (a large app: one decoder's O3 build 480 times, while its
-/// allocator calls' fronts needed a static the drain was never asked for).
+/// they cannot be made off the owner (`unmade`, by why). Left out for the run, the build keeps a
+/// call there, which is a bug, not a policy (a warm launch kept quicksort's stable_partition a call
+/// this way: sort_by_key 2.8x slower than with the disk cache off): only that line asks for a
+/// report. One that waits is a note: its build is queued again once what it waits for is made,
+/// and inlines the candidate then. The waits had said "Relax bug" too, and were nearly always
+/// wrong: the test runs kept 11-13..11-26 said 977 owner waits on a front that needs the unit, and
+/// 1 of their roots left that candidate out for the run after. The build waits for what it is
+/// missing (left_out_wait): the items its fronts asked the owner's drain for that the drain has
+/// not made yet (`noted`, wanted_key), and is queued again once, when the drain makes the first of
+/// them. A build that waits on no such item (its fronts need the owner itself, or what they asked
+/// for is made and they still failed) has the slots it needed built on the owner, each slot once
+/// in the run, and is queued again once after that. Neither repeats for the same item or slot: a
+/// build queued again after every drain that made anything was built hundreds of times in a run,
+/// leaving the same candidate out each time (a large app: one decoder's O3 build 480 times, while
+/// its allocator calls' fronts needed a static the drain was never asked for).
 /// False: `c` has RIR by now (the build's install keeps it for a rebuild once it turns hot), or
 /// nothing is left to wait for (it stays a call for this run).
 fn o3_left_out(up: *mut Unit, id: u32, c: u32, wanted: &[u32], unmade: &HashMap<u32, u8>, noted: &[u64]) -> bool {
@@ -27849,7 +28086,8 @@ fn o3_left_out(up: *mut Unit, id: u32, c: u32, wanted: &[u32], unmade: &HashMap<
             LeftOutWait::Owner => "until the owner builds what it needs",
             LeftOutWait::Never => "for this run (the owner built what it needs already)",
         };
-        eprintln!("relax: the O3 build of {} leaves inline candidate {} out {}: it needs {} -- Relax bug, report it", name(id), name(c), until, why);
+        let report = if wait == LeftOutWait::Never { " -- Relax bug, report it" } else { "" };
+        eprintln!("relax: the O3 build of {} leaves inline candidate {} out {}: it needs {}{}", name(id), name(c), until, why, report);
         wait != LeftOutWait::Never
     })
 }
@@ -28286,7 +28524,7 @@ fn run_spec(unit: usize, id: u32) {
 /// answer to a test waiting for that build at BACK_END_GATE that it will not come.
 fn spec_dropped(unit: usize, id: u32, why: impl FnOnce() -> String) {
     #[cfg(test)]
-    if BACK_END_GATE.load(Ordering::SeqCst) == 1 {
+    if matches!(BACK_END_GATE.load(Ordering::SeqCst), 1 | 3) {
         BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner()).push((unit, id, why()));
         BACK_END_STOPPED.1.notify_all();
         return;
@@ -28388,7 +28626,7 @@ fn take_pause_turn(mine: u32) {
         job_rows::counted(false);
         BG_ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
-    let _budget = crate::pool::suspend_program();
+    let _budget = crate::pool::suspend();
     while PAUSE_HOLDER.compare_exchange(0, me, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         std::thread::sleep(std::time::Duration::from_micros(200));
     }
@@ -28496,7 +28734,7 @@ fn job_gate() -> JobGuard {
             return JobGuard;
         }
         BG_ACTIVE.fetch_sub(1, Ordering::SeqCst);
-        let _budget = crate::pool::suspend_program();
+        let _budget = crate::pool::suspend();
         // A job never starts while an allocator swap is in progress, however long the swap
         // takes: it would allocate from the zone the swap is re-registering (a wall-clock
         // escape here turned a slow machine into a crash). The thread that began the swap
@@ -28552,30 +28790,13 @@ impl Drop for JobIdle {
                 return;
             }
             BG_ACTIVE.fetch_sub(1, Ordering::SeqCst);
-            let _budget = crate::pool::suspend_program();
+            let _budget = crate::pool::suspend();
             let mut g = BG_MX.lock().unwrap_or_else(|e| e.into_inner());
             while BG_DRAINED.load(Ordering::SeqCst) {
                 g = BG_CV.wait_timeout(g, std::time::Duration::from_millis(50)).map(|x| x.0).unwrap_or_else(|e| e.into_inner().0);
             }
         }
     }
-}
-
-/// A compile job's wait for a CPU token (relax-base pool: a readmission, a checkpoint that yields)
-/// lifts the job as a wait on the owner does (JobIdle): a pause (a fork, an allocator swap) waits
-/// for the running jobs, and the jobs it holds at their start keep their permits, so a job counted
-/// while it waited for one of those tokens kept the pause waiting, and the pause kept the tokens
-/// held (a fork in a teardown test waited for an O3 job's readmission after its poll's sleep for
-/// good, 2026-11-14). `job_lift` says whether it lifted the job; `job_back` takes that.
-pub(crate) fn job_lift() -> bool {
-    let idle = JobIdle::enter();
-    let lifted = idle.0;
-    std::mem::forget(idle);
-    lifted
-}
-
-pub(crate) fn job_back(lifted: bool) {
-    drop(JobIdle(lifted));
 }
 
 /// A compile job's sleep that waits for no owner request (a poll): the job is not running meanwhile
@@ -28631,7 +28852,7 @@ fn pause_compile_jobs(what: &str, trace: bool) {
     let mut told = false;
     let busy = || BG_ACTIVE.load(Ordering::SeqCst) > mine || owner::busy_for_other(me());
     // the jobs it waits for may need a token
-    let _budget = crate::pool::suspend_program();
+    let _budget = crate::pool::suspend();
     loop {
         #[cfg(test)]
         {
@@ -28902,6 +29123,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_register_inspect" => Some(crate::inspect::relax_register_inspect as *const () as usize),
         b"relax_inspect_asker" => Some(crate::inspect::relax_inspect_asker as *const () as usize),
         b"relax_register_remote_service" => Some(crate::inspect::relax_register_remote_service as *const () as usize),
+        b"relax_register_remote_service_data" => Some(crate::inspect::relax_register_remote_service_data as *const () as usize),
         b"relax_gpu_span" => Some(crate::inspect::timeline::relax_gpu_span as *const () as usize),
         b"relax_flight_mark" => Some(crate::inspect::flightrec::relax_flight_mark as *const () as usize),
         b"relax_flight_input" => Some(crate::inspect::flightrec::relax_flight_input as *const () as usize),
@@ -28958,6 +29180,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"pthread_get_stacksize_np" => Some(crate::program_os::pthread_get_stacksize_np as *const () as usize),
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         b"mallinfo2" => Some(crate::program_os::mallinfo2 as *const () as usize),
+        b"relax_program_owns" | b"relax_program_outside" | b"relax_loader_dealloc" | b"relax_loader_realloc" => crate::zone_alloc::domain::symbol(name),
         // the program's request for its allocator's free pages also trims its domain heap
         b"malloc_trim" | b"malloc_zone_pressure_relief" => crate::zone_alloc::domain::symbol(name),
         // the web target's runtime and its embedder's page side (web.rs), then run-time modules
@@ -29663,14 +29886,15 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
     Begin::Back(BackWork { id, capture_unit: u.wasm_export_id, spec, front, slots, epoch, env, fold, rotate, lc, session, name, w1, memo })
 }
 
-/// (tests) 1: the next back end stops at its start, showing 2 and its thread, until a test stores 0.
+/// (tests) 1: the next back end stops at its start, showing 2, until a test stores 0. 3: every back
+/// end stops at its start (BACK_ENDS_HELD counts them) until a test stores 0.
 #[cfg(test)]
 static BACK_END_GATE: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static BACK_END_THREAD: AtomicU64 = AtomicU64::new(0);
+static BACK_ENDS_HELD: AtomicU32 = AtomicU32::new(0);
 /// (tests) A back end stopped at BACK_END_GATE, or a speculative build that will not come to it
-/// (spec_dropped: its unit, slot and why): the condvar wakes `back_end_at_gate`'s wait (the back
-/// end itself spins there, keeping its token).
+/// (spec_dropped: its unit, slot and why): the condvar wakes the tests' waits for the gate (the
+/// back end itself spins there).
 #[cfg(test)]
 static BACK_END_STOPPED: (std::sync::Mutex<Vec<(usize, u32, String)>>, std::sync::Condvar) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
 
@@ -29679,7 +29903,6 @@ impl BackWork {
     pub(crate) fn run(self) -> BackDone {
         #[cfg(test)]
         if BACK_END_GATE.load(Ordering::SeqCst) == 1 {
-            BACK_END_THREAD.store(me(), Ordering::SeqCst);
             {
                 let _seen = BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner());
                 BACK_END_GATE.store(2, Ordering::SeqCst);
@@ -29688,6 +29911,18 @@ impl BackWork {
             while BACK_END_GATE.load(Ordering::SeqCst) != 0 {
                 std::thread::yield_now();
             }
+        }
+        #[cfg(test)]
+        if BACK_END_GATE.load(Ordering::SeqCst) == 3 {
+            {
+                let _seen = BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner());
+                BACK_ENDS_HELD.fetch_add(1, Ordering::SeqCst);
+            }
+            BACK_END_STOPPED.1.notify_all();
+            while BACK_END_GATE.load(Ordering::SeqCst) == 3 {
+                std::thread::yield_now();
+            }
+            BACK_ENDS_HELD.fetch_sub(1, Ordering::SeqCst);
         }
         let BackWork { id, capture_unit, spec, front, slots, epoch, env, fold, rotate, lc, session, name, w1, memo: worthy } = self;
         let options = &session.options;
@@ -31115,7 +31350,6 @@ thread_local! {
     /// this thread's front reads held now (counted from before each is taken until after it was
     /// given back: front_read)
     static FRONT_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    static FRONT_READ_SITE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
 }
 
 #[cfg(test)]
@@ -31141,7 +31375,6 @@ pub(crate) fn front_reads_held() -> u32 {
 }
 
 pub struct FrontRead {
-    prior_site: &'static str,
     /// given back first in `drop`, before this thread stops counting as a reader (front_read)
     g: std::mem::ManuallyDrop<std::sync::RwLockReadGuard<'static, ()>>,
     traced: Option<(&'static str, std::time::Instant)>,
@@ -31153,7 +31386,6 @@ impl Drop for FrontRead {
         unsafe { std::mem::ManuallyDrop::drop(&mut self.g) };
         std::sync::atomic::compiler_fence(Ordering::SeqCst);
         front_read_between(2);
-        let _ = FRONT_READ_SITE.try_with(|site| site.set(self.prior_site));
         let _ = FRONT_READS.try_with(|c| c.set(c.get().saturating_sub(1)));
         if let Some(k) = self.row {
             front_holders::release(k);
@@ -31216,7 +31448,7 @@ pub fn front_read(site: &'static str) -> FrontRead {
         Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => {
             // behind a writer, the owner: what it waits for may need the token
-            let _budget = crate::pool::suspend_program();
+            let _budget = crate::pool::suspend();
             // a wait the registry names (inspect `waits`, a hitch's waits, the timeline): a UI
             // thread's check ahead behind a graph load's or a live edit's front write
             let _w = crate::waits::begin(crate::waits::Kind::Futex, &FRONT_RW as *const _ as u64, 0, "front read");
@@ -31226,7 +31458,7 @@ pub fn front_read(site: &'static str) -> FrontRead {
     if let Some(k) = row {
         front_holders::holding(k);
     }
-    FrontRead { prior_site: FRONT_READ_SITE.try_with(|old| old.replace(site)).unwrap_or(""), g: std::mem::ManuallyDrop::new(g), traced: front_trace().then(|| (site, std::time::Instant::now())), row }
+    FrontRead { g: std::mem::ManuallyDrop::new(g), traced: front_trace().then(|| (site, std::time::Instant::now())), row }
 }
 /// What type checks ahead need of a unit, reachable without its lock: the program and type
 /// context (shared, Sync), slot keys, and the checked bodies waiting for their builds.
@@ -31611,6 +31843,12 @@ pub(crate) fn lower_ahead_fn_key(id: u32) -> Option<FnKey> {
     LOWER_AHEAD_IDS.with(|a| a.borrow().keys.get((u32::MAX - id) as usize).cloned())
 }
 
+/// Whether the current thread is inside an off-owner lowering pass.
+#[inline]
+pub(crate) fn lowering_ahead_active() -> bool {
+    LOWERING_AHEAD.try_with(|a| a.get()).unwrap_or(false)
+}
+
 /// FRONT_RW readers must never acquire the unit lock: its owner may be waiting for their
 /// read guard to re-collect types. Abort *before* acquiring it, including when uncontended.
 /// resume_unwind avoids the panic hook; the helper leaves the checked body for a normal build.
@@ -31894,6 +32132,8 @@ fn lower_ahead_as(u: &Unit, into: u32, base: u32, d: DefId, args: &[TyId], epoch
             if p.is::<crate::preempt::NeedsUnit>() {
                 owner::pure_note(owner::PURE_AHEAD_BAIL);
                 Err(AF_NEEDS_UNIT)
+            } else if is_off_owner_statics_panic(&*p) || crate::cache::is_off_owner_cache_panic(&*p) {
+                std::panic::resume_unwind(p);
             } else {
                 if ahead_trace() {
                     eprintln!("ahead-lower panic: {}", u.prog.def_path(d));
@@ -33409,12 +33649,30 @@ mod inspect_tiers_tests;
 #[cfg(test)]
 #[path = "tier_stuck_tests.rs"]
 mod tier_stuck_tests;
+
+#[cfg(test)]
+static STORED_OWNER_VERDICT_HOOK: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn stored_owner_verdict_hook() {
+    if owner::is_owner() { return; }
+    let hook = STORED_OWNER_VERDICT_HOOK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(hook) = hook { hook(); }
+}
+
+#[cfg(test)]
+#[path = "cache_race_tests.rs"]
+mod cache_race_tests;
 #[cfg(test)]
 #[path = "code_window_tests.rs"]
 mod code_window_tests;
 #[cfg(test)]
 #[path = "trap_fill_tests.rs"]
 mod trap_fill_tests;
+#[cfg(test)]
+#[path = "static_race_tests.rs"]
+mod static_race_tests;
 
 #[cfg(test)]
 mod own_work_tests {
@@ -33556,265 +33814,60 @@ mod front_yield_tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Two fns (`triple`, `quad`) in a fresh unit, and the path of their source.
-    fn two_fn_unit(name: &str) -> (Box<Unit>, u32, u32, std::path::PathBuf) {
+    /// `fns` of a fresh unit made of `source`, and the path of the source.
+    fn unit_of(name: &str, source: &str, fns: &[&str]) -> (Box<Unit>, Vec<u32>, std::path::PathBuf) {
         crate::borrowck::lazy::disable_gandalf();
-        let source = "#![no_std]\npub fn triple(x: u32) -> u32 { x * 3 }\npub fn quad(x: u32) -> u32 { x * 4 }\n";
         let path = std::env::temp_dir().join(format!("relax-{name}-{}.rs", std::process::id()));
         std::fs::write(&path, source).unwrap();
         let session = std::sync::Arc::new(crate::Session::default());
         let mut prog = Program::new(&session);
         prog.load_crate(name, path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
         let def = |n: &str| prog.defs.iter().enumerate().find_map(|(i, _)| (prog.name(DefId(i as u32)) == n).then_some(DefId(i as u32))).unwrap();
-        let (triple, quad) = (def("triple"), def("quad"));
+        let defs: Vec<DefId> = fns.iter().map(|n| def(n)).collect();
         let mut tcx = Tcx::new();
         tcx.collect(&prog);
         let mut u = Unit::new(prog, tcx, 0);
-        let (f, g) = (u.fn_id(FnKey::Inst(triple, Vec::new())), u.fn_id(FnKey::Inst(quad, Vec::new())));
+        let ids = defs.into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
         SPEC_UNIT.store(&mut *u as *mut Unit, Ordering::Release);
-        (u, f, g, path)
+        (u, ids, path)
     }
 
-    /// A compile job running beside the build below, with the rest of the JIT's room in the budget:
-    /// the build cannot go above the budget (the JIT has a job running), it needs a token. It waits
-    /// for the build as far as the registry goes: no thread here runs on while the others are stuck.
-    /// Ends with `stop`.
-    fn other_compile_job(stop: std::sync::Arc<AtomicBool>) -> (std::thread::JoinHandle<()>, u64) {
-        use makepad_cpu_budget as budget;
-        BACK_END_THREAD.store(0, Ordering::SeqCst);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let job = std::thread::spawn(move || {
-            let permit = budget::admit(budget::BACKGROUND, budget::JIT, "another compile job");
-            tx.send(me()).unwrap();
-            let mut building = 0;
-            while building == 0 {
-                building = BACK_END_THREAD.load(Ordering::SeqCst);
-                std::thread::yield_now();
-            }
-            let _row = crate::waits::begin(crate::waits::Kind::Build, u64::MAX, building, "another compile job's wait");
-            while !stop.load(Ordering::SeqCst) {
-                std::thread::yield_now();
-            }
-            budget::release(permit);
-        });
-        let thread = rx.recv().unwrap();
-        (job, thread)
+    /// `n` fns (`f0`, `f1`, ..) in a fresh unit, and the path of their source.
+    fn fn_unit(name: &str, n: usize) -> (Box<Unit>, Vec<u32>, std::path::PathBuf) {
+        let names: Vec<String> = (0..n).map(|i| format!("f{i}")).collect();
+        let source: String = std::iter::once("#![no_std]\n".to_string()).chain(names.iter().enumerate().map(|(i, f)| format!("pub fn {f}(x: u32) -> u32 {{ x * {} }}\n", i + 2))).collect();
+        unit_of(name, &source, &names.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
-    /// Blocks until `state`, a state of the CPU budget (who holds a token, who waits for one) or
-    /// one that comes with a change of it, holds: looked at again at each change, never by the
-    /// clock. One that never comes holds the test (a hung test).
-    fn on_budget_change(state: impl Fn() -> bool) {
-        let mut seen = makepad_cpu_budget::changes();
-        while !state() {
-            seen = makepad_cpu_budget::wait_for_change(seen);
-        }
-    }
-
-    /// Blocks until the speculative build of `slot` (unit `up`) queued with BACK_END_GATE at 1
-    /// stopped at its gate. One that ended without its back end (spec_dropped) fails the test with
-    /// its reason.
-    fn back_end_at_gate(up: usize, slot: u32) {
+    /// Blocks until `n` back ends stopped at BACK_END_GATE 3. A speculative build of `up` that ended
+    /// without its back end (spec_dropped) fails the test with its reason.
+    fn back_ends_held(up: usize, n: u32) {
         let mut seen = BACK_END_STOPPED.0.lock().unwrap_or_else(|e| e.into_inner());
-        while BACK_END_GATE.load(Ordering::SeqCst) != 2 {
-            if let Some((_, _, why)) = seen.iter().find(|d| d.0 == up && d.1 == slot) {
+        while BACK_ENDS_HELD.load(Ordering::SeqCst) < n {
+            if let Some((_, slot, why)) = seen.iter().find(|d| d.0 == up) {
                 panic!("the speculative build of #{slot} will not come to its gate: {why}");
             }
             seen = BACK_END_STOPPED.1.wait(seen).unwrap_or_else(|e| e.into_inner());
         }
     }
 
-    /// The budget's rows of these tests' pool jobs (`label`), lent ones too.
-    fn pool_jobs(label: &str) -> usize {
-        makepad_cpu_budget::tokens().holders.iter().filter(|h| h.label == label).count()
-    }
-
-    /// As many jobs as Visible lets in, each with its token, all calling one fn whose speculative
-    /// build (Background, in flight) sits out a checkpoint for them: the build needs a token and they
-    /// wait for the build. Budget::acquire held it for good: nothing moved until the process died.
-    /// `callers` of the jobs call; the others keep their tokens, running.
-    /// `jobs` is what Visible lets in beside the compile jobs past the JIT's floor (it does not count
-    /// the JIT's builds past the floor): with the build, the CPU is over its cores.
-    /// Returns once the callers are on their way: the jobs, and the callers still to end.
-    fn jobs_on_every_token(up: usize, slot: u32, jobs: usize, callers: usize) -> (Vec<std::thread::JoinHandle<u64>>, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-        use makepad_cpu_budget as budget;
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::Arc;
-        BACK_END_GATE.store(1, Ordering::SeqCst);
-        queue::spec(up, slot);
-        back_end_at_gate(up, slot);
-        let (go, left) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(callers)));
-        let handles = (0..jobs).map(|i| {
-            let (go, left) = (go.clone(), left.clone());
-            std::thread::spawn(move || {
-                // (the wait's own code compiled first: under the JIT a thread waiting for a compile
-                // lends its token, and the build would get it)
-                let _ = go.load(Ordering::SeqCst);
-                std::thread::yield_now();
-                let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
-                while !go.load(Ordering::SeqCst) {
-                    std::thread::yield_now();
-                }
-                let code = if i < callers {
-                    let code = rt_compile_in(up, slot as u64);
-                    left.fetch_sub(1, Ordering::SeqCst);
-                    code
-                } else {
-                    1
-                };
-                while left.load(Ordering::SeqCst) != 0 {
-                    std::thread::yield_now();
-                }
-                budget::release(permit);
-                code
-            })
-        }).collect();
-        // the jobs in, the CPU is over its cores: the build's first checkpoint yields its token
-        on_budget_change(|| pool_jobs("a pool job") >= jobs);
-        BACK_END_GATE.store(0, Ordering::SeqCst);
-        // (a build that no longer stops here would pass without showing anything; asked of the budget,
-        // which every JIT in the process shares: under the JIT the wait hook is the loader's)
-        let building = BACK_END_THREAD.load(Ordering::SeqCst);
-        on_budget_change(|| {
-            assert!(queue::running_class(up, slot).is_some(), "the build sits out its checkpoint over the cores");
-            budget::tokens().waiting.iter().any(|w| w.thread == building)
-        });
-        go.store(true, Ordering::SeqCst);
-        (handles, left)
-    }
-
-    /// Other compile jobs one past the JIT's floor: with the build and the jobs Visible lets in, the
-    /// CPU is one over its cores, and the build gives its token up at its checkpoint and needs
-    /// another. (A build gives its token up only then: a job waiting for a token could not have it.
-    /// At the floor it keeps its token: `a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it`.)
-    fn compile_jobs_past_the_floor(stop: &std::sync::Arc<AtomicBool>) -> (Vec<std::thread::JoinHandle<()>>, Vec<u64>) {
-        (0..makepad_cpu_budget::jit_floor() + 1).map(|_| other_compile_job(stop.clone())).unzip()
-    }
-
-    /// With the JIT short of its floor, Visible work leaves it the token: the build keeps its own
-    /// through its checkpoints and finishes while a job waits for a token, and the job then runs. The
-    /// build waits for nothing that job holds, so this is no hang.
+    /// The app's pool on every token, giving none up (it neither lends nor reaches a checkpoint),
+    /// and more builds queued than the JIT runs at once, one of them waited for by a program thread
+    /// through the owner: every build runs, the caller gets its code, and no JIT thread holds or
+    /// waits for a token. The 11-05 deadlock (the slicer's workers on every token, each waiting for
+    /// a build that needed one) with its cause gone, not held shut.
     #[test]
-    fn a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it() {
-        isolated_test!(a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it, cores = 12);
+    fn compile_jobs_run_while_every_app_token_is_held() {
+        isolated_test!(compile_jobs_run_while_every_app_token_is_held, cores = 8);
         use makepad_cpu_budget as budget;
         use std::sync::Arc;
-        // (a small machine has no floor for the build to be below)
-        if budget::jit_floor() < 2 {
-            return;
-        }
-        let (u, f, _, path) = two_fn_unit("budget_floor");
+        // (past the startup's widths: the JIT runs as wide as its own pool)
+        HEADLESS.store(true, Ordering::Release);
+        let (u, fns, path) = fn_unit("every_token_held", budget::background_limit() as usize + 2);
         let up = &*u as *const Unit as usize;
-        let jobs = budget::limit() as usize - 1;
-        let stop = Arc::new(AtomicBool::new(false));
-        let (other, _) = other_compile_job(stop.clone());
-        BACK_END_GATE.store(1, Ordering::SeqCst);
-        queue::spec(up, f);
-        back_end_at_gate(up, f);
-        let done = Arc::new(AtomicBool::new(false));
-        let handles: Vec<_> = (0..jobs).map(|_| {
-            let done = done.clone();
-            std::thread::spawn(move || {
-                // (compiled before it holds a token, as in `jobs_on_every_token`)
-                let _ = done.load(Ordering::SeqCst);
-                std::thread::yield_now();
-                let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
-                while !done.load(Ordering::SeqCst) {
-                    std::thread::yield_now();
-                }
-                budget::release(permit);
-            })
-        }).collect();
-        on_budget_change(|| budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
-        BACK_END_GATE.store(0, Ordering::SeqCst);
-        // (the jobs keep their tokens until the end: a build that gave its own up would stand still
-        // here. Its worker leaves the queue's running list before it gives the build's token back,
-        // a change of the budget: with the last job waiting for one it keeps none for a next job.)
-        on_budget_change(|| queue::running_class(up, f).is_none());
-        // the last job running after it
-        on_budget_change(|| pool_jobs("a pool job") >= jobs);
-        done.store(true, Ordering::SeqCst);
-        for job in handles {
-            job.join().unwrap();
-        }
-        stop.store(true, Ordering::SeqCst);
-        other.join().unwrap();
-        assert!(u.fns[f as usize].build_err.is_none(), "{:?}", u.fns[f as usize].build_err);
-        // (the isolated process owns the runtime globals)
-        std::mem::forget(u);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn jobs_on_every_token_do_not_hang_on_a_build_that_needs_one() {
-        isolated_test!(jobs_on_every_token_do_not_hang_on_a_build_that_needs_one, cores = 8);
-        use std::sync::Arc;
-        let (u, f, g, path) = two_fn_unit("budget_lock");
-        let up = &*u as *const Unit as usize;
-        let floor = makepad_cpu_budget::jit_floor().max(1);
-        let jobs_beside = makepad_cpu_budget::limit() as usize - floor as usize;
-        assert!(makepad_cpu_budget::background_limit() > floor, "this needs the build and the other compile jobs in Background");
-        // every job calls: they sleep without their tokens, and the build gets one. The registry's
-        // chain says so when it does not: a plain failure, as it stands still. (A second of age: a
-        // job between its wait's row and giving its token up looks stuck for that moment.)
-        let stop = Arc::new(AtomicBool::new(false));
-        let (others, _) = compile_jobs_past_the_floor(&stop);
-        let (jobs, left) = jobs_on_every_token(up, f, jobs_beside, jobs_beside);
-        while left.load(Ordering::SeqCst) != 0 {
-            if let Some(chain) = crate::inspect::budget_deadlock(1_000_000_000) {
-                panic!("deadlock: {chain}");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        for job in jobs {
-            assert_ne!(job.join().unwrap(), 0);
-        }
-        stop.store(true, Ordering::SeqCst);
-        others.into_iter().for_each(|other| other.join().unwrap());
-        assert!(u.fns[f as usize].build_err.is_none(), "{:?}", u.fns[f as usize].build_err);
-        // one job calls and the others run on: only its token comes free, and Background is not let
-        // in below its limit. The build takes the class of who waits for it.
-        let stop = Arc::new(AtomicBool::new(false));
-        let (others, other_threads) = compile_jobs_past_the_floor(&stop);
-        let (jobs, left) = jobs_on_every_token(up, g, jobs_beside, 1);
-        let building = BACK_END_THREAD.load(Ordering::SeqCst);
-        let waiter = || crate::waits::snapshot().into_iter().find(|w| !other_threads.contains(&w.thread) && w.holder == building && matches!(w.kind, crate::waits::Kind::Pump | crate::waits::Kind::Build)).map(|w| (w.thread, w.since_ns));
-        while left.load(Ordering::SeqCst) != 0 {
-            // (the same wait before and after: its promotion stands while the class is read)
-            let before = waiter();
-            let class = queue::running_class(up, g);
-            if let (Some(_), Some(class)) = (before, class) {
-                if waiter() == before {
-                    assert_eq!(class, makepad_cpu_budget::VISIBLE, "the build runs at its waiter's class");
-                }
-            }
-            std::thread::yield_now();
-        }
-        for job in jobs {
-            assert_ne!(job.join().unwrap(), 0);
-        }
-        stop.store(true, Ordering::SeqCst);
-        others.into_iter().for_each(|other| other.join().unwrap());
-        assert!(u.fns[g as usize].build_err.is_none(), "{:?}", u.fns[g as usize].build_err);
-        assert!(makepad_cpu_budget::tokens().holders.iter().all(|h| h.client != makepad_cpu_budget::APP), "the jobs' permits are released, none lent");
-        // (the isolated process owns the runtime globals)
-        std::mem::forget(u);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    /// The app's jobs hold every token and run on, waiting for nothing: a speculative build queued
-    /// behind them still runs, beside them and taking none of their tokens: a tier-up does not wait
-    /// for a busy pool, which would leave its work on slow code.
-    #[test]
-    fn a_compile_job_runs_beside_jobs_on_every_token() {
-        isolated_test!(a_compile_job_runs_beside_jobs_on_every_token);
-        use makepad_cpu_budget as budget;
-        use std::sync::Arc;
-        let (u, f, _, path) = two_fn_unit("budget_full");
-        let up = &*u as *const Unit as usize;
+        let waits = crate::waits::jit_token_waits();
         // On a thread that runs no new code and does not sleep while it holds them: under the JIT a
-        // thread waiting for a compile of its own or sleeping lends its tokens, and the build would
-        // be let in on one.
+        // thread waiting for a compile of its own or sleeping lends its tokens.
         let (full, done) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
         let holder = {
             let (full, done) = (full.clone(), done.clone());
@@ -33834,37 +33887,69 @@ mod front_yield_tests {
         while !full.load(Ordering::SeqCst) {
             std::thread::yield_now();
         }
-        BACK_END_GATE.store(1, Ordering::SeqCst);
-        queue::spec(up, f);
-        // (held back it stands still with no compile job in the budget: a plain failure after 10 s)
-        let mut since = std::time::Instant::now();
-        while BACK_END_GATE.load(Ordering::SeqCst) != 2 {
-            if budget::tokens().holders.iter().any(|h| h.client == budget::JIT) {
-                since = std::time::Instant::now();
+        for &f in &fns[1..] {
+            queue::spec(up, f);
+        }
+        let waited = fns[0];
+        let caller = std::thread::spawn(move || rt_compile_in(up, waited as u64));
+        // (a cycle through the budget reads as a chain in the wait registry: a plain failure)
+        while !caller.is_finished() || queue::counts()[3] + queue::running()[3] != 0 {
+            if let Some(chain) = crate::inspect::budget_deadlock(1_000_000_000) {
+                panic!("deadlock: {chain}");
             }
-            assert!(since.elapsed().as_secs() < 10, "no compile job runs beside a full budget: {}", budget::report_string());
             std::thread::yield_now();
         }
-        // (its own row: under the JIT the loader's compile jobs share this budget)
-        let building = BACK_END_THREAD.load(Ordering::SeqCst);
+        assert_ne!(caller.join().unwrap(), 0, "the program thread waiting through the owner gets its code");
+        for &f in &fns {
+            assert!(u.fns[f as usize].build_err.is_none(), "a build failed: {:?}", u.fns[f as usize].build_err);
+        }
         let held = budget::tokens();
-        let rows: Vec<String> = held.holders.iter().map(|h| format!("{} client {} class {} lent {} above {} {}", h.thread, h.client, h.class, h.lent, h.above, h.label)).collect();
-        // The app keeps every token it holds, and the build runs beside them: above the budget, or,
-        // while the JIT comes first (`budget::set_jit_first`, at each pick of a compile queue: this
-        // one's or, under the JIT, the host's, which shares the budget), on a token of the JIT's own
-        // part past the app's limit. Either can be the case here (11-21: the second, 1 run in many).
-        let app = held.holders.iter().filter(|h| h.client == budget::APP && !h.lent).count();
-        assert_eq!(app, budget::limit() as usize, "the app keeps every token it took: {rows:#?}");
-        let beside = |h: &budget::Holder| h.above || held.running > budget::limit() as usize;
-        assert!(held.holders.iter().any(|h| h.thread == building && h.client == budget::JIT && beside(h)), "it runs beside the full budget, taking no token from the app: thread {building}, running {}, jit first {}, {rows:#?}", held.running, budget::jit_first());
-        BACK_END_GATE.store(0, Ordering::SeqCst);
-        while queue::running_class(up, f).is_some() {
-            std::thread::yield_now();
-        }
-        assert!(u.fns[f as usize].build_err.is_none(), "{:?}", u.fns[f as usize].build_err);
+        assert!(held.holders.iter().all(|h| h.client == budget::APP), "only the app holds tokens: {}", budget::report_string());
+        assert!(held.waiting.iter().all(|w| w.client == budget::APP), "no JIT thread waits for one: {}", budget::report_string());
+        assert_eq!(crate::waits::jit_token_waits(), waits, "the boundary counted no token wait on a JIT thread");
         done.store(true, Ordering::SeqCst);
         holder.join().unwrap();
         // (the isolated process owns the runtime globals)
+        std::mem::forget(u);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every build the JIT's own width starts, held at its back end's start, and more queued behind
+    /// them: the app's pool admits Background work up to its limit at once, and its Visible job is
+    /// never asked to yield. The app is never starved for the JIT.
+    #[test]
+    fn app_jobs_are_admitted_while_every_drain_builds() {
+        isolated_test!(app_jobs_are_admitted_while_every_drain_builds, cores = 8);
+        use makepad_cpu_budget as budget;
+        HEADLESS.store(true, Ordering::Release);
+        let b = budget::background_limit() as usize;
+        let (u, fns, path) = fn_unit("every_drain_builds", b + 2);
+        let up = &*u as *const Unit as usize;
+        BACK_END_GATE.store(3, Ordering::SeqCst);
+        for &f in &fns {
+            queue::spec(up, f);
+        }
+        back_ends_held(up, b as u32);
+        assert_eq!((queue::running()[3], queue::counts()[3]), (b, 2), "the JIT runs its own width and queues the rest: {}", queue::pool_line());
+        // (Background counts all that runs against its ceiling, so it goes first; Visible's is higher)
+        let background: Vec<u32> = (0..budget::background_limit()).map(|i| {
+            budget::Admission::default().poll(budget::BACKGROUND, budget::APP, "the app's Background work")
+                .unwrap_or_else(|| panic!("Background job {i} of the app is let in at once: {}", budget::report_string()))
+        }).collect();
+        let visible = budget::Admission::default().poll(budget::VISIBLE, budget::APP, "the app's Visible job")
+            .unwrap_or_else(|| panic!("the app's Visible job is let in at once: {}", budget::report_string()));
+        assert!(!budget::should_yield(visible), "the app's Visible job is not asked to yield to the JIT: {}", budget::report_string());
+        for permit in background {
+            budget::release(permit);
+        }
+        budget::release(visible);
+        BACK_END_GATE.store(0, Ordering::SeqCst);
+        while queue::counts()[3] + queue::running()[3] != 0 {
+            std::thread::yield_now();
+        }
+        for &f in &fns {
+            assert!(u.fns[f as usize].build_err.is_none(), "a build failed: {:?}", u.fns[f as usize].build_err);
+        }
         std::mem::forget(u);
         let _ = std::fs::remove_file(&path);
     }
@@ -34101,112 +34186,6 @@ mod allocator_swap_tests {
         pauser.join().unwrap();
         wait_for(&served, "the nested job's request was never served after the pause");
         nested.join().unwrap();
-    }
-
-    /// A fork never waits for a compile job that waits for a CPU token. The jobs a pause holds at
-    /// their start keep their permits; a job that gave its token back for a poll's sleep and asks
-    /// for one again while those hold every token waits for them, and they for the pause: counted
-    /// as running there, it held a fork for good (a teardown test's fork, 10 min, 2026-11-14).
-    /// Here the held jobs take every token there is, and one more ask queued ahead of the job's
-    /// keeps it waiting whoever else in the process holds one.
-    #[cfg(unix)]
-    #[test]
-    fn a_fork_does_not_wait_for_a_job_waiting_for_a_token() {
-        isolated_test!(a_fork_does_not_wait_for_a_job_waiting_for_a_token, cores = 2);
-        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        use makepad_cpu_budget as budget;
-        use std::sync::Arc;
-        owner::start();
-        let wait_for = |f: &AtomicBool, what: &str| {
-            let t0 = std::time::Instant::now();
-            while !f.load(Ordering::SeqCst) {
-                assert!(t0.elapsed().as_secs() < 30, "{what}");
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-        };
-        let flag = || Arc::new(AtomicBool::new(false));
-        let (in_job, gave_back, asks, readmitted, release) = (flag(), flag(), flag(), flag(), flag());
-        // the job: admitted as the queue's workers are, counted, then a poll's sleep inside the pause
-        let (j, g, a, r) = (in_job.clone(), gave_back.clone(), asks.clone(), readmitted.clone());
-        let (id_tx, id_rx) = std::sync::mpsc::channel();
-        let job = std::thread::spawn(move || {
-            let permit = budget::admit(budget::BACKGROUND, budget::JIT, "job");
-            let _job = crate::pool::BudgetJob::from_permit(permit, budget::BACKGROUND, "job");
-            let _guard = compile_job();
-            id_tx.send(crate::waits::me()).unwrap();
-            j.store(true, Ordering::SeqCst);
-            while paused_for() == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let sleeping = crate::pool::suspend();
-            g.store(true, Ordering::SeqCst);
-            while !a.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            // its readmission: behind every token's holder
-            drop(sleeping);
-            r.store(true, Ordering::SeqCst);
-        });
-        wait_for(&in_job, "the job never began");
-        let job_id = id_rx.recv().unwrap();
-        let fork: extern "C" fn() -> i32 = unsafe { std::mem::transmute(loader_symbol(b"fork").expect("the loader provides fork")) };
-        let (forked, child) = (flag(), Arc::new(std::sync::atomic::AtomicI32::new(0)));
-        let (f, c) = (forked.clone(), child.clone());
-        let pauser = std::thread::spawn(move || {
-            let pid = fork();
-            if pid == 0 {
-                os::thread::exit_now(0);
-            }
-            c.store(pid, Ordering::SeqCst);
-            f.store(true, Ordering::SeqCst);
-        });
-        wait_for(&gave_back, "the job never gave its token back");
-        // jobs that start inside the pause, each with a token it keeps at its start, until an ask
-        // finds none: that one waits, ahead of the job's
-        let mut held = Vec::new();
-        loop {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let go = release.clone();
-            held.push(std::thread::spawn(move || {
-                let mut admission = budget::Admission::default();
-                let permit = admission.poll(budget::BACKGROUND, budget::JIT, "held");
-                tx.send(permit.is_some()).unwrap();
-                let _job = permit.map(|p| crate::pool::BudgetJob::from_permit(p, budget::BACKGROUND, "held"));
-                let _guard = permit.map(|_| compile_job());
-                while !go.load(Ordering::SeqCst) {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }));
-            if !rx.recv().unwrap() {
-                break;
-            }
-        }
-        let holders = held.len() - 1;
-        asks.store(true, Ordering::SeqCst);
-        // the budget's table: the held jobs have their tokens, the job waits for one
-        let t0 = std::time::Instant::now();
-        while !budget::tokens().waiting.iter().any(|w| w.thread == job_id && w.class == budget::BACKGROUND && w.client == budget::JIT) {
-            assert!(t0.elapsed().as_secs() < 30 && !readmitted.load(Ordering::SeqCst), "the job's ask for a token never waited");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        wait_for(&forked, "the fork waited for a job that waits for a CPU token");
-        assert!(child.load(Ordering::SeqCst) > 0, "fork failed");
-        assert!(!readmitted.load(Ordering::SeqCst), "the job got a token ahead of an earlier ask");
-        assert_eq!(budget::tokens().holders.iter().filter(|h| h.label == "held").count(), holders, "a held job gave its token up");
-        release.store(true, Ordering::SeqCst);
-        pauser.join().unwrap();
-        for h in held {
-            h.join().unwrap();
-        }
-        wait_for(&readmitted, "the job was never readmitted after the fork");
-        job.join().unwrap();
-        extern "C" {
-            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-        }
-        let mut status = 0i32;
-        let pid = child.load(Ordering::SeqCst);
-        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
-        assert_eq!(status, 0, "the child did not exit cleanly");
     }
 
     /// A spawn's fork (Relax std's Command with pre_exec closures: `__relax_fork_exec`) goes ahead
@@ -37210,16 +37189,49 @@ fn want_body_consts(u: &Unit, body: &Body) {
     want_missing_body_consts(u, body);
 }
 
-/// Notes all missing free constants; true means lowering would need the owner.
+/// Notes all missing constants the body names, free and associated; true means lowering would need
+/// the owner. A path's key is the one its lowering asks const_addr_shared for (lower_def_value, a
+/// constant pattern): the path's recorded generic arguments, without regions. One whose arguments
+/// need normalizing (or name a parameter) is left to the lowering. Associated constants were all
+/// left to it, one front and drain each: a body matching on a type's constants (a script VM's
+/// dispatch on `Opcode::ADD`, ...) named more than a front's WANT_ROUNDS, never got its front
+/// off the owner (needs unit), and its hot caller's O3 build left it out until the owner built it.
 fn want_missing_body_consts(u: &Unit, body: &Body) -> bool {
+    use crate::types::TypeFlags;
     let epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
-    let mut seen: crate::fxhash::HashSet<DefId> = Default::default();
+    let mut seen: crate::fxhash::HashSet<(DefId, Vec<TyId>)> = Default::default();
     let mut missing = false;
-    for r in body.res.values().chain(body.pat_res.values()).chain(body.fmt_named.values()) {
+    let mut note = |d: DefId, args: Vec<TyId>| {
+        if u.front.consts.get(&(d, args.clone())).is_none() && seen.insert((d, args.clone())) {
+            want(Wanted::Const(d, args), epoch);
+            missing = true;
+        }
+    };
+    // (a path's recorded arguments as its lowering's key: mono_list, here only where that is erasing
+    // regions)
+    let key_args = |k: u32| -> Option<Vec<TyId>> {
+        let Some(&l) = body.res_args.get(&k) else { return Some(Vec::new()) };
+        let tys = u.tcx.tys.list(l);
+        if tys.iter().any(|&t| u.tcx.tys.flags(t).intersects(TypeFlags::HAS_PARAM | TypeFlags::HAS_ALIAS | TypeFlags::HAS_INFER)) {
+            return None;
+        }
+        Some(tys.iter().map(|&t| u.tcx.tys.erase_regions(t)).collect())
+    };
+    let constant = |d: DefId| matches!(u.prog.def(d).kind, DefKind::Const | DefKind::AssocConst);
+    let paths = body.res.as_slice().iter().map(|&(k, r)| (k, r)).chain(body.pat_res.as_slice().iter().map(|&(k, r)| (k | crate::typeck::PAT_KEY, r)));
+    for (k, r) in paths {
         if let Res::Def(d) = r {
-            if u.prog.def(*d).kind == DefKind::Const && seen.insert(*d) && u.front.consts.get(&(*d, Vec::new())).is_none() {
-                want(Wanted::Const(*d, Vec::new()), epoch);
-                missing = true;
+            if constant(d) {
+                if let Some(args) = key_args(k) {
+                    note(d, args);
+                }
+            }
+        }
+    }
+    for r in body.fmt_named.values() {
+        if let Res::Def(d) = r {
+            if u.prog.def(*d).kind == DefKind::Const {
+                note(*d, Vec::new());
             }
         }
     }
@@ -37633,9 +37645,7 @@ fn run_tick() {
 
 fn compile_checkpoint() {
     if !queue::takes_jobs() { return; }
-    let held = front_reads_held() + u32::from(owner::is_owner());
-    let site = if owner::is_owner() { "jit owner unit" } else { FRONT_READ_SITE.try_with(|site| site.get()).unwrap_or("jit front read") };
-    crate::pool::checkpoint(held, site);
+    crate::pool::checkpoint();
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
@@ -37659,14 +37669,17 @@ pub(crate) unsafe fn reset_statics() {
     reset(&ORDER_UNTIL_NS, AtomicU64::new(0));
     reset(&MAIN_HELD, AtomicU64::new(0));
     reset(&ORDER_PRESENT_LEN, std::sync::atomic::AtomicUsize::new(0));
+    reset(&ORDER_AT_PRESENT, std::sync::atomic::AtomicUsize::new(usize::MAX));
     for p in &PRELINKED_ORDER {
         p.store(0, Ordering::Relaxed);
     }
     reset(&PRELINKED_AHEAD, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SEEDED, relax_session::sync::Mutex::new(Vec::new()));
     reset(&NOT_CALLED_AT_PRESENT, relax_session::sync::Mutex::new(None));
+    reset(&NOT_CALLED_IMAGE, std::sync::atomic::AtomicUsize::new(0));
     reset(&NOT_CALLED_TAKEN, AtomicBool::new(false));
     reset(&INSTALL_AHEAD_ENABLED, AtomicBool::new(false));
-    for c in [&INSTALL_AHEAD_INSTALLED, &INSTALL_AHEAD_SKIPPED, &INSTALL_AHEAD_BAILS, &INSTALL_AHEAD_LAZY, &INSTALL_AHEAD_BATCHES, &INSTALL_AHEAD_MAIN_YIELDS, &INSTALL_AHEAD_INDEX, &INSTALL_AHEAD_OWNER_NS, &INSTALL_AHEAD_CPU_NS] {
+    for c in [&INSTALL_AHEAD_INSTALLED, &INSTALL_AHEAD_STARTUP, &INSTALL_AHEAD_SKIPPED, &INSTALL_AHEAD_BAILS, &INSTALL_AHEAD_LAZY, &INSTALL_AHEAD_BATCHES, &INSTALL_AHEAD_MAIN_YIELDS, &INSTALL_AHEAD_INDEX, &INSTALL_AHEAD_OWNER_NS, &INSTALL_AHEAD_CPU_NS] {
         c.store(0, Ordering::Relaxed);
     }
     reset(&INSTALL_AHEAD_FIRST_MAIN, AtomicU64::new(u64::MAX));

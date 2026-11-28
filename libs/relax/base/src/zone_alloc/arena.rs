@@ -918,6 +918,8 @@ unsafe fn drop_region(r: *mut Arena) {
 
 
 pub struct Arena {
+    /// The owning heap's immutable allocator entries, installed before publishing this region.
+    pub(super) program: AtomicPtr<super::domain::ProgramAllocator>,
     dynamic: bool,
     id: usize,
     base: AtomicUsize,
@@ -1113,6 +1115,7 @@ impl Arena {
         }
         // fresh pages read as zero: every field's valid all-zero state, as `create` has it
         let r = &mut *(at as *mut Arena);
+        *r.program.get_mut() = first.program.load(Ordering::Relaxed);
         r.dynamic = true;
         r.id = NEXT_ARENA_ID.fetch_add(1, Ordering::Relaxed);
         r.init_zeroed();
@@ -3276,7 +3279,7 @@ unsafe extern "C" fn free_elsewhere(p: *mut u8, size: usize, align: usize, a: &A
 /// Frees a block of the domain arena the calling thread is inside; false when the block is not
 /// one (the caller finds its owner).
 #[inline(always)]
-pub unsafe fn domain_dealloc(p: *mut u8, l: Layout) -> bool {
+pub unsafe fn domain_dealloc(p: *mut u8, l: Layout, handled: impl FnOnce(&Arena) -> bool) -> bool {
     let t = domain_tls();
     let Some(a) = t.arena.get().as_ref() else {
         return false;
@@ -3284,18 +3287,18 @@ pub unsafe fn domain_dealloc(p: *mut u8, l: Layout) -> bool {
     // an entered arena is reserved (`Arena::create` fails otherwise): its base is not 0
     let off = (p as usize).wrapping_sub(a.base.load(Ordering::Relaxed));
     if off >= RESERVE {
-        return dealloc_elsewhere(p, l, a);
+        return dealloc_elsewhere(p, l, a, handled);
     }
-    a.dealloc_in(t, p, off, l);
+    if !handled(a) { a.dealloc_in(t, p, off, l); }
     true
 }
 /// `domain_dealloc` of a block outside the thread's region: another region of its heap's, or false.
 #[cold]
 #[inline(never)]
-unsafe fn dealloc_elsewhere(p: *mut u8, l: Layout, a: &Arena) -> bool {
+unsafe fn dealloc_elsewhere(p: *mut u8, l: Layout, a: &Arena, handled: impl FnOnce(&Arena) -> bool) -> bool {
     match a.other_region_of(p) {
         Some(r) => {
-            r.dealloc(p, l);
+            if !handled(r) { r.dealloc(p, l); }
             true
         }
         None => false,

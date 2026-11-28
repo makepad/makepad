@@ -2,12 +2,15 @@
 //! match-lowering tests (`matches/tests.rs`).
 use crate::ast::PatId;
 use crate::borrowck::body::{BodyKind, CheckedBody};
+use crate::const_eval::{ConstEvalProvider, ErrorHandled, EvalToValTreeResult, ValTreeCreationError};
+use crate::consts::{Const, GenericArg, ScalarInt, ValTree};
 use crate::mir::build::thir::{Cx, Pat, PatKind, PatRangeBoundary, Pinnedness};
-use crate::mir::build::{BuildCx, BuildRoot};
+use crate::mir::build::{BuildCx, BuildResult, BuildRoot, UnsupportedReason};
 use crate::mir::{BindingMode, ByRef, Mutability};
-use crate::program::{DefId, Program};
+use crate::program::{DefId, Prim, Program};
 use crate::tcx::{EvalCx, EvalState, Tcx, TypingEnv};
 use crate::typeck;
+use crate::types::TyKind;
 
 /// The line `program` puts before each source: spans count from the start of the file.
 pub(crate) const HEADER: &str = "#![no_std]\n";
@@ -72,13 +75,17 @@ pub(crate) fn top_patterns(prog: &Program, body: &typeck::Body) -> Vec<PatId> {
 /// Runs `f` with a THIR context of fn `name` in `source`.
 pub(crate) fn with_cx<R>(source: &str, name: &str, f: impl FnOnce(&mut Cx<'_>, &typeck::Body) -> R) -> R {
     let (prog, tcx) = program(source);
-    let def = named(&prog, name);
-    let body = tcx.typeck(&prog, def);
+    with_body_cx(&prog, &tcx, name, f)
+}
+
+fn with_body_cx<R>(prog: &Program, tcx: &Tcx, name: &str, f: impl FnOnce(&mut Cx<'_>, &typeck::Body) -> R) -> R {
+    let def = named(prog, name);
+    let body = tcx.typeck(prog, def);
     assert!(body.errors.is_empty(), "{:?}", body.errors);
-    let env = TypingEnv::fully_monomorphized(&prog);
+    let env = TypingEnv::fully_monomorphized(prog);
     let state = EvalState::new();
-    let eval = EvalCx::new(&prog, &tcx, env, &state);
-    let root = BuildRoot::new(BuildCx { prog: &prog, tcx: &tcx, env, eval: &eval }, &body).unwrap();
+    let eval = EvalCx::new(prog, tcx, env, &state);
+    let root = BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, &body).unwrap();
     let mut cx = Cx::new(&root, CheckedBody { owner: def, kind: BodyKind::Function });
     f(&mut cx, &body)
 }
@@ -150,16 +157,72 @@ pub(crate) fn show(cx: &Cx<'_>, pat: &Pat) -> String {
     }
 }
 
+fn lower_patterns(cx: &mut Cx<'_>, body: &typeck::Body) -> BuildResult<Vec<String>> {
+    top_patterns(cx.root.cx.prog, body).into_iter().map(|p| {
+        let pat = cx.lower_pattern(p)?;
+        Ok(show(cx, &pat))
+    }).collect()
+}
+
 fn lower(source: &str, name: &str) -> Vec<String> {
-    with_cx(source, name, |cx, body| {
-        let tops = top_patterns(cx.root.cx.prog, body);
-        let mut out = Vec::new();
-        for p in tops {
-            let pat = cx.lower_pattern(p).unwrap_or_else(|e| panic!("{e:?}"));
-            out.push(show(cx, &pat));
-        }
-        out
-    })
+    with_cx(source, name, lower_patterns).unwrap()
+}
+
+pub(crate) fn with_const_eval<R>(tcx: Tcx, value: impl FnOnce(&Tcx) -> EvalToValTreeResult, check: impl FnOnce(&Tcx) -> R) -> R {
+    fn evaluate(context: usize, _: TypingEnv, _: DefId, _: &[GenericArg]) -> EvalToValTreeResult {
+        // The result stays immutable and outlives the context that holds the provider.
+        unsafe { &*(context as *const EvalToValTreeResult) }.clone()
+    }
+    let result: EvalToValTreeResult = value(&tcx);
+    let mut tcx = tcx;
+    tcx.const_eval_provider = Some(ConstEvalProvider { context: (&result as *const EvalToValTreeResult) as usize, evaluate });
+    check(&tcx)
+}
+
+pub(crate) fn scalar_branch(tcx: &Tcx, fields: &[(Prim, u128)]) -> ValTree {
+    let tys = &tcx.tys;
+    let fields: Vec<_> = fields.iter().map(|&(prim, bits)| {
+        let scalar = ScalarInt::try_from_uint(bits, tys.int_info(prim).0 as u8).unwrap();
+        Const::new_value(tys, ValTree::from_scalar_int(tys, scalar), tys.prim(prim))
+    }).collect();
+    ValTree::from_branches(tys, &fields)
+}
+
+pub(crate) fn unsupported_pointer(tcx: &Tcx) -> EvalToValTreeResult {
+    let ptr = tcx.tys.intern(TyKind::Ptr(false, tcx.tys.u8_));
+    Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(ptr)))
+}
+
+fn lower_const(source: &str, value: impl FnOnce(&Tcx) -> EvalToValTreeResult) -> BuildResult<Vec<String>> {
+    let (prog, tcx) = program(source);
+    with_const_eval(tcx, value, |tcx| with_body_cx(&prog, tcx, "f", lower_patterns))
+}
+
+#[test]
+fn const_pattern_enum_with_unused_pointer_variant() {
+    let source = "pub enum Key { Number(u64), Ptr(*const u8) }
+        pub const DELETED: Key = Key::Number(1);
+        pub fn f(k: &Key, v: Key) { match k { &DELETED => {} _ => {} } match v { DELETED => {} _ => {} } }";
+    let pats = lower_const(source, |tcx| Ok(scalar_branch(tcx, &[(Prim::U32, 0), (Prim::U64, 1)]))).unwrap();
+    assert_eq!(pats, ["*Key::Number(0: 1)", "_", "Key::Number(0: 1)", "_"]);
+}
+
+#[test]
+fn const_pattern_active_non_supported_type_is_unresolved() {
+    let source = "pub enum Key { Number(u64), Ptr(*const u8) }
+        pub const BAD: Key = Key::Ptr(0 as *const u8);
+        pub fn f(v: Key) { match v { BAD => {} _ => {} } }";
+    let err = lower_const(source, unsupported_pointer).unwrap_err();
+    assert_eq!(err.reason, UnsupportedReason::UnresolvedFact("constant pattern of a type without a value tree"));
+}
+
+#[test]
+fn const_pattern_manually_drop_lowers_to_leaf() {
+    let source = r#"#[lang = "manually_drop"] pub struct ManuallyDrop<T> { value: T }
+        pub const M: ManuallyDrop<u8> = ManuallyDrop { value: 9 };
+        pub fn f(x: ManuallyDrop<u8>) { match x { M => {} _ => {} } }"#;
+    let pats = lower_const(source, |tcx| Ok(scalar_branch(tcx, &[(Prim::U8, 9)]))).unwrap();
+    assert_eq!(pats, ["Leaf(0: 9)", "_"]);
 }
 
 #[test]

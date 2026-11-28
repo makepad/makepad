@@ -94,6 +94,8 @@ impl Tcx {
     }
 
     pub fn collect_collected_suffix(&mut self, prog: &Program, first: usize) {
+        assert_eq!(self.tys.ptr_bytes, prog.ptr_bytes,
+            "collected Tcx pointer width ({}) differs from program ({})", self.tys.ptr_bytes, prog.ptr_bytes);
         // The retained methods and traits that lost a dropped item come first: their signature
         // cells are empty again and their region contracts follow the recreated items.
         let mut defs: Vec<_> = prog.collected_recollect.iter().copied()
@@ -106,6 +108,7 @@ impl Tcx {
     }
 
     pub fn verify_collected(&self, saved_prog: &Program, prog: &Program, rebuilt: &Self) {
+        assert_eq!(self.tys.ptr_bytes, rebuilt.tys.ptr_bytes, "collected Tcx pointer width differs");
         let mut a_keys: Vec<_> = self.sigs.keys().copied().collect(); a_keys.sort_by_key(|d| d.0);
         let mut b_keys: Vec<_> = rebuilt.sigs.keys().copied().collect(); b_keys.sort_by_key(|d| d.0);
         assert_eq!(a_keys, b_keys, "collected signature definitions differ");
@@ -210,7 +213,7 @@ impl Tcx {
         let errors = self.collected_errors.as_ref()?;
         if !errors.is_empty() { return None; }
         let mut w = Vec::new();
-        7u32.put(&mut w);
+        8u32.put(&mut w);
         macro_rules! put_one {
             (errors) => { errors.put(&mut w) };
             ($f:ident) => { self.$f.put(&mut w) };
@@ -257,11 +260,13 @@ impl Tcx {
         (k == image.len()).then_some(())
     }
 
-    pub fn restore_collected(bytes: &'static [u8], files: usize, crates: usize) -> Option<Self> {
+    pub fn restore_collected(bytes: &'static [u8], files: usize, crates: usize, ptr_bytes: u32) -> Option<Self> {
         let image = crate::image::Reader::new(bytes)?;
         let mut r = Decode::new(image.bytes(0, 0)?);
-        if u32::get(&mut r)? != 7 { return None; }
-        let mut t = Self::with_types(Types::restore_collected(image.bytes(1, 1)?)?);
+        if u32::get(&mut r)? != 8 { return None; }
+        let tys = Types::restore_collected(image.bytes(1, 1)?)?;
+        if tys.ptr_bytes != ptr_bytes { return None; }
+        let mut t = Self::with_types(tys);
         macro_rules! get { ($($f:ident),+) => { $(t.$f = Codec::get(&mut r)?;)+ }; }
         fields!(get);
         if !r.bytes.is_empty() { return None; }
@@ -286,6 +291,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collected_tcx_preserves_32bit_ptr_bytes_and_rejects_width_mismatch() {
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-collected-width-{}-{}", std::process::id(), crate::unique_test_suffix()));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "#![no_std]\npub struct Buf { pub bytes: [u8; 16] }").unwrap();
+        let mut prog = Program::new(&session);
+        prog.ptr_bytes = 4;
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        prog.resolve_imports();
+        assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+        let mut tcx = Tcx::new();
+        tcx.collect(&prog);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        let buf = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "Buf").unwrap() as u32);
+        let field_len = |tcx: &Tcx| {
+            let field = &tcx.adts[&buf].variants[0].fields[0];
+            let TyKind::Array(_, len) = tcx.tys.kind(field.ty) else { panic!("expected an array field") };
+            len.try_to_target_usize(&tcx.tys)
+        };
+        assert_eq!(field_len(&tcx), Some(16), "collected array length");
+        let bytes = Box::leak(tcx.collected_image().unwrap().into_boxed_slice());
+        let restore = |width| Tcx::restore_collected(bytes, prog.files.len(), prog.crates.len(), width);
+        assert!(restore(8).is_none(), "64-bit program accepted a 32-bit image");
+        let restored = restore(4).expect("matching 32-bit image");
+        assert_eq!(restored.tys.ptr_bytes, 4);
+        assert_eq!(field_len(&restored), Some(16), "restored array length");
+    }
+
+    /// Constants lowered on another thread while images are taken: every declaration an image
+    /// holds lowered has its anonymous constant's type in it (a declaration's lowering feeds it
+    /// before its cell is set; an image that read the fed types first held declarations lowered
+    /// in between without it, and a restore typing such a constant panicked).
+    #[test]
+    fn images_taken_while_constants_lower_hold_their_constants_types() {
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("n01-collected-fed-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        // one anonymous constant each: its type's length (the initializer has none)
+        let consts: String = (0..2000).map(|i| format!("pub const C{i}: [u8; {}] = [{}];\n", 1, i % 200)).collect();
+        std::fs::write(&source, format!("#![no_std]\n#[lang = \"sized\"] pub trait Sized {{}}\n{consts}")).unwrap();
+        let mut prog = Program::new(&session);
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        prog.resolve_imports();
+        assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+        let mut tcx = Tcx::new();
+        tcx.collect(&prog);
+        let defs = |kind: DefKind| -> Vec<DefId> { (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|d| prog.def(*d).kind == kind).collect() };
+        let decls = defs(DefKind::Const);
+        let anon_of: crate::fxhash::HashMap<DefId, DefId> = defs(DefKind::AnonConst).into_iter()
+            .map(|a| (crate::borrowck::body::root_owner(&prog, a), a)).collect();
+        assert_eq!((decls.len(), anon_of.len()), (2000, 2000));
+        // the declarations an image holds lowered, each with its constant's type
+        let check = |k: usize, bytes: Vec<u8>| -> usize {
+            let restored = Tcx::restore_collected(Box::leak(bytes.into_boxed_slice()), prog.files.len(), prog.crates.len(), prog.ptr_bytes)
+                .unwrap_or_else(|| panic!("image {k} did not restore"));
+            decls.iter().filter(|d| restored.const_tys.declaration(d).unwrap().get().is_some()).inspect(|d| {
+                assert!(restored.const_tys.fed_type(&anon_of[d]).is_some(), "image {k} holds `{}` without the type of its length", prog.def_path(**d));
+            }).count()
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let (done, started) = (AtomicBool::new(false), AtomicUsize::new(0));
+        let mut images = 0;
+        // each side waits on the other: a panic on either lets the other run out (the lowering
+        // free, the images to its end) before the scope joins and raises it, never a hang
+        struct OnDrop<F: FnMut()>(F);
+        impl<F: FnMut()> Drop for OnDrop<F> { fn drop(&mut self) { (self.0)() } }
+        std::thread::scope(|s| {
+            // 40 constants at a time, each batch once the next image has begun: every image is
+            // taken while constants lower (50 of them)
+            s.spawn(|| {
+                let _done = OnDrop(|| done.store(true, Ordering::Release));
+                for (i, &d) in decls.iter().enumerate() {
+                    while started.load(Ordering::Acquire) <= i / 40 { std::thread::yield_now(); }
+                    tcx.const_ty(&prog, d).unwrap();
+                }
+            });
+            let _free = OnDrop(|| started.store(usize::MAX, Ordering::Release));
+            while !done.load(Ordering::Acquire) {
+                started.fetch_add(1, Ordering::Release);
+                images += 1;
+                check(images, tcx.collected_image().unwrap_or_else(|| panic!("image {images} was not taken")));
+            }
+        });
+        assert_eq!(check(images + 1, tcx.collected_image().expect("the image taken after the lowering")), 2000);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn round38_collected_native_declarations_restore() {
         let session = std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("n01-collected-{}", std::process::id()));
@@ -308,12 +404,12 @@ mod tests {
         let _ = tcx.fn_item_sig(&prog, def).unwrap();
         let program_image = prog.collected_image().unwrap();
         let types_image = tcx.collected_image().unwrap();
-        let pre = [crate::preload::PreCrate { name: "fixture".into(),
+        let pre = [crate::preload::PreCrate { is_bin: false, harness: false, name: "fixture".into(),
             root: source.to_str().unwrap().into(), edition: 2021, cfg: crate::cfg::CfgSet::host(&session, &[]),
             deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![] }];
         let restored_prog = Program::restore_collected(&session, Box::leak(program_image.into_boxed_slice()), &pre,
             |_, _, _, meta| prog.file_paths.iter().position(|path| *path == meta.path).and_then(|i| crate::parser::parse_owned(&session, prog.files[i].src.to_vec(), 2021).ok())).unwrap();
-        let restored_tcx = Tcx::restore_collected(Box::leak(types_image.into_boxed_slice()), restored_prog.files.len(), restored_prog.crates.len()).unwrap();
+        let restored_tcx = Tcx::restore_collected(Box::leak(types_image.into_boxed_slice()), restored_prog.files.len(), restored_prog.crates.len(), restored_prog.ptr_bytes).unwrap();
         prog.verify_collected(&restored_prog);
         tcx.verify_collected(&prog, &restored_prog, &restored_tcx);
         // the running tables adopt the images written from them: same declarations, read in place
@@ -397,10 +493,15 @@ impl ConstTypes {
             }
         }
     }
+    /// The declarations are read before the fed types: a declaration's lowering feeds its
+    /// anonymous constants before its cell is set, so the fed types taken after hold every one
+    /// a declaration taken names. (Taken the other way, a mid-run record while a background
+    /// check lowered constants held a declaration without its constants' types: the restore's
+    /// holder is lowered already and feeds nothing, and typing such a constant panicked, its
+    /// holder never fed it.) Always a copy: a write in place reads the declarations after.
     fn write_image(&self, image: &mut crate::image::Writer<'_>, id: &mut u32) {
-        let added = self.added.snapshot();
-        if added.is_empty() { self.image.write_image(image, id); return; }
         let mut table = self.image.clone();
+        let added = self.added.snapshot();
         table.extend(added.into_iter().map(|(d, ty)| (d, ConstType::Fed(ty))));
         table.write_image(image, id);
     }

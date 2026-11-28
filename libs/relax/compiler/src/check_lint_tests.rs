@@ -146,11 +146,13 @@ enum Uses {
 
 /// `check_code`, the import uses recorded as `uses` says.
 fn check_code_uses(lib: &str, bins: &[&str], harness: bool, uses: Uses) -> i32 {
-    check_code_as(lib, bins, harness, uses, false)
+    check_code_as(lib, bins, harness, uses, false, false)
 }
 
-/// `check_code_uses`; `post_mono`: the check of a build (Options::post_mono, RELAX_CHECK_BUILD).
-fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono: bool) -> i32 {
+/// `check_code_uses`; `post_mono`: the check of a build (Options::post_mono, RELAX_CHECK_BUILD);
+/// `own_harness`: the library's own test harness too, its files parsed again with cfg(test) and
+/// loaded first, as `makepad check --tests` holds a crate and its harness.
+fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono: bool, own_harness: bool) -> i32 {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
     std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     // `makepad check`'s session (run.rs): constants go through the check-mode interpreter first
@@ -175,9 +177,17 @@ fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono:
     std::fs::write(&files[0], lib).unwrap();
     let mut cfg = crate::program_cfg(&sess, &[]);
     if harness { cfg.set.push("test".to_string()); }
+    let own = own_harness.then(|| {
+        let mut test_cfg = crate::program_cfg(&sess, &[]);
+        test_cfg.set.push("test".to_string());
+        let k = prog.load_crate_deferred("pkg", files[0].to_str().unwrap(), 2021, test_cfg, std_deps.clone()).unwrap();
+        prog.crates[k as usize].harness = true;
+        k
+    });
     let root = prog.load_crate_deferred("pkg", files[0].to_str().unwrap(), 2021, cfg, std_deps.clone()).unwrap();
     prog.crates[root as usize].harness = harness;
     let mut crates = vec![root];
+    crates.extend(own);
     for (i, src) in bins.iter().enumerate() {
         let path = dir.join(format!("bin{i}.rs"));
         std::fs::write(&path, src).unwrap();
@@ -252,6 +262,24 @@ fn a_test_targets_test_fns_are_used() {
         "#, &[], true), 0);
     };
     assert_eq!(warnings, ["function `unused` is never used [dead_code]"]);
+}
+
+/// `makepad check --tests` holds a crate and its own test harness, the same files parsed twice. A
+/// macro only the crate has (`#[cfg(not(test))]`) was judged under the harness's file, where cfg
+/// had removed it, so its `#[allow(unused_macros)]` went unread: relax-types' own `eprint` and
+/// `print` were "unused" in its `--tests` check (11-27). One the crate leaves unused is still unused.
+#[test]
+fn a_macro_only_the_crate_has_keeps_its_allow_beside_its_harness() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_macro_only_the_crate_has_keeps_its_allow_beside_its_harness") else {
+        return assert_eq!(check_code_as(r#"
+            #[cfg(not(test))]
+            #[allow(unused_macros)]
+            macro_rules! quiet { () => {} }
+            #[cfg(not(test))]
+            macro_rules! loud { () => {} }
+        "#, &[], false, Uses::Recorded, false, true), 0);
+    };
+    assert_eq!(warnings, ["unused macro definition: `loud` [unused_macros]"]);
 }
 
 /// `makepad check --tests` had reported a binary's `main` and all it calls as never used when it
@@ -443,7 +471,7 @@ fn a_post_monomorphization_error_is_the_builds_not_the_checks() {
     "#;
     if std::env::var_os(CHILD).is_some() {
         let build = std::env::var_os("RELAX_CHECK_LINT_BUILD").is_some();
-        let code = check_code_as(LIB, &[], false, Uses::Recorded, build);
+        let code = check_code_as(LIB, &[], false, Uses::Recorded, build, false);
         assert_eq!(code != 0, build, "the check of a build fails, the check passes");
         return;
     }

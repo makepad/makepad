@@ -445,7 +445,7 @@ fn hosted_program(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> boo
             "--units" => return true,
             "--offline" | "--frozen" => { flags.push(args[i].clone()); i += 1; }
             "--workspace-dir" => { let Some(dir) = args.get(i + 1) else { return false }; workspace = dir.clone(); i += 2; }
-            "--report-to" | "--run-dir" | "--cfg" | "--boundary" => i += 2,
+            "--report-to" | "--run-dir" | "--cfg" | "--boundary" | "--known-refused" => i += 2,
             _ => i += 1,
         }
     }
@@ -1175,6 +1175,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut watch = session.is_some();
     let mut deep = false;
     let mut boundary: Option<Vec<String>> = None;
+    // `--boundary statics`: the statics the runtime refuses on purpose (boundary::read_allowed)
+    let mut known_refused: Option<String> = None;
     let mut root_only = false;
     let mut selftest = false;
     // `makepad check --workspace`: every workspace crate the package reaches, not only its app crates
@@ -1341,6 +1343,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 i += 1;
                 boundary = args.get(i).map(|s| s.split(',').map(|x| x.to_string()).collect());
             }
+            "--known-refused" => {
+                i += 1;
+                known_refused = args.get(i).cloned();
+            }
             _ => return usage(),
         }
         i += 1;
@@ -1354,6 +1360,8 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let boundary_target = (boundary_options && crate::cfg::CfgSet::host(sess, &[]).triple() != crate::cfg::CfgSet::machine(sess, &[]).triple())
         .then(|| crate::cfg::CfgSet::host(sess, &[]).triple());
     if boundary.is_some() && !check { return usage(); }
+    let boundary_statics = boundary.as_ref().is_some_and(|b| b.len() == 1 && b[0] == "statics");
+    if known_refused.is_some() && !boundary_statics { return usage(); }
     if also_requested && (!check || watch || root_only || selftest || session.is_some()) { return usage(); }
     // a profile is a test's: `makepad run` builds as the release profile does. A test's start of
     // its package's binary (CARGO_BIN_EXE_<name>, which names it in RELAX_ARG0) has the test's, as
@@ -1486,7 +1494,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         if harness || plain_test {
             // a run that hangs answers `devhub inspect <node>/<pid> why-hung`
             crate::inspect::start_for_test(&package);
-        } else if !hosted {
+        } else if !hosted && crate::inspect::remote_request() != makepad_remote::ask::Request::Off {
+            // (as the app built natively: off unless `--remote`, MAKEPAD_REMOTE or the per-user
+            // setting asks; a refused form is the app's to say, at its start)
             crate::inspect::start(&package);
         }
     }
@@ -1755,7 +1765,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let mut image_deps: Vec<_> = (0..std_count).collect();
         image_deps.extend(c.deps.iter().map(|(d, _)| pre_index[*d]));
         pre_index[ci] = pre.len();
-        pre.push(crate::preload::PreCrate { name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
+        pre.push(crate::preload::PreCrate { is_bin: c.bin, harness: c.harness, name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
     }
     let front_images = crate::cache::FrontImages::open(options);
     // `makepad check` of an app (not a watch or warm session, a selftest or a workspace check):
@@ -2260,7 +2270,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if !check && !harness && !plain_test {
         for k in crate::check::app_crates(&prog, root) { prog.crates[k as usize].validate = true; }
     }
-    let mut tcx = collected_tcx.take().unwrap_or_else(crate::tcx::Tcx::new);
+    let mut tcx = collected_tcx.take().unwrap_or_else(|| {
+        let mut t = crate::tcx::Tcx::new();
+        t.tys.ptr_bytes = prog.ptr_bytes;
+        t
+    });
+    assert_eq!(tcx.tys.ptr_bytes, prog.ptr_bytes,
+        "type context pointer width ({}) differs from program ({})", tcx.tys.ptr_bytes, prog.ptr_bytes);
     // RELAX_PERTURB: type ids shift (code must not depend on them; syms.rs reloc_sig)
     for i in 0..crate::syms::perturb(options) {
         let u8_ = tcx.tys.prim(crate::program::Prim::U8);
@@ -2382,6 +2398,21 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
         phase("load checked files", t);
         crate::jit::compile_watch(Some(("check: crate", 0)));
+        if boundary_statics {
+            let allowed = match known_refused.as_deref().map(crate::boundary::read_allowed).transpose() {
+                Ok(a) => a.unwrap_or_default(),
+                Err(e) => { eprintln!("relax: {e}"); return 2; }
+            };
+            let up: *mut Unit = &mut *u;
+            let (rep, failed) = crate::owner::call(crate::owner::Class::Program, || crate::boundary::statics(unsafe { &*up }, &crate::provided::registered_names(), &allowed, known_refused.as_deref().unwrap_or("")));
+            print!("{}", rep);
+            std::mem::forget(u);
+            if failed > 0 {
+                eprintln!("relax check --boundary statics: {failed} failure(s): a static of a provided crate that JIT-compiled code can reach is refused when that code first runs");
+                return 1;
+            }
+            return 0;
+        }
         if let Some(b) = &boundary {
             if let Err(e) = crate::boundary::start(&u, b) {
                 eprintln!("relax: {}", e);
@@ -2458,7 +2489,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             // collected image), whose verdicts are written right after (record_check_front may
             // write nothing); else every check that repeats no passing one checks all of std again.
             let lent = u.cache.is_none() && match boot_cache.take().map(Ok).or_else(|| crate::cache::mode_from_env(options).map(|m| crate::cache::Cache::open_collected(&*u, m, None))) {
-                Some(Ok(c)) => { u.cache = Some(Box::new(crate::cache::CacheCell::new(c))); true }
+                Some(Ok(c)) => { u.set_cache(c); true }
                 Some(Err(e)) => { verbose!("relax check: std's verdicts not looked up: {e}"); false }
                 None => false,
             };
@@ -2659,7 +2690,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
                 // (build scripts, the proc-macro host) do not make a first run warm
                 unsafe { std::env::set_var("RELAX_CACHE_STATE", if c.has_startup_manifest() { "warm" } else { "cold" }) };
                 crate::first_frame::classified(c.has_startup_manifest());
-                u.cache = Some(Box::new(crate::cache::CacheCell::new(c)));
+                u.set_cache(c);
             }
             Err(e) => verbose!("relax cache: off ({})", e),
         }
@@ -2866,18 +2897,17 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     jit::ORDER_UNTIL_NS.store(jit::wall_ns() + 5_000_000_000, Ordering::Relaxed);
     // the manifest's slots before the first present: installed now, from its prelinked image
     let t_pre = Instant::now();
-    let prelinked = unsafe { jit::prelink_startup(up) };
-    if prelinked == 0 && warm_start.is_some() {
-        if let Some(c) = unsafe { (*up).cache.as_ref() } {
+    let prelink = unsafe { jit::prelink_startup_report(up) };
+    if prelink.prelinked == 0 && warm_start.is_some() {
+        if let Some(s) = prelink.stats.as_ref() {
             verbose!("relax cache: warm start without a prelinked startup image (image {}, {} stale, {} unresolved, {} had code)",
-                if c.has_startup_image() { "present" } else { "missing" }, c.stats.prelink_changed, c.stats.prelink_failed, c.stats.prelink_had_code);
+                if prelink.has_startup_image { "present" } else { "missing" }, s.prelink_changed, s.prelink_failed, s.prelink_had_code);
         }
     }
-    if prelinked > 0 {
+    if prelink.prelinked > 0 {
         // a warm start: the watcher (started below) takes edits once no demand compile runs
         jit::prelinked_start();
-        if let Some(c) = unsafe { (*up).cache.as_ref() } {
-            let s = &c.stats;
+        if let Some(s) = prelink.stats.as_ref() {
             let ms = |ns: u64| ns as f64 / 1e6;
             verbose!("relax cache: prelinked {} startup slots and {} data objects in {:.1} ms (image read {:.1}, keys {:.1}, symbols {:.1}, placed+linked+installed {:.1}; {} naming a changed crate kept, checked in {:.1}; {} left lazy: {} stale, {} unresolved, {} had code)", s.prelinked, s.prelink_data, t_pre.elapsed().as_secs_f64() * 1e3,
                 ms(s.prelink_parse_ns), ms(s.prelink_keys_ns), ms(s.prelink_syms_ns), ms(s.prelink_ns.saturating_sub(s.prelink_parse_ns + s.prelink_keys_ns + s.prelink_syms_ns + s.prelink_check_ns)),

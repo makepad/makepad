@@ -26,7 +26,8 @@ pub fn dispatch(raw_args: &[Vec<u8>]) -> bool {
             Some(d) => d,
             None => std::env::current_dir().map_err(|e| e.to_string())?.display().to_string(),
         };
-        relax_compiler::resolve::cargo_metadata(&relax_compiler::session_from_env(&[]), &dir, &args[1..])
+        let sess = relax_compiler::session_from_env(&[])?;
+        relax_compiler::resolve::cargo_metadata(&sess, &dir, &args[1..])
     })();
     match result {
         Ok(json) => println!("{json}"),

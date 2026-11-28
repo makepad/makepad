@@ -23,6 +23,156 @@ fn leaf(result: Result<ValTree, ErrorHandled>, size: u8) -> Result<u128, ErrorHa
     result.map(|value| value.try_to_leaf().expect("expected scalar valtree").to_bits(size))
 }
 
+#[test]
+fn aliased_scalar_folds_and_unnormalized_aliases_do_not_report_e0080() {
+    let (prog, tcx) = program(br#"#![no_std]
+        trait Tr { type A; }
+        impl Tr for () { type A = bool; }
+        const OK_ALIAS: <() as Tr>::A = true;
+
+        trait Unimpl { type A; }
+        const BAD_ALIAS: <() as Unimpl>::A = true;
+
+        trait Unsized { type Out; }
+        impl Unsized for str {}
+        const RIGID_ALIAS: <str as Unsized>::Out = loop {};
+
+        trait Id { type Out; }
+        struct S<T>(T);
+        impl<T> Id for S<T> { type Out = T; }
+        impl<T> S<T> { const GENERIC_ALIAS: <S<T> as Id>::Out = loop {}; }
+    "#);
+    let env = TypingEnv::fully_monomorphized(&prog);
+    let ok = named(&prog, "OK_ALIAS");
+    assert_eq!(leaf(tcx.const_eval_resolve(&prog, env, ok, &[]), 1), Ok(1), "OK_ALIAS");
+    assert!(fold_without_execution(&tcx, &prog, env, ok).is_none(), "fold-only evaluation resolved the projection");
+    for name in ["BAD_ALIAS", "RIGID_ALIAS"] {
+        let result = tcx.const_eval_resolve(&prog, env, named(&prog, name), &[]);
+        assert!(matches!(result, Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(_)))), "{name}: {result:?}");
+    }
+    let args = [GenericArg::Type(tcx.tys.intern(TyKind::Param(0)))];
+    let result = tcx.const_eval_resolve(&prog, env, named(&prog, "GENERIC_ALIAS"), &args);
+    assert_eq!(result, Err(ErrorHandled::TooGeneric), "GENERIC_ALIAS");
+    assert_eq!(tcx.dcx.err_count(), 0, "unexpected constant evaluation diagnostic");
+}
+
+#[test]
+fn aliased_const_normalization_respects_typing_mode() {
+    use crate::consts::{AliasConst, ConstKind, IsRigid, ScalarInt};
+    use crate::infer::InferCtxt;
+    use crate::next_solver::{AliasTerm, Certainty, ClauseKind, Goal, ParamEnvId, Predicate, PredicateKind, ProjectionClause, Term};
+    use crate::tcx::TypingMode;
+    use crate::types::TyId;
+    use relax_front::def_collector::NodeId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const SRC: &[u8] = br#"#![no_std]
+        trait Tr { type A; }
+        impl Tr for () { type A = bool; }
+        const OK_ALIAS: <() as Tr>::A = true;
+        trait Unimpl { type A; }
+        const BAD_ALIAS: <() as Unimpl>::A = true;
+        trait Unsized { type Out; }
+        impl Unsized for str {}
+        const RIGID_ALIAS: <str as Unsized>::Out = loop {};
+        trait Marker {}
+        impl Marker for bool {}
+        struct S<const N: bool>;
+        fn def_opaque() -> impl Marker { true }
+        fn owner() { let _: S<{ true }>; }
+    "#;
+
+    fn opaque_ty(prog: &Program, tcx: &Tcx) -> TyId {
+        tcx.lower_opaque_ty(prog, prog.opaque_types_defined_by[&named(prog, "def_opaque")][0])
+    }
+
+    fn feed_anon(prog: &Program, tcx: &Tcx, ty: TyId) -> AliasConst {
+        let owner = named(prog, "owner");
+        let (file, expr) = prog.node_id_to_def_id.iter().find_map(|(&(file, node), &def)| match node {
+            NodeId::AnonConst(expr) if crate::borrowck::body::root_owner(prog, def) == owner => Some((file, expr)),
+            _ => None,
+        }).expect("owner's anonymous constant");
+        let ct = tcx.lower_const_arg(prog, file, &tcx.item_env(prog, owner), expr, ty);
+        let ConstKind::Alias(IsRigid::No, alias) = tcx.tys.const_kind(ct) else { panic!("expected an unevaluated constant") };
+        alias
+    }
+
+    fn project(prog: &Program, tcx: &Tcx, mode: TypingMode, alias: AliasConst) -> (Certainty, ConstKind) {
+        let mut infcx = InferCtxt::new(tcx, mode, Default::default());
+        if mode.is_coherence() { infcx.coherence_crate = Some(0); }
+        let result = infcx.next_const_var();
+        let projection = ProjectionClause { projection_term: AliasTerm::Const(alias), term: Term::Const(result) };
+        let goal = Goal { param_env: ParamEnvId::EMPTY, predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(projection))) };
+        let evaluation = infcx.evaluate_root_goal(prog, goal, None).expect("evaluate the constant projection");
+        (evaluation.certainty, tcx.tys.const_kind(infcx.shallow_resolve_const(result)))
+    }
+
+    let (prog, tcx) = program(SRC);
+    let env = TypingEnv { mode: TypingMode::Coherence, ..TypingEnv::fully_monomorphized(&prog) };
+    for &name in &["OK_ALIAS", "BAD_ALIAS", "RIGID_ALIAS"] {
+        let result = tcx.const_eval_resolve(&prog, env, named(&prog, name), &[]);
+        assert_eq!(result, Err(ErrorHandled::TooGeneric), "Coherence direct: {name}");
+    }
+
+    for &name in &["RIGID_ALIAS", "def_opaque"] {
+        let (prog, tcx) = program(SRC);
+        let ty = if name == "def_opaque" { opaque_ty(&prog, &tcx) } else { tcx.type_of(&prog, named(&prog, name)).unwrap() };
+        let alias = feed_anon(&prog, &tcx, ty);
+        let (certainty, kind) = project(&prog, &tcx, TypingMode::Coherence, alias);
+        assert_eq!(certainty, Certainty::AMBIGUOUS, "Coherence solver: {name} resolved to {kind:?}");
+        assert!(!matches!(kind, ConstKind::Error), "Coherence solver: {name} resolved to an error");
+    }
+
+    struct Provider { value: ValTree, hits: AtomicUsize }
+    fn evaluate(context: usize, _: TypingEnv, _: DefId, _: &[GenericArg]) -> EvalToValTreeResult {
+        // The shared provider outlives the Tcx that calls it.
+        let provider = unsafe { &*(context as *const Provider) };
+        provider.hits.fetch_add(1, Ordering::Relaxed);
+        Ok(provider.value.clone())
+    }
+    let (prog, tcx) = program(SRC);
+    let scalar = ScalarInt::try_from_uint(1, 1).unwrap();
+    let provider = Provider { value: ValTree::from_scalar_int(&tcx.tys, scalar), hits: AtomicUsize::new(0) };
+    let mut tcx = tcx;
+    tcx.const_eval_provider = Some(ConstEvalProvider { context: (&provider as *const Provider) as usize, evaluate });
+    let alias = feed_anon(&prog, &tcx, opaque_ty(&prog, &tcx));
+    let defining = tcx.opaque_types_defined_by(&prog, named(&prog, "def_opaque"));
+    let typeck = TypingMode::Typeck { defining_opaque_types_and_generators: defining };
+    let post_typeck = TypingMode::PostTypeckUntilBorrowck { defining_opaque_types: Default::default() };
+    for (mode, def) in [(typeck, alias.kind.def_id()), (post_typeck, named(&prog, "BAD_ALIAS"))] {
+        let before = provider.hits.load(Ordering::Relaxed);
+        let env = TypingEnv { mode, ..TypingEnv::fully_monomorphized(&prog) };
+        let result = leaf(tcx.const_eval_resolve(&prog, env, def, &[]), 1);
+        let calls = provider.hits.load(Ordering::Relaxed) - before;
+        assert_eq!((result, calls), (Ok(1), 1), "{mode:?} fall-through");
+    }
+    for mode in [TypingMode::PostAnalysis, TypingMode::Codegen] {
+        for name in ["BAD_ALIAS", "RIGID_ALIAS"] {
+            let before = provider.hits.load(Ordering::Relaxed);
+            let env = TypingEnv { mode, ..TypingEnv::fully_monomorphized(&prog) };
+            let result = tcx.const_eval_resolve(&prog, env, named(&prog, name), &[]);
+            let calls = provider.hits.load(Ordering::Relaxed) - before;
+            assert!(matches!(result, Err(ErrorHandled::Reported(ValTreeCreationError::NonSupportedType(_)))),
+                "{mode:?}: {name} returned {result:?} with {calls} provider calls");
+            assert_eq!(calls, 0, "{mode:?}: {name} reached the provider");
+        }
+    }
+    assert_eq!(tcx.dcx.err_count(), 0, "PostAnalysis/Codegen: unexpected constant evaluation diagnostic");
+
+    let (prog, tcx) = program(SRC);
+    let body = tcx.typeck(&prog, named(&prog, "def_opaque"));
+    assert!(body.errors.is_empty(), "ErasedNotCoherence rerun: defining body: {:?}", body.errors);
+    let ty = opaque_ty(&prog, &tcx);
+    let alias = feed_anon(&prog, &tcx, ty);
+    assert!(alias.args.is_empty(), "ErasedNotCoherence rerun: only the fed type carries the opaque");
+    let (certainty, kind) = project(&prog, &tcx, TypingMode::PostAnalysis, alias);
+    assert!(certainty.is_yes(), "ErasedNotCoherence rerun: {certainty:?}");
+    let ConstKind::Value(value) = kind else { panic!("ErasedNotCoherence rerun: expected a value, got {kind:?}") };
+    assert_eq!(value.ty, ty, "ErasedNotCoherence rerun: preserve the fed type");
+    assert_eq!(value.valtree.try_to_leaf().expect("ErasedNotCoherence rerun: scalar").to_bits(1), 1,
+        "ErasedNotCoherence rerun: fold the revealed bool");
+}
+
 // Folding keeps the declared integer width and signedness.
 #[test]
 fn arch_n01_evaluator_wide_literal_control() {

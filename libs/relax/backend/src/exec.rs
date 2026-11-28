@@ -70,6 +70,8 @@ mod win {
 /// Machine code in its own executable mapping. Immutable once built; unmapped on drop.
 pub struct Code {
     ptr: *mut u8,
+    /// the mapping's length; a target without executable memory (wasm) never makes a `Code`
+    #[cfg(any(unix, windows))]
     map_len: usize,
     len: usize,
 }

@@ -21,8 +21,8 @@ and every package that uses one (a dev-dependency too), in both repos: the gate 
 one `cargo check --tests` ([`tested`]). It ends in `--features=<package>/<feature>,..` when its users
 turn on features of it ([`turned_on`]): it is checked with them whatever else that check holds. `--tests` prints only those lines, in any cargo workspace
 (land_gate.sh tests). `--runs` prints the tests bucket's: `tests` lines of the packages whose tests it runs under
-the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages and the gate packages the
-diff reaches, as the fast bucket picks its checks; GATE_FULL=1 (the full bucket, daily) runs every package's,
+the JIT after a landing (land_gate.sh testrun, [`run_units`]): the changed packages, the gate packages the
+diff reaches, and direct users in the same product subtree that fit its test budget. GATE_FULL=1 runs every package's,
 whatever the diff. A package's test variants ([`variants`]) run beside it, a `tests` line each.
 `--runs` with GATE_MACOS=1 prints the mac bucket's instead (mac_tests.sh): a `tests <package> <dir> --test <target>`
 line for each test target only a Mac can fail ([`macos_tests`]) whose package's tests the diff reaches, and a
@@ -32,8 +32,10 @@ A `boundary <app> <dir>` line: an app of BOUNDARY_APPS the diff reaches (its own
 from, a provided one too), whose boundary audit runs after the landing (land_gate.sh qboundary_one).
 """
 import json
+import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -43,6 +45,8 @@ SMOKE = ("makepad-stage", "makepad-scope", "makepad-sandbox", "makepad-fab", "ma
 # smoke app does (its boot, the Android HAL paths): a change in any of them checks it on that
 # landing, not on the next one that happens to check it (11-03)
 GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad-draw", "makepad-widgets", "makepad-run-android")
+SMALL_DIRECT_WALL_S = 300.0
+UNKNOWN_TEST_S = 30.0
 # checked too when the diff reaches the JIT itself: a JIT change reaches every package the JIT checks or runs,
 # not its Rust dependents alone, and a smoke app's check covers only the app's own crates. A resolver change in
 # relax-compiler broke makepad-widgets-core's check, and the bucket ran that check two landings later (11-05).
@@ -146,6 +150,10 @@ def closure(start, edges):
     return seen
 
 
+def has_test_target(pkg):
+    return any(t.get("test", True) for t in pkg["targets"])
+
+
 def tested(packages, members, touched, retry):
     """The packages whose test targets the diff reaches: the changed ones, those that use them
     (normal and build edges, as `affected` follows), and those whose tests use one of these (a
@@ -161,7 +169,7 @@ def tested(packages, members, touched, retry):
                 (dev if dep["kind"] == "dev" else reverse).setdefault(Path(dep["path"]).resolve(), set()).add(directory)
     reached = closure(touched, reverse)
     reached |= {user for d in reached for user in dev.get(d, ())}
-    has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
+    has_tests = {d for d in members if has_test_target(packages[d])}
     names = {packages[d]["name"] for d in reached & has_tests}
     by_name = {p["name"]: d for d, p in packages.items()}
     # a test-target check (`tests <pkg>`) or a run of the tests (`test <pkg>`, the tests bucket) red since
@@ -272,11 +280,120 @@ def workspace_wide(compiled):
     return any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
 
 
-def run_units(packages, members, touched, workspace, jit, retry):
+def workspace_roots(root, packages):
+    """Each package's nearest enclosing [workspace], including virtual workspace manifests."""
+    nearest = {root: root}
+
+    def enclosing(directory):
+        if directory not in nearest:
+            manifest = directory / "Cargo.toml"
+            if manifest.is_file() and re.search(r"(?m)^[ \t]*(?:\[[ \t]*workspace(?:\b[^\]]*)?\]|workspace[ \t]*\.)", manifest.read_text()):
+                nearest[directory] = directory
+            elif directory.parent == directory:
+                nearest[directory] = root
+            else:
+                nearest[directory] = enclosing(directory.parent)
+        return nearest[directory]
+
+    return {d: enclosing(d) for d in packages}
+
+
+def package_group(root, pkg_dir, ws_roots):
+    """A nested workspace or product subtree, or None in the shared layers."""
+    workspace = ws_roots[pkg_dir]
+    if workspace != root:
+        return workspace.relative_to(root).as_posix()
+    parts = pkg_dir.relative_to(root).parts
+    if parts[:2] in (("apps", "commercial"), ("apps", "apps")):
+        return "/".join(parts[:3]) if len(parts) >= 3 else None
+    if len(parts) >= 2 and parts[0] in ("apps", "examples"):
+        return "/".join(parts[:2])
+    return None
+
+
+def load_gate_times(path):
+    """Package seconds from the queue file or inline GATE_TIMES, as shard_units measures them."""
+    times = Path(path).read_text() if path and Path(path).is_file() else os.environ.get("GATE_TIMES", "")
+    whole, variants, targets, parts = {}, {}, {}, {}
+    for entry in times.split(";"):
+        unit, sep, seconds = entry.rpartition("=")
+        words = tuple(unit.split())
+        if not (sep and len(words) >= 2 and words[0] == "test"):
+            continue
+        name, seconds = words[1], float(seconds)
+        if len(words) == 2:
+            whole[name] = seconds
+        elif words[2] == "--features":
+            variants.setdefault(name, {})[words[2:]] = seconds
+        elif len(words) >= 5 and words[-2] == "part" and "/" in words[-1]:
+            index, _, count = words[-1].partition("/")
+            if index.isdigit() and count.isdigit() and 0 < int(index) <= int(count):
+                by_count = parts.setdefault((name, words[2:-2]), {})
+                by_count.setdefault(int(count), {})[int(index)] = seconds
+        else:
+            targets.setdefault(name, {})[words[2:]] = seconds
+
+    # As in shard_units' target_measure, estimate missing parts from the measured mean
+    # and use the largest estimate across historical part counts for this target.
+    for (name, selector), by_count in parts.items():
+        estimates = []
+        for count, measured in by_count.items():
+            total = math.fsum(measured.values())
+            if len(measured) < count:
+                total = total / len(measured) * count
+            estimates.append(total)
+        targets.setdefault(name, {})[selector] = max(estimates)
+
+    result = {}
+    for name in set(whole) | set(targets) | set(variants):
+        base = math.fsum(targets[name].values()) if name in targets else whole.get(name, UNKNOWN_TEST_S)
+        result[name] = base + math.fsum(variants.get(name, {}).values())
+    return result
+
+
+def small_group_direct_users(root, packages, members, touched, gate_times, already_run):
+    """Add all eligible direct users in each touched product group that fits its budget."""
+    touched_roots = workspace_roots(root, touched)
+    groups = {d: package_group(root, d, touched_roots) for d in touched}
+    direct = {d: set() for d in touched if groups[d] is not None}
+    if not direct:
+        return set()
+
+    # Cargo normally gives canonical paths. Resolve other spellings once per distinct path.
+    paths = {str(d): d for d in packages}
+    for user in members - already_run:
+        if not has_test_target(packages[user]):
+            continue
+        for dep in packages[user]["dependencies"]:
+            path = dep.get("path")
+            if not path or dep.get("target") == "cfg(any())" or dep.get("kind") not in (None, "dev"):
+                continue
+            if path not in paths:
+                paths[path] = Path(path).resolve()
+            if paths[path] in direct:
+                direct[paths[path]].add(user)
+
+    user_roots = workspace_roots(root, {u for users in direct.values() for u in users})
+    candidates = {}
+    for d, users in direct.items():
+        group = groups[d]
+        candidates.setdefault(group, set()).update(u for u in users if package_group(root, u, user_roots) == group)
+    added = set()
+    for group, users in sorted(candidates.items()):
+        wall = math.fsum(gate_times.get(packages[u]["name"], UNKNOWN_TEST_S) for u in users)
+        if wall <= SMALL_DIRECT_WALL_S:
+            added.update(users)
+        else:
+            print(f"direct-users-deferred:{group}({len(users)} pkgs,{wall:.0f}s>{SMALL_DIRECT_WALL_S:.0f}s)", file=sys.stderr)
+    return added
+
+
+def run_units(root, packages, members, touched, workspace, jit, retry):
     """The packages whose tests the tests bucket runs after a landing: the changed ones, and the gate
     packages the diff reaches (GATE_PACKAGES, through normal and build edges; every one on a workspace-wide
     input), the smoke set and JIT_CHECKS too when it reaches the JIT or a workspace-wide input: the fast
-    bucket's selection, of the root workspace's packages with a test target; and a unit red since. Not
+    bucket's selection, of the root workspace's packages with a test target; a unit red since; and direct
+    users within each small_group_direct_users budget. Not
     every user of a changed crate: a change to the JIT or makepad-platform reached all 547 units, and the
     bucket held most of the pool's boxes for 78-106 min a run, a new run queued as one ended
     (11-08). The full bucket runs every package's daily; the fast bucket type-checks every reached test
@@ -292,10 +409,12 @@ def run_units(packages, members, touched, workspace, jit, retry):
     # unseen (11-16). Here only, after the landing: no pre-land gate runs them.
     if jit and JIT_PACKAGE in by_name:
         gate.add(by_name[JIT_PACKAGE])
-    has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
-    names = {packages[d]["name"] for d in (touched | gate) & has_tests}
-    names |= {words[1] for words in retry if words[0] in ("tests", "test") and by_name.get(words[1]) in has_tests}
-    return sorted((name, by_name[name]) for name in names)
+    has_tests = {d for d in members if has_test_target(packages[d])}
+    run_dirs = (touched | gate) & has_tests
+    run_dirs.update(by_name[w[1]] for w in retry if w[0] in ("tests", "test") and by_name.get(w[1]) in has_tests)
+    times = load_gate_times(os.environ.get("GATE_TIMES_FILE"))
+    run_dirs.update(small_group_direct_users(root, packages, members, touched, times, run_dirs))
+    return sorted((packages[d]["name"], d) for d in run_dirs)
 
 
 def macos_tests(pkg):
@@ -327,7 +446,7 @@ def tests_only(root, base, cbase, runs):
     if os.environ.get("GATE_FULL") == "1":
         units = tested(packages, members, set(members), retried())
     elif runs:
-        units = run_units(packages, members, touched, workspace, jit, retried())
+        units = run_units(root, packages, members, touched, workspace, jit, retried())
     else:
         # the test targets the diff reaches; a JIT or workspace-wide change reaches every package's
         units = tested(packages, members, set(members) if workspace or jit else touched, retried())

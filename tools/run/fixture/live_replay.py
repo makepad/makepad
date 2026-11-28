@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Nothing breaks a running app: real landings replayed as live edits under this tree's JIT.
 
-usage: live_replay.py --app <package> [--count N] [--only <sha,..>] [--history <makepad>[,apps/<name>=<commit>..]]
+usage: live_replay.py --app <package> [--count N] [--only <sha,..>] [--landings <path>] [--history <makepad>[,apps/<name>=<commit>..]]
        live_replay.py --host --app <package> [--wm]
        live_replay.py --chain --app <package> --only <sha,..>   (one app takes them in turn, no restart)
   (run from the workspace root; results also go to target/live_replay/results-<app>.jsonl)
@@ -12,8 +12,10 @@ moves a node) at the landing's parent, except
 the crates the JIT binary provides (makepad-run's #[relax_api] crates and their path deps) and the
 JIT's own: those stay at this tree, as the loader requires them to match its build.
 
-A landing is one first-parent commit of makepad or of a nested repository that changes a crate the
-app builds (the other repositories at that time), newest first. Far enough back the tree no longer builds against
+A landing moves all participating repositories together if any half changes a crate the app builds.
+--landings reads devhub's ordered JSONL land records. Without it, matching devhub merge subjects
+within five seconds are paired from Git. Direct commits stay separate. Replay runs newest first.
+Far enough back the tree no longer builds against
 this tree's JIT and provided crates: after DRIFTED such landings in a row the run ends there:
   1. the app runs at the parent, first frame, settled, answers input; its layout at three window
      sizes, then again after `session relaunch` with no edit: the nodes that move are the app's
@@ -44,7 +46,11 @@ in the same process id with its state handed over. --wm: the app is a hosted win
 Ends with one number per app: `live_replay: <app> pass rate P% (pass/judged, ...)`; exit 3 on a miss, 1
 when the run could judge nothing.
 """
+from __future__ import annotations
+
+import bisect
 import json, os, re, shutil, subprocess, sys, tempfile, time, zlib
+from typing import NamedTuple
 
 ROOT = os.getcwd()
 WORK = os.path.join(ROOT, "target", "live_replay")
@@ -69,6 +75,8 @@ def nested_repos():
 NESTED = nested_repos()
 # git's empty tree: a nested repository with no commit at a landing's time is absent from its tree
 EMPTY = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+DEVHUB_LAND = re.compile(r"^Merge branch '([^']+)' into (\S+) \(devhub land\)$")
+LAND_WINDOW = 5  # seconds between the first and last merge of a git-only pair
 # the JIT binary's providers (tools/run/Cargo.toml's host-shims dependencies)
 PROVIDERS = ["makepad-live-id", "makepad-script", "makepad-script-std", "makepad-script-compute", "makepad-shader", "makepad-tween-script", "makepad-script-audio-aot", "makepad-hal", "makepad-script-census", "relax-api"]
 JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
@@ -80,6 +88,7 @@ COLD = 1500  # a cold first start of a big app on a busy box
 BOOT = 600  # a start after a tree move
 VERDICT = int(os.environ.get("LIVE_REPLAY_VERDICT", "180"))  # save to the JIT's verdict on the edit
 SETTLE = 120  # the JIT idle after a frame
+LIVE_POLL = 2.0  # how often waits ask the JIT `live` (and `session` for host rebuilds)
 DRIFTED = 5  # landings in a row whose tree rustc rejects here: history older than this JIT can run
 RESIZE = "--no-resize" not in sys.argv  # an applied edit's layout is compared with a fresh start's
 UNSEEN = 20  # no word from the watcher this long: the edit touched nothing the app loaded
@@ -115,9 +124,144 @@ def under(d):
     return next((r for r in NESTED if d == r or d.startswith(r + "/")), None)
 
 
-def parent(repo, sha):
-    """The first parent of a nested repository's commit; a first commit's is the empty tree."""
-    return ngit(repo, "rev-parse", "--verify", "-q", sha + "^1", ok=False) or EMPTY
+class Landing(NamedTuple):
+    t: int
+    order: int  # position in the land records, including same-second lands
+    commits: tuple[tuple[str, str], ...]
+    land_id: int | None = None
+    pre: tuple[tuple[str, str], ...] = ()
+    post: tuple[tuple[str, str], ...] = ()
+
+
+def repo_rank(repo: str) -> tuple[int, str]:
+    return (0, "") if repo == "makepad" else (1, repo)
+
+
+def canonical_commits(mapping: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(mapping.items(), key=lambda kv: repo_rank(kv[0])))
+
+
+def primary_sha(landing: Landing) -> str:
+    """The commit whose 10-hex prefix identifies this landing in CI output."""
+    return landing.commits[0][1]
+
+
+def landing_sort_key(landing: Landing) -> tuple:
+    return (landing.t, 0 if landing.land_id is None else 1, landing.order, landing.commits)
+
+
+def repo_git(repo: str, *args, env=None, ok=True) -> str:
+    return git(*args, env=env, ok=ok) if repo == "makepad" else ngit(repo, *args, env=env, ok=ok)
+
+
+def repo_parent(repo: str, sha: str, cache: dict[tuple[str, str], str] | None = None) -> str:
+    """First parent of sha in repo, or the empty tree for a nested root commit."""
+    key = (repo, sha)
+    if cache is not None and key in cache:
+        return cache[key]
+    p = repo_git(repo, "rev-parse", "--verify", "-q", sha + "^1", ok=False)
+    if not p:
+        if repo == "makepad":
+            raise SystemExit("live_replay: makepad commit %s has no first parent" % sha[:10])
+        p = EMPTY
+    if cache is not None:
+        cache[key] = p
+    return p
+
+
+def repo_at_before(repo: str, t: int, upper: str) -> str:
+    return repo_git(repo, "log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, upper)
+
+
+def is_ancestor(repo: str, anc: str, desc: str) -> bool:
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", anc, desc],
+                       cwd=ROOT if repo == "makepad" else os.path.join(ROOT, repo), capture_output=True)
+    return r.returncode == 0
+
+
+class LandIndex:
+    def __init__(self, records: list[Landing], trimmed: dict[str, int] | None = None):
+        self.records = records
+        self.trimmed = trimmed
+        self.by_commit: dict[tuple[str, str], int] = {}
+        self.by_repo: dict[str, list[tuple[int, str]]] = {}
+        self.by_repo_idx: dict[str, list[int]] = {}
+        self.by_repo_t: dict[str, list[int]] = {}
+        for idx, rec in enumerate(records):
+            for repo, sha in rec.commits:
+                self.by_commit[(repo, sha)] = idx
+                self.by_repo.setdefault(repo, []).append((idx, sha))
+                self.by_repo_idx.setdefault(repo, []).append(idx)
+                self.by_repo_t.setdefault(repo, []).append(rec.t)
+
+    def repo_bounds(self, repo: str, idx: int) -> tuple[str | None, str | None]:
+        """Previous and next landed SHAs in record order, strictly around idx."""
+        indices = self.by_repo_idx.get(repo, [])
+        rows = self.by_repo.get(repo, [])
+        left = bisect.bisect_left(indices, idx)
+        right = bisect.bisect_right(indices, idx)
+        return (rows[left - 1][1] if left else None, rows[right][1] if right < len(rows) else None)
+
+    def next_after_time(self, repo: str, t: int) -> str | None:
+        """First landing of repo strictly after t."""
+        i = bisect.bisect_right(self.by_repo_t.get(repo, []), t)
+        rows = self.by_repo.get(repo, [])
+        return rows[i][1] if i < len(rows) else None
+
+    def present(self, idx, all_tips):
+        """The record's exact states for the repositories installed in this checkout."""
+        rec = self.records[idx]
+        def included(pairs):
+            return tuple((r, c) for r, c in pairs if r in all_tips)
+        return rec._replace(order=idx, commits=included(rec.commits), pre=included(rec.pre), post=included(rec.post))
+
+
+def load_landings(path: str) -> LandIndex:
+    """Read compact JSONL land records in devhub's (changed_ms, id) order."""
+    records = []
+    trimmed = None
+    try:
+        with open(path, encoding="utf-8") as source:
+            for lineno, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or type(row.get("id")) is not int or type(row.get("t")) is not int:
+                        raise ValueError("expected a land record with integer id and t")
+                    if not row.get("commits"):
+                        raise ValueError("expected non-empty commits")
+                    if "trimmed" in row:
+                        if records:
+                            raise ValueError("trimmed is only valid on the first record")
+                        trimmed = row["trimmed"]
+                        if (not isinstance(trimmed, dict) or trimmed.keys() != {"window", "older", "newer", "total"}
+                                or any(type(n) is not int or n < 0 for n in trimmed.values())):
+                            raise ValueError("expected trimmed to contain non-negative integers for window, older, newer and total")
+                    maps = []
+                    for field in ("commits", "pre", "post"):
+                        entries = row.get(field, {})
+                        if not isinstance(entries, dict) or any(
+                            not isinstance(c, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", c) for c in entries.values()
+                        ):
+                            raise ValueError("expected %s to map repository names to 40-hex SHAs" % field)
+                        maps.append(canonical_commits({r: c.lower() for r, c in entries.items()}))
+                    commits, pre, post = maps
+                    records.append(Landing(row["t"], len(records), commits, row["id"], pre, post))
+                except ValueError as e:
+                    raise SystemExit("live_replay: %s:%d: %s" % (path, lineno, e))
+    except (OSError, UnicodeError) as e:
+        raise SystemExit("live_replay: cannot read %s: %s" % (path, e))
+    return LandIndex(records, trimmed)
+
+
+def loaded_line(index: LandIndex, path: str) -> str:
+    line = "live_replay: loaded %d land records from %s" % (len(index.records), path)
+    trim = index.trimmed
+    if trim is not None:
+        line += (f" (the master's {trim['window']}-row window left out {trim['older']} older and "
+                 f"{trim['newer']} newer of {trim['total']}; the oldest kept is #{index.records[0].land_id})")
+    return line
 
 
 def metadata():
@@ -146,24 +290,168 @@ def kept_dirs(meta):
     return outermost(closure(meta, PROVIDERS) | {"libs/relax", "tools/run", ".cargo"})
 
 
-def landings(meta, package, kept, tip, tips, count):
-    """(time, repo, commit) of the landings that change a crate the app builds, oldest first: of
-    makepad ("makepad") and of each nested repository (its apps/<name>) from its tip in `tips`."""
+def git_commits(repo, *args):
+    log = repo_git(repo, "log", "--first-parent", "--format=%ct\t%H\t%s", *args)
+    for line in log.splitlines():
+        parts = line.split("\t", 2)
+        yield int(parts[0]), repo, parts[1], parts[2] if len(parts) > 2 else ""
+
+
+def same_branch_groups(rows, window):
+    """Join closest commits first, keeping one per repository and the whole span within window."""
+    rows = sorted(rows)
+    groups = {row: {row} for row in rows}
+    pairs = []
+    for i, left in enumerate(rows):
+        for j in range(i + 1, len(rows)):
+            right = rows[j]
+            dt = right[0] - left[0]
+            if dt > window:
+                break
+            if left[1] != right[1]:
+                pairs.append((dt, left, right))
+    for _, left, right in sorted(pairs):
+        if groups[left] is groups[right]:
+            continue
+        members = groups[left] | groups[right]
+        if max(members)[0] - min(members)[0] > window or len({r for _, r, _ in members}) != len(members):
+            continue
+        for row in members:
+            groups[row] = members
+    for row, members in groups.items():
+        if row == min(members):
+            yield Landing(row[0], 0, canonical_commits({r: c for _, r, c in members}))
+
+
+def group_git_landings(
+    candidates: list[tuple[int, str, str, str]], all_tips: dict[str, str],
+    claimed: set[tuple[str, str]], window: int = LAND_WINDOW,
+) -> list[Landing]:
+    """Find other halves even outside the app's closure, without claiming an indexed half."""
+    wanted = {(r, c): (t, s) for t, r, c, s in candidates if (r, c) not in claimed}
+    result = []
+    branches = {}
+    times = []
+    for (repo, sha), (t, subject) in wanted.items():
+        match = DEVHUB_LAND.fullmatch(subject)
+        if match:
+            branches.setdefault(match[1], {})[(repo, sha)] = t
+            times.append(t)
+        else:
+            result.append(Landing(t, 0, ((repo, sha),)))
+    if times:
+        bounds = ("--since=%d" % (min(times) - window), "--until=%d" % (max(times) + window))
+        for repo, tip in all_tips.items():
+            for t, _, sha, subject in git_commits(repo, *bounds, tip):
+                match = DEVHUB_LAND.fullmatch(subject)
+                if match and match[1] in branches and (repo, sha) not in claimed:
+                    branches[match[1]][(repo, sha)] = t
+        for commits in branches.values():
+            rows = [(t, r, c) for (r, c), t in commits.items()]
+            result.extend(group for group in same_branch_groups(rows, window)
+                          if any(key in wanted for key in group.commits))
+    return result
+
+
+def landings(
+    meta: dict, package: str, kept: list[str], tip: str, tips: dict[str, str], count: int,
+    land_index: LandIndex | None = None,
+) -> list[Landing]:
+    """Up to count atomic landings changing a crate the app builds, oldest first."""
+    if count <= 0:
+        return []
     dirs = outermost(closure(meta, [package]))
-    found = []
+    candidates = []
     excl = [":(exclude)%s" % d for d in kept]
     ours = [d for d in dirs if under(d) is None and d != "."]
     if ours:
-        for l in git("log", "--first-parent", "--format=%ct %H", "-%d" % count, tip, "--", *ours, *excl).splitlines():
-            t, sha = l.split()
-            found.append((int(t), "makepad", sha))
+        candidates.extend(git_commits("makepad", "-%d" % count, tip, "--", *ours, *excl))
     for repo in NESTED:
         theirs = [os.path.relpath(d, repo) for d in dirs if under(d) == repo]
         if theirs:
-            for l in ngit(repo, "log", "--first-parent", "--format=%ct %H", "-%d" % count, tips[repo], "--", *theirs).splitlines():
-                t, sha = l.split()
-                found.append((int(t), repo, sha))
-    return sorted(found)[-count:]
+            candidates.extend(git_commits(repo, "-%d" % count, tips[repo], "--", *theirs))
+
+    all_tips = {"makepad": tip, **tips}
+    indexed = land_index.by_commit if land_index is not None else {}
+    matched = set()
+    unmatched = []
+    for candidate in candidates:
+        _, repo, sha, _ = candidate
+        if (repo, sha) in indexed:
+            matched.add(indexed[(repo, sha)])
+        else:
+            unmatched.append(candidate)
+    seen = {(r, c) for _, r, c, _ in candidates}
+    result = []
+    for idx in matched:
+        rec = land_index.present(idx, all_tips)
+        if all((r, c) in seen or is_ancestor(r, c, all_tips[r]) for r, c in rec.commits):
+            result.append(rec)
+    if unmatched:
+        result.extend(group_git_landings(unmatched, all_tips, set(indexed)))
+    return sorted(result, key=landing_sort_key)[-count:]
+
+
+def resolve_only(only: list[str], all_tips: dict[str, str], land_index: LandIndex | None = None) -> list[Landing]:
+    """Resolve explicit revisions and emit each complete landing once, in request order."""
+    indexed = land_index.by_commit if land_index is not None else {}
+    claimed = set(indexed)
+    emitted = set()
+    result = []
+    for rev in only:
+        for repo in ["makepad", *NESTED]:
+            sha = repo_git(repo, "rev-parse", "--verify", "-q", rev + "^{commit}", ok=False)
+            if sha:
+                break
+        else:
+            raise SystemExit("live_replay: --only %s: no commit of makepad or %s" % (rev, " ".join(NESTED) or "a nested repository"))
+        if (repo, sha) in emitted:
+            continue
+        if (repo, sha) in indexed:
+            landing = land_index.present(indexed[(repo, sha)], all_tips)
+            for r, c in landing.commits:
+                if not repo_git(r, "rev-parse", "--verify", "-q", c + "^{commit}", ok=False):
+                    raise SystemExit("live_replay: landing #%s: missing commit %s in %s" % (landing.land_id, c, r))
+        else:
+            candidates = list(git_commits(repo, "-1", sha))
+            landing, = group_git_landings(candidates, all_tips, claimed)
+        result.append(landing)
+        emitted.update(landing.commits)
+        claimed.update(landing.commits)
+    return result
+
+
+def resolve_states(
+    landing: Landing, all_tips: dict[str, str], tree_at, land_index: LandIndex | None = None,
+    parent_cache: dict[tuple[str, str], str] | None = None,
+) -> tuple[tuple[str, tuple[tuple[str, str], ...]], tuple[str, tuple[tuple[str, str], ...]]]:
+    """Resolve both sides of a land, including all moved repos and the bounds on unchanged repos."""
+    moved, pre, post = dict(landing.commits), dict(landing.pre), dict(landing.post)
+    before, after = {}, {}
+    for repo in ["makepad", *NESTED]:
+        if repo in moved:
+            after[repo] = moved[repo]
+            before[repo] = pre[repo] if repo in pre else repo_parent(repo, moved[repo], parent_cache)
+            continue
+        if repo in pre or repo in post:
+            commit = pre[repo] if repo in pre else post[repo]
+        else:
+            prev_sha = next_sha = None
+            if land_index is not None:
+                if landing.land_id is not None:
+                    prev_sha, next_sha = land_index.repo_bounds(repo, landing.order)
+                else:
+                    next_sha = land_index.next_after_time(repo, landing.t)
+            upper = all_tips[repo]
+            if next_sha and is_ancestor(repo, next_sha, upper):
+                upper = repo_parent(repo, next_sha, parent_cache)
+            if upper == prev_sha or upper == EMPTY:
+                commit = upper
+            else:
+                commit = repo_at_before(repo, landing.t, upper) or prev_sha or ("" if repo == "makepad" else EMPTY)
+        before[repo] = after[repo] = commit
+    return ((tree_at(before["makepad"]), tuple((r, before[r]) for r in NESTED)),
+            (tree_at(after["makepad"]), tuple((r, after[r]) for r in NESTED)))
 
 
 def hybrid(commit, tip, kept):
@@ -208,6 +496,8 @@ class App:
         base.update(env or {})
         self.proc = subprocess.Popen(JIT + ["run", package, *args], cwd=cwd or TREE, env=base, stdin=subprocess.DEVNULL, stdout=self.file, stderr=self.file, start_new_session=True)
         self.pid = None
+        self.parked = None
+        self.held = None
 
     def text(self):
         with open(self.log_path, errors="replace") as f:
@@ -227,17 +517,81 @@ class App:
     def first_frames(self):
         return self.text().count("first frame at")
 
-    def wait_frame(self, seen, secs):
-        """A first frame past the `seen` count: None, or why not."""
+    def live(self, timeout=10) -> dict | None:
+        """One `inspect live` JSON snapshot, or None when unavailable."""
+        if not self.pid:
+            return None
+        code, said = self.ask("live", timeout=timeout)
+        return parse_json_line(said, "held") if code == 0 else None
+
+    def session_restart(self, timeout=10) -> dict | None:
+        """The `restart` object from `inspect session`, or None when unavailable."""
+        if not self.pid:
+            return None
+        code, said = self.ask("session", timeout=timeout)
+        obj = parse_json_line(said, "restart") if code == 0 else None
+        return obj.get("restart") if obj else None
+
+    def check_held(self, since=0, live_info=None) -> str | None:
+        """Sets and returns `self.held` when the host has no run and waits for a fix."""
+        if self.held:
+            return self.held
+        text = self.text()
+        line = ended_in_place(text, since)
+        if line:
+            self.held = line
+            return self.held
+        info = live_info if live_info is not None else self.live()
+        if info and info.get("held") == 1:
+            self.held = held_reason(info, text, since)
+            return self.held
+        return None
+
+    def wait_frame(self, seen, secs, since=0, await_relaunch=False, watch_rebuild=False) -> str | None:
+        """Wait for a new frame or a reason it cannot arrive. A relaunch also waits for its app check."""
         t = time.time()
-        while time.time() - t < secs:
+        last_live = last_session = t
+        while (now := time.time()) - t < secs:
             text = self.text()
             if self.pid is None:
                 m = re.search(r"^\[\S+-remote\] pid=(\d+) app=", text, re.MULTILINE)
                 if m:
                     self.pid = int(m.group(1))
-            if text.count("first frame at") > seen and self.pid:
-                return None
+            self.parked = parked(text, since)
+            if self.parked:
+                return "its JIT parked: " + self.parked
+            line = ended_in_place(text, since)
+            if line:
+                self.held = line
+                return "its run ended in place: " + line
+            if await_relaunch:
+                line = postponed(text, since)
+                if line:
+                    return "its restart was postponed: " + line
+            if watch_rebuild:
+                line = rebuild_failed(text, since)
+                if line:
+                    return "makepad rebuild failed: " + line
+
+            got_frame = text.count("first frame at") > seen and bool(self.pid)
+            live_info = None
+            if self.pid and ((got_frame and await_relaunch) or now - last_live >= LIVE_POLL):
+                live_info = self.live()
+                last_live = now
+                if live_info and live_info.get("held") == 1:
+                    self.held = held_reason(live_info, text, since)
+                    return "its host held: " + self.held
+            if watch_rebuild and self.pid and now - last_session >= LIVE_POLL:
+                rs = self.session_restart()
+                last_session = now
+                if rs and rs.get("phase") == "Failed":
+                    return "makepad rebuild failed: " + (rs.get("failed") or "phase Failed")[:300]
+            if got_frame:
+                if not await_relaunch:
+                    return None
+                # A failed app check sets held before it clears restart_unfinished.
+                if live_info is not None and live_info.get("restart_unfinished", 0) == 0 and live_info.get("held", 0) == 0:
+                    return None
             if not self.alive():
                 # what it said: the reason alone named nothing (makepad-fab's control app, 11-23)
                 tail = text.splitlines()[-30:]
@@ -250,7 +604,8 @@ class App:
         """Ends the app: asked first, by its recorded process group when it does not go. What a
         quit that hangs was doing is the answer (empty when it went)."""
         stuck = ""
-        if self.alive() and self.pid:
+        # A parked thread may be the one quit waits for. A held host has no app to quit.
+        if self.alive() and self.pid and not self.parked and not self.held:
             code, said = self.ask("gq", timeout=30)
             t = time.time()
             while self.alive() and time.time() - t < 15:
@@ -264,8 +619,77 @@ class App:
         return stuck
 
 
-BAD = re.compile(r"panicked|panic parked|stale access parked|internal compiler error|FATAL|fatal runtime|SIGSEGV|segfault|Bus error|the watcher stopped")
+# "panicked" as a word ("thread 'main' (7) panicked at ..", "JIT call panicked: .."), not inside a name:
+# an O3 build's note names `ScriptVmCall::resume_if_panicked` (a replay judged a clean restart a
+# panic, 11-28)
+BAD = re.compile(r"(?<![\w:])panicked\b|panic parked|stale access parked|internal compiler error|FATAL|fatal runtime|SIGSEGV|segfault|Bus error|the watcher stopped")
 COMPILE = re.compile(r"^\s*(error(\[E\d+\])?:|.*compile error)", re.M)
+# the JIT parked a thread at its call of code that did not compile (relax inspect/events.rs)
+PARKED = re.compile(r"^relax: compile error parked on thread .*$", re.M)
+OTHER_PARKED = re.compile(
+    r"^relax: (?:panic parked on thread |stale access parked as P\d+|.* -- parked as P\d+).*$",
+    re.M,
+)
+ENDED_IN_PLACE = re.compile(r"^relax live: the run ends in place: .*$", re.M)
+BUILD_FAILED = re.compile(
+    r"^makepad: (?:Compilation failed|The app's source could not be had).*$",
+    re.M,
+)
+POSTPONED = re.compile(r"restart postponed .*$", re.M)
+REBUILD_FAILED = re.compile(r"(?:rebuilding \S+ FAILED|does not start|cannot rebuild).*$")
+
+
+def parked(text, since=0) -> str | None:
+    """First compile-error, panic, stale-access, or update-failed park line in `text[since:]`."""
+    m = PARKED.search(text, since) or OTHER_PARKED.search(text, since)
+    return m.group(0)[:300] if m else None
+
+
+def ended_in_place(text, since=0) -> str | None:
+    """First `the run ends in place` or `Compilation failed` hold line in `text[since:]`."""
+    m = ENDED_IN_PLACE.search(text, since) or BUILD_FAILED.search(text, since)
+    return m.group(0)[:300] if m else None
+
+
+def postponed(text, since=0) -> str | None:
+    """First `restart postponed ...` line in `text[since:]`."""
+    m = POSTPONED.search(text, since)
+    return m.group(0)[:300] if m else None
+
+
+def rebuild_failed(text, since=0) -> str | None:
+    """First host-rebuild failure line in `text[since:]`."""
+    for l in text[since:].splitlines():
+        if "relax live" in l and REBUILD_FAILED.search(l):
+            return l.strip()[:300]
+    return None
+
+
+def parse_json_line(text, key) -> dict | None:
+    """First JSON object line in `text` containing `key`, or None."""
+    for l in text.splitlines():
+        if l.startswith("{") and ('"%s"' % key) in l:
+            try:
+                obj = json.loads(l)
+                if isinstance(obj, dict) and key in obj:
+                    return obj
+            except ValueError:
+                pass
+    return None
+
+
+def held_reason(live_info, text, since=0) -> str:
+    """Human-readable reason why the host is held with no running app."""
+    why = (live_info or {}).get("pending_why") or ""
+    if why:
+        return why[:300]
+    line = ended_in_place(text, since)
+    if line:
+        return line[:300]
+    err = COMPILE.search(text, since)
+    if err:
+        return err.group(0).strip()[:300]
+    return "host held with no running app"
 
 
 def bad_lines(text, since=0):
@@ -275,8 +699,13 @@ def bad_lines(text, since=0):
 # a HAL line about drawing (the GPU backends, the frame path); the media, XR-stream, input and
 # window-manager services log their own news with the same prefix, and a backend's upload pool says
 # when a submit had to make an arena (a hiccup that degrades gracefully, logged as such: an app's
-# first frames make theirs, and every replay read that as a GPU error before its edits, 11-12)
-DRAW = re.compile(r"^\[hal-(?!video|media|camera|xr-remote|gamepad|dialog|wm\]|android-permission|android-dialog|vulkan\] upload arenas: )")
+# first frames make theirs, and every replay read that as a GPU error before its edits, 11-12), and
+# the Vulkan backend says once which route a discrete GPU's first APPEND buffer takes (every
+# replay's control edit read that as a GPU error, 11-27), and its memory watch says when the GPU is
+# short of the UI's reserve and it asks for room (`watch_memory`: a notice of graceful degradation,
+# not a failed create; a replay on a box whose GPU other work held at 21 of 24 GB read it as a GPU
+# error, 11-27)
+DRAW = re.compile(r"^\[hal-(?!video|media|camera|xr-remote|gamepad|dialog|wm\]|android-permission|android-dialog|vulkan\] upload arenas: |vulkan\] .* first APPEND buffer: |vulkan\] GPU memory: )")
 
 
 def healthy(app, since):
@@ -286,6 +715,11 @@ def healthy(app, since):
     bad = bad_lines(app.text(), since)
     if bad:
         return ("ice" if any("internal compiler error" in b for b in bad) else "panic"), " | ".join(bad)
+    app.parked = app.parked or parked(app.text(), since)
+    if app.parked:
+        return "parked", "its JIT parked: " + app.parked
+    if app.check_held(since):
+        return "held", "its host held: " + app.held
     # a frame that loses draws is an error UI, whatever a grab still shows
     draws = [l.strip()[:200] for l in app.text()[since:].splitlines() if DRAW.match(l)]
     if draws:
@@ -305,6 +739,7 @@ def healthy(app, since):
         return "error_view", view.strip()[:400]
     code, panics = app.ask("panics")
     if code == 0 and '"id"' in panics:
+        app.parked = panics.strip()[:300]
         return "parked", panics.strip()[:400]
     code, ui = app.ask("ui")
     if code != 0 or len(ui.strip()) < 40:
@@ -435,11 +870,19 @@ def layout_diff(a, b, noise=None, than="fresh"):
 
 def settle(app):
     """The JIT idle (bounded: a busy app is judged as it is)."""
+    if app.parked or app.held:
+        return
     t = time.time()
+    last_live = t
     while time.time() - t < SETTLE and app.alive():
         code, said = app.ask("jit", "ms=100")
         if code == 0 and "idle" in said:
             return
+        now = time.time()
+        if code != 0 or now - last_live >= LIVE_POLL:
+            if app.check_held():
+                return
+            last_live = now
         time.sleep(0.5)
 
 
@@ -467,15 +910,27 @@ def verdict(app, seen, since):
     t = time.time()
     answer = ""
     while time.time() - t < VERDICT:
-        code, answer = app.ask("watch", "on=patchverified,patchrefused,patchreverted", "since=%d" % seen, "timeout_s=10", timeout=60)
+        code, answer = app.ask("watch", "on=patchverified,patchrefused,patchreverted,panic", "since=%d" % seen, "timeout_s=10", timeout=60)
         # (a watch that timed out answers the event `none`)
         line = next((l for l in answer.splitlines() if '"event"' in l and '"event":"none"' not in l), "")
         if line:
-            return json.loads(line)
+            ev = json.loads(line)
+            if ev.get("event") == "panic":
+                app.parked = ("%s: %s" % (ev.get("kind", "panic"), ev.get("message", "")))[:300]
+                return {"outcome": "parked", "error": "its JIT parked: " + app.parked}
+            return ev
         if not app.alive():
             return {}
+        # a thread parked at code that did not compile answers no edit: the park is the verdict
+        app.parked = parked(app.text(), since)
+        if app.parked:
+            return {"outcome": "parked", "error": "its JIT parked: " + app.parked}
+        if app.check_held(since):
+            return {"outcome": "held", "error": "its host held: " + app.held}
         if time.time() - t > UNSEEN and "relax live:" not in app.text()[since:]:
             return {"answer": answer.strip()[:200]} if code != 0 else {}
+        if not line and "not a live session" in answer:
+            time.sleep(0.25)
     return {"answer": "no verdict in %d s: %s" % (VERDICT, answer.strip()[:160])}
 
 
@@ -531,30 +986,55 @@ def done(rec, **fields):
     return rec
 
 
-def relaunch(app, package, what):
+def relaunch(app, package, what, check_tree=True):
     """The restart button and the app back healthy: None, or a (result, kind, why) to end on."""
+    if app.check_held(0):
+        if check_tree:
+            ok, said = rustc_accepts(package)
+            if not ok:
+                return "skip", "tree", "rustc rejects the tree here: %s; the JIT: %s" % (said[:300], app.held[:300])
+        return "fail", "restart", "%s: already held: %s" % (what, app.held)
     frames = app.first_frames()
     since = len(app.text())
     code, said = app.ask("session", "relaunch")
     if code != 0:
         return "fail", "restart", "%s: session relaunch: %s" % (what, said.strip()[:300])
-    why = app.wait_frame(frames, BOOT)
+    why = app.wait_frame(frames, BOOT, since, await_relaunch=True)
     if why:
         bad = bad_lines(app.text(), since)
         if bad:
             return "fail", "ice" if "internal compiler error" in bad[0] else "panic", "%s: %s" % (what, " | ".join(bad))
-        ok, said = rustc_accepts(package)
-        if not ok:
-            return "skip", "tree", "rustc rejects the tree here: " + said[:300]
+        if check_tree:
+            ok, said = rustc_accepts(package)
+            if not ok:
+                return "skip", "tree", "rustc rejects the tree here: %s; the JIT: %s" % (said[:300], why[:300])
         return "fail", "restart", "%s: %s" % (what, why)
     settle(app)
     found = healthy(app, since)
     if found:
+        if found[0] in ("held", "parked") and check_tree:
+            ok, said = rustc_accepts(package)
+            if not ok:
+                return "skip", "tree", "rustc rejects the tree here: %s; the JIT: %s" % (said[:300], found[1][:300])
         return "fail", found[0], "after %s: %s" % (what, found[1])
     return None
 
 
-def replay(sha, parent_tree, tree, package, seq):
+LAYOUT_KINDS = ("stale_layout", "stale_restart")
+
+
+def clock_crossed(start, end):
+    """Whether a UTC or local hour, day, or local DST flag changed during the attempt."""
+    ga, gb = time.gmtime(start), time.gmtime(end)
+    la, lb = time.localtime(start), time.localtime(end)
+    return ga[:4] != gb[:4] or la[:4] != lb[:4] or la.tm_isdst != lb.tm_isdst
+
+
+def utc_stamp(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _replay_once(sha, parent_tree, tree, package, seq):
     """One landing. The verdict record: result pass|fail|skip, rung, kind, why, seconds per step."""
     rec = {"sha": sha, "app": package, "result": "pass", "rung": "-", "kind": "", "why": "", "s": {}}
     t0 = time.time()
@@ -569,7 +1049,7 @@ def replay(sha, parent_tree, tree, package, seq):
             ok, said = rustc_accepts(package)
             if not ok:
                 # (what the JIT said about a tree rustc rejects too is recorded, not judged)
-                return done(rec, result="skip", kind="tree", why="rustc rejects the parent here: %s; the JIT: %s" % (said[:300], " | ".join(bad)[:300]))
+                return done(rec, result="skip", kind="tree", why="rustc rejects the parent here: %s; the JIT: %s" % (said[:300], (" | ".join(bad) or why or "")[:300]))
             if bad:
                 return done(rec, result="fail", kind="ice" if "internal compiler error" in bad[0] else "panic", why="at the parent: " + " | ".join(bad))
             tail = [l for l in app.text().splitlines() if COMPILE.search(l)][:6]
@@ -580,7 +1060,7 @@ def replay(sha, parent_tree, tree, package, seq):
             ok, said = rustc_accepts(package)
             if not ok:
                 return done(rec, result="skip", kind="tree", why="rustc rejects the parent here: %s; the JIT: %s: %s" % (said[:300], found[0], found[1][:300]))
-            return done(rec, result="fail", kind=found[0], why="at the parent: " + found[1])
+            return done(rec, result="fail", kind="agreement" if found[0] == "held" else found[0], why="at the parent: " + found[1])
         noise = None
         if RESIZE:
             # the baseline: this fresh start, relaunched with no edit. What moves between them is
@@ -598,6 +1078,11 @@ def replay(sha, parent_tree, tree, package, seq):
             rec["state"] = layout_diff(fresh, relaunched, None, "relaunched") or ""
         # the landing arrives, as a sync moves the tree
         since = len(app.text())
+        if app.check_held(0):
+            ok, said = rustc_accepts(package)
+            if not ok:
+                return done(rec, result="skip", kind="tree", why="rustc rejects the parent here: %s; the JIT: %s" % (said[:300], app.held[:300]))
+            return done(rec, result="fail", kind="agreement", why="at the parent, rustc accepts: " + app.held)
         code, ev = app.ask("events")
         seen = max([int(m) for m in re.findall(r'"seq":\s*(\d+)', ev)] or [0])
         move_tree(tree)
@@ -609,6 +1094,10 @@ def replay(sha, parent_tree, tree, package, seq):
         settle(app)
         found = healthy(app, since)
         if found:
+            if found[0] in ("parked", "held"):
+                ok, said = rustc_accepts(package)
+                if not ok:
+                    return done(rec, result="skip", kind="tree", why="rustc rejects the tree here: %s; the JIT: %s" % (said[:300], found[1][:300]))
             return done(rec, result="fail", kind=found[0], why="after the edit (%s): %s" % (rec["rung"], found[1]))
         patched = layout(app) if rec["rung"] == "applied" and RESIZE else None
         # the restart button, on the parent's warm cache
@@ -632,7 +1121,12 @@ def replay(sha, parent_tree, tree, package, seq):
             why = app.wait_frame(0, COLD)
             rec["s"]["fresh"] = round(time.time() - t3, 1)
             if why:
-                return done(rec, result="fail", kind="restart", why="a new process at the landing: %s: %s" % (why, " | ".join(bad_lines(app.text()))))
+                bad = bad_lines(app.text())
+                if (app.held or app.parked) and not bad:
+                    ok, said = rustc_accepts(package)
+                    if not ok:
+                        return done(rec, result="skip", kind="tree", why="rustc rejects the tree here: %s; the JIT: %s" % (said[:300], why[:300]))
+                return done(rec, result="fail", kind="restart", why="a new process at the landing: %s: %s" % (why, " | ".join(bad)))
             settle(app)
             found = healthy(app, 0)
             if found:
@@ -648,12 +1142,48 @@ def replay(sha, parent_tree, tree, package, seq):
         quit = app.stop()
         rec["quit"] = rec.get("quit") or quit
         rec["s"]["total"] = round(time.time() - t0, 1)
+        # a draw error's summary quotes its first line only: its app's logs go to the lease's keep
+        # dir (DEVHUB_KEEP, kept by its holder past the run), so every counted line can be read
+        keep = os.environ.get("DEVHUB_KEEP")
+        if rec.get("kind") == "draw_error" and keep:
+            kept = []
+            for path in dict.fromkeys([log, app.log_path]):
+                if os.path.isfile(path):
+                    os.makedirs(keep, exist_ok=True)
+                    dest = os.path.join(keep, "live_replay-%s-%s" % (sha[:10], os.path.basename(path)))
+                    shutil.copy2(path, dest)
+                    kept.append(dest)
+            if kept:
+                rec["kept"] = kept
+
+
+def replay(sha, parent_tree, tree, package, seq):
+    """Replay a landing from scratch once if a layout mismatch spans a clock boundary."""
+    t_start = time.time()
+    rec = _replay_once(sha, parent_tree, tree, package, seq)
+    t_end = time.time()
+    if rec["result"] == "fail" and rec["kind"] in LAYOUT_KINDS and clock_crossed(t_start, t_end):
+        first = rec
+        rec = _replay_once(sha, parent_tree, tree, package, seq)
+        rec["clock_retry"] = "%s across %s -> %s: %s" % (
+            first["kind"], utc_stamp(t_start), utc_stamp(t_end), first["why"])
+        if "total" in first["s"]:
+            rec["s"]["attempt1"] = first["s"]["total"]
+        if first.get("quit") and not rec.get("quit"):
+            rec["quit"] = first["quit"]
+    return rec
 
 
 def wm_session():
     """A hidden WM of this tree, with a runtime dir of its own: (its app, its socket)."""
     run = os.path.join(WORK, "wm-run")
     os.makedirs(run, exist_ok=True)
+    for name in os.listdir(run):
+        if name.startswith("makepad-wm-"):
+            try:
+                os.unlink(os.path.join(run, name))
+            except OSError:
+                pass
     wm = App("makepad-app-wm", os.path.join(WORK, "wm.log"), cwd=ROOT, env={"XDG_RUNTIME_DIR": run}, args=["--", "--remote"])
     why = wm.wait_frame(0, COLD)
     if why:
@@ -678,8 +1208,18 @@ def host_case(app, what, path, n, rec):
     with open(os.path.join(ROOT, path), "a") as f:
         f.write("\n// live_replay host edit %d\n" % n)
     rec["what"] = what
+    last_live = t0
     while True:
-        said = app.text()[since:]
+        text = app.text()
+        app.parked = parked(text, since)
+        if app.parked:
+            return done(rec, result="fail", kind="parked", why="its JIT parked: " + app.parked)
+        now = time.time()
+        if now - last_live >= LIVE_POLL:
+            if app.check_held(since):
+                return done(rec, result="fail", kind="held", why="its host held: " + app.held)
+            last_live = now
+        said = text[since:]
         if "a restart applies it" in said:
             break
         if "FAILED" in said or "does not start" in said or "cannot rebuild" in said:
@@ -688,7 +1228,7 @@ def host_case(app, what, path, n, rec):
             return done(rec, result="fail", kind="crash", why="exited (%s) while makepad rebuilt: %s" % (app.proc.returncode, said[-400:]))
         if "is unchanged" in said:
             return done(rec, result="unreached", rung="unchanged", why="makepad did not change")
-        if time.time() - t0 > REBUILD:
+        if now - t0 > REBUILD:
             return done(rec, result="silent", why="no restart offered in %d s: %s" % (REBUILD, said[-400:]))
         time.sleep(1)
     # the offer comes first: the build is the click's, or the next `cargo run`'s
@@ -705,7 +1245,7 @@ def host_case(app, what, path, n, rec):
     code, said = app.ask("session", "relaunch")
     if code != 0:
         return done(rec, result="fail", kind="restart", why="session relaunch: " + said.strip()[:300])
-    why = app.wait_frame(frames, REBUILD + BOOT)
+    why = app.wait_frame(frames, REBUILD + BOOT, since, watch_rebuild=True)
     rec["s"]["restart"] = round(time.time() - t1, 1)
     if why:
         return done(rec, result="fail", kind="restart", why="the click: %s: %s" % (why, " | ".join(bad_lines(app.text(), since)) or app.text()[-400:]))
@@ -722,11 +1262,16 @@ def host_case(app, what, path, n, rec):
     return rec
 
 
-def host(package, wm):
+def _host_once(package, wm, allow_clock_retry):
     os.makedirs(WORK, exist_ok=True)
     # the edits go back once the run ends: left in the tree, they read as the tree's own changes
     # (a lease's end saved them as unlanded work, 11-14)
-    kept = {path: open(os.path.join(ROOT, path)).read() for _, path in HOST_EDITS}
+    kept = {}
+    for _, path in HOST_EDITS:
+        with open(os.path.join(ROOT, path)) as source:
+            kept[path] = source.read()
+    t_start = time.time()
+    clock_retry = None
     env, session = {}, None
     if wm:
         session, socket = wm_session()
@@ -745,7 +1290,7 @@ def host(package, wm):
         if RESIZE:
             # the baseline: what a relaunch with no edit moves is the app's state (see replay)
             fresh = layout(app)
-            failed = relaunch(app, package, "the relaunch with no edit")
+            failed = relaunch(app, package, "the relaunch with no edit", check_tree=False)
             if failed:
                 raise SystemExit("live_replay: %s: %s" % (package, failed[2]))
             noise = differing(fresh, layout(app))
@@ -764,11 +1309,19 @@ def host(package, wm):
             app = App(package, os.path.join(WORK, "host-fresh.log"), cwd=ROOT, env=env)
             why = app.wait_frame(0, COLD)
             rec = {"app": package, "what": "new process", "result": "pass", "rung": "-", "kind": "", "why": "", "s": {}}
-            differs = why or layout_diff(restarted, layout(app), noise, "new process")
-            if differs:
-                rec.update(result="fail", kind="stale_restart", why="after %d restarts into a rebuilt makepad the app lays out unlike a new process: %s" % (len(recs), differs))
-            tally[rec["result"]] = tally.get(rec["result"], 0) + 1
-            print("%-12s %-9s %-9s %-10s %s" % ("new process", rec["result"], rec["rung"], rec["kind"], rec["why"]), flush=True)
+            if why:
+                rec.update(result="fail", kind="restart", why="a new process after %d restarts into a rebuilt makepad: %s" % (len(recs), why))
+            else:
+                differs = layout_diff(restarted, layout(app), noise, "new process")
+                t_end = time.time()
+                if differs:
+                    if allow_clock_retry and clock_crossed(t_start, t_end):
+                        clock_retry = "stale_restart across %s -> %s: %s" % (utc_stamp(t_start), utc_stamp(t_end), differs)
+                    else:
+                        rec.update(result="fail", kind="stale_restart", why="after %d restarts into a rebuilt makepad the app lays out unlike a new process: %s" % (len(recs), differs))
+            if not clock_retry:
+                tally[rec["result"]] = tally.get(rec["result"], 0) + 1
+                print("%-12s %-9s %-9s %-10s %s" % ("new process", rec["result"], rec["rung"], rec["kind"], rec["why"]), flush=True)
     finally:
         said = [l[:240] for l in app.text().splitlines() if re.search(r"relax live|relaunch|panic", l)]
         app.stop()
@@ -778,9 +1331,25 @@ def host(package, wm):
         for path, text in kept.items():
             with open(os.path.join(ROOT, path), "w") as f:
                 f.write(text)
+    if clock_retry:
+        return None, clock_retry
     if tally.get("fail") or tally.get("silent"):
         print("\n".join(said[-30:]), flush=True)
-    return rate(package + (" under the WM" if wm else "") + " rebuild", tally, {})
+    return rate(package + (" under the WM" if wm else "") + " rebuild", tally, {}), None
+
+
+def host(package, wm):
+    code, retry = _host_once(package, wm, allow_clock_retry=True)
+    if retry is not None:
+        print("live_replay: %s rebuild crossed a clock boundary, retrying once: %s" % (package, retry[:1500]), flush=True)
+        code, _ = _host_once(package, wm, allow_clock_retry=False)
+    return code
+
+
+def print_pair(landing):
+    if len(landing.commits) > 1:
+        label = "paired" if landing.land_id is None else "landing #%s" % landing.land_id
+        print("  %s: %s" % (label, " ".join("%s=%s" % (r, c[:10]) for r, c in landing.commits)), flush=True)
 
 
 def chain(package, steps):
@@ -788,6 +1357,8 @@ def chain(package, steps):
     person's running app takes a day of landings (the restarts they need wait). Each edit's
     verdict is judged: a refusal of a tree rustc accepts is a JIT bug (refused_valid: the edit was
     checked against what the running program lacks, edits that wait for a restart)."""
+    if not steps:
+        return rate(package + " chain", {}, {})
     move_tree(steps[0][1])
     app = App(package, os.path.join(WORK, "chain.log"))
     tally, rungs = {}, {}
@@ -799,7 +1370,8 @@ def chain(package, steps):
         found = healthy(app, 0)
         if found:
             raise SystemExit("live_replay: the chain's app is not healthy at its start: %s: %s" % found)
-        for sha, _, state in steps:
+        for landing, _, state in steps:
+            sha = primary_sha(landing)
             rec = {"sha": sha, "app": package, "result": "pass", "rung": "-", "kind": "", "why": "", "s": {}}
             since = len(app.text())
             code, ev = app.ask("events")
@@ -812,7 +1384,9 @@ def chain(package, steps):
             rec["reasons"] = str(event.get("reasons", event.get("error", event.get("answer", ""))))[:400]
             settle(app)
             found = healthy(app, since)
-            if found:
+            if found and found[0] in ("parked", "held") and not rustc_accepts(package)[0]:
+                done(rec, result="skip", kind="tree", why="rustc rejects the tree here; the JIT: " + found[1][:300])
+            elif found:
                 done(rec, result="fail", kind=found[0], why=found[1])
             elif rec["rung"] == "refuse":
                 ok, said = rustc_accepts(package)
@@ -821,7 +1395,8 @@ def chain(package, steps):
             tally[rec["result"]] = tally.get(rec["result"], 0) + 1
             rungs[rec["rung"]] = rungs.get(rec["rung"], 0) + 1
             print("%s %-9s %-9s %-13s %s %s %s" % (sha[:10], rec["result"], rec["rung"], rec["kind"], rec["s"], rec["why"][:600], rec["reasons"] if rec["result"] != "fail" else ""), flush=True)
-            if not app.alive():
+            print_pair(landing)
+            if not app.alive() or app.held:
                 break
     finally:
         app.stop()
@@ -845,6 +1420,13 @@ def main():
     shutil.copy2(os.path.join(os.environ.get("CARGO_TARGET_DIR", os.path.join(ROOT, "target")), "host", "makepad"), CLIENT)
     if "--host" in sys.argv:
         sys.exit(host(package, "--wm" in sys.argv))
+    landings_path = opt("--landings", "")
+    if landings_path:
+        land_index = load_landings(landings_path)
+        print(loaded_line(land_index, landings_path), flush=True)
+    else:
+        land_index = None
+        print("live_replay: no --landings given; pairing cross-repo lands from git", flush=True)
     count = int(opt("--count", "300"))
     tip = git("rev-parse", "HEAD")
     history = [x for x in opt("--history", "").split(",") if x]
@@ -858,17 +1440,11 @@ def main():
     only = [x for x in opt("--only", "").split(",") if x]
     meta = metadata()
     kept = kept_dirs(meta)
+    all_tips = {"makepad": base, **tips}
     if only:
-        # (a commit of any repository)
-        items = []
-        for x in only:
-            repo = next((r for r in ["makepad", *NESTED] if subprocess.run(["git", "cat-file", "-e", x + "^{commit}"], cwd=ROOT if r == "makepad" else os.path.join(ROOT, r), capture_output=True).returncode == 0), None)
-            if repo is None:
-                raise SystemExit("live_replay: --only %s: no commit of makepad or %s" % (x, " ".join(NESTED) or "a nested repository"))
-            look = git if repo == "makepad" else lambda *a, r=repo: ngit(r, *a)
-            items.append((int(look("log", "-1", "--format=%ct", x)), repo, look("rev-parse", x)))
+        items = resolve_only(only, all_tips, land_index)
     else:
-        items = landings(meta, package, kept, base, tips, count)[::-1]
+        items = landings(meta, package, kept, base, tips, count, land_index)[::-1]
     print("live_replay: %s, %d landings, kept at this tree: %s" % (package, len(items), " ".join(kept)), flush=True)
     print("live_replay: the second tree holds makepad and %s" % (" ".join(NESTED) or "no nested repository"), flush=True)
     results = os.path.join(WORK, "results-%s.jsonl" % package)
@@ -882,25 +1458,11 @@ def main():
             trees[commit] = hybrid(commit, tip, kept)
         return trees[commit]
 
-    def makepad_at(t):
-        return git("log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, base)
-
-    def nested_at(t):
-        return tuple((r, ngit(r, "log", "--first-parent", "-1", "--format=%H", "--before=%d" % t, tips[r]) or EMPTY) for r in NESTED)
-
-    def states(t, repo, sha):
-        """The second tree's states before and after a landing."""
-        if repo == "makepad":
-            side = nested_at(t)
-            return (tree_at(sha + "^1"), side), (tree_at(sha), side)
-        ours, side = tree_at(makepad_at(t)), nested_at(t)
-        at = lambda c: tuple((r, c if r == repo else x) for r, x in side)
-        return (ours, at(parent(repo, sha))), (ours, at(sha))
+    parent_cache = {}
 
     if "--chain" in sys.argv:
-        steps = []
-        for t, repo, sha in sorted(items):
-            steps.append((sha, *states(t, repo, sha)))
+        steps = [(item, *resolve_states(item, all_tips, tree_at, land_index, parent_cache))
+                 for item in sorted(items, key=landing_sort_key)]
         os.makedirs(TREE, exist_ok=True)
         shutil.copy2(os.path.join(ROOT, "Cargo.lock"), os.path.join(TREE, "Cargo.lock"))
         sys.exit(chain(package, steps))
@@ -910,8 +1472,9 @@ def main():
     os.makedirs(TREE, exist_ok=True)
     shutil.copy2(os.path.join(ROOT, "Cargo.lock"), os.path.join(TREE, "Cargo.lock"))
     with open(results, "w") as out:
-        for seq, (t, repo, sha) in enumerate(items):
-            a, b = states(t, repo, sha)
+        for seq, landing in enumerate(items):
+            sha = primary_sha(landing)
+            a, b = resolve_states(landing, all_tips, tree_at, land_index, parent_cache)
             if a == b:
                 rec = {"sha": sha, "app": package, "result": "skip", "rung": "-", "kind": "kept", "why": "only the JIT's and the providers' files changed", "s": {}}
             else:
@@ -922,6 +1485,9 @@ def main():
                         lines = f.read().splitlines()
                         said = [l[:300] for l in lines if re.search(r"relax|relaunch|error|panic", l)]
                         rec["log"] = "\n".join(said[-40:]) + "\n(%d lines, %d draw errors)" % (len(lines), sum(bool(DRAW.match(l)) for l in lines))
+            rec["commits"] = dict(landing.commits)
+            if landing.land_id is not None:
+                rec["land_id"] = landing.land_id
             tally[rec["result"]] = tally.get(rec["result"], 0) + 1
             rungs[rec["rung"]] = rungs.get(rec["rung"], 0) + 1
             drifted = drifted + 1 if rec["kind"] == "tree" else 0
@@ -930,10 +1496,15 @@ def main():
             if rec.get("quit"):
                 print("%s quit hangs: %s" % (sha[:10], rec["quit"]), flush=True)
             print("%s %-9s %-9s %-10s %s %s %s" % (sha[:10], rec["result"], rec["rung"], rec["kind"], rec["s"], rec["why"], rec.get("reasons", "") if rec["rung"] not in ("applied", "none") or rec["result"] == "silent" else ""), flush=True)
+            print_pair(landing)
             if rec.get("state"):
                 print("  the relaunch with no edit moved (skipped as state): %s" % rec["state"][:1500], flush=True)
             if rec.get("log"):
                 print(rec["log"], flush=True)
+            if rec.get("clock_retry"):
+                print("  retried once after a clock boundary: %s" % rec["clock_retry"][:1500], flush=True)
+            if rec.get("kept"):
+                print("  its app's logs, kept: %s" % ", ".join(rec["kept"]), flush=True)
             if drifted >= DRIFTED:
                 print("live_replay: the tree no longer builds against this JIT from %s back: %d of %d landings not run" % (sha[:10], len(items) - seq - 1, len(items)), flush=True)
                 break

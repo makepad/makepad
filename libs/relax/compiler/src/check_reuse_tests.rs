@@ -726,6 +726,7 @@ fn generic_parameters_in_constants_are_rustcs_errors_once() {
 }
 
 const APP_CHILD: &str = "RELAX_CHECK_APP_CHILD";
+const TARGET_CHILD: &str = "RELAX_CHECK_TARGET_CHILD";
 
 /// In a child (APP_CHILD names the workspace folder): `makepad check app_pkg` there, as the command
 /// line runs it (verbose: the type counts of the image it records and restores): the checked crates
@@ -740,6 +741,94 @@ fn app_check_child() {
     eprintln!("app child exit {code}");
 }
 
+#[test]
+fn target_check_child() {
+    let Some(dir) = std::env::var_os(TARGET_CHILD) else { return };
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_current_dir(dir).unwrap();
+    let sess = crate::session_from_env(&[]).expect("session_from_env");
+    let code = crate::run::cmd_run(&sess, &["--verbose".to_string(), "--check".to_string(), "app_pkg".to_string()]);
+    eprintln!("target child exit {code}");
+}
+
+/// A wasm32 check beside a host check in one cache keeps its own 32-bit collected image: the first
+/// wasm32 check does not restore the host's image, a wasm32 check after an edit restores its own with
+/// 4-byte pointers, and a 64-bit transmute checked from it is still E0512. One workspace and cache
+/// for the four checks; each assertion names its step. Where the web target's linear memory can
+/// be reserved only (`web::activate`, macOS and Linux): a wasm32 check elsewhere stops at it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn wasm32_checks_restore_their_32bit_image_beside_a_host_check() {
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some()
+        || std::env::var_os(APP_CHILD).is_some() || std::env::var_os(TARGET_CHILD).is_some() { return; }
+
+    struct Workspace(std::path::PathBuf);
+    impl Drop for Workspace {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    let workspace = Workspace(package("width-wasm32", &[]));
+    let dir = &workspace.0;
+    // Keep dep outside the app workspace: its array length must come from the retained prefix.
+    for (folder, package, deps) in [("dep", "dep", ""), ("app", "app_pkg", "[workspace]\nresolver = \"2\"\n[dependencies]\ndep = { path = \"../dep\" }\n")] {
+        std::fs::create_dir(dir.join(folder)).unwrap();
+        std::fs::write(dir.join(folder).join("Cargo.toml"), format!(
+            "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n{deps}"
+        )).unwrap();
+    }
+    std::fs::write(dir.join("dep/lib.rs"), r#"pub struct Buf { pub bytes: [u8; 16] }
+impl Drop for Buf { fn drop(&mut self) {} }
+#[repr(isize)]
+pub enum Tag { A = 1, B = 2 }
+pub fn mk() -> Buf { Buf { bytes: [0; 16] } }
+"#).unwrap();
+    let app = r#"#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<usize>() == 4);
+#[cfg(target_pointer_width = "32")]
+const _: () = assert!(std::mem::size_of::<&[u8]>() == 8);
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<usize>() == 8);
+#[cfg(target_pointer_width = "32")]
+pub fn ptr_bits(x: usize) -> u32 { unsafe { core::mem::transmute(x) } }
+pub fn touch() -> isize {
+    let _b = dep::mk();
+    dep::Tag::B as isize
+}
+"#;
+    let source = dir.join("app/lib.rs");
+    std::fs::write(&source, app).unwrap();
+    let check = |step: &str, target: Option<&str>, expect_restore: bool, expect_error: Option<&str>| {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "check_reuse_tests::target_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(TARGET_CHILD, dir.join("app")).env("RELAX_CACHE_DIR", dir.join("cache")).env("RELAX_BOOT_TRACE", "1")
+            .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE");
+        if let Some(target) = target { cmd.env("RELAX_CHECK_TARGET", target); } else { cmd.env_remove("RELAX_CHECK_TARGET"); }
+        let out = crate::test_child::output(&mut cmd);
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && stdout.contains("1 passed"), "{step}: the check child failed\n{stdout}\n{stderr}");
+        let code = stderr.lines().find_map(|l| l.strip_prefix("target child exit ")).and_then(|s| s.parse::<i32>().ok());
+        let restored = stderr.lines().any(|l| l.starts_with("relax collected: restored at"));
+        assert_eq!(restored, expect_restore, "{step}: collected restore for {target:?}: {stderr}");
+        if expect_restore {
+            assert!(stderr.lines().any(|l| l.starts_with("relax collected: prefix ") && l.contains("ends at app_pkg (")),
+                "{step}: expected to retain dep and reload app_pkg: {stderr}");
+        }
+        assert!(!stderr.contains("panicked at") && !stderr.contains("internal:"), "{step}: a panic or internal error: {stderr}");
+        if let Some(error) = expect_error {
+            assert!(code.is_some_and(|c| c != 0) && stderr.contains(error), "{step}: expected {error}: {stderr}");
+        } else {
+            assert!(code == Some(0) && !stderr.contains(": E0") && !stderr.contains(": error:"), "{step}: expected a clean check: {stderr}");
+        }
+    };
+    let wasm32 = Some("wasm32-unknown-unknown");
+    check("the host check", None, false, None);
+    check("the first wasm32 check (the host's image is not its own)", wasm32, false, None);
+    let edited = format!("{app}pub fn probe() -> u32 {{ 1 }}\n");
+    std::fs::write(&source, &edited).unwrap();
+    check("the wasm32 check after an edit, from its 32-bit image", wasm32, true, None);
+    std::fs::write(&source, edited.replace("ptr_bits(x: usize) -> u32", "ptr_bits(x: usize) -> u64")).unwrap();
+    check("the wasm32 check of a 64-bit transmute, from its image", wasm32, true, Some("E0512"));
+}
+
 /// The collected image certifies each crate it holds by its fingerprint: an app check restores the
 /// crates below its checked ones after every edit of those (a check that restored them writes its
 /// graph, not the image again), and no crate that changed since loads from it -- an edited
@@ -747,7 +836,7 @@ fn app_check_child() {
 /// image is the program before its bodies were checked: it holds none of the types they made.
 #[test]
 fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
-    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() || std::env::var_os(TARGET_CHILD).is_some() { return; }
     let dir = package("appimage", &[("Cargo.toml", "[workspace]\nmembers = [\"dep\", \"app\"]\nresolver = \"2\"\n")]);
     let write = |f: &str, src: &str| {
         let path = dir.join(f);
@@ -826,7 +915,7 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
 /// std, unchanged, is checked by the cold check alone: the next checks look its clean verdicts up.
 #[test]
 fn a_dependency_error_fails_the_check() {
-    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() || std::env::var_os(TARGET_CHILD).is_some() { return; }
     // a Windows path's drive colon is the path's: the error stays the dependency's on every host
     let windows = "C:\\ws\\dep\\lib.rs:1:19: E0425: cannot find type `NoSuchType` in this scope";
     assert_eq!(crate::check::place_of(windows), Some(("C:\\ws\\dep\\lib.rs", "1", "19", Some(" E0425: cannot find type `NoSuchType` in this scope"))));
@@ -914,7 +1003,7 @@ fn a_dependency_error_fails_the_check() {
 /// a path through `shader` got the lint, which rustc does not report).
 #[test]
 fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
-    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() || std::env::var_os(TARGET_CHILD).is_some() { return; }
     // (the dependency lives outside the workspace: an app check does not check it)
     let dir = package("appglobs", &[]);
     let write = |f: &str, src: &str| {

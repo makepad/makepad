@@ -74,7 +74,7 @@ impl Drop for FreeReplies {
 /// `bytes` become this thread's reply `slot` (valid until its next reply): (start, length). The
 /// reply is freed at the thread's end; one made after that (by a destructor that runs later) is
 /// left to the process.
-fn reply(slot: &'static std::thread::LocalKey<Reply>, bytes: Vec<u8>) -> (*const u8, usize) {
+fn reply(slot: &'static makepad_thread_local::LocalKey<Reply>, bytes: Vec<u8>) -> (*const u8, usize) {
     let _ = FREE_REPLIES.try_with(|_| ());
     slot.with(|r| {
         drop(r.take());
@@ -645,7 +645,7 @@ fn world_std_crates(std_dir: &str, cfg: &crate::cfg::CfgSet) -> Vec<crate::prelo
     let mut v: Vec<crate::preload::PreCrate> = [("core", format!("{}/core/lib.rs", std_dir)), ("alloc", alloc.clone()), ("std", format!("{}/std/lib.rs", std_dir)), ("proc_macro", format!("{}/proc_macro/lib.rs", std_dir))]
         .into_iter()
         .filter(|(n, _)| *n != "alloc" || crate::vfs::exists(&alloc))
-        .map(|(name, root)| crate::preload::PreCrate { name: name.to_string(), root, edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() })
+        .map(|(name, root)| crate::preload::PreCrate { is_bin: false, harness: false, name: name.to_string(), root, edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() })
         .collect();
     for i in 0..v.len() {
         v[i].image_dep_names = (0..i).map(|d| (v[d].name.clone(), v[d].name.clone())).collect();
@@ -776,7 +776,7 @@ fn build_world_once(sess: &std::sync::Arc<crate::Session>, units: &[crate::macro
     // fingerprints): a warm start compiles none of it
     if let Some(mode) = crate::cache::mode_from_env(&u.prog.session.options) {
         if let Ok(c) = crate::cache::Cache::open(&u, mode) {
-            u.cache = Some(Box::new(crate::cache::CacheCell::new(c)));
+            u.set_cache(c);
         }
     }
     let t_cache = t0.elapsed().as_secs_f64() * 1e3;

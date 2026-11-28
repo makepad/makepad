@@ -170,6 +170,13 @@ try {
         Require ($out -match 'This folder holds other files') "a download among other files: no line saying why: $out"
     }
     "PASS $Case"
+    $result = 0
+} catch {
+    "FAIL ${Case}: $_"
+    $result = 1
 } finally {
     Remove-Item -LiteralPath $base -Recurse -Force
 }
+# The case's own result. Without it the caller's $LASTEXITCODE is the last fragment's cmd exit
+# code: the Rust case ends on a fragment that must exit 7 (Rust without rustc is not reused).
+exit $result

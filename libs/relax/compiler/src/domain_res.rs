@@ -65,10 +65,9 @@ impl Released {
     }
 }
 
-#[cfg(unix)]
 fn pages(len: usize) -> usize {
     let p = crate::os::mem::page_size() as usize;
-    (len + p - 1) & !(p - 1)
+    len.checked_add(p - 1).map_or(len & !(p - 1), |n| n & !(p - 1))
 }
 
 /// The domain the calling thread's resources belong to: a run's, or the main program's once it
@@ -417,6 +416,7 @@ pub(crate) use unix::*;
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use crate::zone_alloc::domain::{forget_map, forget_map_discard, record_map, MapForget, MapRecord, TakenMaps};
     use std::ffi::{c_char, c_int, c_uint, c_void};
     use std::os::fd::FromRawFd;
 
@@ -512,23 +512,58 @@ mod unix {
     /// The range is no longer the run's: what is left of a mapping around it stays. The run's
     /// mappings do not overlap (a mapping over one forgets it first), so only the one that starts
     /// below the range can reach into it; the others start in it.
-    fn forget_range(addr: usize, len: usize) {
-        let end = addr + len;
-        with_table(|t| {
-            let below = t.maps.range(..addr).next_back().filter(|&(&a, o)| matches!(o.res, Res::Map { len: l, .. } if a + l > addr)).map(|(&a, _)| a);
-            let hit: Vec<usize> = below.into_iter().chain(t.maps.range(addr..end).map(|(&a, _)| a)).collect();
-            for a in hit {
-                let Some(o) = t.maps.remove(&a) else { continue };
-                let Res::Map { len: l, .. } = o.res else { continue };
-                let e = a + l;
-                if a < addr {
-                    t.maps.insert(a, Owned { res: Res::Map { addr: a, len: addr - a }, ..o });
-                }
-                if end < e {
-                    t.maps.insert(end, Owned { res: Res::Map { addr: end, len: e - end }, ..o });
-                }
+    fn forget_range_locked(t: &mut Table, addr: usize, len: usize) {
+        let Some(end) = addr.checked_add(len) else { return };
+        if len == 0 { return; }
+        let below = t.maps.range(..addr).next_back().filter(|&(&a, o)| matches!(o.res, Res::Map { len: l, .. } if a + l > addr)).map(|(&a, _)| a);
+        let hit: Vec<usize> = below.into_iter().chain(t.maps.range(addr..end).map(|(&a, _)| a)).collect();
+        for a in hit {
+            let Some(o) = t.maps.remove(&a) else { continue };
+            let Res::Map { len: l, .. } = o.res else { continue };
+            let e = a + l;
+            if a < addr {
+                t.maps.insert(a, Owned { res: Res::Map { addr: a, len: addr - a }, ..o });
             }
-        });
+            if end < e {
+                t.maps.insert(end, Owned { res: Res::Map { addr: end, len: e - end }, ..o });
+            }
+        }
+    }
+
+    fn forget_range(addr: usize, len: usize) {
+        if len == 0 || addr.checked_add(len).is_none() { return; }
+        with_table(|t| forget_range_locked(t, addr, len));
+    }
+
+    const ENOMEM: c_int = 12;
+    const MAP_FIXED: c_int = 0x10;
+    #[cfg(target_vendor = "apple")]
+    const MAP_ANON: c_int = 0x1000;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const MAP_ANON: c_int = 0x20;
+
+    unsafe fn errno_ptr() -> *mut c_int {
+        extern "C" {
+            #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
+            #[cfg_attr(target_os = "android", link_name = "__errno")]
+            #[cfg_attr(target_vendor = "apple", link_name = "__error")]
+            fn errno_location() -> *mut c_int;
+        }
+        unsafe { errno_location() }
+    }
+
+    unsafe fn set_errno(err: c_int) {
+        unsafe { *errno_ptr() = err };
+    }
+
+    /// The OS refused the release or remap. Its error belongs to the caller.
+    unsafe fn restore_after_failure(taken: TakenMaps) {
+        let errno = unsafe { errno_ptr() };
+        let err = unsafe { *errno };
+        unsafe {
+            taken.restore();
+            *errno = err;
+        }
     }
 
     mod sys {
@@ -683,17 +718,46 @@ mod unix {
     }
     pub extern "C" fn mmap(addr: *mut u8, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut u8 {
         let p = unsafe { sys::mmap(addr, len, prot, flags, fd, off) };
-        if p as isize != -1 {
-            let len = pages(len);
-            // (MAP_FIXED over what it had)
-            forget_range(p as usize, len);
-            note(Res::Map { addr: p as usize, len });
+        if p as isize == -1 { return p; }
+        let plen = pages(len);
+        let in_handler = crate::os::progsig::in_program_handler();
+        if !in_handler && flags & MAP_FIXED != 0 && !forget_map_discard(p as usize, plen) {
+            std::process::abort();
         }
+        forget_range(p as usize, plen);
+        if !in_handler && flags & MAP_ANON != 0 {
+            match unsafe { record_map(p as usize, plen) } {
+                MapRecord::Recorded => return p,
+                MapRecord::Failed => {
+                    unsafe { sys::munmap(p, plen); set_errno(ENOMEM); }
+                    return (-1isize) as *mut u8;
+                }
+                MapRecord::NotProgramAllocator => {}
+            }
+        }
+        note(Res::Map { addr: p as usize, len: plen });
         p
     }
     pub extern "C" fn munmap(addr: *mut u8, len: usize) -> c_int {
-        forget_range(addr as usize, pages(len));
-        unsafe { sys::munmap(addr, len) }
+        let page = crate::os::mem::page_size() as usize;
+        let plen = pages(len);
+        let in_handler = crate::os::progsig::in_program_handler();
+        let taken = if !in_handler && len != 0 && (addr as usize) & (page - 1) == 0 {
+            match forget_map(addr as usize, plen) {
+                MapForget::Failed => {
+                    unsafe { set_errno(ENOMEM) };
+                    return -1;
+                }
+                MapForget::Removed(t) => Some(t),
+                MapForget::NotTracked => None,
+            }
+        } else { None };
+        forget_range(addr as usize, plen);
+        let r = unsafe { sys::munmap(addr, len) };
+        if r != 0 {
+            if let Some(t) = taken { unsafe { restore_after_failure(t) }; }
+        }
+        r
     }
     // the program's handler goes in a table and the kernel runs a trampoline for it (os/progsig.rs:
     // never inside a compile); the run's end gives back what its domain changed
@@ -779,11 +843,59 @@ mod unix {
             note_fd(unsafe { sys::memfd_create(name, flags) })
         }
         pub extern "C" fn mremap(old: *mut c_void, old_len: usize, new_len: usize, flags: c_int, at: usize) -> *mut c_void {
+            const MREMAP_FIXED: c_int = 2;
+            const MREMAP_DONTUNMAP: c_int = 4;
+            let page = crate::os::mem::page_size() as usize;
+            let old_addr = old as usize;
+            let old_plen = pages(old_len);
+            let new_plen = pages(new_len);
+            let keep_old = flags & MREMAP_DONTUNMAP != 0;
+            let in_handler = crate::os::progsig::in_program_handler();
+            let taken = if !in_handler && old_len != 0 && new_len != 0 && old_addr & (page - 1) == 0 && old_addr.checked_add(old_plen).is_some() {
+                let source = if keep_old {
+                    crate::zone_alloc::domain::pin_maps(old_addr, old_plen)
+                } else {
+                    forget_map(old_addr, old_plen)
+                };
+                match source {
+                    MapForget::Removed(t) => Some(t),
+                    MapForget::NotTracked => None,
+                    MapForget::Failed => {
+                        unsafe { set_errno(ENOMEM) };
+                        return (-1isize) as *mut c_void;
+                    }
+                }
+            } else { None };
             let p = unsafe { sys::mremap(old, old_len, new_len, flags, at) };
-            if p as isize != -1 {
-                forget_range(old as usize, pages(old_len));
-                forget_range(p as usize, pages(new_len));
-                note(Res::Map { addr: p as usize, len: pages(new_len) });
+            if p as isize == -1 {
+                if let Some(t) = taken { unsafe { restore_after_failure(t) }; }
+                return p;
+            }
+            let dst = p as usize;
+            if !in_handler && flags & MREMAP_FIXED != 0 && !forget_map_discard(dst, new_plen) {
+                std::process::abort();
+            }
+            if let Some(t) = taken {
+                let full = {
+                    let mut ranges = t.remap_destinations(old_addr, old_plen, dst, new_plen);
+                    ranges.next() == Some((dst, new_plen)) && ranges.next().is_none()
+                };
+                let dom = if full { None } else { owner() };
+                with_table(|table| {
+                    if !keep_old { forget_range_locked(table, old_addr, old_plen); }
+                    forget_range_locked(table, dst, new_plen);
+                    if let Some(domain) = dom {
+                        table.insert(domain, Res::Map { addr: dst, len: new_plen }, false);
+                        for (addr, len) in t.remap_destinations(old_addr, old_plen, dst, new_plen) {
+                            forget_range_locked(table, addr, len);
+                        }
+                    }
+                });
+                let _ = unsafe { t.commit_remap(old_addr, old_plen, dst, new_plen) };
+            } else {
+                if !keep_old && old_len != 0 { forget_range(old_addr, old_plen); }
+                forget_range(dst, new_plen);
+                note(Res::Map { addr: dst, len: new_plen });
             }
             p
         }
@@ -1016,6 +1128,7 @@ pub(crate) use windows::*;
 #[cfg(windows)]
 mod windows {
     use super::*;
+    use crate::zone_alloc::domain::{forget_map_exact, record_map, MapRecord};
     use crate::os::win32 as os;
     use crate::os::win32::{HANDLE, ProcessInformation, SecurityAttributes};
 
@@ -1343,15 +1456,48 @@ mod windows {
         let p = unsafe { os::VirtualAlloc(addr, len, kind, protect) };
         // (a commit in what it reserved is not another one)
         if !p.is_null() && kind & MEM_RESERVE != 0 {
-            note(Res::Memory { addr: p as usize, len });
+            let base = p as usize;
+            // The reservation starts at the allocation granularity boundary below the request.
+            let span = if addr.is_null() {
+                pages(len)
+            } else {
+                (addr as usize)
+                    .checked_sub(base)
+                    .and_then(|off| off.checked_add(len))
+                    .map_or_else(|| pages(len), pages)
+            };
+            match unsafe { record_map(base, span) } {
+                MapRecord::Recorded => return p,
+                MapRecord::Failed => {
+                    unsafe {
+                        os::VirtualFree(p, 0, MEM_RELEASE);
+                        os::SetLastError(8); // ERROR_NOT_ENOUGH_MEMORY
+                    }
+                    return std::ptr::null_mut();
+                }
+                MapRecord::NotProgramAllocator => note(Res::Memory { addr: base, len: span }),
+            }
         }
         p
     }
     extern "system" fn virtual_free(addr: *mut u8, len: usize, kind: u32) -> i32 {
+        let taken = if kind & MEM_RELEASE != 0 && len == 0 {
+            forget_map_exact(addr as usize)
+        } else { None };
         if kind & MEM_RELEASE != 0 {
             forget(Kind::Memory, addr as u64);
         }
-        unsafe { os::VirtualFree(addr, len, kind) }
+        let ok = unsafe { os::VirtualFree(addr, len, kind) };
+        if ok == 0 {
+            if let Some(t) = taken {
+                unsafe {
+                    let err = os::GetLastError();
+                    t.restore();
+                    os::SetLastError(err);
+                }
+            }
+        }
+        ok
     }
     fn note_view(p: *mut u8, len: usize) -> *mut u8 {
         if !p.is_null() {

@@ -6,7 +6,9 @@
 //! op/JIT reads after that mutation; RAW records op/plain/direct reads. The local op calls the
 //! same helper as the plain JIT call, so both reach one LOCAL in `local_count_bump`.
 //! `static-ref` reaches shared storage through a JIT static reference; `unmarked-ref` must
-//! refuse the same initializer for an unmarked atomic before it prints anything.
+//! refuse the same initializer for an unmarked atomic before it prints anything. `loader`,
+//! `loader-static`, `loader-method` and `loader-impl` use items kept for the loader: each use is
+//! refused with the item's (or its impl's) text, and the impl's op stays an op.
 
 fn shared_reference() {
     use relax_provided_fixture as fixture;
@@ -38,10 +40,44 @@ fn unmarked_case() {
     println!("unmarked {}", relax_provided_fixture::PLAIN_COUNT.load(std::sync::atomic::Ordering::Relaxed));
 }
 
+fn loader_case() {
+    println!("loader {}", relax_provided_fixture::loader_count());
+}
+
+fn loader_static_case() {
+    println!("loader-static {}", relax_provided_fixture::LOADER_COUNT.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+fn loader_method_clear(r: &mut relax_provided_fixture::Registry) {
+    r.clear_all();
+    println!("loader-method cleared");
+}
+
+fn loader_method_case() {
+    let mut r = relax_provided_fixture::Registry::new();
+    r.add("ab");
+    r.add("cde");
+    println!("loader-method total {}", r.names_total());
+    loader_method_clear(&mut r);
+}
+
+fn loader_impl_count() {
+    println!("loader-impl count {}", relax_provided_fixture::LoaderHeld::count());
+}
+
+fn loader_impl_case() {
+    println!("loader-impl twice {}", relax_provided_fixture::LoaderHeld::twice(21));
+    loader_impl_count();
+}
+
 fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("shared") => shared_case(),
         Some("unmarked") => unmarked_case(),
+        Some("loader") => loader_case(),
+        Some("loader-static") => loader_static_case(),
+        Some("loader-method") => loader_method_case(),
+        Some("loader-impl") => loader_impl_case(),
         Some("static-ref") => shared_reference(),
         Some("unmarked-ref") => unmarked_reference(),
         Some("statics") => {

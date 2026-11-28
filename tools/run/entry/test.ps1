@@ -19,10 +19,13 @@ function Check($name, $text, $pattern) {
 function Publish($text, $broken) {
     $zipdir = "$Base\zipfix"
     if (Test-Path $zipdir) { Remove-Item -Recurse -Force $zipdir }
-    New-Item -ItemType Directory -Force -Path "$zipdir\fx1\dep-a", "$zipdir\fx1\tools\run\entry" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$zipdir\fx1\dep-a", "$zipdir\fx1\tools\run\entry", "$zipdir\fx1\libs\loader_switch\src" | Out-Null
+    $switchSource = "$here\..\..\..\libs\loader_switch"
+    Copy-Item -LiteralPath "$switchSource\Cargo.toml" -Destination "$zipdir\fx1\libs\loader_switch\Cargo.toml"
+    Copy-Item -LiteralPath "$switchSource\src\lib.rs" -Destination "$zipdir\fx1\libs\loader_switch\src\lib.rs"
     $files = @{
-        'fx1/Cargo.toml' = "[package]`nname = `"makepad-run`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[dependencies]`ndep-a = { path = `"dep-a`" }`n[[bin]]`nname = `"makepad`"`npath = `"main.rs`"`n[[bin]]`nname = `"makepad-launcher`"`npath = `"launcher.rs`"`n[profile.host]`ninherits = `"release`"`n"
-        'fx1/Cargo.lock' = "version = 4`n`n[[package]]`nname = `"dep-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"makepad-run`"`nversion = `"0.1.0`"`ndependencies = [`n `"dep-a`",`n]`n"
+        'fx1/Cargo.toml' = "[package]`nname = `"makepad-run`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[dependencies]`ndep-a = { path = `"dep-a`" }`nmakepad-loader-switch = { path = `"libs/loader_switch`" }`n[[bin]]`nname = `"makepad`"`npath = `"main.rs`"`n[[bin]]`nname = `"makepad-launcher`"`npath = `"launcher.rs`"`n[profile.host]`ninherits = `"release`"`n"
+        'fx1/Cargo.lock' = "version = 4`n`n[[package]]`nname = `"dep-a`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"makepad-loader-switch`"`nversion = `"0.1.0`"`n`n[[package]]`nname = `"makepad-run`"`nversion = `"0.1.0`"`ndependencies = [`n `"dep-a`",`n `"makepad-loader-switch`",`n]`n"
         'fx1/dep-a/Cargo.toml' = "[package]`nname = `"dep-a`"`nversion = `"0.1.0`"`nedition = `"2021`"`n[lib]`npath = `"lib.rs`"`n"
         'fx1/dep-a/lib.rs' = "pub fn text() -> &'static str { `"$text`" }`n"
         'fx1/launcher.rs' = "fn main() {}`n"
@@ -31,7 +34,12 @@ function Publish($text, $broken) {
         'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else {
 @'
 fn main() {
-    let home = std::fs::canonicalize(std::env::var_os("RELAX_HOME").unwrap()).unwrap();
+    let home = std::path::PathBuf::from(std::env::var_os("RELAX_HOME").unwrap());
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|cmd| cmd == "recover") {
+        std::process::exit(makepad_loader_switch::recover_command(&home.join("cache/loader"), &args[1..]));
+    }
+    let home = home.canonicalize().unwrap();
     let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
     let target = exe.parent().unwrap().parent().unwrap();
     let loaders = home.join("cache/loader");
@@ -42,7 +50,8 @@ fn main() {
         target.parent().unwrap().to_path_buf()
     };
     let record = folder.join("runner.launch");
-    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), std::env::args().skip(1).collect::<Vec<_>>());
+    println!("fixture loader: {} launch record present: {} args: {:?}", dep_a::text(), record.is_file(), args);
+    println!("fixture loader folder: {}", folder.file_name().unwrap().to_string_lossy());
 }
 '@
         })
@@ -99,6 +108,23 @@ function Run($name) {
     $script:code = $LASTEXITCODE
     "=== $name (exit $script:code)"; $out
     return $out
+}
+# The same entry runs against each target layout. Its only job while pending is selection.
+function Check-PendingEntry($layout) {
+    foreach ($previous in $hex, '../outside', $unbuilt) {
+        if ($previous -eq $hex) { $selected = 'src'; $expectedFolder = $hex }
+        else { $selected = $hex; $expectedFolder = 'src' }
+        [IO.File]::WriteAllText("$loader\current", "$selected`n", $utf8)
+        [IO.File]::WriteAllText("$loader\previous", "$previous`n", $utf8)
+        [IO.File]::WriteAllText("$loader\pending", "$hex`n", $utf8)
+        $entry = & "$Base\install\makepad.cmd" 2>&1 | Out-String
+        Check "pending entry ($layout): exits 0" "$LASTEXITCODE" '^0$'
+        Check "pending entry ($layout): previous $previous" $entry "(?m)^fixture loader folder: $expectedFolder\r?$"
+        Check "pending entry ($layout): switch state intact" (([IO.File]::ReadAllText("$loader\current") -ceq "$selected`n") -and
+            ([IO.File]::ReadAllText("$loader\previous") -ceq "$previous`n") -and ([IO.File]::ReadAllText("$loader\pending") -ceq "$hex`n") -and
+            !(Test-Path "$loader\rolled-back")) '^True$'
+    }
+    Remove-Item -LiteralPath "$loader\pending", "$loader\previous"
 }
 # ctrl+c in a console (a pseudo console, as Windows Terminal hosts) while Rust downloads: the jobs
 # beside the screen stop with the script, whatever cmd's "Terminate batch job (Y/N)?" is answered.
@@ -251,8 +277,8 @@ try {
     CtrlC 'N'
     $r1 = Run 'run1'
     Check 'first run exits 0' "$script:code" '^0$'
-    Check 'progress line, the real total' $r1 'Loader build: compiling .+ [0-9]+ / 2 crates'
-    Check 'built: all crates' $r1 'Loader build: compiled .+in [0-9:]+ .+ 2 crates'
+    Check 'progress line, the real total' $r1 'Loader build: compiling .+ [0-9]+ / 3 crates'
+    Check 'built: all crates' $r1 'Loader build: compiled .+in [0-9:]+ .+ 3 crates'
     Check 'rust downloaded' $r1 'Rust 1\.98\.0: ready .+downloaded and unpacked in'
     Check 'loader started' $r1 'fixture loader: one launch record present: true'
     $service = $env:MAKEPAD_LOADER_SERVICE
@@ -323,11 +349,16 @@ arg	makepad-runner
     New-Item -ItemType Directory -Path "$targets\$hex" | Out-Null
     Remove-Item "$loader\$hex\.loader-sha256"
     [IO.File]::WriteAllText("$loader\previous", "src`n", $utf8); [IO.File]::WriteAllText("$loader\current", "$hex`n", $utf8)
+    $unbuilt = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    New-Item -ItemType Directory -Path "$loader\$unbuilt" | Out-Null
+    Check-PendingEntry 'old target'
     $r5 = Run 'run5'
     Check 'current folder: built in place' $r5 'Loader build: compiled .+in [0-9:]+'
     Check 'current folder: stamp written there' (Test-Path "$loader\$hex\.loader-sha256") 'True'
     Check 'current folder: built in the existing new target' (Test-Path "$targets\$hex\host\makepad.exe" -PathType Leaf) 'True'
     Check 'current folder: source marker' (Get-Content -LiteralPath "$targets\$hex\source") "^\.\./\.\./\.\./cache/loader/$hex$"
+    Check-PendingEntry 'shared target'
+    Remove-Item -LiteralPath "$loader\$unbuilt"
     # With no release answer, only recovery can restore the active folder's record.
     $trialRecord = "$loader\$hex\runner.launch"
     Copy-Item -LiteralPath $trialRecord -Destination "$trialRecord.previous"
@@ -337,7 +368,10 @@ arg	makepad-runner
     Move-Item -LiteralPath "$Base\www\public\app\runner\latest" -Destination "$Base\offline-latest"
     try { $codeRollback = Run 'code-rollback' }
     finally { Move-Item -LiteralPath "$Base\offline-latest" -Destination "$Base\www\public\app\runner\latest" }
-    Check 'code rollback: recovery notice' $codeRollback 'Went back to 0123456789: the new runner did not confirm'
+    Check 'code rollback: selected folder runs' $codeRollback "(?m)^fixture loader folder: $hex\r?$"
+    # nothing tries this switch: recovery settles it at once, with no waiting line
+    Check 'code rollback: no wait with no open Makepad' (-not (($codeRollback | Out-String) -match 'Waiting for the update')) '^True$'
+    Check 'code rollback: recovery note' ([IO.File]::ReadAllText("$loader\rolled-back") -ceq 'The update did not confirm its first frame.') '^True$'
     Check 'code rollback: exits 0' "$script:code" '^0$'
     Check 'code rollback: old record restored on the same loader' (([IO.File]::ReadAllText($trialRecord) -ceq $expected) -and
         ((Get-Content -LiteralPath "$loader\current") -ceq $hex) -and !(Test-Path "$trialRecord.previous") -and
@@ -346,8 +380,9 @@ arg	makepad-runner
     [IO.File]::WriteAllText("$loader\previous", "src`n", $utf8)
     [IO.File]::WriteAllText("$loader\pending", "$hex`n", $utf8)
     $r6 = Run 'run6'
-    Check 'rollback: line' $r6 'Went back to src: the new runner did not confirm'
+    Check 'rollback: recovery note' ([IO.File]::ReadAllText("$loader\rolled-back") -ceq 'The update did not confirm its first frame.') '^True$'
     Check 'rollback: src binary runs' $r6 'fixture loader: two'
+    Check 'rollback: selected folder' $r6 '(?m)^fixture loader folder: src\r?$'
     Check 'rollback: pointers' ("" + (-not (Test-Path "$loader\pending")) + (-not (Test-Path "$loader\current")) + (Test-Path "$loader\rolled-back")) 'TrueTrueTrue'
     # The coding-agent form: the one-line PowerShell entry, as from the site, fetches makepad.bat in
     # its ZIP and runs `makepad.bat open fab`, which hands over to the loader; the stable entry

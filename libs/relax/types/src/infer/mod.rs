@@ -16,6 +16,7 @@ pub mod unify_key;
 use crate::tcx::{Tcx, TypingMode};
 use crate::types::{RegionId, TyId, TyKind, UniverseIndex};
 use std::cell::{Cell, RefCell};
+use std::panic::Location;
 
 #[derive(Default)]
 pub struct InferCtxtInner {
@@ -58,6 +59,7 @@ pub struct InferCtxt<'a> {
     pub errors: diagnostics::DiagCtxt,
     pub(crate) diagnostic_checkpoint: diagnostics::DiagnosticCheckpoint,
     tainted: Cell<bool>,
+    first_taint: Cell<Option<&'static Location<'static>>>,
     pub(crate) coherence_crate: Option<u32>,
     /// The crate whose code is solved (`Program::crate_sees`): impls of crates outside its
     /// dependency graph are not candidates. None = every crate (codegen of concrete types).
@@ -77,7 +79,12 @@ impl<'a> InferCtxt<'a> {
     /// rustc_infer/src/infer/mod.rs:1088: errors emitted through this context's taintable
     /// handle (`dcx()`, :724) or observed as error types (set_tainted_by_errors).
     pub fn tainted_by_errors(&self) -> bool { self.tainted.get() || self.errors.tainted_with_errors() }
-    pub fn set_tainted_by_errors(&self) { self.tainted.set(true); }
+    #[track_caller]
+    pub fn set_tainted_by_errors(&self) {
+        if self.first_taint.get().is_none() { self.first_taint.set(Some(Location::caller())); }
+        self.tainted.set(true);
+    }
+    pub fn first_taint(&self) -> Option<&'static Location<'static>> { self.first_taint.get() }
     pub fn register_ty_outlives(&self, ty: TyId, region: RegionId) {
         // rustc_infer outlives/obligations.rs register_type_outlives_constraint: a global type
         // (no params, inference variables, placeholders or non-'static free regions) has no
@@ -101,7 +108,7 @@ impl<'a> InferCtxt<'a> {
         std::mem::take(&mut inner.hir_typeck_potentially_region_dependent_goals)
     }
     pub fn new(tcx: &'a Tcx, typing_mode: TypingMode, recursion_limit: crate::tcx::RecursionLimit) -> Self {
-        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, recursion_read: Cell::new(crate::program::NO_DEF), skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, impl_view: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), rerun_overflow_at_twice_the_limit: true, lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
+        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, recursion_read: Cell::new(crate::program::NO_DEF), skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), first_taint: Cell::new(None), coherence_crate: None, impl_view: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), rerun_overflow_at_twice_the_limit: true, lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
     }
     pub fn for_item(tcx: &'a Tcx, prog: &crate::program::Program, typing_mode: TypingMode, def: crate::program::DefId) -> Self {
         let mut infcx = Self::new(tcx, typing_mode, crate::tcx::RecursionLimit::for_item(prog, def));

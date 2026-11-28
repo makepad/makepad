@@ -172,8 +172,9 @@ impl Types {
     /// the same ids and positions, and claimed in the intern tables in id and position order, as
     /// interning claims them; the constants are copied whole (small). The restored interner then
     /// equals the live one. Nothing of `live`'s heap is shared (it is dropped after the rebuild).
-    /// None: `self` holds rows `live` does not.
+    /// None: the pointer widths differ or `self` holds rows `live` does not.
     pub fn top_up_from(&mut self, live: &Types) -> Option<()> {
+        if self.ptr_bytes != live.ptr_bytes { return None; }
         let (n0, n1) = (self.len(), live.len());
         if n0 > n1 { return None; }
         // `self` is as restore_collected made it: the settle thread's alone from the restore to
@@ -229,6 +230,7 @@ impl Types {
             (self.len(), self.index.table())
         };
         let mut meta = Vec::new();
+        self.ptr_bytes.put(&mut meta);
         // the region lists before the regions: a list names regions interned before it, so the
         // regions taken after hold every one it names (taken the other way, a list another thread
         // interned in between named a region past the image's, and the restore refused it)
@@ -280,6 +282,8 @@ impl Types {
         use crate::collected::Adopt;
         if self.image.is_some() { return Adopt::Mapped; }
         let Some(image) = crate::image::Reader::new(bytes) else { return Adopt::Mismatch };
+        let Some(meta) = image.bytes(0, 0) else { return Adopt::Mismatch };
+        if u32::get(&mut Decode::new(meta)) != Some(self.ptr_bytes) { return Adopt::Mismatch; }
         let Some(rows) = image.slice::<Entry>(1, 1) else { return Adopt::Mismatch };
         let n = rows.len();
         let same = |i: usize| {
@@ -311,12 +315,15 @@ impl Types {
         // bounds-checked slices, without a pass over every type on each warm boot.
         if n > MAX_CHUNKS * CHUNK { return None; }
         let mut r = Decode::new(image.bytes(0, 0)?);
+        let ptr_bytes = u32::get(&mut r)?;
+        if !matches!(ptr_bytes, 4 | 8) { return None; }
         let region_kinds: Vec<RegionKind> = Codec::get(&mut r)?;
         let args: Vec<std::sync::Arc<[RegionId]>> = Codec::get(&mut r)?;
         // Zero is the implicit erased/empty value, not an element of either arena.
         if region_kinds.contains(&RegionKind::ReErased) || args.iter().any(|a| a.is_empty())
             || args.iter().flat_map(|a| a.iter()).any(|id| id.0 as usize > region_kinds.len()) { return None; }
         let mut t = Types::new();
+        t.ptr_bytes = ptr_bytes;
         if n < t.len() { return None; }
         t.regions = Regions::restored(region_kinds, args);
         t.consts = Codec::get(&mut r)?;
@@ -347,6 +354,30 @@ impl Types {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_types_preserves_ptr_bytes_and_const_usize_width() {
+        let mut tys = Types::new();
+        tys.ptr_bytes = 4;
+        let len = tys.const_usize(16);
+        let array = tys.mk_array(tys.u8_, len);
+        let bytes = Box::leak(tys.collected_image().unwrap().into_boxed_slice());
+        let mut restored = Types::restore_collected(bytes).unwrap();
+        assert_eq!(restored.ptr_bytes, 4, "restored wasm32 pointer width");
+        assert_eq!(len.try_to_target_usize(&restored), Some(16));
+        restored.top_up_from(&tys).expect("matching widths");
+        assert_eq!(restored.const_usize(16), len);
+        assert_eq!(restored.mk_array(restored.u8_, len), array);
+        assert_eq!(restored.const_usize(32).try_to_target_usize(&restored), Some(32));
+
+        let mut wide = Types::new();
+        // Match the row IDs so the width itself must prevent adoption.
+        assert_eq!(wide.mk_array(wide.u8_, wide.const_usize(16)), array);
+        let wide_bytes = Box::leak(wide.collected_image().unwrap().into_boxed_slice());
+        let mut restored_wide = Types::restore_collected(wide_bytes).unwrap();
+        assert_eq!(restored_wide.top_up_from(&tys), None, "cross-width top-up");
+        assert_eq!(wide.adopt_collected(bytes), crate::collected::Adopt::Mismatch);
+    }
 
     #[test]
     fn round38_mapped_native_types_keep_ids_and_semantics() {

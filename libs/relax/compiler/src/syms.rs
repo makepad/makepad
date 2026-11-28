@@ -131,6 +131,10 @@ pub struct Syms {
     /// start address -> symbol of each anonymous mutable block (`Unit::rw_sym`): a constant
     /// re-homed per domain (domain.rs rehome_const) is one, and lowering finds its symbol by address
     pub rw_syms: Mutex<BTreeMap<u64, Sym>>,
+    /// Live JIT static storage by start address. Failed initializers revoke their spans so
+    /// off-owner reverse lookup never needs the owner's `Unit::statics` map.
+    /// Leaf lock: never acquire another lock while holding it.
+    static_spans: Mutex<BTreeMap<u64, (DefId, u64)>>,
     /// the anonymous mutable blocks that hold a constant's value copied per domain
     /// (domain.rs rehome_const), by symbol: the start of the constant data object copied. Their
     /// bytes are the value, not storage code writes before it reads, so a cache entry names
@@ -199,9 +203,55 @@ pub fn vtable_name_keys(name: &str) -> impl Iterator<Item = &str> {
 impl Syms {
     /// `made`: SYM_CAP zeroed bytes, the made cells (made_cell)
     pub fn new(vals: u64, dom0: u64, made: u64) -> Syms {
-        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), made, kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
+        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), made, kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), vtable_count: AtomicUsize::new(0), thunk_count: AtomicUsize::new(0), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), static_spans: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
     }
 
+    pub(crate) fn insert_static_span(&self, start: u64, def: DefId, size: u64) {
+        let _k = crate::zone_alloc::kept();
+        self.static_spans.lock().unwrap_or_else(|e| e.into_inner()).insert(start, (def, size));
+    }
+
+    /// Publishes a link section's spans together.
+    pub(crate) fn insert_static_spans(&self, spans: impl IntoIterator<Item = (u64, DefId, u64)>) {
+        let _k = crate::zone_alloc::kept();
+        let mut m = self.static_spans.lock().unwrap_or_else(|e| e.into_inner());
+        for (start, def, size) in spans {
+            m.insert(start, (def, size));
+        }
+    }
+
+    /// A zero-sized section member can share its address with another member.
+    pub(crate) fn remove_static_span(&self, start: u64, def: DefId) {
+        let mut m = self.static_spans.lock().unwrap_or_else(|e| e.into_inner());
+        if m.get(&start).is_some_and(|&(d, _)| d == def) {
+            m.remove(&start);
+        }
+    }
+
+    pub(crate) fn clear_static_spans(&self) {
+        self.static_spans.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    pub(crate) fn static_span_at(&self, start: u64) -> Option<(DefId, u64)> {
+        self.static_spans.lock().unwrap_or_else(|e| e.into_inner()).get(&start).copied()
+    }
+
+    /// The start, definition and size of the static containing `addr`. A ZST owns its start.
+    pub(crate) fn static_span_containing(&self, addr: u64) -> Option<(u64, DefId, u64)> {
+        let m = self.static_spans.lock().unwrap_or_else(|e| e.into_inner());
+        let (&start, &(def, size)) = m.range(..=addr).next_back()?;
+        if addr != start && addr >= start + size {
+            return None;
+        }
+        Some((start, def, size))
+    }
+
+    /// Runs `f` with the span lock held (tests: a lookup outside the writable region must not wait).
+    #[cfg(test)]
+    pub(crate) fn with_static_spans_locked<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _g = self.static_spans.lock().unwrap_or_else(|e| e.into_inner());
+        f()
+    }
 
     /// The symbol for `kind` (created with `value` on first use; later calls return the same id).
     pub fn intern(&self, kind: SymKind, value: u64) -> Sym {
@@ -1455,7 +1505,7 @@ pub(crate) fn pointer_offsets(u: &Unit, start: u64, image: &[u8]) -> Option<Vec<
             let (len, ty) = match promoted {
                 Some(info) => info,
                 None => {
-                    let &(def, len) = u.static_spans.get(&start)?;
+                    let (def, len) = u.syms.static_span_at(start)?;
                     (len, u.tcx.const_ty(&u.prog, def)?)
                 }
             };

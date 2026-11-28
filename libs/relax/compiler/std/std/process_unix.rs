@@ -452,6 +452,14 @@ impl Command {
         (self.env_clear || self.env.iter().any(|(k, _)| k.as_encoded_bytes() == b"PATH")) && !self.program.as_encoded_bytes().contains(&b'/')
     }
 
+    /// real std's posix_spawn on Apple (sys/process/unix/unix.rs, ProgramKind::Relative): a
+    /// current_dir with a relative program ("./x", "../x": a '/' but not at its start) forks, since
+    /// macOS's posix_spawn with posix_spawn_file_actions_addchdir_np can run such a program yet
+    /// return ENOENT
+    fn apple_relative_with_cwd(&self, prog: &[u8]) -> bool {
+        cfg!(target_vendor = "apple") && self.cwd.is_some() && !prog.starts_with(b"/") && prog.contains(&b'/')
+    }
+
     /// The child's environment, as the host's policy gives it (relax-base progenv.rs `child_env`):
     /// under `makepad run` a run of this program again (`self_exec`) gets the host's settings for
     /// its host and the program's own values apart; any other child the program's view. `dir`: where
@@ -675,7 +683,7 @@ impl Command {
 
         #[cfg(not(target_os = "android"))]
         // (posix_spawn cannot change the child's user or group: real std forks for them too)
-        if !self.closures.is_empty() || self.uid.is_some() || self.gid.is_some() || self.searches_own_path() {
+        if !self.closures.is_empty() || self.uid.is_some() || self.gid.is_some() || self.searches_own_path() || self.apple_relative_with_cwd(prog.as_bytes()) {
             if exec {
                 // CommandExt::exec: real std runs the closures in this process before the exec
                 for p in self.closures.iter_mut() {

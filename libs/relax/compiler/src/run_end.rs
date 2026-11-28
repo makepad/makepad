@@ -140,19 +140,19 @@ pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
     Ended { program, stayed, ms }
 }
 
-static NATIVE_END: std::sync::OnceLock<(fn(), fn(std::ops::Range<usize>))> = std::sync::OnceLock::new();
+static NATIVE_END: std::sync::OnceLock<(fn(), fn(usize, usize))> = std::sync::OnceLock::new();
 
 /// What the crates linked into this binary hold of a run goes in `native`, called when a run's
 /// threads have ended (`hal::end_run`, `script::end_run`). What they hold of one domain's heap goes
 /// in `domain`, called before that heap goes, also while other programs go on.
-pub fn set_native_end(native: fn(), domain: fn(std::ops::Range<usize>)) {
+pub fn set_native_end(native: fn(), domain: fn(usize, usize)) {
     let _ = NATIVE_END.set((native, domain));
 }
 
 /// A domain's heap is about to go.
 pub(crate) fn heap_goes(heap: std::ops::Range<usize>) {
     if let Some((_, domain)) = NATIVE_END.get() {
-        domain(heap);
+        domain(heap.start, heap.end);
     }
 }
 
@@ -283,12 +283,17 @@ const BOOT_LOOK: Duration = Duration::from_millis(2);
 /// program, or returns without one, there is no program to end and the boot still builds the unit
 /// the end takes away. True: it waited.
 fn wait_boot() -> bool {
+    wait_boot_looking(|| std::thread::sleep(BOOT_LOOK))
+}
+
+/// [`wait_boot`], calling `look` before each look again (a test learns from it that the end waits).
+fn wait_boot_looking(mut look: impl FnMut()) -> bool {
     if !crate::run::booting() {
         return false;
     }
     eprintln!("relax live: the restart waits for the run's boot: its program has not started yet");
     while crate::run::booting() {
-        std::thread::sleep(BOOT_LOOK);
+        look();
     }
     true
 }
@@ -478,12 +483,26 @@ mod tests {
     /// ends the run only once the boot is over: before, there is nothing to end, and the boot still
     /// builds what the end takes away (a relaunch 3 s into a restarted run killed it, 11-07). A boot
     /// that panics is over too: the host shows its panic, and the restart goes on.
+    /// A restart's end on its own thread; the receiver hears once that end waits in its loop, so
+    /// the test needs no clock to know the end saw the boot before the boot ends.
+    fn waiting_restart() -> (std::thread::JoinHandle<bool>, std::sync::mpsc::Receiver<()>) {
+        let (waits, waiting) = std::sync::mpsc::channel();
+        let restart = std::thread::spawn(move || {
+            let mut said = false;
+            super::wait_boot_looking(|| {
+                if !std::mem::replace(&mut said, true) { let _ = waits.send(()); }
+                std::thread::sleep(super::BOOT_LOOK);
+            })
+        });
+        (restart, waiting)
+    }
+
     #[test]
     fn a_restart_waits_out_the_runs_boot() {
         assert!(!super::wait_boot(), "no boot: the end goes on at once");
         let boot = crate::run::Boot::on();
-        let restart = std::thread::spawn(super::wait_boot);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let (restart, waiting) = waiting_restart();
+        assert!(waiting.recv().is_ok(), "the end saw the boot and waits for it");
         assert!(!restart.is_finished(), "the end waits while the run boots");
         drop(boot);
         assert!(restart.join().unwrap(), "the boot is over: the end goes on, and it waited");
@@ -496,9 +515,9 @@ mod tests {
         // (a restart that ended the run then lost the app's state to that load, 11-21)
         let boot = crate::run::Boot::on();
         crate::run::boot_to_domain(true);
-        let restart = std::thread::spawn(super::wait_boot);
+        let (restart, waiting) = waiting_restart();
+        assert!(waiting.recv().is_ok(), "the end saw the boot and waits for it");
         drop(boot);
-        std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(crate::run::booting() && !restart.is_finished(), "the end waits for the app domain's load, not for the closure");
         crate::run::domain_boot_over();
         assert!(restart.join().unwrap() && !crate::run::booting(), "the load is over: so is the boot");

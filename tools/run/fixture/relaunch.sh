@@ -21,7 +21,12 @@ ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 pkg=${PACKAGE:-makepad-app-calculator}
 n=${RELAUNCHES:-5}
-dir=$(mktemp -d "${TMPDIR:-/tmp}/relaunch.XXXXXX") || exit 1
+if [ -n "${GATE_FIXTURE_LOGS:-}" ]; then
+    dir=$GATE_FIXTURE_LOGS
+    mkdir -p "$dir" || exit 1
+else
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/relaunch.XXXXXX") || exit 1
+fi
 fails=""
 sum=""
 # the loader the first case ran (`cargo run` execs it in place): the `asked` case's client, which
@@ -152,4 +157,13 @@ run_case in-place
 [ -n "$L" ] && run_case swap
 [ "$(uname)" = Linux ] && wm_case
 # a failure's logs outlive the lease's scratch, which takes $dir (keep_logs.sh: the lease's holder copies them)
-if [ -z "$fails" ]; then echo "relaunch: OK$sum"; rm -rf "$dir"; else bash "$(dirname "$0")/keep_logs.sh" "$dir"; echo "relaunch: FAIL$fails (logs in $dir)"; exit 1; fi
+if [ -z "$fails" ]; then
+    echo "relaunch: OK$sum"
+    if [ -z "${GATE_FIXTURE_LOGS:-}" ]; then rm -rf "$dir"; fi
+    exit 0
+fi
+if [ -z "${GATE_FIXTURE_LOGS:-}" ]; then
+    bash "$(dirname "$0")/keep_logs.sh" "$dir" "${dir##*/}"
+fi
+echo "relaunch: FAIL$fails (logs in $dir)"
+exit 1

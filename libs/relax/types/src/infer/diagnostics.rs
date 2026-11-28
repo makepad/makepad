@@ -4,15 +4,32 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use relax_session::sync::Mutex;
 
 thread_local! { static THREAD_EMITTED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+thread_local! {
+    /// What runs on this thread as a check ends, before it takes its errors (a test's session drain).
+    pub(crate) static BEFORE_TAKE: std::cell::Cell<Option<fn(&DiagCtxt)>> = const { std::cell::Cell::new(None) };
+}
 #[derive(Clone, Debug)]
 pub struct Diagnostic { pub cause: ObligationCause, pub message: String }
+#[derive(Default)]
+pub struct Taken {
+    pub errors: Vec<Diagnostic>,
+    pub warnings: Vec<Diagnostic>,
+    /// The first error the session drained from this check.
+    pub drained: Option<Diagnostic>,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum Untaken { Delivered, OtherThread(u32), EarlierCopy }
 /// `echo`: an error the session has already, emitted by another check (a handle of
 /// `into_taintable`: one inference context): the session prints it once (`drain_reported` skips
 /// echoes, `err_count` does not count them), and the check that emitted it again takes it as its own
 /// (`take_since`, `report_to_buffer`). Without it a body checked a second time (the background check
 /// after an ahead check of it, or its own retry once the skipped files loaded) had only "type
 /// checking failed due to previous errors", and its real error was reported by nothing.
-struct Emitted { diagnostic: Diagnostic, thread: u32, delivered: bool, echo: bool }
+/// `claimable`: the session's drain delivered it before the check that would take it did (a
+/// running program prints new errors while checks run); that check claims it at its take, so it
+/// never comes out clean. A row the drain did not deliver is never claimable.
+struct Emitted { diagnostic: Diagnostic, thread: u32, delivered: bool, echo: bool, claimable: bool }
 /// The thread of an error no check takes (`report_unowned`): conc::thread_id counts from 1.
 const UNOWNED: u32 = 0;
 #[derive(Default)]
@@ -87,7 +104,7 @@ impl DiagCtxt {
     fn emit_as(log: &mut Vec<Emitted>, cause: ObligationCause, message: String, thread: u32) {
         THREAD_EMITTED.with(|c| c.set(c.get() + 1));
         if log.iter().any(|d| d.diagnostic.cause == cause && d.diagnostic.message == message) { return; }
-        log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread, delivered: false, echo: false });
+        log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread, delivered: false, echo: false, claimable: false });
     }
     /// An error of no check: rustc reports it while it resolves names, before any inference
     /// context exists, so it taints none. Only the session's drain takes it (no thread is
@@ -112,7 +129,7 @@ impl DiagCtxt {
         // (one this thread has not taken yet comes to this check anyway)
         if first_here && log.iter().any(same) && !log.iter().any(|d| same(d) && d.thread == thread && !d.delivered) {
             THREAD_EMITTED.with(|c| c.set(c.get() + 1));
-            log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread, delivered: false, echo: true });
+            log.push(Emitted { diagnostic: Diagnostic { cause, message }, thread, delivered: false, echo: true, claimable: false });
             return;
         }
         Self::emit(log, cause, message);
@@ -125,15 +142,49 @@ impl DiagCtxt {
     }
     pub fn drain_reported(&self) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
         let mut data = self.data.lock().unwrap();
-        // (an echo is a copy of an error emitted before: printed once)
-        for e in data.errors.iter_mut().filter(|e| e.echo) { e.delivered = true; }
-        (Self::take(&mut data.errors, 0, false), Self::take(&mut data.warnings, 0, false))
+        let mut errors = Vec::new();
+        for e in data.errors.iter_mut().filter(|e| !e.delivered) {
+            e.delivered = true;
+            e.claimable = e.thread != UNOWNED;
+            // The check can claim an echo, but the session prints the error once.
+            if !e.echo { errors.push(e.diagnostic.clone()); }
+        }
+        (errors, Self::take(&mut data.warnings, 0, false))
     }
     /// Body error lists feed JIT stubbing. Capture diagnostics emitted on this
     /// checking thread; unrelated concurrent bodies keep their own diagnostics.
-    pub fn take_since(&self, checkpoint: DiagnosticCheckpoint) -> (Vec<Diagnostic>, Vec<Diagnostic>) {
+    pub fn take_since(&self, checkpoint: DiagnosticCheckpoint) -> Taken {
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_TAKE.with(|h| h.get()) { hook(self); }
         let mut data = self.data.lock().unwrap();
-        (Self::take(&mut data.errors, checkpoint.errors, true), Self::take(&mut data.warnings, checkpoint.warnings, true))
+        let thread = crate::conc::thread_id();
+        let mut taken = Taken::default();
+        for e in data.errors[checkpoint.errors..].iter_mut().filter(|e| e.thread == thread) {
+            if !e.delivered {
+                e.delivered = true;
+                taken.errors.push(e.diagnostic.clone());
+            } else if e.claimable {
+                e.claimable = false;
+                taken.drained.get_or_insert_with(|| e.diagnostic.clone());
+            }
+        }
+        taken.warnings = Self::take(&mut data.warnings, checkpoint.warnings, true);
+        taken
+    }
+    /// When this check took no errors, identify the first one its handle emitted and where it went.
+    pub fn first_untaken(&self) -> Option<(Diagnostic, Untaken)> {
+        // emit_error holds data when it locks emitted. Drop the emitted guard before reading data.
+        let (cause, message) = self.emitted.as_ref()?.lock().unwrap().first()?.clone();
+        let data = self.data.lock().unwrap();
+        let entry = data.errors.iter().find(|e| e.diagnostic.cause == cause && e.diagnostic.message == message)?;
+        let how = if entry.delivered {
+            Untaken::Delivered
+        } else if entry.thread != crate::conc::thread_id() {
+            Untaken::OtherThread(entry.thread)
+        } else {
+            Untaken::EarlierCopy
+        };
+        Some((Diagnostic { cause, message }, how))
     }
     fn take(log: &mut [Emitted], start: usize, current_thread: bool) -> Vec<Diagnostic> {
         let thread = crate::conc::thread_id();
@@ -188,19 +239,19 @@ mod tests {
         let msg = || "mismatched types [E0308]".to_string();
         // the first check, on a thread of its own, takes its error
         let ahead = session.into_taintable();
-        let (first, _) = std::thread::scope(|s| s.spawn(|| {
+        let first = std::thread::scope(|s| s.spawn(|| {
             let at = ahead.checkpoint();
             ahead.report(cause, msg());
             ahead.take_since(at)
         }).join().unwrap());
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.errors.len(), 1);
         // the second check, here: the error is its own too, once however often it emits it
         let again = session.into_taintable();
         let at = again.checkpoint();
         again.report(cause, msg());
         again.report(cause, msg());
-        let (second, _) = again.take_since(at);
-        assert_eq!(second.iter().map(|d| (d.cause, d.message.as_str())).collect::<Vec<_>>(), [(cause, "mismatched types [E0308]")]);
+        let second = again.take_since(at);
+        assert_eq!(second.errors.iter().map(|d| (d.cause, d.message.as_str())).collect::<Vec<_>>(), [(cause, "mismatched types [E0308]")]);
         assert!(again.tainted_with_errors());
         // a check's buffered errors (Fcx::err): the same
         let buffered = session.into_taintable();
@@ -212,6 +263,52 @@ mod tests {
         // and a check on the session's own handle keeps the plain dedup
         let at = session.checkpoint();
         session.report(cause, msg());
-        assert!(session.take_since(at).0.is_empty());
+        assert!(session.take_since(at).errors.is_empty());
+    }
+
+    #[test]
+    fn a_check_with_no_error_taken_names_its_first_untaken_error() {
+        let session = DiagCtxt::default();
+        let cause = ObligationCause { span: 7, body_id: crate::program::NO_DEF };
+        let first = |check: &DiagCtxt| check.first_untaken().map(|(d, how)| (d.cause, d.message, how));
+
+        let drained = session.into_taintable();
+        let at = drained.checkpoint();
+        drained.report(cause, "drained first".into());
+        drained.report(cause, "drained second".into());
+        assert_eq!(session.drain_reported().0.len(), 2, "the session delivers both errors");
+        let taken = drained.take_since(at);
+        assert!(taken.errors.is_empty(), "the check cannot take a drained error");
+        assert_eq!(taken.drained.map(|d| (d.cause, d.message)), Some((cause, "drained first".into())));
+        assert!(drained.take_since(at).drained.is_none(), "the first take claims both drained errors");
+        assert!(drained.tainted_with_errors(), "draining leaves the check tainted");
+        assert_eq!(first(&drained), Some((cause, "drained first".into(), Untaken::Delivered)),
+            "the fallback identifies the first error delivered by the session");
+
+        let buffered = session.into_taintable();
+        let at = buffered.checkpoint();
+        assert!(buffered.report_to_buffer(cause, "buffered".into()).is_some());
+        assert!(session.drain_reported().0.is_empty());
+        assert!(buffered.take_since(at).drained.is_none(), "an error delivered to a buffer cannot be claimed");
+
+        let shared = session.into_taintable();
+        let at = shared.checkpoint();
+        let thread = std::thread::scope(|s| s.spawn(|| {
+            shared.report(cause, "from another thread".into());
+            crate::conc::thread_id()
+        }).join().unwrap());
+        assert!(shared.take_since(at).errors.is_empty(), "the check cannot take another thread's error");
+        assert_eq!(first(&shared), Some((cause, "from another thread".into(), Untaken::OtherThread(thread))),
+            "the fallback identifies the emitting thread");
+        assert_eq!(session.drain_reported().0.len(), 1);
+        assert!(shared.take_since(at).drained.is_none(), "the check cannot claim another thread's drained error");
+
+        session.into_taintable().report(cause, "earlier copy".into());
+        let later = session.into_taintable();
+        let at = later.checkpoint();
+        later.report(cause, "earlier copy".into());
+        assert!(later.take_since(at).errors.is_empty(), "the undelivered copy precedes the checkpoint");
+        assert_eq!(first(&later), Some((cause, "earlier copy".into(), Untaken::EarlierCopy)),
+            "the fallback identifies the earlier check's copy on this thread");
     }
 }

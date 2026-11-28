@@ -1,7 +1,7 @@
 //! Reflection and packets, using the same shader compiler and HAL ABI as the app.
 use makepad_hal::{
-    dialect, format, pipeline_binding as binding, pipeline_blend, Attr, CmdWriter, Draw, Id, Inst,
-    PipelineDesc, Slice,
+    buffer_kind, dialect, format, pipeline_binding as binding, pipeline_blend, Attr, CmdWriter, Draw, Id, Inst,
+    PipelineDesc,
 };
 use makepad_script::{
     id,
@@ -18,6 +18,73 @@ use makepad_shader::{
 
 pub const VERTICES: Id = Id::new(0, 1);
 pub const INDICES: Id = Id::new(1, 1);
+
+/// One retained buffer per draw site. Several sites can draw the same pipeline in one packet.
+pub enum DrawSite {
+    PausedApp, ViewBand, ViewIcon, ViewGlyphs,
+    Ring, Tooltip, TooltipGlyphs,
+    BakePut, BakeTake, BlurHalf, BlurQuarterX, BlurQuarter,
+    BlurredApp, CaptionApp, SharpApp, FieldButtons, FieldGlyphs, Lattice,
+}
+
+pub struct InstanceBuffers([InstanceBuffer; DrawSite::Lattice as usize + 1]);
+
+impl InstanceBuffers {
+    pub fn new() -> Self {
+        // Buffer slots 0 and 1 hold the quad, and field.rs owns slots 2 through 22.
+        Self(std::array::from_fn(|i| InstanceBuffer { id: Id::new(23 + i as u32, 0), capacity: 0, bytes: Vec::new() }))
+    }
+
+    pub fn get(&mut self, site: DrawSite) -> &mut InstanceBuffer {
+        &mut self.0[site as usize]
+    }
+
+    pub fn restore(&self, writer: &mut CmdWriter) {
+        // The HAL recreated storage under the same ids. A kept badge can replay before its next redraw.
+        for buffer in &self.0 {
+            if buffer.capacity != 0 {
+                writer.buffer_update(buffer.id, 0, &buffer.bytes);
+            }
+        }
+    }
+
+    pub fn release(&mut self, writer: &mut CmdWriter) {
+        for buffer in &mut self.0 {
+            if buffer.capacity != 0 {
+                writer.buffer_destroy(buffer.id);
+                buffer.capacity = 0;
+                buffer.bytes = Vec::new();
+            }
+        }
+    }
+}
+
+pub struct InstanceBuffer {
+    id: Id,
+    capacity: u64,
+    bytes: Vec<u8>,
+}
+
+impl InstanceBuffer {
+    fn write(&mut self, writer: &mut CmdWriter, data: &[f32], stride: usize) -> u32 {
+        if data.is_empty() {
+            return 0;
+        }
+        let size = std::mem::size_of_val(data) as u64;
+        if size > self.capacity {
+            if self.capacity != 0 {
+                writer.buffer_destroy(self.id);
+            }
+            self.id.gen += 1;
+            self.capacity = size.next_power_of_two();
+            writer.buffer_create(self.id, buffer_kind::INSTANCE, self.capacity, Attr::default());
+        }
+        self.bytes.clear();
+        self.bytes.extend(data.iter().flat_map(|v| v.to_le_bytes()));
+        writer.buffer_update(self.id, 0, &self.bytes);
+        (data.len() / stride) as u32
+    }
+}
 
 #[derive(PartialEq)]
 pub struct Field {
@@ -145,8 +212,7 @@ impl Pipeline {
         let mut instances = Record::default();
         let mut uniforms = Record::default();
         let mut scope = Record::default();
-        // each texture's name and sampler, as declared (GLES binds a texture by name, with its
-        // sampler)
+        // A draw supplies one id per logical texture, in declaration order.
         let mut textures = Vec::new();
         let mut geometry = false;
         let mut vertex = false;
@@ -257,7 +323,7 @@ impl Pipeline {
                     }
                     geometry = true;
                 }
-                ShaderIoKind::Texture(TextureType::Texture2d) => textures.push((io.name(), io.sampler())),
+                ShaderIoKind::Texture(TextureType::Texture2d) => textures.push(io.name()),
                 ShaderIoKind::VertexPosition => vertex = true,
                 ShaderIoKind::FragmentOutput(i) if *i < 4 => outputs |= 1 << *i,
                 ShaderIoKind::Varying | ShaderIoKind::ScopeUniform => {}
@@ -414,38 +480,28 @@ impl Pipeline {
                     });
                 }
             }
-            let textures = textures
-                .iter()
-                .map(|&(name, sampler)| makepad_hal::glsl::Texture {
-                    name: format!("tex_{name}"),
+            let mut bindings = Vec::with_capacity(desc.glsl_texture_bindings().len());
+            for b in desc.glsl_texture_bindings() {
+                let sampler = desc.samplers().get(b.sampler_index() as usize).ok_or("invalid boot GLSL sampler index")?;
+                bindings.push(makepad_hal::glsl::Texture {
+                    name: b.uniform_name().to_owned(),
+                    slot: b.texture_slot(),
+                    stages: b.stages(),
                     shape: 0,
-                    sampler: desc.samplers().get(sampler).map_or(
-                        makepad_hal::spirv::SpirvSampler {
-                            filter: 1,
-                            address: 1,
-                            compare: false,
-                            pixel: false,
-                            anisotropy: 1,
+                    sampler: makepad_hal::spirv::SpirvSampler {
+                        filter: match sampler.filter { SamplerFilter::Nearest => 0, SamplerFilter::Linear => 1 },
+                        address: match sampler.address {
+                            SamplerAddress::Repeat => 0,
+                            SamplerAddress::ClampToEdge => 1,
+                            SamplerAddress::ClampToZero => 2,
+                            SamplerAddress::MirroredRepeat => 3,
                         },
-                        |sampler| makepad_hal::spirv::SpirvSampler {
-                            filter: match sampler.filter {
-                                SamplerFilter::Nearest => 0,
-                                SamplerFilter::Linear => 1,
-                            },
-                            address: match sampler.address {
-                                SamplerAddress::Repeat => 0,
-                                SamplerAddress::ClampToEdge => 1,
-                                SamplerAddress::ClampToZero => 2,
-                                SamplerAddress::MirroredRepeat => 3,
-                            },
-                            compare: sampler.compare,
-                            pixel: sampler.coord == SamplerCoord::Pixel,
-                            anisotropy: sampler.anisotropy as u32,
-                        },
-                    ),
-                })
-                .into_iter()
-                .collect();
+                        compare: sampler.compare,
+                        pixel: sampler.coord == SamplerCoord::Pixel,
+                        anisotropy: sampler.anisotropy as u32,
+                    },
+                });
+            }
             makepad_hal::glsl::GlslPipeline {
                 vertex: sources.vertex().to_owned(),
                 fragment: sources.fragment().to_owned(),
@@ -459,7 +515,8 @@ impl Pipeline {
                 .map(String::from)
                 .to_vec(),
                 attributes,
-                textures,
+                textures: bindings,
+                pick_twins: Vec::new(),
                 vertex_stride: info.geometry_slots as u32 * 4,
                 instance_stride: info.instance_slots as u32 * 4,
                 instance_texture: info.instance_fetch_from.is_some(),
@@ -508,7 +565,7 @@ impl Pipeline {
             instances,
             uniforms,
             scope: scope.defaults,
-            textures: textures.into_iter().map(|(name, _)| name).collect(),
+            textures,
             blob,
         })
     }
@@ -529,7 +586,7 @@ impl Pipeline {
             return;
         }
         let tex = self.bind(writer, textures);
-        let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
+        let uniforms = [Default::default(), Default::default(), writer.put_uniform(uniforms), writer.put_uniform(&self.scope)];
         writer.draw(Draw {
             pipeline: self.id,
             vb: VERTICES,
@@ -548,30 +605,14 @@ impl Pipeline {
     pub fn draw(
         &self,
         writer: &mut CmdWriter,
+        buffer: &mut InstanceBuffer,
         data: &[f32],
         uniforms: &[f32],
         textures: &[Id],
         scissor: [f32; 4],
     ) {
-        if data.is_empty() {
-            return;
-        }
-        let textures = self.bind(writer, textures);
-        let inst = Inst::inline(writer.keep(data), (data.len() / self.instances.defaults.len()) as u32);
-        let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
-        writer.draw(Draw {
-            pipeline: self.id,
-            vb: VERTICES,
-            ib: INDICES,
-            index: [0, 6],
-            inst,
-            uniforms,
-            tex: textures,
-            scissor,
-            bounds: [f32::NAN; 4],
-            flags: Draw::BLEND | Draw::INDEX_U32,
-            ..Default::default()
-        });
+        let count = buffer.write(writer, data, self.instances.defaults.len());
+        self.draw_range(writer, buffer.id, 0, count, uniforms, textures, scissor);
     }
 
     /// The draw's texture ids, one for each texture the shader declares, in its order.

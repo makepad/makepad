@@ -67,6 +67,10 @@ pub struct ProvidedCrate {
     pub per_side: std::collections::HashSet<String>,
     /// Statics marked bare `#[relax_api]`, by def path: (the loader's address, rustc's size, align).
     pub shared: HashMap<String, (usize, u64, u64)>,
+    /// Fns and statics only the loader's code uses (`#[relax_api(loader = "..")]`), by key (a fn's
+    /// `type_name`, a static's def path): the text of JIT code's error at a call, fn pointer or
+    /// read of one (lower.rs check_loader_only, static_use). Read from `table`.
+    pub loader: HashMap<String, &'static str>,
     pub last_panic: LastPanicFn,
     /// the source identity rustc built it from (srchash.rs; the loader's build.rs): what
     /// check_sources compares the program's copy of the crate with
@@ -82,9 +86,17 @@ pub struct ProvidedCrate {
     pub table: Vec<&'static relax_api::Entry>,
 }
 
+impl ProvidedCrate {
+    /// Whether one of the crate's ops is marked `run`: what it allocates is the program's, so a
+    /// program with a `#[global_allocator]` has its allocator probed and routed to (domain.rs).
+    pub fn runs_in_program(&self) -> bool {
+        self.table.iter().any(|e| e.kind == relax_api::OP && e.run)
+    }
+}
+
 impl Clone for ProvidedCrate {
     fn clone(&self) -> Self {
-        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), per_side: self.per_side.clone(), shared: self.shared.clone(), last_panic: self.last_panic, source: self.source, binding: self.binding, manifest: self.manifest, table: self.table.clone() }
+        ProvidedCrate { name: self.name.clone(), shims: self.shims.clone(), types: self.types.clone(), layouts: self.layouts.clone(), per_side: self.per_side.clone(), shared: self.shared.clone(), loader: self.loader.clone(), last_panic: self.last_panic, source: self.source, binding: self.binding, manifest: self.manifest, table: self.table.clone() }
     }
 }
 
@@ -120,17 +132,18 @@ pub fn register(
     table: Vec<&'static relax_api::Entry>,
 ) {
     let name = name.replace('-', "_");
-    let binding = binding_identity(&name, &shims, &types, &layouts, &per_side, &shared);
-    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, per_side, shared, last_panic, source, binding, manifest, table });
+    let loader: HashMap<String, &'static str> = table.iter().filter(|e| e.kind == relax_api::LOADER).map(|e| (norm((e.key)()), (e.sig)())).collect();
+    let binding = binding_identity(&name, &shims, &types, &layouts, &per_side, &shared, &loader);
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).push(ProvidedCrate { name, shims, types, layouts, per_side, shared, loader, last_panic, source, binding, manifest, table });
 }
 
 /// The identity of what JIT code depends on in a provided crate beyond its source text (which
 /// the interface fingerprints and body keys already cover, as for any crate): which fns are
 /// bound and their rustc signatures and argument layouts (the bridge bodies, lower.rs
 /// bridge_func, call shims by symbol), the opaque handles' rustc size, align, drop and field
-/// offsets, the plain types' rustc layouts, and the per-side/shared statics with shared rustc
-/// sizes and alignments (never addresses, which differ per process), and the binary's Option
-/// layout table. The program's copy of the crate is the loader's own source (check_sources),
+/// offsets, the plain types' rustc layouts, the per-side/shared statics with shared rustc
+/// sizes and alignments (never addresses, which differ per process), the items kept for the
+/// loader with their texts (a use of one is an error), and the binary's Option layout table. The program's copy of the crate is the loader's own source (check_sources),
 /// so a change of these follows a source
 /// change; a change of the crate's native fn bodies alone (a HAL fix) keeps them, and with them
 /// every stored build of the code above the crate.
@@ -141,6 +154,7 @@ fn binding_identity(
     layouts: &HashMap<String, (u64, u64, &'static [u64], &'static [u64])>,
     per_side: &std::collections::HashSet<String>,
     shared: &HashMap<String, (usize, u64, u64)>,
+    loader: &HashMap<String, &'static str>,
 ) -> u64 {
     let mut h = crate::sip::Sip128::new();
     h.str("provided-binding");
@@ -196,6 +210,13 @@ fn binding_identity(
         h.str(k);
         h.u64(*size);
         h.u64(*align);
+    }
+    let mut keys: Vec<&String> = loader.keys().collect();
+    keys.sort_unstable();
+    h.u32(keys.len() as u32);
+    for k in keys {
+        h.str(k);
+        h.str(loader[k]);
     }
     let options = OPTION_LAYOUTS.get();
     let mut keys: Vec<&String> = options.into_iter().flat_map(|m| m.keys()).collect();
@@ -647,6 +668,11 @@ pub fn read_identity_files(pkgs: &[crate::srchash::SrcPkg]) {
     }
 }
 
+/// The names of every crate the loader registered (`makepad_script`).
+pub(crate) fn registered_names() -> Vec<String> {
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| p.name.clone()).collect()
+}
+
 /// The loader's provided crates present in a source-only program, matched by name as
 /// `take_for` matches them, without a source-identity check or any host binding table.
 pub(crate) fn registered_in(prog: &Program) -> Vec<u32> {
@@ -773,6 +799,9 @@ pub fn static_use(u: &crate::jit::Unit, d: DefId, t: TyId) -> StaticUse {
     let Some((_, p)) = u.provided.iter().find(|(k, _)| *k == krate) else { return StaticUse::NotProvided };
     let path = prog.def_path(d);
     let key = norm(&path);
+    if let Some(text) = p.loader.get(&key) {
+        return StaticUse::Refused(format!("static `{path}` of provided crate `{}` is the loader's alone (#[relax_api(loader)]): {text}", p.name));
+    }
     let class_2 = || {
         let ts = crate::typeck::ty_to_string(false, prog, tcx, t);
         if let Some(reason) = option_layout_reason(prog, tcx, t) {

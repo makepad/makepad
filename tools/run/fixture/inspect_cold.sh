@@ -22,7 +22,12 @@ ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 B=$J
 CLIENTS=${CLIENTS:-3}; PACE=${PACE:-0}; HOLD=${HOLD:-10}; ROUNDS=${ROUNDS:-3}; WAIT=${WAIT:-300}; REQ_MAX=${REQ_MAX:-40}; UI_MAX=${UI_MAX:-2000}; STALL=${STALL:-12}
-dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_cold.XXXXXX") || exit 1
+if [ -n "${GATE_FIXTURE_LOGS:-}" ]; then
+    dir=$GATE_FIXTURE_LOGS
+    mkdir -p "$dir" || exit 1
+else
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_cold.XXXXXX") || exit 1
+fi
 fails=0
 now_ms() { date +%s%3N; }
 # ask <args...>: one inspect request (prints its answer)
@@ -124,7 +129,7 @@ for round in $(seq 1 $ROUNDS); do
 done
 if [ $fails = 0 ]; then
   echo "inspect_cold: OK $ROUNDS rounds"
-  [ "${KEEP:-0}" != 1 ] && rm -rf -- "$dir"
+  if [ -z "${GATE_FIXTURE_LOGS:-}" ] && [ "${KEEP:-0}" != 1 ]; then rm -rf -- "$dir"; fi
   exit 0
 fi
 echo "inspect_cold: FAIL $fails/$ROUNDS rounds; logs in $dir"

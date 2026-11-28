@@ -393,6 +393,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
         let _fw = jit::front_write();
         crate::run::preserve_collected_boot(u);
         u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        u.publish_owner_verdicts();
         // parsed on this thread (no parse workers for one small crate)
         let single_before = crate::preload::SINGLE.with(|s| s.replace(true));
         let mut failed = None;
@@ -464,6 +465,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
         // collect_added also drains diagnostics queued by background checks of the host.
         // As for resolve_imports above, only errors in this module's files refuse its load.
         errs.extend(u.tcx.collect_added(&u.prog, &defs, true).into_iter().filter(|e| mine.iter().any(|p| e.starts_with(p.as_str()))));
+        u.publish_owner_verdicts();
     }
     marks.push(("collect", std::time::Instant::now()));
     if tr {
@@ -586,6 +588,7 @@ unsafe fn drop_defs_held(up: *mut Unit, defs: &[DefId]) {
     let impls: Vec<DefId> = defs.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
     u.prog.unbind_defs(defs);
     u.tcx.uncollect_impls(&impls);
+    u.publish_owner_verdicts();
     u.prog.reclaim_caches();
 }
 
@@ -656,6 +659,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
     let child = {
         crate::run::preserve_collected_boot(u);
         u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        u.publish_owner_verdicts();
         let r = u.prog.add_child_module(parent, name, v);
         if r.is_ok() {
             u.prog.resolve_imports_added(i0, d0);
@@ -709,6 +713,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
         // signatures, and a cold start under a loop of them did not reach its present.)
         let visible = u.prog.crates_seeing_files(f0 as u32..u.prog.files.len() as u32);
         errs.extend(u.tcx.collect_loaded(&u.prog, &defs, &visible).into_iter().filter(|e| e.starts_with(path.as_str())));
+        u.publish_owner_verdicts();
     }
     if !errs.is_empty() {
         return fail(up, fw.take(), errs);
@@ -1423,6 +1428,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
             let impls: Vec<DefId> = defs.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
             u.prog.unbind_defs(&defs);
             u.tcx.uncollect_impls(&impls);
+            u.publish_owner_verdicts();
             unsafe {
                 u.prog.reclaim_caches();
             }

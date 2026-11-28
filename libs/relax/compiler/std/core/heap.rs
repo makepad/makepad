@@ -14,6 +14,10 @@ mod sys {
         pub fn relax_alloc_zeroed(size: usize, align: usize) -> *mut u8;
         pub fn relax_dealloc(p: *mut u8, size: usize, align: usize);
         pub fn relax_realloc(p: *mut u8, old: usize, align: usize, size: usize) -> *mut u8;
+        pub fn relax_program_owns(p: *mut u8) -> bool;
+        pub fn relax_program_outside(p: *mut u8, size: usize, align: usize) -> !;
+        pub fn relax_loader_dealloc(p: *mut u8, size: usize, align: usize);
+        pub fn relax_loader_realloc(p: *mut u8, old: usize, align: usize, new: usize) -> *mut u8;
     }
 }
 
@@ -185,6 +189,17 @@ pub unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 
     { crate::intrinsics_rt::rust_realloc(ptr, layout.size, layout.align(), new_size) }
 }
 
+/// Allocates for a provided crate's op through the program's global allocator. The loader's
+/// `zone_alloc::domain::ProgramAllocator` supplies a nonzero layout to these entries.
+pub unsafe extern "C" fn __relax_program_alloc(size: usize, align: usize, zeroed: bool) -> *mut u8 {
+    if zeroed { crate::intrinsics_rt::rust_loader_alloc_zeroed(size, align) } else { crate::intrinsics_rt::rust_loader_alloc(size, align) }
+}
+
+/// Frees a provided crate's block through the program's global allocator.
+pub unsafe extern "C" fn __relax_program_dealloc(p: *mut u8, size: usize, align: usize) {
+    crate::intrinsics_rt::rust_loader_dealloc(p, size, align)
+}
+
 /// rustc's `__rust_alloc_error_handler` with std's default hook (library/std/src/alloc.rs
 /// rust_oom, default_alloc_error_hook @1.100.0): the message on stderr, then the process ends with
 /// SIGABRT, which no catch_unwind catches. The JIT's runtime does both (relax_alloc_error, its
@@ -237,7 +252,8 @@ impl<'a, A: Allocator> Drop for DeallocGuard<'a, A> {
 
 /// rustc_builtin_macros global_allocator.rs: the `__rg_*` fns its expansion defines for a
 /// `#[global_allocator]` static, here generic over the static's type; the allocator shim
-/// (intrinsics_rt::rust_alloc & co) calls them with the static.
+/// (intrinsics_rt::rust_alloc & co) calls them with the static, and the loader's own calls
+/// (intrinsics_rt::rust_loader_*: its probe, an op's routed alloc and free) do so in every program.
 pub(crate) unsafe fn __rg_alloc<A: GlobalAlloc>(a: &A, size: usize, align: usize) -> *mut u8 {
     a.alloc(Layout::from_size_align_unchecked(size, align))
 }
@@ -249,6 +265,36 @@ pub(crate) unsafe fn __rg_dealloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, size: usi
 }
 pub(crate) unsafe fn __rg_realloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
     a.realloc(ptr, Layout::from_size_align_unchecked(old_size, align), new_size)
+}
+
+/// The program's own calls in a program whose domains route the provided crates' run ops to
+/// its allocator (the JIT's Unit::routes_allocator). A block the allocator cannot own is the
+/// loader's (a host op's buffer): the loader frees or resizes it as its own code would drop it.
+/// The allocator's results are checked too: a block outside the memory its domain owns ends the
+/// process (`relax_program_outside`). A domain whose heap does not route through the allocator
+/// owns every block here (`relax_program_owns`).
+pub(crate) unsafe fn __rg_checked_alloc<A: GlobalAlloc>(a: &A, size: usize, align: usize) -> *mut u8 {
+    checked_result(a.alloc(Layout::from_size_align_unchecked(size, align)), size, align)
+}
+pub(crate) unsafe fn __rg_checked_alloc_zeroed<A: GlobalAlloc>(a: &A, size: usize, align: usize) -> *mut u8 {
+    checked_result(a.alloc_zeroed(Layout::from_size_align_unchecked(size, align)), size, align)
+}
+pub(crate) unsafe fn __rg_checked_dealloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, size: usize, align: usize) {
+    #[cfg(not(relax_web))]
+    if !sys::relax_program_owns(ptr) { return sys::relax_loader_dealloc(ptr, size, align); }
+    a.dealloc(ptr, Layout::from_size_align_unchecked(size, align))
+}
+pub(crate) unsafe fn __rg_checked_realloc<A: GlobalAlloc>(a: &A, ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
+    #[cfg(not(relax_web))]
+    if !sys::relax_program_owns(ptr) { return sys::relax_loader_realloc(ptr, old_size, align, new_size); }
+    checked_result(a.realloc(ptr, Layout::from_size_align_unchecked(old_size, align), new_size), new_size, align)
+}
+
+#[inline]
+unsafe fn checked_result(p: *mut u8, _size: usize, _align: usize) -> *mut u8 {
+    #[cfg(not(relax_web))]
+    if !p.is_null() && !sys::relax_program_owns(p) { sys::relax_program_outside(p, _size, _align); }
+    p
 }
 
 /// library/std/src/alloc.rs `__rdl_*`: the default allocator (System) of a program without a

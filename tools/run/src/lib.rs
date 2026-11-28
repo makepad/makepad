@@ -33,6 +33,7 @@ mod hal_host;
 #[cfg(target_os = "ios")]
 pub mod ios;
 mod hal_run;
+mod sources;
 mod quit_signal;
 mod boot_progress;
 mod boot_editor;
@@ -333,6 +334,7 @@ fn provided() {
     #[cfg(any(unix, windows))]
     relax_compiler::reload::set_before_exec(hal_run::prepare_exec, hal_run::undo_exec);
     relax_compiler::reload::set_restart_begins(hal_run::restart_begins);
+    sources::install();
 }
 
 /// The HAL's host, the main-thread run host (the window, the boot screen) and the run's native

@@ -8,6 +8,8 @@
 # rustc-laid field, the violation and its way in said: a game call into a provided heap's maps went unaudited (11-23).
 # A workspace of stub crates under the gate's package names in a temporary git repo, its `makepad check` a stub JIT
 # whose resolver is the changed crate; needs cargo, git and python3, nothing of this tree but the gate's scripts.
+# A nested gate must not publish into the outer lease's keep.
+unset DEVHUB_KEEP
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/jit_break.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT

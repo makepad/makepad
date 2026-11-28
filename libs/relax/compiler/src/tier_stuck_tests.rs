@@ -214,6 +214,30 @@ fn main() {
     let h = Handle { x: 5 };
     let _ = h.clone().get();
 }
+// the loader build's statics check, as the CPU budget was when every app's start refused it: a
+// plain fn reads an unmarked OnceLock; an op reads another, and a private fn only the op calls a third
+static MACHINE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+pub fn machine_cores() -> usize { *MACHINE.get_or_init(|| 4) }
+static NATIVE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+pub fn native_cores() -> usize { *NATIVE.get_or_init(native_only) }
+static UNUSED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+fn native_only() -> usize { *UNUSED.get_or_init(|| 2) }
+pub static LIMIT: usize = 8;
+// a pub fn of a private module is no way in; a `pub use` of one is, and so is the drop of a type
+// a pub fn gives out (unnameable, in that module)
+mod inner {
+    pub fn hidden() -> usize { *super::HIDDEN.get_or_init(|| 3) }
+    pub fn shown() -> usize { *super::SHOWN.get_or_init(|| 5) }
+    pub struct Lease;
+    impl Drop for Lease {
+        fn drop(&mut self) { super::RETURNED.get_or_init(|| 1); }
+    }
+}
+pub use inner::shown;
+pub fn lease() -> inner::Lease { inner::Lease }
+static HIDDEN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static SHOWN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static RETURNED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 "#;
 
 /// A provided crate's opaque type (as the loader binds makepad-script's ScriptHeap) keeps the
@@ -221,6 +245,11 @@ fn main() {
 /// off the owner too. They were refused there as if every impl's method were bridged, and the O3
 /// builds of their hot callers left them calls for the rest of the run ("its front is not made off
 /// the owner: refused": ScriptHeap::heap_key and ::value under a text view's draw).
+/// The same crate holds the loader build's provided-statics cases (boundary::statics): an unmarked
+/// static a plain fn reaches fails with the runtime's refusal and the way in, marked `per_side` it
+/// passes, an op's statics are the loader's, and the allow list passes a refusal but not a row that
+/// names none. Ways in are what another crate can reach: a pub fn of a private module is none, a
+/// `pub use` of it is one, and so is the drop of an unnameable type a pub fn gives out.
 #[test]
 fn an_opaque_types_own_methods_are_made_off_the_owner() {
     isolated_test!(an_opaque_types_own_methods_are_made_off_the_owner);
@@ -245,7 +274,7 @@ fn an_opaque_types_own_methods_are_made_off_the_owner() {
     // the fixture's crate provided as the loader provides makepad-script: Handle an opaque handle
     // laid out as rustc does, no op listed
     unsafe extern "C" fn no_panic_text(_: *mut *const u8, _: *mut usize) {}
-    let fixture = crate::provided::ProvidedCrate { name: "opaque_front".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), shared: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[], table: Vec::new() };
+    let fixture = crate::provided::ProvidedCrate { name: "opaque_front".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), shared: Default::default(), loader: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[], table: Vec::new() };
     u.provided.push((krate, fixture));
     u.provided_types.insert(handle_d, 0);
     assert!(u.provided_rustc_layout(handle_d));
@@ -260,6 +289,30 @@ fn an_opaque_types_own_methods_are_made_off_the_owner() {
     let get = crate::owner::call(crate::owner::Class::Program, || u.fn_id(FnKey::Inst(get_d, Vec::new())));
     let front = crate::owner::call(crate::owner::Class::Program, || u.front.clone());
     assert!(prefront_slot(&front, get), "the front of Handle::get was not made off the owner");
+
+    // the loader build's statics check over the same crate: native_cores is an op (its body rustc's)
+    unsafe extern "C" fn no_op(_: *const *mut u8, _: *mut u8) -> u32 { 0 }
+    let native = def(&u.prog, "native_cores", DefKind::Fn);
+    let key = crate::provided::key(&u.prog, &u.tcx, native);
+    u.provided[0].1.shims.insert(key, crate::provided::Shim { sig: "", slots: &[], f: no_op });
+    let statics = |u: &Unit, allowed: &[(String, String)]| crate::owner::call(crate::owner::Class::Program, || crate::boundary::statics(u, &["opaque_front".to_string()], allowed, "allow.tsv"));
+    let (report, failed) = statics(&*u, &[]);
+    assert_eq!(failed, 3, "the unmarked MACHINE, SHOWN and RETURNED are the failures:\n{report}");
+    let refusal = "static `opaque_front::MACHINE` (`OnceLock<usize>`) is laid out and run by rustc's std on the loader's side and by Relax's on this side (a lock, a lazy cell, a collection, a box or an Rc/Arc): reach it through an op of the crate (#[relax_api] fn), or mark it `#[relax_api(per_side)]`";
+    assert!(report.contains(&format!("static\tFAIL\topaque_front::MACHINE\t{refusal}\n  reached\topaque_front::machine_cores\n")), "the runtime's refusal, and the plain fn it is reached through:\n{report}");
+    assert!(!report.contains("NATIVE") && !report.contains("UNUSED"), "an op's body, and the fn only it calls, are rustc's:\n{report}");
+    assert!(!report.contains("HIDDEN"), "a pub fn of a private module is no way in:\n{report}");
+    assert!(report.contains("static\tFAIL\topaque_front::SHOWN\t") && report.contains("  reached\topaque_front::inner::shown\n"), "a `pub use` of a private module's fn is a way in:\n{report}");
+    assert!(report.contains("static\tFAIL\topaque_front::RETURNED\t") && report.contains("  reached\topaque_front::inner::::drop [JIT code holds `opaque_front::inner::Lease`: the signature of `opaque_front::lease`]\n"), "the drop of a type a pub fn gives out is a way in, and the row says which signature hands JIT code the type:\n{report}");
+    let rest = ["SHOWN", "RETURNED"].map(|s| (format!("opaque_front::{s}"), "a way in".to_string()));
+    let allowed: Vec<_> = rest.iter().cloned().chain([("opaque_front::MACHINE".to_string(), "a refusal case".to_string())]).collect();
+    let (report, failed) = statics(&*u, &allowed);
+    assert!(failed == 0 && report.contains("static\tallowed\topaque_front::MACHINE\ta refusal case\n"), "a listed refusal passes:\n{report}");
+    u.provided[0].1.per_side.insert(crate::provided::norm("opaque_front::MACHINE"));
+    let (report, failed) = statics(&*u, &rest);
+    assert_eq!(failed, 0, "marked per_side, JIT code keeps its own instance:\n{report}");
+    let (report, failed) = statics(&*u, &allowed);
+    assert!(failed == 1 && report.contains("allow\tFAIL\topaque_front::MACHINE\tlisted in allow.tsv"), "a listed static that is no refusal fails, so the list keeps to what is true:\n{report}");
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1201,6 +1254,79 @@ fn a_left_out_build_is_built_again_once_per_thing_it_waited_on() {
     assert!(!o3_left_out(up, root, mid, &[leaf], &unmade, &[]), "a left-out needing a slot the owner built already waits again");
     crate::owner::call(crate::owner::Class::Program, || ());
     assert_eq!(retiers(root), 1, "queued again for a slot the owner built already: a loop");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const ASSOC_SOURCE: &str = r#"
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Op(pub u8);
+impl Op {
+    pub const A: Op = Op(1);
+    pub const B: Op = Op(2);
+    pub const C: Op = Op(3);
+    pub const D: Op = Op(4);
+    pub const E: Op = Op(5);
+    pub const F: Op = Op(6);
+    pub const G: Op = Op(7);
+    pub const H: Op = Op(8);
+    pub const I: Op = Op(9);
+    pub const J: Op = Op(10);
+    pub const K: Op = Op(11);
+    pub const L: Op = Op(12);
+    pub const M: Op = Op(13);
+    pub const N: Op = Op(14);
+    pub const O: Op = Op(15);
+    pub const P: Op = Op(16);
+}
+pub fn pick(x: u8) -> Op {
+    match x { 0 => Op::A, 1 => Op::B, 2 => Op::C, 3 => Op::D, 4 => Op::E, 5 => Op::F, 6 => Op::G, 7 => Op::H, 8 => Op::I, 9 => Op::J, 10 => Op::K, 11 => Op::L, 12 => Op::M, 13 => Op::N, 14 => Op::O, _ => Op::P }
+}
+pub fn code(o: Op) -> u8 {
+    match o { Op::A => 1, Op::B => 2, Op::C => 3, Op::D => 4, Op::E => 5, Op::F => 6, Op::G => 7, Op::H => 8, Op::I => 9, Op::J => 10, Op::K => 11, Op::L => 12, Op::M => 13, Op::N => 14, Op::O => 15, _ => 0 }
+}
+fn main() {
+    let _ = code(pick(1));
+}
+"#;
+
+/// A front off the owner notes every associated constant its body names at once, as it notes free
+/// ones, in expressions and in patterns. The lowering stops at the first constant nobody evaluated
+/// yet, and a front makes WANT_ROUNDS lowerings around the owner's drain: a body naming more
+/// associated constants than that never got its front off the owner ("needs unit"), and its hot
+/// caller's O3 build left it out until the owner built it (a script VM's opcode dispatch on its
+/// `Opcode::*` constants, its parser's step and operator table, a shader compiler's opcode: the
+/// most common left-out of the test runs of 11-22..11-26).
+#[test]
+fn a_front_naming_many_associated_constants_is_made_off_the_owner() {
+    isolated_test!(a_front_naming_many_associated_constants_is_made_off_the_owner);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-assoc-consts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, ASSOC_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "assoc_consts", false).unwrap();
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (pick_d, code_d) = (def(&prog, "pick"), def(&prog, "code"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    let (pick, code) = crate::owner::call(crate::owner::Class::Program, || (u.fn_id(FnKey::Inst(pick_d, Vec::new())), u.fn_id(FnKey::Inst(code_d, Vec::new()))));
+    let front = crate::owner::call(crate::owner::Class::Program, || u.front.clone());
+    assert!(prefront_slot(&front, pick), "the front of a body that returns 16 associated constants was not made off the owner");
+    assert!(prefront_slot(&front, code), "the front of a body that matches on 15 associated constants was not made off the owner");
+    let taken = crate::owner::call(crate::owner::Class::Program, || unsafe { (take_lowered_ahead(&mut *up, pick).is_some(), take_lowered_ahead(&mut *up, code).is_some()) });
+    assert_eq!(taken, (true, true), "a front made off the owner was refused at its take (pick, code)");
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();

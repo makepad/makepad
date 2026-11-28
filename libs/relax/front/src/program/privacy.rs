@@ -194,7 +194,7 @@ impl Program {
             let gd = self.def(g);
             (g, match gd.kind {
                 DefKind::Mod => self.glob_binding(gd.sub, name, ns_type),
-                DefKind::Enum => self.lookup_in_container(g, name, false).map(|d| (d, None)),
+                DefKind::Enum => self.lookup_in_container(g, name, ns_type).map(|d| (d, None)),
                 _ => None,
             })
         }).collect());
@@ -286,14 +286,14 @@ impl Program {
         }
     }
 
-    /// E0603 for the `use` declarations of the own crates (`own[krate]`), each with its crate and,
-    /// for an import that never binds in rustc (a path through something private), the import's
-    /// index: rustc_resolve plants a dummy binding for it and counts it used.
-    pub fn import_privacy_errors(&self, own: &[bool]) -> Vec<(u32, Option<usize>, String)> {
+    /// E0603 for the `use` declarations judged (those of the own crates, or of an edit's files),
+    /// each with its crate and, for an import that never binds in rustc (a path through something
+    /// private), the import's index: rustc_resolve plants a dummy binding for it and counts it used.
+    pub fn import_privacy_errors(&self, j: Judged) -> Vec<(u32, Option<usize>, String)> {
         let mut out = Vec::new();
         for (i, im) in self.imports.iter().enumerate() {
             let krate = self.mods[im.module as usize].krate;
-            if !own.get(krate as usize).copied().unwrap_or(false) || im.bound & BOUND_INJECTED != 0 {
+            if !j.has_crate(krate) || j.files.is_some_and(|fs| !fs.contains(&im.file)) || im.bound & BOUND_INJECTED != 0 {
                 continue;
             }
             let edition = self.crates[krate as usize].edition;

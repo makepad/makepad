@@ -152,7 +152,21 @@ fn say(text: &str) -> io::Result<()> {
     out.flush()
 }
 
+/// Why `makepad open` does not start the app: on a computer whose apps open no remote endpoint
+/// (the default; makepad_remote::ask has the one rule) a coding agent could not talk to it, and
+/// the Runner never opens one on its own.
+fn endpoint_off(setting: Option<&Path>) -> String {
+    let file = setting.map_or("the per-user setting".to_string(), |p| p.display().to_string());
+    format!("  The apps on this computer open no remote endpoint, which a coding agent talks to them through.
+  Turn it on for your user with the one word `local` in {file}
+  (or MAKEPAD_REMOTE=local in this shell), then run this again.")
+}
+
 fn open(id: &str) -> io::Result<i32> {
+    if makepad_remote::ask::request() == makepad_remote::ask::Request::Off {
+        say(&endpoint_off(makepad_remote::ask::setting_path().as_deref()))?;
+        return Ok(1);
+    }
     let home = relax_runner::fetch::home();
     let path = home.join("runner/focus").join(format!("{id}.status"));
     let log = home.join("cache/logs/runner-focus.log");

@@ -23,7 +23,12 @@ WAIT=${WAIT:-300}
 BUILD=${BUILD:-cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher}
 F=platform/hal/src/lib.rs
 grep -q '^    pub fn backend_inits(&self) -> u32 {$' "$F" || { echo "warm_after_hal: FAIL: $F has no Hal::backend_inits to edit"; exit 1; }
-dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_after_hal.XXXXXX") || exit 1
+if [ -n "${GATE_FIXTURE_LOGS:-}" ]; then
+    dir=$GATE_FIXTURE_LOGS
+    mkdir -p "$dir" || exit 1
+else
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_after_hal.XXXXXX") || exit 1
+fi
 mkdir -p "$dir/home" "$dir/t"
 cp "$F" "$dir/orig.rs" || exit 1
 rebuild() { # (word splitting of $BUILD is the point: one cargo argument per word)
@@ -66,7 +71,7 @@ spin=$(echo "$hal" | sed -n 's/.*spinner \([0-9]*\).*/\1/p')
 what="after the HAL edit: $(echo "$hal" | tr '\n' ' ')(cold: $(echo "$cold" | tr '\n' ' '))"
 if echo "$first" | grep -q 'cache warm' && [ "$spin" = 0 ]; then
     echo "warm_after_hal: OK $what"
-    [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
+    if [ -z "${GATE_FIXTURE_LOGS:-}" ] && [ "${KEEP:-0}" != 1 ]; then rm -rf "$dir"; fi
     exit 0
 fi
 echo "warm_after_hal: FAIL $what; logs in $dir"

@@ -896,10 +896,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     }
     let _kept = relax_compiler::zone_alloc::kept();
     let hal = Hal::global();
-    let remote = relax_compiler::os::proc::args_bytes()
-        .iter()
-        .any(|a| a == b"--remote")
-        || std::env::var_os("MAKEPAD_REMOTE").is_some();
+    // launched for an agent (the one rule, makepad_remote::ask): no focus taken; an ordinary
+    // launch with the endpoint on (MAKEPAD_REMOTE=local, the per-user setting) takes it as usual
+    let remote = relax_compiler::inspect::remote_request() == makepad_remote::ask::Request::On;
     let flags = open_flags::RETAIN_WINDOWS
         | open_flags::HIDDEN_UNTIL_PRESENT
         | if remote { open_flags::NO_FOCUS } else { 0 };
@@ -964,7 +963,10 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
         retry: false,
         unnamed,
     });
-    run_state::set_observer(|event| post(Update::Compiler(event)));
+    run_state::set_observer(|event| {
+        crate::sources::observe(&event);
+        post(Update::Compiler(event));
+    });
     relax_compiler::tui::track_for_host();
     relax_compiler::inspect::events::set_run_state_observer(panic_changed);
     relax_compiler::inspect::events::run_state_available(
@@ -1145,6 +1147,7 @@ pub fn undo_exec() {
 }
 
 pub fn observe(id: u32, next: &DomainState) {
+    crate::sources::observe_domain(id, next);
     if state().as_ref().is_some_and(|r| r.domain == id) {
         post(Update::Domain(next.clone()));
     }
@@ -1336,6 +1339,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
             // process): the app may postpone the restart (unsaved work), a rebuild may come first
             Work::Relaunch(who) => {
                 if let Err(e) = relax_compiler::reload::relaunch_pending(&who, false) {
+                    if who == crate::sources::RELAUNCH_REASON { crate::sources::restart_failed(&e); }
                     post(Update::Message(e));
                 }
                 post(Update::Relaunched);
@@ -2128,13 +2132,20 @@ fn pump(
         let running = stage == Stage::Running && lent_to_app && !active && !failed && veil.is_none() && !leaving;
         let update_message = relax_compiler::reload::host::update_message();
         // the person asked for the restart: the ring says how far it is, no dot offers it again
-        let restart_asked = ring_clicked || relax_compiler::reload::host::restart_asked();
+        let mut restart_asked = ring_clicked || relax_compiler::reload::host::restart_asked();
+        let offered = !restart_asked && (update_message.is_some() || !relax_compiler::reload::restart_pending().is_empty());
+        // a source update's restart asks the app as the Restart click does: a call it is in postpones it
+        if crate::sources::take_restart(restart_asked, offered, update_message.is_some()) {
+            enqueue(&mut work_pending, Work::Relaunch(crate::sources::RELAUNCH_REASON.into()));
+            ring_clicked = true;
+            restart_asked = true;
+        }
         let alert = data
             .parked
             .as_ref()
             .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
             .or_else(|| rebuild_failed().then_some(RingAlert::RebuildFailed))
-            .or_else(|| (!restart_asked && (update_message.is_some() || !relax_compiler::reload::restart_pending().is_empty())).then_some(RingAlert::UpdateReady))
+            .or_else(|| (!restart_asked && offered).then_some(RingAlert::UpdateReady))
             .or_else(|| (!restart_asked && patch_notice.is_some()).then_some(RingAlert::PatchFailed));
         let ring_detail = match alert {
             Some(RingAlert::UpdateReady) => update_message.as_deref(),

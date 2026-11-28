@@ -203,7 +203,7 @@ impl PendingPlan {
             .image.outline_macros(ci)
     }
     /// The imports the outline's expansions of crate `ci` wrote, with outline_macros' plan.
-    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<crate::macros::ExpUse>>>> {
         if let Some(uses) = std::ops::Deref::deref(self).image.outline_expansions(ci) {
             return Some(uses);
         }
@@ -1840,6 +1840,7 @@ pub(crate) mod failure_tests {
                 let cfg = crate::cfg::CfgSet::host(&session, &[]);
                 let mut p = crate::program::Program::new(&session);
                 p.preload(vec![crate::preload::PreCrate {
+                    is_bin: false, harness: false,
                     name: "outline_panic".into(), root: load_root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(),
                     proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new(),
                 }]);

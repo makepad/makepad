@@ -9,6 +9,8 @@
 # workspace of stub crates under the gate's package names in a temporary git repo, its JIT a stub whose `makepad
 # test` fails the guard when the guarded crate says BROKEN; needs cargo, git and python3, nothing of this tree but
 # the gate's scripts. A stub app also presents and only reports its check verdict when the gate ends it.
+# A nested gate must not publish into the outer lease's keep.
+unset DEVHUB_KEEP
 here=$(cd "$(dirname "$0")" && pwd)
 dir=$(mktemp -d "${TMPDIR:-/tmp}/guard_units.XXXXXX") || exit 2
 trap 'rm -rf -- "$dir"' EXIT

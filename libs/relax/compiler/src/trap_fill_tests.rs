@@ -115,8 +115,20 @@ fn a_trap_filled_range_traps_at_any_offset_while_its_page_neighbour_runs_on() {
         assert!(t0.elapsed().as_secs() < 30, "the neighbour's loop never ran");
         std::thread::yield_now();
     }
-    // (each fill holds the pages out of reach long enough that the loop surely meets them)
-    invalid::TRANSIT_HOLD_US.store(200, Ordering::Relaxed);
+    // Each fill holds the pages out of reach until the neighbour has met them (its fault began
+    // to wait for this fill), or has called through twice: a fill of another page, which it runs
+    // past. What ends a hold is the neighbour's own step, never a time: a 200 us hold under a
+    // loaded box's tests let the loop sleep through all 100 fills and meet none (11-26). A fill
+    // of its page that it called through fails below (FILLS_MET).
+    static FILLS_MET: AtomicU64 = AtomicU64::new(0);
+    let until_the_neighbour_steps: fn() = || {
+        let calls = CALLS.load(Ordering::SeqCst);
+        while !invalid::transit_met() && CALLS.load(Ordering::SeqCst) < calls + 2 {
+            std::thread::yield_now();
+        }
+        FILLS_MET.fetch_add(invalid::transit_met() as u64, Ordering::SeqCst);
+    };
+    invalid::TRANSIT_HOLD_FN.store(until_the_neighbour_steps as usize, Ordering::SeqCst);
     let mut same_page = 0;
     for k in 0..100u32 {
         // a group of the same generation (its own slot number: a group dies once), run, then killed
@@ -129,13 +141,14 @@ fn a_trap_filled_range_traps_at_any_offset_while_its_page_neighbour_runs_on() {
         let bytes = unsafe { std::slice::from_raw_parts(at as *const u8, 16) };
         assert!(bytes.chunks(4).all(|w| w == invalid::TRAP), "range {k} holds the trap at every offset: {:02x?}", bytes);
     }
-    invalid::TRANSIT_HOLD_US.store(0, Ordering::Relaxed);
+    invalid::TRANSIT_HOLD_FN.store(0, Ordering::SeqCst);
     STOP.store(true, Ordering::Relaxed);
     looping.join().unwrap();
     let stats = invalid::stats_line();
     assert!(same_page > 0, "the dead ranges share the neighbour's page (a generation's arena): {stats}");
     assert_eq!(WRONG.load(Ordering::Relaxed), 0, "every call of the neighbour returned its value ({} calls)", CALLS.load(Ordering::Relaxed));
     assert!(invalid::TRANSIT_WAITS.load(Ordering::Relaxed) > 0, "the neighbour met a fill's pages and waited: {stats}");
+    assert_eq!(FILLS_MET.load(Ordering::SeqCst), same_page as u64, "the neighbour met every fill of its page, and no other: {stats}");
     assert!(crate::stale::verdicts().is_empty(), "no stale access while the neighbour ran: {:?}", crate::stale::verdicts());
     assert_eq!(call_at(live_at), 7, "the neighbour runs on");
     assert!(invalid::PROT_BYTES.load(Ordering::Relaxed) == 0 && invalid::FILLED_BYTES.load(Ordering::Relaxed) == 100 * 16 && stats.contains("in 100 fills"), "100 ranges filled, nothing inaccessible: {stats}");

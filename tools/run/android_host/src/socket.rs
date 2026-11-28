@@ -1,7 +1,7 @@
 //! The network crate's socket factory on Android: TLS streams come from Java (no libssl for native
 //! code), through the HAL's JNI socket calls. Registered once, before anything dials (makepad-remote's
 //! tunnel, HTTPS fetches).
-use makepad_hal::backend::android::socket;
+use makepad_hal::android::socket;
 use makepad_network::{AndroidSocketStream, AndroidSocketStreamFactory};
 use std::io;
 use std::sync::atomic::{AtomicI64, Ordering};

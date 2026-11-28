@@ -1685,7 +1685,7 @@ impl Tcx {
             diagnostics.set(Some(cx.errors().take_since(checkpoint)));
             Box::new(parts)
         }), |parts| {
-            let (errors, warnings) = diagnostics.take().unwrap_or_default();
+            let crate::infer::diagnostics::Taken { errors, warnings, drained: _ } = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 parts.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
@@ -2334,6 +2334,13 @@ impl Tcx {
         }
     }
 
+    /// Lower the current declaration for a live edit, keeping the running declaration cached.
+    pub fn const_ty_fresh(&self, prog: &Program, d: DefId) -> (Option<TyId>, Vec<String>) {
+        let cell = std::sync::OnceLock::new();
+        let decl = self.const_decl(prog, d, &cell);
+        (decl.ty, decl.errors.clone())
+    }
+
     /// An anonymous constant's type is fed by the lowering that meets it (lower_const_arg, as
     /// hir_ty_lowering's feed_anon_const_type): its holder's declared type, signature or body,
     /// which a cold run lowers before anything types the constant. A warm `makepad run` takes
@@ -2404,7 +2411,7 @@ impl Tcx {
             diagnostics.set(Some(cx.errors().take_since(checkpoint)));
             Box::new(decl)
         }), |decl| {
-            let (errors, warnings) = diagnostics.take().unwrap_or_default();
+            let crate::infer::diagnostics::Taken { errors, warnings, drained: _ } = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
                 decl.errors.push(prog.record_error(prog.def(owner).file, error.cause.span, "signature", error.message));
@@ -3088,7 +3095,7 @@ impl Tcx {
             if let Some(s) = prog.syms.get(name) {
                 // an item of the owner's body blocks shadows its type parameters (late.rs ribs)
                 let shadowed = env.owner.is_some_and(|o| prog.lookup_in_body_blocks(module, o, s, true).is_some());
-                for (i, n) in env.names.iter().enumerate().filter(|_| !shadowed) {
+                for (i, n) in env.names.iter().enumerate().filter(|_| !shadowed && !p.global()) {
                     // a const parameter lives in the value namespace: a type path never names it
                     if *n == s && !env.consts.iter().any(|c| c.0 as usize == i) {
                         // a type parameter takes no generic arguments (E0109), no constraints (E0229)

@@ -610,6 +610,11 @@ pub struct Program {
     pub glob_amb_cache: crate::conc::MemoMap<(u32, Sym, bool, bool), u8>,
     /// precise lookups of a name in a glob's module (what `glob_ambiguity` compares) once imports are resolved
     pub glob_prec_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<(DefId, BindVis)>>,
+    /// The module bindings `define` replaced with another item of the same name in the same
+    /// namespace (a duplicate, E0428), by the def that replaced them: (module, type namespace,
+    /// name, the def it was). When that def is unbound (a refused live edit's added item), the
+    /// live def it displaced has the name again (`unbind_defs`).
+    displaced: HashMap<DefId, Vec<(u32, bool, Sym, DefId)>>,
     /// the crates being checked (`makepad check`): the only ones whose paths are privacy-checked
     pub own_crates: Vec<bool>,
     /// rustc's glob ambiguities in the checked crates (the import replay, program/rsim.rs):
@@ -977,6 +982,7 @@ impl Program {
             glob_cache: crate::conc::MemoMap::with_bits(NAME_MEMO_BITS),
             glob_amb_cache: Default::default(),
             glob_prec_cache: Default::default(),
+            displaced: Default::default(),
             own_crates: Vec::new(),
             sim_ambiguity: None,
             sim_own: Vec::new(),
@@ -1380,6 +1386,7 @@ impl Program {
             // runtime entry names. Keep that boundary eager; a complete preload
             // graph (the run/makepad drivers) can safely close demand first.
             self.start_preload(vec![crate::preload::PreCrate {
+                is_bin: false, harness: false,
                 name: kname.clone(),
                 root: root.to_string(),
                 edition,
@@ -1425,12 +1432,12 @@ impl Program {
                 &ahead.defs, &ahead.aliases, &ahead.mods, &ahead.macro_use, &externs);
         }
         if let Some(pool) = &self.pool { pool.start_parsing(ci, self.macros.clone()); }
-        if !ahead.prelexed.is_empty() {
+        let pre_derives = if !ahead.prelexed.is_empty() {
             // This raw-source optimization has no token-origin context. Lowered files
             // expand derives inside their normal token-input parse instead.
             let files: Vec<(&str, &[u8], &[crate::lexer::Tok])> = ahead.prelexed.iter().map(|(p, s, t)| (p.as_str(), &s[..], &t[..])).collect();
-            crate::builtins::pre_expand_derives(&kname, &files, &self.crates[krate as usize].cfg, edition);
-        }
+            Some(crate::builtins::pre_expand_derives(&kname, &files, &self.crates[krate as usize].cfg, edition))
+        } else { None };
         for (p, s, t) in ahead.prelexed {
             self.prelexed.insert(p, (s, t));
         }
@@ -1461,6 +1468,7 @@ impl Program {
             pool.cancel(ahead.idx, &unused);
         }
         self.prelexed.clear();
+        drop(pre_derives);
         if self.ahead.is_empty() {
             // every preloaded crate is in: no worker thread outlives the load (a later fork)
             self.pool = None;
@@ -1831,7 +1839,7 @@ impl Program {
                 Some((pf, used)) if x.mod_path == self.cur_mod_path && used.replays(&self.macros, &kname, path) => {
                     why = "preloaded";
                     ahead_image = x.image_bytes;
-                    ahead = Some((pf, used, x.prep));
+                    ahead = Some((pf, used, x.prep, x.derive_failures));
                 }
                 Some((mut pf, _)) => {
                     PARSE_AGAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1851,7 +1859,7 @@ impl Program {
                 eprintln!("boot-trace-reparse: {path} ({why}) speculative_module={:?} published_module={:?}", x.mod_path, self.cur_mod_path);
             }
         }
-        let (mut pf, mut used, mut prep) = match ahead {
+        let (mut pf, mut used, mut prep, mut derive_failures) = match ahead {
             Some(x) => x,
             None => {
                 // the macro prescan read and lexed most files already
@@ -1868,9 +1876,12 @@ impl Program {
                     }
                 }
                 let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
-                let (pf, used) = self.crates[krate as usize].context.parse_input(src, pre, edition,
-                    Some(crate::macros::MacroScope::new(self.macros.clone())), bctx, crate::parser::lazy_auto())?;
-                (pf, used.unwrap(), None)
+                let (parsed, failures) = crate::macro_reg::capture_derive_failures(|| {
+                    self.crates[krate as usize].context.parse_input(src, pre, edition,
+                        Some(crate::macros::MacroScope::new(self.macros.clone())), bctx, crate::parser::lazy_auto())
+                });
+                let (pf, used) = parsed?;
+                (pf, used.unwrap(), None, failures)
             }
         };
         // A lookup that found no definition of the table may name one an expansion writes in a
@@ -1917,14 +1928,16 @@ impl Program {
             // definitions they name.
             if let Some(uses) = self.pool.as_ref().and_then(|p| p.outline_expansions(self.cur_ahead)) {
                 let known = next.exp_uses.get(&kname).cloned().unwrap_or_default();
-                let renames: Vec<((String, String), Vec<String>)> = uses.iter()
-                    .filter(|(key, to)| missing.contains(&key.1) && known.get(*key) != Some(*to))
+                let renames: Vec<_> = uses.iter()
+                    .filter(|(key, to)| missing.contains(&key.1) && known.get(*key).is_none_or(|have| to.iter().any(|u| !have.contains(u))))
                     .map(|(key, to)| (key.clone(), to.clone())).collect();
                 for (_, to) in &renames {
-                    let Some(target) = to.last() else { continue };
-                    for d in defs.iter().filter(|d| &d.name == target && d.def_file != path) {
-                        if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
-                            next.push(d.clone());
+                    for u in to {
+                        let Some(target) = u.path.last() else { continue };
+                        for d in defs.iter().filter(|d| &d.name == target && d.def_file != path) {
+                            if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
+                                next.push(d.clone());
+                            }
                         }
                     }
                 }
@@ -1935,10 +1948,12 @@ impl Program {
             }
             if !added || used.replays(&table, &kname, path) { break; }
             let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
-            let (fresh, uses) = self.crates[krate as usize].context.parse_input(
-                pf.src[..pf.src_len as usize].to_vec(), None, edition,
-                Some(crate::macros::MacroScope::new(table.clone())), bctx, crate::parser::lazy_auto(),
-            )?;
+            let (parsed, failures) = crate::macro_reg::capture_derive_failures(|| {
+                self.crates[krate as usize].context.parse_input(pf.src[..pf.src_len as usize].to_vec(), None, edition,
+                    Some(crate::macros::MacroScope::new(table.clone())), bctx, crate::parser::lazy_auto())
+            });
+            let (fresh, uses) = parsed?;
+            derive_failures = failures;
             parse_table = table;
             pf = fresh;
             used = uses.unwrap();
@@ -1962,10 +1977,12 @@ impl Program {
             if !used.uses.is_empty() { next.add_exp_uses(&kname, used.uses.clone()); }
             if used.replays(&table, &kname, path) { break; }
             let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
-            let (fresh, uses) = self.crates[krate as usize].context.parse_input(
-                pf.src[..pf.src_len as usize].to_vec(), None, edition,
-                Some(crate::macros::MacroScope::new(table.clone())), bctx, crate::parser::lazy_auto(),
-            )?;
+            let (parsed, failures) = crate::macro_reg::capture_derive_failures(|| {
+                self.crates[krate as usize].context.parse_input(pf.src[..pf.src_len as usize].to_vec(), None, edition,
+                    Some(crate::macros::MacroScope::new(table.clone())), bctx, crate::parser::lazy_auto())
+            });
+            let (fresh, uses) = parsed?;
+            derive_failures = failures;
             parse_table = table;
             pf = fresh;
             used = uses.unwrap();
@@ -1985,10 +2002,11 @@ impl Program {
         };
         if let Some(verify) = verify_image {
             let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
-            let (mut fresh, fused) = self.crates[krate as usize].context.parse_input(
-                pf.src[..pf.src_len as usize].to_vec(), None, edition,
-                Some(crate::macros::MacroScope::new(parse_table.clone())), bctx, crate::parser::lazy_auto(),
-            ).unwrap_or_else(|e| panic!("front verify parse {}: {:?}", path, e));
+            let (parsed, _) = crate::macro_reg::capture_derive_failures(|| {
+                self.crates[krate as usize].context.parse_input(pf.src[..pf.src_len as usize].to_vec(), None, edition,
+                    Some(crate::macros::MacroScope::new(parse_table.clone())), bctx, crate::parser::lazy_auto())
+            });
+            let (mut fresh, fused) = parsed.unwrap_or_else(|e| panic!("front verify parse {}: {:?}", path, e));
             fresh.bind_sources(path, &self.sources).expect("front verify sources");
             let fprep = prepare_file(&mut fresh, &self.crates[krate as usize].cfg);
             if pf.part.get().is_some() { let _ = fresh.part(&self.crates[krate as usize].cfg); }
@@ -2024,6 +2042,7 @@ impl Program {
         if !used.uses.is_empty() {
             table.add_exp_uses(&kname, used.uses);
         }
+        crate::macro_reg::commit_derive_failures(derive_failures);
         self.files.push(pf);
         self.file_paths.push(path.to_string());
         self.exec_profile_file(self.file_paths.len() as u32 - 1);
@@ -2808,6 +2827,22 @@ impl Program {
                 if let Some(items) = self.traits.get_mut(ti) { items.retain(|x| *x != d); }
             }
         }
+        // a def that took a live def's name in its module (a duplicate, E0428: a refused live
+        // edit added it, and its define replaced the binding) gives the name back: without it the
+        // running item's name bound nothing after the refusal, and the code that names it kept
+        // calling the code of before every later patch of it
+        if !self.displaced.is_empty() {
+            for &d in defs {
+                let Some(was) = self.displaced.remove(&d) else { continue };
+                for (module, ns_type, name, w) in was {
+                    if defs.contains(&w) || !self.is_current_version(self.defs[w.0 as usize].file) { continue; }
+                    let m = &self.mods[module as usize];
+                    if (if ns_type { &m.types } else { &m.values }).get(&name).is_none() {
+                        self.define(module, ns_type, name, w);
+                    }
+                }
+            }
+        }
         self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
@@ -3104,10 +3139,9 @@ impl Program {
             self.scope_cache.clear();
         }
         let m = &mut self.mods[module as usize];
-        if ns_type {
-            m.types.insert(name, d);
-        } else {
-            m.values.insert(name, d);
+        let was = if ns_type { m.types.insert(name, d) } else { m.values.insert(name, d) };
+        if let Some(was) = was.filter(|&w| w != d) {
+            self.displaced.entry(d).or_default().push((module, ns_type, name, was));
         }
     }
 
@@ -3599,7 +3633,13 @@ impl Program {
 
     fn collect_new_block_items(&mut self, file: u32, b: BlockId, module: u32, owner: Option<DefId>) -> Result<(), String> {
         let Some((items, subs)) = self.file_blocks[file as usize].get(&b.0).cloned() else { return Ok(()) };
-        let inner = match self.block_mods.get(&(file, b.0)).copied() {
+        // A block module the commit carried over (its items paired) keeps its names only under
+        // the module it was in. When the enclosing block's module is new (an item there was added
+        // or removed), that block's names are new defs, and a lookup from this block falls through
+        // to its old parent's: the old defs. Then this block gets a new module too (11-27: an
+        // `if` block calling a nested fn returning `impl Trait` reached its old opaque).
+        let carried = self.block_mods.get(&(file, b.0)).copied().filter(|&m| self.mods[m as usize].lexical_parent == Some(module));
+        let inner = match carried {
             Some(m) => m,
             None if !items.is_empty() => {
                 let krate = self.mods[module as usize].krate;
@@ -4643,10 +4683,13 @@ impl Program {
         let mut vdef = None;
         let mut src_mod: Option<u32> = None;
         if segs.len() == 1 && ((global && (edition >= 2018 || self.imports[i].ext)) || (edition >= 2018 && last_kind == SegKind::Ident)) {
-            // `use foo;` / `extern crate foo` / `use ::foo` -> extern crate, else item in scope
-            if let Some(c) = self.extern_crate(module, last) {
-                tdef = Some(self.mods[self.crates[c as usize].root_mod as usize].def);
-            } else if !global {
+            // `use ::foo` / `extern crate foo` -> extern prelude only;
+            // bare `use foo` (2018+) -> lexical scope first (respecting `import_waits`), then extern prelude.
+            if global {
+                if let Some(c) = self.extern_crate(module, last) {
+                    tdef = Some(self.mods[self.crates[c as usize].root_mod as usize].def);
+                }
+            } else {
                 tdef = self.lookup_in_scope(module, last, true);
                 vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_scope(module, last, false) };
             }
@@ -5305,6 +5348,18 @@ impl Program {
         cur
     }
 
+    /// A braced enum variant has no value constructor and lives only in the type namespace.
+    pub fn variant_is_struct(&self, d: DefId) -> bool {
+        let def = self.def(d);
+        if def.kind != DefKind::Variant || def.item.0 == u32::MAX {
+            return false;
+        }
+        let Some(f) = self.files.get(def.file as usize) else { return false };
+        let Some(it) = f.ast.items.get(def.item.0 as usize) else { return false };
+        let Some(en) = f.ast.as_enum(&it.kind) else { return false };
+        f.ast.list(en.variants).get(def.sub as usize).is_some_and(|v| matches!(v.data, VariantData::Struct(_)))
+    }
+
     /// Name in a container: module (items, imports, globs), enum (variants), trait (items).
     pub fn lookup_in_container(&self, c: DefId, name: Sym, ns_type: bool) -> Option<DefId> {
         let d = self.def(c);
@@ -5316,7 +5371,7 @@ impl Program {
             }
             DefKind::Enum => {
                 for &v in &self.variants[d.sub as usize] {
-                    if self.def(v).name == name {
+                    if self.def(v).name == name && (ns_type || !self.variant_is_struct(v)) {
                         return Some(v);
                     }
                 }
@@ -5460,10 +5515,7 @@ impl Program {
             let gd = self.def(g);
             let r = match gd.kind {
                 DefKind::Mod => self.lookup_in_module_vis(gd.sub, name, ns_type, q),
-                // a variant is in both namespaces (rustc define(.., TypeNS / ValueNS) in
-                // build_reduced_graph_for_variant): `use Op::*` in a block shadows an outer
-                // struct of the same name for struct literals and patterns too
-                DefKind::Enum => self.lookup_in_container(g, name, false).map(|d| (d, None)),
+                DefKind::Enum => self.lookup_in_container(g, name, ns_type).map(|d| (d, None)),
                 _ => None,
             };
             if collecting { q.collected.push((g, r)); }
@@ -6692,6 +6744,51 @@ impl ParseSnapshot {
     }
 }
 
+/// What a crate-level check judges (relax_types item_checks, check.rs crate_level_errors): every
+/// item of the own crates (`makepad check`, a run's app check), or only those of some files of
+/// them (a live edit's new texts: reload.rs). A module's, a block's and a trait's items are in
+/// one file, so an edit's files hold every scope its items can collide or go wrong in. The items
+/// an `include!` brings into a module are its includer's (its parse holds them), and a save of
+/// the included file is an edit of the includer (reload.rs include_edits).
+#[derive(Clone, Copy)]
+pub struct Judged<'a> {
+    pub own: &'a [bool],
+    /// None: every file of the own crates
+    pub files: Option<&'a [u32]>,
+}
+
+impl<'a> Judged<'a> {
+    pub fn crates(own: &'a [bool]) -> Self {
+        Judged { own, files: None }
+    }
+    pub fn files(own: &'a [bool], files: &'a [u32]) -> Self {
+        Judged { own, files: Some(files) }
+    }
+    pub fn has_crate(&self, k: u32) -> bool {
+        self.own.get(k as usize).copied().unwrap_or(false)
+    }
+    /// Whether file `f` is judged: its crate is an own one and, for an edit, it is one of its files.
+    pub fn has_file(&self, prog: &Program, f: u32) -> bool {
+        self.has_crate(prog.file_crate.get(f as usize).copied().unwrap_or(u32::MAX)) && self.files.map_or(true, |fs| fs.contains(&f))
+    }
+    /// The files judged, by index.
+    pub fn file_ids(self, prog: &'a Program) -> impl Iterator<Item = u32> + 'a {
+        let all = self.files.is_none().then(|| 0..prog.files.len() as u32);
+        all.into_iter().flatten().chain(self.files.into_iter().flatten().copied()).filter(move |&f| self.has_file(prog, f))
+    }
+    /// The defs to look at, in definition order: every def (a check skips other crates' by
+    /// `has_crate`), or those of the files judged (from the per-file index).
+    pub fn defs(self, prog: &'a Program) -> impl Iterator<Item = DefId> + 'a {
+        let all = self.files.is_none().then(|| 0..prog.defs.len() as u32);
+        let some = self.files.map(|fs| {
+            let mut v: Vec<u32> = fs.iter().flat_map(|&f| prog.defs_in_file(f).iter().copied()).collect();
+            v.sort_unstable();
+            v
+        });
+        all.into_iter().flatten().chain(some.into_iter().flatten()).map(DefId)
+    }
+}
+
 /// A parsed next version of a loaded file (hot reload: Program::parse_version / commit_version).
 pub struct FileVersion {
     pub old: u32,
@@ -7237,6 +7334,47 @@ mod deferred_load_tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn load_file_drops_retried_derive_failures_and_commits_accepted_ones() {
+        let retry = crate::macro_reg::FailurePath("derive_load_retry.rs");
+        let accepted = crate::macro_reg::FailurePath("derive_load_accepted.rs");
+        let retry_src = "pub fn f() -> crate::late_ty!() { 0 }\n#[derive(__Slice2RetryDerive)] pub struct S { x: u32 }\n#[macro_export] macro_rules! late_ty { () => { u32 }; }\n";
+        let accepted_src = "#[derive(__Slice2AcceptedDerive)] pub struct Accepted { x: u32 }\n";
+        let sess = Arc::new(crate::Session::default());
+        let cfg = CfgSet::host(&sess, &[]);
+        let test_cfg = cfg.holds("test");
+        let mut prog = Program::new(&sess);
+        prog.sources = Arc::new(prog.sources.overlay(retry.0, Arc::from(retry_src.as_bytes()))
+            .overlay(accepted.0, Arc::from(accepted_src.as_bytes())));
+        prog.cur_mod_path = "test".into();
+        prog.crates.push(CrateInfo {
+            name: prog.syms.intern("test"), root_mod: 0, edition: 2021, recursion_limit: 128,
+            deps: Vec::new(), cfg, proc_macro: false, is_bin: false, harness: false, validate: false,
+            rustc_laid: false, relaxed: Default::default(), export_opt_level: Default::default(),
+            features: Default::default(), impl_view: Default::default(), root_path: retry.0.into(),
+            context: crate::source_context::Context::new(retry.0, prog.sources.clone(), &sess),
+        });
+        Arc::make_mut(&mut prog.macros).add_crate("test".into(), Arc::new(crate::macros::CrateMods {
+            root: "test".into(), src: retry.0.into(), ..Default::default()
+        }));
+
+        let lo = retry_src.find("#[derive").unwrap();
+        let hi = lo + retry_src[lo..].find('\n').unwrap();
+        let _retry_guard = crate::builtins::seed_pre_derive_failure(retry.0, test_cfg, lo as u32, hi as u32,
+            "__Slice2RetryDerive", "stale_first_pass");
+        let id = prog.load_file(retry.0, 2021, 0).unwrap();
+        assert!(!crate::builtins::has_pre_derive_entries(retry.0), "first parse missed its seeded entry");
+        assert!(!prog.files[id as usize].ast.tys.iter().any(|ty| matches!(ty, Ty::Mac(_))),
+            "the retry must resolve the type macro exported later in the file");
+        assert!(retry.messages().is_empty(), "the loader published the discarded parse's failure");
+
+        let name = "__Slice2AcceptedDerive";
+        let _accepted_guard = crate::builtins::seed_pre_derive_failure(accepted.0, test_cfg, 0,
+            accepted_src.trim_end().len() as u32, name, "accepted_err");
+        prog.load_file(accepted.0, 2021, 0).unwrap();
+        assert_eq!(accepted.messages(), [format!("{}: derive({name}) failed: accepted_err", accepted.0)]);
+    }
+
     // Run the original full import/defer fixpoint on the same publication order.
     // This also compares intermediate waits, before all skipped files are loaded.
     fn full_load(p: &mut Program, m: u32) {
@@ -7360,6 +7498,7 @@ mod deferred_load_tests {
             let mut p = Program::new(&session);
             if lazy {
                 p.preload(vec![crate::preload::PreCrate {
+                    is_bin: false, harness: false,
                     name: "load_test".into(),
                     root: root.clone(),
                     edition: 2021,

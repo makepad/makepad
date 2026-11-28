@@ -1729,10 +1729,45 @@ fn item_lo_with_docs(p: &crate::parser::Parser, lo: usize) -> u32 {
     outer_docs_lo(p.src, gap_lo, item_lo)
 }
 
+/// Registry operations used by the derive prescan and expansion.
+trait DeriveHost: Sync {
+    fn is_derive(&self, name: &str) -> bool;
+    fn has_attr(&self, name: &str) -> bool;
+    fn is_derive_helper(&self, name: &str, derives: &[String]) -> bool;
+    fn scoped_derive(&self, name: &str) -> bool;
+    fn derive_entry(&self, krate: &str, name: &str) -> Option<crate::macro_reg::Entry>;
+    fn run_derive_entry(&self, sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str,
+        entry: &crate::macro_reg::Entry, item: &TokenStream, call: Span) -> Result<TokenStream, String>;
+    fn entry_edition(&self, entry: &crate::macro_reg::Entry) -> u16;
+}
+
+struct RegHost;
+
+impl DeriveHost for RegHost {
+    fn is_derive(&self, name: &str) -> bool { is_derive(name) }
+    fn has_attr(&self, name: &str) -> bool { crate::macro_reg::has_attr(name) }
+    fn is_derive_helper(&self, name: &str, derives: &[String]) -> bool { crate::macro_reg::is_derive_helper(name, derives) }
+    fn scoped_derive(&self, name: &str) -> bool { scoped_derive(name) }
+    fn derive_entry(&self, krate: &str, name: &str) -> Option<crate::macro_reg::Entry> {
+        crate::macro_reg::derive_entry(krate, name)
+    }
+    fn run_derive_entry(&self, sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str,
+        entry: &crate::macro_reg::Entry, item: &TokenStream, call: Span) -> Result<TokenStream, String> {
+        crate::macro_reg::run_derive_entry(sess, krate, name, entry, item, call)
+    }
+    fn entry_edition(&self, entry: &crate::macro_reg::Entry) -> u16 { crate::macro_reg::entry_edition(entry) }
+}
+
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
 /// Linked derives run natively, the rest through the JIT host (pmhost.rs; any thread).
 /// `docs`: the item's doc comments before its first token (leading_docs), as `#[doc]` trees.
-fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, docs: Vec<TokenTree>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>, resolve: Option<&dyn Fn(&str) -> Option<crate::macro_reg::Entry>>) -> Result<ItemOut, (u32, String)> {
+fn expand_item_with(
+    sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>,
+    docs: Vec<TokenTree>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16,
+    authored: Option<&dyn Fn(u32, u32) -> Option<Span>>,
+    resolve: Option<&dyn Fn(&str) -> Option<crate::macro_reg::Entry>>,
+    host: &impl DeriveHost, failures: &mut Vec<PreFailure>,
+) -> Result<ItemOut, (u32, String)> {
     let span_of = |a: u32, z: u32| authored.and_then(|f| f(item_lo + a, item_lo + z)).unwrap_or(Span { file: 0, lo: item_lo + a, hi: item_lo + z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
     // the item's own tokens (parsing rewrites tokens in place, `>>` closing two generic lists
     // becomes `>`: callers hand over the tokens as the source spelled them)
@@ -1750,16 +1785,16 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
     let (mut names, item_ts) = prepare_derive_input(input, cfg);
     // A spelling absent from the registry may be an imported alias. The
     // parallel prescan has no lexical scope, so leave that item to the parser.
-    if resolve.is_none() && names.iter().any(|name| !is_derive(name)
+    if resolve.is_none() && names.iter().any(|name| !host.is_derive(name)
         && crate::parser::derive::trait_path(name.rsplit("::").next().unwrap_or(name)).is_none()) {
         return Ok(ItemOut::Deferred);
     }
-    names.retain(|name| is_derive(name) || resolve.is_some_and(|resolve| resolve(name).is_some()));
+    names.retain(|name| host.is_derive(name) || resolve.is_some_and(|resolve| resolve(name).is_some()));
     // a `#[cfg]`-disabled item is gone before derives run (rustc strips it first)
     if names.is_empty() || !item_cfg_on(&item_ts.trees, cfg) {
         return Ok(ItemOut::Nothing);
     }
-    if resolve.is_none() && names.iter().any(|name| scoped_derive(name)) { return Ok(ItemOut::Deferred); }
+    if resolve.is_none() && names.iter().any(|name| host.scoped_derive(name)) { return Ok(ItemOut::Deferred); }
     if trace_on("pmhost") {
         eprintln!("pmhost: derive({}) on `{}`", names.join(", "), item_ts);
     }
@@ -1771,8 +1806,8 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
     let mut expanded = false;
     for name in names {
         // The host selects a source-matched linked library or the sandboxed JIT.
-        let entry = if scoped_derive(&name) { resolve.and_then(|resolve| resolve(&name)) } else { crate::macro_reg::derive_entry(krate, &name) };
-        let result = entry.as_ref().map(|entry| crate::macro_reg::run_derive_entry(sess, krate, &name, entry, &item_ts, call));
+        let entry = if host.scoped_derive(&name) { resolve.and_then(|resolve| resolve(&name)) } else { host.derive_entry(krate, &name) };
+        let result = entry.as_ref().map(|entry| host.run_derive_entry(sess, krate, &name, entry, &item_ts, call));
         let r = match result {
             Some(r) => r,
             // A builtin or an unrelated crate's same-named derive has no host
@@ -1787,17 +1822,17 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
                 if trace_on("pmhost") {
                     eprintln!("pmhost: derive({}) failed: {}", name, m);
                 }
-                let (line,col) = location;
-                crate::macro_reg::derive_failed(path, item_lo, line as u32,col as u32, &name, &m);
                 let e = TokBuf::compile_error(edition, &format!("derive({}): {}", name, m), true);
                 emit_lexed(&e.s, &e.toks, call.into(), &mut out);
+                let (line, col) = location;
+                failures.push(PreFailure { line: line as u32, col: col as u32, name, msg: m });
                 continue;
             }
         };
         let t0 = out.text.len();
         let o0 = out.origins.len();
         emit_tokens(&ts.trees, edition, &mut out, &mut scratch).map_err(|m| (item_lo, m))?;
-        if let Some(entry) = &entry { mark_made(&mut out, o0, call, crate::macro_reg::entry_edition(entry)); }
+        if let Some(entry) = &entry { mark_made(&mut out, o0, call, host.entry_edition(entry)); }
         if trace_on("expand:derive") {
             eprintln!("expand derive({}) @{} => {}", name, path, &out.text[t0..]);
         }
@@ -2002,11 +2037,59 @@ fn single_punct(c: char) -> Option<T> {
     })
 }
 
-crate::memo_local! {
-    /// Derive expansions by file, test cfg and item byte range.
-    static PRE: std::cell::RefCell<crate::fxhash::HashMap<(String, bool, u32, u32), Result<Option<Expansion>, (u32, String)>>>;
+/// A host failure follows its expansion until the parser takes the item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreFailure {
+    line: u32,
+    col: u32,
+    name: String,
+    msg: String,
 }
 
+fn record_derive_failures(path: &str, item_lo: u32, failures: Vec<PreFailure>) {
+    for f in failures {
+        crate::macro_reg::derive_failed(path, item_lo, f.line, f.col, &f.name, &f.msg);
+    }
+}
+
+struct PreEntry {
+    result: Result<Option<Expansion>, (u32, String)>,
+    failures: Vec<PreFailure>,
+}
+
+crate::memo_local! {
+    /// Derive expansions by file, test cfg and item byte range.
+    static PRE: std::cell::RefCell<crate::fxhash::HashMap<(String, bool, u32, u32), PreEntry>>;
+}
+
+/// Discards unconsumed expansions when the loader finishes with this crate.
+#[must_use]
+pub struct PreDerivesGuard {
+    paths: Vec<String>,
+    test_cfg: bool,
+}
+
+impl Drop for PreDerivesGuard {
+    fn drop(&mut self) {
+        if self.paths.is_empty() { return; }
+        PRE.with(|m| m.borrow_mut().retain(|(p, test, _, _), _| {
+            *test != self.test_cfg || self.paths.binary_search(p).is_err()
+        }));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn seed_pre_derive_failure(path: &str, test_cfg: bool, item_lo: u32, item_hi: u32, name: &str, msg: &str) -> PreDerivesGuard {
+    let failure = PreFailure { line: 1, col: 1, name: name.into(), msg: msg.into() };
+    PRE.with(|m| m.borrow_mut().insert((path.into(), test_cfg, item_lo, item_hi),
+        PreEntry { result: Ok(None), failures: vec![failure] }));
+    PreDerivesGuard { paths: vec![path.into()], test_cfg }
+}
+
+#[cfg(test)]
+pub(crate) fn has_pre_derive_entries(path: &str) -> bool {
+    PRE.with(|m| m.borrow().keys().any(|(p, _, _, _)| p == path))
+}
 
 /// For an item `toks[lo..hi]` (outer attributes included) whose attributes name a derive Relax
 /// runs: the derives' expansion as tokens. `Ok(None)`: nothing to expand.
@@ -2026,9 +2109,10 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
     let item_hi = toks.at(hi.saturating_sub(1)).hi;
     // computed ahead on the worker threads?
     if let Some(c) = p.bctx.as_ref().filter(|_| !crate::macro_reg::declaring()) {
-        if let Some(r) = PRE.with(|m| m.borrow_mut().remove(&(c.path.clone(), c.cfg.holds("test"), item_lo, item_hi))) {
+        if let Some(entry) = PRE.with(|m| m.borrow_mut().remove(&(c.path.clone(), c.cfg.holds("test"), item_lo, item_hi))) {
             crate::macro_reg::add_pre(true);
-            return r;
+            record_derive_failures(&c.path, item_lo, entry.failures);
+            return entry.result;
         }
     }
     // quick check: any attribute containing one of our derive names
@@ -2084,7 +2168,12 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         v
     };
     let cfg = p.bctx.as_ref().map(|c| &c.cfg);
-    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, docs, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)), Some(&|name| derive_entry(p, lo, name)));
+    let path = p.bctx.as_ref().map_or("", |c| c.path.as_str());
+    let mut failures = Vec::new();
+    let r = expand_item_with(sess, &p.krate, path, buf.get(item_lo, item_hi), fresh, docs, item_lo,
+        item_location(p, item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)),
+        Some(&|name| derive_entry(p, lo, name)), &RegHost, &mut failures);
+    record_derive_failures(path, item_lo, failures);
     match r? {
         ItemOut::Done(x) => {
             if let Some(reused) = reused {
@@ -2239,7 +2328,7 @@ pub(crate) fn scoped_imports(p: &crate::parser::Parser, mut at: usize) -> Option
                     if active {
                         let toks = p.toks.range(i + 1, stop);
                         let text = |k: usize| String::from_utf8_lossy(p.tok_text(toks[k])).trim_start_matches("r#").to_string();
-                        crate::preload::use_tree(&text, &toks, 0, toks.len(), &[], &module, false, &mut uses);
+                        crate::preload::use_tree(&text, &toks, 0, toks.len(), &[], &module, &crate::macros::UseVis::Private, &mut uses);
                     }
                     i = stop + 1;
                 }
@@ -2396,18 +2485,23 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
 /// Expands the derives of a crate's files ahead of parsing, in parallel (the parser takes
 /// the results by item position; anything missed is expanded when parsed). `files`: (path,
 /// source, tokens) as the macro prescan lexed them.
-pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition: u16) {
+pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition: u16) -> PreDerivesGuard {
+    pre_expand_derives_with(krate, files, cfg, edition, &RegHost)
+}
+
+fn pre_expand_derives_with(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &CfgSet, edition: u16, host: &impl DeriveHost) -> PreDerivesGuard {
     let sess = &cfg.session;
-    if !cfg.session.options.derives || !cfg.session.options.pre_derives {
-        return;
+    let mut guard = PreDerivesGuard { paths: Vec::new(), test_cfg: cfg.holds("test") };
+    if !cfg.session.options.derives || !cfg.session.options.pre_derives || crate::macro_reg::in_world() {
+        return guard;
     }
     // sites: (file, item lo, item hi)
     let mut sites: Vec<(usize, u32, u32)> = Vec::new();
     for (fi, (_, src, toks)) in files.iter().enumerate() {
-        derive_sites(src, toks, |lo, hi| sites.push((fi, lo, hi)));
+        derive_sites_with(src, toks, host, |lo, hi| sites.push((fi, lo, hi)));
     }
     if sites.is_empty() {
-        return;
+        return guard;
     }
     // line starts of the files with sites, once (each site's line/column)
     let mut lines: Vec<Vec<u32>> = vec![Vec::new(); files.len()];
@@ -2432,7 +2526,11 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
             let gap_lo = if before == 0 { 0 } else { files[fi].2[before - 1].hi.min(lo) };
             let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
             let (_, docs) = leading_docs(&src[gap_lo as usize..lo as usize], gap_lo, &span_of);
-            out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), docs, lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
+            let mut failures = Vec::new();
+            let result = expand_item_with(sess, krate, files[fi].0, &src[lo as usize..hi as usize],
+                site_tokens(files[fi].2, lo, hi), docs, lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo),
+                Some(cfg), edition, None, None, host, &mut failures);
+            out.push((k, result, failures));
         }
         out
     };
@@ -2440,7 +2538,7 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
     // the program runs, where an expansion's host request runs in place; on a pool thread that
     // request would wait for the owner, which waits here for that thread (a live edit's macro
     // world build hung in this join).
-    let results: Vec<Vec<(usize, Result<ItemOut, (u32, String)>)>> = if jobs <= 1 {
+    let results = if jobs <= 1 {
         vec![expand_sites()]
     } else {
         crate::pool::scope(|sc| {
@@ -2459,8 +2557,9 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
     };
     PRE.with(|m| {
         let mut m = m.borrow_mut();
+        let mut inserted = vec![false; files.len()];
         for v in results {
-            for (k, r) in v {
+            for (k, r, failures) in v {
                 let (fi, lo, hi) = sites[k];
                 let r = match r {
                     Ok(ItemOut::Done(x)) => Ok(Some(x)),
@@ -2468,11 +2567,19 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
                     Ok(ItemOut::Deferred) => continue,
                     Err(e) => Err(e),
                 };
-                m.insert((files[fi].0.to_string(), cfg.holds("test"), lo, hi), r);
+                let path = files[fi].0;
+                m.insert((path.to_owned(), guard.test_cfg, lo, hi), PreEntry { result: r, failures });
+                if !inserted[fi] {
+                    inserted[fi] = true;
+                    guard.paths.push(path.to_owned());
+                }
             }
         }
     });
+    guard.paths.sort_unstable();
+    guard.paths.dedup();
     crate::macro_reg::add_pre_wall(t_wall.elapsed().as_nanos() as u64);
+    guard
 }
 
 /// The prescan's tokens of the byte range `lo..hi`, relative to `lo`, with a closing Eof.
@@ -2484,85 +2591,154 @@ fn site_tokens(toks: &[Tok], lo: u32, hi: u32) -> Vec<Tok> {
     v
 }
 
-/// Items carrying a `derive(..)` attribute that names a derive Relax runs (is_derive): `f(item lo, item hi)`
-/// with the byte range the parser hands to `derive_items` (first outer attribute through the
-/// item's last token). Items whose extent the scan cannot be sure of are skipped.
-fn derive_sites(src: &[u8], toks: &[Tok], mut f: impl FnMut(u32, u32)) {
+fn is_open_delim(kind: T) -> bool {
+    matches!(kind, T::OpenParen | T::OpenBracket | T::OpenBrace)
+}
+
+/// Collect derive names and possible attribute macros from one outer attribute.
+fn prescan_derive_attr<'a>(
+    src: &'a [u8], attr: &[Tok], host: &impl DeriveHost,
+    derives: &mut Vec<String>, attr_macros: &mut Vec<&'a str>,
+) -> bool {
+    let word = |t: Tok| {
+        std::str::from_utf8(&src[t.lo as usize..t.hi as usize]).unwrap_or("").trim_start_matches("r#")
+    };
+    let Some(first) = attr.first() else { return false };
+    let name = word(*first);
+    let derive = name == "derive" && attr.get(1).map_or(true, |t| t.kind == T::OpenParen);
+    if derive || name == "cfg_attr" {
+        let mut has = false;
+        for (i, t) in attr.iter().enumerate().skip(1) {
+            if !matches!(t.kind, T::Ident | T::RawIdent) { continue; }
+            let w = word(*t);
+            let registered = host.is_derive(w);
+            has |= registered;
+            if derive || registered { derives.push(w.to_owned()); }
+            if !derive && !matches!(w, "derive" | "cfg" | "cfg_attr")
+                && (attr[i - 1].kind == T::PathSep || !crate::builtin_attrs::is_builtin_attr(w))
+                && host.has_attr(w) {
+                attr_macros.push(w);
+            }
+        }
+        return has;
+    }
+    let mut last = "";
+    let mut qualified = false;
+    for t in attr {
+        match t.kind {
+            T::PathSep => qualified = true,
+            T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => last = word(*t),
+            _ => break,
+        }
+    }
+    if !last.is_empty() && (qualified || !crate::builtin_attrs::is_builtin_attr(last)) && host.has_attr(last) {
+        attr_macros.push(last);
+    }
+    false
+}
+
+/// Exclusive end of an item. Jump over nested delimiters so only header-level angles
+/// count and a const argument's brace is never mistaken for the body.
+fn prescan_item_end(toks: &[Tok], mut at: usize, attr_macro: bool) -> Option<usize> {
+    let mut angles = 0usize;
+    let mut in_where = false;
+    while at < toks.len() {
+        match toks[at].kind {
+            T::OpenBrace if angles == 0 => return Some(match_close(toks, at)? + 1),
+            T::OpenParen | T::OpenBracket | T::OpenBrace => at = match_close(toks, at)?,
+            T::Lt => angles += 1,
+            T::Shl => angles += 2,
+            T::Gt => angles = angles.checked_sub(1)?,
+            T::Shr => angles = angles.checked_sub(2)?,
+            T::KwWhere if angles == 0 => in_where = true,
+            T::Semi if angles == 0 => return Some(at + 1),
+            T::Comma if attr_macro && angles == 0 && !in_where => return Some(at),
+            T::CloseParen | T::CloseBracket | T::CloseBrace => return attr_macro.then_some(at),
+            T::Eof => return None,
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Items carrying a hosted derive, from the first outer attribute through the last item
+/// token. The parser expands any item the raw scan leaves out.
+fn derive_sites_with(src: &[u8], toks: &[Tok], host: &impl DeriveHost, mut f: impl FnMut(u32, u32)) {
     let text = |i: usize| &src[toks[i].lo as usize..toks[i].hi as usize];
-    let n = toks.len();
+    let kind = |i: usize| toks.get(i).map_or(T::Eof, |t| t.kind);
     let mut i = 0;
-    while i < n {
-        // an outer attribute run: `#[..]` `#[..]` .. then the item
-        if toks[i].kind == T::Pound && i + 1 < n && toks[i + 1].kind == T::OpenBracket && (i == 0 || toks[i - 1].kind != T::Pound) {
-            let start = i;
-            let mut j = i;
-            let mut has = false;
-            while j + 1 < n && toks[j].kind == T::Pound && toks[j + 1].kind == T::OpenBracket {
-                let close = match match_close(toks, j + 1) {
-                    Some(c) => c,
-                    None => return,
-                };
-                let first = text(j + 2);
-                if first == b"derive" || first == b"cfg_attr" {
-                    for k in j + 2..close {
-                        if toks[k].kind == T::Ident {
-                            let w = text(k);
-                            if std::str::from_utf8(w).map_or(false, is_derive) {
-                                has = true;
-                            }
-                        }
-                    }
-                }
-                j = close + 1;
+    while i < toks.len() {
+        // Macro inputs and definitions are opaque, including both groups of `macro m(..) {..}`.
+        let macro_def = kind(i) == T::Ident && text(i) == b"macro" && matches!(kind(i + 1), T::Ident | T::RawIdent);
+        let group = if kind(i) == T::Pound && kind(i + 1) == T::Not && kind(i + 2) == T::OpenBracket {
+            Some(i + 2)
+        } else if kind(i) == T::Ident && text(i) == b"macro_rules" && kind(i + 1) == T::Not
+            && kind(i + 2).is_ident_like() && is_open_delim(kind(i + 3)) {
+            Some(i + 3)
+        } else if macro_def && matches!(kind(i + 2), T::OpenBrace | T::OpenParen) {
+            Some(i + 2)
+        } else if matches!(kind(i), T::Ident | T::RawIdent) && kind(i + 1) == T::Not && is_open_delim(kind(i + 2)) {
+            Some(i + 2)
+        } else { None };
+        if let Some(open) = group {
+            let Some(close) = match_close(toks, open) else { return };
+            i = close + 1;
+            if macro_def && kind(open) == T::OpenParen && kind(i) == T::OpenBrace {
+                let Some(close) = match_close(toks, i) else { return };
+                i = close + 1;
             }
-            if has {
-                // item: vis? (struct|enum|union) .. ending at a depth-0 `;` or the close of a
-                // depth-0 `{ }`
-                let mut k = j;
-                if k < n && toks[k].kind == T::KwPub {
-                    k += 1;
-                    if k < n && toks[k].kind == T::OpenParen {
-                        k = match match_close(toks, k) {
-                            Some(c) => c + 1,
-                            None => return,
-                        };
-                    }
-                }
-                let is_adt = k < n && (matches!(toks[k].kind, T::KwStruct | T::KwEnum) || (toks[k].kind == T::Ident && text(k) == b"union"));
-                if is_adt {
-                    let mut depth = 0i32;
-                    let mut m = k;
-                    let mut end = None;
-                    while m < n {
-                        match toks[m].kind {
-                            T::OpenParen | T::OpenBracket => depth += 1,
-                            T::CloseParen | T::CloseBracket => depth -= 1,
-                            T::OpenBrace if depth == 0 => {
-                                end = match_close(toks, m);
-                                break;
-                            }
-                            T::OpenBrace => depth += 1,
-                            T::CloseBrace => depth -= 1,
-                            T::Semi if depth == 0 => {
-                                end = Some(m);
-                                break;
-                            }
-                            T::Eof => break,
-                            _ => {}
-                        }
-                        m += 1;
-                    }
-                    if let Some(e) = end {
-                        f(toks[start].lo, toks[e].hi);
-                        i = e + 1;
-                        continue;
-                    }
-                }
-            }
-            i = j.max(i + 1);
             continue;
         }
-        i += 1;
+
+        if kind(i) != T::Pound || kind(i + 1) != T::OpenBracket || (i > 0 && kind(i - 1) == T::Pound) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut has_derive = false;
+        let mut derives = Vec::new();
+        let mut attr_macros = Vec::new();
+        while kind(i) == T::Pound && kind(i + 1) == T::OpenBracket {
+            let Some(close) = match_close(toks, i + 1) else { return };
+            has_derive |= prescan_derive_attr(src, &toks[i + 2..close], host, &mut derives, &mut attr_macros);
+            i = close + 1;
+        }
+        let attr_macro = attr_macros.iter().any(|a| !host.is_derive_helper(a, &derives));
+        if !has_derive && !attr_macro { continue; }
+
+        let mut k = i;
+        if kind(k) == T::KwPub {
+            k += 1;
+            if kind(k) == T::OpenParen {
+                let Some(close) = match_close(toks, k) else { return };
+                k = close + 1;
+            }
+        }
+        if attr_macro {
+            // A registered attribute can replace the entire item, including local items inside it.
+            loop {
+                match kind(k) {
+                    T::KwAsync | T::KwConst | T::KwUnsafe => k += 1,
+                    T::KwExtern => {
+                        k += 1;
+                        if matches!(kind(k), T::Str | T::RawStr) { k += 1; }
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let adt = matches!(kind(k), T::KwStruct | T::KwEnum) || (kind(k) == T::Ident && text(k) == b"union");
+        if attr_macro && (adt || matches!(kind(k), T::KwMod | T::KwFn | T::KwImpl | T::KwTrait)) {
+            let Some(end) = prescan_item_end(toks, k + 1, true) else { return };
+            i = end;
+        } else if !attr_macro && adt && matches!(kind(k + 1), T::Ident | T::RawIdent) {
+            let Some(end) = prescan_item_end(toks, k + 2, false) else { return };
+            if !toks[start..end].iter().any(|t| matches!(t.kind, T::Dollar | T::RawBody | T::Interp)) {
+                f(toks[start].lo, toks[end - 1].hi);
+            }
+            i = end;
+        }
     }
 }
 
@@ -2982,6 +3158,155 @@ fn prescan_rules(tb: &[u8], krate: &str, cfg: &CfgSet) -> Vec<crate::macros::Mac
         i += 1;
     }
     v
+}
+
+#[cfg(test)]
+mod pre_derive_tests {
+    use super::*;
+    use crate::macro_reg::{Entry, Kind};
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+
+    struct FakeHost {
+        derives: &'static [&'static str],
+        attrs: &'static [&'static str],
+        helpers: &'static [(&'static str, &'static str)],
+        error: &'static str,
+        calls: AtomicUsize,
+    }
+
+    impl FakeHost {
+        fn new(error: &'static str) -> Self {
+            Self {
+                derives: &["Widget", "Script"], attrs: &["rewrite", "live"],
+                helpers: &[("Widget", "live")], error, calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl DeriveHost for FakeHost {
+        fn is_derive(&self, name: &str) -> bool { self.derives.contains(&name) }
+        fn has_attr(&self, name: &str) -> bool { self.attrs.contains(&name) }
+        fn is_derive_helper(&self, name: &str, derives: &[String]) -> bool {
+            self.helpers.iter().any(|&(d, a)| a == name && derives.iter().any(|s| s == d))
+        }
+        fn scoped_derive(&self, name: &str) -> bool { name.contains("::") || !self.is_derive(name) }
+        fn derive_entry(&self, _krate: &str, name: &str) -> Option<Entry> {
+            self.is_derive(name).then(|| Entry { unit: 0, fname: name.into(), kind: Kind::Derive })
+        }
+        fn run_derive_entry(&self, _sess: &Arc<crate::Session>, _krate: &str, _name: &str,
+            _entry: &Entry, _item: &TokenStream, _call: Span) -> Result<TokenStream, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(self.error.into())
+        }
+        fn entry_edition(&self, _entry: &Entry) -> u16 { 2021 }
+    }
+
+    struct TestFile(&'static str);
+
+    impl TestFile {
+        fn failures(&self) -> Vec<String> {
+            let prefix = format!("{}:", self.0);
+            crate::macro_reg::derive_failures().into_iter().filter(|m| m.starts_with(&prefix)).collect()
+        }
+        fn cached_starts(&self) -> Vec<u32> {
+            PRE.with(|m| m.borrow().keys().filter(|(p, _, _, _)| p == self.0).map(|k| k.2).collect())
+        }
+    }
+
+    impl Drop for TestFile {
+        fn drop(&mut self) {
+            crate::macro_reg::clear_derive_failures(&[self.0.to_owned()]);
+            PRE.with(|m| m.borrow_mut().retain(|(p, _, _, _), _| p != self.0));
+        }
+    }
+
+    fn lex(src: &str) -> Vec<Tok> {
+        let mut toks = Vec::new();
+        crate::lexer::lex(src.as_bytes(), 2021, &mut toks).map_err(|e| e.msg).unwrap();
+        toks
+    }
+
+    #[test]
+    fn derive_sites_skips_macros_attrs_and_templates() {
+        let file = TestFile("pre_derive_sites.rs");
+        let src = r#"
+            #[macro_export] macro_rules! call_view {
+                ($name:ident $(, $scoped:ident)?) => {
+                    #[derive(Script, ScriptHook, Widget)] pub struct $name {
+                        #[source] source: ScriptObjectRef, $(#[rust] $scoped: Option<u8>,)?
+                    }
+                };
+            }
+            macro_rules! p ( () => { #[derive(Widget)] pub struct P; }; );
+            macro_rules! b [ () => { #[derive(Widget)] pub struct B; }; ];
+            macro m($x:ident) { #[derive(Widget)] pub struct $x; }
+            macro m2 { () => { #[derive(Widget)] pub struct M2; }; }
+            cfg_if::cfg_if! { if #[cfg(unix)] { #[derive(Widget)] pub struct Cfg; } }
+            m!(#[derive(Widget)] pub struct InParen;);
+            m![#[derive(Widget)] pub struct InBrack;];
+            #[outer(#[derive(Widget)] pub struct InOuter;)] fn a() {}
+            #![inner(#[derive(Widget)] pub struct InInner;)]
+            #[rewrite] #[derive(Widget)] pub struct Rewritten;
+            #[cfg_attr(all(), rewrite)] #[derive(Widget)] pub struct CfgRewritten;
+            #[rewrite] mod m { #[derive(Widget)] pub struct InAttrMod; }
+            #[path::rewrite] #[derive(Widget)] pub struct Qualified;
+            #[derive(Widget)] pub struct $Bad;
+            #[derive(Widget)] pub struct BadField { $x: u32 }
+            #[derive(Widget)] #[live] pub(crate) struct VoiceRing { x: u32 }
+            #[cfg_attr(all(), derive(Widget))] pub enum E { A }
+            #[derive(Widget)] pub union U { a: u8 }
+            #[derive(Widget)] pub struct Gen<const N: usize = { 1 }> { a: [u8; N] }
+            #[derive(Widget)] pub struct Tup<T>(T) where T: Tr<{ 1 }>;
+            fn f() { if !(true) { #[derive(Widget)] struct Local; } }
+            impl Tr for ! { fn g() { #[derive(Widget)] struct NeverLocal; } }
+        "#;
+        let mut sites = Vec::new();
+        derive_sites_with(src.as_bytes(), &lex(src), &FakeHost::new("boom"), |lo, hi| {
+            sites.push(&src[lo as usize..hi as usize]);
+        });
+        assert_eq!(sites, [
+            "#[derive(Widget)] #[live] pub(crate) struct VoiceRing { x: u32 }",
+            "#[cfg_attr(all(), derive(Widget))] pub enum E { A }",
+            "#[derive(Widget)] pub union U { a: u8 }",
+            "#[derive(Widget)] pub struct Gen<const N: usize = { 1 }> { a: [u8; N] }",
+            "#[derive(Widget)] pub struct Tup<T>(T) where T: Tr<{ 1 }>;",
+            "#[derive(Widget)] struct Local;",
+            "#[derive(Widget)] struct NeverLocal;",
+        ], "derive sites in {}", file.0);
+    }
+
+    #[test]
+    fn pre_expand_derives_skips_macro_rules_template_without_failure() {
+        let file = TestFile("pre_derive_template.rs");
+        let src = "macro_rules! call_view { ($name:ident) => { #[derive(Widget)] pub struct $name {} }; }";
+        let cfg = CfgSet::host(&Arc::new(crate::Session::default()), &[]);
+        let host = FakeHost::new("Expected any ident");
+        let _guard = pre_expand_derives_with("test", &[(file.0, src.as_bytes(), &lex(src))], &cfg, 2021, &host);
+        assert_eq!(host.calls.load(Ordering::Relaxed), 0, "the template reached the derive host");
+        assert!(file.cached_starts().is_empty(), "the template has a prescan entry");
+        assert!(file.failures().is_empty(), "the template published a failure");
+    }
+
+    #[test]
+    fn pre_expand_derives_defers_failures_until_parser_consumes_entry() {
+        let file = TestFile("pre_derive_consumed.rs");
+        let src = "#[cfg(any())] mod disabled { #[derive(Widget)] pub struct Disabled { x: u32 } }\n#[derive(Widget)] pub struct Live { x: u32 }\n";
+        let sess = Arc::new(crate::Session::default());
+        let cfg = CfgSet::host(&sess, &[]);
+        let host = FakeHost::new("boom");
+        let toks = lex(src);
+        let guard = pre_expand_derives_with("test", &[(file.0, src.as_bytes(), &toks)], &cfg, 2021, &host);
+        assert_eq!(host.calls.load(Ordering::Relaxed), 2, "both item expansions must reach the host");
+        assert_eq!(file.failures().len(), 0, "prescan published a failure before parsing");
+        let scope = crate::macros::MacroScope::new(Arc::new(crate::macros::MacroTable::default()));
+        let ctx = std::rc::Rc::new(FileCtx::new("test", file.0, "test", &cfg));
+        crate::parser::parse_owned_ctx(&sess, src.as_bytes().to_vec(), Some(toks), 2021, Some(scope), "test", Some(ctx), false).unwrap();
+        assert_eq!(file.failures(), [format!("{}: derive(Widget) failed: boom", file.0)]);
+        let disabled = src.find("#[derive(Widget)] pub struct Disabled").unwrap() as u32;
+        assert_eq!(file.cached_starts(), [disabled], "only Live should have consumed its entry");
+        drop(guard);
+        assert!(file.cached_starts().is_empty(), "the crate guard left an unconsumed derive entry");
+    }
 }
 
 #[cfg(test)]

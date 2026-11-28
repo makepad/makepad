@@ -115,6 +115,12 @@ for pkg in $PACKAGES; do
     fi
 done
 # a failure's logs outlive the lease's scratch (keep_logs.sh: copied to the master by the lease's holder)
-[ $fails -eq 0 ] || bash "$(dirname "$0")/keep_logs.sh" "$dir"
+if [ "$fails" -ne 0 ]; then
+    if [ -n "${GATE_KEEP_RUN_DIR:-}" ]; then
+        bash "$(dirname "$0")/keep_logs.sh" "$dir" "$GATE_KEEP_RUN_DIR" "fixture-settle-stress"
+    else
+        bash "$(dirname "$0")/keep_logs.sh" "$dir" "${dir##*/}"
+    fi
+fi
 [ $fails -eq 0 ] && [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
 exit $fails

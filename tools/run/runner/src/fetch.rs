@@ -783,7 +783,11 @@ mod tests {
         let g = graph(&[]).unwrap();
         let (id, src) = unit(&g, "gdep");
         assert_eq!(id, format!("git+{dep}?branch=dev#gdep@0.3.0"));
-        assert!(src.contains("/vfs/git/dep-") && src.ends_with(&format!("{}/crates/gdep/src/lib.rs", &c2[..12])), "{src}");
+        // A unit's source path is native, as cargo's unit graph has it (backslashes on Windows):
+        // compare components, not one separator.
+        let parts: Vec<_> = Path::new(&src).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        assert!(parts.windows(3).any(|w| w[0] == "vfs" && w[1] == "git" && w[2].starts_with("dep-"))
+            && Path::new(&src).ends_with(Path::new(&c2[..12]).join("crates").join("gdep").join("src").join("lib.rs")), "{src}");
         assert_eq!(body(&src), "pub fn gdep() -> u32 { 2 }\n");
         // the path dependency inside the repository shares its source; the patched and the
         // inherited git dependency are one package

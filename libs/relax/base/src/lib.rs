@@ -118,6 +118,7 @@ pub unsafe fn reset_statics() {
     relaxed::reset_statics();
     solver_work::reset_statics();
     vfs::reset_statics();
+    waits::reset_statics();
     why::reset_statics();
     zone_alloc::reset_statics();
 }

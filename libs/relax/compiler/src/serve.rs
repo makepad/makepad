@@ -512,7 +512,7 @@ impl Session {
                 match self.unit.prog.recollect_check_crate(krate, files) {
                     Ok(defs) => {
                         self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, of)| of.iter().any(|f| self.unit.prog.file_crate[*f as usize] == krate) && e.starts_with(p)));
-                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear(); self.unit.tls_places.clear();
+                        self.unit.consts.clear(); self.unit.statics.clear(); self.unit.syms.clear_static_spans(); self.unit.tls_places.clear();
                         self.unit.tcx.collect_check(&self.unit.prog, &defs);
                     }
                     Err(e) => { self.parse_errors.insert(String::new(), crate::diag::from_legacy(&e, "resolve")); }
@@ -805,7 +805,7 @@ mod lazy_tests {
         let sess = std::sync::Arc::new(lazy);
         let mut prog = crate::program::Program::new(&sess);
         let cfg = crate::cfg::CfgSet::host(&sess, &[]);
-        prog.preload(vec![crate::preload::PreCrate {  name: "warm_rx".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
+        prog.preload(vec![crate::preload::PreCrate { is_bin: false, harness: false,  name: "warm_rx".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
         let krate = prog.load_crate("warm_rx", &root, 2021, cfg, Vec::new()).unwrap();
         prog.resolve_imports();
         let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
@@ -860,7 +860,7 @@ mod lazy_tests {
         let sess = std::sync::Arc::new(crate::Session::default());
         let mut prog = crate::program::Program::new(&sess);
         let cfg = crate::cfg::CfgSet::host(&sess, &[]);
-        prog.preload(vec![crate::preload::PreCrate { name: "warm_impl".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
+        prog.preload(vec![crate::preload::PreCrate { is_bin: false, harness: false, name: "warm_impl".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
         let krate = prog.load_crate("warm_impl", &root, 2021, cfg, Vec::new()).unwrap();
         prog.resolve_imports();
         let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
@@ -920,7 +920,7 @@ mod lazy_tests {
         let sess = std::sync::Arc::new(crate::Session::default());
         let mut prog = crate::program::Program::new(&sess);
         let cfg = crate::cfg::CfgSet::host(&sess, &[]);
-        prog.preload(vec![crate::preload::PreCrate { name: "warm_blanket".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
+        prog.preload(vec![crate::preload::PreCrate { is_bin: false, harness: false, name: "warm_blanket".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
         let krate = prog.load_crate("warm_blanket", &root, 2021, cfg, Vec::new()).unwrap();
         prog.resolve_imports();
         let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);

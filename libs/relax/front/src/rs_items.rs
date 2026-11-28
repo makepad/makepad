@@ -172,7 +172,7 @@ pub fn split(src: &[u8], toks: &[Tok], lo: usize, hi: usize, module: &str, out: 
                 item.kind = Kind::Use;
                 let mut uses = Vec::new();
                 let semi = (k..end).find(|&i| toks[i].kind == T::Semi).unwrap_or(end);
-                super::super::use_tree(&|i| word(src, &toks[i]), toks, k + 1, semi, &[], module, false, &mut uses);
+                super::super::use_tree(&|i| word(src, &toks[i]), toks, k + 1, semi, &[], module, &crate::macros::UseVis::Private, &mut uses);
                 item.names.extend(uses.into_iter().filter_map(|u| u.bind).filter(|b| b != "_").map(|b| format!("{module}::{b}")));
             }
             Some(T::KwExtern) if toks.get(k + 1).is_some_and(|t| t.kind == T::KwCrate) => {

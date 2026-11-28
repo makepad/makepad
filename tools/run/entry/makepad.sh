@@ -23,7 +23,7 @@
 #    .loader-sha256; .built records the loader commit, Rust and the target triple. An unchanged ZIP reuses the
 #    source; matching SHA and Rust stamps reuse the binary. A changed ZIP replaces only the files
 #    that changed, so only their crates compile again. Under cache/loader, current selects src or
-#    a commit folder; pending rolls back to previous if the new runner did not confirm its boot.
+#    a commit folder. While pending exists, the entry selects previous and the loader handles recovery.
 #
 # In its folder it creates rust/ (the toolchain), cache/ (downloads, the loader, its caches and
 # logs, and each loader's runner.launch), apps/ (the other apps' launch records),
@@ -649,28 +649,26 @@ for loader_dir in "$loader_root"/*; do
     write_loader_source "$id"
 done
 
-# Restore an unconfirmed switch before any decision about the loader already here.
+# recover_loader BINARY: the loader settles a switch nobody is trying. Exit 3 says an open
+# Makepad is trying one (its watcher holds the lock): wait for it, saying so. A loader from
+# before recover leaves pending; the folder choice below then goes by previous, and the
+# loader built here gets another chance after the build.
+recover_loader() {
+    rl_code=0
+    "$1" recover >>"$logs/recover.log" 2>&1 || rl_code=$?
+    [ "$rl_code" -eq 3 ] || return 0
+    rl_foot=$foot
+    foot='Waiting for the update the open Makepad is trying.'
+    if [ -n "$framed" ]; then row 4 doing waiting ''; draw; else say "$foot"; fi
+    "$1" recover --wait >>"$logs/recover.log" 2>&1 || :
+    foot=$rl_foot
+    if [ -n "$framed" ]; then row 4 wait next ''; draw; fi
+}
 if [ -e "$loader_root/pending" ]; then
-    pending=$(cat "$loader_root/pending") || fail "Cannot read $loader_root/pending"
-    previous=$(loader_folder previous)
-    if [ "$previous" = src ]; then
-        rm -f "$loader_root/current" || fail "Cannot remove $loader_root/current"
-    else
-        atomic_line "$loader_root/current" "$previous" || fail "Cannot write $loader_root/current"
-    fi
-    if valid_loader_folder "$pending"; then
-        pending_record=$loader_root/$pending/runner.launch
-        if [ -e "$pending_record.previous" ] || [ -L "$pending_record.previous" ]; then
-            [ ! -L "$loader_root/$pending" ] && [ ! -d "$pending_record" ] && mv -f "$pending_record.previous" "$pending_record" \
-                || fail "Cannot restore $pending_record"
-        fi
-    fi
-    atomic_line "$loader_root/rolled-back" 'the new runner did not confirm its first start' \
-        || fail "Cannot write $loader_root/rolled-back"
-    rm -f "$loader_root/pending" || fail "Cannot remove $loader_root/pending"
-    notice "Went back to $(printf '%s' "$previous" | cut -c1-10): the new runner did not confirm its first start."
+    previous_bin=$(loader_target_of "$(loader_folder previous)")/host/makepad
+    if [ -f "$previous_bin" ] && [ -x "$previous_bin" ]; then recover_loader "$previous_bin"; fi
 fi
-active=$(loader_folder current)
+if [ -e "$loader_root/pending" ]; then active=$(loader_folder previous); else active=$(loader_folder current); fi
 src=$loader_root/${active:?}
 new_target=$loader_targets/$active
 loader_target=$(loader_target_of "$active")
@@ -1147,6 +1145,7 @@ else
 fi
 
 makepad=$loader_target/host/makepad
+if [ -e "$loader_root/pending" ]; then recover_loader "$makepad"; fi
 
 # This script stays in the folder for the next start.
 if [ -n "$script_dir" ] && [ "$script_dir" != "$root" ]; then
@@ -1187,7 +1186,9 @@ loader_target_of() {
     if [ -f "$loader_targets/$1/host/makepad" ]; then printf '%s\n' "$loader_targets/$1"
     else printf '%s\n' "$loader_root/$1/target"; fi
 }
-active=$(cat "$loader_root/current" 2>/dev/null)
+pointer=current
+[ ! -e "$loader_root/pending" ] || pointer=previous
+active=$(cat "$loader_root/$pointer" 2>/dev/null)
 case "$active" in
     src|*[!0123456789abcdef]*) active=src ;;
     *) [ "${#active}" -eq 40 ] && [ -f "$(loader_target_of "$active")/host/makepad" ] || active=src ;;

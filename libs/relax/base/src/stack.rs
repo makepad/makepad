@@ -290,6 +290,45 @@ fn grow<R, F: FnOnce() -> R>(f: F) -> R {
     }
 }
 
+/// Runs `f` on a fresh stack segment with a guard below the requested `bytes`. Panics, without
+/// running `f`, where it cannot bound the stack: `bytes` below 4096 or too large, or no segment.
+pub fn on_bounded_stack<R, F: FnOnce() -> R>(bytes: usize, f: F) -> R {
+    assert!(bytes >= 4096, "on_bounded_stack: {bytes} bytes is below the 4096-byte minimum");
+    let Some(len) = bytes.checked_add(imp::GUARD) else {
+        panic!("on_bounded_stack: {bytes} bytes overflows with the guard");
+    };
+    let Some(seg) = imp::stack_segment(len) else {
+        panic!("on_bounded_stack: no stack segment of {bytes} bytes could be made");
+    };
+    /// owns the segment: freed on every exit, a panic at `STACK.with` included
+    struct Owned(Segment);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            imp::free_segment(self.0);
+        }
+    }
+    let owned = Owned(seg);
+    struct Job<F, R> {
+        f: Option<F>,
+        r: Option<std::thread::Result<R>>,
+    }
+    extern "C" fn run<F: FnOnce() -> R, R>(p: *mut u8) {
+        let job = unsafe { &mut *(p as *mut Job<F, R>) };
+        let f = job.f.take().unwrap();
+        // Catch the panic here so it never unwinds through the stack switch.
+        job.r = Some(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+    }
+    let mut job: Job<F, R> = Job { f: Some(f), r: None };
+    let old = STACK.with(|c| c.replace((seg.lo, seg.top)));
+    unsafe { imp::call_on_segment(&seg, run::<F, R>, &mut job as *mut Job<F, R> as *mut u8) };
+    STACK.with(|c| c.set(old));
+    drop(owned);
+    match job.r.take().unwrap() {
+        Ok(r) => r,
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
 /// Segments `grow` is done with, for the next one: a signal handler whose first calls compile
 /// maps one segment, not one per compile. (Taken and kept without waiting: `grow` may run in a
 /// handler that interrupted its thread inside either.)
@@ -322,6 +361,12 @@ fn thread_stack() -> (usize, usize) {
 pub fn note_thread_stack() {
     let b = thread_stack();
     let _ = STACK.try_with(|c| if c.get().1 == 0 { c.set(program_stack_bounds().unwrap_or(b)) });
+}
+
+/// The calling OS thread's usable stack size in bytes, if the OS reports it.
+pub fn thread_stack_size() -> Option<usize> {
+    let (lo, hi) = stack_bounds();
+    (hi > lo).then(|| hi - lo)
 }
 
 /// Which stack address `sp` of the calling thread is on, as this module knows them, and the bytes
@@ -420,7 +465,7 @@ mod imp {
     const MAP_PRIVATE_ANON: i32 = 0x1002;
 
     /// Guard bytes below a stack segment.
-    const GUARD: usize = 16384;
+    pub(super) const GUARD: usize = 16384;
 
     pub(super) fn stack_segment(len: usize) -> Option<Segment> {
         let seg = unsafe { mmap(std::ptr::null_mut(), len, PROT_RW, MAP_PRIVATE_ANON, -1, 0) };
@@ -428,7 +473,10 @@ mod imp {
             return None;
         }
         // a guard page at the low end: an overflow faults instead of writing below the segment
-        unsafe { mprotect(seg, GUARD, 0) };
+        if unsafe { mprotect(seg, GUARD, 0) } != 0 {
+            unsafe { munmap(seg, len) };
+            return None;
+        }
         crate::memstat::name_mapping(seg as usize, len, c"relax-stack");
         Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, floor: seg as usize + GUARD, top: (seg as usize + len) & !15 })
     }
@@ -655,7 +703,7 @@ mod imp {
         pub(super) fn back(&self) {}
     }
 
-    const GUARD: usize = 65536;
+    pub(super) const GUARD: usize = 65536;
 
     /// A committed segment with a no-access guard at its low end.
     pub(super) fn stack_segment(len: usize) -> Option<Segment> {
@@ -664,7 +712,10 @@ mod imp {
             return None;
         }
         let mut old = 0u32;
-        unsafe { VirtualProtect(seg, GUARD, PAGE_NOACCESS, &mut old) };
+        if unsafe { VirtualProtect(seg, GUARD, PAGE_NOACCESS, &mut old) } == 0 {
+            unsafe { VirtualFree(seg, 0, MEM_RELEASE) };
+            return None;
+        }
         Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, floor: seg as usize + GUARD, top: (seg as usize + len) & !15 })
     }
 
@@ -821,6 +872,8 @@ mod imp {
 #[cfg(not(any(unix, windows)))]
 mod imp {
     use super::Segment;
+    pub(super) const GUARD: usize = 0;
+
     pub(super) fn stack_segment(_len: usize) -> Option<Segment> {
         None
     }
@@ -851,6 +904,46 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn on_bounded_stack_runs_bounded_or_refuses() {
+        use std::cell::Cell;
+        use std::hint::black_box;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        const BYTES: usize = 256 << 10;
+        let bounds = || super::STACK.with(|c| c.get());
+        let saved = bounds();
+        let caller = black_box(41u32);
+        let caller_addr = black_box(&caller) as *const u32 as usize;
+        let value = super::on_bounded_stack(BYTES, || {
+            let local = black_box(caller + 1);
+            let local_addr = black_box(&local) as *const u32 as usize;
+            let (lo, top) = bounds();
+            assert_ne!((lo, top), saved, "the closure must have fresh stack bounds");
+            assert_eq!(top - lo, BYTES, "the segment must have the requested usable size");
+            assert!((lo..top).contains(&local_addr), "the closure's local must be on the segment");
+            assert!(!(lo..top).contains(&caller_addr), "the caller's local must be outside the segment");
+            local
+        });
+        assert_eq!(value, 42, "the closure's return value must reach the caller");
+        assert_eq!(bounds(), saved, "return must restore the caller's stack bounds");
+
+        let panic = catch_unwind(|| super::on_bounded_stack(BYTES, || panic!("on the bounded stack")))
+            .expect_err("the closure's panic must reach the caller");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"on the bounded stack"), "the original panic payload must reach the caller");
+        assert_eq!(bounds(), saved, "unwinding must restore the caller's stack bounds");
+
+        let calls = Cell::new(0);
+        for bytes in [usize::MAX, usize::MAX - super::imp::GUARD, 0, 4095] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                super::on_bounded_stack(bytes, || calls.set(calls.get() + 1));
+            }));
+            assert!(result.is_err(), "the bounded stack must refuse {bytes} bytes");
+            assert_eq!(calls.get(), 0, "refusing {bytes} bytes must leave the closure uncalled");
+            assert_eq!(bounds(), saved, "refusing {bytes} bytes must preserve the caller's stack bounds");
+        }
+    }
+
     /// a recursion far deeper than the test thread's stack completes, on segments
     #[test]
     fn deep_recursion_grows_onto_segments() {

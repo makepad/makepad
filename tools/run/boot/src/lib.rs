@@ -38,6 +38,7 @@ mod ring;
 mod text;
 
 use document::{Program, BAKE, ERROR_BAND, FIELD, GLYPH, ICON, LATTICE, PIPE_BANK_SIZE, STARS};
+use gpu::{DrawSite, InstanceBuffer, InstanceBuffers};
 pub use groups::order as order_diagnostics;
 pub use icon::Icon;
 pub use ring::{summary as ring_summary, Alert as RingAlert, Want as RingWant};
@@ -221,6 +222,7 @@ struct Renderer {
     presented_scroll: f32,
     field: field::Field,
     layer: layer::Layer,
+    instances: InstanceBuffers,
 }
 
 pub struct Boot {
@@ -453,6 +455,7 @@ impl Boot {
             presented_scroll: 0.0,
             field: field::Field::new(),
             layer: layer::Layer::new(),
+            instances: InstanceBuffers::new(),
         });
         Ok(boot)
     }
@@ -478,6 +481,9 @@ impl Boot {
             self.ring.hovered = None;
         }
         writer.window_close(window);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.instances.release(&mut writer);
+        }
         Hal::global().submit(&writer.buf());
         true
     }
@@ -533,6 +539,7 @@ impl Boot {
         let Some(renderer) = &mut self.renderer else { return };
         let mut writer = CmdWriter::new(HOST);
         upload_quad(&mut writer);
+        renderer.instances.restore(&mut writer);
         if let Some(icon) = &self.icon {
             icon.fill(&mut writer);
         }
@@ -1392,7 +1399,7 @@ impl Boot {
                 ..Default::default()
             },
         );
-        fill_lattice(&mut writer, program, &mut self.lattice);
+        fill_lattice(&mut writer, program, &mut self.lattice, renderer.instances.get(DrawSite::Lattice));
         writer.pass(Pass {
             load: [pass_load::CLEAR; 5],
             clear: [[0.0; 4]; 4],
@@ -1403,7 +1410,6 @@ impl Boot {
         let scissor = frame.map(|v| v * dpi);
         // the paused app under the view: its last frame, dimmed (the HAL copied it into APP at
         // this frame's start); the field stays away
-        let mut kept: Vec<Vec<f32>> = Vec::new();
         let app_pipe = program.layer.map(|i| &program.pipes[i]).filter(|_| paused_layer);
         if let Some(pipe) = app_pipe {
             let mut app_uniforms = Vec::new();
@@ -1417,9 +1423,7 @@ impl Boot {
                 ],
                 &mut app_data,
             );
-            pipe.draw(&mut writer, &app_data, &app_uniforms, &[renderer.layer.texture(layer::APP)], scissor);
-            kept.push(app_data);
-            kept.push(app_uniforms);
+            pipe.draw(&mut writer, renderer.instances.get(DrawSite::PausedApp), &app_data, &app_uniforms, &[renderer.layer.texture(layer::APP)], scissor);
         } else {
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
@@ -1433,12 +1437,13 @@ impl Boot {
                 program.pipes[STARS].draw_range(&mut writer, buffer, first, count, &uniforms[STARS], &[], scissor);
             }
         }
-        for i in [ERROR_BAND, ICON, GLYPH] {
+        for (i, site) in [(ERROR_BAND, DrawSite::ViewBand), (ICON, DrawSite::ViewIcon), (GLYPH, DrawSite::ViewGlyphs)] {
             if i == ICON && !program.icon {
                 continue;
             }
             program.pipes[i].draw(
                 &mut writer,
+                renderer.instances.get(site),
                 &data[i],
                 &uniforms[i],
                 &[if i == ICON {
@@ -1992,10 +1997,10 @@ impl Boot {
         let glyph = &program.pipes[GLYPH];
         let mut writer = CmdWriter::new(HOST);
         badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, dpi, viewport, |writer| {
-            band.draw(writer, &ring_data, &ring_uniforms, &[atlas], px(ring_rect));
+            band.draw(writer, renderer.instances.get(DrawSite::Ring), &ring_data, &ring_uniforms, &[atlas], px(ring_rect));
             if let Some((uniforms, data, glyph_uniforms)) = &tip_draws {
-                band.draw(writer, data, uniforms, &[atlas], px(tip_rect));
-                glyph.draw(writer, &glyphs, glyph_uniforms, &[atlas], px(tip_rect));
+                band.draw(writer, renderer.instances.get(DrawSite::Tooltip), data, uniforms, &[atlas], px(tip_rect));
+                glyph.draw(writer, renderer.instances.get(DrawSite::TooltipGlyphs), &glyphs, glyph_uniforms, &[atlas], px(tip_rect));
             }
         });
         Hal::global().submit(&writer.buf());
@@ -2197,7 +2202,7 @@ impl Boot {
                 ..Default::default()
             },
         );
-        fill_lattice(&mut writer, program, &mut self.lattice);
+        fill_lattice(&mut writer, program, &mut self.lattice, renderer.instances.get(DrawSite::Lattice));
         // the stars past the bake's frontier, into its layers (on the stars' own records), before
         // the frame shows them
         if let Some(bake) = &bake {
@@ -2217,14 +2222,12 @@ impl Boot {
             for &(buffer, first, count) in &bake.runs {
                 pipe.draw_range(&mut writer, buffer, first, count, &bake_uniforms[0], &[], scissor);
             }
-            pipe.draw(&mut writer, &bake.put_in, &bake_uniforms[0], &[], scissor);
-            pipe.draw(&mut writer, &bake.take_out, &bake_uniforms[1], &[], scissor);
+            pipe.draw(&mut writer, renderer.instances.get(DrawSite::BakePut), &bake.put_in, &bake_uniforms[0], &[], scissor);
+            pipe.draw(&mut writer, renderer.instances.get(DrawSite::BakeTake), &bake.take_out, &bake_uniforms[1], &[], scissor);
         }
         // the blurred app: made again from a new app frame (the HAL copied the app's image into
         // APP at this frame's start): full -> half (a box), half -> quarter across, then down
         let layer_pipe = program.layer.map(|i| &program.pipes[i]);
-        // the draws borrow their instance and uniform memory until the submit below
-        let mut kept: Vec<Vec<f32>> = Vec::new();
         if let (Some(look), Some(pipe)) = (look, layer_pipe) {
             let layer = &mut renderer.layer;
             if look.blur && layer.blurred != Some(layer.app_frames) {
@@ -2232,10 +2235,10 @@ impl Boot {
                 let [w, h] = layer.size;
                 let half = [w.div_ceil(2).max(1), h.div_ceil(2).max(1)];
                 let quarter = [w.div_ceil(4).max(1), h.div_ceil(4).max(1)];
-                for (source, target, size, mode, dir) in [
-                    (layer::APP, layer::HALF, half, 0.0, [0.0, 0.0]),
-                    (layer::HALF, layer::QUARTER_X, quarter, 1.0, [2.0 / half[0] as f32, 0.0]),
-                    (layer::QUARTER_X, layer::QUARTER, quarter, 1.0, [0.0, 1.0 / quarter[1] as f32]),
+                for (site, source, target, size, mode, dir) in [
+                    (DrawSite::BlurHalf, layer::APP, layer::HALF, half, 0.0, [0.0, 0.0]),
+                    (DrawSite::BlurQuarterX, layer::HALF, layer::QUARTER_X, quarter, 1.0, [2.0 / half[0] as f32, 0.0]),
+                    (DrawSite::BlurQuarter, layer::QUARTER_X, layer::QUARTER, quarter, 1.0, [0.0, 1.0 / quarter[1] as f32]),
                 ] {
                     let size = [size[0] as f32, size[1] as f32];
                     let mut color = [Id::NONE; 4];
@@ -2261,9 +2264,7 @@ impl Boot {
                         ],
                         &mut data,
                     );
-                    pipe.draw(&mut writer, &data, &uniforms, &[layer.texture(source)], [0.0, 0.0, size[0], size[1]]);
-                    kept.push(data);
-                    kept.push(uniforms);
+                    pipe.draw(&mut writer, renderer.instances.get(site), &data, &uniforms, &[layer.texture(source)], [0.0, 0.0, size[0], size[1]]);
                 }
             }
         }
@@ -2281,7 +2282,7 @@ impl Boot {
             ..Default::default()
         });
         let scissor = [0.0, 0.0, pixels[0], pixels[1]];
-        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32, scissor: [f32; 4]| {
+        let app = |writer: &mut CmdWriter, rows: &mut InstanceBuffer, texture: u32, opacity: f32, dim: f32, scissor: [f32; 4]| {
             if let Some(pipe) = layer_pipe.filter(|_| opacity > 0.0) {
                 let mut uniforms = Vec::new();
                 pipe.uniforms
@@ -2295,13 +2296,11 @@ impl Boot {
                     ],
                     &mut data,
                 );
-                pipe.draw(writer, &data, &uniforms, &[renderer.layer.texture(texture)], scissor);
-                kept.push(data);
-                kept.push(uniforms);
+                pipe.draw(writer, rows, &data, &uniforms, &[renderer.layer.texture(texture)], scissor);
             }
         };
         if look.is_some_and(|l| l.blur) {
-            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM, scissor);
+            app(&mut writer, renderer.instances.get(DrawSite::BlurredApp), layer::QUARTER, 1.0, layer::BLUR_DIM, scissor);
         }
         if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
             program.pipes[FIELD].draw_buffer(
@@ -2323,6 +2322,7 @@ impl Boot {
         if !buttons.is_empty() {
             program.pipes[ERROR_BAND].draw(
                 &mut writer,
+                renderer.instances.get(DrawSite::FieldButtons),
                 &buttons,
                 &band_uniforms,
                 &[renderer.text.atlas()],
@@ -2331,6 +2331,7 @@ impl Boot {
         }
         program.pipes[GLYPH].draw(
             &mut writer,
+            renderer.instances.get(DrawSite::FieldGlyphs),
             &glyphs,
             &glyph_uniforms,
             &[renderer.text.atlas()],
@@ -2339,10 +2340,10 @@ impl Boot {
         if let Some(strip) = app_strip {
             let top = (strip.top * dpi).round().clamp(0.0, pixels[1]);
             let bottom = ((strip.top + strip.height) * dpi).round().clamp(top, pixels[1]);
-            app(&mut writer, layer::APP, 1.0, 0.0, [0.0, top, pixels[0], bottom - top]);
+            app(&mut writer, renderer.instances.get(DrawSite::CaptionApp), layer::APP, 1.0, 0.0, [0.0, top, pixels[0], bottom - top]);
         }
         if let Some(look) = look {
-            app(&mut writer, layer::APP, look.sharp, 0.0, scissor);
+            app(&mut writer, renderer.instances.get(DrawSite::SharpApp), layer::APP, look.sharp, 0.0, scissor);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
         let snapshot = self.dump.as_mut().and_then(|d| d.due());
@@ -2371,7 +2372,6 @@ impl Boot {
             }
         }
         Hal::global().submit(&writer.buf());
-        drop(kept);
         if self.gpu && self.frame % 60 == 0 {
             let stats = Hal::global().with_world(|w| {
                 w.session(HOST)
@@ -2409,7 +2409,7 @@ const LATTICE_SIZE: u32 = 64;
 
 /// Fill the noise lattice with `program`'s `ignition_lattice` (on the GPU that samples it, with
 /// its own `hash21`), when no frame of this program on this device has.
-fn fill_lattice(writer: &mut CmdWriter, program: &Program, filled: &mut Option<Id>) {
+fn fill_lattice(writer: &mut CmdWriter, program: &Program, filled: &mut Option<Id>, rows: &mut InstanceBuffer) {
     let pipe = &program.pipes[LATTICE];
     if *filled == Some(pipe.id) {
         return;
@@ -2430,7 +2430,7 @@ fn fill_lattice(writer: &mut CmdWriter, program: &Program, filled: &mut Option<I
     pipe.uniforms.write(&[(id!(viewport), &[side, side])], &mut uniforms);
     let mut data = Vec::new();
     pipe.instances.write(&[(id!(rect), &[0.0, 0.0, side, side])], &mut data);
-    pipe.draw(writer, &data, &uniforms, &[], [0.0, 0.0, side, side]);
+    pipe.draw(writer, rows, &data, &uniforms, &[], [0.0, 0.0, side, side]);
 }
 
 /// The unit quad every pipeline draws its instances on: its vertices and indices.

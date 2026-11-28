@@ -227,7 +227,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn mallinfo2_of_a_domain_is_its_heap() {
-        let heap = crate::zone_alloc::domain::DomainHeap::new().unwrap();
+        let heap = unsafe { crate::zone_alloc::domain::DomainHeap::new(None, (0, 0)) }.unwrap();
         let outer = crate::zone_alloc::domain::current();
         unsafe { crate::zone_alloc::domain::enter(&*heap) };
         let m = super::mallinfo2();

@@ -189,7 +189,15 @@ impl<'a> Cx<'a> {
                 self.ascribe(&mut pat, annotation, Variance::Contravariant);
                 Ok(pat)
             }
-            DefKind::Variant | DefKind::Struct => self.lower_variant_or_leaf(user_key, ty, Some(d), Vec::new(), span),
+            DefKind::Variant | DefKind::Struct => {
+                let def = self.root.cx.prog.def(d);
+                let (adt, vi) = if def.kind == DefKind::Variant { (def.parent, def.sub as usize) } else { (d, 0) };
+                let variant = self.root.cx.tcx.adts.get(&adt).and_then(|a| a.variants.get(vi));
+                if !variant.is_some_and(|v| v.shape == 0) {
+                    return Err(self.error(span, UnsupportedReason::TypeckTainted));
+                }
+                self.lower_variant_or_leaf(user_key, ty, Some(d), Vec::new(), span)
+            }
             // statics and others are errors E0532 (reported by typeck)
             _ => Err(self.error(span, UnsupportedReason::TypeckTainted)),
         }
@@ -335,10 +343,15 @@ impl<'a> Cx<'a> {
             AstPat::Range(lo, hi, inclusive) => self.lower_pattern_range(lo.get(), hi.get(), inclusive, ty, span),
             AstPat::Path(_) => match tb.pat_res.get(&p.0).copied() {
                 Some(Res::Def(d)) => self.lower_path_pat(p.0 | PAT_KEY, d, ty, span),
+                Some(Res::Err) => Ok(node(PatKind::Error(ErrorGuaranteed))),
                 _ => self.pat_unresolved(span, "unresolved path pattern"),
             },
             AstPat::TupleStruct(_, subs) => {
-                let Some(Res::Def(d)) = tb.pat_res.get(&p.0).copied() else { return self.pat_unresolved(span, "unresolved tuple struct pattern") };
+                let d = match tb.pat_res.get(&p.0).copied() {
+                    Some(Res::Def(d)) => d,
+                    Some(Res::Err) => return Ok(node(PatKind::Error(ErrorGuaranteed))),
+                    _ => return self.pat_unresolved(span, "unresolved tuple struct pattern"),
+                };
                 let TyKind::Adt(adt, _, _) = *tcx.tys.kind(ty) else { return self.pat_unresolved(span, "tuple struct pattern of a non-ADT type") };
                 let variant = if self.root.cx.prog.def(d).kind == DefKind::Variant { self.root.cx.prog.def(d).sub } else { 0 };
                 let arity = self.adt_variant_fields(adt, variant);

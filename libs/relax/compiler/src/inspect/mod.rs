@@ -145,6 +145,14 @@ pub fn say_teardown_threads(domain: u32, pending: &[(String, u64)]) {
     for note in partial { eprintln!("relax domain: {domain}: {note}"); }
 }
 
+/// What the run's command line, `MAKEPAD_REMOTE` and the per-user setting ask of its endpoint: the
+/// one rule a native build's app reads too ([`makepad_remote::ask`]), so `makepad run` opens it
+/// exactly when the same app built natively would.
+pub fn remote_request() -> makepad_remote::ask::Request {
+    let args = crate::os::proc::args_bytes().into_iter().map(|a| String::from_utf8_lossy(&a).into_owned());
+    makepad_remote::ask::request_for(args, std::env::var("MAKEPAD_REMOTE").ok().as_deref())
+}
+
 /// Starts the inspect thread for program `app` (once per process; RELAX_INSPECT=0: off).
 pub fn start(app: &str) {
     if std::env::var("RELAX_INSPECT").map_or(false, |v| v == "0") || STARTED.swap(true, Relaxed) {
@@ -263,7 +271,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
     ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, live patches installed and the ones the newest presented window frame was built with (frame_patch), whether the live watcher is on a save (editing: 1 from the change it saw to its verdict) and the patch groups that run while their check has not reported (unverified), finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
-    ("cpu", "", "the shared CPU budget: running and queued app/JIT jobs per class, waits and checkpoint warnings, who holds and waits for the tokens"),
+    ("cpu", "", "one block per pool and the boundary between them: the app pool's CPU budget (running and queued jobs per class, waits and checkpoint warnings, who holds and waits for the tokens), the JIT pool (drains, section workers, jobs running and queued per class, its threads asleep on its own work, settled), and the boundary (waits for an app token on JIT threads, 0 by design; the program's threads asleep on the JIT)"),
     ("jit", "[ms=250] | spent [n=20]","live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty; spent: the CPU the compile jobs took so far by tier, and the slots whose O2 and O3 jobs took the most"),
     ("jit queue", "[n=10]","running JIT jobs, then the unified queue in admission order: class, heat, UI path, wait, function"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
@@ -1330,23 +1338,28 @@ fn lifeline_fields(r: &crate::lifeline::Row) -> String {
     f
 }
 
-/// The budget's report, and who has its tokens (and what those threads wait for).
+/// One block per pool: the app's (the budget's report, who has its tokens and what those threads
+/// wait for), the JIT's; then the boundary between them.
 fn cmd_cpu(out: &mut Out) {
-    for line in makepad_cpu_budget::report_string().lines() {
-        out.line(line);
+    const POOL: &str = "           ";
+    for (i, line) in makepad_cpu_budget::report_string().lines().enumerate() {
+        out.line(&format!("{}{line}", if i == 0 { "app pool   " } else { POOL }));
     }
     let mut list = threads::list();
     name_handles(&mut list);
     let tokens = makepad_cpu_budget::tokens();
     const CLASSES: [&str; 3] = ["interactive", "visible", "background"];
-    const CLIENTS: [&str; 3] = ["app", "jit", "hal"];
+    let client = |c| match c { makepad_cpu_budget::APP => "app", makepad_cpu_budget::HAL => "hal", _ => "?" };
     for h in &tokens.holders {
         let wait = crate::waits::of(h.thread).map(|w| format!(" -- waits: {}", wait_text(&w, &list))).unwrap_or_default();
-        out.line(&format!("{} {} {} {:?} on {} for {:.1} s{}", if h.lent { "lent" } else if h.above { "above" } else { "token" }, CLASSES[h.class as usize], CLIENTS[h.client as usize], h.label, thread_label(h.thread, &list), h.held_ns as f64 / 1e9, wait));
+        out.line(&format!("{POOL}{} {} {} {:?} on {} for {:.1} s{}", if h.lent { "lent" } else { "token" }, CLASSES[h.class as usize], client(h.client), h.label, thread_label(h.thread, &list), h.held_ns as f64 / 1e9, wait));
     }
     for w in &tokens.waiting {
-        out.line(&format!("wanted {} {} by {}", CLASSES[w.class as usize], CLIENTS[w.client as usize], thread_label(w.thread, &list)));
+        out.line(&format!("{POOL}wanted {} {} by {}", CLASSES[w.class as usize], client(w.client), thread_label(w.thread, &list)));
     }
+    let waits = crate::waits::snapshot();
+    out.line(&format!("jit pool   {}  {} asleep on other JIT work", crate::jit::queue_pool_line(), hang::jit_asleep(&waits)));
+    out.line(&format!("boundary   {}", hang::boundary_line(crate::waits::jit_token_waits(), &waits, crate::clock::wall_ns())));
 }
 
 pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
@@ -1990,14 +2003,24 @@ pub(crate) fn program_reply(cmd: &str) -> Option<String> {
 // ------------------------------------------------------------------ program services
 
 /// `sink(ctx, kind, ptr, len)` of a service channel: kind 0 sends `ptr..len` as one message (false:
-/// the client is gone), 1 ends the stream, 2 ends it with `ptr..len` as the reason. The end call
-/// is the last the program makes for the channel.
+/// the client is gone), 1 ends the stream, 2 ends it with `ptr..len` as the reason. Services
+/// registering DATA may also use 3 to try a send without waiting. The end call is the last.
 pub type ServiceSink = extern "C" fn(ctx: *mut std::ffi::c_void, kind: u32, ptr: *const u8, len: usize) -> bool;
 /// Starts a producer for one channel (`args` = the OPEN arguments); returns its handle, 0 when
 /// refused (after an end call with the reason).
 pub type ServiceOpen = extern "C" fn(args: *const u8, len: usize, sink: ServiceSink, ctx: *mut std::ffi::c_void) -> usize;
 /// The client closed the channel: the producer for `handle` stops.
 pub type ServiceClose = extern "C" fn(handle: usize);
+/// One complete inbound DATA message. The bytes are borrowed. False asks the host to retry
+/// when the producer's inbox is full, before taking another message and granting more credit.
+pub type ServiceData = extern "C" fn(handle: usize, ptr: *const u8, len: usize) -> bool;
+
+#[derive(Clone, Copy)]
+struct ServiceCallbacks {
+    open: ServiceOpen,
+    close: ServiceClose,
+    data: Option<ServiceData>,
+}
 
 struct ServiceChannel {
     tx: makepad_remote::ChannelTx,
@@ -2010,6 +2033,11 @@ extern "C" fn service_sink(ctx: *mut std::ffi::c_void, kind: u32, ptr: *const u8
     if kind == 0 {
         return channel.tx.send(bytes.to_vec()).is_ok();
     }
+    // On a full queue the producer retains its original bytes. A closed channel also
+    // signals its producer through the close callback.
+    if kind == 3 {
+        return channel.tx.try_send(bytes.to_vec()).is_ok();
+    }
     // the end: close the channel and give back the program's reference
     let why = String::from_utf8_lossy(bytes).into_owned();
     if kind == 2 {
@@ -2021,22 +2049,25 @@ extern "C" fn service_sink(ctx: *mut std::ffi::c_void, kind: u32, ptr: *const u8
 }
 
 static ENDPOINT: Mutex<Option<makepad_remote::Endpoint>> = Mutex::new(None);
-static SERVICES: Mutex<Vec<(String, u32, ServiceOpen, ServiceClose, crate::domain::Callback)>> = Mutex::new(Vec::new());
+static SERVICES: Mutex<Vec<(String, u32, ServiceCallbacks, crate::domain::Callback)>> = Mutex::new(Vec::new());
 static ACTIVE_SERVICES: Mutex<Vec<std::sync::Arc<ActiveService>>> = Mutex::new(Vec::new());
 
 struct ActiveService {
     scope: crate::domain::Callback,
-    close: ServiceClose,
+    callbacks: ServiceCallbacks,
     handle: usize,
     channel: std::sync::Arc<ServiceChannel>,
-    closed: AtomicBool,
+    // Serialize DATA with domain teardown, which can close from another thread.
+    closed: Mutex<bool>,
 }
 
 impl ActiveService {
     fn close(&self) {
-        if !self.closed.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            self.channel.tx.close(makepad_remote::conn::CLOSE_NORMAL, "app service closed");
-            let _ = self.scope.cleanup(|| (self.close)(self.handle));
+        self.channel.tx.close(makepad_remote::conn::CLOSE_NORMAL, "app service closed");
+        let mut closed = self.closed.lock().unwrap_or_else(|e| e.into_inner());
+        if !*closed {
+            *closed = true;
+            let _ = self.scope.cleanup(|| (self.callbacks.close)(self.handle));
         }
     }
 }
@@ -2045,7 +2076,7 @@ impl ActiveService {
 /// joining a domain; old endpoint factories reject calls through their incarnation's scope.
 pub fn stop_domain(id: u32) {
     PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.2.domain() != id);
-    SERVICES.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.4.domain() != id);
+    SERVICES.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.3.domain() != id);
     // a stopped first domain hands its services to the next one
     if let Some(endpoint) = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         serve_first_services(endpoint);
@@ -2059,7 +2090,7 @@ pub fn stop_domain(id: u32) {
     for channel in channels { channel.close(); }
 }
 
-fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, version: u32, open: ServiceOpen, close: ServiceClose, scope: crate::domain::Callback) {
+fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, version: u32, callbacks: ServiceCallbacks, scope: crate::domain::Callback) {
     let _k = crate::zone_alloc::kept();
     endpoint.register(
         name,
@@ -2069,9 +2100,9 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
             // one reference for the program (freed by its end call), one kept here
             let for_program = std::sync::Arc::into_raw(channel.clone()) as *mut std::ffi::c_void;
             let active = scope.call(|| {
-                let handle = open(opened.args.as_ptr(), opened.args.len(), service_sink, for_program);
+                let handle = (callbacks.open)(opened.args.as_ptr(), opened.args.len(), service_sink, for_program);
                 if handle == 0 { return None; }
-                let active = std::sync::Arc::new(ActiveService { scope, close, handle, channel: channel.clone(), closed: AtomicBool::new(false) });
+                let active = std::sync::Arc::new(ActiveService { scope, callbacks, handle, channel: channel.clone(), closed: Mutex::new(false) });
                 ACTIVE_SERVICES.lock().unwrap_or_else(|e| e.into_inner()).push(active.clone());
                 // Stop can race an open already in flight: it either drains this entry or this
                 // check closes it. The callback's registration keeps the domain alive throughout.
@@ -2089,9 +2120,25 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
             let service = active.clone();
             { let _k = crate::zone_alloc::kept();
             if let Err(e) = std::thread::Builder::new().name("run-inspect-service".into()).spawn(move || {
-                while let Some(ev) = ch.recv() {
-                    if matches!(ev, makepad_remote::Event::Closed(..)) {
-                        break;
+                'receive: while let Some(ev) = ch.recv() {
+                    match ev {
+                        makepad_remote::Event::Data(bytes) => {
+                            if let Some(data) = callbacks.data {
+                                loop {
+                                    let closed = service.closed.lock().unwrap_or_else(|e| e.into_inner());
+                                    if *closed { break 'receive; }
+                                    match scope.call(|| data(service.handle, bytes.as_ptr(), bytes.len())) {
+                                        Some(true) => break,
+                                        None => break 'receive,
+                                        Some(false) => {}
+                                    }
+                                    drop(closed);
+                                    std::thread::sleep(std::time::Duration::from_millis(1));
+                                }
+                            }
+                        }
+                        makepad_remote::Event::Closed(..) => break,
+                        makepad_remote::Event::Opened(_) => {}
                     }
                 }
                 service.close();
@@ -2111,19 +2158,28 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
 /// its endpoint, each channel a producer the program runs. The same mechanism as
 /// [`relax_register_inspect`], for streams.
 pub extern "C" fn relax_register_remote_service(name: *const u8, len: usize, version: u32, open: ServiceOpen, close: ServiceClose) {
+    register_remote_service(name, len, version, ServiceCallbacks { open, close, data: None });
+}
+
+/// Registration with a DATA callback. The original entry point keeps its five-argument ABI.
+pub extern "C" fn relax_register_remote_service_data(name: *const u8, len: usize, version: u32, open: ServiceOpen, close: ServiceClose, data: ServiceData) {
+    register_remote_service(name, len, version, ServiceCallbacks { open, close, data: Some(data) });
+}
+
+fn register_remote_service(name: *const u8, len: usize, version: u32, callbacks: ServiceCallbacks) {
     let _kept = crate::zone_alloc::kept();
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());
-    services.retain(|x| !(x.0 == name && x.4.domain() == scope.domain()));
-    services.push((name.clone(), version, open, close, scope));
+    services.retain(|x| !(x.0 == name && x.3.domain() == scope.domain()));
+    services.push((name.clone(), version, callbacks, scope));
     // like the commands: the first domain's service is the process's; a later domain's waits
-    let first = services.iter().filter(|x| x.0 == name).min_by_key(|x| x.4.domain()).is_some_and(|x| x.4 == scope);
+    let first = services.iter().filter(|x| x.0 == name).min_by_key(|x| x.3.domain()).is_some_and(|x| x.3 == scope);
     drop(services);
     // the endpoint may be up already; otherwise `start` serves what is registered by then
     if first {
         if let Some(endpoint) = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            serve_program_service(endpoint, &name, version, open, close, scope);
+            serve_program_service(endpoint, &name, version, callbacks, scope);
         }
     }
 }
@@ -2131,10 +2187,10 @@ pub extern "C" fn relax_register_remote_service(name: *const u8, len: usize, ver
 /// Each service name served by its first remaining domain (after `start`, or a domain stopped).
 fn serve_first_services(endpoint: &makepad_remote::Endpoint) {
     let services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());
-    for (i, (name, version, open, close, scope)) in services.iter().enumerate() {
-        let first = services.iter().enumerate().filter(|(_, x)| x.0 == *name).min_by_key(|(_, x)| x.4.domain()).map(|(j, _)| j);
+    for (i, (name, version, callbacks, scope)) in services.iter().enumerate() {
+        let first = services.iter().enumerate().filter(|(_, x)| x.0 == *name).min_by_key(|(_, x)| x.3.domain()).map(|(j, _)| j);
         if first == Some(i) {
-            serve_program_service(endpoint, name, *version, *open, *close, *scope);
+            serve_program_service(endpoint, name, *version, *callbacks, *scope);
         }
     }
 }

@@ -445,7 +445,10 @@ pub fn relax_as_rustc() -> bool {
 pub fn rustc_answer(args: &[String], input: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
     // the session of this process's own options: a question's words are rustc's, never Relax's
     // (a script's `$RUSTC --allow-c` sets nothing of the run's)
-    let sess = answer_session();
+    let sess = match answer_session() {
+        Ok(s) => s,
+        Err(e) => return (2, Vec::new(), format!("{}: {e}\n", crate::tool_name()).into_bytes()),
+    };
     let out = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["--version"] | ["-V"] => format!("rustc {} (Relax {})\n", RUSTC_VERSION, PROVENANCE),
         ["-vV"] | ["--version", "--verbose"] | ["--verbose", "--version"] | ["-V", "--verbose"] | ["--verbose", "-V"] => format!(
@@ -643,9 +646,12 @@ fn drop_ambient_grants() {
 /// a run thread (tool.rs, while the script's and the JIT's threads run) then reads and writes
 /// nothing of the process environment; it made a whole session there, whose start sets
 /// RUSTUP_HOME and CARGO_HOME (keep_toolchain_homes), a race with every thread that reads it.
-fn answer_session() -> &'static std::sync::Arc<crate::Session> {
-    static ANSWER: std::sync::OnceLock<std::sync::Arc<crate::Session>> = std::sync::OnceLock::new();
-    ANSWER.get_or_init(|| std::sync::Arc::new(session_of(crate::options::Options::from_env(), crate::options::RuntimeOptions::from_env())))
+fn answer_session() -> Result<&'static std::sync::Arc<crate::Session>, String> {
+    static ANSWER: std::sync::OnceLock<Result<std::sync::Arc<crate::Session>, String>> = std::sync::OnceLock::new();
+    ANSWER.get_or_init(|| {
+        let options = crate::options::Options::try_from_env()?;
+        Ok(std::sync::Arc::new(session_of(options, crate::options::RuntimeOptions::from_env())))
+    }).as_ref().map_err(Clone::clone)
 }
 
 /// A session of these options: the machine's CPU, the target.
@@ -661,14 +667,19 @@ fn session_of(options: crate::options::Options, runtime: crate::options::Runtime
 
 /// Construct the invocation inputs before parsing; CLI overrides replace environment values.
 /// rustc: compiler/rustc_session/src/config.rs:2428, session.rs:90-93.
-pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
+pub fn session_from_env(args: &[String]) -> Result<std::sync::Arc<crate::Session>, String> {
     crate::pool::thread_start(crate::jit::ensure_altstack);
     keep_toolchain_homes();
     crate::harness::take_test_package();
     if crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed {
         drop_ambient_grants();
     }
-    let mut options = crate::options::Options::from_env();
+    let mut options = crate::options::Options::try_from_env()?;
+    if let Some(width) = options.check_target.web().filter(|_| !crate::web::RUNTIME) {
+        let triple = crate::options::CheckTarget::web_triple(width);
+        let arch = triple.split('-').next().unwrap_or(triple);
+        return Err(format!("{arch} checks need the web runtime, which runs on macOS and Linux only (RELAX_CHECK_TARGET={triple})"));
+    }
     let mut runtime = crate::options::RuntimeOptions::from_env();
     // `--no-asm` and the grants (`--allow-*`) anywhere before `--`, for every command (run, test,
     // check, the relax runner); cli_main drops them from the arguments. `--no-asm` reaches the
@@ -678,20 +689,49 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         if a == "--no-asm" {
             options.no_asm = true;
             std::env::set_var("RELAX_NO_ASM", "1");
-        } else if let Err(e) = crate::options::apply_grant(a, &mut options, &mut runtime) {
-            eprintln!("{}: {e}", crate::tool_name());
-            std::process::exit(2);
+        } else {
+            crate::options::apply_grant(a, &mut options, &mut runtime)?;
         }
     }
     // the RUSTC questions' session: the options a question read before, `--no-asm` included (it
     // reaches them through the environment; the grants never do)
-    answer_session();
+    let _ = answer_session();
     options.live |= args.get(1).map(String::as_str) == Some("live");
     if args.get(1).map(String::as_str) == Some("fix") {
         options.relaxed = Some("all".to_string());
     }
     options.spec_hot = Some(options.spec_hot.unwrap_or_else(crate::jit::on_battery));
-    std::sync::Arc::new(session_of(options, runtime))
+    Ok(std::sync::Arc::new(session_of(options, runtime)))
+}
+
+#[cfg(test)]
+#[test]
+fn session_from_env_and_rustc_answer_refuse_unknown_check_target() {
+    isolated_test!(session_from_env_and_rustc_answer_refuse_unknown_check_target);
+    let unknown = "aarch64-unknown-linux-gnu";
+    std::env::set_var("RELAX_CHECK_TARGET", unknown);
+    let error = session_from_env(&["makepad".into(), "check".into(), "p".into()]).err().expect("unknown target accepted");
+    assert!(error.contains(&format!("unknown RELAX_CHECK_TARGET `{unknown}`")), "{error}");
+    for triple in crate::options::CheckTarget::supported_triples() {
+        assert!(error.contains(triple), "missing {triple} in {error}");
+    }
+    let (code, out, err) = rustc_answer(&["--print".into(), "cfg".into()], &[]);
+    assert_eq!(code, 2);
+    assert!(out.is_empty(), "rustc printed cfg for an unknown target");
+    assert_eq!(String::from_utf8(err).unwrap(), format!("{}: {error}\n", crate::tool_name()));
+
+    std::env::set_var("RELAX_CHECK_TARGET", "wasm32-unknown-unknown");
+    let error = session_from_env(&["makepad".into(), "check".into(), "p".into()]).err();
+    let refusal = "wasm32 checks need the web runtime, which runs on macOS and Linux only";
+    if crate::web::RUNTIME {
+        if let Some(error) = error {
+            assert!(!error.contains(refusal), "{error}");
+            eprintln!("{error}");
+        }
+    } else {
+        let error = error.expect("wasm32 check accepted without the web runtime");
+        assert!(error.contains(refusal), "{error}");
+    }
 }
 
 /// A `makepad run` host (Sandboxed) takes the grants from its words before `--` alone: their
@@ -707,7 +747,7 @@ fn a_sandboxed_host_takes_its_grants_from_its_words_and_bare_relax_from_its_envi
         std::env::set_var(name, value);
     }
     let words = |args: &[&str]| {
-        let s = session_from_env(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        let s = session_from_env(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>()).unwrap();
         crate::options::grant_words(&s.options, &s.runtime)
     };
     // (this test plays both entry points)
@@ -1161,6 +1201,7 @@ fn a_workspace_inside_a_checkout_takes_that_checkouts_std_before_the_one_beside_
 pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool, overflow_checks: bool) -> Vec<preload::PreCrate> {
     let dir = std_dir();
     let mut v = vec![preload::PreCrate {
+        is_bin: false, harness: false,
         
         name: "core".to_string(),
         root: format!("{}/core/lib.rs", dir),
@@ -1174,6 +1215,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool, overflo
     let alloc_root = format!("{}/alloc/lib.rs", dir);
     if crate::vfs::exists(&alloc_root) {
         v.push(preload::PreCrate {
+            is_bin: false, harness: false,
             
             name: "alloc".to_string(),
             root: alloc_root,
@@ -1186,6 +1228,7 @@ pub fn std_pre_crates(sess: &std::sync::Arc<crate::Session>, simd: bool, overflo
         });
     }
     v.push(preload::PreCrate {
+        is_bin: false, harness: false,
         
         name: "std".to_string(),
         root: format!("{}/std/lib.rs", dir),
@@ -1707,7 +1750,7 @@ fn round18_rpit_diagnostic() {
     const CHILD: &str = "RELAX_ROUND18_RPIT_CHILD";
     let dir = env!("CARGO_MANIFEST_DIR");
     if std::env::var_os(CHILD).is_some() {
-        let sess = session_from_env(&[]);
+        let sess = session_from_env(&[]).unwrap();
         os::proc::exit(cmd_test(&sess, &[format!("{dir}/tests/rpit.rs")]));
     }
     let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())

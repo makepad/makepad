@@ -1,5 +1,5 @@
-//! Tiny OS entry point: select the installation's active loader and start one app.
-//! This binary uses only std; it must not link the makepad runner or its JIT dependencies.
+//! Tiny OS entry point: select the installation's confirmed loader and start one app.
+//! The launcher and its loader-switch dependency use only std.
 //!
 //! It starts the loader from a hard link named as the app's program (`program`), so the exec
 //! names the process after it as cargo's binary is named (relax-compiler selfexe.rs launch_link;
@@ -11,21 +11,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// Select the active installed loader, or the source loader when the selection is unavailable.
-fn loader_path(home: &Path, current: &str, is_file: impl Fn(&Path) -> bool) -> (PathBuf, String) {
-    let binary = if cfg!(windows) { "host/makepad.exe" } else { "host/makepad" };
-    let current = current.trim();
-    let commit = current.len() == 40 && current.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
-    let mut name = if commit { current } else { "src" };
-    loop {
-        let new = home.join("target/loader").join(name).join(binary);
-        if is_file(&new) { return (new, name.to_string()); }
-        let old = home.join("cache/loader").join(name).join("target").join(binary);
-        if name == "src" || is_file(&old) { return (old, name.to_string()); }
-        name = "src";
-    }
-}
-
 /// The program `makepad app <id>` runs, named as the run names its own executable (relax-compiler
 /// selfexe.rs program_name): `--bin`'s value, else its package's last part, from the launch
 /// record's `run` words (tools/run/runner/src/launch.rs). None for another command or a name that
@@ -33,7 +18,7 @@ fn loader_path(home: &Path, current: &str, is_file: impl Fn(&Path) -> bool) -> (
 #[cfg(any(unix, test))]
 fn program(words: &[String]) -> Option<String> {
     // the loader's options before the package that take a value (relax-compiler run.rs)
-    const VALUE: [&str; 11] = ["--units", "--profile", "--harness-restart", "--subject", "--report-to", "--entry", "--cfg", "--exports", "--run-dir", "--workspace-dir", "--boundary"];
+    const VALUE: [&str; 12] = ["--units", "--profile", "--harness-restart", "--subject", "--report-to", "--entry", "--cfg", "--exports", "--run-dir", "--workspace-dir", "--boundary", "--known-refused"];
     let mut it = words.iter();
     if it.next()? != "run" {
         return None;
@@ -122,9 +107,9 @@ fn named_start(home: &Path, id: &str, folder: &str, dir: &Path, loader: &Path, l
     made.map_err(|why| note(home, &format!("{why}; app {id} runs under the loader's name"))).ok()
 }
 
-fn active(home: &Path) -> (PathBuf, String) {
-    let current = std::fs::read_to_string(home.join("cache/loader/current")).unwrap_or_default();
-    loader_path(home, &current, Path::is_file)
+fn confirmed_loader(home: &Path) -> (PathBuf, String) {
+    let loader = makepad_loader_switch::confirmed(&home.join("cache/loader"));
+    (loader.binary, loader.name)
 }
 
 // The same app-id rule as tools/run/runner/src/launch.rs valid_id().
@@ -151,7 +136,7 @@ fn launch(exe: &Path) -> Result<(), String> {
     let plist = std::fs::read_to_string(&plist_path).map_err(|e| format!("{}: {e}", plist_path.display()))?;
     let id = plist_string(&plist, "MakepadApp").filter(|id| valid_id(id)).ok_or("Info.plist has no valid MakepadApp")?;
     let home = plist_string(&plist, "MakepadRunHome").filter(|home| !home.is_empty()).map(PathBuf::from).ok_or("Info.plist has no MakepadRunHome")?;
-    let (loader, folder) = active(&home);
+    let (loader, folder) = confirmed_loader(&home);
     // the app's program: a hard link in the bundle (never the launcher itself), else the
     // `makepad` symlink below
     if let Some(named) = named_start(&home, &id, &folder, macos, &loader, exe) {
@@ -183,7 +168,7 @@ fn launch(exe: &Path) -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
     let id = args.next().and_then(|id| id.into_string().ok()).filter(|id| valid_id(id)).ok_or("usage: makepad-launcher <app-id>")?;
     if args.next().is_some() { return Err("usage: makepad-launcher <app-id>".into()); }
-    let (loader, _folder) = active(home);
+    let (loader, _folder) = confirmed_loader(home);
     // the app's program: a hard link in a folder of its own per app, `+launch` as the runner's
     #[cfg(unix)]
     let start = named_start(home, &id, &_folder, &home.join("cache/launch").join(&id).join("+launch"), &loader, exe).unwrap_or_else(|| loader.clone());
@@ -224,26 +209,65 @@ mod tests {
 
     #[test]
     fn loader_selection() {
-        let root = Path::new("installation");
-        let binary = if cfg!(windows) { "makepad.exe" } else { "makepad" };
-        let src = root.join("target/loader/src/host").join(binary);
-        let old_src = root.join("cache/loader/src/target/host").join(binary);
+        use std::fs;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let home = std::env::temp_dir().join(format!("makepad-launcher-{}-{stamp}", std::process::id()));
+        let root = home.join("cache/loader");
+        let selected = || confirmed_loader(&home);
+        let binary = makepad_loader_switch::HOST_BINARY;
         let commit = "0123456789abcdef0123456789abcdef01234567";
-        let selected = root.join("target/loader").join(commit).join("host").join(binary);
-        let old_selected = root.join("cache/loader").join(commit).join("target/host").join(binary);
-        assert_eq!(loader_path(root, &format!(" {commit}\n"), |_| true), (selected, commit.into()));
-        assert_eq!(loader_path(root, commit, |p| p == old_selected || p == src), (old_selected, commit.into()));
-        assert_eq!(loader_path(root, commit, |p| p == src || p == old_src), (src.clone(), "src".into()));
-        assert_eq!(loader_path(root, commit, |p| p == old_src), (old_src.clone(), "src".into()));
-        assert_eq!(loader_path(root, "src\n", |_| true), (src.clone(), "src".into()));
-        assert_eq!(loader_path(root, "src", |_| false), (old_src.clone(), "src".into()));
+        let trial = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let src = home.join("target/loader/src").join(binary);
+        let old_src = root.join("src/target").join(binary);
+        let new = home.join("target/loader").join(commit).join(binary);
+        let old = root.join(commit).join("target").join(binary);
+        let install = |path: &Path| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"loader").unwrap();
+        };
+        for path in [&src, &old_src, &new, &old] { install(path); }
+        fs::write(root.join("current"), format!(" {commit}\n")).unwrap();
+        assert_eq!(selected(), (new.clone(), commit.into()));
+        fs::remove_file(&new).unwrap();
+        assert_eq!(selected(), (old.clone(), commit.into()));
+        fs::remove_file(&old).unwrap();
+        assert_eq!(selected(), (src.clone(), "src".into()));
+        fs::remove_file(&src).unwrap();
+        assert_eq!(selected(), (old_src.clone(), "src".into()));
+        fs::remove_file(&old_src).unwrap();
+        fs::write(root.join("current"), "src").unwrap();
+        assert_eq!(selected(), (old_src.clone(), "src".into()));
+
+        install(&src);
+        fs::write(root.join("current"), "src\n").unwrap();
+        assert_eq!(selected(), (src.clone(), "src".into()));
+        // Even an existing binary at a path named by an invalid pointer is ineligible.
+        let invalid_dirs = ["target/outside", "target/loader/abc", "target/loader/other", "target/loader/0123456789ABCDEF0123456789ABCDEF01234567"];
+        for dir in invalid_dirs { install(&home.join(dir).join(binary)); }
         for invalid in ["", "../outside", "/outside", "0123456789ABCDEF0123456789ABCDEF01234567", "abc", "src/../other"] {
-            let fallback = loader_path(root, invalid, |p| {
-                assert_eq!(p, src, "invalid pointer reached the filesystem");
-                false
-            });
-            assert_eq!(fallback, (old_src.clone(), "src".into()));
+            fs::write(root.join("current"), invalid).unwrap();
+            assert_eq!(selected(), (src.clone(), "src".into()));
         }
+        // On a case-insensitive file system the upper-case folder is the commit's own: clear them.
+        for dir in invalid_dirs { fs::remove_dir_all(home.join(dir)).unwrap(); }
+
+        // The trial binary exists: a pending JIT switch must still use previous.
+        install(&home.join("target/loader").join(trial).join(binary));
+        for key in ["current", "pending"] { fs::write(root.join(key), trial).unwrap(); }
+        assert_eq!(selected(), (src.clone(), "src".into()), "missing previous");
+        for previous in ["../outside", "src", commit] {
+            fs::write(root.join("previous"), previous).unwrap();
+            assert_eq!(selected(), (src.clone(), "src".into()), "invalid, src or unbuilt previous");
+        }
+        install(&old);
+        assert_eq!(selected(), (old.clone(), commit.into()), "previous in its source folder");
+        install(&new);
+        assert_eq!(selected(), (new.clone(), commit.into()), "previous in the shared target");
+        for key in ["current", "pending"] { fs::write(root.join(key), commit).unwrap(); }
+        assert_eq!(selected(), (new.clone(), commit.into()), "code switch in the shared target");
+        fs::remove_file(new).unwrap();
+        assert_eq!(selected(), (old, commit.into()), "code switch in its source folder");
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

@@ -10,9 +10,8 @@ use crate::{
 };
 use std::sync::Arc;
 
-// A macro_rules transcriber's `$x` keeps its position (TNode::Var), and a parsed file its
-// meta_origin table.
-pub const VERSION: u32 = 28;
+// Expansion-made imports retain each path and its visibility in file images and replay.
+pub const VERSION: u32 = 30;
 
 pub(crate) mod strings;
 
@@ -211,8 +210,29 @@ impl Codec for MacroDef {
             builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, scope_pos: Codec::get(r)?, def_mod: Codec::get(r)?, edition: Codec::get(r)?, input: None })
     }
 }
-fields!(UseItem, module, path, bind, is_pub);
-fields!(ModItem, pos, end, macro_use, is_pub);
+impl UseVis {
+    pub(crate) fn tag(&self) -> u8 {
+        match self { Self::Private => 0, Self::Pub => 1, Self::Crate => 2, Self::Super => 3, Self::In(_) => 4 }
+    }
+    pub(crate) fn from_tag(tag: u8, path: impl FnOnce() -> Option<Vec<String>>) -> Option<Self> {
+        Some(match tag {
+            0 => Self::Private, 1 => Self::Pub, 2 => Self::Crate, 3 => Self::Super,
+            4 => Self::In(path()?), _ => return None,
+        })
+    }
+}
+impl Codec for UseVis {
+    fn put(&self, w: &mut Vec<u8>) {
+        w.push(self.tag());
+        if let Self::In(path) = self { path.put(w); }
+    }
+    fn get(r: &mut Decode<'_>) -> Option<Self> {
+        Self::from_tag(u8::get(r)?, || Vec::<String>::get(r))
+    }
+}
+fields!(ExpUse, path, vis);
+fields!(UseItem, module, path, bind, vis);
+fields!(ModItem, pos, end, macro_use, vis);
 fields!(LazyCtx, krate, path, module_path, mods, s2_fmt);
 /// Option<Box<LazyCtx>>'s encoding
 impl Codec for crate::parser::FileLazy {

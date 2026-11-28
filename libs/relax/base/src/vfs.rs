@@ -608,14 +608,16 @@ pub fn edits_deleted() -> BTreeSet<String> {
 }
 
 fn load_deleted(dir: &std::path::Path) -> BTreeSet<String> {
-    std::fs::read_to_string(dir.join(".makepad-run-deleted")).unwrap_or_default().lines()
-        .filter(|p| !p.is_empty()).map(str::to_string).collect()
+    try_load_deleted(dir).unwrap_or_default()
 }
 
-fn save_deleted(dir: &std::path::Path, deleted: &BTreeSet<String>) -> io::Result<()> {
-    let tmp = dir.join(".makepad-run-deleted.tmp");
-    std::fs::write(&tmp, deleted.iter().map(|p| format!("{p}\n")).collect::<String>())?;
-    std::fs::rename(tmp, dir.join(".makepad-run-deleted"))
+fn try_load_deleted(dir: &std::path::Path) -> io::Result<BTreeSet<String>> {
+    Ok(read_ledger(dir, ".makepad-run-deleted")?.lines()
+        .filter(|p| !p.is_empty()).map(str::to_string).collect())
+}
+
+fn save_deleted(held: &LedgerLock, deleted: &BTreeSet<String>) -> io::Result<()> {
+    held.replace(".makepad-run-deleted", &deleted.iter().map(|p| format!("{p}\n")).collect::<String>())
 }
 
 fn deleted_paths(dir: &std::path::Path) -> Arc<BTreeSet<String>> {
@@ -1590,47 +1592,92 @@ pub extern "C" fn relax_vfs_release(id: u64) {
 
 // ---- edits (RELAX_EDITS): writes into virtual folders
 
-/// The edits folder's records: edited path -> the store blob it was edited from (None: a file
-/// the store did not have).
-fn load_records(dir: &std::path::Path) -> BTreeMap<String, Option<Oid>> {
-    let mut out = BTreeMap::new();
-    if let Ok(t) = std::fs::read_to_string(dir.join(".makepad-run-edits")) {
-        for line in t.lines() {
-            if let Some((rel, oid)) = line.split_once('\t') {
-                out.insert(rel.to_string(), if oid == "new" { None } else { store::from_hex(oid) });
-            }
-        }
-    }
-    out
+fn ledger_temp(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    // Read bindings and temp names both need process-unique sequence numbers. Gaps are fine.
+    let seq = BIND_SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{name}.tmp.{}.{seq:x}", std::process::id()))
 }
 
-fn save_records(dir: &std::path::Path, r: &BTreeMap<String, Option<Oid>>) -> io::Result<()> {
+/// The edits folder's cross-process lock, released when the file closes.
+/// Hold it only for ledger I/O and merging, with store and edited-file I/O outside the lock.
+pub struct LedgerLock {
+    dir: std::path::PathBuf,
+    _file: std::fs::File,
+}
+
+impl LedgerLock {
+    pub fn take(dir: &std::path::Path) -> io::Result<Self> {
+        #[cfg(test)]
+        tests::before_ledger_lock();
+        let path = dir.join(".makepad-run-lock");
+        let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path)
+            .and_then(|file| { file.lock()?; Ok(file) })
+            .map_err(|e| io::Error::new(e.kind(), format!("edits ledger lock {}: {e}", path.display())))?;
+        Ok(Self { dir: dir.to_path_buf(), _file: file })
+    }
+
+    /// Publishes a complete ledger by renaming a unique temp file into place.
+    pub fn replace(&self, name: &str, text: &str) -> io::Result<()> {
+        let tmp = ledger_temp(&self.dir, name);
+        let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, self.dir.join(name)));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+}
+
+fn read_ledger(dir: &std::path::Path, name: &str) -> io::Result<String> {
+    let path = dir.join(name);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(io::Error::new(e.kind(), format!("edits ledger {}: {e}", path.display()))),
+    }
+}
+
+/// The edits folder's records: edited path -> the store blob it was edited from (None: a file
+/// the store did not have).
+fn try_load_records(dir: &std::path::Path) -> io::Result<BTreeMap<String, Option<Oid>>> {
+    let mut out = BTreeMap::new();
+    for line in read_ledger(dir, ".makepad-run-edits")?.lines() {
+        if let Some((rel, oid)) = line.split_once('\t') {
+            out.insert(rel.to_string(), if oid == "new" { None } else { store::from_hex(oid) });
+        }
+    }
+    Ok(out)
+}
+
+fn load_records(dir: &std::path::Path) -> BTreeMap<String, Option<Oid>> {
+    try_load_records(dir).unwrap_or_default()
+}
+
+fn save_records(held: &LedgerLock, r: &BTreeMap<String, Option<Oid>>) -> io::Result<()> {
     let text: String = r.iter().map(|(rel, oid)| format!("{}\t{}\n", rel, oid.as_ref().map(store::hex).unwrap_or_else(|| "new".into()))).collect();
-    let tmp = dir.join(".makepad-run-edits.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, dir.join(".makepad-run-edits"))
+    held.replace(".makepad-run-edits", &text)
 }
 
 static EDIT_LOCK: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
 
 /// The files `seed_edits` wrote: path -> the store blob written.
-fn load_seeded(dir: &std::path::Path) -> BTreeMap<String, Oid> {
+fn try_load_seeded(dir: &std::path::Path) -> io::Result<BTreeMap<String, Oid>> {
     let mut out = BTreeMap::new();
-    if let Ok(t) = std::fs::read_to_string(dir.join(".makepad-run-seeded")) {
-        for line in t.lines() {
-            if let Some((rel, oid)) = line.split_once('\t').and_then(|(r, o)| Some((r, store::from_hex(o)?))) {
-                out.insert(rel.to_string(), oid);
-            }
+    for line in read_ledger(dir, ".makepad-run-seeded")?.lines() {
+        if let Some((rel, oid)) = line.split_once('\t').and_then(|(r, o)| Some((r, store::from_hex(o)?))) {
+            out.insert(rel.to_string(), oid);
         }
     }
-    out
+    Ok(out)
 }
 
-fn save_seeded(dir: &std::path::Path, s: &BTreeMap<String, Oid>) -> io::Result<()> {
+#[cfg(test)]
+fn load_seeded(dir: &std::path::Path) -> BTreeMap<String, Oid> {
+    try_load_seeded(dir).unwrap_or_default()
+}
+
+fn save_seeded(held: &LedgerLock, s: &BTreeMap<String, Oid>) -> io::Result<()> {
     let text: String = s.iter().map(|(rel, oid)| format!("{}\t{}\n", rel, store::hex(oid))).collect();
-    let tmp = dir.join(".makepad-run-seeded.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, dir.join(".makepad-run-seeded"))
+    held.replace(".makepad-run-seeded", &text)
 }
 
 /// git's blob id of `data`.
@@ -1647,7 +1694,7 @@ pub fn seed_edits(folders: &[String]) -> io::Result<usize> {
     let Some(dir) = EDITS.read().unwrap().clone() else { return Ok(0) };
     let Some(outer) = MOUNTS.read().unwrap().iter().map(|x| x.root.clone()).min_by_key(|r| r.len()) else { return Ok(0) };
     let _g = EDIT_LOCK.lock().unwrap();
-    let mut seeded = load_seeded(&dir);
+    let mut added = BTreeMap::new();
     let records = load_records(&dir);
     let mut wrote = 0;
     for folder in folders {
@@ -1678,12 +1725,15 @@ pub fn seed_edits(folders: &[String]) -> io::Result<usize> {
                 std::fs::create_dir_all(p)?;
             }
             std::fs::write(&disk, &data)?;
-            seeded.insert(rel, e.oid);
+            added.insert(rel, e.oid);
             wrote += 1;
         }
     }
     if wrote > 0 {
-        save_seeded(&dir, &seeded)?;
+        let held = LedgerLock::take(&dir)?;
+        let mut seeded = try_load_seeded(&dir)?;
+        seeded.extend(added);
+        save_seeded(&held, &seeded)?;
     }
     Ok(wrote)
 }
@@ -1706,8 +1756,12 @@ pub fn prepare_edit(path: &str, keep: bool) -> io::Result<std::path::PathBuf> {
     }
     let _g = EDIT_LOCK.lock().unwrap();
     let dir = EDITS.read().unwrap().clone().unwrap();
-    let mut deleted = load_deleted(&dir);
-    if deleted.remove(&rel) { save_deleted(&dir, &deleted)?; }
+    if load_deleted(&dir).contains(&rel) {
+        let held = LedgerLock::take(&dir)?;
+        let mut deleted = try_load_deleted(&dir)?;
+        deleted.remove(&rel);
+        save_deleted(&held, &deleted)?;
+    }
     if disk.is_file() {
         return Ok(disk);
     }
@@ -1716,28 +1770,28 @@ pub fn prepare_edit(path: &str, keep: bool) -> io::Result<std::path::PathBuf> {
     }
     let (m, mrel) = find(path).ok_or_else(|| not_found(path))?;
     let entry = m.file(&mrel).filter(|e| e.mode != 0o160000).cloned();
-    let mut records = load_records(&dir);
-    match &entry {
-        Some(e) => {
-            let data = match m.store.object(&e.oid)? {
-                Some((_, d)) => d,
-                None => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{path}: object missing"))),
-            };
-            let base = dir.join(".makepad-run-base").join(&rel);
-            if let Some(bp) = base.parent() {
-                std::fs::create_dir_all(bp)?;
-            }
-            std::fs::write(&base, &data)?;
-            if keep {
-                std::fs::write(&disk, &data)?;
-            }
-            records.insert(rel.clone(), Some(e.oid));
+    if let Some(e) = &entry {
+        let data = match m.store.object(&e.oid)? {
+            Some((_, d)) => d,
+            None => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{path}: object missing"))),
+        };
+        let base = dir.join(".makepad-run-base").join(&rel);
+        if let Some(bp) = base.parent() {
+            std::fs::create_dir_all(bp)?;
         }
-        None => {
-            records.entry(rel.clone()).or_insert(None);
+        std::fs::write(&base, &data)?;
+        if keep {
+            std::fs::write(&disk, &data)?;
         }
     }
-    save_records(&dir, &records)?;
+    let held = LedgerLock::take(&dir)?;
+    let mut records = try_load_records(&dir)?;
+    if let Some(e) = entry {
+        records.insert(rel, Some(e.oid));
+    } else {
+        records.entry(rel).or_insert(None);
+    }
+    save_records(&held, &records)?;
     Ok(disk)
 }
 
@@ -1863,21 +1917,27 @@ pub fn prepare_edit_dir(path: &str) -> io::Result<std::path::PathBuf> {
 /// Returns one line per conflict (for the run's report); nothing when there are no edits.
 pub fn reconcile_edits() -> Vec<String> {
     let Some(dir) = EDITS.read().unwrap().clone() else { return Vec::new() };
-    reconcile_seeded(&dir);
-    if !dir.join(".makepad-run-edits").is_file() {
-        return Vec::new();
+    let mut out: Vec<String> = reconcile_seeded(&dir).into_iter().collect();
+    if let Err(e) = reconcile_records(&dir, &mut out) {
+        out.push(e.to_string());
+    }
+    out
+}
+
+fn reconcile_records(dir: &std::path::Path, out: &mut Vec<String>) -> io::Result<()> {
+    if matches!(dir.join(".makepad-run-edits").try_exists(), Ok(false)) {
+        return Ok(());
     }
     let _g = EDIT_LOCK.lock().unwrap();
-    let mut records = load_records(&dir);
-    let mut deleted = load_deleted(&dir);
-    let mut out = Vec::new();
+    let mut records = try_load_records(dir)?;
+    let mut deleted = try_load_deleted(dir)?;
     let mut changed = false;
     let roots: Vec<String> = {
         let m = MOUNTS.read().unwrap();
         let outer = m.iter().map(|x| x.root.clone()).min_by_key(|r| r.len());
         outer.into_iter().collect()
     };
-    let Some(outer) = roots.first().cloned() else { return Vec::new() };
+    let Some(outer) = roots.first().cloned() else { return Ok(()) };
     for (rel, base) in records.clone() {
         let disk = dir.join(&rel);
         if !disk.is_file() && !deleted.contains(&rel) {
@@ -1932,23 +1992,35 @@ pub fn reconcile_edits() -> Vec<String> {
         }
     }
     if changed {
-        if let Err(e) = save_deleted(&dir, &deleted) { out.push(format!("whiteouts: {e}")); }
-        let _ = save_records(&dir, &records);
+        // Cross-process race left open (a design question): this pass decides from the snapshot it
+        // loaded and changes disk during the pass (renames, removals, rewrites), so a merge at commit
+        // cannot make it safe, and holding the ledger lock for the whole pass would make a UI-thread
+        // writer in another process (a file created in an editor) wait for it. The lock covers only
+        // this save: records another process wrote since the snapshot are lost here.
+        let held = LedgerLock::take(dir)?;
+        if let Err(e) = save_deleted(&held, &deleted) { out.push(format!("whiteouts: {e}")); }
+        let _ = save_records(&held, &records);
     }
-    out
+    Ok(())
 }
 
 /// The seeded files against the release being run: one still holding its seeded blob is brought
 /// to the release's file (removed when the release has none); one whose bytes changed becomes an
 /// edit from its seeded blob (then reconciled as every edit); one removed is forgotten.
-fn reconcile_seeded(dir: &std::path::Path) {
-    let mut seeded = load_seeded(dir);
+fn reconcile_seeded(dir: &std::path::Path) -> Option<String> {
+    let mut seeded = match try_load_seeded(dir) {
+        Ok(s) => s,
+        Err(e) => return Some(e.to_string()),
+    };
     if seeded.is_empty() {
-        return;
+        return None;
     }
-    let Some(outer) = MOUNTS.read().unwrap().iter().map(|x| x.root.clone()).min_by_key(|r| r.len()) else { return };
+    let outer = MOUNTS.read().unwrap().iter().map(|x| x.root.clone()).min_by_key(|r| r.len())?;
     let _g = EDIT_LOCK.lock().unwrap();
-    let mut records = load_records(dir);
+    let mut records = match try_load_records(dir) {
+        Ok(r) => r,
+        Err(e) => return Some(e.to_string()),
+    };
     let mut records_changed = false;
     for (rel, oid) in seeded.clone() {
         let disk = dir.join(&rel);
@@ -1977,10 +2049,20 @@ fn reconcile_seeded(dir: &std::path::Path) {
             }
         }
     }
-    let _ = save_seeded(dir, &seeded);
+    // Cross-process race left open (a design question): this pass decides from the snapshot it
+    // loaded and changes disk during the pass (renames, removals, rewrites), so a merge at commit
+    // cannot make it safe, and holding the ledger lock for the whole pass would make a UI-thread
+    // writer in another process (a file created in an editor) wait for it. The lock covers only
+    // this save: records another process wrote since the snapshot are lost here.
+    let held = match LedgerLock::take(dir) {
+        Ok(held) => held,
+        Err(e) => return Some(e.to_string()),
+    };
+    let _ = save_seeded(&held, &seeded);
     if records_changed {
-        let _ = save_records(dir, &records);
+        let _ = save_records(&held, &records);
     }
+    None
 }
 
 /// Whether the program wrote, removed or made the edits folder's `rel` (or a file in it, for a
@@ -2042,6 +2124,111 @@ mod tests {
 
     thread_local! {
         static FIRST_MOUNT_READ: Cell<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = const { Cell::new(None) };
+        static TAKE_HOOK: Cell<Option<fn()>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn before_ledger_lock() {
+        if let Some(hook) = TAKE_HOOK.with(Cell::take) {
+            hook();
+        }
+    }
+
+    const LEDGER_CHILD: &str = "RELAX_VFS_LEDGER_CHILD_STORE";
+
+    #[test]
+    fn ledger_lock_child() {
+        use std::io::Write;
+        let Some(path) = std::env::var_os(LEDGER_CHILD).map(std::path::PathBuf::from) else { return };
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let store = Arc::new(Store::open(&path).unwrap().expect("the child opens the parent's fixture store"));
+        let commit = store.index.refs[0].commit;
+        let root = "/ledger-test/vfs/m";
+        mount(root, store, &commit).unwrap();
+        let edits = path.with_extension("edits");
+        set_edits(Some(edits.clone()));
+        let probe = std::fs::OpenOptions::new().write(true).open(edits.join(".makepad-run-lock")).unwrap();
+        match probe.try_lock() {
+            Ok(()) => println!("ledger-lock: taken"),
+            Err(std::fs::TryLockError::WouldBlock) => println!("ledger-lock: would block"),
+            Err(std::fs::TryLockError::Error(e)) => panic!("the child can probe the parent's lock: {e}"),
+        }
+        std::io::stdout().flush().unwrap();
+        drop(probe);
+        TAKE_HOOK.with(|slot| slot.set(Some(|| {
+            println!("ledger-lock: taking");
+            std::io::stdout().flush().unwrap();
+        })));
+        let disk = prepare_edit(&format!("{root}/two.rs"), false).unwrap();
+        std::fs::write(disk, b"edited two").unwrap();
+        set_edits(None);
+        MOUNTS.write().unwrap().retain(|m| m.root != root);
+    }
+
+    #[test]
+    fn a_second_process_is_refused_the_ledger_lock_and_both_records_stay() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        fn next_marker(reader: &mut impl BufRead) -> io::Result<String> {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line)? == 0 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "child exited before the ledger-lock marker"));
+                }
+                if let Some((_, marker)) = line.split_once("ledger-lock: ") {
+                    return Ok(marker.trim_end().to_string());
+                }
+            }
+        }
+
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = test_store::Fixture::new(&[("one.rs", b"one"), ("two.rs", b"two")]);
+        let edits = fixture.store.path.with_extension("edits");
+        std::fs::create_dir(&edits).unwrap();
+        let name = ".makepad-run-edits";
+        assert!(try_load_records(&edits).expect("a missing ledger loads successfully").is_empty(), "a missing ledger has no records");
+        let held = LedgerLock::take(&edits).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "vfs::tests::ledger_lock_child", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(LEDGER_CHILD, &fixture.store.path).stdout(Stdio::piped()).spawn().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let first = ("one.rs".to_owned(), Some(blob_oid(b"one")));
+        let second = ("two.rs".to_owned(), Some(blob_oid(b"two")));
+        let publish = (|| -> io::Result<()> {
+            let probe = next_marker(&mut stdout)?;
+            if probe != "would block" {
+                return Err(io::Error::other(format!("the parent lock must refuse the child; child printed ledger-lock: {probe}")));
+            }
+            let commit = next_marker(&mut stdout)?;
+            if commit != "taking" {
+                return Err(io::Error::other(format!("the child must reach its records commit before the parent publishes; child printed ledger-lock: {commit}")));
+            }
+            let mut records = try_load_records(&edits)?;
+            records.insert(first.0.clone(), first.1);
+            save_records(&held, &records)
+        })();
+        drop(held);
+        let exit = child.wait().unwrap();
+        publish.expect("the child's probe and commit hook precede the parent's publication");
+        assert!(exit.success(), "the child completes its real edit after the parent unlocks: {exit}");
+        assert_eq!(try_load_records(&edits).unwrap(), BTreeMap::from([first, second]), "both records survive the child's commit");
+
+        let a = ledger_temp(&edits, name);
+        let b = ledger_temp(&edits, name);
+        assert_ne!(a, b, "each ledger replacement gets a distinct temp name");
+        let prefix = format!("{name}.tmp.{}.", std::process::id());
+        for path in [a, b] {
+            let seq = path.file_name().unwrap().to_str().unwrap().strip_prefix(&prefix)
+                .expect("the temp name contains the ledger name and decimal process ID");
+            assert!(!seq.is_empty() && seq.bytes().all(|c| c.is_ascii_hexdigit()), "the temp sequence is nonempty hexadecimal");
+        }
+        let path = edits.join(name);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = try_load_records(&edits).expect_err("a directory at the ledger path fails the reload");
+        assert_eq!(err.kind(), std::fs::read_to_string(&path).unwrap_err().kind(), "the loader preserves the read error kind");
+        assert!(err.to_string().contains(&format!("edits ledger {}", path.display())), "the read error identifies the ledger path: {err}");
     }
 
     pub(super) fn pause_after_first_mount_read() {

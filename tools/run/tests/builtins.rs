@@ -1,6 +1,5 @@
 // Relax's native built-in macros (src/builtins.rs). Expected values come from rustc with the
-// real proc macros (makepad-live-id / makepad-script-derive); the differential harness that
-// produced them: local/agent_state/fast-rust/tools/builtins/diff.sh.
+// real proc macros (makepad-live-id / makepad-script-derive).
 // run (the `makepad` loader links makepad's id! macros): RELAX_STD=libs/relax/compiler/std makepad test tools/run/tests/builtins.rs
 
 #[derive(Clone, Copy, PartialEq)]

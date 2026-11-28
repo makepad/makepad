@@ -285,13 +285,66 @@ pub fn add_pre_wall(ns: u64) {
 /// (rustc would reject the program). Reported by `makepad run` / `--check` (run.rs).
 static DERIVE_FAILED: relax_session::sync::Mutex<Option<(std::collections::HashSet<(String, u32, String)>, Vec<String>)>> = relax_session::sync::Mutex::new(None);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeriveFailure {
+    pub path: String,
+    pub item_lo: u32,
+    pub line: u32,
+    pub col: u32,
+    pub name: String,
+    pub msg: String,
+}
+
+thread_local! {
+    static CAPTURE: RefCell<Option<Vec<DeriveFailure>>> = const { RefCell::new(None) };
+}
+
+struct CaptureGuard(Option<Vec<DeriveFailure>>);
+
+impl CaptureGuard {
+    fn replace(next: Option<Vec<DeriveFailure>>) -> Self {
+        Self(CAPTURE.with(|slot| slot.replace(next)))
+    }
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) { CAPTURE.with(|slot| *slot.borrow_mut() = self.0.take()); }
+}
+
+/// Keeps a parse's failures with its result until the loader decides whether to publish it.
+pub fn capture_derive_failures<R>(f: impl FnOnce() -> R) -> (R, Vec<DeriveFailure>) {
+    let _restore = CaptureGuard::replace(Some(Vec::new()));
+    let result = f();
+    (result, CAPTURE.with(|slot| slot.take().expect("active derive failure capture")))
+}
+
+/// The loader has accepted this parse, even if the load ran inside another capture.
+pub fn commit_derive_failures(failures: Vec<DeriveFailure>) {
+    if failures.is_empty() { return; }
+    record_global(failures);
+}
+
 pub fn derive_failed(path: &str, item_lo: u32, line: u32, col: u32, name: &str, msg: &str) {
     if declaring() { return; }
+    let failure = DeriveFailure { path: path.into(), item_lo, line, col, name: name.into(), msg: msg.into() };
+    CAPTURE.with(|slot| {
+        if let Some(buf) = slot.borrow_mut().as_mut() {
+            buf.push(failure);
+            return;
+        }
+        record_global([failure]);
+    });
+}
+
+fn record_global(failures: impl IntoIterator<Item = DeriveFailure>) {
     let mut g = DERIVE_FAILED.lock().unwrap_or_else(|e| e.into_inner());
     let (seen, msgs) = g.get_or_insert_with(Default::default);
-    if seen.insert((path.to_string(), item_lo, name.to_string())) {
-        let text = format!("derive({}) failed: {}", name, msg);
-        msgs.push(crate::diag::record(format!("{}: {}",path,text), crate::diag::Diagnostic::new("macro",path,line,col,text)));
+    for f in failures {
+        if seen.insert((f.path.clone(), f.item_lo, f.name.clone())) {
+            let text = format!("derive({}) failed: {}", f.name, f.msg);
+            msgs.push(crate::diag::record(format!("{}: {}", f.path, text),
+                crate::diag::Diagnostic::new("macro", &f.path, f.line, f.col, text)));
+        }
     }
 }
 
@@ -306,6 +359,56 @@ pub fn clear_derive_failures(paths: &[String]) {
         seen.retain(|(p, _, _)| !paths.contains(p));
         msgs.retain(|m| !paths.iter().any(|p| m.starts_with(&format!("{}:", p))));
     }
+}
+
+#[cfg(test)]
+pub(crate) struct FailurePath(pub(crate) &'static str);
+
+#[cfg(test)]
+impl FailurePath {
+    pub(crate) fn messages(&self) -> Vec<String> {
+        let prefix = format!("{}:", self.0);
+        derive_failures().into_iter().filter(|message| message.starts_with(&prefix)).collect()
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailurePath {
+    fn drop(&mut self) { clear_derive_failures(&[self.0.to_owned()]); }
+}
+
+#[test]
+fn captured_derive_failures_stay_out_of_global_table_until_committed() {
+    let path = FailurePath("derive_capture_commit.rs");
+    let name = "__Slice2CommitDerive";
+    let ((), failures) = capture_derive_failures(|| derive_failed(path.0, 10, 2, 1, name, "err"));
+    assert!(path.messages().is_empty(), "capture published the failure");
+    assert_eq!(failures, [DeriveFailure {
+        path: path.0.into(), item_lo: 10, line: 2, col: 1, name: name.into(), msg: "err".into(),
+    }]);
+    let ((), outer) = capture_derive_failures(|| commit_derive_failures(failures));
+    assert!(outer.is_empty(), "a surrounding capture intercepted the commit");
+    assert_eq!(path.messages(), [format!("{}: derive({name}) failed: err", path.0)]);
+}
+
+#[test]
+fn capture_derive_failures_restores_on_panic() {
+    let inside = FailurePath("derive_capture_unwind.rs");
+    let after = FailurePath("derive_after_unwind.rs");
+    let name = "__Slice2UnwindDerive";
+    let ((), outer) = capture_derive_failures(|| {
+        let unwound = std::panic::catch_unwind(|| capture_derive_failures(|| {
+            derive_failed(inside.0, 1, 1, 2, name, "discarded");
+            panic!("unwind a speculative parse");
+        }));
+        assert!(unwound.is_err());
+        assert!(inside.messages().is_empty(), "unwinding published the inner failure");
+        derive_failed(inside.0, 2, 1, 3, name, "outer");
+    });
+    assert_eq!(outer.len(), 1, "unwinding did not restore the outer capture");
+    assert_eq!(outer[0].msg, "outer");
+    derive_failed(after.0, 0, 1, 1, name, "after");
+    assert_eq!(after.messages(), [format!("{}: derive({name}) failed: after", after.0)]);
 }
 
 /// Adds to the host's stats (render/parse time is measured by builtins and the parser).
@@ -420,6 +523,44 @@ impl<T> Shared<T> {
 
 pub static REG: Shared<Reg> = Shared(relax_session::sync::Mutex::new(RefCell::new(None)));
 
+/// Registrations run one at a time, from their clone of REG to their write. A domain started into
+/// a running program registers its graph on its own load thread (the HAL host starts one per
+/// domain), and two such loads at once cloned the same registry: the later write dropped the
+/// other's units and entries for the rest of the process (its derives and macros not found).
+/// Taken by load threads only, never the UI thread, and separate from REG's lock, which lookups
+/// take briefly. The held region parses the new proc-macro crates (scan_entries: file reads,
+/// lexing, cfg evaluation, macro_rules expansion, short trace and file-system locks) and waits on
+/// nothing another load can hold up: no owner request, pool or compile job, domain or proc macro.
+static REGISTER: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
+
+/// The steps of a registration a test's hook sees (IN_REGISTER).
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RegisterStep {
+    /// about to take the registration lock
+    Locking,
+    /// the registry cloned, its write still ahead
+    Cloned,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// This thread's hook at each step of its registrations.
+    static IN_REGISTER: RefCell<Option<Box<dyn FnMut(RegisterStep)>>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+fn register_step(step: RegisterStep) {
+    IN_REGISTER.with(|h| if let Some(f) = h.borrow_mut().as_mut() { f(step) });
+}
+
+/// A registry and registration lock of a test's own (the process's REG is replaced by any other
+/// test's load at any time).
+#[cfg(test)]
+fn test_registry() -> (Shared<Reg>, relax_session::sync::Mutex<()>) {
+    (Shared(relax_session::sync::Mutex::new(RefCell::new(None))), relax_session::sync::Mutex::new(()))
+}
+
 static STATS_CELL: Shared<HostStats> = Shared(relax_session::sync::Mutex::new(RefCell::new(None)));
 
 /// `STATS.with(|s| ..)` over the shared stats (a copy in a Cell, written back).
@@ -530,6 +671,7 @@ pub fn run_bang_in(sess: &std::sync::Arc<crate::Session>, krate: &str, i: usize,
     }
     let _krate = with_call_krate(krate);
     let _outside = crate::parse_work::outside();
+    let _capture = CaptureGuard::replace(None);
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, &e, None, &input, call_span),
         Some(r) => r.call(sess, &e, &input, call_span),
@@ -552,7 +694,28 @@ pub fn stats() -> HostStats {
 /// their index, new ones are appended with their dependencies mapped, and only new proc-macro
 /// units are scanned for entries. The index of every earlier unit and entry stays valid.
 fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir: &str, additive: bool) -> Result<(), String> {
-    let mut reg = if additive { REG.with(|r| r.borrow().clone()).unwrap_or_default() } else { Reg::default() };
+    register_in(&REG, &REGISTER, sess, units, std_dir, additive);
+    if let Some(r) = RUNNER.get() {
+        // a world built during the program's load takes its core/alloc/std from that load
+        r.registered(sess)?;
+        // (a program started into a running one has its std loaded already)
+        if !additive {
+            crate::program::share_std_begin();
+        }
+    }
+    Ok(())
+}
+
+/// `register`'s update of the registry in `cell`, one registration at a time behind `one` (REG
+/// and REGISTER; a test passes its own).
+fn register_in(cell: &Shared<Reg>, one: &relax_session::sync::Mutex<()>, sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir: &str, additive: bool) {
+    #[cfg(test)]
+    register_step(RegisterStep::Locking);
+    // a registration that panicked wrote nothing: the registry is as it was
+    let _one = one.lock().unwrap_or_else(|e| e.into_inner());
+    let mut reg = if additive { cell.with(|r| r.borrow().clone()).unwrap_or_default() } else { Reg::default() };
+    #[cfg(test)]
+    register_step(RegisterStep::Cloned);
     reg.std_dir = std_dir.to_string();
     // the dependency closures are computed again for the new units
     reg.reach.clear();
@@ -598,16 +761,7 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
             eprintln!("pmhost: macro {}! ({:?}) -> {}", n, e.kind, reg.units[e.unit].name);
         }
     }
-    REG.with(|r| *r.borrow_mut() = Some(reg));
-    if let Some(r) = RUNNER.get() {
-        // a world built during the program's load takes its core/alloc/std from that load
-        r.registered(sess)?;
-        // (a program started into a running one has its std loaded already)
-        if !additive {
-            crate::program::share_std_begin();
-        }
-    }
-    Ok(())
+    cell.with(|r| *r.borrow_mut() = Some(reg));
 }
 
 #[cfg(test)]
@@ -635,8 +789,9 @@ fn merged_host_units_keep_features_and_dependencies() {
     ], roots: vec![0], workspace_root: String::new(), bins: Vec::new(), script: None, unified: Vec::new() };
     let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
-    let saved = REG.with(|r| r.borrow_mut().take());
-    register_and_strip(sess, &mut g.crates, &dir, false).unwrap();
+    let (cell, one) = test_registry();
+    register_in(&cell, &one, sess, &g.crates, &dir, false);
+    strip_host_only(&mut g.crates, &dir);
     let shared = g.crates.iter().find(|u| u.name == "shared").unwrap();
     assert_eq!(shared.features, ["target"]);
     assert_eq!(shared.deps.len(), 1);
@@ -645,8 +800,8 @@ fn merged_host_units_keep_features_and_dependencies() {
     assert_eq!(helper.src_path, format!("{dir}/proc_macro/empty.rs"));
     // Re-registering the original graph matches the host feature set, not the app's.
     let again = crate::unitgraph::load(&units, false, false).unwrap();
-    register(sess, &again.crates, &dir, true).unwrap();
-    REG.with(|r| {
+    register_in(&cell, &one, sess, &again.crates, &dir, true);
+    cell.with(|r| {
         let r = r.borrow();
         let reg = r.as_ref().unwrap();
         assert_eq!(reg.units.len(), 5);
@@ -660,8 +815,66 @@ fn merged_host_units_keep_features_and_dependencies() {
         let pm = reg.units.iter().find(|u| u.name == "macros").unwrap();
         assert_eq!(reg.units[pm.deps[0].0].features, shared.features);
     });
-    REG.with(|r| *r.borrow_mut() = saved);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two loads registering at once (two domains started at once, each on its own load thread) keep
+/// both graphs: the second waits for the first's write instead of cloning the registry the first
+/// is still adding to, whose write would then drop the second's units.
+#[cfg(test)]
+#[test]
+fn two_loads_registering_at_once_keep_both_graphs() {
+    use crate::resolve::{GraphUnit, Units};
+    use relax_session::sync::TryLockError;
+    let graph = |name: &str| {
+        let lib = GraphUnit {
+            pkg_id: format!("path+file:///{name}#0.1.0"), name: name.to_string(), kind: vec!["lib".to_string()],
+            src_path: format!("/{name}/src/lib.rs"), edition: "2021".to_string(), host: false, checks: None,
+            mode: "build".to_string(), harness: false, sysroot: false, features: Vec::new(), deps: Vec::new(),
+        };
+        let units = Units { units: vec![lib], roots: vec![0], workspace_root: String::new(), bins: Vec::new(), script: None, unified: Vec::new() };
+        crate::unitgraph::load(&units, false, false).unwrap().crates
+    };
+    let sess = std::sync::Arc::new(crate::Session::default());
+    let (first_units, second_units) = (graph("first"), graph("second"));
+    let (inside, inside_rx) = std::sync::mpsc::channel::<()>();
+    let (progress, progress_rx) = std::sync::mpsc::channel::<RegisterStep>();
+    let reg = std::sync::Arc::new(test_registry());
+    let first = {
+        let (sess, reg) = (sess.clone(), reg.clone());
+        std::thread::spawn(move || {
+            // the first stops between its clone and its write until the second has made progress
+            // (or ended: its hook's sender dropped)
+            IN_REGISTER.with(|h| *h.borrow_mut() = Some(Box::new(move |at: RegisterStep| if at == RegisterStep::Cloned {
+                inside.send(()).unwrap();
+                let _ = progress_rx.recv();
+            })));
+            register_in(&reg.0, &reg.1, &sess, &first_units, "", true);
+        })
+    };
+    inside_rx.recv().unwrap();
+    let second = {
+        let reg = reg.clone();
+        std::thread::spawn(move || {
+            // its progress: with the lock, it finds the lock held by the first and will block until
+            // the first's write; without it, it has cloned the registry the first is adding to
+            let held = reg.clone();
+            IN_REGISTER.with(|h| *h.borrow_mut() = Some(Box::new(move |at: RegisterStep| match at {
+                RegisterStep::Locking => if let Err(TryLockError::WouldBlock) = held.1.try_lock() {
+                    let _ = progress.send(at);
+                },
+                RegisterStep::Cloned => {
+                    let _ = progress.send(at);
+                }
+            })));
+            register_in(&reg.0, &reg.1, &sess, &second_units, "", true);
+        })
+    };
+    first.join().unwrap();
+    second.join().unwrap();
+    let names: Vec<String> = reg.0.with(|r| r.borrow().as_ref().map_or(Vec::new(), |reg| reg.units.iter().map(|u| u.name.clone()).collect()));
+    assert!(names.iter().any(|n| n == "first"), "the first load's units are registered: {names:?}");
+    assert!(names.iter().any(|n| n == "second"), "the second load's units are registered: {names:?}");
 }
 
 /// A crate a proc macro and the program both use, with different features, sees on the
@@ -680,12 +893,13 @@ fn a_macro_world_crate_resolves_macros_through_its_host_dependencies() {
     let mut reg = Reg { units: vec![unit("shared", false, &[1]), unit("wrapper", false, &[2]), unit("inner", false, &[3]), unit("rate_derive", true, &[])], ..Default::default() };
     reg.target_deps.insert(0, Vec::new());
     reg.derives.push(("Rate".to_string(), Entry { unit: 3, fname: "derive_rate".to_string(), kind: Kind::Derive }));
-    let saved = REG.with(|r| r.borrow_mut().replace(reg));
-    let program = derive_entry("shared", "Rate").map(|e| e.unit);
+    // the lookup derive_entry makes, on this registry: REG is the process's, and another test's
+    // load replaces it (register_and_strip) whenever it runs, between a swap here and a lookup too
+    // (a tests bucket of 11-26: the lookup ran on another test's registry)
+    let program = resolve_entry(&mut reg, "shared", "Rate", Kind::Derive).map(|e| e.unit);
     set_world_builder(true);
-    let world = derive_entry("shared", "Rate").map(|e| e.unit);
+    let world = resolve_entry(&mut reg, "shared", "Rate", Kind::Derive).map(|e| e.unit);
     set_world_builder(false);
-    REG.with(|r| *r.borrow_mut() = saved);
     assert_eq!(program, None, "the program's shared has no derive crate in reach");
     assert_eq!(world, Some(3), "the macro world's shared reaches the derive through its host dependencies");
 }
@@ -718,8 +932,9 @@ fn a_crate_only_a_build_script_links_is_no_root_of_the_app() {
     ], roots: vec![0], workspace_root: String::new(), bins: Vec::new(), script: None, unified: Vec::new() };
     let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
-    let saved = REG.with(|r| r.borrow_mut().take());
-    register_and_strip(sess, &mut g.crates, &dir, false).unwrap();
+    let (cell, one) = test_registry();
+    register_in(&cell, &one, sess, &g.crates, &dir, false);
+    strip_host_only(&mut g.crates, &dir);
     let empty = format!("{dir}/proc_macro/empty.rs");
     let by_name = |n: &str| g.crates.iter().find(|u| u.name == n).unwrap();
     for name in ["codegen", "generator"] {
@@ -741,7 +956,6 @@ fn a_crate_only_a_build_script_links_is_no_root_of_the_app() {
     assert_eq!(g.raw[4].src_path, format!("{dir}/codegen/src/lib.rs"));
     assert_eq!(g.raw[5].deps, [(6, "rand".to_string())]);
     assert_eq!(g.raw[6].features, ["small_rng", "std"]);
-    REG.with(|r| *r.borrow_mut() = saved);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -829,13 +1043,20 @@ pub fn prewarm(sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
 /// graph see proc-macro crates, and the crates only they depend on, as empty crates: they run in
 /// the macro world, never in the app (rustc also links them into the compiler, not the app).
 pub fn register_and_strip(sess: &std::sync::Arc<crate::Session>, units: &mut [CrateUnit], std_dir: &str, additive: bool) -> Result<(), String> {
-    let empty = format!("{}/proc_macro/empty.rs", std_dir);
     if trace() {
         eprintln!("pmhost: graph of {} units ({} proc-macro), std {}", units.len(), units.iter().filter(|u| u.proc_macro).count(), std_dir);
     }
     register(sess, units, std_dir, additive)?;
+    strip_host_only(units, std_dir);
+    Ok(())
+}
+
+/// The app graph's side of register_and_strip: proc-macro crates, and the crates only they depend
+/// on, become empty crates (when std provides `proc_macro`).
+fn strip_host_only(units: &mut [CrateUnit], std_dir: &str) {
+    let empty = format!("{}/proc_macro/empty.rs", std_dir);
     if !crate::vfs::exists(&empty) {
-        return Ok(());
+        return;
     }
     // units reachable from a non-proc-macro unit stay; the rest is host-only
     let n = units.len();
@@ -871,7 +1092,6 @@ pub fn register_and_strip(sess: &std::sync::Arc<crate::Session>, units: &mut [Cr
             units[i].host = None;
         }
     }
-    Ok(())
 }
 
 /// Is `name` a derive or proc macro of a registered proc-macro crate?
@@ -949,6 +1169,7 @@ pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, e: &Entry, a
     }
     let _krate = with_call_krate(krate);
     let _outside = crate::parse_work::outside();
+    let _capture = CaptureGuard::replace(None);
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, e, Some(attr), item, call_span),
         Some(r) => r.call_attr(sess, e, attr, item, call_span),
@@ -1278,6 +1499,7 @@ pub(crate) fn run_derive_entry(sess: &std::sync::Arc<crate::Session>, krate: &st
     let _profile = crate::load_profile::span(sess.runtime.profile, if native { "derive-native" } else { "derive-jit" }, name);
     let _krate = with_call_krate(krate);
     let _outside = crate::parse_work::outside();
+    let _capture = CaptureGuard::replace(None);
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, e, None, item, call_span),
         Some(r) => r.call(sess, e, item, call_span),
