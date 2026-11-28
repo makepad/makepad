@@ -483,8 +483,9 @@ impl SurfaceMaterial {
         let width = visible.iter().map(|l| l.image.width).max().unwrap();
         let height = visible.iter().map(|l| l.image.height).max().unwrap();
         let mut image = RgbaImage::new(width, height, [0; 4], limits)?;
-        if image.memory_bytes().saturating_add(self.memory_bytes()) > limits.mesh.max_bytes {
-            return Err(Error::Budget("surface flatten bytes"));
+        let needed = image.memory_bytes().saturating_add(self.memory_bytes());
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface flatten bytes", needed, limit: limits.mesh.max_bytes });
         }
         // A lone fully enabled color/data layer has no backdrop to blend.
         // Its nonzero-coverage bytes already are the flattened transfer values;
@@ -557,9 +558,8 @@ impl SurfaceState {
     }
     fn validate_storage(&self, limits: &Limits) -> Result<()> {
         let bytes = self.memory_bytes();
-        if bytes > limits.mesh.max_bytes
-        {
-            return Err(Error::Budget("surface bytes"));
+        if bytes > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface bytes", needed: bytes, limit: limits.mesh.max_bytes });
         }
         Ok(())
     }
@@ -573,13 +573,12 @@ impl SurfaceState {
     ) -> Result<()> {
         ctx.checkpoint(0)?;
         self.validate(limits, ctx)?;
-        if self
+        let needed = self
             .memory_bytes()
             .saturating_mul(2)
-            .saturating_add(op.memory_bytes())
-            > limits.mesh.max_bytes
-        {
-            return Err(Error::Budget("surface transaction bytes"));
+            .saturating_add(op.memory_bytes());
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface transaction bytes", needed, limit: limits.mesh.max_bytes });
         }
         let mut next = self.clone();
         next.apply_inner(op, objects, legacy, limits, ctx)?;
@@ -600,14 +599,15 @@ impl SurfaceState {
     pub(crate) fn apply_disposable(
         &mut self,
         op: &SurfaceOperation,
-        objects: &BTreeMap<String, mesh::Mesh>,
+        objects: &BTreeMap<String, impl crate::baked::MeshEntry>,
         legacy: &BTreeMap<u32, Material>,
         limits: &Limits,
         ctx: &mut mesh::Context<'_>,
     ) -> Result<()> {
         ctx.checkpoint(0)?;
-        if self.memory_bytes().saturating_add(op.memory_bytes()) > limits.mesh.max_bytes {
-            return Err(Error::Budget("surface transaction bytes"));
+        let needed = self.memory_bytes().saturating_add(op.memory_bytes());
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface transaction bytes", needed, limit: limits.mesh.max_bytes });
         }
         self.apply_inner(op, objects, legacy, limits, ctx)?;
         self.validate_storage(limits)?;
@@ -653,7 +653,7 @@ impl SurfaceState {
     fn apply_inner(
         &mut self,
         op: &SurfaceOperation,
-        objects: &BTreeMap<String, mesh::Mesh>,
+        objects: &BTreeMap<String, impl crate::baked::MeshEntry>,
         legacy: &BTreeMap<u32, Material>,
         limits: &Limits,
         ctx: &mut mesh::Context<'_>,
@@ -764,8 +764,9 @@ impl SurfaceState {
                         .map_or(value.visible && value.opacity > 0., |name| &value.id == name))
                     .fold([0usize; 2], |size, value| [size[0].max(value.image.width as usize), size[1].max(value.image.height as usize)]);
                 let scratch_bytes = dimensions[0].saturating_mul(dimensions[1]).saturating_mul(8);
-                if self.memory_bytes().saturating_mul(2).saturating_add(scratch_bytes) > limits.mesh.max_bytes {
-                    return Err(Error::Budget("surface derivation bytes"));
+                let needed = self.memory_bytes().saturating_mul(2).saturating_add(scratch_bytes);
+                if needed > limits.mesh.max_bytes {
+                    return Err(Error::WorkingBytes { what: "surface derivation bytes", needed, limit: limits.mesh.max_bytes });
                 }
                 let source = derivation::source_image(source_material, recipe, limits, ctx)?;
                 // Optional decoded heights must fit beside the resident
@@ -851,7 +852,7 @@ impl SurfaceState {
                     return Err(Error::Invalid("vertex paint"));
                 }
                 let mesh = objects
-                    .get(object)
+                    .get(object).and_then(crate::baked::MeshEntry::editable)
                     .ok_or(Error::Invalid("unknown paint object"))?;
                 for id in vertices {
                     ctx.checkpoint(1)?;
@@ -870,7 +871,7 @@ impl SurfaceState {
                 if vertices.len() != colors.len() || vertices.is_empty()  || !colors.iter().all(|c| color_valid(c)) {
                     return Err(Error::Invalid("vertex colors"));
                 }
-                let mesh = objects.get(object).ok_or(Error::Invalid("unknown paint object"))?;
+                let mesh = objects.get(object).and_then(crate::baked::MeshEntry::editable).ok_or(Error::Invalid("unknown paint object"))?;
                 for (id, color) in vertices.iter().zip(colors) {
                     ctx.checkpoint(1)?;
                     mesh.vertex(*id).ok_or(Error::Invalid("unknown painted vertex"))?;
@@ -917,6 +918,10 @@ impl SurfaceState {
     ) -> Result<()> {
         geometry::reconcile(self, before, after, limits, ctx)
     }
+    pub(crate) fn reconcile_objects(
+        &mut self, before: &BTreeMap<String, impl crate::baked::MeshEntry>, after: &BTreeMap<String, impl crate::baked::MeshEntry>,
+        limits: &Limits, ctx: &mut mesh::Context<'_>,
+    ) -> Result<()> { geometry::reconcile(self, before, after, limits, ctx) }
     /// Transfer source paint onto a disposable derived mesh without altering
     /// source identities or copying the retained material images.
     pub(crate) fn transfer_vertex_colors(

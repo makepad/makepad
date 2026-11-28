@@ -75,7 +75,7 @@ impl RigState {
             constraint.validate(count)?;}
         self.constraint_order(state.skeleton.as_ref())?;
         if let Some(skeleton)=&state.skeleton{self.global_rest(skeleton)?;}
-        for morph in self.morphs.values(){name(&morph.name,limits)?;let mesh=state.objects.get(&morph.object).ok_or_else(||Error::MissingObject(morph.object.clone()))?;
+        for morph in self.morphs.values(){name(&morph.name,limits)?;let mesh=state.editable(&morph.object).ok_or_else(||Error::MissingObject(morph.object.clone()))?;
             if morph.topology!=topology(mesh){return Err(Error::Invalid("morph topology changed; remove or rebuild its shape key explicitly"));}
             valid_weight(morph.weight)?;if morph.deltas.len()>mesh.vertices().len(){return Err(Error::Budget("morph deltas"));}
             for (id,delta) in &morph.deltas{ctx.checkpoint(1)?;if mesh.vertex(*id).is_none()||delta.iter().any(|v|!v.is_finite()||!(*v as f32).is_finite()){return Err(Error::Invalid("morph delta vertex/value"));}}
@@ -260,11 +260,11 @@ impl RigState {
                 let changes=edit_weights(state,object,vertices,edit,limits,ctx)?;result.object=object.clone();result.vertices=changes;
             }
             RigOperation::Morph{name:target_name,object,deltas,weight}=>{
-                name(target_name,limits)?;valid_weight(*weight)?;let m=state.objects.get(object).ok_or_else(||Error::MissingObject(object.clone()))?;
+                name(target_name,limits)?;valid_weight(*weight)?;let m=state.editable(object).ok_or_else(||Error::MissingObject(object.clone()))?;
                 state.rig.morphs.insert(target_name.clone(),MorphTarget{name:target_name.clone(),object:object.clone(),topology:topology(m),deltas:deltas.clone(),weight:*weight});
             }
             RigOperation::CaptureMorph{name:target_name,object,target,weight}=>{
-                let a=state.objects.get(object).ok_or_else(||Error::MissingObject(object.clone()))?;let b=state.objects.get(target).ok_or_else(||Error::MissingObject(target.clone()))?;
+                let a=state.editable(object).ok_or_else(||Error::MissingObject(object.clone()))?;let b=state.editable(target).ok_or_else(||Error::MissingObject(target.clone()))?;
                 if topology(a)!=topology(b){return Err(Error::Invalid("capture shape key requires matching topology and element IDs"));}
                 let deltas=a.vertices().iter().zip(b.vertices()).map(|(a,b)|(a.id,sub(b.position,a.position))).collect();
                 state.rig.morphs.insert(target_name.clone(),MorphTarget{name:target_name.clone(),object:object.clone(),topology:topology(a),deltas,weight:*weight});
@@ -324,7 +324,7 @@ fn normalized_weights(mut proposed:BTreeMap<u32,f64>,old:&[mesh::JointWeight],lo
 fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&WeightEdit,_limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<Vec<mesh::VertexId>>{
     let skeleton=state.skeleton.as_ref().ok_or(Error::Invalid("weight edit requires skeleton"))?;
     if let WeightEdit::Assign{joint}=edit{if *joint as usize>=skeleton.joints.len(){return Err(Error::Invalid("weight assignment target joint"));}}
-    let mesh=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;let ids=if vertices.is_empty(){mesh.vertices().iter().map(|v|v.id).collect::<Vec<_>>()}else{vertices.to_vec()};
+    let mesh=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;let ids=if vertices.is_empty(){mesh.vertices().iter().map(|v|v.id).collect::<Vec<_>>()}else{vertices.to_vec()};
     let selected=ids.iter().copied().collect::<BTreeSet<_>>();if selected.len()!=ids.len()||ids.iter().any(|id|mesh.vertex(*id).is_none()){return Err(Error::Invalid("weight vertices"));}
     let locks=state.rig.locked_groups.get(object).cloned().unwrap_or_default();let mut rows=mesh.vertices().iter().map(|v|(v.id,v.weights.clone())).collect::<BTreeMap<_,_>>();
     let count=match edit{WeightEdit::Smooth{iterations,factor}=>{if *iterations==0||!factor.is_finite()||!(0.0..=1.0).contains(factor){return Err(Error::Invalid("weight smoothing"));}*iterations},_=>1};
@@ -348,7 +348,7 @@ fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&We
             }
             WeightEdit::Transfer{source,max_distance}=>{
                 if !max_distance.is_finite()||*max_distance<0.{return Err(Error::Invalid("weight transfer distance"));}
-                let source=state.objects.get(source).ok_or_else(||Error::MissingObject(source.clone()))?;let mut best=None;
+                let source=state.editable(source).ok_or_else(||Error::MissingObject(source.clone()))?;let mut best=None;
                 for other in source.vertices(){ctx.checkpoint(1)?;let d=length(sub(other.position,vertex.position));if best.is_none_or(|(dist,_)|d<dist){best=Some((d,other));}}
                 let (distance,source)=best.ok_or(Error::Invalid("empty weight transfer source"))?;if distance>*max_distance{return Err(Error::Invalid("weight transfer unmatched vertex"));}
                 for w in &source.weights{proposed.insert(w.joint,w.weight);}
@@ -363,7 +363,7 @@ fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&We
         if proposed.keys().any(|j|*j as usize>=skeleton.joints.len()){return Err(Error::Invalid("weight edit target joint"));}
         next.insert(*id,normalized_weights(proposed,&rows[id],&locks,max)?);
     }rows=next;}
-    let updates=ids.iter().map(|id|(*id,rows.remove(id).unwrap())).collect::<Vec<_>>();state.objects.get_mut(object).unwrap().set_weights_bulk(&updates,ctx)?;Ok(ids)
+    let updates=ids.iter().map(|id|(*id,rows.remove(id).unwrap())).collect::<Vec<_>>();state.editable_mut(object).unwrap().set_weights_bulk(&updates,ctx)?;Ok(ids)
 }
 
 #[path="rig_control_ops.rs"] mod operations;

@@ -12,7 +12,7 @@ mod sky_dome;
 mod skinned;
 mod pbr;
 mod traced;
-mod traced_tiles;
+mod traced_volume;
 mod city;
 mod grass;
 mod foliage;
@@ -36,17 +36,15 @@ pub(crate) const SCRIPT_MOD_STEPS: &[crate::ScriptModStep] = &[
     ("shaders: sky_dome", sky_dome::script_mod),
     ("shaders: skinned", skinned::script_mod),
     ("shaders: pbr", pbr::script_mod),
+    // Both traced and skinned shaders use render-material's named IBL lookups.
+    ("shaders: material builtins", material_builtins),
     ("shaders: traced", traced::script_mod),
-    ("shaders: traced tiles", traced_tiles::script_mod),
+    ("shaders: traced volume", traced_volume::script_mod),
     ("shaders: city", city::script_mod),
     ("shaders: grass", grass::script_mod),
     ("shaders: foliage", foliage::script_mod),
     ("shaders: splat", splat::script_mod),
     ("shaders: impostor", impostor::script_mod),
-    // The skin lane assigns render-material's IBL lookups by name
-    // (skinned_gpu.rs), so they exist before it is declared. Idempotent:
-    // custom_material.rs registers them again for the material programs.
-    ("shaders: material builtins", material_builtins),
     ("shaders: skinned_gpu", skinned_gpu::script_mod),
     ("shaders: world", world::script_mod),
     ("shaders: water", water::script_mod),
@@ -1278,6 +1276,7 @@ pub(crate) fn inspect_scene_backends(vm: &mut ScriptVm, program: ScriptObject, n
 #[derive(Clone, Copy)]
 pub(crate) enum TracedOutput {
     Scene(bool),
+    SceneInside(bool),
     Sun,
 }
 
@@ -1294,7 +1293,8 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
         let mut opts = ShaderCompileOptions::new(backend, false, matches!(target, "SPIR-V" | "WGSL"), false, false);
         opts.gles_complete = target == "GLES";
         opts.xr = target == "SPIR-V";
-        opts.pick = matches!(traced, Some(TracedOutput::Scene(_))) && backend == ShaderBackend::Metal;
+        let inside = matches!(traced, Some(TracedOutput::SceneInside(_)));
+        opts.pick = matches!(traced, Some(TracedOutput::Scene(_) | TracedOutput::SceneInside(_))) && backend == ShaderBackend::Metal;
         let compiled = compile_shader(vm, program, &opts);
         let view = compiled.view();
         assert!(!view.has_errors, "{name} {target}: {}", view.error_report);
@@ -1308,7 +1308,8 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
                     // Walk instructions after the five-word module header. An operand
                     // with the value of an opcode is not an instruction.
                     let mut words = &stage.fragment[5..];
-                    let (mut replacing, mut greater, mut kill) = (false, false, false);
+                    let mode = if inside { EXEC_MODE_DEPTH_LESS } else { EXEC_MODE_DEPTH_GREATER };
+                    let (mut replacing, mut depth_mode, mut kill) = (false, false, false);
                     let (mut volume, mut fetch) = (false, false);
                     let mut location_zero = Vec::new();
                     let (mut scratch, mut depth) = (None, None);
@@ -1318,7 +1319,7 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
                         assert!(size > 0 && size <= words.len(), "{name}: invalid SPIR-V instruction length");
                         match (header & 0xffff, &words[1..size]) {
                             (OP_EXECUTION_MODE, [_, EXEC_MODE_DEPTH_REPLACING]) => replacing = true,
-                            (OP_EXECUTION_MODE, [_, EXEC_MODE_DEPTH_GREATER]) => greater = true,
+                            (OP_EXECUTION_MODE, [_, value]) if *value == mode => depth_mode = true,
                             (OP_KILL, []) => kill = true,
                             (OP_TYPE_IMAGE, [_, _, DIM_3D, _, 0, ..]) => volume = true,
                             (OP_IMAGE_FETCH, _) => fetch = true,
@@ -1333,7 +1334,7 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
                         }
                         words = &words[size..];
                     }
-                    assert!(replacing && greater && kill, "{name}: SPIR-V needs DepthReplacing, DepthGreater and OpKill");
+                    assert!(replacing && depth_mode && kill, "{name}: SPIR-V needs DepthReplacing, depth mode {mode} and OpKill");
                     if matches!(traced, Some(TracedOutput::Sun)) {
                         assert!(volume && fetch, "{name}: SPIR-V needs an integer fetch from the tile volume");
                         assert!(writes_depth && writes_scratch, "{name}: SPIR-V must store FragDepth and color 0");
@@ -1347,8 +1348,8 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
         }
         if let Some(output) = traced.filter(|_| !opts.xr) {
             let (source, depth, discard) = match backend {
-                ShaderBackend::Metal => (view.combined, "[[depth(greater)]]", "discard_fragment();"),
-                ShaderBackend::Hlsl => (view.combined, "SV_DepthGreaterEqual", "discard;"),
+                ShaderBackend::Metal => (view.combined, if inside { "[[depth(less)]]" } else { "[[depth(greater)]]" }, "discard_fragment();"),
+                ShaderBackend::Hlsl => (view.combined, if inside { "SV_DepthLessEqual" } else { "SV_DepthGreaterEqual" }, "discard;"),
                 ShaderBackend::Glsl => (view.glsl_fragment, "gl_FragDepth =", "discard;"),
                 ShaderBackend::Wgsl => (view.combined, "@builtin(frag_depth)", "discard;"),
                 _ => unreachable!(),
@@ -1356,25 +1357,59 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
             let check = |source: &str| {
                 assert!(source.contains(depth), "{name} {target}: missing {depth}");
                 let body = lowered_fn_body(source, "fragment").expect("traced fragment entry");
-                let (face, hit) = body.split_once("io_traced_hit(").expect("entry calls the hit hook");
-                let (_, reject) = face.split_once("io_trace_entry_face(").expect("entry checks the proxy face");
-                assert!(reject.contains(discard), "{name} {target}: wrong face reaches the hit hook");
+                let (face, hit) = body.split_once(if inside { "io_traced_hit_interval(" } else { "io_traced_hit(" })
+                    .expect("entry calls the hit hook");
+                let reject = match output {
+                    TracedOutput::Scene(_) | TracedOutput::SceneInside(_) => {
+                        let (before_planes, ray) = face.split_once("io_trace_model_plane(").expect("scene pulls back the pixel planes");
+                        let (before_ndc, _) = before_planes.split_once("io_trace_ndc(").expect("scene ray starts at the fragment pixel");
+                        if inside {
+                            assert_eq!(face.matches("io_trace_model_plane(").count(), 2, "{name} {target}: only the pixel planes are built in the fragment");
+                            assert_eq!(ray.matches("io_trace_slab(").count(), 3, "{name} {target}: near point slab test");
+                            let vertex_source = if backend == ShaderBackend::Glsl { view.glsl_vertex } else { source };
+                            let vertex = lowered_fn_body(vertex_source, "vertex").expect("Inside vertex");
+                            let (plane, cull) = vertex.split_once("io_trace_inside_cull_box(").expect("tile cull");
+                            let (culled, live) = cull.split_once("return;").expect("culled vertex exits");
+                            let (side_cull, _) = live.split_once("io_trace_model_eye(").expect("surviving tile builds the eye");
+                            let position = if backend == ShaderBackend::Wgsl { "(2.0f, 2.0f, 2.0f, 1.0f)" } else { "(2.0, 2.0, 2.0, 1.0)" };
+                            assert!(plane.contains("io_trace_model_plane(") && culled.contains("vtx_pos =") && culled.contains(position)
+                                && side_cull.contains("vtx_pos =") && side_cull.contains(position) && side_cull.contains("return;"),
+                                "{name} {target}: reject outside tiles before building the eye");
+                            assert_eq!(side_cull.matches("io_trace_inside_outside_plane(").count(), 4, "{name} {target}: four frustum sides");
+                        } else { assert!(ray.contains("io_trace_face_point("), "{name} {target}: march starts on the pixel ray's entry plane"); }
+                        before_ndc.split_once("io_trace_raster_plane(").expect("raster selects the box plane before the ray build").1
+                    }
+                    TracedOutput::Sun => face.split_once("io_trace_entry_face(").expect("Sun checks its entry face").1,
+                };
+                let (_, after_face) = reject.split_once(discard).unwrap_or_else(|| panic!("{name} {target}: wrong face reaches the hit hook"));
                 let (miss, surface) = hit.split_once("frag_depth_out =").expect("entry writes hit depth");
-                assert!(miss.contains(discard), "{name} {target}: miss must discard before writing depth");
+                let (_, after_miss) = miss.split_once(discard).unwrap_or_else(|| panic!("{name} {target}: miss must discard before writing depth"));
+                if backend != ShaderBackend::Wgsl {
+                    for (site, after) in [("back face", after_face), ("miss", after_miss)] {
+                        assert_eq!(after.split_whitespace().next(), Some("return;"), "{name} {target}: {site} discard must exit immediately");
+                    }
+                }
                 match output {
-                    TracedOutput::Scene(_) => assert!(surface.contains("io_shade_mr_surface_at("),
-                        "{name} {target}: missing surface shading"),
+                    TracedOutput::Scene(_) | TracedOutput::SceneInside(_) => {
+                        assert!(surface.contains("io_trace_shade_hit(") &&
+                            lowered_fn_body(source, "trace_shade_hit").is_some_and(|s| s.contains("io_shade_mr_surface_at(")),
+                            "{name} {target}: missing shared surface shading");
+                        assert!(surface.trim_start().starts_with(if inside { "min(" } else { "max(" }),
+                            "{name} {target}: conservative hit depth");
+                    }
                     TracedOutput::Sun => {
-                        let load = match backend {
-                            ShaderBackend::Metal => ".read(uint3(",
-                            ShaderBackend::Hlsl => ".Load(int4(",
-                            ShaderBackend::Glsl => "texelFetch(tex_trace_volume,",
-                            ShaderBackend::Wgsl => "textureLoad(tex_trace_volume,",
+                        let (material_load, load) = match backend {
+                            ShaderBackend::Metal => ("tex_trace_volume.read(uint3(", ".read(uint3("),
+                            ShaderBackend::Hlsl => ("tex_trace_volume.Load(int4(", ".Load(int4("),
+                            ShaderBackend::Glsl => ("texelFetch(tex_trace_volume,", "texelFetch("),
+                            ShaderBackend::Wgsl => ("textureLoad(tex_trace_volume,", "textureLoad("),
                             _ => unreachable!(),
                         };
-                        let march = lowered_fn_body(source, "traced_hit").expect("tile intersection");
-                        assert!(march.contains(load) && !source.contains("tex_trace_palette"),
-                            "{name} {target}: the tile march must read the volume alone");
+                        let march = lowered_fn_body(source, "traced_hit_interval").or_else(|| lowered_fn_body(source, "traced_hit"))
+                            .expect("tile intersection");
+                        assert_eq!(march.matches(material_load).count(), 1, "{name} {target}: one material volume load");
+                        assert!(march.matches(load).count() <= 2 && !source.contains("tex_trace_palette"),
+                            "{name} {target}: the cascade walk may also read a coarse volume");
                         let before_depth = test_source(miss);
                         assert!(before_depth.lines().any(|line| line.contains("l_z01") && line.contains("l_hit.x")),
                             "{name} {target}: cascade z01 must include the traced hit distance");
@@ -1387,7 +1422,7 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
             };
             check(source);
             if opts.pick {
-                let TracedOutput::Scene(reflections) = output else { unreachable!() };
+                let (TracedOutput::Scene(reflections) | TracedOutput::SceneInside(reflections)) = output else { unreachable!() };
                 let pick = view.pick_code.expect("Metal pick program");
                 check(pick);
                 let (_, entry) = pick.split_once("fragment PickOut fragment_main(").expect("Metal pick entry point");
@@ -1399,6 +1434,27 @@ pub(crate) fn inspect_draw_backends(vm: &mut ScriptVm, program: ScriptObject, na
             }
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn check_vertex_input_budget(cx: &Cx, vars: &DrawVars, name: &str) {
+    let id = vars.draw_shader_id.unwrap_or_else(|| panic!("{name} registered"));
+    let mapping = &cx.draw_shaders[id.index].mapping;
+    // One input register per element, and a matrix is one
+    // element per row: what the vertex declaration spends.
+    let instance_elements: usize = mapping
+        .instances
+        .inputs
+        .iter()
+        .chain(mapping.dyn_instances.inputs.iter())
+        .map(|input| if input.slots > 4 { input.slots.div_ceil(4) } else { 1 })
+        .sum();
+    let geometry_elements = mapping.geometries.total_slots.div_ceil(4);
+    assert!(
+        instance_elements + geometry_elements <= 30,
+        "{name}: {instance_elements} instance + {geometry_elements} geometry vertex inputs, \
+         and fxc adds two system values on top of a vs_5_0 limit of 32"
+    );
 }
 
 /// The body of the function `name` in a lowered shader source a compile
@@ -1595,23 +1651,7 @@ pub(crate) mod shader_registration_tests {
                 ("DrawSceneSkinnedGpu", DrawSceneSkinnedGpu::script_new_with_default(vm).draw_vars),
             ];
             for (name, vars) in shaders {
-                let id = vars.draw_shader_id.unwrap_or_else(|| panic!("{name} registered"));
-                let mapping = &vm.cx().draw_shaders[id.index].mapping;
-                // One input register per element, and a matrix is one
-                // element per row: what the vertex declaration spends.
-                let instance_elements: usize = mapping
-                    .instances
-                    .inputs
-                    .iter()
-                    .chain(mapping.dyn_instances.inputs.iter())
-                    .map(|input| if input.slots > 4 { input.slots.div_ceil(4) } else { 1 })
-                    .sum();
-                let geometry_elements = mapping.geometries.total_slots.div_ceil(4);
-                assert!(
-                    instance_elements + geometry_elements <= 30,
-                    "{name}: {instance_elements} instance + {geometry_elements} geometry vertex inputs, \
-                     and fxc adds two system values on top of a vs_5_0 limit of 32"
-                );
+                super::check_vertex_input_budget(vm.cx(), &vars, name);
             }
         });
     }

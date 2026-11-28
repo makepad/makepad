@@ -14,7 +14,7 @@ script_mod! {
     // (clear = uncovered).
     mod.draw.DrawLmSunGatherMesh = mod.std.set_type_default() do #(DrawLmSunGatherMesh::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -76,7 +76,7 @@ script_mod! {
     // height and central-difference normal mirror LmHeightField exactly.
     mod.draw.DrawLmSunGatherGround = mod.std.set_type_default() do #(DrawLmSunGatherGround::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -152,7 +152,7 @@ script_mod! {
     // agree. src_a = (inv_w, inv_h, area_w, area_h) of the mask scratch.
     mod.draw.DrawLmDespeckle = mod.std.set_type_default() do #(DrawLmDespeckle::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -225,7 +225,7 @@ script_mod! {
     // R = lit fraction OF COVERED subs, G = covered fraction of 16.
     mod.draw.DrawLmDownsample = mod.std.set_type_default() do #(DrawLmDownsample::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -299,7 +299,7 @@ script_mod! {
     // regions never bleed.
     mod.draw.DrawLmChamfer = mod.std.set_type_default() do #(DrawLmChamfer::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -489,7 +489,7 @@ script_mod! {
     // coverage prepass's chart-shaped marks.
     mod.draw.DrawLmZero = mod.std.set_type_default() do #(DrawLmZero::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -514,7 +514,7 @@ script_mod! {
 
     mod.draw.DrawLmLampGatherMesh = mod.std.set_type_default() do #(DrawLmLampGatherMesh::script_shader(vm)){
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         depth_write: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -667,7 +667,7 @@ script_mod! {
     // Lamp gather, GROUND region: heightfield quad, same lamp math.
     mod.draw.DrawLmLampGatherGround = mod.std.set_type_default() do #(DrawLmLampGatherGround::script_shader(vm)){
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         depth_write: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)

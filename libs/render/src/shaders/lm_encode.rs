@@ -27,7 +27,7 @@ script_mod! {
     // so both sides of a shared edge land on the same curve.
     mod.draw.DrawLmLampDilate = mod.std.set_type_default() do #(DrawLmLampDilate::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -295,7 +295,7 @@ script_mod! {
     // default the CPU left there.
     mod.draw.DrawLmEncode = mod.std.set_type_default() do #(DrawLmEncode::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -385,7 +385,7 @@ script_mod! {
     // cascades and never consults this plane.)
     mod.draw.DrawLmTop = mod.std.set_type_default() do #(DrawLmTop::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -475,7 +475,7 @@ script_mod! {
     // texels — dilate_top_min, one ring per pass.
     mod.draw.DrawLmTopDilate = mod.std.set_type_default() do #(DrawLmTopDilate::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Bgra8NoBlend
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)

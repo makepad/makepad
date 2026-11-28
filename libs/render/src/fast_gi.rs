@@ -1081,7 +1081,7 @@ impl FastGi {
                     bind_texture(cx2.cx,dv,live_id!(gi_hits),&hits);
                 }
                 if i==1 {
-                    clustered.bind(cx2.cx,dv,true);
+                    clustered.bind_scene(cx2.cx, dv, true);
                     if light_dirty {for (name,v) in [(live_id!(gi_sun_dir),sun.dir),(live_id!(gi_sun_color),sun.color),(live_id!(gi_sky),sun.sky),(live_id!(gi_ground),sun.ground)]{dv.set_uniform(cx2.cx,name,&[v.x,v.y,v.z]);}}
                     if light_dirty {dv.set_uniform(cx2.cx,live_id!(gi_relight),&[c.feedback,if linear{1.0}else{0.0},emission_gain,c.ray_distance]);
                     dv.set_uniform(cx2.cx,live_id!(gi_bounce),&[c.bounce]);}
@@ -1194,7 +1194,8 @@ impl FastGi {
         let same_size = self.screen_fill.as_ref().is_some_and(|fill| fill.full_size == full_size);
         let uniforms = &cx.passes[scene_pass].pass_uniforms;
         let projection = uniforms.camera_projection;
-        let depth_map = match cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => [2.0, -1.0], _ => [1.0, 0.0] };
+        // A sampled depth is clip z/w: one 0..w clip-z convention on every backend (platform/script/tests/clip_z.rs), GL included.
+        let depth_map = [1.0f32, 0.0];
         let ready = self.receivers == GiReceivers::Fast && self.shader_features().0 && cx.gpu_info().float_color_targets
             && projection.v[0] != 0.0 && projection.v[5] != 0.0
             && size.x >= 2.0 && size.y >= 2.0 && width >= 2 && height >= 2

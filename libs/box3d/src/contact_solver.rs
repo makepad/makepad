@@ -41,7 +41,7 @@ use crate::math_functions::{
     mul_sub, mul_sv, neg, perp, rotate_vector, sub, vec2, Matrix3, Vec2, Vec3,
 };
 use crate::math_internal::{dot2, invert2, mul_mv2, sub2, Matrix2};
-use crate::solver::{Softness, SolverBlock, SolverBlockType, SolverShared};
+use crate::solver::{Softness, SolverBlock, SolverBlockType, SolverShared, YieldMember};
 
 // B3_SIMD_WIDTH
 pub const SIMD_WIDTH: usize = 4;
@@ -64,7 +64,7 @@ pub struct ManifoldConstraint {
     pub point_count: i32,
     pub friction: f32,
     pub restitution: f32,
-    /// Positive share of the yielding material slot's impulse budget. Zero bypasses the clamp.
+    /// Impulse cap. Zero is unbounded; ZERO_YIELD_CAP permits no impulse.
     pub yield_cap: f32,
     pub rolling_resistance: f32,
     pub normal: Vec3,
@@ -117,7 +117,7 @@ fn remaining_impulse(room: f32, used: f32) -> f32 {
 }
 
 fn point_limit(cm: &ManifoldConstraint, point: usize) -> f32 {
-    let mut room = cm.yield_cap;
+    let mut room = cm.yield_cap.max(0.0);
     for (index, other) in cm.points[..cm.point_count as usize].iter().enumerate() {
         if index != point {
             room = remaining_impulse(room, other.normal_impulse);
@@ -126,11 +126,14 @@ fn point_limit(cm: &ManifoldConstraint, point: usize) -> f32 {
     room
 }
 
-// If Fh/N is smaller than the least positive impulse, warm starting clips to zero and no
-// normal update can fit. Keep that row inert even though the packed zero cap bypasses clamping.
-#[inline]
-fn normal_mass(inverse_mass: f32, share: Option<f32>) -> f32 {
-    if inverse_mass > 0.0 && share != Some(0.0) { 1.0 / inverse_mass } else { 0.0 }
+const ZERO_YIELD_CAP: f32 = -1.0;
+
+pub(crate) fn pack_yield_cap(cap: f32) -> f32 {
+    if cap == 0.0 { ZERO_YIELD_CAP } else { cap }
+}
+
+fn warm_allowance(cap: f32) -> f32 {
+    if cap == 0.0 { f32::INFINITY } else { cap.max(0.0) }
 }
 
 /// Consume the cache in solver point order before any impulse reaches the bodies.
@@ -142,6 +145,106 @@ fn warm_normal_impulse(cached: f32, room: &mut f32) -> f32 {
         impulse
     } else {
         cached
+    }
+}
+
+/// Preview a cold normal solve on local velocity copies. Both constraint layouts use
+/// the same arithmetic. Only the prepared mass and separation need unpacking per point.
+fn preview_normal_demand(
+    shared: &SolverShared, id: i32, manifold: usize, point_data: impl Fn(usize) -> (f32, f32),
+) -> f64 {
+    // SAFETY: the orchestrator is between completed integration and warm start.
+    let c = unsafe { shared.contacts.get_ref(id as usize) };
+    let m = &c.manifolds[manifold];
+    let body = |index: i32| {
+        if index == NULL_INDEX {
+            (IDENTITY_BODY_STATE, 0.0, Matrix3::ZERO)
+        } else {
+            let sim = &shared.context.sims[index as usize];
+            (shared.states.get(index as usize), sim.inv_mass, sim.inv_inertia_world)
+        }
+    };
+    let (mut a, mass_a, inertia_a) = body(c.body_sim_index_a);
+    let (mut b, mass_b, inertia_b) = body(c.body_sim_index_b);
+    let dp = sub(b.delta_position, a.delta_position);
+    let soft = if c.flags & CONTACT_STATIC_FLAG != 0 { shared.context.static_softness } else { shared.context.contact_softness };
+    let mut demand = 0.0;
+    for (i, p) in m.points[..m.point_count as usize].iter().enumerate() {
+        let (normal_mass, base_separation) = point_data(i);
+        let (ra, rb) = (p.anchor_a, p.anchor_b);
+        let ds = add(dp, sub(rotate_vector(b.delta_rotation, rb), rotate_vector(a.delta_rotation, ra)));
+        let separation = dot(ds, m.normal) + base_separation;
+        let va = add(a.linear_velocity, cross(a.angular_velocity, ra));
+        let vb = add(b.linear_velocity, cross(b.angular_velocity, rb));
+        let vn = dot(sub(vb, va), m.normal);
+        let closing = if separation > 0.0 {
+            vn + separation * shared.context.inv_h
+        } else {
+            // The relaxation pass can supply the full support impulse. The biased
+            // pass can need more when penetrating. Preview the larger cold demand.
+            let bias_s = max_float(separation, -crate::constants::linear_slop());
+            let bias = (soft.mass_scale * soft.bias_rate * bias_s).max(-shared.world.contact_speed);
+            vn.min(soft.mass_scale.mul_add(vn, bias))
+        };
+        let impulse = (-normal_mass * closing).max(0.0);
+        demand += f64::from(impulse);
+        let push = mul_sv(impulse, m.normal);
+        a.linear_velocity = mul_sub(a.linear_velocity, mass_a, push);
+        a.angular_velocity = sub(a.angular_velocity, mul_mv(inertia_a, cross(ra, push)));
+        b.linear_velocity = mul_add(b.linear_velocity, mass_b, push);
+        b.angular_velocity = add(b.angular_velocity, mul_mv(inertia_b, cross(rb, push)));
+    }
+    demand
+}
+
+pub(crate) fn allocate_yield_caps(shared: &SolverShared) {
+    let table = &shared.context.yield_groups;
+    // SAFETY: only the orchestrator uses this scratch. No worker can access a
+    // constraint until this entire pass ends and the next stage is published.
+    let scratch = unsafe { shared.yield_scratch.get() };
+    for &index in &table.multi {
+        let group = &table.groups[index];
+        scratch.demands.clear();
+        for &member in &group.members {
+            let demand = match member {
+                YieldMember::Wide { index, lane } => {
+                    let c = unsafe { shared.wide_constraints.get_ref(index) };
+                    preview_normal_demand(shared, c.contact_ids[lane], 0, |i| {
+                        (c.points[i].normal_masses.get(lane), c.points[i].base_separations.get(lane))
+                    })
+                }
+                YieldMember::Scalar { contact, manifold } => {
+                    let c = unsafe { shared.contact_constraints.get_ref(contact) };
+                    let m = unsafe { shared.manifold_constraints.get_ref(manifold) };
+                    preview_normal_demand(shared, c.contact_id, manifold - c.constraint_start as usize, |i| {
+                        (m.points[i].normal_mass, m.points[i].base_separation)
+                    })
+                }
+            };
+            scratch.demands.push(demand);
+        }
+        crate::contact::allocate_yield_shares(group.force, shared.context.h, &scratch.demands,
+            &mut scratch.order, &mut scratch.caps);
+        for (&member, &cap) in group.members.iter().zip(&scratch.caps) {
+            let mut room = cap;
+            match member {
+                YieldMember::Wide { index, lane } => {
+                    let c = unsafe { shared.wide_constraints.get_mut(index) };
+                    c.yield_caps.set(lane, pack_yield_cap(cap));
+                    for p in &mut c.points {
+                        let impulse = warm_normal_impulse(p.normal_impulses.get(lane), &mut room);
+                        p.normal_impulses.set(lane, impulse);
+                    }
+                }
+                YieldMember::Scalar { manifold, .. } => {
+                    let m = unsafe { shared.manifold_constraints.get_mut(manifold) };
+                    m.yield_cap = pack_yield_cap(cap);
+                    for p in &mut m.points[..m.point_count as usize] {
+                        p.normal_impulse = warm_normal_impulse(p.normal_impulse, &mut room);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -305,8 +408,6 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                     constraint.restitution = contact_constraint.restitution;
                     constraint.rolling_resistance = contact_constraint.rolling_resistance;
                 }
-                let share = shared.manifold_yield_cap(contact, manifold_index as usize);
-                constraint.yield_cap = share.unwrap_or(0.0);
                 constraint.point_count = point_count;
                 constraint.normal = normal;
                 constraint.tangent1 = tangent1;
@@ -315,7 +416,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                 constraint.tangent_velocity1 = dot(contact.tangent_velocity, constraint.tangent1);
                 constraint.tangent_velocity2 = dot(contact.tangent_velocity, constraint.tangent2);
 
-                let mut warm_room = share.unwrap_or(f32::INFINITY);
+                let mut warm_room = warm_allowance(constraint.yield_cap);
                 let mut center_a = Vec3::ZERO;
                 let mut center_b = Vec3::ZERO;
 
@@ -336,7 +437,7 @@ pub fn prepare_contacts_mesh(block: SolverBlock, shared: &SolverShared) {
                     let rn_a = cross(r_a, normal);
                     let rn_b = cross(r_b, normal);
                     let k_normal = m_a + m_b + dot(rn_a, mul_mv(i_a, rn_a)) + dot(rn_b, mul_mv(i_b, rn_b));
-                    cp.normal_mass = normal_mass(k_normal, share);
+                    cp.normal_mass = if k_normal > 0.0 { 1.0 / k_normal } else { 0.0 };
 
                     // Save relative velocity for restitution
                     let vr_a = add(v_a, cross(w_a, r_a));
@@ -569,7 +670,12 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
                     // speculative bias
                     velocity_bias = s * inv_h;
                 } else if use_bias {
-                    velocity_bias = max_float(softness.mass_scale * softness.bias_rate * s, -contact_speed);
+                    let bias_s = if constraint.yield_cap != 0.0 {
+                        max_float(s, -crate::constants::linear_slop())
+                    } else {
+                        s
+                    };
+                    velocity_bias = max_float(softness.mass_scale * softness.bias_rate * bias_s, -contact_speed);
                     mass_scale = softness.mass_scale;
                     impulse_scale = softness.impulse_scale;
                 }
@@ -585,7 +691,7 @@ pub fn solve_contacts_mesh(block: SolverBlock, shared: &SolverShared, use_bias: 
 
                 // clamp the accumulated impulse
                 let mut new_impulse = max_float(cp.normal_impulse + delta_impulse, 0.0);
-                if constraint.yield_cap > 0.0 && new_impulse > cp.normal_impulse {
+                if constraint.yield_cap != 0.0 && new_impulse > cp.normal_impulse {
                     let limit = max_float(point_limit(constraint, point_index as usize), cp.normal_impulse);
                     if new_impulse > limit {
                         new_impulse = limit;
@@ -777,7 +883,7 @@ pub fn apply_restitution_mesh(block: SolverBlock, shared: &SolverShared) {
 
                 // clamp the accumulated impulse
                 let mut new_impulse = max_float(cp.normal_impulse + impulse, 0.0);
-                if cm.yield_cap > 0.0 {
+                if cm.yield_cap != 0.0 {
                     let limit = point_limit(cm, point_index as usize);
                     if cp.normal_impulse >= limit {
                         continue;
@@ -1648,7 +1754,7 @@ pub struct ContactConstraintWide {
     pub mass_scale: FloatW,
     pub impulse_scale: FloatW,
     pub restitution: FloatW,
-    /// Positive manifold share per lane. Zero bypasses the clamp.
+    /// Packed impulse caps, with the same encoding as the scalar manifolds.
     pub yield_caps: FloatW,
 
     /// C: b3Manifold* manifolds[4] — per lane contact id (the manifold is
@@ -1696,9 +1802,9 @@ impl Default for ContactConstraintWide {
 }
 
 // Same directed subtraction as remaining_impulse. Only capped lanes take the resulting limit.
-fn point_limit_w(c: &ContactConstraintWide, point: usize, capped: FloatW) -> FloatW {
+fn point_limit_w(c: &ContactConstraintWide, point: usize, rigid: FloatW) -> FloatW {
     let zero = zero_w();
-    let mut room = c.yield_caps;
+    let mut room = max_w(c.yield_caps, zero);
     for (index, other) in c.points.iter().enumerate() {
         if index != point {
             let used = other.normal_impulses;
@@ -1710,7 +1816,7 @@ fn point_limit_w(c: &ContactConstraintWide, point: usize, capped: FloatW) -> Flo
             room = blend_w(left, down, rounded_up);
         }
     }
-    blend_w(splat_w(f32::INFINITY), room, capped)
+    blend_w(room, splat_w(f32::INFINITY), rigid)
 }
 
 pub fn get_wide_contact_constraint_byte_count() -> i32 {
@@ -1993,9 +2099,7 @@ pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
 
                 constraint.friction.set(lane, contact.friction);
                 constraint.restitution.set(lane, contact.restitution);
-                let share = shared.manifold_yield_cap(contact, 0);
-                constraint.yield_caps.set(lane, share.unwrap_or(0.0));
-                let mut warm_room = share.unwrap_or(f32::INFINITY);
+                let mut warm_room = warm_allowance(constraint.yield_caps.get(lane));
                 constraint.rolling_resistance.set(lane, contact.rolling_resistance);
 
                 constraint.tangent_velocity1.set(lane, dot(contact.tangent_velocity, tangent1));
@@ -2035,7 +2139,7 @@ pub fn prepare_contacts_convex(block: SolverBlock, shared: &SolverShared) {
                     let rn_a = cross(r_a, normal);
                     let rn_b = cross(r_b, normal);
                     let k_normal = m_a + m_b + dot(rn_a, mul_mv(i_a, rn_a)) + dot(rn_b, mul_mv(i_b, rn_b));
-                    cp.normal_masses.set(lane, normal_mass(k_normal, share));
+                    cp.normal_masses.set(lane, if k_normal > 0.0 { 1.0 / k_normal } else { 0.0 });
 
                     // Save relative velocity for restitution
                     let vr_a = add(v_a, cross(w_a, r_a));
@@ -2234,7 +2338,7 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
         let mut total_twist_limit = zero_w();
 
         let yielding = !all_zero_w(c.yield_caps);
-        let capped = greater_than_w(c.yield_caps, zero_w());
+        let rigid = equals_w(c.yield_caps, zero_w());
         for point_index in 0..MAX_MANIFOLD_POINTS {
             let cp = &c.points[point_index];
 
@@ -2254,7 +2358,13 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
             // Apply speculative bias if separation is greater than zero, otherwise apply soft constraint bias
             let mask = greater_than_w(s, zero_w());
             let spec_bias = mul_w(s, inv_h);
-            let soft_bias = max_w(mul_w(bias_rate, s), contact_speed);
+            let bias_s = if yielding {
+                let neg_slop = splat_w(-crate::constants::linear_slop());
+                blend_w(max_w(s, neg_slop), s, rigid)
+            } else {
+                s
+            };
+            let soft_bias = max_w(mul_w(bias_rate, bias_s), contact_speed);
             let bias = blend_w(soft_bias, spec_bias, mask);
 
             let point_mass_scale = blend_w(mass_scale, one_w, mask);
@@ -2276,7 +2386,7 @@ pub fn solve_contacts_convex(block: SolverBlock, shared: &SolverShared, use_bias
             if yielding {
                 // The old impulse already fits. Directed subtraction may round the newly
                 // computed limit below it by an ulp when other points hold small impulses.
-                let limit = max_w(point_limit_w(c, point_index, capped), cp.normal_impulses);
+                let limit = max_w(point_limit_w(c, point_index, rigid), cp.normal_impulses);
                 new_impulse = blend_w(new_impulse, limit, greater_than_w(new_impulse, limit));
             }
             let cp = &mut c.points[point_index];
@@ -2430,7 +2540,7 @@ pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
         // affected by the calculations below.
         let restitution_mask = equals_w(c.restitution, zero);
         let yielding = !all_zero_w(c.yield_caps);
-        let capped = greater_than_w(c.yield_caps, zero_w());
+        let rigid = equals_w(c.yield_caps, zero_w());
 
         for point_index in 0..MAX_MANIFOLD_POINTS {
             let cp = &c.points[point_index];
@@ -2456,7 +2566,7 @@ pub fn apply_restitution_convex(block: SolverBlock, shared: &SolverShared) {
             // Clamp the accumulated impulse
             let mut new_impulse = max_w(sub_w(cp.normal_impulses, neg_impulse), zero_w());
             if yielding {
-                let limit = point_limit_w(c, point_index, capped);
+                let limit = point_limit_w(c, point_index, rigid);
                 new_impulse = blend_w(new_impulse, limit, greater_than_w(new_impulse, limit));
                 // Skip all restitution on saturated lanes, including a negative increment.
                 new_impulse = blend_w(cp.normal_impulses, new_impulse, greater_than_w(limit, cp.normal_impulses));

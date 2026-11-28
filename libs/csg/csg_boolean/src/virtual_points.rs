@@ -452,12 +452,11 @@ pub(crate) fn determinant3(a: [&Dyadic; 3], b: [&Dyadic; 3], c: [&Dyadic; 3]) ->
 
 pub(crate) fn determinant4(rows: [&[Dyadic; 4]; 4]) -> Dyadic {
     let [a, b, c, d] = rows;
-    let xyz = |row: &[Dyadic; 4]| [row[0].clone(), row[1].clone(), row[2].clone()];
-    let [av, bv, cv, dv] = rows.map(xyz);
-    let ma = determinant3(bv.each_ref(), cv.each_ref(), dv.each_ref());
-    let mb = determinant3(av.each_ref(), cv.each_ref(), dv.each_ref());
-    let mc = determinant3(av.each_ref(), bv.each_ref(), dv.each_ref());
-    let md = determinant3(av.each_ref(), bv.each_ref(), cv.each_ref());
+    let [av, bv, cv, dv] = rows.map(|row| [&row[0], &row[1], &row[2]]);
+    let ma = determinant3(bv, cv, dv);
+    let mb = determinant3(av, cv, dv);
+    let mc = determinant3(av, bv, dv);
+    let md = determinant3(av, bv, cv);
     // Expansion along the weight column has signs -, +, -, +.
     a[3].mul(&ma)
         .negate()

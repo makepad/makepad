@@ -177,6 +177,8 @@ pub struct RenderStats {
     pub model_instances: u64,
     pub model_draws: u64,
     pub model_triangles: usize,
+    /// Near-plane-overlapping model/LOD/layer groups submitted to the traced Inside pass.
+    pub traced_inside_draws: u64,
     /// In-world presentation props attached to moving actors (for example a
     /// third-person held weapon). Counted separately because these meshes do
     /// not belong to the placed scene or any of its bake/shadow inputs.
@@ -230,6 +232,9 @@ pub struct RenderStats {
     pub csm_draws: u64,
     /// The current cascades reuse the preceding whole-atlas recording.
     pub csm_kept: bool,
+    /// The current cascades hold every caster of the frame: drawn from a
+    /// clear (`csm_draws` is 0 when none is in view) or kept.
+    pub csm_whole: bool,
     pub csm_gpu_ms: f32,
     /// Dynamic shadows drawn through the GPU SDF-silhouette quad
     /// (characters + driven cars).
@@ -553,6 +558,8 @@ pub struct Renderer {
     pbr_ready: bool,
     /// A secondary camera may borrow the live probe field for sampling only.
     review_gi: bool,
+    /// The drawing a view draw last said it found no scene cascades in (once each).
+    view_unfitted_logged: Option<u64>,
     /// Already resolved lights borrowed by a secondary camera, in lane units.
     review_lights: Option<Vec<crate::lightmap::LmLight>>,
     /// The diffuse and PBR lanes' no-discard variants (opaque.rs).
@@ -614,7 +621,7 @@ pub struct Renderer {
     shadow_debug: bool,
     /// See [`Renderer::set_hdr_output`].
     hdr_output: bool,
-    /// Display dither on 8-bit targets (`bind_output_dither`); off for exact comparisons.
+    /// Display dither on 8-bit targets (`bind_output_dither`, the HDR composite); off for exact comparisons.
     output_dither: bool,
     /// This frame's metered exposure (HDR output only).
     hdr_exposure: f32,
@@ -976,6 +983,7 @@ impl Default for Renderer {
             grass_flower_rings: Default::default(),
             pbr_ready: false,
             review_gi: false,
+            view_unfitted_logged: None,
             review_lights: None,
             lane_variants: Default::default(),
             pbr_materials_enabled: true,

@@ -16,7 +16,9 @@
 //! A drag ([`Drag`], or the one-call [`System::drag`]) has a solver of its
 //! own: a trust-region Newton method on the constraint surface that moves the
 //! dragged point toward the pointer and keeps the sketch on the side it had at
-//! the press.
+//! the press. Each [`DragReport`] gives the move's outcome, side enforcement and round
+//! count, plus the whole sketch's residual, convergence and failing constraints.
+//! At the press and release, [`Drag::report`] gives the full [`Report`] for the current pose.
 //!
 //! After a solve, [`Report`] gives the degrees of freedom (from the rank of
 //! the Jacobian), which unknowns are fully determined (zero in every
@@ -33,6 +35,47 @@ use crate::region::P2;
 use std::f64::consts::PI;
 
 mod drag;
+
+#[cfg(test)]
+pub(crate) mod work {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Default, PartialEq, Debug)]
+    pub(crate) struct Work {
+        pub(crate) evaluate: u64,
+        pub(crate) determinant: u64,
+        pub(crate) reduced_hessian: u64,
+        pub(crate) hessian_tables: u64,
+        pub(crate) band_crossings: u64,
+        pub(crate) band_floor: u64,
+        pub(crate) strip_undone: u64,
+        pub(crate) negative_pred: u64,
+        pub(crate) report_qr: u64,
+        pub(crate) redundant: u64,
+        pub(crate) qr: u64,
+        pub(crate) start_qr: u64,
+        pub(crate) trial_qr: u64,
+        pub(crate) projection_qr: u64,
+        pub(crate) eigen_ql_ops: u64,
+        pub(crate) eigen_jacobi_ops: u64,
+    }
+
+    thread_local! {
+        static COUNTS: Cell<Work> = Cell::new(Work::default());
+    }
+
+    pub(crate) fn add(f: impl FnOnce(&mut Work)) {
+        COUNTS.with(|counts| {
+            let mut work = counts.get();
+            f(&mut work);
+            counts.set(work);
+        });
+    }
+
+    pub(crate) fn take() -> Work {
+        COUNTS.with(Cell::take)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PointId(pub usize);
@@ -179,12 +222,19 @@ pub enum DragOutcome {
 /// What one drag move did.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DragReport {
-    /// The solve report at the pose the move ended on (`converged`: the constraints hold).
-    pub report: Report,
+    /// How the move ended relative to the target.
     pub outcome: DragOutcome,
     /// The drag keeps the sketch on the side (assembly mode) it had at the press. False where
     /// nothing separates the two sides, so a flip is not prevented there.
     pub side_enforced: bool,
+    /// Drag rounds taken by this move.
+    pub rounds: usize,
+    /// Largest remaining residual in the whole sketch (sketch units).
+    pub residual: f64,
+    /// Every constraint in the whole sketch holds within the tolerance.
+    pub converged: bool,
+    /// Whole-sketch constraints that still fail (only when not converged).
+    pub failing: Vec<usize>,
 }
 
 /// Solver settings.
@@ -202,15 +252,27 @@ impl Default for Options {
 }
 
 /// A drag from a press to its release. It holds what is fixed at the press, so the moves
-/// of one drag agree with each other.
+/// of one drag agree with each other. It moves the dragged point's constraint component
+/// and holds the rest of the sketch at its current pose.
+/// A session keeps the last pose's factorisation for a move starting at the same pose and scale.
 #[derive(Clone, Debug)]
 pub struct Drag {
     point: PointId,
     opts: Options,
+    last_rounds: usize,
+    last_scale: f64,
     /// The pose at the press, for `cancel`.
     press: Vec<f64>,
+    /// The component on which the drag solves.
+    sub: System,
+    /// Whole-sketch unknown index for each unknown in the component.
+    map: Vec<usize>,
+    /// Whole-sketch constraint branches at the press, for reporting.
+    branches: Vec<f64>,
     /// The press frame: σ_press, the branches and the spare class, held across the moves of one drag.
     frame: drag::PressFrame,
+    /// The last move's end pose with its evaluation and QR, for the next move's start.
+    kept: Option<drag::Kept>,
     layout: Layout,
 }
 
@@ -241,38 +303,75 @@ impl Layout {
 }
 
 impl Drag {
-    /// Moves the dragged point toward `target` from the current pose.
+    /// Moves the dragged point toward `target` and returns the move's outcome, side enforcement,
+    /// rounds and whole-sketch constraint readings. Use [`Self::report`] for the full report.
     pub fn to(&mut self, s: &mut System, target: P2) -> DragReport {
         if self.point.0 >= s.points.len() {
-            let scale = s.scale();
-            let tol = self.opts.tolerance * scale;
-            // If the constraints also changed, their current branches replace the stale row mapping.
-            let current_branches;
-            let branches = if self.layout.constraints == s.constraints {
-                &self.frame.branches
-            } else {
-                current_branches = s.branches();
-                &current_branches
+            self.last_rounds = 0;
+            self.last_scale = s.scale();
+            let tol = self.opts.tolerance * self.last_scale;
+            let (r, _, rows) = self.evaluate_for_report(s);
+            let (residual, converged, failing) = residual_status(&r, &rows, tol);
+            return DragReport {
+                outcome: DragOutcome::NotReached, side_enforced: self.frame.side_enforced(),
+                rounds: self.last_rounds, residual, converged, failing,
             };
-            let (r, jac, rows) = s.evaluate(&s.x, scale, branches);
-            let report = s.report_from(r, jac, rows, 0, tol);
-            return DragReport { report, outcome: DragOutcome::NotReached, side_enforced: self.frame.side_enforced() };
         }
         if !self.layout.matches(s) {
             eprintln!("constrain: the sketch changed during a drag; its press frame is rebuilt at the current pose");
-            self.frame = drag::PressFrame::new(s, self.point);
+            self.kept = None;
+            self.branches = s.branches();
+            (self.sub, self.map) = s.drag_component(self.point, &self.branches);
+            self.frame = drag::PressFrame::new(&self.sub, self.point, s.scale());
             self.layout = Layout::of(s);
         }
         let scale = s.scale();
         let tol = self.opts.tolerance * scale;
         let end = if target.iter().all(|v| v.is_finite()) {
-            drag::drag_move(s, self.point, target, &self.opts, &mut self.frame)
+            for (x, &g) in self.sub.x.iter_mut().zip(&self.map) {
+                *x = s.x[g];
+            }
+            let end = drag::drag_move(&mut self.sub, self.point, target, &self.opts, &mut self.frame, scale, &mut self.kept);
+            for (&x, &g) in self.sub.x.iter().zip(&self.map) {
+                s.x[g] = x;
+            }
+            end
         } else {
             drag::MoveEnd { rounds: 0, outcome: DragOutcome::NotReached }
         };
-        let (r, jac, rows) = s.evaluate(&s.x, scale, &self.frame.branches);
-        let report = s.report_from(r, jac, rows, end.rounds, tol);
-        DragReport { report, outcome: end.outcome, side_enforced: self.frame.side_enforced() }
+        self.last_rounds = end.rounds;
+        self.last_scale = scale;
+        let (r, _, rows) = s.evaluate(&s.x, scale, &self.branches);
+        #[cfg(test)]
+        work::add(|w| w.evaluate -= r.len() as u64 * s.x.len() as u64);
+        let (residual, converged, failing) = residual_status(&r, &rows, tol);
+        DragReport {
+            outcome: end.outcome, side_enforced: self.frame.side_enforced(),
+            rounds: self.last_rounds, residual, converged, failing,
+        }
+    }
+
+    /// Full report for the current whole-sketch pose, at the last move's scale (the press
+    /// scale before any move), so it agrees with that move's [`DragReport`].
+    pub fn report(&self, s: &System) -> Report {
+        let tol = self.opts.tolerance * self.last_scale;
+        let (r, jac, rows) = self.evaluate_for_report(s);
+        s.report_from(r, jac, rows, self.last_rounds, tol)
+    }
+
+    fn evaluate_for_report(&self, s: &System) -> (Vec<f64>, Jac, Vec<usize>) {
+        // If the constraints changed, their current branches replace the stale row mapping.
+        let current_branches;
+        let branches = if self.layout.constraints == s.constraints {
+            &self.branches
+        } else {
+            current_branches = s.branches();
+            &current_branches
+        };
+        let (r, jac, rows) = s.evaluate(&s.x, self.last_scale, branches);
+        #[cfg(test)]
+        work::add(|w| w.evaluate -= r.len() as u64 * s.x.len() as u64);
+        (r, jac, rows)
     }
 
     /// Restores the press pose if the number of unknowns is unchanged.
@@ -374,10 +473,104 @@ impl System {
 
     /// Starts a drag of `p` at the current pose.
     pub fn start_drag(&self, p: PointId, opts: &Options) -> Drag {
-        Drag { point: p, opts: *opts, press: self.x.clone(), frame: drag::PressFrame::new(self, p), layout: Layout::of(self) }
+        let branches = self.branches();
+        let (sub, map) = self.drag_component(p, &branches);
+        let scale = self.scale();
+        let frame = drag::PressFrame::new(&sub, p, scale);
+        Drag {
+            point: p, opts: *opts, last_rounds: 0, last_scale: scale,
+            press: self.x.clone(), sub, map, branches, frame, kept: None, layout: Layout::of(self),
+        }
     }
 
-    /// The one-call form of [`Self::start_drag`] and [`Drag::to`].
+    #[cfg(test)]
+    fn start_drag_whole(&self, p: PointId, opts: &Options) -> Drag {
+        let branches = self.branches();
+        let sub = self.clone();
+        let map = (0..self.x.len()).collect();
+        let scale = self.scale();
+        let frame = drag::PressFrame::new(&sub, p, scale);
+        Drag {
+            point: p, opts: *opts, last_rounds: 0, last_scale: scale,
+            press: self.x.clone(), sub, map, branches, frame, kept: None, layout: Layout::of(self),
+        }
+    }
+
+    /// Stop at fixed points other than the dragged point, keeping those endpoints and their Fix rows.
+    /// The null space has zero rows at a fixed point, so mechanisms joined only there move independently.
+    /// A sketch that no fixed point splits gives `map = 0..n` and a sub-system equal to the sketch field by field.
+    fn drag_component(&self, p: PointId, branches: &[f64]) -> (System, Vec<usize>) {
+        fn root(parents: &mut [usize], mut node: usize) -> usize {
+            while parents[node] != node {
+                parents[node] = parents[parents[node]];
+                node = parents[node];
+            }
+            node
+        }
+
+        // A point's x and y share a node. Each radius or other unknown starts on its own.
+        let mut parents: Vec<_> = (0..self.x.len()).collect();
+        for &x in &self.points {
+            parents[x + 1] = x;
+        }
+        let mut fixed = vec![false; self.x.len()];
+        for c in &self.constraints {
+            if let Constraint::Fix(q, _) = *c {
+                let x = self.points[q.0];
+                fixed[x..x + 2].fill(q != p);
+            }
+        }
+        let scale = self.scale();
+        let mut locals = Vec::with_capacity(self.constraints.len());
+        for (ci, c) in self.constraints.iter().enumerate() {
+            let mut ctx = Ctx { x: &self.x, sys: self, locals: Vec::new() };
+            let _ = ctx.residuals(c, scale, branches[ci]);
+            let mut free = ctx.locals.iter().copied().filter(|&g| !fixed[g]);
+            if let Some(first) = free.next() {
+                let first_root = root(&mut parents, first);
+                for g in free {
+                    let other_root = root(&mut parents, g);
+                    parents[other_root] = first_root;
+                }
+            }
+            locals.push(ctx.locals);
+        }
+
+        let component = root(&mut parents, self.points[p.0]);
+        let mut included = vec![false; self.x.len()];
+        included[component] = true;
+        for vars in &locals {
+            if vars.iter().any(|&g| root(&mut parents, g) == component) {
+                for &g in vars {
+                    if fixed[g] {
+                        included[root(&mut parents, g)] = true;
+                    }
+                }
+            }
+        }
+        let mut map = Vec::new();
+        let mut inverse = vec![usize::MAX; self.x.len()];
+        for (g, index) in inverse.iter_mut().enumerate() {
+            if included[root(&mut parents, g)] {
+                *index = map.len();
+                map.push(g);
+            }
+        }
+        let sub = System {
+            x: map.iter().map(|&g| self.x[g]).collect(),
+            points: self.points.iter().map(|&g| inverse[g]).collect(),
+            lines: self.lines.clone(),
+            circles: self.circles.iter().map(|c| Circle { r: inverse[c.r], ..*c }).collect(),
+            arcs: self.arcs.clone(),
+            constraints: self.constraints.iter().zip(locals).filter_map(|(&c, vars)| {
+                vars.iter().all(|&g| inverse[g] != usize::MAX).then_some(c)
+            }).collect(),
+        };
+        (sub, map)
+    }
+
+    /// Drags `p` in one move and returns its [`DragReport`]. Use [`Self::start_drag`]
+    /// and [`Drag::to`] for a session with a full report available from [`Drag::report`].
     pub fn drag(&mut self, p: PointId, target: P2, opts: &Options) -> DragReport {
         let mut drag = self.start_drag(p, opts);
         drag.to(self, target)
@@ -414,21 +607,21 @@ impl System {
         self.report_from(r, jac, rows, iterations, tol)
     }
 
-    fn report_from(&self, r: Vec<f64>, jac: Vec<f64>, rows: Vec<usize>, iterations: usize, tol: f64) -> Report {
+    fn report_from(&self, r: Vec<f64>, jac: Jac, rows: Vec<usize>, iterations: usize, tol: f64) -> Report {
         let n = self.x.len();
-        let residual = max_abs(&r);
-        let converged = residual <= tol;
-        let failing = if converged {
-            Vec::new()
-        } else {
-            let mut f: Vec<usize> = rows.iter().zip(&r).filter(|(_, v)| v.abs() > tol).map(|(c, _)| *c).collect();
-            f.dedup();
-            f
-        };
+        let (residual, converged, failing) = residual_status(&r, &rows, tol);
+        #[cfg(test)]
+        work::add(|w| w.report_qr += 1);
         let qr = DragQr::new(&jac, n);
         let dof = n - qr.rank();
         let determined = (0..n).map(|j| qr.determined(j)).collect();
-        let redundant = redundant_constraints(&jac, &rows, n);
+        let mut redundant = qr.redundant_rows(&jac);
+        for row in &mut redundant {
+            *row = rows[*row];
+        }
+        redundant.dedup();
+        #[cfg(test)]
+        assert_eq!(redundant, redundant_constraints(&jac.dense(), &rows, n), "the QR's redundant constraints must match the row-order sweep");
         Report { converged, iterations, residual, dof, determined, redundant, failing }
     }
 
@@ -436,7 +629,7 @@ impl System {
     /// report: the last residuals, Jacobian, each row's constraint and the iteration count.
     fn iterate_weighted(
         &mut self, w: &[f64], scale: f64, branches: &[f64], tol: f64, max_iterations: usize,
-    ) -> (Vec<f64>, Vec<f64>, Vec<usize>, usize) {
+    ) -> (Vec<f64>, Jac, Vec<usize>, usize) {
         let n = self.x.len();
         let winv: Vec<f64> = w.iter().map(|w| 1.0 / w).collect();
         let (mut r, mut jac, mut rows) = self.evaluate(&self.x, scale, branches);
@@ -445,6 +638,7 @@ impl System {
         while iterations < max_iterations && max_abs(&r) > tol {
             iterations += 1;
             let m = r.len();
+            let dense = jac.dense();
             // A = J W⁻¹ Jᵀ
             let mut a = vec![0.0; m * m];
             let mut max_diag: f64 = 0.0;
@@ -452,7 +646,7 @@ impl System {
                 for j in 0..=i {
                     let mut s = 0.0;
                     for k in 0..n {
-                        s += jac[i * n + k] * winv[k] * jac[j * n + k];
+                        s += dense[i * n + k] * winv[k] * dense[j * n + k];
                     }
                     a[i * m + j] = s;
                     a[j * m + i] = s;
@@ -471,7 +665,7 @@ impl System {
                     for k in 0..n {
                         let mut s = 0.0;
                         for i in 0..m {
-                            s += jac[i * n + k] * y[i];
+                            s += dense[i * n + k] * y[i];
                         }
                         trial[k] -= winv[k] * s;
                     }
@@ -495,9 +689,44 @@ impl System {
         (r, jac, rows, iterations)
     }
 
-    /// Residuals, their Jacobian (row-major, rows x unknowns) and each row's
-    /// constraint index.
-    fn evaluate(&self, x: &[f64], scale: f64, branches: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+    /// Residuals, their Jacobian in compressed rows, and each row's constraint index.
+    fn evaluate(&self, x: &[f64], scale: f64, branches: &[f64]) -> (Vec<f64>, Jac, Vec<usize>) {
+        let n = x.len();
+        let row_capacity = 2 * self.constraints.len();
+        let mut r = Vec::with_capacity(row_capacity);
+        let mut rows = Vec::with_capacity(row_capacity);
+        let mut jac = Jac {
+            n,
+            start: Vec::with_capacity(row_capacity + 1),
+            pairs: Vec::with_capacity(4 * row_capacity),
+        };
+        jac.start.push(0);
+        let mut locals = Vec::with_capacity(8);
+        for (ci, c) in self.constraints.iter().enumerate() {
+            locals.clear();
+            let mut ctx = Ctx { x, sys: self, locals };
+            let out = ctx.residuals(c, scale, branches[ci]);
+            for d in out.iter() {
+                r.push(d.v);
+                let base = jac.pairs.len();
+                for (k, &var) in ctx.locals.iter().enumerate() {
+                    jac.pairs.push((var, 0.0 + d.g[k]));
+                }
+                if !jac.pairs[base..].windows(2).all(|w| w[0].0 < w[1].0) {
+                    jac.pairs[base..].sort_unstable_by_key(|&(var, _)| var);
+                }
+                jac.start.push(jac.pairs.len());
+                rows.push(ci);
+            }
+            locals = ctx.locals;
+        }
+        #[cfg(test)]
+        work::add(|w| w.evaluate += r.len() as u64 * n as u64);
+        (r, jac, rows)
+    }
+
+    #[cfg(test)]
+    fn evaluate_dense(&self, x: &[f64], scale: f64, branches: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
         let n = x.len();
         let (mut r, mut jac, mut rows) = (Vec::new(), Vec::new(), Vec::new());
         for (ci, c) in self.constraints.iter().enumerate() {
@@ -514,6 +743,37 @@ impl System {
             }
         }
         (r, jac, rows)
+    }
+}
+
+/// Each row stores its constraint's locals sorted by unknown, including pairs with an exact zero.
+/// Values accumulate as `0.0 + g` as in the dense matrix, so a −0 derivative is stored as +0.
+/// Expanding with `dense()` reproduces the row-major matrix bit for bit.
+#[derive(Clone, Debug)]
+struct Jac {
+    n: usize,
+    start: Vec<usize>,
+    pairs: Vec<(usize, f64)>,
+}
+
+impl Jac {
+    fn rows(&self) -> usize {
+        self.start.len() - 1
+    }
+
+    fn row(&self, i: usize) -> &[(usize, f64)] {
+        &self.pairs[self.start[i]..self.start[i + 1]]
+    }
+
+    fn dense(&self) -> Vec<f64> {
+        let mut dense = vec![0.0; self.rows() * self.n];
+        for i in 0..self.rows() {
+            let base = i * self.n;
+            for &(var, value) in self.row(i) {
+                dense[base + var] = value;
+            }
+        }
+        dense
     }
 }
 
@@ -707,7 +967,8 @@ impl<'a> Ctx<'a> {
             }
             TangentAt(l, c, p) => {
                 let (a, b) = self.line(l);
-                let (ctr, _) = self.circle(c);
+                // The radius does not enter. Reading it would make a ninth unknown when p is its own point.
+                let ctr = self.pt(self.sys.circles[c.0].center);
                 let q = self.pt(p);
                 let u = sub(b, a);
                 vec![dotd(u, sub(q, ctr)) / len(u)]
@@ -790,11 +1051,25 @@ fn max_abs(a: &[f64]) -> f64 {
     a.iter().fold(0.0, |m, v| m.max(v.abs()))
 }
 
+fn residual_status(r: &[f64], rows: &[usize], tol: f64) -> (f64, bool, Vec<usize>) {
+    let residual = max_abs(r);
+    let converged = residual <= tol;
+    let failing = if converged {
+        Vec::new()
+    } else {
+        let mut f: Vec<usize> = rows.iter().zip(r).filter(|(_, v)| v.abs() > tol).map(|(c, _)| *c).collect();
+        f.dedup();
+        f
+    };
+    (residual, converged, failing)
+}
+
 /// Pivot cut of the drag's QR, relative to the first pivot (Q7).
 const RANK_CUT: f64 = 1e-9;
 
 /// Column-pivoted Householder QR of Jᵀ. The independent columns give the drag
 /// its constraint normals Y. Each stores R above the tail of its reflector.
+#[derive(Clone, Debug)]
 struct DragQr {
     columns: Vec<Vec<f64>>,
     /// Original row index of each column, in pivot order.
@@ -806,9 +1081,18 @@ struct DragQr {
 
 impl DragQr {
     /// Keep pivots larger than 1e-9 times the first pivot's magnitude.
-    fn new(jac: &[f64], n: usize) -> Self {
-        let mut columns: Vec<_> = jac.chunks_exact(n.max(1)).map(|row| row.to_vec()).collect();
-        let m = columns.len();
+    fn new(jac: &Jac, n: usize) -> Self {
+        #[cfg(test)]
+        work::add(|w| w.qr += 1);
+        let m = if n == 0 { 0 } else { jac.rows() };
+        let mut columns = Vec::with_capacity(m);
+        for i in 0..m {
+            let mut column = vec![0.0; n];
+            for &(var, value) in jac.row(i) {
+                column[var] = value;
+            }
+            columns.push(column);
+        }
         let mut order: Vec<usize> = (0..m).collect();
         let mut tau = Vec::new();
         for k in 0..n.min(columns.len()) {
@@ -868,6 +1152,66 @@ impl DragQr {
         self.tau.len()
     }
 
+    /// Returns the redundant Jacobian rows in ascending order. The last significant row in a
+    /// dependency is implied by earlier rows. Eliminating it from the other dependencies
+    /// recovers those earlier-row relations regardless of the QR's pivot order.
+    fn redundant_rows(&self, jac: &Jac) -> Vec<usize> {
+        #[cfg(test)]
+        work::add(|w| w.redundant += 1);
+        let m = jac.rows();
+        let rank = self.rank();
+        if rank == m {
+            return Vec::new();
+        }
+        if jac.n == 0 {
+            return (0..m).collect();
+        }
+        let norms: Vec<_> = (0..m).map(|i| {
+            jac.row(i).iter().map(|&(_, value)| value * value).sum::<f64>().sqrt()
+        }).collect();
+        let mut redundant = Vec::with_capacity(m - rank);
+        let mut dependencies = Vec::new();
+        for j in rank..m {
+            let d = self.order[j];
+            if norms[d] == 0.0 {
+                redundant.push(d);
+                continue;
+            }
+            // Back-substitute the top of column j through R11 into y in the original row order.
+            let mut y = vec![0.0; m];
+            for k in (0..rank).rev() {
+                let sum = (k + 1..rank).map(|l| self.columns[l][k] * y[self.order[l]]).sum::<f64>();
+                y[self.order[k]] = (self.columns[j][k] - sum) / self.columns[k][k];
+            }
+            y[d] = -1.0;
+            dependencies.push((d, y));
+        }
+
+        let highest = |d: usize, y: &[f64]| {
+            let cut = 1e-8 * norms[d];
+            // Each remaining vector has -1 at its own d and zero at the other remaining d's.
+            (d + 1..m).rev().find(|&i| y[i].abs() * norms[i] >= cut).unwrap_or(d)
+        };
+        while let Some((slot, h, _)) = dependencies.iter().enumerate()
+            .map(|(slot, (d, y))| (slot, highest(*d, y), *d))
+            .max_by_key(|&(_, h, d)| (h, std::cmp::Reverse(d)))
+        {
+            let (_, pivot) = dependencies.swap_remove(slot);
+            redundant.push(h);
+            for (_, y) in &mut dependencies {
+                if y[h] != 0.0 {
+                    let factor = y[h] / pivot[h];
+                    for (entry, &p) in y.iter_mut().zip(&pivot) {
+                        *entry -= factor * p;
+                    }
+                    y[h] = 0.0;
+                }
+            }
+        }
+        redundant.sort_unstable();
+        redundant
+    }
+
     /// An unknown is determined if its row in the orthonormal null basis has length below 1e-7.
     fn determined(&self, j: usize) -> bool {
         self.z.iter().map(|v| v[j] * v[j]).sum::<f64>().sqrt() < 1e-7
@@ -910,7 +1254,8 @@ fn cholesky_solve(a: &mut [f64], b: &[f64], m: usize) -> Option<Vec<f64>> {
     Some(y)
 }
 
-/// Constraints whose rows lie in the span of the rows before them.
+/// Row-order Gram-Schmidt reference for `DragQr::redundant_rows`, with rows mapped to constraints.
+#[cfg(test)]
 fn redundant_constraints(jac: &[f64], rows: &[usize], n: usize) -> Vec<usize> {
     let mut basis: Vec<Vec<f64>> = Vec::new();
     let mut out = Vec::new();
@@ -1012,6 +1357,40 @@ mod tests {
         let r = s.solve(&Options::default());
         assert!(!r.converged);
         assert!(r.failing.contains(&bad) || r.redundant.contains(&bad), "{r:?}");
+
+        let opts = Options::default();
+        let mut base = System::new();
+        let (p, l) = quad(&mut base);
+        let width = Constraint::Length(l[0], 40.0);
+        let height = Constraint::Length(l[1], 20.0);
+        for c in [Constraint::Fix(p[0], [0.0, 0.0]), Constraint::Horizontal(l[0]),
+                  Constraint::Vertical(l[1]), Constraint::Horizontal(l[2]), Constraint::Vertical(l[3]),
+                  width, height] {
+            base.constrain(c);
+        }
+        let mut s = base.clone();
+        let r = s.solve(&opts);
+        assert!(r.converged, "q=0 rectangle must converge");
+        assert!(r.redundant.is_empty(), "q=0 rectangle must have no redundant constraints");
+        assert_eq!(r.dof, 0, "q=0 rectangle must have no free direction");
+
+        for (case, position) in [("first", 0), ("middle", 3), ("last", base.constraints.len())] {
+            let mut copy = base.clone();
+            copy.constraints.insert(position, width);
+            let later = copy.constraints.iter().rposition(|&c| c == width).unwrap();
+            assert_eq!(copy.solve(&opts).redundant, [later],
+                "with the duplicate placed {case}, only the later width constraint must be redundant");
+        }
+
+        let mut extras = Vec::new();
+        for c in [width, height, Constraint::Parallel(l[0], l[2])] {
+            extras.push(s.constrain(c));
+            assert_eq!(s.solve(&opts).redundant, extras,
+                "q={} rectangle must report all extras in insertion order", extras.len());
+        }
+
+        let zero = base.constrain(Constraint::Coincident(p[1], p[1]));
+        assert_eq!(base.solve(&opts).redundant, [zero], "the zero rows of a self-coincidence must report its id once");
     }
 
     #[test]
@@ -1071,29 +1450,40 @@ mod tests {
 
     #[test]
     fn slot_from_arcs_and_tangent_lines() {
-        // Two half circles joined by tangent lines: a stadium of width 2r.
-        let mut s = System::new();
-        let c1 = s.point([0.0, 0.0]);
-        let c2 = s.point([28.0, 1.0]);
-        let (p1, p2, p3, p4) = (s.point([0.0, -5.5]), s.point([29.0, -4.0]), s.point([27.0, 6.0]), s.point([1.0, 5.0]));
-        let a1 = s.arc(c2, p2, p3);
-        let a2 = s.arc(c1, p4, p1);
-        let (bottom, top) = (s.line(p1, p2), s.line(p3, p4));
-        let (k1, k2) = (s.arcs[a1.0].circle, s.arcs[a2.0].circle);
-        s.constrain(Constraint::Fix(c1, [0.0, 0.0]));
-        s.constrain(Constraint::HorizontalPoints(c1, c2));
-        s.constrain(Constraint::Distance(c1, c2, 30.0));
-        s.constrain(Constraint::EqualRadius(k1, k2));
-        s.constrain(Constraint::Radius(k1, 5.0));
-        s.constrain(Constraint::TangentAt(bottom, k2, p1));
-        s.constrain(Constraint::TangentAt(bottom, k1, p2));
-        s.constrain(Constraint::TangentAt(top, k1, p3));
-        s.constrain(Constraint::TangentAt(top, k2, p4));
-        let r = s.solve(&Options::default());
-        assert!(r.well_constrained(), "{r:?}");
-        assert!((s.at(p1)[1] + 5.0).abs() < 1e-7 && (s.at(p2)[1] + 5.0).abs() < 1e-7);
-        assert!((s.at(p3)[1] - 5.0).abs() < 1e-7 && (s.at(p4)[1] - 5.0).abs() < 1e-7);
-        assert!(close(s.at(c2), [30.0, 0.0]));
+        // Two half circles joined by tangent lines: a stadium of width 2r. With `shared` false the
+        // arcs have their own end points, held on the lines' ends by Coincident, as a sketch draws them.
+        for shared in [true, false] {
+            let mut s = System::new();
+            let c1 = s.point([0.0, 0.0]);
+            let c2 = s.point([28.0, 1.0]);
+            let (p1, p2, p3, p4) = (s.point([0.0, -5.5]), s.point([29.0, -4.0]), s.point([27.0, 6.0]), s.point([1.0, 5.0]));
+            let [e1, e2, e3, e4] = if shared { [p1, p2, p3, p4] } else {
+                [p1, p2, p3, p4].map(|p| {
+                    let at = s.at(p);
+                    let e = s.point(at);
+                    s.constrain(Constraint::Coincident(e, p));
+                    e
+                })
+            };
+            let a1 = s.arc(c2, e2, e3);
+            let a2 = s.arc(c1, e4, e1);
+            let (bottom, top) = (s.line(p1, p2), s.line(p3, p4));
+            let (k1, k2) = (s.arcs[a1.0].circle, s.arcs[a2.0].circle);
+            s.constrain(Constraint::Fix(c1, [0.0, 0.0]));
+            s.constrain(Constraint::HorizontalPoints(c1, c2));
+            s.constrain(Constraint::Distance(c1, c2, 30.0));
+            s.constrain(Constraint::EqualRadius(k1, k2));
+            s.constrain(Constraint::Radius(k1, 5.0));
+            s.constrain(Constraint::TangentAt(bottom, k2, e1));
+            s.constrain(Constraint::TangentAt(bottom, k1, e2));
+            s.constrain(Constraint::TangentAt(top, k1, e3));
+            s.constrain(Constraint::TangentAt(top, k2, e4));
+            let r = s.solve(&Options::default());
+            assert!(r.well_constrained(), "shared={shared}: {r:?}");
+            assert!((s.at(p1)[1] + 5.0).abs() < 1e-7 && (s.at(p2)[1] + 5.0).abs() < 1e-7, "shared={shared}: the bottom line at y = -5");
+            assert!((s.at(p3)[1] - 5.0).abs() < 1e-7 && (s.at(p4)[1] - 5.0).abs() < 1e-7, "shared={shared}: the top line at y = 5");
+            assert!(close(s.at(c2), [30.0, 0.0]), "shared={shared}: the second centre at 30");
+        }
     }
 
     #[test]
@@ -1125,17 +1515,31 @@ mod tests {
         s.constrain(Constraint::Fix(p[0], [0.0, 0.0]));
         s.solve(&Options::default());
         let r = s.drag(p[2], [55.0, 31.0], &Options::default());
-        assert!(r.report.converged);
+        assert!(r.converged, "the free-corner move must satisfy the rectangle constraints");
         assert_eq!(r.outcome, DragOutcome::Reached, "the free corner should reach the pointer");
-        assert!(close(s.at(p[2]), [55.0, 31.0]), "{:?}", s.at(p[2]));
-        assert!(close(s.at(p[1]), [55.0, 0.0]) && close(s.at(p[3]), [0.0, 31.0]));
+        assert!(close(s.at(p[2]), [55.0, 31.0]), "the free corner missed the pointer at {:?}", s.at(p[2]));
+        assert!(close(s.at(p[1]), [55.0, 0.0]) && close(s.at(p[3]), [0.0, 31.0]), "the adjacent corners must follow the free corner");
         // A dimensioned side cannot follow: the drag settles nearest.
         s.constrain(Constraint::Length(l[0], 40.0));
-        let r = s.drag(p[2], [60.0, 25.0], &Options::default());
-        assert!(r.report.converged);
+        let mut drag = s.start_drag(p[2], &Options::default());
+        work::take();
+        let r = drag.to(&mut s, [60.0, 25.0]);
+        let move_work = work::take();
+        assert_eq!(move_work.report_qr, 0, "a move must skip the full report's QR");
+        assert_eq!(move_work.redundant, 0, "a move must skip the redundant-row sweep");
+        assert!(r.converged, "the dimensioned-side move must satisfy the rectangle constraints");
         assert_eq!(r.outcome, DragOutcome::Nearest, "the dimensioned side holds the corner at its nearest pose");
-        assert!(close(s.at(p[1]), [40.0, 0.0]));
-        assert!((s.at(p[2])[1] - 25.0).abs() < 1e-6, "{:?}", s.at(p[2]));
+        assert!(close(s.at(p[1]), [40.0, 0.0]), "the dimensioned side must end at its specified length");
+        assert!((s.at(p[2])[1] - 25.0).abs() < 1e-6, "the dragged corner missed the pointer's height at {:?}", s.at(p[2]));
+
+        let report = drag.report(&s);
+        let report_work = work::take();
+        assert_eq!(report.converged, r.converged, "the full report and move must agree on convergence");
+        assert_eq!(report.failing, r.failing, "the full report and move must name the same failing constraints");
+        assert_eq!(report.iterations, r.rounds, "the full report must carry the last move's round count");
+        assert_eq!(report.residual.to_bits(), r.residual.to_bits(), "the full report and move residuals must match bit for bit");
+        assert_eq!(report_work.report_qr, 1, "requesting the full report must build its QR once");
+        assert_eq!(report_work.redundant, 1, "requesting the full report must find the redundant rows once");
     }
 
     #[test]
@@ -1300,6 +1704,252 @@ mod tests {
     }
 
     #[test]
+    fn spectators_leave_the_drag_bit_for_bit() {
+        fn mechanism_bits(s: &System) -> [u64; 8] {
+            std::array::from_fn(|i| s.x[i].to_bits())
+        }
+
+        let opts = Options::default();
+        let mut baseline = None;
+        for size in [0, 1, 200] {
+            let (mut s, end) = four_bar(&opts);
+            let mut free = Vec::new();
+            for i in 0..size {
+                let start = [0.5 + 0.2 * (i % 20) as f64, 0.05 * (i / 20) as f64];
+                free.push((s.point(start), start));
+            }
+            let mut drag = s.start_drag(end, &opts);
+            work::take();
+            let mut records = Vec::new();
+            for degrees in [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 130.0] {
+                let r = drag.to(&mut s, rocker(degrees));
+                records.push((mechanism_bits(&s), r.outcome, r.rounds, r.side_enforced));
+                for &(p, start) in &free {
+                    assert_eq!(s.at(p), start, "with {size} spectators {p:?} moved at {degrees}°");
+                }
+            }
+            let counts = work::take();
+            if let Some((base_records, base_counts)) = &baseline {
+                assert_eq!(&records, base_records,
+                    "with {size} spectators the pose bits, outcome, iterations and side enforcement must match the bare four-bar");
+                assert_eq!(&counts, base_counts, "with {size} spectators the solver work must match the bare four-bar");
+            } else {
+                baseline = Some((records, counts));
+            }
+
+            if size > 0 {
+                let before = mechanism_bits(&s);
+                let mut free_drag = s.start_drag(free[0].0, &opts);
+                let r = free_drag.to(&mut s, [2.0, 0.25]);
+                assert_eq!(r.outcome, DragOutcome::Reached, "with {size} spectators the free point must reach its target");
+                assert_eq!(mechanism_bits(&s), before, "with {size} spectators dragging the free point moved the four-bar");
+            }
+        }
+    }
+
+    fn attach_arm(s: &mut System, joint: PointId, j: usize, links: usize) -> Vec<(PointId, P2)> {
+        let mut points = Vec::with_capacity(links);
+        let mut previous = joint;
+        for l in 0..links {
+            // Integer tenths preserve the original two heights, 0.1 and 0.3, exactly.
+            let start = [0.5 + 0.5 * l as f64 + 0.4 * j as f64, (1 + 2 * l) as f64 / 10.0];
+            let point = s.point(start);
+            let line = s.line(previous, point);
+            let length = distance(s.at(previous), s.at(point));
+            s.constrain(Constraint::Length(line, length));
+            points.push((point, start));
+            previous = point;
+        }
+        points
+    }
+
+    #[test]
+    fn a_fixed_point_separates_the_mechanisms_on_it() {
+        let opts = Options::default();
+        let mut baseline = None;
+        for arms in [0, 1, 8] {
+            let (mut s, end) = four_bar(&opts);
+            let ground = PointId(0);
+            let mut arm_points = Vec::new();
+            for j in 0..arms {
+                arm_points.extend(attach_arm(&mut s, ground, j, 2));
+            }
+            let mut drag = s.start_drag(end, &opts);
+            assert_eq!(drag.sub.x.len(), 8, "with {arms} extra arms the drag should contain only the four-bar");
+            work::take();
+            let mut records = Vec::new();
+            for degrees in [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 130.0] {
+                let r = drag.to(&mut s, rocker(degrees));
+                let bits: [u64; 8] = std::array::from_fn(|i| s.x[i].to_bits());
+                records.push((bits, r.outcome, r.rounds, r.side_enforced));
+                for &(p, start) in &arm_points {
+                    assert_eq!(s.at(p), start, "with {arms} extra arms {p:?} moved at {degrees}°");
+                }
+            }
+            let counts = work::take();
+            if let Some((base_records, base_counts)) = &baseline {
+                assert_eq!(&records, base_records,
+                    "with {arms} extra arms the pose bits, outcome, iterations and side enforcement must match the bare four-bar");
+                assert_eq!(&counts, base_counts, "with {arms} extra arms solver work must match the bare four-bar");
+            } else {
+                baseline = Some((records, counts));
+            }
+        }
+    }
+
+    #[test]
+    fn a_free_shared_point_keeps_both_sides() {
+        let opts = Options::default();
+        let (base, end) = four_bar(&opts);
+        let elbow = PointId(2);
+        let sweep = [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 130.0];
+        let pose_bits = |s: &System| s.x.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (fixture, joint, links, unknowns) in [
+            ("two links on the elbow", elbow, 2, 12),
+            ("three links on the elbow", elbow, 3, 14),
+            ("two links on the dragged end", end, 2, 12),
+        ] {
+            work::take();
+            let mut s = base.clone();
+            let arm = attach_arm(&mut s, joint, 0, links);
+            let press = s.clone();
+            let pin = press.at(end);
+            let mut plain = Vec::new();
+            let mut drag = s.start_drag(end, &opts);
+            assert_eq!(drag.sub.x.len(), unknowns, "the component must include the four-bar and {fixture}");
+            let mut negative_pred = 0;
+            for degrees in sweep {
+                let target = rocker(degrees);
+                let tol = opts.tolerance * s.scale();
+                let r = drag.to(&mut s, target);
+                let w = work::take();
+                negative_pred += w.negative_pred;
+                assert!(w.strip_undone <= 2 * r.rounds as u64,
+                    "with {fixture} the move to {degrees}° undid the strip on {} trials in {} rounds: a radius far beyond the sketch", w.strip_undone, r.rounds);
+                assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                    "with {fixture} the move to {degrees}° should settle, got {:?}", r.outcome);
+                assert!(r.converged, "with {fixture} the constraints must hold at {degrees}°");
+                if degrees < 130.0 {
+                    assert!(distance(s.at(end), target) <= tol, "with {fixture} the dragged point missed {degrees}°");
+                }
+                plain.push((pose_bits(&s), r.outcome, r.side_enforced));
+            }
+            for (p, start) in arm {
+                assert_ne!(s.at(p), start, "with {fixture} arm point {p:?} must follow the joint");
+            }
+            assert_eq!(negative_pred, 0, "with {fixture} a trial the judge sees must predict a gain");
+
+            let mut s = press.clone();
+            let mut drag = s.start_drag(end, &opts);
+            let r = drag.to(&mut s, pin);
+            assert_eq!(r.outcome, DragOutcome::Reached, "with {fixture} a zero first pull must reach the press position");
+            assert!(!r.side_enforced, "with {fixture} a zero first pull must classify the spare as coupled");
+            for (degrees, (pose, outcome, side)) in sweep.into_iter().zip(plain) {
+                let r = drag.to(&mut s, rocker(degrees));
+                assert_eq!(pose_bits(&s), pose, "with {fixture} a zero first pull changed the pose bits at {degrees}°");
+                assert_eq!(r.outcome, outcome, "with {fixture} a zero first pull changed the outcome at {degrees}°");
+                assert_eq!(r.side_enforced, side, "with {fixture} a zero first pull changed side enforcement at {degrees}°");
+            }
+
+            let mut s = press;
+            let mut drag = s.start_drag(end, &opts);
+            let radius = pin[0].hypot(pin[1]);
+            let target = [pin[0] + 1e-3 * pin[0] / radius, pin[1] + 1e-3 * pin[1] / radius];
+            let r = drag.to(&mut s, target);
+            assert!(!r.side_enforced, "with {fixture} a normal first pull must classify the spare as coupled");
+            for degrees in sweep {
+                let r = drag.to(&mut s, rocker(degrees));
+                assert!(!r.side_enforced, "with {fixture} the spare must stay coupled at {degrees}° after a normal first pull");
+            }
+        }
+    }
+
+    #[test]
+    fn component_drag_agrees_with_the_whole_sketch_drag() {
+        let opts = Options::default();
+        let compare = |fixture: &str, size: usize, mut s: System, end: PointId, targets: &[P2]| {
+            let mechanism_len = s.x.len() - 2 * size;
+            let mut whole = s.clone();
+            let mut drag = s.start_drag(end, &opts);
+            let mut whole_drag = whole.start_drag_whole(end, &opts);
+            for (i, &target) in targets.iter().enumerate() {
+                let step = i + 1;
+                let tol = opts.tolerance * s.scale();
+                let r = drag.to(&mut s, target);
+                let reference = whole_drag.to(&mut whole, target);
+                assert_eq!(r.outcome, reference.outcome, "{fixture} with {size} spectators: outcome at move {step}");
+                assert_eq!(r.side_enforced, reference.side_enforced,
+                    "{fixture} with {size} spectators: side enforcement at move {step}");
+                for g in 0..mechanism_len {
+                    assert!((s.x[g] - whole.x[g]).abs() <= 10.0 * tol,
+                        "{fixture} with {size} spectators: unknown {g} at move {step} differs ({} vs {}, tol {tol})", s.x[g], whole.x[g]);
+                }
+            }
+        };
+
+        let sweep = [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 130.0].map(rocker);
+        for size in [1, 4, 10] {
+            let (mut s, end) = four_bar(&opts);
+            for i in 0..size {
+                s.point([10.0 + i as f64, 10.0]);
+            }
+            compare("four-bar", size, s, end, &sweep);
+        }
+        let (mut s, end) = three_link();
+        s.point([30.0, 30.0]);
+        let targets: Vec<_> = (1..=60).map(|k| [22.0 - 10.0 * k as f64 / 60.0, 6.0 * k as f64 / 60.0]).collect();
+        compare("three-link arm", 1, s, end, &targets);
+    }
+
+    #[test]
+    fn one_component_sketch_is_its_own_sub_system() {
+        let opts = Options::default();
+        let (chain, end, _) = coupled_chain(&opts);
+        for (name, (s, p)) in [("four-bar", four_bar(&opts)), ("two-link arm", two_link(&opts)), ("coupled chain", (chain, end))] {
+            let drag = s.start_drag(p, &opts);
+            assert_eq!(drag.sub.x, s.x, "{name} unknowns");
+            assert_eq!(drag.sub.points, s.points, "{name} points");
+            assert_eq!(drag.sub.lines, s.lines, "{name} lines");
+            assert_eq!(drag.sub.circles, s.circles, "{name} circles");
+            assert_eq!(drag.sub.arcs, s.arcs, "{name} arcs");
+            assert_eq!(drag.sub.constraints, s.constraints, "{name} constraints");
+            assert_eq!(drag.map, (0..s.x.len()).collect::<Vec<_>>(), "{name} identity map");
+        }
+    }
+
+    #[test]
+    fn free_points_add_no_band_floor_work() {
+        let opts = Options::default();
+        for size in [0, 10, 40] {
+            let (mut s, end) = four_bar(&opts);
+            let mut free = Vec::new();
+            for i in 0..size {
+                let start = [(i % 10) as f64 * 0.5, (i / 10) as f64];
+                free.push((s.point(start), start));
+            }
+            work::take();
+            let mut drag = s.start_drag(end, &opts);
+            let mut rounds = 0;
+            let mut reached = 0;
+            for degrees in [20.0, 40.0, 60.0, 80.0, 100.0, 120.0] {
+                let r = drag.to(&mut s, rocker(degrees));
+                assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
+                    "with {size} free points the move to {degrees}° should settle, got {:?}", r.outcome);
+                assert!(r.converged, "with {size} free points the constraints must hold at {degrees}°");
+                rounds += r.rounds as u64;
+                if r.outcome == DragOutcome::Reached { reached += 1; }
+                for &(p, start) in &free {
+                    assert_eq!(s.at(p), start, "with {size} free points {p:?} moved at {degrees}°");
+                }
+            }
+            let counts = work::take();
+            assert_eq!(counts.band_floor, 0, "with {size} free points no move should need the cofactor sum");
+            assert_eq!(counts.hessian_tables, rounds - reached,
+                "with {size} free points each round must build one curvature table except the last round of a Reached move");
+        }
+    }
+
+    #[test]
     fn drag_past_the_limit_ends_nearest() {
         let opts = Options::default();
         let (base, end) = four_bar(&opts);
@@ -1312,7 +1962,7 @@ mod tests {
                 let before = s.at(end);
                 let tol = opts.tolerance * s.scale();
                 let r = drag.to(&mut s, rocker(degrees));
-                assert!(r.report.converged, "four-bar constraints failed at {degrees}°");
+                assert!(r.converged, "four-bar constraints failed at {degrees}°");
                 assert!(keeps_side(&s, end, press_bend, tol), "four-bar changed side at {degrees}°");
                 if k == 13 {
                     assert_eq!(r.outcome, DragOutcome::Nearest, "130° is beyond the four-bar limit");
@@ -1338,7 +1988,7 @@ mod tests {
             for target in [rocker(119.999), press.at(end)] {
                 let tol = opts.tolerance * s.scale();
                 let r = drag.to(&mut s, target);
-                assert!(r.report.converged, "the near-toggle move to {target:?} lost a constraint");
+                assert!(r.converged, "the near-toggle move to {target:?} lost a constraint");
                 // The pin rule may stop a reachable move up to 2/3 tol short, as the reference does.
                 assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
                     "the near-toggle move to {target:?} should settle");
@@ -1350,7 +2000,7 @@ mod tests {
             let mut drag = s.start_drag(end, &opts);
             let tol = opts.tolerance * s.scale();
             let r = drag.to(&mut s, rocker(120.0));
-            assert!(r.report.converged, "the exact toggle must satisfy all four-bar constraints");
+            assert!(r.converged, "the exact toggle must satisfy all four-bar constraints");
             assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
                 "the move to the exact toggle should settle");
             assert!(distance(s.at(end), rocker(120.0)) <= tol, "the pin missed the exact toggle");
@@ -1367,17 +2017,17 @@ mod tests {
         let tol = opts.tolerance * s.scale();
         let r = drag.to(&mut s, rocker(130.0));
         assert_eq!(r.outcome, DragOutcome::Nearest, "130° should stop at the four-bar limit");
-        assert!(r.report.converged, "the limit pose must satisfy the four-bar constraints");
+        assert!(r.converged, "the limit pose must satisfy the four-bar constraints");
         assert!(distance(s.at(end), rocker(120.0)) <= tol, "the pin must stop at the 120° toggle");
 
         let target = inside_toggle(1e-9);
         let tol = opts.tolerance * s.scale();
         let r = drag.to(&mut s, target);
         assert_eq!(r.outcome, DragOutcome::Reached, "the pin should reach the target just inside the toggle");
-        assert!(r.report.converged, "the return from the toggle must satisfy the constraints");
+        assert!(r.converged, "the return from the toggle must satisfy the constraints");
         assert!(distance(s.at(end), target) <= tol / 2.0, "the returning pin missed its target");
         assert!(keeps_side(&s, end, press_bend, tol), "the elbow flipped on the return from the toggle");
-        assert!(r.report.iterations <= 4,
+        assert!(r.rounds <= 4,
             "rule (b) should answer the return beside the toggle in about 2 rounds (14 without it)");
     }
 
@@ -1390,7 +2040,7 @@ mod tests {
         let mut drag = s.start_drag(end, &opts);
         let r = drag.to(&mut s, rocker(130.0));
         assert_eq!(r.outcome, DragOutcome::Nearest, "the offset fixture must first settle at the limit");
-        assert!(r.report.converged, "the limit pose must satisfy the constraints before shifting the elbow");
+        assert!(r.converged, "the limit pose must satisfy the constraints before shifting the elbow");
 
         let (root, elbow) = (tip - 4, tip - 2);
         let offset = 3e-5;
@@ -1414,15 +2064,16 @@ mod tests {
         // The reference ends this start on the pin rule, 0.59 tol short, in 2 rounds.
         assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
             "the pin should settle at the target from the offset start");
-        assert!(r.report.converged, "the return from the offset start must satisfy the constraints");
+        assert!(r.converged, "the return from the offset start must satisfy the constraints");
         assert!(distance(s.at(end), target) <= tol, "the pin missed its target from the offset start");
         assert!(keeps_side(&s, end, press_bend, tol), "the elbow flipped on the return from the offset start");
-        assert!(r.report.iterations <= 4,
+        assert!(r.rounds <= 4,
             "rule (b) should answer the return from the offset start in about 2 rounds (the probe's start took 16 without it)");
     }
 
     #[test]
     fn toggle_form_answers_a_return_from_the_exact_toggle() {
+        work::take();
         let opts = Options::default();
         let (base, end) = four_bar(&opts);
         let mut s = mirror_case(&base, end, &opts);
@@ -1436,10 +2087,10 @@ mod tests {
         let tol = opts.tolerance * s.scale();
         let r = drag.to(&mut s, target);
         assert_eq!(r.outcome, DragOutcome::Reached, "the mirrored four-bar should reach the target inside the toggle");
-        assert!(r.report.converged, "the return must satisfy the mirrored four-bar constraints");
+        assert!(r.converged, "the return must satisfy the mirrored four-bar constraints");
         assert!(distance(s.at(end), target) <= tol / 2.0, "the mirrored pin missed its return target");
         assert!(keeps_side(&s, end, press_bend, tol), "the mirrored elbow flipped on the return");
-        assert!(r.report.iterations <= 2,
+        assert!(r.rounds <= 2,
             "the toggle form of rule (b) answers the return from the exact toggle in 2 rounds (3 without it)");
 
         let (mut s, end) = two_link(&opts);
@@ -1455,11 +2106,14 @@ mod tests {
         let tol = opts.tolerance * s.scale();
         let r = drag.to(&mut s, target);
         assert_eq!(r.outcome, DragOutcome::Reached, "the two-link arm should reach its return target");
-        assert!(r.report.converged, "the return must satisfy the two-link constraints");
+        assert!(r.converged, "the return must satisfy the two-link constraints");
         assert!(distance(s.at(end), target) <= tol / 2.0, "the two-link pin missed its return target");
         assert!(keeps_side(&s, end, press_bend, tol), "the two-link elbow flipped on the return");
-        assert!(r.report.iterations <= 4,
+        assert!(r.rounds <= 4,
             "the toggle form of rule (b) answers the return from the exact toggle in 4 rounds (5 without it)");
+        let counts = work::take();
+        assert!(counts.band_crossings > 0 && counts.band_floor == 0,
+            "the returns cross the sheet in refused trials, and the screen keeps the cofactor sum off them");
     }
 
     #[test]
@@ -1493,7 +2147,7 @@ mod tests {
                         let foot = if r > limit { [root[0] + v[0] * limit / r, root[1] + v[1] * limit / r] } else { pt };
                         let tol = opts.tolerance * s.scale();
                         let result = drag.to(&mut s, pt);
-                        assert!(result.report.converged, "arm constraints failed at move {k}/{moves}, d={d}");
+                        assert!(result.converged, "arm constraints failed at move {k}/{moves}, d={d}");
                         assert!(distance(s.at(end), foot) <= tol, "pin missed its foot at move {k}/{moves}, d={d}");
                         assert!(keeps_side(&s, end, press_bend, tol), "arm flipped at move {k}/{moves}, d={d}");
                         if k == moves {
@@ -1541,7 +2195,7 @@ mod tests {
             let x = at[0] - 0.2 * k as f64;
             let tol = opts.tolerance * s.scale();
             let r = drag.to(&mut s, [x, at[1] + 3.0]);
-            assert!(r.report.converged, "the coupled chain lost a constraint at move {k}");
+            assert!(r.converged, "the coupled chain lost a constraint at move {k}");
             if k >= 28 {
                 let foot = [x.clamp(root[0] - half_width, root[0] + half_width), y];
                 assert_eq!(r.outcome, DragOutcome::Nearest, "the coupled pin should settle at move {k}");
@@ -1573,7 +2227,7 @@ mod tests {
             let mut fresh = copy.start_drag(end, &opts);
             let fresh_result = fresh.to(&mut copy, target);
             let r = drag.to(&mut s, target);
-            assert!(r.report.converged, "the chain lost a constraint at k={k}");
+            assert!(r.converged, "the chain lost a constraint at k={k}");
             assert_eq!(r.outcome, DragOutcome::Nearest, "the target lies above the height constraint at k={k}");
             assert!(distance(s.at(end), foot) <= tol, "the pin missed its closest point at k={k}");
             assert!(keeps_side(&s, end, press_bend, tol), "the elbow changed sides at k={k}");
@@ -1612,7 +2266,7 @@ mod tests {
         let tol = opts.tolerance * s.scale();
         let r = drag.to(&mut s, target);
         assert_eq!(r.outcome, DragOutcome::Nearest, "the return should settle below the target at k=28");
-        assert!(r.report.converged, "the return must satisfy the coupled chain constraints");
+        assert!(r.converged, "the return must satisfy the coupled chain constraints");
         assert!(distance(s.at(end), foot) <= tol, "the coupled pin missed its foot on the return");
         assert!(keeps_side(&s, end, press_bend, tol), "the coupled elbow flipped on the return");
         assert!(r.side_enforced, "the return must enforce the side chosen at the press");
@@ -1634,7 +2288,7 @@ mod tests {
         let mut drag = s.start_drag(end, &opts);
         let r = drag.to(&mut s, centre);
         assert_eq!(r.outcome, DragOutcome::Nearest, "the centre is equally far from every allowed pin pose");
-        assert!(r.report.converged, "the open chain must keep its constraints when dragged to the centre");
+        assert!(r.converged, "the open chain must keep its constraints when dragged to the centre");
         assert!((distance(s.at(end), centre) - 4.0).abs() <= tol, "the pin left its circle around the centre");
         assert!(distance(s.at(end), start) <= tol, "the pin should stay where it started on a continuum of nearest poses");
     }
@@ -1644,18 +2298,37 @@ mod tests {
         let opts = Options::default();
         let (mut s, end) = three_link();
         let spare = s.point([30.0, 30.0]);
+        {
+            let mut copy = s.clone();
+            let mut drag = copy.start_drag(end, &opts);
+            let target = copy.at(end);
+            for (state, tables) in [("unjudged", 1), ("judged", 0)] {
+                work::take();
+                let r = drag.to(&mut copy, target);
+                let counts = work::take();
+                assert_eq!(r.outcome, DragOutcome::Reached, "the stationary pin must be Reached when the spare is {state}");
+                assert_eq!(r.rounds, 1, "the stationary move must finish in one round when the spare is {state}");
+                assert_eq!(counts.hessian_tables, tables, "the stationary move has the wrong curvature table count when the spare is {state}");
+            }
+        }
         let mut drag = s.start_drag(end, &opts);
         for k in 1..=60 {
             let target = [22.0 - 10.0 * k as f64 / 60.0, 6.0 * k as f64 / 60.0];
             let tol = opts.tolerance * s.scale();
+            work::take();
             let r = drag.to(&mut s, target);
-            assert!(r.report.converged, "the three-link arm lost a constraint at move {k}");
+            let counts = work::take();
+            if r.outcome == DragOutcome::Reached {
+                assert_eq!(counts.hessian_tables, r.rounds as u64 - 1,
+                    "Reached move {k} must build a curvature table in every round except its last");
+            }
+            assert!(r.converged, "the three-link arm lost a constraint at move {k}");
             assert!(!r.side_enforced, "the three-link arm's spare freedom couples to its fold, so no sheet separates its sides");
             // Some moves stop on the pin rule up to 2/3 tol short of the target, as the reference does.
             assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
                 "the three-link arm should settle at target {k}");
             assert!(distance(s.at(end), target) <= tol, "the three-link pin missed target {k}");
-            assert!(distance(s.at(spare), [30.0, 30.0]) <= 1e-12, "the unrelated point moved at target {k}");
+            assert_eq!(s.at(spare), [30.0, 30.0], "the unrelated point moved at target {k}");
         }
     }
 
@@ -1684,7 +2357,7 @@ mod tests {
             let angle = (k as f64).to_radians();
             let target = [fixed[0] + 40.0 * angle.cos(), fixed[1] + 40.0 * angle.sin()];
             let r = drag.to(&mut s, target);
-            assert!(r.report.converged, "the line lost tangency at move {k}");
+            assert!(r.converged, "the line lost tangency at move {k}");
             assert!(matches!(r.outcome, DragOutcome::Reached | DragOutcome::Nearest),
                 "the tangent endpoint failed to settle at move {k}");
             assert!(side(&s) * press_side > 0.0, "the centre must stay on its press side of the tangent at move {k}");
@@ -1693,19 +2366,60 @@ mod tests {
 
     #[test]
     fn stale_drag_session_rebuilds() {
+        fn compare_move(drag: &mut Drag, s: &mut System, k: usize) -> (DragOutcome, work::Work) {
+            let target = rocker(20.0 + k as f64);
+            let mut cold = drag.clone();
+            cold.kept = None;
+            let mut copy = s.clone();
+            let expected = cold.to(&mut copy, target);
+
+            work::take();
+            let r = drag.to(s, target);
+            let counts = work::take();
+            assert_eq!(s.x.len(), copy.x.len(), "move {k} must preserve the cold pose's length");
+            for (i, (x, y)) in s.x.iter().zip(&copy.x).enumerate() {
+                assert_eq!(x.to_bits(), y.to_bits(), "move {k} must match the cold pose bits at unknown {i}");
+            }
+            assert_eq!(r.outcome, expected.outcome, "move {k} must match the cold outcome");
+            assert_eq!(r.rounds, expected.rounds, "move {k} must match the cold round count");
+            (r.outcome, counts)
+        }
+
         let opts = Options::default();
         let (mut s, end) = four_bar(&opts);
         let elbow = PointId(end.0 - 1);
         let press = s.at(end);
         let mut drag = s.start_drag(end, &opts);
+        for k in 0..60 {
+            let (outcome, counts) = compare_move(&mut drag, &mut s, k);
+            // Reached asks for half the tolerance; a move that stops between half and the whole
+            // tolerance reads Nearest (move 42 here), so the series checks the miss itself.
+            let miss = distance(s.at(end), rocker(20.0 + k as f64));
+            assert!(outcome != DragOutcome::NotReached && miss <= opts.tolerance * s.scale(),
+                "move {k} should end within the tolerance of its rocker target ({outcome:?}, miss {miss:e})");
+            if k == 0 {
+                assert_eq!(counts.start_qr, 1, "the first move must build one round-start QR");
+            } else {
+                assert_eq!(counts.start_qr, 0, "move {k} should reuse the preceding move's QR");
+                assert_eq!(counts.qr, counts.trial_qr + counts.projection_qr, "move {k} should factor only trials and projections");
+            }
+        }
+        let pin_x = s.points[end.0];
+        s.x[pin_x] = f64::from_bits(s.x[pin_x].to_bits() + 1);
+        let (_, counts) = compare_move(&mut drag, &mut s, 60);
+        assert_eq!(counts.start_qr, 1, "a one-ulp pin edit must cause a fresh round-start QR");
+        drag.cancel(&mut s);
+
         s.constrain(Constraint::Fix(elbow, s.at(elbow)));
         let tol = opts.tolerance * s.scale();
+        work::take();
         let r = drag.to(&mut s, rocker(20.0));
-        assert!(r.report.converged, "the rebuilt frame must satisfy the added elbow constraint");
+        assert_eq!(work::take().start_qr, 1, "the first move on the changed layout must build a fresh round-start QR");
+        assert!(r.converged, "the rebuilt frame must satisfy the added elbow constraint");
         assert_eq!(r.outcome, DragOutcome::Nearest, "the fixed elbow should hold the pin at its nearest pose");
         assert!(distance(s.at(end), press) <= tol, "the newly constrained pin moved away from its press");
         let r = drag.to(&mut s, press);
-        assert!(r.report.converged, "the rebuilt frame must keep its constraints on a second move");
+        assert!(r.converged, "the rebuilt frame must keep its constraints on a second move");
         assert_eq!(r.outcome, DragOutcome::Reached, "a second move to the fixed pin should reach it");
     }
 
@@ -1729,6 +2443,10 @@ mod tests {
         }
         let r = s.solve(&Options::default());
         assert!(r.converged && r.dof == 0, "{:?} {} {}", r.converged, r.dof, r.residual);
+    }
+
+    fn bits(values: &[f64]) -> Vec<u64> {
+        values.iter().map(|value| value.to_bits()).collect()
     }
 
     fn check_null_basis(qr: &DragQr, jac: &[f64], scale: f64) {
@@ -1755,12 +2473,18 @@ mod tests {
         s.x.copy_from_slice(&[0.0, 0.0, 40.0, 0.0, 40.0, 25.0, 0.0, 25.0]);
         let scale = s.scale();
         let branches = s.branches();
-        let (r, jac, _) = s.evaluate(&s.x, scale, &branches);
+        let (r, jac, rows) = s.evaluate(&s.x, scale, &branches);
+        let (reference_r, reference_jac, reference_rows) = s.evaluate_dense(&s.x, scale, &branches);
+        let dense = jac.dense();
+        assert_eq!(bits(&r), bits(&reference_r), "rectangle residuals must match the dense evaluation bit for bit");
+        assert_eq!(rows, reference_rows, "rectangle rows must have the same constraint indices as the dense evaluation");
+        assert_eq!(bits(&dense), bits(&reference_jac), "rectangle Jacobian entries must match the dense evaluation bit for bit");
+        assert!(jac.pairs.iter().any(|&(_, value)| value.to_bits() == 0), "the rectangle must store a positive-zero derivative among its row pairs");
         let qr = DragQr::new(&jac, s.x.len());
         assert_eq!(r.len(), 9, "redundant rectangle has nine scalar rows");
         assert_eq!(qr.rank(), 7, "redundant rectangle has seven independent rows");
         assert_eq!(qr.z.len(), 1, "rectangle has one free height");
-        check_null_basis(&qr, &jac, scale);
+        check_null_basis(&qr, &dense, scale);
 
         let report = s.solve(&Options::default());
         assert_eq!(report.dof, 1, "the rectangle report must leave its height free");
@@ -1791,10 +2515,15 @@ mod tests {
         }
         let scale = s.scale();
         let branches = s.branches();
-        let (_, jac, _) = s.evaluate(&s.x, scale, &branches);
+        let (r, jac, rows) = s.evaluate(&s.x, scale, &branches);
+        let (reference_r, reference_jac, reference_rows) = s.evaluate_dense(&s.x, scale, &branches);
+        let dense = jac.dense();
+        assert_eq!(bits(&r), bits(&reference_r), "chain residuals must match the dense evaluation bit for bit");
+        assert_eq!(rows, reference_rows, "chain rows must have the same constraint indices as the dense evaluation");
+        assert_eq!(bits(&dense), bits(&reference_jac), "chain Jacobian entries must match the dense evaluation bit for bit");
         let qr = DragQr::new(&jac, s.x.len());
         assert_eq!(qr.z.len(), 2, "the two free joints must give two tangent directions");
-        check_null_basis(&qr, &jac, scale);
+        check_null_basis(&qr, &dense, scale);
 
         let report = s.solve(&Options::default());
         assert_eq!(report.dof, 2, "the chain report must count both free joints");
@@ -1821,8 +2550,8 @@ mod tests {
             drag.frame.trial_cap = 1;
             let r = drag.to(&mut s, target);
             assert_eq!(r.outcome, DragOutcome::NotReached, "{name}: a round at the trial cap ends only this move");
-            assert!(r.report.iterations < whole.report.iterations, "{name}: the capped move should end before the uncapped one");
-            assert!(r.report.converged, "{name}: the capped move must keep its last accepted pose, which holds the constraints");
+            assert!(r.rounds < whole.rounds, "{name}: the capped move should end before the uncapped one");
+            assert!(r.converged, "{name}: the capped move must keep its last accepted pose, which holds the constraints");
             assert!(keeps_side(&s, end, press_bend, tol), "{name}: the capped move flipped the elbow");
 
             drag.frame.trial_cap = cap;

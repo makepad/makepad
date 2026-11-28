@@ -387,8 +387,7 @@ pub(crate) struct TracedSunBatch {
 #[derive(PartialEq)]
 struct TracedCasterKey {
     draw_serial: u64,
-    volume: TextureId,
-    texels: u64,
+    volumes: [Option<(TextureId, u64)>; 2],
     geometry: GeometryId,
     geometry_generation: u64,
     transform: Mat4f,
@@ -912,6 +911,16 @@ pub struct GpuLightmapBaker {
     /// cascades after per-cascade culling.
     csm_draws: usize,
     pub(crate) csm_kept: bool,
+    /// The last frame's cascades hold every caster it has: drawn from a
+    /// clear (with or without casters in view) or kept from the drawing
+    /// before. False when they did not render, or published only lit.
+    pub(crate) csm_whole: bool,
+    /// An aux draw is recording (a map that shades nothing with the sun):
+    /// its receivers take the off binding, never the scene's cascades.
+    csm_unbound: bool,
+    /// The drawing (`Cx::drawing_id`) whose scene draw ran the cascade step
+    /// last: a view of the frame binds `csm_last` only when it is its own.
+    csm_drawing: Option<u64>,
     csm_mover_bounds: Vec<(Vec3f, Vec3f)>,
     /// Admitted batches for this recording of the realtime cascades.
     pub(crate) traced_casters: Vec<std::rc::Rc<std::cell::RefCell<TracedSunBatch>>>,
@@ -966,10 +975,13 @@ impl GpuLightmapBaker {
         for batch in &self.traced_casters {
             let batch = batch.borrow();
             let draw = batch.draw.as_ref().expect("admitted Sun draw");
-            let volume = draw.draw_vars.texture_slots[0].as_ref().expect("Sun volume");
-            let Some(texels) = volume.uploaded_texel_generation(cx) else { return false };
+            let mut volumes = [None; 2];
+            for (key, volume) in volumes.iter_mut().zip(draw.draw_vars.texture_slots.iter().flatten()) {
+                let Some(texels) = volume.uploaded_texel_generation(cx) else { return false };
+                *key = Some((volume.texture_id(), texels));
+            }
             self.traced_scratch.extend(batch.groups.iter().map(|g| TracedCasterKey {
-                draw_serial: batch.draw_serial, volume: volume.texture_id(), texels,
+                draw_serial: batch.draw_serial, volumes,
                 geometry: g.geometry, geometry_generation: cx.geometries[g.geometry].data_generation,
                 transform: g.transform, min: g.min, max: g.max,
             }));
@@ -1024,6 +1036,9 @@ impl Default for GpuLightmapBaker {
             csm_gpu_ms: 0.0,
             csm_draws: 0,
             csm_kept: false,
+            csm_whole: false,
+            csm_unbound: false,
+            csm_drawing: None,
             csm_mover_bounds: Vec::new(),
             traced_casters: Vec::new(),
             traced_drawn: Vec::new(),
@@ -1834,6 +1849,7 @@ impl GpuLightmapBaker {
             self.csm_gpu_ms = 0.0;
             self.csm_draws = 0;
             self.csm_kept = false;
+            self.csm_whole = false;
             self.csm_frame_stats = (0, 0, 0);
         }
         // Receivers rebind this frame's targets before they draw, and a
@@ -1851,6 +1867,27 @@ impl GpuLightmapBaker {
     /// The host's key of the casters the element lookup names (`set_element_lookup`).
     pub(crate) fn element_lookup_casters(&self) -> u64 {
         self.element_lookup_casters
+    }
+
+    /// While on, receivers take the off binding (an aux draw records).
+    pub(crate) fn set_csm_unbound(&mut self, on: bool) {
+        self.csm_unbound = on;
+    }
+
+    /// A scene draw of `drawing` runs the cascade step.
+    pub(crate) fn stamp_csm_drawing(&mut self, drawing: u64) {
+        self.csm_drawing = Some(drawing);
+    }
+
+    /// Whether the cascades as they stand are the ones a scene draw of
+    /// `drawing` fitted (or found off).
+    pub(crate) fn csm_fitted_in(&self, drawing: u64) -> bool {
+        self.csm_drawing == Some(drawing)
+    }
+
+    /// The pass the sun cascades render in, once made.
+    pub(crate) fn cascade_pass(&self) -> Option<DrawPassId> {
+        self.csm_pool.first().map(|stage| stage.pass.draw_pass_id())
     }
 
     /// The off-tier `csm_map` binding (1x1 sampled depth), created once.
@@ -1955,7 +1992,7 @@ impl GpuLightmapBaker {
     /// Before its first fit, every receiver projects outside the tiles.
     pub fn csm_binding(&self) -> Option<(CsmFrame, Texture, f32)> {
         let tiers = dynamic_shadow_tiers(self.mode);
-        let on = self.csm_sun_up && (tiers.static_csm || (tiers.csm && self.csm_last.is_some()));
+        let on = !self.csm_unbound && self.csm_sun_up && (tiers.static_csm || (tiers.csm && self.csm_last.is_some()));
         if let Some(depth) = self.csm_depth.as_ref().filter(|_| on) {
             let mut frame = self.csm_last.unwrap_or_else(|| {
                 let mut frame = CsmFrame::default();
@@ -2277,6 +2314,7 @@ impl GpuLightmapBaker {
         self.csm_last = None;
         self.csm_draws = 0;
         self.csm_kept = false;
+        self.csm_whole = false;
         self.csm_frame_stats = (0, 0, 0);
         let tiers = dynamic_shadow_tiers(self.mode);
         self.set_cascade_daylight(sun_dir);
@@ -2417,6 +2455,7 @@ impl GpuLightmapBaker {
             let kept = reusable && self.csm_drawn.as_ref().is_some_and(|(d, _)| *d == drawn)
                 && self.traced_drawn == self.traced_scratch;
             self.csm_kept = kept;
+            self.csm_whole = kept;
             if kept {
                 // Not painted whole yet (the GPU is behind, or a draw was left
                 // out while its pipeline compiled): the recording stays
@@ -3573,6 +3612,7 @@ impl GpuLightmapBaker {
         draws.sun_depth_inside.depth.draw_vars.options.scissor = None;
         draws.sun_depth_skinned.draw_vars.options.scissor = None;
         self.csm_draws = draws_n;
+        self.csm_whole = true;
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(
             state.as_ref(),

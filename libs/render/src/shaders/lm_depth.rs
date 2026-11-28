@@ -13,7 +13,7 @@ script_mod! {
     // are double-sided and the CPU rays hit both faces.
     mod.draw.DrawLmSunDepth = mod.std.set_type_default() do #(DrawLmSunDepth::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Rf32
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -145,7 +145,7 @@ script_mod! {
 
     mod.draw.DrawLmSunDepthSkinned = mod.std.set_type_default() do #(DrawLmSunDepthSkinned::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Rf32
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
@@ -404,7 +404,7 @@ script_mod! {
 
     mod.draw.DrawLmLampDepth = mod.std.set_type_default() do #(DrawLmLampDepth::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         color_format: @Rf32
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)

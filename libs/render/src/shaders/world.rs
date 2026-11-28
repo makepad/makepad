@@ -20,7 +20,7 @@ script_mod! {
     // actually measured.
     mod.draw.DrawSceneFoliage = mod.std.set_type_default() do #(DrawSceneFoliage::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -109,7 +109,7 @@ script_mod! {
     mod.draw.DrawSceneShadow = mod.std.set_type_default() do #(DrawSceneShadow::script_shader(vm)){
         alpha_blend: true
         depth_write: false
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -164,7 +164,7 @@ script_mod! {
     mod.draw.DrawSceneShadowSdf = mod.std.set_type_default() do #(DrawSceneShadowSdf::script_shader(vm)){
         alpha_blend: true
         depth_write: false
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -271,7 +271,7 @@ script_mod! {
     // The smooth terrain mesh: per-vertex colored triangles, flat normals.
     mod.draw.DrawSceneTerrain = mod.std.set_type_default() do #(DrawSceneTerrain::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

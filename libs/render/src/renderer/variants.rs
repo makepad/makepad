@@ -621,7 +621,7 @@ pub(super) fn bounding_sphere(min: Vec3f, max: Vec3f, transform: &Mat4f) -> (Vec
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
 
@@ -739,10 +739,10 @@ mod tests {
                     csm_debug: true, cluster: true, local_shadows: true, reflections,
                 };
                 let label = format!("outside sphere {features:?}");
-                let obj = textured.outside_object(vm, features).expect("textured sphere variant");
+                let obj = textured.scene_object(vm, features, false).expect("textured sphere variant");
                 // Both recipes use the engine's analytic intersection. Compile the
                 // unmodified scene recipe too, including its Metal pick replay.
-                let analytic = if clip { sphere.outside_object(vm, features).unwrap() } else { obj };
+                let analytic = if clip { sphere.scene_object(vm, features, false).unwrap() } else { obj };
                 crate::shaders::inspect_scene_backends(vm, analytic, &label, Some(reflections));
                 let id = lane.shader(vm, Some(obj)).expect("traced variant shader");
                 assert!(same_layout(vm.cx(), base_id, id), "{features:?}: traced binding layout changed");
@@ -795,6 +795,9 @@ mod tests {
 
         let mut cx = shader_cx();
         let pass = DrawPass::new(&mut cx);
+        let projection = Mat4f::perspective(60.0, 1.0, 0.1, 100.0);
+        pass.set_keep_camera_matrix(&mut cx, true);
+        pass.set_camera(&mut cx, Mat4f::translation(vec3f(0.0, -1.0, -4.0)), projection);
         let mut renderer = Renderer::default();
         renderer.pbr_materials_enabled = false;
         let mut diffuse = cx.with_vm(|vm| DrawSceneSkinned::script_new_with_default(vm));
@@ -903,8 +906,9 @@ mod tests {
                 assert_eq!(call.geometry_id, Some(proxy), "{label}: the traced submission must use the proxy geometry");
                 assert_eq!(call.draw_shader_id, shader, "{label}: submit the selected outside variant");
                 assert_ne!(call.draw_shader_id, stock, "{label}: the traced lane must use its own shader");
-                assert!(!call.options.backface_culling && call.options.depth_write && !call.options.alpha_blend,
-                    "{label}: the proxy draws opaque, writes depth and selects its face in the shader");
+                let expected_cull = if renderer.traced_programs["surface"].cull_proxy_faces() { CullMode::Back } else { CullMode::None };
+                assert!(call.options.cull_mode == expected_cull && call.options.depth_write && !call.options.alpha_blend,
+                    "{label}: Outside uses the recipe's culling and draws opaque with depth writes");
                 let bindings = &draw.draw_shaders[call.draw_shader_id.index].mapping.textures;
                 for (name, expected) in [(live_id!(ssao_map), &texture), (live_id!(trace_palette), &palette)] {
                     let slot = bindings.iter().position(|t| t.id == name).unwrap();
@@ -923,7 +927,7 @@ mod tests {
         let mut traced_shader = None;
         let reason = "lamp pipeline rejected the target format";
         let scene_reason = "Metal rejected the fragment output for this scene layout";
-        let web_reason = "ray-traced surfaces aren't available on WebGL2 yet";
+        let web_reason = crate::custom_material::TRACED_WEBGL_FAILURE;
         for (frame, expected) in [Waiting, Waiting, Waiting, Waiting, Waiting, Ready,
                                   Failed(reason.into()), Failed(reason.into()), Failed(scene_reason.into()),
                                   Failed(scene_reason.into()), Failed(web_reason.into()),
@@ -934,19 +938,20 @@ mod tests {
                 renderer.install_traced_surface("surface".into(), recipe);
                 renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
                 let program = renderer.traced_programs.get_mut("surface").unwrap();
-                for pass in [TracedPass::Inside, TracedPass::Lamp] {
-                    program.passes.set_shader(pass, stock);
-                }
+                program.passes.set_shader(TracedPass::Lamp, stock);
             }
             if frame == 8 {
                 renderer.install_traced_surface("surface".into(), TracedSurfaceRecipe::default());
                 renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
             }
             if frame >= 10 {
-                let mut recipe = TracedSurfaceRecipe::default();
+                let mut recipe = TracedSurfaceRecipe::volume(0.125, 32);
                 recipe.host_vm = Some(std::rc::Rc::new(|_, _| panic!("WebGL2 must fail before entering the material VM")));
-                renderer.install_traced_program("surface".into(), recipe, TracedSurfacePasses::ALL, frame == 11, true);
-                assert_eq!(renderer.traced_surface_failure("surface"), Some(web_reason), "available at install, before prewarm");
+                renderer.install_traced_program("surface".into(), recipe, TracedSurfacePasses::ALL, frame == 11);
+                let scene = renderer.traced_caster_scene(&cx, pass.draw_pass_id());
+                renderer.traced_programs.get_mut("surface").unwrap()
+                    .prepare_with_volume_support(&mut cx, scene, "surface", |_| Some(Err(web_reason)));
+                assert_eq!(renderer.traced_surface_failure("surface"), Some(web_reason), "unsupported volume fails before shader compilation");
                 renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
             }
             if let Some(program) = renderer.traced_programs.get_mut("surface") {
@@ -1001,6 +1006,11 @@ mod tests {
                 assert_eq!(bounds, ordinary_bounds, "{expected:?}: blob must sit under the sibling");
                 assert!(sdf.is_none(), "{expected:?}: the model-wide SDF contains the proxy");
             }
+            if frame == 5 {
+                let scene = renderer.traced_caster_scene(&cx, pass.draw_pass_id()).with_features(renderer.traced_outside_features());
+                let program = renderer.traced_programs.get_mut("surface").unwrap();
+                assert!(program.inside(scene).is_some(), "the complete generic program warmed its real Inside pipeline");
+            }
             let shader = (expected == Ready).then(|| traced_shader.expect("a ready full program probed Outside"));
             record(&mut renderer, &mut cx, &pass, shader, &format!("full program frame {frame}"));
         }
@@ -1035,6 +1045,8 @@ mod tests {
         record(&mut renderer, &mut cx, &pass, None, "outside pending");
         let first_shader = complete_outside(&mut renderer, &pass);
         assert_eq!(renderer.traced_surface_state("surface"), Ready, "outside alone satisfies the declared set");
+        let scene = renderer.traced_caster_scene(&cx, pass.draw_pass_id()).with_features(renderer.traced_outside_features());
+        assert!(renderer.traced_programs.get_mut("surface").unwrap().inside(scene).is_none(), "Outside-only omits Inside");
         record(&mut renderer, &mut cx, &pass, Some(first_shader), "outside ready");
 
         pass.set_color_texture(&mut cx, &hdr, Default::default());
@@ -1082,18 +1094,20 @@ mod tests {
         });
         renderer.install_traced_surface_for_passes("surface".into(), recipe.clone(), with_sun);
         assert!(!renderer.traced_programs["surface"].wants_sun(), "a recipe without a tile volume has no Sun draw");
-        let mut tiles = TracedSurfaceRecipe::tiles(0.125);
-        tiles.textures = vec![(live_id!(trace_volume), texture.clone()), (live_id!(trace_palette), palette.clone())].into();
-        renderer.install_traced_surface_for_passes("surface".into(), tiles.clone(), with_sun);
-        renderer.prewarm_traced_surfaces(&mut cx, scene_id);
-        let exterior = complete_outside(&mut renderer, &pass);
-        record(&mut renderer, &mut cx, &pass, Some(exterior), "Off admits Outside alone");
-
-        assert_eq!(renderer.traced_programs["surface"].passes.failure(true), Some("trace_volume must be a sampled 3D texture"),
-            "Off must try the Sun shader while admitting Outside");
         let volume = Texture::new_with_format(&mut cx, TextureFormat::Unknown);
-        tiles.textures = [(live_id!(trace_volume), volume.clone()), (live_id!(trace_palette), palette.clone())].into();
-        renderer.install_traced_surface_for_passes("surface".into(), tiles, with_sun);
+        let coarse = Texture::new_with_format(&mut cx, TextureFormat::Unknown);
+        let volume_recipe = |material: &Texture| {
+            let mut recipe = TracedSurfaceRecipe::volume(0.125, 32);
+            recipe.textures = [(live_id!(trace_volume), material.clone()), (live_id!(trace_coarse), coarse.clone()),
+                (live_id!(trace_palette), palette.clone())].into();
+            recipe
+        };
+        renderer.install_traced_surface_for_passes("surface".into(), volume_recipe(&texture), with_sun);
+        renderer.prewarm_traced_surfaces(&mut cx, scene_id);
+        assert_eq!(renderer.traced_surface_state("surface"), Failed("trace_volume must be a sampled 3D texture".into()));
+        record(&mut renderer, &mut cx, &pass, None, "Off rejects definite 2D volume");
+
+        renderer.install_traced_surface_for_passes("surface".into(), volume_recipe(&volume), with_sun);
         renderer.prewarm_traced_surfaces(&mut cx, scene_id);
         complete_outside(&mut renderer, &pass);
         assert_eq!(renderer.traced_surface_state("surface"), Ready, "Off admits Outside while the volume has no format");
@@ -1153,16 +1167,20 @@ mod tests {
         assert_eq!(sun_available(&mut renderer, &cx), Some(sun_id), "the admitted caster owns the real tile shader");
         let outside = renderer.traced_caster_scene(&cx, scene_id);
         let outside = renderer.traced_programs.get_mut("surface").unwrap().outside(outside).unwrap();
-        let slot = cx.draw_shaders[exterior.index].mapping.textures.iter().position(|t| t.id == live_id!(trace_volume)).unwrap();
-        assert_eq!(outside.skinned.draw_vars.texture_slots[slot].as_ref().unwrap().texture_id(), volume.texture_id(),
-            "Outside must use the replacement volume too");
+        for (name, tex) in [(live_id!(trace_volume), &volume), (live_id!(trace_coarse), &coarse)] {
+            let slot = cx.draw_shaders[exterior.index].mapping.textures.iter().position(|t| t.id == name).unwrap();
+            assert_eq!(outside.skinned.draw_vars.texture_slots[slot].as_ref().unwrap().texture_id(), tex.texture_id(),
+                "Outside must use the replacement {name} binding");
+        }
         record(&mut renderer, &mut cx, &pass, Some(exterior), "both layouts ready");
         // Use writable CPU texels to exercise a real dirty rect on this recording's
         // bound handle. No device allocation or upload takes place in this fixture.
-        *volume.get_format(&mut cx) = TextureFormat::VecRu8 {
-            width: 2, height: 1, data: Some(vec![0; 2]), unpack_row_length: None, updated: TextureUpdated::Empty,
-        };
-        volume.set_staged_upload(&mut cx, false);
+        for tex in [&volume, &coarse] {
+            *tex.get_format(&mut cx) = TextureFormat::VecRu8 {
+                width: 2, height: 1, data: Some(vec![0; 2]), unpack_row_length: None, updated: TextureUpdated::Empty,
+            };
+            tex.set_staged_upload(&mut cx, false);
+        }
         let mut texels = volume.take_vec_u8(&mut cx);
         texels[0] = 1;
         let rect = RectUsize { origin: PointUsize { x: 0, y: 0 }, size: SizeUsize { width: 1, height: 1 } };
@@ -1285,7 +1303,11 @@ mod tests {
                             assert_eq!(id, shadow, "a traced draw reached another depth pass");
                             assert_eq!(instance[flip.offset], 0.0, "a flipped pass received a traced layer");
                             assert!(call.options.scissor.is_some(), "traced depth must stay in its tile");
-                            assert_eq!(call.texture_slots[0].as_ref().unwrap().texture_id(), volume.texture_id());
+                            let bindings = &draw.draw_shaders[call.draw_shader_id.index].mapping.textures;
+                            for (name, tex) in [(live_id!(trace_volume), &volume), (live_id!(trace_coarse), &coarse)] {
+                                let slot = bindings.iter().position(|t| t.id == name).unwrap();
+                                assert_eq!(call.texture_slots[slot].as_ref().unwrap().texture_id(), tex.texture_id(), "Sun {name}");
+                            }
                             assert_eq!(call.geometry_id, Some(proxy), "the other group's shadow lies past the camera");
                             let transform = inputs.find(live_id!(transform)).unwrap().offset;
                             assert_eq!(&instance[transform + 12..transform + 15], &attachment.transform.v[12..15]);
@@ -1337,6 +1359,7 @@ mod tests {
         assert_eq!(renderer.traced_surface_failure("surface"), Some(rejected), "dawn retains this generation's diagnosis");
         record(&mut renderer, &mut cx, &pass, None, "day after a Sun rejection");
         *volume.get_format(&mut cx) = TextureFormat::Unknown;
+        *coarse.get_format(&mut cx) = TextureFormat::Unknown;
         cx.reload_generation += 1;
         renderer.prewarm_traced_surfaces(&mut cx, scene_id);
         assert_eq!(renderer.traced_surface_state("surface"), Waiting, "reload checks the volume again");
@@ -1346,14 +1369,15 @@ mod tests {
         renderer.prewarm_traced_surfaces(&mut cx, scene_id);
         assert_eq!(renderer.traced_surface_state("surface"), Failed("trace_volume must be a sampled 3D texture".into()),
             "a definite 2D format ends the wait");
-        renderer.install_traced_surface_for_passes("surface".into(), TracedSurfaceRecipe::tiles(0.125), with_sun);
+        renderer.install_traced_surface_for_passes("surface".into(), TracedSurfaceRecipe::volume(0.125, 32), with_sun);
         renderer.prewarm_traced_surfaces(&mut cx, scene_id);
         assert_eq!(renderer.traced_surface_state("surface"), Failed("missing traced texture binding trace_volume".into()),
             "without a native session the missing binding keeps its own diagnostic");
-        let mut duplicate = TracedSurfaceRecipe::tiles(0.125);
+        let mut duplicate = TracedSurfaceRecipe::volume(0.125, 32);
         let volume_slot = live_id!(trace_volume);
-        let binding = (volume_slot, volume.clone());
-        duplicate.textures = [binding.clone(), binding].into();
+        let binding = (volume_slot, Texture::new_with_format(&mut cx, TextureFormat::Unknown));
+        duplicate.textures = [binding.clone(), binding, (live_id!(trace_coarse), coarse.clone()),
+            (live_id!(trace_palette), palette.clone())].into();
         renderer.install_traced_surface_for_passes("surface".into(), duplicate, with_sun);
         renderer.prewarm_traced_surfaces(&mut cx, scene_id);
         assert_eq!(renderer.traced_surface_state("surface"), Failed(format!("duplicate traced texture binding {volume_slot}")),
@@ -1366,7 +1390,7 @@ mod tests {
             let prepare = |renderer: &mut Renderer, cx: &mut Cx, support| {
                 renderer.traced_programs.get_mut("surface").unwrap().prepare_with_volume_support(cx, scene, "surface", |_| Some(support));
             };
-            renderer.install_traced_surface_for_passes("surface".into(), TracedSurfaceRecipe::tiles(0.125), with_sun);
+            renderer.install_traced_surface_for_passes("surface".into(), TracedSurfaceRecipe::volume(0.125, 32), with_sun);
             prepare(&mut renderer, &mut cx, Ok(()));
             assert_eq!(renderer.traced_surface_state("surface"), Failed("missing traced texture binding trace_volume".into()),
                 "a capable device keeps the missing-binding diagnostic");
@@ -1375,7 +1399,7 @@ mod tests {
             let support = device.sampled_volume_support();
             let reason = support.expect_err("the recording advertises no 3D textures");
             for (label, count) in [("missing", 0), ("2D", 1), ("duplicate", 2)] {
-                let mut tiles = TracedSurfaceRecipe::tiles(0.125);
+                let mut tiles = TracedSurfaceRecipe::volume(0.125, 32);
                 tiles.textures = vec![(volume_slot, volume.clone()); count].into();
                 renderer.install_traced_surface_for_passes("surface".into(), tiles, with_sun);
                 prepare(&mut renderer, &mut cx, support);
@@ -1383,30 +1407,28 @@ mod tests {
             }
 
             *volume.get_format(&mut cx) = TextureFormat::Unknown;
-            let mut tiles = TracedSurfaceRecipe::tiles(0.125);
+            let mut tiles = TracedSurfaceRecipe::volume(0.125, 32);
             tiles.textures = [(volume_slot, volume.clone())].into();
             renderer.install_traced_surface_for_passes("surface".into(), tiles.clone(), with_sun);
             prepare(&mut renderer, &mut cx, support);
-            assert_eq!(renderer.traced_surface_state("surface"), Waiting, "an unknown format waits even without volume support");
-            renderer.traced_programs.get_mut("surface").unwrap().passes.refresh(|pass, _, _| {
-                assert_eq!(pass, TracedPass::Outside, "only Outside can reject the program while Sun waits for a format");
-                Err(reason.into())
-            });
-            assert_eq!(renderer.traced_surface_state("surface"), Failed(reason.into()), "Outside reports the pipeline rejection");
+            assert_eq!(renderer.traced_surface_state("surface"), Failed(reason.into()), "device rejection precedes format readiness");
 
             let headless = HalInfo { backend: backend_id::HEADLESS, ..Default::default() };
             renderer.install_traced_surface_for_passes("surface".into(), tiles, with_sun);
-            prepare(&mut renderer, &mut cx, headless.sampled_volume_support());
-            complete_outside(&mut renderer, &pass);
-            renderer.gpu_baker.set_cascade_daylight(vec3f(0.0, -1.0, 0.0));
-            assert_eq!(renderer.traced_surface_state("surface"), Ready, "the accepted headless Outside pipeline can draw at night");
-            renderer.gpu_baker.set_cascade_daylight(vec3f(0.0, 1.0, 0.0));
+            let support = headless.sampled_volume_support();
+            let reason = support.expect_err("headless has no sampled volume support");
+            prepare(&mut renderer, &mut cx, support);
+            assert_eq!(renderer.traced_surface_state("surface"), Failed(reason.into()), "headless reports its device rejection immediately");
         }
         renderer.gpu_baker.set_mode(crate::gpu_lightmap::GpuLightmapMode::Off);
 
         renderer.install_traced_outside_preview("surface".into(), recipe);
         renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
-        let preview = complete_outside(&mut renderer, &pass);
+        let scene = renderer.traced_caster_scene(&cx, pass.draw_pass_id()).with_features(renderer.traced_outside_features());
+        let program = renderer.traced_programs.get_mut("surface").unwrap();
+        program.passes.refresh(|pass, _, _| Ok(pass == TracedPass::Outside));
+        assert!(program.inside(scene).is_none(), "an isolated Outside preview omits Inside");
+        let preview = program.outside(scene).unwrap().skinned.draw_vars.draw_shader_id.unwrap();
         assert_eq!(renderer.traced_surface_state("surface"), Waiting, "preview still reports full-program availability");
         record(&mut renderer, &mut cx, &pass, Some(preview), "isolated outside preview");
         assert!(renderer.remove_traced_surface("surface"), "removing an installed binding reports its removal");
@@ -1432,10 +1454,97 @@ mod tests {
         renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
         let Failed(message) = renderer.traced_surface_state("surface") else { panic!("expected texture binding failure") };
         assert!(message.contains(&missing.to_string()), "the host needs the rejected binding: {message}");
+
+        let required = TracedSurfacePasses { inside: true, ..TracedSurfacePasses::OUTSIDE };
+
+        let mut volume = TracedSurfaceRecipe::volume(0.1, 32);
+        volume.textures = [live_id!(trace_volume), live_id!(trace_coarse), live_id!(trace_palette)]
+            .map(|id| (id, Texture::new_with_format(&mut cx, TextureFormat::Unknown))).into();
+        pass.set_size(&mut cx, dvec2(200.0, 100.0));
+        let scene = renderer.traced_caster_scene(&cx, pass.draw_pass_id()).with_features(renderer.traced_outside_features());
+        use CullMode::{Back, Front, None as NoCull};
+        let big = 2.0f32.powi(64);
+        let analytic_cases = [(0.5, vec3f(1.0, 1.0, 1.0), false, true, NoCull, NoCull)];
+        // Eye Z, copy scale, stage reflection, near-plane overlap, Outside and Inside cull modes.
+        let volume_cases = [
+            (4.0, vec3f(1.0, 1.0, 1.0), false, false, Back, Front),
+            (0.5, vec3f(1.0, 1.0, 1.0), false, true, Back, Front),
+            (0.5, vec3f(-1.0, 1.0, 1.0), false, true, Front, Back),
+            (0.5, vec3f(1.0, 1.0, 1.0), true, true, Front, Back),
+            (0.5, vec3f(-1.0, 1.0, 1.0), true, true, Back, Front),
+            (0.5, vec3f(0.0, 1.0, 1.0), false, true, NoCull, NoCull),
+            (0.5, vec3f(1.0, big, big), false, true, NoCull, NoCull),
+            (0.5, vec3f(1.0, big, big), true, true, NoCull, NoCull),
+        ];
+        for (recipe, outside_default, inside_default, cases) in [
+            (TracedSurfaceRecipe::default(), NoCull, NoCull, analytic_cases.as_slice()),
+            (volume, Back, Front, volume_cases.as_slice()),
+        ] {
+            renderer.install_traced_surface_for_passes("surface".into(), recipe, required);
+            renderer.prewarm_traced_surfaces(&mut cx, pass.draw_pass_id());
+            let program = renderer.traced_programs.get_mut("surface").unwrap();
+            program.passes.refresh(|_, _, _| Ok(true));
+            let outside = &program.outside(scene).unwrap().skinned.draw_vars;
+            assert_eq!(outside.options.cull_mode, outside_default, "Outside shader default");
+            let outside = outside.draw_shader_id.unwrap();
+            let inside = &program.inside(scene).unwrap().skinned.draw_vars;
+            assert_eq!(inside.options.cull_mode, inside_default, "Inside shader default");
+            let mut inv = [0.0; 2];
+            inside.get_uniform(&mut cx, live_id!(trace_inv_viewport), &mut inv);
+            assert_eq!(inv, [1.0/200.0, 1.0/100.0], "Inside receives the active viewport");
+            let inside = inside.draw_shader_id.unwrap();
+            assert_ne!(outside, inside);
+            for &(eye_z, scale, mirror_stage, overlaps, outside_cull, inside_cull) in cases {
+                let eye = vec3f(0.0, 0.0, eye_z);
+                pass.set_camera(&mut cx, Mat4f::translation(eye * -1.0), projection);
+                let copies = [20.0, 0.0].map(|x| ModelInstance {
+                    transform: Mat4f::nonuniform_scaled_translation(scale, vec3f(x, 0.0, 0.0)), ..pair[0].clone()
+                });
+                let mut list = DrawList::new(&mut cx);
+                let event = DrawEvent::default();
+                let mut draw = CxDraw::new(&mut cx, &event);
+                draw.begin_pass(&pass, Some(1.0));
+                list.begin_always(&mut draw);
+                if mirror_stage { draw.draw_lists[list.id()].draw_list_uniforms.view_transform.v[0] = -1.0; }
+                let mut cx3d = Cx3d::new(&mut draw);
+                let mut stats = RenderStats::default();
+                renderer.draw_custom_models(&mut cx3d, eye, 1.0, &copies, WorldModelLane::Attachment,
+                    (Vec3f::default(), 0.0), &sun, None, &mut stats);
+                list.end(&mut draw);
+                draw.end_pass(&pass);
+                let items = &draw.draw_lists[list.id()].draw_items;
+                assert_eq!(stats.traced_inside_draws, u64::from(overlaps), "Inside group count at {eye_z}");
+                assert_eq!((stats.world_attachment_draws, stats.world_attachment_instances, stats.world_attachment_triangles),
+                    (1, 2, 4), "Inside preserves Outside accounting for two copies of the two-triangle model");
+                assert_eq!(items.len(), 1 + usize::from(overlaps), "only submit Inside when one copy overlaps");
+                for index in 0..items.len() {
+                    let is_inside = overlaps && index == 0;
+                    let item = &items[index];
+                    let call = item.draw_call().unwrap();
+                    assert_eq!(call.geometry_id, Some(proxy));
+                    assert_eq!(call.draw_shader_id, if is_inside { inside } else { outside }, "Inside precedes Outside when the near plane overlaps");
+                    let expected = if is_inside { inside_cull } else { outside_cull };
+                    assert_eq!(call.options.cull_mode, expected, "eye_z={eye_z} scale={scale:?} mirror_stage={mirror_stage} inside={is_inside}");
+                    let data = item.instances.as_ref().unwrap().as_slice();
+                    assert_eq!(data.len(), call.total_instance_slots * if is_inside { 1 } else { 2 });
+                    if is_inside {
+                        let at = draw.draw_shaders[inside.index].mapping.instances.find(live_id!(transform)).unwrap().offset;
+                        assert_eq!(&data[at..at+16], &copies[1].transform.v, "Inside retains the second copy's original slot");
+                    }
+                }
+            }
+        }
+        let rejected = "Inside depth output rejected by the scene target";
+        renderer.traced_programs.get_mut("surface").unwrap().passes.refresh(|pass, _, _| {
+            if pass == TracedPass::Inside { Err(rejected.into()) } else { Ok(true) }
+        });
+        assert_eq!(renderer.traced_surface_state("surface"), Failed(rejected.into()));
+        assert!(renderer.traced_programs.get_mut("surface").unwrap().inside(scene).is_none());
+
     }
 
     /// A Cx whose VM has the renderer's shaders.
-    fn shader_cx() -> Cx {
+    pub(crate) fn shader_cx() -> Cx {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(register_test_shaders);
         cx
@@ -1609,6 +1718,78 @@ mod tests {
             "only the changed splat pipelines should be queued");
         assert_eq!(cx.draw_shaders.shaders.len(), count,
             "a sampler clamp change must preserve the total program count");
+    }
+
+    #[test]
+    fn a_view_binds_the_cascades_its_drawings_scene_draw_fitted_and_no_others() {
+        let mut cx = shader_cx();
+        let mut renderer = Renderer::default();
+        renderer.gpu_baker.set_mode(crate::gpu_lightmap::GpuLightmapMode::Realtime);
+        let mut world = World::default();
+        world.sun.dir = Some(vec3f(0.0, 1.0, 0.0));
+        let (scene_pass, view_pass, aux_pass) = (DrawPass::new(&mut cx), DrawPass::new(&mut cx), DrawPass::new(&mut cx));
+        let mut scene_list = DrawList::new(&mut cx);
+        let mut view_list = DrawList::new(&mut cx);
+        let mut aux_list = DrawList::new(&mut cx);
+        let mut sky = cx.with_vm(|vm| DrawSceneSky::script_new_with_default(vm));
+        let mut draws = SceneDraws {
+            sky: &mut sky, sky_analytic: None, cube: None, alpha: None, terrain: None,
+            shadow: None, firework: None, flare: None, shadow_sdf: None, water: None,
+            screen: None, screen_instances: &[], view_model: None,
+        };
+        let state = SceneState3D {
+            projection: Mat4f::perspective(70.0, 1.5, 0.1, 200.0), ..Default::default()
+        };
+        let mut reflected = state;
+        reflected.camera_pos.x = 5.0;
+        reflected.view.v[12] = -reflected.camera_pos.x;
+        let lamp = |x| crate::lightmap::LmLight::omni(vec3f(x, 0.0, -8.0), Vec3f::all(1.0), 4.0);
+        renderer.set_clustered_lighting(true);
+        renderer.set_hdr_output(true);
+        renderer.set_cluster_config(crate::clustered::ClusterConfig {
+            tiles_x: 2, tiles_y: 1, slices: 2, ..Default::default()
+        });
+        renderer.add_frame_lights(vec![lamp(0.0)]);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        draw.begin_pass(&scene_pass, Some(1.0));
+        renderer.draw_scene(&mut Cx3d::new(&mut draw), &mut scene_list, &mut draws, &world, state);
+        assert_eq!(renderer.frame_lights.len(), 1, "the scene picks up the first queued lamp");
+        let scene_lamps = format!("{:?}", renderer.frame_lights);
+        renderer.add_frame_lights(vec![lamp(5.0)]);
+        let (scene, scene_map, _) = renderer.gpu_baker.csm_binding().unwrap();
+        assert!(scene.on, "the scene's draw binds its cascades");
+        draw.end_pass(&scene_pass);
+        draw.begin_pass(&view_pass, Some(1.0));
+        assert!(renderer.bind_view_cascades(&mut draw), "a view after its drawing's scene draw binds the scene's cascades");
+        let (view, view_map, _) = renderer.gpu_baker.csm_binding().unwrap();
+        assert!(view.on && view_map.texture_id() == scene_map.texture_id(), "the view samples the scene's atlas");
+        assert_eq!(format!("{view:?}"), format!("{scene:?}"), "the view binds the scene's fit, not one of its own");
+        renderer.draw_scene_view(&mut Cx3d::new(&mut draw), &mut view_list, &mut draws, &world, reflected, None);
+        assert_eq!(format!("{:?}", renderer.frame_lights), scene_lamps, "the view preserves the scene's light list");
+        assert_eq!(renderer.host_lights.len(), 1, "the view leaves the next scene's host lamp queued");
+        draw.end_pass(&view_pass);
+        draw.begin_pass(&aux_pass, Some(1.0));
+        renderer.draw_scene_aux(&mut Cx3d::new(&mut draw), &mut aux_list, &mut draws, &world, reflected, None);
+        assert_eq!(format!("{:?}", renderer.frame_lights), scene_lamps, "the aux draw preserves the scene's light list");
+        assert_eq!(renderer.host_lights.len(), 1, "the aux draw leaves the next scene's host lamp queued");
+        draw.end_pass(&aux_pass);
+        drop(draw);
+
+        // The next drawing: a view recorded before any scene draw in it.
+        let mut draw = CxDraw::new(&mut cx, &event);
+        draw.begin_pass(&view_pass, Some(1.0));
+        assert!(!renderer.bind_view_cascades(&mut draw), "a view with no scene draw before it in its drawing binds no cascades");
+        assert!(!renderer.gpu_baker.csm_binding().unwrap().0.on, "it takes the off binding, never the last drawing's fit");
+        renderer.draw_scene_view(&mut Cx3d::new(&mut draw), &mut view_list, &mut draws, &world, reflected, None);
+        assert_eq!(format!("{:?}", renderer.frame_lights), scene_lamps, "an early view keeps the previous scene's lights");
+        draw.end_pass(&view_pass);
+        draw.begin_pass(&scene_pass, Some(1.0));
+        renderer.draw_scene(&mut Cx3d::new(&mut draw), &mut scene_list, &mut draws, &world, state);
+        assert!(renderer.host_lights.is_empty(), "the next scene consumes the pending host lamp");
+        assert_eq!(renderer.frame_lights.len(), 1, "the queued lamp replaces the previous frame's lamp");
+        assert_eq!(renderer.frame_lights[0].pos, lamp(5.0).pos, "the scene receives the lamp that survived both secondary draws");
+        draw.end_pass(&scene_pass);
     }
 
     #[test]

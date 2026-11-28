@@ -148,12 +148,11 @@ impl Skeleton {
         owner: crate::transform::Matrix4,
         ctx: &mut mesh::Context<'_>,
     ) -> Result<Vec<(mesh::VertexId, Vec<mesh::JointWeight>)>> {
-        if mesh
+        let needed = mesh
             .memory_bytes()
-            .saturating_add(mesh.vertices().len().saturating_mul(128))
-            > ctx.limits.max_bytes
-        {
-            return Err(Error::Budget("auto-weight working bytes"));
+            .saturating_add(mesh.vertices().len().saturating_mul(128));
+        if needed > ctx.limits.max_bytes {
+            return Err(Error::WorkingBytes { what: "auto-weight working bytes", needed, limit: ctx.limits.max_bytes });
         }
         if heads.len()!=self.joints.len(){return Err(Error::Invalid("auto weights rest count"));}
         let mut out = Vec::with_capacity(mesh.vertices().len());

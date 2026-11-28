@@ -118,7 +118,7 @@ script_mod! {
             let q = floor(uv / self.texel)
             let n1 = fract(sin(dot(q, vec2(12.9898, 78.233))) * 43758.5453)
             let n2 = fract(sin(dot(q, vec2(39.3468, 11.1352))) * 24634.6345)
-            let d = (n1 + n2 - 1.0) / 255.0
+            let d = (n1 + n2 - 1.0) / 255.0 * self.dither
             return vec4(c + vec3(d, d, d), 1.0)
         }
     }
@@ -132,7 +132,8 @@ pub struct DrawSceneTexture {
     /// The composite's post chain, set by the host from
     /// `makepad_render::Renderer::composite_post`: x = 1 when the scene texture is
     /// linear HDR (exposure + tone map + sRGB encode here), y = exposure,
-    /// z = 1 for FXAA, w unused. All zero (the default) is the plain blit.
+    /// z = 1 for FXAA, w = 1 for auto-exposure. All zero (the default) is the
+    /// plain blit.
     #[live(vec4(0.0, 1.0, 0.0, 0.0))]
     pub post: Vec4f,
     /// One scene-texture texel in uv (1/width, 1/height), for FXAA.
@@ -155,4 +156,8 @@ pub struct DrawSceneTexture {
     /// draws the tilt-shift alone, over premultiplied textures.
     #[live(vec4(0.0, 0.6, 0.2, 0.0))]
     pub tilt: Vec4f,
+    /// The HDR lane's display dither: 1 = on (the default), 0 = off, from
+    /// `makepad_render::Renderer::set_output_dither`.
+    #[live(1.0)]
+    pub dither: f32,
 }

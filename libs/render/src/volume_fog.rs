@@ -25,7 +25,7 @@ script_mod! {
         u_ref: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // density, height, falloff, max distance
         u_medium: uniform(vec4(0.0, 0.0, 0.0, 80.0))
-        // Hardware depth -> clip z (GL maps clip z to 0..1).
+        // Hardware depth -> clip z: (1, 0) on every backend, GL included (one 0..w clip z).
         u_depth_map: uniform(vec2(1.0, 0.0))
 
         unproject: fn(uv: vec2f, raw: float) -> vec3f {
@@ -335,7 +335,8 @@ impl VolumeFogCamera {
         Self { general, eye: terms.eye, axis: terms.axis, reference: terms.reference }
     }
     pub(crate) fn bind(&self, cx: &Cx, dv: &mut DrawVars) {
-        let depth_map = match cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => [2.0, -1.0], _ => [1.0, 0.0] };
+        // A sampled depth is clip z/w: one 0..w clip-z convention on every backend (platform/script/tests/clip_z.rs), GL included.
+        let depth_map = [1.0f32, 0.0];
         dv.set_uniform(cx, live_id!(u_world_from_clip), &self.general.world_from_clip);
         dv.set_uniform(cx, live_id!(u_eye), &self.eye);
         dv.set_uniform(cx, live_id!(u_axis), &self.axis);

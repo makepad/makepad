@@ -56,7 +56,7 @@ script_mod! {
     // hash dither against banding, as the analytic dome has.
     mod.draw.DrawEnvBackground = mod.std.set_type_default() do #(DrawEnvBackground::script_shader(vm)){
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -181,6 +181,10 @@ pub(super) enum EnvScope {
     /// map): its world's environment is not looked at, so a world that
     /// names none cannot drop what the scene's draws prepared.
     Aux,
+    /// The frame's scene seen again (a mirror, the frame behind glass):
+    /// it resolves nothing and shows the environment and the sun cascades
+    /// the scene's own draw of this drawing left bound.
+    View,
 }
 
 /// What a preparation is for: the source, whether its key stays in the
@@ -761,7 +765,7 @@ impl Renderer {
     pub(super) fn resolve_ibl_for(&mut self, cx: &mut Cx, env: &Environment, scope: EnvScope) {
         match scope {
             EnvScope::Scene if !self.ibl.mirror => self.resolve_ibl(cx, env),
-            EnvScope::Scene | EnvScope::Aux => {}
+            EnvScope::Scene | EnvScope::Aux | EnvScope::View => {}
         }
     }
 

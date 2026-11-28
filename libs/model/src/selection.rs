@@ -13,9 +13,9 @@ use crate::{canon::{Reader,Writer},mesh_editing::{Action,codec::*},mesh::{Vertex
 }
 impl SelectionState{
     pub fn memory_bytes(&self)->usize{self.groups.values().map(|g|g.object.len()+g.name.len()+(g.vertices.len()+g.faces.len())*8+256).sum()}
-    pub(crate) fn reconcile(&mut self,objects:&BTreeMap<String,mesh::Mesh>){self.groups.retain(|(object,_),_|objects.contains_key(object));for g in self.groups.values_mut(){let m=&objects[&g.object];if g.vertices.iter().any(|id|m.vertex(*id).is_none())||g.faces.iter().any(|id|m.face(*id).is_none()){g.stale=true;}}}
+    pub(crate) fn reconcile(&mut self,objects:&BTreeMap<String,crate::ObjectGeometry>){self.groups.retain(|(object,_),_|objects.get(object).and_then(crate::baked::MeshEntry::editable).is_some());for g in self.groups.values_mut(){let m=crate::baked::MeshEntry::editable(&objects[&g.object]).unwrap();if g.vertices.iter().any(|id|m.vertex(*id).is_none())||g.faces.iter().any(|id|m.face(*id).is_none()){g.stale=true;}}}
     pub(crate) fn validate(&self,state:&State,limits:&Limits)->Result<()>{if self.memory_bytes()>limits.mesh.max_bytes/4{return Err(Error::Budget("selection groups"));}
-        for ((object,n),g) in &self.groups{name(object,limits)?;name(n,limits)?;if object!=&g.object||n!=&g.name{return Err(Error::Invalid("selection identity"));}let m=state.objects.get(object).ok_or_else(||Error::MissingObject(object.clone()))?;
+        for ((object,n),g) in &self.groups{name(object,limits)?;name(n,limits)?;if object!=&g.object||n!=&g.name{return Err(Error::Invalid("selection identity"));}let m=state.editable(object).ok_or_else(||Error::MissingObject(object.clone()))?;
             if g.vertices.windows(2).any(|w|w[0]>=w[1])||g.faces.windows(2).any(|w|w[0]>=w[1]){return Err(Error::Invalid("selection IDs must be unique and ordered"));}
             if !g.stale&&(g.vertices.iter().any(|id|m.vertex(*id).is_none())||g.faces.iter().any(|id|m.face(*id).is_none())){return Err(Error::Invalid("named selection references missing elements"));}
         }Ok(())
@@ -28,7 +28,7 @@ impl SelectionOperation{
     pub fn memory_bytes(&self)->usize{let mut w=Writer::new();if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(3).saturating_add(128)}
     pub(crate) fn apply(&self,state:&mut State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<OperationResult>{
         self.check(limits)?;
-        let object=self.object_name();let m=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;
+        let object=self.object_name();let m=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;
         match self{
             Self::Use{name,element,operation,..}=>{
                 let g=state.selections.groups.get(&(object.into(),name.clone())).ok_or(Error::Invalid("unknown named selection"))?;
@@ -44,7 +44,7 @@ impl SelectionOperation{
         }
     }
 }
-fn save(state:&mut State,object:&str,name:&str,mut vertices:Vec<mesh::VertexId>,mut faces:Vec<mesh::FaceId>,limits:&Limits)->Result<OperationResult>{vertices.sort();vertices.dedup();faces.sort();faces.dedup();let m=&state.objects[object];if vertices.iter().any(|v|m.vertex(*v).is_none())||faces.iter().any(|f|m.face(*f).is_none()){return Err(Error::Invalid("selection element missing"));}
+fn save(state:&mut State,object:&str,name:&str,mut vertices:Vec<mesh::VertexId>,mut faces:Vec<mesh::FaceId>,limits:&Limits)->Result<OperationResult>{vertices.sort();vertices.dedup();faces.sort();faces.dedup();let m=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;if vertices.iter().any(|v|m.vertex(*v).is_none())||faces.iter().any(|f|m.face(*f).is_none()){return Err(Error::Invalid("selection element missing"));}
     // Earlier edits in this atomic batch may have removed elements belonging
     // to other groups. Mark those stale before validating the fresh query.
     state.selections.reconcile(&state.objects);
@@ -55,7 +55,7 @@ impl SelectionQuery{
             Self::Bounds{min,max,..}if min.iter().chain(max).any(|v|!v.is_finite())||(0..3).any(|i|min[i]>max[i])=>return Err(Error::Invalid("selection bounds")),
             Self::Ray{origin,direction,..}if origin.iter().chain(direction).any(|v|!v.is_finite())=>return Err(Error::Invalid("selection ray")),_=>{}
         }
-        let m=&state.objects[object];let mut vertices=BTreeSet::new();let mut faces=BTreeSet::new();
+        let m=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;let mut vertices=BTreeSet::new();let mut faces=BTreeSet::new();
         match self{
             Self::All=>{vertices.extend(m.vertices().iter().map(|v|v.id));faces.extend(m.faces().iter().map(|f|f.id));},
             Self::Material(id)=>{for f in m.faces(){ctx.checkpoint(1)?;if f.material==*id{faces.insert(f.id);}}},
@@ -90,7 +90,7 @@ mod loop_accounting_tests{
         let mut polygons=Vec::new();for y in 0..n-1{for x in 0..n-1{let a=(y*n+x)as u32;polygons.push(mesh::Polygon::new(vec![a,a+1,a+1+n as u32,a+n as u32]));}}
         let m=mesh::Mesh::from_polygons(&positions,&polygons,&mut mesh::Context::default()).unwrap();let a=m.vertices()[(n/2)*n+n/2].id;let b=m.vertices()[(n/2)*n+n/2+1].id;
         let mut baseline=mesh::Context::default();m.adjacency(&mut baseline).unwrap();let adjacency_work=baseline.work_used();
-        let mut state=State::default();state.objects.insert("grid".into(),m);
+        let mut state=State::default();state.objects.insert("grid".into(),m.into());
         let query=SelectionQuery::Loop{edge:mesh::EdgeKey::new(a,b),ring:false};let mut ctx=mesh::Context::default();let (vertices,faces)=query.evaluate(&state,"grid",&mut ctx).unwrap();
         assert_eq!(vertices.len(),n);assert_eq!(faces.len(),2*(n-1));
         let walk_work=ctx.work_used()-adjacency_work;assert!(walk_work>20*n as u64,"candidate comparisons must be charged: {walk_work}");assert!(walk_work<100*n as u64,"walk should depend on adjacent edges: {walk_work}");
@@ -215,7 +215,7 @@ mod typed_tests {
     #[test]
     fn selection_literals_and_query_variants(){
         let mut state = State::default();
-        state.objects.insert("body".into(), mesh::Mesh::cube([1.;3], &mut mesh::Context::default()).unwrap());
+        state.objects.insert("body".into(), mesh::Mesh::cube([1.;3], &mut mesh::Context::default()).unwrap().into());
         for i in 0..129 {
             let name = format!("group-{i}");
             let group = SelectionGroup {object:"body".into(),name:name.clone(),vertices:vec![],faces:vec![],stale:false};

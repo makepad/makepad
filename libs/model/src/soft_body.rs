@@ -53,7 +53,7 @@ impl SoftBodyBind {
         let total=skeleton.joints.len()+if reusing{0}else{SOFT_BODY_TETRAHEDRA}+new_frames;
         // The soft-body v1 metadata format and affine palette use this bound.
         if total>SOFT_BODY_MAX_JOINTS{return Err(Error::Budget("soft-body v1 joint palette"));}
-        let body=state.objects.get(&self.object).ok_or_else(||Error::MissingObject(self.object.clone()))?;
+        let body=state.editable(&self.object).ok_or_else(||Error::MissingObject(self.object.clone()))?;
         if !body.validate(ctx)?.is_closed_manifold{return Err(Error::Invalid("soft-body body must be a closed manifold"));}
         let mut groups=BTreeSet::from([self.object.as_str()]);let mut names=BTreeSet::new();
         for object in &self.deform_objects {schema::name(object,limits)?;if !groups.insert(object.as_str()){return Err(Error::Invalid("duplicate soft-body deform object"));}}
@@ -64,8 +64,8 @@ impl SoftBodyBind {
             for object in &a.objects{schema::name(object,limits)?;if !groups.insert(object.as_str()){return Err(Error::Invalid("soft-body object belongs to multiple bindings"));}}
         }
         for name in &groups {check_geometry(state,name)?;}
-        let working=groups.iter().map(|name|state.objects[*name].vertices().len().saturating_mul(160)).sum::<usize>();
-        if working>ctx.limits.max_bytes {return Err(Error::Budget("soft-body binding working bytes"));}
+        let working=groups.iter().map(|name|state.editable(name).unwrap().vertices().len().saturating_mul(160)).sum::<usize>();
+        if working>ctx.limits.max_bytes {return Err(Error::WorkingBytes{what:"soft-body binding working bytes",needed:working,limit:ctx.limits.max_bytes});}
         // Existing rig root is preserved. A rotated/scaled root would make
         // rigid child animation inherit scale/shear, so refuse that contract.
         let root=state.skeleton.as_ref().map(|s|state.rig.local_rest(s,0)).transpose()?.unwrap_or_default();
@@ -128,10 +128,10 @@ impl SoftBodyBind {
         // budget/cancellation failures while writing these weights.
         state.skeleton=Some(skeleton);
         for a in &attachments {if let Some(rest)=state.rig.rests.get_mut(&(a.joint as u32)){rest.translation=state.skeleton.as_ref().unwrap().joints[a.joint as usize].translation;}}
-        state.objects.get_mut(&self.object).unwrap().set_weights_bulk(&weights,ctx)?;
-        for(object,weights)in extra_weights{state.objects.get_mut(&object).unwrap().set_weights_bulk(&weights,ctx)?;}
+        state.objects.get_mut(&self.object).and_then(crate::baked::MeshEntry::editable_mut).unwrap().set_weights_bulk(&weights,ctx)?;
+        for(object,weights)in extra_weights{state.objects.get_mut(&object).and_then(crate::baked::MeshEntry::editable_mut).unwrap().set_weights_bulk(&weights,ctx)?;}
         for a in &attachments {for object in &a.objects{
-            let mesh=state.objects.get_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;
+            let mesh=state.objects.get_mut(object).and_then(crate::baked::MeshEntry::editable_mut).ok_or_else(||Error::MissingObject(object.clone()))?;
             let skeleton=state.skeleton.as_ref().unwrap();
             let weights=mesh.vertices().iter().map(|v|{let preserve=reusing&&!v.weights.is_empty()&&v.weights.iter().all(|w|within_frame(skeleton,w.joint,a.joint as u32));
                 (v.id,if preserve{v.weights.clone()}else{vec![mesh::JointWeight{joint:a.joint as u32,weight:1.}]})}).collect::<Vec<_>>();
@@ -186,14 +186,14 @@ fn within_frame(skeleton:&Skeleton,joint:u32,frame:u32)->bool{
 }
 
 fn check_geometry(state:&State,object:&str)->Result<()> {
-    if !state.objects.contains_key(object){return Err(Error::MissingObject(object.into()));}
+    if state.editable(object).is_none(){return Err(Error::MissingObject(object.into()));}
     if state.scene.nodes.get(object).is_some_and(|n|n.linked_to.is_some()) || state.scene.modifiers.contains_key(object)
         || state.scene.lods.contains_key(object) || state.rig.morphs.values().any(|m|m.object==object) {
         return Err(Error::Invalid("soft-body binding requires unique baked geometry without body/attachment LODs or shape keys"));
     }Ok(())
 }
 fn world_points(state:&State,object:&str,ctx:&mut mesh::Context<'_>)->Result<Vec<(mesh::VertexId,[f64;3])>>{
-    let mesh=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;let world=state.scene.world_matrix(object)?;
+    let mesh=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;let world=state.scene.world_matrix(object)?;
     mesh.vertices().iter().map(|v|{ctx.checkpoint(1)?;let p=transform_point(world,v.position);point32(p)?;Ok((v.id,p))}).collect()
 }
 fn bounds(points:impl Iterator<Item=[f64;3]>)->Result<[[f64;3];2]>{let mut b=[[f64::INFINITY;3],[f64::NEG_INFINITY;3]];for p in points{for i in 0..3{b[0][i]=b[0][i].min(p[i]);b[1][i]=b[1][i].max(p[i]);}}if b.iter().flatten().any(|v|!v.is_finite()){return Err(Error::Invalid("empty soft-body geometry"));}Ok(b)}
@@ -217,7 +217,7 @@ fn sample_surface(binder:&physics::SoftBodyBinder<'_>,points:&[(mesh::VertexId,[
 fn geometry_hash(state:&State,metadata:&SoftBodyMetadata,_limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<String>{
     let objects=std::iter::once(&metadata.object).chain(&metadata.deform_objects).chain(metadata.attachments.iter().flat_map(|a|a.objects.iter())).collect::<BTreeSet<_>>();
     let mut w=Writer::new();w.raw(b"soft-body-geometry-v1\0")?;
-    for object in objects{check_geometry(state,object)?;w.string(object)?;let mesh=&state.objects[object];w.raw(&crate::rig_control::topology(mesh))?;
+    for object in objects{check_geometry(state,object)?;w.string(object)?;let mesh=state.editable(object).ok_or_else(||Error::MissingObject(object.clone()))?;w.raw(&crate::rig_control::topology(mesh))?;
         for (id,p) in world_points(state,object,ctx)?{w.u64(id.0)?;for v in p{w.f64(v)?;}}
     }
     Ok(makepad_core_util::sha256::sha256(&w.bytes).iter().map(|b|format!("{b:02x}")).collect())
@@ -243,7 +243,7 @@ pub(crate) fn validate(state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->
         }
     }
     let mut tet_for_joint=[None;SOFT_BODY_MAX_JOINTS];for(index,joint)in m.tet_joints.iter().enumerate(){tet_for_joint[*joint as usize]=Some(index);}
-    for (object,mesh) in &state.objects{
+    for (object,mesh) in state.editable_objects(){
         let required=object==&m.object||m.deform_objects.contains(object);
         let world=state.scene.world_matrix(object)?;
         for vertex in mesh.vertices(){
@@ -262,7 +262,7 @@ pub(crate) fn validate(state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->
         let j=&skeleton.joints[a.joint as usize];let rest=state.rig.local_rest(skeleton,a.joint as usize)?;
         if j.name!=a.name||j.parent!=Some(m.root_joint as u32)||rest.rotation!=[0.,0.,0.,1.]||rest.scale!=[1.;3]
             || (0..3).any(|i|((rest.translation[i]+root.translation[i]) as f32-a.rest_pivot[i]).abs()>1e-5){return Err(Error::Invalid("soft-body rigid frame rest changed"));}
-        for object in &a.objects {for vertex in state.objects[object].vertices(){ctx.checkpoint(1)?;
+        for object in &a.objects {for vertex in state.editable(object).ok_or_else(||Error::MissingObject(object.clone()))?.vertices(){ctx.checkpoint(1)?;
             if vertex.weights.is_empty(){return Err(Error::Invalid("soft-body attachment is unbound"));}
             for w in &vertex.weights {if !within_frame(skeleton,w.joint,a.joint as u32){return Err(Error::Invalid("rigid attachment weights must remain inside its frame hierarchy"));}}
         }}

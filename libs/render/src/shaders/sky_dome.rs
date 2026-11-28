@@ -22,7 +22,7 @@ script_mod! {
         ..mod.draw.DrawCube,
         // DELIBERATE: the sky is a cube the camera sits INSIDE, so every
         // visible face is a back face. Culling erases the sky completely.
-        backface_culling: false
+        cull_mode: @None
         v_dir: varying(vec3f)
 
         vertex: fn() {
@@ -73,7 +73,7 @@ script_mod! {
         ..mod.draw.DrawCube,
         // Same deliberate choice as DrawSceneSky: the camera sits INSIDE
         // the dome, every visible face is a back face.
-        backface_culling: false
+        cull_mode: @None
         // Night-sky panorama (equirectangular; NASA SVS Deep Star Map —
         // see the sandbox's resources/sky/ATTRIBUTION.txt). A 1x1 black
         // stand-in binds when no map is loaded; star_r0.w gates it.
@@ -242,7 +242,7 @@ script_mod! {
         // Classic sky portals are ceiling/floor sheets seen from their
         // underside as often as their front. Culling those faces exposes the
         // pass clear colour (black) even though SKY1 is correctly bound.
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

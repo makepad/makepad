@@ -157,6 +157,7 @@ pub(crate) fn primitive_kind(mesh: &crate::MeshPrimitive) -> (&str, &'static str
     match mesh {
         crate::MeshPrimitive::Sphere { object, .. } => (object, "sphere"),
         crate::MeshPrimitive::Cylinder { object, .. } => (object, "cylinder"),
+        crate::MeshPrimitive::Baked { object, .. } => (object, "baked"),
         crate::MeshPrimitive::Polygons { object, .. } => (object, "polygons"),
     }
 }
@@ -199,7 +200,7 @@ impl Drop for OperationTimer {
     }
 }
 
-fn operation_kind(op: &Operation) -> &'static str {
+pub(crate) fn operation_kind(op: &Operation) -> &'static str {
     use crate::{Action, Construction as C, SceneOperation as S, Shape};
     match op {
         Operation::Construction(op) => match &op.kind {
@@ -248,7 +249,7 @@ fn operation_kind(op: &Operation) -> &'static str {
         Operation::Surface(SurfaceOperation::VertexColors { .. } | SurfaceOperation::VertexPaint { .. }) => "vertex_colors",
         Operation::Surface(_) | Operation::TextureSolid { .. } | Operation::PaintTexture { .. } => "surface",
         Operation::Cube { .. } => "box", Operation::Plane { .. } => "plane",
-        Operation::ImportMesh { .. } => "import_mesh", Operation::Transform { .. } => "transform",
+        Operation::Baked { .. } => "baked", Operation::ImportMesh { .. } => "import_mesh", Operation::Transform { .. } => "transform",
         Operation::Smooth { .. } => "smooth", Operation::Extrude { .. } => "extrude",
         Operation::Inset { .. } => "inset", Operation::Weld { .. } => "weld",
         Operation::Mirror { .. } => "mirror", Operation::Subdivide { .. } => "subdivide",

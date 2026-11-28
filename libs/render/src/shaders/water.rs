@@ -1,4 +1,4 @@
-//! The water surface (local/plans/water.md): one radial mesh around the
+//! The water surface: one radial mesh around the
 //! eye, displaced by the swell, shaded in one pass.
 
 use super::*;
@@ -31,7 +31,7 @@ script_mod! {
     // under water, show the mesh's underside.
     mod.draw.DrawSceneWater = mod.std.set_type_default() do #(DrawSceneWater::script_shader(vm)){
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

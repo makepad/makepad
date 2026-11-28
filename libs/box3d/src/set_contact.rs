@@ -933,7 +933,7 @@ fn cluster_faces(
             let normal = if n == outward { face.normal } else { neg(n) };
             let mut patch_plane = plane;
             if n != outward {
-                if n == Vec3::ZERO {
+                if n == Vec3::ZERO || dot(outward, n).abs() < std::f32::consts::FRAC_1_SQRT_2 {
                     let other = mul_sub(on_box, g.separation, face.normal);
                     *dropped_rows += 1;
                     remember_drop(&mut scratch.deepest_drop, p, other, materials, true, set);
@@ -1084,7 +1084,10 @@ fn collide_convex_pairs(
                     na = exterior_normal(set_a, slot_a, child.bounds, closest, axis);
                 }
             }
-            if na == Vec3::ZERO {
+            if na == Vec3::ZERO
+                || (na != old && matches!(geometry_b, ShapeGeometry::Hull(_))
+                    && dot(old, na).abs() < std::f32::consts::FRAC_1_SQRT_2)
+            {
                 *dropped_rows += 1;
                 remember_drop(&mut scratch.deepest_drop, point, wb, materials, false, set_a);
                 continue;

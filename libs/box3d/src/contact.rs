@@ -431,8 +431,74 @@ pub(crate) fn has_yield_force(force: f32, h: f32) -> bool {
 /// share below the smallest f32 impulse is a zero allowance, distinct from a rigid row.
 pub(crate) fn yield_impulse_share(force: f32, h: f32, count: usize) -> f32 {
     let budget = f64::from(force) * f64::from(h);
+    floor_equal_share(budget, count)
+}
+
+fn floor_equal_share(budget: f64, count: usize) -> f32 {
     let share = (budget / count as f64) as f32;
     if f64::from(share).mul_add(count as f64, -budget) > 0.0 { share.next_down() } else { share }
+}
+
+/// Subtract demand conservatively even when it is smaller than an ulp of the budget.
+fn remaining_budget(room: f64, demand: f64) -> f64 {
+    let left = (room - demand).max(0.0);
+    if left > 0.0 && demand > room - left { left.next_down() } else { left }
+}
+
+/// Give lightly loaded manifolds their demand first. When all demands fit, every
+/// manifold gets equal headroom. Equal demands always receive identical caps.
+pub(crate) fn allocate_yield_shares(force: f32, h: f32, demands: &[f64], order: &mut Vec<usize>, caps: &mut Vec<f32>) {
+    let mut room = f64::from(force) * f64::from(h);
+    order.clear();
+    order.extend(0..demands.len());
+    order.sort_unstable_by(|&a, &b| demands[a].total_cmp(&demands[b]));
+    caps.resize(order.len(), 0.0);
+    if order.is_empty() {
+        return;
+    }
+    let mut spare = room;
+    for &i in order.iter() {
+        spare = remaining_budget(spare, demands[i]);
+        if spare == 0.0 { break; }
+    }
+    let headroom = spare / order.len() as f64;
+    let mut pending = order.as_slice();
+    while let Some(&first) = pending.first() {
+        let request = demands[first] + headroom;
+        let share = floor_equal_share(room, pending.len());
+        if request >= room / pending.len() as f64 {
+            for &i in pending { caps[i] = share; }
+            break;
+        }
+        let cap = request as f32;
+        let cap = if f64::from(cap) > request { cap.next_down() } else { cap };
+        let end = pending.iter().position(|&i| demands[i] != demands[first]).unwrap_or(pending.len());
+        for &i in &pending[..end] {
+            caps[i] = cap.min(share);
+            room = remaining_budget(room, request);
+        }
+        pending = &pending[end..];
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn water_filling_preserves_budget_and_symmetry() {
+    let mut order = Vec::new();
+    let mut caps = Vec::new();
+    let mut allocate = |f, h, demands: &[f64]| {
+        allocate_yield_shares(f, h, demands, &mut order, &mut caps);
+        assert!(caps.iter().map(|&c| f64::from(c)).sum::<f64>() <= f64::from(f) * f64::from(h));
+        caps.clone()
+    };
+    assert_eq!(allocate(20.0, 0.5, &[9.0, 2.0, 9.0, 0.0]), [4.0, 2.0, 4.0, 0.0]);
+    assert_eq!(allocate(20.0, 0.5, &[2.0, 9.0, 0.0, 9.0]), [2.0, 4.0, 0.0, 4.0]);
+    assert_eq!(allocate(20.0, 0.5, &[1.0, 3.0, 0.0]), [3.0, 5.0, 2.0]);
+    for (f, h) in [(1.0, 1.0), (0.73, 0.017), (f32::from_bits(1), 0.5)] {
+        assert_eq!(allocate(f, h, &[0.0; 7]), [yield_impulse_share(f, h, 7); 7]);
+    }
+    let caps = allocate(1.0, 1.0, &[1e-30, 4.0]);
+    assert!(caps[0] > 0.0 && caps[1] < 1.0, "even a tiny load consumes budget");
 }
 
 // The C b3ContactRegister table: (supported, primary). Built from the

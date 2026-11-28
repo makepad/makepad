@@ -384,6 +384,12 @@ impl LocalShadows {
     }
 
     pub(crate) fn parent_to(&self,cx:&mut Cx,parent:DrawPassId){if let Some(pass)=&self.pass{pass.set_pass_parent(cx,parent);}}
+    pub(crate) fn pass_id(&self) -> Option<DrawPassId> {
+        self.pass.as_ref().map(DrawPass::draw_pass_id)
+    }
+    pub(crate) fn has_faces(&self) -> bool {
+        !self.faces.is_empty()
+    }
     pub fn config(&self) -> LocalShadowConfig {
         self.config
     }
@@ -820,7 +826,7 @@ impl LocalShadows {
 
     /// Whether every depth draw's pipeline has answered (made, or failed for good).
     fn depth_draws_settled(&self, cx: &Cx) -> bool {
-        let pass = self.pass.as_ref().map(DrawPass::draw_pass_id);
+        let pass = self.pass_id();
         let settled = |vars: Option<&DrawVars>| {
             vars.and_then(|v| v.draw_shader_id).is_some_and(|id| {
                 pass.is_some_and(|pass| cx.draw_shader_ready_in(id, pass)) || cx.draw_shader_failed(id)

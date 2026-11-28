@@ -550,6 +550,7 @@ trait Scenario {
     fn create(&mut self, world: &mut World);
     // C: stepFcn(worldId, stepCount); a default no-op matches a NULL stepFcn.
     fn step(&mut self, _world: &mut World, _step_index: i32) {}
+    fn finish(&mut self, _world: &World) {}
 }
 
 // --- joint_grid ---
@@ -1246,6 +1247,77 @@ impl Scenario for Junkyard {
     }
 }
 
+// A stepped face stays in contact under constant diagonal loading. Each body
+// supplies one yielding material to eleven exposed end planes and one floor plane.
+struct YieldingSteps {
+    bodies: usize,
+    samples: u32,
+    profile_ms: [f64; 4],
+}
+
+impl YieldingSteps {
+    fn new(bodies: usize) -> Self { Self { bodies, samples: 0, profile_ms: [0.0; 4] } }
+
+    fn sample(&mut self, world: &World, timed: bool) {
+        let manifolds: i32 = world.constraint_graph.colors.iter().map(|c| c.manifold_constraint_count).sum();
+        assert_eq!(manifolds as usize, 12 * self.bodies, "the yielding contact workload changed");
+        assert!(world.task_contexts.iter().all(|t| t.set_dropped_rows == 0), "the scene buried a contact");
+        if timed {
+            let p = world_get_profile(world);
+            for (sum, ms) in self.profile_ms.iter_mut().zip([p.solver_setup, p.warm_start, p.solve_impulses, p.constraints]) {
+                *sum += f64::from(ms);
+            }
+            self.samples += 1;
+        }
+    }
+}
+
+impl Scenario for YieldingSteps {
+    fn create(&mut self, world: &mut World) {
+        use makepad_box3d::{create_box_set, AABB, SetBox};
+        use makepad_box3d::shape::create_box_set_shape;
+        world_enable_sleeping(world, false);
+        world_set_gravity(world, vec3(12.0, -2.0, 0.0));
+        world_set_contact_tuning(world, world.contact_hertz, world.contact_damping_ratio, 0.0);
+        let fixed = create_body(world, &default_body_def());
+        let length = self.bodies as f32 * 5.0;
+        let def = default_shape_def();
+        create_hull_shape(world, fixed, &def, &make_offset_box_hull(2.0, 4.0, length, vec3(2.0, 0.0, 0.0)));
+        create_hull_shape(world, fixed, &def, &make_offset_box_hull(4.0, 2.0, length, vec3(0.0, -2.0, 0.0)));
+        let child = |lower_bound, upper_bound| SetBox { bounds: AABB { lower_bound, upper_bound }, material: 0, user_data: 0 };
+        let mut boxes = vec![child(vec3(-1.25, 0.0, 0.0), vec3(-1.0, 1.0, 2.75))];
+        for i in 0..11 {
+            let z = 0.25 * i as f32;
+            boxes.push(child(vec3(-1.0, 0.0, z), vec3(0.0125 * (i + 1) as f32, 1.0, z + 0.2)));
+        }
+        let set = create_box_set(&boxes);
+        let yielding = ShapeDef {
+            base_material: SurfaceMaterial { yield_force: 64.0, friction: 0.0, ..default_surface_material() },
+            ..default_shape_def()
+        };
+        for i in 0..self.bodies {
+            let body = create_body(world, &BodyDef {
+                body_type: BodyType::Dynamic, position: pos(0.0, 0.0, (5 * i) as _),
+                ..default_body_def()
+            });
+            create_box_set_shape(world, body, &yielding, &set);
+            body_set_mass_data(world, body, MassData { mass: 1.0, ..Default::default() });
+        }
+    }
+
+    fn step(&mut self, world: &mut World, index: i32) {
+        // Sample the preceding step. Step zero is the harness's untimed warm-up.
+        if index > 0 { self.sample(world, index > 1); }
+    }
+
+    fn finish(&mut self, world: &World) {
+        self.sample(world, true);
+        let [setup, warm, solve, constraints] = self.profile_ms.map(|ms| ms * 1000.0 / f64::from(self.samples));
+        println!("yield groups={} manifolds={} dropped=0 samples={} us/step setup={setup:.3} warm={warm:.3} solve={solve:.3} constraints={constraints:.3}",
+            self.bodies, 12 * self.bodies, self.samples);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // benchmark/main.c harness
 // ---------------------------------------------------------------------------
@@ -1311,6 +1383,8 @@ fn main() {
         Benchmark { name: "rain", make: || Box::new(Rain::default()), total_step_count: 400 },
         Benchmark { name: "washer", make: || Box::new(Washer), total_step_count: 1000 },
         Benchmark { name: "large_world", make: || Box::new(LargeWorld::default()), total_step_count: 500 },
+        Benchmark { name: "yield_1", make: || Box::new(YieldingSteps::new(1)), total_step_count: 601 },
+        Benchmark { name: "yield_16", make: || Box::new(YieldingSteps::new(16)), total_step_count: 601 },
     ];
 
     let benchmark_count = benchmarks.len() as i32;
@@ -1415,6 +1489,7 @@ fn main() {
             }
 
             let ms = get_milliseconds(ticks);
+            scenario.finish(&world);
             println!("run {} : {} (ms)", run_index, ms);
 
             if run_index == 0 {

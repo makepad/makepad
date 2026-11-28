@@ -12,6 +12,32 @@ use makepad_csg_sdf::{Hints, Sdf3, SdfNode, SdfOp};
 
 pub type P3 = [f64; 3];
 
+/// Minimum circumferential segments used by [`segments_for_chord`].
+pub const MIN_LOWER_SEGMENTS: u32 = 16;
+
+/// Circumferential segments for an inscribed polygon with maximum radial deviation `chord`.
+/// Counts are multiples of four. If meeting the tolerance requires more segments than fit in a `u32`,
+/// returns the largest representable multiple of four. Invalid inputs use [`MIN_LOWER_SEGMENTS`].
+pub fn segments_for_chord(radius: f64, chord: f64) -> u32 {
+    if !radius.is_finite() || radius <= 0.0 {
+        return MIN_LOWER_SEGMENTS;
+    }
+    if !chord.is_finite() || chord <= 0.0 {
+        return MIN_LOWER_SEGMENTS;
+    }
+    let diameter = 2.0 * radius;
+    if chord >= diameter {
+        return MIN_LOWER_SEGMENTS;
+    }
+    let ratio = if diameter.is_finite() { chord / diameter } else { (chord / radius) * 0.5 };
+    let u = ratio.clamp(f64::MIN_POSITIVE, 1.0).sqrt();
+    let half_step = u.asin();
+    let raw = (std::f64::consts::FRAC_PI_2 / half_step).ceil() as u64;
+    // Round up to four, keeping the type bound aligned even when the required count overflows.
+    let padded = raw.saturating_add(3).max(MIN_LOWER_SEGMENTS as u64).min(u32::MAX as u64);
+    (padded as u32) & !3
+}
+
 pub fn add(a: P3, b: P3) -> P3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
@@ -155,9 +181,16 @@ impl Prim {
 
     /// The same solid as csg_graph nodes (`segments` round a circle).
     pub fn lower(&self, g: &mut Graph, segments: u32) -> Result<NodeId, String> {
+        self.lower_with(g, &|_| segments)
+    }
+
+    /// Lower with the segment count chosen from a sphere's radius or a frustum's larger radius.
+    pub fn lower_with(&self, g: &mut Graph, segments_for: &dyn Fn(f64) -> u32) -> Result<NodeId, String> {
         match self {
             Prim::Sphere { c, r } => {
-                let s = g.push(Op::Sphere { radius: *r, segments, rings: segments / 2 })?;
+                let segments = segments_for(*r).max(4);
+                let rings = (segments / 2).max(2);
+                let s = g.push(Op::Sphere { radius: *r, segments, rings })?;
                 g.push(Op::Transform { source: s, at: *c, rotate: [0.0; 3], scale: [1.0; 3] })
             }
             Prim::Slab { n, lo, hi, c, half } => {
@@ -166,6 +199,7 @@ impl Prim {
             }
             Prim::Frustum { a, b, ra, rb } => {
                 let ax = sub(*b, *a);
+                let segments = segments_for(ra.max(*rb)).max(3);
                 let s = g.push(Op::Cylinder { radius: *ra, top_radius: *rb, height: len(ax), segments })?;
                 g.push(Op::Transform { source: s, at: scale(add(*a, *b), 0.5), rotate: euler_xyz(&rot_y_to(ax)), scale: [1.0; 3] })
             }
@@ -373,14 +407,19 @@ impl Solid {
         (s, ops)
     }
 
-    /// csg_graph nodes with `parts[i]` the original parts' nodes.
+    /// csg_graph nodes with `parts[i]` the original parts' nodes and a fixed segment count.
+    pub fn lower(&self, g: &mut Graph, parts: &[NodeId], segments: u32) -> Result<NodeId, String> {
+        self.lower_with(g, parts, &|_| segments)
+    }
+
+    /// Lower with per-primitive radius-based segment counts and the same Boolean ordering as [`Self::lower`].
     ///
     /// A part's joint edits cross its whole mesh once per group, not once per tool: cuts in a
     /// row are one difference by their union and additions in a row one union, and an edit moves
     /// back past the other kind's group before it when it misses every tool there (a cut that
     /// misses an addition takes nothing from it). The solid is the same; only the mesh Booleans
     /// are grouped. Distances (`to_node`, `distance_bounded`) keep the tree as built.
-    pub fn lower(&self, g: &mut Graph, parts: &[NodeId], segments: u32) -> Result<NodeId, String> {
+    pub fn lower_with(&self, g: &mut Graph, parts: &[NodeId], segments_for: &dyn Fn(f64) -> u32) -> Result<NodeId, String> {
         let (base, ops) = self.chain();
         if ops.len() > 1 {
             let mut groups: Vec<(bool, Vec<&Solid>)> = Vec::new();
@@ -394,21 +433,21 @@ impl Solid {
                     groups.push((cut, vec![tool]));
                 }
             }
-            let mut acc = base.lower(g, parts, segments)?;
+            let mut acc = base.lower_with(g, parts, segments_for)?;
             for (cut, tools) in groups {
                 let tool = match tools.as_slice() {
-                    [one] => one.lower(g, parts, segments)?,
-                    _ => Solid::Union(tools.into_iter().cloned().collect()).lower(g, parts, segments)?,
+                    [one] => one.lower_with(g, parts, segments_for)?,
+                    _ => Solid::Union(tools.into_iter().cloned().collect()).lower_with(g, parts, segments_for)?,
                 };
                 let mode = if cut { BoolMode::Difference } else { BoolMode::Union };
                 acc = g.push(Op::Boolean { mode, a: acc, b: vec![tool] })?;
             }
             return Ok(acc);
         }
-        let many = |g: &mut Graph, l: &[Solid]| -> Result<Vec<NodeId>, String> { l.iter().map(|s| s.lower(g, parts, segments)).collect() };
+        let many = |g: &mut Graph, l: &[Solid]| -> Result<Vec<NodeId>, String> { l.iter().map(|s| s.lower_with(g, parts, segments_for)).collect() };
         match self {
             Solid::Part(i) => Ok(parts[*i]),
-            Solid::Prim(q) => q.lower(g, segments),
+            Solid::Prim(q) => q.lower_with(g, segments_for),
             Solid::Union(l) | Solid::Inter(l) => {
                 let mode = if matches!(self, Solid::Union(_)) { BoolMode::Union } else { BoolMode::Intersection };
                 let mut ids = many(g, l)?;
@@ -419,7 +458,7 @@ impl Solid {
                 g.push(Op::Boolean { mode, a, b: ids })
             }
             Solid::Diff(a, l) => {
-                let a = a.lower(g, parts, segments)?;
+                let a = a.lower_with(g, parts, segments_for)?;
                 let b = many(g, l)?;
                 if b.is_empty() {
                     return Ok(a);
@@ -455,6 +494,75 @@ impl<F: Fn(P3) -> f64 + Sync> Sdf3 for FnField<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segments_for_chord_meets_deviation_and_scales_without_cap() {
+        for (radius, expected) in [
+            (0.5, 16), (0.8, 20), (1.2, 28), (1.55, 28), (2.0, 32), (3.55, 44),
+            (3.90, 44), (5.5, 56), (8.0, 64), (15.0, 88), (25.0, 112), (50.0, 160),
+        ] {
+            assert_eq!(segments_for_chord(radius, 0.01), expected, "radius {radius}");
+        }
+        assert_eq!(segments_for_chord(1e12, 0.01), 22_214_416);
+        assert_eq!(segments_for_chord(f64::MAX, 0.01), u32::MAX - 3, "type-bound alignment");
+        assert_eq!(segments_for_chord(f64::MAX, f64::MAX / 100.0), 24, "finite radius with unrepresentable diameter");
+
+        for chord in [0.005, 0.01, 0.02, 0.035, 0.05] {
+            let mut previous = 0;
+            for step in 0..=100 {
+                let radius = 0.2 + (200.0 - 0.2) * f64::from(step) / 100.0;
+                let n = segments_for_chord(radius, chord);
+                assert!(n >= MIN_LOWER_SEGMENTS, "minimum at radius {radius}, chord {chord}");
+                assert_eq!(n % 4, 0, "alignment at radius {radius}, chord {chord}");
+                let sagitta = radius * (1.0 - (std::f64::consts::PI / f64::from(n)).cos());
+                assert!(sagitta <= chord + 1e-12, "deviation {sagitta} at radius {radius}, chord {chord}");
+                assert!(n >= previous, "count fell from {previous} to {n} at radius {radius}, chord {chord}");
+                previous = n;
+            }
+        }
+
+        for radius in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(segments_for_chord(radius, 0.01), MIN_LOWER_SEGMENTS, "radius {radius}");
+        }
+        for chord in [0.0, -0.1, f64::NAN, f64::INFINITY, 2.0, 3.0] {
+            assert_eq!(segments_for_chord(1.0, chord), MIN_LOWER_SEGMENTS, "chord {chord}");
+        }
+    }
+
+    #[test]
+    fn solid_lower_with_sizes_each_primitive_by_its_own_radius() {
+        let a = [0.0; 3];
+        let b = [0.0, 2.0, 0.0];
+        let solid = Solid::diff(
+            Solid::Union(vec![Solid::Part(0), Solid::Prim(Prim::cyl(a, b, 1.2))]),
+            vec![Solid::Prim(Prim::Frustum { a, b, ra: 3.55, rb: 3.90 }), Solid::Prim(Prim::Sphere { c: a, r: 5.5 })],
+        );
+        let mut base = Graph::new();
+        let parts = [base.push(Op::Box { size: [10.0; 3], radius: 0.0 }).unwrap()];
+        let mut sized = base.clone();
+        let radii = std::cell::RefCell::new(Vec::new());
+        solid.lower_with(&mut sized, &parts, &|radius| {
+            radii.borrow_mut().push(radius);
+            segments_for_chord(radius, 0.01)
+        }).unwrap();
+        assert_eq!(radii.into_inner(), [1.2, 3.90, 5.5], "larger frustum radius is used even when both ends round to 44");
+        let cylinders: Vec<_> = sized.nodes.iter().filter_map(|node| match node.op {
+            Op::Cylinder { segments, .. } => Some(segments),
+            _ => None,
+        }).collect();
+        assert_eq!(cylinders, [28, 44]);
+        let spheres: Vec<_> = sized.nodes.iter().filter_map(|node| match node.op {
+            Op::Sphere { segments, rings, .. } => Some((segments, rings)),
+            _ => None,
+        }).collect();
+        assert_eq!(spheres, [(56, 28)]);
+
+        let mut fixed = base.clone();
+        let fixed_root = solid.lower(&mut fixed, &parts, 96).unwrap();
+        let callback_root = solid.lower_with(&mut base, &parts, &|_| 96).unwrap();
+        assert_eq!(fixed_root, callback_root);
+        assert!(fixed.nodes.iter().map(|n| n.key).eq(base.nodes.iter().map(|n| n.key)), "fixed segment graph keys");
+    }
 
     #[test]
     fn frustum_matches_csg_sdf_cylinder() {

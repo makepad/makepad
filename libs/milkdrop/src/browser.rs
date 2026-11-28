@@ -8,8 +8,7 @@
 //! selection), drawn as a tree: a folder row folds with a press, Return or
 //! the Left and Right keys; a preset row loads with a press or Return. The
 //! grid does its own hit testing against where its rows really are, which
-//! is what the old TreeView could not do inside an aligned parent (see the
-//! report in `local/agent_state/skeuomorph/music/browser/`).
+//! is what the old TreeView could not do inside an aligned parent.
 //!
 //! The widget owns its library: a worker thread scans the pack (with the
 //! index cache) and the person's own presets

@@ -77,7 +77,7 @@ script_mod! {
         // Imported model layers may be deliberate sheets (roof soffits,
         // glazing, CAD faces). The shadow depth path is already two-sided;
         // the receiver path must show and light the same geometry.
-        backface_culling: false
+        cull_mode: @None
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

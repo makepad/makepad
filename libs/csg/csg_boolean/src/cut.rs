@@ -217,6 +217,11 @@ struct ExactPredicates<'a> {
     /// Per CDT point, filled on first use: its exact homogeneous (x, y, w), and the tails of x / w and
     /// y / w after the rounded position the CDT holds.
     cache: RefCell<Vec<Option<([Dyadic; 3], [f64; 2])>>>,
+    /// Per CDT point, filled on its first exact in-circle test.
+    lifted: RefCell<Vec<Option<[Dyadic; 4]>>>,
+    /// Per CDT point, filled on its first in-circle test past the double-double: its position cut to
+    /// a few terms (`Truncated`), None where the cut is refused.
+    truncated: RefCell<Vec<Option<Option<Truncated>>>>,
     exact: &'a Cell<usize>,
 }
 
@@ -301,31 +306,157 @@ impl ExactPredicates<'_> {
     /// The in-circle sign past the float filter: the double-double determinant where its bound makes
     /// the sign certain, else the exact sign (-1, 0 or 1).
     fn in_circle_decided(&self, points: &[Point2], a: u32, b: u32, c: u32, d: u32) -> f64 {
-        let tails = {
-            let mut cache = self.cache.borrow_mut();
-            [a, b, c, d].map(|i| {
-                self.fill(&mut cache, points, i);
-                cache[i as usize].as_ref().unwrap().1
-            })
+        let indices = [a, b, c, d];
+        let mut cache = self.cache.borrow_mut();
+        let tails = indices.map(|i| {
+            self.fill(&mut cache, points, i);
+            cache[i as usize].as_ref().unwrap().1
+        });
+        let exact_sign = || {
+            let mut lifted = self.lifted.borrow_mut();
+            for i in indices {
+                let i = i as usize;
+                lifted[i].get_or_insert_with(|| {
+                    let [x, y, w] = &cache[i].as_ref().unwrap().0;
+                    // Positive squared weights clear the denominators without changing the sign.
+                    [x.mul(w), y.mul(w), x.mul(x).add(&y.mul(y)), w.mul(w)]
+                });
+            }
+            determinant4(indices.map(|i| lifted[i as usize].as_ref().unwrap())).sign() as f64
         };
-        if let Some(det) = in_circle_double_double([a, b, c, d].map(|i| points[i as usize]), tails) {
-            debug_assert_eq!(det.signum(), {
-                let cache = self.cache.borrow();
-                in_circle_sign([a, b, c, d].map(|i| &cache[i as usize].as_ref().unwrap().0))
-            }, "the double-double in-circle sign is the exact one");
+        if let Some(det) = in_circle_double_double(indices.map(|i| points[i as usize]), tails) {
+            debug_assert_eq!(det.signum(), exact_sign(), "the double-double in-circle sign is the exact one");
             return det;
         }
-        self.evaluate(points, [a, b, c, d], in_circle_sign)
+        self.exact.set(self.exact.get() + 1);
+        let decided = {
+            let mut truncated = self.truncated.borrow_mut();
+            for i in indices {
+                let i = i as usize;
+                if truncated[i].is_none() {
+                    let p = points[i];
+                    truncated[i] = Some(Truncated::of(&cache[i].as_ref().unwrap().0, [p.x, p.y]));
+                }
+            }
+            match indices.map(|i| truncated[i as usize].as_ref().unwrap().as_ref()) {
+                [Some(a), Some(b), Some(c), Some(d)] => in_circle_truncated([a, b, c, d]),
+                _ => None,
+            }
+        };
+        if let Some(sign) = decided {
+            debug_assert_eq!(sign, exact_sign(), "the truncated in-circle sign is the exact one");
+            return sign;
+        }
+        exact_sign()
     }
 }
 
-/// The exact in-circle sign (-1, 0 or 1) of four homogeneous rows.
-fn in_circle_sign(rows: [&[Dyadic; 3]; 4]) -> f64 {
-    // Positive squared weights clear the denominators without changing the sign.
-    let rows = rows.map(|[x, y, w]| [
-        x.mul(w), y.mul(w), x.mul(x).add(&y.mul(y)), w.mul(w),
-    ]);
-    determinant4(rows.each_ref()).sign() as f64
+/// The terms a truncated coordinate keeps: its rounded position and three 50-bit tails after it.
+const TERMS: usize = 4;
+
+/// A point's exact position (x / w, y / w) cut to its first `TERMS` terms, each the rounded quotient of
+/// what the terms before it leave, and `e`, a power of two (0 where the cut is exact) that each
+/// coordinate is within: the in-circle determinant evaluated exactly on these short numbers is within
+/// a bound of the true one, where the full exact path works on rows of nine limbs and more.
+#[derive(Clone)]
+struct Truncated {
+    q: [Dyadic; 2],
+    e: f64,
+}
+
+impl Truncated {
+    /// The cut of exact row (x, y, w) after its rounded position `h`; None where a term is not a normal
+    /// quotient with room to spare (`ratio`'s 2^-50 holds for normal quotients only; a zero term over a
+    /// nonzero remainder is an underflow), and the full exact path decides.
+    fn of(row: &[Dyadic; 3], h: [f64; 2]) -> Option<Truncated> {
+        let w = &row[2];
+        let mut e = 0.0_f64;
+        let mut cut = |x: &Dyadic, h: f64| {
+            if !h.is_finite() {
+                return None;
+            }
+            let mut kept = Dyadic::from_f64(h);
+            // Every step is exact: the remainder is what the kept terms leave of x / w, times w.
+            let mut rest = x.sub(&kept.mul(w));
+            let mut last = 0.0_f64;
+            for _ in 1..TERMS {
+                if rest.is_zero() {
+                    break;
+                }
+                last = rest.ratio(w);
+                if !(last.abs() >= 2.0_f64.powi(-1000) && last.abs() <= 2.0_f64.powi(1000)) {
+                    return None;
+                }
+                let term = Dyadic::from_f64(last);
+                rest = rest.sub(&term.mul(w));
+                kept = kept.add(&term);
+            }
+            // x / w - kept = rest / w = r / w - t for the last term t = ratio(r, w), under
+            // 2^-50 |r / w| <= 2^-50 |t| / (1 - 2^-50) < 2^-49 |t|.
+            if !rest.is_zero() {
+                e = e.max(pow2_above(last.abs()) * 2.0_f64.powi(-49));
+            }
+            Some(kept)
+        };
+        let x = cut(&row[0], h[0])?;
+        let y = cut(&row[1], h[1])?;
+        Some(Truncated { q: [x, y], e })
+    }
+}
+
+const _: () = assert!(TERMS >= 2, "a truncated coordinate keeps at least one tail");
+
+/// The power of two just above `v`, a positive normal double under 2^1023.
+fn pow2_above(v: f64) -> f64 {
+    f64::from_bits((v.to_bits() & (0x7ff << 52)) + (1 << 52))
+}
+
+/// `in_circle_float`'s determinant, evaluated exactly on the four truncated positions, where its sign
+/// is the exact one; else None.
+///
+/// The determinant is 12 monomials of degree 4 in the six differences against `d`, each with
+/// coefficient 1 or -1. Each difference is within 2e of its exact one, e the largest of the four `e`,
+/// and with D at least every difference, truncated or exact, a monomial moves by at most
+/// |a1 a2 a3 a4 - b1 b2 b3 b4| <= sum over k of |a1..a(k-1)| |ak - bk| |b(k+1)..b4| <= 4 D^3 2e, so the
+/// determinant by at most 12 * 8 e D^3 = 96 e D^3 < 2^7 e D^3. Past that bound its sign is the exact
+/// one. e and D are powers of two, so the bound is exact and so is the comparison; an exact zero
+/// (or every e 0 and a zero determinant) is left to the full path.
+fn in_circle_truncated(p: [&Truncated; 4]) -> Option<f64> {
+    let e = p.iter().map(|t| t.e).fold(0.0, f64::max);
+    let diff = |i: usize, axis: usize| p[i].q[axis].sub(&p[3].q[axis]);
+    let (adx, ady) = (diff(0, 0), diff(0, 1));
+    let (bdx, bdy) = (diff(1, 0), diff(1, 1));
+    let (cdx, cdy) = (diff(2, 0), diff(2, 1));
+    // `estimate` rounds toward zero within 2^-52 for normal values, so twice the largest is above every
+    // truncated difference, and with 2e more above every exact one; D is the power of two above that.
+    let mut largest = 0.0_f64;
+    for v in [&adx, &ady, &bdx, &bdy, &cdx, &cdy] {
+        if !v.is_zero() {
+            let v = v.estimate().abs();
+            if !(v >= f64::MIN_POSITIVE && v <= 2.0_f64.powi(1000)) {
+                return None;
+            }
+            largest = largest.max(v);
+        }
+    }
+    if largest == 0.0 {
+        return None;
+    }
+    let size = pow2_above(2.0 * largest + 2.0 * e);
+    let bound = 128.0 * e * size * size * size;
+    if e > 0.0 && !bound.is_normal() {
+        return None;
+    }
+    let abdet = adx.mul(&bdy).sub(&bdx.mul(&ady));
+    let bcdet = bdx.mul(&cdy).sub(&cdx.mul(&bdy));
+    let cadet = cdx.mul(&ady).sub(&adx.mul(&cdy));
+    let alift = adx.mul(&adx).add(&ady.mul(&ady));
+    let blift = bdx.mul(&bdx).add(&bdy.mul(&bdy));
+    let clift = cdx.mul(&cdx).add(&cdy.mul(&cdy));
+    let det = alift.mul(&bcdet).add(&blift.mul(&cadet)).add(&clift.mul(&abdet));
+    let sign = det.sign();
+    let magnitude = if sign < 0 { det.negate() } else { det };
+    (sign != 0 && magnitude.sub(&Dyadic::from_f64(bound)).sign() > 0).then_some(sign as f64)
 }
 
 /// The in-circle determinant of `d` against `a`, `b`, `c` in plain doubles (Shewchuk's first stage
@@ -536,6 +667,8 @@ pub(crate) fn cut_triangle(
         axes: [(axis + 1) % 3, (axis + 2) % 3],
         coordinates,
         cache: RefCell::new(vec![None; ids.len() + 3]),
+        lifted: RefCell::new(vec![None; ids.len() + 3]),
+        truncated: RefCell::new(vec![None; ids.len() + 3]),
         exact: &exact,
     };
     let mut cdt = CDT::with_predicates(min, max, predicates);
@@ -616,4 +749,85 @@ pub(crate) fn cut_triangle(
         .filter(|&&[a, b]| !directed.contains(&(a, b)) && !directed.contains(&(b, a)))
         .count();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_in_circle_decides_only_past_its_bound() {
+        let rounded = |[x, y, w]: &[Dyadic; 3]| Point2 { x: x.ratio(w), y: y.ratio(w) };
+        let exact_sign = |rows: &[[Dyadic; 3]; 4]| {
+            let lifted = rows.each_ref().map(|[x, y, w]| {
+                [x.mul(w), y.mul(w), x.mul(x).add(&y.mul(y)), w.mul(w)]
+            });
+            determinant4(lifted.each_ref()).sign() as f64
+        };
+        let checked_cut = |row: &[Dyadic; 3]| {
+            let h = rounded(row);
+            let cut = Truncated::of(row, [h.x, h.y]).expect("the fixture has finite, normal tails or exact coordinates");
+            let e = cut.e;
+            assert!(
+                e == 0.0 || (e > 0.0 && e.is_normal() && e.to_bits().trailing_zeros() >= 52),
+                "the remainder bound must be zero or a power of two, got {e}"
+            );
+            let abs = |v: Dyadic| if v.sign() < 0 { v.negate() } else { v };
+            let w = &row[2];
+            let bound = abs(Dyadic::from_f64(e).mul(w));
+            for (axis, q) in cut.q.iter().enumerate() {
+                let remainder = abs(row[axis].sub(&q.mul(w)));
+                assert!(remainder.sub(&bound).sign() <= 0, "axis {axis} exceeds its exact remainder bound");
+            }
+            cut
+        };
+        let truncated_sign = |rows: &[[Dyadic; 3]; 4]| {
+            in_circle_truncated(rows.each_ref().map(checked_cut).each_ref())
+        };
+
+        // The first three points run counterclockwise. The negative weight represents (4/5, -3/5).
+        let row = |values: [f64; 3]| values.map(Dyadic::from_f64);
+        let circle = [row([-3., 4., 5.]), row([0., -5., 5.]), row([-4., 3., -5.]), row([3., 4., 5.])];
+        assert_eq!(exact_sign(&circle), 0.0, "the four unit-circle points must be exactly cocircular");
+        assert_eq!(truncated_sign(&circle), None, "the cut must defer an exact zero");
+
+        // Move only the fourth x coordinate by step / (5 * 2^bits).
+        let moved = |bits, step| {
+            let scale = Dyadic::from_f64(2.0_f64.powi(bits));
+            let mut rows = circle.clone();
+            rows[3] = circle[3].each_ref().map(|v| v.mul(&scale));
+            rows[3][0] = rows[3][0].add(&Dyadic::from_f64(step));
+            rows
+        };
+        for step in [1.0, -1.0] {
+            let rows = moved(120, step);
+            let points = rows.each_ref().map(rounded);
+            let tails = std::array::from_fn(|i| {
+                let [x, y, w] = &rows[i];
+                let tail = |v: &Dyadic, h| v.sub(&Dyadic::from_f64(h).mul(w)).ratio(w);
+                [tail(x, points[i].x), tail(y, points[i].y)]
+            });
+            assert_eq!(in_circle_double_double(points, tails), None, "double-double must defer the 120-bit move {step}");
+            let sign = exact_sign(&rows);
+            assert_eq!(sign, -step, "the outward move must be outside and the inward move inside");
+            assert_eq!(truncated_sign(&rows), Some(sign), "the cut must decide the exact sign for the 120-bit move {step}");
+        }
+        let tiny = moved(230, 1.0);
+        assert_eq!(exact_sign(&tiny), -1.0, "the 230-bit outward move must still be strictly outside");
+        assert_eq!(truncated_sign(&tiny), None, "the four-term cut must defer the 230-bit move");
+
+        let exact = [row([0., 0., 4.]), row([4., 0., 4.]), row([0., 4., 4.]), row([3., 5., 4.])];
+        let cuts = exact.each_ref().map(checked_cut);
+        for cut in &cuts {
+            assert_eq!(cut.e, 0.0, "an exactly representable point must have zero remainder bound");
+        }
+        assert_eq!(cuts[3].q, [0.75, 1.25].map(Dyadic::from_f64), "the cut must retain both exact coordinates");
+        let sign = exact_sign(&exact);
+        assert_eq!(sign, -1.0, "the exact fourth point must be outside the first three points' circle");
+        assert_eq!(in_circle_truncated(cuts.each_ref()), Some(sign), "a nonzero determinant must be decided at zero bound");
+
+        for h in [[f64::NAN, 1.25], [0.75, f64::INFINITY]] {
+            assert!(Truncated::of(&exact[3], h).is_none(), "the cut must refuse a non-finite coordinate in {h:?}");
+        }
+    }
 }

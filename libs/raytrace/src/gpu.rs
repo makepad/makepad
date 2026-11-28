@@ -53,7 +53,7 @@ script_mod! {
         geom: vertex_buffer(geom.DepthMeshVertex, geom.DepthMeshGeom)
         color_format: @Rgba32F
         alpha_blend: false
-        backface_culling: false
+        cull_mode: @None
         v_bary: varying(vec4f)
         v_depth: varying(1.0)
         vertex: fn() {

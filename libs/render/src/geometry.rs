@@ -206,22 +206,21 @@ mod shape_tests {
     #[test]
     fn culling_choices_match_the_geometry_they_draw() {
         let src = crate::shaders::SHADER_SOURCE;
-        let setting = |shader: &str| -> Option<bool> {
+        let setting = |shader: &str| -> Option<&str> {
             let at = src.find(&format!("mod.draw.{shader} = "))?;
             let tail = &src[at..];
             let end = tail.find("\n    mod.draw.").unwrap_or(tail.len());
             let decl = &tail[..end];
-            // Only the declaration's OWN line decides — scanning to the
-            // block's end made any later identifier containing "true"
-            // (e.g. a `sun_true` field) read as culling enabled.
-            decl.rfind("backface_culling:")
-                .map(|i| decl[i..].lines().next().unwrap_or("").contains("true"))
+            // Read the mode token on the declaration's own property line.
+            decl.lines().rev()
+                .find_map(|line| line.trim_start().strip_prefix("cull_mode:"))?
+                .split_whitespace().next()
         };
 
         // Culls: closed solids whose winding this crate generates and asserts.
-        assert_eq!(setting("DrawSceneCube"), Some(true), "solid slabs must cull");
-        assert_eq!(setting("DrawSceneTerrain"), Some(true), "terrain must cull");
-        assert_eq!(setting("DrawSceneSkinnedGpu"), Some(true), "characters must cull");
+        assert_eq!(setting("DrawSceneCube"), Some("@Back"), "solid slabs must cull");
+        assert_eq!(setting("DrawSceneTerrain"), Some("@Back"), "terrain must cull");
+        assert_eq!(setting("DrawSceneSkinnedGpu"), Some("@Back"), "characters must cull");
 
         // Does not cull, deliberately — each documented at its declaration.
         // The sky is a cube seen from INSIDE, so every visible face is a back
@@ -230,25 +229,25 @@ mod shape_tests {
         // the composite rather than hiding a hidden face.
         assert_eq!(
             setting("DrawSceneSkinned"),
-            Some(false),
+            Some("@None"),
             "imported model sheets and roof undersides are two-sided"
         );
-        assert_eq!(setting("DrawSceneSky"), Some(false), "sky is viewed from inside");
+        assert_eq!(setting("DrawSceneSky"), Some("@None"), "sky is viewed from inside");
         assert_eq!(
             setting("DrawSceneSkyAnalytic"),
-            Some(false),
+            Some("@None"),
             "analytic sky is viewed from inside"
         );
         assert_eq!(
             setting("DrawSceneSkyMap"),
-            Some(false),
+            Some("@None"),
             "classic map sky portals are viewed from their underside"
         );
-        assert_eq!(setting("DrawSceneFoliage"), Some(false), "foliage is two-sided");
-        assert_eq!(setting("DrawSceneAlpha"), Some(false), "alpha is flat/one-sided");
+        assert_eq!(setting("DrawSceneFoliage"), Some("@None"), "foliage is two-sided");
+        assert_eq!(setting("DrawSceneAlpha"), Some("@None"), "alpha is flat/one-sided");
         assert_eq!(
             setting("DrawSceneWater"),
-            Some(false),
+            Some("@None"),
             "a wave trough seen flat-on shows the sheet's underside"
         );
     }

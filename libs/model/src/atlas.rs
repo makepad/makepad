@@ -70,7 +70,7 @@ pub(crate) fn bake(materials: &BTreeMap<u32, Material>, ranges: &UvBounds, limit
     for (&id, bounds) in ranges {
         let image = decode(materials.get(&id).ok_or(Error::Invalid("unknown atlas material"))?, limits, ctx)?;
         decoded_bytes = decoded_bytes.checked_add(image.rgb.len()).ok_or(Error::Budget("skin atlas decoded bytes"))?;
-        if decoded_bytes > ctx.limits.max_bytes { return Err(Error::Budget("skin atlas decoded bytes")); }
+        if decoded_bytes > ctx.limits.max_bytes { return Err(Error::WorkingBytes { what: "skin atlas decoded bytes", needed: decoded_bytes, limit: ctx.limits.max_bytes }); }
         let constant = image.width == 1 && image.height == 1;
         let mut low = [0.; 2];
         let mut repeats = [1u32; 2];
@@ -105,8 +105,9 @@ pub(crate) fn bake(materials: &BTreeMap<u32, Material>, ranges: &UvBounds, limit
     let height = y + row_height;
     let bytes = width as usize * height as usize * 3;
     // Account for atlas pixels/PNG staging plus decoded inputs before allocating.
-    if bytes.saturating_mul(4).saturating_add(decoded_bytes) > limits.mesh.max_bytes {
-        return Err(Error::Budget("skin atlas working bytes"));
+    let needed = bytes.saturating_mul(4).saturating_add(decoded_bytes);
+    if needed > limits.mesh.max_bytes {
+        return Err(Error::WorkingBytes { what: "skin atlas working bytes", needed, limit: limits.mesh.max_bytes });
     }
     let mut image = Texture::solid(width, height, [0; 3], limits)?;
     let mut regions = BTreeMap::new();

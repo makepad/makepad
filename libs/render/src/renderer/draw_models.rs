@@ -38,7 +38,7 @@ impl LayerLane {
             ModelDraw::Splat(_) => Self::Splat,
             ModelDraw::Foliage(_) => Self::Foliage,
             ModelDraw::Custom(name, _) => Self::Custom((*name).to_string()),
-            ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Traced(..) => unreachable!("not a deferred model lane"),
+            ModelDraw::City(_) | ModelDraw::Grass(_) | ModelDraw::Traced(..) | ModelDraw::TracedInside(..) => unreachable!("not a deferred model lane"),
         }
     }
 }
@@ -186,6 +186,8 @@ pub(super) struct ModelOrder {
     /// complementary (the shader's `color_adjust_ctl.w` dither code); 0 is
     /// no window.
     order: Vec<(usize, usize, f32)>,
+    /// Near-plane overlap for the current traced program, indexed in the original instance list.
+    inside_order: Vec<(usize, usize, f32)>,
     /// Each model slot's pack occlusion atlas (index into `ao_textures`),
     /// resolved on first use this frame.
     ao: Vec<Option<Option<usize>>>,
@@ -320,13 +322,7 @@ impl PlacedBlocks {
             // The copy's world box, padded as the lanes' own test pads it.
             let pad = vec3f(0.05, 0.05, 0.05);
             let (mid, half) = ((root.min + root.max) * 0.5, (root.max - root.min) * 0.5 + pad);
-            let t = &inst.transform.v;
-            let c = vec3f(t[0] * mid.x + t[4] * mid.y + t[8] * mid.z + t[12], t[1] * mid.x + t[5] * mid.y + t[9] * mid.z + t[13], t[2] * mid.x + t[6] * mid.y + t[10] * mid.z + t[14]);
-            let e = vec3f(
-                t[0].abs() * half.x + t[4].abs() * half.y + t[8].abs() * half.z,
-                t[1].abs() * half.x + t[5].abs() * half.y + t[9].abs() * half.z,
-                t[2].abs() * half.x + t[6].abs() * half.y + t[10].abs() * half.z,
-            );
+            let (c, e) = transformed_center_half(mid, half, &inst.transform);
             let (lo, hi) = (c - e, c + e);
             let cell = ((c.x / 64.0).floor() as i32, (c.z / 64.0).floor() as i32);
             let b = *cells.entry(cell).or_insert_with(|| {
@@ -339,6 +335,62 @@ impl PlacedBlocks {
             block.1 = vec3f(block.1.x.max(hi.x), block.1.y.max(hi.y), block.1.z.max(hi.z));
             block.2.push((i as u32, at as u32));
         }
+    }
+}
+
+/// Bounds of the hardware near rectangle, unioned across the active eyes.
+pub(crate) fn near_plane_aabb(clips: &[Mat4f], margin: f32) -> Option<(Vec3f, Vec3f)> {
+    if clips.is_empty() { return None; }
+    let mut lo = Vec3f::all(f32::INFINITY);
+    let mut hi = Vec3f::all(f32::NEG_INFINITY);
+    for clip in clips {
+        let inverse = clip.invert();
+        for x in [-1.0, 1.0] { for y in [-1.0, 1.0] {
+            let corner = inverse.transform_vec4(vec4(x, y, 0.0, 1.0));
+            if !corner.w.is_finite() || corner.w.abs() < 1e-7 { return None; }
+            let point = corner.to_vec3f() / corner.w;
+            lo = Vec3f::min_componentwise(lo, point);
+            hi = Vec3f::max_componentwise(hi, point);
+        } }
+    }
+    Some((lo - Vec3f::all(margin), hi + Vec3f::all(margin)))
+}
+
+fn transformed_center_half(mid: Vec3f, half: Vec3f, transform: &Mat4f) -> (Vec3f, Vec3f) {
+    let t = &transform.v;
+    let center = transform.transform_vec4(mid.to_vec4()).to_vec3f();
+    let extent = vec3f(
+        t[0].abs() * half.x + t[4].abs() * half.y + t[8].abs() * half.z,
+        t[1].abs() * half.x + t[5].abs() * half.y + t[9].abs() * half.z,
+        t[2].abs() * half.x + t[6].abs() * half.y + t[10].abs() * half.z,
+    );
+    (center, extent)
+}
+
+fn instance_world_aabb(min: Vec3f, max: Vec3f, transform: &Mat4f) -> (Vec3f, Vec3f) {
+    let (center, half) = transformed_center_half((min + max) * 0.5, (max - min) * 0.5, transform);
+    (center - half, center + half)
+}
+
+fn aabbs_overlap((lo, hi): (Vec3f, Vec3f), (min, max): (Vec3f, Vec3f)) -> bool {
+    lo.x <= max.x && hi.x >= min.x && lo.y <= max.y && hi.y >= min.y && lo.z <= max.z && hi.z >= min.z
+}
+
+fn mat4_det3(transform: &Mat4f) -> f32 {
+    let m = &transform.v;
+    let x = vec3f(m[0], m[1], m[2]);
+    let y = vec3f(m[4], m[5], m[6]);
+    let z = vec3f(m[8], m[9], m[10]);
+    Vec3f::cross(x, y).dot(z)
+}
+
+fn traced_cull_mode(det: f32, inside: bool) -> CullMode {
+    if !det.is_finite() || det == 0.0 {
+        CullMode::None
+    } else if det > 0.0 {
+        if inside { CullMode::Front } else { CullMode::Back }
+    } else {
+        if inside { CullMode::Back } else { CullMode::Front }
     }
 }
 
@@ -466,6 +518,55 @@ impl ModelOrder {
 }
 
 impl Renderer {
+    /// All opaque lanes walk the same model/LOD groups. Diffuse refreshes the
+    /// list each frame; Inside can also be the first lane to need its order.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn ensure_model_order(&mut self, instances: &(impl ModelList + ?Sized), lane: WorldModelLane,
+        eye: Vec3f, lod_scale: f32, frustum: Option<&Frustum>, stats: &mut RenderStats, force: bool,
+    ) {
+        self.apply_model_lod_chains();
+        let which = matches!(lane, WorldModelLane::Attachment) as usize;
+        let key = instances.view().key();
+        if key.1 == 0 || (!force && self.model_orders[which].key == (key.0, key.1, lod_scale.to_bits())) { return; }
+        let chains = &self.model_lod_chains;
+        let occluders = self.stream.as_ref().map(|st| st.occluders());
+        // Refreshed for this frame's placed list by draw_scene_inner.
+        let blocks = matches!(lane, WorldModelLane::Placed).then_some(&self.placed_blocks);
+        let culled = self.model_orders[which].build(&self.static_models, instances, eye, lod_scale, key,
+            &|id| chains.contains_key(id), frustum, occluders, blocks);
+        match lane {
+            WorldModelLane::Placed => stats.model_culled += culled,
+            WorldModelLane::Attachment => stats.world_attachment_culled += culled,
+        }
+    }
+
+    pub(super) fn collect_traced_inside_entries(&mut self, name: &str, instances: &(impl ModelList + ?Sized),
+        lane: WorldModelLane, near: (Vec3f, Vec3f),
+    ) -> bool {
+        let list = instances.view();
+        let order = &mut self.model_orders[matches!(lane, WorldModelLane::Attachment) as usize];
+        order.inside_order.clear();
+        // The Outside order groups copies by model and LOD. Check layer ownership once per group.
+        let mut previous = None;
+        let mut owns = false;
+        for &(i, lod, window) in &order.order {
+            let Some(at) = order.slots[i] else { continue };
+            let root = &self.static_models[at].1;
+            if previous != Some((at, lod)) {
+                previous = Some((at, lod));
+                let model = if lod == 0 { root } else { &root.lods[lod - 1].1 };
+                let layers = usize::from(model.triangles > 0) + model.extra_draws.len();
+                owns = (0..layers).map(ModelLayer::Body).chain(model.part_layers())
+                    .filter_map(|layer| model.layer_draw(layer)?.4.traced_required.as_ref())
+                    .any(|(program, role)| program.as_ref() == name && *role == TracedLayerRole::Outside);
+            }
+            if owns && list.get(i).is_some_and(|inst| aabbs_overlap(near, instance_world_aabb(root.min, root.max, &inst.transform))) {
+                order.inside_order.push((i, lod, window));
+            }
+        }
+        !order.inside_order.is_empty()
+    }
+
     /// Replay only lanes that deferred a layer, in the opaque phase's order
     /// within each list. Both the queue storage and custom draw keys are reused.
     #[allow(clippy::too_many_arguments)]
@@ -563,7 +664,7 @@ impl Renderer {
         stats: &mut RenderStats,
     ) {
         if phase == LayerPhase::Opaque {
-            self.apply_model_lod_chains();
+            self.ensure_model_order(instances, lane, eye, lod_scale, frustum, stats, matches!(draw, ModelDraw::Diffuse(_)));
         }
         let instances = instances.view();
         if instances.len() == 0 {
@@ -605,7 +706,15 @@ impl Renderer {
             ModelDraw::Custom(name, _) => Some(*name),
             _ => None,
         };
-        let traced_name = match &draw { ModelDraw::Traced(name, _) => Some(*name), _ => None };
+        let traced_name = match &draw {
+            ModelDraw::Traced(name, _, _) | ModelDraw::TracedInside(name, _, _) => Some(*name),
+            _ => None,
+        };
+        let traced_inside = matches!(draw, ModelDraw::TracedInside(..));
+        let cull_faces = matches!(draw, ModelDraw::Traced(_, _, true) | ModelDraw::TracedInside(_, _, true));
+        let view_transform = cull_faces.then(|| {
+            cx.draw_lists[cx.get_current_draw_list_id().expect("traced draw list")].draw_list_uniforms.view_transform
+        });
         // Shiny stock models under an environment leave the PBR lane for
         // the engine's IBL program (renderer/stock_ibl.rs): decided in the
         // diffuse pass above, read here by every lane so exactly one of
@@ -710,31 +819,9 @@ impl Renderer {
         // Which block the draw_vars currently carry; statics rewrite only
         // after a dynamic instance changed it.
         let mut dynamic_block_active = true;
-        // Sort by model so equal geometry+texture land adjacent: consecutive
-        // add_instance calls with unchanged geometry and texture accumulate
-        // into a single draw item; and by LOD within a model: copies at
-        // different distances draw different geometry, and interleaved they
-        // split into one draw item per copy (a forest of LOD'd trees:
-        // thousands of draws a frame). Resolved once per list per frame:
-        // the diffuse lane builds it and the PBR, foliage and custom lanes
-        // that walk the same list after it reuse it.
-        let key = instances.key();
-        // The same list can be drawn with a different projection or detail bias.
-        if phase == LayerPhase::Opaque && (matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != (key.0, key.1, lod_scale.to_bits())) {
-            let mut built = std::mem::take(&mut self.model_orders[which]);
-            let chains = &self.model_lod_chains;
-            let occluders = self.stream.as_ref().map(|st| st.occluders());
-            // Refreshed for this frame's placed list by draw_scene_inner.
-            let blocks = matches!(lane, WorldModelLane::Placed).then_some(&self.placed_blocks);
-            let culled = built.build(&self.static_models, &instances, eye, lod_scale, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
-            match lane {
-                WorldModelLane::Placed => stats.model_culled += culled,
-                WorldModelLane::Attachment => stats.world_attachment_culled += culled,
-            }
-            self.model_orders[which] = built;
-        }
         let mut model_order = std::mem::take(&mut self.model_orders[which]);
-        let ModelOrder { slots, distances, order, ao: model_ao, layered, pass_buf, .. } = &mut model_order;
+        let ModelOrder { slots, distances, order, inside_order, ao: model_ao, layered, pass_buf, .. } = &mut model_order;
+        let order = if traced_inside { inside_order } else { order };
         // Layer-major: every copy's first layer, then every copy's second.
         // A multi-layer model (a tree: trunk, then leaves) drawn copy by
         // copy alternates geometry, and the batcher only appends to the
@@ -774,6 +861,7 @@ impl Renderer {
         let mut fur_budget = 0;
         let mut pending_parts = None;
         let mut last: Option<(usize, usize)> = None;
+        let mut last_inside = None;
         // One body for the layer-major opaque walk and the distance-major
         // recorded walk. Advancing an opaque pass keeps the old entry order.
         loop {
@@ -950,7 +1038,7 @@ impl Renderer {
                 let pad = match &draw { ModelDraw::Custom(_, m) => m.bounds_pad, _ => 0.0 };
                 let fur_margin = vec3f(0.05 + pad, 0.05 + pad, 0.05 + pad);
                 if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min-fur_margin, root.max+fur_margin, &inst.transform) {
-                    if count_copy {
+                    if count_copy && !traced_inside {
                         match lane {
                             WorldModelLane::Placed => stats.model_culled += 1,
                             WorldModelLane::Attachment => stats.world_attachment_culled += 1,
@@ -974,10 +1062,10 @@ impl Renderer {
             if let Some(t) = ao_tex.filter(|_| lod_index == 0 && traced_name.is_none()) {
                 draw.base().draw_vars.set_texture(1, t);
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[1.0]);
-                stats.ao_bound += count_copy as u64;
+                stats.ao_bound += (count_copy && !traced_inside) as u64;
             } else {
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
-                stats.ao_missing += count_copy as u64;
+                stats.ao_missing += (count_copy && !traced_inside) as u64;
             }
             draw.base().transform = inst.transform;
             draw.base().tint = inst.tint;
@@ -1055,14 +1143,14 @@ impl Renderer {
                     WorldModelLane::Attachment => self.world_attachment_ground.get(i),
                 }.copied().unwrap_or(0.0);
             }
-            if count_copy && last.is_none_or(|(slot, level)| slot != at || level != lod_index) {
+            if count_copy && !traced_inside && last.is_none_or(|(slot, level)| slot != at || level != lod_index) {
                 match lane {
                     WorldModelLane::Placed => stats.model_draws += 1,
                     WorldModelLane::Attachment => stats.world_attachment_draws += 1,
                 }
                 last = Some((at, lod_index));
             }
-            if count_copy { match lane {
+            if count_copy && !traced_inside { match lane {
                 WorldModelLane::Placed => {
                     stats.model_instances += 1;
                     stats.model_triangles += tri_count;
@@ -1096,7 +1184,7 @@ impl Renderer {
                 // Moving layers have no chart in the static light atlas.
                 draw.base().lm_rect = Vec4f::default();
                 last = None;
-                if phase == LayerPhase::Opaque {
+                if phase == LayerPhase::Opaque && !traced_inside {
                     let triangles = cx.cx.geometries[geometry_id].index_count / 3;
                     match lane {
                         WorldModelLane::Placed => stats.model_triangles += triangles,
@@ -1142,10 +1230,10 @@ impl Renderer {
                 // (shaders/impostor.rs).
                 let own = match root.stand_in { Some(c) if body_layer.is_some() && (stand_in || !dynamic) => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
-                // Terrain tiles and splat-lane surfaces read the GI screen
-                // cache; every other copy gathers.
+                // Traced draws carry screen-cache sampling in their own shader.
+                let gi_cached = cached || traced_name.is_some();
                 if let Some(ctl) = screen_ctl {
-                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(gi_screen_ctl), &[if cached { ctl[0] } else { 0.0 }, ctl[1], ctl[2], ctl[3]]);
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(gi_screen_ctl), &[if gi_cached { ctl[0] } else { 0.0 }, ctl[1], ctl[2], ctl[3]]);
                 }
                 // The reflection capture finishes only what the reflection passes read (shaders/pbr.rs).
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(ssr_pass_floor), &[ssr_floor]);
@@ -1175,7 +1263,9 @@ impl Renderer {
                     // set_material resets the raster options. This lane keeps
                     // its own draw struct, so a mesh sibling keeps its options.
                     let base = draw.base();
-                    base.draw_vars.options.backface_culling = false;
+                    base.draw_vars.options.cull_mode = view_transform.as_ref().map_or(CullMode::None, |view| {
+                        traced_cull_mode(mat4_det3(&Mat4f::mul(view, &base.transform)), traced_inside)
+                    });
                     base.draw_vars.options.depth_write = true;
                     base.draw_vars.options.alpha_blend = false;
                     base.lm_rect = Vec4f::default();
@@ -1226,6 +1316,11 @@ impl Renderer {
                 } else {
                     0
                 };
+                let group = (at, lod_index, body_layer);
+                if traced_inside && last_inside != Some(group) && draw.base().draw_vars.can_instance() {
+                    stats.traced_inside_draws += 1;
+                    last_inside = Some(group);
+                }
                 stats.fur_triangles += if body_layer.is_some() {
                     draw.submit_as(cx, distance, &mut fur_budget, item_opaque.filter(|_| !cut))
                 } else {
@@ -1252,9 +1347,7 @@ impl Renderer {
     /// screen-space AO, the lightmap atlas, the cascades and the ground
     /// light field. Shared by the placed/attachment lanes and the streamed
     /// world lane (stream_draw.rs), so they can never shade differently.
-    /// Returns the GI screen cache's switch for the lane's terrain tiles and
-    /// splat-lane surfaces
-    /// (`FastGi::bind_screen_cache`).
+    /// Returns the GI screen cache's switch for terrain, splat and traced surfaces.
     pub(super) fn bind_model_lane(
         &mut self,
         cx: &mut Cx3d,
@@ -1266,13 +1359,9 @@ impl Renderer {
         let pbr_lane = draw.is_pbr();
         // Mesh lanes share a fixed layout. A traced pass owns its binding
         // layout; resolve the lighting slots once for this list of instances.
-        let [light_slot, top_slot, csm_slot, ssao_slot] = if matches!(draw, ModelDraw::Traced(..)) {
+        let [light_slot, top_slot, csm_slot, ssao_slot] = if matches!(draw, ModelDraw::Traced(..) | ModelDraw::TracedInside(..)) {
             let vars = &mut draw.base().draw_vars;
-            let depth_map = match cx.gpu_backend() {
-                GpuBackend::OpenGl | GpuBackend::WebGl => [0.5, 0.5],
-                _ => [1.0, 0.0],
-            };
-            vars.set_uniform(cx.cx, live_id!(trace_depth_map), &depth_map);
+            vars.set_uniform(cx.cx, live_id!(trace_depth_map), &[1.0, 0.0]);
             let shader = vars.draw_shader_id.expect("ready traced surface");
             let textures = &cx.draw_shaders[shader.index].mapping.textures;
             [live_id!(light_map), live_id!(top_map), live_id!(csm_map), live_id!(ssao_map)]
@@ -1284,6 +1373,9 @@ impl Renderer {
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
         let screen_ctl = self.gi.bind_screen_cache(cx.cx, &mut draw.base().draw_vars, self.gi.last_scene_origin);
         self.bind_output_dither(cx.cx, &mut draw.base().draw_vars);
+        if matches!(draw, ModelDraw::Traced(..) | ModelDraw::TracedInside(..)) {
+            self.bind_ibl(cx.cx, &mut draw.base().draw_vars);
+        }
         // An IBL program's control of its two lookups: the lane's scale,
         // and for the stock IBL program whether the fill comes from the
         // map (renderer/stock_ibl.rs).
@@ -1592,13 +1684,13 @@ impl Renderer {
                     })
                     .unwrap_or_default();
                 log!(
-                    "map sky draw: model='{}' texture='{}' shader_ready={} cull={} brightness={:.3} \
+                    "map sky draw: model='{}' texture='{}' shader_ready={} cull={:?} brightness={:.3} \
                      layer0={:?} layer1={:?} bound0={:?} bound1={:?} inputs={:?} \
                      resident0={} tris={}",
                     inst.model,
                     sky.part.texture.as_deref().unwrap_or("<unnamed>"),
                     shader_ready,
-                    draw.draw_vars.options.backface_culling,
+                    draw.draw_vars.options.cull_mode,
                     draw.brightness,
                     sky.tex0.texture_id(),
                     sky.tex1.texture_id(),
@@ -1744,6 +1836,37 @@ impl Renderer {
 #[cfg(test)]
 mod chain_fade_tests {
     use super::*;
+
+    #[test]
+    fn near_plane_aabb_test_single_and_xr_stereo() {
+        let (near, far) = (0.1, 100.0);
+        let projection = Mat4f::perspective(90.0, 1.0, near, far);
+        let z = -2.0 * near * far / (far + near);
+        let margin = 0.01;
+        let flat = near_plane_aabb(&[projection], margin).unwrap();
+        assert!((flat.0.z - (z - margin)).abs() < 1e-6 && (flat.1.z - (z + margin)).abs() < 1e-6);
+        let box_at = |x, z, half| {
+            let center = vec3f(x, 0.0, z);
+            (center - Vec3f::all(half), center + Vec3f::all(half))
+        };
+        assert!(!aabbs_overlap(flat, box_at(0.0, -2.0, 0.5)), "room wholly ahead");
+        assert!(aabbs_overlap(flat, box_at(0.0, 0.0, 0.5)), "eye inside room");
+        assert!(aabbs_overlap(flat, (vec3f(-z, -z, z), vec3f(0.5, 0.5, 0.0))), "near plane slices a corner");
+        assert!(!aabbs_overlap(flat, box_at(0.0, -0.1, 0.03)), "between eye and hardware near");
+        assert!(!aabbs_overlap(flat, box_at(0.0, 0.2, 0.05)), "behind eye");
+
+        let right = Mat4f::mul(&projection, &Mat4f::translation(vec3f(-0.065, 0.0, 0.0)));
+        let at_left_edge = box_at(z, z, 0.01);
+        assert!(aabbs_overlap(flat, at_left_edge));
+        assert!(!aabbs_overlap(near_plane_aabb(&[right], margin).unwrap(), at_left_edge));
+        assert!(aabbs_overlap(near_plane_aabb(&[projection, right], margin).unwrap(), at_left_edge), "XR retains either eye");
+        assert!(near_plane_aabb(&[], margin).is_none());
+        // This invertible clip matrix exchanges z and w. All near corners unproject to w=0.
+        let mut infinite = Mat4f::identity();
+        infinite.v.swap(10, 11);
+        infinite.v.swap(14, 15);
+        assert!(near_plane_aabb(&[projection, infinite], margin).is_none(), "invalid second eye");
+    }
 
     #[test]
     fn lod_bias_switches_model_and_caster_at_the_same_camera() {

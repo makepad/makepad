@@ -426,7 +426,8 @@ pub(super) struct LayerMaterial {
 pub(super) enum ModelDraw<'a> {
     Diffuse(&'a mut DrawSceneSkinned),
     Pbr(&'a mut DrawScenePbr),
-    Traced(&'a str, &'a mut DrawScenePbr),
+    Traced(&'a str, &'a mut DrawScenePbr, bool),
+    TracedInside(&'a str, &'a mut DrawScenePbr, bool),
     Custom(&'a str, &'a mut crate::custom_material::CustomMaterial),
     /// The streamed world's surfaces (stream_draw.rs).
     City(&'a mut crate::shaders::DrawSceneCity),
@@ -442,7 +443,7 @@ impl ModelDraw<'_> {
     pub(super) fn base(&mut self) -> &mut DrawSceneSkinned {
         match self {
             ModelDraw::Diffuse(d) => d,
-            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d) => &mut d.skinned,
+            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d, _) | ModelDraw::TracedInside(_, d, _) => &mut d.skinned,
             ModelDraw::Custom(_, d) => &mut d.draw.pbr.skinned,
             ModelDraw::City(d) => &mut d.pbr.skinned,
             ModelDraw::Grass(d) => &mut d.pbr.skinned,
@@ -460,7 +461,7 @@ impl ModelDraw<'_> {
     fn pbr(&mut self) -> Option<&mut DrawScenePbr> {
         match self {
             ModelDraw::Diffuse(_) => None,
-            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d) => Some(d),
+            ModelDraw::Pbr(d) | ModelDraw::Traced(_, d, _) | ModelDraw::TracedInside(_, d, _) => Some(d),
             ModelDraw::Custom(_, d) => Some(&mut d.draw.pbr),
             ModelDraw::City(d) => Some(&mut d.pbr),
             ModelDraw::Grass(d) => Some(&mut d.pbr),
@@ -534,7 +535,8 @@ impl ModelDraw<'_> {
             let (mut normal_scale, mut occlusion_strength) = (0.0f32, 0.0f32);
             let (mut emissive, mut double_sided, mut triplanar) = (vec3f(0.0, 0.0, 0.0), 0.0f32, 0.0f32);
             let mut crown = 0.0f32;
-            d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
+            d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;
+            d.skinned.draw_vars.options.cull_mode = CullMode::Back;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
                 fur = crate::material_surface::fur_params(definition.fur);
@@ -545,7 +547,8 @@ impl ModelDraw<'_> {
                 d.skinned.tex_mag.y=definition.packed_shading();
                 normal_scale=definition.normal_scale;occlusion_strength=definition.occlusion_strength;
                 emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);double_sided=if definition.double_sided{1.0}else{0.0};
-                d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
+                d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;
+                d.skinned.draw_vars.options.cull_mode = if definition.double_sided { CullMode::None } else { CullMode::Back };
             }
             // An opaque layer's texture alpha is not coverage: a program that
             // masks or blends over it starts from alpha 1, not from that data.

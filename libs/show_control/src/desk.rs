@@ -584,8 +584,8 @@ mod tests {
     impl TestBank {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../local/agent_state/dmx-preset-tests")
+            let dir = std::env::temp_dir()
+                .join("dmx-preset-tests")
                 .join(format!(
                     "{}-{}",
                     std::process::id(),

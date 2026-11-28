@@ -1,4 +1,4 @@
-//! The water surface (local/plans/water.md): one radial mesh drawn per
+//! The water surface: one radial mesh drawn per
 //! visible water volume, its swell displaced in the vertex shader from the
 //! sim's own coefficients, shaded in one pass from three small textures:
 //! a baked sky for reflections, a ripple map made from the sea's spectrum,

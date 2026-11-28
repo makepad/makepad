@@ -228,27 +228,35 @@ script_mod! {
         // body as the car turns. Flakes are hashed facets ~1 mm across that
         // catch the sun a little off the mirror direction.
         clear_coat: fn(wp: vec3, base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float, spec_occ: float, sun_vis: float) -> vec3 {
-            let ndv = max(dot(n, v), 0.0001)
-            let r = n * (2.0 * ndv) - v
             let packed_all = floor(self.tex_mag.y + 0.5)
             let rim = floor(packed_all / 65536.0)
             let packed = packed_all - rim * 65536.0
             let coat = floor(packed / 256.0) / 255.0
             let flake = (packed - floor(packed / 256.0) * 256.0) / 255.0
+            return self.clear_coat_layer(wp, base, n, v, l, albedo, sun, amb_occ, spec_occ, sun_vis, coat, 0.03, flake, rim)
+        }
+        surface_clear_coat: fn(coat_uv: vec2) -> vec2 { return vec2(0.0, 0.03) }
+        clear_coat_layer: fn(wp: vec3, base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3,
+            sun: vec3, amb_occ: float, spec_occ: float, sun_vis: float,
+            coat: float, coat_rough: float, flake: float, rim: float) -> vec3 {
+            let ndv = max(dot(n, v), 0.0001)
+            let r = n * (2.0 * ndv) - v
+            let r_c = clamp(coat_rough, 0.03, 1.0)
             let fc = (0.04 + 0.96 * self.pow5(1.0 - ndv)) * coat
-            var env = self.sky_env_lit(normalize(r), 0.03, sun_vis)
+            var env = self.sky_env_lit(normalize(r), r_c, sun_vis)
             // The treeline is car paint's; a toy (rim set) reflects a plain
             // studio sky, and skips the two noise taps.
             if rim < 0.5 { env = self.coat_treeline(env, r) }
             env = env * spec_occ
             let h = normalize(l + v)
             let ndh = max(dot(n, h), 0.0)
-            let a2 = 0.0016
+            let r2 = r_c * r_c
+            let a2 = max(r2 * r2, 0.0016)
             let den = ndh * ndh * (a2 - 1.0) + 1.0
             let glint = a2 / max(3.14159265 * den * den, 0.0001) * 0.25
             let coat_env = env * (fc * amb_occ)
             self.ssr_coat(coat_env, vec3(fc, fc, fc), 1.0 - fc)
-            var out = base * (1.0 - fc) + coat_env + sun * (glint * fc) * self.key_lobe_gain(0.03)
+            var out = base * (1.0 - fc) + coat_env + sun * (glint * fc) * self.key_lobe_gain(r_c)
             if flake > 0.0 {
                 let cell = floor(wp * 900.0)
                 let fh = fract(sin(dot(cell, vec3(12.9898, 78.233, 37.719))) * 43758.5453)
@@ -257,7 +265,7 @@ script_mod! {
                 let sparkle = pow(max(dot(tilt, h), 0.0), 220.0) * step(0.55, fh2)
                 let flake_env = env * albedo * (flake * 0.12 * amb_occ)
                 self.ssr_coat(flake_env, albedo * (flake * 0.12), 1.0)
-                out = out + sun * albedo * (sparkle * flake * 6.0) * self.key_lobe_gain(0.03) + flake_env
+                out = out + sun * albedo * (sparkle * flake * 6.0) * self.key_lobe_gain(r_c) + flake_env
             }
             if rim > 0.0 { out = out + self.toy_rim(n, v, l, amb_occ) * (rim / 255.0) }
             return out
@@ -410,8 +418,12 @@ script_mod! {
             let spec_local = local_pbr * ao_direct
             self.ssr_surface(n, rough, added_env, f_env, to_eye)
             var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, spec_sun, added_env, spec_local, n, l, v, sun_rad, f, lobe), n, to_eye) + emission
+            let extra_coat = self.surface_clear_coat(ao_uv)
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(light_p_ndl.xyz, lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ, sun_lit)
+            } else if extra_coat.x > 0.01 {
+                lit = self.clear_coat_layer(light_p_ndl.xyz, lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct),
+                    ao * sao * occlusion, spec_occ, sun_lit, extra_coat.x, extra_coat.y, 0.0, 0.0)
             }
             lit = max(lit, least)
             let fin = self.finish_lit(lit, spec_sun + added_env + spec_local, surf_w, f_env)
@@ -656,7 +668,7 @@ script_mod! {
     // than as flat paint.
     mod.draw.DrawSceneViewModel = mod.std.set_type_default() do #(DrawSceneViewModel::script_shader(vm)){
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

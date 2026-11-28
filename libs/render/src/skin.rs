@@ -5339,6 +5339,7 @@ mod generated_material_atlas_tests {
         let uvs = [[0.0, 0.0], [if outside_uv { 2.0 } else { 1.0 }, 0.0], [0.0, 1.0]];
         let indices = [0, 1, 2];
         let part = |color| GlbTexturedPart {
+            material_bytes: None,
             positions: &positions, uvs: &uvs, indices: &indices, base_color_png: png,
             normals: None, base_color_factor: Some(color), colors: None,
             lightmap_png: None, lightmap_uvs: None, detail_png: None, detail_scale: [1.0, 1.0],

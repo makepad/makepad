@@ -12,13 +12,22 @@ fn json_value(value:json::Value)->Result<JsonValue>{Ok(match value{
 })}
 pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],ctx:&mut mesh::Context<'_>)->Result<Vec<u8>>{
     if doc.rig().morphs.is_empty()&&doc.rig().clip_options.is_empty(){return Ok(glb);}
-    let vertices=primitives.iter().map(|p|p.positions.len()).sum::<usize>();
-    if vertices.saturating_mul(doc.rig().morphs.len()).saturating_mul(128).saturating_add(glb.len()*3)>ctx.limits.max_bytes{return Err(Error::Budget("morph export working bytes"));}
+    let count = |p: &PrimitiveSource| match doc.state.objects.get(&p.object) {
+        Some(crate::ObjectGeometry::Baked(m)) => m.positions.len(), _ => p.positions.len(),
+    };
+    let vertices=primitives.iter().map(count).sum::<usize>();
+    let needed=vertices.saturating_mul(doc.rig().morphs.len()).saturating_mul(128).saturating_add(glb.len()*3);
+    if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"morph export working bytes",needed,limit:ctx.limits.max_bytes});}
     let mut targets=Vec::new();
     for morph in doc.rig().morphs.values(){
         let mut streams=Vec::new();
         for primitive in primitives{
-            ctx.checkpoint(1)?;let count=primitive.positions.len();let active=source(doc,&primitive.object)?==morph.object;
+            ctx.checkpoint(1)?;let count=count(primitive);
+            if matches!(doc.state.objects.get(&primitive.object), Some(crate::ObjectGeometry::Baked(_))) {
+                streams.push(GlbMorphDeltas { positions: vec![[0.;3]; count], normals: vec![[0.;3]; count] });
+                continue;
+            }
+            let active=source(doc,&primitive.object)?==morph.object;
             let world=if doc.skeleton().is_some(){doc.scene().world_matrix(&primitive.object)?}else{IDENTITY_MATRIX};
             let mut positions=Vec::with_capacity(count);let mut normals=vec![[0.;3];count];
             for vertex in &primitive.source_vertices{ctx.checkpoint(1)?;let delta=if active{morph.deltas.get(vertex).copied().unwrap_or([0.;3])}else{[0.;3]};let d=transform_vector(world,delta);positions.push([num(d[0])?,num(d[1])?,num(d[2])?]);}

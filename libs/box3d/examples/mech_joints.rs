@@ -1,4 +1,4 @@
-//! Print-in-place mechanism prototype (research lane FABMECH, see local/agent_state/fab/MECH-DESIGN.md).
+//! Print-in-place mechanism prototype (research lane FABMECH).
 //!
 //! Two assemblies are generated from joint declarations: an 8-link hinge chain and a 3-part puppet arm
 //! (torso socket, shoulder ball, elbow hinge). Each joint op writes both mating halves and the clearance gap.

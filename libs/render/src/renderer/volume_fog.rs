@@ -119,8 +119,8 @@ impl Renderer {
             camera.eye[2] += origin.z;
         }
         if camera.eye[3] == 0.0 {
-            let near = match cx.gpu_backend() { GpuBackend::OpenGl | GpuBackend::WebGl => -1.0, _ => 0.0 };
-            let h = Mat4f { v: camera.general.world_from_clip }.transform_vec4(vec4(0.0, 0.0, near, 1.0));
+            // The near plane is clip z = 0: one 0..w clip-z convention on every backend (platform/script/tests/clip_z.rs), GL included.
+            let h = Mat4f { v: camera.general.world_from_clip }.transform_vec4(vec4(0.0, 0.0, 0.0, 1.0));
             if h.w.abs() > 1e-7 { camera.reference = [h.x / h.w, h.y / h.w, h.z / h.w, 0.0]; }
         }
         camera

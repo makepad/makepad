@@ -23,6 +23,7 @@ pub enum Operation {
         object: String,
         size: [f64; 2],
     },
+    Baked { object: String, mesh: std::sync::Arc<crate::BakedMesh> },
     ImportMesh {
         object: String,
         source: Vec<u8>,
@@ -177,6 +178,7 @@ impl Operation {
             Self::Surface(op) => op.object_name(),
             Self::Cube { object, .. }
             | Self::Plane { object, .. }
+            | Self::Baked { object, .. }
             | Self::ImportMesh { object, .. }
             | Self::DeleteObject { object }
             | Self::Transform { object, .. }
@@ -198,7 +200,16 @@ impl Operation {
             _ => None,
         }
     }
+    pub(crate) fn baked_bytes(&self) -> usize {
+        match self { Self::Baked { mesh, .. } => mesh.memory_bytes(), _ => 0 }
+    }
+    pub(crate) fn baked_source_bytes(&self) -> usize {
+        match self { Self::Baked { mesh, .. } => mesh.encoded_size(), _ => 0 }
+    }
     pub(crate) fn memory_bytes(&self) -> usize {
+        if let Self::Baked { object, mesh } = self {
+            return std::mem::size_of::<Self>() + object.capacity() + mesh.memory_bytes();
+        }
         let variable = match self {
             Self::SoftBody(op) => op.memory_bytes(),
             Self::Selection(op) => op.memory_bytes(),
@@ -254,6 +265,12 @@ impl Operation {
         use crate::Error;
         let axis = |a: u8| if a > 2 { Err(Error::Invalid("axis must be 0, 1 or 2")) } else { Ok(()) };
         match self {
+            Self::Baked { object, mesh } => {
+                crate::schema::name(object, limits)?;
+                let needed = mesh.memory_bytes();
+                if needed > limits.mesh.max_bytes { return Err(Error::WorkingBytes { what: "baked geometry", needed, limit: limits.mesh.max_bytes }); }
+                return mesh.view().validate();
+            }
             Self::SoftBody(op) => return op.check(limits),
             Self::Selection(op) => return op.check(limits),
             Self::Construction(op) => return op.check(limits),

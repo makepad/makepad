@@ -92,24 +92,24 @@ impl ConstructionOperation {
     pub fn apply(&self,objects:&mut BTreeMap<String,Mesh>,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
         self.apply_in_scene(objects,&crate::SceneState::default(),limits,ctx)
     }
-    pub(crate) fn apply_in_scene(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
+    pub(crate) fn apply_in_scene(&self,objects:&mut BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
         self.apply_inner(objects,scene,limits,ctx,None)
     }
-    pub(crate) fn apply_cached_in_scene(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:&mut ConstructionCache)->Result<OperationResult>{
+    pub(crate) fn apply_cached_in_scene(&self,objects:&mut BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:&mut ConstructionCache)->Result<OperationResult>{
         self.apply_inner(objects,scene,limits,ctx,Some(cache))
     }
-    fn apply_inner(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:Option<&mut ConstructionCache>)->Result<OperationResult>{
+    fn apply_inner(&self,objects:&mut BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:Option<&mut ConstructionCache>)->Result<OperationResult>{
         self.check(limits)?;
         if objects.contains_key(&self.object){return Err(Error::DuplicateObject(self.object.clone()));}
         ctx.checkpoint(0)?;let mesh=match &self.kind{
-            Construction::Fibers{source,count,length,width,seed,material}=>fibers::generate(objects.get(source).ok_or_else(||Error::MissingObject(source.clone()))?,*count,*length,*width,*seed,*material,ctx)?,
+            Construction::Fibers{source,count,length,width,seed,material}=>fibers::generate(objects.get(source).and_then(crate::baked::MeshEntry::editable).ok_or_else(||Error::MissingObject(source.clone()))?,*count,*length,*width,*seed,*material,ctx)?,
             Construction::Sweep{profile,path,caps,material}=>sweep(profile,path,*caps,*material,ctx)?,
             Construction::Lathe{profile,axis,segments,caps,material,outward}=>lathe(profile,*axis,*segments,*caps,*material,*outward,ctx)?,
             Construction::Loft{profiles,closed,caps,material}=>loft(profiles,*closed,*caps,*material,ctx)?,
             Construction::QuadStrip{a,b,closed,material}=>quad_strip(a,b,*closed,*material,ctx)?,
             Construction::Boolean{a,b,mode}=>{
-                let source_bytes=[a,b].iter().try_fold(0usize,|n,name|->Result<usize>{Ok(n.saturating_add(objects.get(*name).ok_or_else(||Error::MissingObject((*name).clone()))?.memory_bytes()))})?;
-                if source_bytes.saturating_mul(3)>ctx.limits.max_bytes{return Err(Error::Budget("construction frame copies"));}
+                let source_bytes=[a,b].iter().try_fold(0usize,|n,name|->Result<usize>{Ok(n.saturating_add(objects.get(*name).and_then(crate::baked::MeshEntry::editable).ok_or_else(||Error::MissingObject((*name).clone()))?.memory_bytes()))})?;
+                let needed=source_bytes.saturating_mul(3);if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"construction frame copies",needed,limit:ctx.limits.max_bytes});}
                 let a=world_source(objects,scene,a,ctx)?;let b=world_source(objects,scene,b,ctx)?;
                 boolean_mesh(&a,&b,*mode,ctx)?
             },
@@ -123,18 +123,18 @@ impl ConstructionOperation {
             }
         };
         ctx.checkpoint(0)?;let mut result=OperationResult{object:self.object.clone(),faces:mesh.faces().iter().map(|f|f.id).collect(),vertices:mesh.vertices().iter().map(|v|v.id).collect(),..Default::default()};
-        result.metrics.insert("faces".into(),mesh.faces().len());result.metrics.insert("vertices".into(),mesh.vertices().len());objects.insert(self.object.clone(),mesh);Ok(result)
+        result.metrics.insert("faces".into(),mesh.faces().len());result.metrics.insert("vertices".into(),mesh.vertices().len());objects.insert(self.object.clone(),mesh.into());Ok(result)
     }
 }
 // New Boolean/remesh objects have an identity frame, so their source meshes
 // are baked to world space. Direct mesh operations retain source topology;
 // linked instances and unapplied modifiers require explicit make_unique first.
-fn world_source(objects:&BTreeMap<String,Mesh>,scene:&crate::SceneState,name:&str,ctx:&mut Context<'_>)->Result<Mesh>{
+fn world_source(objects:&BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,name:&str,ctx:&mut Context<'_>)->Result<Mesh>{
     let (source, frame) = construction_source(objects, scene, name)?;
     bake_source(source, frame, ctx)
 }
-fn construction_source<'a>(objects:&'a BTreeMap<String,Mesh>,scene:&crate::SceneState,name:&str)->Result<(&'a Mesh,crate::transform::Matrix4)>{
-    let source=objects.get(name).ok_or_else(||Error::MissingObject(name.into()))?;
+fn construction_source<'a>(objects:&'a BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,name:&str)->Result<(&'a Mesh,crate::transform::Matrix4)>{
+    let source=objects.get(name).and_then(crate::baked::MeshEntry::editable).ok_or_else(||Error::MissingObject(name.into()))?;
     if scene.nodes.get(name).is_some_and(|n|n.linked_to.is_some())||scene.modifiers.get(name).is_some_and(|m|m.iter().any(|m|m.enabled)){
         return Err(Error::Invalid("make construction sources unique and apply modifiers first"));
     }
@@ -142,7 +142,7 @@ fn construction_source<'a>(objects:&'a BTreeMap<String,Mesh>,scene:&crate::Scene
 }
 fn bake_source(source:&Mesh,frame:crate::transform::Matrix4,ctx:&mut Context<'_>)->Result<Mesh>{
     ctx.checkpoint(0)?;
-    if source.memory_bytes().saturating_mul(3)>ctx.limits.max_bytes{return Err(Error::Budget("construction frame copy"));}
+    let needed=source.memory_bytes().saturating_mul(3);if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"construction frame copy",needed,limit:ctx.limits.max_bytes});}
     let mut source=source.clone();let vertices=source.vertices().iter().map(|v|v.id).collect::<Vec<_>>();
     source.transform(&vertices,frame,ctx)?;Ok(source)
 }
@@ -221,7 +221,8 @@ fn boolean_mesh(a:&Mesh,b:&Mesh,mode:BooleanMode,ctx:&mut Context<'_>)->Result<M
     // csg_boolean::corefine materializes BVH overlaps as Vec<(u32, u32)>.
     const CANDIDATE_PAIR_BYTES: usize = std::mem::size_of::<(u32, u32)>();
     let mut sources=source_triangles(a,ctx)?;let other=source_triangles(b,ctx)?;let pairs=sources.len().saturating_mul(other.len());
-    if pairs.saturating_mul(CANDIDATE_PAIR_BYTES).saturating_add(a.memory_bytes()).saturating_add(b.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("boolean candidate pairs"));}
+    let needed=pairs.saturating_mul(CANDIDATE_PAIR_BYTES).saturating_add(a.memory_bytes()).saturating_add(b.memory_bytes());
+    if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"boolean candidate pairs",needed,limit:ctx.limits.max_bytes});}
     ctx.checkpoint(pairs.saturating_mul(64)as u64)?;sources.extend(other);
     let convert=|m:&Mesh,ctx:&mut Context<'_>|->Result<makepad_csg_mesh::TriMesh>{let tri=m.triangulate(ctx)?;let indices=m.vertices().iter().enumerate().map(|(i,v)|(v.id,i as u32)).collect::<BTreeMap<_,_>>();
         Ok(makepad_csg_mesh::TriMesh{vertices:m.vertices().iter().map(|v|makepad_csg_math::dvec3(v.position[0],v.position[1],v.position[2])).collect(),triangles:tri.triangles.iter().map(|t|t.indices.map(|i|indices[&tri.vertices[i as usize].source_vertex])).collect(),tags:Vec::new(),corner_normals:Vec::new()})};
@@ -329,6 +330,11 @@ mod tests {
     #[test]
     fn sweep_lathe_loft_and_strip_are_real_geometry_with_canonical_commands(){
         let limits=Limits::default();let mut ctx=Context::default();let mut objects=BTreeMap::new();
+        // A refused frame copy says what it needed: three copies of its source.
+        let cube=Mesh::cube([1.;3],&mut Context::default()).unwrap();let needed=cube.memory_bytes()*3;
+        let mut tight=Context::new(crate::mesh::Limits{max_bytes:needed-1},None);
+        assert_eq!(bake_source(&cube,crate::transform::IDENTITY_MATRIX,&mut tight).unwrap_err(),
+            Error::WorkingBytes{what:"construction frame copy",needed,limit:needed-1},"a refused frame copy names its step and its numbers");
         for op in [
             ConstructionOperation {
                 object: "tube".into(),

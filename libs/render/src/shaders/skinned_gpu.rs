@@ -28,7 +28,7 @@ script_mod! {
         ..mod.draw.SceneMsdfText,
         ..mod.draw.SceneColorAdjust,
         alpha_blend: false
-        backface_culling: true
+        cull_mode: @Back
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)

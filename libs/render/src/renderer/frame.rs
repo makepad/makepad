@@ -85,8 +85,7 @@ impl Renderer {
     ///   environment's light folded in (`env_lamp_rig`), which in the legacy
     ///   lane is the rig the bake snapshots.
     pub(super) fn frame_lamps(&mut self, world: &World, camera_pos: Vec3f) -> (SunLight, Vec3f) {
-        let sun = self.frame_start_sun(world);
-        let daylight = self.daylight_dir(world);
+        let (sun, daylight) = self.frame_sun_and_daylight(world);
         self.light_eye = camera_pos;
         self.light_daylight = daylight;
         self.stream_lights(camera_pos, daylight.y);
@@ -98,6 +97,10 @@ impl Renderer {
             world, &mut self.frame_lights, &self.model_headlight_owners, level, camera_pos, &mut self.vehicle_lamp_radius,
         );
         (sun, daylight)
+    }
+
+    fn frame_sun_and_daylight(&self, world: &World) -> (SunLight, Vec3f) {
+        (self.frame_start_sun(world), self.daylight_dir(world))
     }
 
     /// The sun the frame's rig starts from: `resolve_sun`, aimed by a
@@ -254,10 +257,10 @@ impl Renderer {
     /// is (a world with the default environment resolved here would drop the
     /// scene's textures and cancel its preparation on every recording, and a
     /// host that waits for `environment_pending` would never see it land),
-    /// and the draw shows whatever the scene's last draw bound. A world that
-    /// is the scene's own with some items taken out (a mirror, the frame
-    /// behind glass) names the scene's environment and goes through
-    /// [`Self::draw_scene_full`], so it sees what the scene sees.
+    /// and the draw shows whatever the scene's last draw bound. It fits and
+    /// binds no sun cascades and takes the last scene's local lights. A
+    /// world that is the scene's own with some items taken out (a mirror,
+    /// the frame behind glass) goes through [`Self::draw_scene_view`].
     pub fn draw_scene_aux(
         &mut self,
         cx: &mut Cx3d,
@@ -268,6 +271,54 @@ impl Renderer {
         models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
         self.draw_scene_scoped(cx, draw_list, draws, world, scene_state, None, models_draw, EnvScope::Aux)
+    }
+
+    /// The frame's scene seen again: a mirror's view, or the frame behind
+    /// glass, from a world that is the scene's with some items taken out.
+    /// Record it after the scene's own draw ([`Self::draw_scene_full`]) in
+    /// the same drawing: it resolves no environment and fits no sun
+    /// cascades, it binds the ones that draw fitted (one sun, one set of
+    /// shadows per frame) and declares that its pass reads their pass, so
+    /// they paint before it whatever the passes' order. It shares the scene's
+    /// local lights and shadow atlas, assigning the lights to its own camera's
+    /// grid. A view recorded before its scene draw keeps the last scene's grid,
+    /// binds no sun cascades and says so once. A renderer's first draw builds
+    /// its initial local light set. Like an aux draw, a view takes no screen
+    /// AO and keeps the GI fill for the scene's next draw.
+    pub fn draw_scene_view(
+        &mut self,
+        cx: &mut Cx3d,
+        draw_list: &mut DrawList,
+        draws: &mut SceneDraws,
+        world: &World,
+        scene_state: SceneState3D,
+        models_draw: Option<&mut DrawSceneSkinned>,
+    ) -> RenderStats {
+        self.draw_scene_scoped(cx, draw_list, draws, world, scene_state, None, models_draw, EnvScope::View)
+    }
+
+    /// A view draw's sun cascades: the ones this drawing's scene draw fitted,
+    /// read from their pass, or none (and one log line per drawing) when no
+    /// scene draw ran before it in this drawing. True when it binds them.
+    pub(super) fn bind_view_cascades(&mut self, cx: &mut CxDraw) -> bool {
+        let drawing = cx.cx.drawing_id();
+        if self.gpu_baker.csm_fitted_in(drawing) {
+            self.gpu_baker.set_csm_unbound(false);
+            if let Some(pass) = self.gpu_baker.cascade_pass() {
+                cx.read_pass_id(pass);
+            }
+            return true;
+        }
+        self.gpu_baker.ensure_csm_fallback(cx.cx);
+        let stale = self.gpu_baker.csm_binding().is_some_and(|(frame, _, _)| frame.on);
+        self.gpu_baker.set_csm_unbound(true);
+        let previous_lights = self.clustered.active(self.clustered_enabled)
+            && self.clustered.drawing != Some(drawing);
+        if (stale || previous_lights) && self.view_unfitted_logged != Some(drawing) {
+            self.view_unfitted_logged = Some(drawing);
+            log!("render: a view drawn before its scene's draw (drawing {drawing}): using the last local light set with no sun cascades; record the scene's draw_scene_full first");
+        }
+        false
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -308,13 +359,35 @@ impl Renderer {
         // An aux draw (a contact or id map) takes no screen AO: the AO is made from the scene's
         // depth after these maps draw, so a map that bound it would read a texture written after
         // it, and be owed a paint in every repaint after a recording.
-        let ssao = if matches!(scope, EnvScope::Aux) { self.ssao.take() } else { None };
+        let ssao = if matches!(scope, EnvScope::Aux | EnvScope::View) { self.ssao.take() } else { None };
         // An aux map reads no GI screen cache, and keeps the scene's fill and render origin for the
         // scene's next draw.
-        let aux_view = if matches!(scope, EnvScope::Aux) {
+        let aux_view = if matches!(scope, EnvScope::Aux | EnvScope::View) {
             Some((self.gi.last_scene_origin, self.gi.take_screen_view()))
         } else { None };
-        let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
+        // The sun cascades are the scene's, fitted once in its own draw. An aux
+        // map shades nothing with the sun: it runs none and binds none, so it
+        // can be recorded before or after the scene's draw. A view runs none
+        // and binds the scene's.
+        let viewed = match scope {
+            EnvScope::Scene => {
+                self.gpu_baker.set_csm_unbound(false);
+                false
+            }
+            EnvScope::Aux => {
+                self.gpu_baker.ensure_csm_fallback(cx.cx);
+                self.gpu_baker.set_csm_unbound(true);
+                false
+            }
+            EnvScope::View => self.bind_view_cascades(cx.cx),
+        };
+        let mut stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw, scope);
+        self.gpu_baker.set_csm_unbound(false);
+        self.clustered.unbind();
+        if viewed {
+            // the frame's shadows, as its scene draw left them
+            stats.csm_whole = self.gpu_baker.csm_whole;
+        }
         if let Some((scene_origin, view)) = aux_view {
             self.gi.last_scene_origin = scene_origin;
             self.gi.restore_screen_view(view);
@@ -339,7 +412,12 @@ impl Renderer {
         scene_state: SceneState3D,
         skinned: Option<SkinnedBatch>,
         mut models_draw: Option<&mut DrawSceneSkinned>,
+        scope: EnvScope,
     ) -> RenderStats {
+        let cascades = matches!(scope, EnvScope::Scene);
+        // The first draw also establishes a light set for secondary draws that
+        // precede the scene.
+        let build_lights = cascades || self.clustered.drawing.is_none();
         self.blended_models.clear();
         let mut stats = RenderStats::default();
         // The placed list's static blocks for this frame (draw_models.rs):
@@ -425,9 +503,15 @@ impl Renderer {
         self.sky_hour = hour;
         // The daylight switches and the lamps (N1, I1c), and the sun the
         // frame's rig starts from (frame_lamps also sets `lamp_level`).
-        let (sun, daylight) = self.frame_lamps(world, camera_pos);
-        stats.stream_lights = self.frame_stream_lights;
-        stats.vehicle_lamps = self.frame_vehicle_lamps;
+        let (sun, daylight) = if build_lights {
+            self.frame_lamps(world, camera_pos)
+        } else {
+            self.frame_sun_and_daylight(world)
+        };
+        if cascades {
+            stats.stream_lights = self.frame_stream_lights;
+            stats.vehicle_lamps = self.frame_vehicle_lamps;
+        }
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
         // list and the GI relight all see the same convention.
@@ -437,7 +521,7 @@ impl Renderer {
         // world authors (renderer/stock_ibl.rs).
         self.resolve_ibl_lane(world, env.as_ref());
         let sun = if self.hdr_output {
-            self.scale_frame_lights_hdr();
+            if build_lights { self.scale_frame_lights_hdr(); }
             // The environment's sun and fill (renderer/env_sun.rs; the lane
             // is HDR here, so nothing is exposed in the values).
             let hdr = self.lane_rig(world, sun);
@@ -481,8 +565,10 @@ impl Renderer {
         // in the lane's units already: they join after the rig's HDR gains,
         // and its Sun and Sky replace the rig's key and fill.
         let sun = crate::world_lights::apply_world_sun(world, sun);
-        crate::world_lights::append_world_lights(world, &mut self.frame_lights);
-        if let Some(lights) = &self.review_lights { self.frame_lights.clone_from(lights); }
+        if build_lights {
+            crate::world_lights::append_world_lights(world, &mut self.frame_lights);
+            if let Some(lights) = &self.review_lights { self.frame_lights.clone_from(lights); }
+        }
         self.prepare_volume_fog_lighting(cx.current_pass_id(), sun, camera_pos);
         self.prepare_ssr_camera(cx.current_pass_id(), camera_pos);
         self.clustered.lin_ctl = self.lin_ctl();
@@ -498,20 +584,22 @@ impl Renderer {
         // The frame's caster lists reuse the renderer's buffers (taken here, put back below).
         let mut lm_movers = std::mem::take(&mut self.frame_movers);
         lm_movers.clear();
-        if tiers.csm || local_shadows {
+        // Only the scene's own draw fits the sun cascades (and collects their casters).
+        let sun_casters = tiers.csm && cascades;
+        if sun_casters || (local_shadows && build_lights) {
             self.ensure_entity_caster_geometries(cx.cx);
             let mut static_movers = std::mem::take(&mut self.frame_static_movers);
             self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()), &mut static_movers, &mut lm_movers);
             self.frame_static_movers = static_movers;
         }
-        if tiers.csm && !self.world_atlas_required() {
+        if sun_casters && !self.world_atlas_required() {
             self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
         }
         // The camera slice the Realtime cascades fit to: the far-plane
         // corners of the host's stable projection or this view, unprojected
         // (far = clip z +w in every backend). Flat stage only — in XR the runtime owns
         // the eye matrices, and the baker falls back to eye-centered rings.
-        let csm_view = (tiers.csm && self.stage.mode == StageMode::Flat)
+        let csm_view = (sun_casters && self.stage.mode == StageMode::Flat)
             .then(|| {
                 let clip = Mat4f::mul(
                     self.csm_fit_projection.as_ref().unwrap_or(&scene_state.projection),
@@ -556,21 +644,24 @@ impl Renderer {
             ));
             self.stream_prepare(cx.cx, camera_pos, clip.as_ref(), frustum);
         }
-        let sun_movers = if tiers.csm { lm_movers.as_slice() } else { &[] };
-        self.run_gpu_lightmap(cx.cx, world, sun_movers, csm_view.as_ref(), camera_pos);
-        let (csm_statics, csm_movers, csm_us) = self.gpu_baker.csm_frame_stats();
-        stats.csm_static_casters = csm_statics as u64;
-        stats.csm_movers = csm_movers as u64;
-        stats.csm_encode_us = csm_us;
-        stats.csm_draws = self.gpu_baker.csm_draws() as u64;
-        stats.csm_kept = self.gpu_baker.csm_kept;
-        stats.csm_gpu_ms = self.gpu_baker.csm_gpu_ms();
-        if self.clustered_enabled {
+        if cascades {
+            let sun_movers = if tiers.csm { lm_movers.as_slice() } else { &[] };
+            self.run_gpu_lightmap(cx.cx, world, sun_movers, csm_view.as_ref(), camera_pos);
+            let (csm_statics, csm_movers, csm_us) = self.gpu_baker.csm_frame_stats();
+            stats.csm_static_casters = csm_statics as u64;
+            stats.csm_movers = csm_movers as u64;
+            stats.csm_encode_us = csm_us;
+            stats.csm_draws = self.gpu_baker.csm_draws() as u64;
+            stats.csm_kept = self.gpu_baker.csm_kept;
+            stats.csm_whole = self.gpu_baker.csm_whole;
+            stats.csm_gpu_ms = self.gpu_baker.csm_gpu_ms();
+        }
+        if self.clustered_enabled && build_lights {
             self.clustered.update(cx.cx, &self.frame_lights, cluster_view);
             let mut statics = std::mem::take(&mut self.frame_local_statics);
             statics.clear();
             if local_shadows {
-                if !(tiers.csm && !self.world_atlas_required()) {
+                if !(sun_casters && !self.world_atlas_required()) {
                     self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
                 }
                 self.collect_local_static_casters(cx.cx, world, &mut statics);
@@ -578,6 +669,20 @@ impl Renderer {
             self.clustered.render_shadows(cx.cx, camera_pos, &statics, &lm_movers);
             stats.clustered = self.clustered.stats();
             self.frame_local_statics = statics;
+        } else if self.clustered.active(self.clustered_enabled) {
+            if matches!(scope, EnvScope::View) && self.clustered.drawing == Some(cx.drawing_id()) {
+                stats.clustered = self.clustered.view(cx.cx, pass_id, cluster_view);
+                if self.clustered.shadows.has_faces() {
+                    if let Some(atlas) = self.clustered.shadows.pass_id() {
+                        cx.read_pass_id(atlas);
+                    }
+                }
+            } else {
+                stats.clustered = self.clustered.view_stats();
+            }
+        } else if build_lights {
+            // The legacy lane's list: the drawing's later draws take it.
+            self.clustered.drawing = Some(cx.drawing_id());
         }
         self.frame_movers = lm_movers;
         if !self.review_gi { self.gi.flush_retired(cx.cx); }

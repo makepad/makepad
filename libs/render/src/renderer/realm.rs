@@ -1,7 +1,7 @@
 //! Realm lifecycle, stage/quality, effects, placed models and custom materials.
 
 use super::*;
-use super::draw_models::LayerPhase;
+use super::draw_models::{near_plane_aabb, LayerPhase};
 use super::model_instance::refill_from_slice;
 use crate::custom_material::{TracedScene, TracedSurfacePasses};
 
@@ -1572,23 +1572,20 @@ impl Renderer {
     pub fn install_traced_surface_for_passes(
         &mut self, name: String, recipe: TracedSurfaceRecipe, required: TracedSurfacePasses,
     ) {
-        self.install_traced_program(name, recipe, required, false, cfg!(target_arch = "wasm32"));
+        self.install_traced_program(name, recipe, required, false);
     }
 
     /// Inspect the outside pass in isolation while the other passes are being
     /// developed. The host still sees the state of the complete program.
     pub fn install_traced_outside_preview(&mut self, name: String, recipe: TracedSurfaceRecipe) {
-        self.install_traced_program(name, recipe, TracedSurfacePasses::ALL, true, cfg!(target_arch = "wasm32"));
+        self.install_traced_program(name, recipe, TracedSurfacePasses::ALL, true);
     }
 
     pub(super) fn install_traced_program(
-        &mut self, name: String, recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool, webgl: bool,
+        &mut self, name: String, recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool,
     ) {
-        let mut program = TracedProgram::new(recipe, required, preview, webgl);
+        let mut program = TracedProgram::new(recipe, required, preview);
         program.serial = crate::custom_material::next_traced_serial();
-        if let Some(reason) = program.passes.failure(self.gpu_baker.realtime_sun_active()) {
-            log!("render: traced surface {name} unavailable: {reason}");
-        }
         self.traced_programs.insert(name, program);
     }
 
@@ -1638,31 +1635,50 @@ impl Renderer {
         self.traced_programs.remove(name).is_some()
     }
 
+    /// Update dense-volume AO strength, clamped to `0.0..=1.0`, in place without
+    /// recompiling shaders or dropping pass readiness. Returns true for an installed
+    /// volume surface, false for a missing or non-volume surface.
+    pub fn set_traced_surface_voxel_ao_strength(&mut self, cx: &Cx, name: &str, strength: f32) -> bool {
+        self.traced_programs
+            .get_mut(name)
+            .is_some_and(|program| program.set_voxel_ao_strength(cx, strength))
+    }
+
     /// Readiness for the current scene features on the most recently prewarmed target.
     /// Prewarm again after changing the target or its attachments.
     pub fn traced_surface_state(&self, name: &str) -> TracedSurfaceState {
-        self.traced_programs.get(name).map_or_else(|| {
-            self.traced_surface_failure(name).map_or(TracedSurfaceState::Waiting, |reason| TracedSurfaceState::Failed(reason.to_owned()))
-        }, |p| p.passes.state(self.traced_features(p), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass()))
+        self.traced_programs.get(name).map_or(TracedSurfaceState::Waiting, |p|
+            p.passes.state(self.traced_features(p), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass()))
     }
 
     /// The terminal reason for this program generation, including backend unavailability.
     pub fn traced_surface_failure(&self, name: &str) -> Option<&str> {
-        if cfg!(target_arch = "wasm32") { return Some(crate::custom_material::TRACED_WEBGL_FAILURE); }
         self.traced_programs.get(name)?.passes.failure(self.gpu_baker.realtime_sun_active())
     }
 
+    pub(super) fn traced_outside_features(&self) -> super::variants::Features {
+        let mut f = self.lane_features();
+        f.gi_screen = f.gi;
+        f
+    }
+
+    fn traced_caster_scene_features(&self) -> super::variants::Features {
+        let mut f = self.traced_caster_features();
+        f.gi_screen = f.gi;
+        f
+    }
+
     fn traced_features(&self, program: &TracedProgram) -> super::variants::Features {
-        if program.wants_sun() { self.traced_caster_features() } else { self.lane_features() }
+        if program.wants_sun() { self.traced_caster_scene_features() } else { self.traced_outside_features() }
     }
 
     pub(super) fn traced_caster_scene(&self, cx: &Cx, pass: DrawPassId) -> TracedScene {
-        TracedScene::new(cx, pass, self.traced_caster_features(), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass())
+        TracedScene::new(cx, pass, self.traced_caster_scene_features(), self.gpu_baker.realtime_sun_active(), self.gpu_baker.realtime_cascade_pass())
     }
 
     fn traced_scenes(&self, cx: &Cx, pass: DrawPassId) -> TracedScenes {
         let caster = self.traced_caster_scene(cx, pass);
-        TracedScenes { caster, outside: caster.with_features(self.lane_features()) }
+        TracedScenes { caster, outside: caster.with_features(self.traced_outside_features()) }
     }
 
     pub fn prewarm_traced_surfaces(&mut self, cx: &mut Cx, scene: DrawPassId) {
@@ -1722,12 +1738,36 @@ impl Renderer {
         if !self.traced_programs.is_empty() && instances.view().len() != 0 {
             let pass = cx.current_pass_id();
             let scenes = self.traced_scenes(cx.cx, pass);
+            let base_near = if self.traced_programs.values().any(TracedProgram::wants_inside) {
+                let list = cx.get_current_draw_list_id().expect("traced draw list");
+                let stage = &cx.draw_lists[list].draw_list_uniforms.view_transform;
+                let clip = |view: &Mat4f, projection: &Mat4f| Mat4f::mul(projection, &Mat4f::mul(view, stage));
+                let pass = &cx.passes[pass];
+                if matches!(pass.parent, CxDrawPassParent::Xr) {
+                    cx.cx.xr_pass_eyes().and_then(|(eyes, _)| near_plane_aabb(&eyes.map(|(v, p)| clip(&v, &p)), 0.0))
+                } else {
+                    let uniforms = &pass.pass_uniforms;
+                    near_plane_aabb(&[clip(&uniforms.camera_view, &uniforms.camera_projection)], 0.0)
+                }
+            } else { None };
             let mut programs = std::mem::take(&mut self.traced_programs);
             for (name, program) in &mut programs {
-                if let Some(draw) = program.outside(scenes.for_program(program)) {
-                    self.draw_models_inner(cx, ModelDraw::Traced(name, draw), LayerPhase::Opaque,
-                        eye, lod_scale, instances, lane, fog, sun, frustum, stats);
+                let scene = scenes.for_program(program);
+                let cull_faces = program.cull_proxy_faces();
+                if let Some((lo, hi)) = base_near.filter(|_| program.wants_inside()) {
+                    if program.outside(scene).is_none() { continue; }
+                    let margin = Vec3f::all(program.cell_pitch().map_or(0.05, |pitch| (2.0 * pitch).max(0.05)));
+                    if let Some(draw) = program.inside(scene) {
+                        self.ensure_model_order(instances, lane, eye, lod_scale, frustum, stats, false);
+                        if self.collect_traced_inside_entries(name, instances, lane, (lo - margin, hi + margin)) {
+                            self.draw_models_inner(cx, ModelDraw::TracedInside(name, draw, cull_faces), LayerPhase::Opaque,
+                                eye, lod_scale, instances, lane, fog, sun, frustum, stats);
+                        }
+                    }
                 }
+                let Some(draw) = program.outside(scene) else { continue };
+                self.draw_models_inner(cx, ModelDraw::Traced(name, draw, cull_faces), LayerPhase::Opaque,
+                    eye, lod_scale, instances, lane, fog, sun, frustum, stats);
             }
             self.traced_programs = programs;
         }
@@ -1856,9 +1896,38 @@ mod traced_fork_tests {
     use crate::custom_material::TracedSurfaceRecipe;
 
     #[test]
+    fn traced_volume_ao_strength_updates_recipe_and_mirrors_to_review_fork() {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        let mut live = Renderer::default();
+        live.install_traced_surface_for_passes("vol".into(), TracedSurfaceRecipe::volume(0.05, 32), TracedSurfacePasses::OUTSIDE);
+        live.install_traced_surface_for_passes("analytic".into(), TracedSurfaceRecipe::default(), TracedSurfacePasses::OUTSIDE);
+        assert!(live.traced_programs["vol"].is_volume());
+        assert!(!live.traced_programs["analytic"].is_volume());
+        assert!(!live.set_traced_surface_voxel_ao_strength(&cx, "missing", 0.0));
+        let analytic_serial = live.traced_programs["analytic"].serial;
+        assert!(!live.set_traced_surface_voxel_ao_strength(&cx, "analytic", 0.0));
+        assert_eq!(live.traced_programs["analytic"].serial, analytic_serial);
+
+        let mut fork = live.fork_scene_for_review();
+        let initial = live.traced_programs["vol"].serial;
+        assert!(live.set_traced_surface_voxel_ao_strength(&cx, "vol", 1.0));
+        assert_eq!(live.traced_programs["vol"].serial, initial, "default strength is a no-op");
+        for (strength, clamped) in [(-0.5, 0.0), (2.5, 1.0)] {
+            let previous = live.traced_programs["vol"].serial;
+            assert!(live.set_traced_surface_voxel_ao_strength(&cx, "vol", strength));
+            let volume = &live.traced_programs["vol"];
+            assert_ne!(volume.serial, previous, "changing AO advances the program serial");
+            assert_eq!(volume.voxel_ao_strength(), Some(clamped));
+            fork.mirror_review_frame_from(&live);
+            assert_eq!(fork.traced_programs["vol"].serial, volume.serial);
+            assert_eq!(fork.traced_programs["vol"].voxel_ao_strength(), Some(clamped));
+        }
+    }
+
+    #[test]
     fn review_fork_follows_traced_programs() {
         let mut live = Renderer::default();
-        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE);
+        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::volume(0.05, 32), TracedSurfacePasses::OUTSIDE);
         let mut fork = live.fork_scene_for_review();
         assert!(fork.traced_programs.contains_key("body"), "a fork carries the live renderer's traced program");
         assert!(matches!(fork.traced_surface_state("body"), TracedSurfaceState::Waiting),
@@ -1868,15 +1937,15 @@ mod traced_fork_tests {
 
         // Serials never repeat across renderers, so a rebuilt renderer cannot pass for the one a fork follows.
         let mut rebuilt = Renderer::default();
-        rebuilt.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.2), TracedSurfacePasses::OUTSIDE);
+        rebuilt.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::volume(0.2, 32), TracedSurfacePasses::OUTSIDE);
         assert!(rebuilt.traced_programs["body"].serial != live.traced_programs["body"].serial, "install serials are process-wide");
         let mut stale = rebuilt.fork_scene_for_review();
         stale.mirror_review_frame_from(&live);
         assert!(stale.traced_programs["body"].serial == live.traced_programs["body"].serial, "a fork takes the live renderer's program even under the same name");
 
         // Replacing a program under the same name replaces the fork's copy; a new name is added.
-        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::tiles(0.1), TracedSurfacePasses::OUTSIDE);
-        live.install_traced_surface_for_passes("wheel".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE);
+        live.install_traced_surface_for_passes("body".into(), TracedSurfaceRecipe::volume(0.1, 32), TracedSurfacePasses::OUTSIDE);
+        live.install_traced_surface_for_passes("wheel".into(), TracedSurfaceRecipe::volume(0.05, 32), TracedSurfacePasses::OUTSIDE);
         fork.mirror_review_frame_from(&live);
         assert_eq!(fork.traced_programs.len(), 2, "a program the fork lacked is installed");
         assert!(fork.traced_programs["body"].serial == live.traced_programs["body"].serial, "a replaced program is installed again");
@@ -1887,7 +1956,12 @@ mod traced_fork_tests {
         assert!(!fork.traced_programs.contains_key("wheel") && fork.traced_programs.len() == 1, "a dropped program leaves the fork");
 
         // A program with a terminal failure reports the same failure in the fork.
-        live.install_traced_program("lost".into(), TracedSurfaceRecipe::tiles(0.05), TracedSurfacePasses::OUTSIDE, false, true);
+        live.install_traced_program("lost".into(), TracedSurfaceRecipe::volume(0.05, 32), TracedSurfacePasses::OUTSIDE, false);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let pass = DrawPass::new(&mut cx);
+        let scene = live.traced_scenes(&cx, pass.draw_pass_id()).outside;
+        live.traced_programs.get_mut("lost").unwrap().prepare_with_volume_support(&mut cx, scene, "lost",
+            |_| Some(Err(crate::custom_material::TRACED_WEBGL_FAILURE)));
         fork.mirror_review_frame_from(&live);
         assert!(matches!(fork.traced_surface_state("lost"), TracedSurfaceState::Failed(_)), "a failed program fails in the fork too");
         assert_eq!(fork.traced_surface_failure("lost"), live.traced_surface_failure("lost"), "with the same reason");

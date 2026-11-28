@@ -127,8 +127,9 @@ impl Texture {
         if center.iter().any(|v| !v.is_finite()) || !radius.is_finite() || radius <= 0.0 {
             return Err(Error::Invalid("paint disk"));
         }
-        if self.rgb.len().saturating_mul(2) > limits.mesh.max_bytes {
-            return Err(Error::Budget("paint working bytes"));
+        let needed = self.rgb.len().saturating_mul(2);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "paint working bytes", needed, limit: limits.mesh.max_bytes });
         }
         let mut candidate = self.rgb.clone();
         for y in 0..self.height {
@@ -267,8 +268,9 @@ impl RgbaImage {
         ctx: &mut crate::mesh::Context<'_>,
     ) -> Result<()> {
         self.validate(limits)?;
-        if self.pixels.len().saturating_mul(3) > limits.mesh.max_bytes {
-            return Err(Error::Budget("dilation working bytes"));
+        let needed = self.pixels.len().saturating_mul(3);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "dilation working bytes", needed, limit: limits.mesh.max_bytes });
         }
         let mut pixels = self.pixels.clone();
         let mut coverage: Vec<bool> = pixels.chunks_exact(4).map(|p| p[3] != 0).collect();
@@ -327,8 +329,9 @@ impl RgbaImage {
         ctx: &mut crate::mesh::Context<'_>,
     ) -> Result<Vec<Self>> {
         self.validate(limits)?;
-        if self.pixels.len().saturating_mul(3) > limits.mesh.max_bytes {
-            return Err(Error::Budget("mip working bytes"));
+        let needed = self.pixels.len().saturating_mul(3);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "mip working bytes", needed, limit: limits.mesh.max_bytes });
         }
         if self.width == 1 && self.height == 1 {
             return Ok(Vec::new());

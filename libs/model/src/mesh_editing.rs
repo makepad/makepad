@@ -72,13 +72,13 @@ impl MeshEditingOperation {
     pub fn apply(&self,objects:&mut BTreeMap<String,Mesh>,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
         self.apply_in_scene(objects,&crate::SceneState::default(),limits,ctx)
     }
-    pub(crate) fn apply_in_scene(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
+    pub(crate) fn apply_in_scene(&self,objects:&mut BTreeMap<String,impl crate::baked::MeshEntry>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
         self.check(limits)?;
-        let reference=if let Action::Shrinkwrap{reference,..}=&self.action{let source=objects.get(reference).ok_or_else(||Error::MissingObject(reference.clone()))?;
-            ctx.checkpoint(0)?;if source.memory_bytes().saturating_mul(2)>ctx.limits.max_bytes{return Err(Error::Budget("reference clone bytes"));}let mut source=source.clone();
+        let reference=if let Action::Shrinkwrap{reference,..}=&self.action{let source=objects.get(reference).and_then(crate::baked::MeshEntry::editable).ok_or_else(||Error::MissingObject(reference.clone()))?;
+            ctx.checkpoint(0)?;let needed=source.memory_bytes().saturating_mul(2);if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"reference clone bytes",needed,limit:ctx.limits.max_bytes});}let mut source=source.clone();
             let matrix=crate::transform::matrix_mul(crate::transform::inverse(scene.world_matrix(&self.object)?)?,scene.world_matrix(reference)?);
             if matrix!=crate::transform::IDENTITY_MATRIX{let vertices=source.vertices().iter().map(|v|v.id).collect::<Vec<_>>();source.transform(&vertices,matrix,ctx)?;}Some(source)}else{None};
-        let mesh=objects.get_mut(&self.object).ok_or_else(||Error::MissingObject(self.object.clone()))?;let mut result=OperationResult{object:self.object.clone(),..Default::default()};
+        let mesh=objects.get_mut(&self.object).and_then(crate::baked::MeshEntry::editable_mut).ok_or_else(||Error::MissingObject(self.object.clone()))?;let mut result=OperationResult{object:self.object.clone(),..Default::default()};
         let changes=match &self.action {
             Action::Subdivide{levels}=>mesh.subdivide(*levels,ctx)?,Action::Mirror{axis,offset}=>mesh.mirror(*axis,*offset,ctx)?,
             Action::FlipFaces{faces}=>{result.faces=faces.clone();mesh.flip_faces(faces,ctx)?},

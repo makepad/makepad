@@ -7,7 +7,7 @@
 #[path = "program_weathering.rs"]
 mod weathering;
 use crate::{canon::Writer, character::{CharacterSpec, FpsArms}, transform::*, Attachment, CompiledModel, Document, Error, Limits, Operation, RigOperation, SceneOperation, Socket, WeightEdit, Workspace};
-use std::{cell::Cell, collections::BTreeMap, time::Duration};
+use std::{cell::Cell, collections::BTreeMap, sync::Arc, time::Duration};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use std::time::Instant as ProgramInstant;
@@ -90,6 +90,7 @@ pub enum ProgramOp {
 /// Mesh primitives a program describes and the build makes ([`Operation::sphere`] ...).
 #[derive(Clone, Debug, PartialEq)]
 pub enum MeshPrimitive {
+    Baked { object: String, mesh: Arc<crate::BakedMesh> },
     Sphere { object: String, radius: f64, segments: u32, rings: u32, smooth: bool },
     Cylinder { object: String, radius: f64, height: f64, segments: u32, smooth: bool },
     Polygons { object: String, positions: Vec<[f64; 3]>, polygons: Vec<crate::mesh::Polygon>, normals: Vec<[f64; 3]>, colors: Vec<[f64; 4]> },
@@ -105,7 +106,7 @@ impl MeshPrimitive {
         match self {
             Self::Sphere { object, radius, segments, rings, smooth } => Some((PrimitiveKey::Sphere { radius: radius.to_bits(), segments: *segments, rings: *rings, smooth: *smooth }, object)),
             Self::Cylinder { object, radius, height, segments, smooth } => Some((PrimitiveKey::Cylinder { radius: radius.to_bits(), height: height.to_bits(), segments: *segments, smooth: *smooth }, object)),
-            Self::Polygons { .. } => None,
+            Self::Baked { .. } | Self::Polygons { .. } => None,
         }
     }
     fn cached_operations(&self, limits: &Limits, cache: &mut BTreeMap<PrimitiveKey, CachedPrimitive>) -> crate::Result<Vec<Operation>> {
@@ -124,6 +125,10 @@ impl MeshPrimitive {
     }
     fn operations(&self, limits: &Limits) -> crate::Result<Vec<Operation>> {
         let op = match self {
+            Self::Baked { object, mesh } => {
+                mesh.view().validate()?;
+                Ok(Operation::Baked { object: object.clone(), mesh: Arc::clone(mesh) })
+            }
             Self::Sphere { object, radius, segments, rings, smooth } => Operation::sphere(object.clone(), *radius, *segments, *rings, *smooth, limits),
             Self::Cylinder { object, radius, height, segments, smooth } => Operation::cylinder(object.clone(), *radius, *height, *segments, *smooth, limits),
             Self::Polygons { object, positions, polygons, normals, colors } => {
@@ -163,6 +168,10 @@ impl MeshPrimitive {
     }
     fn write(&self, w: &mut Writer) -> crate::Result<()> {
         match self {
+            Self::Baked { object, mesh } => {
+                w.u8(4)?; w.string(object)?;
+                mesh.view().write(w)
+            }
             Self::Sphere { object, radius, segments, rings, smooth } => { w.u8(0)?; w.string(object)?; w.f64(*radius)?; w.u32(*segments)?; w.u32(*rings)?; w.u8(*smooth as u8) }
             Self::Cylinder { object, radius, height, segments, smooth } => { w.u8(1)?; w.string(object)?; w.f64(*radius)?; w.f64(*height)?; w.u32(*segments)?; w.u8(*smooth as u8) }
             Self::Polygons { object, positions, polygons, normals, colors } => {
@@ -252,7 +261,18 @@ pub fn program_bytes(ops: &[ProgramOp]) -> crate::Result<Vec<u8>> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ProgramFailure { pub index: usize, pub op: String, pub message: String }
+pub struct ProgramFailure {
+    pub index: usize,
+    pub op: String,
+    pub message: String,
+    /// The underlying model operation refused its working-memory budget.
+    pub memory_refusal: bool,
+}
+impl ProgramFailure {
+    fn from_error(index: usize, op: String, error: Error) -> Self {
+        Self { index, op, message: describe_error(&error), memory_refusal: error.is_memory_refusal() }
+    }
+}
 impl std::fmt::Display for ProgramFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "operation {} ({}): {}", self.index, self.op, self.message) }
 }
@@ -277,6 +297,7 @@ pub fn describe_error(error: &Error) -> String {
         Error::Invalid(s) | Error::Corrupt(s) => (*s).into(),
         Error::Budget(s) => format!("over budget: {s}"),
         Error::WorkingBytes { .. } => format!("over budget: {error}"),
+        Error::BakedObject { op, object, .. } => format!("cannot {op} '{object}': the object is baked"),
         Error::MissingObject(n) => format!("unknown object '{n}'"),
         Error::DuplicateObject(n) => format!("object '{n}' already exists"),
         Error::Mesh(e) => format!("{e:?}"),
@@ -290,6 +311,7 @@ struct Runner<'a> {
     doc: Workspace,
     limits: Limits,
     program: &'a [ProgramOp],
+    borrowed_baked_bytes: usize,
     pending: Vec<(usize, Operation)>,
     generation: u64,
     // Own the already-materialized inputs for error-only replay. Successful
@@ -334,12 +356,12 @@ impl Runner<'_> {
         loop {
             let (indices, operations): (Vec<_>, Vec<_>) = pending.by_ref().take(CHUNK).unzip();
             if operations.is_empty() { break; }
-            if let Err((failed, error)) = self.doc.execute_program(&operations, self.replay_bytes, self.cancelled) {
+            if let Err((failed, error)) = self.doc.execute_program(&operations, self.replay_bytes, self.borrowed_baked_bytes, self.cancelled) {
                 let failure = |at: usize, error: Error| {
                     let index = indices[at];
-                    ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message: describe_error(&error) }
+                    ProgramFailure::from_error(index, names.get(index).cloned().unwrap_or_default(), error)
                 };
-                if matches!(error, Error::Mesh(crate::mesh::MeshError::Cancelled)) { return Err(failure(failed, error)); }
+                if matches!(error, Error::BakedObject { .. } | Error::Mesh(crate::mesh::MeshError::Cancelled)) { return Err(failure(failed, error)); }
                 // End-of-batch validation can find an error introduced by an
                 // earlier operation. Reconstruct the boundary only on failure,
                 // then use the original one-at-a-time attribution behavior.
@@ -348,12 +370,12 @@ impl Runner<'_> {
                 self.doc = Workspace::new(self.limits.clone()).map_err(|e| failure(failed, e))?;
                 for batch in &self.replay_batches {
                     let batch = self.materialize(batch).map_err(|e| failure(failed, e))?;
-                    self.doc.execute_program(&batch, self.replay_bytes, self.cancelled).map_err(|(_, e)| failure(failed, e))?;
+                    self.doc.execute_program(&batch, self.replay_bytes, self.borrowed_baked_bytes, self.cancelled).map_err(|(_, e)| failure(failed, e))?;
                 }
                 let count = operations.len();
                 for (at, op) in operations.into_iter().enumerate() {
                     let batch = vec![op];
-                    self.doc.execute_program(&batch, self.replay_bytes, self.cancelled).map_err(|(_, e)| failure(at, e))?;
+                    self.doc.execute_program(&batch, self.replay_bytes, self.borrowed_baked_bytes, self.cancelled).map_err(|(_, e)| failure(at, e))?;
                     self.remember(&indices[at..at + 1], batch);
                 }
                 self.generation += count as u64 + 1;
@@ -415,9 +437,28 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             None => op.name().to_string(),
         }
     }).collect();
-    let fail = |index: usize, message: String| ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message };
-    let doc = Workspace::new(limits.clone()).map_err(|e| fail(0, describe_error(&e)))?;
-    let mut run = Runner { doc, limits: limits.clone(), program: ops, pending: Vec::new(), generation: 0, replay_batches: Vec::new(), replay_bytes: 0, cancelled };
+    let op_name = |index: usize| names.get(index).cloned().unwrap_or_default();
+    let fail = |index, message| ProgramFailure { index, op: op_name(index), message, memory_refusal: false };
+    let model_error = |index, error| ProgramFailure::from_error(index, op_name(index), error);
+    // The program pins these arrays even before creation and after deletion.
+    // Reserve each allocation once; lowered operations and state share it.
+    let host_limit = limits.mesh.max_bytes;
+    let mut limits = limits;
+    let mut seen = std::collections::HashSet::new();
+    for (index, op) in ops.iter().enumerate() {
+        let mesh = match op {
+            ProgramOp::Mesh(MeshPrimitive::Baked { mesh, .. }) | ProgramOp::Op(Operation::Baked { mesh, .. }) => mesh,
+            _ => continue,
+        };
+        if seen.insert(Arc::as_ptr(mesh)) {
+            let bytes = mesh.memory_bytes();
+            limits.mesh.max_bytes = limits.mesh.max_bytes.checked_sub(bytes).ok_or_else(||
+                model_error(index, Error::WorkingBytes { what: "borrowed program arrays", needed: bytes, limit: limits.mesh.max_bytes }))?;
+        }
+    }
+    let borrowed_baked_bytes = host_limit - limits.mesh.max_bytes;
+    let doc = Workspace::new(limits.clone()).map_err(|e| model_error(0, e))?;
+    let mut run = Runner { doc, limits: limits.clone(), program: ops, borrowed_baked_bytes, pending: Vec::new(), generation: 0, replay_batches: Vec::new(), replay_bytes: 0, cancelled };
     let mut warnings = Vec::new();
     let mut bound = std::collections::BTreeSet::new();
     // All entries use this build's fixed Limits. Retain source bytes only for
@@ -438,7 +479,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             ProgramOp::Impostor { .. } => {}
             ProgramOp::Mesh(m) => {
                 let started = ProgramInstant::now();
-                let operations = m.cached_operations(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?;
+                let operations = m.cached_operations(&run.limits, &mut primitives).map_err(|e| model_error(index, e))?;
                 crate::build_detail::record_operation(crate::build_detail::primitive_kind(m).1, 0, started.elapsed());
                 run.pending.extend(operations.into_iter().map(|op| (index, op)));
             }
@@ -447,7 +488,11 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                 let image_start = ProgramInstant::now();
                 let nested_textures = texture_time();
                 let bytes = fetch(image).map_err(|e| fail(index, format!("image '{image}': {e}")))?;
-                let pixels = crate::RgbaImage::from_png(&bytes, &run.limits).map_err(|e| fail(index, format!("image '{image}': {}", describe_error(&e))))?;
+                let pixels = crate::RgbaImage::from_png(&bytes, &run.limits).map_err(|e| {
+                    let mut failure = model_error(index, e);
+                    failure.message = format!("image '{image}': {}", failure.message);
+                    failure
+                })?;
                 record_texture_time(image_start.elapsed().saturating_sub(texture_time() - nested_textures));
                 // The image carries the channel: its factor goes neutral (white base colour
                 // keeping alpha, full roughness and metalness, white emission).
@@ -457,7 +502,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                     Some(m) => m.clone(),
                     None => {
                         let legacy = run.doc.materials().get(material).ok_or_else(|| fail(index, format!("image '{image}': material {material} is not declared")))?;
-                        crate::SurfaceMaterial::from_legacy(legacy, &run.limits).map_err(|e| fail(index, describe_error(&e)))?
+                        crate::SurfaceMaterial::from_legacy(legacy, &run.limits).map_err(|e| model_error(index, e))?
                     }
                 };
                 factors.channels.clear();
@@ -499,17 +544,18 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
                 }
             }
             ProgramOp::Character(spec) => {
-                let built = crate::character::build_from_spec(spec, &run.limits).map_err(|e| fail(index, describe_error(&e)))?;
+                let built = crate::character::build_from_spec(spec, &run.limits).map_err(|e| model_error(index, e))?;
                 warnings.extend(built.warnings);
                 run.pending.extend(built.early.into_iter().chain(built.operations).chain(built.late).map(|o| (index, o)));
             }
             ProgramOp::FpsArms(spec, arms) => {
-                let built = crate::character::build_fps_arms(spec, arms, &run.limits).map_err(|e| fail(index, describe_error(&e)))?;
+                let built = crate::character::build_fps_arms(spec, arms, &run.limits).map_err(|e| model_error(index, e))?;
                 warnings.extend(built.warnings);
                 run.pending.extend(built.early.into_iter().chain(built.operations).chain(built.late).map(|o| (index, o)));
             }
             ProgramOp::Bind { object, joint } => {
                 run.flush(&names)?;
+                run.doc.check_editable(index, "bind", object).map_err(|e| fail(index, e.to_string()))?;
                 let joints = joint_world(&run.doc);
                 if joints.is_empty() { return Err(fail(index, "bind needs a skeleton first (humanoid_rig or skeleton)".into())); }
                 let j = joints.iter().position(|x| x.0 == *joint).ok_or_else(|| fail(index, format!("unknown joint '{joint}'")))?;
@@ -518,6 +564,9 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::BindAll => {
                 run.flush(&names)?;
+                for (name, _) in run.doc.geometries() {
+                    run.doc.check_editable(index, "bind_all", name).map_err(|e| fail(index, e.to_string()))?;
+                }
                 let joints = joint_world(&run.doc);
                 if joints.is_empty() { return Err(fail(index, "bind_all needs a skeleton first".into())); }
                 let mut edits = Vec::new();
@@ -539,10 +588,21 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::Weathering { ao, distance, edges, samples, objects } => {
                 run.flush(&names)?;
+                for (name, _) in run.doc.geometries() {
+                    if objects.as_ref().is_some_and(|names| names.iter().any(|n| n == name))
+                        || (!name.starts_with("__") && (objects.is_none() || *ao > 0.)) {
+                        run.doc.check_editable(index, "weathering", name).map_err(|e| fail(index, e.to_string()))?;
+                    }
+                }
                 let weathering_start = ProgramInstant::now();
                 let (ao, distance, edges, samples) = (ao.clamp(0., 1.), distance.clamp(0.005, 10.), edges.clamp(0., 1.), (*samples).clamp(1, 64) as usize);
                 let operations = weathering::weathering_ops(&run.doc, objects.as_deref(), ao, distance, edges, samples, &mut weathering_detail, cancelled)
-                    .map_err(|_| fail(index, "cancelled".into()))?;
+                    .map_err(|e| {
+                        let cancelled = matches!(e, Error::Mesh(crate::mesh::MeshError::Cancelled));
+                        let mut failure = model_error(index, e);
+                        if cancelled { failure.message = "cancelled".into(); }
+                        failure
+                    })?;
                 for op in operations {
                     run.pending.push((index, op));
                 }
@@ -564,13 +624,14 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::Rig { joints, op } => {
                 run.flush(&names)?;
+                run.doc.check_geometry_op(index, &Operation::Rig(op.clone())).map_err(|e| model_error(index, e))?;
                 let skeleton = run.doc.skeleton().ok_or_else(|| fail(index, "rig controls need a skeleton first (rig_humanoid, character or soft_body)".into()))?;
                 let mut resolved = Vec::with_capacity(joints.len());
                 for j in joints {
                     let at = skeleton.joints.iter().position(|x| x.name == *j).ok_or_else(|| fail(index, format!("unknown joint '{j}'")))?;
                     resolved.push(at as u32);
                 }
-                let op = op.map_joints(&|i| resolved.get(i as usize).copied().ok_or(Error::Invalid("rig joint outside the program's joint table"))).map_err(|e| fail(index, describe_error(&e)))?;
+                let op = op.map_joints(&|i| resolved.get(i as usize).copied().ok_or(Error::Invalid("rig joint outside the program's joint table"))).map_err(|e| model_error(index, e))?;
                 run.pending.push((index, Operation::Rig(op)));
             }
             ProgramOp::Clip { joints, clip } => {
@@ -590,8 +651,8 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::ImportGlb { alias, prefix, material_base, transform } => {
                 let bytes = fetch(alias).map_err(|e| fail(index, format!("import_glb '{alias}': {e}")))?;
-                let root = match transform { Some(t) => t.matrix().map_err(|e| fail(index, describe_error(&e)))?, None => IDENTITY_MATRIX };
-                let imported = crate::import::import_glb(&bytes, prefix, *material_base, root, &run.limits).map_err(|e| fail(index, describe_error(&e)))?;
+                let root = match transform { Some(t) => t.matrix().map_err(|e| model_error(index, e))?, None => IDENTITY_MATRIX };
+                let imported = crate::import::import_glb(&bytes, prefix, *material_base, root, &run.limits).map_err(|e| model_error(index, e))?;
                 warnings.extend(imported.warnings);
                 run.pending.extend(imported.operations.into_iter().map(|o| (index, o)));
             }
@@ -599,8 +660,8 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
     }
     run.flush(&names)?;
     drop(run.replay_batches);
-    let document = run.doc.into_document(run.generation, cancelled)
-        .map_err(|e| fail(ops.len(), describe_error(&e)))?;
+    let mut document = run.doc.into_document(run.generation, cancelled)
+        .map_err(|e| model_error(ops.len(), e))?;
     timings.textures = texture_time() - texture_start;
     timings.geometry = geometry_start.elapsed().saturating_sub(timings.weathering + timings.textures);
     crate::build_detail::reset_compile_timings();
@@ -609,7 +670,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
     let compiled = match cache {
         Some(cache) => document.compile_with_cache(cache, cancelled),
         None => document.compile(cancelled),
-    }.map_err(|e| ProgramFailure { index: ops.len(), op: "compile".into(), message: describe_error(&e) })?;
+    }.map_err(|e| ProgramFailure::from_error(ops.len(), "compile".into(), e))?;
     warnings.extend(compiled.warnings.iter().cloned());
     let compile_textures = texture_time() - texture_start;
     let compile_elapsed = compile_start.elapsed();
@@ -621,6 +682,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
     detail.vertices = compiled.vertices;
     detail.triangles = compiled.triangles;
     detail.weathering = weathering_detail;
+    document.set_memory_limit(host_limit);
     Ok(BuiltProgram { document, compiled, warnings, timings, detail })
 }
 
@@ -669,6 +731,25 @@ mod tests {
                 }
             }
         }
+        let baked = |x: f32, runs| ProgramOp::Mesh(MeshPrimitive::Baked { object: "card".into(), mesh: Arc::new(crate::BakedMesh {
+            positions: vec![[0.;3], [x,0.,0.], [0.,1.,0.]], normals: vec![[0.,0.,1.];3], uvs: None, material_bytes: None,
+            indices: vec![0,1,2], runs }) });
+        let original = program_bytes(&[baked(1., vec![(0,0..3)])]).unwrap();
+        let changed = program_bytes(&[baked(f32::from_bits(1.0f32.to_bits() + 1), vec![(0,0..3)])]).unwrap();
+        assert_eq!(original.iter().zip(&changed).filter(|(a,b)| a != b).count(), 1, "every position byte reaches the program key");
+        for runs in [vec![], vec![(0,1..3)], vec![(0,0..2)], vec![(0,0..6)], vec![(0,0..3),(1,0..3)]] {
+            assert!(program_bytes(&[baked(1., runs)]).is_err(), "reject incomplete, unaligned or overlapping material runs");
+        }
+        let mut bytes_op = baked(1., vec![(0, 0..3)]);
+        let mut key_for = |material_bytes| {
+            let ProgramOp::Mesh(MeshPrimitive::Baked { mesh, .. }) = &mut bytes_op else { unreachable!() };
+            Arc::make_mut(mesh).material_bytes = Some(material_bytes);
+            program_bytes(std::slice::from_ref(&bytes_op))
+        };
+        let key = key_for(vec![[0; 4]; 3]).unwrap();
+        let changed = key_for(vec![[0; 4], [0; 4], [0, 0, 0, 1]]).unwrap();
+        assert_eq!(key.iter().zip(changed).filter(|(a,b)| **a != *b).count(), 1, "the fourth material byte reaches the program key");
+        assert!(key_for(vec![[0; 4]; 2]).is_err(), "material bytes need one value per vertex");
         // A colour operation can fall in the next transaction. Error replay must
         // not expand either half twice or lose the original failure attribution.
         let limits = Limits::default();

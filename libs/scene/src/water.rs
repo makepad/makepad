@@ -1,7 +1,7 @@
 //! Published water surfaces, the shared wave coefficients and the sea look.
 //!
 //! A water surface's waves are up to [`MAX_WAVES`] analytic [`WaterWave`]s
-//! (local/plans/water.md): the sim sums them per tick (the physics truth:
+//! the sim sums them per tick (the physics truth:
 //! buoyancy, swimming, boats) and the renderer's vertex shader adds the same
 //! expression. A [`SeaLook`] derives them from a wind spectrum and a seed,
 //! so every machine shows the same sea; the small ripples are a tiling

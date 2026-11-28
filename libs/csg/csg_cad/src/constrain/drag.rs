@@ -9,6 +9,8 @@
 //! | Rank cut | `1e-9` times the first QR pivot, also used for the strong pin directions | Q7, Q19 amendment |
 //! | SHRINK | 1/4 of the refused step length for the next radius | Q7, Q17, Q20 |
 //! | c₀ | `1e-8 (‖BᵀB‖ + ‖K‖)`, the curvature floor for the eigenvalue split | Q7, Q19 amendment |
+//! | JACOBI_MAX_K | 16: the reduced Hessian's eigen-solver is Jacobi up to this k and QL above it; the grams use Jacobi at every k. Under any exact solver a pose's weak directions resolve to about k ε ‖H‖ / λ⁺ of the step, not to tol (λ⁺ the smallest curvature the step divides by) | R7, Q28 |
+//! | Weak set | measured on open chains to 100 links: every round with two or more directions under c₀ floors all of them and zeroes all their slopes, so the step takes nothing from the weak set in any basis | Q28, M3b |
 //! | n_eff | `2e-8 ‖r⊥‖ ‖c‖ + 16 ε ‖BᵀB‖`, the weak-direction curvature noise | Q19 amendment |
 //! | ν | `‖JZ‖_F ‖r‖ / abs(last pivot)`, zero without a pivot, the projected slope noise | Q7 |
 //! | τ | tol/2, the reached distance | Q19 amendment, R8 |
@@ -22,7 +24,9 @@
 //! | RUNAWAY | 1e12 times the sketch scale, the rollback threshold for unmeasured growth | R2 |
 //! | TRIAL_CAP | 200 trial iterations per round (the frame's `trial_cap`), then the move keeps its last accepted pose and the next move goes on from it | Probe trial cap |
 
-use super::{dot, max_abs, DragOutcome, DragQr, Options, PointId, System, RANK_CUT};
+use super::{dot, max_abs, DragOutcome, DragQr, Jac, Options, PointId, System, RANK_CUT};
+#[cfg(test)]
+use super::work;
 use crate::region::P2;
 
 const SHRINK: f64 = 0.25;
@@ -60,12 +64,13 @@ impl DragQr {
         delta
     }
 
-    fn noise_floor(&self, jac: &[f64], n: usize, distance: f64) -> f64 {
+    fn noise_floor(&self, jac: &Jac, distance: f64) -> f64 {
         let Some(last) = self.tau.len().checked_sub(1) else { return 0.0 };
         let mut squared = 0.0;
         for v in &self.z {
-            for row in jac.chunks_exact(n) {
-                squared += dot(row, v).powi(2);
+            for i in 0..jac.rows() {
+                let projection = jac.row(i).iter().map(|&(a, value)| value * v[a]).sum::<f64>();
+                squared += projection.powi(2);
             }
         }
         squared.sqrt() / self.columns[last][last].abs() * distance
@@ -95,6 +100,8 @@ fn sign(x: f64) -> i32 {
 }
 
 fn determinant(mut a: Vec<Vec<f64>>) -> f64 {
+    #[cfg(test)]
+    super::work::add(|w| w.determinant += (a.len() as u64).pow(3));
     let mut det = 1.0;
     for j in 0..a.len() {
         let p = (j..a.len()).max_by(|&i, &k| a[i][j].abs().total_cmp(&a[k][j].abs())).unwrap();
@@ -148,8 +155,7 @@ pub(super) struct PressFrame {
     point: usize,
     nullity: usize,
     /// The spare directions are independent of the fold (Q21, Q22c addendum): σ_press then applies.
-    /// Computed once per frame, in the first round the frame's drag runs (the test needs that move's
-    /// target), then frozen. A rebuilt frame computes it again.
+    /// Judged at the two axis pulls in the frame's first round, then frozen. A rebuilt frame judges it again.
     independent_spare: bool,
     /// Whether `independent_spare` has been computed for this frame.
     spare_judged: bool,
@@ -167,10 +173,10 @@ pub(super) struct PressFrame {
 }
 
 impl PressFrame {
-    pub(super) fn new(s: &System, p: PointId) -> Self {
+    pub(super) fn new(s: &System, p: PointId, scale: f64) -> Self {
         let point = s.points[p.0];
         let branches = s.branches();
-        let (_, jac, _) = s.evaluate(&s.x, s.scale(), &branches);
+        let (_, jac, _) = s.evaluate(&s.x, scale, &branches);
         let qr = DragQr::new(&jac, s.x.len());
         let mut frame = Self { anchor: s.x.clone(), branches, point, nullity: 0, independent_spare: false, spare_judged: false, reach: 0, spare: Vec::new(),
             tau: [0.0; 2], tau_point: s.at(p), pivot_rows: Vec::new(), press_sign: 0, k_eq_r: false, current: SheetRead::default(), trial_cap: TRIAL_CAP };
@@ -245,6 +251,8 @@ impl PressFrame {
 
     /// Sum of the absolute entries of that matrix (the absolute cofactors beyond 2 by 2).
     fn sheet_scale(&self, qr: &DragQr, tau: P2) -> f64 {
+        #[cfg(test)]
+        super::work::add(|w| w.band_floor += 1);
         let Some(m) = self.sheet_matrix(qr, tau) else { return 0.0 };
         let k = m.len();
         if k <= 2 { return m.iter().flatten().map(|v| v.abs()).sum(); }
@@ -325,7 +333,11 @@ fn chord_projection(s: &System, x: &mut Vec<f64>, scale: f64, branches: &[f64], 
     let (mut r, mut jac, _) = s.evaluate(x, scale, branches);
     let mut residual = max_abs(&r);
     let mut fresh = round_qr.is_none();
-    let mut local_qr = if fresh { Some(DragQr::new(&jac, n)) } else { None };
+    let mut local_qr = if fresh {
+        #[cfg(test)]
+        super::work::add(|w| w.projection_qr += 1);
+        Some(DragQr::new(&jac, n))
+    } else { None };
     while residual > 0.0 {
         let qr = local_qr.as_ref().or(round_qr).unwrap();
         let delta = qr.chord(&r, n);
@@ -348,6 +360,8 @@ fn chord_projection(s: &System, x: &mut Vec<f64>, scale: f64, branches: &[f64], 
             // all-row residual. In particular a conflicting dependent row can
             // keep it nonzero after every pivot row has reached zero.
             if fresh || !allow_refactor { return false; }
+            #[cfg(test)]
+            super::work::add(|w| w.projection_qr += 1);
             local_qr = Some(DragQr::new(&jac, n));
             fresh = true;
         }
@@ -356,10 +370,53 @@ fn chord_projection(s: &System, x: &mut Vec<f64>, scale: f64, branches: &[f64], 
     true
 }
 
-fn reduced_hessian(s: &System, point: usize, qr: &DragQr, pull: P2,
-                   scale: f64, branches: &[f64], h: f64) -> (Vec<Vec<f64>>, [f64; 2]) {
+struct CurvatureTable {
+    n: usize,
+    h: f64,
+    // For each Z direction, the nonzero Jacobian differences in each constraint row.
+    diffs: Vec<Vec<Vec<(usize, f64)>>>,
+}
+
+fn row_differences(plus: &[(usize, f64)], minus: &[(usize, f64)]) -> Vec<(usize, f64)> {
+    let mut row = Vec::new();
+    let mut plus = plus.iter().copied().peekable();
+    let mut minus = minus.iter().copied().peekable();
+    loop {
+        let a = match (plus.peek(), minus.peek()) {
+            (Some(&(a, _)), Some(&(b, _))) => a.min(b),
+            (Some(&(a, _)), None) | (None, Some(&(a, _))) => a,
+            (None, None) => break,
+        };
+        let p = plus.next_if(|&(b, _)| b == a).map_or(0.0, |(_, value)| value);
+        let m = minus.next_if(|&(b, _)| b == a).map_or(0.0, |(_, value)| value);
+        let d = p - m;
+        if d != 0.0 { row.push((a, d)); }
+    }
+    row
+}
+
+fn curvature_table(s: &System, qr: &DragQr, scale: f64, branches: &[f64], h: f64) -> CurvatureTable {
+    #[cfg(test)]
+    super::work::add(|w| w.hessian_tables += 1);
     let n = s.x.len();
+    let mut diffs = Vec::with_capacity(qr.z.len());
+    for zj in &qr.z {
+        let plus: Vec<_> = s.x.iter().zip(zj).map(|(x, z)| x + h * z).collect();
+        let minus: Vec<_> = s.x.iter().zip(zj).map(|(x, z)| x - h * z).collect();
+        let (_, jp, _) = s.evaluate(&plus, scale, branches);
+        let (_, jm, _) = s.evaluate(&minus, scale, branches);
+        let rows = (0..jp.rows().min(jm.rows())).map(|i| row_differences(jp.row(i), jm.row(i))).collect();
+        diffs.push(rows);
+    }
+    CurvatureTable { n, h, diffs }
+}
+
+fn reduced_hessian(table: &CurvatureTable, point: usize, qr: &DragQr, pull: P2) -> (Vec<Vec<f64>>, [f64; 2]) {
+    let n = table.n;
+    let h = table.h;
     let k = qr.z.len();
+    #[cfg(test)]
+    super::work::add(|w| w.reduced_hessian += (k as u64).pow(2) * n as u64);
     let mut rhs = vec![0.0; n];
     rhs[point..point + 2].copy_from_slice(&pull);
     let lambda = qr.multipliers(rhs);
@@ -367,14 +424,12 @@ fn reduced_hessian(s: &System, point: usize, qr: &DragQr, pull: P2,
     let mut point_squared = 0.0;
     let mut curvature_squared = 0.0;
     for (j, zj) in qr.z.iter().enumerate() {
-        let plus: Vec<_> = s.x.iter().zip(zj).map(|(x, z)| x + h * z).collect();
-        let minus: Vec<_> = s.x.iter().zip(zj).map(|(x, z)| x - h * z).collect();
-        let (_, jp, _) = s.evaluate(&plus, scale, branches);
-        let (_, jm, _) = s.evaluate(&minus, scale, branches);
         let mut curvature = vec![0.0; n];
-        for ((rp, rm), &l) in jp.chunks_exact(n).zip(jm.chunks_exact(n)).zip(&lambda) {
-            for a in 0..n {
-                curvature[a] += l * (rp[a] - rm[a]);
+        // Skipped terms add ±0 to a sum starting at +0. Exact cancellation rounds to +0,
+        // so the sum never reaches −0, and the nonzero differences retain their original order.
+        for (row, &l) in table.diffs[j].iter().zip(&lambda) {
+            for &(a, d) in row {
+                curvature[a] += l * d;
             }
         }
         for (i, zi) in qr.z.iter().enumerate() {
@@ -400,54 +455,206 @@ struct SmallEigen {
     vectors: Vec<Vec<f64>>,
 }
 
+/// The reduced Hessian uses Jacobi through this size, which keeps every calibrated cell bit-exact,
+/// and QL above it. The grams in `set_basis` and `reach_eigen` stay on Jacobi at every k. They
+/// order a real eigenvalue against a zero cluster at `point_mobility`'s 1e-14 cut, where QL's
+/// absolute error, about k·ε·‖G‖, is larger (Q28).
+const JACOBI_MAX_K: usize = 16;
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum EigenSolver { Auto, Jacobi, Ql }
+
+#[cfg(test)]
+thread_local! {
+    static EIGEN_SOLVER: std::cell::Cell<EigenSolver> = const { std::cell::Cell::new(EigenSolver::Auto) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_eigen_solver(solver: EigenSolver) -> EigenSolver {
+    EIGEN_SOLVER.with(|slot| slot.replace(solver))
+}
+
 impl SmallEigen {
+    fn new(a: Vec<Vec<f64>>) -> Self {
+        #[cfg(test)]
+        match EIGEN_SOLVER.with(std::cell::Cell::get) {
+            EigenSolver::Jacobi => return Self::jacobi(a),
+            EigenSolver::Ql => return Self::ql(a),
+            EigenSolver::Auto => {}
+        }
+        if a.len() <= JACOBI_MAX_K { Self::jacobi(a) } else { Self::ql(a) }
+    }
+
     fn jacobi(mut a: Vec<Vec<f64>>) -> Self {
         let k = a.len();
-        let mut v = vec![vec![0.0; k]; k];
-        for i in 0..k {
-            v[i][i] = 1.0;
-        }
+        #[cfg(test)]
+        let mut count = 0u64;
         let magnitude = a.iter().map(|row| max_abs(row)).fold(0.0, f64::max);
+        // Flat row-major storage preserves the Jacobi rotations bit for bit.
+        let mut flat = Vec::with_capacity(k * k);
+        for row in a.drain(..) {
+            flat.extend_from_slice(&row);
+        }
+        let mut a = flat;
+        let mut v = vec![0.0; k * k];
+        for i in 0..k {
+            v[i * k + i] = 1.0;
+        }
         loop {
             let mut rotated = false;
             for i in 0..k {
                 for j in i + 1..k {
-                    let off = a[i][j];
+                    let off = a[i * k + j];
                     if off.abs() <= f64::EPSILON * magnitude {
                         continue;
                     }
                     rotated = true;
-                    let half_gap = 0.5 * (a[j][j] - a[i][i]);
+                    // Two diagonal updates and two multiply-adds per rotated pair in A and V.
+                    #[cfg(test)]
+                    { count += 2 + 2 * ((k - 2) as u64 + k as u64); }
+                    let half_gap = 0.5 * (a[j * k + j] - a[i * k + i]);
                     let t = if half_gap == 0.0 { 1.0 } else {
                         off / (half_gap + half_gap.hypot(off).copysign(half_gap))
                     };
                     let c = 1.0 / t.hypot(1.0);
                     let sn = t * c;
-                    a[i][i] -= t * off;
-                    a[j][j] += t * off;
-                    a[i][j] = 0.0;
-                    a[j][i] = 0.0;
+                    a[i * k + i] -= t * off;
+                    a[j * k + j] += t * off;
+                    a[i * k + j] = 0.0;
+                    a[j * k + i] = 0.0;
                     for l in 0..k {
                         if l != i && l != j {
-                            let (u, w) = (a[l][i], a[l][j]);
-                            a[l][i] = c * u - sn * w;
-                            a[l][j] = sn * u + c * w;
-                            a[i][l] = a[l][i];
-                            a[j][l] = a[l][j];
+                            let (u, w) = (a[l * k + i], a[l * k + j]);
+                            a[l * k + i] = c * u - sn * w;
+                            a[l * k + j] = sn * u + c * w;
+                            a[i * k + l] = a[l * k + i];
+                            a[j * k + l] = a[l * k + j];
                         }
-                        let (u, w) = (v[i][l], v[j][l]);
-                        v[i][l] = c * u - sn * w;
-                        v[j][l] = sn * u + c * w;
+                        let (u, w) = (v[i * k + l], v[j * k + l]);
+                        v[i * k + l] = c * u - sn * w;
+                        v[j * k + l] = sn * u + c * w;
                     }
                 }
             }
             if !rotated { break; }
         }
         let mut order: Vec<_> = (0..k).collect();
-        order.sort_by(|&i, &j| a[i][i].total_cmp(&a[j][j]));
+        order.sort_by(|&i, &j| a[i * k + i].total_cmp(&a[j * k + j]));
+        #[cfg(test)]
+        work::add(|w| w.eigen_jacobi_ops += count);
         Self {
-            values: order.iter().map(|&i| a[i][i]).collect(),
-            vectors: order.iter().map(|&i| v[i].clone()).collect(),
+            values: order.iter().map(|&i| a[i * k + i]).collect(),
+            vectors: order.iter().map(|&i| v[i * k..(i + 1) * k].to_vec()).collect(),
+        }
+    }
+
+    /// Symmetric Householder reduction followed by implicit QL on the tridiagonal matrix.
+    fn ql(a: Vec<Vec<f64>>) -> Self {
+        let k = a.len();
+        let mut matrix = Vec::with_capacity(k * k);
+        for row in a {
+            matrix.extend_from_slice(&row);
+        }
+        let mut q = vec![0.0; k * k];
+        for i in 0..k { q[i * k + i] = 1.0; }
+        let mut e = vec![0.0; k];
+        let mut work_vec = vec![0.0; k];
+        #[cfg(test)]
+        let mut count = 0u64;
+
+        // Reduce row i to its subdiagonal entry. Earlier rows form the active symmetric block A.
+        for i in (2..k).rev() {
+            let (leading, rest) = matrix.split_at_mut(i * k);
+            let u = &mut rest[..i];
+            let scale: f64 = u.iter().map(|x| x.abs()).sum();
+            if scale == 0.0 { continue; }
+            for x in &mut *u { *x /= scale; }
+            let squared = dot(u, u);
+            let alpha = -squared.sqrt().copysign(u[i - 1]);
+            let beta = 1.0 / (squared - alpha * u[i - 1]);
+            u[i - 1] -= alpha;
+            e[i - 1] = scale * alpha;
+
+            // H = I - βuuᵀ. Write HAH as A - uwᵀ - wuᵀ, updating each symmetric pair once.
+            let w = &mut work_vec[..i];
+            for (wj, row) in w.iter_mut().zip(leading.chunks_exact(k)) {
+                *wj = beta * dot(&row[..i], u);
+            }
+            let correction = 0.5 * beta * dot(u, w);
+            for j in 0..i { w[j] -= correction * u[j]; }
+            for j in 0..i {
+                for l in 0..=j {
+                    let value = leading[j * k + l] - (u[j] * w[l] + w[j] * u[l]);
+                    leading[j * k + l] = value;
+                    leading[l * k + j] = value;
+                }
+            }
+            // Accumulate QH in reduction order, so the tridiagonal is Qᵀ A_original Q.
+            for row in q.chunks_exact_mut(k) {
+                let weight = beta * dot(&row[..i], u);
+                for l in 0..i { row[l] -= weight * u[l]; }
+            }
+            #[cfg(test)]
+            {
+                let i = i as u64;
+                count += 2 * i * i + 4 * i + 1 + 2 * k as u64 * i;
+            }
+        }
+        // e[i] couples d[i] to d[i+1]. The final entry remains the zero sentinel.
+        if k > 1 { e[0] = matrix[k]; }
+        let mut d: Vec<_> = (0..k).map(|i| matrix[i * k + i]).collect();
+
+        let mut tst1 = 0.0_f64;
+        for l in 0..k {
+            tst1 = tst1.max(d[l].abs() + e[l].abs());
+            let cut = f64::EPSILON * tst1;
+            'sweep: loop {
+                let mut m = l;
+                while m + 1 < k && e[m].abs() > cut { m += 1; }
+                if m == l { break; }
+
+                // Wilkinson shift of the leading 2 × 2, carried implicitly from the far end.
+                let gap = (d[l + 1] - d[l]) / (2.0 * e[l]);
+                let mut g = (d[m] - d[l]) + e[l] / (gap + gap.hypot(1.0).copysign(gap));
+                let (mut sine, mut cosine, mut shift) = (1.0, 1.0, 0.0);
+                for i in (l..m).rev() {
+                    let f = sine * e[i];
+                    let b = cosine * e[i];
+                    let radius = g.hypot(f);
+                    e[i + 1] = radius;
+                    if radius == 0.0 {
+                        d[i + 1] -= shift;
+                        e[m] = 0.0;
+                        continue 'sweep;
+                    }
+                    sine = f / radius;
+                    cosine = g / radius;
+                    g = d[i + 1] - shift;
+                    let delta = (d[i] - g) * sine + 2.0 * cosine * b;
+                    shift = sine * delta;
+                    d[i + 1] = g + shift;
+                    g = cosine * delta - b;
+                    for row in q.chunks_exact_mut(k) {
+                        let (x, y) = (row[i], row[i + 1]);
+                        row[i] = cosine * x - sine * y;
+                        row[i + 1] = sine * x + cosine * y;
+                    }
+                    #[cfg(test)]
+                    { count += 3 + 2 * k as u64; }
+                }
+                d[l] -= shift;
+                e[l] = g;
+                e[m] = 0.0;
+            }
+        }
+        let mut order: Vec<_> = (0..k).collect();
+        order.sort_by(|&i, &j| d[i].total_cmp(&d[j]));
+        #[cfg(test)]
+        work::add(|w| w.eigen_ql_ops += count);
+        Self {
+            values: order.iter().map(|&j| d[j]).collect(),
+            vectors: order.iter().map(|&j| (0..k).map(|i| q[i * k + j]).collect()).collect(),
         }
     }
 
@@ -668,8 +875,8 @@ struct Reduced {
 
 /// The reduced model per weak direction. Sign: c is such that r . c = v^T K_d v, so that
 /// with S empty r.c = ev - |Bv|^2.
-fn reduced_model(s: &System, point: usize, qr: &DragQr, eig: &SmallEigen, r: P2, tol: f64, nu: f64,
-                 c0: f64, norm_btb: f64, scale: f64, branches: &[f64], h: f64) -> Reduced {
+fn reduced_model(table: &CurvatureTable, point: usize, qr: &DragQr, eig: &SmallEigen, r: P2, tol: f64, nu: f64,
+                 c0: f64, norm_btb: f64) -> Reduced {
     let k = qr.z.len();
     let bcol: Vec<P2> = qr.z.iter().map(|z| [z[point], z[point + 1]]).collect();
     let strong: Vec<usize> = (0..k).filter(|&j| eig.values[j] > c0).collect();
@@ -695,8 +902,8 @@ fn reduced_model(s: &System, point: usize, qr: &DragQr, eig: &SmallEigen, r: P2,
     if weak_ids.is_empty() { return out; }
     let (kx, ky) = if rank_s < 2 {
         let btb = |i: usize, j: usize| bcol[i][0] * bcol[j][0] + bcol[i][1] * bcol[j][1];
-        let hx = reduced_hessian(s, point, qr, [1.0, 0.0], scale, branches, h).0;
-        let hy = reduced_hessian(s, point, qr, [0.0, 1.0], scale, branches, h).0;
+        let hx = reduced_hessian(table, point, qr, [1.0, 0.0]).0;
+        let hy = reduced_hessian(table, point, qr, [0.0, 1.0]).0;
         let sub = |m: &Vec<Vec<f64>>| (0..k).map(|i| (0..k).map(|j| m[i][j] - btb(i, j)).collect::<Vec<f64>>()).collect::<Vec<_>>();
         (sub(&hx), sub(&hy))
     } else { (Vec::new(), Vec::new()) };
@@ -730,6 +937,18 @@ pub(super) struct MoveEnd {
     pub(super) outcome: DragOutcome,
 }
 
+/// The pose a move ended at, kept for the next move's start. Its residuals `r` and compressed
+/// Jacobian `jac` are exactly those from `s.evaluate(&pose, scale, &frame.branches)`, and
+/// `qr` is exactly `DragQr::new(&jac, pose.len())`.
+#[derive(Clone, Debug)]
+pub(super) struct Kept {
+    pose: Vec<f64>,
+    scale: f64,
+    r: Vec<f64>,
+    jac: Jac,
+    qr: DragQr,
+}
+
 /// Constraint residual, slope and curvature used to judge one move, and its stopping state.
 struct MoveState {
     tol: f64,
@@ -744,20 +963,32 @@ struct MoveState {
 /// An accepted pose holds the constraints and is no farther from the target
 /// within the distance objective's measured resolution. Where a sheet can
 /// be enforced, accepted poses stay on the press sheet or in its fold band.
-pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, frame: &mut PressFrame) -> MoveEnd {
+/// Reuse `kept` when pose and scale match bit for bit, and keep the end pose's evaluation and QR when available.
+pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, frame: &mut PressFrame,
+                        scale: f64, kept: &mut Option<Kept>) -> MoveEnd {
+    let previous = kept.take().filter(|entry| {
+        entry.scale.to_bits() == scale.to_bits() && entry.pose.len() == s.x.len()
+            && entry.pose.iter().zip(&s.x).all(|(a, b)| a.to_bits() == b.to_bits())
+    });
     let start = s.x.clone();
     let start_frame = frame.clone();
     let n = s.x.len();
     let i = s.points[p.0];
-    let scale = s.scale();
     let branches = frame.branches.clone();
     let h = f64::EPSILON.cbrt() * scale;
     let mut report = MoveState {
         tol: opts.tolerance * scale, rounds: 0, residual: 0.0, gamma: 0.0, nu: 0.0,
         lambda_min: 0.0, outcome: DragOutcome::NotReached,
     };
-    let (mut r, mut jac, _) = s.evaluate(&s.x, scale, &branches);
+    let (mut r, mut jac, mut cached_qr) = match previous {
+        Some(entry) => (entry.r, entry.jac, Some(entry.qr)),
+        None => {
+            let (r, jac, _) = s.evaluate(&s.x, scale, &branches);
+            (r, jac, None)
+        }
+    };
     if max_abs(&r) > report.tol {
+        cached_qr = None;
         let mut x = s.x.clone();
         let mut correction = ProjectionCorrection::default();
         let projected = project_pose(s, &mut x, scale, &branches, report.tol, i, &mut correction, None);
@@ -769,7 +1000,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
     }
     let mut radius = f64::INFINITY;
     let mut best_gamma_accept = f64::INFINITY;
-    let mut cached_qr = None;
+    let mut restored_start = false;
     // Each round carries forward the trust radius, frozen constraints and acceptance history.
     let mut advance_one_round = || -> bool {
         if report.rounds >= opts.max_iterations {
@@ -777,16 +1008,56 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             return false;
         }
         report.rounds += 1;
-        let qr = cached_qr.take().unwrap_or_else(|| DragQr::new(&jac, n));
+        let qr: &DragQr = cached_qr.get_or_insert_with(|| {
+            #[cfg(test)]
+            super::work::add(|w| w.start_qr += 1);
+            DragQr::new(&jac, n)
+        });
+        // Q26: the spare is independent of the fold when curvature and slope vanish on every spare
+        // direction at both axis pulls, scale·e_x and scale·e_y. This pull-free test gives the press
+        // its class independently of the first target. Judge it in the frame's first round, then freeze it.
+        let mut judged_table = None;
+        if !frame.spare.is_empty() && !frame.spare_judged {
+            let table = curvature_table(s, qr, scale, &branches, h);
+            let k = qr.z.len();
+            let btb = |a: usize, b: usize| dot(&qr.z[a][i..i + 2], &qr.z[b][i..i + 2]);
+            let (hx, nrm) = reduced_hessian(&table, i, qr, [1.0, 0.0]);
+            let hy = reduced_hessian(&table, i, qr, [0.0, 1.0]).0;
+            let p_norm = nrm[0];
+            let kappa = qr.noise_floor(&jac, scale);
+            let mut ok = true;
+            for v in &frame.spare {
+                let u: Vec<f64> = qr.z.iter().map(|z| dot(z, v)).collect();
+                let quad = |m: &Vec<Vec<f64>>| (0..k).map(|a| (0..k).map(|b| u[a] * (m[a][b] - btb(a, b)) * u[b]).sum::<f64>()).sum::<f64>();
+                let c = [-quad(&hx), -quad(&hy)];
+                let n_eff = 2e-8 * scale * c[0].hypot(c[1]) + 16.0 * f64::EPSILON * p_norm;
+                for (a_dir, h_a) in [(0usize, &hx), (1usize, &hy)] {
+                    let w: Vec<f64> = (0..k).map(|p| (0..k).map(|q| btb(p, q) * u[q] + scale * (h_a[p][q] - btb(p, q)) * u[q]).sum::<f64>()).collect();
+                    let g_a = scale * (0..k).map(|j| u[j] * qr.z[j][i + a_dir]).sum::<f64>();
+                    if norm(&w) > n_eff || g_a.abs() > kappa { ok = false; }
+                }
+            }
+            frame.independent_spare = ok;
+            frame.spare_judged = true;
+            judged_table = Some(table);
+        }
+        // R8: check Reached before building the round's model.
+        report.residual = max_abs(&r);
+        let offset = [s.x[i] - target[0], s.x[i + 1] - target[1]];
+        let length = offset[0].hypot(offset[1]);
+        if report.residual <= report.tol && length <= report.tol / 2.0 {
+            report.outcome = DragOutcome::Reached;
+            return false;
+        }
         let d = [target[0] - s.x[i], target[1] - s.x[i + 1]];
         let distance = norm(&d);
         let coordinate_floor = 8.0 * f64::EPSILON * max_abs(&s.x).max(1.0) * distance;
-        let gamma = drag_gradient(&qr, i, d);
-        report.residual = max_abs(&r);
+        let gamma = drag_gradient(qr, i, d);
         report.gamma = norm(&gamma);
-        report.nu = qr.noise_floor(&jac, n, distance);
-        let (hessian, term_norms) = reduced_hessian(s, i, &qr, d, scale, &branches, h);
-        let eig = SmallEigen::jacobi(hessian.clone());
+        report.nu = qr.noise_floor(&jac, distance);
+        let table = judged_table.take().unwrap_or_else(|| curvature_table(s, qr, scale, &branches, h));
+        let (hessian, term_norms) = reduced_hessian(&table, i, qr, d);
+        let eig = SmallEigen::new(hessian.clone());
         report.lambda_min = eig.values.first().copied().unwrap_or(0.0);
         let curvature_floor = CURVATURE_FLOOR * (term_norms[0] + term_norms[1]);
         let g: Vec<_> = eig.vectors.iter().map(|v| dot(v, &gamma)).collect();
@@ -797,7 +1068,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             .filter(|(_, ev)| **ev > curvature_floor)
             .map(|(gj, ev)| (gj / ev).powi(2)).sum::<f64>().sqrt();
         let r_vec = [s.x[i] - target[0], s.x[i + 1] - target[1]];
-        let red = reduced_model(&*s, i, &qr, &eig, r_vec, report.tol, report.nu, curvature_floor, term_norms[0], scale, &branches, h);
+        let red = reduced_model(&table, i, qr, &eig, r_vec, report.tol, report.nu, curvature_floor, term_norms[0]);
         let pin_early = {
             let mut by_e = [0.0_f64, 0.0];
             for j in 0..qr.z.len() {
@@ -809,38 +1080,16 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             by_e[0].hypot(by_e[1])
         };
         let nearest_new = report.residual <= report.tol && !red.ridge_any && pin_early <= report.tol * (2.0 / 3.0) && red.all_settled;
-        // Q21, Q22c addendum: the spare is independent of the fold when the reduced Hessian and
-        // the slope vanish on every spare direction, within the curvature noise n_eff and the slope noise ν.
-        // Judged once, at the frame's first round, then frozen.
-        if !frame.spare.is_empty() && !frame.spare_judged {
-            let k = qr.z.len();
-            let btb = |a: usize, b: usize| dot(&qr.z[a][i..i + 2], &qr.z[b][i..i + 2]);
-            let hx = reduced_hessian(&*s, i, &qr, [1.0, 0.0], scale, &branches, h).0;
-            let hy = reduced_hessian(&*s, i, &qr, [0.0, 1.0], scale, &branches, h).0;
-            let mut ok = true;
-            for v in &frame.spare {
-                let u: Vec<f64> = qr.z.iter().map(|z| dot(z, v)).collect();
-                let g_u = dot(&gamma, &u);
-                let quad = |m: &Vec<Vec<f64>>| (0..k).map(|a| (0..k).map(|b| u[a] * (m[a][b] - btb(a, b)) * u[b]).sum::<f64>()).sum::<f64>();
-                let c = [-quad(&hx), -quad(&hy)];
-                let n_eff = 2e-8 * red.r_norm * c[0].hypot(c[1]) + 16.0 * f64::EPSILON * term_norms[0];
-                let hu: Vec<f64> = (0..k).map(|a| (0..k).map(|b| hessian[a][b] * u[b]).sum::<f64>()).collect();
-                let hu_norm = norm(&hu);
-                if hu_norm > n_eff || g_u.abs() > report.nu { ok = false; }
-            }
-            frame.independent_spare = ok;
-            frame.spare_judged = true;
-        }
         // Q22 rule (b): a start below the frame's rank with a strong negative direction takes
-        // the quartic radius θ* when the gates hold (−ev <= 1/32, the linear share <= 1/8).
+        // the quartic radius θ* when the gates hold (−ev <= 1/32, the linear share <= 1/8, θ* <= scale/4).
         let toggle_candidate = frame.current.reach < frame.reach && report.lambda_min < -curvature_floor;
         let pin_inf = s.x[i].abs().max(s.x[i + 1].abs());
         if toggle_candidate {
             let k = qr.z.len();
             let v = &eig.vectors[0];
             let btb = |a: usize, b: usize| dot(&qr.z[a][i..i + 2], &qr.z[b][i..i + 2]);
-            let hx = reduced_hessian(&*s, i, &qr, [1.0, 0.0], scale, &branches, h).0;
-            let hy = reduced_hessian(&*s, i, &qr, [0.0, 1.0], scale, &branches, h).0;
+            let hx = reduced_hessian(&table, i, qr, [1.0, 0.0]).0;
+            let hy = reduced_hessian(&table, i, qr, [0.0, 1.0]).0;
             let quad = |m: &Vec<Vec<f64>>| (0..k).map(|a| (0..k).map(|b| v[a] * (m[a][b] - btb(a, b)) * v[b]).sum::<f64>()).sum::<f64>();
             let c = [-quad(&hx), -quad(&hy)];
             let c_norm = c[0].hypot(c[1]);
@@ -849,7 +1098,9 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             let pred_q_round = if c_norm > 0.0 { eig.values[0] * eig.values[0] / (2.0 * c_norm * c_norm) } else { f64::NAN };
             let lin_share = report.gamma * theta / pred_q_round;
             let ev_gate = -eig.values[0] <= 1.0 / 32.0;
-            let gate_b = theta.is_finite() && lin_share <= 0.125 && ev_gate;
+            // Q25 note 2: the quartic expansion holds over a fraction of the sketch, not over many sketch
+            // sizes, so the radius it routes is at most scale/4 (g1's bound with |c| at the sketch's 1/scale).
+            let gate_b = theta.is_finite() && lin_share <= 0.125 && ev_gate && theta <= scale / 4.0;
             if gate_b {
                 radius = theta;
             }
@@ -861,8 +1112,8 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             let k = qr.z.len();
             let v = &eig.vectors[0];
             let btb = |a: usize, b: usize| dot(&qr.z[a][i..i + 2], &qr.z[b][i..i + 2]);
-            let hx = reduced_hessian(&*s, i, &qr, [1.0, 0.0], scale, &branches, h).0;
-            let hy = reduced_hessian(&*s, i, &qr, [0.0, 1.0], scale, &branches, h).0;
+            let hx = reduced_hessian(&table, i, qr, [1.0, 0.0]).0;
+            let hy = reduced_hessian(&table, i, qr, [0.0, 1.0]).0;
             let quad = |m: &Vec<Vec<f64>>| (0..k).map(|a| (0..k).map(|b| v[a] * (m[a][b] - btb(a, b)) * v[b]).sum::<f64>()).sum::<f64>();
             let c = [-quad(&hx), -quad(&hy)];
             let c2 = c[0] * c[0] + c[1] * c[1];
@@ -882,7 +1133,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                 let g1 = a_t < 0.0 && -a_t <= 1.0 / 32.0;
                 let g2 = norm(&gres_vec) * theta_near.abs() <= pred_q_o / 8.0;
                 let g3 = bres[0].hypot(bres[1]) * theta_near.abs() <= r_c.abs() / (8.0 * c_norm_o);
-                let gate_o = phi_star.is_finite() && g1 && g2 && g3;
+                let gate_o = phi_star.is_finite() && g1 && g2 && g3 && theta_near.abs() <= scale / 4.0;
                 if gate_o {
                     radius = theta_near.abs();
                 }
@@ -944,7 +1195,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             let (original, mut boundary, fold_choice) = eig.step(&gamma, radius, curvature_floor, slope_floor, report.tol, &qr.z, &s.x, &frame.anchor, other_side, &unzero);
             let original_length = norm(&original);
             let mut mirror_neg = false;
-            let mirror = (kind == TrialKind::Mirror).then(|| mirror_step(&qr, i, &hessian, &gamma, &refused.as_ref().unwrap().step, curvature_floor));
+            let mirror = (kind == TrialKind::Mirror).then(|| mirror_step(qr, i, &hessian, &gamma, &refused.as_ref().unwrap().step, curvature_floor));
             if kind == TrialKind::Mirror && fold_start {
                 let m = mirror.as_ref().unwrap();
                 let model = &refused.as_ref().unwrap().step;
@@ -964,7 +1215,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                     }
                 }
             }
-            let mut projection_qr = &qr;
+            let mut projection_qr = qr;
             let mut x = s.x.clone();
             let step = match kind {
                 TrialKind::Model => original.clone(),
@@ -993,7 +1244,19 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                 for v in &frame.spare { let c = dot(&amb, v); for (o, vi) in s_v.iter_mut().zip(v) { *o += c * vi; } }
                 let ratio = norm(&s_v) / norm(&amb).max(f64::MIN_POSITIVE);
                 if ratio > 8.0 * f64::EPSILON {
-                    for (sj, z) in step.iter_mut().zip(&qr.z) { *sj -= dot(z, &s_v); }
+                    let mut stripped = step.clone();
+                    for (sj, z) in stripped.iter_mut().zip(&qr.z) { *sj -= dot(z, &s_v); }
+                    let prediction = |v: &[f64]| {
+                        let quadratic: f64 = hessian.iter().zip(v).map(|(row, si)| si * dot(row, v)).sum();
+                        -dot(&gamma, v) - 0.5 * quadratic
+                    };
+                    // The strip may spend at most 1/8 of this trial's predicted gain.
+                    if prediction(&stripped) >= (7.0 / 8.0) * prediction(&step) {
+                        step = stripped;
+                    } else {
+                        #[cfg(test)]
+                        super::work::add(|w| w.strip_undone += 1);
+                    }
                 }
             }
             if kind != TrialKind::Twin {
@@ -1004,6 +1267,10 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             let length = norm(&step);
             let quadratic: f64 = hessian.iter().zip(&step).map(|(row, si)| si * dot(row, &step)).sum();
             let pred = -dot(&gamma, &step) - 0.5 * quadratic;
+            #[cfg(test)]
+            if matches!(kind, TrialKind::Model | TrialKind::Mirror) && pred < 0.0 {
+                super::work::add(|w| w.negative_pred += 1);
+            }
             let mut correction = ProjectionCorrection::default();
             let projected = project_pose(s, &mut x, scale, &branches, report.tol, i, &mut correction, Some(projection_qr));
             let dp = [x[i] - s.x[i], x[i + 1] - s.x[i + 1]];
@@ -1023,6 +1290,8 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                 ared >= 1e-4 * pred // ACC_RATIO
             } else if flat {
                 let (trial_r, trial_j, _) = s.evaluate(&x, scale, &branches);
+                #[cfg(test)]
+                super::work::add(|w| w.trial_qr += 1);
                 let trial_qr = DragQr::new(&trial_j, n);
                 let trial_d = [target[0] - x[i], target[1] - x[i + 1]];
                 let trial_gamma = norm(&drag_gradient(&trial_qr, i, trial_d));
@@ -1043,6 +1312,8 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             if accepted || (kind != TrialKind::Model && projected) {
                 let (tr, tj, tq, gamma_accept) = checked.unwrap_or_else(|| {
                     let (tr, tj, _) = s.evaluate(&x, scale, &branches);
+                    #[cfg(test)]
+                    super::work::add(|w| w.trial_qr += 1);
                     let tq = DragQr::new(&tj, n);
                     (tr, tj, tq, None)
                 });
@@ -1064,13 +1335,22 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                         continue;
                     }
                 }
-                if regular && accepted {
-                    let d_eps = candidate.3.noise_floor(&candidate.2, n, 1.0).max(8.0 * f64::EPSILON) * frame.sheet_scale(&candidate.3, tau);
-                    let floor_term = chord.after <= 0.0 && chord.after.abs() <= d_eps;
+                if regular && accepted && chord.after <= 0.0 {
+                    #[cfg(test)]
+                    super::work::add(|w| w.band_crossings += 1);
                     let past_term = chord.before > 0.0 && chord.past.is_some_and(|e| e <= report.tol);
                     let cmp_term = chord.before <= 0.0 && chord.after.abs() <= chord.before.abs();
-                    let band = chord.after <= 0.0 && (floor_term || past_term || cmp_term);
-                    if chord.after <= 0.0 && !band {
+                    let band = past_term || cmp_term || {
+                        let nu1 = candidate.3.noise_floor(&candidate.2, 1.0).max(8.0 * f64::EPSILON);
+                        let k = candidate.3.z.len();
+                        // Every column of the sheet matrix is Zᵀw with Z orthonormal and w a unit vector, so by
+                        // Hadamard each minor is at most 1 and the cofactor sum at most k²; 2 covers its rounding.
+                        chord.after.abs() <= 2.0 * (k * k) as f64 * nu1 && {
+                            let d_eps = nu1 * frame.sheet_scale(&candidate.3, tau);
+                            chord.after.abs() <= d_eps
+                        }
+                    };
+                    if !band {
                         sheet_rejected = true;
                     }
                 }
@@ -1085,7 +1365,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                             if chord.alpha < 0.5 {
                                 kind = TrialKind::Mirror;
                             } else if frame.sheet_dim()>=2 {
-                                kind = match make_twin(s, &qr, &candidate.0, candidate.3,
+                                kind = match make_twin(s, qr, &candidate.0, candidate.3,
                                     frame, chord, scale, report.tol) {
                                     TwinAttempt::Ready(twin) => {
                                         source.twin = Some(twin);
@@ -1151,6 +1431,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
                 let (x, tr, tj, tq, gamma_accept, reading, used_radius, boundary, ratio, tau) = candidate;
                 if !x.iter().all(|v| v.is_finite()) {
                     s.x.clone_from(&start);
+                    restored_start = true;
                     frame.clone_from(&start_frame);
                     report.outcome = DragOutcome::NotReached;
                     eprintln!("constrain drag: a trial pose is not finite; the move restores its start");
@@ -1207,6 +1488,7 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
             let unmeasured = below_res && boundary;
             if unmeasured && original_length / SHRINK >= RUNAWAY * scale {
                 s.x.clone_from(&start);
+                restored_start = true;
                 frame.clone_from(&start_frame);
                 report.outcome = DragOutcome::NotReached;
                 eprintln!("constrain drag: a trial radius ran away (R2); the move restores its start");
@@ -1232,5 +1514,169 @@ pub(super) fn drag_move(s: &mut System, p: PointId, target: P2, opts: &Options, 
         true
     };
     while advance_one_round() {}
+    if !restored_start && report.rounds > 0 {
+        *kept = cached_qr.map(|qr| Kept { pose: s.x.clone(), scale, r, jac, qr });
+    }
     MoveEnd { rounds: report.rounds, outcome: report.outcome }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn symmetric(k: usize, mut entry: impl FnMut(usize, usize) -> f64) -> Vec<Vec<f64>> {
+        let mut matrix = vec![vec![0.0; k]; k];
+        for i in 0..k {
+            for j in 0..=i {
+                let value = entry(i, j);
+                matrix[i][j] = value;
+                matrix[j][i] = value;
+            }
+        }
+        matrix
+    }
+
+    fn same_bits(a: &[f64], b: &[f64]) -> bool {
+        a.iter().map(|v| v.to_bits()).eq(b.iter().map(|v| v.to_bits()))
+    }
+
+    #[test]
+    fn small_eigen_ql_against_jacobi() {
+        let mut state = 0x6b27_f335_856c_d419u64;
+        let mut sample = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 * (2.0 / (1u64 << 53) as f64) - 1.0
+        };
+        let mut ql_ops_32 = 0;
+        for k in [1, 2, 5, 16, 17, 32, 64] {
+            let random = symmetric(k, |_, _| sample());
+            let b0: Vec<_> = (0..k).map(|_| sample()).collect();
+            let b1: Vec<_> = (0..k).map(|_| sample()).collect();
+            let gram = symmetric(k, |i, j| b0[i] * b0[j] + b1[i] * b1[j]);
+            let perturbed = symmetric(k, |i, j| gram[i][j] + 1e-6 * random[i][j]);
+
+            let mut q = vec![vec![0.0; k]; k];
+            for i in 0..k { q[i][i] = 1.0; }
+            for _ in 0..3 {
+                let u: Vec<_> = (0..k).map(|_| sample()).collect();
+                let beta = 2.0 / dot(&u, &u);
+                for row in &mut q {
+                    let weight = beta * dot(row, &u);
+                    for i in 0..k { row[i] -= weight * u[i]; }
+                }
+            }
+            let repeated = symmetric(k, |i, j| {
+                (0..k).map(|l| q[i][l] * (l / 3) as f64 * q[j][l]).sum()
+            });
+
+            for (kind, matrix) in [("random", random), ("Gram", gram),
+                                   ("Gram plus 1e-6", perturbed), ("repeated", repeated)] {
+                work::take();
+                let jacobi = SmallEigen::jacobi(matrix.clone());
+                let jacobi_ops = work::take().eigen_jacobi_ops;
+                let ql = SmallEigen::ql(matrix.clone());
+                let ql_ops = work::take().eigen_ql_ops;
+                let magnitude = jacobi.values[0].abs().max(jacobi.values[k - 1].abs());
+                let bound = 64.0 * k as f64 * f64::EPSILON * magnitude;
+                assert!(ql.values.windows(2).all(|pair| pair[0] <= pair[1]),
+                    "{kind} k={k} QL eigenvalues must be ascending");
+                for (j, v) in ql.vectors.iter().enumerate() {
+                    let error = (ql.values[j] - jacobi.values[j]).abs();
+                    assert!(error <= bound, "{kind} k={k} eigenvalue {j} differs by {error:e}, bound {bound:e}");
+                    for (i, u) in ql.vectors[..=j].iter().enumerate() {
+                        let target = if i == j { 1.0 } else { 0.0 };
+                        let error = (dot(u, v) - target).abs();
+                        assert!(error <= 1e-12, "{kind} k={k} orthonormality error at ({i},{j}) is {error:e}");
+                    }
+                    let residual = matrix.iter().zip(v).map(|(row, &x)| {
+                        (dot(row, v) - ql.values[j] * x).powi(2)
+                    }).sum::<f64>().sqrt();
+                    assert!(residual <= bound, "{kind} k={k} eigenvector {j} residual is {residual:e}, bound {bound:e}");
+                }
+
+                if k == 16 || k == 17 {
+                    let auto = if k == 16 { &jacobi } else { &ql };
+                    for (mode, expected) in [(EigenSolver::Auto, auto), (EigenSolver::Jacobi, &jacobi), (EigenSolver::Ql, &ql)] {
+                        let previous = set_eigen_solver(mode);
+                        let actual = SmallEigen::new(matrix.clone());
+                        set_eigen_solver(previous);
+                        assert!(same_bits(&actual.values, &expected.values),
+                            "{kind} k={k} {mode:?} dispatched eigenvalue bits differ");
+                        for j in 0..k {
+                            assert!(same_bits(&actual.vectors[j], &expected.vectors[j]),
+                                "{kind} k={k} {mode:?} dispatched eigenvector {j} bits differ");
+                        }
+                    }
+                }
+                if kind == "random" && k == 32 { ql_ops_32 = ql_ops; }
+                if kind == "random" && k == 64 {
+                    assert!(ql_ops < 12 * ql_ops_32,
+                        "{kind} k={k} QL work {ql_ops} must be below 12 times its k=32 work {ql_ops_32}");
+                    assert!(ql_ops < jacobi_ops,
+                        "{kind} k={k} QL work {ql_ops} must be below Jacobi work {jacobi_ops}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ql_drag_matches_jacobi_on_a_coupled_chain() {
+        use super::super::Constraint;
+
+        let opts = Options::default();
+        // Built in M3b's order (points, lines, the fix, then the lengths), so its measured spread applies.
+        let mut base = System::new();
+        let mut points = vec![base.point([0.0, 0.0])];
+        let mut at = [0.0_f64, 0.0];
+        for i in 0..25 {
+            let angle = (i as f64 * (90.0 / 25.0)).to_radians();
+            at = [at[0] + 4.0 * angle.cos(), at[1] + 4.0 * angle.sin()];
+            points.push(base.point(at));
+        }
+        let lines: Vec<_> = points.windows(2).map(|pair| base.line(pair[0], pair[1])).collect();
+        base.constrain(Constraint::Fix(points[0], [0.0, 0.0]));
+        for line in lines {
+            base.constrain(Constraint::Length(line, 4.0));
+        }
+        let end = points[25];
+        assert!(base.solve(&opts).converged, "the 25-link chain must converge at the press before the three targets");
+
+        let at = base.at(end);
+        let tol = opts.tolerance * base.scale();
+        let run = |solver, target| {
+            let mut s = base.clone();
+            let previous = set_eigen_solver(solver);
+            let mut drag = s.start_drag(end, &opts);
+            let report = drag.to(&mut s, target);
+            set_eigen_solver(previous);
+            (s, report)
+        };
+        for k in 1..=3 {
+            let target = [at[0] - 0.25 * k as f64, at[1] - 0.15 * k as f64];
+            let (reference, jacobi) = run(EigenSolver::Jacobi, target);
+            let (actual, auto) = run(EigenSolver::Auto, target);
+            assert_eq!(auto.outcome, jacobi.outcome, "target {k} {target:?} must give the same outcome");
+            assert_eq!(auto.rounds, jacobi.rounds, "target {k} {target:?} must take the same number of rounds");
+            assert_eq!(auto.side_enforced, jacobi.side_enforced, "target {k} {target:?} must give the same side enforcement");
+            for (solver, residual) in [("Jacobi", jacobi.residual), ("Auto", auto.residual)] {
+                assert!(residual <= tol, "target {k} {target:?} {solver} residual {residual:e} exceeds {tol:e}");
+            }
+            let reference_pin = reference.at(end);
+            let actual_pin = actual.at(end);
+            for axis in 0..2 {
+                let error = (actual_pin[axis] - reference_pin[axis]).abs();
+                assert!(error <= tol / 100.0, "target {k} {target:?} pin coordinate {axis} differs by {error:e}, above tol/100");
+            }
+            // M3b (Q28): on these three moves the exact controls (Jacobi on the index-reversed matrix,
+            // and on H scaled by 1 ± ε by the parity of i + j) spread the pose by S <= 0.14 tol.
+            // The bound is 2 tol, the next round number above 8 S = 1.11 tol. QL measured 0.05 to 0.13 tol.
+            let pose_bound = 2.0 * tol;
+            for i in 0..base.x.len() {
+                let error = (actual.x[i] - reference.x[i]).abs();
+                assert!(error <= pose_bound, "target {k} {target:?} pose coordinate {i} differs by {error:e}, above {pose_bound:e}");
+            }
+        }
+    }
 }

@@ -1,10 +1,47 @@
 use crate::{Error, Result};
 
-pub(crate) struct Writer { pub bytes: Vec<u8> }
-impl Writer {
-    pub fn new() -> Self { Self { bytes: Vec::new() } }
+enum Sink<'a> {
+    Buffer,
+    Measure,
+    Compare(&'a [u8]),
+    Hash(Box<makepad_core_util::sha256::Sha256>),
+}
+
+pub(crate) struct Writer<'a> {
+    pub bytes: Vec<u8>,
+    sink: Sink<'a>,
+    length: usize,
+}
+impl<'a> Writer<'a> {
+    pub fn new() -> Self { Self::with_sink(Sink::Buffer) }
+    pub fn measure() -> Self { Self::with_sink(Sink::Measure) }
+    pub fn compare(bytes: &'a [u8]) -> Self { Self::with_sink(Sink::Compare(bytes)) }
+    pub fn hashing() -> Self { Self::with_sink(Sink::Hash(Box::default())) }
+    fn with_sink(sink: Sink<'a>) -> Self { Self { bytes: Vec::new(), sink, length: 0 } }
+    pub fn len(&self) -> usize { self.length }
+    pub fn finish_hash(self) -> [u8; 32] {
+        match self.sink { Sink::Hash(h) => h.finish(), _ => unreachable!() }
+    }
     pub fn raw(&mut self, bytes: &[u8]) -> Result<()> {
-        self.bytes.extend_from_slice(bytes); Ok(())
+        let end = self.length.checked_add(bytes.len()).ok_or(Error::Budget("model source size"))?;
+        match &mut self.sink {
+            Sink::Buffer => self.bytes.extend_from_slice(bytes),
+            Sink::Measure => {}
+            Sink::Hash(h) => h.update(bytes),
+            Sink::Compare(source) if source.get(self.length..end) != Some(bytes) => return Err(Error::Corrupt("noncanonical document")),
+            Sink::Compare(_) => {}
+        }
+        self.length = end;
+        Ok(())
+    }
+    pub fn measure_or_reserve(&mut self, size: usize) -> Result<bool> {
+        if matches!(self.sink, Sink::Measure) {
+            self.length = self.length.checked_add(size).ok_or(Error::Budget("model source size"))?;
+            Ok(true)
+        } else {
+            if matches!(self.sink, Sink::Buffer) { self.bytes.reserve_exact(size); }
+            Ok(false)
+        }
     }
     pub fn u8(&mut self, v: u8) -> Result<()> { self.raw(&[v]) }
     pub fn u32(&mut self, v: u32) -> Result<()> { self.raw(&v.to_le_bytes()) }
@@ -66,7 +103,7 @@ impl CanonicalZeros for crate::document::State {
     fn canonicalize_zeros(&mut self) {
         use crate::*;
         let Self { objects, materials, skeleton, clips, scene, selections, rig, surface, soft_body } = self;
-        objects.values_mut().for_each(mesh::Mesh::canonicalize_zeros);
+        objects.values_mut().filter_map(crate::baked::MeshEntry::editable_mut).for_each(mesh::Mesh::canonicalize_zeros);
         for Material { color, base_color_png: _ } in materials.values_mut() { zeros!(color); }
         if let Some(Skeleton { joints }) = skeleton { for Joint { name: _, parent: _, translation } in joints { zeros!(translation); } }
         for AnimationClip { name: _, channels } in clips.values_mut() {

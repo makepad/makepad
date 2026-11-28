@@ -1,10 +1,11 @@
+use crate::{baked::MeshEntry, ObjectGeometry};
 use crate::{
     canon::{CanonicalZeros, Reader, Writer},
     mesh,
     rig::{read_clip, read_skeleton, write_clip, write_skeleton},
     AnimationClip, Material, Operation, OperationResult, Skeleton,
 };
-use makepad_core_util::sha256::{sha256, Sha256};
+use makepad_core_util::sha256::sha256;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
@@ -24,6 +25,13 @@ pub enum Error {
     DuplicateObject(String),
     StaleHead { expected: Head, actual: Head },
     RequestIdReused,
+    BakedObject { index: usize, op: &'static str, object: String },
+}
+impl Error {
+    /// Whether the builder should retry this refusal under a larger working-memory limit.
+    pub fn is_memory_refusal(&self) -> bool {
+        matches!(self, Self::WorkingBytes { .. } | Self::Mesh(mesh::MeshError::Budget { resource: "bytes", .. }) | Self::Budget(_))
+    }
 }
 impl From<mesh::MeshError> for Error {
     fn from(v: mesh::MeshError) -> Self {
@@ -33,6 +41,7 @@ impl From<mesh::MeshError> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BakedObject { index, op, object } => write!(f, "operation {index}: cannot {op} '{object}': the object is baked"),
             Self::UnsupportedVersion(version) => write!(
                 f,
                 "model source version {version} is not supported (this build reads version {SOURCE_VERSION})"
@@ -88,7 +97,7 @@ pub struct Applied {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct State {
-    pub objects: BTreeMap<String, mesh::Mesh>,
+    pub objects: BTreeMap<String, ObjectGeometry>,
     pub materials: BTreeMap<u32, Material>,
     pub skeleton: Option<Skeleton>,
     pub clips: BTreeMap<String, AnimationClip>,
@@ -99,14 +108,35 @@ pub(crate) struct State {
     pub soft_body: Option<makepad_gltf::SoftBodyMetadata>,
 }
 impl State {
+    pub(crate) fn editable(&self, name: &str) -> Option<&mesh::Mesh> {
+        self.objects.get(name)?.editable()
+    }
+    pub(crate) fn editable_mut(&mut self, name: &str) -> Option<&mut mesh::Mesh> {
+        self.objects.get_mut(name)?.editable_mut()
+    }
+    pub(crate) fn editable_objects(&self) -> impl Iterator<Item = (&String, &mesh::Mesh)> {
+        self.objects.iter().filter_map(|(name, geometry)| Some((name, geometry.editable()?)))
+    }
     fn memory_bytes(&self) -> usize {
         self.mesh_bytes().saturating_add(self.bytes_besides_meshes())
     }
-    fn mesh_bytes(&self) -> usize {
-        self.objects.iter().fold(0usize, |n, (name, m)| {
-            n.saturating_add(m.memory_bytes())
-                .saturating_add(name.len().saturating_mul(2))
-                .saturating_add(128)
+    pub(crate) fn baked_meshes(&self) -> impl Iterator<Item = &std::sync::Arc<crate::BakedMesh>> {
+        self.objects.values().filter_map(|g| match g { ObjectGeometry::Baked(m) => Some(m), _ => None })
+    }
+    pub(crate) fn baked_bytes(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.baked_meshes().filter(|m| seen.insert(std::sync::Arc::as_ptr(m))).map(|m| m.memory_bytes()).sum()
+    }
+    // Frozen arrays in a replay candidate are already owned by its checkpoint or log.
+    fn copy_bytes(&self) -> usize { self.mesh_copy_bytes().saturating_add(self.bytes_besides_meshes()) }
+    fn copies_bytes(&self, copies: usize) -> usize {
+        self.copy_bytes().saturating_mul(copies).saturating_add(self.baked_bytes())
+    }
+    fn mesh_bytes(&self) -> usize { self.mesh_copy_bytes().saturating_add(self.baked_bytes()) }
+    fn mesh_copy_bytes(&self) -> usize {
+        self.objects.iter().fold(0usize, |n, (name, geometry)| {
+            n.saturating_add(geometry.editable().map_or(0, mesh::Mesh::memory_bytes))
+                .saturating_add(name.len().saturating_mul(2)).saturating_add(128)
         })
     }
     fn bytes_besides_meshes(&self) -> usize {
@@ -236,6 +266,7 @@ pub struct Document {
     log_memory: Vec<usize>,
     log_source: Vec<usize>,
     log_memory_bytes: usize,
+    log_baked_bytes: usize,
     log_source_bytes: usize,
     checkpoint_source: SourceMeasure,
     cursor: usize,
@@ -261,7 +292,7 @@ impl LastUse {
         self.0.compile_with_cache(cache, cancelled)
     }
     /// The working memory its edits and compiles may hold, in bytes (`mesh::Limits::max_bytes`).
-    pub fn set_memory_limit(&mut self, bytes: usize) { self.0.limits.mesh.max_bytes = bytes; }
+    pub fn set_memory_limit(&mut self, bytes: usize) { self.0.set_memory_limit(bytes); }
 }
 /// An unlogged model state, for callers that keep their own program and undo
 /// log and rebuild the model from it: operations execute in place, with none
@@ -275,6 +306,12 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    pub(crate) fn check_geometry_op(&self, index: usize, op: &Operation) -> Result<()> {
+        self.state.check_geometry_op(index, op)
+    }
+    pub(crate) fn check_editable(&self, index: usize, op: &'static str, name: &str) -> Result<()> {
+        self.state.check_editable(index, op, name)
+    }
     pub fn new(limits: Limits) -> Result<Self> {
         let mut state = State::default();
         state.materials.insert(0, Material::default());
@@ -288,22 +325,26 @@ impl Workspace {
     pub fn execute(&mut self, ops: &[Operation], cancelled: Option<&dyn Fn() -> bool>) -> Result<Vec<OperationResult>> {
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         ctx.checkpoint(1)?;
-        execute_with(&mut self.state, ops, &self.limits, &mut ctx, false, &mut 0)
+        execute_with(&mut self.state, ops, &self.limits, &mut ctx, Execution::Workspace, &mut 0)
     }
     /// Program batches are disposable on failure; retain the failing operation
     /// index instead of cloning the state for a successful batch's rollback.
-    pub(crate) fn execute_program(&mut self, ops: &[Operation], retained_bytes: usize, cancelled: Option<&dyn Fn() -> bool>) -> std::result::Result<(), (usize, Error)> {
+    pub(crate) fn execute_program(&mut self, ops: &[Operation], retained_bytes: usize, borrowed_baked_bytes: usize, cancelled: Option<&dyn Fn() -> bool>) -> std::result::Result<(), (usize, Error)> {
+        // The program has already reserved the immutable payloads. Validate each
+        // source operation against the full limit, then charge only its private storage.
+        let mut source_limits = self.limits.clone();
+        source_limits.mesh.max_bytes += borrowed_baked_bytes;
         for (index, op) in ops.iter().enumerate() {
             if cancelled.is_some_and(|c| c()) { return Err((index, Error::Mesh(mesh::MeshError::Cancelled))); }
-            op.check(&self.limits).map_err(|error| (index, error))?;
+            op.check(&source_limits).map_err(|error| (index, error))?;
         }
         // Charge canonical transaction storage against the host memory budget.
-        let resident = ops.iter().fold(retained_bytes, |n, op| n.saturating_add(op.memory_bytes()));
+        let resident = ops.iter().fold(retained_bytes, |n, op| n.saturating_add(op.memory_bytes() - op.baked_bytes()));
         {
-            let mut encoded = Writer::new();
+            let mut encoded = Writer::measure();
             write_head(&mut encoded, Head { generation: 0, content: [0; 32] }).map_err(|e| (0, e))?;
-            write_ops(&mut encoded, ops, &self.limits).map_err(|e| (0, e))?;
-            let needed = self.state.memory_bytes().saturating_add(resident).saturating_add(encoded.bytes.len());
+            write_ops(&mut encoded, ops, &source_limits).map_err(|e| (0, e))?;
+            let needed = self.state.copy_bytes().saturating_add(resident).saturating_add(encoded.len().saturating_sub(ops.iter().map(Operation::baked_source_bytes).sum()));
             if needed > self.limits.mesh.max_bytes {
                 return Err((0, Error::WorkingBytes { what: "program working bytes", needed, limit: self.limits.mesh.max_bytes }));
             }
@@ -312,7 +353,7 @@ impl Workspace {
         ctx.limits.max_bytes = ctx.limits.max_bytes.checked_sub(resident)
             .ok_or((0, Error::WorkingBytes { what: "program working bytes", needed: resident, limit: self.limits.mesh.max_bytes }))?;
         let mut index = 0;
-        execute_with(&mut self.state, ops, &self.limits, &mut ctx, false, &mut index)
+        execute_with(&mut self.state, ops, &self.limits, &mut ctx, Execution::Program, &mut index)
             .map(|_| ()).map_err(|error| (index, error))
     }
     /// Establish the editable checkpoint once, after a successful program.
@@ -326,20 +367,23 @@ impl Workspace {
         self.state.canonicalize_zeros();
         // The returned checkpoint must remain serializable/reopenable too.
         // Admit its copies before measurement decodes any temporary state.
-        let needed = self.state.memory_bytes().saturating_mul(3);
+        // The checkpoint and compiler count their live baked arrays themselves.
+        // Deleted geometry is still pinned by the calling program until compile returns.
+        self.limits.mesh.max_bytes += self.state.baked_bytes();
+        let needed = self.state.copies_bytes(3);
         if needed > self.limits.mesh.max_bytes {
             return Err(Error::WorkingBytes { what: "program checkpoint bytes", needed, limit: self.limits.mesh.max_bytes });
         }
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         let content = state_hash(&self.state, &self.limits, &mut ctx)?;
-        let (_, checkpoint_source) = checkpoint_load_work(&self.state, &self.limits, cancelled)?;
+        let checkpoint_source = verify_checkpoint(&self.state, &self.limits, &mut ctx)?;
         ctx.checkpoint(0)?;
         let checkpoint = {
             let _clone = GeometryTimer::new(GeometryPhase::Clone);
             self.state.clone()
         };
         let document = Document { limits: self.limits, state: self.state, checkpoint,
-            log: Vec::new(), log_memory: Vec::new(), log_source: Vec::new(), log_memory_bytes: 0, log_source_bytes: 0,
+            log: Vec::new(), log_memory: Vec::new(), log_source: Vec::new(), log_memory_bytes: 0, log_baked_bytes: 0, log_source_bytes: 0,
             checkpoint_source, cursor: 0,
             head: Head { generation, content }, receipts: Receipts::default(), request_identities: HashSet::new(), request_order: VecDeque::new() };
         let mut source_ctx = mesh::Context::new(document.limits.mesh.clone(), cancelled);
@@ -348,7 +392,7 @@ impl Workspace {
             cursor: 0, log: &[], receipts: &[], identities: &document.request_order, added_identity: None,
         }, &document.limits, &mut source_ctx)?;
         let source_bytes = checkpoint_source.bytes.saturating_add(envelope.len());
-        let needed = document.state.memory_bytes().saturating_mul(3).saturating_add(source_bytes);
+        let needed = document.state.copies_bytes(3).saturating_add(source_bytes);
         if needed > document.limits.mesh.max_bytes {
             return Err(Error::WorkingBytes { what: "program checkpoint bytes", needed, limit: document.limits.mesh.max_bytes });
         }
@@ -361,20 +405,25 @@ impl Workspace {
         if self.state.objects.contains_key(object) {
             return Err(Error::DuplicateObject(object.to_string()));
         }
-        self.state.objects.insert(object.to_string(), mesh);
+        self.state.objects.insert(object.to_string(), mesh.into());
         Ok(())
     }
     /// Replace an existing object's mesh, keeping its scene node.
     pub fn set_mesh(&mut self, object: &str, mesh: mesh::Mesh) -> Result<()> {
-        let slot = self.state.objects.get_mut(object).ok_or_else(|| Error::MissingObject(object.to_string()))?;
+        self.state.check_editable(0, "set_mesh", object)?;
+        let slot = self.state.editable_mut(object).ok_or_else(|| Error::MissingObject(object.to_string()))?;
         *slot = mesh;
         Ok(())
     }
+    /// Objects with editable topology. Use `geometries` to enumerate every object.
     pub fn objects(&self) -> impl Iterator<Item = (&str, &mesh::Mesh)> {
-        self.state.objects.iter().map(|(name, mesh)| (name.as_str(), mesh))
+        self.state.editable_objects().map(|(name, mesh)| (name.as_str(), mesh))
+    }
+    pub fn geometries(&self) -> impl Iterator<Item = (&str, &ObjectGeometry)> {
+        self.state.objects.iter().map(|(name, g)| (name.as_str(), g))
     }
     pub fn object(&self, name: &str) -> Option<&mesh::Mesh> {
-        self.state.objects.get(name)
+        self.state.editable(name)
     }
     pub fn materials(&self) -> &BTreeMap<u32, Material> {
         &self.state.materials
@@ -392,12 +441,12 @@ impl Document {
         state.materials.insert(0, Material::default());
         let mut ctx = mesh::Context::new(limits.mesh.clone(), None);
         let hash = state_hash(&state, &limits, &mut ctx)?;
-        let (_,checkpoint_source)=checkpoint_load_work(&state,&limits,None)?;
+        let checkpoint_source = verify_checkpoint(&state, &limits, &mut ctx)?;
         Ok(Self {
             limits,
             checkpoint: state.clone(),
             log: Vec::new(),
-            log_memory: Vec::new(), log_source: Vec::new(), log_memory_bytes: 0, log_source_bytes: 0,
+            log_memory: Vec::new(), log_source: Vec::new(), log_memory_bytes: 0, log_baked_bytes: 0, log_source_bytes: 0,
             checkpoint_source,
             cursor: 0,
             state,
@@ -409,20 +458,22 @@ impl Document {
             request_identities: HashSet::new(), request_order: VecDeque::new(),
         })
     }
+    pub(crate) fn set_memory_limit(&mut self, bytes: usize) { self.limits.mesh.max_bytes = bytes; }
     pub fn head(&self) -> Head {
         self.head
     }
     pub fn limits(&self) -> &Limits {
         &self.limits
     }
+    /// Objects with editable topology. Use `geometries` to enumerate every object.
     pub fn objects(&self) -> impl Iterator<Item = (&str, &mesh::Mesh)> {
-        self.state
-            .objects
-            .iter()
-            .map(|(name, mesh)| (name.as_str(), mesh))
+        self.state.editable_objects().map(|(name, mesh)| (name.as_str(), mesh))
+    }
+    pub fn geometries(&self) -> impl Iterator<Item = (&str, &ObjectGeometry)> {
+        self.state.objects.iter().map(|(name, g)| (name.as_str(), g))
     }
     pub fn object(&self, name: &str) -> Option<&mesh::Mesh> {
-        self.state.objects.get(name)
+        self.state.editable(name)
     }
     pub fn materials(&self) -> &BTreeMap<u32, Material> {
         &self.state.materials
@@ -443,7 +494,7 @@ impl Document {
     /// it (those meshes and their working copies).
     pub(crate) fn evaluation_copy(&self, working:usize) -> Result<Self> {
         self.admit(working.saturating_add(self.state.bytes_besides_meshes()))?;
-        Ok(Self { limits:self.limits.clone(), checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
+        Ok(Self { limits:self.limits.clone(), checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_baked_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
             cursor:0, state:self.state.clone_without_meshes(), head:self.head, receipts:Receipts::default(), request_identities:HashSet::new(), request_order:VecDeque::new() })
     }
     /// The document for its last use, by a host that derives one more product from a document
@@ -451,22 +502,30 @@ impl Document {
     /// was saved). Its undo history and checkpoint go, so an edit and a compile hold one copy of
     /// the state where a document with its history holds two.
     pub fn into_last_use(self) -> LastUse {
-        LastUse(Self { limits:self.limits, checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
+        LastUse(Self { limits:self.limits, checkpoint:State::default(), log:Vec::new(), log_memory:Vec::new(), log_source:Vec::new(), log_memory_bytes:0, log_baked_bytes:0, log_source_bytes:0, checkpoint_source:SourceMeasure::default(),
             cursor:0, state:self.state, head:self.head, receipts:Receipts::default(), request_identities:HashSet::new(), request_order:VecDeque::new() })
     }
     pub fn history_position(&self) -> (usize, usize) {
         (self.cursor, self.log.len())
     }
     fn memory_bytes(&self) -> usize {
-        self.checkpoint
-            .memory_bytes()
-            .saturating_add(self.state.memory_bytes())
-            .saturating_add(self.log_memory_bytes)
+        let mut seen = HashSet::new();
+        let mut unique_bytes = 0usize;
+        let mut include = |mesh: &std::sync::Arc<crate::BakedMesh>| {
+            if seen.insert(std::sync::Arc::as_ptr(mesh)) { unique_bytes = unique_bytes.saturating_add(mesh.memory_bytes()); }
+        };
+        for mesh in self.checkpoint.baked_meshes().chain(self.state.baked_meshes()) { include(mesh); }
+        if self.log_baked_bytes != 0 {
+            for op in self.log.iter().flatten() { if let Operation::Baked { mesh, .. } = op { include(mesh); } }
+        }
+        self.checkpoint.copy_bytes().saturating_add(self.state.copy_bytes())
+            .saturating_add(self.log_memory_bytes - self.log_baked_bytes).saturating_add(unique_bytes)
             .saturating_add(self.receipts.resident_bytes)
             .saturating_add(self.request_identities.len().saturating_mul(128))
             .saturating_add(self.request_order.len().saturating_mul(32))
     }
     fn drain_history(&mut self, count: usize) {
+        self.log_baked_bytes -= self.log[..count].iter().flatten().map(Operation::baked_bytes).sum::<usize>();
         self.log.drain(..count);
         self.log_memory_bytes -= self.log_memory.drain(..count).sum::<usize>();
         self.log_source_bytes -= self.log_source.drain(..count).sum::<usize>();
@@ -495,7 +554,25 @@ impl Document {
         // resident while the transaction executes. The edit runs and logs the
         // operations it decodes to (a -0.0 literal reads as +0.0), the values
         // a reopen replays.
-        let (fingerprint, operation_source_bytes, operations) = {
+        let (fingerprint, operation_source_bytes, operations) = if tx.operations.iter().any(|op| matches!(op, Operation::Baked { .. })) {
+            let mut hash = Writer::hashing();
+            write_head(&mut hash, tx.expected)?;
+            let start = hash.len();
+            write_ops(&mut hash, &tx.operations, &self.limits)?;
+            let size = hash.len() - start;
+            let mut operations = Vec::with_capacity(tx.operations.len());
+            for op in tx.operations {
+                if matches!(op, Operation::Baked { .. }) { operations.push(op); }
+                else {
+                    let mut w = Writer::new();
+                    op.write(&mut w)?;
+                    let mut r = Reader::new(&w.bytes);
+                    operations.push(Operation::read(&mut r, &self.limits)?);
+                    r.end()?;
+                }
+            }
+            (hash.finish_hash(), size, operations)
+        } else {
             let mut encoded = Writer::new();
             write_head(&mut encoded, tx.expected)?;
             let start = encoded.bytes.len();
@@ -537,17 +614,18 @@ impl Document {
         // copy; execute still performs and validates the deletion itself.
         let retained = self.memory_bytes();
         let state_bytes = self.state.memory_bytes();
+        let baked_ops = tx.operations.iter().map(Operation::baked_bytes).sum::<usize>();
         let history_bytes = retained
             .saturating_sub(state_bytes)
             .saturating_sub(self.checkpoint.memory_bytes());
         let released = released_objects(&self.state, &tx.operations);
         let placeholder_bytes = mesh::Mesh::new().memory_bytes();
-        let candidate_bytes = released.iter().fold(state_bytes, |n, name| {
-            n.saturating_sub(self.state.objects[*name].memory_bytes())
+        let candidate_bytes = released.iter().fold(self.state.copy_bytes(), |n, name| {
+            n.saturating_sub(self.state.editable(name).map_or(0, mesh::Mesh::memory_bytes))
                 .saturating_add(placeholder_bytes)
         });
         let transaction_bytes = operation_bytes
-            .saturating_mul(2)
+            .saturating_mul(2).saturating_sub(baked_ops)
             .saturating_add(history_bytes);
         self.admit(candidate_bytes.saturating_add(transaction_bytes))?;
         // Mesh operations work beside the retained document and the
@@ -559,7 +637,7 @@ impl Document {
             .saturating_sub(operation_bytes);
         let mut candidate = candidate_state(&self.state, &released);
         let results = execute(&mut candidate, &tx.operations, &self.limits, &mut ctx)?;
-        self.admit(candidate.memory_bytes().saturating_add(transaction_bytes))?;
+        self.admit(candidate.copy_bytes().saturating_add(transaction_bytes))?;
         let content = state_hash(&candidate, &self.limits, &mut ctx)?;
         let head = Head {
             generation: self
@@ -571,12 +649,12 @@ impl Document {
         };
         let folded = history_fold_count(self.cursor + 1, self.limits.max_history);
         let automatic_checkpoint = if folded == 0 { None } else {
-            self.admit(candidate.memory_bytes().saturating_add(self.checkpoint.memory_bytes().saturating_mul(2)).saturating_add(transaction_bytes))?;
+            self.admit(candidate.copy_bytes().saturating_add(self.checkpoint.copy_bytes().saturating_mul(2)).saturating_add(transaction_bytes))?;
             let mut checkpoint_ctx = mesh::Context::new(mesh::Limits {
-                max_bytes: ctx.limits.max_bytes.saturating_sub(candidate.memory_bytes()),
+                max_bytes: ctx.limits.max_bytes.saturating_sub(candidate.copy_bytes()),
             }, cancelled);
             let checkpoint = if folded == self.cursor + 1 {
-                self.admit(candidate.memory_bytes().saturating_mul(3).saturating_add(transaction_bytes))?;
+                self.admit(candidate.copy_bytes().saturating_mul(3).saturating_add(transaction_bytes))?;
                 candidate.clone()
             } else {
                 let mut checkpoint = self.checkpoint.clone();
@@ -585,7 +663,7 @@ impl Document {
                 }
                 checkpoint
             };
-            let source = checkpoint_source_measure(&checkpoint, &self.limits, &mut checkpoint_ctx)?.1;
+            let source = checkpoint_source_measure(&checkpoint, &self.limits, &mut checkpoint_ctx)?;
             Some((checkpoint, source))
         };
         let identity_evictions = (self.request_order.len() + 1).saturating_sub(MAX_REQUEST_IDENTITIES);
@@ -620,7 +698,7 @@ impl Document {
             .saturating_add(self.receipts.source_bytes - evicted_source)
             .saturating_add(if retain_receipt { receipt.source_bytes } else { 0 })
             .saturating_add((self.request_order.len() + 1 - identity_evictions).saturating_mul(32));
-        self.admit(candidate.memory_bytes().saturating_add(operation_bytes.saturating_mul(2))
+        self.admit(candidate.copy_bytes().saturating_add(operation_bytes.saturating_mul(2).saturating_sub(baked_ops))
             .saturating_add(source_bytes.saturating_sub(checkpoint_source.bytes)))?;
         // Preserve source work accounting without copying or traversing history.
         ctx.checkpoint(checkpoint_source.work)?;
@@ -629,6 +707,8 @@ impl Document {
         ctx.checkpoint(1)?;
         // Install in place: nothing below can fail, so the previous state, the
         // redo branch and evicted receipts are released only after every check.
+        self.log_baked_bytes -= self.log[self.cursor..].iter().flatten().map(Operation::baked_bytes).sum::<usize>();
+        self.log_baked_bytes += baked_ops;
         self.log.truncate(self.cursor);
         self.log_memory_bytes -= self.log_memory[self.cursor..].iter().sum::<usize>();
         self.log_source_bytes -= self.log_source[self.cursor..].iter().sum::<usize>();
@@ -696,7 +776,7 @@ impl Document {
     fn move_cursor(&mut self, cursor: usize, cancelled: Option<&dyn Fn() -> bool>) -> Result<Head> {
         let mut ctx = mesh::Context::new(self.limits.mesh.clone(), cancelled);
         ctx.checkpoint(1)?;
-        self.admit(self.checkpoint.memory_bytes().saturating_mul(2))?;
+        self.admit(self.checkpoint.copy_bytes().saturating_mul(2))?;
         ctx.limits.max_bytes = ctx.limits.max_bytes.saturating_sub(self.memory_bytes());
         let folded = history_fold_count(cursor, self.limits.max_history);
         let mut state = self.checkpoint.clone();
@@ -705,10 +785,10 @@ impl Document {
             execute(&mut state, ops, &self.limits, &mut ctx)?;
             // Redo can cross a smaller retention window used to reopen a source.
             if index + 1 == folded {
-                self.admit(state.memory_bytes().saturating_mul(3))?;
-                let source = checkpoint_source_measure(&state, &self.limits, &mut ctx)?.1;
+                self.admit(state.copy_bytes().saturating_mul(3))?;
+                let source = checkpoint_source_measure(&state, &self.limits, &mut ctx)?;
                 automatic_checkpoint = Some((state.clone(), source));
-                ctx.limits.max_bytes = ctx.limits.max_bytes.saturating_sub(state.memory_bytes());
+                ctx.limits.max_bytes = ctx.limits.max_bytes.saturating_sub(state.copy_bytes());
             }
         }
         let head = Head {
@@ -740,14 +820,15 @@ impl Document {
             .generation
             .checked_add(1)
             .ok_or(Error::Budget("generation"))?;
-        self.admit(self.state.memory_bytes())?;
-        let (_,source)=checkpoint_load_work(&self.state,&self.limits,None)?;
+        self.admit(self.state.copy_bytes())?;
+        let source = verify_checkpoint(&self.state, &self.limits, &mut mesh::Context::new(self.limits.mesh.clone(), None))?;
         self.checkpoint = self.state.clone();
         self.checkpoint_source=source;
         self.log.clear();
         self.log_memory.clear();
         self.log_source.clear();
         self.log_memory_bytes = 0;
+        self.log_baked_bytes = 0;
         self.log_source_bytes = 0;
         self.cursor = 0;
         // The content is unchanged, but the serialized source revision changed.
@@ -768,6 +849,18 @@ impl Document {
         self.encode_parts(ctx, false)
     }
     fn encode_parts(&self, ctx: &mut mesh::Context, snapshot: bool) -> Result<Vec<u8>> {
+        let mut w = Writer::new();
+        if self.state.baked_bytes() != 0 || self.checkpoint.baked_bytes() != 0 ||
+            self.log_baked_bytes != 0 {
+            let mut size = Writer::measure();
+            self.write_parts(&mut size, ctx, snapshot)?;
+            self.admit(size.len())?;
+            w.bytes.reserve_exact(size.len());
+        }
+        self.write_parts(&mut w, ctx, snapshot)?;
+        Ok(w.bytes)
+    }
+    fn write_parts(&self, w: &mut Writer, ctx: &mut mesh::Context, snapshot: bool) -> Result<()> {
         self.admit(
             self.memory_bytes()
                 .saturating_sub(self.state.memory_bytes()),
@@ -778,7 +871,7 @@ impl Document {
             self.log.iter().map(Vec::as_slice).collect::<Vec<_>>()
         };
         let receipts = self.receipts.iter().collect::<Vec<_>>();
-        encode_source(
+        write_source(w,
             &SourceParts {
                 head: self.head,
                 checkpoint: CheckpointSource::State(if snapshot { &self.state } else { &self.checkpoint }),
@@ -813,12 +906,12 @@ impl Document {
             return Err(Error::UnsupportedVersion(version));
         }
         let head = read_head(&mut r)?;
-        let checkpoint = read_state(&mut r, &limits, &mut ctx)?;
-        let needed = checkpoint.memory_bytes().saturating_mul(3);
+        let checkpoint = read_state(&mut r, &limits, &mut ctx, None)?;
+        let needed = checkpoint.copies_bytes(3);
         if needed > ctx.limits.max_bytes {
             return Err(Error::WorkingBytes { what: "decode checkpoint copies", needed, limit: ctx.limits.max_bytes });
         }
-        let checkpoint_source=checkpoint_source_measure(&checkpoint,&limits,&mut ctx)?.1;
+        let checkpoint_source=checkpoint_source_measure(&checkpoint,&limits,&mut ctx)?;
         let cursor = r.u32()? as usize;
         let count = r.count(4)?;
         if cursor > count {
@@ -832,25 +925,26 @@ impl Document {
         let mut current = checkpoint.clone();
         let decode_budget = ctx.limits.max_bytes;
         let mut log_bytes = 0usize;
+        let mut log_baked_bytes = 0usize;
         for i in 0..count {
             let start = r.position();
-            let ops = read_ops(&mut r, &limits)?;
+            let retained = checkpoint.memory_bytes().saturating_add(current.copy_bytes()).saturating_add(log_bytes);
+            let available = decode_budget.saturating_sub(retained).saturating_sub(state.copy_bytes());
+            let ops = read_ops_budgeted(&mut r, &limits, available)?;
             let source_bytes = r.position() - start;
             log_source.push(source_bytes);
             log_source_bytes += source_bytes;
             let op_bytes = ops.iter().fold(0usize, |n, op| n.saturating_add(op.memory_bytes()));
+            log_baked_bytes += ops.iter().map(Operation::baked_bytes).sum::<usize>();
             log_memory.push(op_bytes);
             log_bytes = log_bytes.saturating_add(op_bytes);
-            let pinned = checkpoint
-                .memory_bytes()
-                .saturating_add(current.memory_bytes())
-                .saturating_add(log_bytes);
+            let pinned = retained.saturating_add(op_bytes);
             ctx.limits.max_bytes = decode_budget
                 .checked_sub(pinned)
                 .ok_or(Error::WorkingBytes { what: "decode history working bytes", needed: pinned, limit: decode_budget })?;
             execute(&mut state, &ops, &limits, &mut ctx)?;
             if i + 1 == cursor {
-                let needed = pinned.saturating_add(state.memory_bytes().saturating_mul(2));
+                let needed = pinned.saturating_add(state.copy_bytes().saturating_mul(2));
                 if needed > decode_budget {
                     return Err(Error::WorkingBytes { what: "decode cursor copy", needed, limit: decode_budget });
                 }
@@ -919,7 +1013,7 @@ impl Document {
             limits,
             checkpoint,
             log,
-            log_memory, log_source, log_memory_bytes: log_bytes, log_source_bytes,
+            log_memory, log_source, log_memory_bytes: log_bytes, log_baked_bytes, log_source_bytes,
             checkpoint_source,
             cursor,
             state: current,
@@ -928,7 +1022,9 @@ impl Document {
             request_identities, request_order,
         };
         // Exact re-encoding rejects ambiguous orderings and noncanonical inputs.
-        if out.encode(&mut ctx)? != bytes {
+        let mut canonical = Writer::compare(bytes);
+        out.write_parts(&mut canonical, &mut ctx, false)?;
+        if canonical.len() != bytes.len() {
             return Err(Error::Corrupt("noncanonical document"));
         }
         // A source may have been saved with larger retention windows. Decode
@@ -937,7 +1033,7 @@ impl Document {
         if folded != 0 {
             let mut checkpoint = out.checkpoint.clone();
             for ops in &out.log[..folded] { execute(&mut checkpoint, ops, &out.limits, &mut ctx)?; }
-            out.checkpoint_source = checkpoint_source_measure(&checkpoint, &out.limits, &mut ctx)?.1;
+            out.checkpoint_source = checkpoint_source_measure(&checkpoint, &out.limits, &mut ctx)?;
             out.checkpoint = checkpoint;
             out.drain_history(folded); out.cursor -= folded;
             eprintln!("model history: checkpointed {folded} oldest edits");
@@ -978,7 +1074,7 @@ fn candidate_state(state: &State, released: &BTreeSet<&str>) -> State {
             .objects
             .iter()
             .map(|(name, mesh)| {
-                let mesh = if released.contains(name.as_str()) { mesh::Mesh::new() } else { mesh.clone() };
+                let mesh = if released.contains(name.as_str()) { mesh::Mesh::new().into() } else { mesh.clone() };
                 (name.clone(), mesh)
             })
             .collect(),
@@ -1037,28 +1133,32 @@ struct SourceParts<'a> {
     added_identity: Option<[u8; 32]>,
 }
 fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Context) -> Result<Vec<u8>> {
+    let mut w = Writer::new();
+    write_source(&mut w, parts, limits, ctx)?;
+    Ok(w.bytes)
+}
+fn write_source(w: &mut Writer, parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Context) -> Result<()> {
     let measured = match &parts.checkpoint {
         CheckpointSource::Measured(m) => m.bytes,
         CheckpointSource::State(_) => 0,
     };
     // Measured checkpoint bytes participate in work accounting without a copy.
-    let mut w = Writer::new();
     w.raw(b"MPMODEL\0")?;
     w.u32(SOURCE_VERSION)?;
-    write_head(&mut w, parts.head)?;
+    write_head(w, parts.head)?;
     match &parts.checkpoint {
-        CheckpointSource::State(state) => write_state(&mut w, state, limits, ctx, true)?,
+        CheckpointSource::State(state) => write_state(w, state, limits, ctx, true)?,
         CheckpointSource::Measured(m) => ctx.checkpoint(m.work)?,
     }
     w.count(parts.cursor)?;
     w.count(parts.log.len())?;
     for ops in parts.log {
         ctx.checkpoint(1)?;
-        write_ops(&mut w, ops, limits)?;
+        write_ops(w, ops, limits)?;
     }
     w.count(parts.receipts.len())?;
     for receipt in parts.receipts {
-        write_receipt(&mut w, receipt)?;
+        write_receipt(w, receipt)?;
     }
     let identity_count = parts.identities.len().saturating_add(parts.added_identity.is_some() as usize);
     // Apply eviction in the candidate encoding too, without mutating the document.
@@ -1066,8 +1166,8 @@ fn encode_source(parts: &SourceParts<'_>, limits: &Limits, ctx: &mut mesh::Conte
     w.count(identity_count - evicted)?;
     for identity in parts.identities.iter().skip(evicted) { w.raw(identity)?; }
     if let Some(identity) = parts.added_identity { w.raw(&identity)?; }
-    ctx.checkpoint(w.bytes.len().saturating_add(measured) as u64)?;
-    Ok(w.bytes)
+    ctx.checkpoint(w.len().saturating_add(measured) as u64)?;
+    Ok(())
 }
 
 fn write_receipt(w: &mut Writer, receipt: &Receipt) -> Result<()> {
@@ -1131,13 +1231,16 @@ pub(crate) fn execute(
     limits: &Limits,
     ctx: &mut mesh::Context,
 ) -> Result<Vec<OperationResult>> {
-    let results = execute_with(state, ops, limits, ctx, true, &mut 0)?;
+    let results = execute_with(state, ops, limits, ctx, Execution::Transaction, &mut 0)?;
     // A document's state holds the values its source decodes to: an edit, an
     // undo/redo replay and a reopen then compile the same bytes.
     state.canonicalize_zeros();
     Ok(results)
 }
-/// `accounted`: hold each operation to the execution budget minus the rest
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Execution { Transaction, Workspace, Program }
+
+/// A transaction holds each operation to the execution budget minus the rest
 /// of the state (a [`Document`] transaction's admission). A [`Workspace`]
 /// skips that per-operation pass over the state; operations still check
 /// their own working budget.
@@ -1146,7 +1249,7 @@ fn execute_with(
     ops: &[Operation],
     limits: &Limits,
     ctx: &mut mesh::Context,
-    accounted: bool,
+    execution: Execution,
     failed_operation: &mut usize,
 ) -> Result<Vec<OperationResult>> {
     if ops.is_empty() {
@@ -1154,6 +1257,7 @@ fn execute_with(
     }
     let mut out = Vec::new();
     let execution_budget = ctx.limits.max_bytes;
+    let accounted = execution == Execution::Transaction;
     // Stable, fully painted vertices need no provenance copy. Sparse paint
     // still needs the original interpolation even in an attribute-only batch.
     let changes_vertices = ops.iter().any(|op| !matches!(op,
@@ -1168,31 +1272,40 @@ fn execute_with(
     let mut color_counts = BTreeMap::new();
     for (name, _) in state.surface.vertex_colors.keys() { *color_counts.entry(name).or_insert(0usize) += 1; }
     let colored_objects = color_counts.into_iter().filter_map(|(name, count)|
-        (changes_vertices || state.objects.get(name).is_some_and(|m| count < m.vertices().len())).then_some(name)
+        (changes_vertices || state.editable(name).is_some_and(|m| count < m.vertices().len())).then_some(name)
     ).collect::<BTreeSet<_>>();
-    let color_source_bytes=state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|n.len()+m.memory_bytes()+128).sum::<usize>();
-    if accounted{let needed=color_source_bytes.saturating_add(state.memory_bytes());if needed>execution_budget{return Err(Error::WorkingBytes{what:"vertex color provenance snapshot",needed,limit:execution_budget});}}
+    let color_source_bytes=state.editable_objects().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|n.len()+m.memory_bytes()+128).sum::<usize>();
+    if accounted{let needed=color_source_bytes.saturating_add(state.copy_bytes());if needed>execution_budget{return Err(Error::WorkingBytes{what:"vertex color provenance snapshot",needed,limit:execution_budget});}}
     let color_sources = {
         let _clone = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Clone);
-        if colored_objects.is_empty(){None}else{Some(state.objects.iter().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())}
+        if colored_objects.is_empty(){None}else{Some(state.editable_objects().filter(|(name,_)|colored_objects.contains(name)).map(|(n,m)|(n.clone(),m.clone())).collect::<BTreeMap<_,_>>())}
     };
     drop(colored_objects);
     let mut construction_cache = crate::construction::ConstructionCache::new(ops);
     for (index, op) in ops.iter().enumerate() {
         *failed_operation = index;
+        state.check_geometry_op(index, op)?;
         let _operation_timer = crate::build_detail::OperationTimer::new(op);
         if accounted {
             let target = op
                 .object_name()
-                .and_then(|name| state.objects.get(name))
+                .and_then(|name| state.editable(name))
                 .map_or(0, mesh::Mesh::memory_bytes);
-            let pinned = state.memory_bytes().saturating_sub(target).saturating_add(color_source_bytes);
+            let pinned = state.copy_bytes().saturating_sub(target).saturating_add(color_source_bytes);
             ctx.limits.max_bytes = execution_budget
                 .checked_sub(pinned)
                 .ok_or(Error::WorkingBytes { what: "candidate working bytes", needed: pinned, limit: execution_budget })?;
         }
         ctx.checkpoint(1)?;
         match op {
+            Operation::Baked { object, mesh } => {
+                check_name(object, limits)?;
+                if state.objects.contains_key(object) { return Err(Error::DuplicateObject(object.clone())); }
+                mesh.view().validate()?;
+                state.objects.insert(object.clone(), ObjectGeometry::Baked(mesh.clone()));
+                out.push(OperationResult { object: object.clone(), ..Default::default() });
+                continue;
+            }
             Operation::SoftBodyUnbind => {
                 out.push(crate::soft_body::unbind(state, ctx)?);
                 continue;
@@ -1287,7 +1400,7 @@ fn execute_with(
             Operation::SetSkeleton { skeleton } => {
                 skeleton.validate(limits, ctx)?;
                 if let Some(old) = &state.skeleton {
-                    for mesh in state.objects.values() {
+                    for (_, mesh) in state.editable_objects() {
                         for v in mesh.vertices() {
                             for weight in &v.weights {
                                 let index = weight.joint as usize;
@@ -1379,31 +1492,32 @@ fn execute_with(
                 vertices: mesh.vertices().iter().map(|v| v.id).collect(),
                 ..Default::default()
             };
-            state.objects.insert(object.clone(), mesh);
+            state.objects.insert(object.clone(), mesh.into());
             out.push(result);
             continue;
         }
-        let mesh = state
-            .objects
-            .get_mut(object)
-            .ok_or_else(|| Error::MissingObject(object.clone()))?;
+
         let mut result = OperationResult {
             object: object.clone(),
             ..Default::default()
         };
+        if matches!(op, Operation::DeleteObject { .. }) {
+            if !state.objects.contains_key(object) { return Err(Error::MissingObject(object.clone())); }
+            state.objects.remove(object);
+            state.scene.nodes.remove(object);
+            state.scene.modifiers.remove(object);
+            state.scene.lods.remove(object);
+            state.scene.colliders.remove(object);
+            state.scene.paint.remove(object);
+            state.surface.vertex_colors.retain(|(name,_),_| name != object);
+            // A replacement with the same name is a new object, even if
+            // its mesh allocator happens to reuse the old element IDs.
+            state.selections.groups.retain(|(name,_),_| name != object);
+            out.push(result);
+            continue;
+        }
+        let mesh = state.objects.get_mut(object).and_then(MeshEntry::editable_mut).ok_or_else(|| Error::MissingObject(object.clone()))?;
         match op {
-            Operation::DeleteObject { .. } => {
-                state.objects.remove(object);
-                state.scene.nodes.remove(object);
-                state.scene.modifiers.remove(object);
-                state.scene.lods.remove(object);
-                state.scene.colliders.remove(object);
-                state.scene.paint.remove(object);
-                state.surface.vertex_colors.retain(|(name,_),_| name != object);
-                // A replacement with the same name is a new object, even if
-                // its mesh allocator happens to reuse the old element IDs.
-                state.selections.groups.retain(|(name,_),_| name != object);
-            }
             Operation::Transform {
                 vertices, matrix, ..
             } => {
@@ -1515,21 +1629,37 @@ fn execute_with(
         out.push(result);
     }
     let _validate = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::Validate);
-    let needed = state.memory_bytes();
+    let needed = if execution == Execution::Workspace { state.memory_bytes() } else { state.copy_bytes() };
     if needed > execution_budget {
         return Err(Error::WorkingBytes { what: "candidate bytes", needed, limit: execution_budget });
     }
     ctx.limits.max_bytes = execution_budget;
-    if let Some(before) = color_sources { state.surface.reconcile(&before, &state.objects, limits, ctx)?; }
+    if let Some(before) = color_sources { state.surface.reconcile_objects(&before, &state.objects, limits, ctx)?; }
     state.selections.reconcile(&state.objects);
     state.selections.validate(state, limits)?;
     validate_surface_refs(state)?;
-    for mesh in state.objects.values() {
+    for (_, mesh) in state.editable_objects() {
         for face in mesh.faces() {
             if !state.materials.contains_key(&face.material) {
                 return Err(Error::Invalid("unknown face material"));
             }
         }
+    }
+    if let Err(error) = state.validate_baked_references() {
+        // Scene records can refer to an object created later in the transaction.
+        if let Error::BakedObject { object, .. } = &error {
+            for (index, op) in ops.iter().enumerate().rev() {
+                if matches!(op, Operation::Scene(_) | Operation::Rig(_)) {
+                    if let Err(refused @ Error::BakedObject { .. }) = state.check_geometry_op(index, op) {
+                        if matches!(&refused, Error::BakedObject { object: target, .. } if target == object) {
+                            *failed_operation = index;
+                            return Err(refused);
+                        }
+                    }
+                }
+            }
+        }
+        return Err(error);
     }
     validate_rig(state, limits, ctx)?;
     state.scene.validate(state, limits, ctx)?;
@@ -1541,7 +1671,7 @@ fn execute_with(
 
 fn validate_surface_refs(state:&State)->Result<()> {
     if state.surface.materials.keys().any(|id|!state.materials.contains_key(id)) { return Err(Error::Invalid("surface references unknown material")); }
-    if state.surface.vertex_colors.keys().any(|(object,id)|state.objects.get(object).and_then(|m|m.vertex(*id)).is_none()) { return Err(Error::Invalid("surface references unknown vertex")); }
+    if state.surface.vertex_colors.keys().any(|(object,id)|state.editable(object).and_then(|m|m.vertex(*id)).is_none()) { return Err(Error::Invalid("surface references unknown vertex")); }
     Ok(())
 }
 fn texture_admission(
@@ -1572,7 +1702,7 @@ fn png_admission(bytes: &[u8], ctx: &mesh::Context<'_>) -> Result<()> {
 fn validate_rig(state: &State, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<()> {
     if let Some(skeleton) = &state.skeleton {
         skeleton.validate(limits, ctx)?;
-        for mesh in state.objects.values() {
+        for (_, mesh) in state.editable_objects() {
             for vertex in mesh.vertices() {
                 ctx.checkpoint(1)?;
                 if vertex
@@ -1606,33 +1736,37 @@ fn read_head(r: &mut Reader) -> Result<Head> {
 // Measure the checkpoint using the model source encoding.
 // The measured section stands in for the checkpoint when a transaction bounds
 // the source it would produce, so this is the single source of that measure.
-fn checkpoint_source_measure(state:&State,limits:&Limits,ctx:&mut mesh::Context)->Result<(Vec<u8>,SourceMeasure)>{
-    let mut writer=Writer::new();
-    let start=ctx.work_used();
-    write_state(&mut writer,state,limits,ctx,true)?;
-    let measure=SourceMeasure{bytes:writer.bytes.len(),work:ctx.work_used()-start};
-    Ok((writer.bytes,measure))
+fn checkpoint_source_measure(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<SourceMeasure> {
+    let mut writer = Writer::measure();
+    let start = ctx.work_used();
+    write_state(&mut writer, state, limits, ctx, true)?;
+    Ok(SourceMeasure { bytes: writer.len(), work: ctx.work_used() - start })
 }
-// Compute once per checkpoint (and derive directly while decoding). The
-// serialized work counters are deliberately not trusted or persisted.
-fn checkpoint_load_work(state:&State,limits:&Limits,cancelled:Option<&dyn Fn()->bool>)->Result<(u64,SourceMeasure)>{
-    let mut ctx=mesh::Context::new(limits.mesh.clone(),cancelled);
-    let (bytes,source)=checkpoint_source_measure(state,limits,&mut ctx)?;
-    let mut reader=Reader::new(&bytes);
-    read_state(&mut reader,limits,&mut ctx)?;reader.end()?;
-    Ok((ctx.work_used(),source))
-}
-fn state_hash(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<[u8; 32]> {
+
+fn verify_checkpoint(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<SourceMeasure> {
     let mut w = Writer::new();
-    write_state(&mut w, state, limits, ctx, false)?;
-    ctx.checkpoint(w.bytes.len() as u64)?;
-    // A large model's state hashed for 0.12 s at a 2-core share: poll between pieces.
-    let mut hash = Sha256::new();
-    for piece in w.bytes.chunks(1 << 20) {
-        hash.update(piece);
-        ctx.checkpoint(0)?;
+    if state.baked_bytes() != 0 {
+        let size = checkpoint_source_measure(state, limits, ctx)?.bytes;
+        let needed = state.copies_bytes(2).saturating_add(size);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "checkpoint verification", needed, limit: limits.mesh.max_bytes });
+        }
+        w.bytes.reserve_exact(size);
     }
-    Ok(hash.finish())
+    let start = ctx.work_used();
+    write_state(&mut w, state, limits, ctx, true)?;
+    let measure = SourceMeasure { bytes: w.len(), work: ctx.work_used() - start };
+    let mut r = Reader::new(&w.bytes);
+    read_state(&mut r, limits, ctx, Some(state))?;
+    r.end()?;
+    Ok(measure)
+}
+
+fn state_hash(state: &State, limits: &Limits, ctx: &mut mesh::Context) -> Result<[u8; 32]> {
+    let mut w = Writer::hashing();
+    write_state(&mut w, state, limits, ctx, false)?;
+    ctx.checkpoint(w.len() as u64)?;
+    Ok(w.finish_hash())
 }
 fn write_material(w: &mut Writer, value: &Material) -> Result<()> {
     for v in value.color {
@@ -1658,6 +1792,7 @@ fn write_state(
     ctx: &mut mesh::Context,
     include_empty_extensions: bool,
 ) -> Result<()> {
+    state.validate_baked_references()?;
     validate_rig(state, limits, ctx)?;
     state.scene.validate(state, limits, ctx)?;
     state.rig.validate(state, limits, ctx)?;
@@ -1674,7 +1809,18 @@ fn write_state(
     for (name, mesh) in &state.objects {
         ctx.checkpoint(1)?;
         w.string(name)?;
-        w.blob(&mesh.to_bytes(ctx)?)?;
+        match mesh {
+            ObjectGeometry::Editable(m) => {
+                let bytes = m.to_bytes(ctx)?;
+                w.count(bytes.len())?;
+                for piece in bytes.chunks(1 << 20) { ctx.checkpoint(0)?; w.raw(piece)?; }
+            }
+            ObjectGeometry::Baked(m) => {
+                ctx.checkpoint(m.encoded_size() as u64)?;
+                w.count(m.encoded_size())?;
+                m.view().write_checked(w, || Ok(ctx.checkpoint(0)?))?;
+            }
+        }
     }
     w.u8(state.skeleton.is_some() as u8)?;
     if let Some(skeleton) = &state.skeleton {
@@ -1715,7 +1861,7 @@ fn write_state(
     }
     Ok(())
 }
-fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context) -> Result<State> {
+fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context, known: Option<&State>) -> Result<State> {
     let mut state = State::default();
     for _ in 0..r.count(32)? {
         let id = r.u32()?;
@@ -1731,7 +1877,21 @@ fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context) -> Resul
     for _ in 0..object_count {
         let name = r.string()?;
         check_name(&name, limits)?;
-        let mesh = mesh::Mesh::from_bytes(r.blob()?, ctx)?;
+        let bytes = r.blob()?;
+        if bytes.starts_with(crate::baked::MAGIC) {
+            ctx.checkpoint(bytes.len() as u64)?;
+            let mesh = match known.and_then(|s| s.objects.get(&name)) {
+                Some(ObjectGeometry::Baked(m)) => m.clone(),
+                _ => std::sync::Arc::new(crate::BakedMesh::read(bytes, ctx.limits.max_bytes.saturating_sub(state.memory_bytes()))?),
+            };
+            if state.objects.insert(name, ObjectGeometry::Baked(mesh)).is_some() { return Err(Error::Corrupt("duplicate object")); }
+            continue;
+        }
+        let budget = ctx.limits.max_bytes;
+        ctx.limits.max_bytes = budget.saturating_sub(state.baked_bytes());
+        let decoded = mesh::Mesh::from_bytes(bytes, ctx);
+        ctx.limits.max_bytes = budget;
+        let mesh = decoded?;
         if mesh
             .faces()
             .iter()
@@ -1739,7 +1899,7 @@ fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context) -> Resul
         {
             return Err(Error::Corrupt("face material"));
         }
-        if state.objects.insert(name, mesh).is_some() {
+        if state.objects.insert(name, mesh.into()).is_some() {
             return Err(Error::Corrupt("duplicate object"));
         }
     }
@@ -1770,6 +1930,7 @@ fn read_state(r: &mut Reader, limits: &Limits, ctx: &mut mesh::Context) -> Resul
         }
         payload.end()?;
     }
+    state.validate_baked_references()?;
     state.selections.validate(&state, limits)?;
     validate_surface_refs(&state)?;
     validate_rig(&state, limits, ctx)?;
@@ -1791,6 +1952,7 @@ impl Operation {
     pub(crate) fn write(&self, w: &mut Writer) -> Result<()> {
         let op = self;
         match op {
+            Operation::Baked { object, mesh } => { w.u8(34)?; w.string(object)?; w.count(mesh.encoded_size())?; mesh.view().write(w)?; }
             Operation::SoftBodyUnbind => { w.u8(33)?; }
             Operation::SoftBody(op) => { w.u8(32)?; op.write(w)?; }
             Operation::Selection(op) => { w.u8(31)?; op.write(w)?; }
@@ -2072,15 +2234,23 @@ impl Operation {
     }
 }
 fn read_ops(r: &mut Reader, limits: &Limits) -> Result<Vec<Operation>> {
+    read_ops_budgeted(r, limits, limits.mesh.max_bytes)
+}
+fn read_ops_budgeted(r: &mut Reader, limits: &Limits, mut available: usize) -> Result<Vec<Operation>> {
     let mut ops = Vec::new();
     for _ in 0..r.count(1)? {
-        ops.push(Operation::read(r, limits)?);
+        let op = Operation::read_budgeted(r, limits, available)?;
+        available = available.saturating_sub(op.memory_bytes());
+        ops.push(op);
     }
     Ok(ops)
 }
 impl Operation {
     /// Decode one operation of the canonical encoding (`write`).
     pub(crate) fn read(r: &mut Reader, limits: &Limits) -> Result<Self> {
+        Self::read_budgeted(r, limits, limits.mesh.max_bytes)
+    }
+    fn read_budgeted(r: &mut Reader, limits: &Limits, available: usize) -> Result<Self> {
         let tag = r.u8()?;
         if tag == 11 {
             let material = r.u32()?;
@@ -2088,6 +2258,7 @@ impl Operation {
             return Ok(Operation::SetMaterial { material, value });
         }
         let global = match tag {
+            34 => Some(Operation::Baked { object: r.string()?, mesh: std::sync::Arc::new(crate::BakedMesh::read(r.blob()?, available)?) }),
             33 => Some(Operation::SoftBodyUnbind),
             32 => Some(Operation::SoftBody(crate::SoftBodyBind::read(r,limits)?)),
             31 => Some(Operation::Selection(crate::SelectionOperation::read(r,limits)?)),
@@ -2311,6 +2482,133 @@ mod history_budget_tests {
     fn apply(doc:&mut Document,id:&str,operations:Vec<Operation>)->Result<Applied>{doc.apply(Transaction{request_id:id.into(),expected:doc.head(),operations},None)}
     fn edit(doc:&Document,index:usize)->Operation{Operation::SetUv{object:"body".into(),corner:doc.object("body").unwrap().corners()[0].id,uv:[index as f64*0.01,0.25]}}
     #[test]
+    fn indexed_material_runs_reopen_with_only_their_referenced_vertices() {
+        use crate::{BakedMesh, MeshPrimitive, ProgramOp};
+        use makepad_gltf::{decode_mesh_primitive, load_gltf_from_bytes};
+        let positions: Vec<_> = (0..96).map(|i| [(i / 3) as f32, (i % 3 == 1) as u8 as f32, (i % 3 == 2) as u8 as f32]).collect();
+        let uvs: Vec<_> = positions.iter().map(|p| [p[0], p[2]]).collect();
+        let mut indices: Vec<_> = (0..96).rev().collect();
+        indices[60] = indices[59];
+        let normals = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]].into_iter().cycle().take(positions.len()).collect();
+        let mut mesh = BakedMesh { normals, positions, uvs: Some(uvs), material_bytes: None,
+            indices, runs: vec![(7, 0..60), (0, 60..81), (7, 81..96)] };
+        let payload = 96 * (12 + 12 + 8 + 4) + 3 * 12;
+        assert_eq!(mesh.memory_bytes(), payload);
+        // The original UV-only blob used 1 here and had no stream between UVs and indices.
+        let mut legacy = b"MPBAKE01".to_vec();
+        for count in [96u32, 96, 3] { legacy.extend_from_slice(&count.to_le_bytes()); }
+        legacy.push(1);
+        for v in mesh.positions.iter().chain(&mesh.normals).flatten().chain(mesh.uvs.as_ref().unwrap().iter().flatten()) {
+            legacy.extend_from_slice(&v.to_le_bytes());
+        }
+        for word in mesh.indices.iter().copied().chain(mesh.runs.iter().flat_map(|(m, r)| [*m, r.start, r.end])) {
+            legacy.extend_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(BakedMesh::read(&legacy, payload).unwrap(), mesh, "the UV-only source remains readable");
+        let mut encoded = Writer::new();
+        mesh.view().write(&mut encoded).unwrap();
+        assert_eq!(encoded.bytes, legacy, "absent material bytes preserve the original source encoding");
+        legacy[20] |= 4;
+        assert!(matches!(BakedMesh::read(&legacy, payload), Err(Error::Corrupt(_))), "unknown attribute flags are corrupt");
+        let patterns = [[0; 4], [255; 4], [0, 0, 0xc0, 0x7f], [1, 0, 0x80, 0x7f],
+            [0, 0, 0, 0x80], [1, 0, 0, 0], [17, 31, 173, 240]];
+        mesh.material_bytes = Some(patterns.into_iter().cycle().take(mesh.positions.len()).collect());
+        let uvs = mesh.uvs.take();
+        let mut bytes_only = Writer::new();
+        mesh.view().write(&mut bytes_only).unwrap();
+        assert_eq!(bytes_only.bytes[20], 2, "material bytes have their own flag without UVs");
+        assert_eq!(BakedMesh::read(&bytes_only.bytes, mesh.memory_bytes()).unwrap(), mesh, "byte-only geometry reopens");
+        mesh.uvs = uvs;
+        let payload = payload + 4 * mesh.positions.len();
+        assert_eq!(mesh.memory_bytes(), payload, "material byte capacity is admitted");
+        let mesh = std::sync::Arc::new(mesh);
+        let primitive = MeshPrimitive::Baked { object: "strip".into(), mesh: mesh.clone() };
+        let program = [ProgramOp::Op(Operation::SetMaterial { material: 7, value: Material { color: [0.25, 0.5, 0.75], base_color_png: vec![] } }),
+            ProgramOp::Mesh(primitive)];
+        let admitted = crate::program_bytes(&program).unwrap().len();
+        assert!((payload..2 * payload).contains(&admitted), "program admission {admitted} for {payload} bytes of arrays");
+        let built = crate::build_program(&program, Limits::default(), &mut |_| unreachable!(), None).unwrap();
+        assert!(matches!(&built.document.state.objects["strip"], ObjectGeometry::Baked(stored) if std::sync::Arc::ptr_eq(stored, &mesh)),
+            "the compiled document shares the program's allocation");
+        let mut spare = (*mesh).clone();
+        spare.indices.reserve_exact(512);
+        spare.material_bytes.as_mut().unwrap().reserve_exact(16_384);
+        let spare = std::sync::Arc::new(spare);
+        let op = Operation::Baked { object: "other".into(), mesh: spare.clone() };
+        assert!(op.memory_bytes() >= payload + 512 * 4 + 16_384 * 4, "the operation charges spare index and attribute capacity");
+        let shared = [program[0].clone(), ProgramOp::Mesh(MeshPrimitive::Baked { object: "strip".into(), mesh: spare.clone() }),
+            ProgramOp::Op(op)];
+        let shared_limit = Limits { mesh: mesh::Limits { max_bytes: spare.memory_bytes() + 8 * payload }, ..Default::default() };
+        crate::build_program(&shared, shared_limit, &mut |_| unreachable!(), None)
+            .expect("two names and their lowered operations charge the shared buffers once");
+        let resident = built.document.memory_bytes();
+        assert!((payload..2 * payload).contains(&resident), "resident checkpoint and current geometry cost {resident}");
+        let loaded = load_gltf_from_bytes(&built.compiled.glb, None).unwrap();
+        let prims = &loaded.document.meshes_slice()[0].primitives;
+        assert_eq!(prims.len(), mesh.runs.len());
+        assert_eq!(built.compiled.vertices, 96, "the shared corner is exported twice and unused vertex 35 is omitted");
+        assert_ne!(prims[0].material, prims[1].material);
+        assert_eq!(prims[0].material, prims[2].material, "a repeated material keeps its own run");
+        for (i, (material, range)) in mesh.runs.iter().enumerate() {
+            let primitive = decode_mesh_primitive(&loaded, 0, i).unwrap();
+            let corners = &mesh.indices[range.start as usize..range.end as usize];
+            let referenced: Vec<_> = corners.iter().copied().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+            for &accessor in prims[i].attributes.values() {
+                assert_eq!(loaded.document.accessors_slice()[accessor].count, referenced.len(), "run {i} accessor count");
+            }
+            for (local, &original) in referenced.iter().enumerate() {
+                let j = original as usize;
+                assert_eq!(primitive.positions[local], mesh.positions[j], "ascending positions for run {i}");
+                assert_eq!(primitive.normals.as_ref().unwrap()[local], mesh.normals[j], "normal for run {i}");
+                assert_eq!(primitive.texcoords0.as_ref().unwrap()[local], mesh.uvs.as_ref().unwrap()[j], "UV for run {i}");
+            }
+            let decoded: Vec<_> = primitive.indices.iter().map(|&j| referenced[j as usize]).collect();
+            assert_eq!(decoded, corners, "triangle order and corner identity for run {i}");
+            let bytes = &loaded.document.accessors_slice()[prims[i].attributes["_MATERIAL_BYTES"]];
+            let view = &loaded.document.buffer_views_slice()[bytes.buffer_view.unwrap()];
+            let start = view.byte_offset.unwrap_or(0) + bytes.byte_offset.unwrap_or(0);
+            let expected: Vec<_> = referenced.iter().flat_map(|&j| mesh.material_bytes.as_ref().unwrap()[j as usize]).collect();
+            assert_eq!(&loaded.buffers[view.buffer][start..start + expected.len()], expected, "material bytes for run {i}");
+            assert_eq!(built.compiled.primitives[i].material, *material);
+            let expected = &built.document.materials()[material].color;
+            let factor = loaded.document.materials_slice()[primitive.material.unwrap()].pbr_metallic_roughness.as_ref().unwrap().base_color_factor.unwrap_or([1.;4]);
+            assert_eq!(&factor[..3], &expected.map(|v| v as f32));
+        }
+        let row = built.document.to_bytes(None).unwrap();
+        let restored = Document::from_bytes(&row, Limits::default(), None).unwrap();
+        assert_eq!(restored.state.objects["strip"], ObjectGeometry::Baked(mesh.clone()), "full-detail source preserves each material byte");
+        let reopened_glb = restored.compile(None).unwrap().glb;
+        assert_eq!(reopened_glb, built.compiled.glb);
+        let reopened = load_gltf_from_bytes(&reopened_glb, None).unwrap();
+        let run = &reopened.document.meshes_slice()[0].primitives[0];
+        let accessor = &reopened.document.accessors_slice()[run.attributes["_MATERIAL_BYTES"]];
+        assert_eq!((accessor.accessor_type.as_str(), accessor.component_type, accessor.normalized), ("VEC4", 5121, None),
+            "material byte accessor is raw VEC4 UNSIGNED_BYTE");
+        let view = &reopened.document.buffer_views_slice()[accessor.buffer_view.unwrap()];
+        assert_eq!((view.byte_stride, view.target), (Some(4), Some(34962)), "four byte vertex stride and ARRAY_BUFFER target");
+        let mut capped = restored.clone().into_last_use();
+        capped.set_memory_limit(4 * payload);
+        assert_eq!(capped.compile_with_cache(&mut crate::CompileCache::default(), None).unwrap().glb, built.compiled.glb,
+            "the writer admits its array and binary buffer footprint");
+        let mut placed = restored.clone();
+        let transform = crate::Transform { translation: [3., -2., 1.], ..Default::default() };
+        apply(&mut placed, "place", vec![
+            Operation::Scene(crate::SceneOperation::Node { object: "strip".into(), node: crate::SceneNode { transform, ..Default::default() } }),
+            Operation::Scene(crate::SceneOperation::Socket(crate::Socket { name: "tip".into(), attachment: crate::Attachment::Object("strip".into()), transform: Default::default() })),
+        ]).unwrap();
+        let compiled = placed.compile(None).unwrap();
+        assert_eq!(compiled.bounds[0], [3., -2., 1.]);
+        assert_eq!(placed.state.objects["strip"], restored.state.objects["strip"]);
+        let mut corrupt = row.clone();
+        let counts = corrupt.windows(8).position(|bytes| bytes == crate::baked::MAGIC).unwrap() + 8;
+        corrupt[counts..counts+4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(Document::from_bytes(&corrupt, Limits::default(), None),
+            Err(Error::Corrupt("baked geometry counts" | "baked geometry size overflow"))));
+        let tight = Limits { mesh: mesh::Limits { max_bytes: row.len() + payload - 1 }, ..Default::default() };
+        assert!(matches!(Document::from_bytes(&row, tight, None), Err(Error::WorkingBytes { .. })), "decode charges both the source and the live arrays");
+    }
+
+    #[test]
     fn program_workspace_preserves_product_checkpoint_and_error_attribution() {
         let limits = Limits::default();
         let mut operations = vec![Operation::Cube { object: "body".into(), size: [1.; 3] }];
@@ -2374,6 +2672,43 @@ mod history_budget_tests {
         })), crate::ProgramOp::Op(Operation::SetMaterial { material: 0, value: Material::default() })];
         let failure = crate::build_program(&bad, limits.clone(), &mut |_| unreachable!(), None).err().unwrap();
         assert_eq!(failure.index, 1, "batch validation must identify the introducing operation");
+        let baked = Operation::Baked {
+            object: "card".into(),
+            mesh: std::sync::Arc::new(crate::BakedMesh {
+                positions: vec![[0.; 3], [1., 0., 0.], [0., 1., 0.]], normals: vec![[0., 0., 1.]; 3],
+                uvs: None, material_bytes: None, indices: vec![0, 1, 2], runs: vec![(0, 0..3)],
+            }),
+        };
+        apply(&mut reopened, "card", vec![baked.clone()]).unwrap();
+        let reopen = |d: &Document| Document::from_bytes(&d.to_bytes(None).unwrap(), limits.clone(), None).unwrap();
+        let mut mixed = reopen(&reopened);
+        assert_eq!(mixed.state, reopened.state, "recorded baked object replays beside editable body");
+        mixed.checkpoint(mixed.head()).unwrap();
+        let checkpoint = reopen(&mixed);
+        assert_eq!(checkpoint.state, mixed.state, "baked checkpoint restores both kinds");
+        let replace = vec![Operation::DeleteObject { object: "card".into() }, Operation::Plane { object: "card".into(), size: [1.; 2] }];
+        apply(&mut mixed, "replace", replace).unwrap();
+        assert!(mixed.object("card").is_some(), "name reused for an editable object");
+        mixed.undo(mixed.head(), None).unwrap();
+        assert_eq!(mixed.state, checkpoint.state, "undo restores the baked geometry");
+        let indirect = Operation::Construction(crate::ConstructionOperation { object: "derived".into(),
+            kind: crate::Construction::Boolean { a: "body".into(), b: "card".into(), mode: crate::BooleanMode::Union } });
+        let head = mixed.head();
+        let err = apply(&mut mixed, "indirect", vec![Operation::Cube { object: "new".into(), size: [1.;3] }, indirect.clone()]).unwrap_err();
+        assert!(matches!(err, Error::BakedObject { index: 1, ref object, .. } if object == "card"), "{err}");
+        assert_eq!(mixed.head(), head, "indirect refusal rolls back the transaction");
+        let mut forward = Document::new(limits.clone()).unwrap();
+        let err = apply(&mut forward, "forward-link", vec![Operation::Plane { object: "copy".into(), size: [1.; 2] },
+            Operation::Scene(crate::SceneOperation::Node { object: "copy".into(), node: crate::SceneNode { linked_to: Some("card".into()), ..Default::default() } }),
+            baked.clone()]).unwrap_err();
+        assert!(matches!(err, Error::BakedObject { index: 1, ref object, .. } if object == "card"), "{err}");
+        let err = crate::build_program(&[crate::ProgramOp::Op(baked), crate::ProgramOp::Op(indirect)], limits.clone(),
+            &mut |_| unreachable!(), None).err().unwrap();
+        assert_eq!(err.index, 1);
+        assert!(err.message.contains("'card': the object is baked"), "{err}");
+        assert!(mixed.apply(Transaction { request_id: "cancel".into(), expected: head,
+            operations: vec![Operation::DeleteObject { object: "card".into() }] }, Some(&|| true)).is_err());
+        assert_eq!(mixed.state, checkpoint.state, "cancel preserves baked buffers");
         let valid_import = [crate::ProgramOp::Op(Operation::ImportMesh {
             object: "body".into(), source: mesh.to_bytes(&mut mesh::Context::default()).unwrap(),
         })];
@@ -2396,7 +2731,7 @@ mod history_budget_tests {
             crate::SurfaceOperation::VertexPaint { object: "body".into(), vertices: vec![ids[1], ids[1]], color: [0.5, 0.25, 0.75, 1.], opacity: 0.25 },
         ] {
             actual.apply_disposable(&op, &doc.state.objects, &doc.state.materials, &limits, &mut mesh::Context::default()).unwrap();
-            expected.apply(&op, &doc.state.objects, &doc.state.materials, &limits, &mut mesh::Context::default()).unwrap();
+            expected.apply(&op, &BTreeMap::from([("body".into(), doc.object("body").unwrap().clone())]), &doc.state.materials, &limits, &mut mesh::Context::default()).unwrap();
             assert_eq!(actual, expected);
             let bits = |surface: &crate::SurfaceState| surface.vertex_colors.iter().map(|(key, color)| (key.clone(), color.map(f64::to_bits))).collect::<Vec<_>>();
             assert_eq!(bits(&actual), bits(&expected), "every vertex color bit is preserved");
@@ -2476,7 +2811,7 @@ mod history_budget_tests {
             if total == 9 || total == 13 { folded += 4; }
             assert_eq!(doc.history_position(), (total - folded, total - folded), "fold only each fourth edit after filling the window");
             if folded != 0 {
-                assert_eq!(doc.checkpoint.objects["body"].corners()[0].uv, [(folded - 2) as f64 * 0.01, 0.25], "checkpoint includes exactly the oldest half-window");
+                assert_eq!(doc.checkpoint.editable("body").unwrap().corners()[0].uv, [(folded - 2) as f64 * 0.01, 0.25], "checkpoint includes exactly the oldest half-window");
             }
             // Explicit checkpoints advance the public concurrency token. For
             // byte comparison keep the same generation and request fingerprints

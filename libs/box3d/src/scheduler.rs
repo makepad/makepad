@@ -75,11 +75,18 @@ struct Semaphore {
 
 impl Semaphore {
     fn new(init_count: i32) -> Semaphore {
-        Semaphore {
+        let semaphore = Semaphore {
             count: std::sync::atomic::AtomicI32::new(init_count),
             wakeups: Mutex::new(0),
             cond: Condvar::new(),
-        }
+        };
+        // Where std boxes its lock and condition variable lazily (macOS
+        // pthread), the first lock or wait allocates. A worker's first
+        // sleep can land inside a step, so initialize both here, when the
+        // scheduler is created, and a warm step never allocates.
+        drop(semaphore.wakeups.lock().unwrap());
+        semaphore.cond.notify_all();
+        semaphore
     }
 
     /// Try to consume a permit without ever going into debt (only succeeds

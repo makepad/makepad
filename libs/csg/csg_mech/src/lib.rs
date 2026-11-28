@@ -31,7 +31,7 @@ pub mod weave;
 
 pub use check::{Found, Gap, LayerReport, Risk, Tack, Turned};
 pub use flex::{BondDecl, Flex};
-pub use geom::{Prim, Solid, P3};
+pub use geom::{Prim, Solid, P3, MIN_LOWER_SEGMENTS, segments_for_chord};
 pub use joint::{AnchorDecl, BallDecl, BearingDecl, Brake, BrakeDecl, Extent, BRAKE_SQUEEZE, HingeDecl, JointDecl, JointGeom, Material, Measured, MotorDecl, MotorKind, Note, PartBox, Profile, Seat, SliderDecl};
 
 use geom::*;

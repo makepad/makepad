@@ -215,6 +215,24 @@ struct Part {
     colors: Vec<[f32; 4]>,
     tangents: Vec<[f32; 4]>,
 }
+/// Packed attributes for one material run. The source mesh and its editing indices stay intact.
+struct BakedRun<'a> {
+    positions: std::borrow::Cow<'a, [[f32; 3]]>,
+    normals: std::borrow::Cow<'a, [[f32; 3]]>,
+    uvs: Option<std::borrow::Cow<'a, [[f32; 2]]>>,
+    material_bytes: Option<std::borrow::Cow<'a, [[u8; 4]]>>,
+    indices: Vec<u32>,
+}
+
+fn run_attribute<'a, T: Copy>(attribute: &'a [T], originals: &[u32], contiguous: bool) -> std::borrow::Cow<'a, [T]> {
+    if contiguous {
+        let first = originals[0] as usize;
+        std::borrow::Cow::Borrowed(&attribute[first..first + originals.len()])
+    } else {
+        std::borrow::Cow::Owned(originals.iter().map(|&i| attribute[i as usize]).collect())
+    }
+}
+
 fn f32_value(v: f64) -> Result<f32> {
     let v = v as f32;
     if v.is_finite() {
@@ -267,12 +285,68 @@ impl Document {
             .map(|m| m.base_color_png.len())
             .sum::<usize>();
         let surface_bytes = self.surface().memory_bytes();
+        let baked_bytes = self.state.baked_bytes();
+        let limit = self.limits().mesh.max_bytes;
+        let check_packing = |needed| {
+            if needed > limit { Err(Error::WorkingBytes { what: "baked run packing", needed, limit }) } else { Ok(()) }
+        };
+        let mut baked_runs = Vec::new();
+        let mut binary = 0usize;
+        let mut packed = 0usize;
+        for (object, geometry) in self.geometries() {
+            let crate::ObjectGeometry::Baked(mesh) = geometry else { continue };
+            let stride = (mesh.render_bytes() - mesh.indices.len() * 4) / mesh.positions.len();
+            // Reuse one source-to-local map across this mesh. Only entries touched by a run
+            // need resetting, so a small run never scans the whole source array.
+            let map_bytes = mesh.positions.len() * 4;
+            check_packing(baked_bytes.saturating_add(packed).saturating_add(map_bytes))?;
+            let mut local = vec![u32::MAX; mesh.positions.len()];
+            for (id, range) in &mesh.runs {
+                let source = &mesh.indices[range.start as usize..range.end as usize];
+                ctx.checkpoint(source.len() as u64)?;
+                let capacity = source.len().min(mesh.positions.len());
+                let scratch = map_bytes + capacity * 4;
+                check_packing(baked_bytes.saturating_add(packed).saturating_add(scratch))?;
+                let mut originals = Vec::with_capacity(capacity);
+                for &i in source {
+                    if local[i as usize] == u32::MAX {
+                        local[i as usize] = 0;
+                        originals.push(i);
+                    }
+                }
+                originals.sort_unstable();
+                let first = originals[0] as usize;
+                let contiguous = originals.last().copied().unwrap() as usize - first + 1 == originals.len();
+                let attributes = originals.len() * stride;
+                binary = binary.saturating_add(attributes).saturating_add(source.len() * 4);
+                if !contiguous { packed = packed.saturating_add(attributes); }
+                packed = packed.saturating_add(source.len() * 4);
+                check_packing(baked_bytes.saturating_add(packed).saturating_add(scratch))?;
+                for (j, &i) in originals.iter().enumerate() {
+                    local[i as usize] = j as u32;
+                }
+                let run = BakedRun {
+                    positions: run_attribute(&mesh.positions, &originals, contiguous),
+                    normals: run_attribute(&mesh.normals, &originals, contiguous),
+                    uvs: mesh.uvs.as_ref().map(|v| run_attribute(v, &originals, contiguous)),
+                    material_bytes: mesh.material_bytes.as_ref().map(|v| run_attribute(v, &originals, contiguous)),
+                    indices: source.iter().map(|&i| local[i as usize]).collect(),
+                };
+                for i in originals { local[i as usize] = u32::MAX; }
+                baked_runs.push((object, *id, run));
+            }
+        }
+        // Packed runs, writer BIN and output GLB coexist. Metadata rewriting follows their drop.
+        let assembly = binary.saturating_mul(2).saturating_add(packed);
+        let rewrite = if rich_surface || !self.scene().is_empty() || !self.rig().is_empty() { binary.saturating_mul(4) } else { 0 };
+        let baked_peak = baked_bytes.saturating_add(assembly.max(rewrite));
         let working = predicted_triangles
             .saturating_mul(512usize.saturating_add(joint_count.saturating_mul(32)))
+            .saturating_add(baked_peak)
             .saturating_add(texture_bytes.saturating_mul(4))
             .saturating_add(surface_bytes.saturating_mul(4));
         if working > self.limits().mesh.max_bytes {
-            return Err(Error::Budget("skin/export working bytes"));
+            return Err(Error::WorkingBytes { what: "skin/export working bytes", needed: working, limit: self.limits().mesh.max_bytes });
         }
         ctx.checkpoint(1)?;
         let mut parts: BTreeMap<(String, u32), Arc<Part>> = BTreeMap::new();
@@ -325,8 +399,9 @@ impl Document {
                 .checked_add(triangulated.triangles.len())
                 .ok_or(Error::Budget("compiled triangles"))?;
             // Conservative bound includes temporary writer copies and accessors.
-            if triangles.saturating_mul(384) > self.limits().mesh.max_bytes {
-                return Err(Error::Budget("compile working bytes"));
+            let needed = triangles.saturating_mul(384).saturating_add(baked_peak);
+            if needed > self.limits().mesh.max_bytes {
+                return Err(Error::WorkingBytes { what: "compile working bytes", needed, limit: self.limits().mesh.max_bytes });
             }
             for tri in &triangulated.triangles {
                 ctx.checkpoint(1)?;
@@ -405,11 +480,21 @@ impl Document {
                 });
             }
         }
+        let needed = triangles.saturating_mul(384).saturating_add(baked_peak);
+        if needed > self.limits().mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "compile working bytes", needed, limit: self.limits().mesh.max_bytes });
+        }
+        for (_, geometry) in self.geometries() {
+            if let crate::ObjectGeometry::Baked(mesh) = geometry { triangles += mesh.indices.len() / 3; }
+        }
         if triangles == 0 {
             return Err(Error::Invalid("model has no surface to compile"));
         }
         if let Some(cache) = cache.as_deref_mut() {
-            let used = parts.keys().map(|(_, material)| *material).collect::<std::collections::BTreeSet<_>>();
+            let mut used = parts.keys().map(|(_, material)| *material).collect::<std::collections::BTreeSet<_>>();
+            for (_, geometry) in self.geometries() {
+                if let crate::ObjectGeometry::Baked(m) = geometry { used.extend(m.runs.iter().map(|(id, _)| *id)); }
+            }
             cache.textures.retain(|(id, _), _| used.contains(id));
         }
         drop(packing_timer);
@@ -480,6 +565,7 @@ impl Document {
                 normals: part.indices.iter().map(|&i| part.normals[i as usize]).collect(),
             });
             views.push(GlbTexturedPart {
+                material_bytes: None,
                 positions: &part.positions,
                 normals: Some(&part.normals),
                 uvs: &part.uvs,
@@ -509,6 +595,26 @@ impl Document {
             });
         }
         ctx.checkpoint(1)?;
+        for &(object, id, ref run) in &baked_runs {
+            let material = self.materials().get(&id).ok_or(Error::Invalid("unknown baked material"))?;
+            vertices += run.positions.len();
+            for position in run.positions.iter() {
+                for d in 0..3 {
+                    bounds[0][d] = bounds[0][d].min(position[d]);
+                    bounds[1][d] = bounds[1][d].max(position[d]);
+                }
+            }
+            primitives.push(PrimitiveSource { object: object.into(), material: id, faces: Vec::new(),
+                source_vertices: Vec::new(), positions: Vec::new(), normals: Vec::new() });
+            views.push(GlbTexturedPart {
+                material_bytes: run.material_bytes.as_deref(),
+                positions: &run.positions, normals: Some(&run.normals), uvs: run.uvs.as_deref().unwrap_or_default(),
+                indices: &run.indices,
+                base_color_png: if material.base_color_png.is_empty() { &white } else { &material.base_color_png },
+                base_color_factor: Some([material.color[0] as f32, material.color[1] as f32, material.color[2] as f32, 1.]),
+                colors: None, lightmap_png: None, lightmap_uvs: None, detail_png: None, detail_scale: [0.; 2],
+            });
+        }
         drop(packing_timer);
         let _assembly_timer = CompileTimer::new(CompilePhase::GlbAssembly);
         let mut glb = if atlas.is_some() {
@@ -517,8 +623,9 @@ impl Document {
             write_glb_mesh_textured_parts(&views, false)
         };
         drop(views);
+        drop(baked_runs);
         if rich_surface {
-            glb = export_surface(self, &glb, &parts, &mut ctx, cache.as_deref_mut())?;
+            glb = export_surface(self, &glb, &primitives, &parts, &mut ctx, cache.as_deref_mut())?;
         }
         if let Some(skeleton) = self.skeleton() {
             let parsed = makepad_gltf::parse_glb_bytes(&glb)
@@ -637,6 +744,7 @@ pub(crate) fn material_samples_texture(doc: &Document, material: u32) -> bool {
 fn export_surface(
     doc: &Document,
     glb: &[u8],
+    primitives: &[PrimitiveSource],
     parts: &BTreeMap<(String, u32), Arc<Part>>,
     ctx: &mut mesh::Context<'_>,
     mut cache: Option<&mut CompileCache>,
@@ -647,7 +755,9 @@ fn export_surface(
     let mut ids = BTreeMap::new();
     let mut assignments = Vec::new();
     let mut derived_bytes = 0usize;
-    for (primitive, ((_, id), part)) in parts.iter().enumerate() {
+    for (primitive, source) in primitives.iter().enumerate() {
+        let id = &source.material;
+        let part = parts.get(&(source.object.clone(), *id));
         ctx.checkpoint(1)?;
         let material = if let Some(index) = ids.get(id) {
             *index
@@ -722,13 +832,12 @@ fn export_surface(
                 if let Some(texture) = &texture {
                     derived_bytes = derived_bytes.saturating_add(texture.png.len());
                     for png in &texture.mip_pngs { derived_bytes = derived_bytes.saturating_add(png.len()); }
-                    if derived_bytes
+                    let needed = derived_bytes
                         .saturating_mul(4)
                         .saturating_add(doc.surface().memory_bytes())
-                        .saturating_add(glb.len() * 3)
-                        > doc.limits().mesh.max_bytes
-                    {
-                        return Err(Error::Budget("PBR export images"));
+                        .saturating_add(glb.len() * 3);
+                    if needed > doc.limits().mesh.max_bytes {
+                        return Err(Error::WorkingBytes { what: "PBR export images", needed, limit: doc.limits().mesh.max_bytes });
                     }
                 }
                 Ok(texture)
@@ -766,8 +875,8 @@ fn export_surface(
             mesh: 0,
             primitive,
             material,
-            colors: part.colors.clone(),
-            tangents: part.tangents.clone(),
+            colors: part.map_or_else(Vec::new, |p| p.colors.clone()),
+            tangents: part.map_or_else(Vec::new, |p| p.tangents.clone()),
         });
     }
     ctx.checkpoint((derived_bytes + glb.len()) as u64)?;

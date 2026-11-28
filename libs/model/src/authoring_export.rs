@@ -31,6 +31,12 @@ impl Document {
         self.compile_view(cancelled,true,None)
     }
     fn compile_view(&self,cancelled:Option<&dyn Fn()->bool>,preview:bool,cache:Option<&mut crate::CompileCache>)->Result<CompiledModel>{
+        // The skin exporter binds every primitive of the model. A rigid object has no joint weights.
+        if !preview && self.skeleton().is_some() {
+            if let Some((name, _)) = self.geometries().find(|(_, g)| matches!(g, crate::ObjectGeometry::Baked(_))) {
+                return Err(Error::Mesh(mesh::MeshError::InvalidInput(format!("cannot skin '{name}': the object is baked"))));
+            }
+        }
         if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled,cache,None);}
         let evaluation_timer=crate::build_detail::CompileTimer::new(crate::build_detail::CompilePhase::Evaluation);
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
@@ -65,8 +71,19 @@ impl Document {
             objects.insert(name.into(),mesh);
         }
         // Interpolate painted attributes onto newly generated modifier vertices.
-        evaluated.state.surface.reconcile(&self.state.objects,&objects,self.limits(),&mut ctx)?;
-        evaluated.state.objects=objects;
+        evaluated.state.surface.reconcile_objects(&self.state.objects,&objects,self.limits(),&mut ctx)?;
+        evaluated.state.objects=objects.into_iter().map(|(n, m)| (n, m.into())).collect();
+        for (name, geometry) in self.geometries() {
+            let crate::ObjectGeometry::Baked(mesh) = geometry else { continue };
+            let world = self.scene().world_matrix(name)?;
+            for vertex in &mesh.positions {
+                ctx.checkpoint(1)?;
+                let p = transform_point(world, vertex.map(f64::from));
+                let p = yaw.map_or(p, |q| quat_rotate(q, p));
+                for d in 0..3 { bounds[0][d] = bounds[0][d].min(p[d]); bounds[1][d] = bounds[1][d].max(p[d]); }
+            }
+            evaluated.state.objects.insert(name.into(), geometry.clone());
+        }
         drop(cached);
         let delivery=crate::delivery::expand(&mut evaluated,&mut ctx,cancelled)?;
         drop(evaluation_timer);
@@ -107,13 +124,13 @@ fn prepare_preview_metadata(doc:&mut Document,ctx:&mut mesh::Context<'_>)->Resul
 
 pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],delivery:Option<&crate::delivery::LodDelivery>,ctx:&mut mesh::Context<'_>)->Result<Vec<u8>>{
     if doc.scene().is_empty()&&doc.rig().is_empty(){return Ok(glb);}
-    let scene=doc.scene();let names=doc.objects().enumerate().map(|(i,(n,_))|(n.to_string(),i)).collect::<BTreeMap<_,_>>();
+    let scene=doc.scene();let names=doc.geometries().enumerate().map(|(i,(n,_))|(n.to_string(),i)).collect::<BTreeMap<_,_>>();
     let mut export=GlbAuthoring::default();
     let frame=vehicle_frame(doc)?;let yaw=frame.as_ref().and_then(|f|f.yaw);
     // A vehicle laid out facing another way is turned to face +Z at its
     // roots: every node below, its wheels too, follows its root.
     let face=|t:Transform|match yaw{Some(q)=>Transform{translation:quat_rotate(q,t.translation),rotation:quat_mul(q,t.rotation),scale:t.scale},None=>t};
-    for (name,_) in doc.objects(){
+    for (name,_) in doc.geometries(){
         ctx.checkpoint(1)?;let mut node=scene.nodes.get(name).cloned().unwrap_or_default();
         if node.parent.is_none(){node.transform=face(node.transform);}
         let mut extras=std::collections::HashMap::new();

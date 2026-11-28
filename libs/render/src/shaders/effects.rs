@@ -27,7 +27,7 @@ script_mod! {
         // DELIBERATE: a billboarded quad is built facing the camera in view
         // space, so its winding depends on nothing we control here, and half
         // the sky would vanish if this culled.
-        backface_culling: false
+        cull_mode: @None
         // DELIBERATE: sparks are transparent and unordered among themselves.
         // Writing depth would make whichever drew first punch a hole in the
         // ones behind it.
@@ -257,7 +257,7 @@ script_mod! {
         world: varying(vec4f)
         alpha_blend: true
         // Billboarded in view space; winding is not ours to control.
-        backface_culling: false
+        cull_mode: @None
         // Transparent glow must never punch holes in later transparents.
         depth_write: false
         v_uv: varying(vec2f)
@@ -320,7 +320,7 @@ script_mod! {
         world: varying(vec4f)
         v_uv: varying(vec2f)
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         // Marks overlap solid surfaces by design. The 2 mm world-space lift
         // wins their own depth test; not writing depth keeps overlapping marks
         // and later transparent effects well behaved.
@@ -406,7 +406,7 @@ script_mod! {
         v_uv: varying(vec2f)
         // A screen is watchable from behind (mirrored); culling half the
         // orientations away buys nothing here.
-        backface_culling: false
+        cull_mode: @None
 
         vertex: fn() {
             let center = self.screen_pos.xyz

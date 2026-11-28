@@ -175,6 +175,89 @@ fn material(force: f32, restitution: f32) -> SurfaceMaterial {
     SurfaceMaterial { yield_force: force, restitution, friction: 0.0, ..default_surface_material() }
 }
 
+#[test]
+fn pitched_multi_manifold_yielding_stop_does_not_rebound_at_contact_speed() {
+    let with_wall = || {
+        let mut w = create_world(&WorldDef { gravity: Vec3::ZERO, ..default_world_def() });
+        let wall = create_body(&mut w, &BodyDef { position: pos(0., 0., -2.), ..default_body_def() });
+        create_hull_shape(&mut w, wall, &default_shape_def(), &make_box_hull(5., 5., 2.));
+        w
+    };
+    let mut w = with_wall();
+    let body = create_body(&mut w, &BodyDef {
+        body_type: BodyType::Dynamic,
+        position: pos(0., 0., 1.02),
+        rotation: make_quat_from_axis_angle(Vec3::AXIS_X, -0.08),
+        linear_velocity: vec3(0., 0., -16.7),
+        ..default_body_def()
+    });
+    // Two stepped front planes (0.10 m apart > linear_slop) sharing material 0 so
+    // cluster_for keeps two manifolds and allocate_yield_caps shares one 300 kN cap.
+    let nose = [
+        SetBox {
+            bounds: AABB { lower_bound: vec3(-1.0, -0.50, -1.00), upper_bound: vec3(1.0, -0.05, 1.0) },
+            material: 0, user_data: 0,
+        },
+        SetBox {
+            bounds: AABB { lower_bound: vec3(-1.0, 0.05, -0.90), upper_bound: vec3(1.0, 0.50, 1.0) },
+            material: 0, user_data: 0,
+        },
+    ];
+    let shape = create_box_set_shape(&mut w, body, &ShapeDef {
+        density: 1., base_material: material(300_000., 0.), ..default_shape_def()
+    }, &create_box_set(&nose));
+    // Hold the -0.08 rad pitch fixed so translational rebound measures contact bias
+    // rather than free-floating rotational slap-back (same idiom as line 334).
+    body_set_mass_data(&mut w, body, MassData { mass: 1400., ..Default::default() });
+    assert!((body_get_mass(&w, body) - 1400.).abs() < 0.01);
+    let mut embedded_manifolds = 0;
+    let mut rebound = 0.0_f32;
+    let mut pos_rebound = 0.0_f32;
+    for _ in 0..30 {
+        let prev_z = body_get_position(&w, body).z as f32;
+        world_step(&mut w, 1. / 60., 4);
+        let next_z = body_get_position(&w, body).z as f32;
+        rebound = rebound.max(body_get_linear_velocity(&w, body).z);
+        pos_rebound = pos_rebound.max((next_z - prev_z) * 60.0);
+        for c in shape_get_contact_data(&w, shape, 1) {
+            let embedded = c.manifolds.iter().filter(|m| m.points[..m.point_count as usize]
+                .iter().any(|p| (0.15..=0.35).contains(&-p.separation))).count();
+            embedded_manifolds = embedded_manifolds.max(embedded);
+        }
+    }
+    destroy_world(w);
+
+    // Release two independent bodies from rest with the smaller one embedded
+    // 0.20 m in the wall and 0.15 m in the larger body.
+    let mut w = with_wall();
+    let mut embedded_box = |z: f32, half_z: f32, mass: f32| {
+        let body = create_body(&mut w, &BodyDef {
+            body_type: BodyType::Dynamic, position: pos(0., 0., z), ..default_body_def()
+        });
+        let shape = create_hull_shape(&mut w, body, &ShapeDef {
+            density: mass / (2. * half_z), base_material: material(300_000., 0.),
+            ..default_shape_def()
+        }, &make_box_hull(0.5, 0.5, half_z));
+        assert!((body_get_mass(&w, body) - mass).abs() < 0.01);
+        (body, shape)
+    };
+    let (parent, _) = embedded_box(0.95, 0.7, 700.);
+    let (piece, piece_shape) = embedded_box(0.10, 0.3, 50.);
+    let mut contacts = 0;
+    let (mut piece_rebound, mut parent_rebound) = (0.0_f32, 0.0_f32);
+    for _ in 0..30 {
+        world_step(&mut w, 1. / 60., 4);
+        contacts = contacts.max(shape_get_contact_data(&w, piece_shape, 2).len());
+        piece_rebound = piece_rebound.max(body_get_linear_velocity(&w, piece).z);
+        parent_rebound = parent_rebound.max(body_get_linear_velocity(&w, parent).z);
+    }
+    destroy_world(w);
+    assert!(embedded_manifolds >= 2, "multiple manifolds must embed 0.15–0.35 m: {embedded_manifolds}");
+    assert_eq!(contacts, 2, "the released piece must contact both the wall and the parent");
+    assert!(rebound <= 0.5 && pos_rebound <= 0.5 && piece_rebound <= 0.5 && parent_rebound <= 0.5,
+        "rebound in m/s: pitched vel {rebound}, pitched pos {pos_rebound}, released {piece_rebound}, parent {parent_rebound}");
+}
+
 // The floor body's origin is at y = -0.5, so both forms have their top face at zero.
 fn floor_shape(world: &mut physics_world::World, floor: BodyId, ground: Ground, mat: SurfaceMaterial) -> ShapeId {
     let def = ShapeDef { base_material: mat, ..default_shape_def() };
@@ -214,6 +297,123 @@ fn cube_shape(world: &physics_world::World, cube: BodyId) -> ShapeId {
 
 fn normal_load(m: &Manifold) -> f64 {
     m.points[..m.point_count as usize].iter().map(|p| f64::from(p.normal_impulse)).sum()
+}
+
+#[test]
+fn yielding_hollow_box_set_against_hull_and_mesh_drops_buried_side_flips() {
+    let run = |mesh_wall, workers| {
+        let mut world = impact_world(workers);
+        let (thickness, angle, ideal, start) = if mesh_wall {
+            (0.25, 7.0_f32.to_radians(), 0.20, 0.105)
+        } else {
+            (0.125, 0.005, 0.50, 0.0)
+        };
+        let fixed = create_body(&mut world, &default_body_def());
+        if mesh_wall {
+            let sheet = mesh::create_mesh(&MeshDef {
+                vertices: &[vec3(-8.0, 0.0, -8.0), vec3(0.0, 0.0, 8.0), vec3(8.0, 0.0, -8.0)],
+                indices: &[0, 1, 2], ..Default::default()
+            }, None).unwrap();
+            create_mesh_shape(&mut world, fixed, &default_shape_def(), &sheet, Vec3::ONE);
+        } else {
+            create_hull_shape(&mut world, fixed, &default_shape_def(), &make_box_hull(6.0, 3.0, 6.0));
+            body_set_transform(&mut world, fixed, pos(0.0, -3.0, 0.0), Quat::IDENTITY);
+        }
+        let child = |lower_bound, upper_bound| SetBox {
+            bounds: AABB { lower_bound, upper_bound }, material: 0, user_data: 0,
+        };
+        // The tilt brings the leading rim into the sheet while the plate's centre
+        // stays on the front side of the triangle, even at the stopping depth.
+        let width = 1.5;
+        let rim = 0.125;
+        let set = create_box_set(&[
+            child(vec3(-width, 0.0, -1.0), vec3(width, thickness, 1.0)),
+            child(vec3(-width, thickness, -1.0), vec3(-width + rim, 1.0, 1.0)),
+            child(vec3(width - rim, thickness, -1.0), vec3(width, 1.0, 1.0)),
+            child(vec3(-width + rim, thickness, -1.0), vec3(width - rim, 1.0, -1.0 + rim)),
+            child(vec3(-width + rim, thickness, 1.0 - rim), vec3(width - rim, 1.0, 1.0)),
+        ]);
+        let body = create_body(&mut world, &BodyDef {
+            body_type: BodyType::Dynamic,
+            position: pos(0.0, start as _, 0.0),
+            rotation: make_quat_from_axis_angle(Vec3::AXIS_Z, angle),
+            enable_contact_recycling: false,
+            ..default_body_def()
+        });
+        let force = 0.5 * MASS * SPEED * SPEED / ideal;
+        let shape = create_box_set_shape(&mut world, body, &ShapeDef {
+            base_material: material(force, 0.0), ..default_shape_def()
+        }, &set);
+        // Hold the tilt fixed so translation measures work against the normal force.
+        body_set_mass_data(&mut world, body, MassData { mass: MASS, ..Default::default() });
+        body_set_linear_velocity(&mut world, body, vec3(0.0, -SPEED, 0.0));
+        let mut depth = 0.0_f32;
+        for _ in 0..64 {
+            world_step(&mut world, H, 1);
+            for c in shape_get_contact_data(&world, shape, 1) {
+                for m in c.manifolds {
+                    assert!(m.normal.y.abs() >= std::f32::consts::FRAC_1_SQRT_2,
+                        "mesh={mesh_wall}: buried rim supplied normal {:?}", m.normal);
+                }
+            }
+            depth = depth.max(start - body_get_position(&world, body).y as f32);
+        }
+        assert!(depth - start + width * angle.sin() > thickness * angle.cos(),
+            "mesh={mesh_wall}: the leading buried rim must reach the surface");
+        assert!(depth <= ideal + SPEED * H, "mesh={mesh_wall}: stopped at {depth}, energy bound {ideal}");
+        let speed = body_get_linear_velocity(&world, body).y;
+        assert!(speed.abs() < 0.05, "mesh={mesh_wall}: still moving at {speed}");
+        destroy_world(world);
+        (depth.to_bits(), speed.to_bits())
+    };
+    for mesh_wall in [false, true] {
+        assert_eq!(run(mesh_wall, 1), run(mesh_wall, 4));
+    }
+}
+
+#[test]
+fn yield_water_filling_gives_active_manifold_full_budget_beside_unloaded_and_lightly_loaded() {
+    let run = |workers, ground, gravity: f32| {
+        let mut world = impact_world(workers);
+        physics_world::world_set_gravity(&mut world, vec3(0.0, -gravity, 0.0));
+        let fixed = floor_body(&mut world);
+        let floor = floor_shape(&mut world, fixed, ground, material(0.0, 0.0));
+        let wall = create_hull_shape(&mut world, fixed, &default_shape_def(),
+            &hull::make_offset_box_hull(1.0, 2.0, 2.0, vec3(1.5, 0.5, 0.0)));
+        let side = create_hull_shape(&mut world, fixed, &default_shape_def(),
+            &hull::make_offset_box_hull(2.0, 2.0, 1.0, vec3(0.0, 0.5, 1.502)));
+        let cube = unit_cube(&mut world, 0.5, 0.0);
+        let face = cube_shape(&world, cube);
+        shape_set_surface_material(&mut world, face, material(1.0 / H, 0.0));
+        body_set_linear_velocity(&mut world, cube, vec3(16.0, 0.0, 0.0));
+        let mut trace = Vec::new();
+        for _ in 0..8 {
+            world_step(&mut world, H, 1);
+            let [support, impact, speculative] = [floor, wall, side].map(|shape| {
+                let data = shape_get_contact_data(&world, shape, 1);
+                assert_eq!(data.len(), 1);
+                assert_eq!(data[0].manifolds.len(), 1);
+                normal_load(&data[0].manifolds[0])
+            });
+            let weight = f64::from(gravity * H);
+            assert_eq!(speculative, 0.0, "the separated face must take no impulse");
+            assert!((support - weight).abs() < 1e-6, "floor took {support} for a load of {weight}");
+            assert!(support + impact + speculative <= 1.0, "the group exceeded its substep budget");
+            assert!(impact >= 1.0 - weight - 1e-6, "the impact received only {impact}");
+            let pos = body_get_position(&world, cube);
+            assert!((pos.y - 0.5).abs() < 0.0001, "the light support sagged to {}", pos.y);
+            trace.push((support.to_bits(), impact.to_bits(), pos.x.to_bits(), pos.y.to_bits()));
+        }
+        destroy_world(world);
+        trace
+    };
+    for ground in [Ground::Hull, Ground::BoxSet] {
+        for gravity in [0.0_f32, 8.0] {
+            let trace = run(1, ground, gravity);
+            assert_eq!(trace, run(4, ground, gravity), "worker count changed the impact");
+            println!("support trace {gravity} {trace:?}");
+        }
+    }
 }
 
 #[test]

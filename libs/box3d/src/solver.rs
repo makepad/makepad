@@ -192,6 +192,8 @@ pub struct StepContext {
     pub main_claimed: crate::sync::AtomicIndex,
 
     pub enable_warm_starting: bool,
+    pub(crate) yield_groups: YieldGroups,
+    has_multi_manifold_yield: bool,
 }
 
 #[derive(Default)]
@@ -223,14 +225,35 @@ pub struct SolverScratch {
     pub block_sync: Vec<crate::sync::AtomicIndex>,
     pub stage_completion: Vec<crate::sync::AtomicIndex>,
     set_ccd: Vec<SetCcdScratch>,
-    yield_groups: std::collections::HashMap<crate::contact::YieldKey, MaterialYield>,
+    yield_groups: YieldGroups,
+    yield_scratch: YieldScratch,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum YieldMember {
+    Wide { index: usize, lane: usize },
+    Scalar { contact: usize, manifold: usize },
 }
 
 #[derive(Default)]
-struct MaterialYield {
-    manifolds: usize,
-    force: f32,
-    share: f32,
+pub(crate) struct YieldGroup {
+    pub force: f32,
+    pub members: Vec<YieldMember>,
+}
+
+#[derive(Default)]
+pub(crate) struct YieldGroups {
+    indices: std::collections::HashMap<crate::contact::YieldKey, usize>,
+    // Keep each member vector's allocation. Only the first indices.len() groups are live.
+    pub groups: Vec<YieldGroup>,
+    pub multi: Vec<usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct YieldScratch {
+    pub demands: Vec<f64>,
+    pub order: Vec<usize>,
+    pub caps: Vec<f32>,
 }
 
 impl SolverScratch {
@@ -247,6 +270,7 @@ impl SolverScratch {
         for worker in &mut self.set_ccd {
             worker.counts = Default::default();
         }
+        context.yield_groups = std::mem::take(&mut self.yield_groups);
         context.wide_constraints = std::mem::take(&mut self.wide_constraints);
         context.contact_constraints = std::mem::take(&mut self.contact_constraints);
         context.manifold_constraints = std::mem::take(&mut self.manifold_constraints);
@@ -264,6 +288,7 @@ impl SolverScratch {
 
     /// Move the scratch buffers back out of the context (end of world_step).
     pub fn detach(&mut self, context: &mut StepContext) {
+        self.yield_groups = std::mem::take(&mut context.yield_groups);
         self.wide_constraints = std::mem::take(&mut context.wide_constraints);
         self.contact_constraints = std::mem::take(&mut context.contact_constraints);
         self.manifold_constraints = std::mem::take(&mut context.manifold_constraints);
@@ -422,16 +447,7 @@ pub struct SolverShared<'a> {
     pub contact_constraints: crate::sync::SyncSlice<'a, crate::contact_solver::ContactConstraint>,
     pub task_contexts: crate::sync::SyncSlice<'a, crate::physics_world::TaskContext>,
     pub profile: crate::sync::SyncPtr<SolveProfile>,
-}
-
-impl SolverShared<'_> {
-    pub(crate) fn manifold_yield_cap(&self, contact: &crate::contact::Contact, manifold: usize) -> Option<f32> {
-        if !self.world.may_yield {
-            return None;
-        }
-        let (key, _) = contact.manifold_yield(&self.world.shapes, manifold, self.context.h)?;
-        Some(self.world.solver_scratch.yield_groups[&key].share)
-    }
+    pub(crate) yield_scratch: crate::sync::SyncPtr<YieldScratch>,
 }
 
 /// C: UINT_MAX sync-bits sentinel — workers exit their spin loop.
@@ -1749,6 +1765,11 @@ fn solver_task(shared: &SolverShared, worker_index: i32) {
 
             profile.integrate_velocities += get_milliseconds_and_reset(&mut ticks);
 
+            // All velocity blocks have completed, and no warm-start block can run yet.
+            if shared.world.may_yield && context.has_multi_manifold_yield {
+                crate::contact_solver::allocate_yield_caps(shared);
+            }
+
             // Warm start constraints
             crate::joint::warm_start_joints_overflow(shared);
             crate::contact_solver::warm_start_contacts_overflow(shared);
@@ -1954,39 +1975,49 @@ fn run_solver_tasks(shared: &SolverShared, worker_count: i32) {
     }
 }
 
-/// The graph holds exactly the contacts about to be solved, including recycled and overflow
-/// rows. Count before dispatch. Only integer counts and a minimum are combined, and iteration
-/// over the scratch map never determines solver order.
-fn count_yielding_manifolds(world: &mut World, h: f32) {
-    let groups = &mut world.solver_scratch.yield_groups;
-    groups.clear();
-    // A world that never held a yielding material (most rigid-body worlds) pays nothing here.
-    if !world.may_yield {
-        return;
-    }
+/// Collect contacts in graph and manifold order, including the scalar overflow color.
+fn build_yield_groups(world: &World, context: &mut StepContext) {
+    let table = &mut context.yield_groups;
+    table.indices.clear();
+    table.multi.clear();
+    let h = context.h;
+    let mut record = |contact: i32, m: usize, member| {
+        let Some((key, force)) = world.contacts[contact as usize].manifold_yield(&world.shapes, m, h) else { return };
+        let next = table.indices.len();
+        let index = *table.indices.entry(key).or_insert(next);
+        if index == next {
+            if index == table.groups.len() { table.groups.push(YieldGroup::default()); }
+            table.groups[index].members.clear();
+            table.groups[index].force = force;
+        }
+        let group = &mut table.groups[index];
+        group.force = crate::contact::mix_yield_force(group.force, force);
+        group.members.push(member);
+    };
     for color in &world.constraint_graph.colors {
-        for id in color.convex_contacts.iter().copied().chain(color.contacts.iter().map(|s| s.contact_id)) {
-            let contact = &world.contacts[id as usize];
-            let mut count = |manifold, n| {
-                if let Some((key, force)) = contact.manifold_yield(&world.shapes, manifold, h) {
-                    let group = groups.entry(key).or_default();
-                    group.force = crate::contact::mix_yield_force(group.force, force);
-                    group.manifolds += n;
-                }
-            };
-            if contact.set_contact.is_some() {
-                for m in 0..contact.manifolds.len() {
-                    count(m, 1);
-                }
-            } else {
-                // Ordinary contacts use the same mixed force for all their manifolds.
-                count(0, contact.manifolds.len());
+        for (slot, &id) in color.convex_contacts.iter().enumerate() {
+            let index = color.wide_constraint_start as usize + slot / SIMD_WIDTH as usize;
+            record(id, 0, YieldMember::Wide { index, lane: slot % SIMD_WIDTH as usize });
+        }
+        for (slot, spec) in color.contacts.iter().enumerate() {
+            let contact = color.contact_constraint_start as usize + slot;
+            for m in 0..spec.manifold_count as usize {
+                record(spec.contact_id, m, YieldMember::Scalar { contact, manifold: spec.manifold_start as usize + m });
             }
         }
     }
-    for group in groups.values_mut() {
-        group.share = crate::contact::yield_impulse_share(group.force, h, group.manifolds);
+    for (index, group) in table.groups[..table.indices.len()].iter().enumerate() {
+        let budget = crate::contact::yield_impulse_share(group.force, h, 1);
+        let cap = crate::contact_solver::pack_yield_cap(budget);
+        for &member in &group.members {
+            match member {
+                YieldMember::Wide { index, lane } => context.wide_constraints[index].yield_caps.set(lane, cap),
+                YieldMember::Scalar { manifold, .. } => context.manifold_constraints[manifold].yield_cap = cap,
+            }
+        }
+        if budget > 0.0 && group.members.len() > 1 { table.multi.push(index); }
     }
+    context.has_multi_manifold_yield = !table.multi.is_empty();
 }
 
 // Solve with graph coloring
@@ -2003,7 +2034,6 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
     // Solve constraints using graph coloring
     {
         let mut setup_ticks = get_ticks();
-        count_yielding_manifolds(world, step_context.h);
 
         // Prepare buffers for continuous collision (fast bodies).
         // (C: atomic count + stack array; the port reuses the context Vec.)
@@ -2231,6 +2261,8 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             });
             b3_assert!(joint_base == joint_count);
         }
+
+        if world.may_yield { build_yield_groups(world, step_context); }
 
         // Special span for overflow to allow for function re-use (starts are relative
         // to the overflow range per the layout contract).
@@ -2463,6 +2495,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             // duration of the constraint stages (see SolverShared docs). The
             // world then presents a read-only view to all workers; disjoint
             // mutation goes through the SyncSlice/StateAccess views.
+            let mut yield_scratch = std::mem::take(&mut world.solver_scratch.yield_scratch);
             let mut states = std::mem::take(&mut step_context.states);
             let mut wide_constraints = std::mem::take(&mut step_context.wide_constraints);
             let mut manifold_constraints = std::mem::take(&mut step_context.manifold_constraints);
@@ -2491,6 +2524,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
                     manifold_constraints: crate::sync::SyncSlice::new(&mut manifold_constraints),
                     contact_constraints: crate::sync::SyncSlice::new(&mut contact_constraints),
                     task_contexts: crate::sync::SyncSlice::new(&mut task_contexts),
+                    yield_scratch: crate::sync::SyncPtr::new(&mut yield_scratch),
                     profile: crate::sync::SyncPtr::new(&mut solve_profile),
                 };
 
@@ -2498,6 +2532,7 @@ pub fn solve(world: &mut World, step_context: &mut StepContext) {
             }
 
             // Restore the taken arrays.
+            world.solver_scratch.yield_scratch = yield_scratch;
             world.contacts = contacts;
             world.task_contexts = task_contexts;
             for (color, joints) in world.constraint_graph.colors.iter_mut().zip(joint_colors) {

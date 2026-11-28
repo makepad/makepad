@@ -349,6 +349,16 @@ impl Renderer {
     ) {
         // The materials' `csm_map` slot is a depth texture in every mode.
         self.gpu_baker.ensure_csm_fallback(cx.cx);
+        // What this step leaves bound is this drawing's, for its views. Only
+        // a scene draw runs it, and a renderer has one cascade atlas and one
+        // local light set: a second scene draw by it in one drawing fits and
+        // builds them again, and the first one's receivers and views then
+        // see the second one's.
+        let drawing = cx.cx.drawing_id();
+        if self.gpu_baker.csm_fitted_in(drawing) {
+            trace!("scene_draws", "two scene draws by one renderer in drawing {drawing}: the first one's receivers and views see the second one's cascades and local lights");
+        }
+        self.gpu_baker.stamp_csm_drawing(drawing);
         // Both cascade tiers serve worlds without an atlas. Off can skip the
         // baker in such a world once it has released the previous tier's targets.
         let tiers = crate::gpu_lightmap::dynamic_shadow_tiers(self.gpu_baker.mode());

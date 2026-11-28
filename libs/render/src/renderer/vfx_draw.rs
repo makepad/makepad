@@ -274,15 +274,11 @@ impl Renderer {
             self.vfx.note_gpu_ms(ms);
         }
         let p = frame.scene.projection.v;
-        // Metal, Vulkan and D3D keep clip z/w as the stored depth; only GL
-        // maps it to 0..1. Read as GL, a Vulkan depth put the scene a few
-        // metres from the eye, so every particle with geometry behind it was
-        // discarded (a hearth's flames; only sparks against the sky showed).
-        let unmapped = match cx.cx.gpu_backend() {
-            GpuBackend::OpenGl | GpuBackend::WebGl => 0.0,
-            _ => 1.0,
-        };
-        let depth_ctl = [1.0, p[10], p[14], unmapped];
+        // Every backend stores clip z/w as the depth: one 0..w clip-z convention on every backend (platform/script/tests/clip_z.rs), GL included.
+        // Read as z/w * 0.5 + 0.5, a depth put the scene a few metres from the
+        // eye, so every particle with geometry behind it was discarded (a
+        // hearth's flames; only sparks against the sky showed).
+        let depth_ctl = [1.0, p[10], p[14], 0.0];
         // The scene target's own density: a pass at any other dpi would
         // re-allocate the shared target and lose the scene in it.
         let dpi = cx.current_dpi_factor();

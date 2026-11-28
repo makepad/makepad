@@ -3,6 +3,8 @@
 //! The authoritative state is a checkpoint and a typed transaction log. Render
 //! meshes are derived products. No UI, network, locks or thread creation live here.
 
+mod baked;
+pub use baked::{BakedMesh, MaterialRun, ObjectGeometry};
 mod canon;
 mod atlas;
 mod document;
@@ -45,7 +47,8 @@ pub use makepad_strict_json as json;
 /// 10: a far stand-in's albedo carries no occlusion and its leaf mips
 /// average in linear light; its occlusion rides in the depth atlas's blue,
 /// and a crown tree's stand-in is a crown layer.
-pub const MODEL_GENERATOR_VERSION: u32 = 10;
+/// 11: generated stand-ins use indexed quads.
+pub const MODEL_GENERATOR_VERSION: u32 = 11;
 pub use makepad_mesh_edit as mesh;
 
 mod schema;

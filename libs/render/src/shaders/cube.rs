@@ -24,7 +24,7 @@ script_mod! {
         // so this is the single cheapest win available on the geometry that
         // covers most of the screen. Safe because shape_geometry_data winds
         // every primitive outward and `shape_windings_face_outward` asserts it.
-        backface_culling: true
+        cull_mode: @Back
         v_fog: varying(float)
         v_direct: varying(vec3f)
         v_up: varying(float)
@@ -286,6 +286,6 @@ script_mod! {
         // guaranteed to face the viewer, and culling a blended surface changes
         // the composite rather than merely hiding a hidden face. Overriding the
         // `true` now inherited from DrawSceneCube.
-        backface_culling: false
+        cull_mode: @None
     }
 }

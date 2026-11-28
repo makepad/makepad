@@ -68,8 +68,9 @@ struct Tree {
 impl Tree {
     fn new(mesh: &mesh::Mesh, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<Self> {
         let t = mesh.triangulate(ctx)?;
-        if t.triangles.len().saturating_mul(1024) > limits.mesh.max_bytes {
-            return Err(Error::Budget("surface BVH bytes"));
+        let needed = t.triangles.len().saturating_mul(1024);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface BVH bytes", needed, limit: limits.mesh.max_bytes });
         }
         let triangles = t
             .triangles
@@ -369,7 +370,7 @@ fn sample(image: &RgbaImage, uv: [f64; 2], ch: SurfaceChannel) -> [f64; 4] {
 pub(super) fn project(
     state: &mut SurfaceState,
     op: &SurfaceOperation,
-    objects: &BTreeMap<String, mesh::Mesh>,
+    objects: &BTreeMap<String, impl crate::baked::MeshEntry>,
     limits: &Limits,
     ctx: &mut mesh::Context<'_>,
 ) -> Result<()> {
@@ -399,21 +400,20 @@ pub(super) fn project(
         return Err(Error::Invalid("projected brush axis/depth"));
     }
     let mesh = objects
-        .get(object)
+        .get(object).and_then(crate::baked::MeshEntry::editable)
         .ok_or(Error::Invalid("projected brush object"))?;
     let tree = Tree::new(mesh, limits, ctx)?;
     let d = normalize(*direction);
     let target = state.layer(*material, *channel, layer)?;
     let (w, h) = (target.image.width, target.image.height);
-    if target
+    let needed = target
         .image
         .pixels
         .len()
         .saturating_mul(4)
-        .saturating_add(tree.triangles.len() * 1024)
-        > limits.mesh.max_bytes
-    {
-        return Err(Error::Budget("projected brush bytes"));
+        .saturating_add(tree.triangles.len() * 1024);
+    if needed > limits.mesh.max_bytes {
+        return Err(Error::WorkingBytes { what: "projected brush bytes", needed, limit: limits.mesh.max_bytes });
     }
     let mut coverage = vec![0f64; w as usize * h as usize];
     for tri in tree.triangles.iter().filter(|t| t.material == *material) {
@@ -447,7 +447,7 @@ pub(super) fn project(
 pub(super) fn bake(
     state: &mut SurfaceState,
     op: &SurfaceOperation,
-    objects: &BTreeMap<String, mesh::Mesh>,
+    objects: &BTreeMap<String, impl crate::baked::MeshEntry>,
     legacy: &BTreeMap<u32, Material>,
     limits: &Limits,
     ctx: &mut mesh::Context<'_>,
@@ -478,22 +478,21 @@ pub(super) fn bake(
     }
     let mut image = RgbaImage::new(*width, *height, [0; 4], limits)?;
     let high = Tree::new(
-        objects.get(source).ok_or(Error::Invalid("bake source"))?,
+        objects.get(source).and_then(crate::baked::MeshEntry::editable).ok_or(Error::Invalid("bake source"))?,
         limits,
         ctx,
     )?;
     let low = Tree::new(
-        objects.get(target).ok_or(Error::Invalid("bake target"))?,
+        objects.get(target).and_then(crate::baked::MeshEntry::editable).ok_or(Error::Invalid("bake target"))?,
         limits,
         ctx,
     )?;
-    if (high.triangles.len() + low.triangles.len())
+    let needed = (high.triangles.len() + low.triangles.len())
         .saturating_mul(1024)
         .saturating_add(image.memory_bytes() * 8)
-        .saturating_add(state.memory_bytes())
-        > limits.mesh.max_bytes
-    {
-        return Err(Error::Budget("surface bake bytes"));
+        .saturating_add(state.memory_bytes());
+    if needed > limits.mesh.max_bytes {
+        return Err(Error::WorkingBytes { what: "surface bake bytes", needed, limit: limits.mesh.max_bytes });
     }
     let mut materials = BTreeMap::new();
     let mut images = BTreeMap::new();
@@ -516,7 +515,7 @@ pub(super) fn bake(
             images.insert(tri.material, map);
         }
         materials.insert(tri.material, mat);
-        if images
+        let needed = images
             .values()
             .map(RgbaImage::memory_bytes)
             .sum::<usize>()
@@ -528,10 +527,9 @@ pub(super) fn bake(
             )
             .saturating_add(state.memory_bytes())
             .saturating_add(image.memory_bytes() * 8)
-            .saturating_add((high.triangles.len() + low.triangles.len()) * 1024)
-            > limits.mesh.max_bytes
-        {
-            return Err(Error::Budget("bake material working bytes"));
+            .saturating_add((high.triangles.len() + low.triangles.len()) * 1024);
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "bake material working bytes", needed, limit: limits.mesh.max_bytes });
         }
     }
     let emissive_bake_strength = materials
@@ -701,8 +699,9 @@ pub(super) fn transfer_vertex_colors(
     let color_bytes = target.vertices().len().saturating_mul(target_name.len() + 96);
     let scratch = color_bytes
         .saturating_add(source.corners().len().saturating_mul(1024));
-    if state.memory_bytes().saturating_add(scratch) > limits.mesh.max_bytes {
-        return Err(Error::Budget("derived vertex color transfer bytes"));
+    let needed = state.memory_bytes().saturating_add(scratch);
+    if needed > limits.mesh.max_bytes {
+        return Err(Error::WorkingBytes { what: "derived vertex color transfer bytes", needed, limit: limits.mesh.max_bytes });
     }
     let mut colors = BTreeMap::new();
     let mut tree = None;
@@ -729,8 +728,8 @@ pub(super) fn transfer_vertex_colors(
 
 pub(super) fn reconcile(
     state: &mut SurfaceState,
-    before: &BTreeMap<String, mesh::Mesh>,
-    after: &BTreeMap<String, mesh::Mesh>,
+    before: &BTreeMap<String, impl crate::baked::MeshEntry>,
+    after: &BTreeMap<String, impl crate::baked::MeshEntry>,
     limits: &Limits,
     ctx: &mut mesh::Context<'_>,
 ) -> Result<()> {
@@ -739,7 +738,8 @@ pub(super) fn reconcile(
         return Ok(());
     }
     let mut colors = BTreeMap::new();
-    for (name, mesh) in after {
+    for (name, entry) in after {
+        let Some(mesh) = entry.editable() else { continue };
         if !state.vertex_colors.keys().any(|(n, _)| n == name) {
             continue;
         }
@@ -751,7 +751,7 @@ pub(super) fn reconcile(
                 colors.insert(key, *c);
                 continue;
             }
-            let Some(old) = before.get(name) else {
+            let Some(old) = before.get(name).and_then(crate::baked::MeshEntry::editable) else {
                 continue;
             };
             if old.faces().is_empty() {
@@ -771,13 +771,12 @@ pub(super) fn reconcile(
             }
         }
     }
-    if colors
+    let needed = colors
         .keys()
         .fold(0usize, |bytes, (name, _)| bytes.saturating_add(name.len() + 96))
-        .saturating_add(state.memory_bytes())
-        > limits.mesh.max_bytes
-    {
-        return Err(Error::Budget("vertex color transfer bytes"));
+        .saturating_add(state.memory_bytes());
+    if needed > limits.mesh.max_bytes {
+        return Err(Error::WorkingBytes { what: "vertex color transfer bytes", needed, limit: limits.mesh.max_bytes });
     }
     ctx.checkpoint(0)?;
     state.vertex_colors = colors;

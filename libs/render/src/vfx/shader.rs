@@ -25,7 +25,7 @@ script_mod! {
         // adds light; an alpha one occludes what is behind it.
         alpha_blend: true
         // Billboards are built in view space; their winding is not ours.
-        backface_culling: false
+        cull_mode: @None
         // Transparent and unordered within a burst: writing depth would
         // punch holes in the particles behind.
         depth_write: false
@@ -35,8 +35,8 @@ script_mod! {
         // x = 1 when the atlas is resident (else procedural fallbacks).
         vfx_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x = 1: soft particles against `scene_depth`, a hardware depth
-        // buffer of a GL-style projection; y, z = its m[2][2], m[3][2];
-        // w = 1 when the backend stores clip z/w unmapped (Metal).
+        // buffer of a GL-style projection that holds clip z/w on every
+        // backend; y, z = its m[2][2], m[3][2]; w unused.
         vfx_depth: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // (linear on, exposure, 1/exposure, emission gain) — the lanes' HDR
         // convention (renderer/settings.rs).
@@ -311,10 +311,7 @@ script_mod! {
                 let suv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5)
                 let zd = self.scene_depth.sample_nearest(suv).x
                 if zd < 0.99999 {
-                    // w = 1: the backend stores clip z/w as is (Metal);
-                    // else the GL convention, z/w * 0.5 + 0.5.
-                    let ndc_z = mix(zd * 2.0 - 1.0, zd, self.vfx_depth.w)
-                    let scene_z = self.vfx_depth.z / (ndc_z + self.vfx_depth.y)
+                    let scene_z = self.vfx_depth.z / (zd + self.vfx_depth.y)
                     let gap = scene_z - self.v_look.z
                     if gap <= 0.0 {
                         discard()
@@ -375,7 +372,7 @@ script_mod! {
         world: varying(vec4f)
         v_uv: varying(vec2f)
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         depth_write: false
         // Ambient + sun reaching a surface, in the lane's units.
         decal_light: uniform(vec3(1.0, 1.0, 1.0))

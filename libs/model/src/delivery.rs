@@ -23,7 +23,7 @@ pub(crate) fn expand(doc: &mut Document, ctx: &mut mesh::Context<'_>, cancelled:
     let limits = doc.limits().clone();
     let mut delivery = LodDelivery::default();
     let names = doc.objects().map(|(n, _)| n.to_owned()).collect::<Vec<_>>();
-    let mut bytes = doc.objects().map(|(_, m)| m.memory_bytes()).sum::<usize>();
+    let mut bytes = doc.geometries().map(|(_, m)| m.memory_bytes()).sum::<usize>();
     for (i, name) in names.iter().enumerate() {
         let levels = doc.scene().lods.get(name).cloned().unwrap_or_default();
         if levels.is_empty() { continue; }
@@ -37,7 +37,7 @@ pub(crate) fn expand(doc: &mut Document, ctx: &mut mesh::Context<'_>, cancelled:
         let prepared = (|| -> Result<_> {
             if requested.is_empty() { return Ok(None); }
             for (level, options) in levels.iter().enumerate() {
-                if options.target_faces != 0 && doc.object(&lod_name(i, level)).is_some() {
+                if options.target_faces != 0 && doc.state.objects.contains_key(&lod_name(i, level)) {
                     return Err(Error::Invalid("reserved derived LOD name collision"));
                 }
             }
@@ -188,7 +188,7 @@ pub(crate) fn expand(doc: &mut Document, ctx: &mut mesh::Context<'_>, cancelled:
                 // part's failure at this level (it keeps its previous geometry), never
                 // the whole compile's.
                 mesh.triangulate(&mut part_ctx)?;
-                if bytes.saturating_add(mesh.memory_bytes().saturating_mul(3))>ctx.limits.max_bytes{return Err(Error::Budget("derived LOD geometry"));}
+                let needed=bytes.saturating_add(mesh.memory_bytes().saturating_mul(3));if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"derived LOD geometry",needed,limit:ctx.limits.max_bytes});}
                 doc.state.surface.transfer_vertex_colors(name,&base,&derived,&mesh,&limits,&mut part_ctx)?;
                 Ok(mesh)
             })();
@@ -199,7 +199,7 @@ pub(crate) fn expand(doc: &mut Document, ctx: &mut mesh::Context<'_>, cancelled:
                     previous = derived.clone();
                     let node = doc.scene().nodes.get(name).cloned().unwrap_or_default();
                     doc.state.scene.nodes.insert(derived.clone(), SceneNode { linked_to: None, ..node });
-                    doc.state.objects.insert(derived.clone(), mesh);
+                    doc.state.objects.insert(derived.clone(), mesh.into());
                     outcomes.push(LodGeometry::Derived(derived));
                 }
                 Err(error @ Error::Mesh(mesh::MeshError::Cancelled)) => return Err(error),

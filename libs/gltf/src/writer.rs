@@ -537,6 +537,10 @@ pub struct GlbTexturedPart<'a> {
     /// Optional linear RGB vertex colors (COLOR_0). Tiling albedo stays on
     /// TEXCOORD_0; this carries per-vertex lightmaps / baked light.
     pub colors: Option<&'a [[f32; 3]]>,
+    /// A primitive's `_MATERIAL_BYTES` (VEC4 UNSIGNED_BYTE): four exact bytes per vertex
+    /// that its material reads with `unpack4u8`. An AO atlas, morph indices or a road
+    /// band take precedence in the packed vertex's AO lane.
+    pub material_bytes: Option<&'a [[u8; 4]]>,
     /// Optional shipped lightmap (Q3). Paired with [`lightmap_uvs`]
     /// (`TEXCOORD_1`). The viewer applies it on load; albedo keeps tiling.
     pub lightmap_png: Option<&'a [u8]>,
@@ -810,6 +814,39 @@ pub fn write_glb_mesh_textured_parts_linear(parts: &[GlbTexturedPart], double_si
     write_glb_mesh_textured_parts_filtered(parts, double_sided, 9729)
 }
 
+// Material runs with the same authored attributes share their accessors. Generated
+// normals depend on the run's indices and therefore have no shared key.
+type AttributeKey = (*const [f32; 3], usize, *const [f32; 3], *const [f32; 2], usize, Option<*const [u8; 4]>);
+fn attribute_key(part: &GlbTexturedPart) -> Option<AttributeKey> {
+    let n = part.normals.filter(|n| n.len() == part.positions.len())?;
+    Some((part.positions.as_ptr(), part.positions.len(), n.as_ptr(), part.uvs.as_ptr(), part.uvs.len(),
+        part.material_bytes.filter(|v| v.len() == part.positions.len()).map(<[_]>::as_ptr)))
+}
+
+fn textured_bin_size(parts: &[GlbTexturedPart]) -> usize {
+    let mut next_run = None;
+    let mut images = std::collections::HashSet::new();
+    let mut size = 0usize;
+    for p in parts.iter().filter(|p| !p.positions.is_empty() && p.indices.len() >= 3) {
+        size += std::mem::size_of_val(p.indices);
+        let key = attribute_key(p);
+        if key.is_none() || next_run != key.map(|k| (k, p.indices.as_ptr())) {
+            size += 2 * std::mem::size_of_val(p.positions) + std::mem::size_of_val(p.uvs);
+            if let Some(bytes) = p.material_bytes.filter(|v| v.len() == p.positions.len()) { size += std::mem::size_of_val(bytes); }
+        }
+        next_run = key.map(|k| (k, p.indices.as_ptr_range().end));
+        if let Some(c) = p.colors.filter(|c| c.len() == p.positions.len()) { size += std::mem::size_of_val(c); }
+        if let (Some(_), Some(uv)) = (p.lightmap_png, p.lightmap_uvs.filter(|v| v.len() == p.positions.len())) {
+            size += std::mem::size_of_val(uv);
+        }
+        let detail = p.detail_png.filter(|_| p.detail_scale.iter().any(|v| v.abs() > 1e-4));
+        for image in [Some(p.base_color_png), p.lightmap_png, detail].into_iter().flatten() {
+            if images.insert(image) { size += image.len().next_multiple_of(4); }
+        }
+    }
+    size
+}
+
 fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_sided: bool, min_filter: u32) -> Vec<u8> {
     if parts.is_empty() {
         return write_glb_mesh(
@@ -818,8 +855,10 @@ fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_side
         );
     }
     let mut b = GlbBinBuilder::new();
+    b.bin.reserve_exact(textured_bin_size(parts));
     let mut prims = Vec::new();
     let mut materials = Vec::new();
+    let mut next_run = None;
     let mut material_by_record = std::collections::HashMap::<String, usize>::new();
     let mut textures = Vec::new();
     let mut images = Vec::new();
@@ -841,26 +880,26 @@ fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_side
             computed = compute_vertex_normals(part.positions, part.indices);
             &computed
         };
-        let mut idx_bytes = Vec::with_capacity(part.indices.len() * 4);
-        for &i in part.indices {
-            idx_bytes.extend_from_slice(&i.to_le_bytes());
-        }
-        let idx_acc = b.accessor(&idx_bytes, 5125, part.indices.len(), "SCALAR", None, Some(34963));
-        let mut pos = Vec::with_capacity(part.positions.len() * 3);
-        for p in part.positions {
-            pos.extend_from_slice(p);
-        }
-        let pos_acc = b.f32_accessor(&pos, 3, "VEC3", true, Some(34962));
-        let mut nrm = Vec::with_capacity(normals.len() * 3);
-        for n in normals {
-            nrm.extend_from_slice(n);
-        }
-        let nrm_acc = b.f32_accessor(&nrm, 3, "VEC3", false, Some(34962));
-        let mut uvs = Vec::with_capacity(part.uvs.len() * 2);
-        for uv in part.uvs {
-            uvs.extend_from_slice(uv);
-        }
-        let uv_acc = b.f32_accessor(&uvs, 2, "VEC2", false, Some(34962));
+        let idx_acc = b.word_accessor(part.indices.iter().copied(), 5125, part.indices.len(), "SCALAR", None, Some(34963));
+        let mut attributes = || {
+            let pos = b.f32_accessor(part.positions.as_flattened(), 3, "VEC3", true, Some(34962));
+            let nrm = b.f32_accessor(normals.as_flattened(), 3, "VEC3", false, Some(34962));
+            let uv = (!part.uvs.is_empty()).then(|| b.f32_accessor(part.uvs.as_flattened(), 2, "VEC2", false, Some(34962)));
+            let bytes = part.material_bytes.filter(|v| v.len() == part.positions.len()).map(|v| {
+                let view = b.strided_view(v.as_flattened(), Some(34962), Some(4));
+                b.finish_accessor(view, 5121, v.len(), "VEC4", None)
+            });
+            (pos, nrm, uv, bytes)
+        };
+        let key = attribute_key(part);
+        let accessors = match next_run {
+            Some((previous, next_index, accessors)) if Some(previous) == key && next_index == part.indices.as_ptr() => accessors,
+            _ => attributes(),
+        };
+        next_run = key.map(|k| (k, part.indices.as_ptr_range().end, accessors));
+        let (pos_acc, nrm_acc, uv_acc, bytes_acc) = accessors;
+        let bytes_attr = bytes_acc.map_or_else(String::new, |acc| format!(",\"_MATERIAL_BYTES\":{acc}"));
+        let uv_attr = uv_acc.map_or_else(String::new, |acc| format!(",\"TEXCOORD_0\":{acc}"));
         let color_attr = match part.colors {
             Some(cols) if cols.len() == part.positions.len() => {
                 let mut cvals = Vec::with_capacity(cols.len() * 3);
@@ -936,14 +975,15 @@ fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_side
                 format!(",\"extras\":{{{}}}", bits.join(","))
             }
         };
+        let base_texture = if uv_acc.is_some() { format!("\"baseColorTexture\":{{\"index\":{ti}}},") } else { String::new() };
         let material = format!(
-            "{{\"pbrMetallicRoughness\":{{{factor}\"baseColorTexture\":{{\"index\":{ti}}},\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"doubleSided\":{double_sided}{extras}}}"
+            "{{\"pbrMetallicRoughness\":{{{factor}{base_texture}\"metallicFactor\":0.0,\"roughnessFactor\":1.0}},\"doubleSided\":{double_sided}{extras}}}"
         );
         let mi = *material_by_record.entry(material.clone()).or_insert_with(|| {
             let index = materials.len(); materials.push(material); index
         });
         prims.push(format!(
-            "{{\"attributes\":{{\"POSITION\":{pos_acc},\"NORMAL\":{nrm_acc},\"TEXCOORD_0\":{uv_acc}{color_attr}{lm_attr}}},\"indices\":{idx_acc},\"material\":{mi},\"mode\":4}}"
+            "{{\"attributes\":{{\"POSITION\":{pos_acc},\"NORMAL\":{nrm_acc}{uv_attr}{color_attr}{lm_attr}{bytes_attr}}},\"indices\":{idx_acc},\"material\":{mi},\"mode\":4}}"
         ));
     }
     if prims.is_empty() {
@@ -1116,13 +1156,20 @@ impl GlbBinBuilder {
     }
     /// Add a bufferView over `bytes` (4-aligned), returns the view index.
     fn view(&mut self, bytes: &[u8], target: Option<u32>) -> usize {
+        self.strided_view(bytes, target, None)
+    }
+    fn strided_view(&mut self, bytes: &[u8], target: Option<u32>, stride: Option<u32>) -> usize {
         self.align4();
         let offset = self.bin.len();
         self.bin.extend_from_slice(bytes);
+        self.finish_view(offset, target, stride)
+    }
+    fn finish_view(&mut self, offset: usize, target: Option<u32>, stride: Option<u32>) -> usize {
+        let stride = stride.map_or(String::new(), |s| format!(",\"byteStride\":{s}"));
         let target = target.map_or(String::new(), |t| format!(",\"target\":{t}"));
         self.views.push(format!(
-            "{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{}{target}}}",
-            bytes.len()
+            "{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{}{target}{stride}}}",
+            self.bin.len() - offset
         ));
         self.views.len() - 1
     }
@@ -1137,6 +1184,19 @@ impl GlbBinBuilder {
         target: Option<u32>,
     ) -> usize {
         let view = self.view(bytes, target);
+        self.finish_accessor(view, component_type, count, ty, min_max)
+    }
+
+    fn word_accessor(&mut self, words: impl Iterator<Item = u32>, component_type: u32, count: usize,
+        ty: &str, min_max: Option<(String, String)>, target: Option<u32>) -> usize {
+        self.align4();
+        let offset = self.bin.len();
+        for word in words { self.bin.extend_from_slice(&word.to_le_bytes()); }
+        let view = self.finish_view(offset, target, None);
+        self.finish_accessor(view, component_type, count, ty, min_max)
+    }
+
+    fn finish_accessor(&mut self, view: usize, component_type: u32, count: usize, ty: &str, min_max: Option<(String, String)>) -> usize {
         let mm = min_max.map_or(String::new(), |(mn, mx)| {
             format!(",\"min\":[{mn}],\"max\":[{mx}]")
         });
@@ -1153,10 +1213,6 @@ impl GlbBinBuilder {
         with_min_max: bool,
         target: Option<u32>,
     ) -> usize {
-        let mut bytes = Vec::with_capacity(vals.len() * 4);
-        for v in vals {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
         let count = vals.len() / lanes;
         let mm = with_min_max.then(|| {
             let mut mn = vec![f32::INFINITY; lanes];
@@ -1173,7 +1229,7 @@ impl GlbBinBuilder {
             }
             (fmt_f32_list(&mn), fmt_f32_list(&mx))
         });
-        self.accessor(&bytes, 5126, count, ty, mm, target)
+        self.word_accessor(vals.iter().map(|v| v.to_bits()), 5126, count, ty, mm, target)
     }
 }
 
@@ -1405,6 +1461,7 @@ mod tests {
         let uvs = [[0.0,0.0],[1.0,0.0],[0.0,1.0]];
         let indices = [0,1,2];
         let base = || super::GlbTexturedPart {
+            material_bytes: None,
             positions: &positions, normals: None, uvs: &uvs, indices: &indices,
             base_color_png: b"base", base_color_factor: None, colors: None,
             lightmap_png: None, lightmap_uvs: None, detail_png: None, detail_scale: [0.0;2],
@@ -1417,6 +1474,20 @@ mod tests {
         assert_eq!(loaded.document.materials_slice().len(), 4);
         assert_eq!(loaded.document.meshes_slice()[0].primitives.iter().map(|p| p.material.unwrap()).collect::<Vec<_>>(), [0,0,1,2,3,2]);
         assert!(String::from_utf8_lossy(&glb).contains("\"minFilter\":9729"));
+
+        let runs = [0, 1, 2, 2, 1, 0, 0, 2, 1];
+        let normals = [[0., 0., 1.]; 3];
+        let a = [[1; 4]; 3];
+        let b = [[2; 4]; 3];
+        let parts = [(0, &a), (3, &a), (6, &b)].map(|(start, bytes)| super::GlbTexturedPart {
+            indices: &runs[start..start + 3], normals: Some(&normals), material_bytes: Some(bytes), ..base()
+        });
+        let glb = super::write_glb_mesh_textured_parts(&parts, false);
+        let loaded = load_gltf_from_bytes(&glb, None).unwrap();
+        let prims = &loaded.document.meshes_slice()[0].primitives;
+        let bytes = |i: usize| prims[i].attributes["_MATERIAL_BYTES"];
+        assert_eq!(bytes(0), bytes(1), "contiguous runs share the same byte accessor");
+        assert_ne!(bytes(1), bytes(2), "different bytes break accessor sharing");
     }
 
     #[test]
@@ -1427,6 +1498,7 @@ mod tests {
         let indices = [0u32, 1, 2];
         let glb = write_glb_mesh_textured_parts(
             &[GlbTexturedPart {
+                material_bytes: None,
                 positions: &positions,
                 uvs: &uvs,
                 indices: &indices,
@@ -1491,6 +1563,7 @@ mod tests {
         let indices = vec![0u32, 1, 2];
         let glb = write_glb_mesh_textured_parts(
             &[GlbTexturedPart {
+                material_bytes: None,
                 positions: &positions,
                 uvs: &uvs,
                 indices: &indices,

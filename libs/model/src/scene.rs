@@ -175,11 +175,11 @@ impl SceneState {
     /// One cache per evaluation; instances and shrinkwrap references share an
     /// immutable result. No cache survives a document revision.
     pub(crate) fn evaluated_meshes(&self,state:&State,ctx:&mut mesh::Context<'_>)->Result<BTreeMap<String,Arc<mesh::Mesh>>>{
-        let mut cache=BTreeMap::new();let mut visiting=BTreeSet::new();for object in state.objects.keys(){self.evaluate_one(state,object,&mut cache,&mut visiting,ctx)?;}Ok(cache)
+        let mut cache=BTreeMap::new();let mut visiting=BTreeSet::new();for (object, _) in state.editable_objects(){self.evaluate_one(state,object,&mut cache,&mut visiting,ctx)?;}Ok(cache)
     }
     fn evaluate_one(&self,state:&State,object:&str,cache:&mut BTreeMap<String,Arc<mesh::Mesh>>,visiting:&mut BTreeSet<String>,ctx:&mut mesh::Context<'_>)->Result<Arc<mesh::Mesh>>{
         ctx.checkpoint(1)?;if let Some(mesh)=cache.get(object){return Ok(mesh.clone());}if !visiting.insert(object.into()){return Err(Error::Invalid("modifier/instance dependency cycle"));}
-        let original=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;
+        let original=state.editable(object).ok_or_else(||Error::MissingObject(object.into()))?;
         let base=if let Some(source)=self.nodes.get(object).and_then(|n|n.linked_to.as_deref()){self.evaluate_one(state,source,cache,visiting,ctx)?}else{
             let needed=cache_bytes(cache).saturating_add(original.memory_bytes().saturating_mul(3));if needed>ctx.limits.max_bytes{return Err(Error::WorkingBytes{what:"modifier source copies",needed,limit:ctx.limits.max_bytes});}Arc::new(original.clone())};
         let mut result=base;for modifier in self.modifiers.get(object).into_iter().flatten().filter(|m|m.enabled){ctx.checkpoint(1)?;
@@ -200,17 +200,17 @@ impl SceneState {
             SceneOperation::Node{object,node}=>{name(object,limits)?;state.scene.nodes.insert(object.clone(),node.clone());}
             SceneOperation::Instance{object,source,transform}=>{
                 create_name(state,object,limits)?;if !state.objects.contains_key(source){return Err(Error::MissingObject(source.clone()));}
-                state.objects.insert(object.clone(),mesh::Mesh::new());
+                state.objects.insert(object.clone(),mesh::Mesh::new().into());
                 state.scene.nodes.insert(object.clone(),SceneNode{parent:None,linked_to:Some(source.clone()),transform:*transform});
                 if state.scene.paint.contains(source){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::Duplicate{object,source}=>{
-                create_name(state,object,limits)?;let mesh=state.scene.local_mesh(state,source,ctx)?;state.objects.insert(object.clone(),mesh);
+                create_name(state,object,limits)?;let mesh=state.scene.local_mesh(state,source,ctx)?;state.objects.insert(object.clone(),mesh.into());
                 let mut node=state.scene.nodes.get(source).cloned().unwrap_or_default();node.linked_to=None;state.scene.nodes.insert(object.clone(),node);
                 if state.scene.paint.contains(source){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::MakeUnique{object}=>{
-                let mesh=state.scene.local_mesh(state,object,ctx)?;state.objects.insert(object.clone(),mesh);
+                let mesh=state.scene.local_mesh(state,object,ctx)?;state.objects.insert(object.clone(),mesh.into());
                 state.scene.nodes.entry(object.clone()).or_default().linked_to=None;
                 state.scene.modifiers.remove(object);
             }
@@ -224,13 +224,13 @@ impl SceneState {
                     mesh.transform(&ids,state.scene.world_matrix(source)?,ctx)?;
                     joined.append(&mesh,ctx)?;
                 }
-                state.objects.insert(object.clone(),joined);
+                state.objects.insert(object.clone(),joined.into());
                 if sources.iter().all(|source|state.scene.paint.contains(source)){state.scene.paint.insert(object.clone());}
             }
             SceneOperation::Separate{object,name:target,faces}=>{
                 create_name(state,target,limits)?;
                 if state.scene.nodes.get(object).is_some_and(|n|n.linked_to.is_some())||state.scene.modifiers.get(object).is_some_and(|m|!m.is_empty()){return Err(Error::Invalid("make geometry unique and apply modifiers before separating faces"));}
-                let source=state.objects.get_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;let(separated,_)=source.separate_faces(faces,ctx)?;state.objects.insert(target.clone(),separated);
+                let source=state.editable_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;let(separated,_)=source.separate_faces(faces,ctx)?;state.objects.insert(target.clone(),separated.into());
                 let mut node=state.scene.nodes.get(object).cloned().unwrap_or_default();node.linked_to=None;state.scene.nodes.insert(target.clone(),node);
                 if state.scene.paint.contains(object){state.scene.paint.insert(target.clone());}
             }
@@ -239,7 +239,7 @@ impl SceneState {
                 if state.scene.nodes.get(object).is_some_and(|n|n.linked_to.is_some()) || state.scene.nodes.values().any(|n|n.linked_to.as_deref()==Some(object)) || state.scene.modifiers.get(object).is_some_and(|m|!m.is_empty()) {
                     return Err(Error::Invalid("make linked geometry unique and apply modifiers before changing its pivot"));
                 }
-                let geometry=state.objects.get_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;
+                let geometry=state.editable_mut(object).ok_or_else(||Error::MissingObject(object.clone()))?;
                 let vertices=geometry.vertices().iter().map(|v|v.id).collect::<Vec<_>>();
                 let mut offset=IDENTITY_MATRIX;for i in 0..3{offset[i][3]=-position[i];}
                 geometry.transform(&vertices,offset,ctx)?;
@@ -275,9 +275,9 @@ impl SceneState {
             SceneOperation::ModifierOrder{object,names}=>{let stack=state.scene.modifiers.get_mut(object).ok_or(Error::Invalid("unknown modifier stack"))?;
                 if names.len()!=stack.len()||names.iter().collect::<BTreeSet<_>>().len()!=names.len(){return Err(Error::Invalid("modifier order must be an exact permutation"));}
                 let reordered=names.iter().map(|name|stack.iter().find(|m|&m.name==name).cloned().ok_or(Error::Invalid("unknown modifier in order"))).collect::<Result<Vec<_>>>()?;*stack=reordered;}
-            SceneOperation::ApplyModifiers{object}=>{let mesh=state.scene.local_mesh(state,object,ctx)?;state.objects.insert(object.clone(),mesh);state.scene.modifiers.remove(object);state.scene.nodes.entry(object.clone()).or_default().linked_to=None;}
+            SceneOperation::ApplyModifiers{object}=>{let mesh=state.scene.local_mesh(state,object,ctx)?;state.objects.insert(object.clone(),mesh.into());state.scene.modifiers.remove(object);state.scene.nodes.entry(object.clone()).or_default().linked_to=None;}
         }
-        if let Some(object)=op.object_name(){result.object=object.into();if let Some(m)=state.objects.get(object){result.vertices=m.vertices().iter().map(|v|v.id).collect();result.faces=m.faces().iter().map(|f|f.id).collect();}}
+        if let Some(object)=op.object_name(){result.object=object.into();if let Some(m)=state.editable(object){result.vertices=m.vertices().iter().map(|v|v.id).collect();result.faces=m.faces().iter().map(|f|f.id).collect();}}
         // Cross-object invariants are checked at the transaction boundary, so
         // a batch can remove/reparent attachments alongside their objects.
         Ok(result)

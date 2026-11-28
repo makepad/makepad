@@ -113,12 +113,16 @@ fn distance_squared(b: Bounds, p: Vec3f) -> f32 {
     x * x + y * y + z * z
 }
 
+fn valid_camera(camera: Option<(Mat4f, Mat4f)>) -> Option<(Mat4f, Mat4f)> {
+    camera
+        .filter(|(v, p)| v.v.iter().chain(p.v.iter()).all(|x| x.is_finite()))
+        .filter(|(_, p)| p.v[0].abs() > 1.0e-6 && p.v[5].abs() > 1.0e-6)
+}
+
 /// Per-view data. Reuses all list storage; no allocations per object or cluster.
-pub struct ClusteredLights {
-    pub(crate) shadows: crate::local_shadows::LocalShadows,
-    active: Vec<bool>,
+pub(crate) struct ClusterGrid {
+    camera: Option<(Mat4f, Mat4f)>,
     config: ClusterConfig,
-    lights: Vec<LmLight>,
     bounds: Vec<Bounds>,
     counts: Vec<usize>,
     indices: Vec<usize>,
@@ -138,6 +142,25 @@ pub struct ClusteredLights {
     /// The texture holds an empty grid (no light in any cluster): a frame
     /// with no lights again has nothing new to pack or upload.
     uploaded_empty: bool,
+}
+
+struct ViewGrid {
+    pass: DrawPassId,
+    drawing: u64,
+    grid: ClusterGrid,
+}
+
+/// The frame's light list and shadow atlas, shared by all its cameras.
+pub struct ClusteredLights {
+    pub(crate) shadows: crate::local_shadows::LocalShadows,
+    lights: Vec<LmLight>,
+    active: Vec<bool>,
+    scene: ClusterGrid,
+    views: Vec<ViewGrid>,
+    /// The view grid `bind` takes (None: the scene's), for one draw.
+    bound: Option<usize>,
+    /// The drawing whose scene draw last built this set (None before any).
+    pub(crate) drawing: Option<u64>,
     /// The lighting convention every lit lane reads (`lin_ctl`; see
     /// `Renderer::lin_ctl`), bound together with the cluster uniforms.
     pub(crate) lin_ctl: [f32; 4],
@@ -158,13 +181,11 @@ pub struct ClusteredLights {
     pub(crate) uw: [[f32; 4]; 3],
 }
 
-impl Default for ClusteredLights {
+impl Default for ClusterGrid {
     fn default() -> Self {
         Self {
-            shadows: Default::default(),
-            active: Vec::new(),
+            camera: None,
             config: ClusterConfig::default(),
-            lights: Vec::new(),
             bounds: Vec::new(),
             counts: Vec::new(),
             indices: Vec::new(),
@@ -182,6 +203,20 @@ impl Default for ClusteredLights {
             wrote_shadow_rows: false,
             stats: ClusterStats::default(),
             uploaded_empty: false,
+        }
+    }
+}
+
+impl Default for ClusteredLights {
+    fn default() -> Self {
+        Self {
+            shadows: Default::default(),
+            lights: Vec::new(),
+            active: Vec::new(),
+            scene: ClusterGrid::default(),
+            views: Vec::new(),
+            bound: None,
+            drawing: None,
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
             key_spec: [0.0; 2],
             key_tint: [0.0; 4],
@@ -211,40 +246,207 @@ impl ClusteredLights {
     }
     /// The three RGBA texels per lamp that relight reads, in its light-index order.
     pub(crate) fn gi_light_texels<'a>(&self, cx: &'a mut Cx) -> &'a [f32] {
-        let Some(texture) = &self.texture else { return &[] };
+        let Some(texture) = &self.scene.texture else { return &[] };
         match texture.get_format(cx) {
             TextureFormat::VecRGBAf32 { data: Some(table), .. } => {
-                table.get(self.light_texel * 4..self.shadow_texel * 4).unwrap_or(&[])
+                table.get(self.scene.light_texel * 4..self.scene.shadow_texel * 4).unwrap_or(&[])
             }
             _ => &[],
         }
     }
     pub(crate) fn parent_shadows(&self,cx:&mut Cx,parent:DrawPassId){self.shadows.parent_to(cx,parent);}
     pub fn set_config(&mut self, config: ClusterConfig) {
-        self.config = config.clamped();
+        self.scene.config = config.clamped();
     }
     pub fn config(&self) -> ClusterConfig {
-        self.config
+        self.scene.config
     }
     pub fn stats(&self) -> ClusterStats {
-        self.stats
+        self.scene.stats
     }
 
     pub fn render_shadows(&mut self,cx:&mut CxDraw,eye:Vec3f,statics:&[crate::gpu_lightmap::GpuBakeMesh],movers:&[crate::gpu_lightmap::GpuLmMover]) {
-        self.active.clear(); self.active.resize(self.lights.len(),false);
-        for (cell,count) in self.counts.iter().enumerate() {
-            for k in 0..*count {self.active[self.indices[cell*self.config.lights_per_cluster+k]]=true;}
+        self.active.clear();
+        self.active.resize(self.lights.len(), false);
+        let grid = &mut self.scene;
+        for (cell, &count) in grid.counts.iter().enumerate() {
+            for k in 0..count {
+                self.active[grid.indices[cell * grid.config.lights_per_cluster + k]] = true;
+            }
         }
-        self.shadows.render(cx,&self.lights,&self.active,eye,statics,movers);
-        self.stats.shadows=self.shadows.stats;
-        let Some(texture) = &self.texture else { return };
-        if self.shadows.metadata().is_empty() && !self.wrote_shadow_rows { return; }
-        let old_height = self.texture_height;
+        self.shadows.render(cx, &self.lights, &self.active, eye, statics, movers);
+        grid.stats.shadows = self.shadows.stats;
+        let Some(texture) = &grid.texture else { return };
+        let metadata = self.shadows.metadata();
+        if metadata.is_empty() && !grid.wrote_shadow_rows { return; }
+        let old_height = grid.texture_height;
         let mut data = texture.take_vec_f32(cx.cx);
-        self.write_shadow_metadata(&mut data);
-        self.upload(cx.cx, data, old_height);
+        grid.write_shadow_metadata(&mut data, metadata);
+        grid.upload(cx.cx, data, old_height);
     }
 
+    fn filter_lights(&mut self, lights: &[LmLight], camera: Option<(Mat4f, Mat4f)>) -> usize {
+        self.lights.clear();
+        let mut rejected = 0;
+        let max_lights = self.scene.config.max_lights;
+        for light in lights {
+            if valid_light(light) {
+                self.lights.push(light.clone());
+            } else {
+                rejected += 1;
+            }
+        }
+        if rejected > 0 && first_report(live_id!(clustered_invalid_lights).0) {
+            log!("clustered lighting: {} invalid lights omitted", rejected);
+        }
+        // Below the GPU bound no ranking or reordering is needed. Only an
+        // overflowing frame pays linear partial selection over valid lights.
+        if self.lights.len() > max_lights {
+            let omitted = self.lights.len() - max_lights;
+            let eye = valid_camera(camera).map(|(v, _)| v.invert().transform_vec4(vec4(0.0, 0.0, 0.0, 1.0)).to_vec3f());
+            self.lights.select_nth_unstable_by(max_lights, |a, b| {
+                b.view_contribution(eye).total_cmp(&a.view_contribution(eye))
+            });
+            self.lights.truncate(max_lights);
+            rejected += omitted;
+            if first_report(live_id!(clustered_frame_light_budget).0) {
+                log!("{omitted} lights over the {}-light frame budget: the {} that count most for this view are drawn", max_lights, max_lights);
+            }
+        }
+        rejected
+    }
+
+    fn build(&mut self, lights: &[LmLight], camera: Option<(Mat4f, Mat4f)>) {
+        let rejected = self.filter_lights(lights, camera);
+        self.scene.assign(&self.lights, camera);
+        self.scene.stats.rejected_lights = rejected;
+    }
+
+    pub fn update(
+        &mut self,
+        cx: &mut Cx,
+        lights: &[LmLight],
+        view: Option<(Mat4f, Mat4f)>,
+    ) -> ClusterStats {
+        let start = Cx::monotonic_now();
+        self.build(lights, view);
+        self.unbind();
+        if let Some(previous) = self.drawing.replace(cx.drawing_id()) {
+            self.views.retain(|view| view.drawing >= previous);
+        }
+        let grid = &mut self.scene;
+        // An empty grid packs to zeros whatever the camera: the texture
+        // already holds exactly that.
+        let empty = self.lights.is_empty();
+        if empty && grid.uploaded_empty && grid.texture.is_some() && grid.light_texel == grid.config.count() {
+            grid.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
+            return grid.stats;
+        }
+        grid.uploaded_empty = empty;
+        let old_height = grid.texture_height;
+        let mut data = grid.take_data(cx);
+        grid.pack(&mut data, &self.lights, self.shadows.metadata());
+        grid.upload(cx, data, old_height);
+        grid.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
+        grid.stats
+    }
+
+    pub(crate) fn view(
+        &mut self,
+        cx: &mut CxDraw,
+        pass: DrawPassId,
+        camera: Option<(Mat4f, Mat4f)>,
+    ) -> ClusterStats {
+        let same_camera = match (self.scene.camera, camera) {
+            (Some((sv, sp)), Some((v, p))) => {
+                sv.v.map(f32::to_bits) == v.v.map(f32::to_bits)
+                    && sp.v.map(f32::to_bits) == p.v.map(f32::to_bits)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same_camera {
+            self.unbind();
+            return self.view_stats();
+        }
+        let start = Cx::monotonic_now();
+        let drawing = cx.drawing_id();
+        let index = self.views.iter().position(|v| v.pass == pass).unwrap_or_else(|| {
+            self.views.push(ViewGrid { pass, drawing, grid: ClusterGrid::default() });
+            self.views.len() - 1
+        });
+        let view = &mut self.views[index];
+        let grid = &mut view.grid;
+        grid.config = self.scene.config;
+        grid.assign(&self.lights, camera);
+        let old_height = grid.texture_height;
+        let metadata = self.shadows.metadata();
+        let mut data = grid.take_data(cx);
+        grid.pack(&mut data, &self.lights, metadata);
+        grid.write_shadow_metadata(&mut data, metadata);
+        grid.upload(cx, data, old_height);
+        grid.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
+        view.drawing = drawing;
+        self.bound = Some(index);
+        self.view_stats()
+    }
+
+    pub(crate) fn unbind(&mut self) {
+        self.bound = None;
+    }
+
+    fn bound_grid(&self) -> &ClusterGrid {
+        self.bound.map_or(&self.scene, |index| &self.views[index].grid)
+    }
+
+    /// A secondary draw uses the frame's shadow allocation and records no atlas work.
+    pub(crate) fn view_stats(&self) -> ClusterStats {
+        let mut stats = self.bound_grid().stats;
+        stats.shadows = self.scene.stats.shadows;
+        stats.shadows.rendered_faces = 0;
+        stats.shadows.caster_draws = 0;
+        stats.shadows.encode_us = 0;
+        stats
+    }
+
+    /// Whether `bind` switches the clustered lights on (`cluster_on`).
+    pub fn active(&self, enabled: bool) -> bool {
+        enabled && self.scene.texture.is_some()
+    }
+
+    /// Whether the lamps' shadow maps are on in a lane `bind` switched on.
+    pub fn shadows_active(&self, enabled: bool) -> bool {
+        self.active(enabled) && self.shadows.active()
+    }
+
+    pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool) {
+        self.bind_grid(cx, vars, enabled, self.bound_grid());
+    }
+
+    pub(crate) fn bind_scene(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool) {
+        self.bind_grid(cx, vars, enabled, &self.scene);
+    }
+
+    fn bind_grid(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool, grid: &ClusterGrid) {
+        let texture = grid.texture.as_ref().filter(|_| enabled);
+        vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
+        vars.set_uniform(cx, live_id!(key_spec), &self.key_spec);
+        vars.set_uniform(cx, live_id!(key_tint), &self.key_tint);
+        vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
+        vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
+        vars.set_uniform(cx, live_id!(fog_sun), &self.fog_sun);
+        vars.set_uniform(cx, live_id!(fog_glow), &self.fog_glow);
+        vars.set_uniform(cx, live_id!(uw_ctl), &self.uw[0]);
+        vars.set_uniform(cx, live_id!(uw_rect), &self.uw[1]);
+        vars.set_uniform(cx, live_id!(uw_color), &self.uw[2]);
+        vars.set_uniform(cx, live_id!(cluster_on), &[if texture.is_some() { 1.0 } else { 0.0 }]);
+        let Some(texture) = texture else { return };
+        self.shadows.bind(cx, vars, texture, grid.shadow_texel);
+        grid.bind(cx, vars, texture);
+    }
+}
+
+impl ClusterGrid {
     fn slice(&self, depth: f32) -> usize {
         if self.world_grid {
             return (depth.clamp(0.0, 0.999999) * self.config.slices as f32) as usize;
@@ -286,12 +488,12 @@ impl ClusteredLights {
         Some(x + self.config.tiles_x * (y + self.config.tiles_y * self.slice(d)))
     }
 
-    fn world_bounds(&mut self) -> Bounds {
+    fn world_bounds(lights: &[LmLight]) -> Bounds {
         let mut b = Bounds {
             min: vec3f(-1.0, -1.0, -1.0),
             max: vec3f(1.0, 1.0, 1.0),
         };
-        for (i, l) in self.lights.iter().enumerate() {
+        for (i, l) in lights.iter().enumerate() {
             let r = vec3f(l.radius, l.radius, l.radius);
             let (lo, hi) = (l.pos - r, l.pos + r);
             if i == 0 {
@@ -314,41 +516,14 @@ impl ClusteredLights {
         b
     }
 
-    /// `view` maps TRUE world coordinates into the clustering camera. None is
-    /// the XR-safe world-grid fallback, never the unrelated flat orbit camera.
-    fn build(&mut self, lights: &[LmLight], view: Option<(Mat4f, Mat4f)>) {
-        self.config = self.config.clamped();
+    /// The camera maps true world coordinates into its frustum. Without a valid
+    /// camera, the world grid covers all light influences (including both XR eyes).
+    fn assign(&mut self, lights: &[LmLight], camera: Option<(Mat4f, Mat4f)>) {
+        self.camera = camera;
+        let view = valid_camera(camera);
         let c = self.config;
         self.stats = ClusterStats::default();
-        self.lights.clear();
-        let view = view
-            .filter(|(v, p)| v.v.iter().chain(p.v.iter()).all(|x| x.is_finite()))
-            .filter(|(_, p)| p.v[0].abs() > 1.0e-6 && p.v[5].abs() > 1.0e-6);
-        for light in lights {
-            if valid_light(light) {
-                self.lights.push(light.clone());
-            } else {
-                self.stats.rejected_lights += 1;
-            }
-        }
-        if self.stats.rejected_lights > 0 && first_report(live_id!(clustered_invalid_lights).0) {
-            log!("clustered lighting: {} invalid lights omitted", self.stats.rejected_lights);
-        }
-        // Below the GPU bound no ranking or reordering is needed. Only an
-        // overflowing frame pays linear partial selection over valid lights.
-        if self.lights.len() > c.max_lights {
-            let omitted = self.lights.len() - c.max_lights;
-            let eye = view.map(|(v, _)| v.invert().transform_vec4(vec4(0.0, 0.0, 0.0, 1.0)).to_vec3f());
-            self.lights.select_nth_unstable_by(c.max_lights, |a, b| {
-                b.view_contribution(eye).total_cmp(&a.view_contribution(eye))
-            });
-            self.lights.truncate(c.max_lights);
-            self.stats.rejected_lights += omitted;
-            if first_report(live_id!(clustered_frame_light_budget).0) {
-                log!("{omitted} lights over the {}-light frame budget: the {} that count most for this view are drawn", c.max_lights, c.max_lights);
-            }
-        }
-        self.stats.lights = self.lights.len();
+        self.stats.lights = lights.len();
         self.bounds.resize(c.count(), Bounds::default());
         self.counts.resize(c.count(), 0);
         self.counts.fill(0);
@@ -378,7 +553,7 @@ impl ClusteredLights {
             self.log_scale = (c.slices - 1) as f32 / (self.far / self.near).log2();
             let ortho = p.v[15].abs() > 0.5;
             // Cluster bounds only place lights: none, nothing to place.
-            for z in (0..c.slices).filter(|_| !self.lights.is_empty()) {
+            for z in (0..c.slices).filter(|_| !lights.is_empty()) {
                 let (z0, z1) = (self.slice_start(z), self.slice_start(z + 1));
                 for y in 0..c.tiles_y {
                     for x in 0..c.tiles_x {
@@ -407,7 +582,7 @@ impl ClusteredLights {
                 }
             }
         } else {
-            box_bounds = self.world_bounds();
+            box_bounds = Self::world_bounds(lights);
             let b = box_bounds;
             let s = b.max - b.min;
             self.rows = [
@@ -417,7 +592,7 @@ impl ClusteredLights {
                 vec4(0.0, 0.0, 0.0, 1.0),
             ];
             self.depth_row = vec4(0.0, 0.0, 1.0 / s.z, -b.min.z / s.z);
-            for z in (0..c.slices).filter(|_| !self.lights.is_empty()) {
+            for z in (0..c.slices).filter(|_| !lights.is_empty()) {
                 for y in 0..c.tiles_y {
                     for x in 0..c.tiles_x {
                         let lo = b.min
@@ -450,8 +625,7 @@ impl ClusteredLights {
                 .sqrt()
             })
             .fold(0.0f32, f32::max);
-        for li in 0..self.lights.len() {
-            let l = &self.lights[li];
+        for (li, l) in lights.iter().enumerate() {
             let q = view_matrix.transform_vec4(vec4(l.pos.x, l.pos.y, l.pos.z, 1.0));
             let p = vec3f(q.x, q.y, q.z);
             let r = l.radius * radius_scale;
@@ -561,27 +735,26 @@ impl ClusteredLights {
         self.stats.max_lights_in_cluster = self.counts.iter().copied().max().unwrap_or(0);
     }
 
-    fn resize_table(&mut self, data: &mut Vec<f32>) {
-        let texels = self.shadow_texel + self.shadows.metadata().len() / 4;
+    fn resize_table(&mut self, data: &mut Vec<f32>, metadata: &[f32]) {
+        let texels = self.shadow_texel + metadata.len() / 4;
         let height = texels.max(1).div_ceil(TEXTURE_WIDTH).next_power_of_two();
         self.texture_height = self.texture_height.max(height);
         data.resize(TEXTURE_WIDTH * self.texture_height * 4, 0.0);
     }
 
-    fn write_shadow_metadata(&mut self, data: &mut Vec<f32>) {
-        self.resize_table(data);
-        let metadata = self.shadows.metadata();
+    fn write_shadow_metadata(&mut self, data: &mut Vec<f32>, metadata: &[f32]) {
+        self.resize_table(data, metadata);
         let (rows, padding) = data[self.shadow_texel * 4..].split_at_mut(metadata.len());
         rows.copy_from_slice(metadata);
         padding.fill(0.0);
         self.wrote_shadow_rows = !metadata.is_empty();
     }
 
-    fn pack(&mut self, data: &mut Vec<f32>) {
+    fn pack(&mut self, data: &mut Vec<f32>, lights: &[LmLight], metadata: &[f32]) {
         let c = self.config;
         self.light_texel = c.count() + (self.stats.references + 3) / 4;
-        self.shadow_texel = self.light_texel + self.lights.len() * 3;
-        self.resize_table(data);
+        self.shadow_texel = self.light_texel + lights.len() * 3;
+        self.resize_table(data, metadata);
         data.fill(0.0);
         let mut offset = 0;
         for ci in 0..c.count() {
@@ -592,7 +765,7 @@ impl ClusteredLights {
                 offset += 1;
             }
         }
-        for (i, l) in self.lights.iter().enumerate() {
+        for (i, l) in lights.iter().enumerate() {
             let at = (self.light_texel + i * 3) * 4;
             let dir = if l.dir.length() > 1.0e-8 {
                 l.dir.normalize()
@@ -629,32 +802,8 @@ impl ClusteredLights {
         }
     }
 
-    pub fn update(
-        &mut self,
-        cx: &mut Cx,
-        lights: &[LmLight],
-        view: Option<(Mat4f, Mat4f)>,
-    ) -> ClusterStats {
-        let start = Cx::monotonic_now();
-        self.build(lights, view);
-        // An empty grid packs to zeros whatever the camera: the texture
-        // already holds exactly that.
-        let empty = self.lights.is_empty();
-        if empty && self.uploaded_empty && self.texture.is_some() && self.light_texel == self.config.count() {
-            self.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
-            return self.stats;
-        }
-        self.uploaded_empty = empty;
-        let old_height = self.texture_height;
-        let mut data = self
-            .texture
-            .as_ref()
-            .map(|t| t.take_vec_f32(cx))
-            .unwrap_or_default();
-        self.pack(&mut data);
-        self.upload(cx, data, old_height);
-        self.stats.build_us = ((Cx::monotonic_now() - start) * 1_000_000.0) as u64;
-        self.stats
+    fn take_data(&self, cx: &mut Cx) -> Vec<f32> {
+        self.texture.as_ref().map(|texture| texture.take_vec_f32(cx)).unwrap_or_default()
     }
 
     fn upload(&mut self, cx: &mut Cx, data: Vec<f32>, old_height: usize) {
@@ -677,33 +826,7 @@ impl ClusteredLights {
         }
     }
 
-    /// Whether `bind` switches the clustered lights on (`cluster_on`).
-    pub fn active(&self, enabled: bool) -> bool {
-        enabled && self.texture.is_some()
-    }
-
-    /// Whether the lamps' shadow maps are on in a lane `bind` switched on.
-    pub fn shadows_active(&self, enabled: bool) -> bool {
-        self.active(enabled) && self.shadows.active()
-    }
-
-    pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool) {
-        let on = enabled && self.texture.is_some();
-        vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
-        vars.set_uniform(cx, live_id!(key_spec), &self.key_spec);
-        vars.set_uniform(cx, live_id!(key_tint), &self.key_tint);
-        vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
-        vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
-        vars.set_uniform(cx, live_id!(fog_sun), &self.fog_sun);
-        vars.set_uniform(cx, live_id!(fog_glow), &self.fog_glow);
-        vars.set_uniform(cx, live_id!(uw_ctl), &self.uw[0]);
-        vars.set_uniform(cx, live_id!(uw_rect), &self.uw[1]);
-        vars.set_uniform(cx, live_id!(uw_color), &self.uw[2]);
-        vars.set_uniform(cx, live_id!(cluster_on), &[if on { 1.0 } else { 0.0 }]);
-        if !on {
-            return;
-        }
-        self.shadows.bind(cx,vars,self.texture.as_ref().unwrap(),self.shadow_texel);
+    fn bind(&self, cx: &Cx, vars: &mut DrawVars, texture: &Texture) {
         if let Some(id) = vars.draw_shader_id {
             if let Some(slot) = cx.draw_shaders[id.index]
                 .mapping
@@ -711,7 +834,7 @@ impl ClusteredLights {
                 .iter()
                 .position(|t| t.id == live_id!(cluster_data))
             {
-                vars.set_texture(slot, self.texture.as_ref().unwrap());
+                vars.set_texture(slot, texture);
             }
         }
         for (id, r) in [
@@ -750,7 +873,6 @@ impl ClusteredLights {
         );
     }
 }
-
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -1080,7 +1202,7 @@ mod tests {
     fn camera() -> Option<(Mat4f, Mat4f)> {
         Some((Mat4f::identity(), Mat4f::perspective(70.0, 1.5, 0.1, 200.0)))
     }
-    fn contains(c: &ClusteredLights, p: Vec3f, light: usize) -> bool {
+    fn contains(c: &ClusterGrid, p: Vec3f, light: usize) -> bool {
         let Some(i) = c.cluster_at(p) else {
             return false;
         };
@@ -1105,9 +1227,9 @@ mod tests {
         let mut c = ClusteredLights::default();
         c.build(&vec![light(vec3f(0.0, 1.0, -8.0), 5.0); 20], camera());
         for i in 0..20 {
-            assert!(contains(&c, vec3f(0.0, 0.0, -8.0), i));
+            assert!(contains(&c.scene, vec3f(0.0, 0.0, -8.0), i));
         }
-        assert_eq!(c.stats.overflow_references, 0);
+        assert_eq!(c.stats().overflow_references, 0);
     }
     #[test]
     fn depth_slices_separate_near_and_far_lights() {
@@ -1119,9 +1241,9 @@ mod tests {
             ],
             camera(),
         );
-        assert!(contains(&c, vec3f(0.0, 0.0, -4.0), 0));
-        assert!(!contains(&c, vec3f(0.0, 0.0, -4.0), 1));
-        assert!(contains(&c, vec3f(0.0, 0.0, -80.0), 1));
+        assert!(contains(&c.scene, vec3f(0.0, 0.0, -4.0), 0));
+        assert!(!contains(&c.scene, vec3f(0.0, 0.0, -4.0), 1));
+        assert!(contains(&c.scene, vec3f(0.0, 0.0, -80.0), 1));
     }
     #[test]
     fn sphere_coverage_is_conservative_across_tile_and_depth_boundaries() {
@@ -1138,8 +1260,8 @@ mod tests {
                     for z in -6..=6 {
                         let offset = vec3f(x as f32, y as f32, z as f32) * (l.radius / 6.0);
                         let p = l.pos + offset;
-                        if offset.length() < l.radius && c.cluster_at(p).is_some() {
-                            assert!(contains(&c, p, i), "missing light {i} at {p:?}");
+                        if offset.length() < l.radius && c.scene.cluster_at(p).is_some() {
+                            assert!(contains(&c.scene, p, i), "missing light {i} at {p:?}");
                         }
                     }
                 }
@@ -1156,10 +1278,10 @@ mod tests {
         c.build(&lights, None);
         for (i, l) in lights.iter().enumerate() {
             for dx in [-0.04, 0.04] {
-                assert!(contains(&c, l.pos + vec3f(dx, 0.0, 0.0), i));
+                assert!(contains(&c.scene, l.pos + vec3f(dx, 0.0, 0.0), i));
             }
         }
-        assert!(c.stats.world_grid);
+        assert!(c.stats().world_grid);
     }
     #[test]
     fn overflow_is_bounded_reported_and_prefers_stronger_lights() {
@@ -1171,9 +1293,9 @@ mod tests {
         let mut lights = vec![light(vec3f(0.0, 0.0, -8.0), 5.0); 20];
         lights[19].color = vec3f(5.0, 5.0, 5.0);
         c.build(&lights, camera());
-        assert!(c.stats.overflow_references > 0);
-        assert_eq!(c.stats.max_lights_in_cluster, 8);
-        assert!(contains(&c, vec3f(0.0, 0.0, -8.0), 19));
+        assert!(c.stats().overflow_references > 0);
+        assert_eq!(c.stats().max_lights_in_cluster, 8);
+        assert!(contains(&c.scene, vec3f(0.0, 0.0, -8.0), 19));
     }
     #[test]
     fn frame_budget_keeps_the_strongest_lights_for_the_view() {
@@ -1191,7 +1313,7 @@ mod tests {
         let mut c = ClusteredLights::default();
         c.set_config(ClusterConfig { tiles_x: 1, tiles_y: 1, slices: 2, max_lights: 4, ..Default::default() });
         c.build(&lights, Some((view, camera().unwrap().1)));
-        assert_eq!(c.stats.rejected_lights, 2);
+        assert_eq!(c.stats().rejected_lights, 2);
         assert_eq!(c.lights.len(), 4);
         for light in &lights[2..] {
             assert!(c.lights.iter().any(|kept| kept.pos == light.pos), "near or bright light kept: {:?}", light.pos);
@@ -1214,41 +1336,137 @@ mod tests {
             ..light(vec3f(0.0, 0.0, -8.0), 0.5)
         };
         c.build(&[spot], camera());
-        assert!(c.stats.references > 0, "the spot has packed cluster references");
+        assert!(c.stats().references > 0, "the spot has packed cluster references");
         c.shadows.prepare(&c.lights, &[true], Vec3f::default());
         c.shadows.pack_metadata();
         let mut data = Vec::new();
-        c.pack(&mut data);
-        assert_eq!(c.shadow_texel, c.light_texel + c.lights.len() * 3, "shadow headers follow the light rows");
-        let start = c.shadow_texel * 4;
+        c.scene.pack(&mut data, &c.lights, c.shadows.metadata());
+        assert_eq!(c.scene.shadow_texel, c.scene.light_texel + c.lights.len() * 3, "shadow headers follow the light rows");
+        let start = c.scene.shadow_texel * 4;
         let end = start + c.shadows.metadata().len();
         assert_eq!(end - start, 6 * 4, "one spot header and five face texels");
         assert!(start < TEXTURE_WIDTH * 4 && end > TEXTURE_WIDTH * 4, "shadow rows cross the texture row boundary");
         assert!(data.len() >= end, "pack reserves the shadow rows");
         data[start..].fill(f32::NAN);
-        c.write_shadow_metadata(&mut data);
+        c.scene.write_shadow_metadata(&mut data, c.shadows.metadata());
         assert_eq!(&data[start..end], c.shadows.metadata(), "shadow rows land at the shader's base texel");
         assert_eq!(data[start + 2], 1.0, "the face offset is relative to the shadow headers");
         assert!(data[end..].iter().all(|&v| v == 0.0), "unused texels after the face are cleared");
-        for i in 0..c.config.count() {
+        for i in 0..c.config().count() {
             let start = data[i * 4] as usize;
             let count = data[i * 4 + 1] as usize;
-            assert!(start + count <= c.stats.references);
+            assert!(start + count <= c.stats().references);
             for j in start..start + count {
-                assert!((data[c.config.count() * 4 + j] as usize) < c.lights.len());
+                assert!((data[c.config().count() * 4 + j] as usize) < c.lights.len());
             }
         }
         c.build(&[], camera());
-        c.pack(&mut data);
+        c.scene.pack(&mut data, &c.lights, c.shadows.metadata());
         c.shadows.prepare(&c.lights, &[], Vec3f::default());
         c.shadows.pack_metadata();
-        c.write_shadow_metadata(&mut data);
+        c.scene.write_shadow_metadata(&mut data, c.shadows.metadata());
         assert!(c.shadows.metadata().is_empty(), "an empty frame has no shadow rows");
         assert!(data[start..end].iter().all(|&v| v == 0.0), "the previous spot's rows are cleared");
-        assert_eq!(c.stats.references, 0);
-        assert_eq!(c.stats.lights, 0);
-        assert!(c.counts.iter().all(|&n| n == 0));
+        assert_eq!(c.stats().references, 0);
+        assert_eq!(c.stats().lights, 0);
+        assert!(c.scene.counts.iter().all(|&n| n == 0));
     }
+    #[test]
+    fn views_assign_the_frames_budgeted_lights_and_share_its_shadow_rows() {
+        fn texture_bits(cx: &mut Cx, grid: &ClusterGrid) -> Vec<u32> {
+            let texture = grid.texture.as_ref().expect("the grid uploaded its table");
+            let TextureFormat::VecRGBAf32 { data: Some(data), .. } = texture.get_format(cx) else {
+                panic!("the cluster texture must retain its packed float table");
+            };
+            data.iter().map(|v| v.to_bits()).collect()
+        }
+
+        let mut cx = crate::renderer::variants::tests::shader_cx();
+        let mut material = cx.with_vm(|vm| crate::shaders::DrawSceneCube::script_new_with_default(vm));
+        let scene = DrawPass::new(&mut cx);
+        let view = DrawPass::new(&mut cx);
+        let event = DrawEvent::default();
+        let mut c = ClusteredLights::default();
+        c.set_config(ClusterConfig { tiles_x: 25, tiles_y: 5, slices: 2, max_lights: 1, ..Default::default() });
+        c.shadows.set_config(crate::local_shadows::LocalShadowConfig { max_faces: 1, resolution: 128 });
+        let eye = vec3f(20.0, 0.0, 0.0);
+        let point = eye + vec3f(0.0, 0.0, -8.0);
+        let spot = LmLight {
+            dir: vec3f(0.0, 0.0, -1.0), cone: Some((10.0, 25.0)), shadows: true,
+            ..light(point, 0.5)
+        };
+        let other = light(eye + vec3f(0.0, 0.0, -1.0), 0.1);
+        assert!(other.view_contribution(Some(eye)) > spot.view_contribution(Some(eye)),
+            "budgeting by the view would choose the other lamp");
+        let lamps = [other, spot];
+        let mut camera_view = Mat4f::identity();
+        camera_view.v[12] = -eye.x;
+
+        let mut draw = CxDraw::new(&mut cx, &event);
+        draw.begin_pass(&scene, Some(1.0));
+        c.update(draw.cx, &lamps, camera());
+        c.render_shadows(&mut draw, Vec3f::default(), &[], &[]);
+        assert_eq!(c.stats().rejected_lights, 1, "the scene budget drops one lamp");
+        assert_eq!(c.lights[0].pos, point, "the scene assigns index zero to the spot");
+        assert!(c.scene.cluster_at(point).is_none(), "the spot lies outside the scene frustum");
+        assert_eq!(c.stats().shadows.rendered_faces, 1, "the scene records the offscreen spot face");
+        let scene_bits = texture_bits(draw.cx, &c.scene);
+        draw.end_pass(&scene);
+
+        draw.begin_pass(&view, Some(1.0));
+        c.view(&mut draw, view.draw_pass_id(), camera());
+        assert!(c.views.is_empty() && c.bound.is_none(), "a matching camera binds the scene without allocating a grid");
+        let stats = c.view(&mut draw, view.draw_pass_id(), Some((camera_view, camera().unwrap().1)));
+        let grid = c.bound_grid();
+        assert!(contains(grid, point, 0), "the view finds the scene's index for the spot at its world position");
+        assert_ne!(grid.texture.as_ref().unwrap().texture_id(), c.scene.texture.as_ref().unwrap().texture_id(),
+            "the view uploads to a separate texture");
+        assert_eq!(texture_bits(draw.cx, &c.scene), scene_bits, "assigning the view preserves every scene texture bit");
+        let view_bits = texture_bits(draw.cx, grid);
+        assert_ne!(grid.light_texel, c.scene.light_texel, "the view's cluster references shift its light and shadow rows");
+        assert_eq!(&view_bits[grid.light_texel * 4..grid.shadow_texel * 4],
+            &scene_bits[c.scene.light_texel * 4..c.scene.shadow_texel * 4], "view light indices address the frame's light table");
+        let shadow = grid.shadow_texel * 4;
+        let size = c.shadows.metadata().len();
+        assert_eq!(size, 6 * 4, "the spot contributes one shadow header and five face texels");
+        assert!(shadow < TEXTURE_WIDTH * 4 && shadow + size > TEXTURE_WIDTH * 4,
+            "the view's spot face crosses a texture row");
+        assert_eq!(&view_bits[shadow..shadow + size],
+            &scene_bits[c.scene.shadow_texel * 4..c.scene.shadow_texel * 4 + size], "the view copies the frame's shadow rows at its own offset");
+        let vars = &mut material.cube.draw_vars;
+        let shader = vars.draw_shader_id.expect("the cube has its lighting shader");
+        let slot = draw.draw_shaders[shader.index].mapping.textures.iter()
+            .position(|input| input.id == live_id!(cluster_data)).expect("the cube samples a cluster table");
+        for (scene_bind, expected) in [(false, grid), (true, &c.scene)] {
+            if scene_bind {
+                c.bind_scene(draw.cx, vars, true);
+            } else {
+                c.bind(draw.cx, vars, true);
+            }
+            assert_eq!(vars.texture_slots[slot].as_ref().map(Texture::texture_id),
+                expected.texture.as_ref().map(Texture::texture_id), "scene bind {scene_bind} selects the matching texture");
+            let mut base = [f32::NAN];
+            vars.get_uniform(draw.cx, live_id!(local_shadow_tex), &mut base);
+            assert_eq!(base[0], expected.shadow_texel as f32, "scene bind {scene_bind} selects that texture's shadow rows");
+        }
+        assert_eq!(stats.shadows.offscreen_lights, 1, "the view reports the frame's offscreen allocation");
+        assert_eq!((stats.shadows.rendered_faces, stats.shadows.caster_draws, stats.shadows.encode_us),
+            (0, 0, 0), "the view reports no shadow rendering");
+        c.unbind();
+        draw.end_pass(&view);
+        drop(draw);
+
+        let mut draw = CxDraw::new(&mut cx, &event);
+        c.update(draw.cx, &lamps, None);
+        assert_eq!(c.views.len(), 1, "the previous scene drawing's view grid is retained");
+        c.view(&mut draw, view.draw_pass_id(), None);
+        assert!(c.bound.is_none(), "two XR cameras share the scene world grid");
+        drop(draw);
+        let mut draw = CxDraw::new(&mut cx, &event);
+        c.update(&mut draw, &lamps, camera());
+        assert!(c.views.is_empty(), "a view grid unused since the previous scene draw is pruned");
+    }
+
     #[test]
     fn invalid_lights_are_rejected_and_config_is_clamped() {
         let mut c = ClusteredLights::default();
@@ -1266,9 +1484,9 @@ mod tests {
             ],
             None,
         );
-        assert_eq!(c.stats.rejected_lights, 2);
-        assert_eq!(c.stats.references, 0);
-        assert_eq!(c.config.lights_per_cluster, MAX_CLUSTER_LIGHTS);
+        assert_eq!(c.stats().rejected_lights, 2);
+        assert_eq!(c.stats().references, 0);
+        assert_eq!(c.config().lights_per_cluster, MAX_CLUSTER_LIGHTS);
     }
 
     #[test]
@@ -1294,9 +1512,9 @@ mod tests {
                         for z in -4..=4 {
                             let offset = vec3f(x as f32, y as f32, z as f32) * (l.radius / 4.0);
                             let p = l.pos + offset;
-                            if offset.length() < l.radius && c.cluster_at(p).is_some() {
+                            if offset.length() < l.radius && c.scene.cluster_at(p).is_some() {
                                 assert!(
-                                    contains(&c, p, i),
+                                    contains(&c.scene, p, i),
                                     "missing transformed light {i} at {p:?}"
                                 );
                             }
@@ -1312,8 +1530,8 @@ mod tests {
         let mut c = ClusteredLights::default();
         let p = vec3f(100000.0, 100000.0, 100000.0);
         c.build(&[light(p, 0.00001)], None);
-        assert!(contains(&c, p, 0));
-        assert!(c
+        assert!(contains(&c.scene, p, 0));
+        assert!(c.scene
             .rows
             .iter()
             .all(|r| r.x.is_finite() && r.y.is_finite() && r.z.is_finite() && r.w.is_finite()));

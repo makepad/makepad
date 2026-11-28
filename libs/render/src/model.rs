@@ -33,7 +33,9 @@ use std::sync::Arc;
 /// its band coordinates from TEXCOORD_1 (unorm16 x 2, read only by the paint
 /// lane: shaders/splat.rs `splat_band_coords`). A band never takes the lane
 /// from an atlas or morphs: such a model keeps its AO and draws without the
-/// band ([`PrimSpan::band`]).
+/// band ([`PrimSpan::band`]). A primitive's `_MATERIAL_BYTES` (VEC4 UNSIGNED_BYTE):
+/// four exact bytes per vertex that its material reads with `unpack4u8`. An AO atlas,
+/// morph indices or a road band take precedence over these bytes.
 pub const MODEL_VERTEX_FLOATS: usize = 7;
 /// The AO lane's float in a packed vertex ([`MODEL_VERTEX_FLOATS`]).
 pub const AO_LANE: usize = 6;
@@ -1212,11 +1214,9 @@ impl StaticModel {
         let mut raw_nrm: Vec<Vec3f> = Vec::new();
         let mut raw_tint: Vec<[f32; 3]> = Vec::new();
         let mut raw_alpha: Vec<f32> = Vec::new();
-        let mut raw_source:Vec<usize>=Vec::new();
         let mut raw_uv: Vec<[f32; 2]> = Vec::new();
-        // Per vertex: a worn road primitive's band coordinates (0 elsewhere).
-        let mut raw_band: Vec<[f32; 2]> = Vec::new();
-        let mut band_lane_reported = false;
+        let mut raw_lane = Vec::new();
+        let mut lanes = AoLaneUsage { atlas: ao_atlas.is_some(), morphs: has_morphs, ..Default::default() };
         // (image, detail_image, detail_scale, v0, v1, i0, i1)
         let mut prim_spans: Vec<PrimSpan> = Vec::new();
 
@@ -1281,17 +1281,7 @@ impl StaticModel {
                     .map(|a| acc.read_f32(a))
                     .transpose()?
                     .map(|(v, _)| v);
-                // A worn road part's band coordinates ride the AO lane, when
-                // the model leaves it free (see MODEL_VERTEX_FLOATS).
-                let prim_band = prim.get("material").and_then(Val::usize).is_some_and(|i| gltf_material_has_band(&json, i));
-                if prim_band && (ao_atlas.is_some() || has_morphs) && !band_lane_reported {
-                    band_lane_reported = true;
-                    makepad_draw::log!("model: a worn road primitive's band left off: the model's AO lane carries {}", if has_morphs { "morph indices" } else { "its AO atlas" });
-                }
-                let prim_band = prim_band && ao_atlas.is_none() && !has_morphs;
-                let band_uv = if prim_band {
-                    attrs.get("TEXCOORD_1").and_then(Val::usize).map(|a| acc.read_f32(a)).transpose()?.map(|(v, _)| v)
-                } else { None };
+                let lane = lanes.primitive(&acc, prim, attrs, pos.len() / 3, source_offset)?;
                 // COLOR_0 vertex colors (e.g. trellis-generated meshes carry
                 // their PBR base color here): multiplied into the material
                 // tint per vertex, exactly like the shader multiplies tint
@@ -1374,13 +1364,12 @@ impl StaticModel {
                         None => [tint[0], tint[1], tint[2]],
                     };
                     raw_pos.push(p);
-                    raw_source.push(source_offset+i);
                     raw_nrm.push(nrm);
                     raw_tint.push(vt);
                     let surface=prim.get("material").and_then(Val::usize).is_some_and(|i|gltf_material_is_surface(&json,i));
                     raw_alpha.push(if surface { vcolor.as_ref().and_then(|(values,lanes)|(*lanes==4).then(||values.get(i*lanes+3).copied()).flatten()).unwrap_or(1.0) }else{1.0});
                     raw_uv.push([g(&uv, 2, 0, 0.0), g(&uv, 2, 1, 0.0)]);
-                    raw_band.push([g(&band_uv, 2, 0, 0.0), g(&band_uv, 2, 1, 0.0)]);
+                    if !lanes.atlas { raw_lane.push(lane.pack(i)); }
                     vertices.extend_from_slice(&[
                         p.x,
                         p.y,
@@ -1417,6 +1406,10 @@ impl StaticModel {
                 }
                 vert_total += count;
                 if count > 0 && liquid_nodes[node_index].is_some() {
+                    if matches!(lane, PrimitiveLane::MaterialBytes { .. }) && !lanes.reported_bytes {
+                        lanes.reported_bytes = true;
+                        makepad_draw::log!("model: _MATERIAL_BYTES left off the liquid draw stream: it has no AO lane");
+                    }
                     liquid_spans.push((node_index, prim_i0, indices.len()));
                 }
                 if count > 0 {
@@ -1424,7 +1417,7 @@ impl StaticModel {
                     prim_spans.push(PrimSpan {
                         stand_in,
                         material: prim.get("material").and_then(Val::usize),
-                        band: band_uv.is_some(),
+                        band: matches!(lane, PrimitiveLane::Band(_)),
                         image: prim_image,
                         detail_image,
                         detail_scale,
@@ -1451,7 +1444,7 @@ impl StaticModel {
             Vec::new()
         } else {
             build_anim_parts(
-                &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner, &material_names,
+                &json, &acc, bin_chunk, node_vals, &rests, &parents, anim_defs, &anim_owner, &material_names, &mut lanes,
             )?
         };
         let driven_parts = if driven_defs.is_empty() {
@@ -1467,12 +1460,13 @@ impl StaticModel {
                 driven_defs,
                 &driven_owner,
                 &material_names,
+                &mut lanes,
             )?
         };
         let sky = if sky_owner.is_empty() {
             None
         } else {
-            build_sky_part(&json, &acc, bin_chunk, node_vals, &rests, &parents, &sky_owner)?
+            build_sky_part(&json, &acc, bin_chunk, node_vals, &rests, &parents, &sky_owner, &mut lanes)?
         };
         // The parts belong to the model's silhouette even though they are not
         // in its stream: bounds drive frustum culling and ground placement,
@@ -1588,10 +1582,9 @@ impl StaticModel {
                 }
                 raw_uv = uv;
                 raw_tint = tint;
-                (baked.ao_uv, baked.vertex_ao, baked.ground)
+                (Some(baked.ao_uv), baked.vertex_ao, baked.ground)
             }
-            // No atlas: the lane is neutral, or a worn road part's band.
-            None => (raw_band.clone(), vec![1.0; raw_pos.len()], None),
+            None => (None, vec![1.0; raw_pos.len()], None),
         };
 
         vertices.clear();
@@ -1607,7 +1600,7 @@ impl StaticModel {
                 makepad_draw::pack_pair_f16(ox, oy),
                 makepad_draw::pack_pair_f16(raw_uv[i][0], raw_uv[i][1]),
                 makepad_draw::pack_unorm8x4(t[0], t[1], t[2], if !baked_ao {raw_alpha[i]}else{vertex_ao[i]}),
-                if has_morphs&&!baked_ao{raw_source[i]as f32}else{pack_ao_uv(ao_uv[i][0], ao_uv[i][1])},
+                match &ao_uv { Some(uv) => pack_ao_uv(uv[i][0], uv[i][1]), None => raw_lane[i] },
             ]);
         }
 
@@ -2376,9 +2369,102 @@ impl PartStream {
     }
 }
 
+/// The two primitive packers share the model's lane policy and conflict diagnostics.
+#[derive(Default)]
+struct AoLaneUsage {
+    atlas: bool,
+    morphs: bool,
+    reported_band: bool,
+    reported_bytes: bool,
+}
+
+enum PrimitiveLane<'a> {
+    Neutral,
+    Morph(usize),
+    Band(Vec<f32>),
+    MaterialBytes { bytes: &'a [u8], stride: usize },
+}
+
+impl PrimitiveLane<'_> {
+    fn pack(&self, vertex: usize) -> f32 {
+        match self {
+            Self::Neutral => 0.0,
+            Self::Morph(offset) => (offset + vertex) as f32,
+            Self::Band(uv) => pack_ao_uv(uv.get(vertex * 2).copied().unwrap_or(0.0),
+                uv.get(vertex * 2 + 1).copied().unwrap_or(0.0)),
+            Self::MaterialBytes { bytes, stride } => {
+                let start = vertex * stride;
+                f32::from_bits(u32::from_le_bytes(bytes[start..start + 4].try_into().unwrap()))
+            }
+        }
+    }
+}
+
+impl AoLaneUsage {
+    fn primitive<'a>(&mut self, acc: &Accessors<'a>, prim: &Val, attrs: &Val, count: usize,
+        source_offset: usize) -> Result<PrimitiveLane<'a>, String> {
+        let bytes = attrs.get("_MATERIAL_BYTES").map(|attr| material_byte_view(acc, attr, count)).transpose()?;
+        let band = prim.get("material").and_then(Val::usize).is_some_and(|i| gltf_material_has_band(acc.json, i));
+        let owner = if self.atlas { Some("its AO atlas") } else if self.morphs { Some("morph indices") } else { None };
+        if let Some(owner) = owner {
+            if band && !self.reported_band {
+                self.reported_band = true;
+                makepad_draw::log!("model: a worn road primitive's band left off: the model's AO lane carries {}", owner);
+            }
+        }
+        if let Some(owner) = owner.or(band.then_some("a road band")) {
+            if bytes.is_some() && !self.reported_bytes {
+                self.reported_bytes = true;
+                makepad_draw::log!("model: _MATERIAL_BYTES left off: the AO lane carries {}", owner);
+            }
+        }
+        if self.morphs { return Ok(PrimitiveLane::Morph(source_offset)); }
+        if self.atlas { return Ok(PrimitiveLane::Neutral); }
+        if band {
+            return Ok(match attrs.get("TEXCOORD_1").and_then(Val::usize) {
+                Some(a) => PrimitiveLane::Band(acc.read_f32(a)?.0),
+                None => PrimitiveLane::Neutral,
+            });
+        }
+        Ok(match bytes {
+            Some((bytes, stride)) => PrimitiveLane::MaterialBytes { bytes, stride },
+            None => PrimitiveLane::Neutral,
+        })
+    }
+}
+
+/// Borrow the raw vertex elements, including any interleaving, after checking the
+/// complete range against its buffer view. No float conversion touches the payload.
+fn material_byte_view<'a>(acc: &Accessors<'a>, attr: &Val, count: usize) -> Result<(&'a [u8], usize), String> {
+    fn uint(value: &Val) -> Option<usize> {
+        value.f64().filter(|n| *n >= 0.0 && *n < usize::MAX as f64 && n.fract() == 0.0).map(|n| n as usize)
+    }
+    let index = uint(attr).ok_or("_MATERIAL_BYTES: invalid accessor index")?;
+    let a = acc.json.get("accessors").and_then(|v| v.idx(index)).ok_or("_MATERIAL_BYTES: missing accessor")?;
+    if a.get("type").and_then(Val::str) != Some("VEC4") || a.get("componentType").and_then(uint) != Some(5121)
+        || !matches!(a.get("normalized"), None | Some(Val::Bool(false))) {
+        return Err("_MATERIAL_BYTES: expected non-normalized VEC4 UNSIGNED_BYTE".into());
+    }
+    if a.get("count").and_then(uint) != Some(count) { return Err("_MATERIAL_BYTES: count differs from POSITION".into()); }
+    if a.get("sparse").is_some() { return Err("_MATERIAL_BYTES: sparse accessors unsupported".into()); }
+    let view = a.get("bufferView").and_then(uint).and_then(|i| acc.json.get("bufferViews")?.idx(i))
+        .ok_or("_MATERIAL_BYTES: missing bufferView")?;
+    if view.get("buffer").and_then(uint) != Some(0) { return Err("_MATERIAL_BYTES: expected embedded buffer".into()); }
+    let optional = |v: &Val, key, default| v.get(key).map_or(Ok(default), |n| uint(n).ok_or("_MATERIAL_BYTES: invalid offset or stride"));
+    let start = optional(view, "byteOffset", 0)?;
+    let length = view.get("byteLength").and_then(uint).ok_or("_MATERIAL_BYTES: invalid view length")?;
+    let bytes = acc.bin.get(start..).and_then(|v| v.get(..length)).ok_or("_MATERIAL_BYTES: view exceeds buffer")?;
+    let bytes = bytes.get(optional(a, "byteOffset", 0)?..).ok_or("_MATERIAL_BYTES: offset exceeds view")?;
+    let stride = optional(view, "byteStride", 4)?;
+    if stride < 4 || (count > 0 && (bytes.len() < 4 || count - 1 > (bytes.len() - 4) / stride)) {
+        return Err("_MATERIAL_BYTES: vertex elements exceed view or overlap".into());
+    }
+    Ok((bytes, stride))
+}
+
 /// Pack one mesh node's primitives into `out`, placed by `place`.
 ///
-/// The same packing the static stream does, minus the AO lanes: geometry that
+/// The same packing the static stream does, without baking occlusion: geometry that
 /// leaves the level stream (a door, a sky surface) is either moving or unlit,
 /// and in both cases a baked occlusion term would be a lie. `place` is the
 /// matrix baked into the vertices — the node's transform relative to whatever
@@ -2390,6 +2476,7 @@ fn pack_node_stream(
     place: &Mat4f,
     mirrored: bool,
     out: &mut PartStream,
+    lanes: &mut AoLaneUsage,
 ) -> Result<(), String> {
     let node_index=json.get("nodes").map(Val::arr).unwrap_or(&[]).iter().position(|n|std::ptr::eq(n,node)).unwrap_or(0);
     if !crate::asset_morph::active_nodes(json)?.get(node_index).copied().unwrap_or(false){return Ok(())}
@@ -2400,8 +2487,7 @@ fn pack_node_stream(
         .get("meshes")
         .and_then(|m| m.idx(mesh_index))
         .ok_or("bad mesh index")?;
-    let node_index=json.get("nodes").map(Val::arr).unwrap_or(&[]).iter().position(|n|std::ptr::eq(n,node)).unwrap_or(0);
-    let has_morphs=crate::asset_morph::has_morphs(json);
+    let has_morphs = lanes.morphs;
     for (primitive_index,prim) in mesh.get("primitives").map(|p| p.arr()).unwrap_or(&[]).iter().enumerate() {
         let source_offset=if has_morphs{crate::asset_morph::vertex_offset(json,node_index,primitive_index)}else{0};
         let attrs = prim
@@ -2445,6 +2531,15 @@ fn pack_node_stream(
             .transpose()?;
         let base = out.vert_total as u32;
         let count = pos.len() / 3;
+        // Node streams historically carry just the morph index or zero. Resolve
+        // competing uses when a primitive asks for the material-byte lane.
+        let lane = if attrs.get("_MATERIAL_BYTES").is_some() {
+            lanes.primitive(acc, prim, attrs, count, source_offset)?
+        } else if has_morphs {
+            PrimitiveLane::Morph(source_offset)
+        } else {
+            PrimitiveLane::Neutral
+        };
         let prim_v0 = out.vert_total;
         let prim_i0 = out.indices.len();
         for i in 0..count {
@@ -2498,10 +2593,8 @@ fn pack_node_stream(
                 p.z,
                 makepad_draw::pack_pair_f16(ox, oy),
                 makepad_draw::pack_pair_f16(tex_uv[0], tex_uv[1]),
-                // AO lane neutral: this geometry moves or is unlit, so a
-                // baked occlusion term could never stay true.
                 makepad_draw::pack_unorm8x4(vt[0], vt[1], vt[2], vcolor.as_ref().filter(|(_,lanes)|*lanes==4).and_then(|(v,_)|v.get(i*4+3)).copied().unwrap_or(1.0)),
-                if has_morphs{(source_offset+i)as f32}else{pack_ao_uv(0.0, 0.0)},
+                lane.pack(i),
             ]);
         }
         if let Some(idx_acc) = prim.get("indices").and_then(Val::usize) {
@@ -2532,7 +2625,7 @@ fn pack_node_stream(
             out.spans.push(PrimSpan {
                 stand_in: false,
                 material: prim.get("material").and_then(Val::usize),
-                band: false,
+                band: matches!(lane, PrimitiveLane::Band(_)),
                 image: gltf_prim_image_index(json, prim),
                 detail_image,
                 detail_scale,
@@ -2625,6 +2718,7 @@ fn build_sky_part(
     rests: &[NodeTrs],
     parents: &[Option<usize>],
     owner_of: &[bool],
+    lanes: &mut AoLaneUsage,
 ) -> Result<Option<SkyPart>, String> {
     let mut stream = PartStream::new();
     // (projection, repeat, speeds, offset, texture, v_span)
@@ -2636,7 +2730,7 @@ fn build_sky_part(
         }
         let place = node_world(node_index, parents, rests);
         let mirrored = node_is_mirrored(node_index, parents, rests);
-        pack_node_stream(json, acc, n, &place, mirrored, &mut stream)?;
+        pack_node_stream(json, acc, n, &place, mirrored, &mut stream, lanes)?;
         // The first node that carries a projection sets the sky; the rest
         // contribute geometry. A map has many sky brushes but one sky.
         if params.is_some() {
@@ -2718,6 +2812,7 @@ fn build_anim_parts(
     defs: Vec<AnimNodeDef>,
     owner_of: &[Option<usize>],
     material_names: &[Arc<str>],
+    lanes: &mut AoLaneUsage,
 ) -> Result<Vec<AnimPart>, String> {
     let mut out = Vec::with_capacity(defs.len());
     for (part_index, def) in defs.into_iter().enumerate() {
@@ -2730,7 +2825,7 @@ fn build_anim_parts(
             // node's own transform is what the clip replaces per frame.
             let local = node_local_under(node_index, def.node, parents, rests);
             let mirrored = node_is_mirrored(node_index, parents, rests);
-            pack_node_stream(json, acc, n, &local, mirrored, &mut stream)?;
+            pack_node_stream(json, acc, n, &local, mirrored, &mut stream, lanes)?;
         }
         // A marked node with no geometry under it is a trigger volume, not a
         // moving part — nothing to draw and nothing to collide with.
@@ -2771,6 +2866,7 @@ fn build_driven_parts(
     defs: Vec<DrivenNodeDef>,
     owner_of: &[Option<usize>],
     material_names: &[Arc<str>],
+    lanes: &mut AoLaneUsage,
 ) -> Result<Vec<DrivenPart>, String> {
     let mut out = Vec::with_capacity(defs.len());
     for (part_index, def) in defs.into_iter().enumerate() {
@@ -2781,7 +2877,7 @@ fn build_driven_parts(
             }
             let local = node_local_under(node_index, def.node, parents, rests);
             let mirrored = node_is_mirrored(node_index, parents, rests);
-            pack_node_stream(json, acc, node, &local, mirrored, &mut stream)?;
+            pack_node_stream(json, acc, node, &local, mirrored, &mut stream, lanes)?;
         }
         if !stream.is_drawable() {
             // A distance level that hides the part's geometry (an LOD owner
@@ -4154,6 +4250,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn material_bytes_reach_the_shader_lane_bit_exact() {
+        let patterns = [[0; 4], [255; 4], [0, 0, 0xc0, 0x7f], [1, 0, 0x80, 0x7f],
+            [0, 0, 0, 0x80], [1, 0, 0, 0], [13, 49, 129, 253]];
+        let positions = [[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.],
+            [-1., 1., 0.], [-1., 0., 0.], [0., -1., 0.]];
+        let part = makepad_gltf::GlbTexturedPart {
+            positions: &positions, indices: &[0, 1, 2, 0, 3, 4, 0, 5, 6], normals: None, uvs: &[],
+            material_bytes: Some(&patterns), colors: None, base_color_png: b"base", base_color_factor: None,
+            lightmap_png: Some(b"light"), lightmap_uvs: Some(&[[0.25, 0.75]; 7]), detail_png: None, detail_scale: [0.; 2],
+        };
+        let glb = makepad_gltf::write_glb_mesh_textured_parts(&[part], false);
+        let chunks = makepad_gltf::split_glb(&glb).unwrap();
+        let with = |from: &str, to: &str| {
+            assert!(chunks.json.contains(from), "writer fixture contains {from}");
+            glb_from(chunks.json.replace(from, to), chunks.bin.to_vec())
+        };
+        let check = |stream: &[f32]| {
+            assert_eq!(stream.len(), positions.len() * MODEL_VERTEX_FLOATS, "every source vertex reaches the packed stream");
+            for (position, bytes) in positions.iter().zip(patterns) {
+                let v = stream.chunks_exact(MODEL_VERTEX_FLOATS).find(|v| &v[..3] == position)
+                    .expect("source position present in packed stream");
+                let bits = v[AO_LANE].to_bits();
+                assert_eq!(bits, u32::from_le_bytes(bytes), "raw AO-lane bits at {position:?}");
+                let decoded = [0, 8, 16, 24].map(|shift| {
+                    let channel = ((bits >> shift) & 255u32) as f32 / 255.0;
+                    (channel * 255.0).round() as u8
+                });
+                assert_eq!(decoded, bytes, "unpack4u8 channel order and values at {position:?}");
+            }
+        };
+        check(&StaticModel::parse_glb(&glb).expect("valid raw byte stream").vertices);
+        let sky = with(r#""mesh":0"#, r#""mesh":0,"extras":{"kind":"sky","projection":"cylinder"}"#);
+        check(&StaticModel::parse_glb(&sky).unwrap().sky.expect("sky uses the node packer").vertices);
+
+        for (from, to) in [(r#""type":"VEC4""#, r#""type":"VEC3""#),
+            (r#""componentType":5121"#, r#""componentType":5123"#),
+            (r#""componentType":5121"#, r#""componentType":5121,"normalized":true"#)] {
+            let err = StaticModel::parse_glb(&with(from, to)).err().expect("invalid material accessor rejected");
+            assert!(err.contains("_MATERIAL_BYTES"), "malformed attribute is named in {err}");
+        }
+        let json = JsonParser::parse(chunks.json.as_bytes()).unwrap();
+        let acc = Accessors { json: &json, bin: chunks.bin };
+        let prim = json.get("meshes").unwrap().idx(0).unwrap().get("primitives").unwrap().idx(0).unwrap();
+        let mut atlas = AoLaneUsage { atlas: true, ..Default::default() };
+        let lane = atlas.primitive(&acc, prim, prim.get("attributes").unwrap(), positions.len(), 0).unwrap();
+        assert!(matches!(lane, PrimitiveLane::Neutral) && atlas.reported_bytes, "an atlas reserves the lane and reports the omitted bytes");
+        let band = with(r#""lightmapTexture":"#, r#""makepadSplat":{"band":{}},"lightmapTexture":"#);
+        let band = StaticModel::parse_glb(&band).unwrap();
+        assert!(band.vertices.chunks_exact(MODEL_VERTEX_FLOATS).all(|v| v[AO_LANE].to_bits() == pack_ao_uv(0.25, 0.75).to_bits()),
+            "a road band keeps its coordinates when the primitive also carries material bytes");
+        let morph = with(r#""mode":4"#, r#""mode":4,"targets":[{}]"#);
+        let morph = StaticModel::parse_glb(&morph).unwrap();
+        for (i, v) in morph.vertices.chunks_exact(MODEL_VERTEX_FLOATS).enumerate() {
+            assert_eq!(v[AO_LANE].to_bits(), (i as f32).to_bits(), "morph source index takes precedence at vertex {i}");
+        }
+    }
+
+    #[test]
     fn parses_a_static_mesh_without_a_skin() {
         let m = StaticModel::parse_glb(&tiny_glb(false)).unwrap();
         assert_eq!(m.vertex_count(), 3);
@@ -4172,6 +4326,7 @@ pub(crate) mod tests {
         let glb = makepad_gltf::write_glb_mesh_textured_parts(
             &[
                 makepad_gltf::GlbTexturedPart {
+                    material_bytes: None,
                     positions: &positions_a,
                     uvs: &uvs,
                     indices: &indices,
@@ -4185,6 +4340,7 @@ pub(crate) mod tests {
                     detail_scale: [1.0, 1.0],
                 },
                 makepad_gltf::GlbTexturedPart {
+                    material_bytes: None,
                     positions: &positions_b,
                     uvs: &uvs,
                     indices: &indices,

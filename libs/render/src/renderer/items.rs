@@ -291,7 +291,7 @@ impl Renderer {
         }
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
-        let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| self.recorded_shader_ready(cx, id)));
+        let custom = self.used_item_shaders().all(|id| self.recorded_shader_ready(cx, id));
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
         let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| self.recorded_shader_ready(cx, id)));
@@ -305,6 +305,29 @@ impl Renderer {
     /// pipelines were made, or VFX while their draws or particle atlas were being made.
     pub fn drew_fallback(&self) -> bool {
         self.items.fallback || !self.clustered.shadows.settled()
+    }
+
+    fn used_item_shaders(&self) -> impl Iterator<Item = DrawShaderId> + '_ {
+        self.items.used_custom.iter().filter_map(move |name| self.custom_draws.get(name)?.draw.draw_vars.draw_shader_id)
+    }
+
+    /// Whether the last draw needs recording again. A host composing several passes
+    /// keeps their outstanding pipelines so it can retry once each pass can draw.
+    pub fn record_item_fallback(&self, cx: &Cx, waiting: &mut Vec<(DrawPassId, DrawShaderId)>) -> bool {
+        if self.items_ready(cx) {
+            return self.drew_fallback();
+        }
+        if let Some(pass) = self.items.recorded_pass {
+            let pbr = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
+            let ibl = self.custom_draws.get(stock_ibl::STOCK_IBL_MATERIAL)
+                .filter(|_| !self.stock_ibl_ready(cx)).and_then(|m| m.draw.draw_vars.draw_shader_id);
+            for id in self.used_item_shaders().chain(pbr).chain(ibl) {
+                if !cx.draw_shader_ready_in(id, pass) && !waiting.contains(&(pass, id)) {
+                    waiting.push((pass, id));
+                }
+            }
+        }
+        true
     }
 
     /// What `items_ready` waits for, by name (empty: nothing), for a host's

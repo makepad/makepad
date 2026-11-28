@@ -273,58 +273,43 @@ impl TracedSurfacePasses {
     }
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) const TRACED_WEBGL_FAILURE: &str = "ray-traced surfaces aren't available on WebGL2 yet";
 
-/// One occupied 8³ tile. Bounds are in tile-local cells, with an exclusive upper end.
-#[derive(Clone, Copy, Debug)]
-pub struct TracedTile {
-    /// Model-grid coordinates of this tile's cell (0,0,0).
-    pub origin_cells: [i32; 3],
-    pub lo: [u8; 3],
-    pub hi: [u8; 3],
-    pub atlas_tile: [u8; 3],
-    pub dominant_material: u8,
-    pub palette_page: u8,
-}
-
-impl TracedTile {
-    /// Append one conservative box to a static model's seven-float vertex stream.
-    /// Adjacent boxes convert a shared grid corner to the same model-space metres.
-    pub fn append_box(&self, vertices: &mut Vec<f32>, indices: &mut Vec<u32>, cell_pitch: f32) {
-        assert!((0..3).all(|i| self.lo[i] < self.hi[i] && self.hi[i] <= 8));
-        assert!(cell_pitch.is_finite() && cell_pitch > 0.0);
-        let stride = crate::model::MODEL_VERTEX_FLOATS;
-        assert_eq!(vertices.len() % stride, 0);
-        let start = u32::try_from(vertices.len() / stride).expect("tile vertex index");
-        assert!(start <= u32::MAX - 7, "tile vertex indices exceed the model index format");
-        let [x, y, z] = self.atlas_tile;
-        let tile = f32::from_bits(u32::from_le_bytes([x, y, z, self.dominant_material]));
-        let bounds = |i: usize| self.lo[i] | (self.hi[i] << 4);
-        let aux = f32::from_bits(u32::from_le_bytes([bounds(0), bounds(1), bounds(2), self.palette_page]));
-        for corner in 0..8 {
-            let cell = [0, 1, 2].map(|i| f32::from(if corner & (1 << i) == 0 { self.lo[i] } else { self.hi[i] }));
-            let [px, py, pz] = [0, 1, 2].map(|i| {
-                let grid = f64::from(self.origin_cells[i]) + f64::from(cell[i]);
-                (grid * f64::from(cell_pitch)) as f32
-            });
-            vertices.extend([px, py, pz, pack_pair_f16(cell[2], 0.0), pack_pair_f16(cell[0], cell[1]), tile, aux]);
-        }
-        for [a, b, c, d] in [[0,2,3,1], [4,5,7,6], [0,4,6,2], [1,3,7,5], [0,1,5,4], [2,6,7,3]] {
-            indices.extend([a, b, c, a, c, d].map(|i| start + i));
-        }
+pub(crate) fn device_volume_support(cx: &Cx) -> Option<Result<(), &'static str>> {
+    if cx.gpu_info().volume_caps().r8_unorm {
+        return Some(Ok(()));
     }
+    if let Some(support) = cx.sampled_volume_support() {
+        return Some(support);
+    }
+    #[cfg(target_arch = "wasm32")]
+    { Some(Err(TRACED_WEBGL_FAILURE)) }
+    #[cfg(not(target_arch = "wasm32"))]
+    { None }
 }
 
 /// A unit sphere by default. A material can replace the trace-space hooks
 /// while the renderer retains its ray, clipping, depth and pass entry points.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TracedSurfaceRecipe {
     hooks: Vec<(LiveId, ScriptObjectRef)>,
     tile_cells_per_unit: Option<f32>,
+    volume_tile_cells: u32,
+    voxel_ao_strength: f32,
     /// Material inputs shared by the program's passes. Each compiled pass
     /// resolves these names in its own texture layout.
     pub textures: Rc<[(LiveId, Texture)]>,
     pub host_vm: Option<MaterialVm>,
+}
+
+impl Default for TracedSurfaceRecipe {
+    fn default() -> Self {
+        Self {
+            hooks: Vec::new(), tile_cells_per_unit: None,
+            volume_tile_cells: 0, voxel_ao_strength: 1.0, textures: Rc::default(), host_vm: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -334,12 +319,28 @@ pub(crate) enum TracedDrawError {
 }
 
 const DUPLICATE_TRACE_VOLUME: &str = "duplicate traced texture binding trace_volume";
+const DUPLICATE_TRACE_COARSE: &str = "duplicate traced texture binding trace_coarse";
+
+fn sampled_volume_format(format: &TextureFormat) -> Result<bool, ()> {
+    match format {
+        TextureFormat::VecVolume(_) => Ok(true),
+        TextureFormat::Unknown => Ok(false),
+        _ => Err(()),
+    }
+}
 
 impl From<String> for TracedDrawError {
     fn from(reason: String) -> Self { Self::Other(reason) }
 }
 
 impl TracedSurfaceRecipe {
+    fn is_volume(&self) -> bool { self.tile_cells_per_unit.is_some() }
+
+    pub(crate) fn wants_volume(&self) -> bool {
+        self.is_volume()
+            || self.textures.iter().any(|(name, _)| *name == live_id!(trace_volume) || *name == live_id!(trace_coarse))
+    }
+
     fn build_in_vm<T>(&self, cx: &mut Cx, mut build: impl FnMut(&mut ScriptVm) -> T) -> Option<T> {
         let mut result = None;
         let mut run = |vm: &mut ScriptVm| result = Some(build(vm));
@@ -350,13 +351,20 @@ impl TracedSurfaceRecipe {
         result.filter(|_| ran)
     }
 
-    /// March an R8 atlas of 8³ tiles with a 256-wide palette. Bind them as
-    /// `trace_volume` and `trace_palette` in `textures`. Each palette page has
-    /// three rows: sRGB base colour and alpha, linear metallic/roughness in RG, and linear emission RGB.
-    /// Use the same model-space cell pitch for [`TracedTile::append_box`].
-    pub fn tiles(cell_pitch: f32) -> Self {
+    /// March dense tiles of up to `tile_cells` on each axis at the given model-space cell pitch.
+    /// Bind the R8 material page as `trace_volume`, the R8 occupancy page (one quarter the
+    /// extent on each axis) as `trace_coarse`, and the tile palette as `trace_palette`.
+    pub fn volume(cell_pitch: f32, tile_cells: u32) -> Self {
+        assert!((1..=128).contains(&tile_cells), "volume tile size must be in 1..=128");
         assert!(cell_pitch > 0.0 && cell_pitch.is_finite() && cell_pitch.recip().is_finite());
-        Self { tile_cells_per_unit: Some(cell_pitch.recip()), ..Self::default() }
+        Self { tile_cells_per_unit: Some(cell_pitch.recip()),
+            volume_tile_cells: tile_cells, ..Self::default() }
+    }
+
+    /// Scale dense-volume neighbor occlusion from disabled (0) to full strength (1).
+    pub fn voxel_ao_strength(mut self, strength: f32) -> Self {
+        self.voxel_ao_strength = strength;
+        self
     }
 
     pub fn set_hook(&mut self, vm: &mut ScriptVm, name: LiveId, function: ScriptObject) -> Result<(), String> {
@@ -384,50 +392,83 @@ impl TracedSurfaceRecipe {
         Ok(obj)
     }
 
-    pub(crate) fn outside_object(&self, vm: &mut ScriptVm, features: Features) -> Result<ScriptObject, String> {
-        let shader = if self.tile_cells_per_unit.is_some() { id!(DrawSceneTracedTiles) } else { id!(DrawSceneTraced) };
+    pub(crate) fn scene_object(&self, vm: &mut ScriptVm, features: Features, inside: bool) -> Result<ScriptObject, String> {
+        let shader = match (self.is_volume(), inside) {
+            (false, true) => id!(DrawSceneTracedInside),
+            (true, true) => id!(DrawSceneTracedVolumeInside),
+            (true, false) => id!(DrawSceneTracedVolume),
+            (false, false) => id!(DrawSceneTraced),
+        };
         let obj = self.shader_object(vm, shader)?;
         variants::scene_variant(vm, obj, features, true, features.reflections)
-            .ok_or_else(|| "could not specialize the outside surface shader".to_owned())
+            .ok_or_else(|| "could not specialize the traced scene shader".to_owned())
     }
 
-    fn outside_draw(&self, vm: &mut ScriptVm, features: Features) -> Result<Box<DrawScenePbr>, TracedDrawError> {
-        let obj = self.outside_object(vm, features)?;
+    fn scene_draw(&self, vm: &mut ScriptVm, features: Features, inside: bool) -> Result<Box<DrawScenePbr>, TracedDrawError> {
+        if self.is_volume() {
+            for (name, missing, wrong_type) in [
+                (live_id!(trace_volume), "missing traced texture binding trace_volume", "trace_volume must be a sampled 3D texture"),
+                (live_id!(trace_coarse), "missing traced texture binding trace_coarse", "trace_coarse must be a sampled 3D texture"),
+            ] {
+                let (_, tex) = self.textures.iter().find(|(id, _)| *id == name)
+                    .ok_or(TracedDrawError::VolumeBinding(missing))?;
+                if sampled_volume_format(tex.get_format(vm.cx_mut())).is_err() {
+                    return Err(TracedDrawError::VolumeBinding(wrong_type));
+                }
+            }
+            if !self.textures.iter().any(|(id, _)| *id == live_id!(trace_palette)) {
+                return Err("missing traced texture binding trace_palette".to_owned().into());
+            }
+        }
+        let obj = self.scene_object(vm, features, inside)?;
         let mut draw = Box::new(DrawScenePbr::script_new(vm));
         draw.skinned.draw_vars.draw_shader_id = None;
         draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
         let vars = &mut draw.skinned.draw_vars;
         let id = vars.draw_shader_id.ok_or_else(|| makepad_draw::makepad_platform::shader_error::take()
-            .unwrap_or_else(|| "outside surface shader did not compile".to_owned()))?;
+            .unwrap_or_else(|| "traced scene shader did not compile".to_owned()))?;
         Self::bind_textures(vm.cx(), vars, id, &self.textures)?;
-        if let Some(scale) = self.tile_cells_per_unit {
-            vars.set_uniform(vm.cx(), live_id!(trace_cells_per_unit), &[scale]);
-        }
+        self.set_tile_uniforms(vm.cx(), vars);
+        vars.set_uniform(vm.cx(), live_id!(voxel_ao_strength), &[self.voxel_ao_strength]);
         Ok(draw)
     }
 
-    fn sun_binding(&self) -> Result<usize, &'static str> {
-        self.tile_cells_per_unit.ok_or("the traced Sun draw requires a tile recipe")?;
-        let mut volumes = self.textures.iter().enumerate().filter(|(_, (name, _))| *name == live_id!(trace_volume));
-        let (binding, _) = volumes.next().ok_or("missing traced texture binding trace_volume")?;
-        if volumes.next().is_some() {
-            return Err(DUPLICATE_TRACE_VOLUME);
+    fn set_tile_uniforms(&self, cx: &Cx, vars: &mut DrawVars) {
+        if let Some(scale) = self.tile_cells_per_unit {
+            vars.set_uniform(cx, live_id!(trace_cells_per_unit), &[scale]);
+            vars.set_uniform(cx, live_id!(trace_tile_steps), &[(3 * self.volume_tile_cells) as f32]);
         }
-        Ok(binding)
     }
 
-    fn build_sun_draw(&self, vm: &mut ScriptVm, binding: usize) -> Result<DrawTracedSun, TracedDrawError> {
-        let obj = self.shader_object(vm, id!(DrawTracedSunTiles))?;
+    fn sun_bindings(&self) -> Result<[usize; 2], &'static str> {
+        if !self.is_volume() { return Err("the traced Sun draw requires a volume recipe"); }
+        let find = |name, missing, duplicate| {
+            let mut matches = self.textures.iter().enumerate().filter(|(_, (id, _))| *id == name);
+            let (index, _) = matches.next().ok_or(missing)?;
+            if matches.next().is_some() { return Err(duplicate); }
+            Ok(index)
+        };
+        let volume = find(live_id!(trace_volume), "missing traced texture binding trace_volume", DUPLICATE_TRACE_VOLUME)?;
+        let coarse = find(live_id!(trace_coarse), "missing traced texture binding trace_coarse", DUPLICATE_TRACE_COARSE)?;
+        Ok([volume, coarse])
+    }
+
+    fn build_sun_draw(&self, vm: &mut ScriptVm, bindings: [usize; 2]) -> Result<DrawTracedSun, TracedDrawError> {
+        let obj = self.shader_object(vm, self.sun_shader())?;
         let mut draw = DrawTracedSun::script_new(vm);
         draw.draw_vars.draw_shader_id = None;
         draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
         let vars = &mut draw.draw_vars;
         let id = vars.draw_shader_id.ok_or_else(|| makepad_draw::makepad_platform::shader_error::take()
             .unwrap_or_else(|| "traced Sun shader did not compile".to_owned()))?;
-        Self::bind_textures(vm.cx(), vars, id, std::slice::from_ref(&self.textures[binding]))?;
-        vars.set_uniform(vm.cx(), live_id!(trace_cells_per_unit), &[self.tile_cells_per_unit.unwrap()]);
+        for binding in bindings {
+            Self::bind_textures(vm.cx(), vars, id, std::slice::from_ref(&self.textures[binding]))?;
+        }
+        self.set_tile_uniforms(vm.cx(), vars);
         Ok(draw)
     }
+
+    fn sun_shader(&self) -> LiveId { id!(DrawTracedSunVolume) }
 
     fn bind_textures(cx: &Cx, vars: &mut DrawVars, id: DrawShaderId, textures: &[(LiveId, Texture)]) -> Result<(), TracedDrawError> {
         let inputs = &cx.draw_shaders[id.index].mapping.textures;
@@ -439,6 +480,9 @@ impl TracedSurfaceRecipe {
                 // Outside can find the duplicate before Sun checks its binding.
                 if *name == live_id!(trace_volume) {
                     return Err(TracedDrawError::VolumeBinding(DUPLICATE_TRACE_VOLUME));
+                }
+                if *name == live_id!(trace_coarse) {
+                    return Err(TracedDrawError::VolumeBinding(DUPLICATE_TRACE_COARSE));
                 }
                 return Err(format!("duplicate traced texture binding {name}").into());
             }
@@ -458,6 +502,7 @@ const TRACED_PASSES: [TracedPass; 4] = [TracedPass::Outside, TracedPass::Inside,
 pub(crate) struct TracedScene {
     features: Features,
     pass: DrawPassId,
+    viewport_pixels: [usize; 2],
     layout: Option<PassLayout>,
     realtime_sun: bool,
     sun: Option<(DrawPassId, PassLayout)>,
@@ -465,7 +510,17 @@ pub(crate) struct TracedScene {
 
 impl TracedScene {
     pub(crate) fn new(cx: &Cx, pass: DrawPassId, features: Features, realtime_sun: bool, sun: Option<DrawPassId>) -> Self {
-        Self { features, pass, layout: cx.pass_layout(pass), realtime_sun,
+        let target = &cx.passes[pass];
+        let dpi = target.dpi_factor.unwrap_or(1.0);
+        let viewport_pixels = match target.parent {
+            CxDrawPassParent::Xr => cx.xr_pass_eyes().map(|(_, size)| [size.x as usize, size.y as usize]),
+            CxDrawPassParent::Window(w) if cx.windows.is_valid(w) && cx.windows[w].window_geom.inner_size.x > 0.0 => {
+                let size = cx.windows[w].window_geom.inner_size;
+                Some(makepad_platform::window_size::window_pixels([size.x, size.y], dpi).map(|n| n as usize))
+            }
+            _ => cx.get_pass_rect(pass, dpi).map(|rect| Cx::pass_pixel_size(rect.size, dpi).into()),
+        }.unwrap_or([0, 0]);
+        Self { features, pass, viewport_pixels, layout: cx.pass_layout(pass), realtime_sun,
             sun: sun.and_then(|id| cx.pass_layout(id).map(|layout| (id, layout))) }
     }
 
@@ -557,8 +612,9 @@ pub(crate) struct TracedProgram {
     recipe: Option<TracedSurfaceRecipe>,
     pub(crate) passes: TracedPasses,
     outside: HashMap<Features, Box<DrawScenePbr>>,
+    inside: HashMap<Features, Box<DrawScenePbr>>,
     pub(crate) sun_batch: Option<Rc<RefCell<TracedSunBatch>>>,
-    sun_binding: Result<usize, &'static str>,
+    sun_bindings: Result<[usize; 2], &'static str>,
     prepared_redraw: Option<u64>,
     generation: u64,
     /// Preview can draw Outside while the full program still reports Waiting.
@@ -579,20 +635,18 @@ pub(crate) fn next_traced_serial() -> u64 {
 }
 
 impl TracedProgram {
-    pub(crate) fn new(recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool, webgl: bool) -> Self {
-        let mut passes = TracedPasses::new(TracedSurfacePasses { sun: required.sun && recipe.tile_cells_per_unit.is_some(), ..required });
-        let sun_binding = recipe.sun_binding();
-        if webgl { passes.failure = Some(TRACED_WEBGL_FAILURE.into()); }
-        let sun_batch = (passes.required.sun && !webgl).then(Default::default);
-        Self { recipe: (!webgl).then_some(recipe), passes, outside: Default::default(), sun_batch, sun_binding,
+    pub(crate) fn new(recipe: TracedSurfaceRecipe, required: TracedSurfacePasses, preview: bool) -> Self {
+        let passes = TracedPasses::new(TracedSurfacePasses { sun: required.sun && recipe.is_volume(), ..required });
+        let sun_bindings = recipe.sun_bindings();
+        let sun_batch = passes.required.sun.then(Default::default);
+        Self { recipe: Some(recipe), passes, outside: Default::default(), inside: Default::default(), sun_batch, sun_bindings,
             prepared_redraw: None, generation: 0, preview, serial: 0, source_ready: false }
     }
 
     /// The same install for another renderer: the recipe is shared, and nothing compiled is.
     /// The copy builds and prewarms its own draws for its own pass target.
     pub(crate) fn installed_again(&self) -> Self {
-        let webgl = self.recipe.is_none();
-        let mut copy = Self::new(self.recipe.clone().unwrap_or_default(), self.passes.required, self.preview, webgl);
+        let mut copy = Self::new(self.recipe.clone().unwrap_or_default(), self.passes.required, self.preview);
         copy.serial = self.serial;
         copy.passes.failure.clone_from(&self.passes.failure);
         copy.passes.sun_failure.clone_from(&self.passes.sun_failure);
@@ -608,6 +662,8 @@ impl TracedProgram {
             self.passes.sun_failure.clone_from(&source.passes.sun_failure);
         }
     }
+
+    pub(crate) fn wants_inside(&self) -> bool { self.passes.required.inside && !self.preview }
 
     pub(crate) fn wants_sun(&self) -> bool { self.passes.required.sun }
 
@@ -627,15 +683,28 @@ impl TracedProgram {
     }
 
     pub(crate) fn prepare_sun(&mut self, cx: &mut Cx,
-        has_volume_format: impl FnOnce(&TextureFormat) -> Result<bool, &'static str>,
+        mut has_volume_format: impl FnMut(&TextureFormat) -> Result<bool, ()>,
     ) -> Result<(), TracedDrawError> {
         let Some(batch) = &self.sun_batch else { return Ok(()) };
         if batch.borrow().draw.is_some() { return Ok(()); }
         let recipe = self.recipe.as_ref().expect("installed Sun recipe");
-        let binding = self.sun_binding.map_err(TracedDrawError::VolumeBinding)?;
-        // Both passes bind the handle. Its owner decides when to publish its texels.
-        if !has_volume_format(recipe.textures[binding].1.get_format(cx)).map_err(TracedDrawError::VolumeBinding)? { return Ok(()); }
-        if let Some(draw) = recipe.build_in_vm(cx, |vm| recipe.build_sun_draw(vm, binding)).transpose()? {
+        let bindings = self.sun_bindings.map_err(TracedDrawError::VolumeBinding)?;
+        // Both passes bind the handles. Their owner decides when to publish the texels.
+        let mut pending = false;
+        for binding in bindings {
+            let (name, tex) = &recipe.textures[binding];
+            match has_volume_format(tex.get_format(cx)) {
+                Ok(true) => {}
+                Ok(false) => pending = true,
+                Err(()) => return Err(TracedDrawError::VolumeBinding(if *name == live_id!(trace_coarse) {
+                    "trace_coarse must be a sampled 3D texture"
+                } else {
+                    "trace_volume must be a sampled 3D texture"
+                })),
+            }
+        }
+        if pending { return Ok(()); }
+        if let Some(draw) = recipe.build_in_vm(cx, |vm| recipe.build_sun_draw(vm, bindings)).transpose()? {
             self.passes.set_shader(TracedPass::Sun, draw.draw_vars.draw_shader_id.expect("compiled Sun draw"));
             let mut batch = batch.borrow_mut();
             batch.draw_serial = next_traced_serial();
@@ -645,7 +714,7 @@ impl TracedProgram {
     }
 
     pub(crate) fn prepare(&mut self, cx: &mut Cx, scene: TracedScene, name: &str) {
-        self.prepare_with_volume_support(cx, scene, name, Cx::sampled_volume_support);
+        self.prepare_with_volume_support(cx, scene, name, device_volume_support);
     }
 
     pub(crate) fn prepare_with_volume_support(
@@ -656,40 +725,47 @@ impl TracedProgram {
         if self.generation != cx.reload_generation {
             self.generation = cx.reload_generation;
             self.outside.clear();
+            self.inside.clear();
             if let Some(batch) = &self.sun_batch { batch.borrow_mut().draw = None; }
             self.passes = TracedPasses::new(self.passes.required);
         }
         if self.passes.failure(scene.realtime_sun).is_some() { return }
-        let wants_sun = self.wants_sun();
-        let diagnostic = |cx: &Cx, error| match error {
-            TracedDrawError::VolumeBinding(binding) => {
-                let device = if wants_sun { volume_support(cx).and_then(Result::err) } else { None };
-                device.unwrap_or(binding).to_owned()
+        if recipe.wants_volume() {
+            if let Some(Err(reason)) = volume_support(cx) {
+                log!("render: traced surface {name} unavailable: {reason}");
+                self.passes.failure = Some(reason.to_owned());
+                return;
             }
+        }
+        let diagnostic = |error| match error {
+            TracedDrawError::VolumeBinding(binding) => binding.to_owned(),
             TracedDrawError::Other(reason) => reason,
         };
         let features = scene.features;
-        if !self.outside.contains_key(&features) {
-            match recipe.build_in_vm(cx, |vm| recipe.outside_draw(vm, features)) {
-                Some(Ok(draw)) => { self.outside.insert(features, draw); }
-                Some(Err(error)) => {
-                    let reason = diagnostic(cx, error);
-                    log!("render: traced surface {name} outside shader failed: {reason}");
-                    self.passes.failure = Some(reason);
-                    return;
-                }
-                None => { self.passes.active = None; return }
-            }
+        for (pass, variants) in [(TracedPass::Outside, &mut self.outside), (TracedPass::Inside, &mut self.inside)] {
+            let inside = pass == TracedPass::Inside;
+            if inside && !self.passes.required.inside { continue; }
+            let draw = match variants.entry(features) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => match recipe.build_in_vm(cx, |vm| recipe.scene_draw(vm, features, inside)) {
+                    Some(Ok(draw)) => entry.insert(draw),
+                    Some(Err(error)) => {
+                        let reason = diagnostic(error);
+                        let label = if inside { "inside" } else { "outside" };
+                        log!("render: traced surface {name} {label} shader failed: {reason}");
+                        self.passes.failure = Some(reason);
+                        return;
+                    }
+                    None => { self.passes.active = None; return }
+                },
+            };
+            let vars = &mut draw.skinned.draw_vars;
+            vars.set_uniform(cx, live_id!(trace_inv_viewport), &scene.viewport_pixels.map(|n| 1.0 / n.max(1) as f32));
+            self.passes.set_shader(pass, vars.draw_shader_id.unwrap());
         }
-        let id = self.outside[&features].skinned.draw_vars.draw_shader_id.unwrap();
-        self.passes.set_shader(TracedPass::Outside, id);
         if self.passes.sun_failure.is_none() {
-            if let Err(error) = self.prepare_sun(cx, |format| match format {
-                TextureFormat::Unknown => Ok(false),
-                TextureFormat::VecVolume(_) => Ok(true),
-                _ => Err("trace_volume must be a sampled 3D texture"),
-            }) {
-                let reason = diagnostic(cx, error);
+            if let Err(error) = self.prepare_sun(cx, sampled_volume_format) {
+                let reason = diagnostic(error);
                 log!("render: traced surface {name} Sun draw failed: {reason}");
                 self.passes.sun_failure = Some(reason);
             }
@@ -721,6 +797,51 @@ impl TracedProgram {
     }
 
     pub(crate) fn outside(&mut self, scene: TracedScene) -> Option<&mut DrawScenePbr> {
+        self.ready_scene_draw(scene, TracedPass::Outside)
+    }
+
+    pub(crate) fn inside(&mut self, scene: TracedScene) -> Option<&mut DrawScenePbr> {
+        if !self.wants_inside() { return None; }
+        self.ready_scene_draw(scene, TracedPass::Inside)
+    }
+
+    pub(crate) fn cell_pitch(&self) -> Option<f32> {
+        self.recipe.as_ref()?.tile_cells_per_unit.map(f32::recip)
+    }
+
+    pub(crate) fn is_volume(&self) -> bool {
+        self.recipe.as_ref().is_some_and(TracedSurfaceRecipe::is_volume)
+    }
+
+    pub(crate) fn cull_proxy_faces(&self) -> bool {
+        self.is_volume()
+    }
+
+    /// Update dense-volume AO on the recipe and compiled Outside/Inside draws,
+    /// preserving shader and pass readiness. A change reaches review forks
+    /// through the program serial. Returns false for non-volume programs.
+    pub(crate) fn set_voxel_ao_strength(&mut self, cx: &Cx, strength: f32) -> bool {
+        let Some(recipe) = self.recipe.as_mut().filter(|r| r.is_volume()) else {
+            return false;
+        };
+        let clamped = strength.clamp(0.0, 1.0);
+        if recipe.voxel_ao_strength == clamped {
+            return true;
+        }
+        recipe.voxel_ao_strength = clamped;
+        for draw in self.outside.values_mut().chain(self.inside.values_mut()) {
+            draw.skinned.draw_vars.set_uniform(cx, live_id!(voxel_ao_strength), &[clamped]);
+        }
+        self.serial = next_traced_serial();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn voxel_ao_strength(&self) -> Option<f32> {
+        self.recipe.as_ref().map(|recipe| recipe.voxel_ao_strength)
+    }
+
+    fn ready_scene_draw(&mut self, scene: TracedScene, pass: TracedPass) -> Option<&mut DrawScenePbr> {
         let required = if self.preview { TracedSurfacePasses::OUTSIDE } else { self.passes.required_for(scene.realtime_sun) };
         let matches = self.passes.active.is_some_and(|active| {
             active.same_exterior(scene) && (!required.sun || active.sun == scene.sun)
@@ -734,8 +855,9 @@ impl TracedProgram {
         } else if self.passes.failure(scene.realtime_sun).is_some() || !self.passes.ready_for(required) {
             return None;
         }
-        let active = self.passes.shaders[TracedPass::Outside as usize];
-        self.outside.get_mut(&scene.features)
+        let active = self.passes.shaders[pass as usize];
+        let variants = if pass == TracedPass::Inside { &mut self.inside } else { &mut self.outside };
+        variants.get_mut(&scene.features)
             .filter(|draw| draw.skinned.draw_vars.draw_shader_id == active)
             .map(Box::as_mut)
     }
@@ -1200,46 +1322,413 @@ mod tests {
     }
 
     #[test]
-    fn traced_tile_march_variants() {
+    fn inside_vertex_culls_non_straddling_tiles() {
         with_vm(|vm| {
-            let recipe = TracedSurfaceRecipe::tiles(0.125);
-            let features = Features { clip: true, reflections: true, gi: true, gi_debug: true,
-                csm: true, csm_debug: true, cluster: true, local_shadows: true, ..Default::default() };
-            let program = recipe.outside_object(vm, features).expect("tiled outside scene");
-            crate::shaders::inspect_scene_backends(vm, program, "tile march", Some(true));
-            let compiled = crate::shaders::compile_scene_webgl2(vm, program, "tile march");
-            let frag = compiled.view().glsl_fragment;
-            let hit = crate::shaders::lowered_fn_body(frag, "traced_hit").expect("tile intersection");
-            let (_, walk) = hit.split_once("for (").expect("tile walk must reach the emitted shader");
-            assert!(walk.lines().next().unwrap().contains("24") && walk.contains("texelFetch(tex_trace_volume,"),
-                "bounded integer volume load must occur inside the walk");
-            let read: std::collections::HashSet<_> = frag.lines()
-                .filter(|line| !line.trim_start().starts_with("uniform "))
-                .flat_map(|line| line.split(|c: char| c != '_' && !c.is_ascii_alphanumeric()))
-                .filter(|word| word.starts_with("tex_")).collect();
-            assert!(read.contains("tex_trace_volume") && read.contains("tex_trace_palette"), "both tile resources must contribute");
-            let draw = recipe.outside_draw(vm, features).expect("tiled scene binding layout");
-            let id = draw.skinned.draw_vars.draw_shader_id.unwrap();
-            let mut cells_per_unit = [0.0];
-            draw.skinned.draw_vars.get_uniform(vm.cx_mut(), live_id!(trace_cells_per_unit), &mut cells_per_unit);
-            assert_eq!(cells_per_unit, [8.0], "the scene must convert cell distance back to model-space depth");
-            let slots = &vm.cx().draw_shaders[id.index].mapping.textures;
-            let names: std::collections::HashSet<_> = slots.iter().map(|slot| format!("tex_{}", slot.id)).collect();
-            assert!(read.iter().all(|name| names.contains(*name)), "emitted fragment sampler without a binding");
-            let vertex_only = slots.iter().any(|s| s.id == live_id!(morph_map)) && !read.contains("tex_morph_map");
-            let fragment_slots = slots.len() - usize::from(vertex_only);
-            assert!(slots.len() <= makepad_draw::DRAW_CALL_TEXTURE_SLOTS && fragment_slots <= 16 && read.len() <= 16,
-                "tile scene uses {} fragment units, {fragment_slots} fragment slots and {} combined slots", read.len(), slots.len());
-            println!("tile march: {} fragment units, {fragment_slots} fragment slots, {} combined slots", read.len(), slots.len());
+            let projection = Mat4f::perspective(70.0, 1.0, 0.1, 100.0);
+            let front = vec3f(0.0, 0.0, -1.0);
+            let center = Vec3f::all(1.5);
+            // At z=1.2 the near plane is within the margin of both adjoining tile faces.
+            let boundary = vec3f(1.5, 1.5, 1.2);
+            let offset = vec3f(-4.0, 2.0, 6.0);
+            for (label, eye, direction, trace_lo, bias, expected_count) in [
+                ("center", center, front, Vec3f::default(), 0.0, Some(9)),
+                ("boundary", boundary, front, Vec3f::default(), 0.0, Some(18)),
+                ("generic bounds", boundary, front, offset, 0.0, Some(18)),
+                ("rotated", center, vec3f(-1.0, 0.5, -1.0), offset, 0.0, None),
+                ("biased", boundary, front, offset, 0.5, Some(9)),
+            ] {
+                let view = Mat4f::look_at(eye, eye + direction, vec3f(0.0, 1.0, 0.0));
+                let clip_z = |point: Vec3f| {
+                    let v = view.transform_vec4(point.to_vec4());
+                    projection.transform_vec4(vec4(v.x * (1.0-bias), v.y * (1.0-bias), v.z * (1.0-bias), v.w)).z
+                };
+                // A rigid camera maps a margin in metres to this clip-z distance.
+                let scale = 8.0;
+                let epsilon = (0.05 / scale) * projection.v[10].abs() * (1.0-bias);
+                let mut survivors = 0;
+                for z in 0..3 { for y in 0..3 { for x in 0..3 {
+                    let origin = vec3f(x as f32, y as f32, z as f32);
+                    let trace_hi = trace_lo + Vec3f::all(scale);
+                    let offset = origin * scale - trace_lo;
+                    let frame = vec4(offset.x, offset.y, offset.z, scale).script_to_value(vm);
+                    let lo = trace_lo.script_to_value(vm);
+                    let hi = trace_hi.script_to_value(vm);
+                    let proj = projection.script_to_value(vm);
+                    let model_view = view.script_to_value(vm);
+                    let culled = script_eval!(vm, {
+                        use mod.prelude.widgets_internal.*
+                        let shader = mod.draw.DrawSceneTracedInside
+                        let frame = #(frame)
+                        let near = shader.trace_model_plane(vec4(0.0, 0.0, 1.0, 0.0),
+                            #(proj), 1.0 - #(bias), #(model_view))
+                        shader.trace_inside_cull_box(near, (frame.xyz + #(lo)) / frame.w,
+                            (frame.xyz + #(hi)) / frame.w, 0.05 / frame.w)
+                    });
+                    let corners = (0..8).map(|k| clip_z(origin + vec3f((k & 1) as f32,
+                        ((k >> 1) & 1) as f32, ((k >> 2) & 1) as f32)));
+                    let reject = corners.clone().all(|z| z > epsilon) || corners.clone().all(|z| z < -epsilon);
+                    assert_eq!(culled.as_bool(), Some(reject), "{label} tile ({x},{y},{z}): {:?}", vm.take_errors());
+                    survivors += usize::from(!reject);
+                } } }
+                assert!((1..27).contains(&survivors), "{label}: both sides of the vertex decision");
+                if let Some(count) = expected_count { assert_eq!(survivors, count, "{label}"); }
+            }
+        });
+    }
 
-            let sun = recipe.shader_object(vm, id!(DrawTracedSunTiles)).expect("tiled Sun shader");
-            crate::shaders::inspect_draw_backends(vm, sun, "tile Sun", Some(crate::shaders::TracedOutput::Sun));
-            let mut draw = DrawTracedSun::script_new(vm);
-            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), sun.into());
-            let id = draw.draw_vars.draw_shader_id.expect("tiled Sun binding layout");
-            let slots = &vm.cx().draw_shaders[id.index].mapping.textures;
-            assert!(matches!(slots.as_slice(), [volume] if volume.id == live_id!(trace_volume)),
-                "the only Sun texture slot must be the volume");
+    #[test]
+    fn traced_inside_frustum_side_cull_matches_clip_halfspaces() {
+        with_vm(|vm| {
+            // In view space the sides are ±x - z >= 0 and ±y - z >= 0.
+            // Offset the camera so the model-space planes have nonzero constants.
+            let eye = vec3f(4.0, 2.0, 3.0);
+            let view = Mat4f::translation(-eye).script_to_value(vm);
+            let projection = Mat4f::perspective(90.0, 1.0, 0.1, 100.0).script_to_value(vm);
+            let planes = [vec4(1.0, 0.0, 0.0, 1.0), vec4(-1.0, 0.0, 0.0, 1.0),
+                vec4(0.0, 1.0, 0.0, 1.0), vec4(0.0, -1.0, 0.0, 1.0)];
+            for (label, lo, hi, rejected) in [
+                ("left", vec3f(-4.0, -0.5, -2.0), vec3f(-3.0, 0.5, -1.0), Some(0)),
+                ("right across w=0", vec3f(2.0, -0.5, -1.0), vec3f(3.0, 0.5, 1.0), Some(1)),
+                ("below", vec3f(-0.5, -4.0, -2.0), vec3f(0.5, -3.0, -1.0), Some(2)),
+                ("above", vec3f(-0.5, 3.0, -2.0), vec3f(0.5, 4.0, -1.0), Some(3)),
+                ("crosses right", vec3f(1.5, -0.5, -2.0), vec3f(3.0, 0.5, -1.0), None),
+                ("within side margin", vec3f(2.02, -0.5, -2.0), vec3f(3.0, 0.5, -1.0), None),
+                ("contains camera", Vec3f::all(-1.0), Vec3f::all(1.0), None),
+            ] {
+                let lo = (eye + lo).script_to_value(vm);
+                let hi = (eye + hi).script_to_value(vm);
+                for (side, plane) in planes.iter().enumerate() {
+                    let plane = plane.script_to_value(vm);
+                    let culled = script_eval!(vm, {
+                        let shader = mod.draw.DrawSceneTracedInside
+                        let side = shader.trace_model_plane(#(plane), #(projection), 1.0, #(view))
+                        shader.trace_inside_outside_plane(side, #(lo), #(hi), 0.05)
+                    });
+                    assert_eq!(culled.as_bool(), Some(rejected == Some(side)), "{label}, side {side}: {:?}", vm.take_errors());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn traced_volume_capability_gate_follows_volume_caps() {
+        let mut cx = variants::tests::shader_cx();
+        let pass = DrawPass::new(&mut cx);
+        let features = Features::default();
+        let scene = TracedScene::new(&cx, pass.draw_pass_id(), features, false, None);
+        let mut volume = TracedSurfaceRecipe::volume(0.1, 4);
+        volume.textures = [live_id!(trace_volume), live_id!(trace_coarse), live_id!(trace_palette)]
+            .map(|name| (name, Texture::new_with_format(&mut cx, TextureFormat::Unknown))).into();
+        for (name, recipe) in [("volume", volume), ("analytic", TracedSurfaceRecipe::default())] {
+            for support in [Ok(()), Err(TRACED_WEBGL_FAILURE)] {
+                let mut program = TracedProgram::new(recipe.clone(), TracedSurfacePasses::OUTSIDE, false);
+                program.prepare_with_volume_support(&mut cx, scene, name, |_| Some(support));
+                if name == "volume" && support.is_err() {
+                    assert!(program.outside.is_empty(), "unsupported volume reached shader compilation");
+                    program.prepare_with_volume_support(&mut cx, scene, name, |_| panic!("terminal failure retried"));
+                    assert_eq!(program.passes.state(features, false, None), TracedSurfaceState::Failed(TRACED_WEBGL_FAILURE.into()));
+                } else {
+                    let shader = program.outside[&features].skinned.draw_vars.draw_shader_id.expect("compiled Outside shader");
+                    // Acknowledge the compiled pipeline for the recording context's scene pass.
+                    program.passes.refresh(|pass, id, target| {
+                        assert_eq!((pass, id, target), (TracedPass::Outside, shader, Some(scene.pass)));
+                        Ok(true)
+                    });
+                    assert_eq!(program.passes.state(features, false, None), TracedSurfaceState::Ready, "{name} on {support:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn traced_volume_compiles_all_six_backends_with_ao_coat_ibl_gi_and_frustum_cull() {
+        use crate::shaders::{lowered_fn_body, test_source};
+        with_vm(|vm| {
+            let mut recipe = TracedSurfaceRecipe::volume(0.1, 64);
+            // Distinct handles before the recording Cx's device handshake. The two
+            // passes resolve names in different layouts, independently of recipe order.
+            recipe.textures = [live_id!(trace_coarse), live_id!(trace_palette), live_id!(trace_volume)]
+                .map(|id| (id, Texture::new_with_format(vm.cx_mut(), TextureFormat::Unknown))).into();
+            let features = Features { clip: true, reflections: true, gi: true, gi_screen: true, gi_debug: true,
+                csm: true, csm_debug: true, cluster: true, local_shadows: true, ..Default::default() };
+            let check_walk = |source: &str| {
+                let hit = crate::shaders::lowered_fn_body(source, "traced_hit_interval").expect("volume intersection");
+                assert!(!hit.contains("io_trace_slab("), "the volume march reuses the supplied slab interval");
+                let hit = crate::shaders::test_source(&hit);
+                let (_, walk) = hit.split_once("for (").expect("volume march loop");
+                let (header, body) = walk.split_once('{').expect("loop body");
+                assert!(header.contains("l_i < 384u") && !hit.contains("_mp_loop_guard") && !hit.contains("_mp_iter"),
+                    "literal march ceiling without a runtime loop guard: {header}");
+                let (first_exit, _) = body.split_once("break;").expect("recipe bound breaks the loop");
+                assert!(hit.contains("l_max_steps = uint(uni_trace_tile_steps)") &&
+                    first_exit.contains("l_i >= l_max_steps") && !first_exit.contains("texelFetch"),
+                    "the recipe bound must be checked before either atlas is loaded");
+                let mut depth = 1;
+                let end = body.find(|c| {
+                    if c == '{' { depth += 1; }
+                    if c == '}' { depth -= 1; }
+                    depth == 0
+                }).expect("closing brace of volume march");
+                let body = &body[..end];
+                for sampler in ["tex_trace_coarse", "tex_trace_volume"] {
+                    assert_eq!(body.matches(&format!("texelFetch({sampler},")).count(), 1,
+                        "one load site per atlas in the loop: {sampler}");
+                }
+                // The VM divides integer vectors as floats. Check the actual GPU block
+                // coordinates and the load inside its cache-miss branch in the lowered shader.
+                let (_, cache) = body.split_once("ivec3 l_block = (l_cell / ivec3(4));").expect("integer coarse address");
+                assert!(body.contains("ivec3 l_block_lo = ((l_cell / ivec3(l_size)) * ivec3(l_size));"),
+                    "integer division aligns the cell to the current block");
+                let (guard, cache) = cache.split_once('{').expect("cache-miss guard");
+                let (update, _) = cache.split_once('}').expect("coarse cache update");
+                assert!(["x", "y", "z"].iter().all(|a| guard.contains(&format!("l_block.{a} != l_cached.{a}"))) &&
+                    guard.matches("||").count() == 2 && update.contains("texelFetch(tex_trace_coarse, l_block,") &&
+                    update.contains("l_cached = l_block;"), "reuse the byte until any block coordinate changes");
+            };
+            let check_uniforms = |vm: &mut ScriptVm, vars: &DrawVars, steps| {
+                for (name, expected) in [(live_id!(trace_cells_per_unit), 10.0), (live_id!(trace_tile_steps), steps),
+                    (live_id!(trace_coarse_only), 0.0)] {
+                    let mut value = [f32::NAN];
+                    vars.get_uniform(vm.cx_mut(), name, &mut value);
+                    assert_eq!(value, [expected], "volume uniform {name}");
+                }
+            };
+            for (inside, name, output) in [
+                (false, "volume Outside", crate::shaders::TracedOutput::Scene(true)),
+                (true, "volume Inside", crate::shaders::TracedOutput::SceneInside(true)),
+            ] {
+                let scene = recipe.scene_object(vm, features, inside).expect("volume scene");
+                crate::shaders::inspect_draw_backends(vm, scene, name, Some(output));
+                let compiled = crate::shaders::compile_scene_webgl2(vm, scene, name);
+                let view = compiled.view();
+                check_walk(view.glsl_fragment);
+                let body = |hook| lowered_fn_body(view.glsl_fragment, hook)
+                    .unwrap_or_else(|| panic!("{name}: missing {hook}"));
+                assert_eq!(body("traced_ao").matches("io_volume_ao_occ(").count(), 4, "{name}: four neighboring cells");
+                assert!(body("trace_shade_hit").contains("io_traced_ao("), "{name}: hits use voxel AO");
+                assert!(body("shade_mr_surface_at").contains("io_clear_coat_layer("), "{name}: per-material clearcoat");
+                for (hook, lane, lookup) in [
+                    ("sky_env_lit", "mat_ibl_lane_sky_env_lit", "mat_ibl_lookup"),
+                    ("mat_ambient", "mat_ibl_lane_ambient", "mat_ibl_ambient"),
+                ] {
+                    let dispatch = body(hook);
+                    assert!(dispatch.contains("uni_ibl_ctl.x > 0.5") && dispatch.contains(&format!("io_{lane}("))
+                        && body(lane).contains(&format!("io_{lookup}(")), "{name}: {hook} switches to the lane's IBL lookup");
+                }
+
+                let control = recipe.scene_object(vm, Features { gi_screen: false, ..features }, inside)
+                    .expect("unhoisted volume scene");
+                let control = crate::shaders::compile_scene_webgl2(vm, control, name);
+                for (gi_screen, frag) in [(true, view.glsl_fragment), (false, control.view().glsl_fragment)] {
+                    let early = lowered_fn_body(frag, "gi_receive_early").expect("early GI hook");
+                    let ambient = lowered_fn_body(frag, "gi_surface_ambient").expect("surface ambient hook");
+                    let shade_hit = test_source(&lowered_fn_body(frag, "trace_shade_hit").expect("trace_shade_hit"));
+                    let surface = lowered_fn_body(frag, "shade_mr_surface_at").expect("shade_mr_surface_at");
+                    assert!(shade_hit.contains("l_gi_pre = io_gi_receive_early(") && shade_hit.lines().any(|line|
+                        line.contains("io_shade_mr_surface_at(") && line.contains(", l_gi_pre)")),
+                        "{name} gi_screen={gi_screen}: hit forwards early GI to surface shading");
+                    assert!(surface.contains("io_gi_surface_ambient(p_gi_pre,"),
+                        "{name} gi_screen={gi_screen}: surface ambient receives the early result");
+                    if gi_screen {
+                        assert!(early.contains("io_gi_screen_fetch(") && early.contains("io_gi_gather_split("),
+                            "{name}: early receive needs both screen sampling and fallback gather: {early}");
+                        assert!(ambient.contains("p_gi_pre.xyz") && ambient.contains("p_fallback") && ambient.contains("p_gi_pre.w")
+                            && !ambient.contains("io_gi_ambient_at("), "{name}: ambient combines precomputed GI with fill: {ambient}");
+                        assert!(!frag.contains("io_gi_ambient_at("), "{name}: screen-cache variant contains a second GI receive");
+                    } else {
+                        assert!(!early.contains("io_gi_screen_fetch(") && !early.contains("io_gi_gather_split("),
+                            "{name}: early hook should be a stub with the screen cache off: {early}");
+                        assert!(ambient.contains("io_gi_ambient_at(") && !ambient.contains("p_gi_pre"),
+                            "{name}: regular ambient receives GI at the surface: {ambient}");
+                    }
+                }
+                let draw = recipe.scene_draw(vm, features, inside).expect("prewarm with pending atlas handles");
+                let vars = &draw.skinned.draw_vars;
+                check_uniforms(vm, vars, 192.0);
+                let mut strength = [f32::NAN];
+                vars.get_uniform(vm.cx_mut(), live_id!(voxel_ao_strength), &mut strength);
+                assert_eq!(strength, [1.0], "{name}: volume AO is enabled by default");
+                crate::shaders::check_vertex_input_budget(vm.cx(), vars, name);
+                let slots = &vm.cx().draw_shaders[vars.draw_shader_id.unwrap().index].mapping.textures;
+                let names: std::collections::HashSet<_> = slots.iter().map(|s| format!("tex_{}", s.id)).collect();
+                let reads = |source: &str| -> std::collections::HashSet<String> {
+                    source.lines().filter(|line| !line.trim_start().starts_with("uniform "))
+                        .flat_map(|line| line.split(|c: char| c != '_' && !c.is_ascii_alphanumeric()))
+                        .filter(|word| word.starts_with("tex_")).map(str::to_owned).collect()
+                };
+                let fragment = reads(view.glsl_fragment);
+                assert!(fragment.is_subset(&names) && reads(view.glsl_vertex).is_subset(&names), "emitted sampler without a binding");
+                for (name, texture) in recipe.textures.iter() {
+                    assert!(fragment.contains(&format!("tex_{name}")), "volume scene (inside={inside}) samples {name}: {fragment:?}");
+                    let slot = slots.iter().position(|s| s.id == *name).unwrap();
+                    assert_eq!(vars.texture_slots[slot].as_ref().unwrap().texture_id(), texture.texture_id(), "scene {name}");
+                }
+                let vertex_only = names.contains("tex_morph_map") && !fragment.contains("tex_morph_map");
+                let fragment_slots = slots.len() - usize::from(vertex_only);
+                println!("{name}: {} fragment units, {fragment_slots} fragment slots, {} combined slots", fragment.len(), slots.len());
+                assert!(fragment.len() <= 16 && fragment_slots <= 16 && slots.len() <= makepad_draw::DRAW_CALL_TEXTURE_SLOTS);
+            }
+
+            let sun = recipe.shader_object(vm, recipe.sun_shader()).expect("volume Sun");
+            crate::shaders::inspect_draw_backends(vm, sun, "volume Sun", Some(crate::shaders::TracedOutput::Sun));
+            let compiled = crate::shaders::compile_scene_webgl2(vm, sun, "volume Sun");
+            let sun_fragment = compiled.view().glsl_fragment;
+            check_walk(sun_fragment);
+            assert_eq!(sun_fragment.matches("texelFetch(tex_trace_volume,").count(), 1, "Sun reads only the hit material");
+            assert!(sun_fragment.matches("texelFetch(").count() <= 2 && !sun_fragment.contains("io_traced_ao("),
+                "Sun only needs the material and coarse loads");
+            let draw = recipe.build_sun_draw(vm, recipe.sun_bindings().unwrap()).expect("bound volume Sun");
+            check_uniforms(vm, &draw.draw_vars, 192.0);
+            crate::shaders::check_vertex_input_budget(vm.cx(), &draw.draw_vars, "volume Sun");
+            let slots = &vm.cx().draw_shaders[draw.draw_vars.draw_shader_id.unwrap().index].mapping.textures;
+            assert_eq!(slots.len(), 2, "Sun uses only the material and coarse volumes");
+            for (name, texture) in recipe.textures.iter().filter(|(name, _)| *name != live_id!(trace_palette)) {
+                let slot = slots.iter().position(|s| s.id == *name).expect("Sun volume slot");
+                assert_eq!(draw.draw_vars.texture_slots[slot].as_ref().unwrap().texture_id(), texture.texture_id(), "Sun {name}");
+            }
+            println!("volume Sun: {} volume slots", slots.len());
+
+            let mut small = TracedSurfaceRecipe::volume(0.1, 32).voxel_ao_strength(0.0);
+            small.textures = recipe.textures.clone();
+            let small_scene = small.scene_draw(vm, features, false).expect("32-cell scene");
+            let small_sun = small.build_sun_draw(vm, small.sun_bindings().unwrap()).expect("32-cell Sun");
+            check_uniforms(vm, &small_scene.skinned.draw_vars, 96.0);
+            let mut strength = [f32::NAN];
+            small_scene.skinned.draw_vars.get_uniform(vm.cx_mut(), live_id!(voxel_ao_strength), &mut strength);
+            assert_eq!(strength, [0.0], "the scene can disable voxel AO");
+            check_uniforms(vm, &small_sun.draw_vars, 96.0);
+
+            // The occupied child starts at x=2; its only material is at x=3.
+            for (coarse_only, expected) in [(1.0, [3.0, -1.0, 0.0, 1.0, 0.0]), (0.0, [4.0, -1.0, 0.0, 37.0, 2.0])] {
+                let result = script_eval!(vm, {
+                    use mod.prelude.widgets_internal.*
+                    let reads = { material: 0 }
+                    let scene = mod.draw.DrawSceneTracedVolume{
+                        v_trace_hi: vec3(4.0)
+                        v_trace_payload: vec4(0.0)
+                        trace_tile_steps: 12.0
+                        trace_coarse_only: #(coarse_only)
+                        trace_coarse: {load: fn(q) { return vec4(2.0 / 255.0) }}
+                        trace_volume: {load: fn(q) {
+                            reads.material += 1
+                            if q.x == 3 { return vec4(37.0 / 255.0) }
+                            return vec4(0.0)
+                        }}
+                    }
+                    let hit = scene.traced_hit(vec3(-1.0, 0.5, 0.5), vec3(1.0, 0.0, 0.0))
+                    { t: hit.x, nx: hit.y, ny: hit.z, material: hit.w, loads: reads.material }
+                }).as_object().expect("VM volume hit");
+                let values = [id!(t), id!(nx), id!(ny), id!(material), id!(loads)]
+                    .map(|key| vm.value(result, key).as_number().unwrap());
+                assert_eq!(values, expected, "hit and material loads with trace_coarse_only={coarse_only}: {:?}", vm.take_errors());
+            }
+
+            let passes = TracedSurfacePasses { sun: true, ..TracedSurfacePasses::OUTSIDE };
+            let mut program = TracedProgram::new(recipe.clone(), passes, false);
+            let mut format_checks = 0;
+            program.prepare_sun(vm.cx_mut(), |_| {
+                format_checks += 1;
+                Ok(format_checks == 1) // Material is ready while coarse is still pending.
+            }).unwrap();
+            assert_eq!(format_checks, 2, "check both volume formats");
+            assert!(program.sun_batch.as_ref().unwrap().borrow().draw.is_none(), "Sun waits for the coarse format");
+
+            // Keep the other page pending. Sun checks material first, so the
+            // first case must find the invalid coarse page past a pending material.
+            for (name, expected) in [
+                (live_id!(trace_coarse), "trace_coarse must be a sampled 3D texture"),
+                (live_id!(trace_volume), "trace_volume must be a sampled 3D texture"),
+            ] {
+                let (_, page) = recipe.textures.iter().find(|(id, _)| *id == name).unwrap();
+                *page.get_format(vm.cx_mut()) = TextureFormat::VecBGRAu8_32 {
+                    width: 1, height: 1, data: Some(vec![0]), updated: TextureUpdated::Full,
+                };
+                assert!(matches!(recipe.scene_draw(vm, features, false),
+                    Err(TracedDrawError::VolumeBinding(reason)) if reason == expected), "scene must reject 2D {name} by name");
+                assert!(matches!(program.prepare_sun(vm.cx_mut(), sampled_volume_format),
+                    Err(TracedDrawError::VolumeBinding(reason)) if reason == expected), "Sun must reject 2D {name} by name");
+                *page.get_format(vm.cx_mut()) = TextureFormat::Unknown;
+            }
+
+            for child in 0..8 {
+                let cell = [9 + 2 * (child & 1), 20 + 2 * ((child >> 1) & 1), 37 + 2 * (child >> 2)];
+                let [x, y, z] = cell.map(|v| ScriptValue::from_i32(v as i32));
+                let bit = 1u8 << child;
+                for byte in [bit, !bit] {
+                    let occupied = script_eval!(vm, {
+                        use mod.pod.*
+                        mod.draw.TracedVolumeHit.volume_child_occupied(#(ScriptValue::from_u32(byte.into())), vec3i(#(x), #(y), #(z)))
+                    });
+                    assert_eq!(occupied.as_bool(), Some(crate::traced_volume::volume_child_occupied(byte, cell)),
+                        "coarse byte {byte:#04x}, cell {cell:?}: {:?}", vm.take_errors());
+                }
+            }
+            for (lo, size, d) in [(0, 1, -1.0), (4, 4, 0.5), (12, 2, -0.25), (254, 2, 1.0)] {
+                let plane = script_eval!(vm, {
+                    mod.draw.TracedVolumeHit.volume_exit_plane(#(ScriptValue::from_i32(lo)), #(ScriptValue::from_i32(size)), #(d))
+                });
+                assert_eq!(plane.as_number(), Some(f64::from(crate::traced_volume::volume_exit_plane(lo, size, d))),
+                    "exit plane at {lo}, size {size}, direction {d}: {:?}", vm.take_errors());
+            }
+        });
+    }
+
+    #[test]
+    fn traced_scene_ray_and_eye_invariants() {
+        with_vm(|vm| {
+            // Same pixel on the z=7 and y=5 faces of two adjacent proxies.
+            // The old interpolants put the roof at z=7.00068 for the low-z
+            // box and 6.99996 for the high-z box: neither owned the hit.
+            let roof = script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                let scene = mod.draw.DrawSceneTraced
+                let ndc = scene.trace_ndc(vec2(1060.5, 355.5), vec2(1.0 / 1360.0, 1.0 / 860.0))
+                let projection = mat4x4f(
+                    0.82536765, 0.0, 0.0, 0.0,   0.0, 1.30523256, 0.0, 0.0,
+                    -0.45588235, 0.06511628, -1.0, -1.0,   0.0, 0.0, -0.2, 0.0)
+                let model_view = mat4x4f(
+                    0.32568131, 0.32364189, -0.88836232, 0.0,   -0.00390803, 0.94004186, 0.34103669, 0.0,
+                    0.94547153, -0.10759753, 0.30741887, 0.0,   0.39950016, -0.87622955, -8.12304291, 1.0)
+                let a = scene.trace_model_plane(vec4(1.0, 0.0, 0.0, -ndc.x), projection, 1.0, model_view)
+                let b = scene.trace_model_plane(vec4(0.0, 1.0, 0.0, -ndc.y), projection, 1.0, model_view)
+                let line = cross(a.xyz, b.xyz)
+                let d = scene.trace_direction(line, model_view)
+                let origin = vec3(8.5, 40.5, 0.5)
+                let at_roof = fn(q, lo, hi) {
+                    let face = scene.trace_raster_plane(q, lo, hi)
+                    if dot(face.xyz, d) >= 0.0 { return vec4(0.0) }
+                    let p = scene.trace_face_point(a, b, line, face, vec4(origin, 20.0)) * 20.0 - origin
+                    let t = (4.5 - p.y) / d.y
+                    return vec4(p + d * t, t)
+                }
+                let low = at_roof(vec3(6.84338284, 4.49944496, 7.0), vec3(0.0), vec3(7.0, 5.0, 7.0))
+                let high = at_roof(vec3(3.93073916, 5.0, 7.61318111), vec3(0.0, 0.0, 7.0), vec3(7.0, 5.0, 8.0))
+                low.w < 0.0 && high.w > 0.0 && length(low.xyz - high.xyz) < 0.00003
+                    && high.z > 7.0004 && high.z < 7.0007
+                    && abs(high.x - 6.8395) < 0.0002
+            });
+            assert_eq!(roof.as_bool(), Some(true), "both raster faces must put the roof inside the high-z proxy: {:?}", vm.take_errors());
+
+            // Reflecting this sheared model frame flips the local eye's X.
+            // For parallel rays the local view axis also flips X and ignores translation.
+            let facing = script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                let scene = mod.draw.DrawSceneTraced
+                let perspective = mat4x4f(2.0, 0.0, 0.0, 0.0,  0.0, 2.0, 0.0, 0.0,
+                    0.5, -0.25, -1.0, -1.0,  0.0, 0.0, -0.5, 0.0)
+                let ortho = mat4x4f(1.0, 0.0, 0.0, 0.0,  0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,  0.25, -0.5, 0.0, 1.0)
+                let check = fn(scale_x) {
+                    let model_view = mat4x4f(scale_x, 0.0, 0.0, 0.0,  0.0, 1.0, 0.0, 0.0,
+                        1.0, 0.0, 1.0, 0.0,  2.0, 1.0, -4.0, 1.0)
+                    let eye = scene.trace_model_eye(perspective, 0.5, model_view)
+                    let back = scene.trace_model_eye(ortho, 0.5, model_view)
+                    return eye.w > 0.0 && length(eye.xyz - eye.w * vec3(-6.0 / scale_x, -1.0, 4.0)) == 0.0
+                        && back.w == 0.0 && back.z > 0.0 && back.x * scale_x == -back.z && back.y == 0.0
+                }
+                check(2.0) && check(-2.0)
+            });
+            assert_eq!(facing.as_bool(), Some(true), "perspective and parallel rays must preserve model handedness: {:?}", vm.take_errors());
         });
     }
 
@@ -1282,7 +1771,9 @@ mod tests {
                 let obj = variants::variant_object(vm, program, features, m.lit()).unwrap_or(program);
                 let label = format!("hooked PBR {features:?}");
                 crate::shaders::check_scene_backends(vm, obj, &label);
-                crate::shaders::compile_scene_webgl2(vm, obj, &label);
+                let compiled = crate::shaders::compile_scene_webgl2(vm, obj, &label);
+                let coverage = crate::shaders::lowered_fn_body(compiled.view().glsl_fragment, "cut_coverage").expect("masked PBR coverage");
+                assert!(coverage.contains("dFdx(") && coverage.contains("dFdy("), "{label}: keep quad derivatives for cut coverage");
             }
             for (body, expected) in [
                 ("base", SurfaceAlpha::Base),
@@ -1344,7 +1835,7 @@ mod tests {
                 assert!(fill.contains("mat_ibl_ambient(p_n, p_a) * ") && fill.contains("ibl_ctl.y"), "glsl {glsl}: the fill carries the lane's scale: {fill}");
                 assert!(fill.contains("ibl_ctl.z > 0.5") && fill.contains("return p_a;"), "glsl {glsl}: the fill is the map's only while the switch is set, else the lane's own: {fill}");
                 // Nothing in the lit surface or the coat reads the map past them.
-                for stage in ["shade_mr_surface_at", "clear_coat"] {
+                for stage in ["shade_mr_surface_at", "clear_coat", "clear_coat_layer"] {
                     let body = lowered_fn_body(&source, stage).unwrap_or_else(|| panic!("glsl {glsl}: no {stage}"));
                     assert!(!body.contains("mat_ibl_"), "glsl {glsl}: {stage} takes a lookup at the map's raw scale");
                 }
@@ -1390,7 +1881,7 @@ mod tests {
                 // Under a map: no noise ridge and no analytic horizon
                 // colour in the coat, and the function it calls for car
                 // paint returns the reflection as it took it.
-                let coat = body(&ibl, "the IBL program", "clear_coat");
+                let coat = body(&ibl, "the IBL program", "clear_coat_layer");
                 assert!(!coat.contains("tn_noise(") && !coat.contains("sun_ground"), "glsl {glsl}: an IBL program's coat paints the analytic treeline over the map's reflection: {coat}");
                 assert_eq!(body(&ibl, "the IBL program", "coat_treeline").trim(), "return p_env;", "glsl {glsl}: under a map the treeline is the identity");
                 // The stock lane: the band it had, every constant of it,
@@ -1409,11 +1900,13 @@ mod tests {
                 assert_eq!((band.matches("tn_noise(").count(), band.trim().lines().count()), (2, 4), "glsl {glsl}: two noise taps, four statements: {band}");
                 // Car paint only (a toy's rim skips it), and the IBL
                 // program's coat is this coat: only the function differs.
-                let stock_coat = body(&stock, "the stock PBR program", "clear_coat");
+                let stock_coat = body(&stock, "the stock PBR program", "clear_coat_layer");
                 // GLSL and HLSL name a shader function alike (`io_<name>`).
-                let call = "if ((l_rim < 0.5)) {\nl_env = io_coat_treeline(l_env, l_r);\n}\n";
+                let call = "if ((p_rim < 0.5)) {\nl_env = io_coat_treeline(l_env, l_r);\n}\n";
                 assert!(stock_coat.contains(call) && !stock_coat.contains("tn_noise("), "glsl {glsl}: the coat paints the band through the function, on car paint: {stock_coat}");
                 assert_eq!(coat, stock_coat, "glsl {glsl}: an IBL program's coat is the stock coat");
+                assert_eq!(body(&ibl, "the IBL program", "clear_coat"), body(&stock, "the stock PBR program", "clear_coat"),
+                    "glsl {glsl}: both programs decode the same packed coat");
             }
             assert!(vm.take_errors().is_empty());
         });

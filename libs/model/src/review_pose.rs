@@ -64,7 +64,7 @@ impl Document {
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
         let meshes=self.scene().evaluated_meshes(&self.state,&mut ctx)?;
         let size=meshes.values().map(|m|m.memory_bytes()).sum::<usize>();
-        let mut draft=self.evaluation_copy(size.saturating_mul(4))?;
+        let mut draft=self.evaluation_copy(size.saturating_mul(4).saturating_add(self.state.baked_bytes()))?;
         let mut palette=Vec::new();let mut joints=Vec::new();
         let mut movements=BTreeMap::<String,Matrix4>::new();
         match pose{
@@ -168,8 +168,30 @@ impl Document {
             light.transform=Transform{translation:transform_point(frame,[0.;3]),rotation:quat_from_to([0.,0.,-1.],transform_vector(frame,[0.,0.,-1.]))?,scale:[1.;3]};
             light.attachment=Attachment::Root;
         }
-        draft.state.surface.reconcile(&self.state.objects,&evaluated,self.limits(),&mut ctx)?;
-        draft.state.objects=evaluated;
+        draft.state.surface.reconcile_objects(&self.state.objects,&evaluated,self.limits(),&mut ctx)?;
+        draft.state.objects=evaluated.into_iter().map(|(n, m)| (n, m.into())).collect();
+        // Editable pose samples above are already in world space. Freeze rigid geometry
+        // into the same frame for this review product, including inherited wheel motion.
+        for (name, geometry) in self.geometries() {
+            let crate::ObjectGeometry::Baked(original) = geometry else { continue };
+            let frame = object_frame(name)?;
+            let mut baked = original.clone();
+            if frame != IDENTITY_MATRIX {
+                let inv = inverse(frame)?;
+                let normal_matrix = std::array::from_fn(|i| std::array::from_fn(|j| inv[j][i]));
+                let mesh = std::sync::Arc::make_mut(&mut baked);
+                for (position, normal) in mesh.positions.iter_mut().zip(&mut mesh.normals) {
+                    ctx.checkpoint(1)?;
+                    *position = transform_point(frame, position.map(f64::from)).map(|v| v as f32);
+                    *normal = normalized(transform_vector(normal_matrix, normal.map(f64::from)))?.map(|v| v as f32);
+                }
+                if dot(cross(transform_vector(frame,[1.,0.,0.]),transform_vector(frame,[0.,1.,0.])),transform_vector(frame,[0.,0.,1.])) < 0. {
+                    for tri in mesh.indices.chunks_exact_mut(3) { tri.swap(1, 2); }
+                }
+                mesh.view().validate()?;
+            }
+            draft.state.objects.insert(name.into(), crate::ObjectGeometry::Baked(baked));
+        }
         let emitters=std::mem::take(&mut draft.state.scene.emitters);
         draft.state.scene=SceneState{emitters,..Default::default()};
         draft.state.soft_body=None;draft.state.skeleton=None;draft.state.clips.clear();draft.state.rig=RigState::default();

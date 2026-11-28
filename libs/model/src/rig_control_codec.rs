@@ -511,8 +511,9 @@ impl RigState {
     }
 }
 fn size(s: &RigState, l: &Limits) -> Result<()> {
-    if s.memory_bytes() > l.mesh.max_bytes {
-        Err(Error::Budget("rig decoded bytes"))
+    let needed = s.memory_bytes();
+    if needed > l.mesh.max_bytes {
+        Err(Error::WorkingBytes { what: "rig decoded bytes", needed, limit: l.mesh.max_bytes })
     } else {
         Ok(())
     }

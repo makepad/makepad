@@ -35,7 +35,7 @@ script_mod! {
         geom: vertex_buffer(geom.CubeVertex, geom.CubeGeom)
         world: varying(vec4f)
         alpha_blend: true
-        backface_culling: false
+        cull_mode: @None
         depth_write: false
         // TRUE world camera, sun and fill (the frame's SunLight), fog.
         eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))

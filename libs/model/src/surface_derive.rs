@@ -10,9 +10,9 @@ pub(super) fn source_image(
         let source = material.channels.get(&recipe.source_channel)
             .and_then(|layers| layers.iter().find(|layer| &layer.id == name))
             .ok_or(Error::Invalid("unknown height source layer"))?;
-        if material.memory_bytes().saturating_mul(2)
-            .saturating_add(source.image.memory_bytes().saturating_mul(2)) > limits.mesh.max_bytes {
-            return Err(Error::Budget("surface derivation source bytes"));
+        let needed = material.memory_bytes().saturating_mul(2).saturating_add(source.image.memory_bytes().saturating_mul(2));
+        if needed > limits.mesh.max_bytes {
+            return Err(Error::WorkingBytes { what: "surface derivation source bytes", needed, limit: limits.mesh.max_bytes });
         }
         // A named layer may be hidden in its display stack. Its opacity and
         // mask still contribute to height coverage; blend needs no backdrop.
@@ -309,9 +309,21 @@ mod tests {
             material.channels.insert(SurfaceChannel::BaseColor, vec![layer.clone()]);
             assert_eq!(material.flatten(SurfaceChannel::BaseColor, &limits, &mut mesh::Context::default()).unwrap().unwrap(), flattened_reference, "flatten {blend:?}");
         }
+        let mut material = SurfaceMaterial::default();
+        material.channels.insert(SurfaceChannel::BaseColor, vec![layer.clone()]);
+        let tight = Limits { mesh: mesh::Limits { max_bytes: material.memory_bytes() }, ..limits.clone() };
+        match material.flatten(SurfaceChannel::BaseColor, &tight, &mut mesh::Context::default()) {
+            Err(Error::WorkingBytes { what: "surface flatten bytes", needed, limit }) =>
+                assert!(limit == tight.mesh.max_bytes && needed > limit, "a refused flatten says what it needed: {needed} against {limit}"),
+            other => panic!("a flatten beside no room for its image is refused for its bytes: {:?}", other.map(|i| i.map(|i| i.pixels.len()))),
+        }
         assert_eq!(layer.image.mip_chain(ImageEncoding::Srgb, &limits, &mut mesh::Context::default()).unwrap(),
             mip_chain_reference(&layer.image, ImageEncoding::Srgb, &limits, &mut mesh::Context::default()).unwrap(),
             "all 64x64 FBM mip bytes retain portable premultiplied filtering");
+        let needed = layer.image.pixels.len() * 3;
+        let tight = Limits { mesh: mesh::Limits { max_bytes: needed - 1 }, ..limits.clone() };
+        assert_eq!(layer.image.mip_chain(ImageEncoding::Srgb, &tight, &mut mesh::Context::default()).unwrap_err(),
+            Error::WorkingBytes { what: "mip working bytes", needed, limit: needed - 1 }, "a refused mip chain names its step and its numbers");
         let transfer = crate::texture::SrgbBytes::new();
         for i in 0..255 {
             let boundary = crate::texture::srgb_to_linear((i as f64 + 0.5) / 255.).to_bits();

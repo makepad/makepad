@@ -75,7 +75,9 @@ impl Renderer {
         self.hdr_output
     }
 
-    /// Display dither on 8-bit targets (on by default).
+    /// Display dither on 8-bit targets (on by default): in the draws themselves on the legacy 8-bit
+    /// target (`bind_output_dither`), and in the HDR composite (`bind_composite`, `bind_live_look`).
+    /// Off for exact comparisons.
     pub fn set_output_dither(&mut self, on: bool) {
         self.output_dither = on;
     }
@@ -286,6 +288,7 @@ impl Renderer {
         draw.grade = vec4(finite(g.contrast, 1.0).clamp(0.25, 4.0), finite(g.saturation, 1.0).clamp(0.0, 4.0),
             2.0f32.powf(finite(g.auto_max_ev, 0.678).clamp(0.0, 8.0)), 2.0f32.powf(finite(g.exposure_ev, 0.0).clamp(-8.0, 8.0)));
         draw.tilt = vec4(finite(g.tilt, 0.0).clamp(0.0, 1.0), finite(g.tilt_center, 0.6).clamp(0.0, 1.0), finite(g.tilt_width, 0.2).clamp(0.0, 1.0), 0.0);
+        draw.dither = if self.output_dither { 1.0 } else { 0.0 };
         if let (Some(exposure), true) = self.post.exposure() { draw.draw_vars.set_texture(2, exposure); }
     }
 
